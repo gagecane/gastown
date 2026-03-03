@@ -36,6 +36,10 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-proxy-client ./cmd/gt-proxy-client
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gt
 ifeq ($(shell uname),Darwin)
+	@codesign -s - -f $(BUILD_DIR)/$(BINARY)-proxy-server 2>/dev/null || true
+	@echo "Signed $(BINARY)-proxy-server for macOS"
+	@codesign -s - -f $(BUILD_DIR)/$(BINARY)-proxy-client 2>/dev/null || true
+	@echo "Signed $(BINARY)-proxy-client for macOS"
 	@codesign -s - -f $(BUILD_DIR)/$(BINARY) 2>/dev/null || true
 	@echo "Signed $(BINARY) for macOS"
 endif
