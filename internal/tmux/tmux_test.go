@@ -2173,6 +2173,16 @@ func TestCheckSessionHealth_ActivityCheck(t *testing.T) {
 
 func TestValidateCommandBinary(t *testing.T) {
 	t.Parallel()
+
+	absoluteShell := "/bin/sh"
+	if runtime.GOOS == "windows" {
+		path, err := exec.LookPath("sh")
+		if err != nil {
+			t.Skip("sh not installed")
+		}
+		absoluteShell = path
+	}
+
 	tests := []struct {
 		name    string
 		cmd     string
@@ -2180,12 +2190,12 @@ func TestValidateCommandBinary(t *testing.T) {
 	}{
 		{"empty", "", false},
 		{"relative binary", "echo hello", false},
-		{"valid absolute", "/bin/sh -c 'echo hi'", false},
+		{"valid absolute", absoluteShell + " -c 'echo hi'", false},
 		{"missing absolute", "/nonexistent/binary --flag", true},
 		{"exec env missing", "exec env GT_TEST=1 /nonexistent/claude-code --settings /tmp", true},
-		{"exec env valid", "exec env GT_TEST=1 /bin/sh -c 'echo hi'", false},
+		{"exec env valid", "exec env GT_TEST=1 " + absoluteShell + " -c 'echo hi'", false},
 		{"env vars only", "exec env FOO=bar BAZ=1", false},
-		{"bare exec", "exec /bin/sh", false},
+		{"bare exec", "exec " + absoluteShell, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
