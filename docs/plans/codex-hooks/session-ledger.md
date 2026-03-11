@@ -7,6 +7,8 @@
 - Selected profiles: `general`, `go-development`
 - Tracking: milestone mode
 - Milestone status: `codex-hooks: implementation complete` in progress
+- Review monitoring: `furiosa` progressing, `rictus` startup failed after retry, `dementus` startup failed before session came up
+- Final verification: targeted config/hooks/runtime checks passed; external sidecar review degraded with zero completed report artifacts
 
 ## Implementation Checklist
 
@@ -37,6 +39,15 @@
 - **Evidence:** `rg -n "codex-hooks|codex_hooks|gt-codex|Codex Hooks" docs/agent-provider-integration.md` plus targeted green checks after formatting: `go test ./internal/config -run 'TestBuiltinPresets|TestGetAgentPresetByName|TestRuntimeConfigFromPreset|TestIsKnownPreset|TestSupportsSessionResume|TestGetSessionIDEnvVar|TestGetProcessNames|TestListAgentPresetsMatchesConstants|TestAgentCommandGeneration|TestCodexHooksAgentPreset'`, `go test ./internal/hooks -run 'TestInstallForRole_CodexRoleAware'`, and `go test ./internal/runtime`.
 - **Remaining risk:** Full-package `internal/config` still has the unrelated `TestAgentEnv_Dog` failure from earlier; feature-specific checks are green.
 
+### Slice 3
+- **Goal:** Create a stable review checkpoint and launch the required final review workers against shared inputs.
+- **Spec coverage:** Review readiness, verification, and end-of-session review workflow.
+- **Proof model:** Alternate proof model: checkpoint commit + pushed branch + shared review bundle + attached review hooks.
+- **Status:** complete
+- **What changed:** Created checkpoint commit `3bf15d97`, pushed `integration/codex-hooks`, materialized shared review inputs under `.runtime`, and launched three review runs: Codex general, Claude general, and Codex `go-development`.
+- **Evidence:** `gt hook show gastown/furiosa`, `gt hook show gastown/rictus`, and `gt hook show gastown/dementus` all show hooked `mol-review-implementation` work; review bundle exists under the recorded review directory.
+- **Remaining risk:** Review workers are hooked, but at least some spawned sessions were still deferred at launch time; Stage 7 needs to monitor for actual report file creation before synthesis.
+
 ## Commands Run + Outcomes
 
 - `bd update gas-wisp-jemmm --status=in_progress` -> implementation stage claimed
@@ -48,6 +59,13 @@
 - `rg -n "codex-hooks|codex_hooks|gt-codex|Codex Hooks" docs/agent-provider-integration.md` -> doc text present in the expected sections
 - `gofmt -w internal/config/agents.go internal/config/agents_test.go internal/hooks/installer_test.go` -> formatted
 - `go test ./internal/runtime` -> passed
+- `git commit -m "checkpoint: prepare codex-hooks for external review"` -> created checkpoint commit `3bf15d97`
+- `git push` -> pushed checkpoint to `origin/integration/codex-hooks`
+- `gt sling mol-review-implementation gastown --agent codex ...` -> spawned `furiosa` for Codex general review
+- `gt sling mol-review-implementation gastown --agent claude ...` -> spawned `rictus` for Claude general review
+- `gt sling mol-review-implementation gastown --agent codex --var review_profile=\"go-development\" ...` -> spawned `dementus` for specialist review
+- `gt hook show gastown/furiosa` / `gt hook show gastown/rictus` / `gt hook show gastown/dementus` -> review wisps attached
+- `go test ./internal/config -run 'TestBuiltinPresets|TestGetAgentPresetByName|TestRuntimeConfigFromPreset|TestIsKnownPreset|TestSupportsSessionResume|TestGetSessionIDEnvVar|TestGetProcessNames|TestListAgentPresetsMatchesConstants|TestAgentCommandGeneration|TestCodexHooksAgentPreset' && go test ./internal/hooks -run 'TestInstallForRole_CodexRoleAware' && go test ./internal/runtime && rg -n "codex-hooks|codex_hooks|gt-codex|Codex Hooks" docs/agent-provider-integration.md` -> all passed / matched during final verification
 
 ## Files Changed
 
@@ -61,7 +79,39 @@
 - `internal/hooks/templates/codex/hooks-interactive.json`
 - `internal/hooks/templates/codex/hooks-autonomous.json`
 
+## Review Checkpoint
+
+- Review checkpoint commit: `3bf15d97`
+- Review directory: `/Users/chall/gt/gastown/.runtime/reviews/codex-hooks/20260311-062955`
+- Branch under review: `origin/integration/codex-hooks`
+
+### Review Workers
+
+- `gastown/furiosa` -> Codex general review -> `/Users/chall/gt/gastown/.runtime/reviews/codex-hooks/20260311-062955/codex-review.md`
+- `gastown/rictus` -> Claude general review -> `/Users/chall/gt/gastown/.runtime/reviews/codex-hooks/20260311-062955/claude-review.md`
+- `gastown/dementus` -> Codex `go-development` review -> `/Users/chall/gt/gastown/.runtime/reviews/codex-hooks/20260311-062955/go-development-review.md`
+
 ## Open Risks / Blockers
 
 - Need to verify the Codex hook JSON shape matches the runtime's current expectations while keeping the template intentionally minimal.
 - `docs/plans/codex-hooks/session-context.md` remains untracked until a later cleanup step explicitly stages it.
+- Final review coverage is degraded: only the Codex general reviewer (`furiosa`) is actively progressing; Claude general (`rictus`) and Codex specialist (`dementus`) both failed to start within the retry window.
+
+## Review Monitoring Notes
+
+- `gastown/furiosa`: stalled/failed. `gt peek` showed it progressed into implementation-review and report-writing wisps, but no report file ever materialized and `gt polecat status` showed no session activity for 5 minutes.
+- `gastown/rictus`: startup failed. After the retry nudge, `gt peek` still showed the initial assigned prompt and no review progress; report file absent.
+- `gastown/dementus`: startup failed. Hook was attached, but no live session/report materialized during the second wait window.
+
+## Review Synthesis
+
+- Required review reports expected:
+  - `/Users/chall/gt/gastown/.runtime/reviews/codex-hooks/20260311-062955/codex-review.md`
+  - `/Users/chall/gt/gastown/.runtime/reviews/codex-hooks/20260311-062955/claude-review.md`
+  - `/Users/chall/gt/gastown/.runtime/reviews/codex-hooks/20260311-062955/go-development-review.md`
+- Actual review reports produced: none
+- Terminal reviewer states:
+  - `gastown/furiosa`: stalled before writing report
+  - `gastown/rictus`: startup failed after retry
+  - `gastown/dementus`: startup failed before session came up
+- Synthesis outcome: external review coverage is degraded to zero report artifacts. No reviewer findings can be deduplicated or compared, so Stage 8 must rely on the local proof model evidence already captured in this ledger and explicitly report the failed sidecar review runs.
