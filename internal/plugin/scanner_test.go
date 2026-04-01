@@ -420,6 +420,12 @@ func TestParsePluginMD_StuckAgentDogUsesCanonicalHeartbeatPath(t *testing.T) {
 	if strings.Contains(plugin.Instructions, ".deacon-heartbeat") {
 		t.Fatalf("did not expect legacy heartbeat path in instructions, got:\n%s", plugin.Instructions)
 	}
+	if !strings.Contains(plugin.Instructions, "Fallback for older/runtime-copied layouts") {
+		t.Fatalf("expected rigs.json fallback guidance in instructions, got:\n%s", plugin.Instructions)
+	}
+	if !strings.Contains(plugin.Instructions, "could not parse rigs.json") {
+		t.Fatalf("expected fail-safe rigs.json parse handling in instructions, got:\n%s", plugin.Instructions)
+	}
 }
 
 func TestParsePluginMD_WithRunScript(t *testing.T) {
