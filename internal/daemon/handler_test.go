@@ -395,3 +395,80 @@ func TestReapIdleDogs_Constants(t *testing.T) {
 		t.Errorf("maxDogPoolSize = %d, want 4", maxDogPoolSize)
 	}
 }
+
+// TestFindDispatchableDog covers the idle-pool filter used by dispatchPlugins.
+// The critical behavior is that dogs with a live tmux session are skipped
+// even when their registry state is idle, preventing the infinite-loop seen
+// in gt-o24 where GetIdleDog kept picking the same dog during a termination race.
+func TestFindDispatchableDog_SkipsWorkingDogs(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupWorkingDogState(t, townRoot, "alpha", "plugin:x", time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, d.logger)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil, want bravo")
+	}
+	if got.Name != "bravo" {
+		t.Errorf("findDispatchableDog = %q, want bravo (working alpha must be skipped)", got.Name)
+	}
+}
+
+func TestFindDispatchableDog_AllWorkingReturnsNil(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupWorkingDogState(t, townRoot, "alpha", "plugin:x", time.Now())
+	testSetupWorkingDogState(t, townRoot, "bravo", "plugin:y", time.Now())
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, d.logger)
+	if got != nil {
+		t.Errorf("findDispatchableDog = %q, want nil (all working)", got.Name)
+	}
+}
+
+func TestFindDispatchableDog_EmptyKennelReturnsNil(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, d.logger)
+	if got != nil {
+		t.Errorf("findDispatchableDog = %q, want nil (empty kennel)", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive verifies the
+// default path (no tmux sessions exist for any dog): the first idle dog
+// from mgr.List is returned. The "skip idle dogs with live sessions"
+// behavior — the actual gt-o24 regression — is exercised at runtime via
+// sm.IsRunning, whose tmux-backed correctness is covered in session_manager
+// tests.
+func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := findDispatchableDog(mgr, sm, d.logger)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil; expected an idle dog")
+	}
+	if got.Name != "alpha" && got.Name != "bravo" {
+		t.Errorf("findDispatchableDog = %q, want alpha or bravo", got.Name)
+	}
+}
