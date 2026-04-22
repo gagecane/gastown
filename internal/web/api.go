@@ -251,13 +251,10 @@ func (h *APIHandler) runGtCommand(ctx context.Context, timeout time.Duration, ar
 
 	err := cmd.Run()
 
-	// Combine stdout and stderr for output
+	// Return only stdout — stderr contains warnings that corrupt JSON output.
 	output := stdout.String()
 	if stderr.Len() > 0 {
-		if output != "" {
-			output += "\n"
-		}
-		output += stderr.String()
+		log.Printf("[api] gt %s stderr: %s", args[0], strings.TrimSpace(stderr.String()))
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
