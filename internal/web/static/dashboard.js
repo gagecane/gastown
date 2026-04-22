@@ -3033,7 +3033,7 @@
         if (sessionPreviewInterval) clearInterval(sessionPreviewInterval);
         sessionPreviewInterval = setInterval(function() {
             fetchSessionPreview(sessionName, contentEl, statusEl);
-        }, 3000);
+        }, 2000);
     }
 
     function fetchSessionPreview(sessionName, contentEl, statusEl) {
@@ -3044,10 +3044,17 @@
                     contentEl.textContent = 'Error: ' + data.error;
                     return;
                 }
-                contentEl.textContent = data.content || '(empty)';
-                // Auto-scroll to bottom
-                contentEl.scrollTop = contentEl.scrollHeight;
-                // Show refresh timestamp
+                var newText = data.content || '(empty)';
+                if (newText !== contentEl.textContent) {
+                    var atBottom = contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight < 20;
+                    var savedScroll = contentEl.scrollTop;
+                    contentEl.textContent = newText;
+                    if (atBottom) {
+                        contentEl.scrollTop = contentEl.scrollHeight;
+                    } else {
+                        contentEl.scrollTop = savedScroll;
+                    }
+                }
                 var now = new Date();
                 var timeStr = now.getHours() + ':' + (now.getMinutes() < 10 ? '0' : '') + now.getMinutes() + ':' + (now.getSeconds() < 10 ? '0' : '') + now.getSeconds();
                 statusEl.textContent = 'refreshed ' + timeStr;
