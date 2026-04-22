@@ -141,6 +141,8 @@ func (h *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSSE(w, r)
 	case path == "/session/preview" && r.Method == http.MethodGet:
 		h.handleSessionPreview(w, r)
+	case path == "/session/send" && r.Method == http.MethodPost:
+		h.handleSessionSend(w, r)
 	default:
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
@@ -2029,6 +2031,46 @@ func (h *APIHandler) handleSessionPreview(w http.ResponseWriter, r *http.Request
 		Content:   stdout.String(),
 		Timestamp: time.Now().Format(time.RFC3339),
 	})
+}
+
+// handleSessionSend sends input to a tmux session via send-keys.
+func (h *APIHandler) handleSessionSend(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Session string `json:"session"`
+		Input   string `json:"input"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendError(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Session == "" || req.Input == "" {
+		h.sendError(w, "Missing session or input", http.StatusBadRequest)
+		return
+	}
+
+	// Validate session name (same as handleSessionPreview)
+	if !session.HasKnownPrefix(req.Session) {
+		h.sendError(w, "Invalid session name", http.StatusBadRequest)
+		return
+	}
+	for _, c := range req.Session {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			h.sendError(w, "Invalid session name", http.StatusBadRequest)
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	cmd := tmux.BuildCommandContext(ctx, "send-keys", "-t", req.Session, req.Input, "Enter")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.sendError(w, "send-keys failed: "+string(out), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // parseCommandArgs splits a command string into args, respecting quotes.

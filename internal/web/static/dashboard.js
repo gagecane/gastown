@@ -3078,6 +3078,29 @@
         sessionPreviewBack.addEventListener('click', closeSessionPreview);
     }
 
+    // Session input send
+    var sessionSendBtn = document.getElementById('session-send-btn');
+    var sessionSendInput = document.getElementById('session-send-input');
+    function sendSessionInput() {
+        var nameEl = document.getElementById('session-preview-name');
+        var input = sessionSendInput ? sessionSendInput.value.trim() : '';
+        if (!input || !nameEl) return;
+        fetch('/api/session/send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session: nameEl.textContent, input: input})
+        }).then(function() {
+            sessionSendInput.value = '';
+            var contentEl = document.getElementById('session-preview-content');
+            var statusEl = document.getElementById('session-preview-status');
+            setTimeout(function() { fetchSessionPreview(nameEl.textContent, contentEl, statusEl); }, 500);
+        });
+    }
+    if (sessionSendBtn) sessionSendBtn.addEventListener('click', sendSessionInput);
+    if (sessionSendInput) sessionSendInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') sendSessionInput();
+    });
+
     // ============================================
     // CONVOY DRILL-DOWN (expand rows to show tracked issues)
     // ============================================
