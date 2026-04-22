@@ -742,3 +742,111 @@ func TestPolecatSlot(t *testing.T) {
 		t.Errorf("with hidden dir: polecatSlot(beta) = %d, want 1", slot)
 	}
 }
+
+func TestParseFreshBranchName_RoundTrip(t *testing.T) {
+	sm := &SessionManager{}
+
+	cases := []struct {
+		name    string
+		polecat string
+		issue   string
+	}{
+		{name: "with issue", polecat: "alpha", issue: "gt-abc"},
+		{name: "no issue", polecat: "beta", issue: ""},
+		{name: "numeric issue", polecat: "nux", issue: "gt-123"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			branch := sm.freshBranchName(c.polecat, c.issue)
+			meta := parseFreshBranchName(branch)
+			if !meta.ok {
+				t.Fatalf("parseFreshBranchName(%q) not ok", branch)
+			}
+			if meta.polecat != c.polecat {
+				t.Errorf("polecat = %q, want %q (from %q)", meta.polecat, c.polecat, branch)
+			}
+			if meta.issue != c.issue {
+				t.Errorf("issue = %q, want %q (from %q)", meta.issue, c.issue, branch)
+			}
+		})
+	}
+}
+
+func TestParseFreshBranchName_Rejects(t *testing.T) {
+	rejects := []string{
+		"main",
+		"master",
+		"develop",
+		"feature/x",
+		"polecat/",          // empty tail
+		"polecat/alpha",     // no ts or issue
+		"polecat/alpha-",    // trailing dash, no ts
+		"polecat//gt-abc@1", // empty polecat name
+		"polecat/alpha/@1",  // empty issue
+		"polecat/alpha/gt-abc@", // empty ts
+		"",
+	}
+	for _, b := range rejects {
+		if meta := parseFreshBranchName(b); meta.ok {
+			t.Errorf("parseFreshBranchName(%q) = %+v, want ok=false", b, meta)
+		}
+	}
+}
+
+func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
+	// Non-standard canonical branch (e.g., "develop") — must be honored even
+	// though the old string-heuristic hardcoded "main"/"master".
+	cases := []struct {
+		name            string
+		currentBranch   string
+		issue           string
+		canonicalBranch string
+		want            bool
+	}{
+		{
+			name:            "on develop as canonical triggers fresh",
+			currentBranch:   "develop",
+			issue:           "gt-abc",
+			canonicalBranch: "develop",
+			want:            true,
+		},
+		{
+			name:            "on main when canonical is develop does NOT trigger fresh",
+			currentBranch:   "main",
+			issue:           "gt-abc",
+			canonicalBranch: "develop",
+			want:            false,
+		},
+		{
+			name:            "same-issue respawn preserves branch",
+			currentBranch:   "polecat/alpha/gt-abc@xyz",
+			issue:           "gt-abc",
+			canonicalBranch: "main",
+			want:            false,
+		},
+		{
+			name:            "other-issue polecat branch triggers fresh",
+			currentBranch:   "polecat/alpha/gt-999@xyz",
+			issue:           "gt-abc",
+			canonicalBranch: "main",
+			want:            true,
+		},
+		{
+			name:            "empty canonical with non-polecat branch does not trigger",
+			currentBranch:   "feature/x",
+			issue:           "gt-abc",
+			canonicalBranch: "",
+			want:            false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := shouldCreateFreshSessionBranch(c.currentBranch, c.issue, c.canonicalBranch); got != c.want {
+				t.Errorf("shouldCreateFreshSessionBranch(%q, %q, %q) = %v, want %v",
+					c.currentBranch, c.issue, c.canonicalBranch, got, c.want)
+			}
+		})
+	}
+}
