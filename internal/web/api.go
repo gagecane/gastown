@@ -1718,11 +1718,12 @@ func (h *APIHandler) handleCrew(w http.ResponseWriter, r *http.Request) {
 
 	// Parse the JSON output
 	var crewData []struct {
-		Name    string `json:"name"`
-		Rig     string `json:"rig"`
-		Branch  string `json:"branch"`
-		Session string `json:"session,omitempty"`
-		Hook    string `json:"hook,omitempty"`
+		Name       string `json:"name"`
+		Rig        string `json:"rig"`
+		Branch     string `json:"branch"`
+		Path       string `json:"path"`
+		HasSession bool   `json:"has_session"`
+		GitClean   bool   `json:"git_clean"`
 	}
 
 	if err := json.Unmarshal([]byte(output), &crewData); err != nil {
@@ -1734,13 +1735,12 @@ func (h *APIHandler) handleCrew(w http.ResponseWriter, r *http.Request) {
 	// Convert to CrewMember format with state detection
 	for _, c := range crewData {
 		sessionName := session.CrewSessionName(session.PrefixFor(c.Rig), c.Name)
-		state, lastActive, sessionStatus := h.detectCrewState(ctx, sessionName, c.Hook)
+		state, lastActive, sessionStatus := h.detectCrewState(ctx, sessionName, "")
 
 		member := CrewMember{
 			Name:       c.Name,
 			Rig:        c.Rig,
 			State:      state,
-			Hook:       c.Hook,
 			Session:    sessionStatus,
 			LastActive: lastActive,
 		}
