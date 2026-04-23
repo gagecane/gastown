@@ -3080,7 +3080,7 @@
         if (sessionPreviewInterval) clearInterval(sessionPreviewInterval);
         sessionPreviewInterval = setInterval(function() {
             fetchSessionPreview(sessionName, contentEl, statusEl);
-        }, 500);
+        }, 250);
     }
 
     function fetchSessionPreview(sessionName, contentEl, statusEl) {
