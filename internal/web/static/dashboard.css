@@ -3714,6 +3714,13 @@
         .ansi-bg-4 { background: #61afef; } .ansi-bg-5 { background: #c678dd; }
         .ansi-bg-6 { background: #56b6c2; } .ansi-bg-7 { background: #dcdfe4; }
 
+        .session-hotkey {
+            padding: 3px 10px; border: 1px solid var(--border); border-radius: 12px;
+            background: var(--bg); color: var(--text-secondary); cursor: pointer;
+            font-size: 11px; font-family: monospace;
+        }
+        .session-hotkey:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
         @keyframes slideIn {
             from { transform: translateX(100%); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }

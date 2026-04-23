@@ -3080,7 +3080,7 @@
         if (sessionPreviewInterval) clearInterval(sessionPreviewInterval);
         sessionPreviewInterval = setInterval(function() {
             fetchSessionPreview(sessionName, contentEl, statusEl);
-        }, 2000);
+        }, 1000);
     }
 
     function fetchSessionPreview(sessionName, contentEl, statusEl) {
@@ -3154,6 +3154,23 @@
     if (sessionSendBtn) sessionSendBtn.addEventListener('click', sendSessionInput);
     if (sessionSendInput) sessionSendInput.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') sendSessionInput();
+    });
+
+    // Hotkey buttons
+    document.querySelectorAll('.session-hotkey').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var nameEl = document.getElementById('session-preview-name');
+            if (!nameEl) return;
+            fetch('/api/session/send', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({session: nameEl.textContent, input: btn.getAttribute('data-key')})
+            }).then(function() {
+                var contentEl = document.getElementById('session-preview-content');
+                var statusEl = document.getElementById('session-preview-status');
+                setTimeout(function() { fetchSessionPreview(nameEl.textContent, contentEl, statusEl); }, 300);
+            });
+        });
     });
 
     // ============================================
