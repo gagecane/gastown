@@ -599,7 +599,7 @@
                         <table>
                             <thead>
                                 <tr>
-                                    <th>MR</th>
+                                    <th>Review</th>
                                     <th>Rig</th>
                                     <th>Title</th>
                                     <th>Branch</th>
@@ -609,7 +609,7 @@
                             <tbody>
                                 {{range .MergeQueue}}
                                 <tr class="pr-row {{.ColorClass}}">
-                                    <td><span class="pr-link">{{.ID}}</span></td>
+                                    <td>{{if .CRID}}<a href="https://code.amazon.com/reviews/{{.CRID}}" target="_blank" class="pr-link">{{.CRID}}</a>{{else}}<span class="pr-link">{{.ID}}</span>{{end}}</td>
                                     <td>{{.Repo}}</td>
                                     <td class="pr-title">{{.Title}}</td>
                                     <td>{{.Branch}}{{if .Target}} → {{.Target}}{{end}}</td>

@@ -187,6 +187,7 @@ type WorkerRow struct {
 // MergeQueueRow represents a PR in the merge queue.
 type MergeQueueRow struct {
 	ID         string // Bead ID (e.g., "gt-abc12")
+	CRID       string // CRUX CR ID (e.g., "CR-12345"), empty if none
 	Repo       string // Rig name
 	Title      string
 	Branch     string // Source branch

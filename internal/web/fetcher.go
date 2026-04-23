@@ -650,13 +650,14 @@ func (f *LiveConvoyFetcher) FetchMergeQueue() ([]MergeQueueRow, error) {
 	result := make([]MergeQueueRow, 0, len(issues))
 	for _, iss := range issues {
 		// Parse branch and target from description (format: "branch: X\ntarget: Y\n...")
-		branch, target, rig := parseMRDescription(iss.Description)
+		branch, target, rig, crID := parseMRDescription(iss.Description)
 		color := "mq-yellow"
 		if iss.Status == "hooked" {
 			color = "mq-green" // Being processed by refinery
 		}
 		result = append(result, MergeQueueRow{
 			ID:         iss.ID,
+			CRID:       crID,
 			Repo:       rig,
 			Title:      iss.Title,
 			Branch:     branch,
@@ -669,8 +670,8 @@ func (f *LiveConvoyFetcher) FetchMergeQueue() ([]MergeQueueRow, error) {
 	return result, nil
 }
 
-// parseMRDescription extracts branch, target, and rig from MR bead description.
-func parseMRDescription(desc string) (branch, target, rig string) {
+// parseMRDescription extracts branch, target, rig, and CR ID from MR bead description.
+func parseMRDescription(desc string) (branch, target, rig, crID string) {
 	for _, line := range strings.Split(desc, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "branch:") {
@@ -679,6 +680,8 @@ func parseMRDescription(desc string) (branch, target, rig string) {
 			target = strings.TrimSpace(strings.TrimPrefix(line, "target:"))
 		} else if strings.HasPrefix(line, "rig:") {
 			rig = strings.TrimSpace(strings.TrimPrefix(line, "rig:"))
+		} else if strings.HasPrefix(line, "cr:") {
+			crID = strings.TrimSpace(strings.TrimPrefix(line, "cr:"))
 		}
 	}
 	return
