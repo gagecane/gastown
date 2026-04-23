@@ -599,28 +599,24 @@
                         <table>
                             <thead>
                                 <tr>
-                                    <th>PR</th>
-                                    <th>Repo</th>
+                                    <th>MR</th>
+                                    <th>Rig</th>
                                     <th>Title</th>
-                                    <th>CI</th>
-                                    <th>Merge</th>
+                                    <th>Branch</th>
+                                    <th>Status</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {{range .MergeQueue}}
-                                <tr class="pr-row {{.ColorClass}}" data-pr-url="{{.URL}}" data-pr-repo="{{.Repo}}" data-pr-number="{{.Number}}">
-                                    <td><span class="pr-link">#{{.Number}}</span></td>
+                                <tr class="pr-row {{.ColorClass}}">
+                                    <td><span class="pr-link">{{.ID}}</span></td>
                                     <td>{{.Repo}}</td>
                                     <td class="pr-title">{{.Title}}</td>
+                                    <td>{{.Branch}}{{if .Target}} → {{.Target}}{{end}}</td>
                                     <td>
-                                        {{if eq .CIStatus "pass"}}<span class="badge badge-green">CI Pass</span>
-                                        {{else if eq .CIStatus "fail"}}<span class="badge badge-red">CI Fail</span>
-                                        {{else}}<span class="badge badge-yellow">CI Running</span>{{end}}
-                                    </td>
-                                    <td>
-                                        {{if eq .Mergeable "ready"}}<span class="badge badge-green">Ready</span>
-                                        {{else if eq .Mergeable "conflict"}}<span class="badge badge-red">Conflict</span>
-                                        {{else}}<span class="badge badge-muted">Pending</span>{{end}}
+                                        {{if eq .Status "hooked"}}<span class="badge badge-green">Processing</span>
+                                        {{else if eq .Status "open"}}<span class="badge badge-yellow">Queued</span>
+                                        {{else}}<span class="badge badge-muted">{{.Status}}</span>{{end}}
                                     </td>
                                 </tr>
                                 {{end}}
@@ -628,7 +624,7 @@
                         </table>
                         {{else}}
                         <div class="empty-state">
-                            <p>No PRs in queue</p>
+                            <p>No MRs in queue</p>
                         </div>
                         {{end}}
                     </div>

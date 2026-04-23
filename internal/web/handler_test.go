@@ -287,21 +287,17 @@ func TestConvoyHandler_MergeQueueRendering(t *testing.T) {
 		Convoys: []ConvoyRow{},
 		MergeQueue: []MergeQueueRow{
 			{
-				Number:     123,
+				ID: "gt-abc12",
 				Repo:       "roxas",
 				Title:      "Fix authentication bug",
-				URL:        "https://github.com/test/repo/pull/123",
-				CIStatus:   "pass",
-				Mergeable:  "ready",
+				Status: "open",
 				ColorClass: "mq-green",
 			},
 			{
-				Number:     456,
+				ID: "gt-jkl78",
 				Repo:       "gastown",
 				Title:      "Add dashboard feature",
-				URL:        "https://github.com/test/repo/pull/456",
-				CIStatus:   "pending",
-				Mergeable:  "pending",
+				Status: "open",
 				ColorClass: "mq-yellow",
 			},
 		},
@@ -599,11 +595,10 @@ func TestConvoyHandler_FullDashboard(t *testing.T) {
 		},
 		MergeQueue: []MergeQueueRow{
 			{
-				Number:     789,
+				ID: "gt-def34",
 				Repo:       "testrig",
 				Title:      "Test PR",
-				CIStatus:   "pass",
-				Mergeable:  "ready",
+				Status: "open",
 				ColorClass: "mq-green",
 			},
 		},
@@ -676,12 +671,10 @@ func TestE2E_Server_FullDashboard(t *testing.T) {
 		},
 		MergeQueue: []MergeQueueRow{
 			{
-				Number:     101,
+				ID: "gt-ghi56",
 				Repo:       "roxas",
 				Title:      "E2E Test PR",
-				URL:        "https://github.com/test/roxas/pull/101",
-				CIStatus:   "pass",
-				Mergeable:  "ready",
+				Status: "open",
 				ColorClass: "mq-green",
 			},
 		},
@@ -860,12 +853,10 @@ func TestE2E_Server_MergeQueueStatuses(t *testing.T) {
 			mock := &MockConvoyFetcher{
 				MergeQueue: []MergeQueueRow{
 					{
-						Number:     42,
+						ID: "gt-mno90",
 						Repo:       "test",
 						Title:      "Test PR",
-						URL:        "https://github.com/test/test/pull/42",
-						CIStatus:   tt.ciStatus,
-						Mergeable:  tt.mergeable,
+						Status: "open",
 						ColorClass: tt.colorClass,
 					},
 				},

@@ -186,12 +186,13 @@ type WorkerRow struct {
 
 // MergeQueueRow represents a PR in the merge queue.
 type MergeQueueRow struct {
-	Number     int
-	Repo       string // Short repo name (e.g., "roxas", "gastown")
+	ID         string // Bead ID (e.g., "gt-abc12")
+	Repo       string // Rig name
 	Title      string
-	URL        string
-	CIStatus   string // "pass", "fail", "pending"
-	Mergeable  string // "ready", "conflict", "pending"
+	Branch     string // Source branch
+	Target     string // Target branch
+	Status     string // "open", "in_progress", "hooked"
+	Assignee   string // Agent that submitted
 	ColorClass string // "mq-green", "mq-yellow", "mq-red"
 }
 
