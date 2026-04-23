@@ -355,6 +355,49 @@
         return div.innerHTML;
     }
 
+    // Convert ANSI escape sequences to HTML spans with CSS classes.
+    function ansiToHtml(str) {
+        if (!str) return '';
+        var out = '';
+        var open = false;
+        var i = 0;
+        while (i < str.length) {
+            if (str.charCodeAt(i) === 0x1b && str[i + 1] === '[') {
+                var end = str.indexOf('m', i + 2);
+                if (end === -1) { i++; continue; }
+                var codes = str.substring(i + 2, end).split(';');
+                i = end + 1;
+                if (open) { out += '</span>'; open = false; }
+                var classes = [];
+                for (var c = 0; c < codes.length; c++) {
+                    var n = parseInt(codes[c], 10);
+                    if (n === 0) { /* reset */ }
+                    else if (n === 1) classes.push('ansi-bold');
+                    else if (n === 2) classes.push('ansi-dim');
+                    else if (n === 3) classes.push('ansi-italic');
+                    else if (n === 4) classes.push('ansi-underline');
+                    else if (n >= 30 && n <= 37) classes.push('ansi-fg-' + (n - 30));
+                    else if (n >= 40 && n <= 47) classes.push('ansi-bg-' + (n - 40));
+                    else if (n >= 90 && n <= 97) classes.push('ansi-fg-' + (n - 90) + '-bright');
+                    else if (n >= 100 && n <= 107) classes.push('ansi-bg-' + (n - 100) + '-bright');
+                }
+                if (classes.length > 0) {
+                    out += '<span class="' + classes.join(' ') + '">';
+                    open = true;
+                }
+            } else {
+                var ch = str[i];
+                if (ch === '<') out += '&lt;';
+                else if (ch === '>') out += '&gt;';
+                else if (ch === '&') out += '&amp;';
+                else out += ch;
+                i++;
+            }
+        }
+        if (open) out += '</span>';
+        return out;
+    }
+
     // Parse args template like "<address> -s <subject> -m <message>" into field definitions
     // Returns [{name: "address", flag: null}, {name: "subject", flag: "-s"}, {name: "message", flag: "-m"}]
     function parseArgsTemplate(argsStr) {
@@ -2891,10 +2934,14 @@
         // Collect unique rigs and agents for dropdowns
         var rigs = {};
         var agents = {};
+        // Use actual rig names from the Rigs panel, not data-rig attributes
+        // (which include non-rig values like 'mayor', 'deacon', 'hq')
+        document.querySelectorAll('.rig-name').forEach(function(el) {
+            var name = el.textContent.trim();
+            if (name) rigs[name] = true;
+        });
         entries.forEach(function(entry) {
-            var rig = entry.getAttribute('data-rig');
             var agent = entry.getAttribute('data-agent');
-            if (rig) rigs[rig] = true;
             if (agent) agents[agent] = true;
         });
 
@@ -3045,10 +3092,11 @@
                     return;
                 }
                 var newText = data.content || '(empty)';
-                if (newText !== contentEl.textContent) {
+                if (newText !== (contentEl._rawContent || '')) {
+                    contentEl._rawContent = newText;
                     var atBottom = contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight < 20;
                     var savedScroll = contentEl.scrollTop;
-                    contentEl.textContent = newText;
+                    contentEl.innerHTML = ansiToHtml(newText);
                     if (atBottom) {
                         contentEl.scrollTop = contentEl.scrollHeight;
                     } else {
