@@ -3691,7 +3691,7 @@
             color: var(--text-primary);
             white-space: pre-wrap;
             word-wrap: break-word;
-            max-height: 400px;
+            max-height: 70vh;
             overflow-y: auto;
             min-height: 100px;
         }

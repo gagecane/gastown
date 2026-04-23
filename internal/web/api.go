@@ -2010,7 +2010,7 @@ func (h *APIHandler) handleSessionPreview(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	cmd := tmux.BuildCommandContext(ctx, "capture-pane", "-e", "-t", sessionName, "-p", "-J", "-S", "-30")
+	cmd := tmux.BuildCommandContext(ctx, "capture-pane", "-e", "-t", sessionName, "-p", "-J", "-S", "-80")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
