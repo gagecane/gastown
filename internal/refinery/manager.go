@@ -610,7 +610,7 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 
 	result := &PostMergeResult{
 		MR:            mr,
-		SourceIssueID: mr.IssueID,
+		SourceIssueID: stripMRIssueTimestampSuffix(mr.IssueID),
 	}
 
 	b := beads.New(m.rig.BeadsPath())
@@ -633,12 +633,19 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 	// The source issue may have an attached molecule (wisp) whose open steps
 	// would block a normal bd close. ForceCloseWithReason bypasses this,
 	// matching how gt done handles closures for the no-MR path.
-	if mr.IssueID != "" {
+	//
+	// Defense-in-depth: strip any timestamp suffix from the MR's IssueID
+	// before closing. Historically (pre-gu-y2w fix) the submit flow wrote
+	// convoy-suffixed IDs like "gu-aei--moiitf15" into source_issue, which
+	// caused this close to fail with "not found". result.SourceIssueID was
+	// already stripped above — reuse it so both the close and the UI agree.
+	if result.SourceIssueID != "" {
+		sourceID := result.SourceIssueID
 		closeReason := fmt.Sprintf("Merged in %s", mr.ID)
-		if err := b.ForceCloseWithReason(closeReason, mr.IssueID); err != nil {
+		if err := b.ForceCloseWithReason(closeReason, sourceID); err != nil {
 			// Check if already closed (by polecat's gt done) — that's fine
-			if issue, showErr := b.Show(mr.IssueID); showErr == nil && beads.IssueStatus(issue.Status).IsTerminal() {
-				_, _ = fmt.Fprintf(m.output, "  %s source issue already closed: %s\n", style.Dim.Render("○"), mr.IssueID)
+			if issue, showErr := b.Show(sourceID); showErr == nil && beads.IssueStatus(issue.Status).IsTerminal() {
+				_, _ = fmt.Fprintf(m.output, "  %s source issue already closed: %s\n", style.Dim.Render("○"), sourceID)
 				result.SourceIssueClosed = true
 			} else {
 				_, _ = fmt.Fprintf(m.output, "  %s source issue close: %v\n", style.Dim.Render("○"), err)
@@ -650,6 +657,26 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 	}
 
 	return result, nil
+}
+
+// stripMRIssueTimestampSuffix removes a trailing "--<timestamp>" or
+// "@<timestamp>" suffix from an MR's source_issue field. Polecat branches
+// are named polecat/<name>/<issue>--<ts> (current) or ...@<ts> (legacy),
+// and the submit flow historically wrote the un-stripped branch tail into
+// the MR bead. This helper lets the refinery close the actual bug bead
+// (gu-aei) rather than a non-existent gu-aei--moiitf15 — see gu-y2w.
+//
+// The primary fix lives in cmd/mq_submit.go's parseBranchName; this
+// function provides belt-and-suspenders protection for MR beads that were
+// written by older binaries before that fix shipped.
+func stripMRIssueTimestampSuffix(id string) string {
+	if idx := strings.Index(id, "--"); idx > 0 {
+		return id[:idx]
+	}
+	if idx := strings.Index(id, "@"); idx > 0 {
+		return id[:idx]
+	}
+	return id
 }
 
 // notifyWorkerRejected sends a rejection notification to a polecat.
