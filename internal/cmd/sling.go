@@ -662,6 +662,13 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		target = args[1]
 	}
 	if rigName, isRig := IsRigName(target); isRig {
+		// Release the outer per-bead flock before calling executeSling —
+		// executeSling acquires its own per-bead lock and FlockTryAcquire is
+		// non-blocking, so holding both deadlocks the nested acquire.
+		releaseSlingLock()
+		// Prevent the deferred release from running a second time (no-op is
+		// safe today because release is idempotent, but we make intent clear).
+		releaseSlingLock = func() {}
 		return runSlingRigTarget(runSlingRigTargetParams{
 			BeadID:      beadID,
 			RigName:     rigName,
