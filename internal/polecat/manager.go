@@ -115,6 +115,12 @@ var (
 	ErrDoltUnhealthy      = errors.New("dolt health check failed")
 	ErrDoltAtCapacity     = errors.New("dolt server at connection capacity")
 	ErrDiskSpaceLow       = errors.New("insufficient disk space")
+	// ErrPolecatNameRedundantRigPrefix is returned when a polecat name starts
+	// with "<rigName>-". Such names produce double-prefix session names like
+	// "cadk-casc_cdk-cat" (where cadk is the prefix for rig casc_cdk), which
+	// the witness patrol flags as malformed and cannot reliably reconcile with
+	// worktree names. See gu-aei.
+	ErrPolecatNameRedundantRigPrefix = errors.New("polecat name cannot start with rig name")
 )
 
 // UncommittedWorkError provides details about uncommitted work.
@@ -634,6 +640,29 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	return result
 }
 
+// validatePolecatNameNotRedundantPrefix rejects polecat names that start with
+// "<rigName>-". Such names produce double-prefix session names (e.g. a polecat
+// named "casc_cdk-cat" in rig "casc_cdk" yields session "cadk-casc_cdk-cat"
+// instead of the canonical "cadk-cat"), which witness patrols cannot reliably
+// reconcile with the worktree directory layout. See gu-aei.
+//
+// This is checked at spawn time so the problem is caught as early as possible,
+// rather than leaving the SessionName() warning as the only signal.
+func validatePolecatNameNotRedundantPrefix(name, rigName string) error {
+	if rigName == "" || name == "" {
+		return nil
+	}
+	// Only reject the exact "<rigName>-..." pattern — other names that merely
+	// contain the rig name as a substring are fine (e.g. "mycat-rig").
+	if strings.HasPrefix(name, rigName+"-") {
+		return fmt.Errorf("%w: %q starts with rig name %q; "+
+			"use a shorter name (e.g. %q) to avoid double-prefix session names",
+			ErrPolecatNameRedundantRigPrefix, name, rigName,
+			strings.TrimPrefix(name, rigName+"-"))
+	}
+	return nil
+}
+
 // Polecat state is derived from beads assignee field, not state.json.
 //
 // Branch naming: Each polecat run gets a unique branch (polecat/<name>-<timestamp>).
@@ -660,6 +689,17 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 
 	name, err := m.namePool.Allocate()
 	if err != nil {
+		_ = poolLock.Unlock()
+		return "", nil, err
+	}
+
+	// Defense-in-depth: reject themed/custom names that would collide with the
+	// rig name and produce double-prefix sessions (gu-aei). Themed names
+	// normally don't hit this, but a poorly-chosen custom theme could.
+	if err := validatePolecatNameNotRedundantPrefix(name, m.rig.Name); err != nil {
+		// Release the name back so it isn't permanently lost.
+		m.namePool.Release(name)
+		_ = m.namePool.Save()
 		_ = poolLock.Unlock()
 		return "", nil, err
 	}
@@ -844,6 +884,15 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 // cross-beads routing issues when slinging work to new polecats.
 func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retErr error) {
 	defer func() { telemetry.RecordPolecatSpawn(context.Background(), name, retErr) }()
+
+	// Guard against names that produce double-prefix session names (gu-aei).
+	// Checked here (not only in SessionName) so spawn fails fast rather than
+	// silently creating a worktree whose session name the witness will later
+	// flag as malformed.
+	if err := validatePolecatNameNotRedundantPrefix(name, m.rig.Name); err != nil {
+		return nil, err
+	}
+
 	// Acquire per-polecat file lock to prevent concurrent Add/Remove/Repair races
 	fl, err := m.lockPolecat(name)
 	if err != nil {

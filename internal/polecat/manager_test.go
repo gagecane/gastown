@@ -2141,3 +2141,77 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 		t.Fatal("expected error from worktree operations")
 	}
 }
+
+// TestValidatePolecatNameNotRedundantPrefix verifies the name validator rejects
+// polecat names that would produce double-prefix session names (gu-aei).
+// Example: a polecat named "casc_cdk-cat" in rig "casc_cdk" yields session
+// "cadk-casc_cdk-cat" instead of "cadk-cat".
+func TestValidatePolecatNameNotRedundantPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		polecat  string
+		rigName  string
+		wantErr  bool
+	}{
+		// Valid names — no redundant prefix
+		{"plain name", "cat", "casc_cdk", false},
+		{"themed name", "furiosa", "gastown", false},
+		{"name containing rig as substring", "gastown-cat", "gt", false},
+		{"name contains rig later", "my-gastown-cat", "gastown", false},
+
+		// Invalid — name starts with "<rigName>-"
+		{"rig prefix + cat", "casc_cdk-cat", "casc_cdk", true},
+		{"rig prefix + themed", "casc_shared-furiosa", "casc_shared", true},
+		{"rig prefix + number", "codegen_ws-51", "codegen_ws", true},
+		{"gastown-prefixed", "gastown-nux", "gastown", true},
+
+		// Edge cases — empty inputs are treated as valid (caller handles)
+		{"empty name", "", "gastown", false},
+		{"empty rig", "furiosa", "", false},
+		{"name equals rig (no hyphen)", "gastown", "gastown", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePolecatNameNotRedundantPrefix(tt.polecat, tt.rigName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validatePolecatNameNotRedundantPrefix(%q, %q) error = %v, wantErr %v",
+					tt.polecat, tt.rigName, err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, ErrPolecatNameRedundantRigPrefix) {
+				t.Errorf("expected error to wrap ErrPolecatNameRedundantRigPrefix, got %v", err)
+			}
+		})
+	}
+}
+
+// TestAddWithOptions_RejectsRedundantRigPrefix verifies that AddWithOptions
+// refuses to create a polecat whose name starts with "<rigName>-", failing
+// fast rather than silently creating a worktree with a malformed session
+// name (gu-aei).
+func TestAddWithOptions_RejectsRedundantRigPrefix(t *testing.T) {
+	root := t.TempDir()
+
+	r := &rig.Rig{
+		Name: "casc_cdk",
+		Path: root,
+	}
+	m := NewManager(r, git.NewGit(root), nil)
+
+	// Attempt to create a polecat named "casc_cdk-cat" — which would yield
+	// session "cadk-casc_cdk-cat" (double-prefix). Should fail with the
+	// dedicated sentinel error BEFORE any filesystem side effects.
+	_, err := m.AddWithOptions("casc_cdk-cat", AddOptions{})
+	if err == nil {
+		t.Fatal("AddWithOptions should reject names starting with rig name")
+	}
+	if !errors.Is(err, ErrPolecatNameRedundantRigPrefix) {
+		t.Errorf("expected ErrPolecatNameRedundantRigPrefix, got %v", err)
+	}
+
+	// Verify no polecat directory was created.
+	polecatDir := filepath.Join(root, "polecats", "casc_cdk-cat")
+	if _, err := os.Stat(polecatDir); !os.IsNotExist(err) {
+		t.Errorf("polecat dir %s should not exist after rejected AddWithOptions", polecatDir)
+	}
+}
