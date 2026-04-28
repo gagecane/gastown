@@ -287,13 +287,24 @@ func hasRedirectWithStaleFiles(beadsDir string) bool {
 		return false
 	}
 
+	// When metadata.json declares a dolt_database, cleanStaleBeadsFiles will
+	// preserve it (see metadataHasDoltDB guard below). If metadata.json is
+	// the ONLY match in this directory, flagging would produce a warning
+	// whose --fix is a no-op (we'd "clean" nothing). Skip metadata.json
+	// from the stale-trigger list in that case so the check and the fix
+	// stay symmetric.
+	skipMetadata := metadataHasDoltDB(beadsDir)
+
 	// Check for any stale files
 	for _, pattern := range staleFilePatterns {
 		matches, err := filepath.Glob(filepath.Join(beadsDir, pattern))
 		if err != nil {
 			continue
 		}
-		if len(matches) > 0 {
+		for _, match := range matches {
+			if skipMetadata && filepath.Base(match) == "metadata.json" {
+				continue
+			}
 			return true
 		}
 	}
