@@ -2029,10 +2029,13 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	cfg := wisp.NewConfig(d.config.TownRoot, rigName)
 
-	// Warn if wisp config is missing - parked/docked state may have been lost
-	if _, err := os.Stat(cfg.ConfigPath()); os.IsNotExist(err) {
-		d.logger.Printf("Warning: no wisp config for %s - parked state may have been lost", rigName)
-	}
+	// Note: a missing wisp config file is the normal state for rigs that have
+	// never been parked or had a wisp-level override set. Parked/docked state
+	// is authoritatively tracked via rig bead labels (see IsRigParkedOrDockedE
+	// below), so the absence of a wisp config does NOT indicate lost state.
+	// An earlier version of this code printed a warning here on every heartbeat
+	// cycle per rig, which at 15 rigs × ~8/min produced ~260K log lines/day
+	// (52% of daemon.log). The warning was never actionable — removed in gu-66xp.
 
 	// Check parked/docked via the shared helper. The error variant lets us
 	// implement fail-safe semantics: when the rig bead can't be read
