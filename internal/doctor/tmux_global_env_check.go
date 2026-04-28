@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -71,7 +72,7 @@ func (c *TmuxGlobalEnvCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if val != ctx.TownRoot {
+	if !sameResolvedPath(val, ctx.TownRoot) {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
@@ -98,4 +99,25 @@ func (c *TmuxGlobalEnvCheck) Fix(ctx *CheckContext) error {
 		accessor = tmux.NewTmux()
 	}
 	return accessor.SetGlobalEnvironment("GT_TOWN_ROOT", ctx.TownRoot)
+}
+
+// sameResolvedPath returns true if a and b resolve to the same canonical
+// filesystem path. This handles the case where GT_TOWN_ROOT was set from
+// one path (e.g. /home/canewiw/gt, a symlink) and ctx.TownRoot was resolved
+// from the other (e.g. /local/home/canewiw/gt, the symlink target). Both
+// forms point to the same town — the raw string compare would flag them as
+// a mismatch, producing a recurring false-positive warning.
+//
+// Falls back to raw string compare if symlink resolution fails on either side
+// (e.g., the path no longer exists).
+func sameResolvedPath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return ra == rb
 }
