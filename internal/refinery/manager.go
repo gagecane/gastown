@@ -215,6 +215,13 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		return fmt.Errorf("creating tmux session: %w", err)
 	}
 
+	// Set remain-on-exit IMMEDIATELY after session creation so the pane
+	// survives even if the agent exits before the auto-respawn hook is
+	// installed below. Without this, a fast agent crash would destroy the
+	// pane and leave the daemon to spawn a fresh session 3-5 minutes later.
+	// Mirrors the deacon/manager.go pattern (PATCH-010).
+	_ = t.SetRemainOnExit(sessionID, true)
+
 	// Set environment variables (non-fatal: session works without these)
 	// Use centralized AgentEnv for consistency across all role startup paths
 	envVars := config.AgentEnv(config.AgentEnvConfig{
@@ -250,6 +257,17 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		// Kill the zombie session before returning error
 		_ = t.KillSessionWithProcesses(sessionID)
 		return fmt.Errorf("waiting for refinery to start: %w", err)
+	}
+
+	// Install the auto-respawn hook so the agent (kiro-cli / claude / etc.)
+	// is restarted immediately at the tmux layer when it exits — no need to
+	// wait for the daemon's 5-minute refinery patrol tick to notice.
+	// Mirrors the deacon/manager.go PATCH-010 pattern. Non-fatal: if the
+	// hook fails to install, the daemon heartbeat still restarts the
+	// session, just with a delay.
+	// (gu-6az)
+	if err := t.SetAutoRespawnHook(sessionID); err != nil {
+		log.Printf("warning: failed to set auto-respawn hook for refinery %s: %v", sessionID, err)
 	}
 
 	// Start nudge-queue poller (gt-dgf). Claude's UserPromptSubmit hook only
