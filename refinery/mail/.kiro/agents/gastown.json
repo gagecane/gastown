@@ -18,6 +18,9 @@
     ],
     "stop": [
       {
+        "command": "/local/home/canewiw/.local/bin/gt tap polecat-stop-check"
+      },
+      {
         "command": "/local/home/canewiw/.local/bin/gt costs record"
       }
     ]
