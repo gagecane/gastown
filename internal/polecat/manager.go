@@ -20,6 +20,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -1228,9 +1229,21 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	// not errors, so nuke still proceeds. See: disk-space-resilience.
 	polecatGit := git.NewGit(clonePath)
 	if branch, brErr := polecatGit.CurrentBranch(); brErr == nil && branch != "" {
-		pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemote(branch, "origin")
-		if checkErr == nil && !pushed && unpushedCount > 0 {
-			if pushErr := polecatGit.Push("origin", branch, false); pushErr != nil {
+		// HARD GUARD (gu-cfb): Never push a polecat worktree that is sitting
+		// on mainline. If a worktree somehow ended up on main/master (e.g., a
+		// manual `git checkout`, a broken sync, or the rig root misidentified
+		// as a polecat clone), pushing it here would land whatever local
+		// commits exist directly on origin/main, bypassing the merge queue.
+		// Polecat branches are always `polecat/*` by construction — anything
+		// else is a misconfiguration we refuse to propagate to origin.
+		if !strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
+			style.PrintWarning("skipping best-effort push before nuke: branch %q is not a polecat branch (refusing to push non-polecat refs from a polecat worktree)", branch)
+		} else if pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemote(branch, "origin"); checkErr == nil && !pushed && unpushedCount > 0 {
+			// Use explicit refspec (branch:branch) so we never fall through to
+			// tracking-config-based pushes (which would target origin/main for
+			// polecat branches that track main — the G20 root cause).
+			refspec := branch + ":" + branch
+			if pushErr := polecatGit.Push("origin", refspec, false); pushErr != nil {
 				style.PrintWarning("could not push branch %s before removal (%d unpushed commit(s)): %v",
 					branch, unpushedCount, pushErr)
 				style.PrintWarning("WORK AT RISK: branch %s has %d unpushed commit(s) in worktree %s",

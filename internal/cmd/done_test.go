@@ -1386,6 +1386,41 @@ func TestPushSubmoduleChanges_NoSubmodules(t *testing.T) {
 	pushSubmoduleChanges(g, "main")
 }
 
+// TestIsDefaultBranchName pins down the gu-cfb safety-net guard used by the
+// gt-pvx auto-commit path and the MR push refspec builder. The guard must
+// refuse to act on any of: the rig-configured default branch, "main", or
+// "master" — catching both misconfigured rigs and polecats sitting on a
+// non-polecat branch. See the incident in gu-cfb: the auto-commit ran from
+// a rig root on main and pushed polecats/* rename artifacts straight to
+// origin/main, causing a refinery merge race.
+func TestIsDefaultBranchName(t *testing.T) {
+	tests := []struct {
+		name          string
+		branch        string
+		defaultBranch string
+		want          bool
+	}{
+		{"configured main", "main", "main", true},
+		{"configured master", "master", "master", true},
+		{"configured custom matches", "release", "release", true},
+		{"custom default still catches main alias", "main", "release", true},
+		{"custom default still catches master alias", "master", "release", true},
+		{"polecat branch passes", "polecat/chrome/gu-abc--moi123", "main", false},
+		{"feature branch passes", "feat/my-change", "main", false},
+		{"empty branch is not default", "", "main", false},
+		{"empty default still catches main", "main", "", true},
+		{"empty default still catches master", "master", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDefaultBranchName(tt.branch, tt.defaultBranch); got != tt.want {
+				t.Errorf("isDefaultBranchName(%q, %q) = %v, want %v",
+					tt.branch, tt.defaultBranch, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestAutoCommitSafetyNet verifies that the gt done auto-commit safety net
 // (gt-pvx) correctly detects uncommitted implementation work and auto-commits it.
 // This tests the git-level operations that underpin the safety net in done.go.

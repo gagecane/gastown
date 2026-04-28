@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -140,8 +141,22 @@ func (c *StalledPolecatCheck) Fix(ctx *CheckContext) error {
 
 	var lastErr error
 	for _, s := range c.stalledPolecats {
+		// HARD GUARD (gu-cfb): Skip worktrees whose branch is not a polecat
+		// branch. A polecat worktree should only ever be on `polecat/*`; if
+		// it is sitting on main/master, pushing it here would land local
+		// commits directly on origin/main, bypassing the merge queue. This
+		// has been observed when gt-pvx auto-save runs from a rig root
+		// misidentified as a polecat clone.
+		if !strings.HasPrefix(s.branch, constants.BranchPolecatPrefix) {
+			lastErr = fmt.Errorf("refusing to push %s/%s: branch %q is not a polecat branch (expected %s*)",
+				s.rigName, s.name, s.branch, constants.BranchPolecatPrefix)
+			continue
+		}
 		polecatGit := git.NewGit(s.clonePath)
-		if err := polecatGit.Push("origin", s.branch, false); err != nil {
+		// Use an explicit refspec (branch:branch) so we never fall through to
+		// tracking-config-based pushes (polecat branches may track origin/main).
+		refspec := s.branch + ":" + s.branch
+		if err := polecatGit.Push("origin", refspec, false); err != nil {
 			lastErr = fmt.Errorf("pushing %s/%s branch %s: %w", s.rigName, s.name, s.branch, err)
 		}
 	}
