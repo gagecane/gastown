@@ -187,8 +187,13 @@ bd update gt-rig-myrig --labels="polecat_branch_template:adam/{year}/{month}/{de
 **Default Behavior (backward compatible):**
 
 When `polecat_branch_template` is empty or not set:
-- With issue: `polecat/{name}/{issue}@{timestamp}`
+- With issue: `polecat/{name}/{issue}--{timestamp}`
 - Without issue: `polecat/{name}-{timestamp}`
+
+> Note: The issue/timestamp separator is `--` (double-dash), not `@`. Many
+> remote pre-receive hooks (including internal Amazon git.amazon.com) reject
+> `@` in branch names, so the default format uses `--` to keep polecat
+> branches pushable to arbitrary remotes.
 
 **Example Configurations:**
 

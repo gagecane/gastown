@@ -176,14 +176,20 @@ func (m *SessionManager) clonePath(polecat string) string {
 
 // freshBranchName returns a unique branch name for a new polecat session.
 // Mirrors the naming convention in Manager.buildBranchName:
-//   - polecat/<name>/<issue>@<timestamp> when an issue is known
+//   - polecat/<name>/<issue>--<timestamp> when an issue is known
 //   - polecat/<name>-<timestamp> otherwise
+//
+// The issue/timestamp separator is "--" (double-dash). It was "@" until
+// 2026-04-28, but internal Amazon git.amazon.com pre-receive hooks reject
+// "@" in branch names, so polecats could never push their work to the
+// refinery. "--" is safe in git refs, URL-safe, and unambiguous (bead IDs
+// use single "-" between prefix and slug but never "--").
 //
 // parseFreshBranchName is the structural inverse.
 func (m *SessionManager) freshBranchName(polecatName, issue string) string {
 	ts := strconv.FormatInt(time.Now().UnixMilli(), 36)
 	if issue != "" {
-		return fmt.Sprintf("polecat/%s/%s@%s", polecatName, issue, ts)
+		return fmt.Sprintf("polecat/%s/%s--%s", polecatName, issue, ts)
 	}
 	return fmt.Sprintf("polecat/%s-%s", polecatName, ts)
 }
@@ -200,6 +206,11 @@ type freshBranchMeta struct {
 // does not consult git or the filesystem; it recognises the two formats
 // the formatter emits. Used in place of substring heuristics so that
 // branch-naming changes can be made in a single place.
+//
+// Accepts both the current separator ("--") and the legacy separator ("@")
+// between issue and timestamp, so branches created by older binaries still
+// parse correctly during rolling upgrades. When both are present, "--" wins
+// (takes precedence) because it is the canonical current form.
 func parseFreshBranchName(branch string) freshBranchMeta {
 	const prefix = "polecat/"
 	if !strings.HasPrefix(branch, prefix) {
@@ -207,17 +218,24 @@ func parseFreshBranchName(branch string) freshBranchMeta {
 	}
 	rest := branch[len(prefix):]
 	if slash := strings.Index(rest, "/"); slash >= 0 {
-		// polecat/<name>/<issue>@<ts>
+		// polecat/<name>/<issue>--<ts>  (current form)
+		// polecat/<name>/<issue>@<ts>   (legacy form, kept for back-compat)
 		if slash == 0 {
 			return freshBranchMeta{}
 		}
 		name := rest[:slash]
 		tail := rest[slash+1:]
-		at := strings.LastIndex(tail, "@")
-		if at <= 0 || at == len(tail)-1 {
+		// Prefer "--" over "@" when both are present.
+		sep := strings.LastIndex(tail, "--")
+		sepLen := 2
+		if sep < 0 {
+			sep = strings.LastIndex(tail, "@")
+			sepLen = 1
+		}
+		if sep <= 0 || sep == len(tail)-sepLen {
 			return freshBranchMeta{}
 		}
-		return freshBranchMeta{polecat: name, issue: tail[:at], ok: true}
+		return freshBranchMeta{polecat: name, issue: tail[:sep], ok: true}
 	}
 	// polecat/<name>-<ts> (no slash in rest)
 	dash := strings.LastIndex(rest, "-")

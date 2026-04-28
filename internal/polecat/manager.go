@@ -535,8 +535,13 @@ type AddOptions struct {
 // - {timestamp}: unique timestamp
 //
 // If no template is configured or template is empty, uses default format:
-// - polecat/{name}/{issue}@{timestamp} when issue is available
+// - polecat/{name}/{issue}--{timestamp} when issue is available
 // - polecat/{name}-{timestamp} otherwise
+//
+// NOTE: The issue/timestamp separator is "--" (double-dash), not "@".
+// Many remote pre-receive hooks (e.g. internal Amazon git.amazon.com)
+// reject branch names containing characters outside [a-zA-Z0-9_/-.], so
+// "@" must never appear in generated branch names.
 func (m *Manager) buildBranchName(name, issue string) string {
 	template := m.rig.GetStringConfig("polecat_branch_template")
 
@@ -544,7 +549,7 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	if template == "" {
 		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 36)
 		if issue != "" {
-			return fmt.Sprintf("polecat/%s/%s@%s", name, issue, timestamp)
+			return fmt.Sprintf("polecat/%s/%s--%s", name, issue, timestamp)
 		}
 		return fmt.Sprintf("polecat/%s-%s", name, timestamp)
 	}

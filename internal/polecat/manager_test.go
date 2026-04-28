@@ -960,7 +960,7 @@ func TestBuildBranchName(t *testing.T) {
 			name:     "default_with_issue",
 			template: "", // Empty template = default behavior
 			issue:    "gt-123",
-			want:     "polecat/alpha/gt-123@", // timestamp suffix varies
+			want:     "polecat/alpha/gt-123--", // timestamp suffix varies; "--" separator (was "@", changed 2026-04-28 for pre-receive-hook compatibility)
 		},
 		{
 			name:     "default_without_issue",
