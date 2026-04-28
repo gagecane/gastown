@@ -107,6 +107,65 @@ func SquashWIPCommits(workDir, baseRef string) (int, error) {
 	return wipCount, nil
 }
 
+// BestCommitMessage returns the full commit message (%B) of the most
+// recent non-WIP commit on `branch` relative to `baseRef`, i.e. the most
+// recent commit in merge-base(baseRef, branch)..branch whose subject does
+// NOT start with WIPCommitPrefix.
+//
+// If no non-WIP commit exists in that range, it returns ("", nil) so the
+// caller can fall back to its own default message.
+//
+// Intended use: when squash-merging a polecat branch into mainline, the
+// refinery copies the branch-tip commit message onto the squash commit.
+// If the tip happens to be a `WIP: checkpoint (auto)` commit produced by
+// checkpoint_dog (e.g. the polecat crashed before committing real work,
+// or ran `gt done` on a branch whose tip was a WIP), the merge commit
+// message ends up as "WIP: checkpoint (auto)" on mainline — the gu-zd2
+// incident. Walking back past WIP tips selects a clean conventional
+// commit message instead.
+//
+// This does NOT rewrite history — it only picks a better message. The
+// squash-merge itself still captures the full branch diff.
+func BestCommitMessage(workDir, branch, baseRef string) (string, error) {
+	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, branch)
+	if err != nil {
+		return "", fmt.Errorf("finding merge-base: %w", err)
+	}
+
+	// List commits in mergeBase..branch, newest-first, with a NUL record
+	// separator so multi-line commit bodies can be parsed unambiguously.
+	// Format: "<subject>\n<body>" per commit, records separated by \x00.
+	rev := mergeBase + ".." + branch
+	logOut, err := gitOutput(workDir, "log", "--format=%B%x00", rev)
+	if err != nil {
+		return "", fmt.Errorf("listing commits: %w", err)
+	}
+	if logOut == "" {
+		return "", nil
+	}
+
+	// Split on NUL. `git log` emits the records in reverse-chronological
+	// order (newest first), which is exactly what we want — the first
+	// non-WIP record we encounter is the newest non-WIP commit.
+	for _, rec := range strings.Split(logOut, "\x00") {
+		msg := strings.TrimSpace(rec)
+		if msg == "" {
+			continue
+		}
+		// The subject is the first line.
+		subj := msg
+		if idx := strings.IndexByte(msg, '\n'); idx != -1 {
+			subj = msg[:idx]
+		}
+		if !strings.HasPrefix(subj, WIPCommitPrefix) {
+			return msg, nil
+		}
+	}
+
+	// All commits in the range were WIP checkpoints.
+	return "", nil
+}
+
 // gitOutput runs a git command and returns trimmed stdout.
 func gitOutput(workDir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
@@ -639,15 +640,30 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 
 	// Step 5: Perform the actual merge using squash merge
 	// Get the original commit message from the polecat branch to preserve the
-	// conventional commit format (feat:/fix:) instead of creating redundant merge commits
-	originalMsg, err := e.git.GetBranchCommitMessage(branch)
-	if err != nil {
+	// conventional commit format (feat:/fix:) instead of creating redundant merge commits.
+	//
+	// gu-zd2: prefer the most recent non-WIP commit. If the polecat branch
+	// tip is a `WIP: checkpoint (auto)` commit produced by checkpoint_dog
+	// (crash recovery, or `gt done` on a WIP tip), copying that subject
+	// onto the mainline squash commit makes the merge commit itself look
+	// like a WIP — the exact history pollution the bead describes.
+	var originalMsg string
+	if best, bestErr := checkpoint.BestCommitMessage(e.git.WorkDir(), branch, "origin/"+target); bestErr == nil {
+		originalMsg = strings.TrimSpace(best)
+	}
+	var msgErr error
+	if originalMsg == "" {
+		originalMsg, msgErr = e.git.GetBranchCommitMessage(branch)
+	}
+	if msgErr != nil || strings.TrimSpace(originalMsg) == "" {
 		// Fallback to a descriptive message if we can't get the original
 		originalMsg = fmt.Sprintf("Squash merge %s into %s", branch, target)
 		if sourceIssue != "" {
 			originalMsg = fmt.Sprintf("Squash merge %s into %s (%s)", branch, target, sourceIssue)
 		}
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not get original commit message: %v\n", err)
+		if msgErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not get original commit message: %v\n", msgErr)
+		}
 	}
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Squash merging with message: %s\n", strings.TrimSpace(originalMsg))
 	if err := e.git.MergeSquash(branch, originalMsg); err != nil {

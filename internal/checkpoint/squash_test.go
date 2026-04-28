@@ -227,3 +227,159 @@ func TestSquashWIPCommits_NoCommits(t *testing.T) {
 		t.Errorf("expected 0 for no commits, got %d", wipCount)
 	}
 }
+
+// --- BestCommitMessage tests (gu-zd2) --------------------------------------
+
+// addCommitWithBody adds a file and commits with a subject and multi-line body.
+// Using a helper keeps the intent (multi-line body matters for %B selection)
+// visible in the tests.
+func addCommitWithBody(t *testing.T, dir, filename, content, subject, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", filename},
+		{"git", "commit", "-m", subject, "-m", body},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args[1:], err, out)
+		}
+	}
+}
+
+// TestBestCommitMessage_NoWIPReturnsTipMessage: a branch with only real
+// commits returns the tip commit's message, same as GetBranchCommitMessage.
+func TestBestCommitMessage_NoWIPReturnsTipMessage(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a\n", "feat: add feature A")
+	addCommit(t, dir, "b.go", "package b\n", "feat: add feature B")
+
+	msg, err := BestCommitMessage(dir, "feature", "main")
+	if err != nil {
+		t.Fatalf("BestCommitMessage returned error: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(msg), "feat: add feature B") {
+		t.Errorf("expected tip message 'feat: add feature B', got %q", msg)
+	}
+}
+
+// TestBestCommitMessage_WIPTipSkipped: a branch whose tip is a WIP commit
+// returns the preceding real commit's message. This is the gu-zd2 primary
+// acceptance case — preserves conventional commit format on the squash
+// commit even when the polecat's last commit was an auto-checkpoint.
+func TestBestCommitMessage_WIPTipSkipped(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a\n", "feat: real work")
+	addCommit(t, dir, "b.txt", "b\n", WIPCommitPrefix)
+
+	msg, err := BestCommitMessage(dir, "feature", "main")
+	if err != nil {
+		t.Fatalf("BestCommitMessage returned error: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(msg), "feat: real work") {
+		t.Errorf("expected 'feat: real work' (WIP tip skipped), got %q", msg)
+	}
+	if strings.HasPrefix(strings.TrimSpace(msg), WIPCommitPrefix) {
+		t.Errorf("expected non-WIP message, still got a WIP: %q", msg)
+	}
+}
+
+// TestBestCommitMessage_AllWIPReturnsEmpty: if every commit on the branch
+// is a WIP checkpoint (polecat crashed before any real commit), return ""
+// so the caller can produce a descriptive fallback message.
+func TestBestCommitMessage_AllWIPReturnsEmpty(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.txt", "a\n", WIPCommitPrefix)
+	addCommit(t, dir, "b.txt", "b\n", WIPCommitPrefix)
+
+	msg, err := BestCommitMessage(dir, "feature", "main")
+	if err != nil {
+		t.Fatalf("BestCommitMessage returned error: %v", err)
+	}
+	if strings.TrimSpace(msg) != "" {
+		t.Errorf("expected empty message when all commits are WIP, got %q", msg)
+	}
+}
+
+// TestBestCommitMessage_MultipleWIPsBetweenReals: walks back past several
+// consecutive WIPs to find the real commit beneath.
+func TestBestCommitMessage_MultipleWIPsBetweenReals(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a\n", "feat: first real")
+	addCommit(t, dir, "w1.txt", "1\n", WIPCommitPrefix)
+	addCommit(t, dir, "w2.txt", "2\n", WIPCommitPrefix)
+	addCommit(t, dir, "w3.txt", "3\n", WIPCommitPrefix)
+
+	msg, err := BestCommitMessage(dir, "feature", "main")
+	if err != nil {
+		t.Fatalf("BestCommitMessage returned error: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(msg), "feat: first real") {
+		t.Errorf("expected 'feat: first real' beneath three WIPs, got %q", msg)
+	}
+}
+
+// TestBestCommitMessage_PreservesBody: the full %B (subject + body) of the
+// chosen commit must be returned, not just the subject. Conventional commit
+// bodies often carry important context that should survive on the squash
+// commit message.
+func TestBestCommitMessage_PreservesBody(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommitWithBody(t, dir, "a.go", "package a\n",
+		"feat: add feature A",
+		"This body describes the change.\n\nWith a second paragraph.")
+	addCommit(t, dir, "w.txt", "w\n", WIPCommitPrefix)
+
+	msg, err := BestCommitMessage(dir, "feature", "main")
+	if err != nil {
+		t.Fatalf("BestCommitMessage returned error: %v", err)
+	}
+	if !strings.Contains(msg, "feat: add feature A") {
+		t.Errorf("expected subject in message, got %q", msg)
+	}
+	if !strings.Contains(msg, "This body describes the change.") {
+		t.Errorf("expected body in message (multi-line preserved), got %q", msg)
+	}
+	if !strings.Contains(msg, "second paragraph") {
+		t.Errorf("expected full body including second paragraph, got %q", msg)
+	}
+}
+
+// TestBestCommitMessage_EmptyRangeReturnsEmpty: when the branch has no
+// commits past baseRef (freshly created, not diverged), return "" with no
+// error.
+func TestBestCommitMessage_EmptyRangeReturnsEmpty(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	// No new commits on feature.
+
+	msg, err := BestCommitMessage(dir, "feature", "main")
+	if err != nil {
+		t.Fatalf("BestCommitMessage returned error on empty range: %v", err)
+	}
+	if strings.TrimSpace(msg) != "" {
+		t.Errorf("expected empty message for no diverged commits, got %q", msg)
+	}
+}
+
+// TestBestCommitMessage_InvalidBaseRefErrors: an unknown baseRef returns an
+// error so the caller can log and fall back; it must not silently succeed
+// with a misleading message.
+func TestBestCommitMessage_InvalidBaseRefErrors(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a\n", "feat: add A")
+
+	_, err := BestCommitMessage(dir, "feature", "origin/does-not-exist")
+	if err == nil {
+		t.Errorf("expected error for unknown baseRef, got nil")
+	}
+}

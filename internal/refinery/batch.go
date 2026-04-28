@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/checkpoint"
 )
 
 // BatchConfig holds configuration for the batch-then-bisect merge queue.
@@ -174,7 +176,25 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 }
 
 // getMergeMessage returns the commit message for a squash-merged MR.
+//
+// Selection order:
+//  1. The most recent non-WIP commit message on mr.Branch relative to its
+//     target (checkpoint.BestCommitMessage). This guards against the
+//     gu-zd2 incident where a `WIP: checkpoint (auto)` tip would have
+//     made the squash commit's subject "WIP: checkpoint (auto)" on
+//     mainline.
+//  2. Branch-tip commit message via GetBranchCommitMessage (legacy path).
+//  3. A generated "Squash merge …" fallback.
 func (e *Engineer) getMergeMessage(mr *MRInfo) string {
+	// Prefer the most recent non-WIP commit message. Any error or empty
+	// result falls through to the existing tip-based logic — this is a
+	// best-effort filter, never a hard gate.
+	if best, err := checkpoint.BestCommitMessage(e.git.WorkDir(), mr.Branch, "origin/"+mr.Target); err == nil {
+		if clean := strings.TrimSpace(best); clean != "" {
+			return best
+		}
+	}
+
 	// Try to get the original commit message from the branch
 	msg, err := e.git.GetBranchCommitMessage(mr.Branch)
 	if err != nil || strings.TrimSpace(msg) == "" {

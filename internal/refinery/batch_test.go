@@ -831,6 +831,72 @@ func TestGetMergeMessage_Fallback(t *testing.T) {
 	}
 }
 
+// TestGetMergeMessage_PrefersNonWIPOverWIPTip verifies the gu-zd2 fix:
+// when the polecat branch tip is a `WIP: checkpoint (auto)` commit, the
+// squash merge message must come from the most recent NON-WIP commit on
+// the branch, not the WIP tip. Without this, the squash commit on
+// mainline inherits "WIP: checkpoint (auto)" as its subject — the exact
+// history pollution described in the bead.
+func TestGetMergeMessage_PrefersNonWIPOverWIPTip(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	// origin/main must exist so BestCommitMessage can compute merge-base.
+	// testGitRepo already pushes main to origin, so origin/main is a
+	// valid merge-base reference.
+	run(t, workDir, "git", "checkout", "-b", "feat-wip-tip", "main")
+	writeFile(t, workDir, "feature.go", "package feature\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat(widgets): add widget loader")
+	// Append a checkpoint_dog-style WIP commit on top.
+	writeFile(t, workDir, "scratch.txt", "ephemeral churn\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "WIP: checkpoint (auto)")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	mr := makeMR("mr-widgets", "feat-wip-tip", "main")
+
+	msg := e.getMergeMessage(mr)
+	if strings.HasPrefix(strings.TrimSpace(msg), "WIP: checkpoint") {
+		t.Errorf("refinery must not inherit WIP tip message; got %q", msg)
+	}
+	if !strings.Contains(msg, "feat(widgets): add widget loader") {
+		t.Errorf("expected non-WIP conventional commit message, got %q", msg)
+	}
+}
+
+// TestGetMergeMessage_AllWIPFallsBackToBranchTip verifies that when every
+// commit on the branch is a WIP checkpoint (polecat crashed before any
+// real commit), getMergeMessage still returns a non-empty message. The
+// exact content comes from GetBranchCommitMessage — which is itself a
+// WIP subject in this pathological case — but we accept that: there is
+// no real message to promote, and the fallback chain (tip → generated
+// "Squash merge …") is still valid input to MergeSquash.
+//
+// The important guarantee is: getMergeMessage never returns empty.
+func TestGetMergeMessage_AllWIPFallsBackToBranchTip(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	run(t, workDir, "git", "checkout", "-b", "feat-all-wip", "main")
+	writeFile(t, workDir, "w1.txt", "1\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "WIP: checkpoint (auto)")
+	writeFile(t, workDir, "w2.txt", "2\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "WIP: checkpoint (auto)")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	mr := makeMR("mr-wip-only", "feat-all-wip", "main")
+
+	msg := e.getMergeMessage(mr)
+	if strings.TrimSpace(msg) == "" {
+		t.Errorf("expected non-empty fallback, got empty")
+	}
+}
+
 // TestProcessBatch_SingleMR_BranchNotFound verifies that a missing branch is treated as a
 // skippable condition (added to Conflicts) rather than a fatal infrastructure error.
 func TestProcessBatch_SingleMR_BranchNotFound(t *testing.T) {
