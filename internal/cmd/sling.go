@@ -649,19 +649,27 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
-	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
-	// and scheduler dispatch already use the unified path. Single-sling is deferred
-	// because it handles non-rig targets (dogs, mayor, crew, self-sling, nudge)
-	// that executeSling does not cover. The rig-target case could be factored out
-	// to use executeSling, limiting this to non-rig targets only.
+	// Rig-target dispatch: delegate to the unified executeSling() path so
+	// single-sling uses the same spawn/cook/instantiate/hook/session flow as
+	// batch sling and scheduler dispatch. Non-rig targets (dogs, mayor, crew,
+	// self-sling, existing polecats) keep the inline path below because
+	// executeSling only covers rig dispatch (GH scheduler-unify).
 	//
-	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
 	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
 	var target string
 	if len(args) > 1 {
 		target = args[1]
+	}
+	if rigName, isRig := IsRigName(target); isRig {
+		return runSlingRigTarget(runSlingRigTargetParams{
+			BeadID:      beadID,
+			RigName:     rigName,
+			FormulaName: formulaName,
+			Info:        info,
+			Force:       force,
+			TownRoot:    townRoot,
+		})
 	}
 	resolved, err := resolveTarget(target, ResolveTargetOptions{
 		DryRun:     slingDryRun,
