@@ -563,7 +563,14 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer releaseSlingLock()
+	slingLockReleased := false
+	releaseLockOnce := func() {
+		if !slingLockReleased {
+			slingLockReleased = true
+			releaseSlingLock()
+		}
+	}
+	defer releaseLockOnce()
 
 	// Check if bead is already assigned (guard against accidental re-sling).
 	// This must happen before resolveTarget(), since rig targets can spawn/hook a new polecat as a side-effect.
@@ -649,19 +656,24 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
-	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
-	// and scheduler dispatch already use the unified path. Single-sling is deferred
-	// because it handles non-rig targets (dogs, mayor, crew, self-sling, nudge)
-	// that executeSling does not cover. The rig-target case could be factored out
-	// to use executeSling, limiting this to non-rig targets only.
-	//
 	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
 	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
 	var target string
 	if len(args) > 1 {
 		target = args[1]
+	}
+
+	// Rig-target dispatch (scheduler-unify): rig targets flow through the unified
+	// executeSling() path shared with batch sling and scheduler dispatch. The inline
+	// branch below only handles non-rig targets (dogs, mayor, crew, self-sling,
+	// existing polecats, and dead-polecat fallback), which executeSling does not cover.
+	if rigName, isRig := IsRigName(target); isRig {
+		// Release the per-bead sling lock before handing off to executeSling,
+		// which acquires its own lock. Holding both would deadlock (flock is
+		// non-blocking and returns "already being slung").
+		releaseLockOnce()
+		return runSlingToRig(ctx, beadID, rigName, formulaName, info, townRoot, townBeadsDir, force)
 	}
 	resolved, err := resolveTarget(target, ResolveTargetOptions{
 		DryRun:     slingDryRun,
@@ -1029,6 +1041,110 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		} else {
 			fmt.Printf("%s Start prompt sent\n", style.Bold.Render("▶"))
 		}
+	}
+
+	return nil
+}
+
+// runSlingToRig routes a single-sling rig-target dispatch through the unified
+// executeSling() path (gu-4d1, scheduler-unify). Rig targets always spawn a
+// fresh polecat, which is exactly what executeSling handles. Non-rig targets
+// (dogs, self, mayor, crew, existing polecats, dead-polecat fallback) remain
+// on the inline runSling path because executeSling does not cover them.
+//
+// Responsibilities this function owns (executeSling does not):
+//   - Cross-rig guard (executeSling requires the caller to pre-check)
+//   - Dry-run preview (executeSling has no dry-run mode)
+//   - Auto-apply mol-polecat-work (runSling has this only for the inline path)
+//   - wakeRigAgents() after dispatch when !NoBoot (executeSling requires the caller)
+func runSlingToRig(ctx context.Context, beadID, rigName, formulaName string, info *beadInfo, townRoot, townBeadsDir string, force bool) error {
+	_ = ctx  // reserved for future use (e.g., ctx-aware executeSling)
+	_ = info // reserved — info already validated in runSling before this call
+
+	// Cross-rig guard: prevent slinging beads to a rig whose prefix is different
+	// (gt-myecw). executeSling does NOT run this check — its contract puts it on
+	// the caller. Skipped under --force.
+	if !force {
+		if err := checkCrossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
+			return err
+		}
+	}
+
+	// Auto-apply mol-polecat-work when slinging a bare bead to a rig (issue #288).
+	// Rig targets always dispatch to a polecat, so the polecat path always applies.
+	// Use --hook-raw-bead to bypass for expert/debugging scenarios.
+	if formulaName == "" && !slingHookRawBead {
+		formulaName = resolveFormula(slingFormula, false, townRoot, rigName)
+		if slingFormula != "" {
+			fmt.Printf("  Applying %s for polecat work...\n", formulaName)
+		} else {
+			fmt.Printf("  Auto-applying %s for polecat work...\n", formulaName)
+		}
+	}
+
+	// Dry-run preview: describe what would happen without invoking executeSling.
+	// Mirrors the inline runSling output so existing CLI UX is preserved.
+	if slingDryRun {
+		fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
+		if formulaName != "" {
+			fmt.Printf("Would instantiate formula %s on bead %s\n", formulaName, beadID)
+		}
+		fmt.Printf("Would hook %s to new polecat\n", beadID)
+		if slingArgs != "" {
+			fmt.Printf("  args: %s\n", slingArgs)
+		}
+		if slingSubject != "" {
+			fmt.Printf("  subject: %s\n", slingSubject)
+		}
+		if slingMessage != "" {
+			fmt.Printf("  context: %s\n", slingMessage)
+		}
+		return nil
+	}
+
+	// Announce dispatch (mirrors inline runSling UX).
+	if formulaName != "" {
+		fmt.Printf("%s Slinging formula %s on %s to %s...\n", style.Bold.Render("🎯"), formulaName, beadID, rigName)
+	} else {
+		fmt.Printf("%s Slinging %s to %s...\n", style.Bold.Render("🎯"), beadID, rigName)
+	}
+
+	var mode string
+	if slingRalph {
+		mode = "ralph"
+	}
+
+	params := SlingParams{
+		BeadID:           beadID,
+		FormulaName:      formulaName,
+		RigName:          rigName,
+		Args:             slingArgs,
+		Vars:             slingVars,
+		Merge:            slingMerge,
+		BaseBranch:       slingBaseBranch,
+		Account:          slingAccount,
+		Agent:            slingAgent,
+		NoConvoy:         slingNoConvoy,
+		Owned:            slingOwned,
+		NoMerge:          slingNoMerge,
+		ReviewOnly:       slingReviewOnly,
+		Force:            force,
+		HookRawBead:      slingHookRawBead,
+		NoBoot:           slingNoBoot,
+		Mode:             mode,
+		FormulaFailFatal: true, // Single-sling: fatal on formula failure (batch-sling uses false)
+		CallerContext:    "sling",
+		TownRoot:         townRoot,
+		BeadsDir:         townBeadsDir,
+	}
+
+	if _, err := executeSling(params); err != nil {
+		return err
+	}
+
+	// wakeRigAgents is the caller's responsibility (see executeSling header).
+	if !slingNoBoot {
+		wakeRigAgents(rigName)
 	}
 
 	return nil
