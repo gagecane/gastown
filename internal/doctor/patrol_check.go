@@ -317,12 +317,12 @@ type stuckWispRow struct {
 func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string) ([]string, error) {
 	cmd := exec.Command("bd", "sql", "--json", stuckWispsQuery) //nolint:gosec // G204: query is a constant
 	cmd.Dir = rigPath
-	output, err := cmd.CombinedOutput()
+	output, err := cmd.Output() // Output() discards stderr; bd warnings go to stderr.
 	if err != nil {
 		return nil, fmt.Errorf("bd sql: %w", err)
 	}
 
-	// Strip any non-JSON prefix (e.g., bd warnings written to stdout).
+	// Defense-in-depth: strip any non-JSON prefix in case bd ever writes to stdout.
 	if idx := bytes.IndexByte(output, '['); idx > 0 {
 		output = output[idx:]
 	} else if idx < 0 {
