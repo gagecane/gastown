@@ -26,6 +26,7 @@ var (
 	awaitEventQuiet       bool
 	awaitEventAgentBead   string
 	awaitEventCleanup     bool
+	awaitEventFilterRig   string
 )
 
 // validChannelName is a convenience alias for the canonical regex in channelevents.
@@ -108,6 +109,8 @@ func init() {
 		"Suppress output (for scripting)")
 	moleculeAwaitEventCmd.Flags().BoolVar(&awaitEventCleanup, "cleanup", false,
 		"Delete event files after reading them")
+	moleculeAwaitEventCmd.Flags().StringVar(&awaitEventFilterRig, "filter-rig", "",
+		"Only process events matching this rig name (skip others)")
 	moleculeAwaitEventCmd.Flags().BoolVar(&moleculeJSON, "json", false,
 		"Output as JSON")
 	_ = moleculeAwaitEventCmd.MarkFlagRequired("channel")
@@ -203,6 +206,31 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("event watch failed: %w", err)
 	}
 	result.Elapsed = time.Since(startTime)
+
+	// Filter events by rig if --filter-rig is set.
+	// Events without a "rig" field in their payload pass the filter (backward compat).
+	if awaitEventFilterRig != "" && result.Reason == "event" {
+		var filtered []EventFile
+		for _, ef := range result.Events {
+			var payload map[string]interface{}
+			if err := json.Unmarshal(ef.Content, &payload); err == nil {
+				if rigVal, ok := payload["rig"]; ok {
+					if rigStr, ok := rigVal.(string); ok && rigStr != awaitEventFilterRig {
+						// Rig doesn't match — skip this event but still clean it up
+						if awaitEventCleanup {
+							_ = os.Remove(ef.Path)
+						}
+						continue
+					}
+				}
+			}
+			filtered = append(filtered, ef)
+		}
+		result.Events = filtered
+		if len(filtered) == 0 {
+			result.Reason = "timeout"
+		}
+	}
 
 	// Update agent bead idle cycles and heartbeat
 	if awaitEventAgentBead != "" && beadsDir != "" {
