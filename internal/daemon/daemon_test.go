@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log"
@@ -660,4 +661,51 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 		t.Error("isRigOperational should return false when rig bead is missing")
 	}
 	t.Logf("Docked rig check returned: operational=%v, reason=%q", operational, reason)
+}
+
+// TestIsRigOperational_NoWispConfig_NoWarningSpam is a regression test for
+// gu-66xp: isRigOperational previously printed a warning on every heartbeat
+// cycle for every rig without a wisp config file. With 15 rigs × ~8 heartbeats
+// per minute, this produced ~260K log lines per day (52% of daemon.log). The
+// absence of a wisp config is the normal state for rigs that have never been
+// parked, so the warning was never actionable.
+//
+// This test verifies the warning is NOT emitted when the wisp config is
+// missing but the rig is otherwise operational.
+func TestIsRigOperational_NoWispConfig_NoWarningSpam(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a rig with no wisp config but a valid rig bead setup.
+	// We don't need a live rig bead — we only need to verify the warning path
+	// is not hit. The downstream IsRigParkedOrDockedE call may fail
+	// (fail-safe), but that's fine — what we care about here is that the
+	// "no wisp config" warning is suppressed.
+	rigName := "noconfigrig"
+	rigPath := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture daemon log output
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{
+			TownRoot: tmpDir,
+		},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	// Call isRigOperational multiple times to simulate repeated heartbeats.
+	// The pre-fix code would emit the "no wisp config" warning once per call.
+	for i := 0; i < 5; i++ {
+		_, _ = d.isRigOperational(rigName)
+	}
+
+	logs := logBuf.String()
+	if strings.Contains(logs, "no wisp config") {
+		t.Errorf("isRigOperational should not emit 'no wisp config' warning (gu-66xp regression); log output:\n%s", logs)
+	}
+	if strings.Contains(logs, "parked state may have been lost") {
+		t.Errorf("isRigOperational should not emit 'parked state may have been lost' warning (gu-66xp regression); log output:\n%s", logs)
+	}
 }
