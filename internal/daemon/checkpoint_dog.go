@@ -109,7 +109,7 @@ func (d *Daemon) checkpointRigPolecats(rigName string) (int, int) {
 			continue
 		}
 
-		workDir := filepath.Join(polecatsDir, polecatName)
+		workDir := filepath.Join(polecatsDir, polecatName, rigName)
 		if d.checkpointWorktree(workDir, rigName, polecatName) {
 			checkpointed++
 		}
