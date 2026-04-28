@@ -68,7 +68,7 @@ fi
 
 # Read rigs.json for rig names and beads prefixes
 # CRITICAL: We need both the rig name (for filesystem paths like $TOWN_ROOT/$RIG/polecats/)
-# and the beads prefix (for tmux session names like $PREFIX-polecat-$NAME).
+# and the beads prefix (for tmux session names like $PREFIX-$NAME).
 # These can differ — e.g. rig "cfutons" may have prefix "CF".
 if [ ! -f "$RIGS_JSON_PATH" ]; then
   echo "SKIP: rigs.json not found at $RIGS_JSON_PATH"
@@ -116,7 +116,7 @@ while IFS='|' read -r RIG PREFIX; do
     [ -d "$PCAT_PATH" ] || continue
     PCAT_NAME=$(basename "$PCAT_PATH")
     # Use beads prefix (not rig name) for tmux session name
-    SESSION_NAME="${PREFIX}-polecat-${PCAT_NAME}"
+    SESSION_NAME="${PREFIX}-${PCAT_NAME}"
 
     # Check if session exists
     if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
