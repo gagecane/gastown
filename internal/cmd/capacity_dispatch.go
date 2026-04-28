@@ -357,9 +357,11 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 		return nil, nil
 	}
 
-	// 2. Build readyWorkIDs set from bd ready across all dirs
-	// (work beads live in rig-local DBs, so we need to check all dirs)
-	readyWorkIDs, readyErr := listReadyWorkBeadIDsWithError(townRoot)
+	// 2. Build readyWorkIDs + agentWorkIDs set from bd ready across all dirs
+	// (work beads live in rig-local DBs, so we need to check all dirs).
+	// agentWorkIDs carry the gt:agent label and must never be dispatched —
+	// they are state beads, not work items (gu-7gm).
+	readyWorkIDs, agentWorkIDs, readyErr := listReadyWorkBeadsWithError(townRoot)
 	if readyErr != nil {
 		return nil, readyErr
 	}
@@ -395,6 +397,17 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 
 		// Only include if work bead is ready (unblocked)
 		if !readyWorkIDs[fields.WorkBeadID] {
+			continue
+		}
+
+		// Safety net (gu-7gm): never dispatch agent state beads as work.
+		// The scheduleBead path already rejects these up-front, but stale
+		// contexts from older code paths or manual bd writes may still be in
+		// the queue — skip them here instead of handing a polecat a state
+		// bead whose "work" is to resubmit some prior auto-save branch.
+		if agentWorkIDs[fields.WorkBeadID] {
+			fmt.Fprintf(os.Stderr, "%s Skipping sling context %s: work bead %s is an agent state bead (gt:agent), not a work item\n",
+				style.Warning.Render("⚠"), ctx.ID, fields.WorkBeadID)
 			continue
 		}
 
@@ -519,7 +532,21 @@ func listAllSlingContexts(townRoot string) []*beads.Issue {
 // listReadyWorkBeadIDsWithError returns a set of work bead IDs that are unblocked.
 // Returns an error only when ALL dirs fail (partial success is acceptable).
 func listReadyWorkBeadIDsWithError(townRoot string) (map[string]bool, error) {
+	readyIDs, _, err := listReadyWorkBeadsWithError(townRoot)
+	return readyIDs, err
+}
+
+// listReadyWorkBeadsWithError returns two sets:
+//   - readyIDs: work bead IDs that are unblocked
+//   - agentIDs: subset of readyIDs that carry the gt:agent label or
+//     legacy issue_type == "agent" (polecat/witness/refinery/mayor/dog state beads)
+//
+// The scheduler uses agentIDs to filter out state beads that must never be
+// dispatched as work (gu-7gm). Returns an error only when ALL dirs fail
+// (partial success is acceptable).
+func listReadyWorkBeadsWithError(townRoot string) (map[string]bool, map[string]bool, error) {
 	readyIDs := make(map[string]bool)
+	agentIDs := make(map[string]bool)
 	dirs := beadsSearchDirs(townRoot)
 	failCount := 0
 	var lastErr error
@@ -538,18 +565,30 @@ func listReadyWorkBeadIDsWithError(townRoot string) (map[string]bool, error) {
 			continue
 		}
 		var readyBeads []struct {
-			ID string `json:"id"`
+			ID        string   `json:"id"`
+			IssueType string   `json:"issue_type"`
+			Labels    []string `json:"labels"`
 		}
 		if err := json.Unmarshal(readyOut, &readyBeads); err == nil {
-			for _, b := range readyBeads {
-				readyIDs[b.ID] = true
+			for _, rb := range readyBeads {
+				readyIDs[rb.ID] = true
+				if rb.IssueType == "agent" {
+					agentIDs[rb.ID] = true
+					continue
+				}
+				for _, l := range rb.Labels {
+					if l == "gt:agent" {
+						agentIDs[rb.ID] = true
+						break
+					}
+				}
 			}
 		}
 	}
 	if failCount == len(dirs) && failCount > 0 {
-		return nil, fmt.Errorf("all %d bd ready queries failed (last: %w)", failCount, lastErr)
+		return nil, nil, fmt.Errorf("all %d bd ready queries failed (last: %w)", failCount, lastErr)
 	}
-	return readyIDs, nil
+	return readyIDs, agentIDs, nil
 }
 
 // listReadyWorkBeadIDs returns a set of work bead IDs that are unblocked.

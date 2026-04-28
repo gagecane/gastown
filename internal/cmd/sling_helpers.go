@@ -109,6 +109,31 @@ func isDeferredBead(info *beadInfo) bool {
 	return false
 }
 
+// isAgentBead reports whether the bead info describes an agent bead
+// (polecat/witness/refinery/mayor/dog state bead rather than a work item).
+//
+// Agent beads track per-agent state — role_type, rig, agent_state, hook_bead,
+// cleanup_status — and must never be dispatched as work. Dispatching one causes
+// a polecat to accept the agent bead as its hook and submit whatever auto-save
+// branch the prior polecat left behind, which can revert merged commits (gu-7gm).
+//
+// Identification mirrors beads.IsAgentBead: the "gt:agent" label (current
+// standard) or the legacy issue_type == "agent" (pre-migration beads).
+func isAgentBead(info *beadInfo) bool {
+	if info == nil {
+		return false
+	}
+	if info.IssueType == "agent" {
+		return true
+	}
+	for _, l := range info.Labels {
+		if l == "gt:agent" {
+			return true
+		}
+	}
+	return false
+}
+
 // collectExistingMolecules returns all molecule wisp IDs attached to a bead.
 // Checks both dependency bonds (ground truth from bd mol bond) and the
 // description's attached_molecule field (metadata pointer). Wisp IDs are
