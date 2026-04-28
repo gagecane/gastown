@@ -64,6 +64,7 @@ type CheckContext struct {
 	Verbose         bool   // Enable verbose output
 	RestartSessions bool   // Restart patrol sessions when fixing (requires explicit --restart-sessions flag)
 	NoStart         bool   // Suppress starting daemon/agents during --fix
+	ReadOnly        bool   // When true, checks MUST NOT mutate filesystem or state (auto-clean etc. disabled)
 }
 
 // RigPath returns the full path to the rig directory.

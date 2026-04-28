@@ -100,9 +100,14 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 			// session exits uncleanly, and the cleanup logic is already
 			// defined in (*Lock).Check() — we just mirror it here. If
 			// removal fails we fall back to reporting the stale lock.
-			if err := lock.New(workerDir).Release(); err == nil {
-				autoCleaned++
-				continue
+			//
+			// When ctx.ReadOnly is set (--read-only flag), skip the mutation
+			// and just report — caller wants pure observation.
+			if !ctx.ReadOnly {
+				if err := lock.New(workerDir).Release(); err == nil {
+					autoCleaned++
+					continue
+				}
 			}
 			staleLocks = append(staleLocks,
 				fmt.Sprintf("%s (dead PID %d)", workerDir, info.PID))

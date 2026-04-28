@@ -572,3 +572,108 @@ func TestStaleBeadsRedirectCheck_RefineryWorkspace(t *testing.T) {
 		t.Errorf("Expected StatusWarning for refinery missing redirect, got %v: %s", result.Status, result.Message)
 	}
 }
+
+// TestStaleBeadsRedirectCheck_MetadataOnlyWithDoltDB verifies that a .beads/
+// directory with only metadata.json (declaring a dolt_database) alongside
+// a redirect file is NOT flagged as stale. metadata.json is protected from
+// cleanup by the dolt_database guard, so flagging it would produce a warning
+// whose --fix is a guaranteed no-op.
+func TestStaleBeadsRedirectCheck_MetadataOnlyWithDoltDB(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	// Exercise a polecat worktree, which is the real-world scenario where the
+	// rig repo git-tracks .beads/ and checkouts restore metadata.json.
+	polecatBeadsDir := filepath.Join(rigDir, "polecats", "obsidian", "myrig", ".beads")
+	if err := os.MkdirAll(polecatBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Mark the polecat dir as a git worktree so getWorktreePaths picks it up.
+	if err := os.WriteFile(filepath.Join(rigDir, "polecats", "obsidian", "myrig", ".git"), []byte("gitdir: nowhere\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Canonical rig .beads (redirect target).
+	rigBeads := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Rig-level metadata declaring dolt_database so ComputeRedirectTarget
+	// resolves to the rig root.
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"dolt_database":"myrig"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make rig look like a git repo.
+	if err := os.MkdirAll(filepath.Join(rigDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a valid redirect in the polecat .beads dir pointing up at the rig.
+	if err := os.WriteFile(filepath.Join(polecatBeadsDir, "redirect"), []byte("../../../.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// metadata.json is the ONLY match from staleFilePatterns, AND it declares dolt_database.
+	// The patched check should skip this file and therefore NOT flag the dir.
+	if err := os.WriteFile(filepath.Join(polecatBeadsDir, "metadata.json"), []byte(`{"dolt_database":"myrig"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewStaleBeadsRedirectCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	// Must not flag a stale-files issue. Topology issues (missing/incorrect
+	// redirects) are also absent: we wrote a valid redirect above.
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK when only stale match is protected metadata.json, got %v: %q (details=%v)",
+			result.Status, result.Message, result.Details)
+	}
+}
+
+// TestStaleBeadsRedirectCheck_MetadataPlusOtherStaleFile verifies that when
+// metadata.json (protected) coexists with a genuinely stale file (e.g.
+// daemon.lock) in the same .beads dir, the check STILL flags — metadata.json
+// being protected must not mask other real stale files.
+func TestStaleBeadsRedirectCheck_MetadataPlusOtherStaleFile(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	polecatBeadsDir := filepath.Join(rigDir, "polecats", "obsidian", "myrig", ".beads")
+	if err := os.MkdirAll(polecatBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "polecats", "obsidian", "myrig", ".git"), []byte("gitdir: nowhere\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigBeads := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"dolt_database":"myrig"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(polecatBeadsDir, "redirect"), []byte("../../../.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Protected — should be skipped by the metadata guard.
+	if err := os.WriteFile(filepath.Join(polecatBeadsDir, "metadata.json"), []byte(`{"dolt_database":"myrig"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// NOT protected — matches staleFilePatterns and has no preservation guard.
+	if err := os.WriteFile(filepath.Join(polecatBeadsDir, "daemon.lock"), []byte("pid=1234"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewStaleBeadsRedirectCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Errorf("expected StatusWarning when daemon.lock is present alongside protected metadata.json, got %v: %q",
+			result.Status, result.Message)
+	}
+}

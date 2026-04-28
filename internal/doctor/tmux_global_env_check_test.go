@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -116,5 +118,54 @@ func TestTmuxGlobalEnvCheck_NoTmuxServer(t *testing.T) {
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK when no tmux server, got %v: %s", result.Status, result.Message)
+	}
+}
+
+func TestSameResolvedPath(t *testing.T) {
+	// Case 1: identical raw strings — fast path, no stat calls.
+	if !sameResolvedPath("/foo/bar", "/foo/bar") {
+		t.Error("sameResolvedPath: identical strings should match")
+	}
+
+	// Case 2: real symlink equivalence — create a temp symlink and compare
+	// the symlink path against its target. EvalSymlinks should resolve both
+	// to the same canonical path, so they should compare equal.
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "real-town")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmpDir, "link-to-town")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink creation not supported on this filesystem: %v", err)
+	}
+	if !sameResolvedPath(link, target) {
+		t.Errorf("sameResolvedPath: symlink %q and target %q should be equivalent", link, target)
+	}
+	// And reversed.
+	if !sameResolvedPath(target, link) {
+		t.Errorf("sameResolvedPath: target %q and symlink %q should be equivalent (reversed)", target, link)
+	}
+
+	// Case 3: genuinely different paths — should NOT match.
+	other := filepath.Join(tmpDir, "other-town")
+	if err := os.MkdirAll(other, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if sameResolvedPath(target, other) {
+		t.Errorf("sameResolvedPath: %q and %q are different directories, should NOT match", target, other)
+	}
+
+	// Case 4: non-existent paths — EvalSymlinks errors on both sides, fallback
+	// to raw string compare (fast path already handled equality), so unequal
+	// non-existent paths must report false.
+	if sameResolvedPath("/does/not/exist/a", "/does/not/exist/b") {
+		t.Error("sameResolvedPath: unequal non-existent paths should NOT match")
+	}
+
+	// Case 5: one exists, one doesn't — EvalSymlinks fails on the missing
+	// side, so the function must return false (cannot prove equivalence).
+	if sameResolvedPath(target, "/does/not/exist/c") {
+		t.Error("sameResolvedPath: real path vs missing path should NOT match")
 	}
 }
