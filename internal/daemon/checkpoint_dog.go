@@ -164,6 +164,20 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 		return false
 	}
 
+	// Defensive guard: refuse to commit if this worktree's branch exists at
+	// origin. Daemon-initiated commits on shared branches (main, mainline,
+	// or a polecat branch that has already been submitted to the MQ) cause
+	// merge-queue disruption and hours of confusion chasing "WIP: checkpoint
+	// (auto)" commits that appeared out of nowhere. Unstage and skip.
+	if err := guardDaemonCommit(workDir); err != nil {
+		d.logger.Printf("checkpoint_dog: %v — skipping checkpoint in %s/%s",
+			err, rigName, polecatName)
+		// Undo the staging so we don't leave the worktree in a half-committed
+		// state. `git reset HEAD` is a no-op if nothing was staged.
+		_, _ = runGitCmd(workDir, "reset", "HEAD")
+		return false
+	}
+
 	// Commit the checkpoint
 	if _, err := runGitCmd(workDir, "commit", "-m", "WIP: checkpoint (auto)"); err != nil {
 		d.logger.Printf("checkpoint_dog: git commit failed in %s/%s: %v", rigName, polecatName, err)
