@@ -402,6 +402,21 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// Defensive strip of "--<timestamp>" / "@<timestamp>" suffix from issueID
+	// regardless of source (gu-ypi). parseBranchName already strips for the
+	// branch-derived path, but the --issue flag and any future issueID source
+	// (hook fallback, env var, etc.) must not leak a branch-slug suffix into
+	// the MR bead's source_issue field. Without this, `gt mq post-merge` emits
+	// "source issue close: issue not found" and the real bug bead stays
+	// HOOKED until the refinery manually closes it.
+	//
+	// Two-layer defense (matches gu-y2w pattern):
+	//   - parseBranchName strips at source for branch-name path
+	//   - this strip covers --issue flag and any non-branch source
+	//   - refinery/manager.go stripMRIssueTimestampSuffix strips defensively
+	//     on post-merge for MRs written by older binaries
+	issueID = stripBranchTimestampSuffix(issueID)
+
 	// Write done-intent label EARLY, before push/MR operations.
 	// If gt done crashes after this point, the Witness can detect the intent
 	// and auto-nuke the zombie polecat.
