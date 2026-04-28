@@ -208,26 +208,30 @@ func (c *BranchCheck) expectedBranch(townRoot, dir string) string {
 // isExpectedBranch checks if a directory is on the expected branch.
 // For rigs with a custom default_branch, that branch is expected.
 // Otherwise, main or master are expected.
+// Also accepts detached HEAD at origin/<expected> as equivalent — this
+// happens when another worktree (e.g. a polecat) holds the branch.
 func (c *BranchCheck) isExpectedBranch(townRoot, dir, branch string) bool {
 	if branch == "main" || branch == "master" {
 		return true
 	}
-	// Derive the rig path from the directory.
-	// Directories are like <town>/<rig>/refinery/rig or <town>/<rig>/crew/<name>.
-	rel, err := filepath.Rel(townRoot, dir)
-	if err != nil {
-		return false
+
+	expected := c.expectedBranch(townRoot, dir)
+
+	// Named branch matches expected
+	if branch == expected {
+		return true
 	}
-	parts := strings.SplitN(filepath.ToSlash(rel), "/", 2)
-	if len(parts) < 1 {
-		return false
+
+	// Detached HEAD: check if detached at origin/<expected>
+	if branch == "" {
+		for _, target := range c.getDetachedTargets(dir) {
+			if target == expected || target == "main" || target == "master" {
+				return true
+			}
+		}
 	}
-	rigPath := filepath.Join(townRoot, parts[0])
-	cfg, err := rig.LoadRigConfig(rigPath)
-	if err != nil || cfg.DefaultBranch == "" {
-		return false
-	}
-	return branch == cfg.DefaultBranch
+
+	return false
 }
 
 // findPersistentRoleDirs finds infrastructure directories that should be on main:
@@ -290,6 +294,8 @@ func (c *BranchCheck) isRig(path string) bool {
 }
 
 // getCurrentBranch returns the current git branch for a directory.
+// For detached HEAD, returns "" — callers should use isExpectedBranch
+// which handles detached-at-origin as equivalent to being on the branch.
 func (c *BranchCheck) getCurrentBranch(dir string) (string, error) {
 	cmd := exec.Command("git", "branch", "--show-current")
 	cmd.Dir = dir
@@ -298,6 +304,26 @@ func (c *BranchCheck) getCurrentBranch(dir string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// getDetachedTarget returns the remote branch names if HEAD is detached at
+// one or more origin/<branch> refs. Returns nil if not detached or no origin refs.
+func (c *BranchCheck) getDetachedTargets(dir string) []string {
+	cmd := exec.Command("git", "log", "-1", "--format=%D", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	// %D output looks like: "HEAD, origin/polecat/x, origin/mainline, origin/HEAD, mainline"
+	var targets []string
+	for _, ref := range strings.Split(strings.TrimSpace(string(out)), ", ") {
+		ref = strings.TrimSpace(ref)
+		if strings.HasPrefix(ref, "origin/") && ref != "origin/HEAD" {
+			targets = append(targets, strings.TrimPrefix(ref, "origin/"))
+		}
+	}
+	return targets
 }
 
 // relativePath returns path relative to base, or the full path if that fails.
