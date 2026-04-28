@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -319,6 +320,13 @@ func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("bd sql: %w", err)
+	}
+
+	// Strip any non-JSON prefix (e.g., bd warnings written to stdout).
+	if idx := bytes.IndexByte(output, '['); idx > 0 {
+		output = output[idx:]
+	} else if idx < 0 {
+		return nil, fmt.Errorf("no JSON array in output: %s", string(output))
 	}
 
 	var rows []stuckWispRow
