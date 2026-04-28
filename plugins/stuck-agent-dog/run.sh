@@ -112,7 +112,18 @@ else
 
   HEARTBEAT_FILE="$TOWN_ROOT/deacon/heartbeat.json"
   if [ -f "$HEARTBEAT_FILE" ]; then
-    HEARTBEAT_TIME=$(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
+    # mtime lookup: GNU coreutils (Linux) uses `stat -c %Y`, BSD/macOS uses
+    # `stat -f %m`. Naive fallback (`stat -f ... || stat -c ...`) is broken
+    # on Linux: GNU's `-f` means `--file-system` and prints filesystem info
+    # to stdout with exit 0, so the fallback never fires and HEARTBEAT_TIME
+    # ends up as a multi-line string starting with "  File: ..." — which
+    # trips `set -u` in the arithmetic below. Detect the OS once and call
+    # the right flavor.
+    if stat -c %Y / >/dev/null 2>&1; then
+      HEARTBEAT_TIME=$(stat -c %Y "$HEARTBEAT_FILE")
+    else
+      HEARTBEAT_TIME=$(stat -f %m "$HEARTBEAT_FILE")
+    fi
     NOW=$(date +%s)
     HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
 
