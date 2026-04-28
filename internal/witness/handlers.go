@@ -1840,6 +1840,153 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 	notifyMayorSlotOpen(workDir, rigName, payload.PolecatName, payload.Exit)
 }
 
+// PostHocCompletion describes a polecat whose work was merged to the default
+// branch but whose hook bead was never closed because `gt done` didn't run —
+// typically because the session died between step 7 (push) and step 8 (submit).
+// See gu-jr8.
+type PostHocCompletion struct {
+	PolecatName string
+	AgentBeadID string
+	HookBead    string
+	Action      string // "closed-hook-bead", "skipped-session-alive", etc.
+	Error       error
+}
+
+// DiscoverPostHocCompletionsResult contains results from scanning for polecats
+// whose work was merged but hook bead was never closed.
+type DiscoverPostHocCompletionsResult struct {
+	Checked    int                 // Number of polecats scanned
+	Discovered []PostHocCompletion // Post-hoc completions found
+	Errors     []error             // Transient errors
+}
+
+// DiscoverPostHocCompletions scans all polecat agent beads for cases where the
+// polecat's work has been merged to the rig default branch but `gt done` was
+// never called — e.g. the session died between step 7 (pre-verify/push) and
+// step 8 (submit-and-exit). Without this safety net, the hook bead stays
+// `in_progress` forever, causing spawn-storms where witness re-dispatches
+// already-merged work to new polecats.
+//
+// Preconditions for auto-closure (ALL must hold):
+//   - Polecat tmux session is dead. A live session means gt done may still be
+//     in progress; don't race it.
+//   - Agent bead has no exit_type set. If gt done ran, the normal
+//     DiscoverCompletions path handles it.
+//   - Agent state is active (working/running/spawning) — NOT idle/done/nuked.
+//   - Hook bead is non-empty and still in_progress or hooked.
+//   - verifyCommitOnMain returns true — polecat's HEAD is an ancestor of
+//     origin/<default-branch>, meaning the work IS on mainline.
+//
+// When all preconditions hold: close the hook bead with a clear reason. The
+// polecat's subsequent fate (zombie restart, nuke, etc.) is handled by the
+// existing DetectZombiePolecats path — this function only closes the bead so
+// the work isn't re-dispatched.
+//
+// Design notes:
+//   - Caller responsibility: run this AFTER DiscoverCompletions. Normal
+//     completions (gt done wrote exit_type) take precedence.
+//   - We deliberately do NOT synthesize exit_type / mr_id / completion_time on
+//     the agent bead. By the time we detect post-hoc merge, refinery has
+//     already fast-forwarded — there is no MR left to process. The only debt
+//     is the stuck hook bead; closing it is sufficient.
+func DiscoverPostHocCompletions(bd *BdCli, workDir, rigName string) *DiscoverPostHocCompletionsResult {
+	result := &DiscoverPostHocCompletionsResult{}
+
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+	initRegistryFromTownRoot(townRoot)
+
+	polecatsDir := filepath.Join(townRoot, rigName, "polecats")
+	entries, err := os.ReadDir(polecatsDir)
+	if err != nil {
+		return result
+	}
+
+	t := tmux.NewTmux()
+
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		polecatName := entry.Name()
+		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+		result.Checked++
+
+		// Preconditions 1-3: read agent bead, check active state + empty exit_type.
+		fields := getAgentBeadFields(bd, workDir, agentBeadID)
+		if fields == nil {
+			continue // Bead missing — DetectZombiePolecats handles cleanup.
+		}
+		if fields.ExitType != "" {
+			continue // gt done ran — let DiscoverCompletions process the normal path.
+		}
+		if !beads.AgentState(fields.AgentState).IsActive() {
+			continue // idle/done/nuked — not the scenario we guard against.
+		}
+		if fields.HookBead == "" {
+			continue // No work to close.
+		}
+
+		// Precondition 4: session must be dead. A live session may be mid-`gt done`.
+		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+		sessionAlive, err := t.HasSession(sessionName)
+		if err != nil {
+			result.Errors = append(result.Errors,
+				fmt.Errorf("checking session %s for post-hoc completion: %w", sessionName, err))
+			continue
+		}
+		if sessionAlive {
+			continue // gt done may be in flight — skip this cycle.
+		}
+
+		// Precondition 5: hook bead still expects work (in_progress / hooked).
+		hookStatus, hookFound := getBeadStatus(bd, workDir, fields.HookBead)
+		if !hookFound {
+			continue // Transient bd error; don't risk a wrong close.
+		}
+		if hookStatus != "in_progress" && hookStatus != "hooked" {
+			continue // Already closed or otherwise handled.
+		}
+
+		// Precondition 6: the polecat's HEAD is on the default branch at origin.
+		onMain, err := verifyCommitOnMain(workDir, rigName, polecatName)
+		if err != nil {
+			// Can't verify — skip. Fail-open (conservative): we'd rather leave a
+			// bead open than close one whose work isn't actually merged.
+			result.Errors = append(result.Errors,
+				fmt.Errorf("verifying commit-on-main for %s: %w", polecatName, err))
+			continue
+		}
+		if !onMain {
+			continue
+		}
+
+		// All preconditions satisfied — auto-close the hook bead.
+		discovery := PostHocCompletion{
+			PolecatName: polecatName,
+			AgentBeadID: agentBeadID,
+			HookBead:    fields.HookBead,
+		}
+		reason := fmt.Sprintf("Work merged to mainline but gt done was not called — "+
+			"auto-closed by witness (polecat %s).", polecatName)
+		if err := bd.Run(workDir, "close", fields.HookBead, "-r", reason); err != nil {
+			discovery.Error = fmt.Errorf("closing hook bead %s: %w", fields.HookBead, err)
+			discovery.Action = "close-failed"
+			result.Discovered = append(result.Discovered, discovery)
+			continue
+		}
+		discovery.Action = "closed-hook-bead"
+		result.Discovered = append(result.Discovered, discovery)
+	}
+
+	return result
+}
+
+
 // agentBeadSnapshot holds all fields from a single bd show --json call for an agent bead.
 // Used to avoid redundant subprocess invocations during zombie detection, where the same
 // agent bead was previously queried 3-5 times per polecat per patrol cycle. (gt-2gra)
