@@ -1262,6 +1262,56 @@ func TestDetectOrphanedBeads_ErrorPath(t *testing.T) {
 	}
 }
 
+// TestDetectOrphanedBeads_SkipsRegisteredWorktree is the regression test for
+// gu-eno2. When the polecat directory does not exist on disk at the expected
+// nested path but git worktree list reports a legitimate worktree for the
+// polecat, we must NOT reset the bead.
+func TestDetectOrphanedBeads_SkipsRegisteredWorktree(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	polecatName := "nux"
+
+	// Intentionally do NOT create polecats/nux/ on disk. The only signal
+	// that the polecat is legitimate is the stubbed git worktree list below.
+
+	// Stub git worktree list to report the nested polecat path.
+	registeredPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	original := gitWorktreePathsRunner
+	gitWorktreePathsRunner = func(repoPath string) ([]string, error) {
+		return []string{registeredPath}, nil
+	}
+	t.Cleanup(func() { gitWorktreePathsRunner = original })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "{}", nil
+			}
+			if args[0] == "list" {
+				joined := strings.Join(args, " ")
+				if strings.Contains(joined, "--status=in_progress") {
+					return `[{"id":"gt-legit1","assignee":"testrig/polecats/nux"}]`, nil
+				}
+				return "[]", nil
+			}
+			return "{}", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectOrphanedBeads(bd, townRoot, rigName, nil)
+
+	if result.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", result.Checked)
+	}
+	if len(result.Orphans) != 0 {
+		t.Errorf("Orphans = %d, want 0 — legitimate worktree must not be flagged as orphan (%+v)",
+			len(result.Orphans), result.Orphans)
+	}
+}
+
 // --- DetectOrphanedMolecules tests ---
 
 func TestOrphanedMoleculeResult_Types(t *testing.T) {

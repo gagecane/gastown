@@ -2417,6 +2417,16 @@ func DetectOrphanedBeads(bd *BdCli, workDir, rigName string, router *mail.Router
 			continue // Session reappeared — polecat was respawned, not an orphan
 		}
 
+		// Belt-and-suspenders guard (gu-eno2): consult `git worktree list`
+		// from the rig's main clone. If the polecat's expected path is a
+		// registered worktree (after symlink resolution), the worktree is
+		// legitimate and we must not reset the bead. This prevents false
+		// positives when ancestor paths are symlinks or the filesystem
+		// layout makes os.Stat unreliable.
+		if isRegisteredPolecatWorktree(townRoot, assigneeRig, polecatName) {
+			continue
+		}
+
 		// Polecat is truly gone (no session, no directory). Reset the bead.
 		orphan := OrphanedBeadResult{
 			BeadID:      bead.ID,
@@ -2545,6 +2555,16 @@ func DetectOrphanedMolecules(bd *BdCli, workDir, rigName string, router *mail.Ro
 		}
 		if alive, _ := t.HasSession(sessionName); alive {
 			continue // Session reappeared — polecat was respawned
+		}
+
+		// Belt-and-suspenders guard (gu-eno2): consult `git worktree list`
+		// from the rig's main clone. If the polecat's expected path is a
+		// registered worktree (after symlink resolution), the worktree is
+		// legitimate and we must not close its molecule. This prevents false
+		// positives when ancestor paths are symlinks or the filesystem
+		// layout makes os.Stat unreliable.
+		if isRegisteredPolecatWorktree(townRoot, rigName, polecatName) {
+			continue
 		}
 
 		// Polecat is dead and gone — read the full bead to check for attached molecule
