@@ -18,6 +18,9 @@
     ],
     "stop": [
       {
+        "command": "{{GT_BIN}} tap polecat-stop-check"
+      },
+      {
         "command": "{{GT_BIN}} costs record"
       }
     ]
