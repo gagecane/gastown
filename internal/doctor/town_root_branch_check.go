@@ -59,8 +59,8 @@ func (c *TownRootBranchCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Accept main or master
-	if branch == "main" || branch == "master" || branch == "gt_managed" {
+	// Accept main, master, mainline, or gt_managed
+	if branch == "main" || branch == "master" || branch == "mainline" || branch == "gt_managed" {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -86,7 +86,7 @@ func (c *TownRootBranchCheck) Run(ctx *CheckContext) *CheckResult {
 // Fix switches the town root back to main branch.
 func (c *TownRootBranchCheck) Fix(ctx *CheckContext) error {
 	// Only fix if we're not already on main
-	if c.currentBranch == "main" || c.currentBranch == "master" || c.currentBranch == "gt_managed" {
+	if c.currentBranch == "main" || c.currentBranch == "master" || c.currentBranch == "mainline" || c.currentBranch == "gt_managed" {
 		return nil
 	}
 

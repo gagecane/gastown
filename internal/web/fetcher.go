@@ -32,7 +32,14 @@ func runCmd(timeout time.Duration, name string, args ...string) (*bytes.Buffer, 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, name, args...)
+	var cmd *exec.Cmd
+	if name == "tmux" {
+		// Route tmux through BuildCommandContext so the town socket (-L) is applied.
+		// Without this, the dashboard hits the default tmux server and sees 0 sessions.
+		cmd = tmux.BuildCommandContext(ctx, args...)
+	} else {
+		cmd = exec.CommandContext(ctx, name, args...)
+	}
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 

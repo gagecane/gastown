@@ -14,6 +14,7 @@ import (
 )
 
 var hooksSyncDryRun bool
+var hooksSyncFailOnDrift bool
 
 var hooksSyncCmd = &cobra.Command{
 	Use:   "sync",
@@ -41,6 +42,7 @@ Examples:
 func init() {
 	hooksCmd.AddCommand(hooksSyncCmd)
 	hooksSyncCmd.Flags().BoolVar(&hooksSyncDryRun, "dry-run", false, "Show what would change without writing")
+	hooksSyncCmd.Flags().BoolVar(&hooksSyncFailOnDrift, "fail-on-drift", false, "Exit non-zero if any target would change (CI mode)")
 }
 
 func runHooksSync(cmd *cobra.Command, args []string) error {
@@ -236,6 +238,11 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 			errors,
 			strings.Join(failedTargets, ", "),
 		)
+	}
+
+	// --fail-on-drift: exit non-zero if any target would change (CI mode)
+	if hooksSyncFailOnDrift && (updated+created) > 0 {
+		return fmt.Errorf("hooks drift detected: %d target(s) would change", updated+created)
 	}
 
 	return nil

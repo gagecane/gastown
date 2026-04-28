@@ -564,8 +564,8 @@ func (c *ClaudeSettingsCheck) checkSettings(path, _ string) []string {
 		missing = append(missing, "SessionStart hook (prime --hook)")
 	}
 
-	// Check Stop hook exists with costs record (for all roles)
-	if !c.hookHasPattern(hooks, "Stop", "costs record") {
+	// Check Stop hook exists (costs record for most roles, polecat-stop-check for polecats)
+	if !c.hookHasPattern(hooks, "Stop", "costs record") && !c.hookHasPattern(hooks, "Stop", "polecat-stop-check") {
 		missing = append(missing, "Stop hook")
 	}
 

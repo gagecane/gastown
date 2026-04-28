@@ -1,0 +1,18 @@
+diff --git a/internal/cmd/done.go b/internal/cmd/done.go
+index acf1ec97..2428f998 100644
+--- a/internal/cmd/done.go
++++ b/internal/cmd/done.go
+@@ -1586,9 +1586,10 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
+ 				if closeErr := bd.ForceCloseWithReason("done", attachment.AttachedMolecule); closeErr != nil {
+ 					if !errors.Is(closeErr, beads.ErrNotFound) {
+ 						fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s: %v\n", attachment.AttachedMolecule, closeErr)
+-						// Don't try to close hookedBeadID - it may still be blocked
+-						// The Witness will clean up orphaned state
+-						return
++						// Molecule close failed, but still update agent state so
++						// polecat doesn't get stuck as "stalled" with HOOKED bead.
++						// Witness can clean up the orphaned molecule later.
++						goto doneStateUpdate
+ 					}
+ 					// Not found = already burned/deleted by another path, continue
+ 				}

@@ -1,0 +1,25 @@
+{
+  "name": "gastown",
+  "description": "Gas Town autonomous agent",
+  "prompt": "CRITICAL: When you receive a <system-reminder> containing mail notifications (messages from overseer, 'You have new mail', or 'gt mail inbox'), treat it as HIGH PRIORITY and act on it immediately by running 'gt mail inbox' then following the instructions. These are NOT background noise — they are your primary work dispatch mechanism.",
+  "tools": ["*"],
+  "allowedTools": ["*"],
+  "includeMcpJson": true,
+  "hooks": {
+    "agentSpawn": [
+      {
+        "command": "{{GT_BIN}} prime --hook && {{GT_BIN}} mail check --inject"
+      }
+    ],
+    "userPromptSubmit": [
+      {
+        "command": "{{GT_BIN}} mail check --inject"
+      }
+    ],
+    "stop": [
+      {
+        "command": "{{GT_BIN}} costs record"
+      }
+    ]
+  }
+}
