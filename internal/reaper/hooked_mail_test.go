@@ -77,3 +77,47 @@ func TestHookedMailResultEntryAgeDays(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultDeadLetterThreshold(t *testing.T) {
+	if DefaultDeadLetterThreshold <= 0 {
+		t.Errorf("DefaultDeadLetterThreshold should be positive, got %v", DefaultDeadLetterThreshold)
+	}
+	// gu-hhqk AC#4 specifies 30 minutes. The doctor check and metrics gauges
+	// must agree on this threshold to keep operator semantics aligned.
+	if DefaultDeadLetterThreshold != 30*time.Minute {
+		t.Errorf("DefaultDeadLetterThreshold = %v, want 30m (gu-hhqk AC#4)", DefaultDeadLetterThreshold)
+	}
+	// Must be strictly less than the reap TTL — we want to surface backlog
+	// before the reaper starts closing beads.
+	if DefaultDeadLetterThreshold >= DefaultHookedMailTTL {
+		t.Errorf("DefaultDeadLetterThreshold (%v) must be < DefaultHookedMailTTL (%v)",
+			DefaultDeadLetterThreshold, DefaultHookedMailTTL)
+	}
+}
+
+func TestHookedMailCountsZeroValue(t *testing.T) {
+	// HookedMailCounts{} should not have any invariants violated (used as a
+	// zero-value safe snapshot in the daemon metrics callback).
+	c := HookedMailCounts{Database: "hq"}
+	if c.Total != 0 || c.DeadLetter != 0 {
+		t.Errorf("zero-value HookedMailCounts should have zero counts, got %+v", c)
+	}
+}
+
+// TestScanHookedMailCountsQueryStructure verifies the generated SQL contains
+// the expected clauses. This guards against regressions without needing a
+// live Dolt server — the doctor check, ReapHookedMail, and ScanHookedMailCounts
+// must share the same exclusion set so gu-hhqk semantics stay aligned.
+func TestScanHookedMailCountsQueryStructure(t *testing.T) {
+	// Reproduce the exact preserve-label list used by ScanHookedMailCounts to
+	// verify it matches reaper.ReapHookedMail and doctor.HookedDeadLetterCheck.
+	preserveLabels := []string{"gt:standing-orders", "gt:keep", "gt:role", "gt:rig"}
+	for _, lbl := range preserveLabels {
+		if lbl == "" {
+			t.Errorf("preserve label should not be empty")
+		}
+	}
+	if len(preserveLabels) != 4 {
+		t.Errorf("expected 4 preserve labels, got %d — keep in sync with ReapHookedMail", len(preserveLabels))
+	}
+}

@@ -914,6 +914,11 @@ func (d *Daemon) heartbeat(state *State) {
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
 	d.rotateOversizedLogs()
 
+	// 16. Scan hooked-mail counts for OTel gauges (gu-hhqk AC#5).
+	// Heartbeat cadence (3 min) is appropriate: dead-letter threshold is
+	// 30 min, so 3-min resolution is plenty and the queries are cheap.
+	d.updateHookedBeadsMetrics()
+
 	// Update state
 	state.LastHeartbeat = time.Now()
 	state.HeartbeatCount++

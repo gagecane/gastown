@@ -23,6 +23,7 @@ func TestDaemonMetrics_NilReceiver(t *testing.T) {
 	dm.recordHeartbeat(ctx)
 	dm.recordRestart(ctx, "deacon")
 	dm.updateDoltHealth(5, 100, 2.5, 1024, true)
+	dm.updateHookedBeads(map[string]int64{"hq": 1}, map[string]int64{"hq": 0})
 }
 
 func TestDaemonMetrics_RecordHeartbeat(t *testing.T) {
@@ -109,5 +110,127 @@ func TestDaemonMetrics_UpdateDoltHealth_Idempotent(t *testing.T) {
 	}
 	if dm.doltHealthy != 0 {
 		t.Errorf("doltHealthy = %d, want 0 (unhealthy from last write)", dm.doltHealthy)
+	}
+}
+
+func TestDaemonMetrics_UpdateHookedBeads_NilReceiver(t *testing.T) {
+	var dm *daemonMetrics
+	// Must be nil-safe per the struct contract.
+	dm.updateHookedBeads(map[string]int64{"hq": 5}, map[string]int64{"hq": 1})
+}
+
+func TestDaemonMetrics_UpdateHookedBeads_Snapshot(t *testing.T) {
+	dm, err := newDaemonMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dm.updateHookedBeads(
+		map[string]int64{"hq": 10, "rig-a": 2},
+		map[string]int64{"hq": 3, "rig-a": 0},
+	)
+
+	dm.hookedMu.RLock()
+	defer dm.hookedMu.RUnlock()
+
+	if dm.hookedByDB["hq"] != 10 {
+		t.Errorf("hookedByDB[hq] = %d, want 10", dm.hookedByDB["hq"])
+	}
+	if dm.hookedByDB["rig-a"] != 2 {
+		t.Errorf("hookedByDB[rig-a] = %d, want 2", dm.hookedByDB["rig-a"])
+	}
+	if dm.hookedDeadByDB["hq"] != 3 {
+		t.Errorf("hookedDeadByDB[hq] = %d, want 3", dm.hookedDeadByDB["hq"])
+	}
+	if dm.hookedDeadByDB["rig-a"] != 0 {
+		t.Errorf("hookedDeadByDB[rig-a] = %d, want 0", dm.hookedDeadByDB["rig-a"])
+	}
+}
+
+func TestDaemonMetrics_UpdateHookedBeads_ReplacesSnapshot(t *testing.T) {
+	// Second update must fully replace the first so a rig that disappears
+	// between scans stops emitting stale series (see gu-hhqk AC#5 design note).
+	dm, err := newDaemonMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dm.updateHookedBeads(
+		map[string]int64{"hq": 10, "rig-a": 2},
+		map[string]int64{"hq": 3, "rig-a": 1},
+	)
+	dm.updateHookedBeads(
+		map[string]int64{"hq": 4}, // rig-a vanished
+		map[string]int64{"hq": 0},
+	)
+
+	dm.hookedMu.RLock()
+	defer dm.hookedMu.RUnlock()
+
+	if _, ok := dm.hookedByDB["rig-a"]; ok {
+		t.Error("rig-a should be absent from total snapshot after replacement")
+	}
+	if _, ok := dm.hookedDeadByDB["rig-a"]; ok {
+		t.Error("rig-a should be absent from dead-letter snapshot after replacement")
+	}
+	if dm.hookedByDB["hq"] != 4 {
+		t.Errorf("hookedByDB[hq] = %d, want 4", dm.hookedByDB["hq"])
+	}
+	if dm.hookedDeadByDB["hq"] != 0 {
+		t.Errorf("hookedDeadByDB[hq] = %d, want 0", dm.hookedDeadByDB["hq"])
+	}
+}
+
+func TestDaemonMetrics_UpdateHookedBeads_DefensiveCopy(t *testing.T) {
+	// Caller's map must not be aliased — mutations after update must not
+	// affect the stored snapshot.
+	dm, err := newDaemonMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	totals := map[string]int64{"hq": 10}
+	deadLetter := map[string]int64{"hq": 3}
+
+	dm.updateHookedBeads(totals, deadLetter)
+
+	// Mutate the caller's maps after the snapshot call.
+	totals["hq"] = 999
+	deadLetter["hq"] = 888
+	totals["injected"] = 1
+
+	dm.hookedMu.RLock()
+	defer dm.hookedMu.RUnlock()
+
+	if dm.hookedByDB["hq"] != 10 {
+		t.Errorf("hookedByDB[hq] = %d, want 10 (defensive copy violated)", dm.hookedByDB["hq"])
+	}
+	if _, ok := dm.hookedByDB["injected"]; ok {
+		t.Error("injected key leaked into snapshot (defensive copy violated)")
+	}
+	if dm.hookedDeadByDB["hq"] != 3 {
+		t.Errorf("hookedDeadByDB[hq] = %d, want 3 (defensive copy violated)", dm.hookedDeadByDB["hq"])
+	}
+}
+
+func TestDaemonMetrics_UpdateHookedBeads_NilMaps(t *testing.T) {
+	// Passing nil maps is equivalent to zeroing out — confirms we accept
+	// both nil (scanner with no Dolt server) and empty (no rigs found).
+	dm, err := newDaemonMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dm.updateHookedBeads(map[string]int64{"hq": 5}, map[string]int64{"hq": 1})
+	dm.updateHookedBeads(nil, nil)
+
+	dm.hookedMu.RLock()
+	defer dm.hookedMu.RUnlock()
+
+	if len(dm.hookedByDB) != 0 {
+		t.Errorf("hookedByDB should be empty after nil update, got %d entries", len(dm.hookedByDB))
+	}
+	if len(dm.hookedDeadByDB) != 0 {
+		t.Errorf("hookedDeadByDB should be empty after nil update, got %d entries", len(dm.hookedDeadByDB))
 	}
 }

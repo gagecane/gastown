@@ -248,6 +248,93 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 	return result, nil
 }
 
+// DefaultDeadLetterThreshold is the age at which a hooked mail bead is
+// considered "dead-letter" for observability purposes. Mirrors the doctor
+// check threshold from gu-hhqk AC#4. Reported via the gastown.hooked_beads.*
+// gauges so operators see backlog accumulation before it bites.
+//
+// Note: this is separate from DefaultHookedMailTTL (24h). The dead-letter
+// threshold surfaces backlog early; the TTL governs when the reaper actually
+// closes beads.
+const DefaultDeadLetterThreshold = 30 * time.Minute
+
+// HookedMailCounts is a read-only snapshot of hooked mail counts for one
+// database. Produced by ScanHookedMailCounts and consumed by the metrics
+// gauge callback.
+type HookedMailCounts struct {
+	Database   string // rig / database name
+	Total      int    // all hooked mail beads (excluding preserve-labels and agents)
+	DeadLetter int    // subset older than the dead-letter threshold
+}
+
+// ScanHookedMailCounts returns the hooked-mail counts for a database using
+// the same exclusion set as ReapHookedMail and the hooked-dead-letter doctor
+// check: excludes issue_type='agent' and any bead labeled
+// gt:standing-orders, gt:keep, gt:role, or gt:rig. Does not modify any data.
+//
+// "Dead-letter" is the subset older than deadLetterThreshold (typically 30
+// minutes). Use DefaultDeadLetterThreshold unless overriding for tests.
+//
+// Returns zero counts (no error) when the issues/labels tables are absent,
+// matching ScanHookedMail's split-brain tolerance.
+func ScanHookedMailCounts(db *sql.DB, dbName string, deadLetterThreshold time.Duration) (HookedMailCounts, error) {
+	result := HookedMailCounts{Database: dbName}
+
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	// The exclusion set matches reaper.ReapHookedMail and
+	// doctor.HookedDeadLetterCheck to keep all three semantics aligned.
+	preserveLabels := []string{"gt:standing-orders", "gt:keep", "gt:role", "gt:rig"}
+	preserveArgs := make([]interface{}, len(preserveLabels))
+	for i, lbl := range preserveLabels {
+		preserveArgs[i] = lbl
+	}
+
+	totalQuery := fmt.Sprintf(`
+		SELECT COUNT(DISTINCT i.id) FROM issues i
+		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
+		WHERE i.status = 'hooked'
+		AND i.issue_type != 'agent'
+		AND mail_l.label = 'gt:message'
+		AND i.id NOT IN (
+			SELECT l2.issue_id FROM labels l2
+			WHERE l2.label IN (%s)
+		)`, sqlPlaceholders(len(preserveLabels)))
+	if err := db.QueryRowContext(ctx, totalQuery, preserveArgs...).Scan(&result.Total); err != nil {
+		if isTableNotFound(err) {
+			return result, nil
+		}
+		return result, fmt.Errorf("count hooked mail total: %w", err)
+	}
+
+	if result.Total == 0 {
+		return result, nil
+	}
+
+	cutoff := time.Now().UTC().Add(-deadLetterThreshold)
+	dlArgs := append([]interface{}{cutoff}, preserveArgs...)
+	dlQuery := fmt.Sprintf(`
+		SELECT COUNT(DISTINCT i.id) FROM issues i
+		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
+		WHERE i.status = 'hooked'
+		AND i.issue_type != 'agent'
+		AND mail_l.label = 'gt:message'
+		AND i.created_at < ?
+		AND i.id NOT IN (
+			SELECT l2.issue_id FROM labels l2
+			WHERE l2.label IN (%s)
+		)`, sqlPlaceholders(len(preserveLabels)))
+	if err := db.QueryRowContext(ctx, dlQuery, dlArgs...).Scan(&result.DeadLetter); err != nil {
+		if isTableNotFound(err) {
+			return result, nil
+		}
+		return result, fmt.Errorf("count hooked mail dead-letter: %w", err)
+	}
+
+	return result, nil
+}
+
 // sqlPlaceholders returns a comma-separated list of n "?" placeholders for
 // use in an IN (...) clause. Returns "NULL" if n == 0 so the query still
 // parses (empty IN lists are not valid SQL).

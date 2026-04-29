@@ -30,6 +30,12 @@ type daemonMetrics struct {
 	doltLatencyMs      float64
 	doltDiskBytes      int64
 	doltHealthy        int64 // 1 = healthy, 0 = unhealthy
+
+	// hookedMu protects hooked-beads gauge snapshots written by the scanner
+	// goroutine and read by the OTel callback.
+	hookedMu         sync.RWMutex
+	hookedByDB       map[string]int64 // db → total hooked mail beads
+	hookedDeadByDB   map[string]int64 // db → hooked mail beads past dead-letter threshold
 }
 
 // newDaemonMetrics registers all daemon OTel instruments against the global
@@ -115,6 +121,45 @@ func newDaemonMetrics() (*daemonMetrics, error) {
 		return nil, err
 	}
 
+	// Hooked-mail observable gauges — values are updated by the hooked-beads
+	// scanner (runs on heartbeat) and collected by the SDK on each export
+	// interval. See gu-hhqk AC#5.
+	//
+	// Per-db attribute (db=<name>) lets VictoriaMetrics show per-rig backlog;
+	// an unlabeled aggregate can be computed via sum() in the query layer.
+	hookedTotalGauge, err := m.Int64ObservableGauge("gastown.hooked_beads.total",
+		metric.WithDescription("Hooked mail beads per database (excluding agent heartbeats and preserve-labeled beads)"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	hookedDeadLetterGauge, err := m.Int64ObservableGauge("gastown.hooked_beads.dead_letter",
+		metric.WithDescription("Hooked mail beads per database older than the dead-letter threshold (gu-hhqk)"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		dm.hookedMu.RLock()
+		defer dm.hookedMu.RUnlock()
+		for db, n := range dm.hookedByDB {
+			o.ObserveInt64(hookedTotalGauge, n,
+				metric.WithAttributes(attribute.String("db", db)),
+			)
+		}
+		for db, n := range dm.hookedDeadByDB {
+			o.ObserveInt64(hookedDeadLetterGauge, n,
+				metric.WithAttributes(attribute.String("db", db)),
+			)
+		}
+		return nil
+	}, hookedTotalGauge, hookedDeadLetterGauge)
+	if err != nil {
+		return nil, err
+	}
+
 	return dm, nil
 }
 
@@ -163,4 +208,30 @@ func (dm *daemonMetrics) updateDoltHealth(conns, maxConns int64, latencyMs float
 	dm.doltLatencyMs = latencyMs
 	dm.doltDiskBytes = diskBytes
 	dm.doltHealthy = healthyInt
+}
+
+// updateHookedBeads replaces the snapshot of hooked-mail counts observed by
+// the hooked_beads.total and hooked_beads.dead_letter gauges.
+//
+// The scanner passes complete per-database maps; each call replaces both maps
+// wholesale so databases that vanish between scans stop emitting stale values.
+// Nil maps are treated as empty — pass empty maps to zero out all series.
+func (dm *daemonMetrics) updateHookedBeads(total, deadLetter map[string]int64) {
+	if dm == nil {
+		return
+	}
+	// Defensive copies so the caller can keep mutating its map safely.
+	tCopy := make(map[string]int64, len(total))
+	for k, v := range total {
+		tCopy[k] = v
+	}
+	dCopy := make(map[string]int64, len(deadLetter))
+	for k, v := range deadLetter {
+		dCopy[k] = v
+	}
+
+	dm.hookedMu.Lock()
+	defer dm.hookedMu.Unlock()
+	dm.hookedByDB = tCopy
+	dm.hookedDeadByDB = dCopy
 }
