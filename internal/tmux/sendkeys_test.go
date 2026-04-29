@@ -52,3 +52,53 @@ func TestShouldSkipEscapeForAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestShouldCheckRewindForAgent covers agent-type gating for Claude Code's
+// Rewind menu detection. Per gu-yx80: only Claude-family agents expose the
+// Rewind UI, so non-Claude agents can skip the ~15ms pane-capture check.
+//
+// Rules:
+//   - Anything containing "claude" (case-insensitive, trimmed) → true
+//   - Empty/whitespace-only → true (conservative: preserve legacy behavior
+//     for sessions that pre-date GT_AGENT tagging)
+//   - All other known agents → false (kiro-cli, copilot, gemini, cursor, …)
+func TestShouldCheckRewindForAgent(t *testing.T) {
+	tests := []struct {
+		name     string
+		agent    string
+		expected bool
+	}{
+		// Claude-family: must still check Rewind (behavior preserved).
+		{"claude bare", "claude", true},
+		{"claude-code canonical", "claude-code", true},
+		{"claude uppercase", "CLAUDE", true},
+		{"claude mixed case", "Claude-Code", true},
+		{"claude with whitespace", "  claude  ", true},
+		{"claude suffix variant", "claude-next", true},
+		{"claude embedded", "anthropic-claude-cli", true},
+
+		// Conservative default: unset GT_AGENT preserves legacy behavior.
+		{"empty string", "", true},
+		{"whitespace only", "   ", true},
+
+		// Non-Claude agents: skip Rewind check (savings path).
+		{"kiro-cli", "kiro-cli", false},
+		{"kiro bare", "kiro", false},
+		{"kiro uppercase", "KIRO-CLI", false},
+		{"copilot", "copilot", false},
+		{"copilot uppercase", "COPILOT", false},
+		{"gemini", "gemini", false},
+		{"cursor", "cursor", false},
+		{"unknown agent", "some-new-agent", false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldCheckRewindForAgent(tc.agent)
+			if got != tc.expected {
+				t.Errorf("shouldCheckRewindForAgent(%q) = %v; want %v", tc.agent, got, tc.expected)
+			}
+		})
+	}
+}
