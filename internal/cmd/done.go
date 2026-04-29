@@ -271,6 +271,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// Resolve the rig's default branch early so downstream guards (safety-net
+	// auto-commit, push refspec builder) can refuse operations that would
+	// contaminate mainline. Duplicated below where the MR path needs it —
+	// keep both in sync until we consolidate into a single resolution pass.
+	defaultBranchEarly := "main" // fallback
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranchEarly = rigCfg.DefaultBranch
+	}
+
 	// SAFETY NET: Auto-commit uncommitted work before ANY exit path (gt-pvx).
 	// Polecats have been observed running gt done without committing their
 	// implementation work (1000s of lines lost). This happened because:
@@ -281,7 +290,26 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	//
 	// Auto-commit ensures work is NEVER lost regardless of exit type or agent behavior.
 	// The commit message is clearly marked as an auto-save so reviewers know.
-	if cwdAvailable && doneCleanupStatus == "uncommitted" {
+	//
+	// HARD GUARD (gu-cfb): Refuse to auto-commit if the current branch is the
+	// rig's default branch (main) or a common mainline alias (master). When a
+	// polecat runs `gt done` from the rig root or otherwise ends up on main
+	// (shouldn't happen in normal flow, but has been observed when a session's
+	// cwd is the rig root rather than the polecat worktree), the auto-commit
+	// + later push path would land unrelated artifacts (worktree pointers,
+	// sibling-rig .kiro/ configs) directly on origin/main — bypassing the
+	// merge queue and racing with refinery merges. Losing an unfinished
+	// auto-save is strictly better than poisoning mainline: the polecat can
+	// recover its work from the worktree; refinery cannot un-push bad commits.
+	if cwdAvailable && doneCleanupStatus == "uncommitted" && isDefaultBranchName(branch, defaultBranchEarly) {
+		style.PrintWarning("auto-commit safety net refused: current branch %q is a protected default branch", branch)
+		fmt.Fprintf(os.Stderr, "  Uncommitted changes will NOT be auto-saved — committing to %q would bypass the merge queue.\n", branch)
+		fmt.Fprintf(os.Stderr, "  This usually means gt done was invoked from the rig root or a stale worktree.\n")
+		fmt.Fprintf(os.Stderr, "  Manually stash or commit your changes from the correct polecat worktree before re-running.\n\n")
+		// Leave doneCleanupStatus == "uncommitted" so downstream paths (the
+		// COMPLETED branch check, the uncommitted-changes block) still fire
+		// and refuse to submit. The agent sees the warning and can recover.
+	} else if cwdAvailable && doneCleanupStatus == "uncommitted" {
 		// Re-check to get file details (cleanup detection already confirmed uncommitted changes)
 		workStatus, err := g.CheckUncommittedWork()
 		if err == nil && workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
@@ -400,11 +428,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", issueID)
 	}
 
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	// Reuse the rig's default branch resolved earlier for the safety-net guard.
+	// Kept as a local alias to minimize diff to the extensive code below that
+	// references `defaultBranch` by name.
+	defaultBranch := defaultBranchEarly
 
 	// For COMPLETED, we need an issue ID and branch must not be the default branch
 	var mrID string
@@ -683,6 +710,20 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// bypassing the MR/refinery flow (G20 root cause).
 		fmt.Printf("Pushing branch to remote...\n")
 		refspec = branch + ":" + branch
+		// HARD GUARD (gu-cfb): Refuse to push a default-branch-to-default-branch
+		// refspec. The COMPLETED preflight above already rejects `branch == defaultBranch`,
+		// but this is a belt-and-suspenders check in case a future refactor lets
+		// a `main`-branched polecat reach this push. Pushing `main:main` here would
+		// send any auto-commit (or stray local commit) straight to origin/main,
+		// bypassing the merge queue and racing with refinery merges.
+		if isDefaultBranchName(branch, defaultBranch) {
+			pushErr = fmt.Errorf("refusing to push %q: branch is the rig's default branch; polecat work must go through the merge queue", branch)
+			pushFailed = true
+			errMsg := pushErr.Error()
+			doneErrors = append(doneErrors, errMsg)
+			style.PrintWarning("%s", errMsg)
+			goto notifyWitness
+		}
 		pushErr = g.Push("origin", refspec, false)
 		if pushErr != nil {
 			// Primary push failed — try fallback from the bare repo (GH #1348).
@@ -1586,9 +1627,10 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 				if closeErr := bd.ForceCloseWithReason("done", attachment.AttachedMolecule); closeErr != nil {
 					if !errors.Is(closeErr, beads.ErrNotFound) {
 						fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s: %v\n", attachment.AttachedMolecule, closeErr)
-						// Don't try to close hookedBeadID - it may still be blocked
-						// The Witness will clean up orphaned state
-						return
+						// Molecule close failed, but still update agent state so
+						// polecat doesn't get stuck as "stalled" with HOOKED bead.
+						// Witness can clean up the orphaned molecule later.
+						goto doneStateUpdate
 					}
 					// Not found = already burned/deleted by another path, continue
 				}
@@ -1750,6 +1792,26 @@ func selfNukePolecat(roleInfo RoleInfo, _ string) error {
 func isPolecatActor(actor string) bool {
 	parts := strings.Split(actor, "/")
 	return len(parts) >= 2 && parts[1] == "polecats"
+}
+
+// isDefaultBranchName reports whether `branch` is the rig's configured
+// default branch or a common mainline alias ("main", "master"). Used by
+// the gt-pvx auto-commit safety net and the push refspec builder to
+// refuse operations that would land polecat work directly on mainline,
+// bypassing the merge queue. See gu-cfb for the incident that motivated
+// this guard.
+//
+// The check is conservative: we always reject "main" and "master" in
+// addition to whatever the rig config says, because some rigs have both
+// a legacy master and a newer main tracked side-by-side.
+func isDefaultBranchName(branch, defaultBranch string) bool {
+	if branch == "" {
+		return false
+	}
+	if branch == defaultBranch {
+		return true
+	}
+	return branch == "main" || branch == "master"
 }
 
 // selfKillSession terminates the polecat's own tmux session after logging the event.

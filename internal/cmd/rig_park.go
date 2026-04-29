@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -180,13 +181,9 @@ func unparkOneRig(rigName string) error {
 // Checks the wisp layer (ephemeral) first, then falls back to the rig
 // identity bead's status:parked label (persistent). This ensures parked
 // state survives wisp cleanup. (Fixes upstream #2079)
+//
+// Delegates to internal/rig.IsRigParked. Kept in cmd for back-compat with
+// existing call sites.
 func IsRigParked(townRoot, rigName string) bool {
-	// Check wisp layer first (fast, local)
-	wispCfg := wisp.NewConfig(townRoot, rigName)
-	if wispCfg.GetString(RigStatusKey) == RigStatusParked {
-		return true
-	}
-
-	// Fall back to persistent bead label
-	return hasRigBeadLabel(townRoot, rigName, "status:parked")
+	return rig.IsRigParked(townRoot, rigName)
 }

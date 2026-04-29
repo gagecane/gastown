@@ -110,14 +110,14 @@ func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
 	}
 
 	openIssue, err := b.Create(beads.CreateOptions{
-		Title: "Open MR",
+		Title:  "Open MR",
 		Labels: []string{"gt:merge-request"},
 	})
 	if err != nil {
 		t.Fatalf("create open merge-request issue: %v", err)
 	}
 	closedIssue, err := b.Create(beads.CreateOptions{
-		Title: "Closed MR",
+		Title:  "Closed MR",
 		Labels: []string{"gt:merge-request"},
 	})
 	if err != nil {
@@ -226,7 +226,7 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 
 	// Create a source issue
 	srcIssue, err := b.Create(beads.CreateOptions{
-		Title: "Implement feature X",
+		Title:  "Implement feature X",
 		Labels: []string{"gt:task"},
 	})
 	if err != nil {
@@ -265,6 +265,64 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 	}
 }
 
+// TestManager_PostMerge_StripsTimestampSuffix is a regression test for gu-y2w.
+// If an older binary wrote a polecat branch timestamp suffix into the MR's
+// source_issue field (e.g. "gu-aei--moiitf15" instead of "gu-aei"),
+// PostMerge should still close the real bug bead rather than fail with
+// "not found" and leave the bug stuck in HOOKED.
+func TestManager_PostMerge_StripsTimestampSuffix(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{
+		Title:  "Real bug bead",
+		Labels: []string{"gt:task"},
+	})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+
+	// Simulate the broken-submit MR: source_issue includes the "--<ts>"
+	// suffix that parseBranchName didn't strip pre-gu-y2w.
+	suffixedID := srcIssue.ID + "--moiitf15"
+	mrDesc := "branch: polecat/test/" + suffixedID +
+		"\nsource_issue: " + suffixedID +
+		"\nworker: test\ntarget: main"
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR with suffixed source_issue",
+		Labels:      []string{"gt:merge-request"},
+		Description: mrDesc,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error: %v", err)
+	}
+
+	if !result.SourceIssueClosed {
+		t.Errorf("PostMerge() SourceIssueClosed = false, want true (suffix should be stripped)")
+	}
+	if result.SourceIssueID != srcIssue.ID {
+		t.Errorf("PostMerge() SourceIssueID = %q, want %q (stripped form)", result.SourceIssueID, srcIssue.ID)
+	}
+	// Verify the real bug bead is now terminal.
+	got, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("show real bug bead: %v", err)
+	}
+	if !beads.IssueStatus(got.Status).IsTerminal() {
+		t.Errorf("source issue status = %q, want terminal", got.Status)
+	}
+}
+
 func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
@@ -300,5 +358,30 @@ func TestManager_PostMerge_NotFound(t *testing.T) {
 	_, err := mgr.PostMerge("nonexistent-mr-id")
 	if err == nil {
 		t.Error("PostMerge() expected error for nonexistent MR")
+	}
+}
+
+// TestStripMRIssueTimestampSuffix is a pure-unit regression test for gu-y2w.
+func TestStripMRIssueTimestampSuffix(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"dashdash suffix (current)", "gu-aei--moiitf15", "gu-aei"},
+		{"at suffix (legacy)", "gt-abc@mk123456", "gt-abc"},
+		{"no suffix", "gu-aei", "gu-aei"},
+		{"subtask no suffix", "gu-aei.1", "gu-aei.1"},
+		{"subtask with dashdash", "gu-aei.1--mk123", "gu-aei.1"},
+		{"empty", "", ""},
+		{"leading dashdash rejected (nothing to strip)", "--mk123", "--mk123"},
+		{"leading at rejected (nothing to strip)", "@mk123", "@mk123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripMRIssueTimestampSuffix(tc.in); got != tc.want {
+				t.Errorf("stripMRIssueTimestampSuffix(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

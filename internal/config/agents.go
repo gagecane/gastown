@@ -32,6 +32,8 @@ const (
 	AgentOpenCode AgentPreset = "opencode"
 	// AgentCopilot is GitHub Copilot CLI.
 	AgentCopilot AgentPreset = "copilot"
+	// AgentKiro is Kiro CLI (Amazon's AI coding assistant).
+	AgentKiro AgentPreset = "kiro"
 	// AgentPi is Pi Coding Agent (extension-based lifecycle).
 	AgentPi AgentPreset = "pi"
 	// AgentOmp is Oh My Pi (OMP) — Pi fork with hook-based lifecycle.
@@ -401,6 +403,29 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		HooksInformational: false,
 		ReadyPromptPrefix:  "",   // GA: no ❯ prompt; Copilot uses hint text, not a detectable prefix
 		ReadyDelayMs:       5000, // Delay-based readiness detection (no prompt prefix)
+		InstructionsFile:   "AGENTS.md",
+	},
+	AgentKiro: {
+		Name:                AgentKiro,
+		Command:             "kiro-cli",
+		Args:                []string{"chat", "--trust-all-tools", "--agent", "gastown"},
+		ProcessNames:        []string{"kiro-cli", "node"},
+		SessionIDEnv:        "",
+		ResumeFlag:          "--resume",
+		ResumeStyle:         "flag",
+		SupportsHooks:       true,
+		SupportsForkSession: false,
+		NonInteractive: &NonInteractiveConfig{
+			Subcommand: "chat",
+			PromptFlag: "--no-interactive --trust-all-tools --agent gastown",
+		},
+		PromptMode:         "arg",
+		ConfigDir:          ".kiro",
+		HooksProvider:      "kiro",
+		HooksDir:           ".kiro/agents",
+		HooksSettingsFile:  "gastown.json",
+		HooksInformational: false,
+		ReadyDelayMs:       5000,
 		InstructionsFile:   "AGENTS.md",
 	},
 	AgentPi: {

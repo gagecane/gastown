@@ -2023,60 +2023,49 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // Returns true if the rig can have agents auto-started.
 // Returns false (with reason) if the rig is parked, docked, or has auto_restart blocked/disabled.
 //
-// TODO(#2120): This duplicates parked/docked checking logic from
-// cmd.IsRigParkedOrDocked and cmd.hasRigBeadLabel. Consolidating into a
-// shared package (e.g. internal/rig) would eliminate the third implementation
-// and reduce drift risk. Not done here due to circular import constraints
-// (daemon cannot import cmd).
+// Parked/docked detection is delegated to rig.IsRigParkedOrDockedE (shared
+// with cmd package). This daemon-specific wrapper adds fail-safe semantics
+// (returns false when status can't be verified) and auto_restart checking.
 func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	cfg := wisp.NewConfig(d.config.TownRoot, rigName)
 
-	// Warn if wisp config is missing - parked/docked state may have been lost
-	if _, err := os.Stat(cfg.ConfigPath()); os.IsNotExist(err) {
-		d.logger.Printf("Warning: no wisp config for %s - parked state may have been lost", rigName)
-	}
+	// Note: a missing wisp config file is the normal state for rigs that have
+	// never been parked or had a wisp-level override set. Parked/docked state
+	// is authoritatively tracked via rig bead labels (see IsRigParkedOrDockedE
+	// below), so the absence of a wisp config does NOT indicate lost state.
+	// An earlier version of this code printed a warning here on every heartbeat
+	// cycle per rig, which at 15 rigs × ~8/min produced ~260K log lines/day
+	// (52% of daemon.log). The warning was never actionable — removed in gu-66xp.
 
-	// Check wisp layer first (local/ephemeral overrides)
-	status := cfg.GetString("status")
-	switch status {
-	case "parked":
-		return false, "rig is parked"
-	case "docked":
-		return false, "rig is docked"
-	}
-
-	// Check rig bead labels (global/synced docked status)
-	// This is the persistent docked state set by 'gt rig dock'
-	rigPath := filepath.Join(d.config.TownRoot, rigName)
-
-	// Try to get prefix from rig config.json, fall back to rigs.json registry
-	var prefix string
-	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.Beads != nil {
-		prefix = rigCfg.Beads.Prefix
-	} else {
-		// Fall back to registry (mayor/rigs.json) when config.json is missing
-		prefix = agentconfig.GetRigPrefix(d.config.TownRoot, rigName)
-	}
-
-	rigBeadID := fmt.Sprintf("%s-rig-%s", prefix, rigName)
-	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
-	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
-	if issue, err := bd.Show(rigBeadID); err == nil {
-		for _, label := range issue.Labels {
-			if label == "status:docked" {
-				return false, "rig is docked (global)"
-			}
-			if label == "status:parked" {
-				return false, "rig is parked (global)"
-			}
-		}
-	} else {
-		// Log when rig bead lookup fails - this helps debug transient Dolt issues
-		// FAIL-SAFE: When we can't verify docked status (Dolt down, network issue, etc.),
-		// assume the rig is NOT operational. This prevents wasting API credits starting
-		// witnesses that might be docked. Better to delay work than burn credits unnecessarily.
-		d.logger.Printf("Warning: failed to check rig bead %s for docked/parked status: %v (assuming not operational)", rigBeadID, err)
+	// Check parked/docked via the shared helper. The error variant lets us
+	// implement fail-safe semantics: when the rig bead can't be read
+	// (e.g., Dolt down, prefix missing), we refuse to start agents rather
+	// than waste API credits on a potentially-docked rig.
+	blocked, reason, err := rig.IsRigParkedOrDockedE(d.config.TownRoot, rigName)
+	if err != nil {
+		// FAIL-SAFE: Can't verify docked status (Dolt down, prefix missing,
+		// network issue, etc.). Assume NOT operational to avoid wasting
+		// credits on potentially-docked rigs. Better to delay work than
+		// burn credits unnecessarily.
+		d.logger.Printf("Warning: failed to check rig %s for docked/parked status: %v (assuming not operational)", rigName, err)
 		return false, "cannot verify rig status (Dolt unavailable)"
+	}
+	if blocked {
+		// Match existing reason strings for compatibility with log scrapers
+		// and tests.
+		switch reason {
+		case "parked":
+			// Wisp-sourced parked uses "rig is parked"; bead-sourced parked
+			// historically used "rig is parked (global)". We can no longer
+			// distinguish the two from inside the shared helper, so we
+			// return the generic form. Callers that care about source can
+			// query wisp directly.
+			return false, "rig is parked"
+		case "docked":
+			return false, "rig is docked"
+		default:
+			return false, fmt.Sprintf("rig is %s", reason)
+		}
 	}
 
 	// Check auto_restart config

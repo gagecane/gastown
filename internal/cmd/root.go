@@ -237,7 +237,7 @@ func warnIfTownRootOffMain() {
 	}
 
 	branch := strings.TrimSpace(string(out))
-	if branch == "" || branch == "main" || branch == "master" || branch == "gt_managed" {
+	if branch == "" || branch == "main" || branch == "master" || branch == "mainline" || branch == "gt_managed" {
 		return
 	}
 

@@ -538,13 +538,14 @@ func assertSlotValue(t *testing.T, townRoot, issueID, slot, want string) {
 // 2. gt rig add succeeds
 // 3. gt crew add succeeds
 // 4. Basic commands work
+// 5. gt doctor -v runs without crashing
+// 6. gt doctor --fix --no-start -v runs without crashing AND reduces the
+//    number of reported errors (does not regress)
 //
-// NOTE: Full doctor --fix verification is currently limited by known issues:
-// - Doctor fix has bugs with bead creation (UNIQUE constraint errors)
-// - Container environment lacks tmux for session checks
-// - Test repos don't satisfy priming expectations (AGENTS.md length)
-//
-// TODO: Enable full doctor verification once these issues are resolved.
+// The prior-known blockers for full doctor --fix verification are resolved:
+// - Dolt nil pointer dereference during agent bead creation: fixed (see 87a5847e)
+// - Container tmux availability: tmux is installed in the CI container
+// - --no-start flag was added so --fix doesn't try to launch the daemon here
 func TestInstallDoctorClean(t *testing.T) {
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "test-hq")
@@ -665,12 +666,49 @@ func TestInstallDoctorClean(t *testing.T) {
 		out, _ := cmd.CombinedOutput()
 		outStr := string(out)
 		t.Logf("Doctor output:\n%s", outStr)
-		// Fail on crashes/panics even though we tolerate doctor errors
-		for _, signal := range []string{"panic:", "SIGSEGV", "runtime error"} {
-			if strings.Contains(outStr, signal) {
-				t.Fatalf("doctor crashed with %s", signal)
+		assertNoDoctorCrash(t, outStr)
+	})
+
+	// 10. Full doctor --fix verification
+	// Runs `doctor --fix --no-start -v` to exercise the fix path end-to-end,
+	// then re-runs `doctor -v` to confirm fix didn't regress the state.
+	//
+	// We use --no-start so the daemon isn't launched for this fix pass
+	// (TestInstallWithDaemon exercises the with-daemon fix path separately).
+	t.Run("doctor-fix-verification", func(t *testing.T) {
+		// Capture baseline error count before --fix.
+		baseOut, _ := runDoctorCmd(gtBinary, hqPath, env, "doctor", "-v")
+		t.Logf("Pre-fix doctor output:\n%s", baseOut)
+		assertNoDoctorCrash(t, baseOut)
+		baselineErrors := parseDoctorErrors(baseOut)
+
+		// Run --fix. We don't require zero exit status (some issues may be
+		// environment-dependent and unfixable inside the test sandbox), but
+		// the fix pass must not crash, hit UNIQUE constraint errors, or
+		// dereference nil pointers.
+		fixOut, _ := runDoctorCmd(gtBinary, hqPath, env, "doctor", "--fix", "--no-start", "-v")
+		t.Logf("Doctor --fix output:\n%s", fixOut)
+		assertNoDoctorCrash(t, fixOut)
+		for _, regressed := range []string{
+			"UNIQUE constraint failed",
+			"nil pointer dereference",
+		} {
+			if strings.Contains(fixOut, regressed) {
+				t.Fatalf("doctor --fix hit previously-fixed error: %q", regressed)
 			}
 		}
+
+		// Re-run doctor and verify we didn't make things worse. Fix should
+		// reduce (or at least not increase) the number of failing checks.
+		postOut, _ := runDoctorCmd(gtBinary, hqPath, env, "doctor", "-v")
+		t.Logf("Post-fix doctor output:\n%s", postOut)
+		assertNoDoctorCrash(t, postOut)
+		postErrors := parseDoctorErrors(postOut)
+		if postErrors > baselineErrors {
+			t.Errorf("doctor --fix regressed: errors went from %d to %d",
+				baselineErrors, postErrors)
+		}
+		t.Logf("doctor --fix: errors %d -> %d", baselineErrors, postErrors)
 	})
 }
 
@@ -679,6 +717,7 @@ func TestInstallDoctorClean(t *testing.T) {
 // 1. Starting the daemon after install
 // 2. Verifying the daemon is healthy
 // 3. Running basic operations with daemon support
+// 4. Verifying gt doctor --fix runs cleanly against a live daemon
 func TestInstallWithDaemon(t *testing.T) {
 	tmpDir := t.TempDir()
 	hqPath := filepath.Join(tmpDir, "test-hq")
@@ -758,12 +797,40 @@ func TestInstallWithDaemon(t *testing.T) {
 		out, _ := cmd.CombinedOutput()
 		outStr := string(out)
 		t.Logf("Doctor output:\n%s", outStr)
-		// Fail on crashes/panics even though we tolerate doctor errors
-		for _, signal := range []string{"panic:", "SIGSEGV", "runtime error"} {
-			if strings.Contains(outStr, signal) {
-				t.Fatalf("doctor crashed with %s", signal)
+		assertNoDoctorCrash(t, outStr)
+	})
+
+	// 9. Full doctor --fix verification with daemon running.
+	// Parallels TestInstallDoctorClean/doctor-fix-verification, but with
+	// the daemon live so we exercise the path where --fix shouldn't try
+	// to restart an already-running daemon.
+	t.Run("doctor-fix-verification", func(t *testing.T) {
+		baseOut, _ := runDoctorCmd(gtBinary, hqPath, env, "doctor", "-v")
+		t.Logf("Pre-fix doctor output:\n%s", baseOut)
+		assertNoDoctorCrash(t, baseOut)
+		baselineErrors := parseDoctorErrors(baseOut)
+
+		fixOut, _ := runDoctorCmd(gtBinary, hqPath, env, "doctor", "--fix", "-v")
+		t.Logf("Doctor --fix output:\n%s", fixOut)
+		assertNoDoctorCrash(t, fixOut)
+		for _, regressed := range []string{
+			"UNIQUE constraint failed",
+			"nil pointer dereference",
+		} {
+			if strings.Contains(fixOut, regressed) {
+				t.Fatalf("doctor --fix hit previously-fixed error: %q", regressed)
 			}
 		}
+
+		postOut, _ := runDoctorCmd(gtBinary, hqPath, env, "doctor", "-v")
+		t.Logf("Post-fix doctor output:\n%s", postOut)
+		assertNoDoctorCrash(t, postOut)
+		postErrors := parseDoctorErrors(postOut)
+		if postErrors > baselineErrors {
+			t.Errorf("doctor --fix regressed: errors went from %d to %d",
+				baselineErrors, postErrors)
+		}
+		t.Logf("doctor --fix: errors %d -> %d", baselineErrors, postErrors)
 	})
 }
 
@@ -809,4 +876,59 @@ func runGTCmd(t *testing.T, binary, dir string, env []string, args ...string) {
 	if err != nil {
 		t.Fatalf("gt %v failed: %v\n%s", args, err, out)
 	}
+}
+
+// runDoctorCmd runs a `gt doctor ...` command against the given town and returns
+// combined output plus the error (if any). We don't fail on non-zero exit:
+// doctor signals "things are wrong" by exiting non-zero, which is valuable
+// test signal rather than a test failure.
+func runDoctorCmd(binary, dir string, env []string, args ...string) (string, error) {
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// assertNoDoctorCrash fails the test if doctor output contains crash signals.
+// Doctor is allowed to report errors and warnings (that's its job); it is NOT
+// allowed to panic, segfault, or hit runtime errors.
+func assertNoDoctorCrash(t *testing.T, out string) {
+	t.Helper()
+	for _, signal := range []string{"panic:", "SIGSEGV", "runtime error"} {
+		if strings.Contains(out, signal) {
+			t.Fatalf("doctor crashed with %q in output:\n%s", signal, out)
+		}
+	}
+}
+
+// parseDoctorErrors extracts the "✖ N failed" count from doctor's summary
+// footer. Returns 0 when no summary is present (e.g. on early exit).
+// Matches lines like: "✓ 83 passed  ⚠ 7 warnings  ✖ 1 failed".
+func parseDoctorErrors(out string) int {
+	// Look for the last occurrence of the summary. Multiple doctor runs in
+	// sequence would each emit one — we want the most recent.
+	const failedMarker = " failed"
+	idx := strings.LastIndex(out, failedMarker)
+	if idx == -1 {
+		return 0
+	}
+	// Walk left from idx to find the preceding number.
+	end := idx
+	start := end
+	for start > 0 {
+		c := out[start-1]
+		if c < '0' || c > '9' {
+			break
+		}
+		start--
+	}
+	if start == end {
+		return 0
+	}
+	n := 0
+	for i := start; i < end; i++ {
+		n = n*10 + int(out[i]-'0')
+	}
+	return n
 }

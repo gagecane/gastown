@@ -33,6 +33,23 @@ func TestParseBranchName(t *testing.T) {
 			wantWorker: "furiosa",
 		},
 		{
+			// Current form (since 2026-04-28): "--" separator for
+			// git.amazon.com pre-receive hook compatibility. Regression
+			// test for gu-y2w: `gt mq post-merge` was leaving the
+			// un-stripped "gu-aei--moiitf15" in source_issue, which
+			// caused `bd close` to fail and the bug bead to stay HOOKED.
+			name:       "polecat branch with issue and dashdash timestamp",
+			branch:     "polecat/nux/gu-aei--moiitf15",
+			wantIssue:  "gu-aei",
+			wantWorker: "nux",
+		},
+		{
+			name:       "polecat branch with subtask and dashdash timestamp",
+			branch:     "polecat/furiosa/gt-jns7.1--mk123456",
+			wantIssue:  "gt-jns7.1",
+			wantWorker: "furiosa",
+		},
+		{
 			name:       "modern polecat branch (timestamp format)",
 			branch:     "polecat/furiosa-mkc36bb9",
 			wantIssue:  "", // Should NOT extract fake issue from worker-timestamp
@@ -378,7 +395,7 @@ func TestMRFilteringByLabel(t *testing.T) {
 			issue: &beads.Issue{
 				ID:     "mr-1",
 				Title:  "Merge: test-branch",
-				Type:   "task", // Wrong type (default from bd create)
+				Type:   "task",                       // Wrong type (default from bd create)
 				Labels: []string{"gt:merge-request"}, // Correct label
 			},
 			wantIsMR: true,

@@ -744,7 +744,7 @@ func (r *Router) queryAgents(descContains string) []*agentBead {
 // queryAgentsInDir queries agent beads in a specific beads directory with optional description filtering.
 // Queries both the issues and wisps tables, merging results.
 func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, error) {
-	args := []string{"list", "--label=gt:agent", "--json", "--flat", "--limit=0"}
+	args := []string{"list", "--label=gt:agent", "--include-infra", "--json", "--flat", "--limit=0"}
 
 	if descContains != "" {
 		args = append(args, "--desc-contains="+descContains)
@@ -1710,7 +1710,21 @@ func formatNotificationMessage(msg *Message) string {
 	if msg.Type == TypeEscalation {
 		return fmt.Sprintf("🚨 Escalation mail from %s. ID: %s. Severity: %s. Subject: %s. Run 'gt mail read %s' or 'gt escalate ack %s'.", msg.From, msg.ThreadID, prioritySeverityLabel(msg.Priority), msg.Subject, msg.ThreadID, msg.ThreadID)
 	}
+	// Plugin-dispatch subjects are informational — use non-mail phrasing so the
+	// system "reply to mail" reminder heuristic does not fire. See gt-swirk.
+	if isPluginDispatchSubject(msg.Subject) {
+		return fmt.Sprintf("🔌 %s dispatched from %s.", msg.Subject, msg.From)
+	}
 	return fmt.Sprintf("📬 You have new mail from %s. Subject: %s. Run 'gt mail inbox' to read.", msg.From, msg.Subject)
+}
+
+// isPluginDispatchSubject returns true when the message subject is a plugin
+// dispatch ("Plugin: <name>"). Plugin dispatches are informational and do not
+// require a reply, so reminder nudges should be suppressed for them.
+// See gt-swirk (nudge storm) — deacon cycles were losing ~30% context to
+// phantom "reply via mail" reminders fired on plugin dispatches.
+func isPluginDispatchSubject(subject string) bool {
+	return strings.HasPrefix(subject, "Plugin: ")
 }
 
 func prioritySeverityLabel(priority Priority) string {
@@ -1739,6 +1753,9 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	}
 	if msg.Type == TypeReply {
 		return // Already a reply — reminder would be redundant
+	}
+	if isPluginDispatchSubject(msg.Subject) {
+		return // Plugin-dispatch is informational — no reply expected. See gt-swirk.
 	}
 	delay := config.LoadOperationalConfig(r.townRoot).GetMailConfig().ReplyReminderDelayD()
 	if delay <= 0 {

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -97,5 +99,152 @@ func TestCheckpointDogEnabled(t *testing.T) {
 	config.Patrols.CheckpointDog.Enabled = false
 	if IsPatrolEnabled(config, "checkpoint_dog") {
 		t.Error("expected checkpoint_dog disabled when Enabled=false")
+	}
+}
+
+// --- gu-y3r: gate WIP commits when polecat has no real edits ---------------
+//
+// These tests exercise the two helpers the checkpoint gate relies on:
+// - noNewTrackedChangesVsHEAD: is the tracked-file diff vs HEAD empty?
+// - headIsWIPCheckpoint:       is HEAD a "WIP: checkpoint (auto)" commit?
+//
+// Together they reproduce the two acceptance scenarios from the bead:
+// 1. Worktree with no tracked diff since the last WIP commit → SKIP.
+// 2. Worktree with real uncommitted tracked changes          → checkpoint.
+//
+// Because checkpointWorktree itself shells out to git, session.tmux, and the
+// daemon logger, it is not easy to drive end-to-end in a unit test. The
+// gate's correctness reduces to the correctness of the two helpers, which
+// these tests cover directly. The existing guardDaemonCommit tests in
+// commit_guard_test.go use the same local-git scaffolding pattern.
+
+// seedWorktreeWithWIP returns a worktree whose HEAD is a
+// "WIP: checkpoint (auto)" commit and whose tracked files match HEAD.
+func seedWorktreeWithWIP(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	gitRun(t, "", "init", "-b", "main", repo)
+
+	// Seed with a real file + commit so HEAD has a tree to diff against.
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatalf("write file.txt: %v", err)
+	}
+	gitRun(t, repo, "add", "file.txt")
+	gitRun(t, repo, "commit", "-m", "initial")
+
+	// Modify the file and create a WIP commit on top so HEAD matches the
+	// pattern checkpoint_dog would produce.
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatalf("rewrite file.txt: %v", err)
+	}
+	gitRun(t, repo, "add", "file.txt")
+	gitRun(t, repo, "commit", "-m", "WIP: checkpoint (auto)")
+
+	return repo
+}
+
+// TestNoNewTrackedChangesVsHEAD_Clean: tracked files match HEAD → true.
+func TestNoNewTrackedChangesVsHEAD_Clean(t *testing.T) {
+	repo := seedWorktreeWithWIP(t)
+
+	if !noNewTrackedChangesVsHEAD(repo) {
+		t.Errorf("expected noNewTrackedChangesVsHEAD=true when tracked files match HEAD")
+	}
+}
+
+// TestNoNewTrackedChangesVsHEAD_TrackedEdit: a modification to a tracked file
+// flips the result to false — the current checkpoint behavior must still fire.
+func TestNoNewTrackedChangesVsHEAD_TrackedEdit(t *testing.T) {
+	repo := seedWorktreeWithWIP(t)
+
+	// Edit the tracked file.
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("v3\n"), 0o644); err != nil {
+		t.Fatalf("rewrite file.txt: %v", err)
+	}
+
+	if noNewTrackedChangesVsHEAD(repo) {
+		t.Errorf("expected noNewTrackedChangesVsHEAD=false after tracked-file edit")
+	}
+}
+
+// TestNoNewTrackedChangesVsHEAD_UntrackedOnly: untracked files alone do not
+// count as tracked-file changes. This is what distinguishes the "idle polecat
+// with ephemeral churn" case from real work.
+func TestNoNewTrackedChangesVsHEAD_UntrackedOnly(t *testing.T) {
+	repo := seedWorktreeWithWIP(t)
+
+	// Drop an untracked file — simulates runtime churn the exclusion list
+	// does not cover. `git diff HEAD` ignores untracked files.
+	if err := os.WriteFile(filepath.Join(repo, "untracked.log"), []byte("noise\n"), 0o644); err != nil {
+		t.Fatalf("write untracked.log: %v", err)
+	}
+
+	if !noNewTrackedChangesVsHEAD(repo) {
+		t.Errorf("expected noNewTrackedChangesVsHEAD=true with only untracked noise")
+	}
+}
+
+// TestHeadIsWIPCheckpoint_True: HEAD subject is the exact WIP prefix.
+func TestHeadIsWIPCheckpoint_True(t *testing.T) {
+	repo := seedWorktreeWithWIP(t)
+
+	if !headIsWIPCheckpoint(repo) {
+		t.Errorf("expected headIsWIPCheckpoint=true when HEAD is a WIP checkpoint")
+	}
+}
+
+// TestHeadIsWIPCheckpoint_False: HEAD is an ordinary (non-WIP) commit →
+// the gate must not fire and a real checkpoint can proceed.
+func TestHeadIsWIPCheckpoint_False(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	gitRun(t, "", "init", "-b", "main", repo)
+	gitRun(t, repo, "commit", "--allow-empty", "-m", "feat: real work")
+
+	if headIsWIPCheckpoint(repo) {
+		t.Errorf("expected headIsWIPCheckpoint=false for a real commit")
+	}
+}
+
+// TestHeadIsWIPCheckpoint_EmptyRepo: a brand-new repo with no commits must
+// not panic and must return false (the checkpoint path can then proceed,
+// which is the safer default).
+func TestHeadIsWIPCheckpoint_EmptyRepo(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	gitRun(t, "", "init", "-b", "main", repo)
+
+	if headIsWIPCheckpoint(repo) {
+		t.Errorf("expected headIsWIPCheckpoint=false for an empty repo")
+	}
+}
+
+// TestCheckpointGate_SkipsOnIdleWIPHead is the primary acceptance test:
+// when tracked files match HEAD AND HEAD is a WIP checkpoint, the gate
+// should trigger (both helpers agree → skip).
+func TestCheckpointGate_SkipsOnIdleWIPHead(t *testing.T) {
+	repo := seedWorktreeWithWIP(t)
+
+	if !(noNewTrackedChangesVsHEAD(repo) && headIsWIPCheckpoint(repo)) {
+		t.Fatalf("expected gate to fire (skip) on idle WIP head: "+
+			"noNewTrackedChangesVsHEAD=%v headIsWIPCheckpoint=%v",
+			noNewTrackedChangesVsHEAD(repo), headIsWIPCheckpoint(repo))
+	}
+}
+
+// TestCheckpointGate_ProceedsOnRealEdit is the other acceptance test:
+// an uncommitted tracked-file modification must not trigger the gate,
+// preserving checkpoint_dog's primary duty of saving in-flight work.
+func TestCheckpointGate_ProceedsOnRealEdit(t *testing.T) {
+	repo := seedWorktreeWithWIP(t)
+
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("v3\n"), 0o644); err != nil {
+		t.Fatalf("rewrite file.txt: %v", err)
+	}
+
+	// Gate must NOT fire: noNewTrackedChangesVsHEAD is now false.
+	if noNewTrackedChangesVsHEAD(repo) && headIsWIPCheckpoint(repo) {
+		t.Errorf("expected gate NOT to fire when tracked file is modified")
 	}
 }

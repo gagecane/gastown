@@ -439,11 +439,11 @@ func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
 		t.Fatalf("read mock bd log: %v", err)
 	}
 	logOutput := string(logData)
-	if !strings.Contains(logOutput, "pwd="+townRoot) {
-		t.Fatalf("mock bd log missing town root cwd:\n%s", logOutput)
+	if !strings.Contains(logOutput, "pwd="+workerDir) {
+		t.Fatalf("mock bd log missing rig cwd:\n%s", logOutput)
 	}
-	if !strings.Contains(logOutput, "beads_dir="+filepath.Join(townRoot, ".beads")) {
-		t.Fatalf("mock bd log missing town-root BEADS_DIR:\n%s", logOutput)
+	if !strings.Contains(logOutput, "beads_dir="+filepath.Join(workerDir, ".beads")) {
+		t.Fatalf("mock bd log missing rig BEADS_DIR:\n%s", logOutput)
 	}
 	if !strings.Contains(logOutput, "create --json --id=pt-imported-polecat-shiny") {
 		t.Fatalf("mock bd log missing create call:\n%s", logOutput)

@@ -74,6 +74,39 @@ Only use `--force` after Mayor authorizes or confirms work is unrecoverable.
 
 ---
 
+## Post-Hoc Completion Recovery
+
+The `gt doctor patrol-scan` cycle runs `DiscoverPostHocCompletions` alongside
+the normal zombie and completion passes. This is an automated safety net for
+the crash-between-push-and-`gt done` case:
+
+1. A polecat pushes its branch (step 7 of the work formula).
+2. The refinery fast-forwards the branch to mainline.
+3. The polecat session dies **before** `gt done` writes `exit_type`.
+4. The hook bead stays `in_progress` forever, and the next witness cycle
+   re-dispatches "unfinished" work to a new polecat — spawn-storm.
+
+The post-hoc pass closes the hook bead when **all** of these hold:
+- Tmux session is dead (won't race an in-progress `gt done`).
+- Agent bead has no `exit_type` set (normal completion didn't fire).
+- Agent state is active (`working` / `running` / `spawning`).
+- Hook bead is still `in_progress` or `hooked`.
+- Polecat's HEAD is an ancestor of `origin/<default-branch>`
+  (the same check as the `#2036` spawn-storm guard).
+
+When all conditions hold, the bead is closed with reason *"Work merged to
+mainline but gt done was not called — auto-closed by witness."* The polecat's
+subsequent fate (restart, nuke, or idle) is handled by the existing
+`DetectZombiePolecats` path — the post-hoc pass only closes the bead so the
+work is not re-dispatched.
+
+**What you do as a witness**: usually nothing — the Go patrol runs every
+cycle. If you see `post_hoc_completions` in `gt doctor patrol-scan --json`
+output, it means the system recovered from a silent polecat death without
+operator intervention. See gu-jr8 for the original incident.
+
+---
+
 ## Pre-Kill Verification Checklist
 
 Before killing ANY polecat session:

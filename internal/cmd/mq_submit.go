@@ -31,23 +31,27 @@ var issuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
 
 // parseBranchName extracts issue ID and worker from a branch name.
 // Supports formats:
-//   - polecat/<worker>/<issue>  → issue=<issue>, worker=<worker>
-//   - polecat/<worker>-<timestamp>  → issue="", worker=<worker> (modern polecat branches)
-//   - <issue>                   → issue=<issue>, worker=""
+//   - polecat/<worker>/<issue>                    → issue=<issue>, worker=<worker>
+//   - polecat/<worker>/<issue>--<timestamp>       → issue=<issue>, worker=<worker> (current form)
+//   - polecat/<worker>/<issue>@<timestamp>        → issue=<issue>, worker=<worker> (legacy form)
+//   - polecat/<worker>-<timestamp>                → issue="", worker=<worker> (no issue)
+//   - <issue>                                     → issue=<issue>, worker=""
+//
+// The issue/timestamp separator changed from "@" to "--" on 2026-04-28 for
+// compatibility with git.amazon.com pre-receive hooks that reject "@" in
+// refs. Both forms are recognised here so the merge queue, `gt done`, and
+// refinery post-merge cleanup record the un-suffixed bead ID in the MR's
+// source_issue field (gu-y2w). Without stripping "--<ts>", the bug bead
+// stays HOOKED after merge because `bd close gu-aei--moiitf15` fails.
 func parseBranchName(branch string) branchInfo {
 	info := branchInfo{Branch: branch}
 
-	// Try polecat/<worker>/<issue> or polecat/<worker>/<issue>@<timestamp> format
+	// Try polecat/<worker>/<issue> with optional --<timestamp> or @<timestamp> suffix.
 	if strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
 		parts := strings.SplitN(branch, "/", 3)
 		if len(parts) == 3 {
 			info.Worker = parts[1]
-			// Strip @timestamp suffix if present (e.g., "gt-abc@mk123" -> "gt-abc")
-			issue := parts[2]
-			if atIdx := strings.Index(issue, "@"); atIdx > 0 {
-				issue = issue[:atIdx]
-			}
-			info.Issue = issue
+			info.Issue = stripBranchTimestampSuffix(parts[2])
 			return info
 		}
 		// Modern polecat branch format: polecat/<worker>-<timestamp>
@@ -73,6 +77,26 @@ func parseBranchName(branch string) branchInfo {
 	}
 
 	return info
+}
+
+// stripBranchTimestampSuffix removes the timestamp suffix from the issue
+// portion of a polecat branch name. The separator is "--" (current) or "@"
+// (legacy, pre-2026-04-28). When both are present, "--" takes precedence to
+// match parseFreshBranchName in internal/polecat/session_manager.go.
+//
+// Examples:
+//
+//	"gu-aei--moiitf15" -> "gu-aei"
+//	"gt-abc@mk123456"  -> "gt-abc"
+//	"gt-abc.1"         -> "gt-abc.1" (no suffix)
+func stripBranchTimestampSuffix(issue string) string {
+	if idx := strings.Index(issue, "--"); idx > 0 {
+		return issue[:idx]
+	}
+	if idx := strings.Index(issue, "@"); idx > 0 {
+		return issue[:idx]
+	}
+	return issue
 }
 
 func runMqSubmit(cmd *cobra.Command, args []string) error {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -115,6 +116,12 @@ var (
 	ErrDoltUnhealthy      = errors.New("dolt health check failed")
 	ErrDoltAtCapacity     = errors.New("dolt server at connection capacity")
 	ErrDiskSpaceLow       = errors.New("insufficient disk space")
+	// ErrPolecatNameRedundantRigPrefix is returned when a polecat name starts
+	// with "<rigName>-". Such names produce double-prefix session names like
+	// "cadk-casc_cdk-cat" (where cadk is the prefix for rig casc_cdk), which
+	// the witness patrol flags as malformed and cannot reliably reconcile with
+	// worktree names. See gu-aei.
+	ErrPolecatNameRedundantRigPrefix = errors.New("polecat name cannot start with rig name")
 )
 
 // UncommittedWorkError provides details about uncommitted work.
@@ -535,8 +542,13 @@ type AddOptions struct {
 // - {timestamp}: unique timestamp
 //
 // If no template is configured or template is empty, uses default format:
-// - polecat/{name}/{issue}@{timestamp} when issue is available
+// - polecat/{name}/{issue}--{timestamp} when issue is available
 // - polecat/{name}-{timestamp} otherwise
+//
+// NOTE: The issue/timestamp separator is "--" (double-dash), not "@".
+// Many remote pre-receive hooks (e.g. internal Amazon git.amazon.com)
+// reject branch names containing characters outside [a-zA-Z0-9_/-.], so
+// "@" must never appear in generated branch names.
 func (m *Manager) buildBranchName(name, issue string) string {
 	template := m.rig.GetStringConfig("polecat_branch_template")
 
@@ -544,7 +556,7 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	if template == "" {
 		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 36)
 		if issue != "" {
-			return fmt.Sprintf("polecat/%s/%s@%s", name, issue, timestamp)
+			return fmt.Sprintf("polecat/%s/%s--%s", name, issue, timestamp)
 		}
 		return fmt.Sprintf("polecat/%s-%s", name, timestamp)
 	}
@@ -629,6 +641,29 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	return result
 }
 
+// validatePolecatNameNotRedundantPrefix rejects polecat names that start with
+// "<rigName>-". Such names produce double-prefix session names (e.g. a polecat
+// named "casc_cdk-cat" in rig "casc_cdk" yields session "cadk-casc_cdk-cat"
+// instead of the canonical "cadk-cat"), which witness patrols cannot reliably
+// reconcile with the worktree directory layout. See gu-aei.
+//
+// This is checked at spawn time so the problem is caught as early as possible,
+// rather than leaving the SessionName() warning as the only signal.
+func validatePolecatNameNotRedundantPrefix(name, rigName string) error {
+	if rigName == "" || name == "" {
+		return nil
+	}
+	// Only reject the exact "<rigName>-..." pattern — other names that merely
+	// contain the rig name as a substring are fine (e.g. "mycat-rig").
+	if strings.HasPrefix(name, rigName+"-") {
+		return fmt.Errorf("%w: %q starts with rig name %q; "+
+			"use a shorter name (e.g. %q) to avoid double-prefix session names",
+			ErrPolecatNameRedundantRigPrefix, name, rigName,
+			strings.TrimPrefix(name, rigName+"-"))
+	}
+	return nil
+}
+
 // Polecat state is derived from beads assignee field, not state.json.
 //
 // Branch naming: Each polecat run gets a unique branch (polecat/<name>-<timestamp>).
@@ -655,6 +690,17 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 
 	name, err := m.namePool.Allocate()
 	if err != nil {
+		_ = poolLock.Unlock()
+		return "", nil, err
+	}
+
+	// Defense-in-depth: reject themed/custom names that would collide with the
+	// rig name and produce double-prefix sessions (gu-aei). Themed names
+	// normally don't hit this, but a poorly-chosen custom theme could.
+	if err := validatePolecatNameNotRedundantPrefix(name, m.rig.Name); err != nil {
+		// Release the name back so it isn't permanently lost.
+		m.namePool.Release(name)
+		_ = m.namePool.Save()
 		_ = poolLock.Unlock()
 		return "", nil, err
 	}
@@ -839,6 +885,15 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 // cross-beads routing issues when slinging work to new polecats.
 func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retErr error) {
 	defer func() { telemetry.RecordPolecatSpawn(context.Background(), name, retErr) }()
+
+	// Guard against names that produce double-prefix session names (gu-aei).
+	// Checked here (not only in SessionName) so spawn fails fast rather than
+	// silently creating a worktree whose session name the witness will later
+	// flag as malformed.
+	if err := validatePolecatNameNotRedundantPrefix(name, m.rig.Name); err != nil {
+		return nil, err
+	}
+
 	// Acquire per-polecat file lock to prevent concurrent Add/Remove/Repair races
 	fl, err := m.lockPolecat(name)
 	if err != nil {
@@ -1174,9 +1229,21 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	// not errors, so nuke still proceeds. See: disk-space-resilience.
 	polecatGit := git.NewGit(clonePath)
 	if branch, brErr := polecatGit.CurrentBranch(); brErr == nil && branch != "" {
-		pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemote(branch, "origin")
-		if checkErr == nil && !pushed && unpushedCount > 0 {
-			if pushErr := polecatGit.Push("origin", branch, false); pushErr != nil {
+		// HARD GUARD (gu-cfb): Never push a polecat worktree that is sitting
+		// on mainline. If a worktree somehow ended up on main/master (e.g., a
+		// manual `git checkout`, a broken sync, or the rig root misidentified
+		// as a polecat clone), pushing it here would land whatever local
+		// commits exist directly on origin/main, bypassing the merge queue.
+		// Polecat branches are always `polecat/*` by construction — anything
+		// else is a misconfiguration we refuse to propagate to origin.
+		if !strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
+			style.PrintWarning("skipping best-effort push before nuke: branch %q is not a polecat branch (refusing to push non-polecat refs from a polecat worktree)", branch)
+		} else if pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemote(branch, "origin"); checkErr == nil && !pushed && unpushedCount > 0 {
+			// Use explicit refspec (branch:branch) so we never fall through to
+			// tracking-config-based pushes (which would target origin/main for
+			// polecat branches that track main — the G20 root cause).
+			refspec := branch + ":" + branch
+			if pushErr := polecatGit.Push("origin", refspec, false); pushErr != nil {
 				style.PrintWarning("could not push branch %s before removal (%d unpushed commit(s)): %v",
 					branch, unpushedCount, pushErr)
 				style.PrintWarning("WORK AT RISK: branch %s has %d unpushed commit(s) in worktree %s",

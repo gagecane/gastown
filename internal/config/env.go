@@ -146,11 +146,19 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// Only set GT_ROOT if provided
 	// Empty values would override tmux session environment
 	if cfg.TownRoot != "" {
-		env["GT_ROOT"] = cfg.TownRoot
+		// Resolve symlinks so GT_ROOT is always the canonical path.
+		// Without this, sessions started from /home/user/gt (symlink) get a
+		// different GT_ROOT than sessions started from /local/home/user/gt
+		// (real path), causing gt doctor env-vars warnings on every cycle.
+		townRoot := cfg.TownRoot
+		if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {
+			townRoot = resolved
+		}
+		env["GT_ROOT"] = townRoot
 		// Prevent git from walking up to umbrella repo when running in rig worktrees.
 		// This stops accidental commits to the umbrella when running git commands from
 		// intermediate directories (e.g., polecats/) that don't have their own .git.
-		env["GIT_CEILING_DIRECTORIES"] = cfg.TownRoot
+		env["GIT_CEILING_DIRECTORIES"] = townRoot
 	}
 
 	// Set BEADS_AGENT_NAME for polecat/crew (uses same format as BD_ACTOR)

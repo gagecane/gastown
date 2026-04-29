@@ -332,11 +332,13 @@ func runSynthesisClose(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading convoy '%s': %w", convoyID, err)
 	}
 	var convoys []struct {
+		Title  string `json:"title"`
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(showOut.Bytes(), &convoys); err != nil || len(convoys) == 0 {
 		return fmt.Errorf("parsing convoy '%s': invalid response", convoyID)
 	}
+	title := convoys[0].Title
 	status := convoys[0].Status
 
 	if err := ensureKnownConvoyStatus(status); err != nil {
@@ -364,8 +366,11 @@ func runSynthesisClose(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Convoy closed: %s\n", style.Bold.Render("✓"), convoyID)
 
-	// TODO: Trigger notification if configured
-	// Parse description for "Notify: <address>" and send mail
+	// Notify convoy owner, Notify address, and Watchers (if any) that synthesis
+	// is complete. Parses Owner/Notify/Watchers fields from the convoy
+	// description and dispatches via gt mail/nudge — same notification path
+	// used by the auto-close flows in convoy.go.
+	notifyConvoyCompletion(townBeads, convoyID, title)
 
 	return nil
 }

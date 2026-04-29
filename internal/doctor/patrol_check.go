@@ -1,7 +1,7 @@
 package doctor
 
 import (
-	"encoding/csv"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -304,23 +304,37 @@ func (c *PatrolNotStuckCheck) Run(ctx *CheckContext) *CheckResult {
 // stuckWispsQuery selects in_progress issues for stuck-wisp detection via Dolt.
 const stuckWispsQuery = `SELECT id, title, status, updated_at FROM issues WHERE status = 'in_progress' ORDER BY updated_at ASC`
 
+// stuckWispRow represents a single row from the bd sql --json output.
+type stuckWispRow struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 // checkStuckWispsDolt queries the Dolt database for stuck wisps using bd sql.
-// Returns an error if the query fails (caller should fall back to JSONL).
+// Uses JSON output to avoid CSV parsing issues with special characters in titles.
 func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string) ([]string, error) {
-	cmd := exec.Command("bd", "sql", "--csv", stuckWispsQuery) //nolint:gosec // G204: query is a constant
+	cmd := exec.Command("bd", "sql", "--json", stuckWispsQuery) //nolint:gosec // G204: query is a constant
 	cmd.Dir = rigPath
-	output, err := cmd.CombinedOutput()
+	output, err := cmd.Output() // Output() discards stderr; bd warnings go to stderr.
 	if err != nil {
 		return nil, fmt.Errorf("bd sql: %w", err)
 	}
 
-	r := csv.NewReader(strings.NewReader(string(output)))
-	records, err := r.ReadAll()
-	if err != nil {
-		return nil, fmt.Errorf("csv parse: %w", err)
+	// Defense-in-depth: strip any non-JSON prefix in case bd ever writes to stdout.
+	if idx := bytes.IndexByte(output, '['); idx > 0 {
+		output = output[idx:]
+	} else if idx < 0 {
+		return nil, fmt.Errorf("no JSON array in output: %s", string(output))
 	}
-	if len(records) < 2 {
-		return nil, nil // No results (header only or empty)
+
+	var rows []stuckWispRow
+	if err := json.Unmarshal(output, &rows); err != nil {
+		return nil, fmt.Errorf("json parse: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
 	}
 
 	var stuck []string
@@ -329,18 +343,10 @@ func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string
 	// false "future timestamp" alarms every evening PDT (gt-ty4).
 	cutoff := time.Now().UTC().Add(-c.stuckThreshold)
 
-	for _, rec := range records[1:] { // Skip CSV header
-		if len(rec) < 4 {
-			continue
-		}
-		id := strings.TrimSpace(rec[0])
-		title := strings.TrimSpace(rec[1])
-		updatedAt := strings.TrimSpace(rec[3])
-
-		t, err := time.Parse("2006-01-02 15:04:05", updatedAt)
+	for _, row := range rows {
+		t, err := time.Parse("2006-01-02 15:04:05", row.UpdatedAt)
 		if err != nil {
-			// Try RFC3339 as fallback
-			t, err = time.Parse(time.RFC3339, updatedAt)
+			t, err = time.Parse(time.RFC3339, row.UpdatedAt)
 			if err != nil {
 				continue
 			}
@@ -348,7 +354,7 @@ func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string
 
 		if !t.IsZero() && t.Before(cutoff) {
 			stuck = append(stuck, fmt.Sprintf("%s: %s (%s) - stale since %s UTC",
-				rigName, id, title, t.UTC().Format("2006-01-02 15:04")))
+				rigName, row.ID, row.Title, t.UTC().Format("2006-01-02 15:04")))
 		}
 	}
 

@@ -207,3 +207,136 @@ func getCurrentBranchHelper(t *testing.T, dir string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// setupRigWithDefaultBranch creates a town/rig/refinery/rig worktree layout on
+// a given default branch. If configDefault is non-empty, it's written into the
+// rig's config.json as default_branch. The bare repo's origin/HEAD is pointed
+// at defaultBranch so that git-side detection also returns defaultBranch.
+//
+// Returns the townRoot and the path to the refinery worktree.
+func setupRigWithDefaultBranch(t *testing.T, defaultBranch, configDefault string) (string, string) {
+	t.Helper()
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	rigDir := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write config.json. If configDefault is empty, omit default_branch so the
+	// check falls through to git-based detection.
+	configBytes := []byte(`{"name":"testrig"}`)
+	if configDefault != "" {
+		configBytes = []byte(`{"name":"testrig","default_branch":"` + configDefault + `"}`)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), configBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a bare repo acting as origin and seed it with one commit on defaultBranch.
+	bareRepo := filepath.Join(rigDir, ".repo.git")
+	runGit(t, "", "init", "--bare", "-b", defaultBranch, bareRepo)
+	tmpInit := bareRepo + "-init"
+	runGit(t, "", "init", "-b", defaultBranch, tmpInit)
+	runGit(t, tmpInit, "commit", "--allow-empty", "-m", "initial commit")
+	runGit(t, tmpInit, "remote", "add", "bare", bareRepo)
+	runGit(t, tmpInit, "push", "bare", defaultBranch)
+	os.RemoveAll(tmpInit)
+
+	// Bare repo's HEAD points at defaultBranch.
+	runGit(t, bareRepo, "symbolic-ref", "HEAD", "refs/heads/"+defaultBranch)
+
+	// Create the refinery/rig worktree tracking origin/defaultBranch so that
+	// origin/HEAD is populated correctly for git-side detection.
+	refineryRig := filepath.Join(rigDir, "refinery", "rig")
+	if err := os.MkdirAll(filepath.Dir(refineryRig), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Clone locally so origin/HEAD is set to defaultBranch automatically.
+	runGit(t, "", "clone", "--branch", defaultBranch, bareRepo, refineryRig)
+
+	return townRoot, refineryRig
+}
+
+// TestIsExpectedBranch_RigWithMainlineConfig verifies that a rig whose
+// config.json sets default_branch=mainline is happy on "mainline". This is
+// the primary fix case from the bug report.
+func TestIsExpectedBranch_RigWithMainlineConfig(t *testing.T) {
+	townRoot, refineryRig := setupRigWithDefaultBranch(t, "mainline", "mainline")
+
+	check := NewBranchCheck()
+	if !check.isExpectedBranch(townRoot, refineryRig, "mainline") {
+		t.Error("rig with default_branch=mainline on mainline should be expected")
+	}
+	// Regression: a worker on "main" inside a mainline-default rig is drift
+	// (the old code masked this with the hardcoded main/master short-circuit).
+	if check.isExpectedBranch(townRoot, refineryRig, "main") {
+		t.Error("rig with default_branch=mainline on main should NOT be expected (that's drift)")
+	}
+}
+
+// TestIsExpectedBranch_GitFallback_Mainline verifies that when config.json
+// lacks default_branch, the check falls back to git's origin/HEAD and accepts
+// "mainline" as expected.
+func TestIsExpectedBranch_GitFallback_Mainline(t *testing.T) {
+	townRoot, refineryRig := setupRigWithDefaultBranch(t, "mainline", "")
+
+	check := NewBranchCheck()
+	if !check.isExpectedBranch(townRoot, refineryRig, "mainline") {
+		t.Error("rig with no config default_branch but origin/HEAD=mainline should accept mainline")
+	}
+}
+
+// TestIsExpectedBranch_GitFallback_MainRejectsMainline verifies that when the
+// remote default is main (via origin/HEAD) and config.json is unset, a worktree
+// on "mainline" is flagged as drift.
+func TestIsExpectedBranch_GitFallback_MainRejectsMainline(t *testing.T) {
+	townRoot, refineryRig := setupRigWithDefaultBranch(t, "main", "")
+
+	check := NewBranchCheck()
+	if check.isExpectedBranch(townRoot, refineryRig, "mainline") {
+		t.Error("rig with origin/HEAD=main should NOT accept mainline")
+	}
+	if !check.isExpectedBranch(townRoot, refineryRig, "main") {
+		t.Error("rig with origin/HEAD=main should accept main")
+	}
+}
+
+// TestIsExpectedBranch_DetachedAtExpected verifies that detached HEAD at
+// origin/<expected> is still considered expected.
+func TestIsExpectedBranch_DetachedAtExpected(t *testing.T) {
+	townRoot, refineryRig := setupRigWithDefaultBranch(t, "mainline", "mainline")
+
+	// Detach HEAD at origin/mainline.
+	runGit(t, refineryRig, "checkout", "--detach", "origin/mainline")
+
+	check := NewBranchCheck()
+	// Empty branch string signals detached HEAD to isExpectedBranch.
+	if !check.isExpectedBranch(townRoot, refineryRig, "") {
+		t.Error("detached HEAD at origin/mainline should be expected")
+	}
+}
+
+// TestDetectDefaultBranchFromGit verifies the git detection helper resolves
+// origin/HEAD to the remote default branch name.
+func TestDetectDefaultBranchFromGit(t *testing.T) {
+	_, refineryRig := setupRigWithDefaultBranch(t, "mainline", "")
+
+	got := detectDefaultBranchFromGit(refineryRig)
+	if got != "mainline" {
+		t.Errorf("detectDefaultBranchFromGit = %q, want %q", got, "mainline")
+	}
+}
+
+// TestExpectedBranch_ConfigBeatsGit verifies config.json takes precedence over
+// git detection — even if origin/HEAD differs from config, config wins.
+func TestExpectedBranch_ConfigBeatsGit(t *testing.T) {
+	// Remote default is main, but config.json declares develop.
+	townRoot, refineryRig := setupRigWithDefaultBranch(t, "main", "develop")
+
+	check := NewBranchCheck()
+	got := check.expectedBranch(townRoot, refineryRig)
+	if got != "develop" {
+		t.Errorf("expectedBranch = %q, want %q (config should beat git)", got, "develop")
+	}
+}

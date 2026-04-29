@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
@@ -109,7 +110,7 @@ func (d *Daemon) checkpointRigPolecats(rigName string) (int, int) {
 			continue
 		}
 
-		workDir := filepath.Join(polecatsDir, polecatName)
+		workDir := filepath.Join(polecatsDir, polecatName, rigName)
 		if d.checkpointWorktree(workDir, rigName, polecatName) {
 			checkpointed++
 		}
@@ -129,6 +130,24 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	}
 	if strings.TrimSpace(statusOut) == "" {
 		return false // Clean worktree
+	}
+
+	// Secondary safety net (gu-y3r): if the last commit on HEAD is already a
+	// WIP checkpoint AND there are no tracked-file modifications vs HEAD,
+	// whatever `status --porcelain` flagged is untracked/ephemeral churn
+	// the existing exclusion list does not cover. Committing it would
+	// produce yet another near-empty WIP commit that pollutes the branch
+	// (see gu-y3r incident: idle polecat produced two duplicate WIPs that
+	// nearly contaminated the merge queue on nuke-push).
+	//
+	// The strict "HEAD is already WIP" condition preserves the current
+	// behavior for the first checkpoint after a real commit (we still want
+	// to capture untracked work once), and only suppresses consecutive
+	// duplicate WIPs on a stalled polecat.
+	if noNewTrackedChangesVsHEAD(workDir) && headIsWIPCheckpoint(workDir) {
+		d.logger.Printf("checkpoint_dog: skipping WIP in %s/%s: no changes since last checkpoint",
+			rigName, polecatName)
+		return false
 	}
 
 	// Stage everything
@@ -164,6 +183,20 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 		return false
 	}
 
+	// Defensive guard: refuse to commit if this worktree's branch exists at
+	// origin. Daemon-initiated commits on shared branches (main, mainline,
+	// or a polecat branch that has already been submitted to the MQ) cause
+	// merge-queue disruption and hours of confusion chasing "WIP: checkpoint
+	// (auto)" commits that appeared out of nowhere. Unstage and skip.
+	if err := guardDaemonCommit(workDir); err != nil {
+		d.logger.Printf("checkpoint_dog: %v — skipping checkpoint in %s/%s",
+			err, rigName, polecatName)
+		// Undo the staging so we don't leave the worktree in a half-committed
+		// state. `git reset HEAD` is a no-op if nothing was staged.
+		_, _ = runGitCmd(workDir, "reset", "HEAD")
+		return false
+	}
+
 	// Commit the checkpoint
 	if _, err := runGitCmd(workDir, "commit", "-m", "WIP: checkpoint (auto)"); err != nil {
 		d.logger.Printf("checkpoint_dog: git commit failed in %s/%s: %v", rigName, polecatName, err)
@@ -194,4 +227,39 @@ func runGitCmd(workDir string, args ...string) (string, error) {
 	}
 
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// noNewTrackedChangesVsHEAD reports whether the worktree has zero
+// modifications to tracked files relative to HEAD. Untracked files are
+// intentionally ignored: the caller uses this to decide whether untracked
+// churn alone is worth a new WIP commit.
+//
+// Any git error is treated as "changes present" (fail open — default to
+// the existing checkpoint behavior rather than silently skipping).
+func noNewTrackedChangesVsHEAD(workDir string) bool {
+	// `git diff --quiet HEAD -- .` exits 0 when there are no tracked-file
+	// differences vs HEAD, 1 when differences exist. Any other exit code
+	// is a real git error, which we treat as "assume changes present."
+	cmd := exec.Command("git", "diff", "--quiet", "HEAD", "--", ".")
+	cmd.Dir = workDir
+	util.SetDetachedProcessGroup(cmd)
+	if err := cmd.Run(); err != nil {
+		// Exit 1 = differences; anything else = git error.
+		return false
+	}
+	return true
+}
+
+// headIsWIPCheckpoint reports whether the current HEAD commit message
+// is a `WIP: checkpoint (auto)` commit produced by checkpoint_dog.
+//
+// Any git error (no commits yet, detached HEAD with no commits, etc.)
+// is treated as "not a WIP" — the caller falls through to the normal
+// checkpoint path, which is the safer default.
+func headIsWIPCheckpoint(workDir string) bool {
+	subject, err := runGitCmd(workDir, "log", "-1", "--format=%s", "HEAD")
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(subject), checkpoint.WIPCommitPrefix)
 }

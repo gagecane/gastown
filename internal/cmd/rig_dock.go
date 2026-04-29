@@ -2,9 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -12,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -265,26 +264,9 @@ func runRigUndock(cmd *cobra.Command, args []string) error {
 
 // IsRigDocked checks if a rig is docked by checking for the status:docked label
 // on the rig identity bead. This function is exported for use by the daemon.
+//
+// Delegates to internal/rig.IsRigDocked. Kept in cmd for back-compat with
+// existing call sites.
 func IsRigDocked(townRoot, rigName, prefix string) bool {
-	// Construct the rig beads path
-	rigPath := filepath.Join(townRoot, rigName)
-	beadsPath := filepath.Join(rigPath, "mayor", "rig")
-	if _, err := os.Stat(beadsPath); err != nil {
-		beadsPath = rigPath
-	}
-
-	bd := beads.New(beadsPath)
-	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
-
-	rigBead, err := bd.Show(rigBeadID)
-	if err != nil {
-		return false
-	}
-
-	for _, label := range rigBead.Labels {
-		if label == RigDockedLabel {
-			return true
-		}
-	}
-	return false
+	return rig.IsRigDocked(townRoot, rigName, prefix)
 }

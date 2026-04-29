@@ -17,6 +17,7 @@ var (
 	doctorRestartSessions bool
 	doctorNoStart         bool
 	doctorSlow            string
+	doctorReadOnly        bool
 )
 
 var doctorCmd = &cobra.Command{
@@ -128,12 +129,19 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorRestartSessions, "restart-sessions", false, "Restart patrol sessions when fixing stale settings (use with --fix)")
 	doctorCmd.Flags().BoolVar(&doctorNoStart, "no-start", false, "Suppress starting daemon/agents during --fix")
 	doctorCmd.Flags().StringVar(&doctorSlow, "slow", "", "Highlight slow checks (optional threshold, default 1s)")
+	doctorCmd.Flags().BoolVar(&doctorReadOnly, "read-only", false, "Pure observation mode — disable auto-clean of proven-dead state during Run() (implies --fix is rejected)")
 	// Allow --slow without a value (uses default 1s)
 	doctorCmd.Flags().Lookup("slow").NoOptDefVal = "1s"
 	rootCmd.AddCommand(doctorCmd)
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
+	// --read-only is incompatible with --fix: the former guarantees no mutation,
+	// the latter explicitly performs mutations. Reject the contradiction early.
+	if doctorReadOnly && doctorFix {
+		return fmt.Errorf("--read-only and --fix are mutually exclusive")
+	}
+
 	// Find town root
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -147,6 +155,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		Verbose:         doctorVerbose,
 		RestartSessions: doctorRestartSessions,
 		NoStart:         doctorNoStart,
+		ReadOnly:        doctorReadOnly,
 	}
 
 	// Create doctor and register checks

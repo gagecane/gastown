@@ -1262,6 +1262,56 @@ func TestDetectOrphanedBeads_ErrorPath(t *testing.T) {
 	}
 }
 
+// TestDetectOrphanedBeads_SkipsRegisteredWorktree is the regression test for
+// gu-eno2. When the polecat directory does not exist on disk at the expected
+// nested path but git worktree list reports a legitimate worktree for the
+// polecat, we must NOT reset the bead.
+func TestDetectOrphanedBeads_SkipsRegisteredWorktree(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	polecatName := "nux"
+
+	// Intentionally do NOT create polecats/nux/ on disk. The only signal
+	// that the polecat is legitimate is the stubbed git worktree list below.
+
+	// Stub git worktree list to report the nested polecat path.
+	registeredPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	original := gitWorktreePathsRunner
+	gitWorktreePathsRunner = func(repoPath string) ([]string, error) {
+		return []string{registeredPath}, nil
+	}
+	t.Cleanup(func() { gitWorktreePathsRunner = original })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "{}", nil
+			}
+			if args[0] == "list" {
+				joined := strings.Join(args, " ")
+				if strings.Contains(joined, "--status=in_progress") {
+					return `[{"id":"gt-legit1","assignee":"testrig/polecats/nux"}]`, nil
+				}
+				return "[]", nil
+			}
+			return "{}", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectOrphanedBeads(bd, townRoot, rigName, nil)
+
+	if result.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", result.Checked)
+	}
+	if len(result.Orphans) != 0 {
+		t.Errorf("Orphans = %d, want 0 — legitimate worktree must not be flagged as orphan (%+v)",
+			len(result.Orphans), result.Orphans)
+	}
+}
+
 // --- DetectOrphanedMolecules tests ---
 
 func TestOrphanedMoleculeResult_Types(t *testing.T) {
@@ -1911,5 +1961,292 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 	if payload["rig"] != "dashboard" {
 		t.Errorf("payload.rig = %v, want dashboard", payload["rig"])
+	}
+}
+
+
+// --- DiscoverPostHocCompletions tests (gu-jr8) ---
+//
+// Post-hoc completion covers the narrow case where:
+//   - A polecat pushed its branch (step 7 of the work formula)
+//   - Refinery fast-forwarded the branch to mainline
+//   - The polecat session died BEFORE `gt done` wrote exit_type metadata
+//
+// Without this safety net the hook bead stays in_progress forever, causing
+// spawn-storms when subsequent witness cycles re-dispatch "unfinished" work.
+
+// postHocTestBd constructs a mock bd that returns a canned agent bead description
+// for `show <agent>` and a canned status for `show <hook>`. Closes are captured.
+func postHocTestBd(agentDescription, hookStatus string) (*BdCli, *mockBdCalls) {
+	return mockBd(
+		func(args []string) (string, error) {
+			if len(args) >= 2 && args[0] == "show" {
+				// args[1] is the bead ID. Agent bead IDs start with the prefix
+				// and contain "polecat" in their constructed form; hook beads are
+				// plain work bead IDs (e.g. "gt-work-001"). Distinguish by checking
+				// for "polecat" in the ID.
+				if strings.Contains(args[1], "polecat") {
+					return fmt.Sprintf(`[{"id":%q,"description":%q,"agent_state":"working"}]`,
+						args[1], agentDescription), nil
+				}
+				return fmt.Sprintf(`[{"id":%q,"status":%q}]`, args[1], hookStatus), nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+}
+
+func setupPostHocTestDir(t *testing.T, rigName, polecatName string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	polecatsDir := filepath.Join(tmpDir, rigName, "polecats", polecatName)
+	if err := os.MkdirAll(polecatsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gt-root"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return tmpDir
+}
+
+// TestDiscoverPostHocCompletions_ClosesBeadWhenBranchMerged verifies the primary
+// fix path: active polecat, no exit_type, session dead, hook in_progress,
+// commit on main → bead is closed.
+func TestDiscoverPostHocCompletions_ClosesBeadWhenBranchMerged(t *testing.T) {
+	// Not parallel: overrides package-level verifyCommitOnMain.
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	const (
+		rigName     = "testrig"
+		polecatName = "nux"
+		hookBead    = "gt-work-001"
+	)
+	tmpDir := setupPostHocTestDir(t, rigName, polecatName)
+
+	// Agent bead: active state, no exit_type, non-empty hook.
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: " + hookBead
+	bd, mock := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, rigName)
+	if result.Checked != 1 {
+		t.Errorf("Checked = %d, want 1", result.Checked)
+	}
+	if len(result.Discovered) != 1 {
+		t.Fatalf("Discovered = %d, want 1", len(result.Discovered))
+	}
+	d := result.Discovered[0]
+	if d.Action != "closed-hook-bead" {
+		t.Errorf("Action = %q, want %q", d.Action, "closed-hook-bead")
+	}
+	if d.HookBead != hookBead {
+		t.Errorf("HookBead = %q, want %q", d.HookBead, hookBead)
+	}
+
+	// Verify bd close was called on the hook bead with a reason.
+	var foundClose bool
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close "+hookBead) && strings.Contains(call, "-r") {
+			foundClose = true
+			break
+		}
+	}
+	if !foundClose {
+		t.Errorf("expected bd close %s with -r reason, got calls: %v", hookBead, mock.calls)
+	}
+}
+
+// TestDiscoverPostHocCompletions_SkipsWhenExitTypePresent verifies that a polecat
+// which already has exit_type set (gt done ran) is NOT handled by the post-hoc
+// path — the normal DiscoverCompletions takes precedence.
+func TestDiscoverPostHocCompletions_SkipsWhenExitTypePresent(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil // even if on main
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: gt-work-001\n" +
+		"exit_type: COMPLETED\ncompletion_time: 2026-04-28T11:00:00Z"
+	bd, mock := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 (exit_type present)", len(result.Discovered))
+	}
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close") {
+			t.Errorf("bd close should not be called when exit_type is set, got: %v", mock.calls)
+		}
+	}
+}
+
+// TestDiscoverPostHocCompletions_SkipsWhenCommitNotOnMain verifies fail-open
+// behavior: if the polecat's work is NOT merged to mainline, the bead is left
+// alone.
+func TestDiscoverPostHocCompletions_SkipsWhenCommitNotOnMain(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil // work NOT on main
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: gt-work-001"
+	bd, mock := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 (commit not on main)", len(result.Discovered))
+	}
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close") {
+			t.Errorf("bd close should not be called when commit not on main, got: %v", mock.calls)
+		}
+	}
+}
+
+// TestDiscoverPostHocCompletions_SkipsWhenAgentIdle verifies that an idle
+// polecat (no active work) is NOT picked up — idle polecats are healthy, not
+// stuck.
+func TestDiscoverPostHocCompletions_SkipsWhenAgentIdle(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: idle\nhook_bead: gt-work-001"
+	bd, _ := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 (agent idle)", len(result.Discovered))
+	}
+}
+
+// TestDiscoverPostHocCompletions_SkipsWhenHookBeadEmpty verifies that a polecat
+// with no hook bead is NOT picked up — there's nothing to close.
+func TestDiscoverPostHocCompletions_SkipsWhenHookBeadEmpty(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: null"
+	bd, _ := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 (no hook bead)", len(result.Discovered))
+	}
+}
+
+// TestDiscoverPostHocCompletions_SkipsWhenHookAlreadyClosed verifies that a
+// polecat whose hook bead is already closed is NOT re-closed.
+func TestDiscoverPostHocCompletions_SkipsWhenHookAlreadyClosed(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: gt-work-001"
+	bd, mock := postHocTestBd(agentDesc, "closed") // hook already closed
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 (hook already closed)", len(result.Discovered))
+	}
+	for _, call := range mock.calls {
+		if strings.HasPrefix(call, "close") {
+			t.Errorf("bd close should not be called when hook already closed, got: %v", mock.calls)
+		}
+	}
+}
+
+// TestDiscoverPostHocCompletions_VerifyError treats verification errors as
+// fail-open: don't close, record an error. This preserves the "never close a
+// bead whose work isn't actually merged" invariant.
+func TestDiscoverPostHocCompletions_VerifyError(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, fmt.Errorf("git error")
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: gt-work-001"
+	bd, _ := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 on verify error (fail-open)", len(result.Discovered))
+	}
+	if len(result.Errors) == 0 {
+		t.Error("expected an error to be recorded when verify fails")
+	}
+}
+
+// TestDiscoverPostHocCompletions_EmptyPolecatsDir verifies behavior on an empty
+// rig.
+func TestDiscoverPostHocCompletions_EmptyPolecatsDir(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	polecatsDir := filepath.Join(tmpDir, "testrig", "polecats")
+	if err := os.MkdirAll(polecatsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gt-root"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if result.Checked != 0 {
+		t.Errorf("Checked = %d, want 0", result.Checked)
+	}
+}
+
+// TestDiscoverPostHocCompletions_NonexistentDir verifies behavior on a missing
+// rig directory.
+func TestDiscoverPostHocCompletions_NonexistentDir(t *testing.T) {
+	t.Parallel()
+	result := DiscoverPostHocCompletions(DefaultBdCli(), "/nonexistent/path", "testrig")
+	if result.Checked != 0 {
+		t.Errorf("Checked = %d, want 0", result.Checked)
 	}
 }

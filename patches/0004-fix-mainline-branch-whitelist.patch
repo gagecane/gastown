@@ -1,0 +1,13 @@
+diff --git a/internal/cmd/root.go b/internal/cmd/root.go
+index 95fb0c96..36a7b7bc 100644
+--- a/internal/cmd/root.go
++++ b/internal/cmd/root.go
+@@ -237,7 +237,7 @@ func warnIfTownRootOffMain() {
+ 	}
+ 
+ 	branch := strings.TrimSpace(string(out))
+-	if branch == "" || branch == "main" || branch == "master" || branch == "gt_managed" {
++	if branch == "" || branch == "main" || branch == "master" || branch == "mainline" || branch == "gt_managed" {
+ 		return
+ 	}
+ 

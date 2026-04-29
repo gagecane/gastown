@@ -77,6 +77,7 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 	var staleLocks []string
 	var orphanedLocks []string
 	var healthyLocks int
+	var autoCleaned int
 
 	for workerDir, info := range locks {
 		// First check if the session exists in tmux - that's the real indicator
@@ -92,7 +93,22 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 				healthyLocks++
 				continue
 			}
-			// Both PID dead AND session gone = truly stale
+			// Both PID dead AND session gone = truly stale.
+			// Auto-clean inline: the lock owner is proven dead (PID gone AND
+			// session gone), so the file is safe to remove. Leaving these
+			// lying around produces a recurring warning every time a polecat
+			// session exits uncleanly, and the cleanup logic is already
+			// defined in (*Lock).Check() — we just mirror it here. If
+			// removal fails we fall back to reporting the stale lock.
+			//
+			// When ctx.ReadOnly is set (--read-only flag), skip the mutation
+			// and just report — caller wants pure observation.
+			if !ctx.ReadOnly {
+				if err := lock.New(workerDir).Release(); err == nil {
+					autoCleaned++
+					continue
+				}
+			}
 			staleLocks = append(staleLocks,
 				fmt.Sprintf("%s (dead PID %d)", workerDir, info.PID))
 			continue
@@ -112,10 +128,14 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Build result
 	if len(staleLocks) == 0 && len(orphanedLocks) == 0 {
+		msg := fmt.Sprintf("%d worker lock(s), all healthy", healthyLocks)
+		if autoCleaned > 0 {
+			msg = fmt.Sprintf("%s (auto-cleaned %d stale lock(s))", msg, autoCleaned)
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("%d worker lock(s), all healthy", healthyLocks),
+			Message: msg,
 		}
 	}
 

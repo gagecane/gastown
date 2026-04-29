@@ -218,14 +218,10 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	// Don't bail out — try the bd create calls anyway (GH#1769).
 	_ = EnsureCustomTypes(targetDir)
 
-	// For routed cross-rig bead IDs, run bd from the town root so bd's own
-	// prefix router resolves the target once. Running from a rig worktree with
-	// a routed BEADS_DIR can double-stack the path for imported rigs.
+	// Route to the correct rig database. ResolveRoutingTarget (above) already
+	// resolved targetDir via routes.jsonl. The override below handles the
+	// cross-rig case; for same-rig, target=b is already correct.
 	target := b
-	townRoot := b.getTownRoot()
-	if townRoot != "" && ExtractPrefix(id) != "" {
-		target = NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads"))
-	}
 
 	description := FormatAgentDescription(title, fields)
 

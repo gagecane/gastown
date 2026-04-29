@@ -236,3 +236,32 @@ func TestIsSlingConfigError(t *testing.T) {
 		})
 	}
 }
+
+// TestIsAgentBead verifies that agent state beads (polecat/witness/refinery/
+// mayor/dog) are correctly identified by the gt:agent label or the legacy
+// issue_type == "agent" field, so that scheduleBead and getReadySlingContexts
+// refuse to dispatch them as work (gu-7gm).
+func TestIsAgentBead(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &beadInfo{}, false},
+		{"task with no agent signal", &beadInfo{IssueType: "task", Labels: []string{"gt:task"}}, false},
+		{"bug bead", &beadInfo{IssueType: "bug", Labels: []string{"gt:bug", "infra"}}, false},
+		{"gt:agent label (current standard)", &beadInfo{IssueType: "task", Labels: []string{"gt:agent"}}, true},
+		{"gt:agent label among others", &beadInfo{IssueType: "task", Labels: []string{"idle:3", "gt:agent", "role:polecat"}}, true},
+		{"legacy issue_type=agent", &beadInfo{IssueType: "agent"}, true},
+		{"legacy type + label (both)", &beadInfo{IssueType: "agent", Labels: []string{"gt:agent"}}, true},
+		{"similar label does not match", &beadInfo{IssueType: "task", Labels: []string{"gt:agentless", "agent"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAgentBead(tt.info); got != tt.want {
+				t.Errorf("isAgentBead(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}

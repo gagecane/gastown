@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -346,8 +345,30 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 	return t.RespawnPane(pane, restartCmd)
 }
 
-// handleParallelSteps handles executing multiple steps concurrently (fan-out pattern).
-// This function spawns goroutines to execute each step in parallel and waits for all to complete.
+// handleParallelSteps handles the fan-out pattern: multiple ready steps that can
+// be worked on concurrently by independent agents.
+//
+// Parallelism model (cooperative, not in-process):
+//
+// Parallelism here is achieved ACROSS agents, not within this process. Each ready
+// step is marked in_progress so only one agent will claim it, and the current
+// agent continues with the first step. Other agents in the same workspace (e.g.,
+// other polecats during a witness patrol) discover the remaining in_progress
+// steps — or the same agent picks them up on a later `gt mol step done` cycle —
+// and execute them independently. The gather step becomes ready once all
+// parallel steps are closed.
+//
+// In-process parallelism via goroutines is NOT viable here: step execution
+// requires an agent (LLM) reading step.Description and performing real work
+// (editing code, running commands, calling APIs). The CLI process can't do that
+// itself — it only orchestrates bead state transitions. Earlier versions of
+// this function spawned goroutines that did nothing but print a line, giving
+// the misleading appearance of concurrent execution; that has been removed.
+//
+// If future work ever needs true in-process fan-out (e.g., spawning fresh
+// agent sessions in separate tmux panes or slinging sub-polecats), this is the
+// place to add it. The cross-cutting design decisions (rig/worktree isolation,
+// agent bootstrap, error aggregation) should be discussed before implementing.
 func handleParallelSteps(cwd, townRoot, _ string, steps []*beads.Issue, dryRun bool) error {
 	fmt.Printf("\n%s Fan-out: %d parallel steps ready\n", style.Bold.Render("⚡"), len(steps))
 	for i, step := range steps {
@@ -355,18 +376,16 @@ func handleParallelSteps(cwd, townRoot, _ string, steps []*beads.Issue, dryRun b
 	}
 
 	if dryRun {
-		fmt.Printf("\n[dry-run] Would execute %d steps in parallel\n", len(steps))
+		fmt.Printf("\n[dry-run] Would mark %d steps as in_progress and continue with first\n", len(steps))
 		return nil
 	}
 
-	// For parallel execution, we use goroutines with a WaitGroup
-	// Each step is executed by running its commands in sequence
-	// For now, we execute them sequentially but mark them all as in_progress first
-	// TODO: True parallel execution requires spawning subagents or separate tmux panes
+	fmt.Printf("\n%s Marking parallel steps as in_progress...\n", style.Bold.Render("🔄"))
 
-	fmt.Printf("\n%s Executing parallel steps...\n", style.Bold.Render("🔄"))
-
-	// Mark all steps as in_progress
+	// Mark all steps as in_progress. This both signals work-in-flight to other
+	// agents and prevents two agents from claiming the same step. We do this
+	// sequentially because each call is a single fast bd update; concurrent
+	// bd processes would just contend on the same Dolt server with no speedup.
 	gitRoot, err := getGitRoot()
 	if err != nil {
 		return fmt.Errorf("finding git root: %w", err)
@@ -381,42 +400,13 @@ func handleParallelSteps(cwd, townRoot, _ string, steps []*beads.Issue, dryRun b
 		}
 	}
 
-	// Execute steps concurrently using goroutines
-	// Note: This is simplified - each step's "execution" just marks it complete
-	// In practice, the agent (witness/deacon) needs to actually do the work described in step.Description
-	// For true parallel execution, this would spawn separate tmux panes or Task subagents
-
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(steps))
-
-	for _, step := range steps {
-		wg.Add(1)
-		go func(s *beads.Issue) {
-			defer wg.Done()
-
-			// Execute the step by closing it
-			// In a real implementation, the agent would process the step description
-			// For now, we just mark it as requiring manual execution
-			fmt.Printf("  %s Step %s ready for parallel execution\n", style.Dim.Render("→"), s.ID)
-		}(step)
-	}
-
-	wg.Wait()
-	close(errChan)
-
-	// Check for errors
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
-
 	fmt.Printf("\n%s All parallel steps marked as in_progress\n", style.Bold.Render("✓"))
-	fmt.Printf("%s Execute each step and close with: gt mol step done <step-id>\n", style.Dim.Render("ℹ"))
-	fmt.Printf("%s Once all parallel steps are closed, the gather step will become ready\n", style.Dim.Render("ℹ"))
+	fmt.Printf("%s Other agents (or subsequent cycles) can claim remaining steps\n", style.Dim.Render("ℹ"))
+	fmt.Printf("%s Close each step with: gt mol step done <step-id>\n", style.Dim.Render("ℹ"))
+	fmt.Printf("%s The gather step becomes ready once all parallel steps are closed\n", style.Dim.Render("ℹ"))
 
-	// For the current agent, pick the first step to continue with
-	// Other steps can be picked up by other agents or run manually
+	// The current agent picks up the first step; remaining steps are left as
+	// in_progress for other agents (or for this agent on a later pass).
 	if len(steps) > 0 {
 		fmt.Printf("\n%s Continuing with first parallel step: %s\n", style.Bold.Render("→"), steps[0].ID)
 		return handleStepContinue(cwd, townRoot, steps[0], dryRun)

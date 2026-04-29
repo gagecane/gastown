@@ -362,7 +362,9 @@ func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
 
 	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
 	branch := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
-	if !strings.Contains(branch, "/gt-9qb@") {
+	// "--" is the current issue/timestamp separator; "@" is the legacy form
+	// we still parse but no longer emit.
+	if !strings.Contains(branch, "/gt-9qb--") {
 		t.Fatalf("fresh session branch = %q, want issue-scoped branch", branch)
 	}
 
@@ -779,17 +781,48 @@ func TestParseFreshBranchName_Rejects(t *testing.T) {
 		"master",
 		"develop",
 		"feature/x",
-		"polecat/",          // empty tail
-		"polecat/alpha",     // no ts or issue
-		"polecat/alpha-",    // trailing dash, no ts
-		"polecat//gt-abc@1", // empty polecat name
-		"polecat/alpha/@1",  // empty issue
-		"polecat/alpha/gt-abc@", // empty ts
+		"polecat/",              // empty tail
+		"polecat/alpha",         // no ts or issue
+		"polecat/alpha-",        // trailing dash, no ts
+		"polecat//gt-abc--1",    // empty polecat name (new form)
+		"polecat//gt-abc@1",     // empty polecat name (legacy form)
+		"polecat/alpha/--1",     // empty issue (new form)
+		"polecat/alpha/@1",      // empty issue (legacy form)
+		"polecat/alpha/gt-abc--", // empty ts (new form)
+		"polecat/alpha/gt-abc@", // empty ts (legacy form)
 		"",
 	}
 	for _, b := range rejects {
 		if meta := parseFreshBranchName(b); meta.ok {
 			t.Errorf("parseFreshBranchName(%q) = %+v, want ok=false", b, meta)
+		}
+	}
+}
+
+// TestParseFreshBranchName_LegacyAtSeparator verifies that branches produced
+// by pre-2026-04-28 binaries (with "@" separator) still parse correctly,
+// so rolling upgrades and in-flight polecats don't break.
+func TestParseFreshBranchName_LegacyAtSeparator(t *testing.T) {
+	cases := []struct {
+		branch  string
+		polecat string
+		issue   string
+	}{
+		{"polecat/alpha/gt-abc@mm4heq3e", "alpha", "gt-abc"},
+		{"polecat/furiosa/la-cagb2@mm4heq3e", "furiosa", "la-cagb2"},
+		{"polecat/casc_webapp-cat/casw-bdd@moicxp2k", "casc_webapp-cat", "casw-bdd"},
+	}
+	for _, c := range cases {
+		meta := parseFreshBranchName(c.branch)
+		if !meta.ok {
+			t.Errorf("parseFreshBranchName(%q) not ok", c.branch)
+			continue
+		}
+		if meta.polecat != c.polecat {
+			t.Errorf("polecat = %q, want %q (from %q)", meta.polecat, c.polecat, c.branch)
+		}
+		if meta.issue != c.issue {
+			t.Errorf("issue = %q, want %q (from %q)", meta.issue, c.issue, c.branch)
 		}
 	}
 }

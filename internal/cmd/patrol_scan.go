@@ -66,6 +66,7 @@ type PatrolScanOutput struct {
 	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
 	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
 	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
+	PostHoc     *PatrolScanPostHocOutput  `json:"post_hoc_completions,omitempty"`
 	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
 }
 
@@ -123,6 +124,23 @@ type PatrolScanCompleteItem struct {
 	CompletionTime string `json:"completion_time,omitempty"`
 }
 
+// PatrolScanPostHocOutput holds post-hoc completion discovery results (gu-jr8).
+type PatrolScanPostHocOutput struct {
+	Checked int                       `json:"checked"`
+	Found   int                       `json:"found"`
+	Items   []PatrolScanPostHocItem   `json:"items,omitempty"`
+	Errors  []string                  `json:"errors,omitempty"`
+}
+
+// PatrolScanPostHocItem is a single post-hoc completion in scan output.
+type PatrolScanPostHocItem struct {
+	Polecat     string `json:"polecat"`
+	AgentBead   string `json:"agent_bead"`
+	HookBead    string `json:"hook_bead"`
+	Action      string `json:"action"`
+	Error       string `json:"error,omitempty"`
+}
+
 func runPatrolScan(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -155,6 +173,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	zombieResult := witness.DetectZombiePolecats(bd, workDir, rigName, router)
 	stallResult := witness.DetectStalledPolecats(workDir, rigName)
 	completionResult := witness.DiscoverCompletions(bd, workDir, rigName, router)
+	// gu-jr8: run AFTER DiscoverCompletions so normal gt-done completions take precedence.
+	// Catches polecats whose branch was merged to mainline but whose session died
+	// before running gt done (so no exit_type metadata was written).
+	postHocResult := witness.DiscoverPostHocCompletions(bd, workDir, rigName)
 
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
@@ -171,10 +193,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, receipts)
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -229,7 +251,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -305,12 +327,36 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.Completions = co
 	}
 
+	// Post-hoc completions (gu-jr8)
+	if postHocResult != nil {
+		po := &PatrolScanPostHocOutput{
+			Checked: postHocResult.Checked,
+			Found:   len(postHocResult.Discovered),
+		}
+		for _, d := range postHocResult.Discovered {
+			item := PatrolScanPostHocItem{
+				Polecat:   d.PolecatName,
+				AgentBead: d.AgentBeadID,
+				HookBead:  d.HookBead,
+				Action:    d.Action,
+			}
+			if d.Error != nil {
+				item.Error = d.Error.Error()
+			}
+			po.Items = append(po.Items, item)
+		}
+		for _, e := range postHocResult.Errors {
+			po.Errors = append(po.Errors, e.Error())
+		}
+		output.PostHoc = po
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -396,6 +442,30 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
+	// Post-hoc completions (gu-jr8): polecats whose branch was merged to mainline
+	// but whose hook bead was never closed because gt done didn't run.
+	if postHocResult != nil && (len(postHocResult.Discovered) > 0 || patrolScanVerbose) {
+		fmt.Printf("%s Post-Hoc Completion Recovery: checked %d polecat(s)\n",
+			style.Bold.Render("🪦"), postHocResult.Checked)
+
+		if len(postHocResult.Discovered) == 0 {
+			fmt.Printf("  %s\n", style.Dim.Render("No post-hoc completions found"))
+		} else {
+			for _, d := range postHocResult.Discovered {
+				fmt.Printf("  ● %s: hook=%s → %s\n", d.PolecatName, d.HookBead, d.Action)
+				if d.Error != nil {
+					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", d.Error)))
+				}
+			}
+		}
+		if len(postHocResult.Errors) > 0 && patrolScanVerbose {
+			for _, e := range postHocResult.Errors {
+				fmt.Printf("    - %v\n", e)
+			}
+		}
+		fmt.Println()
+	}
+
 	// Summary
 	zombieCount := 0
 	activeCount := 0
@@ -411,12 +481,16 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 	if completionResult != nil {
 		completionCount = len(completionResult.Discovered)
 	}
+	postHocCount := 0
+	if postHocResult != nil {
+		postHocCount = len(postHocResult.Discovered)
+	}
 
-	if zombieCount == 0 && stallCount == 0 && completionCount == 0 {
+	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && postHocCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s)\n",
-			zombieCount, activeCount, stallCount, completionCount)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d post-hoc\n",
+			zombieCount, activeCount, stallCount, completionCount, postHocCount)
 	}
 
 	return nil

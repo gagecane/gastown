@@ -1,0 +1,76 @@
+diff --git a/internal/rig/manager.go b/internal/rig/manager.go
+index 84a2b77c..8ffc2b30 100644
+--- a/internal/rig/manager.go
++++ b/internal/rig/manager.go
+@@ -614,9 +614,11 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
+ 		configCmd.Dir = mayorRigPath
+ 		_, _ = configCmd.CombinedOutput() // Ignore errors - older beads don't need this
+ 
+-		prefixSetCmd := exec.Command("bd", "config", "set", "issue_prefix", opts.BeadsPrefix)
+-		prefixSetCmd.Dir = mayorRigPath
+-		if prefixOutput, prefixErr := prefixSetCmd.CombinedOutput(); prefixErr != nil {
++		prefixInitArgs := []string{"init", "--server", "--prefix", opts.BeadsPrefix,
++			"--server-port", strconv.Itoa(doltserver.DefaultConfig(m.townRoot).Port), "--force"}
++		prefixInitCmd := exec.Command("bd", prefixInitArgs...)
++		prefixInitCmd.Dir = mayorRigPath
++		if prefixOutput, prefixErr := prefixInitCmd.CombinedOutput(); prefixErr != nil {
+ 			fmt.Printf("  Warning: Could not set issue_prefix: %v (%s)\n", prefixErr, strings.TrimSpace(string(prefixOutput)))
+ 		}
+ 	}
+@@ -663,20 +665,25 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
+ 	}
+ 
+ 	// Set issue_prefix on the correct server-side database.
+-	// InitBeads ran bd config set issue_prefix, but against the wrong database
+-	// (beads_<prefix> from bd init, not <rigName> from the centralized server).
+-	// Now that EnsureMetadata has corrected dolt_database, re-set it.
++	// EnsureMetadata has corrected dolt_database to point at <rigName>.
++	// Use "bd init --server --prefix --force" which reliably sets issue_prefix,
++	// unlike "bd config set issue_prefix" which bd rejects. --force is safe here
++	// because this is a fresh rig with no existing agent config to lose.
+ 	{
+ 		resolvedBeadsDir := beads.ResolveBeadsDir(rigPath)
+-		prefixCmd := exec.Command("bd", "config", "set", "issue_prefix", opts.BeadsPrefix)
+-		prefixCmd.Dir = rigPath
+-		prefixCmd.Env = append(os.Environ(), "BEADS_DIR="+resolvedBeadsDir)
+-		if out, err := prefixCmd.CombinedOutput(); err != nil {
++		bdEnv := append(os.Environ(), "BEADS_DIR="+resolvedBeadsDir)
++		doltCfg := doltserver.DefaultConfig(m.townRoot)
++		initArgs := []string{"init", "--server", "--prefix", opts.BeadsPrefix,
++			"--server-port", strconv.Itoa(doltCfg.Port), "--force"}
++		initCmd := exec.Command("bd", initArgs...)
++		initCmd.Dir = rigPath
++		initCmd.Env = bdEnv
++		if out, err := initCmd.CombinedOutput(); err != nil {
+ 			fmt.Printf("  Warning: Could not set issue_prefix on rig database: %v (%s)\n", err, strings.TrimSpace(string(out)))
+ 		}
+ 		typesCmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
+ 		typesCmd.Dir = rigPath
+-		typesCmd.Env = append(os.Environ(), "BEADS_DIR="+resolvedBeadsDir)
++		typesCmd.Env = bdEnv
+ 		_, _ = typesCmd.CombinedOutput()
+ 	}
+ 
+@@ -1080,13 +1087,15 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
+ 		// Ignore errors - older beads versions don't need this
+ 		_, _ = configCmd.CombinedOutput()
+ 
+-		// Explicitly set issue_prefix config (bd init --prefix may not persist it in newer versions).
+-		// Without this, bd create and gt sling fail with "issue_prefix config is missing".
+-		prefixSetCmd := exec.Command("bd", "config", "set", "issue_prefix", prefix)
+-		prefixSetCmd.Dir = rigPath
+-		prefixSetCmd.Env = filteredEnv
+-		if prefixOutput, prefixErr := prefixSetCmd.CombinedOutput(); prefixErr != nil {
+-			return fmt.Errorf("bd config set issue_prefix failed: %s", strings.TrimSpace(string(prefixOutput)))
++		// Set issue_prefix via bd init --force (bd rejects "bd config set issue_prefix").
++		// --force is safe here: InitBeads only runs on fresh rigs with no agent config.
++		prefixInitArgs := []string{"init", "--server", "--prefix", prefix,
++			"--server-port", strconv.Itoa(doltCfg.Port), "--force"}
++		prefixInitCmd := exec.Command("bd", prefixInitArgs...)
++		prefixInitCmd.Dir = rigPath
++		prefixInitCmd.Env = filteredEnv
++		if prefixOutput, prefixErr := prefixInitCmd.CombinedOutput(); prefixErr != nil {
++			return fmt.Errorf("bd init --force (issue_prefix) failed: %s", strings.TrimSpace(string(prefixOutput)))
+ 		}
+ 
+ 		// Drop the orphaned beads_<prefix> database created by bd init (gt-sv1h).
