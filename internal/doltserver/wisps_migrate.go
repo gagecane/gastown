@@ -208,10 +208,20 @@ func ensureWispAuxTables(workDir string) ([]string, error) {
 // copyAgentBeadsToWisps inserts agent beads from issues into wisps, skipping duplicates.
 func copyAgentBeadsToWisps(workDir string, result *MigrateWispsResult) error {
 	// INSERT IGNORE skips rows where the primary key already exists in wisps.
-	// We use explicit column list to handle any schema differences.
-	err := bdSQL(workDir,
-		"INSERT IGNORE INTO wisps (id, title, description, status, issue_type, agent_state, role_type, rig, hook_bead, role_bead, created_at, updated_at, created_by, owner, assignee, priority, ephemeral, wisp_type, mol_type, metadata) "+
-			"SELECT id, title, description, status, issue_type, agent_state, role_type, rig, hook_bead, role_bead, created_at, updated_at, created_by, owner, assignee, priority, 1, wisp_type, mol_type, metadata FROM issues WHERE issue_type = 'agent'")
+	// Agent-specific columns (agent_state, role_type, rig, hook_bead, role_bead)
+	// only exist in newer/hq schemas. Detect and adapt for older rig DBs.
+	hasAgentCols := bdSQL(workDir, "SELECT agent_state FROM issues LIMIT 0") == nil
+
+	var err error
+	if hasAgentCols {
+		err = bdSQL(workDir,
+			"INSERT IGNORE INTO wisps (id, title, description, status, issue_type, agent_state, role_type, rig, hook_bead, role_bead, created_at, updated_at, created_by, owner, assignee, priority, ephemeral, wisp_type, mol_type, metadata) "+
+				"SELECT id, title, description, status, issue_type, agent_state, role_type, rig, hook_bead, role_bead, created_at, updated_at, created_by, owner, assignee, priority, 1, wisp_type, mol_type, metadata FROM issues WHERE issue_type = 'agent'")
+	} else {
+		err = bdSQL(workDir,
+			"INSERT IGNORE INTO wisps (id, title, description, status, issue_type, agent_state, role_type, rig, hook_bead, role_bead, created_at, updated_at, created_by, owner, assignee, priority, ephemeral, wisp_type, mol_type, metadata) "+
+				"SELECT id, title, description, status, issue_type, '', '', '', '', '', created_at, updated_at, created_by, owner, assignee, priority, 1, wisp_type, mol_type, metadata FROM issues WHERE issue_type = 'agent'")
+	}
 	if err != nil {
 		return err
 	}
