@@ -287,6 +287,115 @@ func TestResolveRoutingTarget(t *testing.T) {
 	}
 }
 
+// TestResolveRoutingTarget_TownRootPrefixFallback verifies that well-known
+// town-root prefixes (gt-, hq-, hq-cv-) silently fall back to the town-root
+// .beads directory when routes.jsonl lacks an explicit entry — rather than
+// emitting a "no route found for prefix" warning. This fixes gu-0bqg where
+// legacy towns bootstrapped before gt- was seeded spammed the warning on
+// every gt escalate or bd op touching a gt-* bead.
+func TestResolveRoutingTarget_TownRootPrefixFallback(t *testing.T) {
+	// Create a legacy-shaped town whose routes.jsonl only has hq- (no gt- row).
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Only hq- — intentionally missing gt-, hq-cv-
+	routesContent := `{"prefix": "hq-", "path": "."}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fallback := "/fallback/.beads"
+
+	tests := []struct {
+		name     string
+		beadID   string
+		expected string // expected return value
+	}{
+		{
+			name:     "gt- wisp bead falls back to town root silently",
+			beadID:   "gt-wisp-zos",
+			expected: beadsDir,
+		},
+		{
+			name:     "gt- short bead id falls back to town root silently",
+			beadID:   "gt-3jtzo",
+			expected: beadsDir,
+		},
+		{
+			name:     "hq- bead still resolves via explicit route",
+			beadID:   "hq-mayor",
+			expected: beadsDir,
+		},
+		{
+			name:     "hq-cv- convoy bead falls back to town root silently",
+			beadID:   "hq-cv-abc",
+			expected: beadsDir,
+		},
+		{
+			name:     "unknown prefix still falls back with warning",
+			beadID:   "xx-unknown",
+			expected: fallback,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ResolveRoutingTarget(tmpDir, tc.beadID, fallback)
+			if result != tc.expected {
+				t.Errorf("ResolveRoutingTarget(%q, %q, %q) = %q, want %q",
+					tmpDir, tc.beadID, fallback, result, tc.expected)
+			}
+		})
+	}
+}
+
+// TestResolveRoutingTarget_ExplicitGtRigRouteOverrides verifies that when a
+// rig (e.g., gastown/mayor/rig) explicitly claims the gt- prefix, the rig
+// route takes precedence over the town-root fallback. This guards against
+// regressions in towns where gt- legitimately routes to a specific rig.
+func TestResolveRoutingTarget_ExplicitGtRigRouteOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// gt- claimed by a specific rig — should NOT fall back to town root.
+	routesContent := `{"prefix": "gt-", "path": "gastown/mayor/rig"}
+{"prefix": "hq-", "path": "."}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigBeadsDir := filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	fallback := "/fallback/.beads"
+	result := ResolveRoutingTarget(tmpDir, "gt-wisp-rig-owned", fallback)
+	if result != rigBeadsDir {
+		t.Errorf("explicit rig route for gt- should win over town-root fallback: got %q, want %q",
+			result, rigBeadsDir)
+	}
+}
+
 func TestEnsureCustomTypes(t *testing.T) {
 	// Reset the in-memory cache before testing
 	ResetEnsuredDirs()

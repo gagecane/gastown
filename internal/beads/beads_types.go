@@ -54,6 +54,17 @@ func FindTownRoot(startDir string) string {
 	}
 }
 
+// townRootPrefixes are bead ID prefixes that route to the town-root .beads
+// directory by convention, even when routes.jsonl lacks an explicit entry.
+// This provides defense-in-depth against legacy towns whose routes.jsonl was
+// bootstrapped before a given prefix was seeded. Matching is silent (no warning)
+// because the fallback dir is the town-root beads dir — the correct destination.
+var townRootPrefixes = map[string]bool{
+	"gt-":    true, // default town-root prefix used by gt escalate, storm beads, wisps
+	"hq-":    true, // town-level mayor/deacon/hq beads
+	"hq-cv-": true, // convoy beads created by gt sling
+}
+
 // ResolveRoutingTarget determines which beads directory a bead ID will route to.
 // It extracts the prefix from the bead ID and looks up the corresponding route.
 // Returns the resolved beads directory path, following any redirects.
@@ -73,6 +84,15 @@ func ResolveRoutingTarget(townRoot, beadID, fallbackDir string) string {
 	// Look up rig path for this prefix
 	rigPath := GetRigPathForPrefix(townRoot, prefix)
 	if rigPath == "" {
+		// Defense-in-depth: well-known town-root prefixes silently fall back to
+		// the town-root beads dir. This prevents log noise for legacy towns
+		// whose routes.jsonl was bootstrapped before the prefix was seeded
+		// (e.g., pre-existing towns missing the gt- route). The canonical fix
+		// is to add the row to routes.jsonl (see gt install bootstrap and
+		// gt doctor --fix), but this keeps behavior correct even without it.
+		if townRootPrefixes[prefix] {
+			return ResolveBeadsDir(townRoot)
+		}
 		fmt.Fprintf(os.Stderr, "Warning: no route found for prefix %q (bead %s), falling back to %s\n", prefix, beadID, fallbackDir)
 		return fallbackDir
 	}

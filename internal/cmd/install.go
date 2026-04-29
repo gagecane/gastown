@@ -685,6 +685,16 @@ func initTownBeads(townPath string) error {
 		fmt.Printf("   %s Could not register convoy prefix: %v\n", style.Dim.Render("⚠"), err)
 	}
 
+	// Register gt- prefix for town-root beads (gt escalate, wisps, storm/recovery
+	// beads). This eliminates the "no route found for prefix" warning that
+	// appears on every gt escalate and bd op resolving a gt-* bead in towns
+	// where gt- was not previously seeded (gu-0bqg). Rigs that claim gt- as
+	// their own prefix overwrite this via a subsequent AppendRoute during
+	// rig add.
+	if err := beads.AppendRoute(townPath, beads.Route{Prefix: "gt-", Path: "."}); err != nil {
+		fmt.Printf("   %s Could not register gt- prefix: %v\n", style.Dim.Render("⚠"), err)
+	}
+
 	return nil
 }
 

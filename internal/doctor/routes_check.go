@@ -100,6 +100,7 @@ func (c *RoutesCheck) Run(ctx *CheckContext) *CheckResult {
 	var details []string
 	var missingTownRoute bool
 	var missingConvoyRoute bool
+	var missingGtRoute bool
 
 	// Check town root route exists (hq- -> .)
 	if _, hasTownRoute := routeByPrefix["hq-"]; !hasTownRoute {
@@ -113,12 +114,21 @@ func (c *RoutesCheck) Run(ctx *CheckContext) *CheckResult {
 		details = append(details, "Convoy route (hq-cv- -> .) is missing")
 	}
 
+	// Check town-root gt- route exists (gt- -> .)
+	// Without this, gt escalate and bd ops on gt-* beads emit "no route found
+	// for prefix" warnings (gu-0bqg). Only warn when gt- is completely absent;
+	// if a rig claims gt- (e.g., gt- -> gastown/mayor/rig), that's valid.
+	if _, hasGtRoute := routeByPrefix["gt-"]; !hasGtRoute {
+		missingGtRoute = true
+		details = append(details, "Town-root gt- route (gt- -> .) is missing")
+	}
+
 	// Load rigs registry
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsPath)
 	if err != nil {
 		// No rigs config - check for missing town/convoy routes and validate existing routes
-		if missingTownRoute || missingConvoyRoute {
+		if missingTownRoute || missingConvoyRoute || missingGtRoute {
 			return &CheckResult{
 				Name:    c.Name(),
 				Status:  StatusWarning,
@@ -209,7 +219,7 @@ func (c *RoutesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Determine result
-	if missingTownRoute || missingConvoyRoute || len(missingRigs) > 0 || len(invalidRoutes) > 0 || len(suboptimalRoutes) > 0 {
+	if missingTownRoute || missingConvoyRoute || missingGtRoute || len(missingRigs) > 0 || len(invalidRoutes) > 0 || len(suboptimalRoutes) > 0 {
 		status := StatusWarning
 		var messageParts []string
 
@@ -218,6 +228,9 @@ func (c *RoutesCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		if missingConvoyRoute {
 			messageParts = append(messageParts, "convoy route missing")
+		}
+		if missingGtRoute {
+			messageParts = append(messageParts, "town-root gt- route missing")
 		}
 		if len(missingRigs) > 0 {
 			messageParts = append(messageParts, fmt.Sprintf("%d rig(s) missing routes", len(missingRigs)))
@@ -337,6 +350,20 @@ func (c *RoutesCheck) Fix(ctx *CheckContext) error {
 	if _, exists := routeMap["hq-cv-"]; !exists {
 		routeMap["hq-cv-"] = len(routes)
 		routes = append(routes, beads.Route{Prefix: "hq-cv-", Path: "."})
+		modified = true
+	}
+
+	// Ensure town-root gt- route exists (gt- -> .)
+	// Town-root beads with prefix gt- are used by gt escalate, storm/recovery
+	// beads, and ephemeral wisps. Without this route, every bd op on a gt-*
+	// bead prints a "no route found for prefix" warning. gu-0bqg.
+	//
+	// Only add when no existing gt- entry is present — rigs.json may map
+	// gt- to a specific rig (e.g., gt- -> gastown/mayor/rig), which takes
+	// precedence and is preserved unchanged.
+	if _, exists := routeMap["gt-"]; !exists {
+		routeMap["gt-"] = len(routes)
+		routes = append(routes, beads.Route{Prefix: "gt-", Path: "."})
 		modified = true
 	}
 
