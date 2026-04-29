@@ -125,6 +125,10 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			var checkDirs []string
 			if loc.Rig == "" || useSettingsDir {
 				checkDirs = []string{loc.Dir}
+			} else if loc.Role == "polecat" {
+				// Polecat worktree is nested one level below the state dir:
+				//   polecats/<name>/<rigName>/ ← agent cwd, where hook files must live
+				checkDirs = hooks.DiscoverPolecatWorktrees(loc.Dir)
 			} else {
 				checkDirs = hooks.DiscoverWorktrees(loc.Dir)
 			}

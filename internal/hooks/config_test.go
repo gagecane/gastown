@@ -1027,6 +1027,80 @@ func TestDiscoverWorktrees_InvalidDir(t *testing.T) {
 	}
 }
 
+func TestDiscoverPolecatWorktrees(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Typical polecat layout:
+	//   polecats/alice/myrig/.git   (git worktree file)
+	//   polecats/bob/myrig/.git/    (primary clone, git dir)
+	//   polecats/incomplete/        (no worktree yet — should be skipped)
+	//   polecats/.hidden/           (hidden — should be skipped)
+	//   polecats/state.json         (file — should be skipped)
+	aliceWorktree := filepath.Join(tmpDir, "alice", "myrig")
+	os.MkdirAll(aliceWorktree, 0755)
+	os.WriteFile(filepath.Join(aliceWorktree, ".git"), []byte("gitdir: /somewhere/else"), 0644)
+	// Also create a non-worktree sibling under alice/ that must not be picked.
+	os.MkdirAll(filepath.Join(tmpDir, "alice", ".runtime"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "alice", "state.json"), []byte("{}"), 0644)
+
+	bobWorktree := filepath.Join(tmpDir, "bob", "myrig")
+	os.MkdirAll(filepath.Join(bobWorktree, ".git"), 0755)
+
+	os.MkdirAll(filepath.Join(tmpDir, "incomplete"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, ".hidden", "myrig"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, ".hidden", "myrig", ".git"), []byte("x"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "state.json"), []byte("{}"), 0644)
+
+	dirs := DiscoverPolecatWorktrees(tmpDir)
+
+	if len(dirs) != 2 {
+		t.Fatalf("expected 2 worktrees, got %d: %v", len(dirs), dirs)
+	}
+
+	found := make(map[string]bool)
+	for _, d := range dirs {
+		found[d] = true
+	}
+	if !found[aliceWorktree] {
+		t.Errorf("expected alice worktree %q, got %v", aliceWorktree, dirs)
+	}
+	if !found[bobWorktree] {
+		t.Errorf("expected bob worktree %q, got %v", bobWorktree, dirs)
+	}
+	// State dir must NOT appear.
+	if found[filepath.Join(tmpDir, "alice")] {
+		t.Error("polecat state dir should not be returned as a worktree")
+	}
+}
+
+func TestDiscoverPolecatWorktrees_EmptyDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirs := DiscoverPolecatWorktrees(tmpDir)
+	if dirs != nil {
+		t.Errorf("expected nil for empty dir, got %v", dirs)
+	}
+}
+
+func TestDiscoverPolecatWorktrees_InvalidDir(t *testing.T) {
+	dirs := DiscoverPolecatWorktrees("/nonexistent/path/that/does/not/exist")
+	if dirs != nil {
+		t.Errorf("expected nil for invalid dir, got %v", dirs)
+	}
+}
+
+func TestDiscoverPolecatWorktrees_SkipsWhenNoGitFound(t *testing.T) {
+	// A polecat dir without any nested .git should be skipped entirely
+	// rather than returning the state dir (which would reintroduce the bug).
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "alice", "myrig"), 0755)
+	// No .git anywhere.
+
+	dirs := DiscoverPolecatWorktrees(tmpDir)
+	if len(dirs) != 0 {
+		t.Errorf("expected 0 worktrees when no .git present, got %v", dirs)
+	}
+}
+
 func TestDiscoverRoleLocations_ReadError(t *testing.T) {
 	_, err := DiscoverRoleLocations("/nonexistent/path/that/does/not/exist")
 	if err == nil {

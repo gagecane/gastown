@@ -550,8 +550,12 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 }
 
 // DiscoverWorktrees returns subdirectories within a role parent directory that
-// are individual worktrees (e.g., crew/alice, crew/bob, polecats/toast).
+// are individual worktrees (e.g., crew/alice, crew/bob).
 // Skips hidden directories and non-directories.
+//
+// NOTE: For polecats, use DiscoverPolecatWorktrees instead. Polecat worktrees
+// are nested one level deeper (polecats/<name>/<rigName>/), so this function
+// returns the polecat *state dir*, not the actual git worktree.
 func DiscoverWorktrees(roleDir string) []string {
 	entries, err := os.ReadDir(roleDir)
 	if err != nil {
@@ -566,6 +570,62 @@ func DiscoverWorktrees(roleDir string) []string {
 		dirs = append(dirs, filepath.Join(roleDir, entry.Name()))
 	}
 	return dirs
+}
+
+// DiscoverPolecatWorktrees returns the actual git worktree directories for
+// every polecat under a polecats/ parent directory.
+//
+// Polecats have a two-level layout:
+//
+//	polecats/<name>/             ← state dir (mail, .runtime, etc.)
+//	polecats/<name>/<rigName>/   ← the git worktree (where agents run)
+//
+// For each polecat state dir, this function returns the single non-hidden
+// subdirectory that contains a `.git` entry (file for worktrees, dir for
+// primary clones). Polecats without a discoverable worktree are skipped
+// rather than returning the state dir, because writing hook files to the
+// state dir is invisible to agent sessions (the original bug).
+//
+// Callers that need the state dir (e.g., for mail) should use DiscoverWorktrees.
+func DiscoverPolecatWorktrees(polecatsDir string) []string {
+	entries, err := os.ReadDir(polecatsDir)
+	if err != nil {
+		return nil
+	}
+
+	var worktrees []string
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		stateDir := filepath.Join(polecatsDir, entry.Name())
+		if wt := findNestedWorktree(stateDir); wt != "" {
+			worktrees = append(worktrees, wt)
+		}
+	}
+	return worktrees
+}
+
+// findNestedWorktree looks inside a polecat state dir for its git worktree.
+// Returns the path to the worktree subdirectory, or "" if none is found.
+// A worktree is identified by the presence of a `.git` entry (either a file,
+// as produced by `git worktree add`, or a directory for primary clones).
+func findNestedWorktree(stateDir string) string {
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return ""
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		candidate := filepath.Join(stateDir, entry.Name())
+		if _, err := os.Stat(filepath.Join(candidate, ".git")); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // isRig checks if a directory looks like a rig (has crew/, witness/, or polecats/ subdirectory).
