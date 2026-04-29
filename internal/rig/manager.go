@@ -987,7 +987,11 @@ func warnDeprecatedRigConfigKeys(data []byte, path string) {
 // InitBeads initializes the beads database at rig level.
 // The project's .beads/config.yaml determines sync-branch settings.
 // Use `bd doctor --fix` in the project to configure sync-branch if needed.
-// TODO(bd-yaml): beads config should migrate to JSON (see beads issue)
+//
+// The beads config file format (currently YAML) is owned by the upstream bd
+// CLI; this function invokes `bd init` and then patches the resulting file via
+// beads.EnsureConfigYAML. If upstream beads ever switches config formats, that
+// helper is the single point to update.
 //
 // rigName is the rig's database name (e.g. "gastown"). When non-empty and
 // different from the default "beads_<prefix>" database that bd init creates,
