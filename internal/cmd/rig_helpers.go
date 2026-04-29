@@ -61,33 +61,6 @@ func getRig(rigName string) (string, *rig.Rig, error) {
 	return townRoot, r, nil
 }
 
-// hasRigBeadLabel checks if a rig's identity bead has a specific label.
-// Returns false if the rig config or bead can't be loaded (safe default).
-//
-// Deprecated: kept as a thin wrapper for any direct callers inside the cmd
-// package. New code should use internal/rig helpers directly.
-func hasRigBeadLabel(townRoot, rigName, label string) bool {
-	// Delegate to the shared implementation. The rig package doesn't expose
-	// this as a public function (it's an internal helper), so we reproduce
-	// the minimal bead lookup here by asking for the two labels we actually
-	// care about.
-	switch label {
-	case rig.LabelStatusParked:
-		return rig.IsRigParked(townRoot, rigName)
-	case rig.LabelStatusDocked:
-		prefix := rig.RigBeadsPrefix(townRoot, filepath.Join(townRoot, rigName), rigName)
-		if prefix == "" {
-			return false
-		}
-		return rig.IsRigDocked(townRoot, rigName, prefix)
-	default:
-		// Any other label check would require a full bead fetch. No
-		// current caller asks for anything other than parked/docked;
-		// add a new rig-package helper if that changes.
-		return false
-	}
-}
-
 // IsRigParkedOrDocked checks if a rig is parked or docked by any mechanism
 // (wisp ephemeral state or persistent bead labels). Returns (blocked, reason).
 // This is the single entry point for all dispatch paths (sling, convoy launch,
