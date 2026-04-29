@@ -23,6 +23,23 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
+// nudgeOptsForSession builds tmux.NudgeOpts for a session, honoring the
+// agent preset's EscapeCancelsRequest flag. Without this, every direct
+// tmux delivery path would need to duplicate the GT_AGENT lookup + preset
+// check, and it's easy to miss one — as happened in the wait-idle direct
+// delivery and queue-fallback paths, which left kiro-cli sessions stuck
+// with unsubmitted nudge text in the prompt buffer. (see ro-obsidian
+// stall, 2026-04-28)
+func nudgeOptsForSession(t *tmux.Tmux, sessionName, townRoot string) tmux.NudgeOpts {
+	opts := tmux.NudgeOpts{TownRoot: townRoot}
+	if agentName, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && agentName != "" {
+		if preset := config.GetAgentPresetByName(agentName); preset != nil && preset.EscapeCancelsRequest {
+			opts.SkipEscape = true
+		}
+	}
+	return opts
+}
+
 func hasACPSessionByName(townRoot, sessionName string) bool {
 	if townRoot == "" {
 		return false
@@ -206,7 +223,7 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 						Message:  message,
 						Priority: nudgePriorityFlag,
 					}})
-					return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+					return t.NudgeSessionWithOpts(sessionName, formatted, nudgeOptsForSession(t, sessionName, townRoot))
 				}
 				// Ensure a nudge-poller is running so the queue actually drains.
 				// The poller is normally started by gt crew start, but if the
@@ -230,7 +247,7 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 				Message:  message,
 				Priority: nudgePriorityFlag,
 			}})
-			return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
+			return t.NudgeSessionWithOpts(sessionName, formatted, nudgeOptsForSession(t, sessionName, townRoot))
 		}
 		// Terminal errors (session gone, no server) — propagate, don't queue.
 		// Queueing a nudge for a dead session means it will never be delivered.
@@ -265,15 +282,10 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 		return nil
 
 	default: // NudgeModeImmediate
-		opts := tmux.NudgeOpts{TownRoot: townRoot}
-		// Check if the target agent uses Escape as cancel (e.g., Gemini CLI).
-		// For these agents, skip the Escape keystroke to avoid canceling
-		// in-flight generation. (GH#gt-wasn)
-		if agentName, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil && agentName != "" {
-			if preset := config.GetAgentPresetByName(agentName); preset != nil && preset.EscapeCancelsRequest {
-				opts.SkipEscape = true
-			}
-		}
+		// Build opts honoring the agent preset's EscapeCancelsRequest flag.
+		// Agents like Gemini CLI treat Escape as cancel-in-flight-generation,
+		// so the Escape step in NudgeSession would strand the nudge. (GH#gt-wasn)
+		opts := nudgeOptsForSession(t, sessionName, townRoot)
 		return t.NudgeSessionWithOpts(sessionName, prefixedMessage, opts)
 	}
 }
