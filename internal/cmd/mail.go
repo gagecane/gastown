@@ -33,6 +33,7 @@ var (
 	mailReplySubject  string
 	mailReplyMessage  string
 	mailStdin         bool // Read message body from stdin
+	mailConsumerBead  string // consumer_bead_id metadata: ID of the bead expected to consume this hooked mail (gu-ub1l)
 
 	// Search flags
 	mailSearchFrom    string
@@ -477,6 +478,7 @@ func init() {
 	mailSendCmd.Flags().StringVar(&mailFrom, "from", "", "Override sender address (for relay/bridge use)")
 	mailSendCmd.Flags().BoolVar(&mailSendSelf, "self", false, "Send to self (auto-detect from cwd)")
 	mailSendCmd.Flags().StringArrayVar(&mailCC, "cc", nil, "CC recipients (can be used multiple times)")
+	mailSendCmd.Flags().StringVar(&mailConsumerBead, "consumer-bead", "", "Expected consumer bead ID (sets consumer_bead_id metadata; exempts from hooked-mail TTL while consumer is open) (gu-ub1l)")
 	_ = mailSendCmd.MarkFlagRequired("subject") // cobra flags: error only at runtime if missing
 
 	// Inbox flags

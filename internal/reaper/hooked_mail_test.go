@@ -1,6 +1,7 @@
 package reaper
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -119,5 +120,68 @@ func TestScanHookedMailCountsQueryStructure(t *testing.T) {
 	}
 	if len(preserveLabels) != 4 {
 		t.Errorf("expected 4 preserve labels, got %d — keep in sync with ReapHookedMail", len(preserveLabels))
+	}
+}
+
+// TestConsumerAliveClause verifies the SQL fragment exists and looks
+// syntactically plausible. The clause is referenced by ReapHookedMail,
+// ScanHookedMail, ScanHookedMailCounts, and (via a duplicated copy, by
+// intent) doctor.hookedDeadLetterCountQuery. gu-ub1l.
+func TestConsumerAliveClause(t *testing.T) {
+	if ConsumerAliveClause == "" {
+		t.Fatal("ConsumerAliveClause must not be empty")
+	}
+
+	// Required SQL fragments: the clause must reference the issues table
+	// alias, the metadata column, and the consumer_bead_id metadata key.
+	requiredFragments := []string{
+		"NOT EXISTS",
+		"FROM issues",
+		"JSON_EXTRACT",
+		"metadata",
+		"consumer_bead_id",
+		"status",
+		"closed",
+	}
+	for _, frag := range requiredFragments {
+		if !strings.Contains(ConsumerAliveClause, frag) {
+			t.Errorf("ConsumerAliveClause missing required fragment %q: %s", frag, ConsumerAliveClause)
+		}
+	}
+
+	// Semantic guard: the clause must correlate via `c.id = ... JSON ...`
+	// so the subquery is correlated (per-row), not decorrelated.
+	if !strings.Contains(ConsumerAliveClause, "c.id") {
+		t.Errorf("ConsumerAliveClause should use alias 'c.id' for the correlated subquery: %s", ConsumerAliveClause)
+	}
+	// The "alive" predicate is "status != 'closed'", not "status = 'open'",
+	// so in_progress, pinned, and other non-closed statuses also count as alive.
+	if !strings.Contains(ConsumerAliveClause, "status != 'closed'") {
+		t.Errorf("ConsumerAliveClause should test `status != 'closed'` so non-closed statuses are treated as alive: %s", ConsumerAliveClause)
+	}
+}
+
+// TestReapHookedMailQueryEmbedsConsumerClause inspects the SQL the reaper
+// builds for its candidate SELECT to confirm the consumer-alive exclusion
+// is wired in. We invoke the query-construction path indirectly by reading
+// the source file (sanity guard for gu-ub1l regressions).
+func TestReapHookedMailQueriesEmbedConsumerClause(t *testing.T) {
+	// Read the source file and verify every hooked-mail query references
+	// ConsumerAliveClause. This is a low-cost regression guard that catches
+	// someone copy-pasting a query without the exclusion.
+	data, err := os.ReadFile("hooked_mail.go")
+	if err != nil {
+		t.Fatalf("read hooked_mail.go: %v", err)
+	}
+	src := string(data)
+
+	// Expect the clause identifier to appear multiple times — once per
+	// query that must exclude live-consumer beads. At the time of writing,
+	// that's at least 4 occurrences (ScanHookedMail total+candidates,
+	// ReapHookedMail select+remain, ScanHookedMailCounts total+dl) plus
+	// the declaration itself.
+	count := strings.Count(src, "ConsumerAliveClause")
+	if count < 5 {
+		t.Errorf("expected ConsumerAliveClause referenced by all hooked-mail queries (>=5 occurrences), got %d", count)
 	}
 }

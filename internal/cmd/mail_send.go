@@ -102,6 +102,16 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	// Set CC recipients
 	msg.CC = mailCC
 
+	// Set consumer_bead_id metadata (gu-ub1l): exempts hooked mail from
+	// the TTL reaper sweep while the named consumer bead is still open.
+	// When the consumer is closed or missing, the TTL fallback applies.
+	if mailConsumerBead != "" {
+		if msg.Metadata == nil {
+			msg.Metadata = map[string]string{}
+		}
+		msg.Metadata["consumer_bead_id"] = mailConsumerBead
+	}
+
 	// Suppress router-side notification when --no-notify is passed.
 	// Otherwise the router handles idle-aware notification per-recipient,
 	// which also works correctly for fan-out (groups, lists, channels).

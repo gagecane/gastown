@@ -1939,3 +1939,70 @@ func TestEnqueueReplyReminder_DisabledByConfig(t *testing.T) {
 		t.Errorf("reply_reminder_delay=0s should disable reminders, got %d pending", pending)
 	}
 }
+
+// TestAppendMetadataArgs verifies that msg.Metadata is rendered as a
+// --metadata JSON argument to bd create. Anchors the wire format that
+// gu-ub1l (consumer_bead_id) and other protocol extensions rely on.
+func TestAppendMetadataArgs(t *testing.T) {
+	t.Run("nil metadata returns args unchanged", func(t *testing.T) {
+		msg := &Message{}
+		args := []string{"create", "foo"}
+		got := appendMetadataArgs(args, msg)
+		if len(got) != len(args) {
+			t.Fatalf("expected args unchanged, got %v", got)
+		}
+	})
+
+	t.Run("empty metadata returns args unchanged", func(t *testing.T) {
+		msg := &Message{Metadata: map[string]string{}}
+		args := []string{"create", "foo"}
+		got := appendMetadataArgs(args, msg)
+		if len(got) != len(args) {
+			t.Fatalf("expected args unchanged, got %v", got)
+		}
+	})
+
+	t.Run("consumer_bead_id is serialized into --metadata JSON (gu-ub1l)", func(t *testing.T) {
+		msg := &Message{Metadata: map[string]string{"consumer_bead_id": "gu-xyz123"}}
+		args := []string{"create", "foo"}
+		got := appendMetadataArgs(args, msg)
+		if len(got) != len(args)+2 {
+			t.Fatalf("expected 2 extra args for --metadata JSON, got %v", got)
+		}
+		if got[len(got)-2] != "--metadata" {
+			t.Errorf("expected --metadata flag, got %q", got[len(got)-2])
+		}
+		var parsed map[string]string
+		if err := json.Unmarshal([]byte(got[len(got)-1]), &parsed); err != nil {
+			t.Fatalf("metadata JSON must round-trip: %v (value=%q)", err, got[len(got)-1])
+		}
+		if parsed["consumer_bead_id"] != "gu-xyz123" {
+			t.Errorf("consumer_bead_id = %q, want %q", parsed["consumer_bead_id"], "gu-xyz123")
+		}
+	})
+
+	t.Run("multi-key metadata round-trips in JSON", func(t *testing.T) {
+		msg := &Message{Metadata: map[string]string{
+			"consumer_bead_id": "gu-xyz123",
+			"branch":           "polecat/fury/gu-ub1l",
+			"rig":              "gastown_upstream",
+		}}
+		args := []string{"create"}
+		got := appendMetadataArgs(args, msg)
+		if len(got) < 3 {
+			t.Fatalf("expected args + flag + value, got %v", got)
+		}
+		var parsed map[string]string
+		if err := json.Unmarshal([]byte(got[len(got)-1]), &parsed); err != nil {
+			t.Fatalf("metadata JSON must round-trip: %v (value=%q)", err, got[len(got)-1])
+		}
+		if len(parsed) != 3 {
+			t.Errorf("expected 3 keys in metadata, got %d: %+v", len(parsed), parsed)
+		}
+		for k, want := range msg.Metadata {
+			if parsed[k] != want {
+				t.Errorf("metadata[%q] = %q, want %q", k, parsed[k], want)
+			}
+		}
+	})
+}

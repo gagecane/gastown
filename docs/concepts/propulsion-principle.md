@@ -141,5 +141,42 @@ the dead-letter backlog is visible in other health checks.
 When filing a new bead type that will land on a hook, decide up-front: is
 there a guaranteed consumer? If not, add it to the TTL reaper.
 
+### Consumer linkage (gu-ub1l)
+
+TTL is the fallback. The *first* half of the rule — "guaranteed consumer" —
+is also enforceable at creation time using the `consumer_bead_id` metadata
+convention:
+
+- When a producer knows which bead will consume the hook (for example, a
+  session-handoff mail whose recipient is a specific successor polecat
+  bead), it may declare this via `--consumer-bead <id>` on `gt mail send`.
+- The flag sets `Metadata["consumer_bead_id"]` on the resulting hooked
+  bead. The value is a bead ID of the expected consumer.
+- The reaper (`reaper.ReapHookedMail`, `reaper.ScanHookedMailCounts`) and
+  the `hooked-dead-letter` doctor check apply an exclusion — beads whose
+  `consumer_bead_id` points to a still-open bead are **exempt** from the
+  TTL sweep and from dead-letter accounting.
+- When the consumer is closed, missing, or the metadata is absent, the
+  TTL fallback applies as before. No behavior change for producers that
+  don't set the metadata.
+
+This layers cleanly on top of TTL: a hooked bead with a live consumer is
+never dead-letter (there is a named successor; the engine is balanced).
+Once the consumer closes, the bead becomes a normal TTL candidate and will
+be reaped after its TTL elapses.
+
+**When to set `--consumer-bead`**: producer-side code that creates a bead
+it intends for a specific other bead (or successor session) to consume.
+Examples: session handoff mail addressed to a successor polecat bead;
+cross-rig coordination where the expected responder is known up-front.
+
+**When NOT to set it**: broadcast/opportunistic delivery, group mail,
+agent heartbeats, or anything where the consumer is not known at creation
+time — let TTL handle those.
+
+**Data model**: the exclusion is a single SQL fragment
+(`reaper.ConsumerAliveClause`) referenced by every hooked-mail query so
+the semantics stay consistent across reap, scan, metrics, and doctor.
+
 See `gu-hhqk` for the design history and the lifecycle audit that surfaced
-this rule.
+this rule. See `gu-ub1l` for the consumer-linkage design decision.

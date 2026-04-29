@@ -46,6 +46,11 @@ func NewHookedDeadLetterCheck() *HookedDeadLetterCheck {
 // The SELECT limits the count to hooked mail (gt:message label) older than
 // 30 minutes, excluding agent heartbeat beads and long-lived conventional
 // labels. Matches the exclusion set used by reaper.ReapHookedMail.
+//
+// Also excludes beads that declare a still-open consumer via
+// metadata.consumer_bead_id (gu-ub1l) — such beads have a guaranteed
+// consumer and are exempt from dead-letter accounting. Must stay in sync
+// with reaper.ConsumerAliveClause.
 const hookedDeadLetterCountQuery = `
 SELECT COUNT(DISTINCT i.id)
 FROM issues i
@@ -57,6 +62,11 @@ WHERE i.status = 'hooked'
   AND i.id NOT IN (
     SELECT l2.issue_id FROM labels l2
     WHERE l2.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig')
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM issues c
+    WHERE c.id = JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.consumer_bead_id'))
+    AND c.status != 'closed'
   )`
 
 // Run scans all rig databases (Dolt) for hooked mail beads past the dead-letter threshold.

@@ -46,6 +46,12 @@ func TestHookedDeadLetterCountQueryStructure(t *testing.T) {
 		"gt:keep",
 		"gt:role",
 		"gt:rig",
+		// gu-ub1l: consumer-linkage exclusion must be mirrored here so the
+		// doctor check does not warn about beads with live consumers.
+		"consumer_bead_id",
+		"NOT EXISTS",
+		"JSON_EXTRACT",
+		"status != 'closed'",
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(hookedDeadLetterCountQuery, want) {

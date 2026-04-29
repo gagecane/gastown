@@ -62,7 +62,8 @@ func ScanHookedMail(db *sql.DB, dbName string, ttl time.Duration) (total, candid
 		INNER JOIN labels l ON i.id = l.issue_id
 		WHERE i.status = 'hooked'
 		AND i.issue_type != 'agent'
-		AND l.label = 'gt:message'`
+		AND l.label = 'gt:message'
+		AND ` + ConsumerAliveClause
 	if err := db.QueryRowContext(ctx, totalQuery).Scan(&total); err != nil {
 		if isTableNotFound(err) {
 			return 0, 0, nil // issues/labels not on this server — skip
@@ -82,7 +83,8 @@ func ScanHookedMail(db *sql.DB, dbName string, ttl time.Duration) (total, candid
 		WHERE i.status = 'hooked'
 		AND i.issue_type != 'agent'
 		AND l.label = 'gt:message'
-		AND i.created_at < ?`
+		AND i.created_at < ?
+		AND ` + ConsumerAliveClause
 	if err := db.QueryRowContext(ctx, candQuery, cutoff).Scan(&candidates); err != nil {
 		if isTableNotFound(err) {
 			return total, 0, nil
@@ -115,6 +117,8 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 
 	// Build the eligibility SELECT. We need the bead title and created_at for
 	// the ClosedEntries log. Must NOT match beads carrying a preserve label.
+	// The ConsumerAliveClause (gu-ub1l) additionally exempts beads that
+	// declare a still-open consumer via metadata.consumer_bead_id.
 	selectQuery := fmt.Sprintf(`
 		SELECT DISTINCT i.id, i.title, i.created_at FROM issues i
 		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
@@ -126,7 +130,8 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 			SELECT l2.issue_id FROM labels l2
 			WHERE l2.label IN (%s)
 		)
-		LIMIT %d`, sqlPlaceholders(len(preserveLabels)), DefaultBatchSize)
+		AND %s
+		LIMIT %d`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause, DefaultBatchSize)
 
 	args := []interface{}{cutoff}
 	for _, lbl := range preserveLabels {
@@ -232,14 +237,26 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 
 	result.Closed = totalClosed
 
-	// Count remaining hooked mail for the report.
-	remainQuery := `
+	// Count remaining hooked mail for the report. Apply the same
+	// consumer-linkage and preserve-label exclusions as the select above so
+	// the reported "remain" number reflects beads actually subject to the
+	// TTL reaper (not beads we intentionally skipped).
+	remainQuery := fmt.Sprintf(`
 		SELECT COUNT(*) FROM issues i
 		INNER JOIN labels l ON i.id = l.issue_id
 		WHERE i.status = 'hooked'
 		AND i.issue_type != 'agent'
-		AND l.label = 'gt:message'`
-	if err := db.QueryRowContext(ctx, remainQuery).Scan(&result.HookedRemain); err != nil {
+		AND l.label = 'gt:message'
+		AND i.id NOT IN (
+			SELECT l2.issue_id FROM labels l2
+			WHERE l2.label IN (%s)
+		)
+		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
+	remainArgs := make([]interface{}, 0, len(preserveLabels))
+	for _, lbl := range preserveLabels {
+		remainArgs = append(remainArgs, lbl)
+	}
+	if err := db.QueryRowContext(ctx, remainQuery, remainArgs...).Scan(&result.HookedRemain); err != nil {
 		if !isTableNotFound(err) {
 			return result, fmt.Errorf("count hooked mail remain: %w", err)
 		}
@@ -257,6 +274,35 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 // threshold surfaces backlog early; the TTL governs when the reaper actually
 // closes beads.
 const DefaultDeadLetterThreshold = 30 * time.Minute
+
+// ConsumerAliveClause is the SQL fragment that excludes hooked mail beads
+// whose consumer_bead_id metadata points to a still-open bead (gu-ub1l).
+//
+// A hooked mail bead may carry metadata like:
+//
+//	{"consumer_bead_id": "gu-xyz123"}
+//
+// to declare its expected consumer. While that consumer is still open (i.e.
+// the successor session is alive and working), the bead is exempt from the
+// TTL sweep — it has a guaranteed consumer, not just a time budget.
+//
+// When the consumer is missing, closed, or the metadata is absent, this
+// clause is satisfied and the TTL fallback applies.
+//
+// Semantics ("consumer alive" means NOT reaped):
+//   - metadata null / empty / no consumer_bead_id key → NOT alive → reap per TTL
+//   - consumer_bead_id present and pointing to an open bead → alive → skip
+//   - consumer_bead_id present but consumer bead missing → NOT alive → reap
+//   - consumer_bead_id present and consumer bead closed → NOT alive → reap
+//
+// The clause is phrased as "no live consumer exists" so it composes with
+// other AND-clauses in the WHERE without flipping logic.
+const ConsumerAliveClause = `
+	NOT EXISTS (
+		SELECT 1 FROM issues c
+		WHERE c.id = JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.consumer_bead_id'))
+		AND c.status != 'closed'
+	)`
 
 // HookedMailCounts is a read-only snapshot of hooked mail counts for one
 // database. Produced by ScanHookedMailCounts and consumed by the metrics
@@ -300,7 +346,8 @@ func ScanHookedMailCounts(db *sql.DB, dbName string, deadLetterThreshold time.Du
 		AND i.id NOT IN (
 			SELECT l2.issue_id FROM labels l2
 			WHERE l2.label IN (%s)
-		)`, sqlPlaceholders(len(preserveLabels)))
+		)
+		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
 	if err := db.QueryRowContext(ctx, totalQuery, preserveArgs...).Scan(&result.Total); err != nil {
 		if isTableNotFound(err) {
 			return result, nil
@@ -324,7 +371,8 @@ func ScanHookedMailCounts(db *sql.DB, dbName string, deadLetterThreshold time.Du
 		AND i.id NOT IN (
 			SELECT l2.issue_id FROM labels l2
 			WHERE l2.label IN (%s)
-		)`, sqlPlaceholders(len(preserveLabels)))
+		)
+		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
 	if err := db.QueryRowContext(ctx, dlQuery, dlArgs...).Scan(&result.DeadLetter); err != nil {
 		if isTableNotFound(err) {
 			return result, nil
