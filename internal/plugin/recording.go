@@ -94,11 +94,13 @@ func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
 		return "", fmt.Errorf("creating plugin run bead: %s: %w", stderr.String(), err)
 	}
 
-	// Parse created bead ID from JSON output
+	// Parse created bead ID from JSON output.
+	// bd may emit warnings to stdout (e.g., "⚠ Creating test issue...")
+	// before the JSON object, so strip any non-JSON prefix first.
 	var result struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+	if err := json.Unmarshal(extractJSONObject(stdout.Bytes()), &result); err != nil {
 		return "", fmt.Errorf("parsing bd create output: %w", err)
 	}
 
@@ -178,16 +180,17 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 		return nil, fmt.Errorf("querying plugin runs: %s: %w", stderr.String(), err)
 	}
 
-	// Parse JSON output
+	// Parse JSON output (strip any non-JSON prefix like bd warnings).
+	out := extractJSONArray(stdout.Bytes())
 	var beads []struct {
 		ID        string   `json:"id"`
 		Title     string   `json:"title"`
 		CreatedAt string   `json:"created_at"`
 		Labels    []string `json:"labels"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &beads); err != nil {
+	if err := json.Unmarshal(out, &beads); err != nil {
 		// Empty array is valid
-		if stdout.String() == "[]\n" || stdout.Len() == 0 {
+		if string(out) == "[]\n" || len(out) == 0 {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("parsing bd list output: %w", err)
