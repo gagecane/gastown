@@ -279,28 +279,56 @@ func (t *Tmux) dismissRewindMode(target string) {
 	time.Sleep(300 * time.Millisecond)
 }
 
-// sendEnterVerified sends Enter to a tmux target and verifies it was processed
-// by checking that the pane content changes. Under load, tmux may buffer
-// keystrokes, causing Enter to race with text delivery — Enter arrives while
-// tmux is still processing text/Escape and gets treated as part of the text
-// stream rather than a separate submit action.
+// sendEnterVerified sends Enter to a tmux target and verifies it was processed.
 //
-// After sending Enter, polls the pane content with exponential backoff. If the
-// content hasn't changed (Enter wasn't processed), retries the Enter keystroke.
-// Max 3 retries before returning an error.
+// Under load, tmux may buffer keystrokes, causing Enter to race with text
+// delivery — Enter arrives while tmux is still processing text/Escape and
+// gets treated as part of the text stream rather than a separate submit
+// action. Worse, the Escape keystroke sent at the end of a Claude Code
+// "turn" can be consumed by the TUI state machine if async turn-end UI
+// (e.g., hooks-finished footer, Credits line) is still rendering — in that
+// case, the pane content changes due to unrelated async rendering, and a
+// naïve "any change = success" check declares victory while the nudge text
+// sits stranded on the prompt.
 //
-// Falls back to best-effort (no verification) if pane capture fails.
-func (t *Tmux) sendEnterVerified(target string) error {
+// This function addresses both problems:
+//
+//  1. Quiescence pre-check: wait up to ~1s for pane content to stabilize
+//     before sending Enter, so async turn-end rendering (credits, hooks)
+//     does not race with our submit.
+//
+//  2. Specific post-verification: declare success only when there is
+//     evidence Enter was actually processed — one of:
+//     a) The nudgeText no longer appears in the prompt/input lines
+//     (it was submitted and cleared from the input buffer), or
+//     b) A busy indicator ("esc to interrupt") appeared (agent is
+//     now working on the nudge), or
+//     c) The pane scrolled substantially (many lines of new content
+//     beyond what async footer rendering would produce).
+//     Arbitrary cosmetic changes (footer re-renders, cursor blinks)
+//     alone are NOT sufficient to declare success.
+//
+// Retries Enter up to 3 times before returning an error. Falls back to
+// best-effort (no verification) if pane capture fails.
+//
+// nudgeText should be the sanitized nudge message we expect to find on the
+// prompt line BEFORE submit and expect to be gone AFTER. Callers should
+// pass the sanitized message text; an empty string disables the text-based
+// signal (a) but leaves signals (b) and (c) active.
+func (t *Tmux) sendEnterVerified(target, nudgeText string) error {
 	const (
-		maxRetries     = 3
-		initialBackoff = 500 * time.Millisecond
-		verifyLines    = 5 // capture last N lines for comparison
+		maxRetries  = 3
+		verifyLines = 10 // capture last N lines for comparison
 	)
 
-	// Snapshot pane content before Enter so we can detect processing.
+	// Quiescence pre-check: wait for pane to stabilize before sending Enter.
+	// Ignores failure — if we can't capture, proceed anyway (best-effort).
+	_ = t.waitForPaneQuiescence(target, verifyLines, paneQuiescenceStable, paneQuiescenceTimeout)
+
+	// Snapshot pane content before Enter so we can compute diffs later.
 	preSnapshot, preErr := t.CapturePane(target, verifyLines)
 
-	// Send Enter
+	// Send Enter.
 	if _, err := t.run("send-keys", "-t", target, "Enter"); err != nil {
 		return fmt.Errorf("send Enter: %w", err)
 	}
@@ -310,22 +338,26 @@ func (t *Tmux) sendEnterVerified(target string) error {
 		return nil
 	}
 
-	backoff := initialBackoff
+	// Derive a short "probe" substring of the nudge text to search for on
+	// input/prompt lines. Nudge text can be long and chunked across lines
+	// in the pane; a short distinctive prefix is much more reliable to
+	// find than the entire message.
+	probe := nudgeProbe(nudgeText)
+
+	backoff := paneVerifyInitialBackoff
 	for retry := 0; retry < maxRetries; retry++ {
 		time.Sleep(backoff)
 
-		postSnapshot, err := t.CapturePane(target, verifyLines)
+		processed, err := t.verifyEnterProcessed(target, preSnapshot, probe, verifyLines)
 		if err != nil {
-			// Can't verify — assume success.
+			// Can't verify — assume success (best-effort fallback).
+			return nil
+		}
+		if processed {
 			return nil
 		}
 
-		if postSnapshot != preSnapshot {
-			// Content changed — Enter was processed.
-			return nil
-		}
-
-		// Content unchanged — Enter may not have been processed. Retry.
+		// Enter not processed. Retry.
 		if _, err := t.run("send-keys", "-t", target, "Enter"); err != nil {
 			return fmt.Errorf("send Enter (retry %d): %w", retry+1, err)
 		}
@@ -336,12 +368,223 @@ func (t *Tmux) sendEnterVerified(target string) error {
 
 	// Final verification after last retry.
 	time.Sleep(500 * time.Millisecond)
-	postSnapshot, err := t.CapturePane(target, verifyLines)
-	if err != nil || postSnapshot != preSnapshot {
-		return nil // Can't verify or content changed — consider success.
+	processed, err := t.verifyEnterProcessed(target, preSnapshot, probe, verifyLines)
+	if err != nil || processed {
+		return nil // Can't verify or success — consider delivered.
 	}
 
-	return fmt.Errorf("nudge Enter not processed after %d retries: pane content unchanged", maxRetries)
+	return fmt.Errorf("nudge Enter not processed after %d retries: nudge text still stranded on prompt", maxRetries)
+}
+
+// Pane verification tuning parameters.
+const (
+	// paneQuiescenceStable is the duration of no-change required to declare
+	// the pane has stopped rendering async content (e.g., turn-end footer).
+	paneQuiescenceStable = 300 * time.Millisecond
+
+	// paneQuiescenceTimeout is the upper bound we will wait for quiescence
+	// before giving up and proceeding anyway. Must be small enough not to
+	// delay normal nudge delivery perceptibly.
+	paneQuiescenceTimeout = 1 * time.Second
+
+	// paneQuiescencePoll is the polling interval used while waiting for
+	// quiescence.
+	paneQuiescencePoll = 100 * time.Millisecond
+
+	// paneVerifyInitialBackoff is the initial post-Enter wait before the
+	// first verification attempt.
+	paneVerifyInitialBackoff = 500 * time.Millisecond
+
+	// paneScrollSignificantLines is how many lines of new content (beyond
+	// the previous snapshot's last line) we treat as evidence that the
+	// pane genuinely scrolled due to Enter being processed, not just
+	// cosmetic re-rendering of a footer.
+	paneScrollSignificantLines = 3
+)
+
+// waitForPaneQuiescence polls the pane until its captured content has not
+// changed across two successive samples separated by `stable`, or until
+// `timeout` elapses. Returns nil once quiescent, or the last capture error
+// if the pane could not be captured at all.
+//
+// This protects the Enter-submit sequence from races with async TUI
+// rendering at turn-end (hooks-finished footer, credits line) — we wait
+// for the footer to settle before sending Escape+Enter so our Escape is
+// not consumed by the state machine and our Enter is not misattributed
+// to unrelated content changes.
+func (t *Tmux) waitForPaneQuiescence(target string, lines int, stable, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	last, err := t.CapturePane(target, lines)
+	if err != nil {
+		return err
+	}
+	stableSince := time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(paneQuiescencePoll)
+		cur, err := t.CapturePane(target, lines)
+		if err != nil {
+			return err
+		}
+		if cur != last {
+			last = cur
+			stableSince = time.Now()
+			continue
+		}
+		if time.Since(stableSince) >= stable {
+			return nil
+		}
+	}
+	// Timed out waiting for full quiescence — return nil anyway so caller
+	// can proceed with best-effort delivery.
+	return nil
+}
+
+// verifyEnterProcessed checks whether Enter appears to have been processed
+// since preSnapshot was captured. Returns true on any of the specific
+// positive signals described on sendEnterVerified. Returns an error only
+// if the pane capture itself fails.
+func (t *Tmux) verifyEnterProcessed(target, preSnapshot, probe string, lines int) (bool, error) {
+	post, err := t.CapturePane(target, lines)
+	if err != nil {
+		return false, err
+	}
+
+	// Signal (b): busy indicator appeared.
+	for _, line := range strings.Split(post, "\n") {
+		if hasBusyIndicator(line) {
+			return true, nil
+		}
+	}
+
+	// Signal (a): probe text no longer on any input-like (prompt) line.
+	if probe != "" {
+		if !paneContainsProbeOnPrompt(post, probe) {
+			return true, nil
+		}
+	}
+
+	// Signal (c): pane genuinely scrolled. Compute how many lines of the
+	// post-snapshot are NOT prefixes of the pre-snapshot. A large number
+	// of new lines indicates real scroll, not cosmetic footer re-rendering.
+	if paneNewLineCount(preSnapshot, post) >= paneScrollSignificantLines {
+		return true, nil
+	}
+
+	// If nudge text is empty (nothing to probe for) AND no scroll AND no
+	// busy indicator, fall back to the legacy any-change check so we
+	// don't regress behavior on paths that never pass nudge text in. This
+	// keeps the old contract for callers that never set probe.
+	if probe == "" && post != preSnapshot {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// nudgeProbe returns a short distinctive substring of the nudge text,
+// suitable for searching pane content. Returns "" if nudgeText is empty
+// or too short to be distinctive.
+func nudgeProbe(nudgeText string) string {
+	// Strip leading/trailing whitespace and pick the first non-whitespace
+	// word boundary run of reasonable length. We intentionally avoid very
+	// short probes (< 6 chars) because they are likely to false-match on
+	// unrelated pane content.
+	s := strings.TrimSpace(nudgeText)
+	if len(s) < 6 {
+		return ""
+	}
+	// Use up to the first 48 chars, but cut at a newline if one appears
+	// sooner — multiline messages render across lines in the pane and
+	// a shorter single-line probe is more reliable.
+	if nl := strings.IndexByte(s, '\n'); nl >= 0 && nl < 48 {
+		s = s[:nl]
+	} else if len(s) > 48 {
+		s = s[:48]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) < 6 {
+		return ""
+	}
+	return s
+}
+
+// paneContainsProbeOnPrompt reports whether probe appears on a line that
+// also contains a recognizable prompt marker (the stranded-text scenario).
+//
+// We deliberately require a prompt marker on the same line so that text
+// which has been submitted and scrolled into history (or echoed out of
+// the input buffer) does not false-positive. Matching anywhere in the
+// pane is wrong for shell-style panes that echo typed text; matching
+// only the very last line is wrong for Claude Code panes whose prompt
+// line is followed by status/footer lines during turn-end finalization.
+//
+// Prompt markers recognized:
+//   - "❯" (U+276F) — Claude Code's default prompt character
+//   - "!>" — Claude Code's status-bar-adorned prompt (e.g. "[gastown] 11% !>")
+//   - "$" preceded by a space at start — shell-style prompt
+//
+// False positives are harmless (retry Enter); false negatives (missing a
+// real stranded nudge) are what the other signals (b busy, c scroll) are
+// for.
+func paneContainsProbeOnPrompt(paneContent, probe string) bool {
+	if probe == "" {
+		return false
+	}
+	for _, line := range strings.Split(paneContent, "\n") {
+		if !strings.Contains(line, probe) {
+			continue
+		}
+		if linelooksLikePrompt(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// linelooksLikePrompt heuristically detects whether a pane line is an input
+// prompt line (as opposed to scroll history or a footer line).
+func linelooksLikePrompt(line string) bool {
+	// Fast path: Claude Code's default prompt character.
+	if strings.Contains(line, "❯") {
+		return true
+	}
+	// Claude Code status-bar prompt (e.g. "[gastown] 11% !> ...").
+	if strings.Contains(line, "!>") {
+		return true
+	}
+	// Bash/zsh style "$ " near the start.
+	trimmed := strings.TrimLeft(line, " \t")
+	if strings.HasPrefix(trimmed, "$ ") || strings.HasPrefix(trimmed, "# ") {
+		return true
+	}
+	return false
+}
+
+// paneNewLineCount returns the number of lines in `post` that do not appear
+// anywhere in `pre`. This is a coarse measure of how much genuinely new
+// content the pane gained. Cosmetic re-renders (footer lines being replaced
+// in place) produce 0–2 new lines; a genuine Enter submit with agent output
+// typically produces ≥3.
+//
+// Note: we use a set-based comparison (ignoring line order) rather than a
+// suffix/prefix overlap, because async TUI rendering can change lines in
+// the middle of the pane (e.g., a Credits footer line) without changing
+// surrounding lines — which defeats any contiguous-overlap approach.
+func paneNewLineCount(pre, post string) int {
+	if pre == post {
+		return 0
+	}
+	preSet := make(map[string]struct{})
+	for _, line := range strings.Split(pre, "\n") {
+		preSet[line] = struct{}{}
+	}
+	newLines := 0
+	for _, line := range strings.Split(post, "\n") {
+		if _, ok := preSet[line]; !ok {
+			newLines++
+		}
+	}
+	return newLines
 }
 
 // adaptiveTextDelay returns the post-text-delivery delay for a message.
@@ -592,7 +835,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 
 	// 7. Send Enter with verification — polls pane content to confirm Enter
 	// was processed, retrying with exponential backoff under load. (GH#gt-0b5)
-	if err := t.sendEnterVerified(target); err != nil {
+	if err := t.sendEnterVerified(target, sanitized); err != nil {
 		return fmt.Errorf("nudge to session %q: %w", session, err)
 	}
 
@@ -653,7 +896,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 	// 7. Send Enter with verification — polls pane content to confirm Enter
 	// was processed, retrying with exponential backoff under load. (GH#gt-0b5)
-	if err := t.sendEnterVerified(pane); err != nil {
+	if err := t.sendEnterVerified(pane, sanitized); err != nil {
 		return fmt.Errorf("nudge to pane %q: %w", pane, err)
 	}
 

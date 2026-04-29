@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -720,8 +721,14 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	mayorSession := session.MayorSessionName()
 	t := tmux.NewTmux()
 	if running, err := t.HasSession(mayorSession); err == nil && running {
-		msg := fmt.Sprintf("SLOT_OPEN: %s/%s completed (exit=%s) — slot available. Run `gt polecat list` to verify and sling next bead.", rigName, polecatName, exitType)
+		msg := slotOpenMessage(rigName, polecatName, exitType)
 		if err := t.NudgeSession(mayorSession, msg); err == nil {
+			// Record the nudge in town.log so it appears in `gt log`,
+			// `gt audit`, and operator post-mortems. Without this,
+			// witness-emitted SLOT_OPEN nudges leave no audit trail,
+			// making delivery regressions (like the stranded-text Enter
+			// race) significantly harder to diagnose. (GH#gu-harz)
+			logSlotOpenNudge(townRoot, mayorSession, msg)
 			return // Nudge delivered — no mail needed.
 		}
 	}
@@ -733,6 +740,28 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
 	cmd.Dir = townRoot
 	_ = cmd.Run()
+}
+
+// slotOpenMessage is the canonical SLOT_OPEN nudge body sent to the mayor.
+// Extracted so tests can exercise the exact format without reaching into
+// notifyMayorSlotOpen's tmux side effects.
+func slotOpenMessage(rigName, polecatName, exitType string) string {
+	return fmt.Sprintf("SLOT_OPEN: %s/%s completed (exit=%s) — slot available. Run `gt polecat list` to verify and sling next bead.",
+		rigName, polecatName, exitType)
+}
+
+// logSlotOpenNudge records a successful witness → mayor SLOT_OPEN nudge to
+// the town log. Extracted from notifyMayorSlotOpen so tests can exercise
+// the logging path without a live mayor tmux session.
+//
+// Swallows logging errors intentionally: failing to write a town.log entry
+// must never block the nudge-delivery path, and the nudge itself has
+// already succeeded by the time this runs.
+func logSlotOpenNudge(townRoot, mayorSession, msg string) {
+	if townRoot == "" {
+		return
+	}
+	_ = townlog.NewLogger(townRoot).Log(townlog.EventNudge, mayorSession, msg)
 }
 
 // RecoveryPayload contains data for RECOVERY_NEEDED escalation.

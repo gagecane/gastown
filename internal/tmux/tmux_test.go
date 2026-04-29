@@ -2340,3 +2340,232 @@ func TestValidateCommandBinary(t *testing.T) {
 		})
 	}
 }
+
+// TestNudgeProbe verifies that nudgeProbe returns a distinctive substring
+// suitable for searching the pane, and empty for degenerate inputs.
+func TestNudgeProbe(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"too short", "hi", ""},
+		{"short trim empty", "    ", ""},
+		{"typical SLOT_OPEN prefix",
+			"SLOT_OPEN: casc_webapp/quartz completed (exit=DEFERRED) — slot available. Run `gt polecat list` to verify.",
+			"SLOT_OPEN: casc_webapp/quartz completed (exit=DE"},
+		{"short single-line message",
+			"hello world",
+			"hello world"},
+		{"newline within first 48 chars",
+			"first line\nsecond line that is longer than first",
+			"first line"},
+		{"leading whitespace stripped",
+			"   hello world nudge message",
+			"hello world nudge message"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nudgeProbe(tc.in)
+			if got != tc.want {
+				t.Errorf("nudgeProbe(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPaneContainsProbeOnPrompt verifies that the probe detector finds a
+// substring regardless of which line it sits on.
+func TestPaneContainsProbeOnPrompt(t *testing.T) {
+	t.Parallel()
+	pane := strings.Join([]string{
+		"some earlier output",
+		"more output",
+		"[gastown] 11% !> SLOT_OPEN: casc_webapp/quartz completed (exit=DEFERRED) — slot available.",
+		"",
+	}, "\n")
+	probe := "SLOT_OPEN: casc_webapp/quartz completed"
+
+	if !paneContainsProbeOnPrompt(pane, probe) {
+		t.Error("expected probe to be detected on prompt line")
+	}
+	if paneContainsProbeOnPrompt(pane, "NOT_THERE_XYZ") {
+		t.Error("did not expect missing text to be detected")
+	}
+	if paneContainsProbeOnPrompt(pane, "") {
+		t.Error("empty probe must never match")
+	}
+}
+
+// TestPaneNewLineCount verifies that the scroll estimator correctly
+// distinguishes cosmetic footer changes (0–2 new lines) from real
+// submits (many new lines).
+func TestPaneNewLineCount(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		pre     string
+		post    string
+		wantMin int
+		wantMax int
+	}{
+		{
+			name:    "identical panes → 0 new lines",
+			pre:     "line1\nline2\nline3\n",
+			post:    "line1\nline2\nline3\n",
+			wantMin: 0,
+			wantMax: 0,
+		},
+		{
+			name: "footer re-render only → 1 new line",
+			pre: strings.Join([]string{
+				"[gastown] 11% !>",
+				"✓ 1 of 1 hooks finished in 0.16 s",
+				" ▸ Credits: 17.30 • Time: 11m 0s",
+				"",
+			}, "\n"),
+			post: strings.Join([]string{
+				"[gastown] 11% !>",
+				"✓ 1 of 1 hooks finished in 0.16 s",
+				" ▸ Credits: 17.36 • Time: 11m 4s", // only this line changed
+				"",
+			}, "\n"),
+			wantMin: 0,
+			wantMax: 2,
+		},
+		{
+			name: "genuine scroll with new output → ≥3 new lines",
+			pre: strings.Join([]string{
+				"old line 1",
+				"old line 2",
+				"[gastown] 11% !>",
+				"",
+			}, "\n"),
+			post: strings.Join([]string{
+				"[gastown] 11% !>",
+				"> running tool: Read",
+				"> tool output: Ok",
+				"> result: Done",
+				"[gastown] 12% !>",
+				"",
+			}, "\n"),
+			wantMin: paneScrollSignificantLines,
+			wantMax: 100,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := paneNewLineCount(tc.pre, tc.post)
+			if got < tc.wantMin || got > tc.wantMax {
+				t.Errorf("paneNewLineCount = %d, want in [%d, %d]",
+					got, tc.wantMin, tc.wantMax)
+			}
+		})
+	}
+}
+
+// TestVerifyEnterProcessed_FooterRaceDoesNotFalsePositive is the key
+// regression test for the stranded-nudge bug (gu-harz).
+//
+// Scenario: mayor just finished a turn; hooks-finished + credits footer is
+// still rendering asynchronously after our nudge text lands on the prompt.
+// sendEnterVerified's old "any change = success" logic would declare
+// success based on the footer change alone, even though Enter was consumed
+// by the TUI state machine and the nudge text is still stranded on the
+// prompt.
+//
+// This test directly exercises verifyEnterProcessed's decision logic: when
+// the probe text is still on a prompt line, no busy indicator is present,
+// and only cosmetic footer lines changed, Enter was NOT processed.
+func TestVerifyEnterProcessed_FooterRaceDoesNotFalsePositive(t *testing.T) {
+	t.Parallel()
+	probe := "SLOT_OPEN: casc_webapp/quartz completed"
+	pre := strings.Join([]string{
+		"earlier pane content here",
+		"more earlier content",
+		"more earlier content 2",
+		"[gastown] 11% !> " + probe + " — slot available.",
+		"✓ 1 of 1 hooks finished in 0.16 s",
+		" ▸ Credits: 17.30 • Time: 11m 0s",
+		"",
+	}, "\n")
+	// Post: only the credits footer changed (async re-render), nudge text
+	// is STILL stranded on the prompt line, no busy indicator.
+	post := strings.Join([]string{
+		"earlier pane content here",
+		"more earlier content",
+		"more earlier content 2",
+		"[gastown] 11% !> " + probe + " — slot available.",
+		"✓ 1 of 1 hooks finished in 0.16 s",
+		" ▸ Credits: 17.36 • Time: 11m 4s",
+		"",
+	}, "\n")
+
+	// Drive the pure decision path directly. We can't call
+	// verifyEnterProcessed without a tmux pane, but its components are
+	// unit-testable:
+	// (b) busy indicator absent
+	hasBusy := false
+	for _, line := range strings.Split(post, "\n") {
+		if hasBusyIndicator(line) {
+			hasBusy = true
+			break
+		}
+	}
+	if hasBusy {
+		t.Fatal("busy indicator unexpectedly present in fixture")
+	}
+	// (a) probe still on a prompt line → not submitted
+	if !paneContainsProbeOnPrompt(post, probe) {
+		t.Error("expected probe text still present on prompt; fixture is wrong")
+	}
+	// (c) scroll count is not significant (cosmetic footer change only)
+	n := paneNewLineCount(pre, post)
+	if n >= paneScrollSignificantLines {
+		t.Errorf("paneNewLineCount = %d; should be < %d for cosmetic footer change",
+			n, paneScrollSignificantLines)
+	}
+	// Conclusion: all three positive signals are absent → Enter NOT processed.
+	// This is the fix's behavior; the old code would have returned success
+	// here because pre != post.
+}
+
+// TestVerifyEnterProcessed_BusyIndicatorSignalsSuccess verifies that a
+// busy indicator appearing post-Enter is taken as proof of success.
+func TestVerifyEnterProcessed_BusyIndicatorSignalsSuccess(t *testing.T) {
+	t.Parallel()
+	post := strings.Join([]string{
+		"some content",
+		"⏵⏵ Running tool... esc to interrupt",
+	}, "\n")
+
+	hasBusy := false
+	for _, line := range strings.Split(post, "\n") {
+		if hasBusyIndicator(line) {
+			hasBusy = true
+			break
+		}
+	}
+	if !hasBusy {
+		t.Error("expected busy indicator to be detected")
+	}
+}
+
+// TestVerifyEnterProcessed_ProbeGoneSignalsSuccess verifies that when the
+// nudge probe is no longer visible in the pane, we treat that as success
+// (text was submitted and cleared from input buffer).
+func TestVerifyEnterProcessed_ProbeGoneSignalsSuccess(t *testing.T) {
+	t.Parallel()
+	probe := "SLOT_OPEN: casc_webapp/quartz completed"
+	post := strings.Join([]string{
+		"earlier output",
+		"agent: received SLOT_OPEN event, processing slot",
+		"[gastown] 12% !>",
+		"",
+	}, "\n")
+	if paneContainsProbeOnPrompt(post, probe) {
+		t.Error("probe should be gone (was submitted and cleared)")
+	}
+}

@@ -2250,3 +2250,66 @@ func TestDiscoverPostHocCompletions_NonexistentDir(t *testing.T) {
 		t.Errorf("Checked = %d, want 0", result.Checked)
 	}
 }
+
+// TestSlotOpenMessage verifies the canonical SLOT_OPEN nudge body format.
+// Keeps the format under test so accidental format drift is caught — other
+// parts of Gas Town match on "SLOT_OPEN:" prefix and the shape matters for
+// log readability.
+func TestSlotOpenMessage(t *testing.T) {
+	t.Parallel()
+	msg := slotOpenMessage("casc_webapp", "quartz", "DEFERRED")
+	wantPrefix := "SLOT_OPEN: casc_webapp/quartz completed (exit=DEFERRED)"
+	if !strings.HasPrefix(msg, wantPrefix) {
+		t.Errorf("slotOpenMessage = %q, want prefix %q", msg, wantPrefix)
+	}
+	if !strings.Contains(msg, "slot available") {
+		t.Errorf("slotOpenMessage missing 'slot available' marker: %q", msg)
+	}
+	if !strings.Contains(msg, "gt polecat list") {
+		t.Errorf("slotOpenMessage missing 'gt polecat list' guidance: %q", msg)
+	}
+}
+
+// TestLogSlotOpenNudge_WritesTownLog is the regression test for bug 2 of
+// gu-harz: witness-emitted SLOT_OPEN nudges must leave an audit trail in
+// town.log so operators can diagnose delivery regressions.
+//
+// Previously, notifyMayorSlotOpen called t.NudgeSession directly without
+// any LogNudge call, so SLOT_OPEN nudges were invisible in town.log and
+// `gt audit` even though the text reached the mayor's pane.
+func TestLogSlotOpenNudge_WritesTownLog(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	msg := slotOpenMessage("casc_webapp", "quartz", "DEFERRED")
+
+	logSlotOpenNudge(townRoot, "hq-mayor", msg)
+
+	// Verify a town.log entry was written with the expected shape:
+	// "<timestamp> [nudge] hq-mayor nudged with \"SLOT_OPEN...\""
+	logPath := filepath.Join(townRoot, "logs", "town.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", logPath, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "[nudge]") {
+		t.Errorf("town.log missing [nudge] marker: %q", content)
+	}
+	if !strings.Contains(content, "hq-mayor") {
+		t.Errorf("town.log missing hq-mayor agent: %q", content)
+	}
+	if !strings.Contains(content, "SLOT_OPEN") {
+		t.Errorf("town.log missing SLOT_OPEN body: %q", content)
+	}
+}
+
+// TestLogSlotOpenNudge_EmptyTownRootIsNoop verifies that the logging helper
+// defensively handles the edge case where workspace.Find returned an empty
+// townRoot — writing to a bogus path would create stray directories.
+func TestLogSlotOpenNudge_EmptyTownRootIsNoop(t *testing.T) {
+	t.Parallel()
+	// Should not panic or create files under the current working directory.
+	logSlotOpenNudge("", "hq-mayor", "test message")
+	// No assertion beyond "does not panic / does not side-effect" — the
+	// contract is simply that empty townRoot is a safe no-op.
+}
