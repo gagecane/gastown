@@ -398,3 +398,102 @@ func TestEventFileStruct(t *testing.T) {
 		t.Errorf("type = %v, want MQ_SUBMIT", parsed["type"])
 	}
 }
+
+// TestEventMatchesRig verifies the --filter-rig predicate used by await-event.
+// This is the fix for gu-4pex, where the filter previously read "rig" from the
+// top-level event object instead of the nested payload, causing every rig's
+// refinery to wake on every other rig's events.
+func TestEventMatchesRig(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		expectedRig string
+		want        bool
+	}{
+		{
+			name:        "matching rig in nested payload",
+			content:     `{"type":"MQ_SUBMIT","channel":"refinery","payload":{"rig":"gastown_upstream","source":"sling"}}`,
+			expectedRig: "gastown_upstream",
+			want:        true,
+		},
+		{
+			name:        "non-matching rig in nested payload rejected",
+			content:     `{"type":"MQ_SUBMIT","channel":"refinery","payload":{"rig":"talontriage","source":"sling"}}`,
+			expectedRig: "ralphconfig",
+			want:        false,
+		},
+		{
+			name:        "rig at top level only (old buggy emitter format) — accepted for backward compat",
+			content:     `{"type":"MQ_SUBMIT","channel":"refinery","rig":"talontriage"}`,
+			expectedRig: "ralphconfig",
+			// Top-level rig is NOT consulted. Payload missing → accept (backward compat).
+			// This preserves backward compat at the cost of not dropping truly
+			// malformed events; real emitters all use nested payload.
+			want: true,
+		},
+		{
+			name:        "no payload field — accepted for backward compat",
+			content:     `{"type":"MERGE_READY","channel":"refinery"}`,
+			expectedRig: "gastown_upstream",
+			want:        true,
+		},
+		{
+			name:        "payload present but no rig key — accepted for backward compat",
+			content:     `{"type":"MERGE_READY","channel":"refinery","payload":{"source":"witness"}}`,
+			expectedRig: "gastown_upstream",
+			want:        true,
+		},
+		{
+			name:        "payload is not an object — accepted for backward compat",
+			content:     `{"type":"MERGE_READY","channel":"refinery","payload":"not-a-map"}`,
+			expectedRig: "gastown_upstream",
+			want:        true,
+		},
+		{
+			name:        "payload.rig is not a string — accepted for backward compat",
+			content:     `{"type":"MERGE_READY","channel":"refinery","payload":{"rig":42}}`,
+			expectedRig: "gastown_upstream",
+			want:        true,
+		},
+		{
+			name:        "malformed JSON — accepted (don't drop events on parse failure)",
+			content:     `{"type":"MERGE_READY"`,
+			expectedRig: "gastown_upstream",
+			want:        true,
+		},
+		{
+			name:        "realistic MQ_SUBMIT rejected for wrong rig (gu-4pex regression)",
+			content:     `{"channel":"refinery","payload":{"message":"mr","rig":"talontriage","source":"sling"},"timestamp":"2026-04-29T12:50:25Z","type":"MQ_SUBMIT"}`,
+			expectedRig: "ralphconfig",
+			want:        false,
+		},
+		{
+			name:        "realistic MQ_SUBMIT accepted for matching rig",
+			content:     `{"channel":"refinery","payload":{"message":"mr","rig":"ralphconfig","source":"sling"},"timestamp":"2026-04-29T12:50:25Z","type":"MQ_SUBMIT"}`,
+			expectedRig: "ralphconfig",
+			want:        true,
+		},
+		{
+			name:        "POLECAT_DONE event format",
+			content:     `{"channel":"witness","payload":{"message":"polecat done","rig":"gastown_upstream","source":"polecat"},"timestamp":"2026-04-29T13:00:00Z","type":"POLECAT_DONE"}`,
+			expectedRig: "gastown_upstream",
+			want:        true,
+		},
+		{
+			name:        "SLOT_OPEN event format",
+			content:     `{"channel":"mayor","payload":{"source":"witness","rig":"gastown_upstream","polecat":"chrome","exit":"clean"},"timestamp":"2026-04-29T13:00:00Z","type":"SLOT_OPEN"}`,
+			expectedRig: "talontriage",
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eventMatchesRig([]byte(tt.content), tt.expectedRig)
+			if got != tt.want {
+				t.Errorf("eventMatchesRig(%q, %q) = %v, want %v",
+					tt.content, tt.expectedRig, got, tt.want)
+			}
+		})
+	}
+}

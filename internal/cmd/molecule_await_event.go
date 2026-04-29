@@ -208,23 +208,17 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	result.Elapsed = time.Since(startTime)
 
 	// Filter events by rig if --filter-rig is set.
-	// Events without a "rig" field in their payload pass the filter (backward compat).
 	if awaitEventFilterRig != "" && result.Reason == "event" {
 		var filtered []EventFile
 		for _, ef := range result.Events {
-			var payload map[string]interface{}
-			if err := json.Unmarshal(ef.Content, &payload); err == nil {
-				if rigVal, ok := payload["rig"]; ok {
-					if rigStr, ok := rigVal.(string); ok && rigStr != awaitEventFilterRig {
-						// Rig doesn't match — skip this event but still clean it up
-						if awaitEventCleanup {
-							_ = os.Remove(ef.Path)
-						}
-						continue
-					}
-				}
+			if eventMatchesRig(ef.Content, awaitEventFilterRig) {
+				filtered = append(filtered, ef)
+				continue
 			}
-			filtered = append(filtered, ef)
+			// Rig doesn't match — skip this event but still clean it up
+			if awaitEventCleanup {
+				_ = os.Remove(ef.Path)
+			}
 		}
 		result.Events = filtered
 		if len(filtered) == 0 {
@@ -440,4 +434,42 @@ func readPendingEvents(dir string) ([]EventFile, error) {
 	}
 
 	return events, nil
+}
+
+// eventMatchesRig reports whether an event JSON blob should pass a --filter-rig
+// check for the given expected rig. The rig field lives inside event.payload:
+//
+//	{"type":..., "channel":..., "timestamp":..., "payload":{"rig":..., ...}}
+//
+// Rules:
+//   - If the event JSON is unparseable, accept it (do not drop events due to
+//     unexpected formats — fall through to caller's normal handling).
+//   - If payload is missing or not an object, accept the event (backward compat
+//     for events that didn't have a payload map).
+//   - If payload.rig is absent or not a string, accept the event (backward
+//     compat for legacy emitters that didn't tag events with a rig).
+//   - If payload.rig is a string, accept only when it equals expectedRig.
+//
+// Historical bug (gu-4pex): an earlier implementation read "rig" at the top
+// level of the event object instead of inside payload, so the predicate was
+// effectively always true. The result was that every rig's refinery woke on
+// every other rig's MQ_SUBMIT / MERGE_READY / POLECAT_DONE / SLOT_OPEN events.
+func eventMatchesRig(content []byte, expectedRig string) bool {
+	var evt map[string]interface{}
+	if err := json.Unmarshal(content, &evt); err != nil {
+		return true
+	}
+	payload, ok := evt["payload"].(map[string]interface{})
+	if !ok {
+		return true
+	}
+	rigVal, ok := payload["rig"]
+	if !ok {
+		return true
+	}
+	rigStr, ok := rigVal.(string)
+	if !ok {
+		return true
+	}
+	return rigStr == expectedRig
 }
