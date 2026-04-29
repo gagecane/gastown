@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -101,6 +102,13 @@ func (m *mockStorage) UpdateIssue(_ context.Context, id string, updates map[stri
 	}
 	if v, ok := updates["priority"]; ok {
 		issue.Priority = v.(int)
+	}
+	if v, ok := updates["metadata"]; ok {
+		// Accept json.RawMessage so beads_delegation tests can store and
+		// retrieve metadata through the mock.
+		if raw, ok := v.(json.RawMessage); ok {
+			issue.Metadata = raw
+		}
 	}
 	issue.UpdatedAt = time.Now()
 	return nil
