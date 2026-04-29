@@ -4,7 +4,7 @@ description = "Auto-sling ready tasks to idle polecats across all rigs"
 
 [gate]
 type = "cooldown"
-cooldown = "10m"
+cooldown = "2m"
 +++
 
 ## Auto-Dispatch
