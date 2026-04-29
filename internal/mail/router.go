@@ -254,6 +254,18 @@ func (r *Router) buildLabels(msg *Message) []string {
 	return labels
 }
 
+// appendMetadataArgs appends --metadata JSON to bd create args if msg.Metadata is set.
+func appendMetadataArgs(args []string, msg *Message) []string {
+	if len(msg.Metadata) == 0 {
+		return args
+	}
+	b, err := json.Marshal(msg.Metadata)
+	if err != nil {
+		return args
+	}
+	return append(args, "--metadata", string(b))
+}
+
 // isTownLevelAddress returns true if the address is for a town-level agent or the overseer.
 func isTownLevelAddress(address string) bool {
 	addr := strings.TrimSuffix(address, "/")
@@ -1159,6 +1171,7 @@ func (r *Router) sendToSingle(msg *Message) error {
 
 	// End flag parsing with --, then add subject as positional argument.
 	// This prevents subjects like "--help" or "--json" from being parsed as flags.
+	args = appendMetadataArgs(args, msg)
 	args = append(args, "--", msg.Subject)
 
 	beadsDir := r.resolveBeadsDir()
@@ -1295,6 +1308,7 @@ func (r *Router) sendToQueue(msg *Message) error {
 	// (deliberately not checking shouldBeWisp)
 
 	// End flag parsing, then subject as positional argument
+	args = appendMetadataArgs(args, msg)
 	args = append(args, "--", msg.Subject)
 
 	// Queue messages go to town-level beads (shared location)
@@ -1379,6 +1393,7 @@ func (r *Router) sendToAnnounce(msg *Message) error {
 	// (deliberately not checking shouldBeWisp)
 
 	// End flag parsing, then subject as positional argument
+	args = appendMetadataArgs(args, msg)
 	args = append(args, "--", msg.Subject)
 
 	// Announce messages go to town-level beads (shared location)
@@ -1465,6 +1480,7 @@ func (r *Router) sendToChannel(msg *Message) error {
 	// (deliberately not checking shouldBeWisp)
 
 	// End flag parsing, then subject as positional argument
+	args = appendMetadataArgs(args, msg)
 	args = append(args, "--", msg.Subject)
 
 	// Channel messages go to town-level beads (shared location)

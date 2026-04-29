@@ -248,6 +248,13 @@ func NewReworkRequestMessage(rig, polecat, branch, issue, targetBranch string, c
 	)
 	msg.Priority = mail.PriorityHigh
 	msg.Type = mail.TypeTask
+	msg.Metadata = map[string]string{
+		"branch":  branch,
+		"issue":   issue,
+		"polecat": polecat,
+		"rig":     rig,
+		"target":  targetBranch,
+	}
 
 	return msg
 }

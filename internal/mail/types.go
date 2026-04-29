@@ -137,6 +137,11 @@ type Message struct {
 	// (no nudge, no banner). Set by the CLI when --no-notify is passed.
 	// In-memory only — not serialized.
 	SuppressNotify bool `json:"-"`
+
+	// Metadata is optional structured JSON metadata passed to bd create --metadata.
+	// Used by protocol messages (e.g., REWORK_REQUEST) to store queryable fields
+	// like branch, rig, and issue alongside the human-readable body.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // NewMessage creates a new message with a generated ID and thread ID.
