@@ -781,7 +781,10 @@ func (g *Git) DefaultBranch() string {
 //     works for any default branch name the remote advertises (not just
 //     main/master). This covers hosts whose init.defaultBranch is set to
 //     something exotic like "mainline" and whose origin/HEAD has never been
-//     fetched locally.
+//     fetched locally. The advertised branch must also exist as a local
+//     remote-tracking ref (refs/remotes/origin/<branch>); otherwise we
+//     ignore the answer — this guards against self-loop remotes that report
+//     HEAD from the current repo's own transient state.
 //  3. Existence probe of origin/master, then origin/main, for older remotes
 //     that do not advertise a symbolic HEAD.
 //  4. Final fallback to "main".
@@ -801,6 +804,12 @@ func (g *Git) RemoteDefaultBranch() string {
 	// 2. Ask the remote directly. Works regardless of local tracking state
 	// and handles any default branch name, not just main/master.
 	// Output format (first line): "ref: refs/heads/<branch>\tHEAD"
+	//
+	// We only trust the answer if the advertised branch already exists as a
+	// local remote-tracking ref. Any branch reached legitimately (via clone,
+	// fetch, or push -u) satisfies this. The check filters out stray answers
+	// from self-loop remotes that point at the current repo and report
+	// whatever HEAD happens to be checked out right now.
 	if out, err := g.run("ls-remote", "--symref", "origin", "HEAD"); err == nil && out != "" {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
@@ -815,7 +824,11 @@ func (g *Git) RemoteDefaultBranch() string {
 				continue
 			}
 			ref := fields[0] // e.g. refs/heads/mainline
-			if branch := strings.TrimPrefix(ref, "refs/heads/"); branch != ref && branch != "" {
+			branch := strings.TrimPrefix(ref, "refs/heads/")
+			if branch == ref || branch == "" {
+				continue
+			}
+			if _, err := g.run("rev-parse", "--verify", "refs/remotes/origin/"+branch); err == nil {
 				return branch
 			}
 		}

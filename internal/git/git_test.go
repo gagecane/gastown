@@ -2237,3 +2237,81 @@ func TestRemoteDefaultBranch_PrefersLocalSymref(t *testing.T) {
 		t.Errorf("RemoteDefaultBranch() = %q, want %q", got, mainBranch)
 	}
 }
+
+// TestRemoteDefaultBranch_IgnoresUnpushedSymrefAnswer guards the self-loop
+// remote case: if "origin" points at the current repo (a common test
+// antipattern), `git ls-remote --symref origin HEAD` reports whatever local
+// branch happens to be checked out. We must ignore that answer when the
+// advertised branch has no corresponding refs/remotes/origin/<branch> entry,
+// so RemoteDefaultBranch still resolves to the intended base branch.
+func TestRemoteDefaultBranch_IgnoresUnpushedSymrefAnswer(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Initialize a repo on "main" with one commit.
+	for _, args := range [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "initial"},
+		// Self-loop remote: origin points back at the same workdir.
+		{"git", "remote", "add", "origin", workDir},
+		// Simulate "origin/main" remote-tracking ref (what a real clone/fetch
+		// would have created).
+		{"git", "update-ref", "refs/remotes/origin/main", "HEAD"},
+		// Now check out a different local branch and add a commit. HEAD is
+		// no longer on main, so ls-remote --symref on this self-loop remote
+		// will report refs/heads/other, not refs/heads/main.
+		{"git", "checkout", "-b", "other"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "other.txt"), []byte("other\n"), 0644); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "other branch commit"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+
+	// Sanity: ls-remote --symref on this self-loop remote reports "other".
+	cmd := exec.Command("git", "ls-remote", "--symref", "origin", "HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("ls-remote: %v", err)
+	}
+	if !stringContains(string(out), "refs/heads/other") {
+		t.Skipf("unexpected: ls-remote did not report the checked-out branch; got %q", out)
+	}
+
+	g := NewGit(workDir)
+	got := g.RemoteDefaultBranch()
+	// ls-remote answer "other" has no refs/remotes/origin/other, so we
+	// reject it and fall through. origin/master does not exist, origin/main
+	// does (we created it above), so the probe picks "main".
+	if got != "main" {
+		t.Errorf("RemoteDefaultBranch() = %q, want %q (should ignore bogus ls-remote answer)", got, "main")
+	}
+}
