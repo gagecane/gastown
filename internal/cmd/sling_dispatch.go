@@ -57,9 +57,12 @@ type SlingResult struct {
 }
 
 // executeSling performs the unified per-bead polecat/rig dispatch.
-// Batch sling and queue dispatch call this function. The single-sling path
-// (runSling) retains its own implementation for now (handles dogs, mayor,
-// nudge, and other non-rig targets). See TODO in sling.go.
+// Batch sling, queue dispatch, and single-sling rig-target dispatch (via
+// runSlingToRig in sling.go, gu-4d1) all funnel through this function.
+// The single-sling path (runSling) retains its own inline implementation
+// for non-rig targets (dogs, self-sling, mayor, crew, existing polecats,
+// and the dead-polecat fallback), which executeSling is not designed to
+// handle: it always spawns a fresh polecat for a rig target.
 //
 // Caller responsibilities (NOT handled by executeSling):
 //   - Cross-rig guard: callers must call checkCrossRigGuard() before executeSling
