@@ -2,18 +2,13 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
-	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +21,6 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
-	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
@@ -40,7 +34,6 @@ import (
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
-	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -933,106 +926,9 @@ func (d *Daemon) heartbeat(state *State) {
 	d.logger.Printf("Heartbeat complete (#%d)", state.HeartbeatCount)
 }
 
-// rotateOversizedLogs checks Dolt server log files and rotates any that exceed
-// the size threshold. Uses copytruncate which is safe for logs held open by
-// child processes. Runs every heartbeat but is cheap (just stat calls).
-func (d *Daemon) rotateOversizedLogs() {
-	result := RotateLogs(d.config.TownRoot)
-	for _, path := range result.Rotated {
-		d.logger.Printf("log_rotation: rotated %s", path)
-	}
-	for _, err := range result.Errors {
-		d.logger.Printf("log_rotation: error: %v", err)
-	}
-}
+// rotateOversizedLogs, ensureDoltServerRunning, pourDoctorMolecule, and
+// checkAllRigsDolt live in dolt_health.go.
 
-// ensureDoltServerRunning ensures the Dolt SQL server is running if configured.
-// This provides the backend for beads database access in server mode.
-// Option B throttling: pours a mol-dog-doctor molecule only when health check
-// warnings are detected, with a 5-minute cooldown to avoid wisp spam.
-func (d *Daemon) ensureDoltServerRunning() {
-	if d.doltServer == nil || !d.doltServer.IsEnabled() {
-		return
-	}
-
-	if err := d.doltServer.EnsureRunning(); err != nil {
-		d.logger.Printf("Error ensuring Dolt server is running: %v", err)
-	}
-
-	// Option B throttling: pour mol-dog-doctor only on anomaly with cooldown.
-	if warnings := d.doltServer.LastWarnings(); len(warnings) > 0 {
-		if time.Since(d.lastDoctorMolTime) >= doctorMolCooldown {
-			d.lastDoctorMolTime = time.Now()
-			go d.pourDoctorMolecule(warnings)
-		}
-	}
-
-	// Update OTel gauges with the latest Dolt health snapshot.
-	if d.metrics != nil {
-		h := doltserver.GetHealthMetrics(d.config.TownRoot)
-		d.metrics.updateDoltHealth(
-			int64(h.Connections),
-			int64(h.MaxConnections),
-			float64(h.QueryLatency.Milliseconds()),
-			h.DiskUsageBytes,
-			h.Healthy,
-		)
-	}
-}
-
-// pourDoctorMolecule creates a mol-dog-doctor molecule to track a health anomaly.
-// Runs asynchronously — molecule lifecycle is observability, not control flow.
-func (d *Daemon) pourDoctorMolecule(warnings []string) {
-	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
-		"port": strconv.Itoa(d.doltServer.config.Port),
-	})
-	defer mol.close()
-
-	// Step 1: probe — connectivity was already checked (we got here because it passed).
-	mol.closeStep("probe")
-
-	// Step 2: inspect — resource checks produced the warnings.
-	mol.closeStep("inspect")
-
-	// Step 3: report — log the warning summary.
-	summary := strings.Join(warnings, "; ")
-	d.logger.Printf("Doctor molecule: %d warning(s): %s", len(warnings), summary)
-	mol.closeStep("report")
-}
-
-// checkAllRigsDolt verifies all rigs are using the Dolt backend.
-func (d *Daemon) checkAllRigsDolt() error {
-	var problems []string
-
-	// Check town-level beads
-	townBeadsDir := filepath.Join(d.config.TownRoot, ".beads")
-	if backend := readBeadsBackend(townBeadsDir); backend != "" && backend != "dolt" {
-		problems = append(problems, fmt.Sprintf(
-			"Rig %q is using %s backend.\n  Gas Town requires Dolt. Run: cd %s && bd migrate dolt",
-			"town-root", backend, d.config.TownRoot))
-	}
-
-	// Check each registered rig
-	for _, rigName := range d.getKnownRigs() {
-		rigBeadsDir := filepath.Join(d.config.TownRoot, rigName, "mayor", "rig", ".beads")
-		if backend := readBeadsBackend(rigBeadsDir); backend != "" && backend != "dolt" {
-			rigPath := filepath.Join(d.config.TownRoot, rigName)
-			problems = append(problems, fmt.Sprintf(
-				"Rig %q is using %s backend.\n  Gas Town requires Dolt. Run: cd %s && bd migrate dolt",
-				rigName, backend, rigPath))
-		}
-	}
-
-	if len(problems) == 0 {
-		return nil
-	}
-
-	return fmt.Errorf("daemon startup blocked: %d rig(s) not on Dolt backend\n\n  %s",
-		len(problems), strings.Join(problems, "\n\n  "))
-}
-
-// readBeadsBackend reads the backend field from metadata.json in a beads directory.
-// Returns empty string if the directory or metadata doesn't exist.
 // readBeadsBackend, beads-store compatibility helpers, and openBeadsStores
 // live in beads_store.go.
 
@@ -1754,140 +1650,8 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 
 // openBeadsStores lives in beads_store.go.
 
-// getKnownRigs returns list of registered rig names.
-// Results are memoized per heartbeat tick to coalesce the ~10 per-tick callers
-// into a single mayor/rigs.json read. The cache is invalidated at the start of
-// each heartbeat.
-func (d *Daemon) getKnownRigs() []string {
-	if d.knownRigsCacheValid {
-		return d.knownRigsCache
-	}
-	rigs := d.readKnownRigsFromDisk()
-	d.knownRigsCache = rigs
-	d.knownRigsCacheValid = true
-	return rigs
-}
-
-// invalidateKnownRigsCache clears the per-tick cache so the next
-// getKnownRigs() call re-reads mayor/rigs.json from disk.
-func (d *Daemon) invalidateKnownRigsCache() {
-	d.knownRigsCache = nil
-	d.knownRigsCacheValid = false
-}
-
-// readKnownRigsFromDisk reads and parses mayor/rigs.json.
-func (d *Daemon) readKnownRigsFromDisk() []string {
-	rigsPath := filepath.Join(d.config.TownRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
-	if err != nil {
-		return nil
-	}
-
-	var parsed struct {
-		Rigs map[string]interface{} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil
-	}
-
-	var rigs []string
-	for name := range parsed.Rigs {
-		rigs = append(rigs, name)
-	}
-	return rigs
-}
-
-// getPatrolRigs returns the list of operational rigs for a patrol.
-// If the patrol config specifies a rigs filter, only those rigs are returned.
-// Otherwise, all known rigs are returned. In both cases, non-operational
-// rigs (parked/docked) are filtered out at list-building time. (Fixes upstream #2082)
-func (d *Daemon) getPatrolRigs(patrol string) []string {
-	configRigs := GetPatrolRigs(d.patrolConfig, patrol)
-	var candidates []string
-	if len(configRigs) > 0 {
-		candidates = configRigs
-	} else {
-		candidates = d.getKnownRigs()
-	}
-
-	// Filter out non-operational rigs early to avoid per-rig skip noise
-	var operational []string
-	for _, rigName := range candidates {
-		if ok, reason := d.isRigOperational(rigName); ok {
-			operational = append(operational, rigName)
-		} else {
-			d.logger.Printf("Excluding %s from %s patrol: %s", rigName, patrol, reason)
-		}
-	}
-	return operational
-}
-
-// isRigOperational checks if a rig is in an operational state.
-// Returns true if the rig can have agents auto-started.
-// Returns false (with reason) if the rig is parked, docked, or has auto_restart blocked/disabled.
-//
-// Parked/docked detection is delegated to rig.IsRigParkedOrDockedE (shared
-// with cmd package). This daemon-specific wrapper adds fail-safe semantics
-// (returns false when status can't be verified) and auto_restart checking.
-func (d *Daemon) isRigOperational(rigName string) (bool, string) {
-	cfg := wisp.NewConfig(d.config.TownRoot, rigName)
-
-	// Note: a missing wisp config file is the normal state for rigs that have
-	// never been parked or had a wisp-level override set. Parked/docked state
-	// is authoritatively tracked via rig bead labels (see IsRigParkedOrDockedE
-	// below), so the absence of a wisp config does NOT indicate lost state.
-	// An earlier version of this code printed a warning here on every heartbeat
-	// cycle per rig, which at 15 rigs × ~8/min produced ~260K log lines/day
-	// (52% of daemon.log). The warning was never actionable — removed in gu-66xp.
-
-	// Check parked/docked via the shared helper. The error variant lets us
-	// implement fail-safe semantics: when the rig bead can't be read
-	// (e.g., Dolt down, prefix missing), we refuse to start agents rather
-	// than waste API credits on a potentially-docked rig.
-	blocked, reason, err := rig.IsRigParkedOrDockedE(d.config.TownRoot, rigName)
-	if err != nil {
-		// FAIL-SAFE: Can't verify docked status (Dolt down, prefix missing,
-		// network issue, etc.). Assume NOT operational to avoid wasting
-		// credits on potentially-docked rigs. Better to delay work than
-		// burn credits unnecessarily.
-		d.logger.Printf("Warning: failed to check rig %s for docked/parked status: %v (assuming not operational)", rigName, err)
-		return false, "cannot verify rig status (Dolt unavailable)"
-	}
-	if blocked {
-		// Match existing reason strings for compatibility with log scrapers
-		// and tests.
-		switch reason {
-		case "parked":
-			// Wisp-sourced parked uses "rig is parked"; bead-sourced parked
-			// historically used "rig is parked (global)". We can no longer
-			// distinguish the two from inside the shared helper, so we
-			// return the generic form. Callers that care about source can
-			// query wisp directly.
-			return false, "rig is parked"
-		case "docked":
-			return false, "rig is docked"
-		default:
-			return false, fmt.Sprintf("rig is %s", reason)
-		}
-	}
-
-	// Check auto_restart config
-	// If explicitly blocked (nil), auto-restart is disabled
-	if cfg.IsBlocked("auto_restart") {
-		return false, "auto_restart is blocked"
-	}
-
-	// If explicitly set to false, auto-restart is disabled
-	// Note: GetBool returns false for unset keys, so we need to check if it's explicitly set
-	val := cfg.Get("auto_restart")
-	if val != nil {
-		if autoRestart, ok := val.(bool); ok && !autoRestart {
-			return false, "auto_restart is disabled"
-		}
-	}
-
-	return true, ""
-}
+// getKnownRigs, invalidateKnownRigsCache, readKnownRigsFromDisk,
+// getPatrolRigs, and isRigOperational live in rigs.go.
 
 // processLifecycleRequests checks for and processes lifecycle requests.
 func (d *Daemon) processLifecycleRequests() {
