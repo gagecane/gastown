@@ -724,4 +724,3 @@ func (d *Daemon) Run() (err error) {
 //   reaper.go          dead-polecat wisp reaper + idle-polecat reaper
 //   rigs.go            rig registry cache + operational-state query
 //   shutdown.go        graceful shutdown + IsRunning/Stop*/*OrphanedDaemons
-

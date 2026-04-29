@@ -346,4 +346,3 @@ func KillOrphanedDaemons(townRoot string) (int, error) {
 
 	return killed, nil
 }
-

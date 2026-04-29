@@ -22,7 +22,6 @@ import (
 // to free API slots). Both are invoked from heartbeat and are defensive
 // by design — they require multiple converging signals before acting.
 
-
 // reapDeadPolecatWisps resets in_progress/hooked beads assigned to polecats
 // whose tmux sessions have been dead (with a stale heartbeat) for longer than
 // the configured timeout. This complements checkPolecatSessionHealth, which

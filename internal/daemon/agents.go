@@ -353,7 +353,6 @@ func (d *Daemon) checkDeaconHeartbeat() {
 	}
 }
 
-
 // restartStuckDeacon kills a stuck Deacon session and respawns it.
 // Uses RestartTracker for exponential backoff and crash-loop prevention.
 // Notifies via gt-notify (zero token cost) if the notify script exists.
