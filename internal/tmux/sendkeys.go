@@ -719,6 +719,12 @@ type NudgeOpts struct {
 	// <townRoot>/.runtime/nudge_queue/<session>/.lock before delivery.
 	// When empty, only in-process locking is used (backward-compatible).
 	TownRoot string
+
+	// Target, if non-empty, overrides the default send-keys target derived
+	// from FindAgentPane(session). Set by NudgePane to pass an explicit pane
+	// ID; the session argument is still used for locking, env lookup, and
+	// WakePaneIfDetached.
+	Target string
 }
 
 // shouldSkipEscapeForAgent returns true when the agent's CLI interprets a
@@ -790,11 +796,15 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	}
 	defer releaseNudgeLock(session)
 
-	// Resolve the correct target: in multi-pane sessions, find the pane
-	// running the agent rather than sending to the focused pane.
-	target := session
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = t.canonicalPaneTarget(session, agentPane)
+	// Resolve the send-keys target. opts.Target wins when set (callers like
+	// NudgePane pre-resolve a pane ID); otherwise, in multi-pane sessions
+	// find the pane running the agent rather than the focused pane.
+	target := opts.Target
+	if target == "" {
+		target = session
+		if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
+			target = t.canonicalPaneTarget(session, agentPane)
+		}
 	}
 
 	// 0. Pre-delivery: dismiss Rewind menu if the session is stuck in it.
@@ -873,62 +883,18 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 }
 
 // NudgePane sends a message to a specific pane reliably.
-// Same pattern as NudgeSession but targets a pane ID (e.g., "%9") instead of session name.
-// After sending, triggers SIGWINCH to wake Claude in detached sessions.
-// Nudges to the same pane are serialized to prevent interleaving.
+// Delegates to NudgeSessionWithOpts with the pane pre-resolved as opts.Target,
+// deriving the session name from the pane so locking, GT_AGENT lookup, and
+// cross-process flock all apply. Falls back to the pane string as the lock
+// key when the session cannot be resolved (no tmux server, stale pane ID).
 func (t *Tmux) NudgePane(pane, message string) error {
-	// Serialize nudges to this pane to prevent interleaving.
-	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
-	if !acquireNudgeLock(pane, nudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for pane %q: previous nudge may be hung", pane)
+	session := pane
+	if idx := strings.Index(pane, ":"); idx > 0 && !strings.HasPrefix(pane, "%") {
+		session = pane[:idx]
+	} else if out, err := t.run("display-message", "-t", pane, "-p", "#{session_name}"); err == nil {
+		if s := strings.TrimSpace(out); s != "" {
+			session = s
+		}
 	}
-	defer releaseNudgeLock(pane)
-
-	// 0. Pre-delivery: dismiss Rewind menu if active. (GH#gt-8el)
-	if t.isInRewindMode(pane) {
-		t.dismissRewindMode(pane)
-	}
-
-	// 1. Exit copy/scroll mode if active — copy mode intercepts input,
-	//    preventing delivery to the underlying process.
-	if inMode, _ := t.run("display-message", "-p", "-t", pane, "#{pane_in_mode}"); strings.TrimSpace(inMode) == "1" {
-		_, _ = t.run("send-keys", "-t", pane, "-X", "cancel")
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	// 2. Sanitize control characters that corrupt delivery
-	sanitized := sanitizeNudgeMessage(message)
-
-	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
-	//    with 10ms inter-chunk delays to avoid argument length limits.
-	if err := t.sendMessageToTarget(pane, sanitized); err != nil {
-		return err
-	}
-
-	// 4. Adaptive post-text delay: scales with message length. (GH#gt-0b5)
-	time.Sleep(adaptiveTextDelay(len(sanitized)))
-
-	// 5. Send Escape to exit vim INSERT mode if enabled (harmless in normal mode)
-	// See: https://github.com/anthropics/gastown/issues/307
-	_, _ = t.run("send-keys", "-t", pane, "Escape")
-
-	// 6. Wait 600ms — must exceed bash readline's keyseq-timeout (500ms default)
-	time.Sleep(600 * time.Millisecond)
-
-	// 6.5. Post-Escape: check if our Escape triggered Rewind mode. (GH#gt-8el)
-	if t.isInRewindMode(pane) {
-		t.dismissRewindMode(pane)
-		_ = t.sendMessageToTarget(pane, sanitized)
-		time.Sleep(adaptiveTextDelay(len(sanitized)))
-	}
-
-	// 7. Send Enter with verification — polls pane content to confirm Enter
-	// was processed, retrying with exponential backoff under load. (GH#gt-0b5)
-	if err := t.sendEnterVerified(pane, sanitized); err != nil {
-		return fmt.Errorf("nudge to pane %q: %w", pane, err)
-	}
-
-	// 8. Wake the pane to trigger SIGWINCH for detached sessions
-	t.WakePaneIfDetached(pane)
-	return nil
+	return t.NudgeSessionWithOpts(session, message, NudgeOpts{Target: pane})
 }
