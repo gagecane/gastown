@@ -120,7 +120,7 @@ func TestDuplicateSession(t *testing.T) {
 
 	// Try to create duplicate
 	err := tm.NewSession(sessionName, "")
-	if err != ErrSessionExists {
+	if !errors.Is(err, ErrSessionExists) {
 		t.Errorf("expected ErrSessionExists, got %v", err)
 	}
 }

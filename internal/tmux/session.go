@@ -251,7 +251,7 @@ func (t *Tmux) EnsureSessionFresh(name, workDir string) error {
 	if err == nil {
 		return nil // Created successfully
 	}
-	if err != ErrSessionExists {
+	if !errors.Is(err, ErrSessionExists) {
 		return fmt.Errorf("creating session: %w", err)
 	}
 
@@ -271,7 +271,7 @@ func (t *Tmux) EnsureSessionFresh(name, workDir string) error {
 	// Create fresh session (handle race: another agent may have created it
 	// between our kill and this create — that's fine, treat as success)
 	err = t.NewSession(name, workDir)
-	if err == ErrSessionExists {
+	if errors.Is(err, ErrSessionExists) {
 		return nil
 	}
 	return err
@@ -314,7 +314,7 @@ func (t *Tmux) EnsureSessionFreshWithCommand(name, workDir, command string) erro
 func (t *Tmux) KillSession(name string) (retErr error) {
 	defer func() { telemetry.RecordSessionStop(context.Background(), name, retErr) }()
 	_, retErr = t.run("kill-session", "-t", name)
-	if retErr == ErrSessionNotFound || retErr == ErrNoServer {
+	if errors.Is(retErr, ErrSessionNotFound) || errors.Is(retErr, ErrNoServer) {
 		retErr = nil
 	}
 	return retErr
@@ -354,7 +354,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 	if err != nil {
 		// Session might not exist or server may have already gone away.
 		killErr := t.KillSession(name)
-		if killErr == nil || killErr == ErrSessionNotFound || killErr == ErrNoServer {
+		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
 			return nil
 		}
 		return killErr
@@ -406,7 +406,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 	// Ignore missing/dead-server errors - killing the pane process may have
 	// already caused tmux to destroy the session automatically.
 	err = t.KillSession(name)
-	if err == ErrSessionNotFound || err == ErrNoServer {
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 		return nil
 	}
 	return err
@@ -432,7 +432,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	if err != nil {
 		// Session might not exist or server may have already gone away.
 		killErr := t.KillSession(name)
-		if killErr == nil || killErr == ErrSessionNotFound || killErr == ErrNoServer {
+		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
 			return nil
 		}
 		return killErr
@@ -502,7 +502,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	// Ignore missing/dead-server errors - if we killed all non-excluded
 	// processes, tmux may have already destroyed the session automatically.
 	err = t.KillSession(name)
-	if err == ErrSessionNotFound || err == ErrNoServer {
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 		return nil
 	}
 	return err
