@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -59,6 +60,18 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
+		// Resolve the rig's configured default branch. Polecats whose HEAD
+		// is already an ancestor of origin/<default_branch> have work that
+		// is already merged — they are NOT stalled, regardless of whether
+		// their upstream tracking ref still exists. Using the rig config
+		// avoids the hardcoded-"main" false-positive on rigs whose default
+		// is mainline/master/develop. (gu-nsxb)
+		defaultBranch := "main"
+		rigPath := filepath.Join(ctx.TownRoot, rigName)
+		if cfg, cfgErr := rig.LoadRigConfig(rigPath); cfgErr == nil && cfg.DefaultBranch != "" {
+			defaultBranch = cfg.DefaultBranch
+		}
+
 		for _, entry := range entries {
 			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 				continue
@@ -86,12 +99,20 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 				continue
 			}
 
-			pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemote(branch, "origin")
+			pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemoteWithBase(branch, "origin", defaultBranch)
 			if checkErr != nil || pushed {
 				continue // Already pushed or can't check
 			}
 
 			if unpushedCount > 0 {
+				// Cross-check: if HEAD is already an ancestor of
+				// origin/<default_branch>, the work is merged — the
+				// unpushed count is a counting artifact (e.g., upstream
+				// deleted after squash-merge). Do not flag as stalled.
+				// (gu-nsxb)
+				if merged, mergedErr := polecatGit.IsAncestor("HEAD", "origin/"+defaultBranch); mergedErr == nil && merged {
+					continue
+				}
 				stalled = append(stalled, stalledPolecatInfo{
 					name:          polecatName,
 					rigName:       rigName,
