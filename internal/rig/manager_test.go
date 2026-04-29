@@ -550,8 +550,12 @@ exit 1
 
 func TestInitBeadsSetsIssuePrefix(t *testing.T) {
 	// Cannot use t.Parallel() due to t.Setenv
-	// Verify that initBeads calls 'bd config set issue_prefix <prefix>'
-	// when bd init succeeds (Dolt database is available).
+	// Verify that initBeads sets the issue prefix when bd init succeeds
+	// (Dolt database is available).
+	//
+	// Newer versions of bd reject 'bd config set issue_prefix', so InitBeads
+	// uses 'bd init --force --prefix <prefix>' to (re)set the prefix after
+	// the initial bd init. This test asserts that mechanism.
 	rigPath := t.TempDir()
 
 	// Create mayor/rig directory WITHOUT .beads (no tracked beads)
@@ -584,9 +588,28 @@ exit 0
 	}
 	cmds := string(logData)
 
-	// Verify bd config set issue_prefix was called with the correct prefix
-	if !strings.Contains(cmds, "config set issue_prefix myrig") {
-		t.Errorf("expected 'bd config set issue_prefix myrig' in commands log, got:\n%s", cmds)
+	// Verify bd was invoked to set the issue prefix. The expected invocation
+	// is 'bd init ... --prefix myrig ... --force' (the --force variant is
+	// what actually sets/updates issue_prefix after the initial bd init).
+	//
+	// Scan each logged command line independently so we don't false-match
+	// across lines (the first bd init also contains "--prefix myrig" but
+	// without --force).
+	foundForceWithPrefix := false
+	for _, line := range strings.Split(cmds, "\n") {
+		if !strings.Contains(line, "--force") {
+			continue
+		}
+		if !strings.HasPrefix(strings.TrimSpace(line), "init") {
+			continue
+		}
+		if strings.Contains(line, "--prefix myrig") {
+			foundForceWithPrefix = true
+			break
+		}
+	}
+	if !foundForceWithPrefix {
+		t.Errorf("expected 'bd init --force --prefix myrig' (issue_prefix) in commands log, got:\n%s", cmds)
 	}
 }
 
