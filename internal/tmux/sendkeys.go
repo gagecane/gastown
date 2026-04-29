@@ -721,6 +721,33 @@ type NudgeOpts struct {
 	TownRoot string
 }
 
+// shouldSkipEscapeForAgent returns true when the agent's CLI interprets a
+// bare Escape keystroke as "cancel in-flight generation" (or similar), which
+// would strand nudge text in the input field instead of letting Enter submit
+// it. Matching is case-insensitive to tolerate casing drift in GT_AGENT values.
+//
+// Known agents that require SkipEscape:
+//   - copilot    (GitHub Copilot CLI) — Escape cancels generation (hq-isz)
+//   - kiro-cli   (Kiro CLI; any GT_AGENT containing "kiro") — Escape
+//     cancels generation (gu-flq9)
+//
+// Other agents (claude, gemini-as-vim, cursor, etc.) either ignore Escape or
+// rely on it to exit vim INSERT mode, so it must be preserved.
+func shouldSkipEscapeForAgent(agentType string) bool {
+	a := strings.ToLower(strings.TrimSpace(agentType))
+	if a == "" {
+		return false
+	}
+	if a == "copilot" {
+		return true
+	}
+	// Any agent value containing "kiro" (kiro, kiro-cli, future kiro-* variants).
+	if strings.Contains(a, "kiro") {
+		return true
+	}
+	return false
+}
+
 // canonicalPaneTarget converts a pane identifier like "%23" into a tmux target
 // that send-keys can resolve reliably. Bare pane IDs work for display-message,
 // but for send-keys we prefer an explicit session:window.pane target.
@@ -799,11 +826,12 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	time.Sleep(adaptiveTextDelay(len(sanitized)))
 
 	if !opts.SkipEscape {
-		// Auto-skip Escape for Copilot CLI sessions. Escape cancels in-flight
-		// generation in Copilot CLI (like Gemini), leaving the nudge text
-		// stranded in the input field without Enter being processed. (hq-isz)
+		// Auto-skip Escape for agents where Escape cancels in-flight generation
+		// (Copilot CLI, kiro-cli) rather than harmlessly exiting vim INSERT mode.
+		// Leaving the Escape in the protocol strands the nudge text in the input
+		// buffer without Enter being processed. (hq-isz, gu-flq9)
 		agentType, _ := t.GetEnvironment(session, "GT_AGENT")
-		if agentType == "copilot" {
+		if shouldSkipEscapeForAgent(agentType) {
 			opts.SkipEscape = true
 		}
 	}
