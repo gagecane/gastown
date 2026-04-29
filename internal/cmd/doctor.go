@@ -171,6 +171,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Must run before infrastructure checks that might fail confusingly on full disks.
 	d.Register(doctor.NewDiskSpaceCheck())
 
+	// /tmp inode usage — sits alongside disk space because tmpfs inode
+	// exhaustion produces the same class of confusing failures (ENOSPC on
+	// mkdir) even when byte-level space is fine. See gu-k3xh.
+	d.Register(doctor.NewTmpInodesCheck())
+
 	// Infrastructure prerequisites — these must pass before any check that
 	// shells out to bd/dolt or queries the database. Order matters:
 	// 1. gt binary freshness
