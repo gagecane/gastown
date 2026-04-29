@@ -885,6 +885,14 @@ func (d *Daemon) heartbeat(state *State) {
 	// This validates tmux sessions are still alive for polecats with work-on-hook
 	d.checkPolecatSessionHealth()
 
+	// 12a. Reap stuck in_progress/hooked wisps belonging to dead polecats.
+	// When a polecat hard-crashes (OOM, tmux kill), its Stop hook never fires
+	// and any assigned in_progress/hooked beads stay forever, triggering
+	// doctor patrol-not-stuck warnings. checkPolecatSessionHealth detects the
+	// crash but only notifies the witness — it does not reset the beads.
+	// This reaper bridges that gap with a conservative timeout. See gu-1x0j.
+	d.reapDeadPolecatWisps()
+
 	// 12b. Reap idle polecat sessions to prevent API slot burn.
 	// Polecats transition to IDLE after gt done but sessions stay alive.
 	// Kill sessions that have been idle longer than the configured threshold.
@@ -2720,6 +2728,179 @@ Restart deferred to stuck-agent-dog plugin for context-aware recovery.`,
 	if err := cmd.Run(); err != nil {
 		d.logger.Printf("Warning: failed to notify witness of crashed polecat: %v", err)
 	}
+}
+
+// reapDeadPolecatWisps resets in_progress/hooked beads assigned to polecats
+// whose tmux sessions have been dead (with a stale heartbeat) for longer than
+// the configured timeout. This complements checkPolecatSessionHealth, which
+// detects crashes and notifies the witness but does NOT reset the stuck beads.
+//
+// Why this exists: when a polecat hard-crashes (OOM, tmux kill, machine reboot),
+// its Stop hook never fires, so the bead it was working on stays in_progress
+// forever. That triggers gt doctor patrol-not-stuck warnings on every run and
+// requires manual `bd update --status=open` or `gt sling` to recover. The
+// stuck-agent-dog plugin was supposed to handle this but its context-aware
+// restart path does not reset beads. See gu-1x0j.
+//
+// The reap is conservative by design:
+//   - Only runs for rigs with a polecats/ directory.
+//   - Skips polecats whose directory is already gone (DetectOrphanedBeads
+//     handles that case from the witness side).
+//   - Requires BOTH a dead tmux session AND a stale heartbeat file — either
+//     alone is insufficient evidence of a permanent crash (sessions briefly
+//     disappear during rebuilds; heartbeats can go stale during long-running
+//     commands).
+//   - Requires the heartbeat file to actually exist. No heartbeat means we
+//     can't prove liveness, so we defer to the witness orphan scan.
+//   - Reverifies the session and heartbeat staleness immediately before reset
+//     to narrow the TOCTOU window.
+func (d *Daemon) reapDeadPolecatWisps() {
+	opCfg := d.loadOperationalConfig().GetDaemonConfig()
+	timeout := opCfg.DeadPolecatReapTimeoutD()
+	if timeout <= 0 {
+		// Explicitly disabled via config — treat <=0 as "off" to preserve the
+		// escape hatch for operators who want to rely solely on DetectOrphanedBeads.
+		return
+	}
+
+	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
+		d.reapRigDeadPolecatWisps(rigName, timeout)
+		return nil
+	})
+}
+
+// reapRigDeadPolecatWisps scans a single rig for in_progress/hooked beads
+// assigned to dead polecats and resets them.
+func (d *Daemon) reapRigDeadPolecatWisps(rigName string, timeout time.Duration) {
+	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
+	if _, err := os.Stat(polecatsDir); err != nil {
+		return // Rig has no polecats — nothing to reap.
+	}
+
+	polecatPrefix := rigName + "/polecats/"
+
+	type beadInfo struct {
+		ID       string `json:"id"`
+		Assignee string `json:"assignee"`
+		Status   string `json:"status"`
+	}
+
+	// List candidate beads in both hooked and in_progress states. The sling
+	// flow leaves slung work as hooked; polecats flip to in_progress on claim.
+	var candidates []beadInfo
+	for _, status := range []string{"hooked", "in_progress"} {
+		cmd := exec.Command(d.bdPath, "list", "--rig="+rigName, "--status="+status, "--json", "--limit=0") //nolint:gosec // G204: args are constructed internally
+		setSysProcAttr(cmd)
+		cmd.Dir = d.config.TownRoot
+		cmd.Env = os.Environ()
+		output, err := cmd.Output()
+		if err != nil {
+			d.logger.Printf("reap-dead-polecat-wisps: list %s for %s failed: %v", status, rigName, err)
+			continue
+		}
+		if len(output) == 0 {
+			continue
+		}
+		var batch []beadInfo
+		if err := json.Unmarshal(output, &batch); err != nil {
+			d.logger.Printf("reap-dead-polecat-wisps: parse %s for %s failed: %v", status, rigName, err)
+			continue
+		}
+		for i := range batch {
+			batch[i].Status = status
+		}
+		candidates = append(candidates, batch...)
+	}
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	for _, bead := range candidates {
+		if bead.Assignee == "" || !strings.HasPrefix(bead.Assignee, polecatPrefix) {
+			continue // Not assigned to a polecat in this rig.
+		}
+		polecatName := strings.TrimPrefix(bead.Assignee, polecatPrefix)
+		if polecatName == "" || strings.Contains(polecatName, "/") {
+			continue // Malformed assignee (nested path, etc.) — skip defensively.
+		}
+
+		d.maybeReapDeadPolecatBead(rigName, polecatName, bead.ID, bead.Status, polecatsDir, timeout)
+	}
+}
+
+// maybeReapDeadPolecatBead resets a single bead if the owning polecat is
+// provably dead (session gone + heartbeat stale) and the polecat directory
+// still exists (so this is a crashed session, not a deleted polecat).
+func (d *Daemon) maybeReapDeadPolecatBead(rigName, polecatName, beadID, status, polecatsDir string, timeout time.Duration) {
+	polecatDir := filepath.Join(polecatsDir, polecatName)
+	if _, err := os.Stat(polecatDir); err != nil {
+		// Directory is gone — DetectOrphanedBeads (witness) handles this case
+		// and knows how to distinguish truly orphaned beads from rename races.
+		return
+	}
+
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+
+	alive, err := d.tmux.HasSession(sessionName)
+	if err != nil {
+		// Transient tmux error — err on the side of not reaping.
+		return
+	}
+	if alive {
+		return
+	}
+
+	// Heartbeat must exist AND be stale by at least `timeout`. Missing heartbeat
+	// is not proof of death: it might just mean the polecat never touched one
+	// (e.g. fresh install before heartbeat rollout), in which case we defer to
+	// the witness orphan scanner instead of guessing.
+	hb := polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName)
+	if hb == nil {
+		return
+	}
+	staleFor := time.Since(hb.Timestamp)
+	if staleFor < timeout {
+		return
+	}
+
+	// TOCTOU guard: re-check session + heartbeat immediately before reset.
+	// A polecat could have been respawned between the initial checks and here.
+	if alive2, err := d.tmux.HasSession(sessionName); err != nil || alive2 {
+		return
+	}
+	hb2 := polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName)
+	if hb2 == nil || time.Since(hb2.Timestamp) < timeout {
+		return
+	}
+
+	// Reset bead to open with cleared assignee so the scheduler/sling flow
+	// can re-dispatch it. We use bd update directly rather than routing
+	// through the witness RECOVERED_BEAD pathway because:
+	//   - The witness spawn-count ledger is intended for same-polecat respawn
+	//     loops; a crashed polecat + fresh dispatch is a different failure mode.
+	//   - The daemon already has authority to run bd update (see updateAgentHookBead).
+	//   - Keeping the reset local avoids extra mail traffic and permanent Dolt
+	//     commits on every heartbeat cycle.
+	cmd := exec.Command(d.bdPath, "update", beadID, "--rig="+rigName, "--status=open", "--assignee=") //nolint:gosec // G204: args are constructed internally
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		d.logger.Printf("reap-dead-polecat-wisps: failed to reset %s (rig=%s polecat=%s): %v: %s",
+			beadID, rigName, polecatName, err, strings.TrimSpace(string(output)))
+		return
+	}
+
+	d.logger.Printf("reap-dead-polecat-wisps: reset %s (rig=%s polecat=%s prev_status=%s session=%s heartbeat_stale=%v threshold=%v)",
+		beadID, rigName, polecatName, status, sessionName, staleFor.Truncate(time.Second), timeout)
+
+	// Emit a session-death event so the activity feed and audit log capture the reap.
+	_ = events.LogFeed(events.TypeSessionDeath, fmt.Sprintf("%s/%s", rigName, polecatName),
+		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
+			fmt.Sprintf("dead-polecat-wisp-reap: bead=%s prev_status=%s heartbeat_stale=%v (threshold=%v)",
+				beadID, status, staleFor.Truncate(time.Second), timeout),
+			"daemon"))
 }
 
 // reapIdlePolecats kills polecat tmux sessions that have been idle too long.

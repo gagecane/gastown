@@ -317,6 +317,13 @@ type DaemonThresholds struct {
 	// unlike dogs, they should not persist when idle.
 	PolecatIdleSessionTimeout string `json:"polecat_idle_session_timeout,omitempty"`
 
+	// DeadPolecatReapTimeout is how long a polecat's tmux session must be dead
+	// (with a stale heartbeat) before its in_progress/hooked beads are auto-reset
+	// to open for re-dispatch (default "1h"). Protects against stuck patrol wisps
+	// accumulating when a polecat hard-crashes (OOM, tmux kill) and cannot run
+	// its Stop hook to signal completion. See gu-1x0j.
+	DeadPolecatReapTimeout string `json:"dead_polecat_reap_timeout,omitempty"`
+
 	// PolecatSelfTerminate controls whether polecats kill their own session after
 	// gt done completes (default false). When true, polecats terminate 3 seconds
 	// after work submission instead of transitioning to IDLE. This gives fresh

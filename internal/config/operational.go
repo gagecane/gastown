@@ -41,6 +41,12 @@ const (
 	DefaultPolecatIdleSessionTimeout       = 15 * time.Minute
 	DefaultDogIdleRemoveTimeout            = 4 * time.Hour
 	DefaultStaleWorkingTimeout             = 2 * time.Hour
+	// DefaultDeadPolecatReapTimeout is how long a polecat's tmux session must be
+	// dead (with a stale heartbeat) before its in_progress/hooked beads are auto-reset
+	// to open. Prevents stuck patrol wisps (in_progress issues) from accumulating
+	// when a polecat hard-crashes (OOM, tmux kill) and can't run its Stop hook.
+	// See gu-1x0j.
+	DefaultDeadPolecatReapTimeout          = 1 * time.Hour
 	DefaultMaxDogPoolSize                  = 4
 	DefaultMaxLifecycleMessageAge          = 6 * time.Hour
 	DefaultSyncFailureEscalationThreshold  = 3
@@ -318,6 +324,19 @@ func (d *DaemonThresholds) PolecatIdleSessionTimeoutD() time.Duration {
 		return ParseDurationOrDefault(d.PolecatIdleSessionTimeout, DefaultPolecatIdleSessionTimeout)
 	}
 	return DefaultPolecatIdleSessionTimeout
+}
+
+// DeadPolecatReapTimeoutD returns the configured or default dead-polecat reap timeout.
+// When a polecat's tmux session has been dead (and heartbeat stale) for longer than
+// this threshold, its in_progress/hooked beads are auto-reset to open status with
+// cleared assignee so they can be re-dispatched. This prevents stuck patrol wisps
+// from accumulating when polecats hard-crash (OOM, tmux kill) and can't run their
+// Stop hook. Default 1 hour. See gu-1x0j.
+func (d *DaemonThresholds) DeadPolecatReapTimeoutD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.DeadPolecatReapTimeout, DefaultDeadPolecatReapTimeout)
+	}
+	return DefaultDeadPolecatReapTimeout
 }
 
 // DogIdleRemoveTimeoutD returns the configured or default dog idle remove timeout.
