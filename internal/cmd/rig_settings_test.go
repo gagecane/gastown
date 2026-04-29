@@ -765,6 +765,137 @@ func TestRigSettingsEdgeCases(t *testing.T) {
 	})
 }
 
+// TestRigSettingsMergeQueueGates is a regression test for gu-jnbd:
+// `gt rig settings set <rig> merge_queue.gates` and
+// `gt rig settings set <rig> merge_queue.gates_parallel` must accept the keys
+// (they live on the canonical config.MergeQueueConfig) and `show` must
+// preserve them in output.
+func TestRigSettingsMergeQueueGates(t *testing.T) {
+	t.Run("sets gates_parallel as bool", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForSettings(t)
+		rigPath := filepath.Join(townRoot, rigName)
+
+		cmd := rigSettingsSetCmd
+		if err := runRigSettingsSet(cmd, []string{rigName, "merge_queue.gates_parallel", "true"}); err != nil {
+			t.Fatalf("set merge_queue.gates_parallel: %v", err)
+		}
+
+		settingsPath := filepath.Join(rigPath, "settings", "config.json")
+		settings, err := config.LoadRigSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		if settings.MergeQueue == nil {
+			t.Fatal("MergeQueue is nil")
+		}
+		if settings.MergeQueue.GatesParallel == nil {
+			t.Fatal("MergeQueue.GatesParallel is nil; expected *bool=true")
+		}
+		if *settings.MergeQueue.GatesParallel != true {
+			t.Errorf("GatesParallel = %v, want true", *settings.MergeQueue.GatesParallel)
+		}
+
+		// Raw JSON must include gates_parallel (show-serialization regression).
+		raw, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatalf("read settings file: %v", err)
+		}
+		if !strings.Contains(string(raw), `"gates_parallel": true`) {
+			t.Errorf("settings file should contain gates_parallel=true, got:\n%s", raw)
+		}
+	})
+
+	t.Run("sets gates as JSON object", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForSettings(t)
+		rigPath := filepath.Join(townRoot, rigName)
+
+		// parseValue parses the whole argument as JSON → map, which then
+		// round-trips through the Gates map[string]*GateConfig field.
+		gatesJSON := `{"build": {"cmd": "go build ./...", "timeout": "5m", "phase": "pre-merge"}, "test": {"cmd": "go test ./...", "timeout": "10m"}}`
+		cmd := rigSettingsSetCmd
+		if err := runRigSettingsSet(cmd, []string{rigName, "merge_queue.gates", gatesJSON}); err != nil {
+			t.Fatalf("set merge_queue.gates: %v", err)
+		}
+
+		settingsPath := filepath.Join(rigPath, "settings", "config.json")
+		settings, err := config.LoadRigSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		if settings.MergeQueue == nil {
+			t.Fatal("MergeQueue is nil")
+		}
+		if got := len(settings.MergeQueue.Gates); got != 2 {
+			t.Fatalf("Gates has %d entries, want 2: %+v", got, settings.MergeQueue.Gates)
+		}
+
+		build, ok := settings.MergeQueue.Gates["build"]
+		if !ok || build == nil {
+			t.Fatalf("Gates[\"build\"] missing: %+v", settings.MergeQueue.Gates)
+		}
+		if build.Cmd != "go build ./..." {
+			t.Errorf("Gates[build].Cmd = %q, want %q", build.Cmd, "go build ./...")
+		}
+		if build.Timeout != "5m" {
+			t.Errorf("Gates[build].Timeout = %q, want %q", build.Timeout, "5m")
+		}
+		if build.Phase != "pre-merge" {
+			t.Errorf("Gates[build].Phase = %q, want %q", build.Phase, "pre-merge")
+		}
+
+		test, ok := settings.MergeQueue.Gates["test"]
+		if !ok || test == nil {
+			t.Fatalf("Gates[\"test\"] missing: %+v", settings.MergeQueue.Gates)
+		}
+		if test.Cmd != "go test ./..." {
+			t.Errorf("Gates[test].Cmd = %q, want %q", test.Cmd, "go test ./...")
+		}
+		if test.Phase != "" {
+			t.Errorf("Gates[test].Phase = %q, want empty (omitted)", test.Phase)
+		}
+	})
+
+	t.Run("show preserves gates in output", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForSettings(t)
+		rigPath := filepath.Join(townRoot, rigName)
+
+		// Seed settings/config.json with gates directly on disk, bypassing the CLI.
+		// Reproduces the original complaint: show must not silently drop these.
+		settingsPath := filepath.Join(rigPath, "settings", "config.json")
+		settings := config.NewRigSettings()
+		settings.MergeQueue = &config.MergeQueueConfig{
+			Enabled:       true,
+			GatesParallel: func() *bool { b := true; return &b }(),
+			Gates: map[string]*config.GateConfig{
+				"lint": {Cmd: "golangci-lint run", Timeout: "2m", Phase: "pre-merge"},
+			},
+		}
+		if err := config.SaveRigSettings(settingsPath, settings); err != nil {
+			t.Fatalf("save settings: %v", err)
+		}
+
+		// Re-load and serialize as the show command would.
+		loaded, err := config.LoadRigSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		out, err := json.MarshalIndent(loaded, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+
+		if !strings.Contains(string(out), `"gates"`) {
+			t.Errorf("show output missing gates key:\n%s", out)
+		}
+		if !strings.Contains(string(out), `"gates_parallel": true`) {
+			t.Errorf("show output missing gates_parallel:\n%s", out)
+		}
+		if !strings.Contains(string(out), `"cmd": "golangci-lint run"`) {
+			t.Errorf("show output missing gate cmd:\n%s", out)
+		}
+	})
+}
+
 // Test helper functions
 func TestParseValue(t *testing.T) {
 	tests := []struct {
