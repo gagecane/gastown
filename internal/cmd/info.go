@@ -356,7 +356,6 @@ var versionChanges = []VersionChange{
 			"NEW: Beads-native messaging - Queue, channel, and group beads",
 			"NEW: gt mail claim - Claim messages from queues",
 			"NEW: gt polecat identity show - Display CV summary",
-			"NEW: gastown-release molecule formula - Automated release workflow",
 			"NEW: Parallel agent startup - Faster boot with concurrency limit",
 			"NEW: Automatic orphan cleanup - Detect and kill orphaned processes",
 			"NEW: Worktree setup hooks - Inject local configurations",

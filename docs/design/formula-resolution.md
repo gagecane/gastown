@@ -33,7 +33,7 @@ TIER 1: PROJECT (rig-level)
   Location: <project>/.beads/formulas/
   Source:   Committed to project repo
   Use case: Project-specific workflows (deploy, test, release)
-  Example:  ~/gt/gastown/.beads/formulas/mol-gastown-release.formula.toml
+  Example:  ~/gt/gastown/.beads/formulas/mol-polecat-work.formula.toml
 
 TIER 2: TOWN (user-level)
   Location: ~/gt/.beads/formulas/

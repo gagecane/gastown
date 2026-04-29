@@ -11,22 +11,14 @@
 
 ## How to Release
 
-### Option A: Automated (recommended)
-
-Use the release formula, which handles all steps:
-
-```bash
-gt mol wisp create gastown-release --var version=X.Y.Z
-```
-
-### Option B: Bump script
+### Option A: Bump script (recommended)
 
 ```bash
 cd gastown/mayor/rig
 ./scripts/bump-version.sh X.Y.Z --commit --tag --push --install
 ```
 
-### Option C: Manual
+### Option B: Manual
 
 1. Update CHANGELOG.md `[Unreleased]` section
 2. Update `internal/cmd/info.go` `versionChanges` slice
