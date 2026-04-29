@@ -237,11 +237,18 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// See: https://github.com/steveyegge/gastown/issues/1666
 	env["CLAUDECODE"] = ""
 
+	// Read daemon.json's env block fresh at call time so newly spawned sessions
+	// pick up config updates without requiring a daemon restart (gu-kj7c). For
+	// config-sourced vars (OTEL URLs, Dolt port/host, etc.), prefer this over
+	// the daemon's os.Environ() snapshot which may be stale if daemon.json was
+	// edited after the daemon started.
+	daemonEnv := readDaemonJSONEnv(cfg.TownRoot)
+
 	// Propagate Claude Code's own OTEL telemetry when GT telemetry is enabled.
 	// Reuses the same VictoriaMetrics endpoint as gastown's telemetry so all
 	// metrics (gt + claude) land in the same store.
 	// Opt-in: only active when GT_OTEL_METRICS_URL is explicitly set.
-	if metricsURL := os.Getenv("GT_OTEL_METRICS_URL"); metricsURL != "" {
+	if metricsURL, ok := lookupConfigEnv(daemonEnv, "GT_OTEL_METRICS_URL"); ok {
 		env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
 		env["OTEL_METRICS_EXPORTER"] = "otlp"
 		env["OTEL_METRIC_EXPORT_INTERVAL"] = "1000"
@@ -253,7 +260,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		// Mirror into bd's own var names so any `bd` call inside the Claude
 		// session emits metrics/logs to the same VictoriaMetrics instance.
 		env["BD_OTEL_METRICS_URL"] = metricsURL
-		if logsURL := os.Getenv("GT_OTEL_LOGS_URL"); logsURL != "" {
+		if logsURL, ok := lookupConfigEnv(daemonEnv, "GT_OTEL_LOGS_URL"); ok {
 			env["BD_OTEL_LOGS_URL"] = logsURL
 			// Claude Code supports OTLP log export; route to the same VictoriaLogs
 			// instance. Uses protobuf (VictoriaLogs rejects JSON).
@@ -309,9 +316,9 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// Without this, bd falls back to its own discovery (.beads/dolt-server.port
 	// or auto-start), causing split-brain after reinstall/restart.
 	//
-	// Resolution: config file first, then process env fallback. Process env
-	// propagation ensures agent sessions inherit the port even when TownRoot
-	// is not set (e.g., AgentEnvSimple callers).
+	// Resolution: config file first, then daemon.json, then process env fallback.
+	// daemon.json is checked before process env so newly spawned sessions pick up
+	// fresh daemon.json values without requiring a daemon restart (gu-kj7c).
 	if cfg.TownRoot != "" {
 		if port := resolveDoltPort(cfg.TownRoot); port > 0 {
 			portStr := strconv.Itoa(port)
@@ -319,20 +326,20 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 			env["BEADS_DOLT_PORT"] = portStr
 		}
 	}
-	// Propagate GT_DOLT_PORT / BEADS_DOLT_PORT from process env when not
-	// already resolved from config. This covers sessions where TownRoot is
-	// empty or has no config.yaml (GH#2412).
+	// Propagate GT_DOLT_PORT / BEADS_DOLT_PORT from daemon.json / process env
+	// when not already resolved from config. This covers sessions where
+	// TownRoot is empty or has no config.yaml (GH#2412).
 	if _, ok := env["GT_DOLT_PORT"]; !ok {
-		if v := os.Getenv("GT_DOLT_PORT"); v != "" {
+		if v, ok := lookupConfigEnv(daemonEnv, "GT_DOLT_PORT"); ok {
 			env["GT_DOLT_PORT"] = v
-			// Also set BEADS_DOLT_PORT if not explicitly overridden in env.
-			if os.Getenv("BEADS_DOLT_PORT") == "" {
+			// Also set BEADS_DOLT_PORT if not explicitly overridden.
+			if _, hasBeads := lookupConfigEnv(daemonEnv, "BEADS_DOLT_PORT"); !hasBeads {
 				env["BEADS_DOLT_PORT"] = v
 			}
 		}
 	}
 	if _, ok := env["BEADS_DOLT_PORT"]; !ok {
-		if v := os.Getenv("BEADS_DOLT_PORT"); v != "" {
+		if v, ok := lookupConfigEnv(daemonEnv, "BEADS_DOLT_PORT"); ok {
 			env["BEADS_DOLT_PORT"] = v
 		}
 	}
@@ -350,16 +357,19 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 
 	// Propagate Dolt server host so bd doesn't fall back to 127.0.0.1 when
 	// the server runs on a remote machine (e.g., mini2 over Tailscale).
+	// Prefer daemon.json (fresh) over process env (may be stale).
 	if _, ok := env["BEADS_DOLT_SERVER_HOST"]; !ok {
-		if v := os.Getenv("BEADS_DOLT_SERVER_HOST"); v != "" {
+		if v, ok := lookupConfigEnv(daemonEnv, "BEADS_DOLT_SERVER_HOST"); ok {
 			env["BEADS_DOLT_SERVER_HOST"] = v
-		} else if v := os.Getenv("GT_DOLT_HOST"); v != "" {
+		} else if v, ok := lookupConfigEnv(daemonEnv, "GT_DOLT_HOST"); ok {
 			env["BEADS_DOLT_SERVER_HOST"] = v
 		}
 	}
 
-	// Pass through cloud API credentials and provider configuration from the parent shell.
+	// Pass through cloud API credentials and provider configuration.
 	// Only variables explicitly listed here are forwarded; all others are blocked for isolation.
+	// Prefer daemon.json (fresh at call time) over the daemon's os.Environ()
+	// snapshot so edits to daemon.json take effect without a daemon restart (gu-kj7c).
 	for _, key := range []string{
 		// Anthropic API (direct)
 		"ANTHROPIC_API_KEY",
@@ -418,7 +428,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		"CLAUDE_CODE_CLIENT_KEY",
 		"CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
 	} {
-		if val := os.Getenv(key); val != "" {
+		if val, ok := lookupConfigEnv(daemonEnv, key); ok {
 			env[key] = val
 		}
 	}
@@ -443,13 +453,67 @@ func sanitizeOTELAttrValue(s string, maxLen int) string {
 	return s
 }
 
+// readDaemonJSONEnv reads the env block from mayor/daemon.json at call time.
+// Returns an empty map (never nil) when the file is missing, unreadable, or
+// has no env block. Callers should prefer values from this map over os.Getenv
+// for config-sourced vars so spawned sessions inherit fresh config, not the
+// stale daemon process env snapshot from daemon startup (gu-kj7c).
+//
+// Reading daemon.json fresh on every AgentEnv call is cheap (typically <1ms)
+// and avoids requiring a daemon restart when daemon.json is edited. If
+// townRoot is empty, returns an empty map — AgentEnv handles this gracefully
+// by falling back to os.Getenv.
+func readDaemonJSONEnv(townRoot string) map[string]string {
+	if townRoot == "" {
+		return map[string]string{}
+	}
+	daemonJSONPath := filepath.Join(townRoot, "mayor", "daemon.json")
+	data, err := os.ReadFile(daemonJSONPath)
+	if err != nil {
+		return map[string]string{}
+	}
+	var daemonEnv struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &daemonEnv); err != nil {
+		return map[string]string{}
+	}
+	if daemonEnv.Env == nil {
+		return map[string]string{}
+	}
+	return daemonEnv.Env
+}
+
+// lookupConfigEnv returns the value for key, preferring daemon.json's env
+// block (fresh at call time) over the process env (which may be stale if the
+// daemon was started before daemon.json was edited). Returns ("", false) when
+// the key is not set in either source.
+//
+// Use this for config-sourced vars (GT_DOLT_PORT, GT_OTEL_METRICS_URL, etc.)
+// in AgentEnv so newly spawned sessions pick up fresh daemon.json values
+// without requiring a daemon restart (gu-kj7c).
+func lookupConfigEnv(daemonEnv map[string]string, key string) (string, bool) {
+	if v, ok := daemonEnv[key]; ok && v != "" {
+		return v, true
+	}
+	if v := os.Getenv(key); v != "" {
+		return v, true
+	}
+	return "", false
+}
+
 // resolveDoltPort determines the Dolt server port for the given town root.
 //
 // Resolution order (mirrors doltserver.DefaultConfig without importing it):
 //  1. .dolt-data/config.yaml listener.port (authoritative, machine-generated)
-//  2. GT_DOLT_PORT environment variable
-//  3. mayor/daemon.json env.GT_DOLT_PORT
+//  2. mayor/daemon.json env.GT_DOLT_PORT (fresh at call time)
+//  3. GT_DOLT_PORT environment variable (daemon process env; may be stale)
 //  4. 0 (caller should skip injection — DefaultPort 3307 is bd's own default)
+//
+// daemon.json is checked before the env variable because the daemon's
+// os.Environ() snapshot can go stale after daemon.json is edited. Reading
+// the file fresh ensures new spawns pick up config updates without a
+// daemon restart (gu-kj7c).
 //
 // This avoids importing doltserver (which pulls in yaml, sql, mysql driver)
 // by scanning the config.yaml line-by-line. The file is machine-generated by
@@ -463,25 +527,18 @@ func resolveDoltPort(townRoot string) int {
 		}
 	}
 
-	// 2. Environment variable
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+	// 2. daemon.json (fresh at call time — preferred over process env)
+	daemonEnv := readDaemonJSONEnv(townRoot)
+	if v, ok := daemonEnv["GT_DOLT_PORT"]; ok && v != "" {
+		if port, err := strconv.Atoi(v); err == nil && port > 0 {
 			return port
 		}
 	}
 
-	// 3. daemon.json fallback
-	daemonJSONPath := filepath.Join(townRoot, "mayor", "daemon.json")
-	if data, err := os.ReadFile(daemonJSONPath); err == nil {
-		var daemonEnv struct {
-			Env map[string]string `json:"env"`
-		}
-		if err := json.Unmarshal(data, &daemonEnv); err == nil {
-			if v, ok := daemonEnv.Env["GT_DOLT_PORT"]; ok {
-				if port, err := strconv.Atoi(v); err == nil && port > 0 {
-					return port
-				}
-			}
+	// 3. Environment variable (daemon process env; may be stale)
+	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
 		}
 	}
 

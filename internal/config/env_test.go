@@ -1330,3 +1330,430 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Fresh daemon.json inheritance tests (gu-kj7c)
+//
+// AgentEnv() reads config-sourced env vars from mayor/daemon.json at call time
+// rather than relying on the daemon's os.Environ() snapshot. This ensures new
+// session spawns pick up daemon.json edits without a daemon restart.
+// ---------------------------------------------------------------------------
+
+// writeDaemonJSON creates a minimal mayor/daemon.json with the given env block.
+func writeDaemonJSON(t *testing.T, townRoot string, env map[string]string) {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	body := `{"type":"gt-daemon","version":1`
+	if len(env) > 0 {
+		body += `,"env":{`
+		first := true
+		for k, v := range env {
+			if !first {
+				body += `,`
+			}
+			first = false
+			body += `"` + k + `":"` + v + `"`
+		}
+		body += `}`
+	}
+	body += `}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write daemon.json: %v", err)
+	}
+}
+
+func TestReadDaemonJSONEnv(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty town root returns empty map", func(t *testing.T) {
+		t.Parallel()
+		got := readDaemonJSONEnv("")
+		if got == nil {
+			t.Fatal("readDaemonJSONEnv returned nil; want empty map")
+		}
+		if len(got) != 0 {
+			t.Errorf("empty town root got %d entries, want 0", len(got))
+		}
+	})
+
+	t.Run("missing file returns empty map", func(t *testing.T) {
+		t.Parallel()
+		got := readDaemonJSONEnv(t.TempDir())
+		if got == nil {
+			t.Fatal("readDaemonJSONEnv returned nil; want empty map")
+		}
+		if len(got) != 0 {
+			t.Errorf("missing file got %d entries, want 0", len(got))
+		}
+	})
+
+	t.Run("malformed json returns empty map", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		mayorDir := filepath.Join(town, "mayor")
+		if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte("not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := readDaemonJSONEnv(town)
+		if len(got) != 0 {
+			t.Errorf("malformed json got %d entries, want 0", len(got))
+		}
+	})
+
+	t.Run("reads env block", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeDaemonJSON(t, town, map[string]string{
+			"GT_DOLT_PORT":        "3308",
+			"GT_OTEL_METRICS_URL": "http://example.com:8428/push",
+		})
+		got := readDaemonJSONEnv(town)
+		if got["GT_DOLT_PORT"] != "3308" {
+			t.Errorf("GT_DOLT_PORT = %q, want 3308", got["GT_DOLT_PORT"])
+		}
+		if got["GT_OTEL_METRICS_URL"] != "http://example.com:8428/push" {
+			t.Errorf("GT_OTEL_METRICS_URL = %q, want http://example.com:8428/push", got["GT_OTEL_METRICS_URL"])
+		}
+	})
+
+	t.Run("absent env block returns empty map", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		mayorDir := filepath.Join(town, "mayor")
+		if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(`{"type":"gt-daemon","version":1}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := readDaemonJSONEnv(town)
+		if len(got) != 0 {
+			t.Errorf("absent env block got %d entries, want 0", len(got))
+		}
+	})
+}
+
+func TestLookupConfigEnv(t *testing.T) {
+	t.Run("daemon.json wins over process env", func(t *testing.T) {
+		t.Setenv("MY_VAR", "stale-process-value")
+		daemonEnv := map[string]string{"MY_VAR": "fresh-config-value"}
+		v, ok := lookupConfigEnv(daemonEnv, "MY_VAR")
+		if !ok {
+			t.Fatal("lookupConfigEnv returned not-ok")
+		}
+		if v != "fresh-config-value" {
+			t.Errorf("got %q, want fresh-config-value", v)
+		}
+	})
+
+	t.Run("falls back to process env when daemon.json missing key", func(t *testing.T) {
+		t.Setenv("MY_VAR", "process-value")
+		daemonEnv := map[string]string{}
+		v, ok := lookupConfigEnv(daemonEnv, "MY_VAR")
+		if !ok {
+			t.Fatal("lookupConfigEnv returned not-ok")
+		}
+		if v != "process-value" {
+			t.Errorf("got %q, want process-value", v)
+		}
+	})
+
+	t.Run("empty daemon.json value skips to process env", func(t *testing.T) {
+		t.Setenv("MY_VAR", "process-value")
+		daemonEnv := map[string]string{"MY_VAR": ""}
+		v, ok := lookupConfigEnv(daemonEnv, "MY_VAR")
+		if !ok {
+			t.Fatal("lookupConfigEnv returned not-ok")
+		}
+		if v != "process-value" {
+			t.Errorf("got %q, want process-value (empty daemon.json value should fall through)", v)
+		}
+	})
+
+	t.Run("returns not-ok when unset everywhere", func(t *testing.T) {
+		t.Setenv("MY_VAR", "")
+		daemonEnv := map[string]string{}
+		_, ok := lookupConfigEnv(daemonEnv, "MY_VAR")
+		if ok {
+			t.Error("lookupConfigEnv returned ok for unset key")
+		}
+	})
+}
+
+// TestAgentEnv_OTELFromDaemonJSON verifies OTEL URLs are read from daemon.json
+// rather than the (possibly stale) daemon process env.
+func TestAgentEnv_OTELFromDaemonJSON(t *testing.T) {
+	// Process env has stale values; daemon.json has fresh ones.
+	t.Setenv("GT_OTEL_METRICS_URL", "http://stale:8428/push")
+	t.Setenv("GT_OTEL_LOGS_URL", "http://stale:9428/logs")
+
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"GT_OTEL_METRICS_URL": "http://fresh:8428/push",
+		"GT_OTEL_LOGS_URL":    "http://fresh:9428/logs",
+	})
+
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	if got := env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"]; got != "http://fresh:8428/push" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = %q, want fresh value from daemon.json", got)
+	}
+	if got := env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; got != "http://fresh:9428/logs" {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q, want fresh value from daemon.json", got)
+	}
+	if got := env["BD_OTEL_METRICS_URL"]; got != "http://fresh:8428/push" {
+		t.Errorf("BD_OTEL_METRICS_URL = %q, want fresh value from daemon.json", got)
+	}
+	if got := env["BD_OTEL_LOGS_URL"]; got != "http://fresh:9428/logs" {
+		t.Errorf("BD_OTEL_LOGS_URL = %q, want fresh value from daemon.json", got)
+	}
+}
+
+// TestAgentEnv_OTELFallsBackToProcessEnv verifies process env is still used
+// when daemon.json has no OTEL entries (preserves existing behavior).
+func TestAgentEnv_OTELFallsBackToProcessEnv(t *testing.T) {
+	t.Setenv("GT_OTEL_METRICS_URL", "http://proc:8428/push")
+	t.Setenv("GT_OTEL_LOGS_URL", "http://proc:9428/logs")
+
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{}) // no OTEL overrides
+
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	if got := env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"]; got != "http://proc:8428/push" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = %q, want process env fallback", got)
+	}
+	if got := env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; got != "http://proc:9428/logs" {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = %q, want process env fallback", got)
+	}
+}
+
+// TestAgentEnv_DoltHostFromDaemonJSON verifies BEADS_DOLT_SERVER_HOST is read
+// from daemon.json before process env.
+func TestAgentEnv_DoltHostFromDaemonJSON(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale.example")
+	t.Setenv("GT_DOLT_HOST", "stale.example")
+
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"BEADS_DOLT_SERVER_HOST": "fresh.example",
+	})
+
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "fresh.example" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want fresh.example from daemon.json", got)
+	}
+}
+
+// TestAgentEnv_DoltHostGTDoltHostFallback verifies GT_DOLT_HOST from daemon.json
+// is used when BEADS_DOLT_SERVER_HOST is not set there.
+func TestAgentEnv_DoltHostGTDoltHostFallback(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("GT_DOLT_HOST", "")
+
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"GT_DOLT_HOST": "fresh-gt-host.example",
+	})
+
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "fresh-gt-host.example" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want fresh-gt-host.example from daemon.json GT_DOLT_HOST", got)
+	}
+}
+
+// TestAgentEnv_PassthroughFromDaemonJSON verifies that credentials and
+// provider config in daemon.json override the process env.
+func TestAgentEnv_PassthroughFromDaemonJSON(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "stale-key")
+	t.Setenv("AWS_REGION", "stale-region")
+
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"ANTHROPIC_API_KEY": "fresh-key",
+		"AWS_REGION":        "us-west-9",
+	})
+
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	if got := env["ANTHROPIC_API_KEY"]; got != "fresh-key" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want fresh-key from daemon.json", got)
+	}
+	if got := env["AWS_REGION"]; got != "us-west-9" {
+		t.Errorf("AWS_REGION = %q, want us-west-9 from daemon.json", got)
+	}
+}
+
+// TestAgentEnv_PassthroughFallsBackToProcessEnv verifies process env is still
+// used for cloud credentials when daemon.json doesn't provide overrides.
+func TestAgentEnv_PassthroughFallsBackToProcessEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "shell-key")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{}) // no overrides
+
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	if got := env["ANTHROPIC_API_KEY"]; got != "shell-key" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want shell-key from process env", got)
+	}
+	if got := env["AWS_REGION"]; got != "us-east-1" {
+		t.Errorf("AWS_REGION = %q, want us-east-1 from process env", got)
+	}
+}
+
+// TestResolveDoltPort_DaemonJSONBeatsProcessEnv verifies daemon.json's
+// GT_DOLT_PORT is preferred over a stale process env value.
+func TestResolveDoltPort_DaemonJSONBeatsProcessEnv(t *testing.T) {
+	t.Setenv("GT_DOLT_PORT", "3307") // stale
+
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"GT_DOLT_PORT": "3309", // fresh
+	})
+
+	// No .dolt-data/config.yaml, so resolution should fall to daemon.json.
+	got := resolveDoltPort(town)
+	if got != 3309 {
+		t.Errorf("resolveDoltPort = %d, want 3309 from daemon.json (daemon.json should beat process env)", got)
+	}
+}
+
+// TestResolveDoltPort_ConfigYAMLWins verifies config.yaml remains the top
+// priority even when daemon.json has a different value.
+func TestResolveDoltPort_ConfigYAMLWins(t *testing.T) {
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"GT_DOLT_PORT": "3309",
+	})
+	doltDir := filepath.Join(town, ".dolt-data")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "listener:\n  port: 3311\n"
+	if err := os.WriteFile(filepath.Join(doltDir, "config.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveDoltPort(town)
+	if got != 3311 {
+		t.Errorf("resolveDoltPort = %d, want 3311 from config.yaml", got)
+	}
+}
+
+// TestAgentEnv_GTDoltPortFromDaemonJSONWhenNoTownRoot verifies GT_DOLT_PORT is
+// read from the caller-supplied daemonEnv path when TownRoot is empty (via the
+// fallback block that inspects daemon.json + process env).
+// Note: this specifically covers the fallback path — the primary resolveDoltPort
+// path requires TownRoot. We simulate the "no TownRoot" case by leaving it empty.
+func TestAgentEnv_GTDoltPortFallsBackToDaemonJSONFirst(t *testing.T) {
+	// Process env is stale; we expect daemon.json to win via the fallback
+	// block when resolveDoltPort returns 0 (because TownRoot is empty and
+	// config.yaml can't be read).
+	t.Setenv("GT_DOLT_PORT", "3300")
+	t.Setenv("BEADS_DOLT_PORT", "")
+
+	// Even though we set TownRoot below, no config.yaml exists, so
+	// resolveDoltPort falls through and the fallback block kicks in.
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"GT_DOLT_PORT": "3399",
+	})
+
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	// resolveDoltPort reads daemon.json as step 2, so it should return 3399.
+	if got := env["GT_DOLT_PORT"]; got != "3399" {
+		t.Errorf("GT_DOLT_PORT = %q, want 3399 from daemon.json", got)
+	}
+	if got := env["BEADS_DOLT_PORT"]; got != "3399" {
+		t.Errorf("BEADS_DOLT_PORT = %q, want 3399 from daemon.json", got)
+	}
+}
+
+// TestAgentEnv_StaleDaemonProcessEnvRegressionGuard simulates the gu-kj7c
+// failure mode: daemon started with old shell env, daemon.json was updated,
+// binary rebuilt. A newly spawned session must inherit the fresh daemon.json
+// value, not the daemon's stale process env snapshot.
+func TestAgentEnv_StaleDaemonProcessEnvRegressionGuard(t *testing.T) {
+	// Simulate the daemon process's stale env from startup.
+	t.Setenv("GT_OTEL_METRICS_URL", "http://old-collector:8428/push")
+	t.Setenv("GT_OTEL_LOGS_URL", "http://old-collector:9428/logs")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "old.host.example")
+	t.Setenv("ANTHROPIC_API_KEY", "old-key")
+
+	// Operator updates daemon.json with the new endpoints.
+	town := t.TempDir()
+	writeDaemonJSON(t, town, map[string]string{
+		"GT_OTEL_METRICS_URL":    "http://new-collector:8428/push",
+		"GT_OTEL_LOGS_URL":       "http://new-collector:9428/logs",
+		"BEADS_DOLT_SERVER_HOST": "new.host.example",
+		"ANTHROPIC_API_KEY":      "new-key",
+	})
+
+	// A session is spawned without restarting the daemon.
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  town,
+	})
+
+	checks := map[string]string{
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://new-collector:8428/push",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    "http://new-collector:9428/logs",
+		"BD_OTEL_METRICS_URL":                 "http://new-collector:8428/push",
+		"BD_OTEL_LOGS_URL":                    "http://new-collector:9428/logs",
+		"BEADS_DOLT_SERVER_HOST":              "new.host.example",
+		"ANTHROPIC_API_KEY":                   "new-key",
+	}
+	for key, want := range checks {
+		if got := env[key]; got != want {
+			t.Errorf("spawned session %s = %q, want %q (daemon.json should beat stale process env)", key, got, want)
+		}
+	}
+}
