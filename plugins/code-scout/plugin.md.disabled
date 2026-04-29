@@ -11,6 +11,16 @@ cooldown = "4h"
 
 Periodically scan rig source code for improvement opportunities and file them as beads.
 
+### Critical: Bead Routing
+
+`bd create` auto-discovers the nearest `.beads/` directory walking up from `cwd`.
+If you run `bd create` from the town root (`~/gt`), the bead lands in the town
+HQ database (`gt-*` prefix) instead of the rig that owns the code. **That is a bug.**
+
+You MUST `cd` into the rig's source root before every `bd create`. The rig's
+source root is resolved in Step 1 — capture it per rig and use it as the CWD
+for all `bd` commands that should file into that rig.
+
 ### Steps
 
 1. Discover all rigs dynamically — never hardcode rig names or paths:
@@ -18,6 +28,7 @@ Periodically scan rig source code for improvement opportunities and file them as
    - For each rig, resolve its source root: `readlink -f ~/gt/<rig>/.beads/..`
    - If the resolved path is under `~/gt/` (local beads, no workspace), check `/workplace/canewiw/` for a matching directory
    - Skip any rig whose source root cannot be resolved
+   - Remember each rig's resolved source root — you will `cd` into it in Step 3
 
 2. In each source root, scan for:
    - **TODOs/FIXMEs**: `grep -rn "TODO\|FIXME\|HACK\|XXX" --include="*.py" --include="*.rb" --include="*.ts" --include="*.js" --include="*.md"`
@@ -28,11 +39,24 @@ Periodically scan rig source code for improvement opportunities and file them as
    - **Large files**: files over 500 lines that could be split
    - **Duplicated logic**: similar code blocks across files
 
-3. For each finding:
-   - Check if a bead already exists: `bd search "<description>"` in the appropriate rig
-   - If no duplicate, create: `bd create --title "<improvement>" --type task --priority P3`
-   - Add a note with file path, line number, and what to improve
-   - Label it: `bd tag <id> code-scout`
+3. For each finding, **inside the rig's source root directory** (so the bead
+   lands in the correct rig's `.beads/` database):
+   ```bash
+   cd "$RIG_SOURCE_ROOT"   # the path resolved in Step 1
+   # Check if a bead already exists (include closed beads to avoid re-filing
+   # issues a previous scout cycle already handled):
+   bd search "<description>" --status=all
+   # If no duplicate, create in THIS rig's database:
+   bd create --title "<improvement>" --type task --priority P3
+   # Add a note with file path, line number, and what to improve
+   # Label it:
+   bd tag <id> code-scout
+   ```
+   The `cd` is mandatory: without it, `bd create` walks up to the town HQ
+   database and files the bead with a `gt-*` prefix instead of the rig's prefix.
 
 4. Cap at 5 new beads per rig per cycle to avoid noise
 5. Report: "Code scout found N improvements across M rigs (created K new beads)"
+   - Include the bead prefix in the report to confirm correct routing
+     (e.g., `3 beads in gu-*, 2 beads in caco-*, 0 beads in gt-*`)
+   - If any bead was filed with a `gt-*` prefix, that is a routing bug — escalate
