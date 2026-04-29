@@ -72,6 +72,16 @@ func (c *DaemonCheck) Fix(ctx *CheckContext) error {
 		return ErrSkippedNoStart
 	}
 
+	// Defensive: if a daemon is already running, do not spawn a child that
+	// would just fail on the pidfile lock. Matches the guards in
+	// cmd/daemon.go (gt daemon start) and cmd/up.go ensureDaemon.
+	// Without this, buggy callers that invoke Fix in a loop cause spawn
+	// loops: every attempt forks, logs a warning, fails to acquire the
+	// lock, and exits — bloating daemon.log without achieving anything.
+	if running, _, _ := daemon.IsRunning(ctx.TownRoot); running {
+		return nil
+	}
+
 	// Find gt executable
 	gtPath, err := os.Executable()
 	if err != nil {
