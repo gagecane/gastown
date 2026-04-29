@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`gt dolt kill-imposters` false-positive on symlinked home directories** —
+  On systems where `/home/<user>` is a symlink to `/local/home/<user>` (Amazon
+  CloudDesktop), a running dolt sql-server may report its `--data-dir` via
+  `/proc/<pid>/cmdline` using the physical path while the expected path uses
+  the symlink form (or vice versa). Plain string comparison of `filepath.Abs`
+  output mis-classified the legitimate server as an imposter and attempted
+  termination. `doltProcessMatchesTownPaths` now resolves symlinks via
+  `filepath.EvalSymlinks` (with graceful fallback to `filepath.Abs` when the
+  path doesn't exist). `KillImposters` also re-checks that the process is
+  alive before signaling to avoid an `os: process not initialized` error when
+  the process exits between discovery and termination. See gu-qhyv.
+
 ## [1.0.1] - 2026-04-25
 
 ### Fixed

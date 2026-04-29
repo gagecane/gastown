@@ -952,24 +952,50 @@ func getDoltConfigPathFromProcess(pid int) string {
 	return resolveProcessPath(pid, getDoltFlagFromArgs(getProcessArgs(pid), "--config"))
 }
 
+// canonicalizePath returns the canonical absolute form of a path with symlinks
+// resolved. Falls back to filepath.Abs when EvalSymlinks fails (e.g. path does
+// not exist, permission denied). Returns "" only if the input is empty.
+//
+// This is the primary tool for path equality comparisons in imposter detection:
+// on systems where /home/<user> is a symlink to /local/home/<user> (Amazon
+// CloudDesktop), a process reporting its data-dir via /proc/<pid>/cmdline may
+// surface the physical path while the expected path uses the symlink path (or
+// vice versa). Plain string comparison of filepath.Abs output would mis-classify
+// the legitimate server as an imposter. See gu-qhyv.
+func canonicalizePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	// EvalSymlinks requires the path to exist. When it does, we get the
+	// canonical physical path; when it doesn't, we keep the absolute form so
+	// two non-existent paths still compare equal when they're spelled the same.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
 func doltProcessMatchesTownPaths(expectedDataDir, actualDataDir, actualConfigPath, actualCWD, stateDataDir string) bool {
-	expectedDir, _ := filepath.Abs(expectedDataDir)
+	expectedDir := canonicalizePath(expectedDataDir)
 	if actualDataDir != "" {
-		actualDir, _ := filepath.Abs(actualDataDir)
-		return actualDir == expectedDir
+		return canonicalizePath(actualDataDir) == expectedDir
 	}
 	if actualConfigPath != "" {
-		expectedConfig, _ := filepath.Abs(filepath.Join(expectedDir, "config.yaml"))
-		actualConfig, _ := filepath.Abs(actualConfigPath)
-		return actualConfig == expectedConfig
+		// Join config.yaml onto the UNRESOLVED expectedDataDir (so the join
+		// does not accidentally cross a symlink), then canonicalize.
+		expectedConfig := canonicalizePath(filepath.Join(expectedDataDir, "config.yaml"))
+		return canonicalizePath(actualConfigPath) == expectedConfig
 	}
 	if actualCWD != "" {
-		absCWD, _ := filepath.Abs(actualCWD)
+		absCWD := canonicalizePath(actualCWD)
 		return absCWD == expectedDir || absCWD == filepath.Dir(expectedDir)
 	}
 	if stateDataDir != "" {
-		actualDir, _ := filepath.Abs(stateDataDir)
-		return actualDir == expectedDir
+		return canonicalizePath(stateDataDir) == expectedDir
 	}
 	return false
 }
@@ -1082,9 +1108,30 @@ func KillImposters(townRoot string) error {
 	if err != nil {
 		return fmt.Errorf("finding imposter process %d: %w", pid, err)
 	}
+	if process == nil {
+		// Defensive: os.FindProcess is documented as always returning a valid
+		// Process on Unix, but returns nil on error paths on some platforms.
+		// If it's nil, we can't signal — but the kernel confirmed earlier that
+		// no process held the port, so there's nothing to do.
+		return nil
+	}
+
+	// If the process exited between the port check and now, there's nothing
+	// to kill. Detect that here so we don't hit "os: process not initialized"
+	// from a stale handle.
+	if !processIsAlive(pid) {
+		_ = os.Remove(config.PidFile)
+		return nil
+	}
 
 	// Graceful termination first (SIGTERM on Unix, Kill on Windows)
 	if err := gracefulTerminate(process); err != nil {
+		// Race: process exited between processIsAlive and gracefulTerminate.
+		// That's fine — the imposter is gone.
+		if !processIsAlive(pid) {
+			_ = os.Remove(config.PidFile)
+			return nil
+		}
 		return fmt.Errorf("sending termination signal to imposter PID %d: %w", pid, err)
 	}
 
@@ -1098,8 +1145,10 @@ func KillImposters(townRoot string) error {
 		}
 	}
 
-	// Force kill
-	_ = process.Kill()
+	// Force kill (ignore error — process may have just exited)
+	if processIsAlive(pid) {
+		_ = process.Kill()
+	}
 	time.Sleep(100 * time.Millisecond)
 	_ = os.Remove(config.PidFile)
 

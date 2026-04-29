@@ -195,6 +195,149 @@ func TestDoltProcessMatchesTownPaths(t *testing.T) {
 	}
 }
 
+// TestDoltProcessMatchesTownPaths_Symlinks verifies that paths resolving to the
+// same physical directory via a symlink are treated as equal (gu-qhyv).
+//
+// Regression: on CloudDesktop-style setups, /home/<user> is a symlink to
+// /local/home/<user>. The expected path uses the symlink form while the
+// running dolt process reports the physical path (or vice versa). Plain
+// string comparison would mis-classify the legitimate server as an imposter.
+func TestDoltProcessMatchesTownPaths_Symlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+
+	// Create a physical directory and a symlink pointing at it.
+	physical := t.TempDir()
+	physicalDataDir := filepath.Join(physical, ".dolt-data")
+	if err := os.MkdirAll(physicalDataDir, 0o755); err != nil {
+		t.Fatalf("creating physical data dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(physicalDataDir, "config.yaml"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("creating config.yaml: %v", err)
+	}
+
+	// Create a sibling symlink, like /home/canewiw → /local/home/canewiw.
+	linkParent := t.TempDir()
+	symlinkedRoot := filepath.Join(linkParent, "canewiw")
+	if err := os.Symlink(physical, symlinkedRoot); err != nil {
+		t.Fatalf("creating symlink: %v", err)
+	}
+	symlinkedDataDir := filepath.Join(symlinkedRoot, ".dolt-data")
+
+	// Sanity: both paths resolve to the same physical directory.
+	resolvedSymlinked, err := filepath.EvalSymlinks(symlinkedDataDir)
+	if err != nil {
+		t.Fatalf("resolving symlinked dir: %v", err)
+	}
+	resolvedPhysical, err := filepath.EvalSymlinks(physicalDataDir)
+	if err != nil {
+		t.Fatalf("resolving physical dir: %v", err)
+	}
+	if resolvedSymlinked != resolvedPhysical {
+		t.Fatalf("precondition failed: %q != %q", resolvedSymlinked, resolvedPhysical)
+	}
+
+	tests := []struct {
+		name             string
+		expected         string
+		actualDataDir    string
+		actualConfigPath string
+		actualCWD        string
+		stateDataDir     string
+	}{
+		{
+			name:          "symlinked expected, physical actual data-dir",
+			expected:      symlinkedDataDir,
+			actualDataDir: physicalDataDir,
+		},
+		{
+			name:          "physical expected, symlinked actual data-dir",
+			expected:      physicalDataDir,
+			actualDataDir: symlinkedDataDir,
+		},
+		{
+			name:             "symlinked expected, physical actual config path",
+			expected:         symlinkedDataDir,
+			actualConfigPath: filepath.Join(physicalDataDir, "config.yaml"),
+		},
+		{
+			name:         "symlinked expected, physical state data dir",
+			expected:     symlinkedDataDir,
+			stateDataDir: physicalDataDir,
+		},
+		{
+			name:      "symlinked expected, physical CWD equal to data dir",
+			expected:  symlinkedDataDir,
+			actualCWD: physicalDataDir,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := doltProcessMatchesTownPaths(tt.expected, tt.actualDataDir, tt.actualConfigPath, tt.actualCWD, tt.stateDataDir)
+			if !got {
+				t.Fatalf("doltProcessMatchesTownPaths(expected=%q, actualDataDir=%q, actualConfigPath=%q, actualCWD=%q, stateDataDir=%q) = false, want true",
+					tt.expected, tt.actualDataDir, tt.actualConfigPath, tt.actualCWD, tt.stateDataDir)
+			}
+		})
+	}
+
+	// Negative case: genuinely different directory should still be rejected
+	// even with symlink resolution enabled.
+	otherPhysical := t.TempDir()
+	otherDataDir := filepath.Join(otherPhysical, ".dolt-data")
+	if err := os.MkdirAll(otherDataDir, 0o755); err != nil {
+		t.Fatalf("creating other data dir: %v", err)
+	}
+	if got := doltProcessMatchesTownPaths(symlinkedDataDir, otherDataDir, "", "", ""); got {
+		t.Fatalf("unrelated data dirs should not match after symlink resolution")
+	}
+}
+
+func TestCanonicalizePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+
+	t.Run("empty input returns empty", func(t *testing.T) {
+		if got := canonicalizePath(""); got != "" {
+			t.Fatalf("canonicalizePath(\"\") = %q, want \"\"", got)
+		}
+	})
+
+	t.Run("resolves symlink", func(t *testing.T) {
+		physical := t.TempDir()
+		linkParent := t.TempDir()
+		link := filepath.Join(linkParent, "link")
+		if err := os.Symlink(physical, link); err != nil {
+			t.Fatalf("creating symlink: %v", err)
+		}
+		physicalResolved, err := filepath.EvalSymlinks(physical)
+		if err != nil {
+			t.Fatalf("resolving physical: %v", err)
+		}
+		if got := canonicalizePath(link); got != physicalResolved {
+			t.Fatalf("canonicalizePath(%q) = %q, want %q", link, got, physicalResolved)
+		}
+	})
+
+	t.Run("falls back to Abs for nonexistent path", func(t *testing.T) {
+		// Nonexistent paths can't be EvalSymlinks'd — canonicalizePath should
+		// still return a deterministic absolute form so equal inputs compare
+		// equal.
+		dir := t.TempDir()
+		nonexistent := filepath.Join(dir, "does-not-exist")
+		want, err := filepath.Abs(nonexistent)
+		if err != nil {
+			t.Fatalf("filepath.Abs: %v", err)
+		}
+		if got := canonicalizePath(nonexistent); got != want {
+			t.Fatalf("canonicalizePath(%q) = %q, want %q", nonexistent, got, want)
+		}
+	})
+}
+
 func TestDoltProcessOwnerPathFromEvidence(t *testing.T) {
 	tests := []struct {
 		name             string
