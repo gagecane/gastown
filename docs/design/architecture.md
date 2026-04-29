@@ -59,6 +59,19 @@ Role beads are global templates stored in town beads with `hq-` prefix:
 
 Each agent bead references its role bead via the `role_bead` field.
 
+### Pinning as a Ghost-Dispatch Workaround
+
+Operators can set an agent bead's status to `pinned` to exempt it from the
+dog dispatcher's ready-work scans (see gu-ypjm: dog dispatcher dispatches
+identity beads as work). Pinned agent beads are still treated as "live" by
+doctor, mail resolution, and other callers — they are skipped by default
+`bd list` status filters but remain valid identities.
+
+`gt doctor --fix` on the `agent-beads-exist` check preserves pinned status:
+it adds any missing `gt:agent` label but does not reopen the bead or alter
+its status. This keeps the pinning workaround stable across doctor cycles
+(see gu-dl1s for the prior regression).
+
 ## Agent Taxonomy
 
 ### Town-Level Agents (Cross-Rig)

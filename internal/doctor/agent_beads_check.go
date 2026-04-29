@@ -237,16 +237,22 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
-	// fixAgentBead ensures an agent bead exists and is open.
+	// fixAgentBead ensures an agent bead exists and is open (or pinned).
 	// Logic:
 	//   1. If in issues table → ensure gt:agent label
 	//   2. If in wisps table (open) → ensure gt:agent label
-	//   3. If exists but closed → REOPEN it (don't recreate)
-	//   4. If truly missing → CREATE it
+	//   3. If exists and pinned → PRESERVE status, ensure gt:agent label only
+	//   4. If exists but closed → REOPEN it (don't recreate)
+	//   5. If truly missing → CREATE it
 	// Uses CreateAgentBead which creates durable agent beads (not wisps)
 	// so they survive wisp GC (GH#2768).
 	// workDir is the rig directory for direct SQL fallback when bd update
 	// fails silently (e.g., legacy prefixes that can't be routed — GH#2127).
+	//
+	// Pinned beads are preserved because pinning is a supported workaround for
+	// ghost-dispatch loops (gu-ypjm). Operators pin identity beads to prevent
+	// the dog dispatcher from treating them as ready work, and doctor must not
+	// defeat that workaround by reopening them (gu-dl1s).
 	fixAgentBead := func(bd *beads.Beads, workDir, id, desc string, fields *beads.AgentFields) error {
 		// Check issues table first
 		if issue, exists := allAgentBeads[id]; exists {
@@ -285,10 +291,21 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 			return nil
 		}
 
-		// Not in issues or open wisps — check if it exists but is CLOSED
+		// Not in issues or open wisps — the bead may exist with a non-default
+		// status (pinned, closed). bd list filters those out by default, so we
+		// fall through to bd.Show to inspect the actual stored state.
 		if issue, err := bd.Show(id); err == nil && issue != nil {
-			// Bead exists but is closed — REOPEN it instead of recreating
-			if issue.Status == "closed" {
+			switch issue.Status {
+			case "pinned":
+				// Bead is pinned — preserve the pinned status. Pinning is a
+				// supported workaround for ghost-dispatch loops (gu-ypjm).
+				// Only ensure the gt:agent label is present; do NOT reopen.
+				if !beads.HasLabel(issue, "gt:agent") {
+					_ = bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
+				}
+				return nil
+			case "closed":
+				// Bead exists but is closed — REOPEN it instead of recreating.
 				openStatus := "open"
 				if err := bd.Update(id, beads.UpdateOptions{Status: &openStatus}); err != nil {
 					return fmt.Errorf("reopening closed agent bead %s: %w", id, err)

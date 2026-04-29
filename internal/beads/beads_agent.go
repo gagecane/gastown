@@ -629,12 +629,26 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 // Queries both the issues table (authoritative metadata source) and the
 // wisps table (fallback existence source). Issues take precedence for duplicate
 // IDs so labels/type are preserved for doctor validation.
+//
+// Status filter includes all "live" statuses (open, in_progress, blocked,
+// deferred, pinned) — pinned is explicitly included because pinning identity
+// beads is a supported workaround for ghost-dispatch loops (gu-ypjm, gu-dl1s),
+// and callers (doctor, mail resolver, etc.) need to treat pinned agent beads
+// as existent.
 func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
 	// Query issues table first. Issues include labels and type metadata used by
 	// doctor checks (for example, validating gt:agent labels).
 	// Agent beads are type=agent (infrastructure), hidden by bd list default filter.
 	// Use --include-infra so they appear in results.
-	out, err := b.run("list", "--label=gt:agent", "--include-infra", "--json", "--flat", "--no-pager")
+	// Include pinned agents so doctor and other callers see them as live beads.
+	out, err := b.run("list",
+		"--label=gt:agent",
+		"--include-infra",
+		"--status=open,in_progress,blocked,deferred,pinned",
+		"--json",
+		"--flat",
+		"--no-pager",
+	)
 	if err != nil {
 		return nil, err
 	}

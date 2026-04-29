@@ -285,6 +285,284 @@ esac
 	}
 }
 
+// TestAgentBeadsExistCheck_FixPreservesPinnedStatus verifies that Fix() does
+// not reopen agent beads with status=pinned. Pinning identity beads is a
+// supported workaround for ghost-dispatch loops (gu-ypjm); doctor must leave
+// pinned status alone and only ensure the gt:agent label is present. See gu-dl1s.
+func TestAgentBeadsExistCheck_FixPreservesPinnedStatus(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gs-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(tmpDir, "bd.log")
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	bdScript := filepath.Join(binDir, "bd")
+	// Fake bd: list returns empty (no beads have gt:agent label), wisp list is
+	// empty, but bd show returns a pinned bead (with no gt:agent label) for
+	// the witness ID. This exercises the Fix fallback path that inspects the
+	// Show output and must preserve pinned status.
+	pinnedID := "gs-gastown-witness"
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+
+logfile="` + logFile + `"
+
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == --allow-stale ]]; then
+    continue
+  fi
+  args+=("$arg")
+done
+
+cmd=""
+idx=0
+for i in "${!args[@]}"; do
+  if [[ "${args[$i]}" != -* ]]; then
+    cmd="${args[$i]}"
+    idx=$i
+    break
+  fi
+done
+
+if [[ -z "$cmd" ]]; then
+  exit 0
+fi
+
+rest=("${args[@]:$((idx + 1))}")
+
+case "$cmd" in
+  list)
+    printf '[]\n'
+    ;;
+  mol)
+    if [[ "${rest[0]:-}" == "wisp" && "${rest[1]:-}" == "list" ]]; then
+      printf '{"wisps":[]}\n'
+      exit 0
+    fi
+    exit 1
+    ;;
+  show)
+    # rest[0] is the bead ID. Return a pinned bead with no labels for the
+    # witness; fail for any other ID so the create/reopen path doesn't fire.
+    if [[ "${rest[0]:-}" == "` + pinnedID + `" ]]; then
+      printf 'show %s\n' "${rest[0]}" >> "$logfile"
+      printf '[{"id":"%s","title":"%s","status":"pinned","labels":[]}]\n' "${rest[0]}" "${rest[0]}"
+      exit 0
+    fi
+    exit 1
+    ;;
+  create)
+    id=""
+    for arg in "${rest[@]}"; do
+      case "$arg" in
+        --id=*) id="${arg#--id=}" ;;
+      esac
+    done
+    printf 'create %s\n' "$id" >> "$logfile"
+    printf '{"id":"%s","status":"open","labels":["gt:agent"]}\n' "$id"
+    ;;
+  update)
+    if [[ ${#rest[@]} -gt 0 ]]; then
+      # Log the full update args so tests can assert on flags like --status
+      printf 'update %s\n' "${rest[*]}" >> "$logfile"
+    fi
+    printf '{}'\n
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+
+	check := NewAgentBeadsCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: "gastown"}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading fake bd log: %v", err)
+	}
+	log := string(data)
+
+	// Must NOT have tried to create the pinned bead (it already exists)
+	if strings.Contains(log, "create "+pinnedID) {
+		t.Fatalf("expected Fix() to NOT recreate pinned bead %s, got log: %q", pinnedID, log)
+	}
+
+	// Must NOT have tried to change status (pinned status must be preserved)
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update "+pinnedID) && strings.Contains(line, "--status") {
+			t.Fatalf("expected Fix() to NOT change status on pinned bead %s, got log line: %q", pinnedID, line)
+		}
+	}
+
+	// Must have added the gt:agent label (update with --add-label)
+	foundLabelUpdate := false
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update "+pinnedID) &&
+			(strings.Contains(line, "gt:agent") || strings.Contains(line, "--add-label")) {
+			foundLabelUpdate = true
+			break
+		}
+	}
+	if !foundLabelUpdate {
+		t.Fatalf("expected Fix() to add gt:agent label to pinned bead %s, got log: %q", pinnedID, log)
+	}
+}
+
+// TestAgentBeadsExistCheck_FixReopensClosed verifies that Fix() still reopens
+// agent beads with status=closed. This guards the existing behaviour from
+// d7ef2d6e (doctor --fix reopens closed agent beads instead of recreating)
+// against regression from the pinned-status preservation fix (gu-dl1s).
+func TestAgentBeadsExistCheck_FixReopensClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gs-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(tmpDir, "bd.log")
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	bdScript := filepath.Join(binDir, "bd")
+	closedID := "gs-gastown-witness"
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+
+logfile="` + logFile + `"
+
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == --allow-stale ]]; then
+    continue
+  fi
+  args+=("$arg")
+done
+
+cmd=""
+idx=0
+for i in "${!args[@]}"; do
+  if [[ "${args[$i]}" != -* ]]; then
+    cmd="${args[$i]}"
+    idx=$i
+    break
+  fi
+done
+
+if [[ -z "$cmd" ]]; then
+  exit 0
+fi
+
+rest=("${args[@]:$((idx + 1))}")
+
+case "$cmd" in
+  list)
+    printf '[]\n'
+    ;;
+  mol)
+    if [[ "${rest[0]:-}" == "wisp" && "${rest[1]:-}" == "list" ]]; then
+      printf '{"wisps":[]}\n'
+      exit 0
+    fi
+    exit 1
+    ;;
+  show)
+    if [[ "${rest[0]:-}" == "` + closedID + `" ]]; then
+      printf 'show %s\n' "${rest[0]}" >> "$logfile"
+      printf '[{"id":"%s","title":"%s","status":"closed","labels":["gt:agent"]}]\n' "${rest[0]}" "${rest[0]}"
+      exit 0
+    fi
+    exit 1
+    ;;
+  create)
+    id=""
+    for arg in "${rest[@]}"; do
+      case "$arg" in
+        --id=*) id="${arg#--id=}" ;;
+      esac
+    done
+    printf 'create %s\n' "$id" >> "$logfile"
+    printf '{"id":"%s","status":"open","labels":["gt:agent"]}\n' "$id"
+    ;;
+  update)
+    if [[ ${#rest[@]} -gt 0 ]]; then
+      printf 'update %s\n' "${rest[*]}" >> "$logfile"
+    fi
+    printf '{}'\n
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+
+	check := NewAgentBeadsCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: "gastown"}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading fake bd log: %v", err)
+	}
+	log := string(data)
+
+	// Must NOT recreate the closed bead
+	if strings.Contains(log, "create "+closedID) {
+		t.Fatalf("expected Fix() to NOT recreate closed bead %s, got log: %q", closedID, log)
+	}
+
+	// Must have reopened the closed bead (update with --status=open)
+	foundReopen := false
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update "+closedID) &&
+			(strings.Contains(line, "--status=open") || strings.Contains(line, "--status open")) {
+			foundReopen = true
+			break
+		}
+	}
+	if !foundReopen {
+		t.Fatalf("expected Fix() to reopen closed bead %s via --status=open, got log: %q", closedID, log)
+	}
+}
+
 // TestListCrewWorkers_FiltersWorktrees verifies that listCrewWorkers skips
 // git worktrees (directories where .git is a file) and only returns canonical
 // crew workers (where .git is a directory). This is the fix for GH#2767.
