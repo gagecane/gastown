@@ -148,6 +148,35 @@ title = "Maintainability Review"
 focus = "Code clarity and documentation"
 ```
 
+## Step Lifecycle Annotations
+
+Workflow steps that create ephemeral beads (wisps, HANDOFF mail, patrol
+reports) can declare their cleanup policy using two optional TOML fields on
+`[[steps]]` (and `[[template]]`) blocks:
+
+| Field | Purpose |
+|-------|---------|
+| `wisp_ttl` | Maximum lifetime for ephemeral beads this step creates. Go duration (`"15m"`, `"2h"`), `"inherit"` (use reaper default), or empty (step creates no ephemeral beads). |
+| `consumer_bead_id` | Identifier or description of the bead/step that consumes (closes) what this step creates. May include formula `{{var}}` substitutions. Empty means TTL-bounded cleanup only. |
+
+These fields are **descriptive metadata today** (GUPP / gu-hhqk AC6). The
+reaper uses its own TTL configuration for the actual sweep. Declaring the
+policy on the formula side makes it discoverable, audit-friendly, and
+positions the data for future enforcement.
+
+Parse-time validation rejects malformed `wisp_ttl` values (e.g. `"15 minutes"`,
+`"soonish"`) so typos fail fast rather than silently.
+
+```toml
+[[steps]]
+id = "loop-or-exit"
+title = "Loop or exit for respawn"
+needs = ["context-check"]
+# Wisp created here lives 30m if respawn never consumes it.
+wisp_ttl = "30m"
+consumer_bead_id = "next patrol cycle (self-respawn)"
+```
+
 ## API Reference
 
 ### Parsing

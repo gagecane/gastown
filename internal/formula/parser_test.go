@@ -909,3 +909,211 @@ func stepIDs(f *Formula) []string {
 	}
 	return ids
 }
+
+// TestParse_WorkflowWithLifecycle verifies wisp_ttl and consumer_bead_id
+// round-trip through the parser (gu-hhqk AC6 / gu-3m2a).
+func TestParse_WorkflowWithLifecycle(t *testing.T) {
+	data := []byte(`
+description = "Test workflow with lifecycle annotations"
+formula = "test-lifecycle"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "creates-wisp"
+title = "Creates an ephemeral wisp"
+description = "Emits a wisp with a TTL safety net"
+wisp_ttl = "30m"
+consumer_bead_id = "next patrol cycle"
+
+[[steps]]
+id = "creates-task"
+title = "Creates a first-class task"
+description = "Emits a real task bead, not a wisp"
+needs = ["creates-wisp"]
+consumer_bead_id = "assigned polecat (full task bead, not ephemeral)"
+
+[[steps]]
+id = "inherits-reaper-ttl"
+title = "Defers to the reaper default"
+description = "Uses reaper's default TTL"
+needs = ["creates-task"]
+wisp_ttl = "inherit"
+
+[[steps]]
+id = "no-wisp"
+title = "Creates no ephemeral beads"
+description = "Pure computation, no lifecycle annotation needed"
+needs = ["creates-task"]
+`)
+
+	f, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(f.Steps) != 4 {
+		t.Fatalf("len(Steps) = %d, want 4", len(f.Steps))
+	}
+
+	// Step with explicit TTL + consumer
+	if f.Steps[0].WispTTL != "30m" {
+		t.Errorf("step[0].WispTTL = %q, want %q", f.Steps[0].WispTTL, "30m")
+	}
+	if f.Steps[0].ConsumerBeadID != "next patrol cycle" {
+		t.Errorf("step[0].ConsumerBeadID = %q, want %q", f.Steps[0].ConsumerBeadID, "next patrol cycle")
+	}
+
+	// Step with only consumer (first-class task, no TTL)
+	if f.Steps[1].WispTTL != "" {
+		t.Errorf("step[1].WispTTL = %q, want empty", f.Steps[1].WispTTL)
+	}
+	if f.Steps[1].ConsumerBeadID != "assigned polecat (full task bead, not ephemeral)" {
+		t.Errorf("step[1].ConsumerBeadID = %q, want the task bead label", f.Steps[1].ConsumerBeadID)
+	}
+
+	// Step with "inherit" sentinel
+	if f.Steps[2].WispTTL != "inherit" {
+		t.Errorf("step[2].WispTTL = %q, want %q", f.Steps[2].WispTTL, "inherit")
+	}
+
+	// Step with no lifecycle annotation (pure computation)
+	if f.Steps[3].WispTTL != "" || f.Steps[3].ConsumerBeadID != "" {
+		t.Errorf("step[3] should have empty lifecycle fields; got WispTTL=%q ConsumerBeadID=%q",
+			f.Steps[3].WispTTL, f.Steps[3].ConsumerBeadID)
+	}
+}
+
+// TestParse_WorkflowInvalidWispTTL verifies that malformed wisp_ttl values are
+// rejected at parse time with a helpful error (gu-hhqk AC6 / gu-3m2a).
+func TestParse_WorkflowInvalidWispTTL(t *testing.T) {
+	cases := []struct {
+		name string
+		ttl  string
+	}{
+		{"english words", "15 minutes"},
+		{"min suffix typo", "15min"},
+		{"hour suffix typo", "1 hour"},
+		{"random string", "soonish"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(`
+description = "bad ttl"
+formula = "test-bad-ttl"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "bad"
+title = "Bad TTL"
+description = "Should fail"
+wisp_ttl = "` + tc.ttl + `"
+`)
+			if _, err := Parse(data); err == nil {
+				t.Fatalf("Parse should have rejected wisp_ttl = %q", tc.ttl)
+			}
+		})
+	}
+}
+
+// TestParse_ExpansionWithLifecycle verifies that wisp_ttl and consumer_bead_id
+// defined on [[template]] blocks propagate through to the generated [[steps]]
+// blocks when the expansion is applied (gu-hhqk AC6 / gu-3m2a).
+func TestParse_ExpansionWithLifecycle(t *testing.T) {
+	expansion := []byte(`
+description = "Lifecycle expansion"
+formula = "test-lifecycle-expansion"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "{target}.emits-wisp"
+title = "Emit wisp for {target.title}"
+description = "Emit an ephemeral wisp"
+wisp_ttl = "1h"
+consumer_bead_id = "{target}.consume-wisp"
+
+[[template]]
+id = "{target}.consume-wisp"
+title = "Consume wisp"
+description = "Consume the wisp from {target.title}"
+needs = ["{target}.emits-wisp"]
+`)
+
+	workflow := []byte(`
+description = "Test workflow"
+formula = "test-wf"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "prep"
+title = "Prepare"
+description = "Prepare things"
+
+[[steps]]
+id = "work"
+title = "Do the work"
+description = "Main work"
+needs = ["prep"]
+`)
+
+	// Parse the expansion formula to surface any validation errors.
+	exp, err := Parse(expansion)
+	if err != nil {
+		t.Fatalf("Parse expansion: %v", err)
+	}
+	if exp.Template[0].WispTTL != "1h" {
+		t.Errorf("Template[0].WispTTL = %q, want %q", exp.Template[0].WispTTL, "1h")
+	}
+	if exp.Template[0].ConsumerBeadID != "{target}.consume-wisp" {
+		t.Errorf("Template[0].ConsumerBeadID = %q, want %q",
+			exp.Template[0].ConsumerBeadID, "{target}.consume-wisp")
+	}
+
+	wf, err := Parse(workflow)
+	if err != nil {
+		t.Fatalf("Parse workflow: %v", err)
+	}
+
+	dir := t.TempDir()
+	if writeErr := os.WriteFile(filepath.Join(dir, "test-lifecycle-expansion.formula.toml"), expansion, 0644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	expanded, err := applyExpandRule(wf.Steps, &ExpandRule{Target: "work", With: "test-lifecycle-expansion"}, []string{dir})
+	if err != nil {
+		t.Fatalf("applyExpandRule: %v", err)
+	}
+
+	// Should be: prep, work.emits-wisp, work.consume-wisp
+	wantIDs := []string{"prep", "work.emits-wisp", "work.consume-wisp"}
+	if len(expanded) != len(wantIDs) {
+		t.Fatalf("got %d steps, want %d", len(expanded), len(wantIDs))
+	}
+	for i, want := range wantIDs {
+		if expanded[i].ID != want {
+			t.Errorf("step[%d].ID = %q, want %q", i, expanded[i].ID, want)
+		}
+	}
+
+	// Wisp-emitting step should carry the TTL verbatim and the consumer with
+	// placeholders expanded.
+	emits := expanded[1]
+	if emits.WispTTL != "1h" {
+		t.Errorf("work.emits-wisp.WispTTL = %q, want %q", emits.WispTTL, "1h")
+	}
+	if emits.ConsumerBeadID != "work.consume-wisp" {
+		t.Errorf("work.emits-wisp.ConsumerBeadID = %q, want %q",
+			emits.ConsumerBeadID, "work.consume-wisp")
+	}
+
+	// Consumer step has no lifecycle annotation — it's the consumer, not a
+	// wisp creator.
+	consume := expanded[2]
+	if consume.WispTTL != "" || consume.ConsumerBeadID != "" {
+		t.Errorf("work.consume-wisp should have empty lifecycle fields; got WispTTL=%q ConsumerBeadID=%q",
+			consume.WispTTL, consume.ConsumerBeadID)
+	}
+}

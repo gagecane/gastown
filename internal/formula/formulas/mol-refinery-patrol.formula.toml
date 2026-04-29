@@ -279,6 +279,12 @@ Track verified MR list for this cycle."""
 id = "process-branch"
 title = "Mechanical rebase"
 needs = ["queue-scan"]
+# Lifecycle (gu-hhqk AC6): On rebase conflict, this step may create a task
+# bead ("Resolve merge conflicts: ...") as real rework — owned by an assigned
+# polecat, not an ephemeral wisp. Consumer is the polecat that closes it.
+# No TTL because these are first-class tasks, not HANDOFF/wisp dead-letter
+# candidates. Annotated here so readers know the intent explicitly.
+consumer_bead_id = "assigned polecat (full task bead, not ephemeral)"
 description = """
 Pick next branch from queue. Attempt mechanical rebase on the MR's effective target branch.
 
@@ -421,6 +427,13 @@ Track results: pass count, fail count, specific failures."""
 id = "quality-review"
 title = "Quality review merge diff"
 needs = ["run-tests"]
+# Lifecycle (gu-hhqk AC6): Creates an ephemeral "quality-review" wisp
+# (`bd create ... --ephemeral`) that records the review score for the current
+# MR. Consumer is the next patrol cycle that reads the score in handle-failures
+# and closes the wisp after acting on it. TTL is a safety net if the patrol
+# exits before consuming.
+wisp_ttl = "1h"
+consumer_bead_id = "handle-failures step (same patrol molecule)"
 description = """
 **Config: judgment_enabled = {{judgment_enabled}}**
 **Config: review_depth = {{review_depth}}**
@@ -493,6 +506,11 @@ Track: review score, recommendation, issue count, duration."""
 id = "handle-failures"
 title = "Handle quality check or test failures"
 needs = ["quality-review"]
+# Lifecycle (gu-hhqk AC6): On pre-existing flaky-test discovery, creates a
+# long-lived bug bead (first-class work, not an ephemeral wisp). Consumer is
+# the polecat later assigned to fix the flake. No TTL — bugs are real issues.
+# Annotated here so readers know the intent explicitly.
+consumer_bead_id = "assigned polecat (full bug bead, not ephemeral)"
 description = """
 **VERIFICATION GATE**: This step enforces the Beads Promise.
 
@@ -978,6 +996,14 @@ Keep only: pending MRs in queue."""
 id = "burn-or-loop"
 title = "Burn and respawn or loop"
 needs = ["patrol-cleanup"]
+# Lifecycle (gu-hhqk AC6): `gt patrol report` closes the current patrol wisp
+# and creates a fresh successor (immediate, guaranteed consumption). `gt
+# handoff` creates a HANDOFF mail bead intended for the respawned refinery
+# session; TTL caps the case where respawn never happens (daemon crash,
+# manual kill). The reaper's hooked_mail scan (gu-hhqk) sweeps expired
+# HANDOFFs.
+wisp_ttl = "30m"
+consumer_bead_id = "next refinery patrol cycle (self-respawn)"
 description = """
 End of patrol cycle decision. Use the signals from context-check to decide.
 

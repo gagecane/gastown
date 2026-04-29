@@ -1049,6 +1049,12 @@ See: GH#24, gt-7awfj
 id = "patrol-digest"
 title = "Aggregate daily patrol digests"
 needs = ["costs-digest"]
+# Lifecycle (gu-hhqk AC6): `gt patrol digest` creates a permanent
+# "Patrol Report YYYY-MM-DD" bead (first-class audit record, NOT ephemeral)
+# and deletes the source ephemeral per-cycle digests as part of its own
+# transaction. Consumer is the permanent audit record itself; no TTL because
+# the aggregated bead is intentionally long-lived.
+consumer_bead_id = "permanent Patrol Report YYYY-MM-DD bead (audit record)"
 description = """
 **DAILY DIGEST** - Aggregate yesterday's patrol cycle digests.
 
@@ -1172,6 +1178,14 @@ This enables the Deacon to burn and respawn cleanly."""
 id = "loop-or-exit"
 title = "Loop or exit for respawn"
 needs = ["context-check"]
+# Lifecycle (gu-hhqk AC6): `gt patrol report` closes the current patrol wisp
+# and creates a fresh successor, so consumption is immediate and guaranteed
+# inside the patrol loop. `gt handoff` creates a HANDOFF mail bead intended
+# for the respawned deacon session — TTL caps the case where respawn never
+# happens (e.g. daemon crash). The reaper's hooked_mail scan (gu-hhqk) handles
+# the actual sweep.
+wisp_ttl = "30m"
+consumer_bead_id = "next deacon patrol cycle (self-respawn)"
 description = """
 End of patrol cycle decision.
 

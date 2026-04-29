@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -147,6 +148,13 @@ func (f *Formula) validateWorkflow() error {
 		}
 	}
 
+	// Validate wisp_ttl on each step (if declared)
+	for _, step := range f.Steps {
+		if err := validateWispTTL(step.WispTTL); err != nil {
+			return fmt.Errorf("step %q: %w", step.ID, err)
+		}
+	}
+
 	// Check for cycles
 	if err := f.checkCycles(); err != nil {
 		return err
@@ -178,6 +186,14 @@ func (f *Formula) validateExpansion() error {
 			if !seen[need] {
 				return fmt.Errorf("template %q needs unknown template: %s", tmpl.ID, need)
 			}
+		}
+	}
+
+	// Validate wisp_ttl on each template (if declared). Propagates to the
+	// generated Step when the expansion is applied.
+	for _, tmpl := range f.Template {
+		if err := validateWispTTL(tmpl.WispTTL); err != nil {
+			return fmt.Errorf("template %q: %w", tmpl.ID, err)
 		}
 	}
 
@@ -216,6 +232,25 @@ func (f *Formula) checkCycles() error {
 		deps[step.ID] = step.Needs
 	}
 	return checkDependencyCycles(deps)
+}
+
+// validateWispTTL checks that a wisp_ttl field is a valid Go time.Duration
+// (for example "15m", "2h30m"), or the literal "inherit" meaning "use the
+// reaper's default TTL", or empty (meaning the step creates no ephemeral
+// beads, or relies on consumer_bead_id instead).
+//
+// This is a lightweight, descriptive check: the reaper uses its own TTL
+// configuration today (see internal/reaper/hooked_mail.go, gu-hhqk). The
+// goal is to make the lifecycle policy discoverable on the formula side and
+// catch typos early (e.g. "15min" or "1 hour").
+func validateWispTTL(ttl string) error {
+	if ttl == "" || ttl == "inherit" {
+		return nil
+	}
+	if _, err := time.ParseDuration(ttl); err != nil {
+		return fmt.Errorf("invalid wisp_ttl %q: must be empty, \"inherit\", or a Go duration like \"15m\" (%v)", ttl, err)
+	}
+	return nil
 }
 
 // checkExpansionCycles detects circular dependencies in expansion templates.
@@ -651,10 +686,12 @@ func applyExpandRule(steps []Step, rule *ExpandRule, searchPaths []string) ([]St
 	expanded := make([]Step, 0, len(expansion.Template))
 	for _, tmpl := range expansion.Template {
 		newStep := Step{
-			ID:          expandPlaceholders(tmpl.ID, rule.Target, targetStep),
-			Title:       expandPlaceholders(tmpl.Title, rule.Target, targetStep),
-			Description: expandPlaceholders(tmpl.Description, rule.Target, targetStep),
-			Acceptance:  expandPlaceholders(tmpl.Acceptance, rule.Target, targetStep),
+			ID:             expandPlaceholders(tmpl.ID, rule.Target, targetStep),
+			Title:          expandPlaceholders(tmpl.Title, rule.Target, targetStep),
+			Description:    expandPlaceholders(tmpl.Description, rule.Target, targetStep),
+			Acceptance:     expandPlaceholders(tmpl.Acceptance, rule.Target, targetStep),
+			WispTTL:        tmpl.WispTTL,
+			ConsumerBeadID: expandPlaceholders(tmpl.ConsumerBeadID, rule.Target, targetStep),
 		}
 		if len(tmpl.Needs) == 0 {
 			// First expanded step inherits the target's own needs.

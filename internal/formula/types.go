@@ -118,23 +118,36 @@ type Synthesis struct {
 }
 
 // Step represents a sequential step in a workflow formula.
+//
+// Wisp/HANDOFF lifecycle (GUPP, gu-hhqk):
+// Steps that create ephemeral beads (wisps, HANDOFF messages, patrol reports)
+// MUST declare either an explicit consumer (ConsumerBeadID) or a bounded
+// lifetime (WispTTL). This prevents dead-letter accumulation when downstream
+// consumers fail or reroute. See docs/concepts/propulsion-principle.md.
+// The fields are descriptive metadata — the reaper/doctor tooling uses its own
+// TTL configuration; these annotations make the policy discoverable and
+// auditable on the formula side.
 type Step struct {
-	ID          string   `toml:"id"`
-	Title       string   `toml:"title"`
-	Description string   `toml:"description"`
-	Needs       []string `toml:"needs"`
-	Parallel    bool     `toml:"parallel"`    // If true, this step can run concurrently with other parallel steps that share the same needs
-	Interactive bool     `toml:"interactive"` // If true, this step requires user dialog and runs in the current session instead of being dispatched to a polecat
-	Acceptance  string   `toml:"acceptance"`  // Exit criteria for this step (used by Ralph loop mode)
+	ID             string   `toml:"id"`
+	Title          string   `toml:"title"`
+	Description    string   `toml:"description"`
+	Needs          []string `toml:"needs"`
+	Parallel       bool     `toml:"parallel"`         // If true, this step can run concurrently with other parallel steps that share the same needs
+	Interactive    bool     `toml:"interactive"`      // If true, this step requires user dialog and runs in the current session instead of being dispatched to a polecat
+	Acceptance     string   `toml:"acceptance"`       // Exit criteria for this step (used by Ralph loop mode)
+	WispTTL        string   `toml:"wisp_ttl"`         // Declared TTL for ephemeral beads this step creates (Go duration like "15m" or "inherit" to use reaper default). Empty means the step creates no ephemeral beads.
+	ConsumerBeadID string   `toml:"consumer_bead_id"` // Declared consumer for ephemeral beads this step creates (bead ID or descriptive identifier with {{var}} substitutions). Empty means TTL-bounded instead of consumer-bounded.
 }
 
 // Template represents a template step in an expansion formula.
 type Template struct {
-	ID          string   `toml:"id"`
-	Title       string   `toml:"title"`
-	Description string   `toml:"description"`
-	Needs       []string `toml:"needs"`
-	Acceptance  string   `toml:"acceptance"` // Exit criteria for this expanded step (propagated to generated Step)
+	ID             string   `toml:"id"`
+	Title          string   `toml:"title"`
+	Description    string   `toml:"description"`
+	Needs          []string `toml:"needs"`
+	Acceptance     string   `toml:"acceptance"`       // Exit criteria for this expanded step (propagated to generated Step)
+	WispTTL        string   `toml:"wisp_ttl"`         // Propagated to generated Step (see Step.WispTTL)
+	ConsumerBeadID string   `toml:"consumer_bead_id"` // Propagated to generated Step (see Step.ConsumerBeadID)
 }
 
 // Var represents a variable definition for formulas.
