@@ -1101,6 +1101,108 @@ func TestDiscoverPolecatWorktrees_SkipsWhenNoGitFound(t *testing.T) {
 	}
 }
 
+// TestDiscoverPolecatWorktrees_SkipsDeadNested verifies that when the polecats
+// parent directory is itself nested inside another polecat worktree (e.g., a
+// recursive-spawn artifact like `polecats/alice/myrig/polecats/`), all
+// children are skipped even if they have valid .git layouts.
+func TestDiscoverPolecatWorktrees_SkipsDeadNested(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Simulate the dead-nested layout:
+	//   polecats/alice/myrig/.git            ← outer, legitimate polecat worktree
+	//   polecats/alice/myrig/polecats/bob/myrig/.git  ← nested recursive-spawn artifact
+	outerWorktree := filepath.Join(tmpDir, "polecats", "alice", "myrig")
+	os.MkdirAll(outerWorktree, 0755)
+	os.WriteFile(filepath.Join(outerWorktree, ".git"), []byte("gitdir: /outer"), 0644)
+
+	innerPolecats := filepath.Join(outerWorktree, "polecats")
+	innerWorktree := filepath.Join(innerPolecats, "bob", "myrig")
+	os.MkdirAll(innerWorktree, 0755)
+	os.WriteFile(filepath.Join(innerWorktree, ".git"), []byte("gitdir: /inner"), 0644)
+
+	// Discovery on the nested polecats/ dir must return nothing, even though
+	// the child worktree has a valid .git file.
+	dirs := DiscoverPolecatWorktrees(innerPolecats)
+	if len(dirs) != 0 {
+		t.Errorf("expected nested polecats dir to be skipped, got %v", dirs)
+	}
+
+	// Sanity: the outer polecats/ dir is still a first-class location.
+	outerPolecats := filepath.Join(tmpDir, "polecats")
+	outer := DiscoverPolecatWorktrees(outerPolecats)
+	if len(outer) != 1 || outer[0] != outerWorktree {
+		t.Errorf("expected outer polecats to return [%s], got %v", outerWorktree, outer)
+	}
+}
+
+func TestIsDeadNestedPolecatDir(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"empty", "", false},
+		{"no polecats segment", "/home/user/town/rig/crew/alice", false},
+		{"town polecats dir", "/home/user/town/rig/polecats", false},
+		{"polecat state dir", "/home/user/town/rig/polecats/alice", false},
+		{"polecat worktree", "/home/user/town/rig/polecats/alice/rig", false},
+		{"file inside polecat worktree", "/home/user/town/rig/polecats/alice/rig/src/main.go", false},
+		{"dead nested polecats dir", "/home/user/town/rig/polecats/alice/rig/polecats", true},
+		{"dead nested state dir", "/home/user/town/rig/polecats/alice/rig/polecats/bob", true},
+		{"dead nested worktree", "/home/user/town/rig/polecats/alice/rig/polecats/bob/rig", true},
+		{"deeply nested", "/home/user/town/rig/polecats/a/rig/polecats/b/rig/polecats/c/rig", true},
+		{"substring polecatsX must not trigger", "/home/user/town/rig/polecatsX/alice", false},
+		{"relative path with leading polecats/", "polecats/alice/rig/polecats/bob", true},
+		{"relative first-class", "polecats/alice/rig", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsDeadNestedPolecatDir(tt.path); got != tt.want {
+				t.Errorf("IsDeadNestedPolecatDir(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiscoverRoleLocations_SkipsDeadNestedRig verifies that when townRoot
+// happens to sit inside a polecat worktree (e.g., test fixtures or an
+// unexpected cwd), a rig-shaped directory that is itself a nested-spawn
+// artifact does not leak into DiscoverRoleLocations output.
+func TestDiscoverRoleLocations_SkipsDeadNestedRig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Treat the tmpDir as if it were itself nested inside a polecat's worktree.
+	// Structure:
+	//   <tmpDir>/polecats/alice/myrig/   ← first-level polecat worktree
+	//   <tmpDir>/polecats/alice/myrig/fakeRig/polecats/  ← nested rig artifact
+	// If we call DiscoverRoleLocations on the nested myrig/ as though it were
+	// a town root, any children that are themselves "dead nested" must be
+	// filtered out.
+	outer := filepath.Join(tmpDir, "polecats", "alice", "myrig")
+	os.MkdirAll(outer, 0755)
+
+	// Inside the outer worktree, simulate a rig-shaped dir that is really a
+	// recursive-spawn artifact (fakeRig lives inside another polecat layer).
+	fakeRig := filepath.Join(outer, "polecats", "bob", "myrig", "fakeRig")
+	os.MkdirAll(filepath.Join(fakeRig, "polecats"), 0755)
+	os.MkdirAll(filepath.Join(fakeRig, "crew"), 0755)
+
+	// Point DiscoverRoleLocations at the enclosing nested polecats directory
+	// (a worst-case foot-gun). It should return no locations for the dead
+	// nested rig because IsDeadNestedPolecatDir flags it.
+	nestedTownRoot := filepath.Join(outer, "polecats", "bob", "myrig")
+	locations, err := DiscoverRoleLocations(nestedTownRoot)
+	if err != nil {
+		t.Fatalf("DiscoverRoleLocations: %v", err)
+	}
+	for _, loc := range locations {
+		if strings.Contains(filepath.ToSlash(loc.Dir), "fakeRig") {
+			t.Errorf("expected fakeRig to be filtered as dead-nested, got location: %+v", loc)
+		}
+	}
+}
+
 func TestDiscoverRoleLocations_ReadError(t *testing.T) {
 	_, err := DiscoverRoleLocations("/nonexistent/path/that/does/not/exist")
 	if err == nil {

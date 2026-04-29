@@ -303,3 +303,73 @@ func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 		t.Errorf("editorMode not preserved: got %q, want %q", settings.EditorMode, "vim")
 	}
 }
+
+// TestHooksSyncCheck_SkipsDeadNestedPolecatDirs is a regression test for
+// gu-eibv: hooks-sync must not count dead nested polecat dirs (recursive
+// spawn artifacts) as targets. These dirs accumulate when older builds
+// recursively created polecat workspaces inside existing polecat
+// worktrees (e.g., polecats/alice/myrig/polecats/bob/myrig/), and no
+// active session uses them. Including them inflates the target count and
+// wastes work.
+func TestHooksSyncCheck_SkipsDeadNestedPolecatDirs(t *testing.T) {
+	townRoot := scaffoldWorkspace(t, map[string]string{"polecat": "opencode"})
+
+	// Create a legitimate polecat worktree.
+	legitWorktree := filepath.Join(townRoot, "myrig", "polecats", "alice", "myrig")
+	if err := os.MkdirAll(legitWorktree, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legitWorktree, ".git"), []byte("gitdir: /real"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Install the correct OpenCode template so it's in sync.
+	expectedContent, err := hooks.ComputeExpectedTemplate("opencode", "gastown.js", "polecat")
+	if err != nil {
+		t.Fatalf("ComputeExpectedTemplate: %v", err)
+	}
+	legitPluginDir := filepath.Join(legitWorktree, ".opencode", "plugins")
+	if err := os.MkdirAll(legitPluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legitPluginDir, "gastown.js"), expectedContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a dead-nested polecat worktree artifact INSIDE the legit
+	// worktree. This simulates the recursive-spawn pattern described in
+	// gu-eibv. It has a valid .git file but stale plugin content — if the
+	// checker saw it, it would report out-of-sync.
+	deadWorktree := filepath.Join(legitWorktree, "polecats", "bob", "myrig")
+	if err := os.MkdirAll(deadWorktree, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadWorktree, ".git"), []byte("gitdir: /zombie"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	deadPluginDir := filepath.Join(deadWorktree, ".opencode", "plugins")
+	if err := os.MkdirAll(deadPluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deadPluginDir, "gastown.js"), []byte("// stale zombie content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sync Claude targets so remaining failures are attributable to the
+	// template-agent code path only.
+	syncAllClaudeTargets(t, townRoot)
+
+	check := NewHooksSyncCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	result := check.Run(ctx)
+
+	// Success = the dead nested worktree did not contribute an out-of-sync
+	// target. If the guard regresses, the check would flag the zombie
+	// plugin file and return StatusWarning.
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK (dead nested polecat should be skipped), got %v: %s",
+			result.Status, result.Message)
+		for _, d := range result.Details {
+			t.Logf("  detail: %s", d)
+		}
+	}
+}

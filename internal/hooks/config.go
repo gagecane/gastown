@@ -446,6 +446,12 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 		if !isRig(rigPath) {
 			continue
 		}
+		// Skip rig-shaped dirs that are actually nested polecat spawn
+		// artifacts (defence in depth — legitimate town roots never have
+		// children satisfying IsDeadNestedPolecatDir).
+		if IsDeadNestedPolecatDir(rigPath) {
+			continue
+		}
 
 		// Crew — one shared settings file in the crew parent directory.
 		// All crew members share this via --settings flag.
@@ -540,6 +546,14 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 		if !isRig(rigPath) {
 			continue
 		}
+		// Defence in depth: if townRoot happens to sit inside another
+		// polecat worktree (e.g., FindFromCwd pointed here from a nested
+		// dir), skip recursive-spawn rig artifacts. This is a no-op for
+		// legitimate town roots because their children never satisfy
+		// IsDeadNestedPolecatDir.
+		if IsDeadNestedPolecatDir(rigPath) {
+			continue
+		}
 
 		// Map subdirectories to roles
 		for _, sub := range []struct{ dir, role string }{
@@ -595,8 +609,21 @@ func DiscoverWorktrees(roleDir string) []string {
 // rather than returning the state dir, because writing hook files to the
 // state dir is invisible to agent sessions (the original bug).
 //
+// Dead nested polecat directories — artifacts of recursive polecat spawns
+// that created `polecats/<name>/<rigName>/polecats/<name>/<rigName>/...`
+// layouts — are also skipped. See IsDeadNestedPolecatDir for the detection
+// rule. These dirs are orphaned (no active agent session uses them) and
+// writing hook files into them wastes work and inflates doctor target
+// counts.
+//
 // Callers that need the state dir (e.g., for mail) should use DiscoverWorktrees.
 func DiscoverPolecatWorktrees(polecatsDir string) []string {
+	// If the polecats parent directory is itself inside another polecat
+	// worktree, it's a recursive-spawn artifact — skip every child.
+	if IsDeadNestedPolecatDir(polecatsDir) {
+		return nil
+	}
+
 	entries, err := os.ReadDir(polecatsDir)
 	if err != nil {
 		return nil
@@ -613,6 +640,49 @@ func DiscoverPolecatWorktrees(polecatsDir string) []string {
 		}
 	}
 	return worktrees
+}
+
+// IsDeadNestedPolecatDir reports whether path lives inside a polecat worktree,
+// which means path is a recursive-spawn artifact rather than a first-class
+// location.
+//
+// Gas Town polecats live at `<rig>/polecats/<name>/<rigname>/`. A first-class
+// path therefore has at most one `polecats` directory segment above it. If
+// path has two or more `polecats` segments, then somewhere above path there
+// is a `polecats/<name>/<rigname>/polecats` pattern — meaning path was
+// produced by a polecat spawn recursing inside another polecat's worktree.
+//
+// Dead nested dirs like these accumulate when older builds recursively created
+// polecat workspaces inside existing polecat worktrees. No active session
+// uses them. Hooks, doctor checks, and other workspace sweeps must skip them
+// so the orphaned dirs do not inflate target counts or receive stale writes.
+//
+// The check is purely path-based (no filesystem access) so it is cheap and
+// callable from hot paths. It uses filepath.ToSlash to normalise separators
+// for cross-platform consistency and counts `polecats` directory components
+// via split rather than substring search so that a trailing or leading
+// `polecats` segment counts correctly (and sibling names like `polecatsX` do
+// not).
+func IsDeadNestedPolecatDir(path string) bool {
+	if path == "" {
+		return false
+	}
+	// Normalise to forward slashes so the check works on Windows too.
+	slashed := filepath.ToSlash(filepath.Clean(path))
+
+	// Split into path components and count exact "polecats" segments.
+	// This avoids false matches like "polecatsX" and correctly handles
+	// paths that end in a "polecats" segment (no trailing slash).
+	count := 0
+	for _, seg := range strings.Split(slashed, "/") {
+		if seg == "polecats" {
+			count++
+		}
+	}
+
+	// A first-class polecat path has at most one polecats/ segment.
+	// Two or more means the path is nested inside another polecat worktree.
+	return count >= 2
 }
 
 // findNestedWorktree looks inside a polecat state dir for its git worktree.
