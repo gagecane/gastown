@@ -92,6 +92,43 @@ type MergeQueueConfig struct {
 	// is enabled. Valid values: "quick", "standard", "deep".
 	// Nil defaults to "standard".
 	ReviewDepth string `json:"review_depth,omitempty"`
+
+	// Gates defines named quality gate commands to run before (and optionally
+	// after) the squash merge. When non-empty, gates replace the legacy
+	// RunTests/TestCommand path. Each gate runs as a shell command with an
+	// optional per-gate timeout and phase.
+	//
+	// The canonical runtime parsing (durations, phase enums) lives in
+	// internal/refinery/engineer.go. This struct mirrors the on-disk JSON
+	// shape so that `gt rig settings set` / `show` round-trip through a
+	// single source of truth.
+	Gates map[string]*GateConfig `json:"gates,omitempty"`
+
+	// GatesParallel controls whether gates run concurrently.
+	// When true, all gates start simultaneously; any failure = overall failure.
+	// Nil means "not configured" (refinery default applies).
+	GatesParallel *bool `json:"gates_parallel,omitempty"`
+}
+
+// GateConfig defines a single quality gate command as stored in
+// settings/config.json. The runtime form (with parsed time.Duration / phase
+// enum) lives in internal/refinery/engineer.go. This type exists so the
+// canonical RigSettings struct is aware of gates, which lets the `gt rig
+// settings` CLI accept and preserve gate configuration.
+type GateConfig struct {
+	// Cmd is the shell command to execute.
+	Cmd string `json:"cmd"`
+
+	// Timeout is a Go duration string (e.g., "30s", "5m") capping the gate's
+	// run time. Empty means no per-gate timeout; the refinery inherits the
+	// context deadline.
+	Timeout string `json:"timeout,omitempty"`
+
+	// Phase controls when this gate runs: "pre-merge" (default) or
+	// "post-squash". Pre-merge gates run before the squash merge on the
+	// source branch. Post-squash gates run after the squash merge on the
+	// combined result, before pushing.
+	Phase string `json:"phase,omitempty"`
 }
 
 // OnConflict strategy constants.
