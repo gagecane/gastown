@@ -178,7 +178,7 @@ type MergeQueueConfig struct {
 	MergeStrategy string `json:"merge_strategy,omitempty"`
 
 	// VCSProvider selects the VCS platform for PR operations when
-	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket".
+	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket", "amazon".
 	VCSProvider string `json:"vcs_provider,omitempty"`
 
 	// RequireReview controls whether the refinery requires at least one approving
@@ -528,8 +528,14 @@ func (e *Engineer) initPRProvider() error {
 			return err
 		}
 		e.prProvider = p
+	case "amazon":
+		p, err := newCruxPRProvider(e.git)
+		if err != nil {
+			return err
+		}
+		e.prProvider = p
 	default:
-		return fmt.Errorf("unknown vcs_provider %q (supported: github, bitbucket)", e.config.VCSProvider)
+		return fmt.Errorf("unknown vcs_provider %q (supported: github, bitbucket, amazon)", e.config.VCSProvider)
 	}
 	return nil
 }

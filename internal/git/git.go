@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1147,6 +1149,68 @@ func (g *Git) BitbucketPRMerge(workspace, repoSlug string, prID int, strategy st
 	sha, _ := g.Rev("HEAD")
 	return sha, nil
 }
+
+// FindCruxCRID scans recent commits on the given branch for a CRUX code review
+// trailer (code.amazon.com/reviews/CR-<N>) and returns the numeric CR ID.
+// Returns 0 if no CR ID is present. Unlike GitHub/Bitbucket there is no public
+// API to query open reviews by branch, so we infer the CR from commit trailers
+// that `cr --amend` writes when the review is created.
+func (g *Git) FindCruxCRID(branch string) (int, error) {
+	// Look at the last 20 commits on the branch — more than enough to find a
+	// trailer written by the creating polecat, and bounded so the scan is cheap.
+	out, err := g.run("log", "-20", "--format=%B", branch)
+	if err != nil {
+		return 0, fmt.Errorf("git log for CR trailer failed: %w", err)
+	}
+	// ExtractCRID is defined in internal/crux but to avoid an import cycle we
+	// inline the equivalent regex match here. This regex mirrors crux.crIDPattern.
+	matches := cruxCRIDPattern.FindStringSubmatch(out)
+	if len(matches) < 2 {
+		return 0, nil
+	}
+	id, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0, nil
+	}
+	return id, nil
+}
+
+// CruxCRCreate invokes the `cr` CLI to create or update an Amazon CRUX code
+// review for the currently checked-out branch. When crID > 0 the existing
+// review is updated; otherwise a new review is created.
+//
+// The review is always created with --publish and --auto-merge so CRUX merges
+// automatically once required approvals land. Additional args are passed
+// verbatim to allow callers to supply --summary, --description, etc. via
+// crux.BuildCreateArgs.
+//
+// Returns the numeric CR ID parsed from `cr`'s output, or 0 if none could be
+// recovered (the review may still have been created — callers should treat
+// a zero return as "unknown" rather than a hard failure).
+func (g *Git) CruxCRCreate(args []string) (int, string, error) {
+	cmd := exec.Command("cr", args...) //nolint:gosec // G204: args built by caller via crux.BuildCreateArgs
+	cmd.Dir = g.workDir
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+	if err != nil {
+		return 0, output, fmt.Errorf("cr failed: %s: %w", strings.TrimSpace(output), err)
+	}
+	// Recover the CR ID from the command output for logging and bead notes.
+	// Reuses the cruxCRIDPattern defined below.
+	matches := cruxCRIDPattern.FindStringSubmatch(output)
+	if len(matches) < 2 {
+		return 0, output, nil
+	}
+	id, atoiErr := strconv.Atoi(matches[1])
+	if atoiErr != nil {
+		return 0, output, nil
+	}
+	return id, output, nil
+}
+
+// cruxCRIDPattern matches CRUX CR identifiers. Kept in-package to avoid an
+// import cycle with internal/crux (which depends on types this package exposes).
+var cruxCRIDPattern = regexp.MustCompile(`CR-(\d+)`)
 
 // ListRemoteRefs returns remote ref names matching a prefix using ls-remote.
 // The prefix filters refs (e.g., "refs/heads/polecat/" for all polecat branches).
