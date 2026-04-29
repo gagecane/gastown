@@ -1434,6 +1434,47 @@ func (g *Git) RemoteBranchExists(remote, branch string) (bool, error) {
 	return out != "", nil
 }
 
+// ListRemoteHeadsAtURL returns the list of branch names that exist at a given
+// remote URL, using `git ls-remote --heads <url>`. This does not require a
+// local clone of the remote — it reaches out over the network (or reads the
+// URL directly for file:// / local paths) to enumerate heads.
+//
+// Used by `gt rig add` to diagnose cases where the user may have onboarded a
+// repo whose default branch does not contain their real work (e.g. an empty
+// `main` with meaningful commits on a feature branch).
+//
+// Returns branch short names like ["main", "develop", "feature/x"].
+// If the remote cannot be reached or has no heads, returns an empty slice
+// without error — callers should treat that as "nothing to report".
+func (g *Git) ListRemoteHeadsAtURL(url string) ([]string, error) {
+	out, err := g.run("ls-remote", "--heads", url)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
+	var branches []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// ls-remote output format: <sha>\trefs/heads/<branch>
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		ref := parts[1]
+		const headsPrefix = "refs/heads/"
+		if !strings.HasPrefix(ref, headsPrefix) {
+			continue
+		}
+		branches = append(branches, strings.TrimPrefix(ref, headsPrefix))
+	}
+	return branches, nil
+}
+
 // PushRemoteBranchExists checks if a branch exists on the push target of a remote.
 // With a fork-based or local-bare-repo workflow (pushurl configured), pushes go to
 // the push URL but ls-remote resolves the fetch URL. This method queries the push

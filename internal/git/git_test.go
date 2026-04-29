@@ -2311,3 +2311,91 @@ func TestResolveRemoteBaseline_Fallbacks(t *testing.T) {
 		t.Errorf("baseline after HEAD removal = %q, want origin/main (probe fallback)", baseline)
 	}
 }
+
+// TestListRemoteHeadsAtURL verifies that ListRemoteHeadsAtURL enumerates
+// all branch heads on a remote via `git ls-remote --heads`.
+// Used by `gt rig add` to diagnose cases where the user may have onboarded
+// a repo whose default branch does not contain their real work. (gu-48wk)
+func TestListRemoteHeadsAtURL(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Build a remote repo with multiple branches.
+	remote := filepath.Join(tmp, "remote")
+	if err := os.MkdirAll(remote, 0755); err != nil {
+		t.Fatalf("mkdir remote: %v", err)
+	}
+	runCmd := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	runCmd(remote, "init", "-b", "main")
+	runCmd(remote, "config", "user.email", "test@test.com")
+	runCmd(remote, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(remote, "README.md"), []byte("# r\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(remote, "add", ".")
+	runCmd(remote, "commit", "-m", "initial")
+	runCmd(remote, "checkout", "-b", "develop")
+	runCmd(remote, "checkout", "-b", "feature/x")
+	runCmd(remote, "checkout", "main")
+
+	g := NewGit(tmp)
+	branches, err := g.ListRemoteHeadsAtURL(remote)
+	if err != nil {
+		t.Fatalf("ListRemoteHeadsAtURL: %v", err)
+	}
+
+	have := map[string]bool{}
+	for _, b := range branches {
+		have[b] = true
+	}
+	for _, want := range []string{"main", "develop", "feature/x"} {
+		if !have[want] {
+			t.Errorf("ListRemoteHeadsAtURL: missing branch %q; got %v", want, branches)
+		}
+	}
+	// Sanity: no ref-spec prefix should leak through.
+	for _, b := range branches {
+		if strings.HasPrefix(b, "refs/heads/") {
+			t.Errorf("ListRemoteHeadsAtURL: branch %q contains refs/heads/ prefix (should be stripped)", b)
+		}
+	}
+}
+
+// TestListRemoteHeadsAtURL_SingleBranch verifies behavior on a repo with
+// exactly one branch (the "no warning" path in AddRig's gu-48wk diagnostic).
+func TestListRemoteHeadsAtURL_SingleBranch(t *testing.T) {
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote")
+	if err := os.MkdirAll(remote, 0755); err != nil {
+		t.Fatalf("mkdir remote: %v", err)
+	}
+	runCmd := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	runCmd(remote, "init", "-b", "main")
+	runCmd(remote, "config", "user.email", "test@test.com")
+	runCmd(remote, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(remote, "README.md"), []byte("# r\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(remote, "add", ".")
+	runCmd(remote, "commit", "-m", "initial")
+
+	g := NewGit(tmp)
+	branches, err := g.ListRemoteHeadsAtURL(remote)
+	if err != nil {
+		t.Fatalf("ListRemoteHeadsAtURL: %v", err)
+	}
+	if len(branches) != 1 || branches[0] != "main" {
+		t.Errorf("expected exactly [main], got %v", branches)
+	}
+}

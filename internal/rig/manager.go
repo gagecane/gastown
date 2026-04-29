@@ -496,6 +496,40 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return nil, fmt.Errorf("updating rig config with default branch: %w", err)
 	}
 
+	// Diagnostic: when the user did not explicitly specify --branch, the shallow
+	// single-branch clone only brings in the remote's default branch. If the
+	// remote has meaningful work on other branches (e.g. an unmerged feature
+	// branch), warn so the user knows to pass --branch or merge first rather
+	// than discovering disjoint histories later. (gu-48wk)
+	//
+	// This is a non-fatal informational message. We keep it short and skip it
+	// silently on any ls-remote error (offline, transient DNS, etc.) — the rig
+	// is already cloned and usable; extra diagnostics should not block setup.
+	if opts.DefaultBranch == "" {
+		if branches, err := m.git.ListRemoteHeadsAtURL(opts.GitURL); err == nil && len(branches) > 1 {
+			others := make([]string, 0, len(branches))
+			for _, b := range branches {
+				if b != defaultBranch {
+					others = append(others, b)
+				}
+			}
+			if len(others) > 0 {
+				slices.Sort(others)
+				preview := others
+				const maxPreview = 5
+				suffix := ""
+				if len(preview) > maxPreview {
+					preview = preview[:maxPreview]
+					suffix = fmt.Sprintf(" (+%d more)", len(others)-maxPreview)
+				}
+				fmt.Printf("  Note: cloned %q (remote default). Other remote branches exist: %s%s\n",
+					defaultBranch, strings.Join(preview, ", "), suffix)
+				fmt.Printf("        If your real work lives elsewhere, re-add with --branch <name> or merge it into %q first.\n",
+					defaultBranch)
+			}
+		}
+	}
+
 	// Create mayor as regular clone (separate from bare repo).
 	// Mayor doesn't need to see polecat branches - that's refinery's job.
 	// This also allows mayor to stay on the default branch without conflicting with refinery.

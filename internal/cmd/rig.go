@@ -70,6 +70,14 @@ The command also:
   - Creates ~/gt/plugins/ (town-level) if it doesn't exist
   - Creates <rig>/plugins/ (rig-level)
 
+Git clone details:
+  gt uses shallow (--depth 1) single-branch clones for speed. By default it
+  clones the remote's default branch (HEAD). If your work lives on a
+  different branch (e.g. unmerged feature branch), pass --branch <name>,
+  or merge/push it to the default branch before running 'gt rig add'. If
+  other remote branches exist, gt prints a note after cloning so you can
+  re-onboard with --branch if needed. (gu-48wk)
+
 Use --adopt to register an existing directory instead of creating new:
   - Reads existing config.json if present
   - Auto-detects git URL from origin remote (git-url argument not required)
@@ -78,6 +86,7 @@ Use --adopt to register an existing directory instead of creating new:
 Example:
   gt rig add gastown https://github.com/steveyegge/gastown
   gt rig add my_project git@github.com:user/repo.git --prefix mp
+  gt rig add my_project git@github.com:user/repo.git --branch develop
   gt rig add existing_rig --adopt`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runRigAdd,
