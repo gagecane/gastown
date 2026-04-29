@@ -82,7 +82,8 @@ gt witness start gastown
 ```
 
 ## Verify
-1. Session exists: `tmux has-session -t gastown-witness 2>/dev/null`
+1. Witness alive: `gt witness status gastown` reports a running session
+   (tmux session name is `gt-witness` — prefix-based, not rig-based)
 2. Not stalled: `gt peek gastown/witness` does NOT show \"> Try\" prompt
 3. Heartbeat fresh: Last patrol cycle < 5 min ago"""
 id = "ensure-gastown-witness"
@@ -98,7 +99,8 @@ gt witness start beads
 ```
 
 ## Verify
-1. Session exists: `tmux has-session -t beads-witness 2>/dev/null`
+1. Witness alive: `gt witness status beads` reports a running session
+   (tmux session name is `bd-witness` — prefix-based, not rig-based)
 2. Not stalled: `gt peek beads/witness` does NOT show \"> Try\" prompt
 3. Heartbeat fresh: Last patrol cycle < 5 min ago"""
 id = "ensure-beads-witness"
@@ -124,7 +126,8 @@ gt refinery start gastown
 ```
 
 ## Verify
-1. Session exists: `tmux has-session -t gastown-refinery 2>/dev/null`
+1. Refinery alive: `gt refinery status gastown` reports a running session
+   (tmux session name is `gt-refinery` — prefix-based, not rig-based)
 2. Not stalled: `gt peek gastown/refinery` does NOT show \"> Try\" prompt
 3. Queue processing: Refinery can receive merge requests"""
 id = "ensure-gastown-refinery"
@@ -140,7 +143,8 @@ gt refinery start beads
 ```
 
 ## Verify
-1. Session exists: `tmux has-session -t beads-refinery 2>/dev/null`
+1. Refinery alive: `gt refinery status beads` reports a running session
+   (tmux session name is `bd-refinery` — prefix-based, not rig-based)
 2. Not stalled: `gt peek beads/refinery` does NOT show \"> Try\" prompt
 3. Queue processing: Refinery can receive merge requests"""
 id = "ensure-beads-refinery"
