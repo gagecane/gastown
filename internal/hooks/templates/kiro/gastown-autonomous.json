@@ -22,6 +22,9 @@
       },
       {
         "command": "{{GT_BIN}} costs record"
+      },
+      {
+        "command": "[ -x /home/canewiw/.meshclaw/bin/polecat-slack-notify.sh ] && /home/canewiw/.meshclaw/bin/polecat-slack-notify.sh || true"
       }
     ]
   }
