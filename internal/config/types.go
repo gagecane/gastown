@@ -1634,6 +1634,7 @@ type EscalationContacts struct {
 	HumanEmail   string `json:"human_email,omitempty"`   // email address for email:human action
 	HumanSMS     string `json:"human_sms,omitempty"`     // phone number for sms:human action
 	SlackWebhook string `json:"slack_webhook,omitempty"` // webhook URL for slack action
+	SlackScript  string `json:"slack_script,omitempty"`  // path to script for slack action (takes message as $1)
 	SMTPHost     string `json:"smtp_host,omitempty"`     // SMTP server host (e.g. "smtp.gmail.com")
 	SMTPPort     string `json:"smtp_port,omitempty"`     // SMTP server port (default "587")
 	SMTPFrom     string `json:"smtp_from,omitempty"`     // sender address for email notifications

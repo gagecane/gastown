@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -684,10 +685,17 @@ func executeExternalActions(actions []string, cfg *config.EscalationConfig, bead
 
 		case action == "slack":
 			status := deliveryStatus{Channel: "slack", Target: "slack", Severity: severity}
-			if cfg.Contacts.SlackWebhook == "" {
-				status.Warning = "contacts.slack_webhook not configured"
-				style.PrintWarning("slack action skipped: contacts.slack_webhook not configured in settings/escalation.json")
-			} else {
+			if cfg.Contacts.SlackScript != "" {
+				msg := formatEscalationSlackText(beadID, severity, description)
+				cmd := exec.Command(cfg.Contacts.SlackScript, msg)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					status.Error = fmt.Sprintf("script failed: %v: %s", err, string(out))
+					style.PrintWarning("slack script failed: %v", err)
+				} else {
+					status.RuntimeNotified = true
+					fmt.Printf("  💬 Posted to Slack via script\n")
+				}
+			} else if cfg.Contacts.SlackWebhook != "" {
 				if err := sendEscalationSlack(cfg, beadID, severity, description); err != nil {
 					status.Error = err.Error()
 					style.PrintWarning("slack post failed: %v", err)
@@ -695,6 +703,9 @@ func executeExternalActions(actions []string, cfg *config.EscalationConfig, bead
 					status.RuntimeNotified = true
 					fmt.Printf("  💬 Posted to Slack\n")
 				}
+			} else {
+				status.Warning = "contacts.slack_script or contacts.slack_webhook not configured"
+				style.PrintWarning("slack action skipped: no slack_script or slack_webhook configured in settings/escalation.json")
 			}
 			statuses = append(statuses, status)
 
@@ -712,6 +723,16 @@ func executeExternalActions(actions []string, cfg *config.EscalationConfig, bead
 	}
 	return statuses
 }
+func formatEscalationSlackText(beadID, severity, description string) string {
+	severityEmoji := map[string]string{"critical": "🔴", "high": "🟠", "medium": "🟡"}
+	emoji := severityEmoji[severity]
+	if emoji == "" {
+		emoji = "⚪"
+	}
+	return fmt.Sprintf("%s *[%s] Escalation %s*\n%s\n_Acknowledge: `gt escalate ack %s`_",
+		emoji, strings.ToUpper(severity), beadID, description, beadID)
+}
+
 
 // sendEscalationEmail sends an escalation notification via SMTP.
 func sendEscalationEmail(cfg *config.EscalationConfig, beadID, severity, description string) error {
