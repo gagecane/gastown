@@ -1,17 +1,14 @@
 package crew
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gofrs/flock"
 
-	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -143,11 +140,6 @@ func NewManager(r *rig.Rig, g *git.Git) *Manager {
 // crewDir returns the directory for a crew worker.
 func (m *Manager) crewDir(name string) string {
 	return filepath.Join(m.rig.Path, "crew", name)
-}
-
-// stateFile returns the state file path for a crew worker.
-func (m *Manager) stateFile(name string) string {
-	return filepath.Join(m.crewDir(name), "state.json")
 }
 
 // mailDir returns the mail directory path for a crew worker.
@@ -323,21 +315,19 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 	// Writing to CLAUDE.md would overwrite project instructions and leak
 	// Gas Town internals into the project repo when workers commit/push.
 
-	// Create crew worker state
-	now := time.Now()
+	// Clean up any leftover state.json from previous gt versions (gu-kplt).
+	// Crew metadata now lives in the agent bead; the on-disk file is obsolete.
+	if err := os.Remove(filepath.Join(crewPath, "state.json")); err != nil && !os.IsNotExist(err) {
+		style.PrintWarning("could not remove legacy state.json at %s: %v", crewPath, err)
+	}
+
+	// Build the crew worker view from filesystem + rig context.
+	// No on-disk persistence is needed (gu-kplt); the agent bead owns metadata.
 	crew := &CrewWorker{
 		Name:      name,
 		Rig:       m.rig.Name,
 		ClonePath: crewPath,
 		Branch:    branchName,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	// Save state
-	if err := m.saveState(crew); err != nil {
-		_ = os.RemoveAll(crewPath) // best-effort cleanup
-		return nil, fmt.Errorf("saving state: %w", err)
 	}
 
 	return crew, nil
@@ -514,52 +504,35 @@ func (m *Manager) getLocked(name string) (*CrewWorker, error) {
 		return nil, ErrCrewNotFound
 	}
 
-	return m.loadState(name)
+	return m.loadFromDisk(name)
 }
 
-// saveState persists crew worker state to disk using atomic write.
-func (m *Manager) saveState(crew *CrewWorker) error {
-	stateFile := m.stateFile(crew.Name)
-	if err := atomicfile.WriteJSON(stateFile, crew); err != nil {
-		return fmt.Errorf("writing state: %w", err)
+// loadFromDisk builds a CrewWorker view from the filesystem and live git state.
+//
+// Prior versions of Gas Town persisted this metadata to <crewDir>/state.json,
+// but that file was never read back for its mutable fields (branch, timestamps
+// were redundant vs. git and the agent bead). See gu-kplt.
+//
+// Name and ClonePath come from the directory name (the source of truth — the
+// directory cannot lie about its own name). Rig comes from the manager's rig
+// context. Branch is read live from the clone so it cannot go stale.
+func (m *Manager) loadFromDisk(name string) (*CrewWorker, error) {
+	crewPath := m.crewDir(name)
+
+	// Read the current branch from the clone. If the clone is unreadable
+	// (e.g., mid-creation, corrupted, not yet initialized), fall back to empty
+	// so callers still get a usable CrewWorker for display.
+	branch := ""
+	if b, err := git.NewGit(crewPath).CurrentBranch(); err == nil {
+		branch = b
 	}
 
-	return nil
-}
-
-// loadState reads crew worker state from disk.
-func (m *Manager) loadState(name string) (*CrewWorker, error) {
-	stateFile := m.stateFile(name)
-
-	data, err := os.ReadFile(stateFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Return minimal crew worker if state file missing
-			return &CrewWorker{
-				Name:      name,
-				Rig:       m.rig.Name,
-				ClonePath: m.crewDir(name),
-			}, nil
-		}
-		return nil, fmt.Errorf("reading state: %w", err)
-	}
-
-	var crew CrewWorker
-	if err := json.Unmarshal(data, &crew); err != nil {
-		return nil, fmt.Errorf("parsing state: %w", err)
-	}
-
-	// Directory name is source of truth for Name and ClonePath.
-	// state.json can become stale after directory rename, copy, or corruption.
-	crew.Name = name
-	crew.ClonePath = m.crewDir(name)
-
-	// Rig only needs backfill when empty (less likely to drift)
-	if crew.Rig == "" {
-		crew.Rig = m.rig.Name
-	}
-
-	return &crew, nil
+	return &CrewWorker{
+		Name:      name,
+		Rig:       m.rig.Name,
+		ClonePath: crewPath,
+		Branch:    branch,
+	}, nil
 }
 
 // Rename renames a crew worker from oldName to newName.
@@ -592,27 +565,11 @@ func (m *Manager) Rename(oldName, newName string) error {
 	oldPath := m.crewDir(oldName)
 	newPath := m.crewDir(newName)
 
-	// Rename directory
+	// Rename directory. With state.json gone (gu-kplt), the directory name is
+	// the sole source of truth for Name and ClonePath, so the rename is the
+	// entire operation — no separate metadata file to keep in sync.
 	if err := os.Rename(oldPath, newPath); err != nil {
 		return fmt.Errorf("renaming crew dir: %w", err)
-	}
-
-	// Update state file with new name and path
-	crew, err := m.loadState(newName)
-	if err != nil {
-		// Rollback on error (best-effort)
-		_ = os.Rename(newPath, oldPath)
-		return fmt.Errorf("loading state: %w", err)
-	}
-
-	crew.Name = newName
-	crew.ClonePath = newPath
-	crew.UpdatedAt = time.Now()
-
-	if err := m.saveState(crew); err != nil {
-		// Rollback on error (best-effort)
-		_ = os.Rename(newPath, oldPath)
-		return fmt.Errorf("saving state: %w", err)
 	}
 
 	return nil

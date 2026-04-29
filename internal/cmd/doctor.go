@@ -67,7 +67,7 @@ Clone divergence checks:
   - worktree-gitdir-valid    Verify worktree .git files reference existing paths (fixable)
 
 Crew workspace checks:
-  - crew-state               Validate crew worker state.json files (fixable)
+  - crew-state               Detect leftover crew state.json files from pre-migration gt (fixable)
   - crew-worktrees           Detect stale cross-rig worktrees (fixable)
 
 Migration checks (fixable):

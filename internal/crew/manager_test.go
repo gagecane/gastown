@@ -74,9 +74,13 @@ func TestManagerAddAndGet(t *testing.T) {
 	// NOTE: CLAUDE.md is NOT created by Add() - it's injected via SessionStart hook
 	// See manager.go line 107-110 for why we skip CLAUDE.md creation
 
+	// state.json was migrated to the crew agent bead in gu-kplt; the file must
+	// no longer be written on Add.
 	stateFile := filepath.Join(crewDir, "state.json")
-	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-		t.Error("state.json was not created")
+	if _, err := os.Stat(stateFile); err == nil {
+		t.Errorf("state.json should not exist after Add (migrated to beads in gu-kplt)")
+	} else if !os.IsNotExist(err) {
+		t.Errorf("unexpected error checking state.json absence: %v", err)
 	}
 
 	// Test Get
@@ -359,7 +363,10 @@ func TestManagerRemove(t *testing.T) {
 }
 
 func TestManagerGetWithStaleStateName(t *testing.T) {
-	// Regression test: state.json with wrong name should not affect Get() result
+	// Regression test: a leftover state.json from pre-migration gt versions
+	// must not affect Get() results. Since gu-kplt, crew metadata lives in
+	// the agent bead and the directory name is the sole source of truth for
+	// Name and ClonePath; any on-disk state.json is simply ignored.
 	// See: gt-h1w - gt crew list shows wrong names
 	tmpDir, err := os.MkdirTemp("", "crew-test-stale-*")
 	if err != nil {
@@ -379,13 +386,13 @@ func TestManagerGetWithStaleStateName(t *testing.T) {
 
 	mgr := NewManager(r, git.NewGit(rigPath))
 
-	// Manually create a crew directory with wrong name in state.json
+	// Manually create a crew directory with a leftover state.json from an
+	// older gt version (wrong name on purpose, to simulate stale/copied state).
 	crewDir := filepath.Join(rigPath, "crew", "alice")
 	if err := os.MkdirAll(crewDir, 0755); err != nil {
 		t.Fatalf("failed to create crew dir: %v", err)
 	}
 
-	// Write state.json with wrong name (simulates stale/copied state)
 	stateFile := filepath.Join(crewDir, "state.json")
 	staleState := `{"name": "bob", "rig": "test-rig", "clone_path": "/wrong/path"}`
 	if err := os.WriteFile(stateFile, []byte(staleState), 0644); err != nil {
@@ -399,12 +406,16 @@ func TestManagerGetWithStaleStateName(t *testing.T) {
 	}
 
 	if worker.Name != "alice" {
-		t.Errorf("expected name 'alice', got '%s' (stale state.json not overridden)", worker.Name)
+		t.Errorf("expected name 'alice', got '%s' (directory-name-as-truth broken)", worker.Name)
 	}
 
 	expectedPath := filepath.Join(rigPath, "crew", "alice")
 	if worker.ClonePath != expectedPath {
 		t.Errorf("expected clone_path '%s', got '%s'", expectedPath, worker.ClonePath)
+	}
+
+	if worker.Rig != "test-rig" {
+		t.Errorf("expected rig 'test-rig', got '%s' (rig must come from manager context, not state.json)", worker.Rig)
 	}
 }
 

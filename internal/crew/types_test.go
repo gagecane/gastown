@@ -3,18 +3,14 @@ package crew
 import (
 	"encoding/json"
 	"testing"
-	"time"
 )
 
 func TestCrewWorker_Summary(t *testing.T) {
-	now := time.Now()
 	worker := &CrewWorker{
 		Name:      "test-worker",
 		Rig:       "gastown",
 		ClonePath: "/path/to/clone",
 		Branch:    "main",
-		CreatedAt: now,
-		UpdatedAt: now,
 	}
 
 	summary := worker.Summary()
@@ -28,14 +24,14 @@ func TestCrewWorker_Summary(t *testing.T) {
 }
 
 func TestCrewWorker_JSONMarshaling(t *testing.T) {
-	now := time.Now().Round(time.Second) // Round for JSON precision
+	// CrewWorker is now a derived view (gu-kplt), not a persisted on-disk
+	// struct, but it is still marshaled in CLI output (e.g., crew list --json)
+	// so the JSON contract must round-trip cleanly.
 	worker := &CrewWorker{
 		Name:      "test-worker",
 		Rig:       "gastown",
 		ClonePath: "/path/to/clone",
 		Branch:    "feature-branch",
-		CreatedAt: now,
-		UpdatedAt: now,
 	}
 
 	// Marshal to JSON

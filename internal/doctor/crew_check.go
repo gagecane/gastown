@@ -1,28 +1,26 @@
 package doctor
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
-// CrewStateCheck validates crew worker state.json files for completeness.
-// Empty or incomplete state.json files cause "can't find pane/session" errors.
+// CrewStateCheck detects leftover crew worker state.json files from pre-migration
+// gt versions. Since gu-kplt, crew metadata lives in the crew agent bead
+// (gt-<rig>-crew-<name>) and <rig>/crew/<name>/state.json is obsolete. Leftover
+// files are harmless but confusing (stale Name/Branch values), so Fix removes them.
 type CrewStateCheck struct {
 	FixableCheck
-	invalidCrews []invalidCrew // Cached during Run for use in Fix
+	staleFiles []staleCrewStateFile
 }
 
-type invalidCrew struct {
-	path      string
-	stateFile string
-	rigName   string
-	crewName  string
-	issue     string
+type staleCrewStateFile struct {
+	path     string
+	rigName  string
+	crewName string
 }
 
 // NewCrewStateCheck creates a new crew state check.
@@ -31,16 +29,16 @@ func NewCrewStateCheck() *CrewStateCheck {
 		FixableCheck: FixableCheck{
 			BaseCheck: BaseCheck{
 				CheckName:        "crew-state",
-				CheckDescription: "Validate crew worker state.json files",
+				CheckDescription: "Detect leftover crew state.json files (migrated to beads in gu-kplt)",
 				CheckCategory:    CategoryCleanup,
 			},
 		},
 	}
 }
 
-// Run checks all crew state.json files for completeness.
+// Run looks for obsolete state.json files in crew directories.
 func (c *CrewStateCheck) Run(ctx *CheckContext) *CheckResult {
-	c.invalidCrews = nil
+	c.staleFiles = nil
 
 	crewDirs := c.findAllCrewDirs(ctx.TownRoot)
 	if len(crewDirs) == 0 {
@@ -51,122 +49,47 @@ func (c *CrewStateCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	var validCount int
 	var details []string
-
 	for _, cd := range crewDirs {
 		stateFile := filepath.Join(cd.path, "state.json")
-
-		// Check if state.json exists
-		data, err := os.ReadFile(stateFile)
-		if err != nil {
-			if os.IsNotExist(err) {
-				// Missing state file is OK - code will use defaults
-				validCount++
-				continue
-			}
-			// Other errors are problems
-			issue := fmt.Sprintf("cannot read state.json: %v", err)
-			c.invalidCrews = append(c.invalidCrews, invalidCrew{
-				path:      cd.path,
-				stateFile: stateFile,
-				rigName:   cd.rigName,
-				crewName:  cd.crewName,
-				issue:     issue,
-			})
-			details = append(details, fmt.Sprintf("%s/%s: %s", cd.rigName, cd.crewName, issue))
-			continue
+		if _, err := os.Stat(stateFile); err != nil {
+			continue // No leftover file, all good
 		}
-
-		// Parse state.json
-		var state struct {
-			Name      string `json:"name"`
-			Rig       string `json:"rig"`
-			ClonePath string `json:"clone_path"`
-		}
-		if err := json.Unmarshal(data, &state); err != nil {
-			issue := "invalid JSON in state.json"
-			c.invalidCrews = append(c.invalidCrews, invalidCrew{
-				path:      cd.path,
-				stateFile: stateFile,
-				rigName:   cd.rigName,
-				crewName:  cd.crewName,
-				issue:     issue,
-			})
-			details = append(details, fmt.Sprintf("%s/%s: %s", cd.rigName, cd.crewName, issue))
-			continue
-		}
-
-		// Check for empty/incomplete state
-		var issues []string
-		if state.Name == "" {
-			issues = append(issues, "missing name")
-		}
-		if state.Rig == "" {
-			issues = append(issues, "missing rig")
-		}
-		if state.ClonePath == "" {
-			issues = append(issues, "missing clone_path")
-		}
-
-		if len(issues) > 0 {
-			issue := strings.Join(issues, ", ")
-			c.invalidCrews = append(c.invalidCrews, invalidCrew{
-				path:      cd.path,
-				stateFile: stateFile,
-				rigName:   cd.rigName,
-				crewName:  cd.crewName,
-				issue:     issue,
-			})
-			details = append(details, fmt.Sprintf("%s/%s: %s", cd.rigName, cd.crewName, issue))
-		} else {
-			validCount++
-		}
+		c.staleFiles = append(c.staleFiles, staleCrewStateFile{
+			path:     stateFile,
+			rigName:  cd.rigName,
+			crewName: cd.crewName,
+		})
+		details = append(details, fmt.Sprintf("%s/%s: leftover state.json (safe to delete)", cd.rigName, cd.crewName))
 	}
 
-	if len(c.invalidCrews) == 0 {
+	if len(c.staleFiles) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("All %d crew state files valid", validCount),
+			Message: fmt.Sprintf("All %d crew workspace(s) clean (no legacy state.json)", len(crewDirs)),
 		}
 	}
 
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d crew workspace(s) with invalid state.json", len(c.invalidCrews)),
+		Message: fmt.Sprintf("%d crew workspace(s) with leftover state.json from pre-migration gt", len(c.staleFiles)),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to regenerate state files",
+		FixHint: "Run 'gt doctor --fix' to remove obsolete state.json files",
 	}
 }
 
-// Fix regenerates invalid state.json files with correct values.
+// Fix removes leftover state.json files identified during Run.
 func (c *CrewStateCheck) Fix(ctx *CheckContext) error {
-	if len(c.invalidCrews) == 0 {
+	if len(c.staleFiles) == 0 {
 		return nil
 	}
 
 	var lastErr error
-	for _, ic := range c.invalidCrews {
-		state := map[string]interface{}{
-			"name":       ic.crewName,
-			"rig":        ic.rigName,
-			"clone_path": ic.path,
-			"branch":     "main",
-			"created_at": time.Now().Format(time.RFC3339),
-			"updated_at": time.Now().Format(time.RFC3339),
-		}
-
-		data, err := json.MarshalIndent(state, "", "  ")
-		if err != nil {
-			lastErr = fmt.Errorf("%s/%s: %w", ic.rigName, ic.crewName, err)
-			continue
-		}
-
-		if err := os.WriteFile(ic.stateFile, data, 0644); err != nil {
-			lastErr = fmt.Errorf("%s/%s: %w", ic.rigName, ic.crewName, err)
-			continue
+	for _, sf := range c.staleFiles {
+		if err := os.Remove(sf.path); err != nil && !os.IsNotExist(err) {
+			lastErr = fmt.Errorf("%s/%s: %w", sf.rigName, sf.crewName, err)
 		}
 	}
 

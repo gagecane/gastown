@@ -53,7 +53,6 @@ var agentAllowlist = map[string][]string{
 
 	// Crew workers are user-managed worktrees for human developers.
 	"crew": {
-		"?? state.json", // crew/manager.go: Gas Town metadata (TODO: migrate to beads like polecats)
 		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns
 	},
 
