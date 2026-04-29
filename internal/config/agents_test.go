@@ -32,7 +32,7 @@ func TestBuiltInAgentPresetSummary(t *testing.T) {
 func TestBuiltinPresets(t *testing.T) {
 	t.Parallel()
 	// Ensure all built-in presets are accessible
-	presets := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentCursor, AgentAuggie, AgentAmp, AgentOpenCode, AgentCopilot, AgentPi, AgentOmp}
+	presets := []AgentPreset{AgentClaude, AgentGemini, AgentCodex, AgentCursor, AgentAuggie, AgentAmp, AgentOpenCode, AgentCopilot, AgentKiro, AgentPi, AgentOmp}
 
 	for _, preset := range presets {
 		info := GetAgentPreset(preset)
@@ -68,6 +68,7 @@ func TestGetAgentPresetByName(t *testing.T) {
 		{"aider", "", true},                // Not built-in, can be added via config
 		{"opencode", AgentOpenCode, false}, // Built-in multi-model CLI agent
 		{"copilot", AgentCopilot, false},   // Built-in GitHub Copilot CLI agent
+		{"kiro", AgentKiro, false},         // Built-in Kiro CLI agent
 		{"pi", AgentPi, false},             // Pi Coding Agent
 		{"omp", AgentOmp, false},           // Oh My Pi
 		{"unknown", "", true},
@@ -151,6 +152,7 @@ func TestIsKnownPreset(t *testing.T) {
 		{"aider", false},   // Not built-in, can be added via config
 		{"opencode", true}, // Built-in multi-model CLI agent
 		{"copilot", true},  // Built-in GitHub Copilot CLI agent
+		{"kiro", true},     // Built-in Kiro CLI agent
 		{"pi", true},       // Pi Coding Agent
 		{"omp", true},      // Oh My Pi
 		{"unknown", false},
@@ -1311,6 +1313,77 @@ func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
 		if preset.HooksSettingsFile == "" {
 			t.Errorf("agent %q: SupportsHooks=true but HooksSettingsFile is empty", name)
 		}
+	}
+}
+
+// TestKiroPreset verifies the Kiro built-in preset matches the fields required
+// for autonomous polecat operation (see gu-axjw). kiro-cli 2.0+ defaults to TUI
+// mode which blocks non-interactive sessions; --classic bypasses the TUI. The
+// env vars disable interactive pagers and git prompts that would otherwise
+// hang background sessions.
+func TestKiroPreset(t *testing.T) {
+	t.Parallel()
+	p := GetAgentPreset(AgentKiro)
+	if p == nil {
+		t.Fatal("GetAgentPreset(AgentKiro) returned nil")
+	}
+	if p.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro-cli", p.Command)
+	}
+	wantArgs := []string{"chat", "--classic", "--trust-all-tools"}
+	if len(p.Args) != len(wantArgs) {
+		t.Errorf("Args = %v, want %v", p.Args, wantArgs)
+	} else {
+		for i, a := range wantArgs {
+			if p.Args[i] != a {
+				t.Errorf("Args[%d] = %q, want %q", i, p.Args[i], a)
+			}
+		}
+	}
+	wantEnv := map[string]string{
+		"GIT_TERMINAL_PROMPT": "0",
+		"GIT_PAGER":           "",
+		"AWS_PAGER":           "",
+		"PAGER":               "",
+		"NO_COLOR":            "1",
+	}
+	for k, v := range wantEnv {
+		got, ok := p.Env[k]
+		if !ok {
+			t.Errorf("Env missing key %q", k)
+			continue
+		}
+		if got != v {
+			t.Errorf("Env[%q] = %q, want %q", k, got, v)
+		}
+	}
+	wantProcs := []string{"kiro-cli", "node"}
+	if len(p.ProcessNames) != len(wantProcs) {
+		t.Errorf("ProcessNames = %v, want %v", p.ProcessNames, wantProcs)
+	} else {
+		for i, n := range wantProcs {
+			if p.ProcessNames[i] != n {
+				t.Errorf("ProcessNames[%d] = %q, want %q", i, p.ProcessNames[i], n)
+			}
+		}
+	}
+	if p.SessionIDEnv != "KIRO_SESSION_ID" {
+		t.Errorf("SessionIDEnv = %q, want KIRO_SESSION_ID", p.SessionIDEnv)
+	}
+	if p.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume", p.ResumeFlag)
+	}
+	if !p.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if p.HooksProvider != "kiro" {
+		t.Errorf("HooksProvider = %q, want kiro", p.HooksProvider)
+	}
+	if p.HooksDir != ".kiro/agents" {
+		t.Errorf("HooksDir = %q, want .kiro/agents", p.HooksDir)
+	}
+	if p.ReadyDelayMs != 8000 {
+		t.Errorf("ReadyDelayMs = %d, want 8000", p.ReadyDelayMs)
 	}
 }
 

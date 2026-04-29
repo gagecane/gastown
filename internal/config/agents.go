@@ -406,18 +406,31 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		InstructionsFile:   "AGENTS.md",
 	},
 	AgentKiro: {
-		Name:                AgentKiro,
-		Command:             "kiro-cli",
-		Args:                []string{"chat", "--trust-all-tools", "--agent", "gastown"},
+		Name:    AgentKiro,
+		Command: "kiro-cli",
+		// --classic bypasses the TUI (kiro-cli 2.0+ defaults to TUI mode which
+		// blocks non-interactive polecat sessions). --trust-all-tools
+		// auto-approves tool calls for autonomous operation.
+		Args: []string{"chat", "--classic", "--trust-all-tools"},
+		Env: map[string]string{
+			// Disable interactive git auth prompts that would hang non-interactive sessions.
+			"GIT_TERMINAL_PROMPT": "0",
+			// Disable pagers that require TTY and would block autonomous runs.
+			"GIT_PAGER": "",
+			"AWS_PAGER": "",
+			"PAGER":     "",
+			// Disable ANSI color codes for cleaner log capture.
+			"NO_COLOR": "1",
+		},
 		ProcessNames:        []string{"kiro-cli", "node"},
-		SessionIDEnv:        "",
+		SessionIDEnv:        "KIRO_SESSION_ID",
 		ResumeFlag:          "--resume",
 		ResumeStyle:         "flag",
 		SupportsHooks:       true,
 		SupportsForkSession: false,
 		NonInteractive: &NonInteractiveConfig{
 			Subcommand: "chat",
-			PromptFlag: "--no-interactive --trust-all-tools --agent gastown",
+			PromptFlag: "--no-interactive --trust-all-tools",
 		},
 		PromptMode:         "arg",
 		ConfigDir:          ".kiro",
@@ -425,7 +438,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		HooksDir:           ".kiro/agents",
 		HooksSettingsFile:  "gastown.json",
 		HooksInformational: false,
-		ReadyDelayMs:       5000,
+		ReadyDelayMs:       8000,
 		InstructionsFile:   "AGENTS.md",
 	},
 	AgentPi: {
