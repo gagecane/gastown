@@ -257,3 +257,32 @@ func TestSessionPayload_Minimal(t *testing.T) {
 		t.Error("expected no cwd key when empty")
 	}
 }
+
+func TestAutoDispatchEventTriggeredPayload_Full(t *testing.T) {
+	p := AutoDispatchEventTriggeredPayload("myrig", "gt done", "my-alpha", "myrig/polecats/alpha")
+	if p["rig"] != "myrig" {
+		t.Errorf("rig = %v, want myrig", p["rig"])
+	}
+	if p["trigger"] != "gt done" {
+		t.Errorf("trigger = %v, want gt done", p["trigger"])
+	}
+	if p["trigger_session"] != "my-alpha" {
+		t.Errorf("trigger_session = %v, want my-alpha", p["trigger_session"])
+	}
+	if p["trigger_agent"] != "myrig/polecats/alpha" {
+		t.Errorf("trigger_agent = %v, want myrig/polecats/alpha", p["trigger_agent"])
+	}
+}
+
+func TestAutoDispatchEventTriggeredPayload_OmitEmptyOptional(t *testing.T) {
+	p := AutoDispatchEventTriggeredPayload("myrig", "gt done", "", "")
+	if _, ok := p["trigger_session"]; ok {
+		t.Errorf("trigger_session should be omitted when empty, got %v", p["trigger_session"])
+	}
+	if _, ok := p["trigger_agent"]; ok {
+		t.Errorf("trigger_agent should be omitted when empty, got %v", p["trigger_agent"])
+	}
+	if p["rig"] != "myrig" || p["trigger"] != "gt done" {
+		t.Errorf("required fields lost: %+v", p)
+	}
+}

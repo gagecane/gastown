@@ -74,6 +74,9 @@ const (
 	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
 	TypeSchedulerDispatchFailed = "scheduler_dispatch_failed" // Bead dispatch failed (requeued)
 	TypeSchedulerCloseRetry     = "scheduler_close_retry"     // Context close needed last-resort attempt
+
+	// Auto-dispatch events (event-driven refill observability)
+	TypeAutoDispatchEventTriggered = "auto_dispatch_event_triggered" // Event-driven auto-dispatch fired
 )
 
 // EventsFile is the name of the raw events log.
@@ -367,4 +370,24 @@ func SchedulerDispatchFailedPayload(beadID, rig, errMsg string) map[string]inter
 		"rig":   rig,
 		"error": errMsg,
 	}
+}
+
+// AutoDispatchEventTriggeredPayload creates a payload for event-driven
+// auto-dispatch observability events.
+// rig: the rig whose auto-dispatch was triggered
+// trigger: the session_death reason that caused the trigger (e.g., "gt done")
+// triggerSession: the tmux session name that ended
+// triggerAgent: the agent identity (e.g., "myrig/polecats/alpha") that ended
+func AutoDispatchEventTriggeredPayload(rig, trigger, triggerSession, triggerAgent string) map[string]interface{} {
+	p := map[string]interface{}{
+		"rig":     rig,
+		"trigger": trigger,
+	}
+	if triggerSession != "" {
+		p["trigger_session"] = triggerSession
+	}
+	if triggerAgent != "" {
+		p["trigger_agent"] = triggerAgent
+	}
+	return p
 }

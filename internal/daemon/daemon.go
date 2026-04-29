@@ -58,6 +58,7 @@ type Daemon struct {
 	cancel        context.CancelFunc
 	curator       *feed.Curator
 	convoyManager *ConvoyManager
+	autoDispatch  *AutoDispatchWatcher
 	beadsStores   map[string]beadsdk.Storage
 	doltServer    *DoltServerManager
 	krcPruner     *KRCPruner
@@ -455,6 +456,27 @@ func (d *Daemon) Run() (err error) {
 			d.logger.Printf("Dolt recovery detected: triggering convoy recovery sweep")
 			cm.scan()
 		})
+	}
+
+	// Start the auto-dispatch watcher: tails .events.jsonl and triggers
+	// event-driven auto-dispatch on planned polecat completions (gt done),
+	// bypassing the auto-dispatch plugin's cooldown gate. The cooldown-gated
+	// periodic pass in dispatchPlugins() continues to run as the fallback.
+	// Only active when the "handler" patrol is active — if plugins aren't
+	// being dispatched at all, event-driven refill would have nothing to do.
+	if d.isPatrolActive("handler") {
+		d.autoDispatch = NewAutoDispatchWatcher(
+			d.config.TownRoot,
+			d.logger,
+			newHandlerAutoDispatchConsumer(d),
+		)
+		if err := d.autoDispatch.Start(); err != nil {
+			d.logger.Printf("Warning: failed to start auto-dispatch watcher: %v", err)
+		} else {
+			d.logger.Println("Auto-dispatch watcher started")
+		}
+	} else {
+		d.logger.Println("Handler patrol disabled, auto-dispatch watcher not started")
 	}
 
 	// Start KRC pruner for automatic ephemeral data cleanup
@@ -2105,6 +2127,12 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	if d.convoyManager != nil {
 		d.convoyManager.Stop()
 		d.logger.Println("Convoy manager stopped")
+	}
+
+	// Stop auto-dispatch watcher
+	if d.autoDispatch != nil {
+		d.autoDispatch.Stop()
+		d.logger.Println("Auto-dispatch watcher stopped")
 	}
 	d.beadsStores = nil
 
