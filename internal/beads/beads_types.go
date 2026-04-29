@@ -73,6 +73,17 @@ func ResolveRoutingTarget(townRoot, beadID, fallbackDir string) string {
 	// Look up rig path for this prefix
 	rigPath := GetRigPathForPrefix(townRoot, prefix)
 	if rigPath == "" {
+		// Special case: "gt-" is the town-root prefix (gt-wisp-*, gt-storm-*, etc.).
+		// Legacy towns predate the routes.jsonl seed for gt-, so resolve it silently
+		// to townRoot instead of emitting a spurious "no route found" warning. This
+		// is defense-in-depth for towns that missed the routes.jsonl migration.
+		if prefix == "gt-" {
+			beadsDir := ResolveBeadsDir(townRoot)
+			if beadsDir != "" {
+				return beadsDir
+			}
+			return fallbackDir
+		}
 		fmt.Fprintf(os.Stderr, "Warning: no route found for prefix %q (bead %s), falling back to %s\n", prefix, beadID, fallbackDir)
 		return fallbackDir
 	}

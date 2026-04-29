@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -275,7 +276,6 @@ func TestResolveRoutingTarget(t *testing.T) {
 			expected: fallback,
 		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			result := ResolveRoutingTarget(tc.townRoot, tc.beadID, fallback)
@@ -855,5 +855,63 @@ func TestBeads_getTownRoot(t *testing.T) {
 	// Verify caching works (sync.Once ensures single execution)
 	if b.townRoot != tmpDir {
 		t.Errorf("expected townRoot to be cached as %q, got %q", tmpDir, b.townRoot)
+	}
+}
+
+// TestResolveRoutingTarget_LegacyGTPrefix verifies that the "gt-" prefix
+// is silently resolved to the town root even when routes.jsonl has no
+// explicit gt- row. This is defense-in-depth for legacy towns that
+// predate the gt- route seed in initTownBeads.
+func TestResolveRoutingTarget_LegacyGTPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create .beads directory with NO gt- route in routes.jsonl
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create mayor/town.json for FindTownRoot
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// routes.jsonl intentionally has hq- but NOT gt-
+	routesContent := `{"prefix": "hq-", "path": "."}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fallback := "/fallback/.beads"
+
+	// Capture stderr to verify no warning is emitted
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	result := ResolveRoutingTarget(tmpDir, "gt-wisp-zos", fallback)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	stderrBytes, _ := io.ReadAll(r)
+	stderrStr := string(stderrBytes)
+
+	// Should resolve to the town-root beads dir
+	if result != beadsDir {
+		t.Errorf("ResolveRoutingTarget(gt-wisp-zos) = %q, want %q (town-root beads dir)", result, beadsDir)
+	}
+
+	// And MUST NOT emit a "no route found" warning
+	if strings.Contains(stderrStr, "no route found") {
+		t.Errorf("expected no warning for gt- on legacy town, got stderr: %q", stderrStr)
 	}
 }

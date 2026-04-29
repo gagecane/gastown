@@ -685,6 +685,13 @@ func initTownBeads(townPath string) error {
 		fmt.Printf("   %s Could not register convoy prefix: %v\n", style.Dim.Render("⚠"), err)
 	}
 
+	// Register gt- prefix for town-root beads (gt-wisp-*, gt-storm-*, etc.).
+	// Without this, every operation that routes a gt-* bead emits a spurious
+	// "no route found for prefix" warning before falling back to the town root.
+	if err := beads.AppendRoute(townPath, beads.Route{Prefix: "gt-", Path: "."}); err != nil {
+		fmt.Printf("   %s Could not register gt- prefix: %v\n", style.Dim.Render("⚠"), err)
+	}
+
 	return nil
 }
 
