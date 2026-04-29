@@ -213,6 +213,11 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// forget to call gt done before the session ends. The polecat-stop-check
 		// command is idempotent — it checks heartbeat state and branch commits
 		// before deciding whether to run gt done.
+		//
+		// The polecat-slack-notify hook posts a session-end Slack summary
+		// (commits, bead, duration) via an optional local script. It's gated
+		// on [ -x ... ] so polecats on hosts without MeshClaw installed are
+		// unaffected, and trailing `|| true` ensures it never blocks exit.
 		"polecats": {
 			Stop: []HookEntry{
 				{
@@ -221,6 +226,10 @@ func DefaultOverrides() map[string]*HooksConfig {
 						{
 							Type:    "command",
 							Command: hookChain(pathSetup, "gt tap polecat-stop-check"),
+						},
+						{
+							Type:    "command",
+							Command: "[ -x /home/canewiw/.meshclaw/bin/polecat-slack-notify.sh ] && /home/canewiw/.meshclaw/bin/polecat-slack-notify.sh || true",
 						},
 					},
 				},
