@@ -323,16 +323,25 @@ func (e *Engineer) SetOutput(w io.Writer) {
 	e.output = w
 }
 
-// LoadConfig loads merge queue configuration from the rig's config.json.
+// LoadConfig loads merge queue configuration from the rig.
+//
+// Resolution order (first hit wins):
+//  1. <rig>/settings/config.json — canonical location for behavioral config (RigSettings).
+//  2. <rig>/config.json — legacy location, fallback for rigs not yet migrated.
+//
+// Rationale: merge_queue is behavioral config and belongs in settings/config.json
+// (see config.RigSettings). The rig-root config.json is transitioning to
+// identity-only (RigConfig). We prefer the canonical location but keep the
+// legacy path as a fallback so removing merge_queue from config.json after
+// migration does not silently lose the configuration.
 func (e *Engineer) LoadConfig() error {
-	configPath := filepath.Join(e.rig.Path, "config.json")
-	data, err := os.ReadFile(configPath)
+	data, err := loadMergeQueueConfigData(e.rig.Path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// Use defaults if no config file
-			return nil
-		}
-		return fmt.Errorf("reading config: %w", err)
+		return err
+	}
+	if data == nil {
+		// No config file with a merge_queue block — use defaults.
+		return nil
 	}
 
 	// Parse config file to extract merge_queue section
@@ -462,6 +471,49 @@ func (e *Engineer) LoadConfig() error {
 	}
 
 	return nil
+}
+
+// loadMergeQueueConfigData reads the first config file that contains a
+// merge_queue block, preferring the canonical location.
+//
+// Resolution order:
+//  1. <rigPath>/settings/config.json (canonical — RigSettings)
+//  2. <rigPath>/config.json (legacy — rig-root config)
+//
+// Returns (data, nil) on first hit, (nil, nil) if neither file exists or
+// neither has a merge_queue block, and (nil, err) on read/parse errors.
+// The returned data is the full JSON of the chosen file; callers parse
+// the merge_queue block themselves.
+func loadMergeQueueConfigData(rigPath string) ([]byte, error) {
+	candidates := []string{
+		filepath.Join(rigPath, "settings", "config.json"),
+		filepath.Join(rigPath, "config.json"),
+	}
+
+	for _, path := range candidates {
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path constructed from rigPath
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("reading config: %w", err)
+		}
+		// Peek for a merge_queue block. If absent, fall through to the next
+		// candidate so removing merge_queue from settings/config.json does not
+		// accidentally hide config that still lives in the legacy file.
+		var peek struct {
+			MergeQueue json.RawMessage `json:"merge_queue"`
+		}
+		if err := json.Unmarshal(data, &peek); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		if peek.MergeQueue == nil {
+			continue
+		}
+		return data, nil
+	}
+
+	return nil, nil
 }
 
 // initPRProvider creates the appropriate PRProvider based on vcs_provider config.

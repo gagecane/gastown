@@ -132,6 +132,177 @@ func TestEngineer_LoadConfig_WithMergeQueue(t *testing.T) {
 	}
 }
 
+// TestEngineer_LoadConfig_PrefersSettingsConfig verifies that when both
+// <rig>/settings/config.json and <rig>/config.json contain a merge_queue
+// block, settings/config.json wins. This is the canonical post-migration
+// layout: behavioral config lives in settings, rig-root config.json is
+// identity-only.
+func TestEngineer_LoadConfig_PrefersSettingsConfig(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Rig-root config.json with the old value.
+	rootCfg := map[string]interface{}{
+		"type": "rig",
+		"name": "test-rig",
+		"merge_queue": map[string]interface{}{
+			"test_command": "OLD",
+		},
+	}
+	rootRaw, _ := json.MarshalIndent(rootCfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), rootRaw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// settings/config.json with the new value — should win.
+	settingsDir := filepath.Join(tmpDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]interface{}{
+		"type":    "rig-settings",
+		"version": 1,
+		"merge_queue": map[string]interface{}{
+			"test_command": "NEW",
+		},
+	}
+	settingsRaw, _ := json.MarshalIndent(settings, "", "  ")
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), settingsRaw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+	e := NewEngineer(r)
+	if err := e.LoadConfig(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if e.config.TestCommand != "NEW" {
+		t.Errorf("expected TestCommand 'NEW' (from settings/config.json), got %q", e.config.TestCommand)
+	}
+}
+
+// TestEngineer_LoadConfig_FallsBackToRigRootConfig verifies that when
+// settings/config.json is absent, rig-root config.json is still read. This
+// preserves behavior for rigs that have not been migrated yet.
+func TestEngineer_LoadConfig_FallsBackToRigRootConfig(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	rootCfg := map[string]interface{}{
+		"type": "rig",
+		"name": "test-rig",
+		"merge_queue": map[string]interface{}{
+			"test_command": "legacy-test",
+		},
+	}
+	rootRaw, _ := json.MarshalIndent(rootCfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), rootRaw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+	e := NewEngineer(r)
+	if err := e.LoadConfig(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if e.config.TestCommand != "legacy-test" {
+		t.Errorf("expected fallback TestCommand, got %q", e.config.TestCommand)
+	}
+}
+
+// TestEngineer_LoadConfig_FallsBackWhenSettingsHasNoMergeQueue verifies that
+// if settings/config.json exists but has no merge_queue block (e.g. during
+// migration when only theme/namepool have moved), we still read merge_queue
+// from the legacy rig-root config.json.
+func TestEngineer_LoadConfig_FallsBackWhenSettingsHasNoMergeQueue(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// settings/config.json — no merge_queue block.
+	settingsDir := filepath.Join(tmpDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]interface{}{
+		"type":    "rig-settings",
+		"version": 1,
+		"theme":   map[string]interface{}{"name": "ocean"},
+	}
+	settingsRaw, _ := json.MarshalIndent(settings, "", "  ")
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), settingsRaw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig-root config.json — has merge_queue.
+	rootCfg := map[string]interface{}{
+		"type": "rig",
+		"merge_queue": map[string]interface{}{
+			"test_command": "from-legacy",
+		},
+	}
+	rootRaw, _ := json.MarshalIndent(rootCfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.json"), rootRaw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+	e := NewEngineer(r)
+	if err := e.LoadConfig(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if e.config.TestCommand != "from-legacy" {
+		t.Errorf("expected 'from-legacy' from fallback, got %q", e.config.TestCommand)
+	}
+}
+
+// TestEngineer_LoadConfig_SettingsConfigOnly verifies the post-migration
+// happy path: only settings/config.json exists and has merge_queue.
+func TestEngineer_LoadConfig_SettingsConfigOnly(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	settingsDir := filepath.Join(tmpDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]interface{}{
+		"type":    "rig-settings",
+		"version": 1,
+		"merge_queue": map[string]interface{}{
+			"test_command":  "canonical",
+			"max_concurrent": 3,
+		},
+	}
+	raw, _ := json.MarshalIndent(settings, "", "  ")
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
+	e := NewEngineer(r)
+	if err := e.LoadConfig(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if e.config.TestCommand != "canonical" {
+		t.Errorf("expected 'canonical', got %q", e.config.TestCommand)
+	}
+	if e.config.MaxConcurrent != 3 {
+		t.Errorf("expected MaxConcurrent 3, got %d", e.config.MaxConcurrent)
+	}
+}
+
 func TestEngineer_LoadConfig_AutoPushDisabled(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "engineer-test-*")
 	if err != nil {

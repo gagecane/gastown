@@ -76,16 +76,58 @@ type rigGateConfig struct {
 	Gates       map[string]string // gate name → command
 }
 
-// loadRigGateConfig reads the merge_queue section from a rig's config.json
-// to discover what test/gate commands to run.
+// loadRigGateConfig reads the merge_queue section from a rig's config to
+// discover what test/gate commands to run.
+//
+// Resolution order (first file with a merge_queue block wins):
+//  1. <rigPath>/settings/config.json — canonical behavioral config (RigSettings)
+//  2. <rigPath>/config.json — legacy rig-root config
+//
+// The rig-root config.json is migrating to identity-only; behavioral config
+// (including merge_queue) belongs in settings/config.json. We check the
+// canonical location first but keep the legacy fallback so removing
+// merge_queue from config.json after migration does not silently disable the
+// main_branch_test patrol.
 func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
-	configPath := filepath.Join(rigPath, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // No config, skip
+	candidates := []string{
+		filepath.Join(rigPath, "settings", "config.json"),
+		filepath.Join(rigPath, "config.json"),
+	}
+
+	var data []byte
+	var readErr error
+	for _, path := range candidates {
+		d, err := os.ReadFile(path) //nolint:gosec // G304: path constructed from rigPath
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			readErr = err
+			break
 		}
-		return nil, err
+
+		// Peek for a merge_queue block. If absent, fall through to the next
+		// candidate so removing merge_queue from one file does not mask config
+		// that still lives in the other.
+		var peek struct {
+			MergeQueue json.RawMessage `json:"merge_queue"`
+		}
+		if err := json.Unmarshal(d, &peek); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		if peek.MergeQueue == nil {
+			continue
+		}
+
+		data = d
+		break
+	}
+
+	if readErr != nil {
+		return nil, readErr
+	}
+	if data == nil {
+		return nil, nil // No config with a merge_queue block, skip
 	}
 
 	var raw struct {

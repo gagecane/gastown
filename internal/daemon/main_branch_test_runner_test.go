@@ -197,6 +197,154 @@ func TestLoadRigGateConfig(t *testing.T) {
 			t.Errorf("expected nil for no test commands, got %+v", cfg)
 		}
 	})
+
+	// The following subtests cover the settings/config.json migration:
+	// merge_queue is moving from <rig>/config.json (rig identity) to
+	// <rig>/settings/config.json (behavioral RigSettings). Resolution order
+	// prefers settings/config.json but falls back to config.json so
+	// pre-migration rigs keep working.
+
+	t.Run("settings/config.json preferred over rig-root config.json", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Rig-root config.json has the old value.
+		root := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"test_command": "OLD",
+			},
+		}
+		rootRaw, _ := json.Marshal(root)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), rootRaw, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// settings/config.json has the new value — should win.
+		settingsDir := filepath.Join(dir, "settings")
+		if err := os.MkdirAll(settingsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		settings := map[string]interface{}{
+			"type":    "rig-settings",
+			"version": 1,
+			"merge_queue": map[string]interface{}{
+				"test_command": "NEW",
+			},
+		}
+		settingsRaw, _ := json.Marshal(settings)
+		if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), settingsRaw, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if cfg.TestCommand != "NEW" {
+			t.Errorf("expected 'NEW' (from settings/config.json), got %q", cfg.TestCommand)
+		}
+	})
+
+	t.Run("falls back to rig-root config.json when settings/config.json absent", func(t *testing.T) {
+		dir := t.TempDir()
+		root := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"test_command": "go test ./...",
+			},
+		}
+		raw, _ := json.Marshal(root)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config (fallback to rig-root)")
+		}
+		if cfg.TestCommand != "go test ./..." {
+			t.Errorf("expected fallback value, got %q", cfg.TestCommand)
+		}
+	})
+
+	t.Run("falls back when settings/config.json has no merge_queue block", func(t *testing.T) {
+		// This is the exact scenario rc-2ux enables: remove merge_queue from
+		// rig-root config.json (identity-only) while it lives in settings.
+		// But during migration, an operator might have a settings/config.json
+		// with no merge_queue block yet — we should still find the legacy one.
+		dir := t.TempDir()
+
+		settingsDir := filepath.Join(dir, "settings")
+		if err := os.MkdirAll(settingsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		settings := map[string]interface{}{
+			"type":    "rig-settings",
+			"version": 1,
+			"theme":   map[string]interface{}{"name": "ocean"},
+		}
+		settingsRaw, _ := json.Marshal(settings)
+		if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), settingsRaw, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		root := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"test_command": "legacy-test",
+			},
+		}
+		rootRaw, _ := json.Marshal(root)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), rootRaw, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config (fallback past settings without merge_queue)")
+		}
+		if cfg.TestCommand != "legacy-test" {
+			t.Errorf("expected 'legacy-test' from fallback, got %q", cfg.TestCommand)
+		}
+	})
+
+	t.Run("settings/config.json alone is sufficient after migration", func(t *testing.T) {
+		// Post-migration: rig-root config.json has no merge_queue (or is
+		// missing entirely). settings/config.json is the canonical source.
+		dir := t.TempDir()
+		settingsDir := filepath.Join(dir, "settings")
+		if err := os.MkdirAll(settingsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		settings := map[string]interface{}{
+			"type":    "rig-settings",
+			"version": 1,
+			"merge_queue": map[string]interface{}{
+				"test_command": "canonical-test",
+			},
+		}
+		raw, _ := json.Marshal(settings)
+		if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config from settings/config.json")
+		}
+		if cfg.TestCommand != "canonical-test" {
+			t.Errorf("expected 'canonical-test', got %q", cfg.TestCommand)
+		}
+	})
 }
 
 func TestContains(t *testing.T) {
