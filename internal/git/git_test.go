@@ -2147,3 +2147,167 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
 	}
 }
+
+// initTestRepoWithRemoteOnBranch sets up a local repo with a bare remote whose
+// default branch is a caller-supplied name (e.g. "mainline"). This mirrors the
+// real-world state of TalonTriage / codegen_ws rigs that surfaced gu-yksj.
+// Returns (localDir, remoteDir, defaultBranch).
+func initTestRepoWithRemoteOnBranch(t *testing.T, defaultBranch string) (string, string, string) {
+	t.Helper()
+	tmp := t.TempDir()
+
+	// Bare remote with its own initial branch (e.g. `mainline`).
+	remoteDir := filepath.Join(tmp, "remote.git")
+	if err := exec.Command("git", "init", "--bare", "--initial-branch="+defaultBranch, remoteDir).Run(); err != nil {
+		t.Fatalf("git init --bare: %v", err)
+	}
+
+	// Local repo — also initialized with the same default branch so the
+	// push can advance `refs/heads/<defaultBranch>` on the remote.
+	localDir := filepath.Join(tmp, "local")
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "init", "--initial-branch=" + defaultBranch},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = localDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "initial"},
+		{"git", "remote", "add", "origin", remoteDir},
+		{"git", "push", "-u", "origin", defaultBranch},
+		// Set origin/HEAD so resolveRemoteBaseline can detect the default —
+		// a real `git clone` does this; our init+push does not.
+		{"git", "remote", "set-head", "origin", defaultBranch},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = localDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+
+	return localDir, remoteDir, defaultBranch
+}
+
+// TestBranchPushedToRemote_MainlineDefault is the regression test for gu-yksj.
+//
+// Before the fix: on a rig whose default is `mainline` (not `main`), a polecat
+// branch with zero local commits ahead of mainline was reported as having
+// `unpushedCount == <total commits in repo>` (e.g. 133) because the baseline
+// `origin/main..HEAD` failed with "ambiguous argument" and the fallback counted
+// all of HEAD. That false positive drove doctor's stalled-polecats check wild.
+//
+// After the fix: the baseline resolves dynamically via `origin/HEAD`, the
+// polecat correctly reports 0 unpushed, and `pushed=true`.
+func TestBranchPushedToRemote_MainlineDefault(t *testing.T) {
+	localDir, _, defaultBranch := initTestRepoWithRemoteOnBranch(t, "mainline")
+	if defaultBranch != "mainline" {
+		t.Fatalf("setup: default branch = %q, want mainline", defaultBranch)
+	}
+	g := NewGit(localDir)
+
+	// Sanity: `origin/main` must NOT exist (if it did, the bug would be masked).
+	if _, err := g.run("rev-parse", "--verify", "--quiet", "origin/main"); err == nil {
+		t.Fatal("precondition violated: origin/main should not exist in a mainline-default repo")
+	}
+
+	// Create a feature branch with no new commits, simulating a polecat that
+	// was assigned work but hasn't committed yet (or committed, rebased, and
+	// ended up at parity with mainline).
+	featureBranch := "polecat/yksj/no-work"
+	if err := g.CreateBranch(featureBranch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(featureBranch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+
+	pushed, unpushed, err := g.BranchPushedToRemote(featureBranch, "origin")
+	if err != nil {
+		t.Fatalf("BranchPushedToRemote: %v", err)
+	}
+	if unpushed != 0 {
+		t.Errorf("BranchPushedToRemote unpushed = %d, want 0 (branch is at mainline; gu-yksj regression)", unpushed)
+	}
+	if !pushed {
+		t.Error("BranchPushedToRemote pushed = false, want true (no work to push; gu-yksj regression)")
+	}
+}
+
+// TestBranchPushedToRemote_MainlineDefault_WithLocalCommits verifies the happy
+// path for unpushed work on a mainline-default rig: 1 real local commit ahead
+// of mainline should be reported as exactly 1 unpushed, not "all of HEAD".
+func TestBranchPushedToRemote_MainlineDefault_WithLocalCommits(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemoteOnBranch(t, "mainline")
+	g := NewGit(localDir)
+
+	featureBranch := "polecat/yksj/has-work"
+	if err := g.CreateBranch(featureBranch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(featureBranch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("local\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "local work"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = localDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+
+	pushed, unpushed, err := g.BranchPushedToRemote(featureBranch, "origin")
+	if err != nil {
+		t.Fatalf("BranchPushedToRemote: %v", err)
+	}
+	if pushed {
+		t.Error("BranchPushedToRemote pushed = true, want false")
+	}
+	if unpushed != 1 {
+		t.Errorf("BranchPushedToRemote unpushed = %d, want 1 (not total HEAD count)", unpushed)
+	}
+}
+
+// TestResolveRemoteBaseline_Fallbacks verifies the probe-based fallbacks kick
+// in when origin/HEAD is missing. This mirrors CI-minted clones and repos
+// created without `remote set-head`.
+func TestResolveRemoteBaseline_Fallbacks(t *testing.T) {
+	localDir, _, defaultBranch := initTestRepoWithRemoteOnBranch(t, "main")
+	g := NewGit(localDir)
+
+	// Tier 1 works: origin/HEAD is set.
+	baseline := resolveRemoteBaseline(g, "origin")
+	if baseline != "origin/"+defaultBranch {
+		t.Errorf("baseline with origin/HEAD set = %q, want origin/%s", baseline, defaultBranch)
+	}
+
+	// Remove origin/HEAD and verify the probe fallback still finds origin/main.
+	cmd := exec.Command("git", "remote", "set-head", "--delete", "origin")
+	cmd.Dir = localDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("remote set-head --delete: %v", err)
+	}
+	baseline = resolveRemoteBaseline(g, "origin")
+	if baseline != "origin/main" {
+		t.Errorf("baseline after HEAD removal = %q, want origin/main (probe fallback)", baseline)
+	}
+}

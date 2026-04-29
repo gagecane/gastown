@@ -2076,6 +2076,45 @@ func (g *Git) CheckUncommittedWork() (*UncommittedWorkStatus, error) {
 	return status, nil
 }
 
+// resolveRemoteBaseline returns a ref suitable as the left side of a
+// `<ref>..HEAD` comparison for counting unpushed commits against the given
+// remote's default branch.
+//
+// Resolution order:
+//  1. symbolic-ref refs/remotes/<remote>/HEAD — canonical, set by `git clone`
+//     and `git remote set-head`; encodes the remote's advertised default.
+//  2. probe <remote>/master, then <remote>/main — covers repos created
+//     without HEAD symbolic-ref (some CI-minted clones, older tooling).
+//
+// Returns "" when no default can be determined, letting callers fall through
+// to their own last-resort behavior.
+//
+// We avoid using Git.RemoteDefaultBranch() here because it hardcodes "origin"
+// and returns "main" as its final fallback — that fallback is precisely what
+// caused gu-yksj. Callers here must be able to distinguish "resolved" from
+// "gave up" to pick the right fallback strategy.
+func resolveRemoteBaseline(g *Git, remote string) string {
+	// 1. Canonical source: the remote HEAD symbolic ref.
+	if out, err := g.run("symbolic-ref", "refs/remotes/"+remote+"/HEAD"); err == nil {
+		ref := strings.TrimSpace(out)
+		// Strip "refs/remotes/" to leave "<remote>/<branch>" for rev-list.
+		if trimmed := strings.TrimPrefix(ref, "refs/remotes/"); trimmed != "" && trimmed != ref {
+			return trimmed
+		}
+	}
+
+	// 2. Probe common defaults. Check master first so a lingering
+	// <remote>/main ref on a master-default repo doesn't win.
+	for _, name := range []string{"master", "main"} {
+		candidate := remote + "/" + name
+		if _, err := g.run("rev-parse", "--verify", "--quiet", candidate); err == nil {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
 // BranchPushedToRemote checks if a branch has been pushed to the remote.
 // Returns (pushed bool, unpushedCount int, err).
 // This handles polecat branches that don't have upstream tracking configured.
@@ -2101,21 +2140,40 @@ func (g *Git) BranchPushedToRemote(localBranch, remote string) (bool, int, error
 	}
 
 	if lsOut == "" {
-		// Remote branch doesn't exist - count commits since origin/main (or HEAD if that fails)
-		count, err := g.run("rev-list", "--count", "origin/main..HEAD")
-		if err != nil {
-			// Fallback: just count all commits on HEAD
-			count, err = g.run("rev-list", "--count", "HEAD")
-			if err != nil {
-				return false, 0, fmt.Errorf("counting commits: %w", err)
+		// Remote branch doesn't exist yet — count commits since the remote's
+		// default branch so we distinguish "has real unpushed work" from
+		// "feature branch created but never pushed".
+		//
+		// On rigs whose default is not `main` (e.g. TalonTriage uses `mainline`),
+		// hardcoding `origin/main..HEAD` fails with "ambiguous argument" and
+		// the old fallback (`rev-list --count HEAD`) returns the repo's entire
+		// commit count — surfacing as a catastrophic-looking false positive in
+		// `gt doctor`'s stalled-polecats check (gu-yksj).
+		//
+		// Resolution order:
+		//   1. symbolic-ref refs/remotes/<remote>/HEAD (canonical, set by clone)
+		//   2. probe <remote>/master, then <remote>/main
+		//   3. fall back to `rev-list --count HEAD` (preserves old behavior on
+		//      truly pathological repos with no discoverable default)
+		baseline := resolveRemoteBaseline(g, remote)
+		var count string
+		var countErr error
+		if baseline != "" {
+			count, countErr = g.run("rev-list", "--count", baseline+"..HEAD")
+		}
+		if baseline == "" || countErr != nil {
+			// Last-resort fallback: count all commits on HEAD.
+			count, countErr = g.run("rev-list", "--count", "HEAD")
+			if countErr != nil {
+				return false, 0, fmt.Errorf("counting commits: %w", countErr)
 			}
 		}
 		var n int
-		_, err = fmt.Sscanf(count, "%d", &n)
+		_, err := fmt.Sscanf(count, "%d", &n)
 		if err != nil {
 			return false, 0, fmt.Errorf("parsing commit count: %w", err)
 		}
-		// If there are any commits since main, branch is not pushed
+		// If there are any commits since the default branch, branch is not pushed.
 		return n == 0, n, nil
 	}
 
