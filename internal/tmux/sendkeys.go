@@ -748,6 +748,34 @@ func shouldSkipEscapeForAgent(agentType string) bool {
 	return false
 }
 
+// agentSupportsRewindMode returns true when the agent's CLI implements the
+// double-Escape "Rewind" conversation-history browser that captures all
+// keyboard input until dismissed. Only Claude Code (any GT_AGENT containing
+// "claude", case-insensitive) ships this UI. Every other agent (kiro-cli,
+// copilot, gemini, cursor, etc.) has no Rewind mode, so the pane-capture +
+// pattern-match checks in the nudge protocol (steps 0 and 6.5) are wasted
+// cycles — each check reads ~15ms of tmux pane content that can never
+// match. Callers use this to gate those checks behind agent type.
+//
+// Unknown agents conservatively map to false: the checks only matter for
+// Claude, and false-negatives just regress to the Claude-only fast path
+// (no Rewind handling), which is identical to what every non-Claude agent
+// already experiences today with the checks in place (they simply never
+// fire). False-positives would be worse — they would cost 15ms per nudge
+// on agents that will never need the handling.
+//
+// Matching is case-insensitive and whitespace-tolerant to match the style
+// of shouldSkipEscapeForAgent and absorb casing drift in GT_AGENT values.
+func agentSupportsRewindMode(agentType string) bool {
+	a := strings.ToLower(strings.TrimSpace(agentType))
+	if a == "" {
+		return false
+	}
+	// Any agent value containing "claude" (claude, claude-code, future
+	// claude-* variants). Rewind is a Claude Code feature.
+	return strings.Contains(a, "claude")
+}
+
 // canonicalPaneTarget converts a pane identifier like "%23" into a tmux target
 // that send-keys can resolve reliably. Bare pane IDs work for display-message,
 // but for send-keys we prefer an explicit session:window.pane target.
@@ -797,11 +825,22 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 		target = t.canonicalPaneTarget(session, agentPane)
 	}
 
+	// Read GT_AGENT once up-front: both the Rewind-mode gating below and the
+	// SkipEscape auto-detect (step 5 gate) depend on it. A single lookup keeps
+	// the two decisions consistent and avoids a second tmux show-environment
+	// round-trip later in the protocol.
+	agentType, _ := t.GetEnvironment(session, "GT_AGENT")
+	checkRewind := agentSupportsRewindMode(agentType)
+
 	// 0. Pre-delivery: dismiss Rewind menu if the session is stuck in it.
 	// A previous nudge or user action may have triggered Claude Code's
 	// double-Escape Rewind UI, which captures all input. Dismiss it first
 	// so the nudge can be delivered normally. (GH#gt-8el)
-	if t.isInRewindMode(target) {
+	//
+	// Rewind is a Claude Code-only UI, so skip the pane-capture check for
+	// other agents — the check costs ~15ms per nudge but can never match.
+	// (gu-yx80)
+	if checkRewind && t.isInRewindMode(target) {
 		t.dismissRewindMode(target)
 	}
 
@@ -830,7 +869,6 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 		// (Copilot CLI, kiro-cli) rather than harmlessly exiting vim INSERT mode.
 		// Leaving the Escape in the protocol strands the nudge text in the input
 		// buffer without Enter being processed. (hq-isz, gu-flq9)
-		agentType, _ := t.GetEnvironment(session, "GT_AGENT")
 		if shouldSkipEscapeForAgent(agentType) {
 			opts.SkipEscape = true
 		}
@@ -853,7 +891,10 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 		// If triggered, dismiss Rewind and re-send the message (Rewind
 		// consumed the original input). Skip the second Escape to avoid
 		// re-triggering. (GH#gt-8el)
-		if t.isInRewindMode(target) {
+		//
+		// Gated on agent type: only Claude Code implements Rewind, so the
+		// check is wasted ~15ms on other agents. (gu-yx80)
+		if checkRewind && t.isInRewindMode(target) {
 			t.dismissRewindMode(target)
 			// Re-send message text — Rewind consumed the original input.
 			_ = t.sendMessageToTarget(target, sanitized)
@@ -884,8 +925,21 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	}
 	defer releaseNudgeLock(pane)
 
+	// Resolve session from the pane so we can read GT_AGENT once and gate
+	// the Rewind checks below. Only Claude Code implements Rewind; skipping
+	// the pane-capture probes for other agents saves ~15ms per nudge.
+	// (gu-yx80) If the session lookup fails, fall back to running the
+	// checks (safe default — matches pre-gu-yx80 behavior).
+	checkRewind := true
+	if out, err := t.run("display-message", "-p", "-t", pane, "#{session_name}"); err == nil {
+		if session := strings.TrimSpace(out); session != "" {
+			agentType, _ := t.GetEnvironment(session, "GT_AGENT")
+			checkRewind = agentSupportsRewindMode(agentType)
+		}
+	}
+
 	// 0. Pre-delivery: dismiss Rewind menu if active. (GH#gt-8el)
-	if t.isInRewindMode(pane) {
+	if checkRewind && t.isInRewindMode(pane) {
 		t.dismissRewindMode(pane)
 	}
 
@@ -916,7 +970,8 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	time.Sleep(600 * time.Millisecond)
 
 	// 6.5. Post-Escape: check if our Escape triggered Rewind mode. (GH#gt-8el)
-	if t.isInRewindMode(pane) {
+	// Gated on agent type — Rewind is Claude Code-only. (gu-yx80)
+	if checkRewind && t.isInRewindMode(pane) {
 		t.dismissRewindMode(pane)
 		_ = t.sendMessageToTarget(pane, sanitized)
 		time.Sleep(adaptiveTextDelay(len(sanitized)))

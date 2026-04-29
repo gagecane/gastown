@@ -52,3 +52,50 @@ func TestShouldSkipEscapeForAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentSupportsRewindMode covers the gating decision for the Rewind-mode
+// pane-capture probes in the nudge protocol (steps 0 and 6.5). Only Claude
+// Code implements the double-Escape Rewind UI, so every other agent should
+// skip the ~15ms pane-content check that can never match.
+//
+// Per gu-yx80: any GT_AGENT containing "claude" (case-insensitive) maps to
+// true (check Rewind). All other values — including agents that skip Escape
+// entirely (kiro-cli, copilot), the empty string, and unknown agents — map
+// to false so the wasted checks are elided.
+func TestAgentSupportsRewindMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		agent    string
+		expected bool
+	}{
+		// Claude variants: Rewind mode check applies.
+		{"claude bare", "claude", true},
+		{"claude-code canonical", "claude-code", true},
+		{"claude uppercase", "CLAUDE", true},
+		{"claude-code uppercase", "CLAUDE-CODE", true},
+		{"claude mixed case", "Claude-Code", true},
+		{"claude with whitespace", "  claude-code  ", true},
+		{"claude suffix variant", "claude-next", true},
+		{"claude embedded", "my-claude-build", true},
+
+		// Non-Claude agents: Rewind check is pure overhead.
+		{"kiro-cli", "kiro-cli", false},
+		{"kiro bare", "kiro", false},
+		{"copilot", "copilot", false},
+		{"gemini", "gemini", false},
+		{"cursor", "cursor", false},
+		{"empty string", "", false},
+		{"whitespace only", "   ", false},
+		{"unknown agent", "some-new-agent", false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := agentSupportsRewindMode(tc.agent)
+			if got != tc.expected {
+				t.Errorf("agentSupportsRewindMode(%q) = %v; want %v", tc.agent, got, tc.expected)
+			}
+		})
+	}
+}
