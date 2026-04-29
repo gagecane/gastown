@@ -324,25 +324,25 @@ func TestConvoyHandler_MergeQueueRendering(t *testing.T) {
 		t.Error("Response should contain merge queue section header")
 	}
 
-	// Check PR numbers are rendered
-	if !strings.Contains(body, "#123") {
-		t.Error("Response should contain PR #123")
+	// Check bead IDs are rendered (CRID is empty, so template falls back to ID)
+	if !strings.Contains(body, "gt-abc12") {
+		t.Error("Response should contain bead ID gt-abc12")
 	}
-	if !strings.Contains(body, "#456") {
-		t.Error("Response should contain PR #456")
+	if !strings.Contains(body, "gt-jkl78") {
+		t.Error("Response should contain bead ID gt-jkl78")
 	}
 
 	// Check repo names
 	if !strings.Contains(body, "roxas") {
 		t.Error("Response should contain repo 'roxas'")
 	}
-
-	// Check CI status badges (now display text, not classes)
-	if !strings.Contains(body, "CI Pass") {
-		t.Error("Response should contain 'CI Pass' text for passing PR")
+	if !strings.Contains(body, "gastown") {
+		t.Error("Response should contain repo 'gastown'")
 	}
-	if !strings.Contains(body, "CI Running") {
-		t.Error("Response should contain 'CI Running' text for pending PR")
+
+	// Check status badges for Status=="open" → "Queued"
+	if !strings.Contains(body, "Queued") {
+		t.Error("Response should contain 'Queued' badge for open MRs")
 	}
 }
 
@@ -365,7 +365,7 @@ func TestConvoyHandler_EmptyMergeQueue(t *testing.T) {
 	body := w.Body.String()
 
 	// Should show empty state for merge queue
-	if !strings.Contains(body, "No PRs in queue") {
+	if !strings.Contains(body, "No MRs in queue") {
 		t.Error("Response should show empty merge queue message")
 	}
 }
@@ -639,8 +639,8 @@ func TestConvoyHandler_FullDashboard(t *testing.T) {
 	if !strings.Contains(body, "Merge Queue") {
 		t.Error("Response should contain merge queue section")
 	}
-	if !strings.Contains(body, "#789") {
-		t.Error("Response should contain PR data")
+	if !strings.Contains(body, "gt-def34") {
+		t.Error("Response should contain merge-request bead ID gt-def34")
 	}
 	if !strings.Contains(body, "Polecats") {
 		t.Error("Response should contain polecats section")
@@ -732,8 +732,8 @@ func TestE2E_Server_FullDashboard(t *testing.T) {
 		{"Convoy ID", "hq-cv-e2e"},
 		{"Convoy progress", "2/4"},
 		{"Merge queue section", "Merge Queue"},
-		{"PR number", "#101"},
-		{"PR repo", "roxas"},
+		{"MR bead ID", "gt-ghi56"},
+		{"MR repo", "roxas"},
 		{"Polecats section", "Polecats"},
 		{"Polecat name", "furiosa"},
 		{"HTMX SSE trigger", `hx-trigger="sse:dashboard-update`},
@@ -827,25 +827,27 @@ func TestE2E_Server_MergeQueueEmpty(t *testing.T) {
 	}
 
 	// Empty state message
-	if !strings.Contains(body, "No PRs in queue") {
-		t.Error("Should show 'No PRs in queue' when empty")
+	if !strings.Contains(body, "No MRs in queue") {
+		t.Error("Should show 'No MRs in queue' when empty")
 	}
 }
 
-// TestE2E_Server_MergeQueueStatuses tests all PR status combinations.
+// TestE2E_Server_MergeQueueStatuses tests MR status badge rendering.
+// Maps MergeQueueRow.Status → template badge text:
+//
+//	"hooked" → "Processing" (green) — being processed by refinery
+//	"open"   → "Queued"     (yellow) — waiting in queue
+//	other    → "{Status}"   (muted)  — passthrough label
 func TestE2E_Server_MergeQueueStatuses(t *testing.T) {
 	tests := []struct {
 		name       string
-		ciStatus   string
-		mergeable  string
+		status     string
 		colorClass string
-		wantCI     string
-		wantMerge  string
+		wantBadge  string
 	}{
-		{"green when ready", "pass", "ready", "mq-green", "CI Pass", "Ready"},
-		{"red when CI fails", "fail", "ready", "mq-red", "CI Fail", "Ready"},
-		{"red when conflict", "pass", "conflict", "mq-red", "CI Pass", "Conflict"},
-		{"yellow when pending", "pending", "pending", "mq-yellow", "CI Running", "Pending"},
+		{"green when processing", "hooked", "mq-green", "Processing"},
+		{"yellow when queued", "open", "mq-yellow", "Queued"},
+		{"muted when unknown status", "failed", "mq-red", "failed"},
 	}
 
 	for _, tt := range tests {
@@ -853,10 +855,10 @@ func TestE2E_Server_MergeQueueStatuses(t *testing.T) {
 			mock := &MockConvoyFetcher{
 				MergeQueue: []MergeQueueRow{
 					{
-						ID: "gt-mno90",
+						ID:         "gt-mno90",
 						Repo:       "test",
-						Title:      "Test PR",
-						Status: "open",
+						Title:      "Test MR",
+						Status:     tt.status,
 						ColorClass: tt.colorClass,
 					},
 				},
@@ -882,11 +884,8 @@ func TestE2E_Server_MergeQueueStatuses(t *testing.T) {
 			if !strings.Contains(body, tt.colorClass) {
 				t.Errorf("Should contain row class %q", tt.colorClass)
 			}
-			if !strings.Contains(body, tt.wantCI) {
-				t.Errorf("Should contain CI text %q", tt.wantCI)
-			}
-			if !strings.Contains(body, tt.wantMerge) {
-				t.Errorf("Should contain merge text %q", tt.wantMerge)
+			if !strings.Contains(body, tt.wantBadge) {
+				t.Errorf("Should contain status badge text %q", tt.wantBadge)
 			}
 		})
 	}
