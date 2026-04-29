@@ -90,13 +90,16 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("checking bead status: %w", err)
 	}
 
-	// Reject agent beads (gu-7gm): polecat/witness/refinery/mayor/dog state beads
-	// carry per-agent state (role_type, hook_bead, cleanup_status) and are not
-	// work items. Dispatching one causes a polecat to hook the agent bead and
-	// submit whatever stale auto-save branch the prior polecat left behind,
-	// potentially reverting merged commits.
-	if isAgentBead(info) {
-		return fmt.Errorf("bead %s is an agent state bead (label gt:agent) — not a work item, refusing to schedule", beadID)
+	// Ghost-dispatch guard (gu-7gm + gu-3znx). Reject agent/identity beads —
+	// gt:agent label, legacy type=agent, closed status, or polecat/refinery
+	// title regex. Scheduling one causes a polecat to hook the identity bead
+	// and submit whatever stale auto-save branch the prior polecat left
+	// behind, potentially reverting merged commits. Previously this only
+	// filtered on label/type (isAgentBead); gu-3znx widens it to match the
+	// full beads.IsIdentityBead contract used by convoy feeding so all
+	// dispatch paths share one filter.
+	if isIdentityBeadInfo(info) {
+		return fmt.Errorf("bead %s is an identity/system bead (gt:agent label, closed, or polecat/refinery title): %q — refusing to schedule", beadID, info.Title)
 	}
 
 	// Idempotency: check for existing open sling context for this work bead.

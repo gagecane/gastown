@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -246,6 +247,74 @@ func IsAgentBead(issue *Issue) bool {
 	}
 	// Check for gt:agent label (current standard)
 	return HasLabel(issue, "gt:agent")
+}
+
+// identityBeadTitleRe matches identity/system bead titles by naming convention.
+// Examples that match: "af-agentforge-polecat-quartz", "af-agentforge-refinery",
+// "gu-gastown-polecat-nux". These are agent/role beads that must never be
+// dispatched as work, even if they lack the gt:agent label or have non-closed
+// status (see gu-ypjm "ghost dispatch loop").
+//
+// Conservative regex matching the form used throughout the codebase
+// (polecat + refinery). Witness/deacon/mayor identity beads are expected to
+// carry the gt:agent label, which is caught by IsAgentBead; the title regex
+// is a defense-in-depth guard for the known-drifting cases.
+var identityBeadTitleRe = regexp.MustCompile(`^[a-z]+-.+-(polecat-.+|refinery)$`)
+
+// IsIdentityBeadTitle reports whether a title matches the identity/system
+// naming convention (prefix-rig-role[-name]). Exported for callers that only
+// have a title string (e.g. dep metadata snapshots).
+func IsIdentityBeadTitle(title string) bool {
+	if title == "" {
+		return false
+	}
+	return identityBeadTitleRe.MatchString(title)
+}
+
+// IsIdentityBead reports whether an issue is an identity/system bead that
+// must never be dispatched as work. This is the broader ghost-dispatch filter
+// from gu-ypjm, extended in gu-3znx to cover every dispatch path (sling, sling
+// dispatch, deferred scheduler). Matches any of:
+//
+//  1. label "gt:agent" (explicit identity marker)
+//  2. legacy issue_type == "agent" (pre-migration beads)
+//  3. status == "closed" (closed beads must never dispatch)
+//  4. title matches identity/system naming convention (polecat/refinery/
+//     witness/deacon/mayor/crew beads)
+//
+// The title regex is defense-in-depth: labels and status are often stale in
+// cross-rig dep metadata, and gt doctor --fix agent-beads-exist re-creates
+// identity beads with status=open whenever they go missing.
+//
+// Callers that only have a "label or type=agent" signal should prefer the
+// narrower IsAgentBead; this helper is the correct choice for any code path
+// that decides whether a bead may be dispatched as work.
+func IsIdentityBead(issue *Issue) bool {
+	if issue == nil {
+		return false
+	}
+	if IsAgentBead(issue) {
+		return true
+	}
+	if issue.Status == "closed" {
+		return true
+	}
+	return IsIdentityBeadTitle(issue.Title)
+}
+
+// IsIdentityBeadFields is the fields-based variant of IsIdentityBead. Callers
+// that have decomposed title/status/labels (e.g. convoy tracked issues or
+// cmd/sling beadInfo) use this to avoid constructing a full Issue.
+func IsIdentityBeadFields(title, status string, labels []string) bool {
+	for _, l := range labels {
+		if l == "gt:agent" {
+			return true
+		}
+	}
+	if status == "closed" {
+		return true
+	}
+	return IsIdentityBeadTitle(title)
 }
 
 // IsProtectedBead checks if a bead has any protection labels that should

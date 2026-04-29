@@ -2759,6 +2759,137 @@ func TestIsAgentBead(t *testing.T) {
 	}
 }
 
+// TestIsIdentityBeadTitle verifies the naming-convention regex used by the
+// ghost-dispatch filter (gu-ypjm / gu-3znx). Matches identity beads with
+// titles like "<prefix>-<rig>-polecat-<name>" or "<prefix>-<rig>-refinery".
+func TestIsIdentityBeadTitle(t *testing.T) {
+	tests := []struct {
+		title string
+		want  bool
+	}{
+		// Match
+		{"af-agentforge-polecat-quartz", true},
+		{"af-agentforge-refinery", true},
+		{"gu-gastown-refinery", true},
+		{"cadk-casc_cdk-refinery", true},
+		{"ta-talontriage-polecat-nux", true},
+		{"ro-ralph-polecat-jasper", true},
+		// No match — not enough structure
+		{"refinery", false},
+		{"polecat-research", false},
+		// No match — wrong structure
+		{"af-refinery-feature-work", false}, // polecat/refinery must be at end
+		{"", false},
+		// No match — upper case prefix
+		{"AF-agentforge-refinery", false},
+		// No match — spaces
+		{"Fix bug in parser", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.title, func(t *testing.T) {
+			got := IsIdentityBeadTitle(tt.title)
+			if got != tt.want {
+				t.Errorf("IsIdentityBeadTitle(%q) = %v, want %v", tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsIdentityBeadFields covers the three filter criteria in gu-ypjm/gu-3znx:
+// gt:agent label, status=closed, and identity-naming title regex. Matching
+// ANY criterion classifies the bead as identity (not dispatchable as work).
+func TestIsIdentityBeadFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		title  string
+		status string
+		labels []string
+		want   bool
+	}{
+		// Label match
+		{"gt:agent label alone", "random-title", "open", []string{"gt:agent"}, true},
+		{"gt:agent among others", "random-title", "open", []string{"priority-high", "gt:agent"}, true},
+		{"similar label does not match", "random-title", "open", []string{"gt:agentless", "agent"}, false},
+
+		// Status match
+		{"closed status triggers", "some-task", "closed", nil, true},
+		{"in_progress status does not trigger", "some-task", "in_progress", nil, false},
+		{"tombstone status does not trigger", "some-task", "tombstone", nil, false},
+
+		// Title regex match
+		{"polecat title matches", "af-agentforge-polecat-quartz", "open", nil, true},
+		{"refinery title matches", "cadk-casc_cdk-refinery", "open", nil, true},
+		{"empty title does not match", "", "open", nil, false},
+		{"refinery without rig prefix does not match", "refinery", "open", nil, false},
+
+		// Combined / none
+		{"real task bead not identity", "Fix bug in parser", "open", []string{"priority-high"}, false},
+		{"all three criteria together", "af-agentforge-polecat-quartz", "closed", []string{"gt:agent"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsIdentityBeadFields(tt.title, tt.status, tt.labels)
+			if got != tt.want {
+				t.Errorf("IsIdentityBeadFields(title=%q, status=%q, labels=%v) = %v, want %v",
+					tt.title, tt.status, tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsIdentityBead verifies the Issue-shaped variant of the ghost-dispatch
+// filter. This must match IsIdentityBeadFields for equivalent inputs.
+func TestIsIdentityBead(t *testing.T) {
+	tests := []struct {
+		name  string
+		issue *Issue
+		want  bool
+	}{
+		{"nil issue", nil, false},
+		{"empty issue", &Issue{}, false},
+		{
+			name:  "task bead is not identity",
+			issue: &Issue{Title: "Fix bug", Status: "open", Type: "task"},
+			want:  false,
+		},
+		{
+			name:  "gt:agent label",
+			issue: &Issue{Title: "any", Status: "open", Labels: []string{"gt:agent"}},
+			want:  true,
+		},
+		{
+			name:  "legacy type=agent",
+			issue: &Issue{Title: "any", Status: "open", Type: "agent"},
+			want:  true,
+		},
+		{
+			name:  "closed status",
+			issue: &Issue{Title: "any", Status: "closed", Type: "task"},
+			want:  true,
+		},
+		{
+			name:  "identity title regex",
+			issue: &Issue{Title: "af-agentforge-polecat-quartz", Status: "open", Type: "task"},
+			want:  true,
+		},
+		{
+			name:  "refinery title regex",
+			issue: &Issue{Title: "cadk-casc_cdk-refinery", Status: "open", Type: "task"},
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsIdentityBead(tt.issue); got != tt.want {
+				t.Errorf("IsIdentityBead(%+v) = %v, want %v", tt.issue, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestFilterBeadsEnv_NilInput verifies filterBeadsEnv does not panic on nil.
 func TestFilterBeadsEnv_NilInput(t *testing.T) {
 	got := filterBeadsEnv(nil)

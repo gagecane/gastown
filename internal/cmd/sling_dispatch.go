@@ -133,9 +133,23 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 
 	// Guard against dispatching closed/tombstone beads (defense-in-depth).
 	// Not bypassed by --force — if you need to re-dispatch, reopen the bead first.
+	// Run this before the identity check so the error clearly states "already
+	// closed/tombstone" rather than "identity bead" — closed is the tighter cause.
 	if info.Status == "closed" || info.Status == "tombstone" {
 		result.ErrMsg = "already " + info.Status
 		return result, fmt.Errorf("bead %s is %s (work already completed)", params.BeadID, info.Status)
+	}
+
+	// Ghost-dispatch guard (gu-3znx, follow-up to gu-ypjm / fa341247).
+	// Identity beads — gt:agent label, legacy type=agent, or polecat/refinery
+	// title regex — must never reach a polecat. Batch sling and queue dispatch
+	// both funnel through executeSling, so applying the filter here covers
+	// rig-target batch dispatch and the deferred scheduler's execution step.
+	// (The closed-status prong is handled above; beads.IsIdentityBeadFields
+	// also catches it, but a tighter error message helps debugging.)
+	if isIdentityBeadInfo(info) {
+		result.ErrMsg = "identity bead"
+		return result, fmt.Errorf("bead %s is an identity/system bead (gt:agent label, closed, or polecat/refinery title): %q — not a work item", params.BeadID, info.Title)
 	}
 
 	// Save explicit force state before dead-agent auto-force, so the deferred

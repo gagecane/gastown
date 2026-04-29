@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -16,13 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/util"
 )
-
-// identityBeadTitleRe matches identity/system bead titles by naming convention.
-// Examples that match: "af-agentforge-polecat-quartz", "af-agentforge-refinery",
-// "gt-gastown-polecat-nux". These are agent/role beads that must never be
-// dispatched as work, even if they lack the gt:agent label or have non-closed
-// status (see gu-ypjm "ghost dispatch loop").
-var identityBeadTitleRe = regexp.MustCompile(`^[a-z]+-.+-(polecat-.+|refinery)$`)
 
 // IsIdentityBead reports whether a tracked issue is an identity/system bead
 // that must never be dispatched as work. Matches any of:
@@ -34,19 +26,13 @@ var identityBeadTitleRe = regexp.MustCompile(`^[a-z]+-.+-(polecat-.+|refinery)$`
 // This is the broader ghost-dispatch filter per gu-ypjm. The title regex is
 // a defense-in-depth guard for identity beads whose labels/status snapshots
 // are stale in the local dependency metadata (common for cross-rig deps).
+//
+// This function is a thin delegator to beads.IsIdentityBeadFields. It is kept
+// here with its original signature so cross-rig tracked-issue call sites don't
+// have to construct a full beads.Issue just to run the filter. See gu-3znx
+// for the wider dispatch-path extension.
 func IsIdentityBead(title, status string, labels []string) bool {
-	for _, l := range labels {
-		if l == "gt:agent" {
-			return true
-		}
-	}
-	if status == "closed" {
-		return true
-	}
-	if title != "" && identityBeadTitleRe.MatchString(title) {
-		return true
-	}
-	return false
+	return beads.IsIdentityBeadFields(title, status, labels)
 }
 
 // CheckConvoysForIssue finds any convoys tracking the given issue and triggers

@@ -119,6 +119,10 @@ func isDeferredBead(info *beadInfo) bool {
 //
 // Identification mirrors beads.IsAgentBead: the "gt:agent" label (current
 // standard) or the legacy issue_type == "agent" (pre-migration beads).
+//
+// Note: this is the narrow label/type check. For dispatch gating prefer
+// isIdentityBeadInfo, which also rejects closed beads and identity-named titles
+// (see gu-3znx).
 func isAgentBead(info *beadInfo) bool {
 	if info == nil {
 		return false
@@ -132,6 +136,29 @@ func isAgentBead(info *beadInfo) bool {
 		}
 	}
 	return false
+}
+
+// isIdentityBeadInfo is the beadInfo-backed dispatch filter. It mirrors
+// beads.IsIdentityBead for the compact status/title/labels shape used by
+// sling's bd-show wrapper. Returns true when the bead is an agent identity
+// bead (label gt:agent OR legacy issue_type=agent), is closed, or has a title
+// matching the identity naming convention (^<prefix>-.+-(polecat-.+|refinery)$).
+//
+// Every dispatch path (runSling, executeSling, scheduleBead) consults this
+// helper to guarantee identity beads never hook a polecat. This closes the
+// sling-side gap left by fa341247, which only hardened convoy feeding and the
+// stranded scan (gu-3znx).
+func isIdentityBeadInfo(info *beadInfo) bool {
+	if info == nil {
+		return false
+	}
+	if isAgentBead(info) {
+		return true
+	}
+	if info.Status == "closed" {
+		return true
+	}
+	return beads.IsIdentityBeadTitle(info.Title)
 }
 
 // collectExistingMolecules returns all molecule wisp IDs attached to a bead.

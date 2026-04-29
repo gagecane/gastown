@@ -588,8 +588,19 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Guard against dispatching closed/tombstone beads (defense-in-depth).
 	// Not bypassed by --force — if you need to re-dispatch, reopen the bead first.
+	// Run this before the identity check so the error clearly states the closed
+	// cause rather than the more general "identity bead" message.
 	if info.Status == "closed" || info.Status == "tombstone" {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
+	}
+
+	// Ghost-dispatch guard (gu-3znx, follow-up to gu-ypjm / fa341247).
+	// Identity beads — gt:agent label, legacy type=agent, or polecat/refinery
+	// title regex — must never be dispatched as work. Sling bypasses convoy
+	// feeding, so the gu-ypjm fix alone did not cover this path; identity
+	// beads thrashed via LIFECYCLE:Shutdown reassign.
+	if isIdentityBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is an identity/system bead (gt:agent label or polecat/refinery title) — not a work item", beadID, info.Title)
 	}
 
 	// Guard against slinging deferred beads (gt-1326mw).

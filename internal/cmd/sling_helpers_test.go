@@ -265,3 +265,51 @@ func TestIsAgentBead(t *testing.T) {
 		})
 	}
 }
+
+// TestIsIdentityBeadInfo verifies the broader dispatch-gate filter (gu-3znx).
+// Identity beads — by label, closed status, or polecat/refinery title regex —
+// must never be dispatched as work via any sling path. A real task bead
+// (no agent signal, open/in_progress, non-identity title) must still pass.
+func TestIsIdentityBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &beadInfo{}, false},
+
+		// Real work beads — must NOT be classified as identity.
+		{"plain open task", &beadInfo{Title: "Fix bug in parser", Status: "open", IssueType: "task"}, false},
+		{"in_progress bug", &beadInfo{Title: "Implement feature X", Status: "in_progress", IssueType: "bug"}, false},
+		{"hooked task", &beadInfo{Title: "Add retry logic", Status: "hooked", IssueType: "task"}, false},
+
+		// Label criterion.
+		{"gt:agent label", &beadInfo{Title: "any", Status: "open", Labels: []string{"gt:agent"}}, true},
+		{"legacy type=agent", &beadInfo{Title: "any", Status: "open", IssueType: "agent"}, true},
+
+		// Status criterion.
+		{"closed status", &beadInfo{Title: "any", Status: "closed", IssueType: "task"}, true},
+
+		// Title regex criterion (the path sling missed in gu-3znx).
+		{"cadk refinery identity", &beadInfo{Title: "cadk-casc_cdk-refinery", Status: "open", IssueType: "task"}, true},
+		{"ta witness-style polecat", &beadInfo{Title: "ta-talontriage-polecat-nux", Status: "open", IssueType: "task"}, true},
+		{"ro polecat", &beadInfo{Title: "ro-ralph-polecat-jasper", Status: "open", IssueType: "task"}, true},
+
+		// Combined matches.
+		{"label + closed", &beadInfo{Title: "any", Status: "closed", Labels: []string{"gt:agent"}}, true},
+		{"all three criteria", &beadInfo{Title: "af-agentforge-polecat-quartz", Status: "closed", Labels: []string{"gt:agent"}, IssueType: "agent"}, true},
+
+		// Near misses.
+		{"title has refinery mid-string but not at end", &beadInfo{Title: "af-refinery-feature-work", Status: "open", IssueType: "task"}, false},
+		{"label looks like agent but is not", &beadInfo{Title: "Regular work", Status: "open", Labels: []string{"gt:agentless"}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isIdentityBeadInfo(tt.info); got != tt.want {
+				t.Errorf("isIdentityBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
