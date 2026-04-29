@@ -615,6 +615,15 @@ func runPolecatRemove(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// Close the associated agent bead so doctor's stale-agent-beads check
+		// doesn't flag it. Manager.Remove calls ResetAgentBeadForReuse which
+		// leaves the bead open with agent_state="nuked" (to support nuke→respawn
+		// cycles). But `gt polecat remove` is a user-driven deletion — the
+		// polecat identity is gone for good, so the bead should be closed.
+		// If the same polecat name is ever re-added, CreateOrReopenAgentBead
+		// will reopen the closed bead. (gu-y3fi)
+		closeAgentBeadAfterRemove(p.r, p.rigName, p.polecatName)
+
 		fmt.Printf("  %s removed\n", style.Success.Render("✓"))
 		removed++
 	}
@@ -636,6 +645,44 @@ func runPolecatRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// agentBeadCloser is the narrow beads interface used by closeAgentBead so the
+// helper can be unit-tested with a fake. (gu-y3fi)
+type agentBeadCloser interface {
+	Show(id string) (*beads.Issue, error)
+	Update(id string, opts beads.UpdateOptions) error
+}
+
+// closeAgentBeadAfterRemove closes the polecat's agent bead after the worktree
+// has been successfully removed. Best-effort: failures are logged but do not
+// fail the remove operation. Uses Update(status=closed) rather than Close() to
+// match the doctor stale-agent-beads fix path and avoid dependency-check
+// failures on agent beads that may have orphaned wisps. (gu-y3fi)
+func closeAgentBeadAfterRemove(r *rig.Rig, rigName, polecatName string) {
+	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
+	closeAgentBead(beads.New(r.Path), agentBeadID)
+}
+
+// closeAgentBead performs the actual close + output for an agent bead.
+// Exported as a standalone helper so it can be unit-tested with a fake
+// beads client (see polecat_close_agent_bead_test.go). (gu-y3fi)
+func closeAgentBead(bd agentBeadCloser, agentBeadID string) {
+	// Check existence first so we avoid spurious warnings when the bead
+	// never existed (e.g., removal of a polecat that was created before
+	// agent beads were introduced, or a double-remove race).
+	if _, err := bd.Show(agentBeadID); err != nil {
+		// Bead doesn't exist or can't be read — nothing to do.
+		return
+	}
+
+	closedStatus := "closed"
+	if err := bd.Update(agentBeadID, beads.UpdateOptions{Status: &closedStatus}); err != nil {
+		fmt.Printf("  %s could not close agent bead %s: %v\n",
+			style.Warning.Render("⚠"), agentBeadID, err)
+		return
+	}
+	fmt.Printf("  %s closed agent bead %s\n", style.Success.Render("✓"), agentBeadID)
 }
 
 // PolecatStatus represents detailed polecat status for JSON output.
