@@ -454,3 +454,254 @@ func TestRunHooksSyncNonClaudeAgentDryRun(t *testing.T) {
 		t.Error("dry-run should not create opencode plugin file")
 	}
 }
+
+// TestRunHooksSyncWitnessNoSubdirs verifies that a witness role dir with no
+// subdirectories still gets its hook config synced. Before the fix for gu-5gr4,
+// DiscoverWorktrees would return an empty slice for such dirs and hooks_sync
+// would silently skip the role, leaving stale configs unreachable.
+func TestRunHooksSyncWitnessNoSubdirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	// Put a dummy opencode binary on PATH.
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	townRoot := filepath.Join(tmpDir, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Rig with a witness dir and crew (for isRig detection). Witness has NO
+	// subdirectories — this is the condition that used to cause the skip.
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "witness"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "crew"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(townRoot, "mayor", "town.json"),
+		[]byte(`{"type":"town","version":1,"name":"test"}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure witness role to use opencode (a template-based agent that exercises
+	// the DiscoverWorktrees path).
+	townSettings := config.NewTownSettings()
+	townSettings.RoleAgents = map[string]string{"witness": "opencode"}
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"opencode": {Provider: "opencode", Command: "opencode"},
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatal(err)
+	}
+
+	base := &hooks.HooksConfig{
+		SessionStart: []hooks.HookEntry{
+			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
+		},
+	}
+	if err := hooks.SaveBase(base); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksSyncDryRun = false
+	if err := runHooksSync(nil, nil); err != nil {
+		t.Fatalf("runHooksSync failed: %v", err)
+	}
+
+	// The witness role dir itself must receive the opencode plugin — without
+	// the fix this file would be missing.
+	pluginPath := filepath.Join(townRoot, "myrig", "witness", ".opencode", "plugins", "gastown.js")
+	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+		t.Errorf("opencode plugin not synced to witness role dir at %s", pluginPath)
+	}
+}
+
+// TestRunHooksSyncWitnessWithStateSubdir verifies that when a witness role dir
+// contains a non-worktree state subdirectory (e.g., mail/), the sync targets
+// the role dir itself rather than treating the state dir as a worktree.
+func TestRunHooksSyncWitnessWithStateSubdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	townRoot := filepath.Join(tmpDir, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Witness with a mail/ subdir (state, not a worktree).
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "witness", "mail"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "crew"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(townRoot, "mayor", "town.json"),
+		[]byte(`{"type":"town","version":1,"name":"test"}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	townSettings := config.NewTownSettings()
+	townSettings.RoleAgents = map[string]string{"witness": "opencode"}
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"opencode": {Provider: "opencode", Command: "opencode"},
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatal(err)
+	}
+
+	base := &hooks.HooksConfig{
+		SessionStart: []hooks.HookEntry{
+			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
+		},
+	}
+	if err := hooks.SaveBase(base); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksSyncDryRun = false
+	if err := runHooksSync(nil, nil); err != nil {
+		t.Fatalf("runHooksSync failed: %v", err)
+	}
+
+	// Plugin must land in the witness role dir.
+	rolePlugin := filepath.Join(townRoot, "myrig", "witness", ".opencode", "plugins", "gastown.js")
+	if _, err := os.Stat(rolePlugin); os.IsNotExist(err) {
+		t.Errorf("opencode plugin not synced to witness role dir at %s", rolePlugin)
+	}
+
+	// Plugin must NOT be synced into the mail state subdir — state dirs aren't worktrees.
+	stalePlugin := filepath.Join(townRoot, "myrig", "witness", "mail", ".opencode", "plugins", "gastown.js")
+	if _, err := os.Stat(stalePlugin); !os.IsNotExist(err) {
+		t.Errorf("opencode plugin should NOT be synced into state subdir %s", stalePlugin)
+	}
+}
+
+// TestRunHooksSyncRefineryNoSubdirs mirrors the witness test for the refinery role.
+func TestRunHooksSyncRefineryNoSubdirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	townRoot := filepath.Join(tmpDir, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "refinery"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "crew"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(townRoot, "mayor", "town.json"),
+		[]byte(`{"type":"town","version":1,"name":"test"}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	townSettings := config.NewTownSettings()
+	townSettings.RoleAgents = map[string]string{"refinery": "opencode"}
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"opencode": {Provider: "opencode", Command: "opencode"},
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatal(err)
+	}
+
+	base := &hooks.HooksConfig{
+		SessionStart: []hooks.HookEntry{
+			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
+		},
+	}
+	if err := hooks.SaveBase(base); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksSyncDryRun = false
+	if err := runHooksSync(nil, nil); err != nil {
+		t.Fatalf("runHooksSync failed: %v", err)
+	}
+
+	pluginPath := filepath.Join(townRoot, "myrig", "refinery", ".opencode", "plugins", "gastown.js")
+	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+		t.Errorf("opencode plugin not synced to refinery role dir at %s", pluginPath)
+	}
+}

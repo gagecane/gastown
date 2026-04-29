@@ -160,21 +160,32 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 			// Determine sync targets.
 			// - Town-level roles (mayor, deacon): the role dir IS the working directory.
 			// - Rig roles with useSettingsDir: one shared file in the role parent.
+			// - Witness/refinery: single-instance daemons whose role dir IS the working
+			//   directory (analogous to mayor/deacon, just scoped to a rig). Subdirs
+			//   under these (e.g., witness/mail/) are state, not worktrees, and must
+			//   not receive hook config files.
 			// - Polecats: worktree is nested one level below the state dir
 			//   (polecats/<name>/<rigName>/); sync targets the worktree.
 			// - Other rig roles without useSettingsDir (crew for OpenCode, etc.):
 			//   sync targets each individual worktree subdirectory.
 			var syncDirs []string
-			if loc.Rig == "" || useSettingsDir {
+			switch {
+			case loc.Rig == "" || useSettingsDir:
 				syncDirs = []string{loc.Dir}
-			} else if loc.Role == "polecat" {
+			case loc.Role == "witness" || loc.Role == "refinery":
+				// Single-instance rig daemons — the role dir is the cwd. Without this
+				// branch, DiscoverWorktrees would return either an empty slice (leaving
+				// the state dir unsynced — the original bug) or stray subdirs like
+				// witness/mail/ (which are state, not worktrees).
+				syncDirs = []string{loc.Dir}
+			case loc.Role == "polecat":
 				// Polecat worktrees are nested one level deeper than the state dir:
 				//   polecats/<name>/             ← loc.Dir (state dir, not a worktree)
 				//   polecats/<name>/<rigName>/   ← actual git worktree (agent cwd)
 				// Writing hook files to the state dir is invisible to kiro-cli and
 				// other agents, which read them from the worktree.
 				syncDirs = hooks.DiscoverPolecatWorktrees(loc.Dir)
-			} else {
+			default:
 				syncDirs = hooks.DiscoverWorktrees(loc.Dir)
 			}
 
