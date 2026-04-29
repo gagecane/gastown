@@ -12,8 +12,10 @@ func initTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 
-	// Initialize repo
-	cmd := exec.Command("git", "init")
+	// Initialize repo with an explicit initial branch so tests are
+	// deterministic regardless of the host's init.defaultBranch setting
+	// (e.g. some environments set it to "mainline"). Requires git >= 2.28.
+	cmd := exec.Command("git", "init", "-b", "main")
 	cmd.Dir = dir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -153,9 +155,9 @@ func TestCurrentBranch(t *testing.T) {
 		t.Fatalf("CurrentBranch: %v", err)
 	}
 
-	// Modern git uses "main", older uses "master"
-	if branch != "main" && branch != "master" {
-		t.Errorf("branch = %q, want main or master", branch)
+	// initTestRepo pins the initial branch to "main".
+	if branch != "main" {
+		t.Errorf("branch = %q, want main", branch)
 	}
 }
 
@@ -285,12 +287,10 @@ func TestCheckoutNewBranch(t *testing.T) {
 		t.Errorf("branch = %q, want feature-new", branch)
 	}
 
-	// Verify it fails if branch already exists
+	// Verify it fails if branch already exists.
+	// initTestRepo pins the initial branch to "main".
 	if err := g.Checkout("main"); err != nil {
-		// Try master for older git
-		if err := g.Checkout("master"); err != nil {
-			t.Fatalf("Checkout main/master: %v", err)
-		}
+		t.Fatalf("Checkout main: %v", err)
 	}
 	err = g.CheckoutNewBranch("feature-new", "HEAD")
 	if err == nil {
