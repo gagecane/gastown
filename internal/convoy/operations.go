@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -15,6 +16,38 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/util"
 )
+
+// identityBeadTitleRe matches identity/system bead titles by naming convention.
+// Examples that match: "af-agentforge-polecat-quartz", "af-agentforge-refinery",
+// "gt-gastown-polecat-nux". These are agent/role beads that must never be
+// dispatched as work, even if they lack the gt:agent label or have non-closed
+// status (see gu-ypjm "ghost dispatch loop").
+var identityBeadTitleRe = regexp.MustCompile(`^[a-z]+-.+-(polecat-.+|refinery)$`)
+
+// IsIdentityBead reports whether a tracked issue is an identity/system bead
+// that must never be dispatched as work. Matches any of:
+//
+//  1. label "gt:agent" (explicit identity marker)
+//  2. status=closed (closed beads should never dispatch)
+//  3. title matches identity/system naming convention (polecat/refinery beads)
+//
+// This is the broader ghost-dispatch filter per gu-ypjm. The title regex is
+// a defense-in-depth guard for identity beads whose labels/status snapshots
+// are stale in the local dependency metadata (common for cross-rig deps).
+func IsIdentityBead(title, status string, labels []string) bool {
+	for _, l := range labels {
+		if l == "gt:agent" {
+			return true
+		}
+	}
+	if status == "closed" {
+		return true
+	}
+	if title != "" && identityBeadTitleRe.MatchString(title) {
+		return true
+	}
+	return false
+}
 
 // CheckConvoysForIssue finds any convoys tracking the given issue and triggers
 // convoy completion checks. If the convoy is not complete, it reactively feeds
@@ -149,11 +182,13 @@ func runConvoyCheck(ctx context.Context, townRoot, convoyID, gtPath string) erro
 
 // trackedIssue holds basic info about an issue tracked by a convoy.
 type trackedIssue struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Assignee  string `json:"assignee"`
-	Priority  int    `json:"priority"`
-	IssueType string `json:"issue_type"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Status    string   `json:"status"`
+	Assignee  string   `json:"assignee"`
+	Priority  int      `json:"priority"`
+	IssueType string   `json:"issue_type"`
+	Labels    []string `json:"labels,omitempty"`
 }
 
 // slingableTypes are bead types that can be dispatched via gt sling.
@@ -310,6 +345,16 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			continue
 		}
 
+		// Filter identity/system beads (ghost dispatch loop guard — gu-ypjm).
+		// Matches by gt:agent label, status=closed, or identity-naming title regex.
+		// This is defense-in-depth: status!=open is already filtered above, but
+		// identity beads occasionally appear with status=open after doctor --fix
+		// re-creates them (see beads fragility note in gu-ypjm).
+		if IsIdentityBead(issue.Title, issue.Status, issue.Labels) {
+			logger("%s: convoy %s: %s is an identity bead (label/status/title match), skipping", caller, convoyID, issue.ID)
+			continue
+		}
+
 		// Filter non-slingable types: only leaf work items (task, bug,
 		// feature, chore) can be dispatched. Epics, convoys, and other
 		// container types are skipped.
@@ -362,10 +407,12 @@ func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID
 	// Filter by tracks type and collect IDs
 	var ids []string
 	type depMeta struct {
+		title     string
 		status    string
 		assignee  string
 		priority  int
 		issueType string
+		labels    []string
 	}
 	metaByID := make(map[string]depMeta)
 	for _, d := range deps {
@@ -373,10 +420,12 @@ func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID
 			id := extractIssueID(d.ID)
 			ids = append(ids, id)
 			metaByID[id] = depMeta{
+				title:     d.Title,
 				status:    string(d.Status),
 				assignee:  d.Assignee,
 				priority:  d.Priority,
 				issueType: string(d.IssueType),
+				labels:    d.Labels,
 			}
 		}
 	}
@@ -427,15 +476,19 @@ func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID
 	for _, id := range ids {
 		t := trackedIssue{ID: id}
 		if fresh := freshMap[id]; fresh != nil {
+			t.Title = fresh.Title
 			t.Status = string(fresh.Status)
 			t.Assignee = fresh.Assignee
 			t.Priority = fresh.Priority
 			t.IssueType = string(fresh.IssueType)
+			t.Labels = fresh.Labels
 		} else if meta, ok := metaByID[id]; ok {
+			t.Title = meta.title
 			t.Status = meta.status
 			t.Assignee = meta.assignee
 			t.Priority = meta.priority
 			t.IssueType = meta.issueType
+			t.Labels = meta.labels
 		}
 		result = append(result, t)
 	}

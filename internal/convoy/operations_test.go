@@ -69,6 +69,55 @@ func TestIsSlingableType(t *testing.T) {
 	}
 }
 
+// TestIsIdentityBead covers the three filter criteria in gu-ypjm (ghost
+// dispatch loop): gt:agent label, status=closed, and identity-naming title
+// regex. Matching ANY criterion classifies the bead as identity.
+func TestIsIdentityBead(t *testing.T) {
+	tests := []struct {
+		name   string
+		title  string
+		status string
+		labels []string
+		want   bool
+	}{
+		// Label match (criterion a)
+		{"gt:agent label alone", "random-title", "open", []string{"gt:agent"}, true},
+		{"gt:agent among other labels", "random-title", "open", []string{"priority-high", "gt:agent", "role:polecat"}, true},
+		{"similar label does not match", "random-title", "open", []string{"gt:agentless", "agent"}, false},
+
+		// Status match (criterion b)
+		{"closed status triggers", "some-task", "closed", nil, true},
+		{"in_progress status does not trigger", "some-task", "in_progress", nil, false},
+		{"tombstone status does not trigger", "some-task", "tombstone", nil, false},
+
+		// Title regex match (criterion c)
+		{"polecat title matches", "af-agentforge-polecat-quartz", "open", nil, true},
+		{"refinery title matches", "af-agentforge-refinery", "open", nil, true},
+		{"refinery title (gastown rig) matches", "gt-gastown-refinery", "open", nil, true},
+		{"polecat title (other rig) matches", "ta-talontriage-polecat-nux", "open", nil, true},
+		{"title with -refinery in middle does not match", "af-refinery-feature-work", "open", nil, false},
+		{"title with polecat prefix only does not match", "polecat-research", "open", nil, false},
+		{"empty title does not match", "", "open", nil, false},
+		{"refinery without rig prefix does not match", "refinery", "open", nil, false},
+
+		// Combined / none
+		{"real task bead not identity", "Fix bug in parser", "open", []string{"priority-high"}, false},
+		{"real task bead with open status not identity", "Implement feature X", "in_progress", nil, false},
+		{"all three criteria together", "af-agentforge-polecat-quartz", "closed", []string{"gt:agent"}, true},
+		{"empty status and labels", "Normal work", "", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsIdentityBead(tt.title, tt.status, tt.labels)
+			if got != tt.want {
+				t.Errorf("IsIdentityBead(title=%q, status=%q, labels=%v) = %v, want %v",
+					tt.title, tt.status, tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsIssueBlocked_NoStore(t *testing.T) {
 	// isIssueBlocked with nil store should fail-open (return false, not panic).
 	// This covers the "store unavailable" failure mode (F-17).
@@ -1155,6 +1204,106 @@ func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
 		// It's also possible we got "no ready issues" if getConvoyTrackedIssues
 		// failed due to embedded Dolt. Accept either.
 		t.Logf("log messages: %v", *logMsgs)
+	}
+}
+
+// TestFeedNextReadyIssue_SkipsIdentityBeads is a regression guard for gu-ypjm
+// (ghost dispatch loop). Verifies that identity beads are NOT dispatched,
+// even when they coexist with a real task in the convoy. Covers all three
+// filter criteria together: gt:agent label, status=closed, title regex.
+func TestFeedNextReadyIssue_SkipsIdentityBeads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	convoy := &beadsdk.Issue{
+		ID:        "test-convoyID1",
+		Title:     "Ghost Dispatch Guard Convoy",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Identity bead via gt:agent label (higher priority — would dispatch first if not filtered)
+	agentLabeled := &beadsdk.Issue{
+		ID:        "test-polecat-nux",
+		Title:     "Polecat nux identity",
+		Status:    beadsdk.StatusOpen,
+		Priority:  1,
+		IssueType: beadsdk.TypeTask,
+		Labels:    []string{"gt:agent"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Identity bead via title regex (no gt:agent label, simulating stale metadata)
+	titleMatched := &beadsdk.Issue{
+		ID:        "test-refineryX",
+		Title:     "af-agentforge-refinery",
+		Status:    beadsdk.StatusOpen,
+		Priority:  1,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Real task (should be the only one dispatched)
+	real := &beadsdk.Issue{
+		ID:        "test-realID1",
+		Title:     "Real work",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	for _, iss := range []*beadsdk.Issue{convoy, agentLabeled, titleMatched, real} {
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+		}
+	}
+
+	for _, trackedID := range []string{agentLabeled.ID, titleMatched.ID, real.ID} {
+		dep := &beadsdk.Dependency{
+			IssueID:     convoy.ID,
+			DependsOnID: trackedID,
+			Type:        beadsdk.DependencyType("tracks"),
+			CreatedAt:   now,
+			CreatedBy:   "test",
+		}
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency %s: %v", trackedID, err)
+		}
+	}
+
+	townRoot := setupTownRoot(t)
+	gtPath, logPath := makeGTStub(t, 0)
+	logger, _ := makeLogger()
+
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("gt stub was not called (no log file): %v", err)
+	}
+	logStr := strings.TrimSpace(string(logData))
+
+	// Identity beads must not be dispatched.
+	if strings.Contains(logStr, agentLabeled.ID) {
+		t.Errorf("gt:agent-labeled bead %s should not have been dispatched, got: %q", agentLabeled.ID, logStr)
+	}
+	if strings.Contains(logStr, titleMatched.ID) {
+		t.Errorf("title-matched identity bead %s should not have been dispatched, got: %q", titleMatched.ID, logStr)
+	}
+	// Real task must be dispatched.
+	if !strings.Contains(logStr, "sling "+real.ID+" testrig --no-boot") {
+		t.Errorf("expected real task %s dispatch, got: %q", real.ID, logStr)
 	}
 }
 

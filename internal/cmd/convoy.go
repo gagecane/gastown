@@ -1534,6 +1534,12 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				if !convoyops.IsSlingableType(t.IssueType) {
 					continue
 				}
+				// Ghost-dispatch guard (gu-ypjm): skip identity beads even if
+				// they slip through as slingable. Matches by gt:agent label,
+				// status=closed, or identity/system title regex.
+				if convoyops.IsIdentityBead(t.Title, t.Status, t.Labels) {
+					continue
+				}
 				readyIssues = append(readyIssues, t.ID)
 			}
 		}
