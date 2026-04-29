@@ -774,28 +774,60 @@ func (g *Git) DefaultBranch() string {
 
 // RemoteDefaultBranch returns the default branch from the remote (origin).
 // This is useful in worktrees where HEAD may not reflect the repo's actual default.
-// Checks origin/HEAD first, then falls back to checking if master/main exists.
-// Returns "main" as final fallback.
+//
+// Resolution order:
+//  1. Local symbolic ref refs/remotes/origin/HEAD (populated by clone or fetch).
+//  2. Live query of the remote via `git ls-remote --symref origin HEAD`, which
+//     works for any default branch name the remote advertises (not just
+//     main/master). This covers hosts whose init.defaultBranch is set to
+//     something exotic like "mainline" and whose origin/HEAD has never been
+//     fetched locally.
+//  3. Existence probe of origin/master, then origin/main, for older remotes
+//     that do not advertise a symbolic HEAD.
+//  4. Final fallback to "main".
 func (g *Git) RemoteDefaultBranch() string {
-	// Try to get from origin/HEAD symbolic ref
+	// 1. Try local symbolic ref first — cheapest, no network.
 	out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD")
 	if err == nil && out != "" {
 		// Returns refs/remotes/origin/main -> extract branch name
 		parts := strings.Split(out, "/")
 		if len(parts) > 0 {
-			return parts[len(parts)-1]
+			if name := strings.TrimSpace(parts[len(parts)-1]); name != "" {
+				return name
+			}
 		}
 	}
 
-	// Fallback: check if origin/master exists
-	_, err = g.run("rev-parse", "--verify", "origin/master")
-	if err == nil {
+	// 2. Ask the remote directly. Works regardless of local tracking state
+	// and handles any default branch name, not just main/master.
+	// Output format (first line): "ref: refs/heads/<branch>\tHEAD"
+	if out, err := g.run("ls-remote", "--symref", "origin", "HEAD"); err == nil && out != "" {
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "ref:") {
+				continue
+			}
+			// Strip "ref:" prefix, then split on whitespace to separate
+			// the ref from the trailing "HEAD" marker.
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "ref:"))
+			fields := strings.Fields(rest)
+			if len(fields) == 0 {
+				continue
+			}
+			ref := fields[0] // e.g. refs/heads/mainline
+			if branch := strings.TrimPrefix(ref, "refs/heads/"); branch != ref && branch != "" {
+				return branch
+			}
+		}
+	}
+
+	// 3. Fallback: check if origin/master exists
+	if _, err := g.run("rev-parse", "--verify", "origin/master"); err == nil {
 		return "master"
 	}
 
-	// Fallback: check if origin/main exists
-	_, err = g.run("rev-parse", "--verify", "origin/main")
-	if err == nil {
+	// 4. Fallback: check if origin/main exists
+	if _, err := g.run("rev-parse", "--verify", "origin/main"); err == nil {
 		return "main"
 	}
 

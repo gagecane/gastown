@@ -706,13 +706,17 @@ func stringContains(s, substr string) bool {
 
 // initTestRepoWithRemote sets up a local repo with a bare remote and initial push.
 // Returns (localDir, remoteDir, mainBranch).
+//
+// Both the bare remote and the local repo pin their initial branch to "main"
+// so tests are deterministic regardless of the host's init.defaultBranch
+// setting (e.g. some environments set it to "mainline"). Requires git >= 2.28.
 func initTestRepoWithRemote(t *testing.T) (string, string, string) {
 	t.Helper()
 	tmp := t.TempDir()
 
-	// Create bare remote
+	// Create bare remote with explicit initial branch.
 	remoteDir := filepath.Join(tmp, "remote.git")
-	if err := exec.Command("git", "init", "--bare", remoteDir).Run(); err != nil {
+	if err := exec.Command("git", "init", "--bare", "-b", "main", remoteDir).Run(); err != nil {
 		t.Fatalf("git init --bare: %v", err)
 	}
 
@@ -722,7 +726,7 @@ func initTestRepoWithRemote(t *testing.T) (string, string, string) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	for _, args := range [][]string{
-		{"git", "init"},
+		{"git", "init", "-b", "main"},
 		{"git", "config", "user.email", "test@test.com"},
 		{"git", "config", "user.name", "Test User"},
 	} {
@@ -2145,5 +2149,91 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 	}
 	if unpushed < 1 {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
+	}
+}
+
+// TestRemoteDefaultBranch_LsRemoteFallback verifies that RemoteDefaultBranch
+// discovers the remote's default branch via `git ls-remote --symref` when the
+// local origin/HEAD symbolic ref has not been populated (e.g. after push but
+// before any fetch). This guards the fix for gu-jozk, where hosts with
+// init.defaultBranch=mainline (or any non-main/master value) were mis-detected
+// as having a "main" default, breaking PruneStaleBranches.
+func TestRemoteDefaultBranch_LsRemoteFallback(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Bare remote whose default branch is an exotic name.
+	remoteDir := filepath.Join(tmp, "remote.git")
+	if err := exec.Command("git", "init", "--bare", "-b", "mainline", remoteDir).Run(); err != nil {
+		t.Fatalf("git init --bare -b mainline: %v", err)
+	}
+
+	// Local repo also using the exotic name, push it to origin.
+	localDir := filepath.Join(tmp, "local")
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "init", "-b", "mainline"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = localDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "initial"},
+		{"git", "remote", "add", "origin", remoteDir},
+		{"git", "push", "-u", "origin", "mainline"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = localDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+
+	// Sanity: git push does NOT populate refs/remotes/origin/HEAD, so the
+	// symbolic-ref probe must miss and ls-remote must supply the answer.
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = localDir
+	if err := cmd.Run(); err == nil {
+		t.Skip("unexpected: origin/HEAD already populated; ls-remote fallback not exercised")
+	}
+
+	g := NewGit(localDir)
+	got := g.RemoteDefaultBranch()
+	if got != "mainline" {
+		t.Errorf("RemoteDefaultBranch() = %q, want %q", got, "mainline")
+	}
+}
+
+// TestRemoteDefaultBranch_PrefersLocalSymref verifies that when origin/HEAD is
+// populated locally (e.g. after clone or fetch), RemoteDefaultBranch uses it
+// directly without consulting the remote.
+func TestRemoteDefaultBranch_PrefersLocalSymref(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	// Populate origin/HEAD by fetching (mimics what happens after clone).
+	if err := g.FetchPrune("origin"); err != nil {
+		t.Fatalf("FetchPrune: %v", err)
+	}
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD",
+		"refs/remotes/origin/"+mainBranch)
+	cmd.Dir = localDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("set origin/HEAD: %v", err)
+	}
+
+	got := g.RemoteDefaultBranch()
+	if got != mainBranch {
+		t.Errorf("RemoteDefaultBranch() = %q, want %q", got, mainBranch)
 	}
 }
