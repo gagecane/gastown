@@ -7,5 +7,13 @@
   "beads": {
     "prefix": "gu"
   },
-  "default_branch": "main"
+  "default_branch": "main",
+  "merge_queue": {
+    "enabled": true,
+    "run_tests": true,
+    "build_command": "go build ./...",
+    "test_command": "go test -short -race -timeout=10m -skip=TestInitBeadsSetsIssuePrefix ./...",
+    "lint_command": "go vet ./...",
+    "judgment_enabled": true
+  }
 }
