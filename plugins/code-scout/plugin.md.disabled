@@ -1,0 +1,38 @@
++++
+name = "code-scout"
+description = "Scan rigs for code improvement opportunities and create beads"
+
+[gate]
+type = "cooldown"
+cooldown = "4h"
++++
+
+## Code Scout
+
+Periodically scan rig source code for improvement opportunities and file them as beads.
+
+### Steps
+
+1. Discover all rigs dynamically — never hardcode rig names or paths:
+   - Parse `~/gt/mayor/rigs.json` to get the list of registered rig names
+   - For each rig, resolve its source root: `readlink -f ~/gt/<rig>/.beads/..`
+   - If the resolved path is under `~/gt/` (local beads, no workspace), check `/workplace/canewiw/` for a matching directory
+   - Skip any rig whose source root cannot be resolved
+
+2. In each source root, scan for:
+   - **TODOs/FIXMEs**: `grep -rn "TODO\|FIXME\|HACK\|XXX" --include="*.py" --include="*.rb" --include="*.ts" --include="*.js" --include="*.md"`
+   - **Dead code**: functions/classes that are defined but never imported or called
+   - **Missing tests**: source files with no corresponding test file
+   - **Stale docs**: README or docs/ files that reference things that no longer exist
+   - **Dependency issues**: outdated or pinned versions in requirements.txt, pyproject.toml, package.json
+   - **Large files**: files over 500 lines that could be split
+   - **Duplicated logic**: similar code blocks across files
+
+3. For each finding:
+   - Check if a bead already exists: `bd search "<description>"` in the appropriate rig
+   - If no duplicate, create: `bd create --title "<improvement>" --type task --priority P3`
+   - Add a note with file path, line number, and what to improve
+   - Label it: `bd tag <id> code-scout`
+
+4. Cap at 5 new beads per rig per cycle to avoid noise
+5. Report: "Code scout found N improvements across M rigs (created K new beads)"

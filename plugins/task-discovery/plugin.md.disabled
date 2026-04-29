@@ -1,0 +1,32 @@
++++
+name = "task-discovery"
+description = "Discover actionable follow-up tasks from completed polecat work"
+
+[gate]
+type = "cooldown"
+cooldown = "2h"
++++
+
+## Task Discovery
+
+Scan recently closed beads for artifacts that suggest follow-up work, and create new beads.
+
+### Steps
+
+1. Run `cd ~/gt/talontriage && bd list --status=closed` to find recently closed tasks
+2. For each closed task from the last 24 hours:
+   - Run `bd show <id>` to get the task details and any comments/notes
+   - Check the polecat's work output:
+     - Look for files mentioned in comments (e.g., `docs/discovery.md`, `docs/recommendation.md`)
+     - Read those files if they exist in `/home/canewiw/gt/talontriage/crew/` or `polecats/` directories
+3. In each artifact, look for actionable items:
+   - Lines starting with `TODO`, `FIXME`, `ACTION`, `FOLLOW-UP`
+   - Sections titled "Next Steps", "Recommendations", "Open Questions", "Future Work"
+   - Explicit suggestions like "should", "needs to", "must be", "consider"
+4. For each actionable item found:
+   - Check if a similar bead already exists: `bd search "<summary of item>"`
+   - If no duplicate, create a new bead: `bd create --title "<actionable item>" --type task`
+   - Link it to the parent: `bd link <new-id> <closed-id> --type discovered-from`
+   - Add a note: `bd note <new-id> "Discovered from <closed-id> artifact: <filename>"`
+5. Report summary: "Discovered N new tasks from M completed beads"
+6. If no artifacts or no actionable items found, do nothing
