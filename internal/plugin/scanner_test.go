@@ -440,6 +440,90 @@ func TestParsePluginMD_StuckAgentDogUsesCanonicalHeartbeatPath(t *testing.T) {
 	}
 }
 
+func TestParsePluginMD_PipelineMonitorDriftResistantDedupe(t *testing.T) {
+	// Verify the pipeline-monitor plugin parses correctly and encodes the
+	// v3 drift-resistant dedupe design (gu-ig05).
+	//
+	// This test guards against regressions that would revert the plugin to
+	// exact-title or rig-local dedupe, which caused duplicate P1 beads
+	// across cross-rig, title-drift, and version-drift cycles.
+	content, err := os.ReadFile(filepath.Join("..", "..", "plugins", "pipeline-monitor", "plugin.md"))
+	if err != nil {
+		t.Skipf("pipeline-monitor plugin not found (expected in plugins/): %v", err)
+	}
+
+	plugin, err := parsePluginMD(content, "/test/pipeline-monitor", LocationRig, "gastown")
+	if err != nil {
+		t.Fatalf("parsePluginMD failed: %v", err)
+	}
+
+	if plugin.Name != "pipeline-monitor" {
+		t.Errorf("expected name 'pipeline-monitor', got %q", plugin.Name)
+	}
+	if plugin.Version < 3 {
+		t.Errorf("expected version >= 3 (v3 introduced drift-resistant dedupe), got %d", plugin.Version)
+	}
+	if plugin.Gate == nil || plugin.Gate.Type != GateCooldown {
+		t.Fatal("expected cooldown gate")
+	}
+	if plugin.Gate.Duration != "1h" {
+		t.Errorf("expected gate duration '1h', got %q", plugin.Gate.Duration)
+	}
+
+	// Verify the fingerprint design is documented. These strings are
+	// contract: the plugin agent reads them to compute the fingerprint.
+	wantSubstrings := []string{
+		// Fingerprint concept and schema
+		"fingerprint",
+		"pipeline",
+		"package",
+		"failure_type",
+		"root_cause_category",
+		// Required root-cause categories for drift-resistance
+		"npm-registry-missing-version",
+		"brazil-build-error",
+		"test-flake",
+		"deploy-timeout",
+		// Cross-rig search (Step 5)
+		"every rig",
+		"rigs.json",
+		// Rig-mismatch handling (Step 5c)
+		"rig-mismatch",
+		// Test-scenario coverage mandated by gu-ig05
+		"S1: Same-rig exact match",
+		"S2: Same-rig title drift",
+		"S3: Same-rig version drift",
+		"S4: Cross-rig same cause",
+		"S5: Open-in-rigA, closed-in-rigB",
+		"S6: Legacy bead without fingerprint label",
+		// Audit trail records fingerprint + reused bead ID
+		"audit",
+		"Reused bead",
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(plugin.Instructions, s) {
+			t.Errorf("expected plugin instructions to contain %q; this is a required\n"+
+				"element of the v3 drift-resistant dedupe design (gu-ig05). "+
+				"If you removed it, update the plugin or this test with justification.", s)
+		}
+	}
+
+	// Legacy exact-title-matching language must be gone: v2 instructed the
+	// agent to match on "same pipeline + package + failure type" within a
+	// single rig, which this ticket explicitly fixes. A plain-text scan
+	// for the v2 dedupe instruction would be too brittle; instead we check
+	// that the plugin no longer claims to search "in the chosen rig" only.
+	forbiddenSubstrings := []string{
+		"existing open beads in the chosen rig",
+	}
+	for _, s := range forbiddenSubstrings {
+		if strings.Contains(plugin.Instructions, s) {
+			t.Errorf("plugin instructions still contain legacy rig-local dedupe\n"+
+				"language %q — v3 must search every rig (gu-ig05).", s)
+		}
+	}
+}
+
 func TestParsePluginMD_WithRunScript(t *testing.T) {
 	// Use a temp dir with a fixture plugin.md and run.sh so the test
 	// doesn't depend on the local filesystem layout (fails in CI).
