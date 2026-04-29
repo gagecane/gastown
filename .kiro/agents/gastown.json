@@ -18,7 +18,13 @@
     ],
     "stop": [
       {
+        "command": "/local/home/canewiw/.local/bin/gt tap polecat-stop-check"
+      },
+      {
         "command": "/local/home/canewiw/.local/bin/gt costs record"
+      },
+      {
+        "command": "[ -x /home/canewiw/.meshclaw/bin/polecat-slack-notify.sh ] && /home/canewiw/.meshclaw/bin/polecat-slack-notify.sh || true"
       }
     ]
   }
