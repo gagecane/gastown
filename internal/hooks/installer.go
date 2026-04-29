@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/hookutil"
 )
@@ -141,7 +143,7 @@ func installTargetPath(settingsDir, workDir, hooksDir, hooksFile string, useSett
 	return filepath.Join(installDir, hooksDir, hooksFile)
 }
 
-// resolveAndSubstitute resolves the template and performs {{GT_BIN}} substitution.
+// resolveAndSubstitute resolves the template and performs placeholder substitution.
 func resolveAndSubstitute(provider, hooksFile, role string) ([]byte, error) {
 	content, err := resolveTemplate(provider, hooksFile, role)
 	if err != nil {
@@ -161,7 +163,87 @@ func resolveAndSubstitute(provider, hooksFile, role string) ([]byte, error) {
 		content = bytes.ReplaceAll(content, []byte("{{GT_BIN}}"), gtBinBytes)
 	}
 
+	// AIM package path substitutions.
+	if bytes.Contains(content, []byte("{{AIM_SKILL_PATHS}}")) {
+		content = bytes.ReplaceAll(content, []byte("{{AIM_SKILL_PATHS}}"),
+			[]byte(resolveAIMPaths("skills")))
+	}
+	if bytes.Contains(content, []byte("{{AIM_SOP_PATHS}}")) {
+		content = bytes.ReplaceAll(content, []byte("{{AIM_SOP_PATHS}}"),
+			[]byte(resolveAIMPaths("agent-sops")))
+	}
+	if bytes.Contains(content, []byte("{{AIM_GUARDRAIL}}")) {
+		content = bytes.ReplaceAll(content, []byte("{{AIM_GUARDRAIL}}"),
+			[]byte(resolveAIMGuardrail()))
+	}
+
 	return content, nil
+}
+
+// resolveAIMPaths scans ~/.aim/packages/*/eventId-*/subdir and returns a
+// comma-separated list of the latest eventId path per package.
+func resolveAIMPaths(subdir string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	base := filepath.Join(home, ".aim", "packages")
+	pkgs, err := os.ReadDir(base)
+	if err != nil {
+		return ""
+	}
+	var paths []string
+	for _, pkg := range pkgs {
+		if !pkg.IsDir() {
+			continue
+		}
+		pkgDir := filepath.Join(base, pkg.Name())
+		events, err := os.ReadDir(pkgDir)
+		if err != nil {
+			continue
+		}
+		// Sort descending to get latest eventId first.
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].Name() > events[j].Name()
+		})
+		for _, ev := range events {
+			if !ev.IsDir() || !strings.HasPrefix(ev.Name(), "eventId-") {
+				continue
+			}
+			candidate := filepath.Join(pkgDir, ev.Name(), subdir)
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				paths = append(paths, candidate)
+				break
+			}
+		}
+	}
+	return strings.Join(paths, ",")
+}
+
+// resolveAIMGuardrail returns the path to the AIM use_aws guardrail binary.
+func resolveAIMGuardrail() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	base := filepath.Join(home, ".aim", "packages", "AIPowerUserCapabilities-1.0")
+	events, err := os.ReadDir(base)
+	if err != nil {
+		return ""
+	}
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].Name() > events[j].Name()
+	})
+	for _, ev := range events {
+		if !ev.IsDir() || !strings.HasPrefix(ev.Name(), "eventId-") {
+			continue
+		}
+		candidate := filepath.Join(base, ev.Name(), "agents", "hooks", "use_aws_guardrail", "guardrail")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // writeTemplate resolves a template, substitutes placeholders, and writes it to targetPath.

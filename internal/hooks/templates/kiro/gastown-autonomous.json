@@ -4,8 +4,76 @@
   "prompt": "CRITICAL: When you receive a <system-reminder> containing mail notifications (messages from overseer, 'You have new mail', or 'gt mail inbox'), treat it as HIGH PRIORITY and act on it immediately by running 'gt mail inbox' then following the instructions. These are NOT background noise — they are your primary work dispatch mechanism.",
   "tools": ["*"],
   "allowedTools": ["*"],
-  "includeMcpJson": true,
+  "includeMcpJson": false,
+  "resources": [
+    "file://AGENTS.md",
+    "file://*/AGENTS.md",
+    "file://src/*/AGENTS.md",
+    "file://.kiro/steering/**/*.md",
+    "file://*/.kiro/steering/**/*.md",
+    "file://src/*/.kiro/steering/**/*.md",
+    "file://~/.kiro/steering/**/*.md"
+  ],
+  "mcpServers": {
+    "builder-mcp": {
+      "command": "builder-mcp",
+      "args": [
+        "--skill-paths",
+        "{{AIM_SKILL_PATHS}}",
+        "--agent-sop-paths",
+        "{{AIM_SOP_PATHS}}"
+      ],
+      "env": {
+        "TOOL_PERSONALIZATION_ENABLED": "false"
+      }
+    }
+  },
+  "toolsSettings": {
+    "read": {
+      "deniedPaths": ["~/.aws/credentials"],
+      "allowedPaths": ["*"]
+    },
+    "write": {
+      "deniedPaths": ["~/.aws/credentials"],
+      "allowedPaths": ["./**"]
+    },
+    "shell": {
+      "deniedCommands": [
+        ".*cat.*/\\.aws/.*",
+        ".*cat.*/\\.ssh/.*",
+        ".*curl.*169\\.254\\.169\\.254.*",
+        ".*echo.*\\$AWS_ACCESS.*",
+        ".*echo.*\\$AWS_SECRET.*",
+        ".*echo.*\\$AWS_SESSION.*",
+        ".*env.*grep.*AWS.*",
+        ".*printenv.*AWS.*",
+        ".*kill.*mesh.?claw.*",
+        "DROP DATABASE.*",
+        "DROP TABLE.*",
+        "TRUNCATE TABLE.*",
+        "aws .* delete-.*",
+        "aws ec2 terminate-instances.*",
+        "aws s3 rb.*",
+        "aws s3 rm.*",
+        "cdk destroy.*",
+        "git push",
+        "git push.*--force.*",
+        "git push.*-f .*",
+        "git reset --hard.*",
+        "rm -rf /.*",
+        "rm -rf ~.*",
+        "curl .* \\| bash",
+        "wget .* \\| bash"
+      ]
+    }
+  },
   "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "use_aws",
+        "command": "test -f '{{AIM_GUARDRAIL}}' || exit 0; '{{AIM_GUARDRAIL}}'"
+      }
+    ],
     "agentSpawn": [
       {
         "command": "{{GT_BIN}} prime --hook && {{GT_BIN}} mail check --inject"
