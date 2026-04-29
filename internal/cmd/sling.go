@@ -8,17 +8,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
-	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -166,31 +163,6 @@ func init() {
 
 	slingCmd.AddCommand(slingRespawnResetCmd)
 	rootCmd.AddCommand(slingCmd)
-}
-
-var slingRespawnResetCmd = &cobra.Command{
-	Use:   "respawn-reset <bead-id>",
-	Short: "Reset the respawn counter for a bead",
-	Long: `Reset the per-bead respawn counter so it can be slung again.
-
-When a bead hits the respawn limit (3 attempts), gt sling blocks further
-dispatches to prevent spawn storms. After investigating the root cause,
-use this command to allow re-dispatch.`,
-	Args: cobra.ExactArgs(1),
-	RunE: runSlingRespawnReset,
-}
-
-func runSlingRespawnReset(_ *cobra.Command, args []string) error {
-	beadID := args[0]
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-	if err := witness.ResetBeadRespawnCount(townRoot, beadID); err != nil {
-		return fmt.Errorf("resetting respawn count for %s: %w", beadID, err)
-	}
-	fmt.Printf("Reset respawn counter for %s. It can be slung again.\n", beadID)
-	return nil
 }
 
 func runSling(cmd *cobra.Command, args []string) (retErr error) {
@@ -401,7 +373,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			DryRun:      slingDryRun,
 			Force:       slingForce,
 			NoMerge:     slingNoMerge,
-				ReviewOnly:  slingReviewOnly,
+			ReviewOnly:  slingReviewOnly,
 			Account:     slingAccount,
 			Agent:       slingAgent,
 			HookRawBead: slingHookRawBead,
@@ -1055,265 +1027,4 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	return nil
-}
-
-// runSlingToRig routes a single-sling rig-target dispatch through the unified
-// executeSling() path (gu-4d1, scheduler-unify). Rig targets always spawn a
-// fresh polecat, which is exactly what executeSling handles. Non-rig targets
-// (dogs, self, mayor, crew, existing polecats, dead-polecat fallback) remain
-// on the inline runSling path because executeSling does not cover them.
-//
-// Responsibilities this function owns (executeSling does not):
-//   - Cross-rig guard (executeSling requires the caller to pre-check)
-//   - Dry-run preview (executeSling has no dry-run mode)
-//   - Auto-apply mol-polecat-work (runSling has this only for the inline path)
-//   - wakeRigAgents() after dispatch when !NoBoot (executeSling requires the caller)
-func runSlingToRig(ctx context.Context, beadID, rigName, formulaName string, info *beadInfo, townRoot, townBeadsDir string, force bool) error {
-	_ = ctx  // reserved for future use (e.g., ctx-aware executeSling)
-	_ = info // reserved — info already validated in runSling before this call
-
-	// Cross-rig guard: prevent slinging beads to a rig whose prefix is different
-	// (gt-myecw). executeSling does NOT run this check — its contract puts it on
-	// the caller. Skipped under --force.
-	if !force {
-		if err := checkCrossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
-			return err
-		}
-	}
-
-	// Auto-apply mol-polecat-work when slinging a bare bead to a rig (issue #288).
-	// Rig targets always dispatch to a polecat, so the polecat path always applies.
-	// Use --hook-raw-bead to bypass for expert/debugging scenarios.
-	if formulaName == "" && !slingHookRawBead {
-		formulaName = resolveFormula(slingFormula, false, townRoot, rigName)
-		if slingFormula != "" {
-			fmt.Printf("  Applying %s for polecat work...\n", formulaName)
-		} else {
-			fmt.Printf("  Auto-applying %s for polecat work...\n", formulaName)
-		}
-	}
-
-	// Dry-run preview: describe what would happen without invoking executeSling.
-	// Mirrors the inline runSling output so existing CLI UX is preserved.
-	if slingDryRun {
-		fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
-		if formulaName != "" {
-			fmt.Printf("Would instantiate formula %s on bead %s\n", formulaName, beadID)
-		}
-		fmt.Printf("Would hook %s to new polecat\n", beadID)
-		if slingArgs != "" {
-			fmt.Printf("  args: %s\n", slingArgs)
-		}
-		if slingSubject != "" {
-			fmt.Printf("  subject: %s\n", slingSubject)
-		}
-		if slingMessage != "" {
-			fmt.Printf("  context: %s\n", slingMessage)
-		}
-		return nil
-	}
-
-	// Announce dispatch (mirrors inline runSling UX).
-	if formulaName != "" {
-		fmt.Printf("%s Slinging formula %s on %s to %s...\n", style.Bold.Render("🎯"), formulaName, beadID, rigName)
-	} else {
-		fmt.Printf("%s Slinging %s to %s...\n", style.Bold.Render("🎯"), beadID, rigName)
-	}
-
-	var mode string
-	if slingRalph {
-		mode = "ralph"
-	}
-
-	params := SlingParams{
-		BeadID:           beadID,
-		FormulaName:      formulaName,
-		RigName:          rigName,
-		Args:             slingArgs,
-		Vars:             slingVars,
-		Merge:            slingMerge,
-		BaseBranch:       slingBaseBranch,
-		Account:          slingAccount,
-		Agent:            slingAgent,
-		NoConvoy:         slingNoConvoy,
-		Owned:            slingOwned,
-		NoMerge:          slingNoMerge,
-		ReviewOnly:       slingReviewOnly,
-		Force:            force,
-		HookRawBead:      slingHookRawBead,
-		NoBoot:           slingNoBoot,
-		Mode:             mode,
-		FormulaFailFatal: true, // Single-sling: fatal on formula failure (batch-sling uses false)
-		CallerContext:    "sling",
-		TownRoot:         townRoot,
-		BeadsDir:         townBeadsDir,
-	}
-
-	if _, err := executeSling(params); err != nil {
-		return err
-	}
-
-	// wakeRigAgents is the caller's responsibility (see executeSling header).
-	if !slingNoBoot {
-		wakeRigAgents(rigName)
-	}
-
-	return nil
-}
-
-// checkCrossRigGuard validates that a bead's prefix matches the target rig.
-// Polecats work in their rig's worktree and cannot fix code owned by another rig.
-// Returns an error if the bead belongs to a different rig than the target polecat.
-// Town-root beads (hq-*) are rejected — tasks must be created in the target rig.
-func checkCrossRigGuard(beadID, targetAgent, townRoot string) error {
-	beadPrefix := beads.ExtractPrefix(beadID)
-	if beadPrefix == "" {
-		return nil // Can't determine prefix, skip check
-	}
-
-	// Extract target rig from agent path (e.g., "gastown/polecats/Toast" → "gastown")
-	targetRig := strings.SplitN(targetAgent, "/", 2)[0]
-	if targetRig == "" {
-		return nil
-	}
-
-	beadRig := beads.GetRigNameForPrefix(townRoot, beadPrefix)
-
-	if beadRig != targetRig {
-		if beadRig == "" {
-			return fmt.Errorf("bead %s (prefix %q) is not in rig %q — it belongs to town root\n"+
-				"Create the task from the rig directory: cd %s && bd create --title=...\n"+
-				"Use --force to override", beadID, strings.TrimSuffix(beadPrefix, "-"), targetRig, targetRig)
-		}
-		return fmt.Errorf("cross-rig mismatch: bead %s (prefix %q) belongs to rig %q, but target is rig %q\n"+
-			"Create the task from the target rig: cd %s && bd create --title=...\n"+
-			"Use --force to override", beadID, strings.TrimSuffix(beadPrefix, "-"), beadRig, targetRig, targetRig)
-	}
-
-	return nil
-}
-
-// rollbackSlingArtifactsFn is a seam for tests. Production uses rollbackSlingArtifacts.
-var rollbackSlingArtifactsFn = rollbackSlingArtifacts
-
-// Rollback seams allow tests to assert molecule-cleanup behavior without
-// depending on full beads storage side effects.
-var getBeadInfoForRollback = getBeadInfo
-var collectExistingMoleculesForRollback = collectExistingMolecules
-var burnExistingMoleculesForRollback = burnExistingMolecules
-
-func restorePinnedBead(townRoot, beadID, assignee string) {
-	if townRoot == "" || beadID == "" {
-		return
-	}
-	dir := beads.ResolveHookDir(townRoot, beadID, "")
-	cmd := exec.Command("bd", "update", beadID, "--status=pinned", "--assignee="+assignee)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("  %s Could not restore pinned state for bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-	} else {
-		fmt.Printf("  %s Restored pinned state for bead %s\n", style.Dim.Render("○"), beadID)
-	}
-}
-
-func tryAcquireSlingBeadLock(townRoot, beadID string) (func(), error) {
-	lockDir := filepath.Join(townRoot, ".runtime", "locks", "sling")
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating sling lock dir: %w", err)
-	}
-
-	safeBeadID := strings.NewReplacer("/", "_", ":", "_").Replace(beadID)
-	lockPath := filepath.Join(lockDir, safeBeadID+".flock")
-	release, locked, err := lock.FlockTryAcquire(lockPath)
-	if err != nil {
-		return nil, fmt.Errorf("acquiring sling lock for bead %s: %w", beadID, err)
-	}
-	if !locked {
-		return nil, fmt.Errorf("bead %s is already being slung; retry after the current assignment completes", beadID)
-	}
-
-	return release, nil
-}
-
-// tryAcquireSlingAssigneeLock acquires a per-assignee file lock to serialize concurrent
-// hook writes to the same polecat. The per-bead lock (tryAcquireSlingBeadLock) prevents
-// double-sling of the same bead, but does not prevent concurrent slings from racing on
-// the same assignee's hook_bead field in Dolt. This lock is held only during
-// hookBeadWithRetry. Uses non-blocking try-acquire with retry and timeout to avoid
-// indefinite blocking if a sling gets stuck.
-// See: https://github.com/steveyegge/gastown/issues/3114
-func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
-	lockDir := filepath.Join(townRoot, ".runtime", "locks", "sling")
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating sling lock dir: %w", err)
-	}
-
-	safeAgent := strings.NewReplacer("/", "_", ":", "_").Replace(targetAgent)
-	lockPath := filepath.Join(lockDir, "assignee_"+safeAgent+".flock")
-
-	// Try non-blocking acquire with retry. hookBeadWithRetry itself has 10 retries
-	// with up to 30s backoff, so we allow generous total wait time for the lock.
-	const maxAttempts = 20
-	const retryInterval = 500 // milliseconds
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		release, locked, err := lock.FlockTryAcquire(lockPath)
-		if err != nil {
-			return nil, fmt.Errorf("acquiring assignee sling lock for %s: %w", targetAgent, err)
-		}
-		if locked {
-			return release, nil
-		}
-		if attempt < maxAttempts {
-			time.Sleep(time.Duration(retryInterval) * time.Millisecond)
-		}
-	}
-
-	return nil, fmt.Errorf("timed out acquiring assignee sling lock for %s after %ds (another sling may be stuck)", targetAgent, maxAttempts*retryInterval/1000)
-}
-
-// rollbackSlingArtifacts cleans up artifacts left by a partial sling when session start fails.
-// This prevents zombie polecats that block subsequent sling attempts with "bead already hooked".
-// Cleanup is best-effort: each step logs warnings but continues to clean as much as possible.
-func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string) {
-	townRoot, err := workspace.FindFromCwdOrError()
-
-	// 1. Burn any attached molecules from partial formula instantiation.
-	// This clears attached_molecule metadata and closes stale wisps that
-	// otherwise block subsequent sling attempts.
-	// Some failure modes happen before any bead is hooked (e.g., wisp creation fails).
-	if beadID != "" {
-		if err != nil {
-			fmt.Printf("  %s Could not find workspace to rollback bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-		} else {
-			info, infoErr := getBeadInfoForRollback(beadID)
-			if infoErr != nil {
-				fmt.Printf("  %s Could not inspect bead %s for stale molecules: %v\n", style.Dim.Render("Warning:"), beadID, infoErr)
-			} else {
-				existingMolecules := collectExistingMoleculesForRollback(info)
-				if len(existingMolecules) > 0 {
-					if burnErr := burnExistingMoleculesForRollback(existingMolecules, beadID, townRoot); burnErr != nil {
-						fmt.Printf("  %s Could not burn stale molecule(s) from %s: %v\n", style.Dim.Render("Warning:"), beadID, burnErr)
-					} else {
-						fmt.Printf("  %s Burned %d stale molecule(s): %s\n",
-							style.Dim.Render("○"), len(existingMolecules), strings.Join(existingMolecules, ", "))
-					}
-				}
-			}
-
-			// 2. Unhook the bead (set status back to open so it can be re-slung).
-			unhookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
-			unhookCmd := exec.Command("bd", "update", beadID, "--status=open", "--assignee=")
-			unhookCmd.Dir = unhookDir
-			if err := unhookCmd.Run(); err != nil {
-				fmt.Printf("  %s Could not unhook bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-			} else {
-				fmt.Printf("  %s Unhooked bead %s\n", style.Dim.Render("○"), beadID)
-			}
-		}
-	}
-
-	// 3. Clean up the spawned polecat (worktree, agent bead, convoy, etc.)
-	cleanupSpawnedPolecat(spawnInfo, spawnInfo.RigName, convoyID)
 }
