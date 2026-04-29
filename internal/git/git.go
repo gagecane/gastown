@@ -2015,7 +2015,19 @@ func (g *Git) CheckUncommittedWork() (*UncommittedWorkStatus, error) {
 // BranchPushedToRemote checks if a branch has been pushed to the remote.
 // Returns (pushed bool, unpushedCount int, err).
 // This handles polecat branches that don't have upstream tracking configured.
+//
+// Uses the remote's default branch (e.g. main, master, mainline) as the base
+// for counting unpushed commits when the branch's remote tracking ref is
+// missing. This prevents false positives like "128 unpushed commits" on rigs
+// whose default branch is not "main" (gu-nsxb).
 func (g *Git) BranchPushedToRemote(localBranch, remote string) (bool, int, error) {
+	return g.BranchPushedToRemoteWithBase(localBranch, remote, "")
+}
+
+// BranchPushedToRemoteWithBase is like BranchPushedToRemote but lets the
+// caller specify the default branch explicitly (e.g. from rig config). When
+// baseBranch is empty, it falls back to the remote's default branch.
+func (g *Git) BranchPushedToRemoteWithBase(localBranch, remote, baseBranch string) (bool, int, error) {
 	remoteBranch := remote + "/" + localBranch
 
 	// Resolve the push URL: with a split fetch/push configuration (e.g.,
@@ -2037,13 +2049,37 @@ func (g *Git) BranchPushedToRemote(localBranch, remote string) (bool, int, error
 	}
 
 	if lsOut == "" {
-		// Remote branch doesn't exist - count commits since origin/main (or HEAD if that fails)
-		count, err := g.run("rev-list", "--count", "origin/main..HEAD")
+		// Remote branch doesn't exist (never pushed, or deleted after merge).
+		// Count commits since the rig's default branch — not a hardcoded
+		// "origin/main" — so rigs with a non-main default branch (mainline,
+		// master, develop, etc.) don't see false "N unpushed commits"
+		// counts that walk the entire branch history. (gu-nsxb)
+		base := baseBranch
+		if base == "" {
+			base = g.RemoteDefaultBranch()
+		}
+		baseRef := remote + "/" + base
+
+		// Fast path: if HEAD is already an ancestor of the default branch,
+		// the work is merged and there is nothing unpushed. This catches
+		// the common "upstream deleted after squash-merge" case.
+		if merged, ancErr := g.IsAncestor("HEAD", baseRef); ancErr == nil && merged {
+			return true, 0, nil
+		}
+
+		count, err := g.run("rev-list", "--count", baseRef+"..HEAD")
 		if err != nil {
-			// Fallback: just count all commits on HEAD
-			count, err = g.run("rev-list", "--count", "HEAD")
+			// baseRef may not exist locally (fresh worktree, missing fetch
+			// config). Try the configured name explicitly in case the remote
+			// has a different default.
+			count, err = g.run("rev-list", "--count", "origin/main..HEAD")
 			if err != nil {
-				return false, 0, fmt.Errorf("counting commits: %w", err)
+				// Last-resort fallback: if we can't find a base ref to
+				// compare against, the branch history is uncheckable.
+				// Report 0 unpushed rather than the full branch length —
+				// the old behavior (rev-list --count HEAD) produced
+				// catastrophically wrong numbers that blocked nuke.
+				return true, 0, nil
 			}
 		}
 		var n int
@@ -2051,7 +2087,7 @@ func (g *Git) BranchPushedToRemote(localBranch, remote string) (bool, int, error
 		if err != nil {
 			return false, 0, fmt.Errorf("parsing commit count: %w", err)
 		}
-		// If there are any commits since main, branch is not pushed
+		// If there are any commits since the base, branch is not pushed
 		return n == 0, n, nil
 	}
 
