@@ -415,6 +415,11 @@ func getWispIDs(beadsPath string) map[string]bool {
 //   - Labels if present (gt:agent, gt:role, gt:rig)
 //   - ID suffix "-role" (role definition beads like hq-crew-role)
 //   - ID prefix matching "<prefix>-rig-" (rig identity beads like gt-rig-gastown)
+//   - Title matching the identity naming convention
+//     (e.g. <prefix>-<rig>-polecat-<name>, <prefix>-<rig>-witness, etc. —
+//     see beads.IsIdentityBeadTitle). This is defense-in-depth for cases
+//     where doctor --fix re-creates identity beads with a work-like type
+//     but keeps the canonical title (gu-huta).
 func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 	identityLabels := map[string]bool{
 		"gt:agent": true,
@@ -448,6 +453,14 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 
 		// Filter rig identity beads (IDs containing "-rig-")
 		if strings.Contains(issue.ID, "-rig-") {
+			continue
+		}
+
+		// Filter beads whose title matches the identity naming convention
+		// (polecat/crew/refinery/witness/dog/mayor/deacon). This catches
+		// identity beads that slip through when labels/type are stale,
+		// which is exactly the class of bugs gu-huta was filed to fix.
+		if beads.IsIdentityBeadTitle(issue.Title) {
 			continue
 		}
 

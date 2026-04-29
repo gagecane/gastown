@@ -296,6 +296,14 @@ func TestIsIdentityBeadInfo(t *testing.T) {
 		{"ta witness-style polecat", &beadInfo{Title: "ta-talontriage-polecat-nux", Status: "open", IssueType: "task"}, true},
 		{"ro polecat", &beadInfo{Title: "ro-ralph-polecat-jasper", Status: "open", IssueType: "task"}, true},
 
+		// Widened title regex (gu-huta): witness / crew / dog / mayor / deacon.
+		{"witness identity", &beadInfo{Title: "gu-gastown-witness", Status: "open", IssueType: "task"}, true},
+		{"bd-prefixed witness", &beadInfo{Title: "bd-beads-witness", Status: "open", IssueType: "task"}, true},
+		{"crew identity", &beadInfo{Title: "gu-gastown-crew-joe", Status: "open", IssueType: "task"}, true},
+		{"town dog identity", &beadInfo{Title: "hq-dog-alpha", Status: "open", IssueType: "task"}, true},
+		{"mayor identity", &beadInfo{Title: "hq-mayor", Status: "open", IssueType: "task"}, true},
+		{"deacon identity", &beadInfo{Title: "hq-deacon", Status: "open", IssueType: "task"}, true},
+
 		// Combined matches.
 		{"label + closed", &beadInfo{Title: "any", Status: "closed", Labels: []string{"gt:agent"}}, true},
 		{"all three criteria", &beadInfo{Title: "af-agentforge-polecat-quartz", Status: "closed", Labels: []string{"gt:agent"}, IssueType: "agent"}, true},

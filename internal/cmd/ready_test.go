@@ -149,3 +149,116 @@ func TestFilterFormulaScaffolds_DotInNonScaffold(t *testing.T) {
 		t.Errorf("got %d issues, want 2 (non-formula dots should not filter)", len(filtered))
 	}
 }
+
+// TestFilterIdentityBeads verifies that gt ready strips agent/role/rig
+// identity beads so that polecats and dog dispatchers never see them as
+// selectable work. Covers label, type, ID-suffix, and title-regex paths
+// (see gu-huta — widen filter to cover witness/crew/dog/mayor/deacon).
+func TestFilterIdentityBeads(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    *beads.Issue
+		filtered bool // true = should be removed from ready output
+	}{
+		// Real work bead — must pass through.
+		{
+			name:     "plain task bead passes",
+			input:    &beads.Issue{ID: "gu-abc123", Title: "Fix parser bug", Type: "task"},
+			filtered: false,
+		},
+		{
+			name:     "bug bead passes",
+			input:    &beads.Issue{ID: "gu-def456", Title: "Dispatcher drops ready beads", Type: "bug"},
+			filtered: false,
+		},
+
+		// Label / type criteria (already covered by IsAgentBead).
+		{
+			name:     "gt:agent label filtered",
+			input:    &beads.Issue{ID: "gu-xyz", Title: "Random title", Labels: []string{"gt:agent"}},
+			filtered: true,
+		},
+		{
+			name:     "legacy type=agent filtered",
+			input:    &beads.Issue{ID: "gu-xyz", Title: "Random title", Type: "agent"},
+			filtered: true,
+		},
+		{
+			name:     "gt:role label filtered",
+			input:    &beads.Issue{ID: "gu-xyz", Title: "Role doc", Labels: []string{"gt:role"}},
+			filtered: true,
+		},
+		{
+			name:     "gt:rig label filtered",
+			input:    &beads.Issue{ID: "gu-xyz", Title: "Rig tracker", Labels: []string{"gt:rig"}},
+			filtered: true,
+		},
+
+		// ID-based criteria.
+		{
+			name:     "role suffix filtered",
+			input:    &beads.Issue{ID: "hq-crew-role", Title: "Crew role definition"},
+			filtered: true,
+		},
+		{
+			name:     "-rig- ID filtered",
+			input:    &beads.Issue{ID: "gt-rig-gastown", Title: "Gastown rig identity"},
+			filtered: true,
+		},
+
+		// Title-regex criteria (gu-huta extensions).
+		{
+			name:     "polecat title filtered",
+			input:    &beads.Issue{ID: "gu-abc", Title: "gu-gastown-polecat-guzzle", Type: "task"},
+			filtered: true,
+		},
+		{
+			name:     "witness title filtered",
+			input:    &beads.Issue{ID: "gu-def", Title: "gu-gastown-witness", Type: "task"},
+			filtered: true,
+		},
+		{
+			name:     "refinery title filtered",
+			input:    &beads.Issue{ID: "gu-ghi", Title: "gu-gastown-refinery", Type: "task"},
+			filtered: true,
+		},
+		{
+			name:     "crew title filtered",
+			input:    &beads.Issue{ID: "gu-jkl", Title: "gu-gastown-crew-joe", Type: "task"},
+			filtered: true,
+		},
+		{
+			name:     "mayor title filtered",
+			input:    &beads.Issue{ID: "hq-mno", Title: "hq-mayor", Type: "task"},
+			filtered: true,
+		},
+		{
+			name:     "dog title filtered",
+			input:    &beads.Issue{ID: "hq-pqr", Title: "hq-dog-alpha", Type: "task"},
+			filtered: true,
+		},
+
+		// Near miss — role keyword mid-title should NOT filter.
+		{
+			name:     "refinery mid-title passes",
+			input:    &beads.Issue{ID: "gu-work", Title: "af-refinery-feature-work", Type: "task"},
+			filtered: false,
+		},
+		{
+			name:     "witness in sentence passes",
+			input:    &beads.Issue{ID: "gu-work2", Title: "Add witness support to feature", Type: "task"},
+			filtered: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := []*beads.Issue{tt.input}
+			out := filterIdentityBeads(in)
+			gotFiltered := len(out) == 0
+			if gotFiltered != tt.filtered {
+				t.Errorf("filterIdentityBeads(%+v): filtered=%v, want %v", tt.input, gotFiltered, tt.filtered)
+			}
+		})
+	}
+}

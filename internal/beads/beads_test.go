@@ -2760,30 +2760,69 @@ func TestIsAgentBead(t *testing.T) {
 }
 
 // TestIsIdentityBeadTitle verifies the naming-convention regex used by the
-// ghost-dispatch filter (gu-ypjm / gu-3znx). Matches identity beads with
-// titles like "<prefix>-<rig>-polecat-<name>" or "<prefix>-<rig>-refinery".
+// ghost-dispatch filter (gu-ypjm / gu-3znx / gu-huta). Matches identity beads
+// with titles like "<prefix>-<rig>-polecat-<name>", "<prefix>-<rig>-refinery",
+// "<prefix>-<rig>-witness", "<prefix>-<rig>-crew-<name>", "<prefix>-dog-<name>",
+// "<prefix>-mayor", "<prefix>-deacon".
 func TestIsIdentityBeadTitle(t *testing.T) {
 	tests := []struct {
 		title string
 		want  bool
 	}{
-		// Match
+		// Match — polecat (rig-level named)
 		{"af-agentforge-polecat-quartz", true},
+		{"ta-talontriage-polecat-nux", true},
+		{"ro-ralph-polecat-jasper", true},
+		{"gu-gastown-polecat-guzzle", true},
+
+		// Match — refinery (rig-level singleton)
 		{"af-agentforge-refinery", true},
 		{"gu-gastown-refinery", true},
 		{"cadk-casc_cdk-refinery", true},
-		{"ta-talontriage-polecat-nux", true},
-		{"ro-ralph-polecat-jasper", true},
+
+		// Match — witness (rig-level singleton, gu-huta extension)
+		{"gu-gastown-witness", true},
+		{"bd-beads-witness", true},
+		{"af-agentforge-witness", true},
+
+		// Match — crew (rig-level named, gu-huta extension)
+		{"gu-gastown-crew-joe", true},
+		{"bd-beads-crew-maxwell", true},
+
+		// Match — town-level named agent (gu-huta extension)
+		{"hq-dog-alpha", true},
+		{"gt-dog-compactor", true},
+
+		// Match — town-level singleton (gu-huta extension)
+		{"hq-mayor", true},
+		{"gt-mayor", true},
+		{"hq-deacon", true},
+		{"gt-deacon", true},
+
 		// No match — not enough structure
 		{"refinery", false},
+		{"witness", false},
+		{"mayor", false},
 		{"polecat-research", false},
-		// No match — wrong structure
-		{"af-refinery-feature-work", false}, // polecat/refinery must be at end
+		{"dog-alpha", false},
+
+		// No match — wrong structure (role not at end / mid-string)
+		{"af-refinery-feature-work", false},
+		{"gu-witness-task", false},
+		{"hq-mayor-meeting-notes", false},
 		{"", false},
+
 		// No match — upper case prefix
 		{"AF-agentforge-refinery", false},
-		// No match — spaces
+		{"HQ-mayor", false},
+
+		// No match — spaces or non-canonical prose
 		{"Fix bug in parser", false},
+		{"Add witness support to feature", false},
+
+		// No match — similar-looking but not identity patterns
+		{"gu-gastown-dogfood-feature", false}, // dog-.+ must come directly after prefix
+		{"gt-refinery-proposal", false},       // refinery must follow "<rig>-"
 	}
 
 	for _, tt := range tests {

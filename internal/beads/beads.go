@@ -251,15 +251,23 @@ func IsAgentBead(issue *Issue) bool {
 
 // identityBeadTitleRe matches identity/system bead titles by naming convention.
 // Examples that match: "af-agentforge-polecat-quartz", "af-agentforge-refinery",
-// "gu-gastown-polecat-nux". These are agent/role beads that must never be
-// dispatched as work, even if they lack the gt:agent label or have non-closed
-// status (see gu-ypjm "ghost dispatch loop").
+// "gu-gastown-polecat-nux", "gu-gastown-witness", "gu-gastown-crew-joe",
+// "hq-dog-alpha", "hq-mayor", "hq-deacon". These are agent/role beads that
+// must never be dispatched as work, even if they lack the gt:agent label or
+// have non-closed status (see gu-ypjm "ghost dispatch loop", gu-huta "widen
+// filter to cover every role").
 //
-// Conservative regex matching the form used throughout the codebase
-// (polecat + refinery). Witness/deacon/mayor identity beads are expected to
-// carry the gt:agent label, which is caught by IsAgentBead; the title regex
-// is a defense-in-depth guard for the known-drifting cases.
-var identityBeadTitleRe = regexp.MustCompile(`^[a-z]+-.+-(polecat-.+|refinery)$`)
+// The regex covers all agent roles used across Gas Town:
+//   - Per-rig named agents: <prefix>-<rig>-polecat-<name>, <prefix>-<rig>-crew-<name>
+//   - Per-rig singletons:   <prefix>-<rig>-witness, <prefix>-<rig>-refinery
+//   - Town-level named:     <prefix>-dog-<name>
+//   - Town-level singleton: <prefix>-mayor, <prefix>-deacon
+//
+// The role token is anchored at the end of the title to avoid matching work
+// beads that merely mention a role earlier (e.g. "af-refinery-feature-work").
+// The prefix is [a-z]+ (lowercase), matching the canonical ID format from
+// AgentBeadIDWithPrefix.
+var identityBeadTitleRe = regexp.MustCompile(`^[a-z]+-(.+-(polecat-.+|crew-.+|refinery|witness)|dog-.+|mayor|deacon)$`)
 
 // IsIdentityBeadTitle reports whether a title matches the identity/system
 // naming convention (prefix-rig-role[-name]). Exported for callers that only
