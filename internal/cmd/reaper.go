@@ -405,10 +405,109 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 	},
 }
 
+var reaperHookedMailTTL string
+
+var reaperReapHookedMailCmd = &cobra.Command{
+	Use:   "reap-hooked-mail",
+	Short: "Close stale hooked mail beads (ttl-expired)",
+	Long: `Close mail beads stuck in the 'hooked' state past the TTL threshold.
+
+HANDOFF and other mail beads are hooked for successor sessions to consume.
+If a successor never runs 'gt prime --hook' (session died, rerouted, or the
+bead is orphaned), the hook stays forever and accumulates as dead-letter.
+This command closes such beads with reason "ttl-expired".
+
+Excludes:
+  - Agent heartbeat beads (issue_type='agent')
+  - Pinned beads (status != 'hooked')
+  - Beads labeled gt:standing-orders, gt:keep, gt:role, or gt:rig
+
+When --db is provided, operates on a single database. When omitted,
+auto-discovers all databases on the Dolt server.
+
+Use --dry-run to preview closures without applying them.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ttl, err := time.ParseDuration(reaperHookedMailTTL)
+		if err != nil {
+			return fmt.Errorf("invalid --ttl: %w", err)
+		}
+
+		databases := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		if reaperDB != "" {
+			databases = strings.Split(reaperDB, ",")
+		}
+
+		var results []*reaper.HookedMailResult
+		for _, dbName := range databases {
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				continue
+			}
+
+			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				continue
+			}
+
+			if ok, err := reaper.HasReaperSchema(db); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
+				db.Close()
+				continue
+			} else if !ok {
+				db.Close()
+				continue
+			}
+
+			result, err := reaper.ReapHookedMail(db, dbName, ttl, reaperDryRun)
+			db.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: reap-hooked-mail error: %v\n", dbName, err)
+				continue
+			}
+			results = append(results, result)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(results))
+		} else {
+			var totalClosed, totalRemain int
+			for _, r := range results {
+				prefix := ""
+				verb := "closed"
+				if r.DryRun {
+					prefix = "[DRY RUN] would "
+					verb = "close"
+				}
+				for _, entry := range r.ClosedEntries {
+					fmt.Printf("  %s %s (%dd hooked, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				fmt.Printf("%s: %s%s %d hooked mail bead(s), %d remain hooked\n",
+					r.Database, prefix, verb, r.Closed, r.HookedRemain)
+				for _, a := range r.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+				totalClosed += r.Closed
+				totalRemain += r.HookedRemain
+			}
+			if len(results) > 1 {
+				prefix := ""
+				if reaperDryRun {
+					prefix = "[DRY RUN] "
+				}
+				fmt.Printf("\n%sReap-hooked-mail summary (%d databases): closed %d, %d hooked remain\n",
+					prefix, len(results), totalClosed, totalRemain)
+			}
+		}
+		return nil
+	},
+}
+
 var reaperRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run full reaper cycle across all databases",
-	Long: `Execute a full reaper cycle: scan → reap → purge → auto-close → report.
+	Long: `Execute a full reaper cycle: scan → reap → purge → auto-close → reap-hooked-mail → report.
 
 This is the inline fallback for when Dog dispatch is unavailable.
 Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
@@ -434,8 +533,13 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		if err != nil {
 			return fmt.Errorf("invalid --stale-age: %w", err)
 		}
+		hookedMailTTL, err := time.ParseDuration(reaperHookedMailTTL)
+		if err != nil {
+			return fmt.Errorf("invalid --hooked-mail-ttl: %w", err)
+		}
 
 		var totalReaped, totalPurged, totalMailPurged, totalClosed, totalOpen int
+		var totalHookedMailClosed int
 
 		for _, dbName := range databases {
 			if err := reaper.ValidateDBName(dbName); err != nil {
@@ -500,6 +604,21 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 				totalClosed += closeResult.Closed
 			}
 
+			// Reap hooked mail (gu-hhqk: dead-letter HANDOFF/mail beads past TTL)
+			hookedMailResult, err := reaper.ReapHookedMail(db, dbName, hookedMailTTL, reaperDryRun)
+			if err != nil {
+				fmt.Printf("%s: reap-hooked-mail error: %v\n", dbName, err)
+			} else {
+				for _, entry := range hookedMailResult.ClosedEntries {
+					fmt.Printf("  %s %s (%dd hooked, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				totalHookedMailClosed += hookedMailResult.Closed
+				for _, a := range hookedMailResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+
 			db.Close()
 		}
 
@@ -509,11 +628,12 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			prefix = "[DRY RUN] "
 		}
 		fmt.Printf("\n%sReaper cycle complete:\n", prefix)
-		fmt.Printf("  Databases: %d\n", len(databases))
-		fmt.Printf("  Reaped:    %d\n", totalReaped)
-		fmt.Printf("  Purged:    %d wisps, %d mail\n", totalPurged, totalMailPurged)
-		fmt.Printf("  Closed:    %d stale issues\n", totalClosed)
-		fmt.Printf("  Open:      %d wisps remain\n", totalOpen)
+		fmt.Printf("  Databases:        %d\n", len(databases))
+		fmt.Printf("  Reaped:           %d\n", totalReaped)
+		fmt.Printf("  Purged:           %d wisps, %d mail\n", totalPurged, totalMailPurged)
+		fmt.Printf("  Closed:           %d stale issues\n", totalClosed)
+		fmt.Printf("  Hooked-mail TTL:  %d ttl-expired\n", totalHookedMailClosed)
+		fmt.Printf("  Open:             %d wisps remain\n", totalOpen)
 
 		return nil
 	},
@@ -539,7 +659,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -547,7 +667,7 @@ func init() {
 	}
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -563,11 +683,16 @@ func init() {
 		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d)")
 	}
 
+	// Hooked-mail TTL flag (GUPP: gu-hhqk). Default aligns with DefaultHookedMailTTL.
+	reaperReapHookedMailCmd.Flags().StringVar(&reaperHookedMailTTL, "ttl", reaper.DefaultHookedMailTTL.String(), "Max hooked-mail age before closing as ttl-expired")
+	reaperRunCmd.Flags().StringVar(&reaperHookedMailTTL, "hooked-mail-ttl", reaper.DefaultHookedMailTTL.String(), "Max hooked-mail age before closing as ttl-expired")
+
 	reaperCmd.AddCommand(reaperDatabasesCmd)
 	reaperCmd.AddCommand(reaperScanCmd)
 	reaperCmd.AddCommand(reaperReapCmd)
 	reaperCmd.AddCommand(reaperPurgeCmd)
 	reaperCmd.AddCommand(reaperAutoCloseCmd)
+	reaperCmd.AddCommand(reaperReapHookedMailCmd)
 	reaperCmd.AddCommand(reaperRunCmd)
 
 	rootCmd.AddCommand(reaperCmd)

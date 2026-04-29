@@ -218,6 +218,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewStalledPolecatCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
+	d.Register(doctor.NewHookedDeadLetterCheck())
 	d.Register(doctor.NewCheckMisclassifiedWisps())
 	d.Register(doctor.NewCheckJSONLBloat())
 	d.Register(doctor.NewStaleBeadsRedirectCheck())

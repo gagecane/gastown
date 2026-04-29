@@ -157,9 +157,44 @@ gt reaper auto-close --db=<name> --port={{dolt_port}} \\
 **Exit criteria:** All eligible stale issues auto-closed."""
 
 [[steps]]
+id = "reap-hooked-mail"
+title = "Reap dead-letter hooked mail (gu-hhqk)"
+needs = ["auto-close"]
+description = """
+Close HANDOFF and other mail beads that stayed in the 'hooked' state past
+the dead-letter TTL. This is the GUPP lifecycle guarantee for hooked mail
+(see docs/concepts/propulsion-principle.md — "guaranteed consumer or
+bounded lifetime").
+
+Context: HANDOFF mail is placed in the issues table with status='hooked'
+so 'gt hook' can find it. If a successor session never consumes the hook
+(session died, rerouted, bead orphaned), the hook persists forever and
+accumulates as dead-letter. The wisp reaper does not see these because
+they live in the issues table, not wisps.
+
+**1. For each database:**
+```bash
+gt reaper reap-hooked-mail --db=<name> --port={{dolt_port}} \\
+  --ttl={{hooked_mail_ttl}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**2. Inspect results:**
+- Verify that closed beads are legitimately dead-letter (not in-flight)
+- If the closed count is large (> 50 in one cycle), investigate the
+  producer — a patrol formula may be creating hooks faster than consumers
+  can process them
+
+**Exclusions (do NOT escalate if these remain hooked):**
+- Agent heartbeat beads (issue_type='agent') — intentionally long-lived
+- Beads labeled gt:standing-orders, gt:keep, gt:role, gt:rig
+
+**Exit criteria:** Stale hooked mail closed with reason ttl-expired."""
+
+[[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["auto-close"]
+needs = ["reap-hooked-mail"]
 description = """
 Generate summary and signal completion.
 
@@ -172,6 +207,7 @@ Generate summary and signal completion.
 **Wisps purged**: (total deleted old closed wisps)
 **Mail purged**: (total deleted old closed mail)
 **Issues auto-closed**: (stale > stale_issue_age, excl. epics/P0-P1/deps)
+**Hooked mail ttl-expired**: (dead-letter HANDOFF/mail closed; gu-hhqk)
 **Open wisps remaining**: (total)
 **Anomalies**: (list any anomalies found)
 ```
@@ -199,6 +235,10 @@ default = "720h"
 [vars.mail_delete_age]
 description = "Max closed mail age before purging (e.g., '168h' = 7 days)"
 default = "168h"
+
+[vars.hooked_mail_ttl]
+description = "Max hooked-mail age before ttl-expired close (gu-hhqk; default 24h)"
+default = "24h"
 
 [vars.alert_threshold]
 description = "Open wisp count that triggers escalation warning"

@@ -100,3 +100,46 @@ becomes part of a permanent ledger of demonstrated capability.
 
 This isn't just about the current task. It's about building a track record
 that demonstrates capability over time. Execute with care.
+
+## The Hook Lifecycle Rule: Guaranteed Consumer or Bounded Lifetime
+
+Propulsion works because the hook is an expectation of consumption. But a
+hook without a consumer is just a leak. To keep the engine balanced, every
+hooked bead must satisfy one of two rules:
+
+1. **Guaranteed consumer**: The producer knows, at creation time, which
+   agent or role will consume the hook. Examples:
+   - A witness creates a cleanup wisp with a specific polecat assignee —
+     the polecat's completion closes the wisp.
+   - A refinery creates an MR bead the refinery itself will process.
+
+2. **Bounded lifetime (TTL)**: If the consumer is not guaranteed (opportunistic
+   delivery, best-effort handoff, broadcast), the bead MUST have a TTL after
+   which the reaper closes it with reason `"ttl-expired"`. The default TTL
+   for hooked mail beads is **24 hours**; handoff mail typically lives
+   seconds to minutes, so anything past a day is almost certainly orphaned.
+
+**The failure mode this prevents**: patrol agents (witness, refinery, deacon)
+create predecessor HANDOFF/wisp beads at each cycle. If a downstream molecule
+fails, idles, or reroutes, the predecessor stays `hooked` forever. With no
+TTL and no consumer linkage, `bd list --status=hooked` grows unbounded until
+the dead-letter backlog is visible in other health checks.
+
+**Exclusions from the TTL reaper**:
+- Agent heartbeat beads (`issue_type='agent'`) — long-lived by design
+- Beads with labels `gt:standing-orders`, `gt:keep`, `gt:role`, `gt:rig` —
+  long-lived by convention
+- Pinned beads — not on the hook (`status='pinned'`, not `'hooked'`)
+
+**Operator tools**:
+- `gt doctor` — the `hooked-dead-letter` check warns when >10 hooked mail
+  beads are older than 30 minutes in a rig
+- `gt reaper reap-hooked-mail` — closes stale hooked mail past the TTL
+- `mol-dog-reaper` — runs the full sweep (wisps + hooked mail + stale issues)
+  on the configured daemon interval
+
+When filing a new bead type that will land on a hook, decide up-front: is
+there a guaranteed consumer? If not, add it to the TTL reaper.
+
+See `gu-hhqk` for the design history and the lifecycle audit that surfaced
+this rule.
