@@ -120,7 +120,7 @@
             if (data.success) {
                 showToast('success', 'Closed', issueId + ' closed');
                 // Re-fetch to update the detail view
-                openIssueDetail(issueId);
+                if (window.openIssueDetail) window.openIssueDetail(issueId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
             }
@@ -144,7 +144,7 @@
         .then(function(data) {
             if (data.success) {
                 showToast('success', 'Reopened', issueId + ' reopened');
-                openIssueDetail(issueId);
+                if (window.openIssueDetail) window.openIssueDetail(issueId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
             }
@@ -171,7 +171,7 @@
         .then(function(data) {
             if (data.success) {
                 showToast('success', 'Updated', 'Priority set to P' + priNum);
-                openIssueDetail(issueId);
+                if (window.openIssueDetail) window.openIssueDetail(issueId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
             }
@@ -197,7 +197,7 @@
         .then(function(data) {
             if (data.success) {
                 showToast('success', 'Assigned', 'Assigned to ' + assignee);
-                openIssueDetail(issueId);
+                if (window.openIssueDetail) window.openIssueDetail(issueId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
             }
@@ -208,5 +208,7 @@
     }
     window.assignIssue = assignIssue;
 
+    // Expose for issuePanel (which renders actions after fetching issue detail).
+    window.renderIssueActions = renderIssueActions;
 
 })();

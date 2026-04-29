@@ -106,7 +106,7 @@
                 }
 
                 // Render action buttons
-                renderIssueActions(issueId, data);
+                if (window.renderIssueActions) window.renderIssueActions(issueId, data);
 
                 // Dependencies
                 if (data.depends_on && data.depends_on.length > 0) {
@@ -144,5 +144,7 @@
         });
     }
 
+    // Expose for cross-module use (issueActions reopens detail view after mutations).
+    window.openIssueDetail = openIssueDetail;
 
 })();
