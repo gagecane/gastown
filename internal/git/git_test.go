@@ -764,6 +764,17 @@ func initTestRepoWithRemote(t *testing.T) (string, string, string) {
 		t.Fatalf("push: %v", err)
 	}
 
+	// Set origin/HEAD so RemoteDefaultBranch() can detect the default branch.
+	// A real `git clone` sets this automatically; our manual init+push does not.
+	// Without this, RemoteDefaultBranch() falls back to "main" (even when the
+	// actual default is "mainline" or similar), breaking callers that resolve
+	// origin/<default> (e.g. PruneStaleBranches).
+	cmd = exec.Command("git", "remote", "set-head", "origin", mainBranch)
+	cmd.Dir = localDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("remote set-head: %v", err)
+	}
+
 	return localDir, remoteDir, mainBranch
 }
 
