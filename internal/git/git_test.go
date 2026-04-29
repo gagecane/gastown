@@ -1267,15 +1267,10 @@ func TestSubmoduleChanges_NoSubmodules(t *testing.T) {
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "commit", "-m", "add file")
 
-	// Detect the default branch name (may be "main" or "master" depending on git config)
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--verify", "main")
-	defaultBranch := "main"
-	if cmd.Run() != nil {
-		defaultBranch = "master"
-	}
-
+	// initTestRepo pins the initial branch to "main", so we can reference it
+	// directly without guessing based on host init.defaultBranch.
 	g := NewGit(dir)
-	changes, err := g.SubmoduleChanges(defaultBranch, "feature")
+	changes, err := g.SubmoduleChanges("main", "feature")
 	if err != nil {
 		t.Fatalf("SubmoduleChanges: %v", err)
 	}
