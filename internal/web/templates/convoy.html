@@ -1060,6 +1060,27 @@
         <div id="output-panel-content" class="output-panel-content"></div>
     </div>
 
-    <script src="/static/dashboard.js?v=3"></script>
+    <!--
+        Dashboard scripts. Load order matters: 00-core defines window.gtDash
+        (escapeHtml, ansiToHtml, showToast, showOutput, updateConnectionStatus)
+        that later modules consume. Each module is a self-contained IIFE.
+    -->
+    <script src="/static/dashboard/00-core.js?v=4"></script>
+    <script src="/static/dashboard/01-panels.js?v=4"></script>
+    <script src="/static/dashboard/02-palette.js?v=4"></script>
+    <script src="/static/dashboard/03-mail.js?v=4"></script>
+    <script src="/static/dashboard/04-crew.js?v=4"></script>
+    <script src="/static/dashboard/05-hook.js?v=4"></script>
+    <script src="/static/dashboard/06-issue-modal.js?v=4"></script>
+    <script src="/static/dashboard/07-work-tabs.js?v=4"></script>
+    <script src="/static/dashboard/08-ready.js?v=4"></script>
+    <script src="/static/dashboard/09-convoy.js?v=4"></script>
+    <script src="/static/dashboard/10-issue-panel.js?v=4"></script>
+    <script src="/static/dashboard/11-pr.js?v=4"></script>
+    <script src="/static/dashboard/12-sling.js?v=4"></script>
+    <script src="/static/dashboard/13-escalation.js?v=4"></script>
+    <script src="/static/dashboard/14-activity.js?v=4"></script>
+    <script src="/static/dashboard/15-session.js?v=4"></script>
+    <script src="/static/dashboard/16-convoy-drill.js?v=4"></script>
 </body>
 </html>
