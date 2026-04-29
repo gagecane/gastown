@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -365,4 +366,39 @@ func (p *Propeller) notify(text string, meta map[string]string, urgent bool) err
 		}
 	}
 	return nil
+}
+
+// checkPropulsionTrigger checks if the given JSON-RPC message contains
+// a propulsion trigger in its params.
+func checkPropulsionTrigger(msg *JSONRPCMessage) bool {
+	if msg.Method != "session/update" || len(msg.Params) == 0 {
+		return false
+	}
+
+	// Triggers only make sense in session/update messages where the agent
+	// is sending text or thought chunks to the UI.
+	return isPropulsionTrigger(string(msg.Params))
+}
+
+// isPropulsionTrigger checks if the given line of agent output should
+// trigger autonomous propulsion mode (suppressing output to UI).
+func isPropulsionTrigger(line string) bool {
+	// Standard GUPP propulsion triggers from prime_output.go and prime_molecule.go
+	triggers := []string{
+		"AUTONOMOUS WORK MODE",
+		"PROPULSION PRINCIPLE: Work is on your hook. RUN IT.",
+		"EXECUTE THIS STEP NOW.",
+	}
+
+	upperLine := strings.ToUpper(line)
+	// Replace any sequence of whitespace characters (including newlines) with a single space
+	// to handle multi-line triggers within a single read buffer.
+	normalizedLine := strings.Join(strings.Fields(upperLine), " ")
+
+	for _, trigger := range triggers {
+		if strings.Contains(normalizedLine, strings.ToUpper(trigger)) {
+			return true
+		}
+	}
+	return false
 }
