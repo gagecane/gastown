@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/health"
 )
 
 // Operational constants — timeouts needed to perform checks.
@@ -80,10 +82,18 @@ func doctorDogInterval(config *DaemonPatrolConfig) time.Duration {
 }
 
 // doctorDogDatabases returns the list of production databases for health checks.
-func doctorDogDatabases(config *DaemonPatrolConfig) []string {
+// If the config contains a single entry "*", queries SHOW DATABASES from the dolt server.
+func doctorDogDatabases(config *DaemonPatrolConfig, port int) []string {
 	if config != nil && config.Patrols != nil && config.Patrols.DoctorDog != nil {
-		if len(config.Patrols.DoctorDog.Databases) > 0 {
-			return config.Patrols.DoctorDog.Databases
+		dbs := config.Patrols.DoctorDog.Databases
+		if len(dbs) == 1 && dbs[0] == "*" {
+			_, names, err := health.DatabaseCount("127.0.0.1", port)
+			if err == nil && len(names) > 0 {
+				return names
+			}
+			// Fall through to default on error.
+		} else if len(dbs) > 0 {
+			return dbs
 		}
 	}
 	return []string{"hq", "gt", "mo"}
@@ -102,9 +112,11 @@ func (d *Daemon) runDoctorDog() {
 
 	port := d.doltServerPort()
 	latencyThreshold, orphanCount, backupStaleSec := doctorDogThresholds(d.patrolConfig)
+	databases := doctorDogDatabases(d.patrolConfig, port)
 
 	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
 		"port":              strconv.Itoa(port),
+		"databases":         strings.Join(databases, ","),
 		"latency_threshold": strconv.FormatFloat(latencyThreshold, 'f', 0, 64) + "ms",
 		"orphan_threshold":  strconv.Itoa(orphanCount),
 		"backup_threshold":  strconv.FormatFloat(backupStaleSec, 'f', 0, 64) + "s",

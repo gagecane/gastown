@@ -177,8 +177,18 @@ func checkServerHealth(townRoot string) *ServerHealth {
 	return sh
 }
 
+// productionDatabases queries the dolt server for all databases (excluding system DBs).
+// Falls back to the default set on error.
+func productionDatabases(port int) []string {
+	_, names, err := health.DatabaseCount("127.0.0.1", port)
+	if err == nil && len(names) > 0 {
+		return names
+	}
+	return []string{"hq", "gt", "mo"}
+}
+
 func checkDatabaseHealth(port int) []DatabaseHealth {
-	productionDBs := []string{"hq", "gt", "mo"}
+	productionDBs := productionDatabases(port)
 	var results []DatabaseHealth
 
 	for _, dbName := range productionDBs {
@@ -214,7 +224,7 @@ func checkDatabaseHealth(port int) []DatabaseHealth {
 }
 
 func checkPollution(port int) []PollutionRecord {
-	productionDBs := []string{"hq", "gt", "mo"}
+	productionDBs := productionDatabases(port)
 	var records []PollutionRecord
 
 	// Known pollution patterns to check in the issues table.
