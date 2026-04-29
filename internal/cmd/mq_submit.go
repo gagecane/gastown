@@ -303,6 +303,23 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("creating merge request bead: %w", err)
 		}
 
+		// Guard against empty ID from bd create (observed in ephemeral/wisp mode).
+		// Without this, we'd pass "" to bd.Show and nudge the refinery with no
+		// durable MR wisp, producing spurious MQ_SUBMIT events (gu-v76i).
+		if mrIssue.ID == "" {
+			return fmt.Errorf("creating merge request bead: bd create returned empty ID")
+		}
+
+		// gu-v76i: Verify MR bead is readable before nudging the refinery.
+		// bd.Create() can succeed when the bead is written locally but fail to
+		// persist (Dolt hiccup, transaction rollback, cross-rig routing landing
+		// in the wrong DB). If we nudge anyway, the refinery wakes, finds no
+		// matching MR in its queue, and emits phantom MQ_SUBMIT noise across
+		// the town. Fail the submit instead of leaking a spurious event.
+		if verified, verifyErr := bd.Show(mrIssue.ID); verifyErr != nil || verified == nil {
+			return fmt.Errorf("MR bead %s created but verification read-back failed: %w", mrIssue.ID, verifyErr)
+		}
+
 		// gt-gpy: Validate MR bead landed in the rig's database (warning only).
 		if prefixErr := beads.ValidateRigPrefix(townRoot, rigName, mrIssue.ID); prefixErr != nil {
 			style.PrintWarning("MR bead prefix mismatch: %v\nThe refinery may not find this MR — check 'gt mq list %s'", prefixErr, rigName)

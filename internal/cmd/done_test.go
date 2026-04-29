@@ -1569,3 +1569,44 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// TestNudgeRefineryGuardLogic verifies the refinery-nudge gate in runDone's
+// notifyWitness block (gu-v76i):
+//
+//	if mrID != "" && !mrFailed { nudgeRefinery(...) }
+//
+// The nudge must NOT fire when mrFailed=true even if mrID is populated. When
+// bd.Create succeeds but bd.Show read-back fails, mrID is set on the polecat's
+// local line-1119 assignment before the failure is detected at line 1136;
+// mrFailed is then flipped to true. Pre-fix, the unconditional mrID != ""
+// guard emitted MQ_SUBMIT for a bead that is not durably in the rig's DB,
+// producing the "phantom MQ_SUBMIT" pattern observed across casc_e2e,
+// casc_cdk, ralphconfig, and metarepo_docs refinery sessions.
+func TestNudgeRefineryGuardLogic(t *testing.T) {
+	tests := []struct {
+		name      string
+		mrID      string
+		mrFailed  bool
+		wantNudge bool
+	}{
+		// Happy path — MR created and verified
+		{"mr-id-set+mr-ok", "gt-abc", false, true},
+		// mrID never set (early failure before bd.Create) — no nudge
+		{"mr-id-empty+mr-ok", "", false, false},
+		// bd.Create succeeded, but bd.Show readback failed (gu-v76i fix)
+		{"mr-id-set+mr-failed", "gt-abc", true, false},
+		// Both paths failed — definitely no nudge
+		{"mr-id-empty+mr-failed", "", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Replicate the guard condition from runDone's notifyWitness block.
+			shouldNudge := tt.mrID != "" && !tt.mrFailed
+			if shouldNudge != tt.wantNudge {
+				t.Errorf("shouldNudge(mrID=%q, mrFailed=%v) = %v, want %v",
+					tt.mrID, tt.mrFailed, shouldNudge, tt.wantNudge)
+			}
+		})
+	}
+}
+

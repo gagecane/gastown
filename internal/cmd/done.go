@@ -1220,7 +1220,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 notifyWitness:
 	// Nudge refinery — MR bead is already on main (transaction-based shared main).
-	if mrID != "" {
+	//
+	// gu-v76i: Guard against spurious MQ_SUBMIT events. If the MR bead could not
+	// be created, returned an empty ID, or failed read-back verification, mrFailed
+	// is set. In those cases mrID may still be non-empty (set before the failure
+	// was detected), but there is no durable MR wisp for the refinery to pick up.
+	// Nudging anyway causes refinery sessions to wake, scan an empty queue, and
+	// escalate phantom MQ_SUBMIT alerts across the town.
+	if mrID != "" && !mrFailed {
 		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
 	}
 
