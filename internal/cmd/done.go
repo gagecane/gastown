@@ -1312,7 +1312,13 @@ notifyWitness:
 
 			fmt.Printf("%s Syncing worktree to %s...\n", style.Bold.Render("→"), defaultBranch)
 			if err := g.Checkout(defaultBranch); err != nil {
-				style.PrintWarning("could not checkout %s: %v (worktree stays on feature branch)", defaultBranch, err)
+				// Worktree can't checkout defaultBranch (likely held by rig-root).
+				// Detach HEAD so the old feature branch can be deleted cleanly.
+				if detachErr := g.Checkout("--detach"); detachErr != nil {
+					style.PrintWarning("could not checkout %s or detach: %v (worktree stays on feature branch)", defaultBranch, err)
+				} else {
+					fmt.Printf("%s Detached HEAD (worktree checkout of %s blocked by another worktree)\n", style.Bold.Render("✓"), defaultBranch)
+				}
 			} else if err := g.Pull("origin", defaultBranch); err != nil {
 				style.PrintWarning("could not pull %s: %v (worktree on %s but may be stale)", defaultBranch, defaultBranch, err)
 			} else {
