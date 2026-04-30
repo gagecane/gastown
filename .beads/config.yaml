@@ -47,3 +47,5 @@ issue-prefix:
 dolt.idle-timeout: "0"
 
 routing.mode: "explicit"
+
+sync.remote: "git+ssh://git@github.com/gagecane/gastown.git"
