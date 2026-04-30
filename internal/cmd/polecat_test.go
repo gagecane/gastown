@@ -1,0 +1,472 @@
+package cmd
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/polecat"
+)
+
+// TestFormatActivityTime exercises the relative-time formatter used by
+// `gt polecat status` to describe when a session was last active. The
+// boundaries (seconds -> minutes -> hours -> days) are significant
+// because they drive the human-readable output.
+func TestFormatActivityTime(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name    string
+		delta   time.Duration
+		wantSub string // substring the output must contain
+	}{
+		{"just now (seconds)", 5 * time.Second, "seconds ago"},
+		{"at sub-minute boundary", 59 * time.Second, "seconds ago"},
+		{"minutes bucket lower", 1 * time.Minute, "minutes ago"},
+		{"minutes bucket upper", 59 * time.Minute, "minutes ago"},
+		{"hours bucket lower", 1 * time.Hour, "hours ago"},
+		{"hours bucket upper", 23 * time.Hour, "hours ago"},
+		{"days bucket lower", 24 * time.Hour, "days ago"},
+		{"days bucket higher", 72 * time.Hour, "days ago"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			past := now.Add(-tt.delta)
+			got := formatActivityTime(past)
+			if !containsSubstring(got, tt.wantSub) {
+				t.Errorf("formatActivityTime(%v) = %q, want substring %q",
+					tt.delta, got, tt.wantSub)
+			}
+		})
+	}
+}
+
+// TestFormatActivityTime_ValuePresent verifies the numeric portion of the
+// output actually reflects the magnitude of the delta. The bucket tests
+// above only check the unit word — this one guards against off-by-unit
+// bugs (e.g., returning seconds when minutes are expected).
+func TestFormatActivityTime_ValuePresent(t *testing.T) {
+	past := time.Now().Add(-5 * time.Minute)
+	got := formatActivityTime(past)
+	if !containsSubstring(got, "5") {
+		t.Errorf("formatActivityTime(5m ago) = %q, want to contain the magnitude 5", got)
+	}
+	if !containsSubstring(got, "minutes") {
+		t.Errorf("formatActivityTime(5m ago) = %q, want to contain 'minutes'", got)
+	}
+}
+
+// TestExistingNamesList verifies extraction of polecat names from a slice
+// of pointers. The helper is tiny, but it is used by pool-init dedup and
+// regressing it could cause duplicate polecats or skipped slots.
+func TestExistingNamesList(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []*polecat.Polecat
+		want  []string
+	}{
+		{
+			name:  "empty input",
+			input: []*polecat.Polecat{},
+			want:  []string{},
+		},
+		{
+			name:  "nil input",
+			input: nil,
+			want:  []string{},
+		},
+		{
+			name: "single polecat",
+			input: []*polecat.Polecat{
+				{Name: "shiny"},
+			},
+			want: []string{"shiny"},
+		},
+		{
+			name: "multiple polecats preserve order",
+			input: []*polecat.Polecat{
+				{Name: "alpha"},
+				{Name: "bravo"},
+				{Name: "charlie"},
+			},
+			want: []string{"alpha", "bravo", "charlie"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := existingNamesList(tt.input)
+			if !equalStringSlices(got, tt.want) {
+				t.Errorf("existingNamesList() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPolecatSubcommandsRegistered ensures every expected subcommand is
+// wired up under `gt polecat`. This guards against future refactors that
+// silently drop a subcommand from the command tree.
+func TestPolecatSubcommandsRegistered(t *testing.T) {
+	expected := []string{
+		"list",
+		"add",
+		"remove",
+		"status",
+		"git-state",
+		"check-recovery",
+		"gc",
+		"nuke",
+		"stale",
+		"prune",
+		"pool-init",
+	}
+
+	registered := map[string]bool{}
+	for _, c := range polecatCmd.Commands() {
+		registered[c.Name()] = true
+	}
+
+	for _, name := range expected {
+		if !registered[name] {
+			t.Errorf("gt polecat %s: subcommand not registered", name)
+		}
+	}
+}
+
+// TestPolecatCmdMetadata verifies the top-level polecat command shape. The
+// alias is important: scripts commonly call `gt polecats` (plural). If
+// that alias disappears in a refactor, CI would stay green while user
+// scripts silently break.
+func TestPolecatCmdMetadata(t *testing.T) {
+	if polecatCmd.Use != "polecat" {
+		t.Errorf("polecatCmd.Use = %q, want %q", polecatCmd.Use, "polecat")
+	}
+
+	var hasPluralAlias bool
+	for _, a := range polecatCmd.Aliases {
+		if a == "polecats" {
+			hasPluralAlias = true
+			break
+		}
+	}
+	if !hasPluralAlias {
+		t.Errorf("polecatCmd.Aliases = %v, want to contain %q", polecatCmd.Aliases, "polecats")
+	}
+
+	if polecatCmd.GroupID == "" {
+		t.Errorf("polecatCmd.GroupID = %q, want non-empty", polecatCmd.GroupID)
+	}
+}
+
+// TestPolecatListItemJSON verifies the JSON shape used by `gt polecat
+// list --json`. External tooling (witness, monitoring scripts) parses
+// this output, so the field names must remain stable.
+func TestPolecatListItemJSON(t *testing.T) {
+	item := PolecatListItem{
+		Rig:            "testrig",
+		Name:           "shiny",
+		State:          polecat.StateWorking,
+		Issue:          "gu-69w",
+		SessionRunning: true,
+		Zombie:         false,
+		SessionName:    "gt-testrig-shiny",
+	}
+
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	body := string(data)
+
+	// Spot-check each field is present with its JSON name.
+	wantFragments := []string{
+		`"rig":"testrig"`,
+		`"name":"shiny"`,
+		`"state":"working"`,
+		`"issue":"gu-69w"`,
+		`"session_running":true`,
+		`"session_name":"gt-testrig-shiny"`,
+	}
+	for _, frag := range wantFragments {
+		if !containsSubstring(body, frag) {
+			t.Errorf("JSON = %s, want to contain %q", body, frag)
+		}
+	}
+
+	// zombie:false is the default and uses omitempty, so it should NOT appear.
+	if containsSubstring(body, `"zombie"`) {
+		t.Errorf("JSON = %s, zombie:false should be omitted via omitempty", body)
+	}
+}
+
+// TestPolecatListItemJSON_OmitEmpty ensures optional fields are omitted
+// when blank. This matters because the list output contains many polecats
+// and redundant empty fields inflate logs/payloads.
+func TestPolecatListItemJSON_OmitEmpty(t *testing.T) {
+	item := PolecatListItem{
+		Rig:            "testrig",
+		Name:           "shiny",
+		State:          polecat.StateIdle,
+		SessionRunning: false,
+	}
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	body := string(data)
+
+	omitted := []string{`"issue"`, `"zombie"`, `"session_name"`}
+	for _, f := range omitted {
+		if containsSubstring(body, f) {
+			t.Errorf("JSON = %s, field %s should be omitted when empty", body, f)
+		}
+	}
+}
+
+// TestRecoveryStatusJSON verifies the JSON shape of recovery-status
+// output used by `gt polecat check-recovery --json`. The witness patrol
+// depends on the `verdict` field values exactly.
+func TestRecoveryStatusJSON(t *testing.T) {
+	status := RecoveryStatus{
+		Rig:           "testrig",
+		Polecat:       "shiny",
+		NeedsRecovery: true,
+		Verdict:       "NEEDS_MQ_SUBMIT",
+		Branch:        "polecat/shiny",
+		Issue:         "gu-69w",
+		MQStatus:      "not_submitted",
+	}
+
+	data, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	body := string(data)
+
+	want := []string{
+		`"rig":"testrig"`,
+		`"polecat":"shiny"`,
+		`"needs_recovery":true`,
+		`"verdict":"NEEDS_MQ_SUBMIT"`,
+		`"branch":"polecat/shiny"`,
+		`"issue":"gu-69w"`,
+		`"mq_status":"not_submitted"`,
+	}
+	for _, frag := range want {
+		if !containsSubstring(body, frag) {
+			t.Errorf("JSON = %s, want to contain %q", body, frag)
+		}
+	}
+}
+
+// TestGitStateJSON verifies the JSON shape of `gt polecat git-state
+// --json`. The fields are contract with tooling that aggregates polecat
+// health.
+func TestGitStateJSON(t *testing.T) {
+	state := GitState{
+		Clean:            false,
+		UncommittedFiles: []string{"src/foo.go", "src/bar.go"},
+		UnpushedCommits:  3,
+		StashCount:       1,
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	body := string(data)
+
+	want := []string{
+		`"clean":false`,
+		`"uncommitted_files":["src/foo.go","src/bar.go"]`,
+		`"unpushed_commits":3`,
+		`"stash_count":1`,
+	}
+	for _, frag := range want {
+		if !containsSubstring(body, frag) {
+			t.Errorf("JSON = %s, want to contain %q", body, frag)
+		}
+	}
+}
+
+// TestGetGitState_CleanRepo spins up a real throwaway repo with a single
+// committed README (and no origin remote) and verifies getGitState
+// reports it as clean with no uncommitted files, unpushed commits, or
+// stashes. Uses a real git binary — skips the test gracefully when it is
+// unavailable.
+func TestGetGitState_CleanRepo(t *testing.T) {
+	repo := initTestRepo(t)
+
+	got, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if !got.Clean {
+		t.Errorf("Clean = false, want true (no changes, no stashes): %+v", got)
+	}
+	if len(got.UncommittedFiles) != 0 {
+		t.Errorf("UncommittedFiles = %v, want []", got.UncommittedFiles)
+	}
+	if got.UnpushedCommits != 0 {
+		t.Errorf("UnpushedCommits = %d, want 0 (no remote configured)", got.UnpushedCommits)
+	}
+	if got.StashCount != 0 {
+		t.Errorf("StashCount = %d, want 0", got.StashCount)
+	}
+}
+
+// TestGetGitState_UncommittedFiles verifies we detect working-tree
+// changes. The test writes a new file (untracked) and modifies the
+// committed one (modified), then asserts both show up in
+// UncommittedFiles and the overall Clean flag is false.
+func TestGetGitState_UncommittedFiles(t *testing.T) {
+	repo := initTestRepo(t)
+
+	// Modify the README that initTestRepo committed.
+	readme := filepath.Join(repo, "README.md")
+	if err := os.WriteFile(readme, []byte("changed\n"), 0644); err != nil {
+		t.Fatalf("modify README: %v", err)
+	}
+
+	// Add a new untracked file.
+	newFile := filepath.Join(repo, "NEW.txt")
+	if err := os.WriteFile(newFile, []byte("new\n"), 0644); err != nil {
+		t.Fatalf("write NEW.txt: %v", err)
+	}
+
+	got, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+
+	if got.Clean {
+		t.Errorf("Clean = true, want false with modified + untracked files: %+v", got)
+	}
+	if len(got.UncommittedFiles) < 2 {
+		t.Errorf("UncommittedFiles = %v, want at least 2 entries (README and NEW.txt)",
+			got.UncommittedFiles)
+	}
+
+	var sawReadme, sawNew bool
+	for _, f := range got.UncommittedFiles {
+		if f == "README.md" {
+			sawReadme = true
+		}
+		if f == "NEW.txt" {
+			sawNew = true
+		}
+	}
+	if !sawReadme {
+		t.Errorf("UncommittedFiles = %v, want README.md (modified)", got.UncommittedFiles)
+	}
+	if !sawNew {
+		t.Errorf("UncommittedFiles = %v, want NEW.txt (untracked)", got.UncommittedFiles)
+	}
+}
+
+// TestGetGitState_InvalidPath confirms we surface an error when the
+// path is not a git repo. The polecat health commands rely on this so
+// they don't silently report "clean" for broken worktrees.
+func TestGetGitState_InvalidPath(t *testing.T) {
+	tmp := t.TempDir()
+	// tmp exists but has no .git — getGitState must fail.
+	_, err := getGitState(tmp)
+	if err == nil {
+		t.Errorf("getGitState(non-repo) = nil error, want error")
+	}
+}
+
+// TestSplitLines_FiltersEmpty verifies the helper strips empty entries
+// produced by trailing newlines in `git status --porcelain` output.
+// (polecat_cycle_test.go tests this on the cycle side; this test locks
+// the contract used by getGitState.)
+func TestSplitLines_FiltersEmpty(t *testing.T) {
+	got := splitLines("first\n\nsecond\n\n\nthird\n")
+	want := []string{"first", "second", "third"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("splitLines() = %v, want %v", got, want)
+	}
+}
+
+// TestSplitLines_EmptyInput ensures the helper tolerates empty and
+// whitespace-only input (the common no-change case).
+func TestSplitLines_EmptyInput(t *testing.T) {
+	if got := splitLines(""); len(got) != 0 {
+		t.Errorf("splitLines(empty) = %v, want empty slice", got)
+	}
+	if got := splitLines("\n\n\n"); len(got) != 0 {
+		t.Errorf("splitLines(only newlines) = %v, want empty slice", got)
+	}
+}
+
+// ---- helpers ----
+
+// initTestRepo creates a temp dir, `git init`s it, configures local
+// author identity (required on hosts without a global git config), and
+// commits a README. Returns the absolute path. Test is skipped if git
+// is not on PATH.
+func initTestRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available on PATH: %v", err)
+	}
+
+	repo := t.TempDir()
+
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		// Keep test output tidy even on noisy git setups.
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run("init")
+	// Ensure branch name is predictable. `git init` in newer versions may
+	// already default to main, but older ones still default to master.
+	run("checkout", "-b", "main")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "test")
+	run("config", "commit.gpgsign", "false")
+
+	readme := filepath.Join(repo, "README.md")
+	if err := os.WriteFile(readme, []byte("hello\n"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	run("add", "README.md")
+	run("commit", "-m", "init")
+
+	return repo
+}
+
+// equalStringSlices compares two string slices for equality. nil and
+// empty are treated as equivalent (which is how test expectations are
+// written here).
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// containsSubstring wraps strings.Contains for readability in assertions
+// and to give a single swap-point if we ever need case-insensitive checks.
+func containsSubstring(haystack, needle string) bool {
+	return strings.Contains(haystack, needle)
+}
