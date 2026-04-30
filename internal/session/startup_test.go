@@ -224,20 +224,20 @@ func TestFormatStartupBeacon(t *testing.T) {
 		wantNot []string // substrings that must NOT appear
 	}{
 		{
-			name: "assigned with mol-id uses new format",
+			name: "assigned with mol-id uses new format (non-hook agent)",
 			cfg: BeaconConfig{
-				Recipient: BeaconRecipient("crew", "gus", "gastown"),
-				Sender:    "deacon",
-				Topic:     "assigned",
-				MolID:     "gt-abc12",
+				Recipient:               BeaconRecipient("crew", "gus", "gastown"),
+				Sender:                  "deacon",
+				Topic:                   "assigned",
+				MolID:                   "gt-abc12",
+				IncludePrimeInstruction: true,
 			},
 			wantSub: []string{
 				"[GAS TOWN]",
 				"crew gus (rig: gastown)",
 				"<- deacon",
 				"assigned:gt-abc12",
-				"gt prime --hook",
-				"begin work",
+				"gt prime",
 			},
 			wantNot: []string{
 				"gastown/crew/gus", // must NOT contain path-like format

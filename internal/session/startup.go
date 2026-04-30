@@ -106,8 +106,11 @@ func FormatStartupBeacon(cfg BeaconConfig) string {
 	// For assigned, tell agent to prime then work on the hook.
 	// Prime must come first so the agent gets full role context (formula, commands, etc).
 	// Matches refinery pattern: short instruction with prime before action.
-	// Exclude work instructions only if explicitly set (non-hook agents get them via delayed nudge)
-	if cfg.Topic == "assigned" && !cfg.ExcludeWorkInstructions {
+	// Exclude work instructions only if explicitly set (non-hook agents get them via delayed nudge).
+	// Skip for hook-capable agents (IncludePrimeInstruction=false) — their agentSpawn/SessionStart
+	// hook already runs gt prime --hook automatically. Including it in the beacon causes the LLM
+	// to run it a second time, producing double SessionStart events and identity lock collisions.
+	if cfg.Topic == "assigned" && !cfg.ExcludeWorkInstructions && cfg.IncludePrimeInstruction {
 		beacon += "\n\nRun `" + cli.Name() + " prime --hook` and begin work on your hook."
 	}
 
