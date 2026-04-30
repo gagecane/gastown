@@ -158,6 +158,19 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// gu-ge1s: Reject the literal "HEAD" from detached-HEAD worktrees before
+	// it flows into refspec construction, MR bead fields, or "gt mq submit"'s
+	// dedup path. Refs/heads/HEAD pollution and `cannot determine source
+	// issue from branch HEAD` loops both trace back to letting this value
+	// propagate.
+	if branch == "" || branch == "HEAD" {
+		if detached, detErr := g.IsDetachedHEAD(); detErr == nil && detached {
+			return fmt.Errorf("cannot submit from detached HEAD: no named branch to push\n" +
+				"Create a branch first (git checkout -b <name>) or pass --branch explicitly")
+		}
+		return fmt.Errorf("refusing to submit with branch=%q (no named branch detected); use --branch to specify", branch)
+	}
+
 	// Get configured default branch for this rig
 	defaultBranch := "main" // fallback
 	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {

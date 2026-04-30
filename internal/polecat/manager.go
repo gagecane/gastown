@@ -1229,14 +1229,19 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	// not errors, so nuke still proceeds. See: disk-space-resilience.
 	polecatGit := git.NewGit(clonePath)
 	if branch, brErr := polecatGit.CurrentBranch(); brErr == nil && branch != "" {
-		// HARD GUARD (gu-cfb): Never push a polecat worktree that is sitting
-		// on mainline. If a worktree somehow ended up on main/master (e.g., a
-		// manual `git checkout`, a broken sync, or the rig root misidentified
-		// as a polecat clone), pushing it here would land whatever local
-		// commits exist directly on origin/main, bypassing the merge queue.
-		// Polecat branches are always `polecat/*` by construction — anything
-		// else is a misconfiguration we refuse to propagate to origin.
-		if !strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
+		// gu-ge1s: CurrentBranch returns the literal "HEAD" in detached-HEAD
+		// state. Refuse to push it — "HEAD:HEAD" creates refs/heads/HEAD
+		// pollution on origin.
+		if branch == "HEAD" {
+			style.PrintWarning("skipping best-effort push before nuke: worktree is in detached-HEAD state")
+		} else if !strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
+			// HARD GUARD (gu-cfb): Never push a polecat worktree that is sitting
+			// on mainline. If a worktree somehow ended up on main/master (e.g., a
+			// manual `git checkout`, a broken sync, or the rig root misidentified
+			// as a polecat clone), pushing it here would land whatever local
+			// commits exist directly on origin/main, bypassing the merge queue.
+			// Polecat branches are always `polecat/*` by construction — anything
+			// else is a misconfiguration we refuse to propagate to origin.
 			style.PrintWarning("skipping best-effort push before nuke: branch %q is not a polecat branch (refusing to push non-polecat refs from a polecat worktree)", branch)
 		} else if pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemote(branch, "origin"); checkErr == nil && !pushed && unpushedCount > 0 {
 			// Use explicit refspec (branch:branch) so we never fall through to
