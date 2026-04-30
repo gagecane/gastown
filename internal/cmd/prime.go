@@ -36,6 +36,34 @@ var primeStructuredSessionStartOutput bool
 // when running in hook mode. Used to provide lighter output on compaction/resume.
 var primeHookSource string
 
+// primeHookDeadline is the maximum wall-clock time for gt prime --hook.
+// After this, slow operations (findAgentWork retries, bd prime, mail check)
+// are skipped so the hook returns before the LLM runtime gives up.
+// A partial prime (role context without work lookup) is better than no prime.
+const primeHookDeadline = 60 * time.Second
+
+// primeDeadline is set in hook mode to enforce the overall time budget.
+// Zero value means no deadline (non-hook mode).
+var primeDeadline time.Time
+
+// primeDeadlineExceeded returns true if the hook deadline has passed.
+func primeDeadlineExceeded() bool {
+	return !primeDeadline.IsZero() && time.Now().After(primeDeadline)
+}
+
+// primeDeadlineRemaining returns the time left before the hook deadline,
+// or 0 if no deadline is set. Returns at least 1s to avoid zero-timeout contexts.
+func primeDeadlineRemaining() time.Duration {
+	if primeDeadline.IsZero() {
+		return 0
+	}
+	rem := time.Until(primeDeadline)
+	if rem < time.Second {
+		return time.Second
+	}
+	return rem
+}
+
 // primeHandoffReason stores the reason from the handoff marker (e.g., "compaction").
 // Set by checkHandoffMarker when a marker with a reason field is found.
 var primeHandoffReason string
@@ -128,6 +156,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if primeHookMode {
+		primeDeadline = time.Now().Add(primeHookDeadline)
 		handlePrimeHookMode(townRoot, cwd)
 	}
 
@@ -384,7 +413,17 @@ func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo) error {
 		return nil
 	}
 	if err := acquireIdentityLock(ctx); err != nil {
-		return err
+		if primeHookMode && (ctx.Role == RolePolecat || ctx.Role == RoleCrew || ctx.Role == RoleDog) {
+			// In hook mode, identity lock failure is non-fatal for worker roles.
+			// Double SessionStart hooks (kiro-cli reconnect) cause two concurrent
+			// gt prime --hook processes for the same polecat. The second sees the
+			// first's lock and fails with ErrLocked. This is not a real collision —
+			// it's a race between two primes for the same agent. Log and continue
+			// so the agent gets its prime context rather than starting blind. (GH#TBD)
+			fmt.Fprintf(os.Stderr, "prime: identity lock contention (non-fatal in hook mode): %v\n", err)
+		} else {
+			return err
+		}
 	}
 	if !roleInfo.Mismatch {
 		ensureBeadsRedirect(ctx)
@@ -496,6 +535,7 @@ func outputRoleContext(ctx RoleContext) (string, error) {
 
 // runPrimeExternalTools runs bd prime, memory injection, and gt mail check --inject.
 // Skipped in dry-run mode with explain output.
+// Skipped if the hook deadline has been exceeded — partial prime is better than no prime.
 func runPrimeExternalTools(cwd string) {
 	if primeDryRun {
 		explain(true, "bd prime: skipped in dry-run mode")
@@ -503,15 +543,30 @@ func runPrimeExternalTools(cwd string) {
 		explain(true, "gt mail check --inject: skipped in dry-run mode")
 		return
 	}
+	if primeDeadlineExceeded() {
+		fmt.Fprintf(os.Stderr, "prime: hook deadline exceeded, skipping external tools (bd prime, mail check)\n")
+		return
+	}
 	runBdPrime(cwd)
 	runMemoryInject()
+	if primeDeadlineExceeded() {
+		fmt.Fprintf(os.Stderr, "prime: hook deadline exceeded, skipping mail check\n")
+		return
+	}
 	runMailCheckInject(cwd)
 }
 
 // runBdPrime runs `bd prime` and outputs the result.
 // This provides beads workflow context to the agent.
 func runBdPrime(workDir string) {
-	cmd := exec.Command("bd", "prime")
+	var cmd *exec.Cmd
+	if rem := primeDeadlineRemaining(); rem > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), rem)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, "bd", "prime")
+	} else {
+		cmd = exec.Command("bd", "prime")
+	}
 	cmd.Dir = workDir
 	cmd.Env = os.Environ()
 
@@ -600,7 +655,14 @@ func runMemoryInject() {
 // runMailCheckInject runs `gt mail check --inject` and outputs the result.
 // This injects any pending mail into the agent's context.
 func runMailCheckInject(workDir string) {
-	cmd := exec.Command("gt", "mail", "check", "--inject")
+	var cmd *exec.Cmd
+	if rem := primeDeadlineRemaining(); rem > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), rem)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, "gt", "mail", "check", "--inject")
+	} else {
+		cmd = exec.Command("gt", "mail", "check", "--inject")
+	}
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer
@@ -687,6 +749,11 @@ func findAgentWork(ctx RoleContext) (*beads.Issue, error) {
 	backoff := 500 * time.Millisecond
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
+			// Check deadline before sleeping — no point retrying if we're out of time.
+			if primeDeadlineExceeded() {
+				fmt.Fprintf(os.Stderr, "prime: hook deadline exceeded, skipping findAgentWork retry %d/%d\n", attempt, maxAttempts)
+				break
+			}
 			time.Sleep(backoff)
 			backoff *= 2
 		}
