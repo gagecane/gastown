@@ -476,6 +476,24 @@ func (b *Beads) getResolvedBeadsDir() string {
 	return ResolveBeadsDir(b.workDir)
 }
 
+// forIssueID returns a Beads wrapper bound to the correct beads directory for
+// the given issue ID. This is needed for cross-rig write operations that use an
+// ID to determine the owning database.
+func (b *Beads) forIssueID(id string) *Beads {
+	resolved := ResolveBeadsDirForID(b.getResolvedBeadsDir(), id)
+	if resolved == "" || resolved == b.getResolvedBeadsDir() {
+		return b
+	}
+	return &Beads{
+		workDir:    b.workDir,
+		beadsDir:   resolved,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		townRoot:   b.townRoot,
+	}
+}
+
 // Init initializes a new beads database in the working directory.
 // This uses the same environment isolation as other commands.
 // If ServerPort is set (via NewIsolatedWithPort), passes --server-port to bd init
