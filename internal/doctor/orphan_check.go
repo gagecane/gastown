@@ -434,6 +434,8 @@ func gasTownRuntimeYOLO(cmdName, args string) bool {
 			(strings.Contains(args, "--resume") || argvHasFlag(args, "-p") || strings.Contains(args, "--print"))
 	case "copilot":
 		return strings.Contains(args, "--yolo")
+	case "kiro-cli":
+		return strings.Contains(args, "--no-interactive")
 	default:
 		return false
 	}

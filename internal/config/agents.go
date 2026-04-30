@@ -486,8 +486,10 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		HooksDir:           ".kiro/agents",
 		HooksSettingsFile:  "gastown.json",
 		HooksInformational: false,
-		ReadyDelayMs:       8000,
-		InstructionsFile:   "AGENTS.md",
+		ReadyDelayMs:         8000,
+		InstructionsFile:     "AGENTS.md",
+		ContinueFlag:        "--resume",
+		HasTurnBoundaryDrain: true,
 	},
 	AgentPi: {
 		Name:                AgentPi,
