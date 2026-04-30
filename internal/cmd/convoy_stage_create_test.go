@@ -252,4 +252,3 @@ func TestCreateStagedConvoy_IDFormat(t *testing.T) {
 		}
 	}
 }
-

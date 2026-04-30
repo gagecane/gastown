@@ -73,4 +73,3 @@ func TestDetectCycles_LongChainWithBackEdge(t *testing.T) {
 		t.Fatalf("cycle too short, expected at least b,c,d: %v", cycle)
 	}
 }
-

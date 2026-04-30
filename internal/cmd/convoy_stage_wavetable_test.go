@@ -114,4 +114,3 @@ func TestRenderWaveTable_UTF8Truncation(t *testing.T) {
 		t.Error("long title should be truncated with '..'")
 	}
 }
-

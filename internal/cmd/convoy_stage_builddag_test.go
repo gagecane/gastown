@@ -137,4 +137,3 @@ func TestBuildDAG_RelatedTracksIgnored(t *testing.T) {
 		t.Error("related/tracks should not set hierarchy on b")
 	}
 }
-

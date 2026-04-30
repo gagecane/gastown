@@ -354,4 +354,3 @@ func TestRenderWarnings_Empty(t *testing.T) {
 		t.Errorf("expected empty string for empty findings, got %q", output)
 	}
 }
-

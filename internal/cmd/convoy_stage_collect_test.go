@@ -200,4 +200,3 @@ func TestEpicWalk_CollectsDeps(t *testing.T) {
 		t.Errorf("expected blocks dep gt-t2→gt-t1, got: %v", depTypes)
 	}
 }
-

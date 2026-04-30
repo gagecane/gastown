@@ -224,4 +224,3 @@ func TestRenderDAGTree_OutputOrdering(t *testing.T) {
 		t.Errorf("tree content (at %d) should appear before wave table (at %d) in full output", treeFirstID, waveTableStart)
 	}
 }
-

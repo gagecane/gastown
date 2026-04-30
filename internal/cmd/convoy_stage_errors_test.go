@@ -125,4 +125,3 @@ func TestErrorDetection_Clean(t *testing.T) {
 		t.Errorf("expected 0 findings, got %d", len(findings))
 	}
 }
-

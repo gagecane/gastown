@@ -114,4 +114,3 @@ func TestConvoyStageInput_MultipleTasksOK(t *testing.T) {
 		t.Errorf("expected StageInputTasks, got %v", input.Kind)
 	}
 }
-

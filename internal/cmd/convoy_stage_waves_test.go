@@ -302,4 +302,3 @@ func TestComputeWaves_EmptyDAG(t *testing.T) {
 		t.Error("expected error for DAG with only non-slingable types, got nil")
 	}
 }
-
