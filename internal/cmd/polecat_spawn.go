@@ -113,6 +113,21 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			workingCount, defaultMaxActivePolecats)
 	}
 
+	// Per-rig concurrency cap (gu-1lvs): configurable via
+	// `gt rig settings set <rig> polecat.max_concurrent N`. Nil/0 means
+	// no per-rig cap — only the town-wide cap applies. This is distinct from
+	// maxPolecatDirsPerRig below, which caps worktree directories (working +
+	// idle), not just working polecats.
+	if rigPolecatCap := loadRigPolecatMaxConcurrent(r.Path); rigPolecatCap > 0 {
+		rigWorkingCount := countWorkingPolecatsInRig(rigName)
+		if rigWorkingCount >= rigPolecatCap {
+			return nil, fmt.Errorf("rig %s has %d/%d working polecats (per-rig cap). "+
+				"Wait for one to finish, or raise: "+
+				"gt rig settings set %s polecat.max_concurrent %d",
+				rigName, rigWorkingCount, rigPolecatCap, rigName, rigPolecatCap+1)
+		}
+	}
+
 	// Per-bead respawn circuit breaker (clown show #22):
 	// Track how many times this bead has been slung. Block after N attempts
 	// to prevent witness→deacon→sling feedback loops.
@@ -503,4 +518,17 @@ func verifyWorktreeExists(clonePath string) error {
 	}
 
 	return nil
+}
+
+// loadRigPolecatMaxConcurrent reads settings/config.json from the given rig
+// path and returns the configured per-rig working polecat cap. Returns 0 when
+// unset, non-positive, or unreadable (meaning no per-rig cap applies).
+// See PolecatPoolConfig in internal/config/types.go.
+func loadRigPolecatMaxConcurrent(rigPath string) int {
+	settingsPath := filepath.Join(rigPath, "settings", "config.json")
+	settings, err := config.LoadRigSettings(settingsPath)
+	if err != nil {
+		return 0
+	}
+	return settings.GetPolecatMaxConcurrent()
 }

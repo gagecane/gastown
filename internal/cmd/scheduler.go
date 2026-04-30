@@ -496,19 +496,54 @@ func countActivePolecats() int {
 // Idle polecats (completed work, hook_bead=null) don't count toward capacity
 // since they're available for re-sling under the persistent polecat model.
 func countWorkingPolecats() int {
+	counts, ok := countWorkingPolecatsByRig()
+	if !ok {
+		// Preserve historical fallback: if we can't look up hook state
+		// (e.g., no town root, tmux unavailable), use total active count.
+		return countActivePolecats()
+	}
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	return total
+}
+
+// countWorkingPolecatsInRig counts polecat sessions that are actively working
+// within a specific rig. See countWorkingPolecats for the "working" definition.
+// Returns 0 when tmux or the workspace cannot be located; falls back to a
+// best-effort count of tmux sessions matching the rig when beads is unreachable.
+func countWorkingPolecatsInRig(rigName string) int {
+	counts, ok := countWorkingPolecatsByRig()
+	if !ok {
+		// Fallback when beads lookups failed or workspace is unresolved:
+		// count active tmux sessions scoped to the rig so the cap still
+		// has some protective value. This may over-count (includes idle
+		// polecats) which is the safer direction for a safety limit.
+		return countActivePolecatsInRig(rigName)
+	}
+	return counts[rigName]
+}
+
+// countWorkingPolecatsByRig returns a per-rig map of working polecat counts.
+// The second return value is false when the underlying tmux listing failed,
+// in which case the map is empty and callers should fall back.
+// "Working" matches countWorkingPolecats — a polecat whose agent bead has a
+// non-empty hook_bead. Idle polecats are excluded.
+func countWorkingPolecatsByRig() (map[string]int, bool) {
+	counts := make(map[string]int)
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
-		return countActivePolecats() // Fallback to total count
+		return counts, false
 	}
 
 	listCmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}")
 	out, err := listCmd.Output()
 	if err != nil {
-		return 0
+		return counts, false
 	}
 
 	bd := beads.New(townRoot)
-	count := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -536,7 +571,33 @@ func countWorkingPolecats() int {
 		if fields.HookBead == "" {
 			continue // Idle — don't count toward cap
 		}
-		count++
+		counts[identity.Rig]++
+	}
+	return counts, true
+}
+
+// countActivePolecatsInRig counts all running polecat tmux sessions in a
+// specific rig (working + idle). Used as a fallback when we cannot determine
+// hook state via beads. Prefer countWorkingPolecatsInRig.
+func countActivePolecatsInRig(rigName string) int {
+	listCmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}")
+	out, err := listCmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		identity, err := session.ParseSessionName(line)
+		if err != nil {
+			continue
+		}
+		if identity.Role == session.RolePolecat && identity.Rig == rigName {
+			count++
+		}
 	}
 	return count
 }

@@ -690,6 +690,52 @@ type RigSettings struct {
 	// Values are effort levels: "low", "medium", "high", "max".
 	// Example: {"crew": "max", "witness": "low"}
 	RoleEffort map[string]string `json:"role_effort,omitempty"`
+
+	// Polecat configures per-rig polecat pool settings, such as the maximum
+	// number of concurrently-working polecats for this rig. This is distinct
+	// from the town-wide scheduler.max_polecats cap — it lets operators cap
+	// fast or flaky rigs independently so they don't starve other rigs.
+	Polecat *PolecatPoolConfig `json:"polecat,omitempty"`
+}
+
+// PolecatPoolConfig represents per-rig polecat pool settings.
+//
+// This is analogous to the town-wide scheduler.max_polecats cap, but scoped
+// to a single rig. It lets operators throttle high-throughput or flaky rigs
+// independently so they don't starve quieter rigs.
+//
+// Behavior:
+//   - MaxConcurrent > 0: enforce this cap for working polecats in the rig.
+//   - MaxConcurrent == nil or 0: no per-rig cap; only the town cap applies.
+//
+// The town-wide cap (scheduler.max_polecats) is always enforced on top of
+// any per-rig cap — the effective limit is the minimum of the two.
+type PolecatPoolConfig struct {
+	// MaxConcurrent is the maximum number of working polecats for this rig.
+	// Nil or 0 means no per-rig limit (the town cap still applies).
+	MaxConcurrent *int `json:"max_concurrent,omitempty"`
+}
+
+// GetMaxConcurrent returns the per-rig max concurrent polecats cap.
+// Returns 0 when unset or non-positive, meaning no per-rig cap applies.
+func (c *PolecatPoolConfig) GetMaxConcurrent() int {
+	if c == nil || c.MaxConcurrent == nil {
+		return 0
+	}
+	if *c.MaxConcurrent < 0 {
+		return 0
+	}
+	return *c.MaxConcurrent
+}
+
+// GetPolecatMaxConcurrent returns the per-rig max concurrent polecats cap
+// from rig settings. Nil-safe; returns 0 when no cap is configured (meaning
+// only the town-wide scheduler.max_polecats cap applies).
+func (s *RigSettings) GetPolecatMaxConcurrent() int {
+	if s == nil {
+		return 0
+	}
+	return s.Polecat.GetMaxConcurrent()
 }
 
 // CrewConfig represents crew workspace settings for a rig.

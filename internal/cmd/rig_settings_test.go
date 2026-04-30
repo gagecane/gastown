@@ -483,6 +483,38 @@ func TestRigSettingsSet(t *testing.T) {
 			t.Errorf("Agent should be empty, got %q", loaded.Agent)
 		}
 	})
+
+	t.Run("sets polecat.max_concurrent per-rig cap", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForSettings(t)
+		rigPath := filepath.Join(townRoot, rigName)
+
+		cmd := rigSettingsSetCmd
+		if err := runRigSettingsSet(cmd, []string{rigName, "polecat.max_concurrent", "3"}); err != nil {
+			t.Fatalf("runRigSettingsSet error: %v", err)
+		}
+
+		settingsPath := filepath.Join(rigPath, "settings", "config.json")
+		settings, err := config.LoadRigSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		if got := settings.GetPolecatMaxConcurrent(); got != 3 {
+			t.Errorf("GetPolecatMaxConcurrent = %d, want 3", got)
+		}
+
+		// Unset clears the per-rig cap so the town cap becomes the only gate.
+		unsetCmd := rigSettingsUnsetCmd
+		if err := runRigSettingsUnset(unsetCmd, []string{rigName, "polecat.max_concurrent"}); err != nil {
+			t.Fatalf("runRigSettingsUnset error: %v", err)
+		}
+		settings, err = config.LoadRigSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("reload settings: %v", err)
+		}
+		if got := settings.GetPolecatMaxConcurrent(); got != 0 {
+			t.Errorf("GetPolecatMaxConcurrent after unset = %d, want 0 (inherit town cap)", got)
+		}
+	})
 }
 
 func TestRigSettingsUnset(t *testing.T) {

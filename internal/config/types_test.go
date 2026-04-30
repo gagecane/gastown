@@ -623,3 +623,97 @@ func TestParseDurationOrDefault_AllWebTimeoutDefaults(t *testing.T) {
 }
 
 
+// --- PolecatPoolConfig ---
+
+func TestPolecatPoolConfigGetMaxConcurrent(t *testing.T) {
+	t.Parallel()
+
+	one := 1
+	three := 3
+	zero := 0
+	neg := -5
+
+	tests := []struct {
+		name string
+		cfg  *PolecatPoolConfig
+		want int
+	}{
+		{"nil config returns 0", nil, 0},
+		{"nil MaxConcurrent returns 0", &PolecatPoolConfig{}, 0},
+		{"positive MaxConcurrent returns value", &PolecatPoolConfig{MaxConcurrent: &three}, 3},
+		{"explicit zero returns 0", &PolecatPoolConfig{MaxConcurrent: &zero}, 0},
+		{"negative treated as 0 (no cap)", &PolecatPoolConfig{MaxConcurrent: &neg}, 0},
+		{"single-slot cap", &PolecatPoolConfig{MaxConcurrent: &one}, 1},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.cfg.GetMaxConcurrent(); got != tt.want {
+				t.Errorf("GetMaxConcurrent() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRigSettingsGetPolecatMaxConcurrent(t *testing.T) {
+	t.Parallel()
+
+	two := 2
+
+	tests := []struct {
+		name     string
+		settings *RigSettings
+		want     int
+	}{
+		{"nil settings returns 0", nil, 0},
+		{"no polecat block returns 0", &RigSettings{}, 0},
+		{"empty polecat block returns 0", &RigSettings{Polecat: &PolecatPoolConfig{}}, 0},
+		{"configured value returns value", &RigSettings{Polecat: &PolecatPoolConfig{MaxConcurrent: &two}}, 2},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.settings.GetPolecatMaxConcurrent(); got != tt.want {
+				t.Errorf("GetPolecatMaxConcurrent() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPolecatPoolConfigJSONRoundTrip(t *testing.T) {
+	t.Parallel()
+	// Ensure polecat.max_concurrent serializes with the documented key and
+	// deserializes back to the same value. Guards against silent renames.
+	raw := `{"type":"rig-settings","version":1,"polecat":{"max_concurrent":4}}`
+
+	var settings RigSettings
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := settings.GetPolecatMaxConcurrent(); got != 4 {
+		t.Fatalf("GetPolecatMaxConcurrent after unmarshal = %d, want 4", got)
+	}
+
+	// Round-trip back through JSON.
+	out, err := json.Marshal(&settings)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"polecat":{"max_concurrent":4}`) {
+		t.Errorf("marshaled JSON missing polecat.max_concurrent: %s", string(out))
+	}
+
+	// An unset cap should omit the polecat block entirely.
+	minimal := RigSettings{Type: "rig-settings", Version: 1}
+	out, err = json.Marshal(&minimal)
+	if err != nil {
+		t.Fatalf("marshal minimal: %v", err)
+	}
+	if strings.Contains(string(out), "polecat") {
+		t.Errorf("minimal RigSettings should omit polecat block, got: %s", string(out))
+	}
+}

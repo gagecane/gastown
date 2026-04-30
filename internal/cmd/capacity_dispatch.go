@@ -105,7 +105,15 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 			return cap, nil
 		},
 		QueryPending: func() ([]capacity.PendingBead, error) {
-			return getReadySlingContexts(townRoot)
+			pending, err := getReadySlingContexts(townRoot)
+			if err != nil {
+				return nil, err
+			}
+			// Per-rig cap filter (gu-1lvs): skip beads whose target rig is at
+			// its configured polecat.max_concurrent limit. Preserves order so
+			// older queued beads stay first; dispatched beads leaves slots for
+			// other rigs on the next cycle.
+			return filterByPerRigCapacity(townRoot, pending), nil
 		},
 		Execute: func(b capacity.PendingBead) error {
 			result, err := dispatchSingleBead(b, townRoot, actor)
@@ -431,7 +439,76 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 	return result, nil
 }
 
-// dispatchSingleBead dispatches one scheduled bead via executeSling.
+// filterByPerRigCapacity drops pending beads whose target rig is already at
+// its configured per-rig polecat cap (settings/config.json:polecat.max_concurrent).
+// Rigs without a configured cap or with cap<=0 are never filtered.
+// Called by the scheduler's QueryPending callback so the deferred dispatch
+// path respects per-rig caps during fair-share distribution.
+//
+// Note: This does not reorder the queue or prefer rigs with the most headroom;
+// FIFO order is preserved. PlanDispatch further caps total dispatch by batch
+// size and town-wide capacity. A rig's cap is re-evaluated each cycle, so
+// skipped beads stay in the queue and dispatch as slots free up.
+func filterByPerRigCapacity(townRoot string, pending []capacity.PendingBead) []capacity.PendingBead {
+	if len(pending) == 0 {
+		return pending
+	}
+
+	// Per-rig caps from settings (cached across this call)
+	rigCaps := make(map[string]int)
+	// Per-rig remaining capacity; populated lazily so we only probe rigs that
+	// actually have a cap configured.
+	rigRemaining := make(map[string]int)
+
+	// Pre-fetch rig-level working counts once so we don't pay the tmux+beads
+	// cost per-bead.
+	var workingByRig map[string]int
+	if counts, ok := countWorkingPolecatsByRig(); ok {
+		workingByRig = counts
+	}
+
+	result := make([]capacity.PendingBead, 0, len(pending))
+	for _, b := range pending {
+		rig := b.TargetRig
+		if rig == "" {
+			result = append(result, b)
+			continue
+		}
+
+		cap, known := rigCaps[rig]
+		if !known {
+			cap = loadRigPolecatMaxConcurrent(filepath.Join(townRoot, rig))
+			rigCaps[rig] = cap
+		}
+		if cap <= 0 {
+			result = append(result, b)
+			continue
+		}
+
+		remaining, seen := rigRemaining[rig]
+		if !seen {
+			working := 0
+			if workingByRig != nil {
+				working = workingByRig[rig]
+			}
+			remaining = cap - working
+			if remaining < 0 {
+				remaining = 0
+			}
+			rigRemaining[rig] = remaining
+		}
+
+		if remaining <= 0 {
+			// At cap — drop this bead from this cycle; it stays queued.
+			continue
+		}
+		rigRemaining[rig] = remaining - 1
+		result = append(result, b)
+	}
+	return result
+}
+
+
 // Context fields are already parsed (from PendingBead.Context).
 // Returns the SlingResult (including PolecatName) on success.
 func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {
