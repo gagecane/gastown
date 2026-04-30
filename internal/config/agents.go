@@ -409,9 +409,13 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		Name:    AgentKiro,
 		Command: "kiro-cli",
 		// --classic bypasses the TUI (kiro-cli 2.0+ defaults to TUI mode which
-		// blocks non-interactive polecat sessions). --trust-all-tools
-		// auto-approves tool calls for autonomous operation.
-		Args: []string{"chat", "--classic", "--trust-all-tools"},
+		// blocks non-interactive polecat sessions). --no-interactive runs the
+		// full agentic loop in one turn (analogous to Claude Code's
+		// --dangerously-skip-permissions) so formula steps — including the
+		// mandatory final `gt done` — complete without returning to the `!>`
+		// prompt and idling. --trust-all-tools auto-approves tool calls for
+		// autonomous operation.
+		Args: []string{"chat", "--classic", "--no-interactive", "--trust-all-tools"},
 		Env: map[string]string{
 			// Disable interactive git auth prompts that would hang non-interactive sessions.
 			"GIT_TERMINAL_PROMPT": "0",

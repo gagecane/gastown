@@ -1317,9 +1317,11 @@ func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
 }
 
 // TestKiroPreset verifies the Kiro built-in preset matches the fields required
-// for autonomous polecat operation (see gu-axjw). kiro-cli 2.0+ defaults to TUI
-// mode which blocks non-interactive sessions; --classic bypasses the TUI. The
-// env vars disable interactive pagers and git prompts that would otherwise
+// for autonomous polecat operation (see gu-axjw, gu-xpgx). kiro-cli 2.0+
+// defaults to TUI mode which blocks non-interactive sessions; --classic
+// bypasses the TUI. --no-interactive runs the full agentic loop in one turn so
+// formula steps (including `gt done`) complete without idling at the prompt.
+// The env vars disable interactive pagers and git prompts that would otherwise
 // hang background sessions.
 func TestKiroPreset(t *testing.T) {
 	t.Parallel()
@@ -1330,7 +1332,7 @@ func TestKiroPreset(t *testing.T) {
 	if p.Command != "kiro-cli" {
 		t.Errorf("Command = %q, want kiro-cli", p.Command)
 	}
-	wantArgs := []string{"chat", "--classic", "--trust-all-tools"}
+	wantArgs := []string{"chat", "--classic", "--no-interactive", "--trust-all-tools"}
 	if len(p.Args) != len(wantArgs) {
 		t.Errorf("Args = %v, want %v", p.Args, wantArgs)
 	} else {
