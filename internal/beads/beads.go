@@ -38,6 +38,9 @@ var (
 	bdAllowStaleMu     sync.Mutex
 	bdAllowStalePath   string
 	bdAllowStaleResult bool
+	// bdAllowStaleProbeTimeout bounds the capability probe so a wedged bd
+	// binary cannot hang higher-level commands such as gt status.
+	bdAllowStaleProbeTimeout = 2 * time.Second
 )
 
 // ResetBdAllowStaleCacheForTest clears the cached bd --allow-stale capability.
@@ -71,18 +74,23 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 		return cachedResult
 	}
 
-	cmd := exec.Command(bdPath, "--allow-stale", "version") //nolint:gosec // G204: bd is a trusted internal tool
-	util.SetDetachedProcessGroup(cmd)
+	ctx, cancel := context.WithTimeout(context.Background(), bdAllowStaleProbeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bdPath, "--allow-stale", "version") //nolint:gosec // G204: bd is a trusted internal tool
+	util.SetProcessGroup(cmd)
 	if env != nil {
 		cmd.Env = env
 	}
 	var combinedOut bytes.Buffer
 	cmd.Stdout = &combinedOut
 	cmd.Stderr = &combinedOut
-	_ = cmd.Run()
+	err = cmd.Run()
 	// bd v0.60+ exits 0 even on unknown flags, printing the error to stderr.
-	// Check output for "unknown flag" to detect lack of support.
-	supported := !strings.Contains(combinedOut.String(), "unknown flag")
+	// Check output for "unknown flag" to detect lack of support. Treat probe
+	// errors/timeouts as unsupported so higher-level commands fail closed
+	// instead of hanging on a wedged bd subprocess.
+	supported := err == nil && !strings.Contains(combinedOut.String(), "unknown flag")
 
 	bdAllowStaleMu.Lock()
 	if bdAllowStalePath != bdPath {

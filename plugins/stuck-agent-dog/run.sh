@@ -45,10 +45,11 @@ while IFS='|' read -r RIG PREFIX; do
 
     if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
       # Session dead — check hook.
-      # `|| true` so a missing 'Hooked:' line (grep exits 1) doesn't abort
-      # the whole script under `set -euo pipefail`. We want HOOK_BEAD="" here.
-      HOOK_BEAD=$(gt hook "$RIG/polecats/$PCAT_NAME" 2>/dev/null \
-        | grep -oE 'Hooked: [^ ]+' | head -1 | sed 's/Hooked: //' || true)
+      # Uses `gt hook show` (not `gt hook`) because bare `gt hook ` now
+      # tries to *attach* the path as a bead after the subcommand refactor.
+      # `|| true` so a missing entry doesn't abort under `set -euo pipefail`.
+      HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1)
+      HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
 
       if [ -n "$HOOK_BEAD" ]; then
         # Check agent_state
@@ -69,9 +70,9 @@ while IFS='|' read -r RIG PREFIX; do
         PROC_COMM=$(ps -o comm= -p "$PANE_PID" 2>/dev/null)
         if [ -z "$PROC_COMM" ]; then
           # Zombie: process dead, session alive.
-          # `|| true` — see note above on HOOK_BEAD pipeline under pipefail.
-          HOOK_BEAD=$(gt hook "$RIG/polecats/$PCAT_NAME" 2>/dev/null \
-            | grep -oE 'Hooked: [^ ]+' | head -1 | sed 's/Hooked: //' || true)
+          # Uses `gt hook show` — see note above on subcommand refactor.
+          HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1)
+          HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
           if [ -n "$HOOK_BEAD" ]; then
             STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
             log "  ZOMBIE: $SESSION_NAME (pid=$PANE_PID dead, hook=$HOOK_BEAD)"

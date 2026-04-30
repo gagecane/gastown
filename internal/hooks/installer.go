@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/hookutil"
 )
 
@@ -124,7 +125,10 @@ func SyncForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile strin
 		perm = 0600
 	}
 
-	if err := os.WriteFile(targetPath, content, perm); err != nil {
+	// Atomic write (temp + rename) prevents concurrent polecat spawns from
+	// interleaving truncates+writes into a partial JSON file that Claude
+	// rejects at startup. See gh#3500.
+	if err := atomicfile.WriteFile(targetPath, content, perm); err != nil {
 		return 0, fmt.Errorf("writing hooks file: %w", err)
 	}
 
@@ -262,7 +266,8 @@ func writeTemplate(provider, role, hooksFile, targetPath string) error {
 		perm = 0600
 	}
 
-	if err := os.WriteFile(targetPath, content, perm); err != nil {
+	// Atomic write (temp + rename) — see gh#3500.
+	if err := atomicfile.WriteFile(targetPath, content, perm); err != nil {
 		return fmt.Errorf("writing hooks file: %w", err)
 	}
 

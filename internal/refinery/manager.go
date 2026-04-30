@@ -206,24 +206,10 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		return fmt.Errorf("building startup command: %w", err)
 	}
 
-	// Generate the GASTA run ID for this refinery session.
-	runID := uuid.New().String()
-
-	// Create session with command directly to avoid send-keys race condition.
-	// See: https://github.com/anthropics/gastown/issues/280
-	if err := t.NewSessionWithCommand(sessionID, refineryRigDir, command); err != nil {
-		return fmt.Errorf("creating tmux session: %w", err)
-	}
-
-	// Set remain-on-exit IMMEDIATELY after session creation so the pane
-	// survives even if the agent exits before the auto-respawn hook is
-	// installed below. Without this, a fast agent crash would destroy the
-	// pane and leave the daemon to spawn a fresh session 3-5 minutes later.
-	// Mirrors the deacon/manager.go pattern (PATCH-010).
-	_ = t.SetRemainOnExit(sessionID, true)
-
-	// Set environment variables (non-fatal: session works without these)
-	// Use centralized AgentEnv for consistency across all role startup paths
+	// Compute environment BEFORE creating the session so it can be passed to
+	// tmux via -e flags. Setting env via SetEnvironment after session creation
+	// only affects newly spawned panes — the running pane (and Claude's
+	// subprocesses like bd) keeps its original environment (gt-neycp).
 	envVars := config.AgentEnv(config.AgentEnvConfig{
 		Role:             "refinery",
 		Rig:              m.rig.Name,
@@ -233,15 +219,25 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		SessionName:      sessionID,
 	})
 	envVars = session.MergeRuntimeLivenessEnv(envVars, runtimeConfig)
-
-	// Add refinery-specific flag
 	envVars["GT_REFINERY"] = "1"
 
-	// Set all env vars in tmux session (for debugging) and they'll also be exported to Claude
-	for k, v := range envVars {
-		_ = t.SetEnvironment(sessionID, k, v)
+	// Generate the GASTA run ID for this refinery session.
+	runID := uuid.New().String()
+	envVars["GT_RUN"] = runID
+
+	// Create session with command and env vars via -e flags so the initial
+	// shell — and Claude's subprocesses — inherit them from the start.
+	// See: https://github.com/anthropics/gastown/issues/280 (race condition fix)
+	if err := t.NewSessionWithCommandAndEnv(sessionID, refineryRigDir, command, envVars); err != nil {
+		return fmt.Errorf("creating tmux session: %w", err)
 	}
-	_ = t.SetEnvironment(sessionID, "GT_RUN", runID)
+
+	// Set remain-on-exit IMMEDIATELY after session creation so the pane
+	// survives even if the agent exits before the auto-respawn hook is
+	// installed below. Without this, a fast agent crash would destroy the
+	// pane and leave the daemon to spawn a fresh session 3-5 minutes later.
+	// Mirrors the deacon/manager.go pattern (PATCH-010).
+	_ = t.SetRemainOnExit(sessionID, true)
 
 	// Apply theme (non-fatal: theming failure doesn't affect operation)
 	theme := tmux.ResolveSessionTheme(townRoot, m.rig.Name, "refinery", "")

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestNew verifies the constructor.
@@ -148,6 +149,47 @@ func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 	}
 }
 
+func TestBdSupportsAllowStale_TimeoutTreatsProbeAsUnsupported(t *testing.T) {
+	bdAllowStaleMu.Lock()
+	prevPath := bdAllowStalePath
+	prevResult := bdAllowStaleResult
+	bdAllowStaleMu.Unlock()
+	prevTimeout := bdAllowStaleProbeTimeout
+	ResetBdAllowStaleCacheForTest()
+	bdAllowStaleProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() {
+		bdAllowStaleMu.Lock()
+		bdAllowStalePath = prevPath
+		bdAllowStaleResult = prevResult
+		bdAllowStaleMu.Unlock()
+		bdAllowStaleProbeTimeout = prevTimeout
+	})
+
+	hangingDir := t.TempDir()
+	markerPath := filepath.Join(hangingDir, "allow-stale-timeout-marker")
+	writeHangingAllowStaleBDStub(t, hangingDir, markerPath)
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", hangingDir+string(os.PathListSeparator)+origPath)
+
+	start := time.Now()
+	if BdSupportsAllowStale() {
+		t.Fatal("expected hanging probe to time out and report no --allow-stale support")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("expected probe timeout to return promptly, took %v", elapsed)
+	}
+
+	if runtime.GOOS != "windows" {
+		time.Sleep(250 * time.Millisecond)
+		if _, err := os.Stat(markerPath); err == nil {
+			t.Fatal("expected timed-out probe to kill the entire process group")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat timeout marker: %v", err)
+		}
+	}
+}
+
 // writeAllowStaleBDStub creates a mock bd binary in dir.
 //
 // The detection function (BdSupportsAllowStaleWithEnv) ignores the exit code
@@ -197,6 +239,39 @@ exit 0
 
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
 		t.Fatalf("write bd stub: %v", err)
+	}
+}
+
+func writeHangingAllowStaleBDStub(t *testing.T, dir, markerPath string) {
+	t.Helper()
+
+	var scriptPath, script string
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "bd.bat")
+		script = `@echo off
+setlocal enableextensions
+if "%1"=="--allow-stale" (
+  ping -n 6 127.0.0.1 >nul
+)
+exit /b 0
+`
+	} else {
+		scriptPath = filepath.Join(dir, "bd")
+		script = fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--allow-stale" ]; then
+  (
+    sleep 0.2
+    : > %q
+  ) &
+  child=$!
+  wait "$child"
+fi
+exit 0
+`, markerPath)
+	}
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write hanging bd stub: %v", err)
 	}
 }
 

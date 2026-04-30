@@ -753,6 +753,10 @@ func DefaultAgentPreset() AgentPreset {
 // can be accessed separately for extended functionality.
 func RuntimeConfigFromPreset(preset AgentPreset) *RuntimeConfig {
 	info := GetAgentPreset(preset)
+	return runtimeConfigFromAgentInfo(preset, info)
+}
+
+func runtimeConfigFromAgentInfo(preset AgentPreset, info *AgentPresetInfo) *RuntimeConfig {
 	if info == nil {
 		// Fall back to Claude defaults
 		return DefaultRuntimeConfig()
@@ -770,12 +774,10 @@ func RuntimeConfigFromPreset(preset AgentPreset) *RuntimeConfig {
 	rc := &RuntimeConfig{
 		Provider: string(info.Name),
 		Command:  info.Command,
-		Args:     append([]string(nil), info.Args...), // Copy to avoid mutation
+		Args:     append([]string(nil), info.Args...),
 		Env:      envCopy,
 	}
 
-	// Resolve command path for claude preset (handles alias installations)
-	// Uses resolveClaudePath() from types.go which finds ~/.claude/local/claude
 	if preset == AgentClaude && rc.Command == "claude" {
 		rc.Command = resolveClaudePath()
 	}

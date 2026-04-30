@@ -445,8 +445,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Ralph:       slingRalph,
 			})
 		}
-		// Non-rig target in deferred mode — reject to prevent bypassing capacity control
-		return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>\n'%s' is not a known rig", args[0], args[1])
+		// Dog targets (deacon/dogs, deacon/dogs/<name>, dog:, dog:<name>) fall through
+		// to direct dispatch: dogs are a self-managed pool owned by the Deacon, not rig
+		// polecat slots, and therefore don't participate in the capacity scheduler.
+		// Without this fallthrough, dispatchFeedDog can't feed stranded convoys when a
+		// scheduler is active (bead aa-4yf2).
+		if _, isDog := IsDogTarget(args[1]); !isDog {
+			// Non-rig, non-dog target in deferred mode — reject to prevent bypassing capacity control
+			return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>\n'%s' is not a known rig", args[0], args[1])
+		}
+		// else: fall through to direct dispatch path below (resolveTarget handles dogs).
 	}
 
 	// Epic/convoy auto-detection (1 arg, no rig): works for both deferred and direct
