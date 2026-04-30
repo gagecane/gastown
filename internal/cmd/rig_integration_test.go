@@ -30,7 +30,9 @@ import (
 // These files are allowed to appear as untracked in agent worktrees.
 // Each entry documents which component creates the file and why it's acceptable.
 //
-// TODO items indicate files that should eventually be removed or relocated.
+// Each entry below also references a follow-up bead (gu-*) tracking eventual
+// removal or relocation so the allowlist can shrink over time. When an entry
+// is cleaned up, close its bead and remove the entry here.
 
 // agentAllowlist maps agent type to allowed untracked files in their worktrees.
 // All agents also implicitly allow .beads/ or .beads/redirect (added in checkWorktreeClean).
@@ -43,9 +45,9 @@ var agentAllowlist = map[string][]string{
 	// Mayor is a clone (not worktree) - it's the canonical copy of the user's repo.
 	// For tracked beads repos, bd init creates files here (runs in mayor/rig).
 	"mayor": {
-		"?? AGENTS.md",  // bd init: creates multi-provider instructions (tracked beads repos only)
-		"?? .claude/",   // bd init: creates .claude/settings.json with onboard prompt
-		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns
+		"?? AGENTS.md",  // bd init: creates multi-provider instructions (tracked beads repos only). Cleanup: gu-ksq6
+		"?? .claude/",   // bd init: creates .claude/settings.json with onboard prompt. Cleanup: gu-gh4q
+		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406
 	},
 
 	// Refinery is a worktree for the merge queue processor.
@@ -53,15 +55,15 @@ var agentAllowlist = map[string][]string{
 
 	// Crew workers are user-managed worktrees for human developers.
 	"crew": {
-		"?? state.json", // crew/manager.go: Gas Town metadata (TODO: migrate to beads like polecats)
-		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns
+		"?? state.json", // crew/manager.go: Gas Town metadata. Cleanup: gu-ncv3 (migrate to beads like polecats)
+		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406
 	},
 
 	// Polecats are ephemeral worktrees for autonomous agents.
 	"polecat": {
-		"?? .claude/",   // bd init: creates .claude/commands/ with handoff/review slash commands
-		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns
-		"?? CLAUDE.md",  // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context
+		"?? .claude/",   // bd init: creates .claude/commands/ with handoff/review slash commands. Cleanup: gu-gh4q
+		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406 (polecat already uses EnsureLocalExcludePatterns; .gitignore entry is legacy)
+		"?? CLAUDE.md",  // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context. Cleanup: gu-k9oj
 	},
 }
 
