@@ -67,8 +67,8 @@ func (w *WLCommons) DBName() string {
 	return w.dbName
 }
 
-func (w *WLCommons) EnsureDB() error           { return EnsureWLCommons(w.townRoot) }
-func (w *WLCommons) DatabaseExists(db string) bool { return DatabaseExists(w.townRoot, db) }
+func (w *WLCommons) EnsureDB() error                     { return EnsureWLCommons(w.townRoot) }
+func (w *WLCommons) DatabaseExists(db string) bool       { return DatabaseExists(w.townRoot, db) }
 func (w *WLCommons) InsertWanted(item *WantedItem) error { return InsertWanted(w.townRoot, item) }
 func (w *WLCommons) ClaimWanted(wantedID, rigHandle string) error {
 	return ClaimWanted(w.townRoot, wantedID, rigHandle)
