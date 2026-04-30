@@ -1,30 +1,23 @@
 package cmd
 
-// The `gt prime` command entry point and core orchestration.
-//
-// This file owns the cobra command definition, flag parsing, workspace/role
-// resolution, the main runPrime() control flow, and the small set of helpers
-// that wire the pieces together. Heavier concerns live in sibling files:
-//
-//   prime_session.go     — session ID, hook JSON, handoff markers, state detection
-//   prime_output.go      — role-specific prime context and startup directives
-//   prime_molecule.go    — formula rendering and patrol context
-//   prime_identity.go    — agent identity, locking, agent bead ID resolution
-//   prime_work.go        — hooked work discovery and work-context injection
-//   prime_autonomous.go  — AUTONOMOUS WORK MODE output (hooked-bead directive)
-//   prime_external.go    — bd prime, memory injection, mail check injection
-//   prime_escalation.go  — Mayor escalation display
-
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -501,10 +494,514 @@ func outputRoleContext(ctx RoleContext) (string, error) {
 	return formula, nil
 }
 
-// getGitRoot returns the root of the current git repository.
+// runPrimeExternalTools runs bd prime, memory injection, and gt mail check --inject.
+// Skipped in dry-run mode with explain output.
+func runPrimeExternalTools(cwd string) {
+	if primeDryRun {
+		explain(true, "bd prime: skipped in dry-run mode")
+		explain(true, "memory injection: skipped in dry-run mode")
+		explain(true, "gt mail check --inject: skipped in dry-run mode")
+		return
+	}
+	runBdPrime(cwd)
+	runMemoryInject()
+	runMailCheckInject(cwd)
+}
+
+// runBdPrime runs `bd prime` and outputs the result.
+// This provides beads workflow context to the agent.
+func runBdPrime(workDir string) {
+	cmd := exec.Command("bd", "prime")
+	cmd.Dir = workDir
+	cmd.Env = os.Environ()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// Skip if bd prime fails (beads might not be available)
+		// But log stderr if present for debugging
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			fmt.Fprintf(os.Stderr, "bd prime: %s\n", errMsg)
+		}
+		return
+	}
+
+	output := strings.TrimSpace(stdout.String())
+	if output != "" {
+		fmt.Println()
+		fmt.Println(output)
+	}
+}
+
+// memoryTypeLabels maps type keys to human-readable section headers for prime injection.
+var memoryTypeLabels = map[string]string{
+	"feedback":  "Behavioral Rules (from user feedback)",
+	"user":      "User Context",
+	"project":   "Project Context",
+	"reference":  "Reference Links",
+	"general":   "General",
+}
+
+// runMemoryInject loads memories from beads kv and outputs them during prime.
+// Memories are grouped by type and ordered by priority (feedback first).
+func runMemoryInject() {
+	kvs, err := bdKvListJSON()
+	if err != nil {
+		return // Silently skip if kv list fails
+	}
+
+	// Group memories by type
+	type mem struct {
+		shortKey string
+		value    string
+	}
+	grouped := make(map[string][]mem)
+
+	for k, v := range kvs {
+		if !strings.HasPrefix(k, memoryKeyPrefix) {
+			continue
+		}
+		memType, shortKey := parseMemoryKey(k)
+		grouped[memType] = append(grouped[memType], mem{shortKey: shortKey, value: v})
+	}
+
+	if len(grouped) == 0 {
+		return
+	}
+
+	// Sort each group by key
+	for t := range grouped {
+		sort.Slice(grouped[t], func(i, j int) bool {
+			return grouped[t][i].shortKey < grouped[t][j].shortKey
+		})
+	}
+
+	fmt.Println()
+	fmt.Println("# Agent Memories")
+
+	for _, t := range memoryTypeOrder {
+		mems, ok := grouped[t]
+		if !ok || len(mems) == 0 {
+			continue
+		}
+		label := memoryTypeLabels[t]
+		if label == "" {
+			label = t
+		}
+		fmt.Printf("\n## %s\n\n", label)
+		for _, m := range mems {
+			fmt.Printf("- **%s**: %s\n", m.shortKey, m.value)
+		}
+	}
+}
+
+// runMailCheckInject runs `gt mail check --inject` and outputs the result.
+// This injects any pending mail into the agent's context.
+func runMailCheckInject(workDir string) {
+	cmd := exec.Command("gt", "mail", "check", "--inject")
+	cmd.Dir = workDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// Skip if mail check fails, but log stderr for debugging
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			fmt.Fprintf(os.Stderr, "gt mail check: %s\n", errMsg)
+		}
+		return
+	}
+
+	output := strings.TrimSpace(stdout.String())
+	if output != "" {
+		fmt.Println()
+		fmt.Println(output)
+	}
+}
+
+// checkSlungWork checks for hooked work on the agent's hook.
+// If found, displays AUTONOMOUS WORK MODE and tells the agent to execute immediately.
+// Returns true if hooked work was found (caller should skip normal startup directive).
 //
-// Defined here because it's a generic utility used across cmd/. molecule_step.go
-// is a consumer; it does not re-implement it to preserve a single source of truth.
+// hookedBead is pre-fetched by the caller (runPrime) via findAgentWork to avoid a
+// redundant lookup and ensure work context is already injected before output runs.
+func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) bool {
+	if hookedBead == nil {
+		return false
+	}
+
+	attachment := beads.ParseAttachmentFields(hookedBead)
+	hasWorkflow := hasWorkflowAttachment(attachment)
+
+	outputAutonomousDirective(ctx, hookedBead, hasWorkflow)
+	outputHookedBeadDetails(hookedBead)
+
+	if hasWorkflow {
+		outputMoleculeWorkflow(ctx, attachment)
+	} else {
+		outputBeadPreview(hookedBead)
+	}
+
+	return true
+}
+
+func hasWorkflowAttachment(attachment *beads.AttachmentFields) bool {
+	return attachment != nil && (attachment.AttachedMolecule != "" || attachment.AttachedFormula != "")
+}
+
+// findAgentWork looks up hooked or in-progress beads assigned to this agent.
+// Primary: reads hook_bead from the agent bead (same strategy as detectSessionState/gt hook).
+// Fallback: queries by assignee for agents without an agent bead.
+// For polecats and crew, retries up to 3 times with 2-second delays to handle
+// the timing race where hook state hasn't propagated by the time gt prime runs.
+// See: https://github.com/steveyegge/gastown/issues/1438
+//
+// Returns (nil, nil) if no work is found.
+// Returns (nil, err) if all attempts failed due to database errors — the caller
+// MUST distinguish this from "no work" to avoid silently closing beads. (GH#2638)
+func findAgentWork(ctx RoleContext) (*beads.Issue, error) {
+	agentID := getAgentIdentity(ctx)
+	if agentID == "" {
+		return nil, nil
+	}
+
+	// Polecats, crew, and dogs use a retry loop to handle the timing race
+	// where the hook write (status=hooked + assignee) hasn't propagated to
+	// new Dolt connections by the time gt prime runs on session startup.
+	// Dogs are especially affected since dispatch is fire-and-forget. (GH#2748)
+	// Uses exponential backoff: 500ms, 1s, 2s, 4s, 8s (total ~15.5s max).
+	// See: https://github.com/steveyegge/gastown/issues/2389
+	//
+	// On compact/resume, the agent already has work context in memory.
+	// A single attempt suffices — retries would add ~15s of latency to
+	// compaction hooks, causing non-Claude runtimes to report hook failure.
+	maxAttempts := 1
+	if (ctx.Role == RolePolecat || ctx.Role == RoleCrew || ctx.Role == RoleDog) && !isCompactResume() {
+		maxAttempts = 5
+	}
+
+	var lastErr error
+	backoff := 500 * time.Millisecond
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+
+		result, err := findAgentWorkOnce(ctx, agentID)
+		if result != nil {
+			return result, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			// Successful query returned no work — not a DB error
+			lastErr = nil
+		}
+	}
+
+	return nil, lastErr
+}
+
+// findAgentWorkOnce performs a single attempt to find hooked work for an agent.
+// Returns (nil, nil) when no work is found.
+// Returns (nil, err) when the database query itself failed — the caller must
+// not treat this as "no work assigned". (GH#2638)
+func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
+	// Use rig root for beads queries instead of ctx.WorkDir. Polecat worktrees
+	// rely on .beads/redirect which can fail to resolve in edge cases, causing
+	// polecats to miss hooked work and exit immediately. The rig root directory
+	// always has the authoritative .beads/ database. (GH#2503)
+	b := beads.New(rigBeadsRoot(ctx))
+
+	// Agent bead's hook_bead field. NOTE: updateAgentHookBead was made a no-op
+	// (see sling_helpers.go), so HookBead is typically empty. Kept for backward
+	// compatibility with agent beads that still have hook_bead set.
+	agentBeadID := buildAgentBeadID(agentID, ctx.Role, ctx.TownRoot)
+	if agentBeadID != "" {
+		agentBeadDir := beads.ResolveHookDir(ctx.TownRoot, agentBeadID, ctx.WorkDir)
+		ab := beads.New(agentBeadDir)
+		if agentBead, err := ab.Show(agentBeadID); err == nil && agentBead != nil && agentBead.HookBead != "" {
+			hookBeadDir := beads.ResolveHookDir(ctx.TownRoot, agentBead.HookBead, ctx.WorkDir)
+			hb := beads.New(hookBeadDir)
+			if hookBead, err := hb.Show(agentBead.HookBead); err == nil && hookBead != nil &&
+				(hookBead.Status == beads.StatusHooked || hookBead.Status == "in_progress") {
+				return hookBead, nil
+			}
+		}
+	}
+
+	// Fallback: query by assignee
+	hookedBeads, err := b.List(beads.ListOptions{
+		Status:   beads.StatusHooked,
+		Assignee: agentID,
+		Priority: -1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying hooked beads: %w", err)
+	}
+
+	// Fall back to in_progress beads (session interrupted before completion)
+	if len(hookedBeads) == 0 {
+		inProgressBeads, err := b.List(beads.ListOptions{
+			Status:   "in_progress",
+			Assignee: agentID,
+			Priority: -1,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("querying in-progress beads: %w", err)
+		}
+		if len(inProgressBeads) > 0 {
+			hookedBeads = inProgressBeads
+		}
+	}
+
+	// Town-level fallback: rig-level agents (polecats, crew) may have hooked
+	// HQ beads (hq-* prefix) stored in townRoot/.beads, not the rig's database.
+	// Matches the fallback in molecule_status.go and unsling.go. (gt-dtq7)
+	if len(hookedBeads) == 0 && !isTownLevelRole(agentID) && ctx.TownRoot != "" {
+		townB := beads.New(filepath.Join(ctx.TownRoot, ".beads"))
+		if townHooked, err := townB.List(beads.ListOptions{
+			Status:   beads.StatusHooked,
+			Assignee: agentID,
+			Priority: -1,
+		}); err == nil && len(townHooked) > 0 {
+			hookedBeads = townHooked
+		} else if townIP, err := townB.List(beads.ListOptions{
+			Status:   "in_progress",
+			Assignee: agentID,
+			Priority: -1,
+		}); err == nil && len(townIP) > 0 {
+			hookedBeads = townIP
+		}
+		// Town-level fallback errors are non-fatal — rig-level query succeeded
+	}
+
+	if len(hookedBeads) == 0 {
+		return nil, nil
+	}
+	return hookedBeads[0], nil
+}
+
+// rigBeadsRoot returns the directory to use for beads queries.
+// For rig-level agents (polecats, crew, witness, refinery), returns the rig
+// root (e.g., ~/gt/myrig/) which has the authoritative .beads/ database.
+// For town-level agents, returns ctx.WorkDir unchanged.
+//
+// This avoids relying on .beads/redirect in polecat worktrees, which can
+// fail to resolve and cause polecats to see no hooked work. (GH#2503)
+func rigBeadsRoot(ctx RoleContext) string {
+	if ctx.Rig != "" && ctx.TownRoot != "" {
+		return filepath.Join(ctx.TownRoot, ctx.Rig)
+	}
+	return ctx.WorkDir
+}
+
+// outputAutonomousDirective displays the AUTONOMOUS WORK MODE header and instructions.
+func outputAutonomousDirective(ctx RoleContext, hookedBead *beads.Issue, hasMolecule bool) {
+	roleAnnounce := buildRoleAnnouncement(ctx)
+
+	fmt.Println()
+	fmt.Printf("%s\n\n", style.Bold.Render("## 🚨 AUTONOMOUS WORK MODE 🚨"))
+	fmt.Println("Work is on your hook. After announcing your role, begin IMMEDIATELY.")
+	fmt.Println()
+	fmt.Println("This is physics, not politeness. Gas Town is a steam engine - you are a piston.")
+	fmt.Println("Every moment you wait is a moment the engine stalls. Other agents may be")
+	fmt.Println("blocked waiting on YOUR output. The hook IS your assignment. RUN IT.")
+	fmt.Println()
+	fmt.Println("Remember: Every completion is recorded in the capability ledger. Your work")
+	fmt.Println("history is visible, and quality matters. Execute with care - you're building")
+	fmt.Println("a track record that proves autonomous execution works at scale.")
+	fmt.Println()
+	fmt.Println("1. Announce: \"" + roleAnnounce + "\" (ONE line, no elaboration)")
+
+	if hasMolecule {
+		fmt.Println("2. This bead has an ATTACHED MOLECULE (formula workflow)")
+		fmt.Println("3. Work through molecule steps in order - see CURRENT STEP below")
+		fmt.Println("4. Close each step with `bd close <step-id>`, then check `bd mol current` for next step")
+	} else {
+		fmt.Printf("2. Then IMMEDIATELY run: `bd show %s`\n", hookedBead.ID)
+		fmt.Println("3. Begin execution - no waiting for user input")
+	}
+
+	// Polecats MUST call gt done — this is the single most important instruction.
+	// Without it, work lands but sessions accumulate and the merge queue stalls.
+	if ctx.Role == RolePolecat {
+		fmt.Println()
+		fmt.Printf("**⚠️ MANDATORY: When all work is committed, run `%s done` to submit and exit.**\n", cli.Name())
+		fmt.Printf("Do NOT stop at the prompt. Do NOT push to main directly. `%s done` is your final action.\n", cli.Name())
+	}
+
+	fmt.Println()
+	fmt.Println("**DO NOT:**")
+	fmt.Println("- Wait for user response after announcing")
+	fmt.Println("- Ask clarifying questions")
+	fmt.Println("- Describe what you're going to do")
+	fmt.Println("- Check mail first (hook takes priority)")
+	if hasMolecule {
+		fmt.Println("- Skip molecule steps or work on the base bead directly")
+	}
+	if ctx.Role == RolePolecat {
+		fmt.Printf("- Sit idle after committing (run `%s done`)\n", cli.Name())
+		fmt.Println("- Push directly to main (use the merge queue)")
+	}
+	fmt.Println()
+}
+
+// outputHookedBeadDetails displays the hooked bead's ID, title, and description summary.
+func outputHookedBeadDetails(hookedBead *beads.Issue) {
+	fmt.Printf("%s\n\n", style.Bold.Render("## Hooked Work"))
+	fmt.Printf("  Bead ID: %s\n", style.Bold.Render(hookedBead.ID))
+	fmt.Printf("  Title: %s\n", hookedBead.Title)
+	if hookedBead.Description != "" {
+		lines := strings.Split(hookedBead.Description, "\n")
+		maxLines := 5
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+			lines = append(lines, "...")
+		}
+		fmt.Println("  Description:")
+		for _, line := range lines {
+			fmt.Printf("    %s\n", line)
+		}
+	}
+	fmt.Println()
+}
+
+// outputMoleculeWorkflow displays attached molecule context with current step.
+func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields) {
+	fmt.Printf("%s\n\n", style.Bold.Render("## 🧬 ATTACHED FORMULA (WORKFLOW CHECKLIST)"))
+	if attachment.AttachedFormula != "" {
+		fmt.Printf("Formula: %s\n", attachment.AttachedFormula)
+	}
+	if attachment.AttachedMolecule != "" {
+		fmt.Printf("Molecule ID: %s\n", attachment.AttachedMolecule)
+	}
+	if len(attachment.AttachedVars) > 0 {
+		fmt.Printf("\n%s\n", style.Bold.Render("🧩 VARS (instantiated formula inputs):"))
+		for _, variable := range attachment.AttachedVars {
+			fmt.Printf("  --var %s\n", variable)
+		}
+	}
+	if attachment.AttachedArgs != "" {
+		fmt.Printf("\n%s\n", style.Bold.Render("📋 ARGS (use these to guide execution):"))
+		fmt.Printf("  %s\n", attachment.AttachedArgs)
+	}
+	fmt.Println()
+
+	// Ralph loop mode: output Ralph Wiggum loop command instead of step-by-step execution
+	if attachment.Mode == "ralph" {
+		outputRalphLoopDirective(ctx, attachment)
+		return
+	}
+
+	// Show inline formula steps from the embedded binary (root-only: no child wisps to query).
+	if attachment.AttachedFormula != "" {
+		showFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, strings.Split(attachment.FormulaVars, "\n"))
+		fmt.Println()
+		fmt.Printf("%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
+		fmt.Println("The base bead is your assignment. The formula steps define your workflow.")
+		fmt.Printf("\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit to the merge queue. Do NOT stop after implementation — the formula has submit steps you must follow."))
+		return
+	}
+
+	// Legacy path: no formula name stored, fall back to bd mol current
+	showMoleculeExecutionPrompt(ctx.WorkDir, attachment.AttachedMolecule)
+	fmt.Println()
+	fmt.Printf("%s\n", style.Bold.Render("Follow the molecule steps above, NOT the base bead."))
+	fmt.Println("The base bead is just a container. The molecule steps define your workflow.")
+}
+
+// outputRalphLoopDirective emits inline iterative work instructions for ralph mode.
+// Ralph mode is designed for long, iterative workflows (e.g., quality improvement
+// loops) that benefit from committing progress incrementally. The agent works
+// through formula steps iteratively, committing after each meaningful change,
+// and calls gt done when all acceptance criteria are met or no further progress
+// can be made.
+func outputRalphLoopDirective(ctx RoleContext, attachment *beads.AttachmentFields) {
+	fmt.Printf("%s\n\n", style.Bold.Render("## RALPH LOOP MODE (ITERATIVE WORKFLOW)"))
+	fmt.Println("This work uses iterative loop mode. Work through the steps below,")
+	fmt.Println("committing after each meaningful change. Loop until acceptance criteria")
+	fmt.Println("are met or no further progress can be made.")
+	fmt.Println()
+
+	// Show the formula steps inline (same as normal mode) so the agent has
+	// the full checklist. Previously this emitted a /ralph-loop slash command
+	// that didn't exist, causing the polecat to die immediately.
+	if attachment.AttachedFormula != "" {
+		showFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, strings.Split(attachment.FormulaVars, "\n"))
+		fmt.Println()
+	}
+
+	if attachment.AttachedArgs != "" {
+		fmt.Printf("%s\n", style.Bold.Render("Context:"))
+		fmt.Printf("  %s\n\n", attachment.AttachedArgs)
+	}
+
+	fmt.Printf("%s\n", style.Bold.Render("Iterative workflow:"))
+	fmt.Println("1. Work through the formula steps above")
+	fmt.Println("2. Commit after each meaningful change (preserve progress via git)")
+	fmt.Println("3. After completing a pass, evaluate results against acceptance criteria")
+	fmt.Println("4. If criteria not met, loop: identify the worst gap, fix it, commit, re-evaluate")
+	fmt.Println("5. When all criteria are met (or no further progress possible), run `" + cli.Name() + " done`")
+	fmt.Println()
+	fmt.Printf("%s\n", style.Bold.Render("Commit frequently. Each commit preserves your progress."))
+}
+
+// outputBeadPreview runs `bd show` and displays a truncated preview of the bead.
+func outputBeadPreview(hookedBead *beads.Issue) {
+	fmt.Println("**Bead details:**")
+	cmd := exec.Command("bd", "show", hookedBead.ID)
+	cmd.Env = os.Environ()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			fmt.Fprintf(os.Stderr, "  bd show %s: %s\n", hookedBead.ID, errMsg)
+		} else {
+			fmt.Fprintf(os.Stderr, "  bd show %s: %v\n", hookedBead.ID, err)
+		}
+	} else {
+		lines := strings.Split(stdout.String(), "\n")
+		maxLines := 15
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+			lines = append(lines, "...")
+		}
+		for _, line := range lines {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+	fmt.Println()
+}
+
+// buildRoleAnnouncement creates the role announcement string for autonomous mode.
+func buildRoleAnnouncement(ctx RoleContext) string {
+	switch ctx.Role {
+	case RoleMayor:
+		return "Mayor, checking in."
+	case RoleDeacon:
+		return "Deacon, checking in."
+	case RoleBoot:
+		return "Boot, checking in."
+	case RoleWitness:
+		return fmt.Sprintf("%s Witness, checking in.", ctx.Rig)
+	case RoleRefinery:
+		return fmt.Sprintf("%s Refinery, checking in.", ctx.Rig)
+	case RolePolecat:
+		return fmt.Sprintf("%s Polecat %s, checking in.", ctx.Rig, ctx.Polecat)
+	case RoleCrew:
+		return fmt.Sprintf("%s Crew %s, checking in.", ctx.Rig, ctx.Polecat)
+	default:
+		return "Agent, checking in."
+	}
+}
+
+// getGitRoot returns the root of the current git repository.
 func getGitRoot() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
@@ -512,4 +1009,290 @@ func getGitRoot() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// getAgentIdentity returns the agent identity string for hook lookup.
+func getAgentIdentity(ctx RoleContext) string {
+	switch ctx.Role {
+	case RoleCrew:
+		return fmt.Sprintf("%s/crew/%s", ctx.Rig, ctx.Polecat)
+	case RolePolecat:
+		return fmt.Sprintf("%s/polecats/%s", ctx.Rig, ctx.Polecat)
+	case RoleMayor:
+		return "mayor"
+	case RoleDeacon:
+		return "deacon"
+	case RoleBoot:
+		return "boot"
+	case RoleWitness:
+		return fmt.Sprintf("%s/witness", ctx.Rig)
+	case RoleRefinery:
+		return fmt.Sprintf("%s/refinery", ctx.Rig)
+	default:
+		return ""
+	}
+}
+
+// acquireIdentityLock checks and acquires the identity lock for worker roles.
+// This prevents multiple agents from claiming the same worker identity.
+// Returns an error if another agent already owns this identity.
+func acquireIdentityLock(ctx RoleContext) error {
+	// Only lock worker roles (polecat, crew)
+	// Infrastructure roles (mayor, witness, refinery, deacon) are singletons
+	// managed by tmux session names, so they don't need file-based locks
+	if ctx.Role != RolePolecat && ctx.Role != RoleCrew {
+		return nil
+	}
+
+	// Create lock for this worker directory
+	l := lock.New(ctx.WorkDir)
+
+	// Determine session ID from environment or context
+	sessionID := os.Getenv("TMUX_PANE")
+	if sessionID == "" {
+		// Fall back to a descriptive identifier
+		sessionID = fmt.Sprintf("%s/%s", ctx.Rig, ctx.Polecat)
+	}
+
+	// Try to acquire the lock
+	if err := l.Acquire(sessionID); err != nil {
+		if errors.Is(err, lock.ErrLocked) {
+			// Another agent owns this identity
+			fmt.Printf("\n%s\n\n", style.Bold.Render("⚠️  IDENTITY COLLISION DETECTED"))
+			fmt.Printf("Another agent already claims this worker identity.\n\n")
+
+			// Show lock details
+			if info, readErr := l.Read(); readErr == nil {
+				fmt.Printf("Lock holder:\n")
+				fmt.Printf("  PID: %d\n", info.PID)
+				fmt.Printf("  Session: %s\n", info.SessionID)
+				fmt.Printf("  Acquired: %s\n", info.AcquiredAt.Format("2006-01-02 15:04:05"))
+				fmt.Println()
+			}
+
+			fmt.Printf("To resolve:\n")
+			fmt.Printf("  1. Find the other session and close it, OR\n")
+			fmt.Printf("  2. Run: gt doctor --fix (cleans stale locks)\n")
+			fmt.Printf("  3. If lock is stale: rm %s/.runtime/agent.lock\n", ctx.WorkDir)
+			fmt.Println()
+
+			return fmt.Errorf("cannot claim identity %s/%s: %w", ctx.Rig, ctx.Polecat, err)
+		}
+		return fmt.Errorf("acquiring identity lock: %w", err)
+	}
+
+	return nil
+}
+
+// getAgentBeadID returns the agent bead ID for the current role.
+// Town-level agents (mayor, deacon) use hq- prefix; rig-scoped agents use the rig's prefix.
+// Returns empty string for unknown roles.
+func getAgentBeadID(ctx RoleContext) string {
+	switch ctx.Role {
+	case RoleMayor:
+		return beads.MayorBeadIDTown()
+	case RoleDeacon:
+		return beads.DeaconBeadIDTown()
+	case RoleBoot:
+		// Boot uses deacon's bead since it's a deacon subprocess
+		return beads.DeaconBeadIDTown()
+	case RoleWitness:
+		if ctx.Rig != "" {
+			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
+			return beads.WitnessBeadIDWithPrefix(prefix, ctx.Rig)
+		}
+		return ""
+	case RoleRefinery:
+		if ctx.Rig != "" {
+			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
+			return beads.RefineryBeadIDWithPrefix(prefix, ctx.Rig)
+		}
+		return ""
+	case RolePolecat:
+		if ctx.Rig != "" && ctx.Polecat != "" {
+			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
+			return beads.PolecatBeadIDWithPrefix(prefix, ctx.Rig, ctx.Polecat)
+		}
+		return ""
+	case RoleCrew:
+		if ctx.Rig != "" && ctx.Polecat != "" {
+			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
+			return beads.CrewBeadIDWithPrefix(prefix, ctx.Rig, ctx.Polecat)
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// ensureBeadsRedirect ensures the .beads/redirect file exists for worktree-based roles.
+// This handles cases where git clean or other operations delete the redirect file.
+// Uses the shared SetupRedirect helper which handles both tracked and local beads.
+func ensureBeadsRedirect(ctx RoleContext) {
+	// Only applies to worktree-based roles that use shared beads
+	if ctx.Role != RoleCrew && ctx.Role != RolePolecat && ctx.Role != RoleRefinery {
+		return
+	}
+
+	// Check if redirect already exists
+	redirectPath := filepath.Join(ctx.WorkDir, ".beads", "redirect")
+	if _, err := os.Stat(redirectPath); err == nil {
+		return // Redirect exists, nothing to do
+	}
+
+	// Use shared helper - silently ignore errors during prime
+	_ = beads.SetupRedirect(ctx.TownRoot, ctx.WorkDir)
+}
+
+// injectWorkContext extracts the current work context (rig, bead, molecule) from the
+// hooked bead and persists it in two places so all subsequent subprocesses carry it:
+//
+//  1. Current process env (GT_WORK_RIG/BEAD/MOL via os.Setenv) — inherited by bd, mail,
+//     and any other subprocess spawned from this gt prime invocation (e.g. bd prime).
+//
+//  2. Tmux session env (via tmux set-environment) — inherited by future processes
+//     spawned in the session after a handoff or compaction (e.g. new Claude Code instance).
+//
+// These values are then read by telemetry.RecordPrime (defer in runPrime) and by
+// telemetry.buildGTResourceAttrs which injects them into OTEL_RESOURCE_ATTRIBUTES for
+// bd subprocesses launched from the Go SDK.
+//
+// When hookedBead is nil (no work on hook), the vars are cleared so stale context
+// from a previous prime cycle does not leak into the current one.
+// No-op in dry-run mode.
+func injectWorkContext(ctx RoleContext, hookedBead *beads.Issue) {
+	if primeDryRun || !telemetry.IsActive() {
+		return
+	}
+	workRig := ""
+	workBead := ""
+	workMol := ""
+	if hookedBead != nil {
+		workRig = ctx.Rig
+		workBead = hookedBead.ID
+		if attachment := beads.ParseAttachmentFields(hookedBead); attachment != nil {
+			workMol = attachment.AttachedMolecule
+		}
+	}
+	_ = os.Setenv("GT_WORK_RIG", workRig)
+	_ = os.Setenv("GT_WORK_BEAD", workBead)
+	_ = os.Setenv("GT_WORK_MOL", workMol)
+	setTmuxWorkContext(workRig, workBead, workMol)
+}
+
+// setTmuxWorkContext writes GT_WORK_RIG, GT_WORK_BEAD, GT_WORK_MOL into the current
+// tmux session environment. Future processes spawned in the session (e.g. a new
+// Claude Code instance after handoff/compaction) will inherit these values automatically.
+// Empty values unset the variable in the session env to prevent stale context leaking
+// across prime cycles. No-op when not running inside a tmux session.
+func setTmuxWorkContext(workRig, workBead, workMol string) {
+	if os.Getenv("TMUX") == "" {
+		return
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
+	if err != nil {
+		return
+	}
+	session := strings.TrimSpace(string(out))
+	if session == "" {
+		return
+	}
+	setOrUnset := func(key, value string) {
+		if value != "" {
+			_ = exec.Command("tmux", "set-environment", "-t", session, key, value).Run()
+		} else {
+			_ = exec.Command("tmux", "set-environment", "-u", "-t", session, key).Run()
+		}
+	}
+	setOrUnset("GT_WORK_RIG", workRig)
+	setOrUnset("GT_WORK_BEAD", workBead)
+	setOrUnset("GT_WORK_MOL", workMol)
+}
+
+// checkPendingEscalations queries for open escalation beads and displays them prominently.
+// This is called on Mayor startup to surface issues needing human attention.
+func checkPendingEscalations(ctx RoleContext) {
+	// Query for open escalations using bd list with tag filter
+	cmd := exec.Command("bd", "list", "--status=open", "--tag=escalation", "--json")
+	cmd.Dir = ctx.WorkDir
+	cmd.Env = os.Environ()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// Silently skip - escalation check is best-effort
+		return
+	}
+
+	// Parse JSON output
+	var escalations []struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		Priority    int    `json:"priority"`
+		Description string `json:"description"`
+		Created     string `json:"created"`
+	}
+
+	if err := json.Unmarshal(stdout.Bytes(), &escalations); err != nil || len(escalations) == 0 {
+		// No escalations or parse error
+		return
+	}
+
+	// Count by severity
+	critical := 0
+	high := 0
+	medium := 0
+	for _, e := range escalations {
+		switch e.Priority {
+		case 0:
+			critical++
+		case 1:
+			high++
+		default:
+			medium++
+		}
+	}
+
+	// Display prominently
+	fmt.Println()
+	fmt.Printf("%s\n\n", style.Bold.Render("## 🚨 PENDING ESCALATIONS"))
+	fmt.Printf("There are %d escalation(s) awaiting human attention:\n\n", len(escalations))
+
+	if critical > 0 {
+		fmt.Printf("  🔴 CRITICAL: %d\n", critical)
+	}
+	if high > 0 {
+		fmt.Printf("  🟠 HIGH: %d\n", high)
+	}
+	if medium > 0 {
+		fmt.Printf("  🟡 MEDIUM: %d\n", medium)
+	}
+	fmt.Println()
+
+	// Show first few escalations
+	maxShow := 5
+	if len(escalations) < maxShow {
+		maxShow = len(escalations)
+	}
+	for i := 0; i < maxShow; i++ {
+		e := escalations[i]
+		severity := "MEDIUM"
+		switch e.Priority {
+		case 0:
+			severity = "CRITICAL"
+		case 1:
+			severity = "HIGH"
+		}
+		fmt.Printf("  • [%s] %s (%s)\n", severity, e.Title, e.ID)
+	}
+	if len(escalations) > maxShow {
+		fmt.Printf("  ... and %d more\n", len(escalations)-maxShow)
+	}
+	fmt.Println()
+
+	fmt.Println("**Action required:** Review escalations with `bd list --tag=escalation`")
+	fmt.Println("Close resolved ones with `bd close <id> --reason \"resolution\"`")
+	fmt.Println()
 }
