@@ -74,9 +74,12 @@ func TestManagerAddAndGet(t *testing.T) {
 	// NOTE: CLAUDE.md is NOT created by Add() - it's injected via SessionStart hook
 	// See manager.go line 107-110 for why we skip CLAUDE.md creation
 
+	// state.json is intentionally NOT written anymore (see gu-ykn): crew
+	// metadata lives in beads (agent bead). Assert its absence to catch
+	// regressions where someone re-adds on-disk persistence.
 	stateFile := filepath.Join(crewDir, "state.json")
-	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-		t.Error("state.json was not created")
+	if _, err := os.Stat(stateFile); err == nil {
+		t.Error("state.json should not be created by Add() (crew state lives in beads now)")
 	}
 
 	// Test Get
@@ -359,8 +362,10 @@ func TestManagerRemove(t *testing.T) {
 }
 
 func TestManagerGetWithStaleStateName(t *testing.T) {
-	// Regression test: state.json with wrong name should not affect Get() result
-	// See: gt-h1w - gt crew list shows wrong names
+	// Regression test: a legacy state.json on disk (from a pre-migration
+	// worker) must not affect Get() results. Post-migration (see gu-ykn),
+	// the directory name is the single source of truth for Name and
+	// ClonePath; state.json is never read.
 	tmpDir, err := os.MkdirTemp("", "crew-test-stale-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -385,21 +390,22 @@ func TestManagerGetWithStaleStateName(t *testing.T) {
 		t.Fatalf("failed to create crew dir: %v", err)
 	}
 
-	// Write state.json with wrong name (simulates stale/copied state)
+	// Write a legacy state.json with the wrong name. This simulates a
+	// worker that existed before gu-ykn. The file must be ignored.
 	stateFile := filepath.Join(crewDir, "state.json")
 	staleState := `{"name": "bob", "rig": "test-rig", "clone_path": "/wrong/path"}`
 	if err := os.WriteFile(stateFile, []byte(staleState), 0644); err != nil {
 		t.Fatalf("failed to write state file: %v", err)
 	}
 
-	// Get should return correct name (alice) not stale name (bob)
+	// Get should return correct name (alice) — the legacy state.json is ignored.
 	worker, err := mgr.Get("alice")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
 
 	if worker.Name != "alice" {
-		t.Errorf("expected name 'alice', got '%s' (stale state.json not overridden)", worker.Name)
+		t.Errorf("expected name 'alice', got '%s' (legacy state.json leaked through)", worker.Name)
 	}
 
 	expectedPath := filepath.Join(rigPath, "crew", "alice")

@@ -1,7 +1,6 @@
 package crew
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/gofrs/flock"
 
-	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -128,26 +126,44 @@ func validateCrewName(name string) error {
 
 // Manager handles crew worker lifecycle.
 type Manager struct {
-	rig *rig.Rig
-	git *git.Git
+	rig   *rig.Rig
+	git   *git.Git
+	beads *beads.Beads
 }
 
 // NewManager creates a new crew manager.
+//
+// Crew metadata is stored in beads (agent beads under the rig's shared beads
+// database), not on disk. The manager lazily initializes a Beads wrapper
+// pointed at the rig's resolved beads directory (following any redirect).
+// Beads operations are best-effort from this manager's perspective: if the
+// beads database is unavailable (tests, setup environments), filesystem is the
+// source of truth for crew existence, and CreatedAt/UpdatedAt/Branch fall back
+// to zero values or git introspection.
 func NewManager(r *rig.Rig, g *git.Git) *Manager {
+	// Mirror polecat manager: use the rig's resolved beads directory so crew
+	// worker beads land in the same shared database as polecat beads.
+	resolvedBeads := beads.ResolveBeadsDir(r.Path)
+	beadsPath := filepath.Dir(resolvedBeads)
 	return &Manager{
-		rig: r,
-		git: g,
+		rig:   r,
+		git:   g,
+		beads: beads.NewWithBeadsDir(beadsPath, resolvedBeads),
 	}
+}
+
+// agentBeadID returns the agent bead ID for a crew worker.
+// Format: "<prefix>-<rig>-crew-<name>" (e.g., "gt-gastown-crew-dave")
+// The prefix is looked up from routes.jsonl to support rigs with custom prefixes.
+func (m *Manager) agentBeadID(name string) string {
+	townRoot := filepath.Dir(m.rig.Path)
+	prefix := beads.GetPrefixForRig(townRoot, m.rig.Name)
+	return beads.CrewBeadIDWithPrefix(prefix, m.rig.Name, name)
 }
 
 // crewDir returns the directory for a crew worker.
 func (m *Manager) crewDir(name string) string {
 	return filepath.Join(m.rig.Path, "crew", name)
-}
-
-// stateFile returns the state file path for a crew worker.
-func (m *Manager) stateFile(name string) string {
-	return filepath.Join(m.crewDir(name), "state.json")
 }
 
 // mailDir returns the mail directory path for a crew worker.
@@ -323,7 +339,13 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 	// Writing to CLAUDE.md would overwrite project instructions and leak
 	// Gas Town internals into the project repo when workers commit/push.
 
-	// Create crew worker state
+	// Create crew worker state.
+	// Persistence lives in beads (agent bead), not on disk. The CrewWorker
+	// struct is an in-process value object whose source of truth is:
+	//   - Name/ClonePath: filesystem (directory name)
+	//   - Branch: git (current HEAD)
+	//   - Rig: rig config
+	//   - CreatedAt/UpdatedAt: agent bead description fields (best-effort)
 	now := time.Now()
 	crew := &CrewWorker{
 		Name:      name,
@@ -334,13 +356,41 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 		UpdatedAt: now,
 	}
 
-	// Save state
-	if err := m.saveState(crew); err != nil {
-		_ = os.RemoveAll(crewPath) // best-effort cleanup
-		return nil, fmt.Errorf("saving state: %w", err)
+	// Create or reopen the crew agent bead so the worker is tracked in beads
+	// (mirrors the polecat pattern). This is best-effort: if the beads
+	// database is not configured (tests, fresh rigs), we fall back to
+	// operating without the bead rather than failing crew creation.
+	if err := m.upsertAgentBead(name); err != nil {
+		style.PrintWarning("could not create crew agent bead: %v", err)
 	}
 
 	return crew, nil
+}
+
+// upsertAgentBead creates or reopens the crew agent bead with canonical metadata.
+// Idempotent: safe to call for existing crew workers (e.g., on adoption).
+// Returns nil silently if the beads database is unavailable.
+func (m *Manager) upsertAgentBead(name string) error {
+	if m.beads == nil {
+		return nil
+	}
+	agentID := m.agentBeadID(name)
+	title := fmt.Sprintf("Crew worker %s in %s - human-managed persistent workspace.", name, m.rig.Name)
+	fields := &beads.AgentFields{
+		RoleType:   constants.RoleCrew,
+		Rig:        m.rig.Name,
+		AgentState: "idle",
+	}
+	_, err := m.beads.CreateOrReopenAgentBead(agentID, title, fields)
+	if err != nil {
+		// Treat "beads not configured" as a soft error (test / setup env).
+		if errors.Is(err, beads.ErrNotInstalled) ||
+			strings.Contains(err.Error(), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // syncRemotesFromRig copies remote configuration from the mayor/rig repo to a crew clone.
@@ -464,6 +514,18 @@ func (m *Manager) Remove(name string, force bool) error {
 		return fmt.Errorf("removing crew dir: %w", err)
 	}
 
+	// Reset the crew agent bead so it can be reused on re-add. Mirrors the
+	// polecat cleanup pattern (ResetAgentBeadForReuse avoids the close/reopen
+	// cycle that breaks on the Dolt backend). Best-effort.
+	if m.beads != nil {
+		agentID := m.agentBeadID(name)
+		if resetErr := m.beads.ResetAgentBeadForReuse(agentID, "crew removed"); resetErr != nil {
+			if !errors.Is(resetErr, beads.ErrNotFound) {
+				style.PrintWarning("could not reset crew agent bead %s: %v", agentID, resetErr)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -517,49 +579,47 @@ func (m *Manager) getLocked(name string) (*CrewWorker, error) {
 	return m.loadState(name)
 }
 
-// saveState persists crew worker state to disk using atomic write.
-func (m *Manager) saveState(crew *CrewWorker) error {
-	stateFile := m.stateFile(crew.Name)
-	if err := atomicfile.WriteJSON(stateFile, crew); err != nil {
-		return fmt.Errorf("writing state: %w", err)
-	}
-
-	return nil
-}
-
-// loadState reads crew worker state from disk.
+// loadState constructs a CrewWorker by reading the filesystem and (best-effort)
+// the agent bead. Directory presence is the source of truth for Name and
+// ClonePath; Branch comes from git HEAD; CreatedAt/UpdatedAt come from the
+// agent bead if available, otherwise zero values.
+//
+// Backward compatibility: an obsolete state.json from pre-migration workers is
+// ignored silently (no parse, no read). It may remain on disk but is never
+// consulted; see gu-ykn for the migration rationale.
 func (m *Manager) loadState(name string) (*CrewWorker, error) {
-	stateFile := m.stateFile(name)
+	crewPath := m.crewDir(name)
 
-	data, err := os.ReadFile(stateFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Return minimal crew worker if state file missing
-			return &CrewWorker{
-				Name:      name,
-				Rig:       m.rig.Name,
-				ClonePath: m.crewDir(name),
-			}, nil
+	crew := &CrewWorker{
+		Name:      name,
+		Rig:       m.rig.Name,
+		ClonePath: crewPath,
+	}
+
+	// Derive branch from git HEAD of the worktree (source of truth now that
+	// state.json is no longer written).
+	if workerGit := git.NewGit(crewPath); workerGit != nil {
+		if branch, err := workerGit.CurrentBranch(); err == nil {
+			crew.Branch = strings.TrimSpace(branch)
 		}
-		return nil, fmt.Errorf("reading state: %w", err)
 	}
 
-	var crew CrewWorker
-	if err := json.Unmarshal(data, &crew); err != nil {
-		return nil, fmt.Errorf("parsing state: %w", err)
+	// Best-effort: populate timestamps from the agent bead when available.
+	// Failure (or missing bead) is not an error — it just leaves CreatedAt
+	// and UpdatedAt at their zero values.
+	if m.beads != nil {
+		agentID := m.agentBeadID(name)
+		if issue, _, err := m.beads.GetAgentBead(agentID); err == nil && issue != nil {
+			if t, tErr := time.Parse(time.RFC3339, issue.CreatedAt); tErr == nil {
+				crew.CreatedAt = t
+			}
+			if t, tErr := time.Parse(time.RFC3339, issue.UpdatedAt); tErr == nil {
+				crew.UpdatedAt = t
+			}
+		}
 	}
 
-	// Directory name is source of truth for Name and ClonePath.
-	// state.json can become stale after directory rename, copy, or corruption.
-	crew.Name = name
-	crew.ClonePath = m.crewDir(name)
-
-	// Rig only needs backfill when empty (less likely to drift)
-	if crew.Rig == "" {
-		crew.Rig = m.rig.Name
-	}
-
-	return &crew, nil
+	return crew, nil
 }
 
 // Rename renames a crew worker from oldName to newName.
@@ -597,22 +657,21 @@ func (m *Manager) Rename(oldName, newName string) error {
 		return fmt.Errorf("renaming crew dir: %w", err)
 	}
 
-	// Update state file with new name and path
-	crew, err := m.loadState(newName)
-	if err != nil {
-		// Rollback on error (best-effort)
-		_ = os.Rename(newPath, oldPath)
-		return fmt.Errorf("loading state: %w", err)
+	// Crew state is stored in beads (agent bead), not on disk: the directory
+	// name IS the crew name. Upsert a new crew agent bead under the new name
+	// and reset the old one for reuse so downstream consumers (mail routing,
+	// doctor checks) see the current worker under newName. Best-effort —
+	// filesystem rename is authoritative even if beads is unavailable.
+	if err := m.upsertAgentBead(newName); err != nil {
+		style.PrintWarning("could not create agent bead for renamed crew %s: %v", newName, err)
 	}
-
-	crew.Name = newName
-	crew.ClonePath = newPath
-	crew.UpdatedAt = time.Now()
-
-	if err := m.saveState(crew); err != nil {
-		// Rollback on error (best-effort)
-		_ = os.Rename(newPath, oldPath)
-		return fmt.Errorf("saving state: %w", err)
+	if m.beads != nil {
+		oldAgentID := m.agentBeadID(oldName)
+		if resetErr := m.beads.ResetAgentBeadForReuse(oldAgentID, "crew renamed"); resetErr != nil {
+			if !errors.Is(resetErr, beads.ErrNotFound) {
+				style.PrintWarning("could not reset old crew agent bead %s: %v", oldAgentID, resetErr)
+			}
+		}
 	}
 
 	return nil

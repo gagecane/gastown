@@ -272,7 +272,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewTownCLAUDEmdCheck())
 
 	// Crew workspace checks
-	d.Register(doctor.NewCrewStateCheck())
+	// NOTE: NewCrewStateCheck was removed when crew workers migrated from
+	// on-disk state.json to beads-tracked agent beads (see gu-ykn).
+	// Agent bead presence is covered by NewAgentBeadsCheck.
 	d.Register(doctor.NewCrewWorktreeCheck())
 	d.Register(doctor.NewCommandsCheck())
 
