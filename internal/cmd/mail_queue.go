@@ -227,18 +227,7 @@ func listUnclaimedQueueMessages(beadsDir, queueName string) ([]queueMessage, err
 		}
 
 		// Extract labels
-		for _, label := range issue.Labels {
-			if strings.HasPrefix(label, "from:") {
-				msg.From = strings.TrimPrefix(label, "from:")
-			} else if strings.HasPrefix(label, "claimed-by:") {
-				msg.ClaimedBy = strings.TrimPrefix(label, "claimed-by:")
-			} else if strings.HasPrefix(label, "claimed-at:") {
-				ts := strings.TrimPrefix(label, "claimed-at:")
-				if t, err := time.Parse(time.RFC3339, ts); err == nil {
-					msg.ClaimedAt = &t
-				}
-			}
-		}
+		applyQueueMessageLabels(&msg, issue.Labels)
 		// Only include unclaimed messages - check both ClaimedBy and ClaimedAt
 		// to handle orphaned claimed-at labels from interrupted releases
 		if msg.ClaimedBy == "" && msg.ClaimedAt == nil {
@@ -252,6 +241,27 @@ func listUnclaimedQueueMessages(beadsDir, queueName string) ([]queueMessage, err
 	})
 
 	return messages, nil
+}
+
+// applyQueueMessageLabels populates From, ClaimedBy, and ClaimedAt on a
+// queueMessage from beads labels. Unknown labels are ignored. A malformed
+// claimed-at timestamp leaves msg.ClaimedAt as nil so callers that filter on
+// "unclaimed" still treat the message as unclaimed rather than partially
+// claimed.
+func applyQueueMessageLabels(msg *queueMessage, labels []string) {
+	for _, label := range labels {
+		switch {
+		case strings.HasPrefix(label, "from:"):
+			msg.From = strings.TrimPrefix(label, "from:")
+		case strings.HasPrefix(label, "claimed-by:"):
+			msg.ClaimedBy = strings.TrimPrefix(label, "claimed-by:")
+		case strings.HasPrefix(label, "claimed-at:"):
+			ts := strings.TrimPrefix(label, "claimed-at:")
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				msg.ClaimedAt = &t
+			}
+		}
+	}
 }
 
 // claimQueueMessage claims a message by adding claimed-by and claimed-at labels.
@@ -385,19 +395,27 @@ func getQueueMessageInfo(beadsDir, messageID string) (*queueMessageInfo, error) 
 	}
 
 	// Extract fields from labels
-	for _, label := range issue.Labels {
-		if strings.HasPrefix(label, "queue:") {
+	applyQueueMessageInfoLabels(info, issue.Labels)
+	return info, nil
+}
+
+// applyQueueMessageInfoLabels populates QueueName, ClaimedBy, and ClaimedAt on
+// a queueMessageInfo from beads labels. Unknown labels are ignored. A
+// malformed claimed-at timestamp leaves info.ClaimedAt as nil.
+func applyQueueMessageInfoLabels(info *queueMessageInfo, labels []string) {
+	for _, label := range labels {
+		switch {
+		case strings.HasPrefix(label, "queue:"):
 			info.QueueName = strings.TrimPrefix(label, "queue:")
-		} else if strings.HasPrefix(label, "claimed-by:") {
+		case strings.HasPrefix(label, "claimed-by:"):
 			info.ClaimedBy = strings.TrimPrefix(label, "claimed-by:")
-		} else if strings.HasPrefix(label, "claimed-at:") {
+		case strings.HasPrefix(label, "claimed-at:"):
 			ts := strings.TrimPrefix(label, "claimed-at:")
 			if t, err := time.Parse(time.RFC3339, ts); err == nil {
 				info.ClaimedAt = &t
 			}
 		}
 	}
-	return info, nil
 }
 
 // releaseQueueMessage releases a claimed message by removing claim labels.
