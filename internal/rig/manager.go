@@ -665,7 +665,14 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// writes both fields so bd connects to the correct centralized database.
 	// This must happen BEFORE setting issue_prefix below, so bd connects to
 	// the correct server-side database (rigName, not beads_<prefix>).
-	if err := doltserver.EnsureMetadata(m.townRoot, opts.Name); err != nil {
+	//
+	// Pass opts.Name as the explicit doltDatabase so EnsureMetadata forces
+	// dolt_database=<rigName> even when a stale .dolt-data/<prefix>/ exists
+	// on disk from a prior rig-add cycle. Without the explicit argument,
+	// EnsureMetadata treats any existing DB name as "real enough" and leaves
+	// metadata.json pointing at the wrong database, causing beads to silently
+	// disappear. (gu-euef)
+	if err := doltserver.EnsureMetadata(m.townRoot, opts.Name, opts.Name); err != nil {
 		// Non-fatal: daemon's EnsureAllMetadata self-heals on next startup,
 		// or user can run gt doctor --fix to repair manually.
 		fmt.Printf("  Warning: Could not set Dolt server metadata: %v\n", err)
@@ -699,6 +706,16 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		typesCmd.Dir = rigPath
 		typesCmd.Env = bdEnv
 		_, _ = typesCmd.CombinedOutput()
+
+		// Re-run EnsureMetadata AFTER bd init --force to restore dolt_database=<rigName>.
+		// bd init --prefix <p> writes metadata.json with dolt_database=<p> (prefix,
+		// not rig name), clobbering the correction we applied above. Pass rigName
+		// as the explicit doltDatabase so EnsureMetadata forces the fix even when
+		// a stale .dolt-data/<prefix>/ directory exists on disk. Without this,
+		// bd reads from the wrong database and beads silently disappear. (gu-euef)
+		if err := doltserver.EnsureMetadata(m.townRoot, opts.Name, opts.Name); err != nil {
+			fmt.Printf("  Warning: Could not restore Dolt server metadata after bd init: %v\n", err)
+		}
 	}
 
 	// Auto-create DoltHub remote for the rig's beads database.
@@ -1002,13 +1019,38 @@ func (m *Manager) verifyRigIdentity(rigPath, rigName string) error {
 	// The database should be named after the rig (e.g., "gastown") not after
 	// a bd init artifact (e.g., "beads_gt") or a stale value from another rig.
 	if metadata.DoltDatabase != "" && metadata.DoltDatabase != rigName {
+		oldDB := metadata.DoltDatabase
 		fmt.Fprintf(os.Stderr, "   ⚠ metadata.json has dolt_database=%q (expected %q) — attempting repair\n",
-			metadata.DoltDatabase, rigName)
-		if repairErr := doltserver.EnsureMetadata(m.townRoot, rigName); repairErr != nil {
+			oldDB, rigName)
+		// Pass rigName explicitly as the doltDatabase argument so EnsureMetadata
+		// forces the correction even when a stale database of the wrong name
+		// exists on disk (gu-euef). Without the explicit argument, EnsureMetadata
+		// treats DatabaseExists(townRoot, oldDB)==true as a signal that oldDB is
+		// "real" and refuses to overwrite, silently leaving the mismatch in place
+		// while the caller logs "Repaired" — a misleading no-op.
+		if repairErr := doltserver.EnsureMetadata(m.townRoot, rigName, rigName); repairErr != nil {
 			return fmt.Errorf("metadata.json has dolt_database=%q (expected %q) and auto-repair failed: %w",
-				metadata.DoltDatabase, rigName, repairErr)
+				oldDB, rigName, repairErr)
 		}
-		fmt.Printf("   ✓ Repaired metadata.json identity (was %q, now %q)\n", metadata.DoltDatabase, rigName)
+		// Verify the repair actually landed. EnsureMetadata returns nil even
+		// when its internal guards reject a correction, so re-read metadata.json
+		// to confirm dolt_database now equals rigName. Without this check, the
+		// caller emits a false-positive "Repaired" message and the bug ships.
+		verifyData, verifyErr := os.ReadFile(metadataPath)
+		if verifyErr != nil {
+			return fmt.Errorf("reading metadata.json after repair: %w", verifyErr)
+		}
+		var verified struct {
+			DoltDatabase string `json:"dolt_database"`
+		}
+		if err := json.Unmarshal(verifyData, &verified); err != nil {
+			return fmt.Errorf("parsing metadata.json after repair: %w", err)
+		}
+		if verified.DoltDatabase != rigName {
+			return fmt.Errorf("metadata.json repair did not stick: dolt_database is %q, expected %q",
+				verified.DoltDatabase, rigName)
+		}
+		fmt.Printf("   ✓ Repaired metadata.json identity (was %q, now %q)\n", oldDB, rigName)
 	}
 
 	return nil

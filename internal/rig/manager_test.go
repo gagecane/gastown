@@ -1349,6 +1349,125 @@ func TestEnsureMetadata_SetsRequiredFields(t *testing.T) {
 	}
 }
 
+// TestVerifyRigIdentity_RepairsStaleDatabase is the regression test for gu-euef:
+// when metadata.json's dolt_database points at the beads prefix (e.g. "gu")
+// instead of the rig name (e.g. "gastown_upstream"), and a stale
+// .dolt-data/<prefix>/ exists on disk, verifyRigIdentity must actually repair
+// the metadata rather than emitting a false-positive "Repaired" message while
+// leaving the file untouched.
+func TestVerifyRigIdentity_RepairsStaleDatabase(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "gastown_upstream"
+	rigPath := filepath.Join(townRoot, rigName)
+
+	// Create the canonical beads dir that ResolveBeadsDir will find.
+	// (No mayor/rig redirect in this test — rigPath/.beads is authoritative.)
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both databases exist on disk: the stale prefix-named DB from a previous
+	// rig-add cycle, and the canonical rig-named DB. DatabaseExists("gu")
+	// will return true, which used to block repair silently.
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	for _, name := range []string{"gu", rigName} {
+		nomsDir := filepath.Join(dataDir, name, ".dolt", "noms")
+		if err := os.MkdirAll(nomsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nomsDir, "manifest"), []byte("test"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Write metadata.json pointing at the prefix-named stale DB (the bug symptom).
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	wrong := map[string]interface{}{
+		"backend":          "dolt",
+		"database":         "dolt",
+		"dolt_mode":        "server",
+		"dolt_database":    "gu",
+		"dolt_server_host": "127.0.0.1",
+		"dolt_server_port": float64(doltserver.DefaultPort),
+	}
+	data, _ := json.Marshal(wrong)
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{townRoot: townRoot}
+	if err := m.verifyRigIdentity(rigPath, rigName); err != nil {
+		t.Fatalf("verifyRigIdentity returned error: %v", err)
+	}
+
+	// dolt_database must now be the rig name. Before the fix, this stayed "gu"
+	// while the caller unconditionally logged "Repaired metadata.json identity".
+	repaired, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("reading metadata: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(repaired, &meta); err != nil {
+		t.Fatalf("parsing metadata: %v", err)
+	}
+	if meta["dolt_database"] != rigName {
+		t.Errorf("dolt_database = %v, want %q (repair must override DatabaseExists guard)",
+			meta["dolt_database"], rigName)
+	}
+}
+
+// TestVerifyRigIdentity_DetectsFailedRepair verifies that verifyRigIdentity
+// returns an error when EnsureMetadata silently refuses to write the
+// correction. This prevents the "Repaired identity" log from lying about
+// a no-op repair. Constructing a reliable EnsureMetadata-failing fixture
+// in-process is fragile, so we simulate the missing-post-verify branch by
+// making the beads dir read-only after metadata.json is written, so the
+// atomic rewrite inside EnsureMetadata fails.
+func TestVerifyRigIdentity_DetectsFailedRepair(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based permission test not portable to windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permission checks")
+	}
+
+	townRoot := t.TempDir()
+	rigName := "gastown_upstream"
+	rigPath := filepath.Join(townRoot, rigName)
+
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	wrong := map[string]interface{}{
+		"backend":          "dolt",
+		"database":         "dolt",
+		"dolt_mode":        "server",
+		"dolt_database":    "gu",
+		"dolt_server_host": "127.0.0.1",
+		"dolt_server_port": float64(doltserver.DefaultPort),
+	}
+	data, _ := json.Marshal(wrong)
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the beads dir read-only so EnsureMetadata's atomic file write fails.
+	if err := os.Chmod(beadsDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(beadsDir, 0755) })
+
+	m := &Manager{townRoot: townRoot}
+	err := m.verifyRigIdentity(rigPath, rigName)
+	if err == nil {
+		t.Fatal("verifyRigIdentity returned nil error despite read-only beads dir; false-positive 'Repaired' log would ship")
+	}
+}
+
 // createTestGitRepoForRig creates a minimal git repo with one commit suitable
 // for use as a remote in AddRig tests. Returns the repo path.
 func createTestGitRepoForRig(t *testing.T, name string) string {

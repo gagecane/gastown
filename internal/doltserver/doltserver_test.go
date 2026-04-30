@@ -1873,6 +1873,71 @@ func TestEnsureMetadata_RepairsWrongDoltDatabase(t *testing.T) {
 	}
 }
 
+// TestEnsureMetadata_WrongDoltDatabase_StaleDBExists verifies that when the
+// wrong dolt_database value refers to a database that ALSO exists on disk
+// (e.g., a stale prefix-named .dolt-data/<prefix>/ left over from a previous
+// rig-add cycle), EnsureMetadata still corrects metadata.json when the caller
+// passes an explicit doltDatabase argument.
+//
+// Without the explicit argument, EnsureMetadata's DatabaseExists guard treats
+// the stale DB as "real" and refuses to overwrite — which is the data-loss
+// scenario from gu-euef, where bd silently reads from an empty database while
+// the populated one sits unused on disk.
+func TestEnsureMetadata_WrongDoltDatabase_StaleDBExists(t *testing.T) {
+	townRoot := t.TempDir()
+
+	// Create BOTH databases on disk: the stale prefix-named one ("gu") and
+	// the canonical rig-named one ("gastown_upstream"). This mirrors the
+	// real-world state after a remove+add cycle where .dolt-data/gu/ was
+	// created by an earlier bd init --prefix gu and never cleaned up.
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	setupDoltDB(t, dataDir, "gu")
+	setupDoltDB(t, dataDir, "gastown_upstream")
+
+	beadsDir := filepath.Join(townRoot, "gastown_upstream", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// metadata.json points at the prefix-named stale DB (the bug symptom).
+	wrong := map[string]interface{}{
+		"backend":          "dolt",
+		"database":         "dolt",
+		"dolt_mode":        "server",
+		"dolt_database":    "gu",
+		"dolt_server_host": "127.0.0.1",
+		"dolt_server_port": float64(DefaultPort),
+	}
+	data, _ := json.Marshal(wrong)
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call with explicit doltDatabase = rigName. This is how rig-add's
+	// verifyRigIdentity and the post-bd-init re-run in AddRig must call
+	// EnsureMetadata to force the correction.
+	if err := EnsureMetadata(townRoot, "gastown_upstream", "gastown_upstream"); err != nil {
+		t.Fatalf("EnsureMetadata failed: %v", err)
+	}
+
+	repaired, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("reading metadata: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(repaired, &meta); err != nil {
+		t.Fatalf("parsing metadata: %v", err)
+	}
+
+	// dolt_database must now be "gastown_upstream" — the fix must override
+	// DatabaseExists("gu")==true and write the rig-name value.
+	if meta["dolt_database"] != "gastown_upstream" {
+		t.Errorf("dolt_database = %v, want %q (stale prefix DB must not block repair)",
+			meta["dolt_database"], "gastown_upstream")
+	}
+}
+
 // TestEnsureAllMetadata_RepairsAllCorrupt tests that EnsureAllMetadata
 // repairs metadata for all known databases, even if some are corrupt.
 func TestEnsureAllMetadata_RepairsAllCorrupt(t *testing.T) {
