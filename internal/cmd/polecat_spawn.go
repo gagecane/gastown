@@ -165,86 +165,21 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// Persistent polecat model (gt-4ac): try to reuse an idle polecat first.
 	// Idle polecats have completed their work but kept their sandbox (worktree).
 	// Reusing avoids the overhead of creating a new worktree.
-	idlePolecat, findErr := polecatMgr.FindIdlePolecat()
-	if findErr == nil && idlePolecat != nil {
-		polecatName := idlePolecat.Name
-		fmt.Printf("Reusing idle polecat: %s\n", polecatName)
-
-		// Determine base branch
-		baseBranch := opts.BaseBranch
-		if baseBranch == "" && opts.HookBead != "" {
-			settingsPath := filepath.Join(r.Path, "settings", "config.json")
-			polecatIntegrationEnabled := true
-			if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
-				polecatIntegrationEnabled = settings.MergeQueue.IsPolecatIntegrationEnabled()
+	//
+	// gu-ylom: iterate over ALL idle polecats, not just the first. A single
+	// corrupted polecat worktree (missing .git, stale gitdir reference, etc.)
+	// would otherwise block dispatch to every other idle polecat in the rig.
+	// On reuse/verification failure we log the problem and try the next idle
+	// polecat; if none work we fall through to allocating a fresh one.
+	idlePolecats, findErr := polecatMgr.FindIdlePolecats()
+	if findErr == nil {
+		for _, idlePolecat := range idlePolecats {
+			info, reused := tryReuseIdlePolecat(polecatMgr, r, t, idlePolecat.Name, rigName, opts)
+			if reused {
+				return info, nil
 			}
-			if polecatIntegrationEnabled {
-				repoGit, repoErr := getRigGit(r.Path)
-				if repoErr == nil {
-					bd := beads.New(r.Path)
-					detected, detectErr := beads.DetectIntegrationBranch(bd, repoGit, opts.HookBead)
-					if detectErr == nil && detected != "" {
-						baseBranch = "origin/" + detected
-						fmt.Printf("  Auto-detected integration branch: %s\n", detected)
-					}
-				}
-			}
-		}
-		if baseBranch != "" && !strings.HasPrefix(baseBranch, "origin/") {
-			baseBranch = "origin/" + baseBranch
-		}
-
-		// Reuse the idle polecat with branch-only operations (no worktree add/remove).
-		// Phase 3 of persistent-polecat-pool: eliminates ~5s worktree creation overhead.
-		// Falls back to full worktree repair if branch-only reuse fails.
-		addOpts := polecat.AddOptions{
-			HookBead:   opts.HookBead,
-			BaseBranch: baseBranch,
-		}
-		reuseOK := false
-		if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
-			// Branch-only reuse failed — try full worktree repair as fallback
-			fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v, trying full repair...\n", polecatName, err)
-			if _, err := polecatMgr.RepairWorktreeWithOptions(polecatName, true, addOpts); err != nil {
-				fmt.Printf("  Full repair also failed for %s: %v, allocating new...\n", polecatName, err)
-			} else {
-				reuseOK = true
-			}
-		} else {
-			reuseOK = true
-		}
-
-		if reuseOK {
-			polecatObj, err := polecatMgr.Get(polecatName)
-			if err != nil {
-				return nil, fmt.Errorf("getting idle polecat after reuse: %w", err)
-			}
-			if err := verifyWorktreeExists(polecatObj.ClonePath); err != nil {
-				return nil, fmt.Errorf("worktree verification failed for reused %s: %w", polecatName, err)
-			}
-
-			polecatSessMgr := polecat.NewSessionManager(t, r)
-			sessionName := polecatSessMgr.SessionName(polecatName)
-
-			fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
-			_ = events.LogFeed(events.TypeSpawn, "gt", events.SpawnPayload(rigName, polecatName))
-
-			effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")
-			if effectiveBranch == "" {
-				effectiveBranch = r.DefaultBranch()
-			}
-
-			return &SpawnedPolecatInfo{
-				RigName:     rigName,
-				PolecatName: polecatName,
-				ClonePath:   polecatObj.ClonePath,
-				SessionName: sessionName,
-				Pane:        "",
-				BaseBranch:  effectiveBranch,
-				Branch:      polecatObj.Branch,
-				account:     opts.Account,
-				agent:       opts.Agent,
-			}, nil
+			// tryReuseIdlePolecat already logged the specific failure.
+			// Continue to the next idle polecat.
 		}
 	}
 
@@ -329,6 +264,106 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		account:     opts.Account,
 		agent:       opts.Agent,
 	}, nil
+}
+
+// tryReuseIdlePolecat attempts to reuse a single idle polecat by name.
+// On success it returns (info, true). On failure (broken worktree,
+// branch-only + full repair both fail, verification fails) it prints a
+// diagnostic and returns (nil, false) so the caller can try the next
+// idle polecat or fall through to allocating a new one. See gu-ylom.
+func tryReuseIdlePolecat(
+	polecatMgr *polecat.Manager,
+	r *rig.Rig,
+	t *tmux.Tmux,
+	polecatName, rigName string,
+	opts SlingSpawnOptions,
+) (*SpawnedPolecatInfo, bool) {
+	fmt.Printf("Reusing idle polecat: %s\n", polecatName)
+
+	// Determine base branch (same logic as the allocate path below).
+	baseBranch := opts.BaseBranch
+	if baseBranch == "" && opts.HookBead != "" {
+		settingsPath := filepath.Join(r.Path, "settings", "config.json")
+		polecatIntegrationEnabled := true
+		if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
+			polecatIntegrationEnabled = settings.MergeQueue.IsPolecatIntegrationEnabled()
+		}
+		if polecatIntegrationEnabled {
+			repoGit, repoErr := getRigGit(r.Path)
+			if repoErr == nil {
+				bd := beads.New(r.Path)
+				detected, detectErr := beads.DetectIntegrationBranch(bd, repoGit, opts.HookBead)
+				if detectErr == nil && detected != "" {
+					baseBranch = "origin/" + detected
+					fmt.Printf("  Auto-detected integration branch: %s\n", detected)
+				}
+			}
+		}
+	}
+	if baseBranch != "" && !strings.HasPrefix(baseBranch, "origin/") {
+		baseBranch = "origin/" + baseBranch
+	}
+
+	// Reuse the idle polecat with branch-only operations (no worktree add/remove).
+	// Phase 3 of persistent-polecat-pool: eliminates ~5s worktree creation overhead.
+	// Falls back to full worktree repair if branch-only reuse fails.
+	addOpts := polecat.AddOptions{
+		HookBead:   opts.HookBead,
+		BaseBranch: baseBranch,
+	}
+	reuseOK := false
+	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
+		// Branch-only reuse failed — try full worktree repair as fallback
+		fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v, trying full repair...\n", polecatName, err)
+		if _, err := polecatMgr.RepairWorktreeWithOptions(polecatName, true, addOpts); err != nil {
+			fmt.Printf("  Full repair also failed for %s: %v, trying next idle polecat...\n", polecatName, err)
+			return nil, false
+		}
+		reuseOK = true
+	} else {
+		reuseOK = true
+	}
+
+	if !reuseOK {
+		return nil, false
+	}
+
+	polecatObj, err := polecatMgr.Get(polecatName)
+	if err != nil {
+		fmt.Printf("  Getting idle polecat %s after reuse failed: %v, trying next...\n", polecatName, err)
+		return nil, false
+	}
+	if err := verifyWorktreeExists(polecatObj.ClonePath); err != nil {
+		// gu-ylom: don't return a hard error here. The worktree for this
+		// idle polecat is broken (e.g. missing .git). Skip it so the
+		// caller can try the next idle polecat or allocate a new one.
+		fmt.Printf("  Worktree verification failed for reused %s: %v, skipping (candidate for nuke)\n",
+			polecatName, err)
+		return nil, false
+	}
+
+	polecatSessMgr := polecat.NewSessionManager(t, r)
+	sessionName := polecatSessMgr.SessionName(polecatName)
+
+	fmt.Printf("%s Polecat %s reused (idle → working, session start deferred)\n", style.Bold.Render("✓"), polecatName)
+	_ = events.LogFeed(events.TypeSpawn, "gt", events.SpawnPayload(rigName, polecatName))
+
+	effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")
+	if effectiveBranch == "" {
+		effectiveBranch = r.DefaultBranch()
+	}
+
+	return &SpawnedPolecatInfo{
+		RigName:     rigName,
+		PolecatName: polecatName,
+		ClonePath:   polecatObj.ClonePath,
+		SessionName: sessionName,
+		Pane:        "",
+		BaseBranch:  effectiveBranch,
+		Branch:      polecatObj.Branch,
+		account:     opts.Account,
+		agent:       opts.Agent,
+	}, true
 }
 
 // StartSession starts the tmux session for a spawned polecat.

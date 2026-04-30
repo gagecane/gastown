@@ -2046,16 +2046,34 @@ func (m *Manager) List() ([]*Polecat, error) {
 // that can be reused by gt sling without creating a new worktree.
 // Persistent polecat model (gt-4ac).
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {
+	polecats, err := m.FindIdlePolecats()
+	if err != nil {
+		return nil, err
+	}
+	if len(polecats) == 0 {
+		return nil, nil
+	}
+	return polecats[0], nil
+}
+
+// FindIdlePolecats returns ALL idle polecats in the rig, in List() order.
+// Callers that want to tolerate a corrupted idle polecat (e.g. missing .git
+// worktree) can iterate this list and skip entries whose reuse fails instead
+// of bailing on the whole sling. See gu-ylom: a single broken polecat with
+// state=idle (no tmux session + no assigned bead) would otherwise block
+// dispatch to the whole rig.
+func (m *Manager) FindIdlePolecats() ([]*Polecat, error) {
 	polecats, err := m.List()
 	if err != nil {
 		return nil, err
 	}
+	var idle []*Polecat
 	for _, p := range polecats {
 		if p.State == StateIdle {
-			return p, nil
+			idle = append(idle, p)
 		}
 	}
-	return nil, nil
+	return idle, nil
 }
 
 // Get returns a specific polecat by name.
