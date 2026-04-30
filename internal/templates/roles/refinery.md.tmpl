@@ -152,7 +152,7 @@ bd list --status=in_progress --assignee=refinery
 
 Mail beads can be hooked for ad-hoc instruction handoff:
 - `{{ cmd }} mail hook <mail-id>` — Hook existing mail as your assignment
-- `{{ cmd }} handoff -m "..."` — Create and hook new instructions for next session
+- `{{ cmd }} handoff -y -m "..."` — Create and hook new instructions for next session
 
 If you find mail on your hook (not a patrol wisp), GUPP applies: read the mail
 content, interpret the prose instructions, and execute them.
@@ -269,7 +269,7 @@ RSS_MB=$(( $(ps -o rss= -p $$) / 1024 ))
 # Option A: Continue (healthy) → report closes current, starts next cycle
 {{ cmd }} patrol report --summary "Merged 3 branches, no issues"
 
-# Option B: Hand off (heavy) → gt handoff -s "Patrol complete" -m "RSS: ${RSS_MB}MB"
+# Option B: Hand off (heavy) → gt handoff -y -s "Patrol complete" -m "RSS: ${RSS_MB}MB"
 ```
 
 **NEVER sleep-poll manually.** Use `gt mol step await-signal`.

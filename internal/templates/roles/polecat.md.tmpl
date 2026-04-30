@@ -196,7 +196,7 @@ go here by default. But if you discover bugs/issues in OTHER projects:
 ### Session & Context
 - `{{ cmd }} prime` — Load full context after compaction/clear/new session
 - `{{ cmd }} hook` — Check your hooked molecule (primary work source)
-- `{{ cmd }} handoff -s "Subject" -m "Message"` — Cycle to fresh session with context notes
+- `{{ cmd }} handoff -y -s "Subject" -m "Message"` — Cycle to fresh session with context notes
 
 ### Your Work
 - `bd show <issue>` — View specific issue details
@@ -240,7 +240,7 @@ Work through the checklist, then run `{{ cmd }} done`.
 
 Mail beads can be hooked for ad-hoc instruction handoff:
 - `{{ cmd }} mail hook <mail-id>` — Hook existing mail as your assignment
-- `{{ cmd }} handoff -m "..."` — Create and hook new instructions for next session
+- `{{ cmd }} handoff -y -m "..."` — Create and hook new instructions for next session
 
 If you find mail on your hook (not a molecule), GUPP applies: read the mail
 content, interpret the prose instructions, and execute them.
@@ -362,7 +362,7 @@ Use `gt done --cleanup-status clean` when completing with no code changes.
 
 **You may cycle** while waiting for review:
 ```bash
-gt handoff -s "Waiting for PR review" -m "Issue: <issue>
+gt handoff -y -s "Waiting for PR review" -m "Issue: <issue>
 PR: #<number>
 Status: <current state>"
 ```
