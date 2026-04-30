@@ -220,6 +220,50 @@ type AgentRegistry struct {
 // CurrentAgentRegistryVersion is the current schema version.
 const CurrentAgentRegistryVersion = 1
 
+// rawAgentRegistry is used to deserialize user-provided agents.json so each
+// preset stays as json.RawMessage. This lets us merge partial overrides onto
+// the built-in preset (preserving defaults for fields the user didn't set)
+// instead of replacing the whole preset with a zero-valued struct.
+// See PR #3723 / gt-opencode-preset-inheritance.
+type rawAgentRegistry struct {
+	Version int                        `json:"version"`
+	Agents  map[string]json.RawMessage `json:"agents"`
+}
+
+// cloneAgentPresetInfo returns a deep copy of an AgentPresetInfo, so that
+// merging a user override onto it doesn't mutate the built-in preset for
+// other callers. Returns nil if src is nil.
+func cloneAgentPresetInfo(src *AgentPresetInfo) *AgentPresetInfo {
+	if src == nil {
+		return nil
+	}
+	clone := *src
+	if src.Args != nil {
+		clone.Args = append([]string(nil), src.Args...)
+	}
+	if src.Env != nil {
+		clone.Env = make(map[string]string, len(src.Env))
+		for k, v := range src.Env {
+			clone.Env[k] = v
+		}
+	}
+	if src.ProcessNames != nil {
+		clone.ProcessNames = append([]string(nil), src.ProcessNames...)
+	}
+	if src.NonInteractive != nil {
+		ni := *src.NonInteractive
+		clone.NonInteractive = &ni
+	}
+	if src.ACP != nil {
+		acp := *src.ACP
+		if src.ACP.Args != nil {
+			acp.Args = append([]string(nil), src.ACP.Args...)
+		}
+		clone.ACP = &acp
+	}
+	return &clone
+}
+
 // builtinPresets contains the default presets for supported agents.
 // Each preset is the single source of truth for its agent's behavior.
 var builtinPresets = map[AgentPreset]*AgentPresetInfo{
@@ -602,14 +646,24 @@ func loadAgentRegistryFromPathLocked(path string) error {
 		return err
 	}
 
-	var userRegistry AgentRegistry
+	var userRegistry rawAgentRegistry
 	if err := json.Unmarshal(data, &userRegistry); err != nil {
 		return err
 	}
 
-	for name, preset := range userRegistry.Agents {
-		preset.Name = AgentPreset(name)
-		globalRegistry.Agents[name] = preset
+	// Merge each user override onto a clone of the built-in preset, so fields
+	// the user omitted (Env, ConfigDir, HooksDir, NonInteractive, etc.) are
+	// inherited instead of zero-valued. See PR #3723 (gastownhall/gastown).
+	for name, rawPreset := range userRegistry.Agents {
+		merged := cloneAgentPresetInfo(globalRegistry.Agents[name])
+		if merged == nil {
+			merged = &AgentPresetInfo{}
+		}
+		if err := json.Unmarshal(rawPreset, merged); err != nil {
+			return err
+		}
+		merged.Name = AgentPreset(name)
+		globalRegistry.Agents[name] = merged
 	}
 
 	loadedPaths[path] = true
