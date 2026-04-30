@@ -501,7 +501,7 @@ func hasBusyIndicator(line string) bool {
 	if trimmed == "" {
 		return false
 	}
-	return strings.Contains(trimmed, "esc to interrupt")
+	return strings.Contains(trimmed, "esc to interrupt") || strings.Contains(trimmed, "esc to cancel")
 }
 
 func readyPromptPrefixForSession(t *Tmux, session string) string {
