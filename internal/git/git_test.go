@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,6 +159,91 @@ func TestCurrentBranch(t *testing.T) {
 	// initTestRepo pins the initial branch to "main".
 	if branch != "main" {
 		t.Errorf("branch = %q, want main", branch)
+	}
+}
+
+// TestIsDetachedHEAD_Attached verifies IsDetachedHEAD returns false on a
+// normal checkout where HEAD is a symbolic ref pointing at a branch.
+func TestIsDetachedHEAD_Attached(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	detached, err := g.IsDetachedHEAD()
+	if err != nil {
+		t.Fatalf("IsDetachedHEAD: %v", err)
+	}
+	if detached {
+		t.Error("IsDetachedHEAD = true on freshly-initialized repo, want false")
+	}
+}
+
+// TestIsDetachedHEAD_Detached verifies IsDetachedHEAD detects detachment
+// after `git checkout --detach`. This is the state that caused gu-ge1s:
+// CurrentBranch() returns "HEAD" but IsDetachedHEAD() must return true so
+// downstream guards can refuse to push/submit with the literal.
+func TestIsDetachedHEAD_Detached(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	cmd := exec.Command("git", "checkout", "--detach")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git checkout --detach: %v", err)
+	}
+
+	detached, err := g.IsDetachedHEAD()
+	if err != nil {
+		t.Fatalf("IsDetachedHEAD after detach: %v", err)
+	}
+	if !detached {
+		t.Error("IsDetachedHEAD = false after --detach, want true")
+	}
+
+	// Sanity: CurrentBranch still returns the literal "HEAD", which is why
+	// callers need IsDetachedHEAD (or CurrentBranchStrict) to distinguish.
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch after detach: %v", err)
+	}
+	if branch != "HEAD" {
+		t.Errorf("CurrentBranch after detach = %q, want %q (unexpected git behavior)", branch, "HEAD")
+	}
+}
+
+// TestCurrentBranchStrict_Attached returns the branch name unchanged when
+// HEAD points at a real branch.
+func TestCurrentBranchStrict_Attached(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	branch, err := g.CurrentBranchStrict()
+	if err != nil {
+		t.Fatalf("CurrentBranchStrict: %v", err)
+	}
+	if branch != "main" {
+		t.Errorf("branch = %q, want main", branch)
+	}
+}
+
+// TestCurrentBranchStrict_DetachedReturnsSentinel guarantees that detached
+// HEAD surfaces as ErrDetachedHEAD instead of the literal "HEAD". This is
+// the core contract that prevents refs/heads/HEAD pollution (gu-ge1s).
+func TestCurrentBranchStrict_DetachedReturnsSentinel(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	cmd := exec.Command("git", "checkout", "--detach")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git checkout --detach: %v", err)
+	}
+
+	branch, err := g.CurrentBranchStrict()
+	if !errors.Is(err, ErrDetachedHEAD) {
+		t.Errorf("CurrentBranchStrict error = %v, want ErrDetachedHEAD", err)
+	}
+	if branch != "" {
+		t.Errorf("CurrentBranchStrict branch = %q, want empty string (never the literal HEAD)", branch)
 	}
 }
 

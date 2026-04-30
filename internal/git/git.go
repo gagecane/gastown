@@ -754,9 +754,76 @@ func (g *Git) skipWorktreeFiles() map[string]bool {
 	return result
 }
 
+// ErrDetachedHEAD indicates the working tree is in detached-HEAD state
+// (HEAD points directly at a commit, not a named branch).
+//
+// Returned by CurrentBranchStrict so that callers which must operate on a
+// real branch (gt done push, gt mq submit, best-effort pushes before nuke,
+// etc.) can fail fast rather than treat the literal string "HEAD" as a
+// branch name. Propagating "HEAD" downstream creates malformed MRs,
+// `refs/heads/HEAD` refs on origin, and stuck retry loops (gu-ge1s).
+var ErrDetachedHEAD = errors.New("detached HEAD: HEAD does not point at a named branch")
+
 // CurrentBranch returns the current branch name.
+//
+// CAUTION: In detached-HEAD state, git returns the literal string "HEAD".
+// Callers that need to push, create MRs, or otherwise use the value as a
+// real branch name should prefer CurrentBranchStrict, which surfaces
+// detached HEAD as ErrDetachedHEAD instead of a branch named "HEAD".
 func (g *Git) CurrentBranch() (string, error) {
 	return g.run("rev-parse", "--abbrev-ref", "HEAD")
+}
+
+// IsDetachedHEAD reports whether the working tree is in detached-HEAD state.
+// It returns true when `git symbolic-ref HEAD` exits non-zero, which is the
+// canonical way to detect detachment — `rev-parse --abbrev-ref HEAD` returns
+// the ambiguous literal "HEAD" and can't be distinguished from a branch
+// actually named "HEAD" (valid but pathological).
+//
+// Errors from git (not including "not a symbolic ref") are conservatively
+// reported as detached=true so downstream guards err on the side of refusing
+// risky operations.
+func (g *Git) IsDetachedHEAD() (bool, error) {
+	_, err := g.run("symbolic-ref", "--quiet", "HEAD")
+	if err == nil {
+		return false, nil
+	}
+	var gitErr *GitError
+	if errors.As(err, &gitErr) {
+		// `symbolic-ref --quiet` exits 1 when HEAD is not a symbolic ref.
+		// That's the detached-HEAD signal, not an operational failure.
+		if strings.Contains(gitErr.Err.Error(), "exit status 1") {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("checking detached HEAD: %w", err)
+}
+
+// CurrentBranchStrict returns the current branch name, or ErrDetachedHEAD
+// when HEAD is detached. Unlike CurrentBranch, it never returns the literal
+// string "HEAD": either a real branch name or an error.
+//
+// Use this at the boundaries where we need a real branch — push targets,
+// MR bead fields, refspec construction — so the "HEAD" literal can never
+// leak into origin refs or merge-queue artifacts.
+func (g *Git) CurrentBranchStrict() (string, error) {
+	detached, err := g.IsDetachedHEAD()
+	if err != nil {
+		return "", err
+	}
+	if detached {
+		return "", ErrDetachedHEAD
+	}
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		return "", err
+	}
+	// Defensive: even if symbolic-ref succeeded, guard against the literal.
+	// `git branch -m HEAD` is technically possible; refuse to propagate it.
+	if branch == "" || branch == "HEAD" {
+		return "", ErrDetachedHEAD
+	}
+	return branch, nil
 }
 
 // DefaultBranch returns the default branch name (what HEAD points to).
