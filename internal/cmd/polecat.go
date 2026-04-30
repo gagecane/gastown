@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -1390,7 +1391,12 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 	// Step 2.75: Best-effort push before nuke (gt-4vr guardrail).
 	// Try to preserve any unpushed commits on the branch. If push fails,
 	// proceed — --force already means "I accept data loss".
-	if branchToDelete != "" {
+	//
+	// gu-ge1s: Refuse to push the literal "HEAD" or empty branch names —
+	// those happen when polecatInfo.Branch was recorded from a detached-HEAD
+	// worktree (loadFromBeads calls polecatGit.CurrentBranch()). Pushing
+	// "HEAD:HEAD" here creates refs/heads/HEAD pollution on origin.
+	if branchToDelete != "" && branchToDelete != "HEAD" && strings.HasPrefix(branchToDelete, constants.BranchPolecatPrefix) {
 		var pushGit *git.Git
 		// Try worktree first (may still exist), then bare repo fallback.
 		// Use ClonePath from the polecat record — the worktree lives at
@@ -1414,6 +1420,10 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 				fmt.Printf("  %s pushed branch %s before nuke\n", style.Success.Render("✓"), branchToDelete)
 			}
 		}
+	} else if branchToDelete == "HEAD" {
+		fmt.Printf("  %s skipping best-effort push: branch is literal %q (detached HEAD state)\n", style.Dim.Render("○"), branchToDelete)
+	} else if branchToDelete != "" && !strings.HasPrefix(branchToDelete, constants.BranchPolecatPrefix) {
+		fmt.Printf("  %s skipping best-effort push: %q is not a polecat branch\n", style.Dim.Render("○"), branchToDelete)
 	}
 
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)

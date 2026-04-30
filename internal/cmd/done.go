@@ -245,6 +245,43 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// gu-ge1s: Detached-HEAD guard.
+	//
+	// CurrentBranch() returns the literal string "HEAD" when the worktree is
+	// in detached-HEAD state (no symbolic ref). Without this guard, "HEAD"
+	// flows downstream as a branch name and produces:
+	//   * refs/heads/HEAD pollution on origin (refspec "HEAD:HEAD" is pushed)
+	//   * MR beads with branch="HEAD" that refinery can't process
+	//   * retry loops in worktrees that are detached because the canonical
+	//     branch was deleted out from under them
+	//
+	// If there's a polecat branch we can salvage, prefer that; otherwise fail
+	// with an actionable message. GT_BRANCH (set by session manager) also wins
+	// here because it records the branch the polecat was provisioned on even
+	// if a later checkout detached HEAD.
+	if branch == "" || branch == "HEAD" {
+		if cwdAvailable {
+			if detached, detErr := g.IsDetachedHEAD(); detErr == nil && detached {
+				if envBranch := os.Getenv("GT_BRANCH"); envBranch != "" && envBranch != "HEAD" {
+					style.PrintWarning("HEAD is detached; using GT_BRANCH=%s from environment", envBranch)
+					branch = envBranch
+				} else if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" {
+					fallback := fmt.Sprintf("polecat/%s", polecatName)
+					style.PrintWarning("HEAD is detached and GT_BRANCH is unset; falling back to %s (no-op push if branch missing)", fallback)
+					branch = fallback
+				} else {
+					return fmt.Errorf("cannot submit from detached HEAD: no named branch to push\n" +
+						"Create a branch first (git checkout -b <name>) or run `gt polecat nuke` to terminate this worktree")
+				}
+			}
+		}
+	}
+	// Belt-and-suspenders: never propagate the literal "HEAD" past this point,
+	// even if some fallback above accidentally assigned it.
+	if branch == "HEAD" {
+		return fmt.Errorf("refusing to proceed with branch=%q (detached HEAD); create a named branch or run `gt polecat nuke`", branch)
+	}
+
 	// Auto-detect cleanup status if not explicitly provided
 	// This prevents premature polecat cleanup by ensuring witness knows git state
 	if doneCleanupStatus == "" {
