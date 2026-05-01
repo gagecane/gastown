@@ -191,6 +191,27 @@ func isIdentityBeadInfo(info *beadInfo) bool {
 	return beads.IsIdentityBeadTitle(info.Title)
 }
 
+// isEpicLikeBeadInfo reports whether the bead's title marks it as an epic
+// ("EPIC: ...") while its issue_type is still slingable (e.g., task).
+//
+// This is the sling-side dispatch gate for gu-smr1: the auto-dispatch plugin
+// only filters by issue_type, so a task bead with an EPIC: title prefix
+// escapes the container filter and gets slung to a polecat. The polecat
+// spawns, sees an epic, and wastes a slot. Legitimate epics (type=epic) are
+// rejected earlier by detectSchedulerIDType; this helper covers the data-
+// hygiene gap between title and type.
+func isEpicLikeBeadInfo(info *beadInfo) bool {
+	if info == nil {
+		return false
+	}
+	// Real epics are already routed through the epic path — this gate only
+	// fires when the type disagrees with the title.
+	if info.IssueType == "epic" {
+		return false
+	}
+	return beads.IsEpicLikeTitle(info.Title)
+}
+
 // isSlingContextBeadInfo reports whether the bead is itself a sling context
 // wrapper (label gt:sling-context). Sling contexts are scheduler bookkeeping
 // beads — never work — and must never be re-scheduled.

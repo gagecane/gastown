@@ -69,6 +69,48 @@ func TestIsSlingableType(t *testing.T) {
 	}
 }
 
+// TestIsSlingable verifies the combined type + title-prefix filter (gu-smr1).
+// A bead is slingable only when its type is slingable AND its title does not
+// start with "EPIC:"/"Epic:".
+func TestIsSlingable(t *testing.T) {
+	tests := []struct {
+		name      string
+		issueType string
+		title     string
+		want      bool
+	}{
+		// Pass: ordinary work beads
+		{"plain task", "task", "Fix bug in parser", true},
+		{"bug", "bug", "Timeout on login", true},
+		{"chore", "chore", "Update dependencies", true},
+		{"empty type defaults to task", "", "Add retry logic", true},
+
+		// Reject: non-slingable type trumps title
+		{"real epic", "epic", "Rework auth", false},
+		{"convoy", "convoy", "Deploy wave", false},
+		{"decision", "decision", "Pick DB", false},
+
+		// Reject: EPIC-like title despite slingable type (gu-smr1)
+		{"task with EPIC: prefix", "task", "EPIC: Triage Queue sweep", false},
+		{"bug with EPIC: prefix", "bug", "EPIC: rewrite bug system", false},
+		{"task with Epic: prefix", "task", "Epic: cleanup pass", false},
+		{"task with emoji EPIC: prefix", "task", "🪺 EPIC: nest overhaul", false},
+
+		// Pass: title mentions "EPIC" but not as an opening token
+		{"task mentions EPIC mid-title", "task", "Fix EPIC: flag handling", true},
+		{"task says Epic without colon", "task", "Epic refactor", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsSlingable(tt.issueType, tt.title)
+			if got != tt.want {
+				t.Errorf("IsSlingable(%q, %q) = %v, want %v", tt.issueType, tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsIdentityBead covers the three filter criteria in gu-ypjm (ghost
 // dispatch loop): gt:agent label, status=closed, and identity-naming title
 // regex. Matching ANY criterion classifies the bead as identity.

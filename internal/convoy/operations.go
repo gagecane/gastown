@@ -195,6 +195,25 @@ func IsSlingableType(issueType string) bool {
 	return slingableTypes[issueType]
 }
 
+// IsSlingable reports whether a bead is dispatchable as work, combining the
+// issue_type check (IsSlingableType) with a title-prefix guard for the common
+// data-hygiene failure where a bead has type=task but its title marks it as
+// an epic ("EPIC: Rework X"). Prefer this helper over bare IsSlingableType
+// for any code path that chooses work to hand to a polecat — see gu-smr1.
+//
+// issueType is checked first; the title guard runs only when the type is
+// otherwise slingable, so a legitimate epic (type=epic) is still rejected by
+// the type check alone.
+func IsSlingable(issueType, title string) bool {
+	if !IsSlingableType(issueType) {
+		return false
+	}
+	if beads.IsEpicLikeTitle(title) {
+		return false
+	}
+	return true
+}
+
 // blockingDepTypes are dependency types that prevent an issue from being
 // dispatched. parent-child is intentionally excluded — a child task is
 // dispatchable even if its parent epic is open (consistent with molecule
@@ -343,9 +362,12 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 
 		// Filter non-slingable types: only leaf work items (task, bug,
 		// feature, chore) can be dispatched. Epics, convoys, and other
-		// container types are skipped.
-		if !IsSlingableType(issue.IssueType) {
-			logger("%s: convoy %s: %s has non-slingable type %q, skipping", caller, convoyID, issue.ID, issue.IssueType)
+		// container types are skipped. Also reject beads whose title marks
+		// them as epics ("EPIC: ...") — a data-hygiene guard for beads with
+		// type=task that should really be type=epic (see gu-smr1).
+		if !IsSlingable(issue.IssueType, issue.Title) {
+			logger("%s: convoy %s: %s has non-slingable type %q or epic-like title %q, skipping",
+				caller, convoyID, issue.ID, issue.IssueType, issue.Title)
 			continue
 		}
 

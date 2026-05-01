@@ -102,6 +102,16 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("bead %s is an identity/system bead (gt:agent label, closed, or polecat/refinery title): %q — refusing to schedule", beadID, info.Title)
 	}
 
+	// Epic-like title guard (gu-smr1). Reject beads with "EPIC:" title
+	// prefix and non-epic issue_type. The scheduler dispatch path is the
+	// last chance before a polecat spawn, so we guard here too even though
+	// detectSchedulerIDType already reroutes EPIC: titles down the epic
+	// path — scheduleBead can be invoked directly by internal callers.
+	if isEpicLikeBeadInfo(info) {
+		return fmt.Errorf("bead %s has epic-like title %q but issue_type=%q — refusing to schedule. Fix with: bd update %s --type=epic",
+			beadID, info.Title, info.IssueType, beadID)
+	}
+
 	// Nested-wrapper guard (gu-hfr3). Refuse to schedule a bead that is
 	// itself a sling-context wrapper. Otherwise the idempotency check
 	// below (keyed on WorkBeadID) misses, and a new wrapper is created
@@ -416,6 +426,13 @@ func detectSchedulerIDType(id string) (string, error) {
 		case "gt:convoy":
 			return "convoy", nil
 		}
+	}
+
+	// Data-hygiene fallback (gu-smr1): beads whose title starts with "EPIC:"
+	// are treated as epics even when issue_type=task. Without this, the
+	// auto-dispatcher happily slings them to polecats which waste a slot.
+	if beads.IsEpicLikeTitle(info.Title) {
+		return "epic", nil
 	}
 
 	return "task", nil

@@ -464,6 +464,14 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
+		// Filter beads whose title marks them as epics (data-hygiene guard,
+		// gu-smr1). A bead with "EPIC:" prefix and issue_type=task is a
+		// miscategorised container — it must not reach an auto-dispatched
+		// polecat. Real epics (type=epic) are already filtered by bd ready.
+		if issue.Type != "epic" && beads.IsEpicLikeTitle(issue.Title) {
+			continue
+		}
+
 		filtered = append(filtered, issue)
 	}
 	return filtered

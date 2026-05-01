@@ -323,6 +323,73 @@ func TestIsIdentityBeadInfo(t *testing.T) {
 	}
 }
 
+// TestIsEpicLikeBeadInfo verifies the gu-smr1 dispatch gate: beads with an
+// "EPIC:" title prefix but non-epic issue_type must be rejected. Real epics
+// (type=epic) are routed through a different path and should NOT match.
+func TestIsEpicLikeBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &beadInfo{}, false},
+
+		// Positive: slingable type with EPIC-like title.
+		{"task with EPIC: prefix (ta-823 case)", &beadInfo{
+			Title:     "EPIC: Triage Queue...",
+			IssueType: "task",
+			Status:    "open",
+		}, true},
+		{"bug with Epic: prefix", &beadInfo{
+			Title:     "Epic: rewrite bug tracker",
+			IssueType: "bug",
+			Status:    "open",
+		}, true},
+		{"task with emoji + EPIC prefix", &beadInfo{
+			Title:     "🪺 EPIC: nest overhaul",
+			IssueType: "task",
+			Status:    "open",
+		}, true},
+		{"empty type (defaults to task) with EPIC: prefix", &beadInfo{
+			Title:  "EPIC: cleanup",
+			Status: "open",
+		}, true},
+
+		// Negative: real epics are handled by the epic path, not this gate.
+		{"real epic with EPIC: title", &beadInfo{
+			Title:     "EPIC: Proper epic bead",
+			IssueType: "epic",
+			Status:    "open",
+		}, false},
+
+		// Negative: ordinary work beads.
+		{"plain task", &beadInfo{
+			Title:     "Fix parser bug",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+		{"task mentions EPIC mid-title", &beadInfo{
+			Title:     "Fix EPIC: handling in parser",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+		{"task with Episodic word", &beadInfo{
+			Title:     "Episodic streaming support",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isEpicLikeBeadInfo(tt.info); got != tt.want {
+				t.Errorf("isEpicLikeBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsSlingContextBeadInfo verifies the gu-hfr3 guard that prevents a
 // sling-context wrapper from being re-scheduled (which would nest wrappers).
 // Detection is label-based (gt:sling-context). Other label shapes and

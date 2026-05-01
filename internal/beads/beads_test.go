@@ -221,6 +221,52 @@ func TestIsFlagLikeTitle(t *testing.T) {
 	}
 }
 
+// TestIsEpicLikeTitle verifies epic-like title detection (gu-smr1).
+// Titles starting with "EPIC:" or "Epic:" must be classified as epic-like
+// even when issue_type=task, so auto-dispatch rejects them instead of
+// slinging them to polecats.
+func TestIsEpicLikeTitle(t *testing.T) {
+	tests := []struct {
+		title string
+		want  bool
+	}{
+		// Match — canonical uppercase prefix
+		{"EPIC: Rework auth system", true},
+		{"EPIC: Triage Queue...", true},
+		{"EPIC:no-space-after-colon", true},
+
+		// Match — leading whitespace
+		{"  EPIC: leading spaces", true},
+		{"\tEPIC: leading tab", true},
+
+		// Match — title-case (Epic:)
+		{"Epic: Cleanup pass", true},
+
+		// Match — single emoji / non-ASCII leader
+		{"🪺 EPIC: nest overhaul", true},
+		{"📦 Epic: package refactor", true},
+
+		// No match — not a real EPIC token
+		{"Episodic streaming support", false},
+		{"EPICS are bad", false},
+		{"fix EPIC: handling in parser", false}, // not at start
+		{"Epic storm coming", false},            // no colon
+		{"epic: lowercase only", false},          // lowercase — intentionally strict
+		{"Fix bug in parser", false},
+		{"", false},
+
+		// No match — looks like a word boundary but no colon
+		{"EPIC Rework auth", false},
+	}
+
+	for _, tt := range tests {
+		got := IsEpicLikeTitle(tt.title)
+		if got != tt.want {
+			t.Errorf("IsEpicLikeTitle(%q) = %v, want %v", tt.title, got, tt.want)
+		}
+	}
+}
+
 func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 	bdAllowStaleMu.Lock()
 	prevPath := bdAllowStalePath

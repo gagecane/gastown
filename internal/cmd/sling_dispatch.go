@@ -154,6 +154,15 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		return result, fmt.Errorf("bead %s is an identity/system bead (gt:agent label, closed, or polecat/refinery title): %q — not a work item", params.BeadID, info.Title)
 	}
 
+	// Epic-like title guard (gu-smr1). Batch sling and the deferred scheduler
+	// funnel through executeSling; without this check, an "EPIC: ..." bead
+	// with issue_type=task still reaches a polecat and wastes a slot.
+	if isEpicLikeBeadInfo(info) {
+		result.ErrMsg = "epic-like title"
+		return result, fmt.Errorf("bead %s has epic-like title %q but issue_type=%q — epics are containers, not dispatchable work.\nFix the data with: bd update %s --type=epic (or rename the title)",
+			params.BeadID, info.Title, info.IssueType, params.BeadID)
+	}
+
 	// Save explicit force state before dead-agent auto-force, so the deferred
 	// gate below still requires an explicit --force for deferred beads.
 	explicitForce := params.Force

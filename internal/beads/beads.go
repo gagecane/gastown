@@ -172,6 +172,37 @@ func IsFlagLikeTitle(title string) bool {
 	return !strings.Contains(title, " ")
 }
 
+// epicLikeTitleRe matches titles whose leading token marks the bead as an
+// epic even when `issue_type` says otherwise. The pattern allows optional
+// leading whitespace, an optional emoji-style prefix (one non-ASCII rune),
+// the literal "EPIC" in upper- or title-case, and a trailing colon.
+//
+// Matches: "EPIC: Rework auth", "  Epic: cleanup", "🪺 EPIC: nest overhaul"
+// Does NOT match: "Epic", "Episodic streaming support", "EPICS are bad"
+//
+// Case-sensitive uppercase + a trailing colon is the strong data-hygiene
+// signal used by human authors. We also accept title-case "Epic:" because
+// several existing rigs use that convention.
+var epicLikeTitleRe = regexp.MustCompile(`^\s*(?:[^\x00-\x7F]\s*)?(?:EPIC|Epic):`)
+
+// IsEpicLikeTitle returns true if the title's leading token declares the bead
+// as an epic (e.g., "EPIC: Rework X", "Epic: cleanup pass"). This catches the
+// common data-hygiene failure mode where a bead has issue_type=task but its
+// title explicitly marks it as an epic — the auto-dispatcher and ready queue
+// must treat these as non-dispatchable containers rather than slingable work
+// (see gu-smr1 — auto-dispatch slinging ta-823 "EPIC: Triage Queue..." to
+// polecats because type=task slipped past the IsSlingableType filter).
+//
+// The check is intentionally narrow: it requires the "EPIC:" or "Epic:" token
+// at the start (optional leading whitespace or a single emoji prefix). Words
+// like "Episodic" and "EPICS are bad" do not match.
+func IsEpicLikeTitle(title string) bool {
+	if title == "" {
+		return false
+	}
+	return epicLikeTitleRe.MatchString(title)
+}
+
 // Issue represents a beads issue.
 type Issue struct {
 	ID          string   `json:"id"`

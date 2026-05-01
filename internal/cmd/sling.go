@@ -611,6 +611,17 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("refusing to sling bead %s: %q is an identity/system bead (gt:agent label or polecat/refinery title) — not a work item", beadID, info.Title)
 	}
 
+	// Epic-like title guard (gu-smr1). Beads whose title starts with "EPIC:"
+	// are containers even when issue_type=task slipped past the epic check.
+	// Auto-dispatch kept slinging ta-823 ("EPIC: Triage Queue...") because
+	// the type filter said "task". Polecats spawned, recognized an epic,
+	// and wasted a slot. Reject these the same way we reject true epics.
+	// Not bypassed by --force — fix the data (bd update --type=epic) first.
+	if isEpicLikeBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: title %q begins with \"EPIC:\" but issue_type=%q — epics are containers, not dispatchable work.\nFix the data with: bd update %s --type=epic (or rename the title)",
+			beadID, info.Title, info.IssueType, beadID)
+	}
+
 	// Guard against slinging deferred beads (gt-1326mw).
 	// Deferred work (e.g., "deferred to post-launch") should not consume polecat slots.
 	// Use --force to override when intentionally re-activating deferred work.
