@@ -1211,15 +1211,42 @@ func (b *Beads) ReadyWithType(issueType string) ([]*Issue, error) {
 }
 
 // Show returns detailed information about an issue.
+//
+// Lookup strategy:
+//  1. Route the query through routes.jsonl so rig-level bead IDs
+//     (e.g., "gt-abc123") resolve to the correct rig database.
+//  2. If the routed lookup returns ErrNotFound and the resolved dir
+//     differs from this wrapper's local dir, fall back to the local
+//     dir. This is defense-in-depth for beads that live outside their
+//     prefix's configured route — for example a "gt-" prefixed bead
+//     that mayor stored in a rig DB rather than the town root. Without
+//     this fallback, `gt mol detach` and `gt doctor --fix` cannot clean
+//     up stale pinned attachments on such beads (gu-vkg3).
 func (b *Beads) Show(id string) (*Issue, error) {
-	// Route cross-rig queries via routes.jsonl so that rig-level bead IDs
-	// (e.g., "gt-abc123") resolve to the correct rig database.
-	targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
-	if targetDir != b.getResolvedBeadsDir() {
+	localDir := b.getResolvedBeadsDir()
+	targetDir := ResolveRoutingTarget(b.getTownRoot(), id, localDir)
+	if targetDir != localDir {
 		target := NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
-		return target.Show(id)
+		issue, err := target.showLocal(id)
+		if err == nil {
+			return issue, nil
+		}
+		// If the bead simply isn't in the routed DB, fall back to the
+		// local DB this wrapper was pointed at. Propagate any other
+		// error (permissions, transport) unchanged.
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		// Fall through to local lookup below.
 	}
 
+	return b.showLocal(id)
+}
+
+// showLocal performs the raw bd show lookup against the beads dir this
+// wrapper is bound to, without consulting routes.jsonl. Used by Show()
+// to implement the two-phase routed-then-local lookup.
+func (b *Beads) showLocal(id string) (*Issue, error) {
 	if b.store != nil {
 		return b.storeShow(id)
 	}
