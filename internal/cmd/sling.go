@@ -622,6 +622,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID, info.Title, info.IssueType, beadID)
 	}
 
+	// Sling-context wrapper guard (gu-6dx7, follow-up to gu-hfr3). Beads
+	// carrying the gt:sling-context label are scheduler bookkeeping — never
+	// work. gu-hfr3 blocked this at scheduleBead; this mirror-guard covers
+	// the direct `gt sling` CLI path. Hooking a wrapper leaves the polecat
+	// working on a bead that cannot be completed, and the real work bead
+	// dangling. Not bypassed by --force — the data is wrong, not the intent.
+	if isSlingContextBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is a sling-context wrapper (label gt:sling-context) — not a work item", beadID, info.Title)
+	}
+
 	// Guard against slinging deferred beads (gt-1326mw).
 	// Deferred work (e.g., "deferred to post-launch") should not consume polecat slots.
 	// Use --force to override when intentionally re-activating deferred work.

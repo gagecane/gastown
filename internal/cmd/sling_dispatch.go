@@ -163,6 +163,19 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Title, info.IssueType, params.BeadID)
 	}
 
+	// Sling-context wrapper guard (gu-6dx7, follow-up to gu-hfr3). A bead
+	// carrying the gt:sling-context label is scheduler bookkeeping — never
+	// work. gu-hfr3 added this guard to scheduleBead, but executeSling is
+	// reached by other paths (direct `gt sling`, deacon redispatch, batch
+	// sling) that would otherwise hand a polecat a wrapper to hook. Hooking
+	// a wrapper means the polecat's "work" is the sling-context itself,
+	// which cannot be completed and leaves the real work bead dangling.
+	// Not bypassed by --force — the data is wrong, not the dispatch intent.
+	if isSlingContextBeadInfo(info) {
+		result.ErrMsg = "sling-context wrapper"
+		return result, fmt.Errorf("bead %s is a sling-context wrapper (label gt:sling-context): %q — not a work item", params.BeadID, info.Title)
+	}
+
 	// Save explicit force state before dead-agent auto-force, so the deferred
 	// gate below still requires an explicit --force for deferred beads.
 	explicitForce := params.Force
