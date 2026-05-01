@@ -485,6 +485,7 @@ func (m *Manager) issueToMR(issue *beads.Issue) *MergeRequest {
 		Worker:       fields.Worker,
 		IssueID:      fields.SourceIssue,
 		TargetBranch: target,
+		MergeCommit:  fields.MergeCommit,
 		Status:       MROpen,
 		CreatedAt:    parseTime(issue.CreatedAt),
 	}
@@ -660,6 +661,9 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 	if result.SourceIssueID != "" {
 		sourceID := result.SourceIssueID
 		closeReason := fmt.Sprintf("Merged in %s", mr.ID)
+		if mr.MergeCommit != "" {
+			closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, mr.TargetBranch, mr.MergeCommit)
+		}
 		if err := b.ForceCloseWithReason(closeReason, sourceID); err != nil {
 			// Check if already closed (by polecat's gt done) — that's fine
 			if issue, showErr := b.Show(sourceID); showErr == nil && beads.IssueStatus(issue.Status).IsTerminal() {
