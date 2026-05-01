@@ -433,17 +433,23 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 		return s.Pane, nil
 	}
 
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return "", fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
 	// Pre-condition guard: refuse to start a session with an empty hook.
 	// Without this, a polecat can come up, find no assigned work, escalate
 	// to the witness, and exit — wasting a session slot and generating
 	// noisy dispatch_failed alerts. See gu-56ik.
-	if err := verifyHookedWorkForAgent(s.AgentID(), ""); err != nil {
+	//
+	// Pass the rig's beads dir so the guard queries the correct database.
+	// Without this, the guard defaults to the town-root beads DB (HQ), which
+	// does not contain rig-specific beads (e.g. gu-* live in gastown_upstream/.beads/).
+	// Use the rig root as the working dir so bd list finds the rig's .beads/ DB.
+	rigRoot := filepath.Join(townRoot, s.RigName)
+	if err := verifyHookedWorkForAgent(s.AgentID(), rigRoot); err != nil {
 		return "", fmt.Errorf("refusing to start session for %s: %w", s.AgentID(), err)
-	}
-
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return "", fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
 	// Load rig config
