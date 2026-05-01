@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -319,5 +320,273 @@ func TestIsIdentityBeadInfo(t *testing.T) {
 				t.Errorf("isIdentityBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestVerifyBeadIDMatch verifies the exact-ID guard (gu-yphj) that prevents
+// bd's partial-ID resolver from silently routing dispatch to the wrong bead
+// when a requested full ID is a strict prefix of another bead's ID.
+//
+// Scenario: "gt-74f" exists (OPEN) and "gt-74fjf" exists (CLOSED). bd show
+// "gt-74f" can resolve to "gt-74fjf" via substring matching. Without this
+// guard, sling would silently reject with "work already completed" referring
+// to the wrong bead.
+func TestVerifyBeadIDMatch(t *testing.T) {
+	tests := []struct {
+		name        string
+		requested   string
+		resolved    string
+		wantErr     bool
+		wantErrSubs []string // substrings expected in the error
+	}{
+		{
+			name:      "exact match passes",
+			requested: "gt-74f",
+			resolved:  "gt-74f",
+			wantErr:   false,
+		},
+		{
+			name:      "different prefixed ID fails (prefix collision)",
+			requested: "gt-74f",
+			resolved:  "gt-74fjf",
+			wantErr:   true,
+			wantErrSubs: []string{
+				"gt-74f",
+				"gt-74fjf",
+				"prefix collision",
+			},
+		},
+		{
+			name:      "different-prefix mismatch also fails",
+			requested: "bd-abc",
+			resolved:  "gt-abc",
+			wantErr:   true,
+		},
+		{
+			name:      "bare hash without prefix is permitted to resolve loosely",
+			requested: "74f",
+			resolved:  "gt-74fjf",
+			wantErr:   false, // Partial IDs have no prefix -> loose resolution allowed
+		},
+		{
+			name:      "empty resolved ID (older bd or partial JSON) is permissive",
+			requested: "gt-74f",
+			resolved:  "",
+			wantErr:   false,
+		},
+		{
+			name:      "empty requested ID (no prefix) skips check",
+			requested: "",
+			resolved:  "gt-anything",
+			wantErr:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := verifyBeadIDMatch(tt.requested, tt.resolved)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("verifyBeadIDMatch(%q, %q) err = %v, wantErr %v",
+					tt.requested, tt.resolved, err, tt.wantErr)
+			}
+			if err == nil {
+				return
+			}
+			msg := err.Error()
+			for _, sub := range tt.wantErrSubs {
+				if !strings.Contains(msg, sub) {
+					t.Errorf("verifyBeadIDMatch(%q, %q) err %q missing substring %q",
+						tt.requested, tt.resolved, msg, sub)
+				}
+			}
+		})
+	}
+}
+
+// TestVerifyBeadExistsPrefixCollision reproduces gu-yphj: when bd's resolver
+// returns a different bead than requested (due to prefix collision on partial
+// ID fallback), verifyBeadExists must reject the result rather than silently
+// accepting the misrouted bead. This closes the gt-side gap that let sling
+// dispatch to the wrong (closed) bead.
+func TestVerifyBeadExistsPrefixCollision(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bd stub uses POSIX shell; skipping on Windows")
+	}
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+
+	// Stub bd that returns a bead with a DIFFERENT id than requested,
+	// simulating the prefix-collision substring match.
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	bdScript := `#!/bin/sh
+set -e
+cmd="$1"
+shift || true
+if [ "$cmd" = "--allow-stale" ]; then
+  cmd="$1"
+  shift || true
+fi
+case "$cmd" in
+  show)
+    # Always return gt-74fjf regardless of requested id (mimics bd's
+    # partial-resolver falling through to the longer substring match).
+    echo '[{"id":"gt-74fjf","title":"Old closed bead","status":"closed","assignee":""}]'
+    ;;
+  version)
+    echo "bd 0.1.0"
+    ;;
+esac
+exit 0
+`
+	_ = writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Caller asks for gt-74f, bd resolves to gt-74fjf — must be rejected.
+	err = verifyBeadExists("gt-74f")
+	if err == nil {
+		t.Fatal("verifyBeadExists(\"gt-74f\") = nil, want error (bd returned different id)")
+	}
+	msg := err.Error()
+	for _, sub := range []string{"gt-74f", "gt-74fjf"} {
+		if !strings.Contains(msg, sub) {
+			t.Errorf("verifyBeadExists error %q missing substring %q", msg, sub)
+		}
+	}
+}
+
+// TestGetBeadInfoPrefixCollision mirrors the verifyBeadExists test for
+// getBeadInfo, which is the path sling uses before checking status. Without
+// this guard a prefix collision would surface as "bead X is closed (work
+// already completed)" even though X is actually open.
+func TestGetBeadInfoPrefixCollision(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bd stub uses POSIX shell; skipping on Windows")
+	}
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	bdScript := `#!/bin/sh
+set -e
+cmd="$1"
+shift || true
+if [ "$cmd" = "--allow-stale" ]; then
+  cmd="$1"
+  shift || true
+fi
+case "$cmd" in
+  show)
+    echo '[{"id":"gt-74fjf","title":"Old closed bead","status":"closed","assignee":""}]'
+    ;;
+  version)
+    echo "bd 0.1.0"
+    ;;
+esac
+exit 0
+`
+	_ = writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	info, err := getBeadInfo("gt-74f")
+	if err == nil {
+		t.Fatalf("getBeadInfo(\"gt-74f\") = %+v, want error", info)
+	}
+	if !strings.Contains(err.Error(), "gt-74f") || !strings.Contains(err.Error(), "gt-74fjf") {
+		t.Errorf("getBeadInfo error %q does not mention both requested and resolved ids", err.Error())
+	}
+}
+
+// TestGetBeadInfoExactMatchSucceeds verifies the guard does not break the
+// happy path: when bd returns the exact id we asked for, getBeadInfo passes
+// through unchanged.
+func TestGetBeadInfoExactMatchSucceeds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bd stub uses POSIX shell; skipping on Windows")
+	}
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	bdScript := `#!/bin/sh
+set -e
+cmd="$1"
+shift || true
+if [ "$cmd" = "--allow-stale" ]; then
+  cmd="$1"
+  shift || true
+fi
+case "$cmd" in
+  show)
+    echo '[{"id":"gt-74f","title":"Live bead","status":"open","assignee":""}]'
+    ;;
+  version)
+    echo "bd 0.1.0"
+    ;;
+esac
+exit 0
+`
+	_ = writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	info, err := getBeadInfo("gt-74f")
+	if err != nil {
+		t.Fatalf("getBeadInfo(\"gt-74f\") unexpected err: %v", err)
+	}
+	if info.ID != "gt-74f" {
+		t.Errorf("getBeadInfo returned id = %q, want %q", info.ID, "gt-74f")
+	}
+	if info.Status != "open" {
+		t.Errorf("getBeadInfo returned status = %q, want %q", info.Status, "open")
 	}
 }

@@ -84,6 +84,7 @@ func resolveBeadDirFromRigsJSON(townRoot, prefix string) string {
 
 // beadInfo holds status and assignee for a bead.
 type beadInfo struct {
+	ID           string           `json:"id"`
 	Title        string           `json:"title"`
 	Status       string           `json:"status"`
 	Assignee     string           `json:"assignee"`
@@ -91,6 +92,34 @@ type beadInfo struct {
 	Labels       []string         `json:"labels,omitempty"`
 	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
 	IssueType    string           `json:"issue_type,omitempty"`
+}
+
+// verifyBeadIDMatch returns an error if the resolved bead ID does not match the
+// requested ID when the requested ID looks like a full prefixed ID. This is a
+// defensive guard against bd's partial-ID resolver falling through to substring
+// matching (gu-yphj): when e.g. "gt-74f" exists (OPEN) but "gt-74fjf" also
+// exists (CLOSED), bd show "gt-74f" can return "gt-74fjf" because the exact
+// filter matches neither locally and the substring fallback picks the longer
+// closed bead. That misrouting blocks dispatch of the legitimate bead.
+//
+// We consider the input a "full" ID if it has a valid prefix (as detected by
+// beads.ExtractPrefix). Partial IDs without a prefix (e.g. "74f") are allowed
+// to resolve loosely — that is the documented bd show contract. Full IDs must
+// match exactly or we surface a clear error pointing at the collision.
+func verifyBeadIDMatch(requestedID, resolvedID string) error {
+	// Partial IDs without a recognized prefix are allowed to resolve loosely.
+	if beads.ExtractPrefix(requestedID) == "" {
+		return nil
+	}
+	if resolvedID == "" {
+		// bd show returned no ID field (older bd or partial JSON) — can't verify,
+		// be permissive rather than break existing callers.
+		return nil
+	}
+	if resolvedID == requestedID {
+		return nil
+	}
+	return fmt.Errorf("bead '%s' not found: bd show resolved to a different bead '%s' (prefix collision — use the exact ID)", requestedID, resolvedID)
 }
 
 // isDeferredBead checks whether a bead should be rejected from slinging because
@@ -298,6 +327,12 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 // Resolves the rig directory from the bead's prefix for correct dolt access.
 // StripBeadsDir prevents inherited BEADS_DIR from overriding the resolved
 // directory, which caused rig-prefixed beads to fail (GH#2126).
+//
+// Exact-ID guard (gu-yphj): when the requested ID looks like a full prefixed
+// ID, we reject the result if bd's resolver returned a different bead. Without
+// this, a prefix collision (e.g. "gt-74f" vs "gt-74fjf") can silently route
+// dispatch to the wrong bead — typically the closed one, which then blocks
+// sling with "work already completed".
 func verifyBeadExists(beadID string) error {
 	out, err := BdCmd("show", beadID, "--json", "--allow-stale").
 		Dir(resolveBeadDir(beadID)).
@@ -310,11 +345,23 @@ func verifyBeadExists(beadID string) error {
 	if len(out) == 0 {
 		return fmt.Errorf("bead '%s' not found", beadID)
 	}
-	return nil
+	// Parse and verify the returned ID matches the requested ID to catch
+	// bd's partial-ID resolver falling through to substring matching.
+	var infos []beadInfo
+	if err := json.Unmarshal(out, &infos); err != nil {
+		// Parse failure: be permissive — original behavior was to skip parsing.
+		return nil
+	}
+	if len(infos) == 0 {
+		return fmt.Errorf("bead '%s' not found", beadID)
+	}
+	return verifyBeadIDMatch(beadID, infos[0].ID)
 }
 
 // getBeadInfo returns status and assignee for a bead.
 // Resolves the rig directory from the bead's prefix for correct dolt access.
+//
+// Exact-ID guard (gu-yphj): see verifyBeadExists.
 func getBeadInfo(beadID string) (*beadInfo, error) {
 	out, err := BdCmd("show", beadID, "--json", "--allow-stale").
 		Dir(resolveBeadDir(beadID)).
@@ -334,6 +381,9 @@ func getBeadInfo(beadID string) (*beadInfo, error) {
 	}
 	if len(infos) == 0 {
 		return nil, fmt.Errorf("bead '%s' not found", beadID)
+	}
+	if err := verifyBeadIDMatch(beadID, infos[0].ID); err != nil {
+		return nil, err
 	}
 	return &infos[0], nil
 }
@@ -412,6 +462,13 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 		}
 		if len(issues) == 0 {
 			return fmt.Errorf("bead not found")
+		}
+		// Defense-in-depth (gu-yphj): if bd's resolver returned a different bead
+		// than requested, refuse the write rather than mutate the wrong bead's
+		// fields. getBeadInfo also guards, but this path runs from several sling
+		// entry points and the write is irreversible.
+		if err := verifyBeadIDMatch(beadID, issues[0].ID); err != nil {
+			return fmt.Errorf("refusing to update fields on misrouted bead: %w", err)
 		}
 		issue = &issues[0]
 	}
