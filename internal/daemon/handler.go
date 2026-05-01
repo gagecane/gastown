@@ -264,7 +264,12 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		// pick the same first idle dog — infinite-looping the same failed
 		// dispatch instead of advancing to the next idle dog in the pack.
 		// See gt-o24.
-		idleDog := findDispatchableDog(mgr, sm, d.logger)
+		//
+		// We also skip dogs currently in a startup-failure backoff window.
+		// A dog whose session keeps dying during startup (OOM, missing
+		// binary, bad config) would otherwise be re-dispatched every tick,
+		// burning API credits and polluting logs. See gu-cvbm.
+		idleDog := findDispatchableDog(mgr, sm, d.dogBackoff, d.logger)
 		if idleDog == nil {
 			d.logger.Printf("Handler: no dispatchable idle dogs available, deferring remaining plugins")
 			return
@@ -299,13 +304,29 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		if err := sm.Start(idleDog.Name, dog.SessionStartOptions{
 			WorkDesc: workDesc,
 		}); err != nil {
-			d.logger.Printf("Handler: failed to start session for dog %s: %v", idleDog.Name, err)
+			// Record the failure and advance the backoff schedule so we
+			// don't rapid-fire retry the same dog if the underlying cause
+			// is persistent (OOM, missing binary, bad config). See gu-cvbm.
+			consecutive, delay := d.dogBackoff.RecordFailure(idleDog.Name)
+			if consecutive >= dogFailureWarnThreshold {
+				d.logger.Printf("Handler: WARN dog %s has failed to start %d consecutive times; backing off %v before next attempt",
+					idleDog.Name, consecutive, delay)
+			} else if delay > 0 {
+				d.logger.Printf("Handler: failed to start session for dog %s (attempt %d): %v — backoff %v before next attempt",
+					idleDog.Name, consecutive, err, delay)
+			} else {
+				d.logger.Printf("Handler: failed to start session for dog %s: %v", idleDog.Name, err)
+			}
 			// Roll back assignment on session start failure.
 			if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
 				d.logger.Printf("Handler: failed to clear work after start failure for dog %s: %v", idleDog.Name, clearErr)
 			}
 			continue
 		}
+
+		// Successful start — clear any backoff state for this dog so a
+		// past failure streak doesn't linger.
+		d.dogBackoff.RecordSuccess(idleDog.Name)
 
 		d.logger.Printf("Handler: dispatched plugin %s to dog %s", p.Name, idleDog.Name)
 
@@ -324,8 +345,9 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 }
 
 // findDispatchableDog returns the first dog in the kennel whose registry
-// state is idle AND whose tmux session is NOT currently running. Returns nil
-// when no dog satisfies both conditions.
+// state is idle, whose tmux session is NOT currently running, AND which is
+// not currently in a startup-failure backoff window. Returns nil when no
+// dog satisfies all three conditions.
 //
 // This exists because a dog can be marked idle (via gt dog done or the reaper)
 // before its tmux session fully terminates, producing a transient window where
@@ -333,9 +355,15 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 // dispatch tick infinite-loops the same failed dispatch instead of advancing
 // to another genuinely-free dog in the pack. See gt-o24.
 //
+// The backoff filter addresses a related failure mode: a dog whose session
+// keeps dying during startup (OOM, missing binary, bad config) would
+// otherwise be re-dispatched every heartbeat, burning API credits and
+// polluting logs. See gu-cvbm.
+//
 // IsRunning errors are logged and treated as "not dispatchable" so a flaky
-// tmux check can't wedge the whole dispatch cycle.
-func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.Logger) *dog.Dog {
+// tmux check can't wedge the whole dispatch cycle. The backoff tracker is
+// optional (nil disables the filter) to keep tests simple.
+func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, backoff *DogStartupBackoff, logger *log.Logger) *dog.Dog {
 	dogs, err := mgr.List()
 	if err != nil {
 		logger.Printf("Handler: failed to list dogs while picking dispatch target: %v", err)
@@ -352,6 +380,12 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.L
 		}
 		if running {
 			continue
+		}
+		if backoff != nil {
+			if skip, reason := backoff.ShouldSkip(d.Name); skip {
+				logger.Printf("Handler: skipping dog %s: %s", d.Name, reason)
+				continue
+			}
 		}
 		return d
 	}

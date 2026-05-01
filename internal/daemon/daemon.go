@@ -130,6 +130,12 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	knownRigsCache      []string
 	knownRigsCacheValid bool
+
+	// dogBackoff tracks per-dog startup failures and enforces exponential
+	// backoff between retries in dispatchPlugins. Prevents tight retry loops
+	// when a dog's session repeatedly dies during startup (e.g., OOM
+	// pressure, missing binary, bad config). See gu-cvbm.
+	dogBackoff *DogStartupBackoff
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -334,6 +340,7 @@ func New(config *Config) (*Daemon, error) {
 		otelProvider:    otelProvider,
 		metrics:         dm,
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
+		dogBackoff:      NewDogStartupBackoff(),
 	}, nil
 }
 

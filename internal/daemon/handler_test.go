@@ -410,7 +410,7 @@ func TestFindDispatchableDog_SkipsWorkingDogs(t *testing.T) {
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
 
-	got := findDispatchableDog(mgr, sm, d.logger)
+	got := findDispatchableDog(mgr, sm, nil, d.logger)
 	if got == nil {
 		t.Fatal("findDispatchableDog returned nil, want bravo")
 	}
@@ -429,7 +429,7 @@ func TestFindDispatchableDog_AllWorkingReturnsNil(t *testing.T) {
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
 
-	got := findDispatchableDog(mgr, sm, d.logger)
+	got := findDispatchableDog(mgr, sm, nil, d.logger)
 	if got != nil {
 		t.Errorf("findDispatchableDog = %q, want nil (all working)", got.Name)
 	}
@@ -442,7 +442,7 @@ func TestFindDispatchableDog_EmptyKennelReturnsNil(t *testing.T) {
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
 
-	got := findDispatchableDog(mgr, sm, d.logger)
+	got := findDispatchableDog(mgr, sm, nil, d.logger)
 	if got != nil {
 		t.Errorf("findDispatchableDog = %q, want nil (empty kennel)", got.Name)
 	}
@@ -464,11 +464,67 @@ func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 	mgr := dog.NewManager(townRoot, nil)
 	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
 
-	got := findDispatchableDog(mgr, sm, d.logger)
+	got := findDispatchableDog(mgr, sm, nil, d.logger)
 	if got == nil {
 		t.Fatal("findDispatchableDog returned nil; expected an idle dog")
 	}
 	if got.Name != "alpha" && got.Name != "bravo" {
 		t.Errorf("findDispatchableDog = %q, want alpha or bravo", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_SkipsDogsInBackoff verifies that findDispatchableDog
+// skips dogs whose startup-failure backoff window is still active, advancing
+// to the next idle dog. This is the gu-cvbm regression guard: without this
+// filter, a dog whose session repeatedly dies during startup would be
+// re-dispatched every tick.
+func TestFindDispatchableDog_SkipsDogsInBackoff(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	// Put alpha into an active backoff window (2 consecutive failures
+	// → 3-minute delay). bravo has no failures, so it should be picked.
+	backoff := NewDogStartupBackoff()
+	backoff.RecordFailure("alpha")
+	backoff.RecordFailure("alpha")
+
+	got := findDispatchableDog(mgr, sm, backoff, d.logger)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil, want bravo")
+	}
+	if got.Name != "bravo" {
+		t.Errorf("findDispatchableDog = %q, want bravo (alpha in backoff must be skipped)", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_AllDogsInBackoffReturnsNil verifies that when
+// every idle dog is in an active backoff window, no dispatch target is
+// selected (returns nil) rather than falling back to a backed-off dog.
+func TestFindDispatchableDog_AllDogsInBackoffReturnsNil(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	// Both dogs have 2 consecutive failures → both in backoff.
+	backoff := NewDogStartupBackoff()
+	backoff.RecordFailure("alpha")
+	backoff.RecordFailure("alpha")
+	backoff.RecordFailure("bravo")
+	backoff.RecordFailure("bravo")
+
+	got := findDispatchableDog(mgr, sm, backoff, d.logger)
+	if got != nil {
+		t.Errorf("findDispatchableDog = %q, want nil (all in backoff)", got.Name)
 	}
 }
