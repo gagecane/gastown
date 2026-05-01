@@ -130,6 +130,13 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	knownRigsCache      []string
 	knownRigsCacheValid bool
+
+	// deaconStartFn is a test seam for the deacon start path invoked by
+	// ensureDeaconRunning. When nil (production), ensureDeaconRunning builds
+	// a real deacon.Manager and calls Start. Tests may set this to a stub to
+	// avoid the real tmux/Claude startup path (which blocks in WaitForCommand
+	// against a fake tmux binary). See gu-j0xs.
+	deaconStartFn func() error
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -1389,9 +1396,16 @@ func (d *Daemon) ensureDeaconRunning() {
 		}
 	}
 
-	mgr := deacon.NewManager(d.config.TownRoot)
+	// deaconStartFn is a test seam (see Daemon struct). In production it is
+	// nil and we build a real deacon.Manager. Tests substitute a stub to
+	// avoid the real tmux/Claude startup path.
+	start := d.deaconStartFn
+	if start == nil {
+		mgr := deacon.NewManager(d.config.TownRoot)
+		start = func() error { return mgr.Start("") }
+	}
 
-	if err := mgr.Start(""); err != nil {
+	if err := start(); err != nil {
 		if err == deacon.ErrAlreadyRunning {
 			// Deacon is running - record success to reset backoff
 			if d.restartTracker != nil {

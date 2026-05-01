@@ -56,6 +56,12 @@ func newTestDaemonWithStores(t *testing.T, townRoot string, stores map[string]be
 		tmux:        tmux.NewTmux(),
 		beadsStores: stores,
 		ctx:         context.Background(),
+		// Stub the deacon start path so tests that exercise
+		// restartStuckDeacon do not hang in tmux.WaitForCommand against the
+		// fake tmux binary. Returning ErrAlreadyRunning mimics a healthy
+		// deacon that is already up — the restart tracker records success
+		// and the code returns without further tmux interaction.
+		deaconStartFn: func() error { return deacon.ErrAlreadyRunning },
 	}
 }
 
