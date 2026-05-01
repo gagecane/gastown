@@ -3,6 +3,8 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -316,3 +318,120 @@ func TestOrphanedAttachmentsCheck_AgentExists(t *testing.T) {
 		}
 	}
 }
+
+// TestHookAttachmentValidCheck_FixUsesLocalLookup is a regression test for
+// gu-vkg3: HookAttachmentValidCheck.Fix MUST look up the pinned bead in the
+// rig's own .beads directory (NOT via prefix routing).
+//
+// Before the fix, Fix called DetachMolecule → Show → prefix routing. For a
+// legacy pinned bead whose prefix routes to a different rig than where it
+// actually lives, Show routed lookups to the wrong DB and returned
+// ErrNotFound, causing Fix to emit "failed to detach ... issue not found"
+// and leaving the stale attached_molecule in place forever.
+//
+// After the fix, Fix uses DetachMoleculeLocal, which operates on the
+// directory we already located the pinned bead in and bypasses routing.
+//
+// This test uses a bd-stub that returns "not found" in the town DB but
+// returns the pinned bead in the legacy rig DB; with routing, Fix would
+// fail, and without routing it succeeds.
+func TestHookAttachmentValidCheck_FixUsesLocalLookup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script bd stub not supported on Windows")
+	}
+
+	tmpDir := t.TempDir()
+
+	// Town-level .beads + routes that map "gt-" to the TOWN (not the rig).
+	// This is the misconfiguration that produces the gu-vkg3 failure.
+	townBeads := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "mayor", "town.json"), []byte(`{}`), 0o644); err != nil {
+		// mayor/town.json is needed by getTownRoot; create parent first.
+		if err := os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "mayor", "town.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"."}` + "\n"
+	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig-level .beads that ACTUALLY holds the stale "gt-*" pinned bead.
+	rigBeads := filepath.Join(tmpDir, "legacy", ".beads")
+	if err := os.MkdirAll(filepath.Join(rigBeads, "locks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub bd: returns the pinned bead only when running in the legacy rig DB.
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	updateLog := filepath.Join(tmpDir, "updates.log")
+	bdScript := `#!/bin/sh
+while [ "$1" = "--allow-stale" ]; do shift; done
+cmd="$1"; shift
+location=""
+if [ -n "$BEADS_DIR" ]; then
+    location="$BEADS_DIR"
+else
+    location="$PWD/.beads"
+fi
+case "$cmd" in
+  show)
+    case "$location" in
+      *legacy*)
+        cat <<'JSON'
+[{"id":"gt-stale-legacy","title":"witness Handoff","status":"pinned","description":"attached_molecule: mol-dead"}]
+JSON
+        ;;
+      *)
+        echo "Issue not found: $1" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  update)
+    echo "location=$location args=$*" >> "` + updateLog + `"
+    ;;
+esac
+exit 0
+`
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BEADS_DIR", "")
+
+	check := NewHookAttachmentValidCheck()
+	check.invalidAttachments = []invalidAttachment{
+		{
+			pinnedBeadID:  "gt-stale-legacy",
+			pinnedBeadDir: rigBeads, // where the bead was actually FOUND
+			moleculeID:    "mol-dead",
+			reason:        "not_found",
+		},
+	}
+
+	ctx := &CheckContext{TownRoot: tmpDir}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed (regression: Fix must use DetachMoleculeLocal, not DetachMolecule): %v", err)
+	}
+
+	// The update must have landed in the legacy rig DB, not the town DB.
+	data, err := os.ReadFile(updateLog)
+	if err != nil {
+		t.Fatalf("no bd update was recorded — Fix did not clear attached_molecule: %v", err)
+	}
+	if !strings.Contains(string(data), "legacy") {
+		t.Errorf("Fix updated the wrong DB (expected legacy rig); updates.log:\n%s", data)
+	}
+}
+

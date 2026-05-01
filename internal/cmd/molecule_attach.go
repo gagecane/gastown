@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -94,10 +97,29 @@ func runMoleculeDetach(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.New(workDir)
+	// Locate the pinned bead in its actual home DB.
+	//
+	// We can't rely solely on prefix routing (routes.jsonl): legacy pinned
+	// beads can have a prefix that routes to a different rig than where the
+	// bead actually lives. For example, a "gt-*" pinned bead in
+	// casc_constructs/mayor/rig/.beads predates the town-level "gt-" prefix
+	// mapping and still lives in the rig's DB even though routing would send
+	// lookups to the town DB. Without this fallback, `gt mol detach` returns
+	// "issue not found" for all such stale pins, forcing users to `bd close
+	// --force` and leaving the attached_molecule metadata behind. (gu-vkg3)
+	b, found, err := resolveDetachTarget(workDir, pinnedBeadID)
+	if err != nil {
+		return fmt.Errorf("checking attachment: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("checking attachment: %w", beads.ErrNotFound)
+	}
 
-	// Check current attachment first
-	attachment, err := b.GetAttachment(pinnedBeadID)
+	// Check current attachment.
+	// DetachMoleculeWithAuditLocal only reads/writes the pinned bead's
+	// description, so it naturally tolerates dead molecule references — the
+	// attached_molecule ID is never dereferenced, just cleared. (gu-vkg3)
+	attachment, err := b.GetAttachmentLocal(pinnedBeadID)
 	if err != nil {
 		return fmt.Errorf("checking attachment: %w", err)
 	}
@@ -109,8 +131,9 @@ func runMoleculeDetach(cmd *cobra.Command, args []string) error {
 
 	previousMolecule := attachment.AttachedMolecule
 
-	// Detach the molecule with audit logging
-	_, err = b.DetachMoleculeWithAudit(pinnedBeadID, beads.DetachOptions{
+	// Detach the molecule with audit logging, using the bead's actual home
+	// DB rather than the prefix-routed DB (gu-vkg3).
+	_, err = b.DetachMoleculeWithAuditLocal(pinnedBeadID, beads.DetachOptions{
 		Operation: "detach",
 		Agent:     detectCurrentAgent(),
 	})
@@ -121,6 +144,80 @@ func runMoleculeDetach(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Detached %s from %s\n", style.Bold.Render("✓"), previousMolecule, pinnedBeadID)
 
 	return nil
+}
+
+// resolveDetachTarget returns a Beads wrapper bound to the DB that actually
+// holds the given pinned bead. It tries, in order:
+//
+//  1. Prefix-based routing via routes.jsonl (the common case).
+//  2. A fallback scan of all .beads directories under the town root
+//     (catches legacy/misclassified pins whose prefix routes elsewhere).
+//
+// The returned Beads wrapper is configured to use ShowLocal-family methods
+// so that callers can operate on the bead without triggering another round
+// of routing. The found bool is false when the bead cannot be located in
+// any rig's DB; err is reserved for IO / unexpected errors, not "not found".
+func resolveDetachTarget(workDir, pinnedBeadID string) (*beads.Beads, bool, error) {
+	// Step 1: try prefix routing. beads.ForIssueID returns a wrapper bound
+	// to the routed rig's beads dir when the prefix matches a route.
+	routed := beads.New(workDir).ForIssueID(pinnedBeadID)
+	if _, err := routed.ShowLocal(pinnedBeadID); err == nil {
+		return routed, true, nil
+	} else if !errors.Is(err, beads.ErrNotFound) && !strings.Contains(err.Error(), "not found") {
+		// Non-404 errors (IO, subprocess failures) surface to the caller.
+		return nil, false, err
+	}
+
+	// Step 2: scan every .beads directory under the town root. This is
+	// bounded by the number of rigs in the town (typically < 50) and only
+	// runs when routing missed, so the cost is acceptable.
+	townRoot := beads.FindTownRoot(workDir)
+	if townRoot == "" {
+		return nil, false, nil
+	}
+	for _, rigBeadsDir := range discoverRigBeadsDirs(townRoot) {
+		rigDir := filepath.Dir(rigBeadsDir)
+		b := beads.NewWithBeadsDir(rigDir, rigBeadsDir)
+		if _, err := b.ShowLocal(pinnedBeadID); err == nil {
+			return b, true, nil
+		} else if !errors.Is(err, beads.ErrNotFound) && !strings.Contains(err.Error(), "not found") {
+			// Skip rigs with IO errors; don't fail the whole scan on one flaky DB.
+			fmt.Fprintf(os.Stderr, "Warning: error probing %s for %s: %v\n", rigBeadsDir, pinnedBeadID, err)
+			continue
+		}
+	}
+
+	return nil, false, nil
+}
+
+// discoverRigBeadsDirs returns every .beads directory under townRoot at
+// depth ≤ 2, including the town's own .beads. Mirrors the discovery logic
+// used by the doctor's hook-attachment-valid check so both code paths see
+// the same set of candidate DBs.
+func discoverRigBeadsDirs(townRoot string) []string {
+	var dirs []string
+
+	// Town-level first.
+	townBeads := filepath.Join(townRoot, ".beads")
+	if info, err := os.Stat(townBeads); err == nil && info.IsDir() {
+		dirs = append(dirs, townBeads)
+	}
+
+	// One level deep: <townRoot>/<rig>/.beads
+	entries, err := os.ReadDir(townRoot)
+	if err != nil {
+		return dirs
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(townRoot, entry.Name(), ".beads")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			dirs = append(dirs, candidate)
+		}
+	}
+	return dirs
 }
 
 func runMoleculeAttachment(cmd *cobra.Command, args []string) error {

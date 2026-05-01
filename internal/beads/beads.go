@@ -511,6 +511,17 @@ func (b *Beads) getResolvedBeadsDir() string {
 // the given issue ID. This is needed for cross-rig write operations that use an
 // ID to determine the owning database.
 func (b *Beads) forIssueID(id string) *Beads {
+	return b.ForIssueID(id)
+}
+
+// ForIssueID returns a Beads wrapper bound to the correct beads directory for
+// the given issue ID. This is needed for cross-rig write operations that use an
+// ID to determine the owning database.
+//
+// Exported variant of forIssueID for use by callers outside the beads package
+// (e.g., gt mol detach, gt doctor --fix) that need to perform lookups/updates
+// on beads owned by a rig other than the caller's cwd.
+func (b *Beads) ForIssueID(id string) *Beads {
 	resolved := ResolveBeadsDirForID(b.getResolvedBeadsDir(), id)
 	if resolved == "" || resolved == b.getResolvedBeadsDir() {
 		return b
@@ -1220,6 +1231,27 @@ func (b *Beads) Show(id string) (*Issue, error) {
 		return target.Show(id)
 	}
 
+	return b.showLocal(id)
+}
+
+// ShowLocal returns detailed information about an issue using the beads
+// directory this wrapper is bound to, WITHOUT consulting routes.jsonl.
+//
+// This is needed for stale/misclassified beads where the prefix-based route
+// points at a different rig than where the bead actually lives (e.g., a
+// legacy standalone-town rig with a "gt-*" bead that predates migration to
+// a child-rig prefix). Callers that have independently verified a bead's
+// location (e.g., by enumerating .beads directories) can use this to bypass
+// routing and operate directly on the known DB.
+//
+// See gu-vkg3 for the motivating bug.
+func (b *Beads) ShowLocal(id string) (*Issue, error) {
+	return b.showLocal(id)
+}
+
+// showLocal is the internal non-routing Show implementation shared by Show
+// (post-routing) and ShowLocal (explicit non-routing).
+func (b *Beads) showLocal(id string) (*Issue, error) {
 	if b.store != nil {
 		return b.storeShow(id)
 	}

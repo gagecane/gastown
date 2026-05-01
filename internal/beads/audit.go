@@ -28,8 +28,22 @@ type DetachOptions struct {
 
 // DetachMoleculeWithAudit removes molecule attachment from a pinned bead and logs the operation.
 // Uses advisory file locking to prevent concurrent read-modify-write races.
+// Looks up the pinned bead via prefix routing (routes.jsonl).
 // Returns the updated issue.
 func (b *Beads) DetachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions) (*Issue, error) {
+	return b.detachMoleculeWithAudit(pinnedBeadID, opts, false)
+}
+
+// DetachMoleculeWithAuditLocal removes molecule attachment and logs the operation
+// using the beads directory this wrapper is bound to, WITHOUT consulting routes.
+// See DetachMoleculeLocal for the rationale (gu-vkg3).
+func (b *Beads) DetachMoleculeWithAuditLocal(pinnedBeadID string, opts DetachOptions) (*Issue, error) {
+	return b.detachMoleculeWithAudit(pinnedBeadID, opts, true)
+}
+
+// detachMoleculeWithAudit is the internal implementation shared by
+// DetachMoleculeWithAudit and DetachMoleculeWithAuditLocal.
+func (b *Beads) detachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions, local bool) (*Issue, error) {
 	// Acquire per-bead lock to serialize concurrent attach/detach operations
 	unlock, err := b.lockBead(pinnedBeadID)
 	if err != nil {
@@ -37,8 +51,13 @@ func (b *Beads) DetachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions)
 	}
 	defer unlock()
 
+	showFn := b.Show
+	if local {
+		showFn = b.ShowLocal
+	}
+
 	// Fetch the pinned bead first to get previous state
-	issue, err := b.Show(pinnedBeadID)
+	issue, err := showFn(pinnedBeadID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching pinned bead: %w", err)
 	}
@@ -77,7 +96,7 @@ func (b *Beads) DetachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions)
 	}
 
 	// Re-fetch to return updated state
-	return b.Show(pinnedBeadID)
+	return showFn(pinnedBeadID)
 }
 
 // LogDetachAudit appends an audit entry to the audit log file.

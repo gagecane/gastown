@@ -173,9 +173,16 @@ func (c *HookAttachmentValidCheck) Fix(ctx *CheckContext) error {
 	var errors []string
 
 	for _, inv := range c.invalidAttachments {
+		// Use the beads directory we found the pinned bead in, WITHOUT
+		// prefix routing. A pinned bead can live in a rig whose prefix
+		// routes to a different DB (legacy standalone-town rigs), and
+		// DetachMolecule's default routing would send us looking in the
+		// wrong place and return "issue not found". Since we already
+		// located the bead by scanning rig DBs, route-free detach is the
+		// correct behavior here. (gu-vkg3)
 		b := beads.New(filepath.Dir(inv.pinnedBeadDir))
 
-		_, err := b.DetachMolecule(inv.pinnedBeadID)
+		_, err := b.DetachMoleculeLocal(inv.pinnedBeadID)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("failed to detach from %s: %v", inv.pinnedBeadID, err))
 		}

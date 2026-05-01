@@ -242,8 +242,31 @@ func (b *Beads) AttachMolecule(pinnedBeadID, moleculeID string) (*Issue, error) 
 
 // DetachMolecule removes molecule attachment from a pinned bead.
 // Uses advisory file locking to prevent concurrent read-modify-write races.
+// Looks up the pinned bead via prefix routing (routes.jsonl).
 // Returns the updated issue.
 func (b *Beads) DetachMolecule(pinnedBeadID string) (*Issue, error) {
+	return b.detachMolecule(pinnedBeadID, false)
+}
+
+// DetachMoleculeLocal removes molecule attachment from a pinned bead using
+// the beads directory this wrapper is bound to, WITHOUT consulting routes.
+//
+// This is the right entry point for callers that have independently verified
+// where the pinned bead lives (e.g., `gt doctor --fix` after scanning every
+// rig's .beads directory). It avoids the failure mode where prefix routing
+// sends the lookup to a different DB than the one that actually holds the
+// bead — a common case for legacy pinned beads whose prefix predates the
+// current rig/prefix mapping in routes.jsonl.
+//
+// See gu-vkg3 for the motivating bug.
+func (b *Beads) DetachMoleculeLocal(pinnedBeadID string) (*Issue, error) {
+	return b.detachMolecule(pinnedBeadID, true)
+}
+
+// detachMolecule is the internal implementation of DetachMolecule and
+// DetachMoleculeLocal. When local is true, the pinned bead is looked up in
+// the wrapper's own beads dir without prefix routing.
+func (b *Beads) detachMolecule(pinnedBeadID string, local bool) (*Issue, error) {
 	// Acquire per-bead lock to serialize concurrent attach/detach operations
 	unlock, err := b.lockBead(pinnedBeadID)
 	if err != nil {
@@ -251,8 +274,13 @@ func (b *Beads) DetachMolecule(pinnedBeadID string) (*Issue, error) {
 	}
 	defer unlock()
 
+	showFn := b.Show
+	if local {
+		showFn = b.ShowLocal
+	}
+
 	// Fetch the pinned bead
-	issue, err := b.Show(pinnedBeadID)
+	issue, err := showFn(pinnedBeadID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching pinned bead: %w", err)
 	}
@@ -271,13 +299,25 @@ func (b *Beads) DetachMolecule(pinnedBeadID string) (*Issue, error) {
 	}
 
 	// Re-fetch to return updated state
-	return b.Show(pinnedBeadID)
+	return showFn(pinnedBeadID)
 }
 
 // GetAttachment returns the attachment fields from a pinned bead.
 // Returns nil if no molecule is attached.
 func (b *Beads) GetAttachment(pinnedBeadID string) (*AttachmentFields, error) {
 	issue, err := b.Show(pinnedBeadID)
+	if err != nil {
+		return nil, err
+	}
+
+	return ParseAttachmentFields(issue), nil
+}
+
+// GetAttachmentLocal returns the attachment fields from a pinned bead using
+// the beads directory this wrapper is bound to, WITHOUT consulting routes.
+// See DetachMoleculeLocal for the rationale.
+func (b *Beads) GetAttachmentLocal(pinnedBeadID string) (*AttachmentFields, error) {
+	issue, err := b.ShowLocal(pinnedBeadID)
 	if err != nil {
 		return nil, err
 	}
