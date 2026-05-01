@@ -304,6 +304,103 @@ func TestEnsureSettingsForRole_ClaudeUsesSettingsDir(t *testing.T) {
 	}
 }
 
+// TestEnsureSettingsForRole_ClaudeCommandsInSettingsDir verifies that slash
+// commands are provisioned in settingsDir (not workDir) for Claude, since
+// Claude Code traverses parent directories to find them. Keeping commands
+// out of workDir prevents gastown files from polluting the customer worktree
+// where they could otherwise be accidentally committed and pushed upstream.
+// Regression guard for gu-gh4q.
+func TestEnsureSettingsForRole_ClaudeCommandsInSettingsDir(t *testing.T) {
+	settingsDir := t.TempDir()
+	workDir := t.TempDir()
+
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider:     "claude",
+			Dir:          ".claude",
+			SettingsFile: "settings.json",
+		},
+	}
+
+	err := EnsureSettingsForRole(settingsDir, workDir, "polecat", rc)
+	if err != nil {
+		t.Fatalf("EnsureSettingsForRole() error = %v", err)
+	}
+
+	// Commands should be in settingsDir (parent dir, discoverable via Claude's
+	// directory traversal from the workdir upward).
+	for _, cmd := range []string{"done.md", "handoff.md", "review.md"} {
+		if _, err := os.Stat(settingsDir + "/.claude/commands/" + cmd); err != nil {
+			t.Errorf("Claude slash command %s should be in settingsDir/.claude/commands/", cmd)
+		}
+		// Commands must NOT be in workDir — that would pollute the customer worktree.
+		if _, err := os.Stat(workDir + "/.claude/commands/" + cmd); err == nil {
+			t.Errorf("Claude slash command %s should NOT be in workDir/.claude/commands/ (would pollute worktree)", cmd)
+		}
+	}
+}
+
+// TestEnsureSettingsForRole_ClaudeCommandsInWorkDirWhenSame verifies that for
+// roles like mayor where settingsDir == workDir, commands are provisioned in
+// that directory as expected (no change in behavior).
+func TestEnsureSettingsForRole_ClaudeCommandsInWorkDirWhenSame(t *testing.T) {
+	dir := t.TempDir()
+
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider:     "claude",
+			Dir:          ".claude",
+			SettingsFile: "settings.json",
+		},
+	}
+
+	err := EnsureSettingsForRole(dir, dir, "mayor", rc)
+	if err != nil {
+		t.Fatalf("EnsureSettingsForRole() error = %v", err)
+	}
+
+	// Commands and settings both live in the same dir for mayor.
+	for _, cmd := range []string{"done.md", "handoff.md", "review.md"} {
+		if _, err := os.Stat(dir + "/.claude/commands/" + cmd); err != nil {
+			t.Errorf("Claude slash command %s should be in dir when settingsDir == workDir", cmd)
+		}
+	}
+}
+
+// TestEnsureSettingsForRole_OpenCodeCommandsStayInWorkDir verifies that agents
+// without parent-directory traversal (OpenCode) still get commands in workDir.
+// OpenCode must find commands adjacent to its settings, so we cannot move them
+// to a parent directory.
+func TestEnsureSettingsForRole_OpenCodeCommandsStayInWorkDir(t *testing.T) {
+	settingsDir := t.TempDir()
+	workDir := t.TempDir()
+
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider:     "opencode",
+			Dir:          "plugins",
+			SettingsFile: "gastown.js",
+		},
+	}
+
+	err := EnsureSettingsForRole(settingsDir, workDir, "polecat", rc)
+	if err != nil {
+		t.Fatalf("EnsureSettingsForRole() error = %v", err)
+	}
+
+	// OpenCode commands must be in workDir (no parent-dir traversal support).
+	for _, cmd := range []string{"done.md", "handoff.md", "review.md"} {
+		if _, err := os.Stat(workDir + "/.opencode/commands/" + cmd); err != nil {
+			t.Errorf("OpenCode slash command %s should be in workDir/.opencode/commands/: %v", cmd, err)
+		}
+	}
+	// Key assertion: OpenCode slash commands must NOT end up in settingsDir,
+	// because OpenCode has no flag analogous to Claude's --settings for commands.
+	if _, err := os.Stat(settingsDir + "/.opencode"); err == nil {
+		t.Error("OpenCode should not provision commands in settingsDir (would be unreachable)")
+	}
+}
+
 func TestGetStartupFallbackInfo_HooksWithPrompt(t *testing.T) {
 	// Claude: hooks enabled, prompt mode "arg"
 	rc := &config.RuntimeConfig{
