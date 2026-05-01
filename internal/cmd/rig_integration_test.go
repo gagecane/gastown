@@ -45,7 +45,11 @@ var agentAllowlist = map[string][]string{
 	// Mayor is a clone (not worktree) - it's the canonical copy of the user's repo.
 	// For tracked beads repos, bd init creates files here (runs in mayor/rig).
 	"mayor": {
-		"?? AGENTS.md",  // bd init: creates multi-provider instructions (tracked beads repos only). Cleanup: gu-ksq6
+		// bd init writes AGENTS.md as the user-facing multi-provider instructions
+		// for the user's own repo. This is a legitimate bd init artifact — if the
+		// user wants it committed, they commit it; if not, their .gitignore
+		// excludes it. Gastown is just the caller. No cleanup needed. (gu-ksq6)
+		"?? AGENTS.md",
 		"?? .claude/",   // bd init: creates .claude/settings.json with bd prime hooks (tracked beads repos only). Kept intentionally: the hook is useful for the user's Claude sessions in their own repo, and .gitignore prevents accidental commit (defense-in-depth). gu-gh4q audited and closed this sub-task.
 		"?? .gitignore", // bd init writes a root .gitignore with Gas Town patterns on tracked-beads-repo clones. Mayor does NOT use rig.EnsureGitignorePatterns — root cause is in bd init itself. Left as-is; relocating bd init's write would require a beads-repo change (outside this project). gu-o406 verified mayor is not a caller of EnsureGitignorePatterns.
 	},
