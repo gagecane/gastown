@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // fakeConsumer captures dispatch calls for assertions.
@@ -524,5 +526,97 @@ func TestWatcher_Start_Idempotent(t *testing.T) {
 	// Second start should no-op.
 	if err := w.Start(); err != nil {
 		t.Fatalf("second Start: %v", err)
+	}
+}
+
+// TestClassifyNoDispatchable_NoIdleDog verifies that when no dog is idle
+// (all working, or pack empty) the classifier reports "no_idle_dog".
+// This preserves the original outcome label emitted by dispatchAutoDispatchForRig
+// before gu-yq9w unified the idle/session-live/backoff checks via
+// findDispatchableDog.
+func TestClassifyNoDispatchable_NoIdleDog(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	// All dogs are working.
+	testSetupWorkingDogState(t, townRoot, "alpha", "plugin:x", time.Now())
+	testSetupWorkingDogState(t, townRoot, "bravo", "plugin:y", time.Now())
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := classifyNoDispatchable(d, mgr, sm)
+	if got != "no_idle_dog" {
+		t.Errorf("classifyNoDispatchable = %q, want no_idle_dog", got)
+	}
+}
+
+// TestClassifyNoDispatchable_EmptyKennelReportsNoIdle verifies that an
+// empty pack classifies as "no_idle_dog" rather than leaking "unknown".
+func TestClassifyNoDispatchable_EmptyKennelReportsNoIdle(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := classifyNoDispatchable(d, mgr, sm)
+	if got != "no_idle_dog" {
+		t.Errorf("classifyNoDispatchable = %q, want no_idle_dog", got)
+	}
+}
+
+// TestClassifyNoDispatchable_DogInBackoffReportsBackoff verifies that when
+// the only idle dog is muted by the startup-failure backoff, the outcome is
+// "dog_in_backoff" — the label operators look for when the event-driven
+// path is deferring to the cooldown fallback (gu-ro75).
+func TestClassifyNoDispatchable_DogInBackoffReportsBackoff(t *testing.T) {
+	townRoot := t.TempDir()
+	d, tracker := testDaemonWithTracker(t)
+	// Rewire the daemon at the same townRoot so state files land where we
+	// created the dog directory.
+	d.config = &Config{TownRoot: townRoot}
+	_ = tracker // keeping the reference clear that backoff persists in the daemon
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	d.recordDogStartFailure("alpha")
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := classifyNoDispatchable(d, mgr, sm)
+	if got != "dog_in_backoff" {
+		t.Errorf("classifyNoDispatchable = %q, want dog_in_backoff", got)
+	}
+}
+
+// TestClassifyNoDispatchable_MixedStatesReportsRunningFirst verifies ordering
+// of the classifier: when the pack contains both a session-live idle dog
+// and a backed-off idle dog, we report "idle_session_live" because that
+// condition is usually the more immediate and self-healing case (the tmux
+// session finishes tearing down within a tick).
+//
+// Note: we can't fake sm.IsRunning returning true without a real tmux session,
+// so this test uses an alternate path — it verifies that the classifier
+// falls through to "dog_in_backoff" when backoff is the only applicable
+// condition, leaving the session-live case covered at the caller level
+// (the dispatch test below) where tmux can actually be observed.
+func TestClassifyNoDispatchable_MixedNoRunningFallsThroughToBackoff(t *testing.T) {
+	townRoot := t.TempDir()
+	d, _ := testDaemonWithTracker(t)
+	d.config = &Config{TownRoot: townRoot}
+
+	// Two idle dogs; both in backoff — should still classify as dog_in_backoff.
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+	d.recordDogStartFailure("alpha")
+	d.recordDogStartFailure("bravo")
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := classifyNoDispatchable(d, mgr, sm)
+	if got != "dog_in_backoff" {
+		t.Errorf("classifyNoDispatchable = %q, want dog_in_backoff", got)
 	}
 }

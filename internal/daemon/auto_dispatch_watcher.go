@@ -405,34 +405,25 @@ func (d *Daemon) dispatchAutoDispatchForRig(rig, trigger, triggerSession, trigge
 	t := tmux.NewTmux()
 	sm := dog.NewSessionManager(t, d.config.TownRoot, mgr)
 
-	// Find an idle dog.
-	idleDog, err := mgr.GetIdleDog()
-	if err != nil {
-		return fmt.Errorf("finding idle dog: %w", err)
-	}
+	// Pick an idle dog using the same filter as the cooldown-gated
+	// dispatchPlugins() path in handler.go: skip dogs whose state is idle
+	// but whose tmux session is still live (the gt-o24 race where a dog is
+	// reaped and marked idle before its session fully tears down), and skip
+	// dogs currently in startup backoff (gu-ro75). Without these filters
+	// sm.Start would either fail with "session already running" and lose the
+	// event-driven dispatch without retry, or thrash a known-failing dog.
+	idleDog := d.findDispatchableDog(mgr, sm)
 	if idleDog == nil {
-		// No idle dog — the next cooldown-gated heartbeat will pick up the
-		// work once a dog frees. Emit an observability event and return.
+		// No dispatchable dog — classify the reason for observability so
+		// operators can distinguish "pack is full" from "idle slot exists
+		// but is wedged on a live session or backoff". Classification uses
+		// the same state the filter inspected, so a race between the two is
+		// harmless; the worst case is an outcome label that's one tick stale.
+		outcome := classifyNoDispatchable(d, mgr, sm)
 		_ = events.LogAudit(events.TypeAutoDispatchEventTriggered, "daemon",
 			withExtra(events.AutoDispatchEventTriggeredPayload(rig, trigger, triggerSession, triggerAgent),
-				"outcome", "no_idle_dog"))
-		return fmt.Errorf("no idle dogs available")
-	}
-
-	// Honour startup backoff (gu-ro75): if this dog's last N starts have
-	// failed, skip event-driven dispatch. The cooldown-gated heartbeat pass
-	// in dispatchPlugins() will pick a different dog or wait for backoff to
-	// expire on its own schedule.
-	if skip, reason := d.isDogInStartupBackoff(idleDog.Name); skip {
-		payload := withExtra(
-			withExtra(
-				events.AutoDispatchEventTriggeredPayload(rig, trigger, triggerSession, triggerAgent),
-				"outcome", "dog_in_backoff",
-			),
-			"dog", idleDog.Name,
-		)
-		_ = events.LogAudit(events.TypeAutoDispatchEventTriggered, "daemon", payload)
-		return fmt.Errorf("dispatch deferred: %s", reason)
+				"outcome", outcome))
+		return fmt.Errorf("no dispatchable dogs available: %s", outcome)
 	}
 
 	// Assign work and send mail with a rig-scoped auto-dispatch body.
@@ -534,6 +525,51 @@ func withExtra(payload map[string]interface{}, key, value string) map[string]int
 	}
 	out[key] = value
 	return out
+}
+
+// classifyNoDispatchable explains *why* findDispatchableDog returned nil so
+// the auto-dispatch observability event can distinguish these outcomes:
+//
+//   - "no_idle_dog":      no dog is in StateIdle at all (pack is full).
+//   - "idle_session_live": at least one idle dog exists but its tmux session
+//     is still running (the gt-o24 race). A retry on the next heartbeat is
+//     expected to succeed once the session tears down.
+//   - "dog_in_backoff":   every idle slot without a live session is currently
+//     muted by the startup-failure backoff (gu-ro75).
+//   - "unknown":          list failed or a transient classification race.
+//
+// The classifier is best-effort and intentionally ignores errors — it runs
+// only on the nil path and its output is pure telemetry.
+func classifyNoDispatchable(d *Daemon, mgr *dog.Manager, sm *dog.SessionManager) string {
+	dogs, err := mgr.List()
+	if err != nil {
+		return "unknown"
+	}
+	var sawIdle, sawRunning, sawBackoff bool
+	for _, dg := range dogs {
+		if dg.State != dog.StateIdle {
+			continue
+		}
+		sawIdle = true
+		running, err := sm.IsRunning(dg.Name)
+		if err == nil && running {
+			sawRunning = true
+			continue
+		}
+		if skip, _ := d.isDogInStartupBackoff(dg.Name); skip {
+			sawBackoff = true
+		}
+	}
+	switch {
+	case !sawIdle:
+		return "no_idle_dog"
+	case sawRunning:
+		return "idle_session_live"
+	case sawBackoff:
+		return "dog_in_backoff"
+	default:
+		return "unknown"
+	}
 }
 
 // logf logs via the watcher's logger or stderr if unset.
