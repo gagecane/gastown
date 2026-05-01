@@ -21,14 +21,32 @@ You MUST `cd` into the rig's source root before every `bd create`. The rig's
 source root is resolved in Step 1 — capture it per rig and use it as the CWD
 for all `bd` commands that should file into that rig.
 
+**Routing-by-location is not enough.** Some rigs (e.g. `codegen_ws`) are
+workspace roots whose `.gitignore` excludes `src/`. Files under those paths
+are **filesystem overlays** — they physically live inside the rig's directory
+but are tracked by a DIFFERENT git repo (e.g. `TalonTriage.git`). `cd`-ing
+into the workspace rig and filing a bead about those files routes them to
+the wrong rig.
+
+You MUST resolve each candidate file's actual git repository and route the
+bead to the rig that truly owns it. See Step 3 for the mechanics.
+
 ### Steps
 
 1. Discover all rigs dynamically — never hardcode rig names or paths:
-   - Parse `~/gt/mayor/rigs.json` to get the list of registered rig names
+   - Parse `~/gt/mayor/rigs.json` to get the list of registered rigs
+     (name, `git_url`, and `beads.prefix` for each)
    - For each rig, resolve its source root: `readlink -f ~/gt/<rig>/.beads/..`
    - If the resolved path is under `~/gt/` (local beads, no workspace), check `/workplace/canewiw/` for a matching directory
    - Skip any rig whose source root cannot be resolved
-   - Remember each rig's resolved source root — you will `cd` into it in Step 3
+   - Remember each rig's resolved source root AND its `git_url` — you will
+     use both to route beads in Step 3
+
+   Build a lookup table keyed by normalized git URL → rig name. Normalize by
+   stripping a trailing `.git`, a trailing `/`, and any `ssh://` / `https://`
+   scheme — compare the resulting tail (e.g. `git.amazon.com/pkg/Foo`,
+   `github.com/gagecane/gastown`, `gt-remotes/TalonTriage`) so rigs are
+   matched regardless of scheme.
 
 2. In each source root, scan for:
    - **TODOs/FIXMEs**: `grep -rn "TODO\|FIXME\|HACK\|XXX" --include="*.py" --include="*.rb" --include="*.ts" --include="*.js" --include="*.md"`
@@ -39,24 +57,94 @@ for all `bd` commands that should file into that rig.
    - **Large files**: files over 500 lines that could be split
    - **Duplicated logic**: similar code blocks across files
 
-3. For each finding, **inside the rig's source root directory** (so the bead
-   lands in the correct rig's `.beads/` database):
+   **Filter candidates before filing:**
+
+   a. **Skip gitignored files.** In the rig's source root, run:
+      ```bash
+      git check-ignore -q "$file" && continue
+      ```
+      A gitignored file is a filesystem overlay, not the rig's code. Filing
+      a bead about it in this rig is always wrong.
+
+   b. **For "missing tests" findings, search for sibling tests first.** Before
+      counting a source file as missing tests, look for an existing test:
+      ```bash
+      basename=$(basename "$file" .py)     # or .ts, .js, .rb as appropriate
+      dir=$(dirname "$file")
+      # Search the whole rig, not just the file's directory — tests are often
+      # in a parallel tests/ tree:
+      if find . -type f \
+           \( -name "test_${basename}.*" \
+           -o -name "test_${basename}_*.*" \
+           -o -name "${basename}.test.*" \
+           -o -name "${basename}.spec.*" \
+           -o -name "${basename}_test.*" \) \
+           -not -path "./node_modules/*" \
+           -not -path "./.git/*" \
+           | grep -q .; then
+          continue   # sibling test exists — skip
+      fi
+      ```
+      Adjust the name patterns to match the language's test convention. If
+      any matching test file exists, do not file a "missing tests" bead.
+
+3. For each finding that survives the filters in Step 2, route it to the rig
+   that actually owns the file — not the rig whose directory it lives in.
+
    ```bash
-   cd "$RIG_SOURCE_ROOT"   # the path resolved in Step 1
-   # Check if a bead already exists (include closed beads to avoid re-filing
-   # issues a previous scout cycle already handled):
+   # 3a. Resolve the file's true git toplevel:
+   file_toplevel=$(git -C "$(dirname "$file")" rev-parse --show-toplevel 2>/dev/null)
+   if [[ -z "$file_toplevel" ]]; then
+       continue   # not in any git repo — skip
+   fi
+
+   # 3b. Get that repo's origin URL and normalize it (same rules as Step 1):
+   file_origin=$(git -C "$file_toplevel" remote get-url origin 2>/dev/null)
+   normalized=$(echo "$file_origin" \
+       | sed -E 's#^(ssh|https?)://##; s#\.git/?$##; s#/$##')
+
+   # 3c. Look up the owning rig in the Step 1 table. If no rig matches,
+   # the file belongs to a repo Gas Town doesn't track — skip it rather
+   # than misroute it:
+   owning_rig=$(lookup_rig_by_url "$normalized")   # from Step 1's table
+   if [[ -z "$owning_rig" ]]; then
+       continue
+   fi
+
+   # 3d. Cd into the OWNING rig's source root (which may differ from the
+   # rig we are scanning) and file the bead there:
+   cd "$RIG_SOURCE_ROOTS[$owning_rig]"
+
+   # 3e. Check for duplicates INSIDE the owning rig (include closed beads
+   # so we don't re-file issues a previous cycle already handled):
    bd search "<description>" --status=all
-   # If no duplicate, create in THIS rig's database:
+
+   # 3f. If no duplicate, create the bead in the owning rig's database:
    bd create --title "<improvement>" --type task --priority P3
-   # Add a note with file path, line number, and what to improve
-   # Label it:
+   # Add a note with the file path (relative to the OWNING rig), line
+   # number, and what to improve.
    bd tag <id> code-scout
    ```
-   The `cd` is mandatory: without it, `bd create` walks up to the town HQ
-   database and files the bead with a `gt-*` prefix instead of the rig's prefix.
 
-4. Cap at 5 new beads per rig per cycle to avoid noise
+   The three independent routing safeguards are:
+   - `cd` into the owning rig (resolves `.beads/` discovery)
+   - Gitignore filter (drops overlays before they reach `bd create`)
+   - Git-toplevel lookup (catches overlays that slip past the gitignore
+     check, e.g. when the overlay repo is nested inside an untracked
+     directory rather than an explicitly ignored path)
+
+   Without all three, a scan of a workspace-root rig like `codegen_ws` will
+   file beads into that rig for files that actually live in
+   `talontriage`, `casc_*`, `agentforge`, etc.
+
+4. Cap at 5 new beads per rig per cycle to avoid noise. Count caps against
+   the **owning** rig (where the bead is filed), not the rig being scanned.
+
 5. Report: "Code scout found N improvements across M rigs (created K new beads)"
    - Include the bead prefix in the report to confirm correct routing
      (e.g., `3 beads in gu-*, 2 beads in caco-*, 0 beads in gt-*`)
    - If any bead was filed with a `gt-*` prefix, that is a routing bug — escalate
+   - Also report skipped candidates and why, at least in summary form
+     (e.g. `skipped 42 gitignored overlays, 17 files with existing tests,
+     3 files in untracked repos`). This makes it visible when the scout
+     is quietly dropping real work vs. correctly filtering overlays.
