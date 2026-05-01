@@ -1266,7 +1266,7 @@ This closes the current patrol wisp and automatically creates a new one.
 **If context HIGH** (approaching limit):
 1. Write handoff mail with notable observations:
 ```bash
-gt handoff -s "Deacon patrol handoff" -m "<observations>"
+gt handoff -y -s "Deacon patrol handoff" -m "<observations>"
 ```
 2. Exit cleanly - the daemon will respawn a fresh Deacon session
 

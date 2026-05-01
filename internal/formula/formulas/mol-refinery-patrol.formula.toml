@@ -1082,7 +1082,7 @@ This closes the current patrol wisp and automatically creates a new one.
 Report and exit using `gt handoff` for clean session transition:
 
 ```bash
-gt handoff -s "Patrol complete" -m "Merged X branches, Y tests passed.
+gt handoff -y -s "Patrol complete" -m "Merged X branches, Y tests passed.
 Queue: empty/N remaining
 RSS: X MB, Session age: Xh
 Next: [any notes for successor]"
