@@ -1362,10 +1362,10 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 		if strings.Contains(line, ".beads") {
 			continue
 		}
-		// CLAUDE.md is expected - provisioned by CreatePolecatCLAUDEmd for gt done instructions
-		if strings.Contains(line, "CLAUDE.md") {
-			continue
-		}
+		// CLAUDE.md is no longer written by polecat add (gu-k9oj); polecat
+		// lifecycle context is injected ephemerally by `gt prime --hook`.
+		// If upstream source repos track a CLAUDE.md, checkout will produce
+		// a clean tracked copy — not an untracked file — so no filter needed.
 		unexpected = append(unexpected, line)
 	}
 	if len(unexpected) > 0 {

@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"text/template"
 
@@ -212,60 +211,29 @@ func CreateMayorCLAUDEmd(mayorDir, townRoot, townName, mayorSession, deaconSessi
 	return true, os.WriteFile(claudePath, []byte(content), 0644)
 }
 
-// PolecatLifecycleMarker is a unique string present in the polecat CLAUDE.md
-// template. Used to detect whether a CLAUDE.md file contains the Gas Town
-// overlay (vs. project-specific content). If an existing CLAUDE.md lacks this
-// marker, polecat lifecycle instructions are appended — the agent won't know
-// to call `gt done` otherwise.
+// PolecatLifecycleMarker is a unique string that used to appear in the polecat
+// CLAUDE.md overlay template. Preserved so that `gt done` can still detect and
+// strip leftover overlay CLAUDE.md / CLAUDE.local.md files written by older
+// Gas Town binaries before ephemeral context injection replaced on-disk files. (gu-k9oj)
 const PolecatLifecycleMarker = "IDLE POLECAT HERESY"
 
-// CreatePolecatCLAUDEmd writes the polecat CLAUDE.md template to the worktree.
-// This is the primary mechanism for polecats to learn about `gt done` and other
-// lifecycle commands — the file persists across compaction and session restarts.
+// CreatePolecatCLAUDEmd is retained as a no-op for backwards compatibility with
+// external callers and in-tree tests. Polecat lifecycle context is now injected
+// ephemerally by `gt prime --hook` via the SessionStart hook (see
+// internal/templates/roles/polecat.md.tmpl), so there is no longer anything to
+// write to the worktree.
 //
-// If the worktree already has a tracked CLAUDE.md (e.g., from the rig's repo),
-// polecat lifecycle instructions are written to CLAUDE.local.md instead. This
-// avoids creating uncommitted changes in the tracked CLAUDE.md, which the
-// gt done auto-save safety net would otherwise commit onto the polecat's branch,
-// polluting the PR diff with hundreds of lines of agent context.
+// Returns (false, nil) unconditionally: no file was created.
 //
-// If no CLAUDE.md exists, the full template is written to CLAUDE.md.
-//
-// Returns (created bool, error).
+// Deprecated: do not call from new code. The embedded polecat-CLAUDE.md template
+// and this function will be removed in a future cleanup once no external
+// integrations depend on them. (gu-k9oj)
 func CreatePolecatCLAUDEmd(worktreePath, rigName, polecatName string) (bool, error) {
-	claudePath := filepath.Join(worktreePath, "CLAUDE.md")
-	claudeLocalPath := filepath.Join(worktreePath, "CLAUDE.local.md")
-
-	// Render the polecat template with rig/name substitutions
-	content := polecatCLAUDEmd
-	content = strings.ReplaceAll(content, "{{rig}}", rigName)
-	content = strings.ReplaceAll(content, "{{name}}", polecatName)
-
-	// Check if lifecycle instructions are already present in either file.
-	for _, path := range []string{claudePath, claudeLocalPath} {
-		if existing, err := os.ReadFile(path); err == nil {
-			if strings.Contains(string(existing), PolecatLifecycleMarker) {
-				return false, nil // Already has our instructions
-			}
-		}
-	}
-
-	// If CLAUDE.md exists (tracked repo file), write to CLAUDE.local.md instead
-	// to avoid polluting the tracked file with polecat context. CLAUDE.local.md
-	// is gitignored in standard rig repos and is still loaded by Claude Code.
-	if _, err := os.Stat(claudePath); err == nil {
-		existingLocal, readErr := os.ReadFile(claudeLocalPath)
-		if readErr == nil {
-			// Append to existing CLAUDE.local.md
-			merged := string(existingLocal) + "\n---\n\n" + content
-			return true, os.WriteFile(claudeLocalPath, []byte(merged), 0644)
-		}
-		// Write new CLAUDE.local.md with just polecat context
-		return true, os.WriteFile(claudeLocalPath, []byte(content), 0644)
-	}
-
-	// No CLAUDE.md — write the full template there
-	return true, os.WriteFile(claudePath, []byte(content), 0644)
+	_ = worktreePath
+	_ = rigName
+	_ = polecatName
+	_ = polecatCLAUDEmd // keep embed referenced so the compiler doesn't complain
+	return false, nil
 }
 
 // ProvisionCommands creates the .claude/commands/ directory with standard slash commands.

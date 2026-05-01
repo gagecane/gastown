@@ -28,7 +28,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
-	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -821,11 +820,10 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	}
 	worktreeCreated = true
 
-	// Provision CLAUDE.md with gt done instructions (same as AddWithOptions path).
-	lockedRigName := filepath.Base(m.rig.Path)
-	if _, err := templates.CreatePolecatCLAUDEmd(clonePath, lockedRigName, name); err != nil {
-		style.PrintWarning("could not provision polecat CLAUDE.md: %v", err)
-	}
+	// Polecat lifecycle context (gt done, IDLE POLECAT HERESY, etc.) is injected
+	// ephemerally by `gt prime --hook` via the SessionStart hook. Writing CLAUDE.md
+	// into the worktree risks accidental commits and pollutes repos that don't
+	// track CLAUDE.md upstream. (gu-k9oj)
 
 	if err := m.setupSharedBeads(clonePath); err != nil {
 		cleanupOnError()
@@ -1010,15 +1008,12 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	}
 	worktreeCreated = true
 
-	// Provision CLAUDE.md with gt done instructions and lifecycle context.
-	// This is the primary mechanism for polecats to learn about completion —
-	// the file persists across compaction and session restarts (unlike ephemeral
-	// gt prime output which scrolls past and gets lost).
-	rigName := filepath.Base(m.rig.Path)
-	if _, err := templates.CreatePolecatCLAUDEmd(clonePath, rigName, name); err != nil {
-		// Non-fatal — polecat can still learn via gt prime hook
-		style.PrintWarning("could not provision polecat CLAUDE.md: %v", err)
-	}
+	// Polecat lifecycle context (gt done instructions, completion protocol,
+	// directory discipline) is injected ephemerally by `gt prime --hook` via
+	// the SessionStart hook — see internal/templates/roles/polecat.md.tmpl.
+	// We used to write CLAUDE.md into the worktree here, but that risked
+	// accidental commits and polluted repos that don't track CLAUDE.md
+	// upstream. Ephemeral injection is the single source of truth. (gu-k9oj)
 
 	// Set up shared beads: polecat uses rig's .beads via redirect file.
 	// This eliminates git sync overhead - all polecats share one database.
@@ -1566,11 +1561,8 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		return nil, fmt.Errorf("moving repaired worktree to final path: %w", err)
 	}
 
-	// Provision CLAUDE.md (same as spawn path — repair creates a fresh worktree).
-	repairRigName := filepath.Base(m.rig.Path)
-	if _, err := templates.CreatePolecatCLAUDEmd(newClonePath, repairRigName, name); err != nil {
-		style.PrintWarning("could not provision polecat CLAUDE.md during repair: %v", err)
-	}
+	// Polecat lifecycle context is injected by `gt prime --hook` — see
+	// the spawn path above for the rationale. (gu-k9oj)
 
 	// Set up shared beads — fatal during repair too, same reason as spawn.
 	if err := m.setupSharedBeads(newClonePath); err != nil {
@@ -1710,14 +1702,9 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	_ = polecatGit.ResetHard(startPoint)
 	_ = polecatGit.CleanForce()
 
-	// Re-provision CLAUDE.md after reset — git reset --hard restores the tracked
-	// version (which lacks gt done instructions), and git clean -f removes any
-	// untracked CLAUDE.md we previously wrote. Without this, reused polecats
-	// lose all lifecycle instructions and never call gt done.
-	reuseRigName := filepath.Base(m.rig.Path)
-	if _, err := templates.CreatePolecatCLAUDEmd(clonePath, reuseRigName, name); err != nil {
-		style.PrintWarning("could not re-provision polecat CLAUDE.md on reuse: %v", err)
-	}
+	// Polecat lifecycle context is injected by `gt prime --hook` at session
+	// start — no on-disk file to re-provision after reset. See the spawn path
+	// for the full rationale. (gu-k9oj)
 
 	// Create fresh branch from start point (branch-only, no worktree add/remove)
 	branchName := m.buildBranchName(name, opts.HookBead)

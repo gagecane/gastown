@@ -61,7 +61,9 @@ var agentAllowlist = map[string][]string{
 	// Polecats are ephemeral worktrees for autonomous agents.
 	// Uses rig.EnsureLocalExcludePatterns (writes to .git/info/exclude, never committed).
 	"polecat": {
-		"?? CLAUDE.md", // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context. Cleanup: gu-k9oj
+		// ?? CLAUDE.md removed (gu-k9oj): polecat lifecycle context is now
+		// injected ephemerally by `gt prime --hook` via SessionStart — no
+		// CLAUDE.md is written into the polecat worktree.
 	},
 }
 
