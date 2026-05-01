@@ -3,6 +3,8 @@ package cmd
 import (
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestShouldFireCrossRigEscalation_Debounces(t *testing.T) {
@@ -43,5 +45,70 @@ func TestShouldFireCrossRigEscalation_KeyedByRigAndPrefix(t *testing.T) {
 	// Same (rig, prefix) repeats — debounced.
 	if shouldFireCrossRigEscalation("walletui", "hq", now.Add(time.Minute)) {
 		t.Fatalf("walletui/hq repeat must not fire")
+	}
+}
+
+// TestIsContextOlderThan covers the TTL helper used by cleanupStaleContexts
+// to decide whether a sling-context whose work bead is missing should be
+// reaped (gu-hfr3). Fails-closed for unparseable or empty timestamps so
+// brand-new contexts with no CreatedAt aren't reaped prematurely.
+func TestIsContextOlderThan(t *testing.T) {
+	now := time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC)
+	ttl := 30 * time.Minute
+
+	tests := []struct {
+		name string
+		ctx  *beads.Issue
+		want bool
+	}{
+		{
+			name: "nil context",
+			ctx:  nil,
+			want: false,
+		},
+		{
+			name: "empty created_at",
+			ctx:  &beads.Issue{CreatedAt: ""},
+			want: false,
+		},
+		{
+			name: "unparseable created_at",
+			ctx:  &beads.Issue{CreatedAt: "not-a-timestamp"},
+			want: false,
+		},
+		{
+			name: "created now",
+			ctx:  &beads.Issue{CreatedAt: now.Format(time.RFC3339)},
+			want: false,
+		},
+		{
+			name: "created 15 minutes ago (under TTL)",
+			ctx:  &beads.Issue{CreatedAt: now.Add(-15 * time.Minute).Format(time.RFC3339)},
+			want: false,
+		},
+		{
+			name: "created exactly TTL ago",
+			ctx:  &beads.Issue{CreatedAt: now.Add(-ttl).Format(time.RFC3339)},
+			want: false, // strictly older than TTL
+		},
+		{
+			name: "created TTL+1s ago",
+			ctx:  &beads.Issue{CreatedAt: now.Add(-ttl - time.Second).Format(time.RFC3339)},
+			want: true,
+		},
+		{
+			name: "created 2 hours ago",
+			ctx:  &beads.Issue{CreatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isContextOlderThan(tt.ctx, now, ttl)
+			if got != tt.want {
+				t.Errorf("isContextOlderThan(%+v) = %v, want %v", tt.ctx, got, tt.want)
+			}
+		})
 	}
 }

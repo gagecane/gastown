@@ -323,6 +323,40 @@ func TestIsIdentityBeadInfo(t *testing.T) {
 	}
 }
 
+// TestIsSlingContextBeadInfo verifies the gu-hfr3 guard that prevents a
+// sling-context wrapper from being re-scheduled (which would nest wrappers).
+// Detection is label-based (gt:sling-context). Other label shapes and
+// identity/work beads must not be flagged.
+func TestIsSlingContextBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &beadInfo{}, false},
+
+		// Positive: has the sling-context label.
+		{"has sling-context label", &beadInfo{Labels: []string{"gt:sling-context"}}, true},
+		{"sling-context among other labels", &beadInfo{Labels: []string{"gt:ephemeral", "gt:sling-context", "gt:scheduler"}}, true},
+
+		// Negative: real work and other ephemeral beads.
+		{"plain work bead", &beadInfo{Title: "Fix bug", Status: "open", IssueType: "task"}, false},
+		{"agent bead but no sling label", &beadInfo{Labels: []string{"gt:agent"}}, false},
+		{"similar-sounding label", &beadInfo{Labels: []string{"gt:sling"}}, false},
+		{"message bead", &beadInfo{Labels: []string{"gt:message"}}, false},
+		{"convoy bead", &beadInfo{Labels: []string{"gt:convoy"}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSlingContextBeadInfo(tt.info); got != tt.want {
+				t.Errorf("isSlingContextBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestVerifyBeadIDMatch verifies the exact-ID guard (gu-yphj) that prevents
 // bd's partial-ID resolver from silently routing dispatch to the wrong bead
 // when a requested full ID is a strict prefix of another bead's ID.

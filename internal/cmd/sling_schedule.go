@@ -102,6 +102,17 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("bead %s is an identity/system bead (gt:agent label, closed, or polecat/refinery title): %q — refusing to schedule", beadID, info.Title)
 	}
 
+	// Nested-wrapper guard (gu-hfr3). Refuse to schedule a bead that is
+	// itself a sling-context wrapper. Otherwise the idempotency check
+	// below (keyed on WorkBeadID) misses, and a new wrapper is created
+	// titled "sling-context: sling-context: ..." tracking the old one.
+	// Each retry doubles the chain. Happens most often when a convoy
+	// started tracking a sling-context mid-chain (because the real work
+	// bead was reaped) and convoy schedule re-runs on the wrapper.
+	if isSlingContextBeadInfo(info) {
+		return fmt.Errorf("bead %s is a sling-context wrapper (label %s): %q — refusing to schedule (would create nested wrapper)", beadID, capacity.LabelSlingContext, info.Title)
+	}
+
 	// Idempotency: check for existing open sling context for this work bead.
 	// Fail fast on errors to avoid creating duplicate contexts on transient DB failures.
 	//

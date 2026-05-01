@@ -372,14 +372,45 @@ func cleanupStaleContexts(townRoot string) {
 	// actively worked, and bd ready won't return it, so the dispatch query
 	// already prevents re-dispatch. The context stays open until the polecat
 	// finishes and the bead transitions to closed/tombstone.
+	//
+	// Missing work bead (gu-hfr3): if the work bead can't be found at all,
+	// treat it as stale too — but only after the context has aged past the
+	// TTL so we don't race with in-flight bead creation. A deleted or reaped
+	// work bead leaves its sling-context dangling forever otherwise, which
+	// confused convoys and caused them to track the wrapper instead.
+	now := time.Now()
 	for i, ctx := range staleCheckContexts {
 		fields := staleCheckFields[i]
 		info, found := workBeadInfo[fields.WorkBeadID]
-		if found && (info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone") {
+		if found {
+			if info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone" {
+				b := beadsForContext(townRoot, fields)
+				_ = b.CloseSlingContext(ctx.ID, "stale-work-bead")
+			}
+			continue
+		}
+		// Work bead not found. Only close if the context has aged past the
+		// TTL — guards against transient bd show failures and against
+		// closing a context before its work bead finishes committing.
+		if isContextOlderThan(ctx, now, slingContextTTL) {
 			b := beadsForContext(townRoot, fields)
-			_ = b.CloseSlingContext(ctx.ID, "stale-work-bead")
+			_ = b.CloseSlingContext(ctx.ID, "missing-work-bead")
 		}
 	}
+}
+
+// isContextOlderThan reports whether the context's CreatedAt timestamp is
+// older than the given TTL, relative to now. Unparseable or empty timestamps
+// return false (fail-closed — don't treat an unknown-age context as stale).
+func isContextOlderThan(ctx *beads.Issue, now time.Time, ttl time.Duration) bool {
+	if ctx == nil || ctx.CreatedAt == "" {
+		return false
+	}
+	created, err := time.Parse(time.RFC3339, ctx.CreatedAt)
+	if err != nil {
+		return false
+	}
+	return now.Sub(created) > ttl
 }
 
 // beadStatusInfo holds batch-fetched bead status, title, and labels.

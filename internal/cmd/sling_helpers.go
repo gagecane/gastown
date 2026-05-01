@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/formula"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -188,6 +189,29 @@ func isIdentityBeadInfo(info *beadInfo) bool {
 		return true
 	}
 	return beads.IsIdentityBeadTitle(info.Title)
+}
+
+// isSlingContextBeadInfo reports whether the bead is itself a sling context
+// wrapper (label gt:sling-context). Sling contexts are scheduler bookkeeping
+// beads — never work — and must never be re-scheduled.
+//
+// Without this guard, a convoy that tracks a sling context (e.g. because
+// the real work bead was deleted and the convoy's dep pointer now lands
+// mid-chain) would cause runConvoyScheduleByID to call scheduleBead on
+// the context itself. The idempotency check in scheduleBead queries by
+// WorkBeadID (JSON field), so a sling context's own ID won't match and a
+// new wrapper gets created titled "sling-context: sling-context: <title>".
+// Repeated retries accumulate an N-deep chain of wrappers (gu-hfr3).
+func isSlingContextBeadInfo(info *beadInfo) bool {
+	if info == nil {
+		return false
+	}
+	for _, l := range info.Labels {
+		if l == capacity.LabelSlingContext {
+			return true
+		}
+	}
+	return false
 }
 
 // isOrphanMolecule reports whether a bead's existing attached molecule(s)
