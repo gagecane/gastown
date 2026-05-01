@@ -841,7 +841,13 @@ func (r *Router) shouldBeWisp(msg *Message) bool {
 	if msg.Wisp {
 		return true
 	}
-	// Auto-detect protocol/lifecycle messages by subject prefix
+	// Auto-detect protocol/lifecycle messages by subject prefix.
+	//
+	// These are transient coordination signals between agents (witness, refinery,
+	// deacon, polecats) — not persistent issues. Storing them as regular beads
+	// pollutes `bd ready` output with dozens of open P1 entries that never
+	// auto-close (see gu-m9o3). Wisps live in a separate wisps table, are not
+	// synced to git, and are cleaned up by `bd mol wisp gc`.
 	subjectLower := strings.ToLower(msg.Subject)
 	wispPrefixes := []string{
 		"polecat_started",
@@ -853,6 +859,9 @@ func (r *Router) shouldBeWisp(msg *Message) bool {
 		"merged",
 		"merge_ready",
 		"merge_failed",
+		"rework_request",       // Refinery → Witness: rebase needed
+		"fix_needed",           // Refinery → Polecat: fix code and resubmit
+		"convoy_needs_feeding", // Refinery → Deacon: feed convoy immediately
 	}
 	for _, prefix := range wispPrefixes {
 		if strings.HasPrefix(subjectLower, prefix) {

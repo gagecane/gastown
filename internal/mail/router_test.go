@@ -314,6 +314,21 @@ func TestShouldBeWisp(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "REWORK_REQUEST subject (gu-m9o3: must be wisp to avoid P1 bead pollution)",
+			msg:  &Message{Subject: "REWORK_REQUEST nux"},
+			want: true,
+		},
+		{
+			name: "FIX_NEEDED subject (gu-m9o3: must be wisp to avoid P1 bead pollution)",
+			msg:  &Message{Subject: "FIX_NEEDED nux"},
+			want: true,
+		},
+		{
+			name: "CONVOY_NEEDS_FEEDING subject (gu-m9o3: must be wisp to avoid P1 bead pollution)",
+			msg:  &Message{Subject: "CONVOY_NEEDS_FEEDING conv-abc"},
+			want: true,
+		},
+		{
 			name: "handoff message (not auto-wisp)",
 			msg:  &Message{Subject: "HANDOFF: context notes"},
 			want: false,
