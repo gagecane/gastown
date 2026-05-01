@@ -62,7 +62,9 @@ var agentAllowlist = map[string][]string{
 	"polecat": {
 		"?? .claude/",   // bd init: creates .claude/commands/ with handoff/review slash commands. Cleanup: gu-gh4q
 		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406 (polecat already uses EnsureLocalExcludePatterns; .gitignore entry is legacy)
-		"?? CLAUDE.md",  // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context. Cleanup: gu-k9oj
+		// ?? CLAUDE.md removed (gu-k9oj): polecat lifecycle context is now
+		// injected ephemerally by `gt prime --hook` via SessionStart — no
+		// CLAUDE.md is written into the polecat worktree.
 	},
 }
 
