@@ -192,9 +192,46 @@ gt reaper reap-hooked-mail --db=<name> --port={{dolt_port}} \\
 **Exit criteria:** Stale hooked mail closed with reason ttl-expired."""
 
 [[steps]]
+id = "reap-open-mail"
+title = "Reap stale open coordination mail (gu-ckly)"
+needs = ["reap-hooked-mail"]
+description = """
+Close HANDOFF and other coordination mail beads that stayed in the 'open'
+or 'in_progress' state past the TTL. This closes the gap left by
+auto-close (which excludes P0/P1) and reap-hooked-mail (which only sweeps
+status='hooked').
+
+Context: Witness, mayor, deacon, refinery, and the stuck-agent-dog plugin
+emit transient coordination mail via `gt mail send` with priority=1 (HIGH).
+These create HQ beads with status='open' and NEVER get hooked. The standard
+auto-close reaper excludes P0/P1 to protect real work, so without this
+sweep, each cycling witness or patrol session permanently adds a P1 bead
+to `bd ready`. Operators have had to manually bulk-close 30+ such beads.
+
+**1. For each database:**
+```bash
+gt reaper reap-open-mail --db=<name> --port={{dolt_port}} \\
+  --ttl={{open_mail_ttl}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**2. Inspect results:**
+- Verify that closed beads are legitimately stale coordination notes
+- If the closed count is large (> 100 in one cycle), investigate the
+  producer — a role template or plugin may be sending mail without a
+  consumer linkage
+
+**Exclusions (do NOT escalate if these remain open):**
+- Agent heartbeat beads (issue_type='agent') — not mail, won't match
+- Beads labeled gt:standing-orders, gt:keep, gt:role, gt:rig
+- Beads with a live consumer_bead_id (per ConsumerAliveClause, gu-ub1l)
+
+**Exit criteria:** Stale open mail closed with reason ttl-expired."""
+
+[[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["reap-hooked-mail"]
+needs = ["reap-open-mail"]
 description = """
 Generate summary and signal completion.
 
@@ -208,6 +245,7 @@ Generate summary and signal completion.
 **Mail purged**: (total deleted old closed mail)
 **Issues auto-closed**: (stale > stale_issue_age, excl. epics/P0-P1/deps)
 **Hooked mail ttl-expired**: (dead-letter HANDOFF/mail closed; gu-hhqk)
+**Open mail ttl-expired**: (stale P1 coordination mail closed; gu-ckly)
 **Open wisps remaining**: (total)
 **Anomalies**: (list any anomalies found)
 ```
@@ -238,6 +276,10 @@ default = "168h"
 
 [vars.hooked_mail_ttl]
 description = "Max hooked-mail age before ttl-expired close (gu-hhqk; default 24h)"
+default = "24h"
+
+[vars.open_mail_ttl]
+description = "Max open-mail age before ttl-expired close (gu-ckly; default 24h)"
 default = "24h"
 
 [vars.alert_threshold]

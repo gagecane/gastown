@@ -31,6 +31,17 @@ import (
 // The mol-dog-reaper formula can override via the hooked_mail_ttl var.
 const DefaultHookedMailTTL = 24 * time.Hour
 
+// DefaultOpenMailTTL is the default age before an open (un-hooked) mail bead
+// is eligible for auto-close by the reaper. See ReapOpenMail (gu-ckly).
+//
+// Rationale: P1 coordination mail (HANDOFF, RESTART_POLECAT, "Witness patrol"
+// cycle notes) sent via `gt mail send` creates beads with status='open' that
+// never get hooked. AutoClose excludes P0/P1 so they accumulate forever,
+// polluting `bd ready`. After 24h the coordination content is stale — the
+// successor session has either consumed it or moved on. This matches the
+// hooked-mail TTL for consistency.
+const DefaultOpenMailTTL = 24 * time.Hour
+
 // HookedMailResult holds the results of a hooked-mail reap operation.
 type HookedMailResult struct {
 	Database         string        `json:"database"`
@@ -39,6 +50,18 @@ type HookedMailResult struct {
 	DryRun           bool          `json:"dry_run,omitempty"`
 	ClosedEntries    []ClosedEntry `json:"closed_entries,omitempty"`
 	Anomalies        []Anomaly     `json:"anomalies,omitempty"`
+}
+
+// OpenMailResult holds the results of an open-mail reap operation.
+// Mirrors HookedMailResult but reports the remaining open-mail count
+// (OpenRemain) after the sweep.
+type OpenMailResult struct {
+	Database      string        `json:"database"`
+	Closed        int           `json:"closed"`
+	OpenRemain    int           `json:"open_remain"`
+	DryRun        bool          `json:"dry_run,omitempty"`
+	ClosedEntries []ClosedEntry `json:"closed_entries,omitempty"`
+	Anomalies     []Anomaly     `json:"anomalies,omitempty"`
 }
 
 // ScanHookedMail counts hooked mail beads in a database. Returns both the
@@ -259,6 +282,241 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 	if err := db.QueryRowContext(ctx, remainQuery, remainArgs...).Scan(&result.HookedRemain); err != nil {
 		if !isTableNotFound(err) {
 			return result, fmt.Errorf("count hooked mail remain: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// ScanOpenMail counts open (un-hooked) mail beads in a database. Returns
+// both the total number of open mail beads and the subset that have exceeded
+// the TTL (candidates for auto-close). Does not modify any data.
+//
+// A bead counts as "open mail" iff:
+//   - it is in the `issues` table (not `wisps`)
+//   - its status is `open` or `in_progress`
+//   - it carries the `gt:message` label
+//
+// Agent heartbeat beads (issue_type='agent') are excluded. Beads with a live
+// consumer_bead_id (per ConsumerAliveClause) and beads carrying preserve
+// labels (gt:standing-orders, gt:keep, gt:role, gt:rig) are also excluded
+// so the exclusion semantics match ReapOpenMail. See gu-ckly.
+func ScanOpenMail(db *sql.DB, dbName string, ttl time.Duration) (total, candidates int, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	preserveLabels := []string{"gt:standing-orders", "gt:keep", "gt:role", "gt:rig"}
+	preserveArgs := make([]interface{}, len(preserveLabels))
+	for i, lbl := range preserveLabels {
+		preserveArgs[i] = lbl
+	}
+
+	totalQuery := fmt.Sprintf(`
+		SELECT COUNT(DISTINCT i.id) FROM issues i
+		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
+		WHERE i.status IN ('open', 'in_progress')
+		AND i.issue_type != 'agent'
+		AND mail_l.label = 'gt:message'
+		AND i.id NOT IN (
+			SELECT l2.issue_id FROM labels l2
+			WHERE l2.label IN (%s)
+		)
+		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
+	if err := db.QueryRowContext(ctx, totalQuery, preserveArgs...).Scan(&total); err != nil {
+		if isTableNotFound(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("count open mail total: %w", err)
+	}
+
+	if total == 0 {
+		return 0, 0, nil
+	}
+
+	cutoff := time.Now().UTC().Add(-ttl)
+	candArgs := append([]interface{}{cutoff}, preserveArgs...)
+	candQuery := fmt.Sprintf(`
+		SELECT COUNT(DISTINCT i.id) FROM issues i
+		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
+		WHERE i.status IN ('open', 'in_progress')
+		AND i.issue_type != 'agent'
+		AND mail_l.label = 'gt:message'
+		AND i.created_at < ?
+		AND i.id NOT IN (
+			SELECT l2.issue_id FROM labels l2
+			WHERE l2.label IN (%s)
+		)
+		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
+	if err := db.QueryRowContext(ctx, candQuery, candArgs...).Scan(&candidates); err != nil {
+		if isTableNotFound(err) {
+			return total, 0, nil
+		}
+		return total, 0, fmt.Errorf("count open mail candidates: %w", err)
+	}
+
+	return total, candidates, nil
+}
+
+// ReapOpenMail closes open (un-hooked) mail beads older than the TTL with
+// reason "ttl-expired". Returns the count of closed beads and any remaining
+// open mail. Safe to call when the issues/labels tables are not present on
+// the server — returns zero counts in that case.
+//
+// This addresses gu-ckly: HANDOFF coordination mail sent via `gt mail send`
+// (from witness/mayor/deacon roles, stuck-agent-dog plugin, etc.) creates
+// beads with priority=1 and status='open'. AutoClose excludes priority <= 1
+// so these beads accumulate forever, polluting `bd ready`. ReapHookedMail
+// only sweeps status='hooked'. This function closes the remaining gap by
+// treating stale P1 coordination mail the same way as stale hooked mail.
+//
+// Excluded from the sweep:
+//   - agent heartbeat beads (issue_type='agent')
+//   - beads carrying a preserve label (gt:standing-orders, gt:keep, gt:role, gt:rig)
+//   - beads with a live consumer_bead_id (ConsumerAliveClause)
+//   - already-closed, hooked, or pinned beads (filtered by the WHERE clause)
+func ReapOpenMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (*OpenMailResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cutoff := time.Now().UTC().Add(-ttl)
+	result := &OpenMailResult{Database: dbName, DryRun: dryRun}
+
+	preserveLabels := []string{"gt:standing-orders", "gt:keep", "gt:role", "gt:rig"}
+
+	selectQuery := fmt.Sprintf(`
+		SELECT DISTINCT i.id, i.title, i.created_at FROM issues i
+		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
+		WHERE i.status IN ('open', 'in_progress')
+		AND i.issue_type != 'agent'
+		AND i.created_at < ?
+		AND mail_l.label = 'gt:message'
+		AND i.id NOT IN (
+			SELECT l2.issue_id FROM labels l2
+			WHERE l2.label IN (%s)
+		)
+		AND %s
+		LIMIT %d`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause, DefaultBatchSize)
+
+	args := []interface{}{cutoff}
+	for _, lbl := range preserveLabels {
+		args = append(args, lbl)
+	}
+
+	type candidate struct {
+		id        string
+		title     string
+		createdAt time.Time
+	}
+
+	now := time.Now().UTC()
+	totalClosed := 0
+
+	for {
+		rows, err := db.QueryContext(ctx, selectQuery, args...)
+		if err != nil {
+			if isTableNotFound(err) {
+				return result, nil
+			}
+			return nil, fmt.Errorf("select open mail batch: %w", err)
+		}
+
+		var batch []candidate
+		for rows.Next() {
+			var c candidate
+			if err := rows.Scan(&c.id, &c.title, &c.createdAt); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan open mail row: %w", err)
+			}
+			batch = append(batch, c)
+		}
+		rows.Close()
+
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, c := range batch {
+			result.ClosedEntries = append(result.ClosedEntries, ClosedEntry{
+				ID:       c.id,
+				Title:    c.title,
+				AgeDays:  int(now.Sub(c.createdAt).Hours() / 24),
+				Database: dbName,
+			})
+		}
+
+		if dryRun {
+			totalClosed += len(batch)
+			break
+		}
+
+		placeholders := make([]string, len(batch))
+		updateArgs := make([]interface{}, 0, len(batch))
+		for i, c := range batch {
+			placeholders[i] = "?"
+			updateArgs = append(updateArgs, c.id)
+		}
+		inClause := strings.Join(placeholders, ",")
+
+		updateQuery := fmt.Sprintf(
+			"UPDATE issues SET status='closed', closed_at=NOW() WHERE id IN (%s)",
+			inClause)
+
+		if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+			return result, fmt.Errorf("disable autocommit: %w", err)
+		}
+
+		sqlResult, err := db.ExecContext(ctx, updateQuery, updateArgs...)
+		if err != nil {
+			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+			return result, fmt.Errorf("close open mail batch: %w", err)
+		}
+		affected, _ := sqlResult.RowsAffected()
+		totalClosed += int(affected)
+
+		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+			return result, fmt.Errorf("sql commit: %w", err)
+		}
+		commitMsg := fmt.Sprintf("reaper: ttl-expired close %d open mail in %s", int(affected), dbName)
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
+			if !isNothingToCommit(err) {
+				result.Anomalies = append(result.Anomalies, Anomaly{
+					Type:    "dolt_commit_failed",
+					Message: fmt.Sprintf("dolt commit after open-mail reap failed: %v", err),
+				})
+			}
+		}
+		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+
+		if len(batch) < DefaultBatchSize {
+			break
+		}
+	}
+
+	result.Closed = totalClosed
+
+	// Count remaining open mail for the report. Apply the same
+	// consumer-linkage and preserve-label exclusions as the select above so
+	// the reported "remain" number reflects beads actually subject to the
+	// TTL reaper.
+	remainQuery := fmt.Sprintf(`
+		SELECT COUNT(*) FROM issues i
+		INNER JOIN labels l ON i.id = l.issue_id
+		WHERE i.status IN ('open', 'in_progress')
+		AND i.issue_type != 'agent'
+		AND l.label = 'gt:message'
+		AND i.id NOT IN (
+			SELECT l2.issue_id FROM labels l2
+			WHERE l2.label IN (%s)
+		)
+		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
+	remainArgs := make([]interface{}, 0, len(preserveLabels))
+	for _, lbl := range preserveLabels {
+		remainArgs = append(remainArgs, lbl)
+	}
+	if err := db.QueryRowContext(ctx, remainQuery, remainArgs...).Scan(&result.OpenRemain); err != nil {
+		if !isTableNotFound(err) {
+			return result, fmt.Errorf("count open mail remain: %w", err)
 		}
 	}
 
