@@ -52,6 +52,10 @@ func (d *Daemon) handleDogs() {
 	t := tmux.NewTmux()
 	sm := dog.NewSessionManager(t, d.config.TownRoot, mgr)
 
+	// Process DOG_DONE mail first so dogs that finished their work are idle
+	// before downstream cleanup decides whether to kill their sessions or
+	// flag them as stale. See gu-7537.
+	d.processDogDoneMessages(mgr)
 	d.cleanupStuckDogs(mgr, sm)
 	d.detectStaleWorkingDogs(mgr, sm, opCfg)
 	d.reapIdleDogs(mgr, sm, opCfg)
@@ -73,6 +77,8 @@ func (d *Daemon) handleDogsCleanupOnly() {
 	t := tmux.NewTmux()
 	sm := dog.NewSessionManager(t, d.config.TownRoot, mgr)
 
+	// Process DOG_DONE mail first (see handleDogs for rationale).
+	d.processDogDoneMessages(mgr)
 	d.cleanupStuckDogs(mgr, sm)
 	d.detectStaleWorkingDogs(mgr, sm, opCfg)
 	d.reapIdleDogs(mgr, sm, opCfg)

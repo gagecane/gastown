@@ -142,7 +142,7 @@ gt mail archive <message-id>
 
 **DOG_DONE messages**:
 Dogs report completion after infrastructure tasks (orphan-scan, session-gc, etc.).
-Subject format: `DOG_DONE <hostname>`
+Subject format: `DOG_DONE <hostname>` or `DOG_DONE: <task>`
 Body contains: task name, counts, status.
 ```bash
 # Parse the report, log metrics if needed
@@ -150,8 +150,11 @@ gt mail read <id>
 # Archive after noting completion
 gt mail archive <message-id>
 ```
-Dogs return to idle automatically. The report is informational - no action needed
-unless the dog reports errors that require escalation.
+The daemon's processDogDoneMessages handler clears the sending dog's state
+back to idle on every heartbeat, so most DOG_DONE mail is already deleted by
+the time this step runs. Any DOG_DONE mail still in the inbox is informational —
+no state-transition action is needed unless the dog reports errors that require
+escalation.
 
 **CONVOY_NEEDS_FEEDING messages** (from Refinery):
 The daemon's ConvoyManager handles convoy feeding (event-driven, 5s poll).
