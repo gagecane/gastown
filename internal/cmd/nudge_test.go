@@ -449,6 +449,13 @@ func TestNudgeTrailingSlashNormalization(t *testing.T) {
 	// runNudge must strip the trailing slash so these match the role shortcuts.
 	// Without normalization, "mayor/" falls through to parseAddress which
 	// rejects it ("invalid address format"), silently dropping the nudge.
+	//
+	// GT_TEST_NO_NUDGE: Required so this test cannot accidentally deliver a
+	// real nudge to a running session on the dev box. Before this gate was
+	// added, each run of this test fired literal "test" messages at
+	// hq-mayor/deacon/gu-witness/gu-refinery — see gu-ohzr.
+	t.Setenv("GT_TEST_NO_NUDGE", "1")
+
 	origMode := nudgeModeFlag
 	origPriority := nudgePriorityFlag
 	origMessage := nudgeMessageFlag
