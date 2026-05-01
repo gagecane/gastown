@@ -1,10 +1,18 @@
 package session
 
 import (
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+func hasTmux() bool {
+	_, err := exec.LookPath("tmux")
+	return err == nil
+}
 
 func TestStartSession_RequiresSessionID(t *testing.T) {
 	_, err := StartSession(nil, SessionConfig{
@@ -192,6 +200,79 @@ func TestMergeRuntimeLivenessEnv_UsesEffectiveAgentForProcessNames(t *testing.T)
 	}
 	if got["GT_PROCESS_NAMES"] != "codex" {
 		t.Fatalf("GT_PROCESS_NAMES = %q, want %q (should resolve from effective agent, not runtimeConfig)", got["GT_PROCESS_NAMES"], "codex")
+	}
+}
+
+func TestCapturePaneDiagnostic_NilTmux(t *testing.T) {
+	got := capturePaneDiagnostic(nil, "hq-dog-test")
+	if got != "" {
+		t.Errorf("capturePaneDiagnostic(nil, ...) = %q, want empty", got)
+	}
+}
+
+func TestCapturePaneDiagnostic_EmptySessionID(t *testing.T) {
+	// Real tmux not needed: empty session short-circuits before any tmux call.
+	// The *tmux.Tmux param is unused on this path, so a dummy pointer is fine.
+	got := capturePaneDiagnostic(nil, "")
+	if got != "" {
+		t.Errorf("capturePaneDiagnostic(_, \"\") = %q, want empty", got)
+	}
+}
+
+func TestDiagPaneCaptureBytes_Reasonable(t *testing.T) {
+	// Guardrail: keep the cap small enough to fit in a daemon.log line
+	// without truncation but large enough to carry a real stack trace.
+	if diagPaneCaptureBytes < 512 {
+		t.Errorf("diagPaneCaptureBytes = %d, too small for useful stack traces", diagPaneCaptureBytes)
+	}
+	if diagPaneCaptureBytes > 16*1024 {
+		t.Errorf("diagPaneCaptureBytes = %d, too large — will flood logs", diagPaneCaptureBytes)
+	}
+}
+
+func TestCapturePaneDiagnostic_RealSessionCapturesOutput(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	tm := tmux.NewTmux()
+	sessionID := "gt-test-capture-diag-" + t.Name()
+	_ = tm.KillSession(sessionID)
+	defer func() { _ = tm.KillSession(sessionID) }()
+
+	// Use a long-running shell so NewSessionWithCommand's health check passes.
+	// Then write a marker via send-keys and capture it — this exercises the
+	// same tmux capture-pane path used by capturePaneDiagnostic on real spawn
+	// failures where the pane is alive but the agent has died.
+	if err := tm.NewSession(sessionID, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := tm.SendKeys(sessionID, "echo DIAG-MARKER-12345"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	// Poll for the marker to appear — shells on slow CI may take a moment.
+	var got string
+	for i := 0; i < 30; i++ {
+		got = capturePaneDiagnostic(tm, sessionID)
+		if strings.Contains(got, "DIAG-MARKER-12345") {
+			break
+		}
+		for j := 0; j < 5_000_000; j++ {
+		}
+	}
+	if !strings.Contains(got, "DIAG-MARKER-12345") {
+		t.Errorf("capturePaneDiagnostic did not capture marker; got %q", got)
+	}
+}
+
+func TestCapturePaneDiagnostic_MissingSessionReturnsEmpty(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	tm := tmux.NewTmux()
+	got := capturePaneDiagnostic(tm, "gt-test-nonexistent-session-xyz")
+	if got != "" {
+		t.Errorf("capturePaneDiagnostic on missing session = %q, want empty", got)
 	}
 }
 

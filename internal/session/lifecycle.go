@@ -110,6 +110,22 @@ type SessionConfig struct {
 
 	// VerifySurvived checks that the session is still alive after startup.
 	VerifySurvived bool
+
+	// DiagnosticCapture enables black-box-proof spawn failure diagnostics.
+	// When true:
+	//   * remain-on-exit is set on the session so the pane survives after the
+	//     agent command exits (no more vanished panes on crash).
+	//   * VerifySurvived uses agent-process liveness (IsAgentAlive) instead of
+	//     mere session existence, so a dead agent in a remain-on-exit pane is
+	//     still detected as a startup failure.
+	//   * Any WaitForAgent or VerifySurvived failure captures the final pane
+	//     contents (agent stderr/logs) and includes them in the returned error
+	//     so the caller can diagnose why the agent died.
+	// The session is still killed before returning the error so there is no
+	// leaked tmux session. Recommended for any spawn path whose callers retry
+	// on failure — the error surface is what lets them (and operators) debug.
+	// See gu-klwv.
+	DiagnosticCapture bool
 }
 
 // StartResult contains the results of session startup.
@@ -215,7 +231,9 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	}
 
 	// 6. Set remain-on-exit immediately if requested (before anything else can fail).
-	if cfg.RemainOnExit {
+	// DiagnosticCapture also sets remain-on-exit so the pane survives a dead
+	// agent and can be captured for diagnostics (gu-klwv).
+	if cfg.RemainOnExit || cfg.DiagnosticCapture {
 		_ = t.SetRemainOnExit(cfg.SessionID, true)
 	}
 
@@ -228,7 +246,14 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	if cfg.WaitForAgent {
 		if err := t.WaitForCommand(cfg.SessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
 			if cfg.WaitFatal {
+				diag := ""
+				if cfg.DiagnosticCapture {
+					diag = capturePaneDiagnostic(t, cfg.SessionID)
+				}
 				_ = t.KillSessionWithProcesses(cfg.SessionID)
+				if diag != "" {
+					return nil, fmt.Errorf("waiting for %s to start: %w\n--- pane output ---\n%s\n--- end pane output ---", cfg.Role, err, diag)
+				}
 				return nil, fmt.Errorf("waiting for %s to start: %w", cfg.Role, err)
 			}
 		}
@@ -265,6 +290,19 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		}
 		if !running {
 			return nil, fmt.Errorf("session %s died during startup (agent command may have failed)", cfg.SessionID)
+		}
+		// With DiagnosticCapture the pane has remain-on-exit set, so HasSession
+		// returns true even if the agent process already exited. Do a deeper
+		// liveness probe and, on failure, capture the pane for diagnostics
+		// before killing the session. Without this, every agent crash surfaces
+		// as the opaque "died during startup" with no stderr (gu-klwv).
+		if cfg.DiagnosticCapture && !t.IsAgentAlive(cfg.SessionID) {
+			diag := capturePaneDiagnostic(t, cfg.SessionID)
+			_ = t.KillSessionWithProcesses(cfg.SessionID)
+			if diag != "" {
+				return nil, fmt.Errorf("session %s died during startup (agent command may have failed)\n--- pane output ---\n%s\n--- end pane output ---", cfg.SessionID, diag)
+			}
+			return nil, fmt.Errorf("session %s died during startup (agent command may have failed; pane produced no output)", cfg.SessionID)
 		}
 	}
 
@@ -409,6 +447,40 @@ func MergeRuntimeLivenessEnv(envVars map[string]string, runtimeConfig *config.Ru
 
 	return envVars
 }
+
+// capturePaneDiagnostic returns the final visible pane contents for a session,
+// used to surface agent stderr/logs when a startup probe fails. Returns an
+// empty string if the session or pane is gone or the capture fails for any
+// reason — diagnostics must never block the actual failure path. See gu-klwv.
+//
+// The output is trimmed and capped at diagPaneCaptureBytes bytes so we don't
+// flood logs with scrollback. Blank-only output is reported as empty so the
+// caller can switch the error message to "pane produced no output".
+func capturePaneDiagnostic(t *tmux.Tmux, sessionID string) string {
+	if t == nil || sessionID == "" {
+		return ""
+	}
+	// Capture the full scrollback — when an agent dies fast there are usually
+	// only a handful of lines, but some agents (kiro, claude) emit a stack
+	// trace that's worth preserving verbatim.
+	raw, err := t.CapturePaneAll(sessionID)
+	if err != nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > diagPaneCaptureBytes {
+		trimmed = "…" + trimmed[len(trimmed)-diagPaneCaptureBytes:]
+	}
+	return trimmed
+}
+
+// diagPaneCaptureBytes caps the size of pane output surfaced in spawn-failure
+// errors. Large enough to carry a stack trace or settings.json parse error;
+// small enough not to blow up daemon.log line sizes.
+const diagPaneCaptureBytes = 2048
 
 // KillExistingSession kills an existing session if one is found.
 // Returns true if a session was killed.

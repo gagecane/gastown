@@ -134,6 +134,12 @@ func (m *SessionManager) Start(dogName string, opts SessionStartOptions) error {
 		ReadyDelay:     true,
 		VerifySurvived: true,
 		TrackPID:       true,
+		// gu-klwv: capture pane stderr on spawn failure. Without this, dog
+		// sessions that die on startup produce an opaque "died during startup"
+		// error with no root-cause signal — the daemon re-dispatches forever
+		// because it has no way to tell a transient crash from a permanent
+		// per-dog config problem.
+		DiagnosticCapture: true,
 	})
 	if err != nil {
 		return err
