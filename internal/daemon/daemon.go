@@ -2553,15 +2553,29 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		// be actively working at the moment of death — precisely the opposite of
 		// what operators need to see during an incident. See issue gu-but4.
 		//
-		// Terminal states (done/nuked) are expected shutdowns, not crashes: we skip
-		// their death recording to avoid polluting the mass-death aggregator with
-		// benign exits. Note that `done` polecats typically keep hook_bead populated
-		// until the work bead closes, so this branch (HookBead == "") covers idle
-		// polecats after gt done has cleared the hook and orphans that never had one.
-		// We defensively re-check here in case a future change leaves `done` polecats
-		// in this path.
+		// Expected-resting states (done/nuked/idle) are intentional shutdowns, not
+		// crashes: we skip their death recording to avoid polluting the mass-death
+		// aggregator with benign exits. In particular (gu-vy4l):
+		//   - `done` polecats typically keep hook_bead populated until the work
+		//     bead closes, so this branch (HookBead == "") covers the post-close
+		//     tail. Defensively re-check here in case a future change leaves `done`
+		//     polecats in this path.
+		//   - `nuked` polecats were intentionally stopped.
+		//   - `idle` polecats are pool-ready (pool-init creates them in this state,
+		//     and reapIdlePolecats kills sessions of polecats after gt done leaves
+		//     them in state=idle). A dead session for an idle polecat with no hook
+		//     is the designed resting state, not a crash. Without this guard,
+		//     pool-init of >= massDeathThreshold polecats triggers a false
+		//     MASS DEATH DETECTED event on every heartbeat cycle for as long as
+		//     the pool remains idle.
+		//
+		// Only record a death when the agent state indicates the polecat was
+		// actively doing work (or transitioning through an active state) when the
+		// session died — i.e., AgentState.IsActive() or stuck/escalated. Those are
+		// the genuine crash signatures mass-death detection is designed to surface.
 		agentState := beads.AgentState(info.State)
-		if agentState == beads.AgentStateDone || agentState == beads.AgentStateNuked {
+		switch agentState {
+		case beads.AgentStateDone, beads.AgentStateNuked, beads.AgentStateIdle:
 			return
 		}
 

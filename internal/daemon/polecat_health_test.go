@@ -756,16 +756,86 @@ func TestCheckPolecatHealth_MassDeathFiresForIdlePolecats(t *testing.T) {
 	}
 }
 
-// TestCheckPolecatHealth_SkipsTerminalIdlePolecat verifies that
-// checkPolecatHealth does NOT record a death or emit a session_death event
-// for an idle polecat in a terminal agent_state (done/nuked) with a dead
-// session. These are expected shutdowns, not crashes, and must not pollute
-// the mass-death aggregator. This guards gu-but4's fix against over-firing.
-func TestCheckPolecatHealth_SkipsTerminalIdlePolecat(t *testing.T) {
+// TestCheckPolecatHealth_PoolReadyDoesNotFireMassDeath verifies the gu-vy4l
+// regression: pool-init creates N polecats with agent_state=idle and dead
+// sessions (intentional — the session spawns only when work is dispatched).
+// Previously, every heartbeat cycle classified all pool-ready polecats as
+// crashed, and once the pool reached massDeathThreshold (3), a false
+// MASS DEATH DETECTED event fired every cycle. After the fix, a dead session
+// for an agent_state=idle polecat with no hook_bead is a normal resting state:
+// no crash log, no recorded death, no mass-death event.
+func TestCheckPolecatHealth_PoolReadyDoesNotFireMassDeath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mocks for tmux and bd")
 	}
-	for _, state := range []string{"done", "nuked"} {
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	// Pool-ready polecat: agent_state=idle, hook_bead empty, session dead.
+	bdPath := writeFakeTestBD(t, binDir, "idle", "idle", "", recentTime)
+
+	fakeGt := filepath.Join(binDir, "gt")
+	if err := os.WriteFile(fakeGt, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("writing fake gt: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+		gtPath: fakeGt,
+	}
+
+	// Simulate a 4-polecat pool (default size from pool-init).
+	polecats := []struct{ rig, name string }{
+		{"gastown_upstream", "chrome"},
+		{"gastown_upstream", "dust"},
+		{"gastown_upstream", "rust"},
+		{"gastown_upstream", "shiny"},
+	}
+	// Exercise multiple heartbeat cycles to show the aggregator stays quiet.
+	for cycle := 0; cycle < 3; cycle++ {
+		for _, p := range polecats {
+			d.checkPolecatHealth(p.rig, p.name)
+		}
+	}
+
+	got := logBuf.String()
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("pool-ready polecats must not log CRASH DETECTED, got: %q", got)
+	}
+	if strings.Contains(got, "MASS DEATH DETECTED") {
+		t.Errorf("pool-ready polecats must not trigger MASS DEATH DETECTED, got: %q", got)
+	}
+
+	d.deathsMu.Lock()
+	numDeaths := len(d.recentDeaths)
+	d.deathsMu.Unlock()
+	if numDeaths != 0 {
+		t.Errorf("pool-ready polecats must not record session deaths, got %d", numDeaths)
+	}
+}
+
+// TestCheckPolecatHealth_SkipsExpectedRestingIdlePolecat verifies that
+// checkPolecatHealth does NOT record a death or emit a session_death event
+// for an idle polecat in an expected resting agent_state (done/nuked/idle)
+// with a dead session. These are intentional shutdowns or pool-ready rest,
+// not crashes, and must not pollute the mass-death aggregator.
+//
+// This guards gu-but4's fix against over-firing, and also covers gu-vy4l:
+// pool-ready polecats (agent_state=idle, session intentionally dead after
+// pool-init or reapIdlePolecats) were previously misclassified as crashes,
+// causing a false MASS DEATH DETECTED event on every heartbeat cycle once
+// pool size reached massDeathThreshold.
+func TestCheckPolecatHealth_SkipsExpectedRestingIdlePolecat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	for _, state := range []string{"done", "nuked", "idle"} {
 		state := state
 		t.Run("state="+state, func(t *testing.T) {
 			binDir := t.TempDir()
@@ -787,7 +857,7 @@ func TestCheckPolecatHealth_SkipsTerminalIdlePolecat(t *testing.T) {
 
 			got := logBuf.String()
 			if strings.Contains(got, "CRASH DETECTED") {
-				t.Errorf("terminal-state (%s) idle polecat must not log CRASH DETECTED, got: %q",
+				t.Errorf("expected-resting (%s) idle polecat must not log CRASH DETECTED, got: %q",
 					state, got)
 			}
 
@@ -795,7 +865,7 @@ func TestCheckPolecatHealth_SkipsTerminalIdlePolecat(t *testing.T) {
 			numDeaths := len(d.recentDeaths)
 			d.deathsMu.Unlock()
 			if numDeaths != 0 {
-				t.Errorf("terminal-state (%s) idle polecat must not record death, got %d deaths",
+				t.Errorf("expected-resting (%s) idle polecat must not record death, got %d deaths",
 					state, numDeaths)
 			}
 		})
