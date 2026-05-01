@@ -23,10 +23,11 @@ import (
 
 // Polecat command flags
 var (
-	polecatListJSON  bool
-	polecatListAll   bool
-	polecatForce     bool
-	polecatRemoveAll bool
+	polecatListJSON     bool
+	polecatListAll      bool
+	polecatListDeadOnly bool
+	polecatForce        bool
+	polecatRemoveAll    bool
 )
 
 var polecatCmd = &cobra.Command{
@@ -68,12 +69,25 @@ var polecatListCmd = &cobra.Command{
 In the transient model, polecats exist only while working. The list shows
 all polecats with their states:
   - working: Actively working on an issue
-  - done: Completed work, waiting for cleanup
-  - stuck: Needs assistance
+  - idle:    Session killed; sandbox preserved (ready for reuse)
+  - stalled: Session crashed mid-work
+  - done:    Completed work, waiting for cleanup
+  - zombie:  Tmux session exists but no worktree (incomplete nuke)
+  - stuck:   Polecat requested assistance
+
+Each row also shows whether the tmux session is currently alive:
+  ● alive  — tmux session exists AND agent process is healthy
+  ○ dead   — tmux session does not exist (or agent process has died)
+
+Idle and stalled polecats legitimately have no tmux session; the session
+column lets you distinguish them from working/done polecats whose sessions
+have silently died (a common failure mode after OOM-kills or tmux-server
+restarts).
 
 Examples:
   gt polecat list greenplace
   gt polecat list --all
+  gt polecat list --dead-only          # only polecats with no live session
   gt polecat list greenplace --json`,
 	RunE: runPolecatList,
 }
@@ -327,6 +341,7 @@ func init() {
 	// List flags
 	polecatListCmd.Flags().BoolVar(&polecatListJSON, "json", false, "Output as JSON")
 	polecatListCmd.Flags().BoolVar(&polecatListAll, "all", false, "List polecats in all rigs")
+	polecatListCmd.Flags().BoolVar(&polecatListDeadOnly, "dead-only", false, "Only show polecats whose tmux session is dead (including legitimately idle ones)")
 
 	// Remove flags
 	polecatRemoveCmd.Flags().BoolVarP(&polecatForce, "force", "f", false, "Force removal, bypassing checks")
@@ -408,6 +423,33 @@ func effectivePolecatState(item PolecatListItem) polecat.State {
 		return polecat.StateStalled
 	}
 	return state
+}
+
+// filterDeadPolecats returns only items where SessionRunning is false.
+// Used by `gt polecat list --dead-only` to surface polecats whose tmux
+// session is gone (either legitimately reaped, or silently killed by OOM /
+// tmux-server restart). Before this filter existed, dead sessions were
+// indistinguishable from legitimately idle polecats in the default output
+// because both have no live tmux session.
+func filterDeadPolecats(items []PolecatListItem) []PolecatListItem {
+	filtered := make([]PolecatListItem, 0, len(items))
+	for _, p := range items {
+		if !p.SessionRunning {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered
+}
+
+// sessionLabel returns the plain-text label describing tmux session liveness
+// for a polecat list item. It is rendered alongside the ●/○ glyph so the
+// alive/dead distinction survives pipes, files, and terminals that strip
+// unicode or color.
+func sessionLabel(item PolecatListItem) string {
+	if item.SessionRunning {
+		return "session: alive"
+	}
+	return "session: dead"
 }
 
 // getPolecatManager creates a polecat manager for the given rig.
@@ -502,6 +544,14 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		allPolecats[i].State = effectivePolecatState(allPolecats[i])
 	}
 
+	// Apply --dead-only filter: keep only polecats whose tmux session is not running.
+	// This makes it easy to find polecats whose sessions have died — a failure mode
+	// that's otherwise indistinguishable from legitimately idle polecats in the default
+	// output because both have no live tmux session.
+	if polecatListDeadOnly {
+		allPolecats = filterDeadPolecats(allPolecats)
+	}
+
 	if polecatListJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -509,13 +559,19 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(allPolecats) == 0 {
-		fmt.Println("No polecats found.")
+		if polecatListDeadOnly {
+			fmt.Println("No polecats with dead sessions found.")
+		} else {
+			fmt.Println("No polecats found.")
+		}
 		return nil
 	}
 
 	fmt.Printf("%s\n\n", style.Bold.Render("Polecats"))
 	for _, p := range allPolecats {
-		// Session indicator
+		// Session indicator: ● (green) when alive, ○ (dim) when dead.
+		// We also emit an explicit text tag ("session: alive"/"session: dead") below
+		// so the distinction survives terminals/pipes that strip color or unicode.
 		sessionStatus := style.Dim.Render("○")
 		if p.SessionRunning {
 			sessionStatus = style.Success.Render("●")
@@ -538,7 +594,17 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			stateStr = style.Dim.Render(stateStr)
 		}
 
-		fmt.Printf("  %s %s/%s  %s\n", sessionStatus, p.Rig, p.Name, stateStr)
+		// Render the explicit session label in matching color so it's always obvious,
+		// even in pipes/files where the glyph may not render.
+		label := sessionLabel(p)
+		var renderedSessionLabel string
+		if p.SessionRunning {
+			renderedSessionLabel = style.Success.Render(label)
+		} else {
+			renderedSessionLabel = style.Dim.Render(label)
+		}
+
+		fmt.Printf("  %s %s/%s  %s  %s\n", sessionStatus, p.Rig, p.Name, stateStr, renderedSessionLabel)
 		if p.Issue != "" {
 			fmt.Printf("    %s\n", style.Dim.Render(p.Issue))
 		}
