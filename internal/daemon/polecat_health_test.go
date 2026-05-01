@@ -626,3 +626,178 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 		t.Errorf("expected working-no-hook reason, got: %q", got)
 	}
 }
+
+// TestCheckPolecatHealth_RecordsDeathForIdlePolecat verifies that
+// checkPolecatHealth records session death and emits a session_death event for
+// an idle polecat (no hook_bead) with a dead tmux session. This is the
+// regression test for gu-but4: previously, the function returned early for
+// idle polecats, so mass-death detection (kernel OOM, tmux server restart)
+// had blind spots for exactly the failure mode operators most need to detect.
+// The witness notification path is skipped because there's no work to recover —
+// the Witness's orphan patrol handles cleanup.
+func TestCheckPolecatHealth_RecordsDeathForIdlePolecat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	// Idle polecat: agent_state=working but hook_bead is empty.
+	bdPath := writeFakeTestBD(t, binDir, "working", "working", "", recentTime)
+
+	// Fake gt script that logs invocations — we'll use it to verify that the
+	// witness is NOT notified for idle polecat deaths (no work to recover).
+	gtLog := filepath.Join(t.TempDir(), "gt-invocations.log")
+	fakeGt := filepath.Join(binDir, "gt")
+	gtScript := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\n", gtLog)
+	if err := os.WriteFile(fakeGt, []byte(gtScript), 0755); err != nil {
+		t.Fatalf("writing fake gt: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+		gtPath: fakeGt,
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if !strings.Contains(got, "CRASH DETECTED (idle)") {
+		t.Errorf("expected idle-crash log for idle polecat with dead session, got: %q", got)
+	}
+
+	// Verify the death was recorded for mass-death aggregation.
+	d.deathsMu.Lock()
+	numDeaths := len(d.recentDeaths)
+	d.deathsMu.Unlock()
+	if numDeaths != 1 {
+		t.Errorf("expected 1 recorded session death, got %d", numDeaths)
+	}
+
+	// Verify witness was NOT notified — idle polecats don't need restart.
+	if data, err := os.ReadFile(gtLog); err == nil {
+		if strings.Contains(string(data), "CRASHED_POLECAT") {
+			t.Errorf("idle polecat death must not send CRASHED_POLECAT alert, got: %q", string(data))
+		}
+	}
+}
+
+// TestCheckPolecatHealth_MassDeathFiresForIdlePolecats verifies that
+// simultaneous deaths of many idle polecats trigger the mass-death aggregator.
+// This is the scenario from gu-but4 evidence: 11 idle polecat sessions died
+// simultaneously at 2026-04-30 21:43 UTC (daemon OOM kill), but because they
+// were all idle (empty hook_bead), zero deaths were recorded and the operator
+// had to manually discover the mass death. After this fix, the mass-death
+// event MUST fire.
+func TestCheckPolecatHealth_MassDeathFiresForIdlePolecats(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	bdPath := writeFakeTestBD(t, binDir, "working", "working", "", recentTime)
+
+	// Fake gt script (required by notifyWitnessOfCrashedPolecat path, though
+	// we do not expect it to be called for idle polecats).
+	fakeGt := filepath.Join(binDir, "gt")
+	if err := os.WriteFile(fakeGt, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("writing fake gt: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+		gtPath: fakeGt,
+	}
+
+	// Simulate 11 simultaneous idle polecat deaths (the gu-but4 evidence count).
+	// All share the same fake bd/tmux, but checkPolecatHealth builds a unique
+	// session name per (rigName, polecatName) pair via session.PolecatSessionName.
+	polecats := []struct{ rig, name string }{
+		{"casc_crud", "obsidian"},
+		{"casc_e2e", "furiosa"},
+		{"codegen_ws", "obsidian"},
+		{"gastown_upstream", "chrome"},
+		{"gastown_upstream", "dust"},
+		{"gastown_upstream", "fury"},
+		{"gastown_upstream", "guzzle"},
+		{"gastown_upstream", "rust"},
+		{"gastown_upstream", "shiny"},
+		{"gastown_upstream", "thunder"},
+		{"ralph", "obsidian"},
+	}
+	for _, p := range polecats {
+		d.checkPolecatHealth(p.rig, p.name)
+	}
+
+	got := logBuf.String()
+	// Each death must be logged
+	idleCrashes := strings.Count(got, "CRASH DETECTED (idle)")
+	if idleCrashes != len(polecats) {
+		t.Errorf("expected %d idle-crash logs, got %d. Log: %q",
+			len(polecats), idleCrashes, got)
+	}
+	// Mass-death aggregator must fire (threshold=3, window=30s — well within bounds)
+	if !strings.Contains(got, "MASS DEATH DETECTED") {
+		t.Errorf("expected MASS DEATH DETECTED log after %d idle polecat deaths, got: %q",
+			len(polecats), got)
+	}
+}
+
+// TestCheckPolecatHealth_SkipsTerminalIdlePolecat verifies that
+// checkPolecatHealth does NOT record a death or emit a session_death event
+// for an idle polecat in a terminal agent_state (done/nuked) with a dead
+// session. These are expected shutdowns, not crashes, and must not pollute
+// the mass-death aggregator. This guards gu-but4's fix against over-firing.
+func TestCheckPolecatHealth_SkipsTerminalIdlePolecat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	for _, state := range []string{"done", "nuked"} {
+		state := state
+		t.Run("state="+state, func(t *testing.T) {
+			binDir := t.TempDir()
+			writeFakeTestTmux(t, binDir)
+			recentTime := time.Now().UTC().Format(time.RFC3339)
+			bdPath := writeFakeTestBD(t, binDir, state, state, "", recentTime)
+
+			t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+			var logBuf strings.Builder
+			d := &Daemon{
+				config: &Config{TownRoot: t.TempDir()},
+				logger: log.New(&logBuf, "", 0),
+				tmux:   tmux.NewTmux(),
+				bdPath: bdPath,
+			}
+
+			d.checkPolecatHealth("myr", "mycat")
+
+			got := logBuf.String()
+			if strings.Contains(got, "CRASH DETECTED") {
+				t.Errorf("terminal-state (%s) idle polecat must not log CRASH DETECTED, got: %q",
+					state, got)
+			}
+
+			d.deathsMu.Lock()
+			numDeaths := len(d.recentDeaths)
+			d.deathsMu.Unlock()
+			if numDeaths != 0 {
+				t.Errorf("terminal-state (%s) idle polecat must not record death, got %d deaths",
+					state, numDeaths)
+			}
+		})
+	}
+}

@@ -2528,10 +2528,38 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 
 	// Check if polecat has hooked work
 	if info.HookBead == "" {
-		// No hooked work - this polecat is orphaned (should have self-nuked).
-		// Self-cleaning model: polecats nuke themselves on completion.
-		// An orphan with a dead session doesn't need restart - it needs cleanup.
-		// Let the Witness handle orphan detection/cleanup during patrol.
+		// No hooked work - this polecat is idle/orphaned (should have self-nuked
+		// on completion). The session being dead doesn't require a witness-driven
+		// restart — orphan detection/cleanup is the Witness's job during patrol.
+		//
+		// HOWEVER: we MUST still record the death and emit the session_death event
+		// so the mass-death aggregator can detect simultaneous deaths of many idle
+		// polecats (e.g., kernel OOM, tmux server restart, machine reboot). Without
+		// this, "mass death detection" only fires if every dead polecat happened to
+		// be actively working at the moment of death — precisely the opposite of
+		// what operators need to see during an incident. See issue gu-but4.
+		//
+		// Terminal states (done/nuked) are expected shutdowns, not crashes: we skip
+		// their death recording to avoid polluting the mass-death aggregator with
+		// benign exits. Note that `done` polecats typically keep hook_bead populated
+		// until the work bead closes, so this branch (HookBead == "") covers idle
+		// polecats after gt done has cleared the hook and orphans that never had one.
+		// We defensively re-check here in case a future change leaves `done` polecats
+		// in this path.
+		agentState := beads.AgentState(info.State)
+		if agentState == beads.AgentStateDone || agentState == beads.AgentStateNuked {
+			return
+		}
+
+		d.logger.Printf("CRASH DETECTED (idle): polecat %s/%s has no hook_bead but session %s is dead",
+			rigName, polecatName, sessionName)
+		d.recordSessionDeath(sessionName)
+		_ = events.LogFeed(events.TypeSessionDeath, sessionName,
+			events.SessionDeathPayload(sessionName, rigName+"/polecats/"+polecatName,
+				"idle polecat session died (no hook_bead)", "daemon"))
+		// Deliberately skip notifyWitnessOfCrashedPolecat: there's no work to
+		// recover, just an orphan to clean up. The Witness's orphan patrol
+		// handles that path without needing a CRASHED_POLECAT alert.
 		return
 	}
 
