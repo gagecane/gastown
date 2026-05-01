@@ -563,8 +563,8 @@ func TestDeriveSessionName(t *testing.T) {
 // TestCheckAll_InvalidBeadID tests that invalid bead IDs are skipped
 func TestCheckAll_InvalidBeadID(t *testing.T) {
 	mock := newMockHealthSource()
-	mock.agents["invalid-id"] = &beads.Issue{
-		ID:        "invalid-id",
+	mock.agents["x-invalid"] = &beads.Issue{
+		ID:        "x-invalid",
 		UpdatedAt: time.Now().Format(time.RFC3339),
 	}
 
@@ -575,7 +575,7 @@ func TestCheckAll_InvalidBeadID(t *testing.T) {
 	}
 
 	// Invalid bead ID should be skipped (ParseAgentBeadID returns ok=false for single-char prefix)
-	// "invalid-id" has prefix "invalid" which is > 3 chars, so ParseAgentBeadID will return false
+	// "x-invalid" has prefix "x" which is < 2 chars, so ParseAgentBeadID will return false
 	if len(agents) != 0 {
 		t.Errorf("expected 0 agents for invalid bead ID, got %d", len(agents))
 	}

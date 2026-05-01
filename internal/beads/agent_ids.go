@@ -371,9 +371,9 @@ func PolecatBeadID(rig, name string) string {
 //   - "ff-polecat-nux" → rig="ff", role="polecat", name="nux"
 func ParseAgentBeadID(id string) (rig, role, name string, ok bool) {
 	// Find the prefix (everything before the first hyphen)
-	// Valid prefixes are 2-3 characters (e.g., "gt", "bd", "hq")
+	// Valid prefixes are 2+ characters (e.g., "gt", "bd", "hq", "cadk", "cass")
 	hyphenIdx := strings.Index(id, "-")
-	if hyphenIdx < 2 || hyphenIdx > 3 {
+	if hyphenIdx < 2 {
 		return "", "", "", false
 	}
 

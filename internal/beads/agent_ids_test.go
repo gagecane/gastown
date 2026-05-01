@@ -238,6 +238,11 @@ func TestAgentBeadIDRoundTrip(t *testing.T) {
 		{"collapsed refinery", "ff", "ff", "refinery", ""},
 		{"collapsed polecat", "ff", "ff", "polecat", "nux"},
 		{"collapsed crew", "ff", "ff", "crew", "dave"},
+
+		// 4-character prefixes (e.g., cadk, cass, casw)
+		{"4-char prefix polecat", "cadk", "casc_cdk", "polecat", "furiosa"},
+		{"4-char prefix witness", "cass", "casc_shared", "witness", ""},
+		{"4-char prefix crew", "casw", "casc_webapp", "crew", "nux"},
 	}
 
 	for _, tt := range tests {

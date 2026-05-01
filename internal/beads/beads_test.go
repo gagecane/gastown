@@ -1603,9 +1603,12 @@ func TestParseAgentBeadID(t *testing.T) {
 		{"bd-beads-witness", "beads", "witness", "", true},            // bd prefix rig-level singleton
 		{"bd-beads-polecat-pearl", "beads", "polecat", "pearl", true}, // bd prefix rig-level named
 		{"hq-mayor", "", "mayor", "", true},                           // hq prefix town-level
+		// 4-character prefixes (e.g., cadk, cass, casw from routes.jsonl)
+		{"cadk-casc_cdk-polecat-furiosa", "casc_cdk", "polecat", "furiosa", true}, // 4-char prefix polecat
+		{"cass-casc_shared-witness", "casc_shared", "witness", "", true},           // 4-char prefix witness
 		// Truly invalid patterns
-		{"x-mayor", "", "", "", false},    // Prefix too short (1 char)
-		{"abcd-mayor", "", "", "", false}, // Prefix too long (4 chars)
+		{"x-mayor", "", "", "", false},        // Prefix too short (1 char)
+		{"abcd-mayor", "", "mayor", "", true}, // 4-char prefix is valid (e.g., cadk, cass)
 		{"", "", "", "", false},
 	}
 
