@@ -131,6 +131,15 @@ type Daemon struct {
 	knownRigsCache      []string
 	knownRigsCacheValid bool
 
+	// missingRigBeadLogged tracks which rig names have already had their
+	// "rig identity bead not found" warning emitted for this daemon run.
+	// Without this, isRigOperational logged the warning every heartbeat
+	// (~8/min × N rigs with no identity bead) producing thousands of
+	// duplicate log lines. We want the miss to be explicit (logged once)
+	// but not spammy. See gu-resv.
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	missingRigBeadLogged map[string]bool
+
 	// deaconStartFn is a test seam for the deacon start path invoked by
 	// ensureDeaconRunning. When nil (production), ensureDeaconRunning builds
 	// a real deacon.Manager and calls Start. Tests may set this to a stub to
@@ -2091,12 +2100,30 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	// than waste API credits on a potentially-docked rig.
 	blocked, reason, err := rig.IsRigParkedOrDockedE(d.config.TownRoot, rigName)
 	if err != nil {
-		// FAIL-SAFE: Can't verify docked status (Dolt down, prefix missing,
-		// network issue, etc.). Assume NOT operational to avoid wasting
-		// credits on potentially-docked rigs. Better to delay work than
-		// burn credits unnecessarily.
-		d.logger.Printf("Warning: failed to check rig %s for docked/parked status: %v (assuming not operational)", rigName, err)
-		return false, "cannot verify rig status (Dolt unavailable)"
+		// rig.ErrRigBeadNotFound is a persistent state, not a transient
+		// failure: the rig identity bead simply does not exist in the beads
+		// database. Since no bead means no status labels can exist, the
+		// rig cannot be parked or docked via the bead layer. Treat as
+		// operational (wisp layer was already checked in
+		// checkParkedOrDocked) and log the miss ONCE so it's explicit
+		// without spamming daemon.log. See gu-resv.
+		if errors.Is(err, rig.ErrRigBeadNotFound) {
+			if !d.missingRigBeadLogged[rigName] {
+				if d.missingRigBeadLogged == nil {
+					d.missingRigBeadLogged = make(map[string]bool)
+				}
+				d.missingRigBeadLogged[rigName] = true
+				d.logger.Printf("Warning: rig %s has no identity bead — docked/parked state cannot be read (will treat as operational; run `gt rig up %s` or `gt doctor` to create the bead)", rigName, rigName)
+			}
+			// Fall through to auto_restart check below.
+		} else {
+			// FAIL-SAFE: Can't verify docked status (Dolt down, network
+			// issue, prefix missing, etc.). Assume NOT operational to avoid
+			// wasting credits on potentially-docked rigs. Better to delay
+			// work than burn credits unnecessarily.
+			d.logger.Printf("Warning: failed to check rig %s for docked/parked status: %v (assuming not operational)", rigName, err)
+			return false, "cannot verify rig status (Dolt unavailable)"
+		}
 	}
 	if blocked {
 		// Match existing reason strings for compatibility with log scrapers

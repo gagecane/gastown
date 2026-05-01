@@ -709,3 +709,152 @@ func TestIsRigOperational_NoWispConfig_NoWarningSpam(t *testing.T) {
 		t.Errorf("isRigOperational should not emit 'parked state may have been lost' warning (gu-66xp regression); log output:\n%s", logs)
 	}
 }
+
+// TestIsRigOperational_MissingRigBead_LogsOnce is a regression test for
+// gu-resv: previously, when a rig listed in rigs.json had no corresponding
+// identity bead (e.g., `cait-rig-casc_integ`), the daemon logged a
+// "failed to check rig X for docked/parked status: issue not found" warning
+// on every heartbeat (~8/min × number of missing rigs). The furiosa diagnosis
+// in ta-0pk described this as "thousands of futile lookups" burning Dolt
+// cycles and polluting daemon.log.
+//
+// The fix distinguishes "rig identity bead not found" (persistent state,
+// log once, treat as operational) from "Dolt unavailable" (transient, keep
+// fail-safe behavior). This test covers the log-once behavior and the
+// non-blocking semantics.
+func TestIsRigOperational_MissingRigBead_LogsOnce(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a rig that's registered in rigs.json but has no identity bead.
+	// The bd stub below returns the canonical "no issue found" error,
+	// which beads.wrapError translates to beads.ErrNotFound, which
+	// rig.checkParkedOrDocked then wraps as rig.ErrRigBeadNotFound.
+	rigName := "orphanrig"
+	rigPath := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(rigPath, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"beads": {"prefix": "or"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigsJSON := `{"version":1,"rigs":{"orphanrig":{"beads":{"prefix":"or"}}}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub bd so Show() reports "no issue found", exercising the
+	// ErrRigBeadNotFound path rather than "no beads database found"
+	// (which is correctly treated as a transient failure).
+	stubDir := t.TempDir()
+	stubScript := `#!/bin/sh
+cat >&2 <<'EOT'
+Error: no issue found matching "or-rig-orphanrig"
+EOT
+exit 1
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: tmpDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	// Simulate 10 heartbeats. Pre-fix, each would emit a "failed to check
+	// rig" warning — 10 duplicate lines. Post-fix, exactly one warning
+	// should appear.
+	for i := 0; i < 10; i++ {
+		operational, reason := d.isRigOperational(rigName)
+		// A rig without an identity bead cannot carry dock/park labels.
+		// Treat as operational so work can proceed.
+		if !operational {
+			t.Errorf("heartbeat %d: expected operational=true for rig with missing identity bead, got false (reason=%q)", i, reason)
+		}
+	}
+
+	logs := logBuf.String()
+	missCount := strings.Count(logs, "has no identity bead")
+	if missCount == 0 {
+		t.Errorf("expected exactly one 'has no identity bead' warning, got none; log output:\n%s", logs)
+	}
+	if missCount > 1 {
+		t.Errorf("expected exactly one 'has no identity bead' warning (log-once), got %d; log output:\n%s", missCount, logs)
+	}
+
+	// The "Dolt unavailable" fail-safe path should NOT be taken for a
+	// missing bead — that path is reserved for transient failures.
+	if strings.Contains(logs, "Dolt unavailable") {
+		t.Errorf("missing rig bead should not produce 'Dolt unavailable' warning (that's for transient errors); log output:\n%s", logs)
+	}
+	// The pre-fix warning format must not recur for missing beads.
+	if strings.Contains(logs, "issue not found") {
+		t.Errorf("missing rig bead should not produce 'issue not found' warning spam; log output:\n%s", logs)
+	}
+}
+
+// TestIsRigOperational_DoltDown_StillFailsSafe guards against a regression
+// where relaxing the missing-bead path accidentally also relaxed the
+// transient-Dolt-failure path. A rig whose identity bead cannot be queried
+// due to Dolt being unreachable must still be treated as non-operational to
+// avoid starting agents on potentially-docked rigs.
+func TestIsRigOperational_DoltDown_StillFailsSafe(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	rigName := "doltdownrig"
+	rigPath := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"dd"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(`{"version":1,"rigs":{"doltdownrig":{"beads":{"prefix":"dd"}}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub bd: simulate Dolt connection failure. NOT a "not found" response.
+	stubDir := t.TempDir()
+	stubScript := `#!/bin/sh
+cat >&2 <<'EOT'
+Error: [mysql] read tcp 127.0.0.1:3307: connection refused
+EOT
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stubScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: tmpDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	operational, reason := d.isRigOperational(rigName)
+	if operational {
+		t.Errorf("expected operational=false for transient Dolt failure (fail-safe), got true")
+	}
+	if !strings.Contains(reason, "cannot verify") && !strings.Contains(reason, "Dolt unavailable") {
+		t.Errorf("expected 'cannot verify' or 'Dolt unavailable' in reason, got %q", reason)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "failed to check rig") {
+		t.Errorf("expected 'failed to check rig' warning for Dolt failure; log output:\n%s", logs)
+	}
+}

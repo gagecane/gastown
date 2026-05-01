@@ -6,6 +6,7 @@
 package rig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -107,6 +108,15 @@ func checkParkedOrDocked(townRoot, rigName string) (bool, string, error) {
 	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
 	rigBead, err := bd.Show(rigBeadID)
 	if err != nil {
+		// Distinguish "rig identity bead simply does not exist" from other
+		// failures (Dolt unavailable, network timeout, malformed data).
+		// A missing bead is a persistent state — the rig was never set up
+		// with an identity bead, or the bead was deleted. No amount of
+		// retrying will make it appear, so callers should not treat this
+		// like a transient Dolt outage.
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, "", ErrRigBeadNotFound
+		}
 		return false, "", err
 	}
 
@@ -216,3 +226,16 @@ type rigPrefixError struct{}
 func (*rigPrefixError) Error() string {
 	return "rig beads prefix not found (cannot locate rig identity bead)"
 }
+
+// ErrRigBeadNotFound is returned by IsRigParkedOrDockedE when the rig's
+// identity bead does not exist in the beads database. This is a persistent
+// state (the rig was never set up with an identity bead, or it was deleted),
+// not a transient failure. Callers should handle it separately from
+// "cannot verify" errors: since no identity bead can carry status labels,
+// no rig without a bead can be parked or docked via the bead layer.
+//
+// The daemon uses this to distinguish persistent "no bead" state (log once,
+// treat as not-blocking) from transient Dolt failures (log and fail-safe to
+// not-operational). Without this distinction, missing rig beads produce
+// per-heartbeat warning spam (see gu-resv).
+var ErrRigBeadNotFound = errors.New("rig identity bead not found")
