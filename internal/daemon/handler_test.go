@@ -472,3 +472,76 @@ func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 		t.Errorf("findDispatchableDog = %q, want alpha or bravo", got.Name)
 	}
 }
+
+// TestFindDispatchableDog_Method_SkipsBackedOffDogs is the integration-level
+// companion to the unit tests in dog_startup_backoff_test.go: it verifies
+// that the daemon-aware findDispatchableDog method actually filters out
+// dogs whose startup is in backoff. Without this filter the cooldown-gated
+// dispatchPlugins pass would keep picking the same failing dog every
+// heartbeat (the exact symptom gu-ro75 describes).
+func TestFindDispatchableDog_Method_SkipsBackedOffDogs(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "daemon"), 0o755); err != nil {
+		t.Fatalf("mkdir daemon dir: %v", err)
+	}
+	d := testHandlerDaemon(t, townRoot)
+	d.restartTracker = NewRestartTracker(townRoot, RestartTrackerConfig{
+		InitialBackoff:    5 * time.Second,
+		MaxBackoff:        10 * time.Second,
+		BackoffMultiplier: 2.0,
+		CrashLoopWindow:   1 * time.Minute,
+		CrashLoopCount:    5,
+		StabilityPeriod:   30 * time.Second,
+	})
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	// Mark alpha as freshly-failed so backoff is active.
+	d.recordDogStartFailure("alpha")
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := d.findDispatchableDog(mgr, sm)
+	if got == nil {
+		t.Fatal("findDispatchableDog returned nil; expected bravo (alpha backed off)")
+	}
+	if got.Name != "bravo" {
+		t.Errorf("findDispatchableDog = %q, want bravo (alpha should be in backoff)", got.Name)
+	}
+}
+
+// TestFindDispatchableDog_Method_ReturnsNilWhenAllBackedOff verifies the
+// stop-the-world safety: if every idle dog is in startup backoff, the
+// daemon returns nil (and the caller defers the plugin) rather than
+// forcing a dispatch onto a known-broken dog.
+func TestFindDispatchableDog_Method_ReturnsNilWhenAllBackedOff(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "daemon"), 0o755); err != nil {
+		t.Fatalf("mkdir daemon dir: %v", err)
+	}
+	d := testHandlerDaemon(t, townRoot)
+	d.restartTracker = NewRestartTracker(townRoot, RestartTrackerConfig{
+		InitialBackoff:    5 * time.Second,
+		MaxBackoff:        10 * time.Second,
+		BackoffMultiplier: 2.0,
+		CrashLoopWindow:   1 * time.Minute,
+		CrashLoopCount:    5,
+		StabilityPeriod:   30 * time.Second,
+	})
+
+	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
+	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
+
+	d.recordDogStartFailure("alpha")
+	d.recordDogStartFailure("bravo")
+
+	mgr := dog.NewManager(townRoot, nil)
+	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+
+	got := d.findDispatchableDog(mgr, sm)
+	if got != nil {
+		t.Errorf("findDispatchableDog = %q, want nil (all dogs in backoff)", got.Name)
+	}
+}

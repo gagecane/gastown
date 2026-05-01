@@ -264,7 +264,11 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		// pick the same first idle dog — infinite-looping the same failed
 		// dispatch instead of advancing to the next idle dog in the pack.
 		// See gt-o24.
-		idleDog := findDispatchableDog(mgr, sm, d.logger)
+		//
+		// Also skip dogs in startup backoff (gu-ro75): when a dog's session
+		// repeatedly dies during startup, the restart tracker mutes it for
+		// an exponentially increasing window instead of hot-looping.
+		idleDog := d.findDispatchableDog(mgr, sm)
 		if idleDog == nil {
 			d.logger.Printf("Handler: no dispatchable idle dogs available, deferring remaining plugins")
 			return
@@ -300,12 +304,18 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			WorkDesc: workDesc,
 		}); err != nil {
 			d.logger.Printf("Handler: failed to start session for dog %s: %v", idleDog.Name, err)
+			// Record the failed startup so the next heartbeat applies
+			// exponential backoff instead of immediately retrying. See gu-ro75.
+			d.recordDogStartFailure(idleDog.Name)
 			// Roll back assignment on session start failure.
 			if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
 				d.logger.Printf("Handler: failed to clear work after start failure for dog %s: %v", idleDog.Name, clearErr)
 			}
 			continue
 		}
+		// Successful start — let the tracker reset backoff once the dog has
+		// been stable for StabilityPeriod (noop otherwise).
+		d.recordDogStartSuccess(idleDog.Name)
 
 		d.logger.Printf("Handler: dispatched plugin %s to dog %s", p.Name, idleDog.Name)
 
@@ -335,6 +345,11 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 //
 // IsRunning errors are logged and treated as "not dispatchable" so a flaky
 // tmux check can't wedge the whole dispatch cycle.
+//
+// This is the free-function flavor with no daemon/backoff awareness — it is
+// kept for unit tests that construct a bare SessionManager. Production code
+// should call (*Daemon).findDispatchableDog so dogs in startup backoff are
+// also skipped (see gu-ro75).
 func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.Logger) *dog.Dog {
 	dogs, err := mgr.List()
 	if err != nil {
@@ -354,6 +369,38 @@ func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.L
 			continue
 		}
 		return d
+	}
+	return nil
+}
+
+// findDispatchableDog is the daemon-aware variant of the free function above.
+// In addition to the idle+not-running filter, it skips dogs whose startup is
+// currently in exponential backoff due to prior failures. Every dog whose
+// backoff is active gets a single-line log explaining why it was skipped so
+// the log trail makes the loop protection visible. See gu-ro75.
+func (d *Daemon) findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager) *dog.Dog {
+	dogs, err := mgr.List()
+	if err != nil {
+		d.logger.Printf("Handler: failed to list dogs while picking dispatch target: %v", err)
+		return nil
+	}
+	for _, dg := range dogs {
+		if dg.State != dog.StateIdle {
+			continue
+		}
+		running, err := sm.IsRunning(dg.Name)
+		if err != nil {
+			d.logger.Printf("Handler: IsRunning check failed for dog %s: %v; skipping", dg.Name, err)
+			continue
+		}
+		if running {
+			continue
+		}
+		if skip, reason := d.isDogInStartupBackoff(dg.Name); skip {
+			d.logger.Printf("Handler: skipping dispatch — %s", reason)
+			continue
+		}
+		return dg
 	}
 	return nil
 }

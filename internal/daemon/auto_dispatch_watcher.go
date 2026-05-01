@@ -419,6 +419,22 @@ func (d *Daemon) dispatchAutoDispatchForRig(rig, trigger, triggerSession, trigge
 		return fmt.Errorf("no idle dogs available")
 	}
 
+	// Honour startup backoff (gu-ro75): if this dog's last N starts have
+	// failed, skip event-driven dispatch. The cooldown-gated heartbeat pass
+	// in dispatchPlugins() will pick a different dog or wait for backoff to
+	// expire on its own schedule.
+	if skip, reason := d.isDogInStartupBackoff(idleDog.Name); skip {
+		payload := withExtra(
+			withExtra(
+				events.AutoDispatchEventTriggeredPayload(rig, trigger, triggerSession, triggerAgent),
+				"outcome", "dog_in_backoff",
+			),
+			"dog", idleDog.Name,
+		)
+		_ = events.LogAudit(events.TypeAutoDispatchEventTriggered, "daemon", payload)
+		return fmt.Errorf("dispatch deferred: %s", reason)
+	}
+
 	// Assign work and send mail with a rig-scoped auto-dispatch body.
 	workDesc := fmt.Sprintf("plugin:%s (event-driven, rig=%s)", p.Name, rig)
 	if err := mgr.AssignWork(idleDog.Name, workDesc); err != nil {
@@ -444,11 +460,15 @@ func (d *Daemon) dispatchAutoDispatchForRig(rig, trigger, triggerSession, trigge
 	if err := sm.Start(idleDog.Name, dog.SessionStartOptions{
 		WorkDesc: workDesc,
 	}); err != nil {
+		// Track the failure so subsequent attempts (including the cooldown
+		// heartbeat pass) back off. See gu-ro75.
+		d.recordDogStartFailure(idleDog.Name)
 		if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
 			d.logger.Printf("AutoDispatchWatcher: failed to roll back work assignment after start failure: %v", clearErr)
 		}
 		return fmt.Errorf("starting session for dog %s: %w", idleDog.Name, err)
 	}
+	d.recordDogStartSuccess(idleDog.Name)
 
 	// Record the dispatch so the cooldown gate in dispatchPlugins() sees it.
 	// This prevents the next heartbeat from double-dispatching the same
