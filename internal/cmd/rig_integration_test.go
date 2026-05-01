@@ -47,21 +47,21 @@ var agentAllowlist = map[string][]string{
 	"mayor": {
 		"?? AGENTS.md",  // bd init: creates multi-provider instructions (tracked beads repos only). Cleanup: gu-ksq6
 		"?? .claude/",   // bd init: creates .claude/settings.json with bd prime hooks (tracked beads repos only). Kept intentionally: the hook is useful for the user's Claude sessions in their own repo, and .gitignore prevents accidental commit (defense-in-depth). gu-gh4q audited and closed this sub-task.
-		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406
+		"?? .gitignore", // bd init writes a root .gitignore with Gas Town patterns on tracked-beads-repo clones. Mayor does NOT use rig.EnsureGitignorePatterns — root cause is in bd init itself. Left as-is; relocating bd init's write would require a beads-repo change (outside this project). gu-o406 verified mayor is not a caller of EnsureGitignorePatterns.
 	},
 
 	// Refinery is a worktree for the merge queue processor.
+	// Uses rig.EnsureLocalExcludePatterns (writes to .git/info/exclude, never committed).
 	"refinery": {},
 
 	// Crew workers are user-managed worktrees for human developers.
-	"crew": {
-		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406
-	},
+	// Uses rig.EnsureLocalExcludePatterns (writes to .git/info/exclude, never committed).
+	"crew": {},
 
 	// Polecats are ephemeral worktrees for autonomous agents.
+	// Uses rig.EnsureLocalExcludePatterns (writes to .git/info/exclude, never committed).
 	"polecat": {
-		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406 (polecat already uses EnsureLocalExcludePatterns; .gitignore entry is legacy)
-		"?? CLAUDE.md",  // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context. Cleanup: gu-k9oj
+		"?? CLAUDE.md", // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context. Cleanup: gu-k9oj
 	},
 }
 

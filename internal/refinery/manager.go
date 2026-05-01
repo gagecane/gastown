@@ -182,9 +182,13 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
-	// Ensure .gitignore has required Gas Town patterns
-	if err := rig.EnsureGitignorePatterns(refineryRigDir); err != nil {
-		style.PrintWarning("could not update refinery .gitignore: %v", err)
+	// Ensure worktree-local git exclude has required Gas Town patterns.
+	// Writing to .git/info/exclude keeps Gas Town ignore rules out of the
+	// tracked .gitignore (which belongs to the user's repo), so the refinery
+	// worktree doesn't accidentally commit Gas Town infrastructure patterns
+	// upstream. (gu-o406)
+	if err := rig.EnsureLocalExcludePatterns(refineryRigDir); err != nil {
+		style.PrintWarning("could not update refinery git exclude: %v", err)
 	}
 
 	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{

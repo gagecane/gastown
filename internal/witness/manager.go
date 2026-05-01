@@ -173,9 +173,13 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
 
-	// Ensure .gitignore has required Gas Town patterns
-	if err := rig.EnsureGitignorePatterns(witnessDir); err != nil {
-		style.PrintWarning("could not update witness .gitignore: %v", err)
+	// Ensure worktree-local git exclude has required Gas Town patterns.
+	// Writing to .git/info/exclude keeps Gas Town ignore rules out of the
+	// tracked .gitignore (which belongs to the user's repo), so the witness
+	// worktree doesn't accidentally commit Gas Town infrastructure patterns
+	// upstream. (gu-o406)
+	if err := rig.EnsureLocalExcludePatterns(witnessDir); err != nil {
+		style.PrintWarning("could not update witness git exclude: %v", err)
 	}
 
 	roleConfig, err := m.roleConfig()
