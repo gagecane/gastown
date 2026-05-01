@@ -64,9 +64,10 @@ var agentAllowlist = map[string][]string{
 
 	// Polecats are ephemeral worktrees for autonomous agents.
 	// Uses rig.EnsureLocalExcludePatterns (writes to .git/info/exclude, never committed).
-	"polecat": {
-		"?? CLAUDE.md", // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context. Cleanup: gu-k9oj
-	},
+	// Polecat lifecycle context (gt done, IDLE POLECAT HERESY, etc.) is injected
+	// ephemerally by `gt prime --hook` via the SessionStart hook — no CLAUDE.md
+	// is written into the worktree. (gu-k9oj)
+	"polecat": {},
 }
 
 // createTestGitRepo creates a minimal git repository for testing.
