@@ -200,6 +200,37 @@ Examples:
 	RunE: runDeaconStaleHooks,
 }
 
+var deaconStaleSpawningCmd = &cobra.Command{
+	Use:   "stale-spawning",
+	Short: "Find and close agent beads stuck in spawning state",
+	Long: `Find agent beads stuck in agent_state=spawning and close them if the
+agent's session never came up.
+
+Agent beads transition to spawning when a polecat (or other agent) is being
+brought up — the sandbox is being created and the tmux session is not yet
+live. If the spawn aborts (setup script fails, parent shell dies, rig gets
+renamed or removed mid-spawn), nothing transitions the bead out of spawning
+and it accumulates indefinitely. See gu-iabm.
+
+This command is the town-level watchdog for that scenario. For each agent
+bead in agent_state=spawning, it:
+  1. Checks whether the bead has been spawning longer than --max-age
+     (default 1 hour). Fresh spawns are ignored.
+  2. Verifies the expected tmux session does not exist.
+  3. Closes the bead with reason "spawn-failed: ..." when BOTH gates pass.
+
+The two-factor gate protects normal slow spawns (fail the age gate) and
+agents whose state field simply hasn't been rewritten yet (fail the session
+gate). Beads whose tmux session name can't be resolved are reported but
+never acted on — we can't confirm death for them.
+
+Examples:
+  gt deacon stale-spawning                # Close stuck spawning beads
+  gt deacon stale-spawning --dry-run      # Preview what would be closed
+  gt deacon stale-spawning --max-age=30m  # Use 30 minute threshold`,
+	RunE: runDeaconStaleSpawning,
+}
+
 var deaconPauseCmd = &cobra.Command{
 	Use:   "pause",
 	Short: "Pause the Deacon to prevent patrol actions",
@@ -376,6 +407,11 @@ var (
 	staleHooksMaxAge time.Duration
 	staleHooksDryRun bool
 
+	// Stale-spawning flags
+	staleSpawningMaxAge time.Duration
+	staleSpawningDryRun bool
+	staleSpawningJSON   bool
+
 	// Pause flags
 	pauseReason string
 
@@ -404,6 +440,7 @@ func init() {
 	deaconCmd.AddCommand(deaconForceKillCmd)
 	deaconCmd.AddCommand(deaconHealthStateCmd)
 	deaconCmd.AddCommand(deaconStaleHooksCmd)
+	deaconCmd.AddCommand(deaconStaleSpawningCmd)
 	deaconCmd.AddCommand(deaconPauseCmd)
 	deaconCmd.AddCommand(deaconResumeCmd)
 	deaconCmd.AddCommand(deaconCleanupOrphansCmd)
@@ -435,6 +472,14 @@ func init() {
 		"Maximum age before a hooked bead is considered stale")
 	deaconStaleHooksCmd.Flags().BoolVar(&staleHooksDryRun, "dry-run", false,
 		"Preview what would be unhooked without making changes")
+
+	// Flags for stale-spawning
+	deaconStaleSpawningCmd.Flags().DurationVar(&staleSpawningMaxAge, "max-age", 1*time.Hour,
+		"Maximum age before a spawning agent bead is considered stuck")
+	deaconStaleSpawningCmd.Flags().BoolVar(&staleSpawningDryRun, "dry-run", false,
+		"Preview what would be closed without making changes")
+	deaconStaleSpawningCmd.Flags().BoolVar(&staleSpawningJSON, "json", false,
+		"Output as JSON")
 
 	// Flags for pause
 	deaconPauseCmd.Flags().StringVar(&pauseReason, "reason", "",
@@ -1284,6 +1329,77 @@ func runDeaconStaleHooks(cmd *cobra.Command, args []string) error {
 	if partialWorkCount > 0 {
 		fmt.Printf("%s %d bead(s) had partial work in worktree\n",
 			style.Bold.Render("⚠"), partialWorkCount)
+	}
+
+	return nil
+}
+
+// runDeaconStaleSpawning finds and closes agent beads stuck in
+// agent_state=spawning when their session is gone. See gu-iabm.
+func runDeaconStaleSpawning(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	cfg := &deacon.StaleSpawningConfig{
+		MaxAge: staleSpawningMaxAge,
+		DryRun: staleSpawningDryRun,
+	}
+
+	result, err := deacon.ScanStaleSpawning(townRoot, cfg)
+	if err != nil {
+		return fmt.Errorf("scanning stale spawning beads: %w", err)
+	}
+
+	if staleSpawningJSON {
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
+
+	if result.TotalSpawning == 0 {
+		fmt.Printf("%s No agent beads in spawning state\n", style.Dim.Render("○"))
+		return nil
+	}
+
+	fmt.Printf("%s Found %d spawning agent bead(s), %d stuck (older than %s with dead session)\n",
+		style.Bold.Render("●"), result.TotalSpawning, result.StaleCount, staleSpawningMaxAge)
+
+	if result.StaleCount == 0 {
+		fmt.Printf("%s All spawning beads are fresh or have live sessions\n",
+			style.Dim.Render("○"))
+		return nil
+	}
+
+	for _, r := range result.Results {
+		var marker, action string
+		switch {
+		case r.Error != "" && !r.Closed:
+			marker = style.Dim.Render("✗")
+			action = fmt.Sprintf("skipped: %s", r.Error)
+		case staleSpawningDryRun:
+			marker = style.Bold.Render("?")
+			action = "would close (session dead)"
+		case r.Closed:
+			marker = style.Bold.Render("✓")
+			action = "closed (spawn-failed)"
+		default:
+			marker = style.Dim.Render("○")
+			action = "no action"
+		}
+		assignee := r.Assignee
+		if assignee == "" {
+			assignee = "(none)"
+		}
+		fmt.Printf("  %s %s: %s (age: %s, assignee: %s)\n",
+			marker, r.BeadID, action, r.Age, assignee)
+	}
+
+	if staleSpawningDryRun {
+		fmt.Printf("\n%s Dry run - no changes made. Run without --dry-run to close.\n",
+			style.Dim.Render("ℹ"))
+	} else if result.Closed > 0 {
+		fmt.Printf("\n%s Closed %d stuck spawning bead(s)\n",
+			style.Bold.Render("✓"), result.Closed)
 	}
 
 	return nil
