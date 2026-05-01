@@ -29,7 +29,7 @@ var agentLogCmd = &cobra.Command{
 func init() {
 	agentLogCmd.Flags().StringVar(&agentLogSession, "session", "", "Gas Town tmux session name (used as log tag)")
 	agentLogCmd.Flags().StringVar(&agentLogWorkDir, "work-dir", "", "Agent working directory (used to locate conversation log files)")
-	agentLogCmd.Flags().StringVar(&agentLogAgentType, "agent", "claudecode", "Agent type (claudecode, opencode)")
+	agentLogCmd.Flags().StringVar(&agentLogAgentType, "agent", "claudecode", "Agent type (claudecode, opencode, kiro)")
 	agentLogCmd.Flags().StringVar(&agentLogSince, "since", "", "Only watch JSONL files modified at or after this RFC3339 timestamp (filters out pre-existing Claude sessions)")
 	agentLogCmd.Flags().StringVar(&agentLogRunID, "run-id", "", "GASTA run identifier (GT_RUN); injected into every agent.event for waterfall correlation")
 	_ = agentLogCmd.MarkFlagRequired("session")
@@ -73,7 +73,7 @@ func runAgentLog(cmd *cobra.Command, args []string) error {
 
 	adapter := agentlog.NewAdapter(agentLogAgentType)
 	if adapter == nil {
-		return fmt.Errorf("unknown agent type %q; supported: claudecode, opencode", agentLogAgentType)
+		return fmt.Errorf("unknown agent type %q; supported: claudecode, opencode, kiro", agentLogAgentType)
 	}
 
 	ch, err := adapter.Watch(ctx, agentLogSession, agentLogWorkDir, since)

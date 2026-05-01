@@ -95,7 +95,8 @@ func TestNewAdapter(t *testing.T) {
 		{"claudecode", "claudecode", false, "claudecode"},
 		{"empty defaults to claudecode", "", false, "claudecode"},
 		{"opencode", "opencode", false, "opencode"},
-		{"unknown", "kiro", true, ""},
+		{"kiro", "kiro", false, "kiro"},
+		{"unknown", "bogusagent", true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

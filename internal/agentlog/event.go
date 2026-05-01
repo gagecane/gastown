@@ -53,6 +53,8 @@ func NewAdapter(agentType string) AgentAdapter {
 		return &ClaudeCodeAdapter{}
 	case "opencode":
 		return &OpenCodeAdapter{}
+	case "kiro":
+		return &KiroAdapter{}
 	default:
 		return nil
 	}
