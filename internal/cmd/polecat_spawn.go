@@ -366,13 +366,79 @@ func tryReuseIdlePolecat(
 	}, true
 }
 
+// verifyHookedWorkForAgent queries the beads database for any work bead that is
+// hooked to the given agent. It returns nil if at least one hooked/in-progress
+// bead with matching assignee exists, or a descriptive error otherwise.
+//
+// This is a pre-condition guard used by StartSession to catch gu-56ik: scheduler
+// dispatch paths must spawn a polecat AND attach work to it atomically. If the
+// session is about to start without a hooked work bead, something upstream
+// skipped or silently failed the sling step. Starting the tmux session would
+// produce a polecat that primes, finds an empty hook, mails witness, and exits —
+// wasting a session slot and triggering noisy escalations.
+//
+// beadsDir may be empty; when empty, the default beads lookup path is used.
+//
+// Declared as var so tests can stub it out without a real beads database.
+var verifyHookedWorkForAgent = func(agentID, beadsDir string) error {
+	dir := beadsDir
+	if dir == "" {
+		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+			dir = townRoot
+		}
+	}
+	b := beads.New(dir)
+
+	// Primary: any bead with status=hooked + assignee=<agent>. This is the
+	// canonical post-sling state set by hookBeadWithRetry.
+	hooked, err := b.List(beads.ListOptions{
+		Status:   beads.StatusHooked,
+		Assignee: agentID,
+		Priority: -1,
+	})
+	if err == nil && len(hooked) > 0 {
+		return nil
+	}
+
+	// Secondary: an in_progress bead with this assignee — can happen when the
+	// session is restarted for a polecat that was mid-work before a crash.
+	inProgress, err := b.List(beads.ListOptions{
+		Status:   "in_progress",
+		Assignee: agentID,
+		Priority: -1,
+	})
+	if err == nil && len(inProgress) > 0 {
+		return nil
+	}
+
+	return fmt.Errorf("no hooked or in-progress work bead found for agent %s — "+
+		"refusing to start session with empty hook (gu-56ik: dispatch must attach work before starting session)",
+		agentID)
+}
+
 // StartSession starts the tmux session for a spawned polecat.
 // This is called after the molecule/bead is attached, so the polecat
 // sees its work when gt prime runs on session start.
 // Returns the pane ID after session start.
+//
+// Pre-condition (gu-56ik): a work bead must be hooked to this polecat (status
+// =hooked and assignee=<this polecat>) before the tmux session is launched.
+// This guards against the failure mode where a session is started without a
+// preceding sling step, producing a polecat that primes to an empty hook,
+// mails the witness, and self-terminates. Callers (executeSling, runSling)
+// always hook work before calling StartSession, so this check should pass on
+// the happy path; a failure indicates a bug in an upstream dispatch path.
 func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	if s.SessionStarted() {
 		return s.Pane, nil
+	}
+
+	// Pre-condition guard: refuse to start a session with an empty hook.
+	// Without this, a polecat can come up, find no assigned work, escalate
+	// to the witness, and exit — wasting a session slot and generating
+	// noisy dispatch_failed alerts. See gu-56ik.
+	if err := verifyHookedWorkForAgent(s.AgentID(), ""); err != nil {
+		return "", fmt.Errorf("refusing to start session for %s: %w", s.AgentID(), err)
 	}
 
 	townRoot, err := workspace.FindFromCwdOrError()
