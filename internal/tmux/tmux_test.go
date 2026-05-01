@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func hasTmux() bool {
@@ -348,6 +350,14 @@ func TestEnsureSessionFreshWithCommand_KillsZombie(t *testing.T) {
 		t.Fatalf("NewSession: %v", err)
 	}
 
+	// Wait for the shell to stabilize. Without this, transient non-shell
+	// processes spawned during shell init (e.g., the gt shell-hook running
+	// `git rev-parse` from zsh precmd) can briefly appear as the pane's
+	// current command and be misinterpreted as "agent running".
+	if err := tm.WaitForShellReady(sessionName, 2*time.Second); err != nil {
+		t.Fatalf("WaitForShellReady: %v", err)
+	}
+
 	// Verify it's a zombie
 	if tm.IsAgentRunning(sessionName) {
 		t.Skip("session unexpectedly has agent running")
@@ -397,10 +407,32 @@ func TestIsAgentRunning(t *testing.T) {
 		t.Fatalf("WaitForShellReady: %v", err)
 	}
 
-	// Get the current pane command (should be bash/zsh/etc)
-	cmd, err := tm.GetPaneCommand(sessionName)
-	if err != nil {
-		t.Fatalf("GetPaneCommand: %v", err)
+	// Capture the stable shell command. Even after WaitForShellReady returns
+	// (which confirms the pane was showing a shell for consecutive polls), a
+	// subsequent GetPaneCommand can still catch a transient non-shell process
+	// (e.g., the gt shell-hook running `git rev-parse` from zsh precmd). Retry
+	// until we observe a shell, or give up after a short window.
+	var cmd string
+	{
+		shells := map[string]bool{}
+		for _, s := range constants.SupportedShells {
+			shells[s] = true
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			c, err := tm.GetPaneCommand(sessionName)
+			if err != nil {
+				t.Fatalf("GetPaneCommand: %v", err)
+			}
+			if shells[c] {
+				cmd = c
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if cmd == "" {
+			t.Fatalf("GetPaneCommand: pane never settled on a shell")
+		}
 	}
 
 	tests := []struct {

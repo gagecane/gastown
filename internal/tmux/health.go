@@ -437,21 +437,48 @@ func (t *Tmux) WaitForCommand(session string, excludeCommands []string, timeout 
 	return fmt.Errorf("timeout waiting for command (still running excluded command)")
 }
 
-// WaitForShellReady polls until the pane is running a shell command.
-// Useful for waiting until a process has exited and returned to shell.
+// WaitForShellReady polls until the pane is running a shell command, and that
+// shell has remained the pane's current command for at least two consecutive
+// polls (i.e., is stable). Useful for waiting until a process has exited and
+// returned to shell.
+//
+// The stability check matters because during shell startup, .zshrc/.bashrc and
+// similar rc files can briefly fork short-lived subprocesses (e.g., `sh` via
+// `brew shellenv`, `mise activate`, or login profile chains). Without stability,
+// WaitForShellReady can return while the pane momentarily shows one shell
+// (e.g., `sh`) only to transition to a different shell (e.g., `zsh`) a few ms
+// later. Callers that then cache the "current shell" at ready time end up with
+// a stale value.
 func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 	shells := constants.SupportedShells
+	isShell := func(cmd string) bool {
+		for _, s := range shells {
+			if cmd == s {
+				return true
+			}
+		}
+		return false
+	}
 	deadline := time.Now().Add(timeout)
+	var lastShell string
 	for time.Now().Before(deadline) {
 		cmd, err := t.GetPaneCommand(session)
 		if err != nil {
+			lastShell = ""
 			time.Sleep(constants.PollInterval)
 			continue
 		}
-		for _, shell := range shells {
-			if cmd == shell {
+		if isShell(cmd) {
+			// Require the same shell to be observed in two consecutive polls
+			// before declaring ready. This filters out transient shells (e.g.,
+			// `sh` briefly spawned by zsh init) that would otherwise cause
+			// callers to cache a stale pane command.
+			if lastShell == cmd {
 				return nil
 			}
+			lastShell = cmd
+		} else {
+			lastShell = ""
 		}
 		time.Sleep(constants.PollInterval)
 	}
