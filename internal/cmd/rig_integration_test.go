@@ -46,7 +46,7 @@ var agentAllowlist = map[string][]string{
 	// For tracked beads repos, bd init creates files here (runs in mayor/rig).
 	"mayor": {
 		"?? AGENTS.md",  // bd init: creates multi-provider instructions (tracked beads repos only). Cleanup: gu-ksq6
-		"?? .claude/",   // bd init: creates .claude/settings.json with onboard prompt. Cleanup: gu-gh4q
+		"?? .claude/",   // bd init: creates .claude/settings.json with bd prime hooks (tracked beads repos only). Kept intentionally: the hook is useful for the user's Claude sessions in their own repo, and .gitignore prevents accidental commit (defense-in-depth). gu-gh4q audited and closed this sub-task.
 		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406
 	},
 
@@ -60,7 +60,6 @@ var agentAllowlist = map[string][]string{
 
 	// Polecats are ephemeral worktrees for autonomous agents.
 	"polecat": {
-		"?? .claude/",   // bd init: creates .claude/commands/ with handoff/review slash commands. Cleanup: gu-gh4q
 		"?? .gitignore", // EnsureGitignorePatterns: adds .claude/, .runtime/, .logs/, __pycache__/ patterns. Cleanup: gu-o406 (polecat already uses EnsureLocalExcludePatterns; .gitignore entry is legacy)
 		"?? CLAUDE.md",  // CreatePolecatCLAUDEmd: gt done instructions and lifecycle context. Cleanup: gu-k9oj
 	},

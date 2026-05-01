@@ -17,10 +17,16 @@ import (
 
 // EnsureSettingsForRole provisions all agent-specific configuration for a role.
 // settingsDir is where provider settings (e.g., .claude/settings.json) are installed.
-// workDir is the agent's working directory where slash commands are provisioned.
+// workDir is the agent's working directory.
 // For roles like crew/witness/refinery/polecat, settingsDir is a gastown-managed
 // parent directory (passed via --settings flag), while workDir is the customer repo.
 // For mayor/deacon, settingsDir and workDir are the same.
+//
+// Slash commands are provisioned in settingsDir for agents whose preset sets
+// HooksUseSettingsDir=true (Claude Code, which traverses parent directories to
+// discover commands). For other agents (OpenCode, etc.) commands are provisioned
+// in workDir since those agents don't traverse upward. This keeps gastown files
+// out of customer worktrees whenever the agent supports it (gu-gh4q).
 func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.RuntimeConfig) error {
 	if rc == nil {
 		rc = config.DefaultRuntimeConfig()
@@ -46,9 +52,20 @@ func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.Runtime
 	}
 
 	// 2. Slash commands (agent-agnostic, uses shared body with provider-specific frontmatter)
-	// Only provision for known agents to maintain backwards compatibility
+	// Only provision for known agents to maintain backwards compatibility.
+	//
+	// For agents that support a separate settings directory (HooksUseSettingsDir=true,
+	// currently Claude Code), provision commands in settingsDir — the agent discovers
+	// them via parent-directory traversal, and keeping them out of workDir avoids
+	// polluting the customer repo with gastown slash commands that could otherwise
+	// accidentally be committed. For other agents (no directory traversal support),
+	// commands must live in workDir where the agent looks for them.
 	if commands.IsKnownAgent(provider) {
-		if err := commands.ProvisionFor(workDir, provider); err != nil {
+		commandsDir := workDir
+		if useSettingsDir && settingsDir != "" {
+			commandsDir = settingsDir
+		}
+		if err := commands.ProvisionFor(commandsDir, provider); err != nil {
 			return err
 		}
 	}
