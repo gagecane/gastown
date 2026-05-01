@@ -67,6 +67,12 @@ func init() {
 }
 
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
+	// Allow Refinery to run branch/push operations (its job is to rebase polecat
+	// branches via `git checkout -b` and push the result to main).
+	if os.Getenv("GT_REFINERY") != "" {
+		return nil
+	}
+
 	// Check if we're in a Gas Town agent context
 	if isGasTownAgentContext() {
 		fmt.Fprintln(os.Stderr, "")
