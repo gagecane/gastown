@@ -185,23 +185,18 @@ func (d *Daemon) runMainBranchTests() {
 
 	d.logger.Printf("main_branch_test: starting patrol cycle")
 
-	rigNames := d.getKnownRigs()
+	rigNames := d.getPatrolRigs("main_branch_test")
 	if len(rigNames) == 0 {
 		d.logger.Printf("main_branch_test: no rigs found")
 		return
 	}
 
-	allowedRigs := mainBranchTestRigs(d.patrolConfig)
 	timeout := mainBranchTestTimeout(d.patrolConfig)
 
 	var tested, failed int
 	var failures []string
 
 	for _, rigName := range rigNames {
-		if len(allowedRigs) > 0 && !sliceContains(allowedRigs, rigName) {
-			continue
-		}
-
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
 		if err := d.testRigMainBranch(rigName, rigPath, timeout); err != nil {
 			d.logger.Printf("main_branch_test: %s: FAILED: %v", rigName, err)

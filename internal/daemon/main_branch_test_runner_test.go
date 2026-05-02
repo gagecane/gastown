@@ -375,6 +375,40 @@ func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
 	}
 }
 
+func TestGetPatrolRigsMainBranchTest(t *testing.T) {
+	t.Run("nil config returns nil", func(t *testing.T) {
+		if got := GetPatrolRigs(nil, "main_branch_test"); got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("no rigs configured returns nil", func(t *testing.T) {
+		config := &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				MainBranchTest: &MainBranchTestConfig{Enabled: true},
+			},
+		}
+		if got := GetPatrolRigs(config, "main_branch_test"); got != nil {
+			t.Errorf("expected nil for empty rigs, got %v", got)
+		}
+	})
+
+	t.Run("configured rigs are returned", func(t *testing.T) {
+		config := &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				MainBranchTest: &MainBranchTestConfig{
+					Enabled: true,
+					Rigs:    []string{"gastown", "beads"},
+				},
+			},
+		}
+		got := GetPatrolRigs(config, "main_branch_test")
+		if len(got) != 2 || got[0] != "gastown" || got[1] != "beads" {
+			t.Errorf("expected [gastown beads], got %v", got)
+		}
+	})
+}
+
 func TestEnsureLifecycleDefaultsFillsMainBranchTest(t *testing.T) {
 	config := &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",

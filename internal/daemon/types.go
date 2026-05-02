@@ -349,6 +349,10 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Rigs
 		}
+	case "main_branch_test":
+		if config.Patrols.MainBranchTest != nil {
+			return config.Patrols.MainBranchTest.Rigs
+		}
 	}
 	return nil // All rigs
 }

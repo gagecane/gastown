@@ -10,6 +10,38 @@ import (
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
+// Regression test for gs-3me:
+// getPatrolRigs("main_branch_test") should filter parked/docked rigs.
+func TestGetPatrolRigs_MainBranchTest_FiltersNonOperationalRigs(t *testing.T) {
+	townRoot := t.TempDir()
+
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatalf("mkdir mayor dir: %v", err)
+	}
+	rigsJSON := `{"rigs":{"alpha":{},"beta":{}}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0o644); err != nil {
+		t.Fatalf("write rigs.json: %v", err)
+	}
+
+	if err := wisp.NewConfig(townRoot, "beta").Set("status", "parked"); err != nil {
+		t.Fatalf("set beta parked: %v", err)
+	}
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(os.Stderr, "[test] ", 0),
+	}
+
+	got := d.getPatrolRigs("main_branch_test")
+	slices.Sort(got)
+	// Fail-safe: Dolt unavailable → isRigOperational returns false for all rigs.
+	want := []string{}
+	if !slices.Equal(got, want) {
+		t.Fatalf("getPatrolRigs(main_branch_test) = %v, want %v (all rigs excluded when Dolt unavailable)", got, want)
+	}
+}
+
 // Regression test for gt-arz:
 // getPatrolRigs should filter parked/docked rigs at list-building time.
 func TestGetPatrolRigs_FiltersNonOperationalRigs(t *testing.T) {
