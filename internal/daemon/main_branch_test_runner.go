@@ -303,13 +303,29 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string
 	return nil
 }
 
+// gateEnv builds the subprocess environment for gate commands.
+// PATH is augmented with common user tool directories so commands like yarn,
+// act, etc. are discoverable even when the daemon runs with a minimal
+// inherited PATH (e.g. when started as a background service).
+func gateEnv(townRoot string) []string {
+	home, _ := os.UserHomeDir()
+	dirs := []string{
+		filepath.Join(townRoot, "bin"),
+		filepath.Join(home, "go", "bin"),
+		filepath.Join(home, ".local", "bin"),
+		"/usr/local/bin",
+	}
+	enriched := strings.Join(append(dirs, os.Getenv("PATH")), string(os.PathListSeparator))
+	return append(os.Environ(), "CI=true", "PATH="+enriched)
+}
+
 // runCommandOnWorktree runs a single shell command in the given worktree directory.
 func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, label, command string) error {
 	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "CI=true") // Signal test environment
+	cmd.Env = gateEnv(d.config.TownRoot)
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.CombinedOutput()

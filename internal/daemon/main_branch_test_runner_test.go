@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -424,5 +425,47 @@ func TestEnsureLifecycleDefaultsFillsMainBranchTest(t *testing.T) {
 	}
 	if !config.Patrols.MainBranchTest.Enabled {
 		t.Error("expected MainBranchTest.Enabled=true after defaults")
+	}
+}
+
+func TestGateEnv(t *testing.T) {
+	townRoot := t.TempDir()
+	env := gateEnv(townRoot)
+
+	// Find the last PATH= and CI=true entries (last occurrence wins in exec.Cmd.Env)
+	var lastPath string
+	var hasCI bool
+	for _, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			lastPath = strings.TrimPrefix(e, "PATH=")
+		}
+		if e == "CI=true" {
+			hasCI = true
+		}
+	}
+
+	if !hasCI {
+		t.Error("CI=true missing from gate env")
+	}
+	if lastPath == "" {
+		t.Fatal("no PATH entry in gate env")
+	}
+
+	home, _ := os.UserHomeDir()
+	wantDirs := []string{
+		filepath.Join(townRoot, "bin"),
+		filepath.Join(home, "go", "bin"),
+		filepath.Join(home, ".local", "bin"),
+		"/usr/local/bin",
+	}
+	for _, d := range wantDirs {
+		if !strings.Contains(lastPath, d) {
+			t.Errorf("PATH missing %s; got %s", d, lastPath)
+		}
+	}
+
+	// Original PATH is preserved
+	if orig := os.Getenv("PATH"); orig != "" && !strings.Contains(lastPath, orig) {
+		t.Errorf("PATH missing original PATH %q; got %s", orig, lastPath)
 	}
 }
