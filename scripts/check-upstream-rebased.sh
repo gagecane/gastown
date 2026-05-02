@@ -28,5 +28,5 @@ echo "    git fetch $UPSTREAM_REMOTE" >&2
 echo "    git rebase $UPSTREAM_REF   # or: git merge $UPSTREAM_REF" >&2
 echo "" >&2
 echo "  Commits in upstream but not here:" >&2
-git log --oneline HEAD.."$UPSTREAM_REF" | head -20 >&2
+git log --oneline --max-count=20 HEAD.."$UPSTREAM_REF" >&2
 exit 1
