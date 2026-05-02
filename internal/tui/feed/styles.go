@@ -55,6 +55,9 @@ var (
 	AgentIdleStyle = lipgloss.NewStyle().
 			Foreground(colorDim)
 
+	AgentDeadStyle = lipgloss.NewStyle().
+			Foreground(colorError)
+
 	// Event stream styles
 	StreamPanelStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).

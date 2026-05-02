@@ -40,6 +40,19 @@ const (
 	maxEventHistory    = 1000
 )
 
+// Agent status strings used in the activity tree.
+const (
+	AgentStatusWorking = "working" // recent activity, not in a terminal state
+	AgentStatusIdle    = "idle"    // no recent activity or terminal "done"/"complete"
+	AgentStatusDead    = "dead"    // terminal failure/death event observed
+)
+
+// agentActiveWindow is how long after its last event an agent is still
+// considered actively working for tree-render purposes. Tree status is
+// event-driven, so it cannot decay on its own — renderAgent consults this
+// window against LastUpdate to separate "working" from "gone idle".
+const agentActiveWindow = 5 * time.Minute
+
 // Event represents an activity event
 type Event struct {
 	Time    time.Time
@@ -58,7 +71,7 @@ type Agent struct {
 	Name       string
 	Role       string // mayor, witness, refinery, crew, polecat
 	Rig        string
-	Status     string // running, idle, working, dead
+	Status     string // AgentStatusWorking | AgentStatusIdle | AgentStatusDead (see statusForEventType)
 	LastEvent  *Event
 	LastUpdate time.Time
 	Expanded   bool
@@ -797,6 +810,7 @@ func (m *Model) addEventLocked(e Event) bool {
 			}
 			agent.LastEvent = &e
 			agent.LastUpdate = e.Time
+			agent.Status = statusForEventType(e.Type, agent.Status)
 		}
 	}
 
@@ -837,6 +851,63 @@ func (m *Model) addEventLocked(e Event) bool {
 	}
 
 	return true
+}
+
+// statusForEventType derives an Agent.Status from an event's type. The
+// previous status is passed in so that terminal "dead" events are not
+// clobbered by ordinary follow-up updates emitted by the same bead (for
+// example, a dead polecat's bead still receives pin/unpin updates).
+//
+// Returned status is one of AgentStatusWorking, AgentStatusIdle, or
+// AgentStatusDead. Callers are expected to further decay "working" based
+// on activity recency at render time — see agentActiveWindow and
+// isAgentActive.
+func statusForEventType(eventType, prev string) string {
+	switch eventType {
+	// Terminal death: agent process is gone. Sticky — subsequent updates
+	// should not demote "dead" back to "working" just because the bead
+	// still receives housekeeping mutations.
+	case "session_death", "crash", "zombie", "dead":
+		return AgentStatusDead
+
+	// Terminal success: agent explicitly finished its hooked work.
+	// Also sticky: do not re-animate to "working" on trailing updates.
+	case "done", "complete", "merged", "patrol_complete":
+		if prev == AgentStatusDead {
+			return prev
+		}
+		return AgentStatusIdle
+
+	// Ordinary activity signals — agent is producing events, so it is
+	// actively working. Do not overwrite a sticky terminal state.
+	default:
+		if prev == AgentStatusDead {
+			return prev
+		}
+		return AgentStatusWorking
+	}
+}
+
+// isAgentActive reports whether an agent should render as actively working
+// in the activity tree. An agent is active when its status is "working"
+// (or the legacy "running") AND its last event arrived within
+// agentActiveWindow. Terminal states ("dead", "idle") are never active.
+//
+// The recency gate is required because Agent.Status is driven by event
+// arrivals and has no heartbeat to decay "working" on its own. Without it,
+// an agent that stops producing events would still render with the "→"
+// indicator forever.
+func isAgentActive(agent *Agent) bool {
+	if agent == nil {
+		return false
+	}
+	if agent.Status != AgentStatusWorking && agent.Status != "running" {
+		return false
+	}
+	if agent.LastUpdate.IsZero() {
+		return false
+	}
+	return time.Since(agent.LastUpdate) <= agentActiveWindow
 }
 
 // SetEventChannel sets the channel to receive events from.

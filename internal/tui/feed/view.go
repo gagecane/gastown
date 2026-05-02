@@ -370,7 +370,11 @@ func (m *Model) renderAgent(icon string, agent *Agent, indent int) string {
 
 	nameStyle := AgentIdleStyle
 	statusIndicator := ""
-	if agent.Status == "running" || agent.Status == "working" {
+	switch {
+	case agent.Status == AgentStatusDead:
+		nameStyle = AgentDeadStyle
+		statusIndicator = " ✗"
+	case isAgentActive(agent):
 		nameStyle = AgentActiveStyle
 		statusIndicator = " →"
 	}
