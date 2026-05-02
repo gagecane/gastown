@@ -386,3 +386,40 @@ func TestMatchesFilters(t *testing.T) {
 		})
 	}
 }
+
+func TestTypeSymbol_MatchesEventSymbolsMap(t *testing.T) {
+	// Every entry in EventSymbols must be returned verbatim by typeSymbol so
+	// 'gt feed --plain' and the TUI render identical glyphs for the same
+	// event type. This prevents regression of the divergence fixed by gu-mixk.
+	for eventType, expected := range EventSymbols {
+		got := typeSymbol(eventType)
+		if got != expected {
+			t.Errorf("typeSymbol(%q) = %q, want %q (from EventSymbols)", eventType, got, expected)
+		}
+	}
+}
+
+func TestTypeSymbol_UnknownTypeFallsBackToArrow(t *testing.T) {
+	got := typeSymbol("definitely_not_a_real_event_type")
+	want := "\u2192"
+	if got != want {
+		t.Errorf("typeSymbol(unknown) = %q, want %q", got, want)
+	}
+}
+
+func TestTypeSymbol_CoversKnownGtEvents(t *testing.T) {
+	// Regression guard for gu-mixk: these events were silently falling through
+	// to '→' in plain mode despite being defined in the TUI's EventSymbols map.
+	// If any of these ever stop having a dedicated symbol, the test will flag it.
+	mustHaveSymbol := []string{
+		"spawn", "mail", "boot", "hook", "unhook", "nudge",
+		"kill", "halt", "pin", "escalation_sent", "merge_started",
+		"merge_skipped", "patrol_complete",
+	}
+	for _, t_ := range mustHaveSymbol {
+		sym := typeSymbol(t_)
+		if sym == "\u2192" {
+			t.Errorf("event %q fell back to arrow in plain mode; expected a distinct symbol from EventSymbols", t_)
+		}
+	}
+}

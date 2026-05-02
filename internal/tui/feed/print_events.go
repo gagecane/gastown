@@ -150,33 +150,12 @@ func printEvent(event Event) {
 	fmt.Printf("[%s] %s %-25s %s\n", ts, symbol, actor, event.Message)
 }
 
+// typeSymbol returns the display symbol for an event type. Plain-mode output
+// shares the TUI's EventSymbols source of truth so 'gt feed --plain' and the
+// interactive dashboard render the same glyphs. Unknown types fall back to '→'.
 func typeSymbol(eventType string) string {
-	switch eventType {
-	case "patrol_started":
-		return "\U0001F989" // owl
-	case "patrol_complete":
-		return "\U0001F989" // owl
-	case "polecat_nudged":
-		return "\u26A1" // lightning
-	case "sling":
-		return "\U0001F3AF" // target
-	case "handoff":
-		return "\U0001F91D" // handshake
-	case "done":
-		return "\u2713" // checkmark
-	case "merged":
-		return "\u2713"
-	case "merge_failed":
-		return "\u2717" // x
-	case "create":
-		return "+"
-	case "complete":
-		return "\u2713"
-	case "fail":
-		return "\u2717"
-	case "delete":
-		return "\u2298" // circled minus
-	default:
-		return "\u2192" // arrow
+	if sym, ok := EventSymbols[eventType]; ok {
+		return sym
 	}
+	return "\u2192" // arrow fallback
 }
