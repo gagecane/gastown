@@ -462,10 +462,30 @@ func (d *Daemon) escalate(source, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH",
-		fmt.Sprintf("%s: %s", source, message))
+	// Title (the positional description arg) must be a single line — bd rejects
+	// multi-line titles. Use the first line as a brief summary; pass the full
+	// message via --reason which accepts multi-line content.
+	firstLine := message
+	if idx := strings.IndexByte(message, '\n'); idx >= 0 {
+		firstLine = message[:idx]
+	}
+	title := fmt.Sprintf("%s: %s", source, firstLine)
+
+	args := []string{"escalate", "-s", "HIGH", title}
+	if firstLine != message {
+		// Multi-line message: send the full body via --stdin to avoid any
+		// argv length / quoting concerns, and keep the title clean.
+		args = append(args, "--stdin")
+	} else if message != "" {
+		args = append(args, "-r", message)
+	}
+
+	cmd := exec.CommandContext(ctx, "gt", args...)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
+	if firstLine != message {
+		cmd.Stdin = strings.NewReader(message)
+	}
 	util.SetDetachedProcessGroup(cmd)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		d.logger.Printf("jsonl_git_backup: escalation failed: %v (%s)", err, strings.TrimSpace(string(output)))
