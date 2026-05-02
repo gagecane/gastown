@@ -1,0 +1,177 @@
+#!/bin/bash
+# pre-commit hook: fast Go-only sanity gates on staged changes.
+#
+# Two gates, scoped to packages containing staged *.go files so the hook stays
+# under a second or two on typical commits:
+#
+#   1. go vet ./pkg/...       — catches obviously wrong Go (shadowed errs, bad
+#                               printf directives, unreachable code, etc.)
+#   2. golangci-lint run      — with --fast-only (skip slow linters) and
+#                               --new-from-rev=HEAD --whole-files (only issues
+#                               introduced by the pending commit vs. HEAD).
+#
+# The CI Lint job and the refinery gate both run full 'go vet ./...' and a
+# 5-minute golangci-lint. That feedback loop is a full pipeline round-trip.
+# This hook catches the obvious breakage locally in seconds.
+#
+# Scope:
+#   - Runs only if staged .go files exist.
+#   - go vet runs on the unique set of packages containing those files.
+#   - golangci-lint is scoped to those same packages.
+#   - Non-.go-only commits (docs, beads, scripts) pay zero cost.
+#
+# Skipped automatically:
+#   - Merges (MERGE_HEAD present): let the merge commit through.
+#   - Rebases / cherry-picks: conflict resolution is the human's problem.
+#   - Commits with no staged *.go files.
+#
+# Escape hatches (use sparingly — file a bead if hitting these regularly):
+#   GIT_SKIP_VET=1   git commit ...   — skip this hook entirely
+#   --no-verify                       — skip all hooks (standard git)
+#
+# Graceful degradation:
+#   - If 'go' isn't on PATH: warn and skip (dev environment problem).
+#   - If 'golangci-lint' isn't on PATH: warn and skip that gate only. Vet
+#     still runs. CI will catch anything the local lint would have.
+#
+# Why not run the full suite? Polecats commit constantly. A 5s hook is a tax;
+# a 30s hook is a blocker they'll learn to --no-verify. Fast wins over thorough
+# for a pre-commit; the refinery bisecting merge queue is the thorough backstop.
+
+set -u
+
+# --- Escape hatch & skipped-state short-circuits ---------------------------
+
+if [[ "${GIT_SKIP_VET:-0}" == "1" ]]; then
+  exit 0
+fi
+
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo ".git")
+
+# Merge commits: let them through. The merge itself hasn't broken anything the
+# parent branches didn't already have, and scoping vet to the merge diff is a
+# tarpit of edge cases.
+if [[ -f "$GIT_DIR/MERGE_HEAD" ]]; then
+  exit 0
+fi
+
+# Rebase / cherry-pick / revert in progress: the user is re-applying history,
+# not writing new code. Skip.
+if [[ -d "$GIT_DIR/rebase-merge" ]] \
+   || [[ -d "$GIT_DIR/rebase-apply" ]] \
+   || [[ -f "$GIT_DIR/CHERRY_PICK_HEAD" ]] \
+   || [[ -f "$GIT_DIR/REVERT_HEAD" ]]; then
+  exit 0
+fi
+
+# --- Collect staged Go files ----------------------------------------------
+
+# --diff-filter=ACMR: added, copied, modified, renamed (skip deletions).
+# -z + read -d '': null-delimited so paths with spaces/newlines survive.
+staged_go_files=()
+while IFS= read -r -d '' f; do
+  # Skip vendored / generated trees that the linters already ignore.
+  case "$f" in
+    vendor/*|*/vendor/*|third_party/*|*/testdata/*)
+      continue
+      ;;
+  esac
+  staged_go_files+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.go' ':(exclude)vendor/**' 2>/dev/null)
+
+if (( ${#staged_go_files[@]} == 0 )); then
+  # Nothing Go-shaped in this commit. Nothing to check.
+  exit 0
+fi
+
+# --- Ensure 'go' is available ---------------------------------------------
+
+if ! command -v go >/dev/null 2>&1; then
+  echo "⚠ pre-commit: 'go' not found on PATH — skipping vet/lint checks." >&2
+  echo "  Install Go or set GIT_SKIP_VET=1 to silence this warning." >&2
+  exit 0
+fi
+
+# --- Derive unique packages from staged files -----------------------------
+#
+# We want package import paths, not file paths, so 'go vet' can scope cleanly.
+# 'go list' on the directory of each staged .go file yields the package path.
+# Gather unique directories first, then resolve in one 'go list' call.
+
+declare -A seen_dirs
+pkg_dirs=()
+for f in "${staged_go_files[@]}"; do
+  # Only count files that still exist on disk (not pure deletions).
+  [[ -f "$f" ]] || continue
+  d=$(dirname -- "$f")
+  # Normalize leading ./ so keys are canonical.
+  [[ "$d" == "." ]] || d="./$d"
+  if [[ -z "${seen_dirs[$d]+set}" ]]; then
+    seen_dirs[$d]=1
+    pkg_dirs+=("$d")
+  fi
+done
+
+if (( ${#pkg_dirs[@]} == 0 )); then
+  # All staged .go files were deletions. Nothing to vet.
+  exit 0
+fi
+
+# --- Gate 1: go vet -------------------------------------------------------
+#
+# Run vet scoped to the set of packages touched by the commit. Vet is
+# relatively cheap (sub-second per package on a warm cache).
+
+echo "pre-commit: go vet (${#pkg_dirs[@]} package(s))" >&2
+if ! go vet "${pkg_dirs[@]}"; then
+  cat >&2 <<EOF
+
+✗ Commit rejected: 'go vet' reported issues.
+
+Fix the issues above and try again. Vet catches real bugs the refinery gate
+would also reject (shadowed errors, bad printf directives, unreachable code).
+
+Emergency escape hatch:
+  GIT_SKIP_VET=1 git commit ...
+EOF
+  exit 1
+fi
+
+# --- Gate 2: golangci-lint --fast-only --new-from-rev=HEAD ----------------
+#
+# Only issues introduced by this commit (vs. HEAD) are reported. --fast-only
+# skips the slow linters (staticcheck et al.) so the hook stays responsive.
+# --whole-files lets golangci-lint surface issues that span a changed file but
+# whose exact line isn't in the staged hunks (common for errcheck).
+#
+# Repo pins golangci-lint v2 via .golangci.yml (version: "2"); that binary
+# exposes --fast-only (v1 used --fast). If you're seeing "unknown flag
+# --fast-only" you're on a stale v1 binary — upgrade it.
+
+if ! command -v golangci-lint >/dev/null 2>&1; then
+  echo "⚠ pre-commit: 'golangci-lint' not found on PATH — skipping lint." >&2
+  echo "  CI will still run the full lint; install locally for faster feedback." >&2
+  exit 0
+fi
+
+echo "pre-commit: golangci-lint --fast-only --new-from-rev=HEAD" >&2
+if ! golangci-lint run \
+      --fast-only \
+      --new-from-rev=HEAD \
+      --whole-files \
+      "${pkg_dirs[@]}"; then
+  cat >&2 <<EOF
+
+✗ Commit rejected: 'golangci-lint --fast-only' reported new issues.
+
+Only issues introduced by this commit (vs HEAD) are shown. The CI Lint job
+runs the full suite and will reject these too — fix them locally to save a
+pipeline round-trip.
+
+Emergency escape hatch:
+  GIT_SKIP_VET=1 git commit ...
+EOF
+  exit 1
+fi
+
+exit 0
