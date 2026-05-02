@@ -287,6 +287,23 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			continue
 		}
 
+		// Purge stale plugin mails from previous crashed sessions. A dog that
+		// crashed before reading its mail retains the old message; without this
+		// purge a re-dispatch sends a fresh mail alongside the stale one, and the
+		// dog may execute the stale (pre-edit) content instead of the current one.
+		// Best-effort: failure does not block dispatch.
+		staleMailAddr := fmt.Sprintf("deacon/dogs/%s", idleDog.Name)
+		staleSubject := fmt.Sprintf("Plugin: %s", p.Name)
+		if staleMBox, mboxErr := router.GetMailbox(staleMailAddr); mboxErr == nil {
+			if staleMsgs, listErr := staleMBox.List(); listErr == nil {
+				for _, staleM := range staleMsgs {
+					if !staleM.Read && staleM.Subject == staleSubject {
+						_ = staleMBox.Archive(staleM.ID)
+					}
+				}
+			}
+		}
+
 		// Send mail with plugin instructions BEFORE starting the session
 		// so the dog finds work in its inbox on first check.
 		msg := mail.NewMessage(

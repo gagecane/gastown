@@ -1138,6 +1138,11 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("assigning work to dog: %w", err)
 	}
 
+	// Purge stale plugin mails from previous crashed sessions before sending
+	// fresh instructions. Without this, a re-dispatched dog may read a pre-edit
+	// mail and execute stale plugin content (gs-iuf). Best-effort.
+	closePluginMails(targetDog.Name)
+
 	// Create and send mail message with plugin instructions
 	dogAddress := fmt.Sprintf("deacon/dogs/%s", targetDog.Name)
 	subject := fmt.Sprintf("Plugin: %s", p.Name)

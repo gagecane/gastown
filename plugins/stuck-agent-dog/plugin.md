@@ -194,8 +194,8 @@ else
       NOW=$(date +%s)
       HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
 
-      if [ "$HEARTBEAT_AGE" -gt 900 ]; then
-        echo "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >15m threshold)"
+      if [ "$HEARTBEAT_AGE" -gt 2400 ]; then
+        echo "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >40m threshold)"
         DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
       else
         echo "  OK: Deacon heartbeat ${HEARTBEAT_AGE}s old"

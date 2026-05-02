@@ -208,7 +208,12 @@ func findSourceFromDir(dir string) string {
 		goMod := filepath.Join(current, "go.mod")
 		if hasPlugins(pluginsDir) {
 			if isGastownModule(goMod) {
-				return pluginsDir
+				// Skip git worktrees: they are polecat working copies checked out
+				// at a past commit and contain stale plugin content. Syncing from
+				// a worktree would overwrite town-level edits with old content.
+				if !isGitWorktree(current) {
+					return pluginsDir
+				}
 			}
 		}
 		parent := filepath.Dir(current)
@@ -218,6 +223,18 @@ func findSourceFromDir(dir string) string {
 		current = parent
 	}
 	return ""
+}
+
+// isGitWorktree returns true if dir is a git worktree (has a .git file, not a
+// .git directory). A .git file is the worktree indicator — the main checkout
+// has a .git directory.
+func isGitWorktree(dir string) bool {
+	gitPath := filepath.Join(dir, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
 }
 
 // isGastownModule checks if a go.mod file declares a gastown module path.
