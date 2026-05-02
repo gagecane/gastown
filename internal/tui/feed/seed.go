@@ -112,14 +112,16 @@ func (m *Model) SeedAgents(townSrc AgentBeadSource, rigSrcs map[string]AgentBead
 			continue
 		}
 		r.Agents[e.actor] = &Agent{
-			ID:   e.actor,
-			Name: e.actor,
-			Role: e.role,
-			Rig:  e.rig,
-			// LastEvent stays nil, LastUpdate stays zero, Status stays "".
-			// renderAgent will show the agent with no activity string and
-			// no indicator — i.e., idle. Once an event arrives for this
-			// actor, addEventLocked decorates the existing Agent in place.
+			ID:     e.actor,
+			Name:   e.actor,
+			Role:   e.role,
+			Rig:    e.rig,
+			Status: AgentStatusIdle,
+			// LastEvent stays nil and LastUpdate stays zero. renderAgent
+			// shows the agent with no activity string and no indicator —
+			// isAgentActive returns false because Status != working. Once
+			// an event arrives for this actor, addEventLocked decorates
+			// the existing Agent in place.
 		}
 	}
 

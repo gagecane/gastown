@@ -90,8 +90,8 @@ func TestSeedAgents_PopulatesRigsWithIdleAgents(t *testing.T) {
 		if !agent.LastUpdate.IsZero() {
 			t.Errorf("actor %q LastUpdate = %v, want zero (idle)", actor, agent.LastUpdate)
 		}
-		if agent.Status != "" {
-			t.Errorf("actor %q Status = %q, want empty", actor, agent.Status)
+		if agent.Status != AgentStatusIdle {
+			t.Errorf("actor %q Status = %q, want %q", actor, agent.Status, AgentStatusIdle)
 		}
 	}
 }
