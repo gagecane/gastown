@@ -61,6 +61,10 @@ Problems View (--problems/-p):
   - Keyboard actions: Enter=attach, n=nudge, h=handoff
   - Press 'p' to toggle between activity and problems view
 
+  With --plain, emits one structured line per problem agent instead of
+  the interactive view — suitable for pipelines and agents. Use --rig
+  to restrict to a specific rig.
+
 The feed combines multiple event sources:
   - GT events: Agent activity like patrol, sling, handoff (from .events.jsonl)
   - Beads activity: Issue creates, updates, completions (from bd activity, when available)
@@ -200,6 +204,10 @@ func buildFeedArgs() []string {
 		args = append(args, "--rig", feedRig)
 	}
 
+	if feedProblems {
+		args = append(args, "--problems")
+	}
+
 	return args
 }
 
@@ -207,6 +215,16 @@ func buildFeedArgs() []string {
 // Supports --follow for tailing, and --since/--mol/--type for filtering.
 // townRoot is the resolved workspace root (incorporates --rig if set).
 func runFeedDirect(townRoot string) error {
+	// --problems in plain mode: emit a one-line-per-problem-agent report
+	// instead of streaming events. This is the pipeline/agent counterpart
+	// to the TUI problems view (which is keyboard-interactive).
+	if feedProblems {
+		bd := beads.New(townRoot)
+		return feed.PrintProblems(bd, os.Stdout, feed.PrintProblemsOptions{
+			Rig: feedRig,
+		})
+	}
+
 	// Determine follow behavior:
 	// - Explicit --follow: always follow
 	// - Explicit --no-follow: never follow
