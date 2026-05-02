@@ -2952,11 +2952,12 @@ func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
 // hasPendingMR checks if a polecat has work waiting in the refinery merge queue.
 // Returns true if either:
 //  1. A cleanup wisp exists for this polecat (HandlePolecatDone created it for a pending MR)
-//  2. The agent bead has an active_mr field set
+//  2. The agent bead has an active_mr field set AND that MR bead actually exists
+//     and is still open in the beads DB
 //
 // Used to prevent zombie detection from nuking polecats whose MR is still being
 // processed by the refinery. Nuking would delete the remote branch and orphan the MR.
-// See: gt-6a9d
+// See: gt-6a9d, gu-xd7i (phantom MR ref hardening)
 func hasPendingMR(bd *BdCli, workDir, _, polecatName, agentBeadID string) bool {
 	// Check 1: Cleanup wisp with merge-requested state (created by HandlePolecatDone)
 	wispID, _ := findCleanupWisp(bd, workDir, polecatName)
@@ -2964,13 +2965,19 @@ func hasPendingMR(bd *BdCli, workDir, _, polecatName, agentBeadID string) bool {
 		return true
 	}
 
-	// Check 2: active_mr on agent bead (set by gt done when MR is created)
+	// Check 2: active_mr on agent bead (set by gt done when MR is created).
+	// Validate that the referenced MR bead still exists and is open — if the
+	// MR was GC'd, force-closed, or never actually created, treat active_mr
+	// as a phantom reference and allow cleanup to proceed (gu-xd7i).
 	activeMR := getAgentActiveMR(bd, workDir, agentBeadID)
-	return activeMR != ""
+	return activeMR != "" && mrExistsAndOpen(bd, workDir, activeMR)
 }
 
 // hasPendingMRFromSnapshot checks for a pending MR using a pre-fetched ActiveMR
 // value from the agent bead snapshot, avoiding a redundant bd show call. (gt-2gra)
+//
+// Like hasPendingMR, it validates the ActiveMR actually exists in the DB to
+// avoid blocking on phantom refs (gu-xd7i).
 func hasPendingMRFromSnapshot(bd *BdCli, workDir, polecatName, activeMR string) bool {
 	// Check 1: Cleanup wisp with merge-requested state (created by HandlePolecatDone)
 	wispID, _ := findCleanupWisp(bd, workDir, polecatName)
@@ -2978,8 +2985,8 @@ func hasPendingMRFromSnapshot(bd *BdCli, workDir, polecatName, activeMR string) 
 		return true
 	}
 
-	// Check 2: active_mr from pre-fetched snapshot
-	return activeMR != ""
+	// Check 2: active_mr from pre-fetched snapshot, validated against DB (gu-xd7i)
+	return activeMR != "" && mrExistsAndOpen(bd, workDir, activeMR)
 }
 
 // getAgentActiveMR retrieves the active_mr field from a polecat's agent bead.
@@ -2996,4 +3003,40 @@ func getAgentActiveMR(bd *BdCli, workDir, agentBeadID string) string {
 		return ""
 	}
 	return issues[0].ActiveMR
+}
+
+// mrExistsAndOpen reports whether an MR bead ID references an MR that is still
+// present in the beads DB and has not been closed. It returns false for the
+// phantom-ref case (gu-xd7i), where active_mr on an agent bead points to an MR
+// that was GC'd, force-closed, or never persisted. This lets the witness's
+// nuke safety check distinguish a real pending MR (block nuke) from a stale
+// reference (allow nuke).
+//
+// Returns true only when bd show succeeds AND returns a non-empty status that
+// is not closed. Any error (no issue found, malformed JSON, bd unavailable)
+// treats the MR as phantom and returns false. This is the safe default: if we
+// can't verify the MR is live, we don't want to loop forever refusing cleanup.
+func mrExistsAndOpen(bd *BdCli, workDir, mrID string) bool {
+	if mrID == "" {
+		return false
+	}
+	output, err := bd.Exec(workDir, "show", mrID, "--json")
+	if err != nil || output == "" {
+		// bd show returned non-zero (typically "no issue found") — phantom ref.
+		return false
+	}
+	var issues []struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
+		return false
+	}
+	status := issues[0].Status
+	if status == "" {
+		// Empty status from the DB is ambiguous; treat conservatively as phantom
+		// so we don't block cleanup indefinitely on a malformed record.
+		return false
+	}
+	// Any terminal/closed status means the MR is no longer pending.
+	return !beads.IssueStatus(status).IsTerminal()
 }

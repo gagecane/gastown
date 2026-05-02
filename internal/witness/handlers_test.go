@@ -2397,3 +2397,177 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
 	}
 }
+
+// --- mrExistsAndOpen / hasPendingMR phantom-ref tests (gu-xd7i) ---
+
+// bdShowResponder builds an Exec mock that replies to "show <id>" calls with
+// per-id JSON responses and defaults all other commands to "[]". Unknown IDs
+// return the real bd-style error so the phantom-ref path is exercised exactly
+// as the witness sees it in production.
+func bdShowResponder(showByID map[string]string) func([]string) (string, error) {
+	return func(args []string) (string, error) {
+		if len(args) >= 2 && args[0] == "show" {
+			id := args[1]
+			if body, ok := showByID[id]; ok {
+				return body, nil
+			}
+			return `{"error":"no issues found matching the provided IDs","schema_version":1}`,
+				fmt.Errorf("bd: no issue found matching %q", id)
+		}
+		// findCleanupWisp uses `bd list` — return empty so only the active_mr
+		// path is under test.
+		return "[]", nil
+	}
+}
+
+func TestMrExistsAndOpen_EmptyMRID(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	if mrExistsAndOpen(bd, t.TempDir(), "") {
+		t.Fatal("mrExistsAndOpen(\"\") = true, want false")
+	}
+}
+
+func TestMrExistsAndOpen_PhantomMissingID(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(nil), // every show returns "no issue found"
+		func(args []string) error { return nil },
+	)
+	if mrExistsAndOpen(bd, t.TempDir(), "gt-phantom") {
+		t.Fatal("mrExistsAndOpen on phantom ID = true, want false (gu-xd7i)")
+	}
+}
+
+func TestMrExistsAndOpen_OpenMR(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(map[string]string{
+			"gt-realmr": `[{"status":"open"}]`,
+		}),
+		func(args []string) error { return nil },
+	)
+	if !mrExistsAndOpen(bd, t.TempDir(), "gt-realmr") {
+		t.Fatal("mrExistsAndOpen on open MR = false, want true")
+	}
+}
+
+func TestMrExistsAndOpen_ClosedMRTreatedAsPhantom(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(map[string]string{
+			"gt-closedmr": `[{"status":"closed"}]`,
+		}),
+		func(args []string) error { return nil },
+	)
+	if mrExistsAndOpen(bd, t.TempDir(), "gt-closedmr") {
+		t.Fatal("mrExistsAndOpen on closed MR = true, want false")
+	}
+}
+
+func TestMrExistsAndOpen_TombstoneTreatedAsPhantom(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(map[string]string{
+			"gt-tomb": `[{"status":"tombstone"}]`,
+		}),
+		func(args []string) error { return nil },
+	)
+	if mrExistsAndOpen(bd, t.TempDir(), "gt-tomb") {
+		t.Fatal("mrExistsAndOpen on tombstone MR = true, want false")
+	}
+}
+
+func TestMrExistsAndOpen_MalformedJSONTreatedAsPhantom(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(map[string]string{
+			"gt-malformed": `not-json`,
+		}),
+		func(args []string) error { return nil },
+	)
+	if mrExistsAndOpen(bd, t.TempDir(), "gt-malformed") {
+		t.Fatal("mrExistsAndOpen on malformed JSON = true, want false")
+	}
+}
+
+func TestMrExistsAndOpen_EmptyStatusTreatedAsPhantom(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(map[string]string{
+			"gt-empty": `[{"status":""}]`,
+		}),
+		func(args []string) error { return nil },
+	)
+	if mrExistsAndOpen(bd, t.TempDir(), "gt-empty") {
+		t.Fatal("mrExistsAndOpen on empty-status record = true, want false")
+	}
+}
+
+// TestHasPendingMRFromSnapshot_PhantomActiveMR is the end-to-end regression for
+// gu-xd7i: a polecat agent bead with an active_mr pointing to an MR that no
+// longer exists in the DB must not keep the witness from nuking the zombie.
+func TestHasPendingMRFromSnapshot_PhantomActiveMR(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(nil), // every show returns "no issue found"
+		func(args []string) error { return nil },
+	)
+	if hasPendingMRFromSnapshot(bd, t.TempDir(), "nux", "gt-phantom") {
+		t.Fatal("hasPendingMRFromSnapshot with phantom active_mr = true, want false (gu-xd7i)")
+	}
+}
+
+func TestHasPendingMRFromSnapshot_RealOpenMR(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(map[string]string{
+			"gt-realmr": `[{"status":"open"}]`,
+		}),
+		func(args []string) error { return nil },
+	)
+	if !hasPendingMRFromSnapshot(bd, t.TempDir(), "nux", "gt-realmr") {
+		t.Fatal("hasPendingMRFromSnapshot with real open MR = false, want true")
+	}
+}
+
+func TestHasPendingMRFromSnapshot_EmptyActiveMR(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		bdShowResponder(nil),
+		func(args []string) error { return nil },
+	)
+	if hasPendingMRFromSnapshot(bd, t.TempDir(), "nux", "") {
+		t.Fatal("hasPendingMRFromSnapshot with empty active_mr = true, want false")
+	}
+}
+
+// TestHasPendingMR_PhantomActiveMR is the parallel regression for the
+// NukePolecat call site, which uses the non-snapshot variant via an agent bead
+// lookup. Here we stub the agent bead lookup to return a phantom active_mr and
+// make sure hasPendingMR treats it as cleared.
+func TestHasPendingMR_PhantomActiveMR(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) >= 2 && args[0] == "show" {
+				// Agent bead lookup returns an active_mr that doesn't exist.
+				if strings.HasPrefix(args[1], "gt-agent") {
+					return `[{"active_mr":"gt-phantom"}]`, nil
+				}
+				// Any other show (the phantom MR verify) is not found.
+				return `{"error":"no issues found matching the provided IDs"}`,
+					fmt.Errorf("bd: no issue found matching %q", args[1])
+			}
+			// list calls (findCleanupWisp) return no wisp.
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+	if hasPendingMR(bd, t.TempDir(), "testrig", "nux", "gt-agent-nux") {
+		t.Fatal("hasPendingMR with phantom active_mr = true, want false (gu-xd7i)")
+	}
+}
