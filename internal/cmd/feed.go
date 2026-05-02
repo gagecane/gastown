@@ -3,11 +3,16 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/tui/feed"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -296,6 +301,18 @@ func runFeedTUI(workDir string, problemsView bool) error {
 	m.SetEventChannel(multiSource.Events())
 	m.SetTownRoot(townRoot)
 
+	// Seed the activity tree with every known agent bead so rigs appear in
+	// the tree even when they haven't emitted an event in the retained
+	// window (maxEventHistory). Without this, idle polecats are invisible
+	// even though `gt status` lists them. See gu-dupd.
+	//
+	// Best-effort: seeding errors are swallowed so a transient Dolt hiccup
+	// doesn't prevent the feed from launching. The tree still populates
+	// from events as usual.
+	if townSrc, rigSrcs := discoverAgentBeadSources(townRoot); len(rigSrcs) > 0 || townSrc != nil {
+		m.SeedAgents(townSrc, rigSrcs)
+	}
+
 	// Run the TUI
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -303,6 +320,45 @@ func runFeedTUI(workDir string, problemsView bool) error {
 	}
 
 	return nil
+}
+
+// discoverAgentBeadSources returns the beads clients the TUI should
+// consult when seeding the activity tree. It discovers every registered
+// rig (mirroring `gt status`) and returns a per-rig map plus the town
+// beads client.
+//
+// Returns (nil, nil) gracefully on config/discovery errors — seeding is
+// best-effort, so launching the feed shouldn't depend on perfect rig
+// config. Rigs that fail to load individually are skipped; the rest
+// still contribute.
+func discoverAgentBeadSources(townRoot string) (feed.AgentBeadSource, map[string]feed.AgentBeadSource) {
+	rigsConfigPath := constants.MayorRigsPath(townRoot)
+	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	if err != nil {
+		// Degrade gracefully: no rigs config means no per-rig seeding,
+		// but we can still seed town-level agents below.
+		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+	}
+
+	townBeadsPath := beads.GetTownBeadsPath(townRoot)
+	townSrc := beads.New(townBeadsPath)
+
+	rigSrcs := make(map[string]feed.AgentBeadSource)
+
+	g := git.NewGit(townRoot)
+	mgr := rig.NewManager(townRoot, rigsConfig, g)
+	rigs, err := mgr.DiscoverRigs()
+	if err != nil {
+		// If discovery fails, still return the town source so it can be
+		// used if the model ever seeds town-level agents.
+		return townSrc, rigSrcs
+	}
+	for _, r := range rigs {
+		rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
+		rigSrcs[r.Name] = beads.New(rigBeadsPath)
+	}
+
+	return townSrc, rigSrcs
 }
 
 // runFeedInWindow opens the feed in a dedicated tmux window.
