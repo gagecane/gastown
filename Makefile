@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag clean test test-e2e-container check-up-to-date
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag clean test test-e2e-container check-up-to-date hooks hooks-test
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -195,3 +195,21 @@ else
 		sleep 2; \
 	done
 endif
+
+# hooks: Wire this clone's git to use the repo-tracked hooks in .githooks/.
+# Idempotent — safe to re-run. `gt doctor` (hooks-path-all-rigs check) also
+# fixes this with `gt doctor --fix`; this target is the manual path.
+hooks:
+	@git config core.hooksPath .githooks
+	@echo "core.hooksPath set to .githooks for $$(git rev-parse --show-toplevel)"
+	@ls -1 .githooks | grep -v '_test\.sh$$' | sed 's/^/  - /'
+
+# hooks-test: Run the test suites shipped alongside each hook.
+hooks-test:
+	@fail=0; \
+	for t in .githooks/*_test.sh; do \
+		[ -f "$$t" ] || continue; \
+		echo "=== $$t ==="; \
+		bash "$$t" || fail=1; \
+	done; \
+	exit $$fail

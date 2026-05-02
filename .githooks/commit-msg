@@ -1,0 +1,96 @@
+#!/bin/bash
+# commit-msg hook: enforce Conventional Commits (https://www.conventionalcommits.org).
+#
+# Gas Town agents commit against the gt binary constantly. Keeping commit
+# messages in Conventional Commit form lets CHANGELOG generation, release
+# tooling, and the polecat identity heuristics (which grep for feat:/fix:/etc.)
+# all agree on the same format.
+#
+# Allowed format:
+#   <type>(<scope>)!?: <description>
+#
+# Examples:
+#   feat: add sling dispatch guardrails
+#   fix(sling): handle nil hook bead (gu-abcd)
+#   refactor(polecat)!: drop legacy identity injection
+#
+# Skipped automatically:
+#   - Merge commits (Merge ...)
+#   - Fixup/squash commits (fixup!/squash!/amend!)
+#   - Revert commits (Revert "...")
+#   - Dolt backup commits (bd: backup ...)
+#
+# Escape hatches:
+#   - GT_SKIP_COMMIT_MSG=1    — skip validation for this commit
+#   - --no-verify             — skip all hooks (standard git)
+#
+# File a bead if this hook rejects a commit that should be legitimate;
+# don't reach for the escape hatch as a default.
+
+set -u
+
+msg_file=${1:-}
+if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
+  # No commit message file supplied (shouldn't happen under git), don't block.
+  exit 0
+fi
+
+# Escape hatch for emergencies.
+if [[ "${GT_SKIP_COMMIT_MSG:-0}" == "1" ]]; then
+  exit 0
+fi
+
+# Extract the first non-comment, non-blank line as the subject.
+subject=$(grep -v -E '^\s*#' -- "$msg_file" | awk 'NF {print; exit}')
+
+# Empty message → let git handle it.
+if [[ -z "$subject" ]]; then
+  exit 0
+fi
+
+# Allowed auto-generated / tool-managed prefixes.
+if [[ "$subject" =~ ^Merge[[:space:]] ]] \
+   || [[ "$subject" =~ ^(fixup|squash|amend)! ]] \
+   || [[ "$subject" =~ ^Revert[[:space:]]\" ]] \
+   || [[ "$subject" =~ ^bd:[[:space:]] ]]; then
+  exit 0
+fi
+
+# Conventional Commits regex.
+#
+# Canonical types (matches the set used elsewhere in this repo):
+#   feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+#
+# Scope is optional, lowercase letters/digits plus [-_/.,] and spaces.
+# A trailing ! signals a breaking change.
+cc_re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9][a-z0-9 _./,-]*\))?!?:[[:space:]].+'
+
+if [[ ! "$subject" =~ $cc_re ]]; then
+  cat >&2 <<EOF
+✗ Commit message rejected: does not follow Conventional Commits.
+
+  Got: $subject
+
+Expected format:
+  <type>(<optional-scope>)!?: <description>
+
+Allowed types:
+  feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+
+Examples:
+  feat: add sling dispatch guardrails
+  fix(sling): handle nil hook bead (gu-abcd)
+  refactor(polecat)!: drop legacy identity injection
+
+Emergency escape hatch:
+  GT_SKIP_COMMIT_MSG=1 git commit ...
+EOF
+  exit 1
+fi
+
+# Soft length warning (don't block — CONTRIBUTING.md says "under 72 chars" as guidance).
+if (( ${#subject} > 100 )); then
+  echo "⚠ commit-msg: subject line is ${#subject} chars (guideline: <72, hard-cap 100)." >&2
+fi
+
+exit 0
