@@ -641,11 +641,16 @@ func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
 	// Agent beads are type=agent (infrastructure), hidden by bd list default filter.
 	// Use --include-infra so they appear in results.
 	// Include pinned agents so doctor and other callers see them as live beads.
+	// --limit=0 disables the default 50-row cap. Without it, bd list writes a
+	// "Showing 50 issues; more results hidden by --limit" footer to stderr and
+	// silently truncates the JSON array, so callers (doctor, StuckDetector,
+	// etc.) miss agent beads beyond the first 50 in active fleets.
 	out, err := b.run("list",
 		"--label=gt:agent",
 		"--include-infra",
 		"--status=open,in_progress,blocked,deferred,pinned",
 		"--json",
+		"--limit=0",
 		"--flat",
 		"--no-pager",
 	)

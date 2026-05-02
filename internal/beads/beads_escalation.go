@@ -286,7 +286,7 @@ func (b *Beads) GetEscalationBead(id string) (*Issue, *EscalationFields, error) 
 
 // ListEscalations returns all open escalation beads.
 func (b *Beads) ListEscalations() ([]*Issue, error) {
-	out, err := b.run("list", "--label=gt:escalation", "--status=open", "--json")
+	out, err := b.run("list", "--label=gt:escalation", "--status=open", "--json", "--limit=0")
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +306,7 @@ func (b *Beads) ListEscalationsBySeverity(severity string) ([]*Issue, error) {
 		"--label=severity:"+severity,
 		"--status=open",
 		"--json",
+		"--limit=0",
 	)
 	if err != nil {
 		return nil, err
