@@ -2875,11 +2875,15 @@ func (d *Daemon) reapRigDeadPolecatWisps(rigName string, timeout time.Duration) 
 
 	// List candidate beads in both hooked and in_progress states. The sling
 	// flow leaves slung work as hooked; polecats flip to in_progress on claim.
+	// Run from the rig directory so bd auto-discovers the rig's .beads/
+	// (bd list has no --rig flag; passing one was a silent bug that made this
+	// reaper a no-op for years).
+	rigDir := filepath.Join(d.config.TownRoot, rigName)
 	var candidates []beadInfo
 	for _, status := range []string{"hooked", "in_progress"} {
-		cmd := exec.Command(d.bdPath, "list", "--rig="+rigName, "--status="+status, "--json", "--limit=0") //nolint:gosec // G204: args are constructed internally
+		cmd := exec.Command(d.bdPath, "list", "--status="+status, "--json", "--limit=0") //nolint:gosec // G204: args are constructed internally
 		setSysProcAttr(cmd)
-		cmd.Dir = d.config.TownRoot
+		cmd.Dir = rigDir
 		cmd.Env = os.Environ()
 		output, err := cmd.Output()
 		if err != nil {
@@ -2970,9 +2974,12 @@ func (d *Daemon) maybeReapDeadPolecatBead(rigName, polecatName, beadID, status, 
 	//   - The daemon already has authority to run bd update (see updateAgentHookBead).
 	//   - Keeping the reset local avoids extra mail traffic and permanent Dolt
 	//     commits on every heartbeat cycle.
-	cmd := exec.Command(d.bdPath, "update", beadID, "--rig="+rigName, "--status=open", "--assignee=") //nolint:gosec // G204: args are constructed internally
+	// Same as the list call above: bd has no --rig flag, so run from the rig
+	// directory and let bd auto-discover .beads/ instead of passing the bogus
+	// argument (which would make bd print help and exit 1).
+	cmd := exec.Command(d.bdPath, "update", beadID, "--status=open", "--assignee=") //nolint:gosec // G204: args are constructed internally
 	setSysProcAttr(cmd)
-	cmd.Dir = d.config.TownRoot
+	cmd.Dir = filepath.Join(d.config.TownRoot, rigName)
 	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		d.logger.Printf("reap-dead-polecat-wisps: failed to reset %s (rig=%s polecat=%s): %v: %s",

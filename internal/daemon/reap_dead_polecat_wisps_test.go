@@ -215,9 +215,16 @@ func TestReapDeadPolecatWisps_ReapsDeadPolecatBead(t *testing.T) {
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 bd update, got %d: %v", len(updates), updates)
 	}
-	want := "update gu-stuck --rig=myrig --status=open --assignee="
+	// bd has no --rig flag — the daemon must run bd from the rig directory
+	// instead. We assert on the args (no --rig=) and trust that the daemon
+	// sets cmd.Dir correctly (the build of the candidate list above also
+	// depends on it).
+	want := "update gu-stuck --status=open --assignee="
 	if !strings.Contains(updates[0], want) {
 		t.Errorf("bd update missing expected args\n want contains: %s\n got: %s", want, updates[0])
+	}
+	if strings.Contains(updates[0], "--rig=") {
+		t.Errorf("bd update should not pass --rig= (bd has no such flag); got: %s", updates[0])
 	}
 
 	// Verify INFO log line carries the context needed for operators.
