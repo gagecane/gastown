@@ -227,6 +227,8 @@ func runCompact(cmd *cobra.Command, args []string) error {
 			} else if age > ttl {
 				if isMoleculeStep {
 					deleteWisp(bd, w, "molecule step past TTL", result)
+				} else if isCompletedPluginRunReceipt(w) {
+					deleteWisp(bd, w, "completed plugin-run receipt past TTL", result)
 				} else {
 					reason := "open past TTL"
 					if w.Status == "in_progress" {
@@ -465,6 +467,30 @@ func hasKeepLabel(w *compactIssue) bool {
 		}
 	}
 	return false
+}
+
+// isCompletedPluginRunReceipt reports whether a wisp is a plugin-run receipt
+// recording successful (or no-op) completion. These receipts are *meant* to be
+// closed by the dog before it terminates, but the dispatch protocol creates
+// them open and `gt dog done` doesn't close them. Without this special case,
+// they sit open past TTL and get promoted to permanent beads (compact.go:230),
+// causing the wisp surge that pollutes rig open-lists.
+//
+// Receipts with result:failure or result:warning are NOT covered here — those
+// indicate something a human should see, so promoting them is correct.
+func isCompletedPluginRunReceipt(w *compactIssue) bool {
+	hasPluginRunType := false
+	hasSuccessResult := false
+	for _, label := range w.Labels {
+		if label == "type:plugin-run" {
+			hasPluginRunType = true
+			continue
+		}
+		if label == "result:success" || label == "result:no-op" || label == "result:noop" {
+			hasSuccessResult = true
+		}
+	}
+	return hasPluginRunType && hasSuccessResult
 }
 
 // wispAge returns the age of a compactIssue.

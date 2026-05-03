@@ -108,6 +108,36 @@ func TestHasKeepLabel(t *testing.T) {
 	}
 }
 
+func TestIsCompletedPluginRunReceipt(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"no labels", nil, false},
+		{"plugin-run + success", []string{"type:plugin-run", "result:success"}, true},
+		{"plugin-run + no-op", []string{"type:plugin-run", "result:no-op"}, true},
+		{"plugin-run + noop", []string{"type:plugin-run", "result:noop"}, true},
+		{"plugin-run + failure (must promote)", []string{"type:plugin-run", "result:failure"}, false},
+		{"plugin-run + warning (must promote)", []string{"type:plugin-run", "result:warning"}, false},
+		{"plugin-run alone (no result)", []string{"type:plugin-run"}, false},
+		{"success alone (no plugin-run)", []string{"result:success"}, false},
+		{"unrelated labels", []string{"bug", "urgent"}, false},
+		{"plugin-run + plugin name + success", []string{"type:plugin-run", "plugin:auto-dispatch", "result:success"}, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &compactIssue{
+				Issue: beads.Issue{Labels: tc.labels},
+			}
+			if got := isCompletedPluginRunReceipt(w); got != tc.want {
+				t.Errorf("isCompletedPluginRunReceipt(%v) = %v, want %v", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHasComments(t *testing.T) {
 	tests := []struct {
 		name  string
