@@ -105,6 +105,10 @@ func getTmuxSessionPIDs() map[int]bool {
 // collectPanePIDs queries a single tmux socket for all pane PIDs and adds them
 // (plus their descendant processes) to the protection set.
 func collectPanePIDs(socketPath string, childMap map[int][]int, pids map[int]bool) {
+	// intentionally bare — this helper sweeps ALL sockets in the tmux socket
+	// dir to protect zombie panes across sockets. Using tmux.BuildCommand
+	// here would collapse every call to the default gastown socket and miss
+	// the other servers we're trying to inspect.
 	out, err := exec.Command("tmux", "-S", socketPath, "list-panes", "-a", "-F", "#{pane_pid}").Output()
 	if err != nil {
 		return

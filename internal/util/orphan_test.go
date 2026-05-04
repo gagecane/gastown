@@ -151,12 +151,16 @@ func hasTmux() bool {
 // The caller must kill the session or server in cleanup.
 func tmuxSocketSession(t *testing.T, socketName, sessionName string) int {
 	t.Helper()
+	// intentionally bare — this helper exists to create sessions on
+	// test-specified sockets. tmux.BuildCommand would force the default
+	// gastown socket and defeat the point of testing cross-socket behavior.
 	err := exec.Command("tmux", "-L", socketName, "new-session", "-d",
 		"-s", sessionName, "-x", "80", "-y", "24", "sleep", "300").Run()
 	if err != nil {
 		t.Fatalf("create session %q on socket %q: %v", sessionName, socketName, err)
 	}
 
+	// intentionally bare — list panes on the caller-specified test socket.
 	out, err := exec.Command("tmux", "-L", socketName,
 		"list-panes", "-t", sessionName, "-F", "#{pane_pid}").Output()
 	if err != nil {
@@ -171,6 +175,7 @@ func tmuxSocketSession(t *testing.T, socketName, sessionName string) int {
 
 // killTmuxServer kills a tmux server by socket name.
 func killTmuxServer(socketName string) {
+	// intentionally bare — tear down the caller-specified test socket.
 	_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
 }
 

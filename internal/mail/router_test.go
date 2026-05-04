@@ -1606,9 +1606,12 @@ func requireNotifyTestSocket(t *testing.T) string {
 	// Sanitize: tmux socket names cannot contain slashes or dots.
 	safe := strings.NewReplacer("/", "-", ".", "-").Replace(t.Name())
 	socket := fmt.Sprintf("gt-test-%s-%d", safe, os.Getpid())
-	// Pre-kill any stale server on this socket (e.g., from a crashed prior run).
+	// intentionally bare — pre-kill any stale server on this per-test socket.
+	// Cannot use tmux.BuildCommand: the test explicitly manages its own
+	// isolated socket independent of the package-level default.
 	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
 	t.Cleanup(func() {
+		// intentionally bare — tear down the per-test socket.
 		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
 	})
 	return socket
@@ -1619,12 +1622,14 @@ func requireNotifyTestSocket(t *testing.T) string {
 func createNotifyTestSession(t *testing.T, socket, sessionName, command string) {
 	t.Helper()
 	args := []string{"-L", socket, "new-session", "-d", "-s", sessionName, command}
+	// intentionally bare — operating on the caller-provided per-test socket.
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("failed to create test session %q: %v\n%s", sessionName, err, out)
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
+		// intentionally bare — probing the per-test socket.
 		if exec.Command("tmux", "-L", socket, "has-session", "-t", sessionName).Run() == nil {
 			return
 		}

@@ -1310,7 +1310,12 @@ func setTmuxWorkContext(workRig, workBead, workMol string) {
 	if os.Getenv("TMUX") == "" {
 		return
 	}
-	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
+	// Route through tmux.BuildCommand so we hit the gastown socket when one is
+	// configured via tmux.SetDefaultSocket. A bare exec.Command("tmux", ...)
+	// would silently connect to the default tmux server and target the wrong
+	// session (or find no session at all). Same bug class as 743afe8c and
+	// 04fc8cfc.
+	out, err := tmux.BuildCommand("display-message", "-p", "#{session_name}").Output()
 	if err != nil {
 		return
 	}
@@ -1320,9 +1325,9 @@ func setTmuxWorkContext(workRig, workBead, workMol string) {
 	}
 	setOrUnset := func(key, value string) {
 		if value != "" {
-			_ = exec.Command("tmux", "set-environment", "-t", session, key, value).Run()
+			_ = tmux.BuildCommand("set-environment", "-t", session, key, value).Run()
 		} else {
-			_ = exec.Command("tmux", "set-environment", "-u", "-t", session, key).Run()
+			_ = tmux.BuildCommand("set-environment", "-u", "-t", session, key).Run()
 		}
 	}
 	setOrUnset("GT_WORK_RIG", workRig)

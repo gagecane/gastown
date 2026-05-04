@@ -560,11 +560,16 @@ func TestFindTestSockets_Integration(t *testing.T) {
 	sessionName := "probe-session"
 
 	// Start a tmux server on this socket with a session.
+	// intentionally bare — test creates an isolated socket with -L so
+	// findTestSockets has something to discover. Routing through
+	// tmux.BuildCommand would hit whatever default socket the test binary
+	// has set, not the ephemeral test socket.
 	startCmd := exec.Command("tmux", "-L", socketName, "new-session", "-d", "-s", sessionName)
 	if err := startCmd.Run(); err != nil {
 		t.Fatalf("failed to create test tmux server: %v", err)
 	}
 	t.Cleanup(func() {
+		// intentionally bare — tear down the ephemeral test socket created above.
 		_ = exec.Command("tmux", "-L", socketName, "kill-server").Run()
 		socketPath := filepath.Join(tmux.SocketDir(), socketName)
 		_ = os.Remove(socketPath)

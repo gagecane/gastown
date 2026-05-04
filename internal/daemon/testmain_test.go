@@ -37,6 +37,11 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	if tmuxSocket != "" {
+		// intentionally bare — TestMain teardown for the isolated daemon
+		// test socket created above. tmux.BuildCommand would target the
+		// SetDefaultSocket value, which is exactly this socket — so the
+		// effect is equivalent — but using the raw form keeps teardown
+		// independent of helper package state.
 		_ = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run()
 		socketPath := filepath.Join(tmux.SocketDir(), tmuxSocket)
 		_ = os.Remove(socketPath)
