@@ -350,6 +350,70 @@ If your session dies before persisting, the work is lost forever.
 deliverable. No code to commit. You MUST persist findings to the bead.
 Use `gt done --cleanup-status clean` when completing with no code changes.
 
+## 🚨 SOP: Test Assertion Changes Require Root-Cause Writeup 🚨
+
+**The trap:** Test red → change the assertion → test green → commit.
+This is a local optimum. When a test starts failing, the test is usually
+RIGHT and the service under test has regressed. Broadening an assertion
+set to accept the new (possibly broken) behavior HIDES real bugs.
+
+**Real incident (cait-hk7 / 46ba3d2):** A polecat broadened an integ-test
+status set `[307, 401]` → `[307, 401, 403]` to make a failing test pass.
+The true cause was that the Beta MidwayAuthorizer had stopped enforcing
+authentication — a critical security regression. The "fix" masked it.
+
+**Scope — these files trigger this SOP:**
+- `*.test.ts`, `*.spec.ts`, `*.test.js`, `*.spec.js`, `*.test.tsx`, `*.spec.tsx`
+- `*_test.go`, `*_test.py`, `*.test.py`, `test_*.py`
+- `*.test.rs`, `tests/**/*.rs` (Rust integration tests)
+- Any file under `tests/`, `test/`, `__tests__/`, or `integ/` directories
+- Fixture / golden / snapshot files consumed by the above
+
+**When the SOP fires — BEFORE editing a test, if your change would:**
+- Broaden an assertion (e.g., add accepted status codes, widen a regex, loosen a bound).
+- Remove an assertion, `expect(...)`, `assert*`, or test case entirely.
+- Replace a strict equality check with a looser match (`==` → `contains`, `toEqual` → `toMatchObject`).
+- Bump a timeout, retry count, or sleep to make a flaky test pass.
+- Reorder or skip tests (`.skip`, `.only`, `#[ignore]`, `t.Skip`) to avoid a failure.
+- Change a golden/fixture/snapshot to match new service output.
+
+...then you MUST do the following BEFORE opening an MR / pushing for `{{ cmd }} done`:
+
+1. **Identify the service behavior change.** Which commit or version of the
+   system under test changed? `git log`, `git bisect`, or deploy history on
+   the service. Not "the test started failing" — WHEN and WHY the behavior
+   changed.
+2. **Explain why the new behavior is correct.** Not "the test now passes."
+   Explain the product / contract reason the new output is the desired one.
+   If you can't, the test is right and the service is wrong — STOP.
+3. **Post the rationale on the work bead BEFORE the MR:**
+   ```bash
+   bd update <issue-id> --notes "Root-cause for test assertion change:
+   - Service change: <commit/version/PR that changed behavior>
+   - Why new behavior is correct: <contract / spec / ticket reference>
+   - Why old assertion was wrong (or now stale): <reason>
+   - Alternatives considered: <e.g. fixing the service instead>"
+   ```
+4. **If the service change looks unintentional, suspicious, or
+   security-relevant — DO NOT modify the test. Escalate:**
+   ```bash
+   {{ cmd }} escalate "Test red may indicate service regression, not test bug" -s HIGH \
+     -m "Issue: <id>
+   Test: <path>
+   Expected: <old assertion>
+   Observed: <new behavior>
+   Suspected regression: <service / commit / symptom>"
+   ```
+
+**Refinery / reviewer expectation:** an MR whose diff touches test files and
+broadens/removes assertions without a NOTES block on the bead explaining the
+root cause may be sent back. Absence of this writeup is treated as a symptom
+patch until proven otherwise.
+
+**Rule of thumb:** If your test-assertion change would also let a
+hypothetical future regression slip through undetected, you are papering
+over a bug. File a separate bead for the real service defect and escalate.
+
 ## PR Workflow (for repos that use pull requests)
 
 **Applies to:** longeye and other repos that require code review via GitHub PRs

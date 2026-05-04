@@ -128,6 +128,77 @@ func TestRenderRole_Polecat_DeferredOnNoWork(t *testing.T) {
 	}
 }
 
+// TestRenderRole_Polecat_TestAssertionSOP verifies that the polecat template
+// includes the SOP requiring a root-cause writeup when a polecat modifies
+// test assertions. Regression for gu-mxev (mirror of gt-rsxbn):
+// Incident cait-hk7 / 46ba3d2 — a polecat broadened an assertion set
+// [307, 401] -> [307, 401, 403] to make a failing integ test green, which
+// masked a real Beta MidwayAuthorizer regression (cait-b74). The SOP
+// requires polecats to identify the service behavior change, justify why
+// the new behavior is correct, post a NOTES block on the work bead, and
+// escalate instead of modifying the test when the service change looks
+// unintentional.
+func TestRenderRole_Polecat_TestAssertionSOP(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:          "polecat",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/polecats/TestCat",
+		DefaultBranch: "main",
+		Polecat:       "TestCat",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	output, err := tmpl.RenderRole("polecat", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	// The SOP section must be present with a clearly identifiable heading so
+	// refinery / reviewer checks can grep for it.
+	requiredSubstrings := []string{
+		// Heading — identifiable anchor.
+		"SOP: Test Assertion Changes Require Root-Cause Writeup",
+		// Concrete incident reference so polecats know WHY this rule exists.
+		"cait-hk7",
+		"46ba3d2",
+		// File-extension scope so polecats recognize when the SOP fires.
+		"*.test.ts",
+		"*.spec.ts",
+		"*_test.go",
+		// The 4 required behaviors from the source bead.
+		"Identify the service behavior change",
+		"Explain why the new behavior is correct",
+		"bd update",
+		"escalate",
+		// Escalation must be wired through the `gt` command, not free-form
+		// prose — otherwise the polecat won't do it.
+		"escalate",
+	}
+	for _, want := range requiredSubstrings {
+		if !strings.Contains(output, want) {
+			t.Errorf("polecat template missing required SOP content %q; "+
+				"see gu-mxev — test-assertion changes must require a "+
+				"root-cause writeup before an MR is opened", want)
+		}
+	}
+
+	// The rendered escalation command must use the real `gt` binary name
+	// (templated via {{ cmd }}), not a literal "{{ cmd }}" string — that
+	// would mean the template variable failed to expand.
+	if strings.Contains(output, "{{ cmd }} escalate") {
+		t.Error("polecat template contains unexpanded `{{ cmd }} escalate` — " +
+			"template variable did not render")
+	}
+}
+
 func TestRenderRole_Deacon(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {
