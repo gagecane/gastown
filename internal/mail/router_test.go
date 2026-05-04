@@ -1960,6 +1960,159 @@ func TestEnqueueReplyReminder_DisabledByConfig(t *testing.T) {
 	}
 }
 
+// TestEnqueueReplyReminder_SkipsPluginDispatch verifies that messages with
+// plugin-dispatch subjects ("Plugin: ...") do not trigger a reply reminder and
+// that the early-return happens before config lookup. See gt-swirk (nudge
+// storm fix) and gu-qgia / gt-a50wh (test-coverage follow-up).
+func TestEnqueueReplyReminder_SkipsPluginDispatch(t *testing.T) {
+	townRoot := t.TempDir()
+
+	// Write a settings/config.json with a non-zero reply_reminder_delay so
+	// that if the plugin-dispatch early-return were removed, a reminder
+	// WOULD be enqueued. This makes the test assert the skip, not a
+	// coincidentally-disabled feature.
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{"operational":{"mail":{"reply_reminder_delay":"30s"}}}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+	msg := &Message{
+		From:    "daemon",
+		To:      "gastown/crew/alice",
+		Subject: "Plugin: stuck-agent-dog",
+		Type:    TypeNotification, // Not TypeReply — would otherwise enqueue.
+	}
+	sessionID := "gt-gastown-crew-alice"
+
+	r.enqueueReplyReminder(msg, sessionID)
+
+	pending, err := nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 0 {
+		t.Errorf("plugin-dispatch subject should skip reply reminder, got %d pending", pending)
+	}
+
+	// Additional guard: even after Drain, nothing should be deliverable.
+	nudges, err := nudge.Drain(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 0 {
+		t.Errorf("plugin-dispatch subject should not enqueue anything drainable, got %d", len(nudges))
+	}
+}
+
+// TestIsPluginDispatchSubject table-tests the helper that identifies
+// plugin-dispatch subjects. Mirrors the check used in cmd/dog.go (see
+// gt-swirk). Subjects must have the exact prefix "Plugin: " (with a trailing
+// space) to match.
+func TestIsPluginDispatchSubject(t *testing.T) {
+	cases := []struct {
+		name    string
+		subject string
+		want    bool
+	}{
+		// Matches
+		{"canonical plugin subject", "Plugin: stuck-agent-dog", true},
+		{"single-char plugin name", "Plugin: X", true},
+		{"lowercase plugin name", "Plugin: a", true},
+		{"double space after colon (space still satisfies prefix)", "Plugin:  ", true},
+		{"plugin with trailing context", "Plugin: foo: bar", true},
+
+		// Non-matches
+		{"empty subject", "", false},
+		{"lowercase prefix", "plugin: x", false},
+		{"no space after colon", "Plugin:X", false},
+		{"prefix only, no colon-space", "Plugin", false},
+		{"plugin mentioned mid-subject", "Re: Plugin: X", false},
+		{"leading space before prefix", " Plugin: X", false},
+		{"hyphenated near-miss", "Plugin-: X", false},
+		{"unrelated subject", "You have new mail", false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := isPluginDispatchSubject(tc.subject)
+			if got != tc.want {
+				t.Errorf("isPluginDispatchSubject(%q) = %v, want %v", tc.subject, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatNotificationMessage_PluginDispatch verifies that plugin-dispatch
+// subjects produce the "🔌 ... dispatched from ..." notification string
+// instead of the generic "📬 You have new mail" string. Also asserts that the
+// escalation branch wins when both conditions hold (isEscalation AND
+// plugin-subject) — escalation must take precedence because the plugin-subject
+// branch is an early-return for the mail-style path, not the escalation path.
+func TestFormatNotificationMessage_PluginDispatch(t *testing.T) {
+	t.Run("plugin-dispatch subject produces plugin-style notification", func(t *testing.T) {
+		msg := &Message{
+			From:     "daemon",
+			Subject:  "Plugin: stuck-agent-dog",
+			Type:     TypeNotification,
+			Priority: PriorityNormal,
+		}
+		got := formatNotificationMessage(msg)
+		want := "🔌 Plugin: stuck-agent-dog dispatched from daemon."
+		if got != want {
+			t.Errorf("formatNotificationMessage(plugin) = %q, want %q", got, want)
+		}
+		// Negative assertion: must NOT contain the "📬 ... new mail" phrasing
+		// that triggers the reply-reminder heuristic (the point of gt-swirk).
+		if strings.Contains(got, "📬") || strings.Contains(got, "new mail") {
+			t.Errorf("plugin notification should not contain mail-style phrasing, got %q", got)
+		}
+	})
+
+	t.Run("non-plugin subject produces mail-style notification", func(t *testing.T) {
+		msg := &Message{
+			From:    "gastown/witness",
+			Subject: "status check",
+			Type:    TypeNotification,
+		}
+		got := formatNotificationMessage(msg)
+		for _, want := range []string{"📬", "new mail from gastown/witness", "status check", "gt mail inbox"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("mail notification missing %q: %s", want, got)
+			}
+		}
+	})
+
+	t.Run("escalation with plugin-style subject still uses escalation branch", func(t *testing.T) {
+		// Precedence: formatNotificationMessage checks TypeEscalation FIRST,
+		// so an escalation whose subject happens to start with "Plugin: "
+		// must still produce the 🚨 escalation string, not the 🔌 plugin
+		// string. Guards against regression if the branch order is flipped.
+		msg := &Message{
+			From:     "gastown/witness",
+			Subject:  "Plugin: X", // Pathological: escalation that also matches plugin prefix.
+			Type:     TypeEscalation,
+			Priority: PriorityHigh,
+			ThreadID: "hq-esc789",
+		}
+		got := formatNotificationMessage(msg)
+		if !strings.Contains(got, "🚨") {
+			t.Errorf("escalation should use 🚨 prefix, got %q", got)
+		}
+		if strings.Contains(got, "🔌") {
+			t.Errorf("escalation should NOT use plugin 🔌 prefix, got %q", got)
+		}
+		if !strings.Contains(got, "hq-esc789") {
+			t.Errorf("escalation should mention ThreadID, got %q", got)
+		}
+	})
+}
+
 // TestAppendMetadataArgs verifies that msg.Metadata is rendered as a
 // --metadata JSON argument to bd create. Anchors the wire format that
 // gu-ub1l (consumer_bead_id) and other protocol extensions rely on.
