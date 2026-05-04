@@ -86,6 +86,28 @@ bead to the rig that truly owns it. See Step 3 for the mechanics.
    Remember each rig's resolved source root AND its normalized `git_url` —
    you will use both to route beads in Step 3.
 
+   **Freshen each source root before scanning.** This plugin runs on a 4h
+   cooldown, so HEAD can drift well behind `origin/main` between cycles. A
+   stale HEAD causes the scout to "find" issues that were fixed hours/days
+   ago and file beads that polecats burn credits closing as no-changes
+   (see gt-gp1su for evidence: cadk-c0f, cadk-gj9). In each rig's resolved
+   source root, fast-forward the default branch before scanning:
+
+   ```bash
+   # default branch is typically main; fall back gracefully if different
+   default_branch=$(git -C "$rig_root" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+                    | sed 's#^refs/remotes/origin/##')
+   default_branch=${default_branch:-main}
+   git -C "$rig_root" fetch --quiet origin "$default_branch" 2>/dev/null || true
+   ```
+
+   Do NOT check the branch out or rebase — the worktree may be on a polecat
+   branch with uncommitted work. `git fetch` alone updates the remote-tracking
+   ref (`origin/<default_branch>`), which is what Step 3's HEAD re-verification
+   reads from. If the fetch fails (network, auth), continue with the stale
+   ref — the re-verification will still catch mismatches between the scan
+   snapshot and the fetched ref.
+
 2. In each source root, scan for improvement opportunities. **Always walk
    git-tracked files only** — never `grep -r` the source root directly. In a
    Gas Town deployment the rig root contains runtime-state overlays
@@ -184,37 +206,101 @@ bead to the rig that truly owns it. See Step 3 for the mechanics.
        continue
    fi
 
-   # 3d. Cd into the OWNING rig's source root (which may differ from the
-   # rig we are scanning) and file the bead there:
-   cd "$RIG_SOURCE_ROOTS[$owning_rig]"
+   # 3d. HEAD re-verification (anti-staleness preflight). Between the scan
+   # snapshot (Step 2) and this filing boundary, new commits may have
+   # landed that remove the matched text, renumber lines, or delete the
+   # file entirely. The fetch in Step 1 updated origin/<default_branch>;
+   # re-read the file at that ref and confirm the anchor still exists
+   # BEFORE creating the bead. Without this, polecats burn credits
+   # DEFERRED-closing beads whose described work is already done.
+   #
+   # The "anchor" of a finding is (relative_path, matched_text). Line
+   # numbers drift on any edit above the match, so we do NOT require the
+   # line number to match — we only require the matched text to still
+   # appear somewhere in the file at HEAD. If it does, recompute the
+   # line number from HEAD and use the recomputed number in the bead.
+   owning_root="${RIG_SOURCE_ROOTS[$owning_rig]}"
+   rel_path=$(git -C "$owning_root" ls-files --full-name -- "$file" 2>/dev/null | head -1)
+   if [[ -z "$rel_path" ]]; then
+       rel_path=$(realpath --relative-to="$owning_root" "$file" 2>/dev/null)
+   fi
+   verify_branch=$(git -C "$owning_root" symbolic-ref \
+                       refs/remotes/origin/HEAD 2>/dev/null \
+                       | sed 's#^refs/remotes/origin/##')
+   verify_ref="origin/${verify_branch:-main}"
 
-   # 3e. Check for duplicates INSIDE the owning rig (include closed beads
+   # File must still exist at HEAD:
+   if ! git -C "$owning_root" cat-file -e "$verify_ref:$rel_path" 2>/dev/null; then
+       continue   # file deleted/moved since scan — stale finding
+   fi
+
+   # Matched text must still appear at HEAD. `matched_text` is the exact
+   # substring that triggered the finding in Step 2 (for TODO/FIXME scans:
+   # the grep match line; for dead-code: the defining symbol's name;
+   # for large-file: N/A — skip this check and re-count lines instead).
+   if [[ -n "$matched_text" ]]; then
+       if ! git -C "$owning_root" show "$verify_ref:$rel_path" \
+            | grep -Fq -- "$matched_text"; then
+           continue   # text no longer present — stale finding
+       fi
+       # Recompute line number against HEAD so the bead points at the
+       # right line even after intervening edits:
+       head_line=$(git -C "$owning_root" show "$verify_ref:$rel_path" \
+           | grep -Fn -- "$matched_text" | head -1 | cut -d: -f1)
+       # Use $head_line (not the scan-time line) in the bead body.
+   fi
+
+   # For findings whose "anchor" is a file-level property (large-file
+   # over 500 lines, missing tests, etc.), re-check the property at HEAD
+   # rather than relying on the scan snapshot:
+   # - large-file: `git -C "$owning_root" show "$verify_ref:$rel_path" | wc -l`
+   #   must still exceed the threshold.
+   # - missing-tests: re-run the sibling-test search from Step 2b against
+   #   the HEAD tree (`git -C "$owning_root" ls-tree -r --name-only "$verify_ref"`)
+   #   — a test file may have been added since the scan.
+   # - dead-code: re-grep for references to the symbol at HEAD before
+   #   filing.
+   # Skip any finding whose file-level property no longer holds at HEAD.
+
+   # 3e. Cd into the OWNING rig's source root (which may differ from the
+   # rig we are scanning) and file the bead there:
+   cd "$owning_root"
+
+   # 3f. Check for duplicates INSIDE the owning rig (include closed beads
    # so we don't re-file issues a previous cycle already handled):
    bd search "<description>" --status=all
 
-   # 3f. If no duplicate, create the bead in the owning rig's database:
+   # 3g. If no duplicate, create the bead in the owning rig's database:
    bd create --title "<improvement>" --type task --priority P3
-   # Add a note with the file path (relative to the OWNING rig), line
-   # number, and what to improve.
+   # Add a note with the file path (relative to the OWNING rig), the
+   # HEAD-recomputed line number (not the scan-time line), and what
+   # to improve.
    bd tag <id> code-scout
    ```
 
-   The four independent routing safeguards are:
+   The five independent routing / anti-staleness safeguards are:
    - Step 1 pins each rig's source root to the worktree whose origin matches
      `rigs.json[rig].git_url` (prevents scanning sibling packages in a Brazil
      workspace, e.g. `casc_lambda` will not walk `CodegenAgentSchedulerCDK`)
+   - Step 1 fetches `origin/<default_branch>` before scanning so HEAD
+     re-verification reads the freshest ref
    - `cd` into the owning rig (resolves `.beads/` discovery)
    - Gitignore filter (drops overlays before they reach `bd create`)
    - Git-toplevel lookup (catches overlays that slip past the gitignore
      check, e.g. when the overlay repo is nested inside an untracked
      directory rather than an explicitly ignored path)
+   - HEAD re-verification at the filing boundary (drops findings whose
+     anchor has vanished or moved between scan and file — prevents the
+     stale-bead churn described in gt-gp1su / gu-gq4k)
 
-   Without all four, a scan of a workspace-root rig like `codegen_ws` will
+   Without all of these, a scan of a workspace-root rig like `codegen_ws` will
    file beads into that rig for files that actually live in
-   `talontriage`, `casc_*`, `agentforge`, etc.; and a scan of a package-level
+   `talontriage`, `casc_*`, `agentforge`, etc.; a scan of a package-level
    rig like `casc_lambda` whose source root falls through to a Brazil
    workspace will file CDK-targeted beads against the Lambda-only rig
-   (see gt-r3jn / gu-mbeo).
+   (see gt-r3jn / gu-mbeo); and a 4h-cooldown cycle will keep re-filing
+   beads for PLACEHOLDERs that were replaced hours ago (see cadk-c0f,
+   cadk-gj9).
 
 4. Cap at 5 new beads per rig per cycle to avoid noise. Count caps against
    the **owning** rig (where the bead is filed), not the rig being scanned.
@@ -225,5 +311,13 @@ bead to the rig that truly owns it. See Step 3 for the mechanics.
    - If any bead was filed with a `gt-*` prefix, that is a routing bug — escalate
    - Also report skipped candidates and why, at least in summary form
      (e.g. `skipped 42 gitignored overlays, 17 files with existing tests,
-     3 files in untracked repos`). This makes it visible when the scout
-     is quietly dropping real work vs. correctly filtering overlays.
+     3 files in untracked repos, 5 stale at HEAD`). This makes it visible
+     when the scout is quietly dropping real work vs. correctly filtering
+     overlays.
+   - Report the HEAD re-verification drop count as its own line so the
+     ratio of stale-to-fresh findings is visible cycle-over-cycle. A
+     rising stale count means the cooldown is too long for the rig's
+     commit rate; a zero stale count across many cycles means the
+     preflight is redundant and can be relaxed. Example:
+     `HEAD re-verify: 12 findings checked, 5 dropped (file missing: 2,
+     text missing: 2, large-file no longer >500 lines: 1)`.
