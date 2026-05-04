@@ -539,3 +539,54 @@ func TestTemplateContentEqual(t *testing.T) {
 		t.Error("expected invalid JSON to not match")
 	}
 }
+
+// TestInstallForRole_KiroRoleAware asserts kiro receives role-aware templates.
+// Regression guard for gu-4atk: interactive kiro template must carry the
+// userPromptSubmit mail-inject hook so mayor/crew running under kiro-cli
+// receive queued nudges between turns — same as Claude Code runtime.
+func TestInstallForRole_KiroRoleAware(t *testing.T) {
+	dir := t.TempDir()
+	err := InstallForRole("kiro", dir, dir, "polecat", ".kiro/agents", "gastown.json", false)
+	if err != nil {
+		t.Fatalf("InstallForRole(kiro, polecat): %v", err)
+	}
+
+	got, _ := os.ReadFile(filepath.Join(dir, ".kiro/agents", "gastown.json"))
+	want, err := resolveAndSubstitute("kiro", "gastown-autonomous.json", "polecat")
+	if err != nil {
+		t.Fatalf("resolveAndSubstitute: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Error("kiro autonomous: content mismatch")
+	}
+	// Autonomous template must inject mail at both agentSpawn and userPromptSubmit.
+	if !strings.Contains(string(got), `"agentSpawn"`) || !strings.Contains(string(got), "mail check --inject") {
+		t.Error("kiro autonomous: expected agentSpawn with mail check --inject")
+	}
+	if !strings.Contains(string(got), `"userPromptSubmit"`) {
+		t.Error("kiro autonomous: expected userPromptSubmit hook")
+	}
+
+	dir2 := t.TempDir()
+	err = InstallForRole("kiro", dir2, dir2, "mayor", ".kiro/agents", "gastown.json", false)
+	if err != nil {
+		t.Fatalf("InstallForRole(kiro, mayor): %v", err)
+	}
+
+	got, _ = os.ReadFile(filepath.Join(dir2, ".kiro/agents", "gastown.json"))
+	want, err = resolveAndSubstitute("kiro", "gastown-interactive.json", "mayor")
+	if err != nil {
+		t.Fatalf("resolveAndSubstitute: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Error("kiro interactive (mayor): content mismatch")
+	}
+	// Interactive template must still wire mail injection on user prompts so
+	// nudges/escalations queued between turns reach mayor under kiro-cli.
+	if !strings.Contains(string(got), `"userPromptSubmit"`) {
+		t.Error("kiro interactive: missing userPromptSubmit hook (gu-4atk regression)")
+	}
+	if !strings.Contains(string(got), "mail check --inject") {
+		t.Error("kiro interactive: missing mail check --inject command (gu-4atk regression)")
+	}
+}
