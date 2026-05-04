@@ -141,6 +141,27 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	missingRigBeadLogged map[string]bool
 
+	// rigStatusCache memoizes the last-known parked/docked state per rig so
+	// that transient Dolt errors (build mismatch, CGO hiccup, server restart)
+	// do not silently exclude the rig from every patrol cycle until Dolt
+	// recovers. On a successful rig.IsRigParkedOrDockedE call, the result is
+	// cached. On a subsequent transient failure, isRigOperational falls back
+	// to a fresh cache entry rather than returning "cannot verify". See
+	// gu-7rae / gt-bvqkm — the fail-safe pessimism was compounding with the
+	// witness session-name bug (gt-e8ppw) to make refineries appear broken.
+	//
+	// Cache entries older than rigStatusCacheTTL are ignored (treated as
+	// absent) so we still surface real state changes after a long Dolt
+	// outage. ErrRigBeadNotFound is a persistent state (not transient), so
+	// we do NOT cache it — the daemon already logs it once via
+	// missingRigBeadLogged and falls through to the wisp/auto_restart path.
+	//
+	// Accessed from both the heartbeat goroutine and the convoy manager
+	// (via the isRigParked callback closed over in d.run()), so the cache
+	// is guarded by rigStatusCacheMu.
+	rigStatusCacheMu sync.Mutex
+	rigStatusCache   map[string]rigStatusCacheEntry
+
 	// deaconStartFn is a test seam for the deacon start path invoked by
 	// ensureDeaconRunning. When nil (production), ensureDeaconRunning builds
 	// a real deacon.Manager and calls Start. Tests may set this to a stub to
@@ -165,7 +186,28 @@ const (
 	// doctorMolCooldown is the minimum interval between mol-dog-doctor molecules.
 	// Configurable via operational.daemon.doctor_mol_cooldown.
 	doctorMolCooldown = 5 * time.Minute
+
+	// rigStatusCacheTTL is the maximum age of a rigStatusCache entry that
+	// will be used as a fallback when rig.IsRigParkedOrDockedE returns a
+	// transient error. Entries older than this are treated as absent so
+	// we still pick up real state changes after prolonged Dolt outages.
+	// Chosen at 1h: long enough to absorb the Dolt-outage classes observed
+	// in ta-0ee/ta-pgh/ta-9nn/ta-ruu (bd binary rebuilds, CGO-triggered
+	// restarts) which recover in seconds-to-minutes, short enough that a
+	// rig genuinely left parked/docked will be re-evaluated from live data
+	// once Dolt is healthy again. See gu-7rae.
+	rigStatusCacheTTL = 1 * time.Hour
 )
+
+// rigStatusCacheEntry records the last successful parked/docked check for
+// a rig. Used by isRigOperational to fall back to a recent known state
+// when rig.IsRigParkedOrDockedE hits a transient Dolt failure instead of
+// excluding the rig from patrol. See rigStatusCache on Daemon.
+type rigStatusCacheEntry struct {
+	blocked  bool
+	reason   string
+	cachedAt time.Time
+}
 
 const beadsModulePath = "github.com/steveyegge/beads"
 
@@ -2082,8 +2124,14 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // Returns false (with reason) if the rig is parked, docked, or has auto_restart blocked/disabled.
 //
 // Parked/docked detection is delegated to rig.IsRigParkedOrDockedE (shared
-// with cmd package). This daemon-specific wrapper adds fail-safe semantics
-// (returns false when status can't be verified) and auto_restart checking.
+// with cmd package). This daemon-specific wrapper adds:
+//   - fail-safe semantics when status can't be verified AND no prior result
+//     is cached (returns false);
+//   - transient-error tolerance via rigStatusCache: a recent successful
+//     check is used as a fallback when Dolt hiccups, avoiding the
+//     "rig silently excluded from patrol every cycle until Dolt recovers"
+//     failure mode (gu-7rae / gt-bvqkm);
+//   - auto_restart config checking.
 func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	cfg := wisp.NewConfig(d.config.TownRoot, rigName)
 
@@ -2116,15 +2164,37 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 				d.missingRigBeadLogged[rigName] = true
 				d.logger.Printf("Warning: rig %s has no identity bead — docked/parked state cannot be read (will treat as operational; run `gt rig up %s` or `gt doctor` to create the bead)", rigName, rigName)
 			}
-			// Fall through to auto_restart check below.
+			// Fall through to auto_restart check below. Do NOT cache
+			// "not-blocked" for a rig with a missing identity bead:
+			// the wisp layer is authoritative for parked while the bead
+			// is missing, and we don't want a future Dolt outage to lock
+			// in stale not-blocked state via the cache.
 		} else {
-			// FAIL-SAFE: Can't verify docked status (Dolt down, network
-			// issue, prefix missing, etc.). Assume NOT operational to avoid
-			// wasting credits on potentially-docked rigs. Better to delay
-			// work than burn credits unnecessarily.
-			d.logger.Printf("Warning: failed to check rig %s for docked/parked status: %v (assuming not operational)", rigName, err)
-			return false, "cannot verify rig status (Dolt unavailable)"
+			// Transient error class (Dolt unavailable, CGO hiccup, bd binary
+			// build mismatch, network blip). Before falling back to the
+			// pessimistic "cannot verify" exclusion, consult the cache:
+			// if we have a recent successful check we'll use it so one
+			// flaky Dolt read doesn't drop the rig out of patrol for the
+			// entire outage. See gu-7rae.
+			if cached, ok := d.rigStatusCacheLookup(rigName); ok {
+				d.logger.Printf("Warning: failed to check rig %s for docked/parked status: %v (using cached status from %s ago)", rigName, err, time.Since(cached.cachedAt).Round(time.Second))
+				blocked, reason = cached.blocked, cached.reason
+				// Fall through to the blocked/operational resolution below
+				// with the cached values.
+			} else {
+				// FAIL-SAFE: Can't verify docked status and no recent
+				// cache entry. Assume NOT operational to avoid wasting
+				// credits on potentially-docked rigs. Better to delay
+				// work than burn credits unnecessarily.
+				d.logger.Printf("Warning: failed to check rig %s for docked/parked status: %v (no recent cache; assuming not operational)", rigName, err)
+				return false, "cannot verify rig status (Dolt unavailable)"
+			}
 		}
+	} else {
+		// Successful live check — record it so the next transient failure
+		// can fall back to it. We cache the raw (blocked, reason) pair so
+		// the fallback path produces identical output to a live result.
+		d.rigStatusCacheStore(rigName, blocked, reason)
 	}
 	if blocked {
 		// Match existing reason strings for compatibility with log scrapers
@@ -2160,6 +2230,41 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	}
 
 	return true, ""
+}
+
+// rigStatusCacheLookup returns the cached rig status for rigName if one
+// exists and is still within rigStatusCacheTTL. The ok return is false
+// when the cache is empty, the entry is missing, or the entry is stale.
+func (d *Daemon) rigStatusCacheLookup(rigName string) (rigStatusCacheEntry, bool) {
+	d.rigStatusCacheMu.Lock()
+	defer d.rigStatusCacheMu.Unlock()
+	entry, ok := d.rigStatusCache[rigName]
+	if !ok {
+		return rigStatusCacheEntry{}, false
+	}
+	if time.Since(entry.cachedAt) > rigStatusCacheTTL {
+		// Stale — let the caller fall through to fail-safe so operators
+		// aren't stuck with an old parked/docked decision after a
+		// prolonged Dolt outage.
+		return rigStatusCacheEntry{}, false
+	}
+	return entry, true
+}
+
+// rigStatusCacheStore records the most recent successful rig status check.
+// Called only from the success path of IsRigParkedOrDockedE so we never
+// cache a value derived from a failed lookup.
+func (d *Daemon) rigStatusCacheStore(rigName string, blocked bool, reason string) {
+	d.rigStatusCacheMu.Lock()
+	defer d.rigStatusCacheMu.Unlock()
+	if d.rigStatusCache == nil {
+		d.rigStatusCache = make(map[string]rigStatusCacheEntry)
+	}
+	d.rigStatusCache[rigName] = rigStatusCacheEntry{
+		blocked:  blocked,
+		reason:   reason,
+		cachedAt: time.Now(),
+	}
 }
 
 // processLifecycleRequests checks for and processes lifecycle requests.

@@ -858,3 +858,220 @@ exit 1
 		t.Errorf("expected 'failed to check rig' warning for Dolt failure; log output:\n%s", logs)
 	}
 }
+
+// TestIsRigOperational_TransientDoltErrorUsesCache is the regression test for
+// gu-7rae / gt-bvqkm: transient Dolt errors (bd binary build mismatch, CGO
+// hiccups, server restarts) must NOT silently exclude a rig from every
+// patrol cycle when we have a recent successful docked/parked check. The
+// rig-status cache absorbs transient failures and only falls through to
+// the pessimistic "cannot verify" path when no fresh cache entry exists.
+func TestIsRigOperational_TransientDoltErrorUsesCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigName := "cachedrig"
+
+	// Minimal rig/mayor setup — just enough for RigBeadsPrefix to resolve
+	// the prefix so isRigOperational can reach the bead layer. The actual
+	// Dolt behavior is controlled by the bd stub we install below.
+	rigPath := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"cr"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(`{"version":1,"rigs":{"cachedrig":{"beads":{"prefix":"cr"}}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate the cache with a "not blocked" result — this simulates
+	// a prior successful live check. We exercise the lookup helper
+	// directly rather than driving a real bd stub twice, because this
+	// test's focus is the cache-fallback behavior, not the plumbing.
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: tmpDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+	d.rigStatusCacheStore(rigName, false, "")
+
+	// Install a bd stub that fails with a transient Dolt error. If the
+	// cache is working, isRigOperational should return operational=true
+	// (using the cached not-blocked result) instead of the fail-safe
+	// "cannot verify" exclusion.
+	stubDir := t.TempDir()
+	stubScript := `#!/bin/sh
+cat >&2 <<'EOT'
+Error: [mysql] read tcp 127.0.0.1:3307: connection refused
+EOT
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stubScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	operational, reason := d.isRigOperational(rigName)
+	if !operational {
+		t.Errorf("expected operational=true (cache fallback on transient Dolt error), got false (reason=%q)", reason)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "using cached status") {
+		t.Errorf("expected 'using cached status' log line when falling back to cache; log output:\n%s", logs)
+	}
+	if strings.Contains(logs, "assuming not operational") {
+		t.Errorf("cache fallback should NOT emit the 'assuming not operational' fail-safe warning; log output:\n%s", logs)
+	}
+}
+
+// TestIsRigOperational_TransientDoltErrorUsesCache_Docked guards the
+// asymmetric case: a cached DOCKED result must still block the rig on a
+// subsequent transient Dolt failure. The cache preserves whichever
+// direction was last observed — its purpose is to avoid flipping the
+// answer just because Dolt hiccuped, not to default to operational.
+func TestIsRigOperational_TransientDoltErrorUsesCache_Docked(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigName := "cacheddocked"
+
+	rigPath := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"cd"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(`{"version":1,"rigs":{"cacheddocked":{"beads":{"prefix":"cd"}}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: tmpDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+	// Cached state: last live check observed the rig as docked.
+	d.rigStatusCacheStore(rigName, true, "docked")
+
+	stubDir := t.TempDir()
+	stubScript := `#!/bin/sh
+echo "Error: [mysql] connection refused" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stubScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	operational, reason := d.isRigOperational(rigName)
+	if operational {
+		t.Errorf("expected operational=false (cached docked state should block on Dolt failure), got true")
+	}
+	if reason != "rig is docked" {
+		t.Errorf("expected reason=%q (cached docked should reuse exact live phrasing), got %q", "rig is docked", reason)
+	}
+}
+
+// TestIsRigOperational_StaleCacheFallsThrough verifies that cache entries
+// older than rigStatusCacheTTL are ignored so a prolonged Dolt outage
+// cannot indefinitely lock in stale state. Older entries fall through to
+// the existing fail-safe "cannot verify" path.
+func TestIsRigOperational_StaleCacheFallsThrough(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigName := "stalerig"
+
+	rigPath := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"sr"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(`{"version":1,"rigs":{"stalerig":{"beads":{"prefix":"sr"}}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: tmpDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+	// Seed a cache entry that has already aged past TTL. Using direct
+	// map access (guarded by the mutex) keeps the test independent of a
+	// fake clock — the lookup helper computes time.Since internally.
+	d.rigStatusCacheMu.Lock()
+	if d.rigStatusCache == nil {
+		d.rigStatusCache = make(map[string]rigStatusCacheEntry)
+	}
+	d.rigStatusCache[rigName] = rigStatusCacheEntry{
+		blocked:  false,
+		reason:   "",
+		cachedAt: time.Now().Add(-2 * rigStatusCacheTTL),
+	}
+	d.rigStatusCacheMu.Unlock()
+
+	stubDir := t.TempDir()
+	stubScript := `#!/bin/sh
+echo "Error: dolt server gone" >&2
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte(stubScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	operational, reason := d.isRigOperational(rigName)
+	if operational {
+		t.Errorf("expected operational=false when cache entry is stale (fail-safe fallthrough), got true")
+	}
+	if !strings.Contains(reason, "cannot verify") && !strings.Contains(reason, "Dolt unavailable") {
+		t.Errorf("expected 'cannot verify' reason when cache is stale, got %q", reason)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "no recent cache") {
+		t.Errorf("expected log to distinguish 'no recent cache' fallthrough from cache-hit path; log output:\n%s", logs)
+	}
+}
+
+// TestRigStatusCache_LookupStore directly exercises the cache helper pair.
+// This isolates the TTL and absence semantics from the full
+// isRigOperational path so future refactors of the outer function can
+// rely on the helpers having well-tested behavior.
+func TestRigStatusCache_LookupStore(t *testing.T) {
+	d := &Daemon{}
+
+	// Missing entry.
+	if _, ok := d.rigStatusCacheLookup("missing"); ok {
+		t.Errorf("lookup on empty cache should return ok=false")
+	}
+
+	// Fresh store then lookup.
+	d.rigStatusCacheStore("alpha", true, "docked")
+	entry, ok := d.rigStatusCacheLookup("alpha")
+	if !ok {
+		t.Fatalf("lookup after store should return ok=true")
+	}
+	if !entry.blocked || entry.reason != "docked" {
+		t.Errorf("lookup returned wrong entry: got blocked=%v reason=%q", entry.blocked, entry.reason)
+	}
+
+	// Manually age the entry past TTL and verify lookup reports it missing.
+	d.rigStatusCacheMu.Lock()
+	aged := d.rigStatusCache["alpha"]
+	aged.cachedAt = time.Now().Add(-2 * rigStatusCacheTTL)
+	d.rigStatusCache["alpha"] = aged
+	d.rigStatusCacheMu.Unlock()
+	if _, ok := d.rigStatusCacheLookup("alpha"); ok {
+		t.Errorf("lookup should treat entries older than rigStatusCacheTTL as absent")
+	}
+}
