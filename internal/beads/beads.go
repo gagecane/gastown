@@ -500,6 +500,14 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 	return &Beads{workDir: workDir, beadsDir: beadsDir}
 }
 
+// TownRoot returns the Gas Town root directory for this Beads wrapper.
+// Returns empty string if not in a Gas Town project.
+// This is the exported counterpart to getTownRoot() for callers outside this
+// package that need the town root (e.g., loading routes.jsonl).
+func (b *Beads) TownRoot() string {
+	return b.getTownRoot()
+}
+
 // getActor returns the BD_ACTOR value for this context.
 // Returns empty string when in isolated mode (tests) to prevent
 // inherited actors from routing to production databases.

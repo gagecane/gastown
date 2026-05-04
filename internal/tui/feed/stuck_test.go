@@ -2,18 +2,22 @@ package feed
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // mockHealthSource is a test double for HealthDataSource
 type mockHealthSource struct {
-	agents     map[string]*beads.Issue
-	sessions   map[string]bool
-	listErr    error
-	sessionErr error // if set, IsSessionAlive returns this error
+	agents      map[string]*beads.Issue
+	sessions    map[string]bool
+	listErr     error
+	sessionErr  error           // if set, IsSessionAlive returns this error
+	knownRigs   map[string]bool // registered rig prefixes (with trailing hyphen); empty disables phantom detection
+	knownRigErr error           // if set, KnownRigPrefixes returns this error
 }
 
 func newMockHealthSource() *mockHealthSource {
@@ -37,6 +41,16 @@ func (m *mockHealthSource) IsSessionAlive(sessionName string) (bool, error) {
 	return m.sessions[sessionName], nil
 }
 
+func (m *mockHealthSource) KnownRigPrefixes() (map[string]bool, error) {
+	if m.knownRigErr != nil {
+		return nil, m.knownRigErr
+	}
+	if m.knownRigs == nil {
+		return nil, nil
+	}
+	return m.knownRigs, nil
+}
+
 // TestAgentStateString tests the String() method for all AgentState values
 func TestAgentStateString(t *testing.T) {
 	tests := []struct {
@@ -48,6 +62,7 @@ func TestAgentStateString(t *testing.T) {
 		{StateWorking, "working"},
 		{StateIdle, "idle"},
 		{StateZombie, "zombie"},
+		{StatePhantom, "phantom"},
 		{AgentState(99), "unknown"},
 	}
 
@@ -74,6 +89,9 @@ func TestAgentStatePriority(t *testing.T) {
 	if StateIdle.Priority() >= StateZombie.Priority() {
 		t.Error("Idle should have higher priority than zombie")
 	}
+	if StateZombie.Priority() >= StatePhantom.Priority() {
+		t.Error("Zombie should have higher priority than phantom")
+	}
 }
 
 // TestAgentStateNeedsAttention tests which states require user attention
@@ -82,6 +100,7 @@ func TestAgentStateNeedsAttention(t *testing.T) {
 		StateGUPPViolation,
 		StateStalled,
 		StateZombie,
+		StatePhantom,
 	}
 	noAttention := []AgentState{
 		StateWorking,
@@ -111,6 +130,7 @@ func TestAgentStateSymbol(t *testing.T) {
 		{StateWorking, "●"},
 		{StateIdle, "○"},
 		{StateZombie, "💀"},
+		{StatePhantom, "🪦"},
 		{AgentState(99), "?"},
 	}
 
@@ -134,6 +154,7 @@ func TestAgentStateLabel(t *testing.T) {
 		{StateWorking, "work"},
 		{StateIdle, "idle"},
 		{StateZombie, "dead"},
+		{StatePhantom, "phant"},
 		{AgentState(99), "???"},
 	}
 
@@ -784,6 +805,354 @@ func TestNudgeTarget(t *testing.T) {
 			got := nudgeTarget(tt.agent)
 			if got != tt.expected {
 				t.Errorf("nudgeTarget() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// ----- Tests for gu-aadt: false-positive stuck-detection fixes -----
+//
+// Three fixes:
+//  1. Post-nuke idle polecats (no hook + dead session) → StateIdle, not zombie.
+//  2. Crew (humans) never zombie-flagged via dead-session timer.
+//  3. Rig-level agents whose prefix isn't in routes.jsonl → StatePhantom.
+//
+// Each category is tested here with and without the gating conditions so we
+// verify the logic, not just the happy path.
+
+// TestCheckAll_PolecatIdlePostNuke: polecat with no hook + dead session is
+// the documented "Nuked, identity persists" state. It should read as idle,
+// NOT zombie.
+func TestCheckAll_PolecatIdlePostNuke(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.agents["gt-gastown-polecat-furiosa"] = &beads.Issue{
+		ID:        "gt-gastown-polecat-furiosa",
+		HookBead:  "", // no hooked work — post-nuke
+		UpdatedAt: time.Now().Add(-125 * time.Hour).Format(time.RFC3339),
+	}
+	// Session NOT alive (not in mock.sessions) — nuked after completion.
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StateIdle {
+		t.Errorf("post-nuke polecat should be StateIdle, got %s", agents[0].State)
+	}
+	if agents[0].NeedsAttention() {
+		t.Error("post-nuke idle polecat should NOT need attention")
+	}
+}
+
+// TestCheckAll_PolecatZombieWithHook: the OTHER side of the polecat/idle
+// fix — if a polecat's session is dead but it HAS hooked work, that's a
+// real mid-task crash and should still be flagged as zombie.
+func TestCheckAll_PolecatZombieWithHook(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.agents["gt-gastown-polecat-crashed"] = &beads.Issue{
+		ID:        "gt-gastown-polecat-crashed",
+		HookBead:  "gu-work1", // hooked work abandoned
+		UpdatedAt: time.Now().Add(-20 * time.Minute).Format(time.RFC3339),
+	}
+	// Session NOT alive.
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StateZombie {
+		t.Errorf("polecat with hook + dead session should be zombie, got %s", agents[0].State)
+	}
+}
+
+// TestCheckAll_CrewLoggedOffNoHook: crew with no hook + dead session is
+// just "human is logged off" → idle, NOT zombie.
+func TestCheckAll_CrewLoggedOffNoHook(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.agents["ro-ralph-crew-canewiw"] = &beads.Issue{
+		ID:        "ro-ralph-crew-canewiw",
+		HookBead:  "",
+		UpdatedAt: time.Now().Add(-161 * time.Hour).Format(time.RFC3339),
+	}
+	// Session NOT alive — human isn't logged in.
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StateIdle {
+		t.Errorf("crew with no hook + dead session should be StateIdle (logged off), got %s", agents[0].State)
+	}
+	if agents[0].NeedsAttention() {
+		t.Error("logged-off crew should NOT need attention")
+	}
+}
+
+// TestCheckAll_CrewLoggedOffWithStaleHook: if crew has hooked work that's
+// gone stale past the stalled threshold, that IS worth flagging even with
+// a dead session — the human owes work. Use stalled/gupp, not zombie.
+func TestCheckAll_CrewLoggedOffWithStaleHook(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.agents["gt-gastown-crew-human"] = &beads.Issue{
+		ID:        "gt-gastown-crew-human",
+		HookBead:  "gu-todo",
+		UpdatedAt: time.Now().Add(-45 * time.Minute).Format(time.RFC3339), // >gupp
+	}
+	// Session dead.
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StateGUPPViolation {
+		t.Errorf("crew with stale hook should be StateGUPPViolation, got %s", agents[0].State)
+	}
+	if agents[0].State == StateZombie {
+		t.Error("crew should never be flagged as StateZombie via dead session")
+	}
+}
+
+// TestCheckAll_CrewSessionAliveRecentNoHook: crew that IS online (session
+// alive) with no hook is just idle, not a problem.
+func TestCheckAll_CrewSessionAliveNoHook(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.agents["gt-gastown-crew-active"] = &beads.Issue{
+		ID:        "gt-gastown-crew-active",
+		HookBead:  "",
+		UpdatedAt: time.Now().Add(-3 * time.Minute).Format(time.RFC3339),
+	}
+	mock.sessions["gt-crew-active"] = true
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StateIdle {
+		t.Errorf("active crew with no hook should be idle, got %s", agents[0].State)
+	}
+}
+
+// TestCheckAll_PhantomRig: agent bead for a rig whose prefix isn't in
+// routes.jsonl should surface as StatePhantom with a cleanup hint.
+func TestCheckAll_PhantomRig(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.knownRigs = map[string]bool{
+		"gt-": true,
+		"bd-": true,
+		"hq-": true,
+	}
+
+	// cgs- is not in the known prefix set — rig was removed.
+	mock.agents["cgs-codegenscheduler-polecat-chrome"] = &beads.Issue{
+		ID:        "cgs-codegenscheduler-polecat-chrome",
+		HookBead:  "",
+		UpdatedAt: time.Now().Add(-120 * time.Hour).Format(time.RFC3339),
+	}
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StatePhantom {
+		t.Errorf("agent with unregistered rig prefix should be StatePhantom, got %s", agents[0].State)
+	}
+	if !agents[0].NeedsAttention() {
+		t.Error("phantom agents should need attention (cleanup)")
+	}
+	if !strings.Contains(agents[0].ActionHint, "cleanup") {
+		t.Errorf("phantom hint should mention cleanup, got %q", agents[0].ActionHint)
+	}
+}
+
+// TestCheckAll_PhantomRigWitness: phantom detection also applies to rig
+// singletons (witness, refinery).
+func TestCheckAll_PhantomRigWitness(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.knownRigs = map[string]bool{"gt-": true}
+
+	mock.agents["crd-removed-witness"] = &beads.Issue{
+		ID:        "crd-removed-witness",
+		HookBead:  "",
+		UpdatedAt: time.Now().Add(-5 * time.Hour).Format(time.RFC3339),
+	}
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StatePhantom {
+		t.Errorf("orphaned rig singleton should be StatePhantom, got %s", agents[0].State)
+	}
+}
+
+// TestCheckAll_PhantomSkipsTownLevel: mayor/deacon/dog are town-level —
+// they don't belong to any rig, so they can't be phantom.
+func TestCheckAll_PhantomSkipsTownLevel(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.knownRigs = map[string]bool{"gt-": true} // hq- not registered
+
+	mock.agents["hq-mayor"] = &beads.Issue{
+		ID:        "hq-mayor",
+		HookBead:  "",
+		UpdatedAt: time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+	}
+	mock.sessions["hq-mayor"] = true
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State == StatePhantom {
+		t.Error("town-level agents (mayor) must never be flagged as phantom")
+	}
+}
+
+// TestCheckAll_PhantomDisabledWhenPrefixesUnknown: if routes.jsonl is
+// unavailable (empty prefix set), we can't tell phantom from legitimate,
+// so we MUST NOT flag anything as phantom. This is the degrade-gracefully
+// guard.
+func TestCheckAll_PhantomDisabledWhenPrefixesUnknown(t *testing.T) {
+	mock := newMockHealthSource()
+	// mock.knownRigs left nil — simulates routes.jsonl missing.
+
+	mock.agents["cgs-removed-polecat-chrome"] = &beads.Issue{
+		ID:        "cgs-removed-polecat-chrome",
+		HookBead:  "",
+		UpdatedAt: time.Now().Add(-120 * time.Hour).Format(time.RFC3339),
+	}
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State == StatePhantom {
+		t.Error("must not flag phantom when known-prefix set is empty/unknown")
+	}
+	// Should fall through to standard polecat logic: no hook + dead session → idle.
+	if agents[0].State != StateIdle {
+		t.Errorf("expected StateIdle (post-nuke fallback), got %s", agents[0].State)
+	}
+}
+
+// TestCheckAll_PhantomPrefixErrorIgnored: if KnownRigPrefixes returns an
+// error, we degrade gracefully and don't flag phantoms.
+func TestCheckAll_PhantomPrefixErrorIgnored(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.knownRigErr = fmt.Errorf("routes.jsonl unreadable")
+
+	mock.agents["gt-gastown-polecat-ok"] = &beads.Issue{
+		ID:        "gt-gastown-polecat-ok",
+		HookBead:  "",
+		UpdatedAt: time.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+	}
+	mock.sessions["gt-ok"] = true
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll should not surface phantom-prefix errors: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State == StatePhantom {
+		t.Error("must not flag phantom when KnownRigPrefixes errored")
+	}
+}
+
+// TestCheckAll_PhantomTakesPriority: when an agent is BOTH phantom AND
+// would otherwise be zombie (dead session + hook), phantom wins because
+// cleanup is the right action.
+func TestCheckAll_PhantomTakesPriority(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.knownRigs = map[string]bool{"gt-": true}
+
+	// con- is unregistered, has hook, session dead — without phantom rule
+	// this would be a zombie.
+	mock.agents["con-removed-polecat-chrome"] = &beads.Issue{
+		ID:        "con-removed-polecat-chrome",
+		HookBead:  "gu-stale",
+		UpdatedAt: time.Now().Add(-100 * time.Hour).Format(time.RFC3339),
+	}
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].State != StatePhantom {
+		t.Errorf("phantom should beat zombie classification, got %s", agents[0].State)
+	}
+}
+
+// TestIsRigLevelAgentRole exercises the helper that gates phantom detection.
+func TestIsRigLevelAgentRole(t *testing.T) {
+	tests := []struct {
+		role string
+		want bool
+	}{
+		{constants.RolePolecat, true},
+		{constants.RoleCrew, true},
+		{constants.RoleWitness, true},
+		{constants.RoleRefinery, true},
+		{constants.RoleMayor, false},
+		{constants.RoleDeacon, false},
+		{"dog", false},
+		{"unknown", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			if got := isRigLevelAgentRole(tt.role); got != tt.want {
+				t.Errorf("isRigLevelAgentRole(%q) = %v, want %v", tt.role, got, tt.want)
 			}
 		})
 	}

@@ -6,7 +6,9 @@
 package feed
 
 import (
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -22,6 +24,11 @@ type HealthDataSource interface {
 	ListAgentBeads() (map[string]*beads.Issue, error)
 	// IsSessionAlive checks if a tmux session exists (zombie detection only).
 	IsSessionAlive(sessionName string) (bool, error)
+	// KnownRigPrefixes returns the set of registered rig prefixes from
+	// routes.jsonl (e.g., {"gt-": true, "bd-": true}). Prefixes include the
+	// trailing hyphen. Returns nil (not an error) if routes are unavailable;
+	// callers must treat a nil/empty result as "unknown — don't flag phantoms".
+	KnownRigPrefixes() (map[string]bool, error)
 }
 
 // AgentState represents the possible states for a GasTown agent.
@@ -34,6 +41,7 @@ const (
 	StateWorking                         // Actively producing output
 	StateIdle                            // No hooked work
 	StateZombie                          // Dead/crashed session
+	StatePhantom                         // Agent bead for rig that's no longer registered
 )
 
 func (s AgentState) String() string {
@@ -48,6 +56,8 @@ func (s AgentState) String() string {
 		return "idle"
 	case StateZombie:
 		return "zombie"
+	case StatePhantom:
+		return "phantom"
 	default:
 		return "unknown"
 	}
@@ -61,7 +71,7 @@ func (s AgentState) Priority() int {
 // NeedsAttention returns true if this state requires user action.
 func (s AgentState) NeedsAttention() bool {
 	switch s {
-	case StateGUPPViolation, StateStalled, StateZombie:
+	case StateGUPPViolation, StateStalled, StateZombie, StatePhantom:
 		return true
 	default:
 		return false
@@ -81,6 +91,8 @@ func (s AgentState) Symbol() string {
 		return "○"
 	case StateZombie:
 		return "💀"
+	case StatePhantom:
+		return "🪦"
 	default:
 		return "?"
 	}
@@ -99,6 +111,8 @@ func (s AgentState) Label() string {
 		return "idle"
 	case StateZombie:
 		return "dead"
+	case StatePhantom:
+		return "phant"
 	default:
 		return "???"
 	}
@@ -221,16 +235,57 @@ func (d *StuckDetector) analyzeAgent(id string, issue *beads.Issue) *ProblemAgen
 		agent.IdleMinutes = int(time.Since(updatedAt).Minutes())
 	}
 
-	// 1. Zombie check (tmux liveness)
-	// On error, treat session as alive (unknown) rather than falsely flagging as zombie
-	alive, err := d.source.IsSessionAlive(sessionName)
-	if err == nil && !alive {
-		agent.State = StateZombie
-		agent.ActionHint = "Session dead - may need restart"
-		return agent
+	// 0. Phantom check (rig no longer registered in routes.jsonl).
+	// Only applies to rig-level roles (not mayor/deacon/dog) and only when the
+	// known-prefix set is non-empty (empty means "unknown — don't flag").
+	// This catches orphaned agent beads left behind when a rig is removed.
+	if isRigLevelAgentRole(role) && rig != "" {
+		if knownPrefixes, kpErr := d.source.KnownRigPrefixes(); kpErr == nil && len(knownPrefixes) > 0 {
+			prefix := beads.ExtractPrefix(id)
+			if prefix != "" && !knownPrefixes[prefix] {
+				agent.State = StatePhantom
+				agent.ActionHint = "Rig prefix " + strings.TrimSuffix(prefix, "-") + " no longer registered — close bead (gt:agent cleanup)"
+				return agent
+			}
+		}
 	}
 
+	// 1. Zombie / liveness check.
+	// On error, treat session as alive (unknown) rather than falsely flagging as zombie.
+	alive, err := d.source.IsSessionAlive(sessionName)
+	sessionDead := err == nil && !alive
+
 	hasHook := issue.HookBead != ""
+
+	// Role-specific session-death handling.
+	// - Polecats post-nuke: session legitimately dies, bead persists with
+	//   no hook. That's the documented "idle, ready for next assignment"
+	//   state — not a zombie. Only flag zombie if there IS hooked work
+	//   (session died mid-task).
+	// - Crew (humans): dead session just means "logged off". Never flag
+	//   via the dead-session timer; stalled/gupp thresholds still apply
+	//   to hooked work.
+	// - Other roles (witness, refinery, mayor, deacon): dead session
+	//   always signals a real zombie — these are supposed to be up.
+	if sessionDead {
+		switch role {
+		case constants.RolePolecat:
+			if hasHook {
+				agent.State = StateZombie
+				agent.ActionHint = "Session dead - may need restart"
+				return agent
+			}
+			// No hook + dead session = post-nuke idle. Fall through to
+			// the standard idle classification below.
+		case constants.RoleCrew:
+			// Never zombie-flag humans. Fall through; stalled/gupp still
+			// apply to hooked work, otherwise they read as idle.
+		default:
+			agent.State = StateZombie
+			agent.ActionHint = "Session dead - may need restart"
+			return agent
+		}
+	}
 
 	// Determine thresholds — ralphcats get a longer leash since Ralph loops
 	// involve multiple fresh-context iterations that can take much longer.
@@ -263,6 +318,18 @@ func (d *StuckDetector) analyzeAgent(id string, issue *beads.Issue) *ProblemAgen
 	}
 
 	return agent
+}
+
+// isRigLevelAgentRole returns true if the role is owned by a specific rig
+// (and therefore can become phantom when the rig is removed). Town-level
+// roles (mayor, deacon, dog) are not rig-scoped.
+func isRigLevelAgentRole(role string) bool {
+	switch role {
+	case constants.RoleWitness, constants.RoleRefinery, constants.RoleCrew, constants.RolePolecat:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsGUPPViolation checks if an agent is in GUPP violation.
@@ -342,4 +409,31 @@ func (s *defaultHealthSource) IsSessionAlive(sessionName string) (bool, error) {
 	// but Claude has crashed inside the pane.
 	status := s.tmux.CheckSessionHealth(sessionName, 0)
 	return status == tmux.SessionHealthy, nil
+}
+
+// KnownRigPrefixes reads the town's routes.jsonl and returns the set of
+// registered rig prefixes (including the trailing hyphen, e.g. "gt-").
+// Returns a nil map with no error if the town root can't be located or the
+// routes file doesn't exist — callers treat that as "unknown, don't flag
+// phantoms". Genuine I/O errors on the routes file surface as errors.
+func (s *defaultHealthSource) KnownRigPrefixes() (map[string]bool, error) {
+	townRoot := s.bd.TownRoot()
+	if townRoot == "" {
+		// Not in a Gas Town project — can't determine truth. Degrade gracefully.
+		return nil, nil
+	}
+	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
+	if err != nil {
+		return nil, err
+	}
+	if len(routes) == 0 {
+		return nil, nil
+	}
+	prefixes := make(map[string]bool, len(routes))
+	for _, r := range routes {
+		if r.Prefix != "" {
+			prefixes[r.Prefix] = true
+		}
+	}
+	return prefixes, nil
 }
