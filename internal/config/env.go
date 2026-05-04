@@ -237,6 +237,22 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// See: https://github.com/steveyegge/gastown/issues/1666
 	env["CLAUDECODE"] = ""
 
+	// Suppress interactive TUI prompts that block headless agent sessions.
+	// Without these, the Claude CLI may render surveys, update notices, or other
+	// prompts that capture the input loop and prevent the agent from processing
+	// heartbeats or dispatched work. Root cause of the deacon crash-loop incident
+	// (2026-05-03): feedback survey captured deacon's input for ~5 days (gs-4hk).
+	//
+	// CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: the specific prompt that caused the
+	//   crash-loop ("How is Claude doing this session? 1: Bad / 2: Fine / 3: Good")
+	// CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: suppresses auto-title Haiku calls,
+	//   release notes fetching, and usage metrics non-essential to agent function
+	// DISABLE_AUTOUPDATER: prevents auto-updater from rendering update prompts or
+	//   starting background downloads that interfere with agent sessions
+	env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
+	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+	env["DISABLE_AUTOUPDATER"] = "1"
+
 	// Read daemon.json's env block fresh at call time so newly spawned sessions
 	// pick up config updates without requiring a daemon restart (gu-kj7c). For
 	// config-sourced vars (OTEL URLs, Dolt port/host, etc.), prefer this over

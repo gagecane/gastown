@@ -21,6 +21,9 @@ func TestAgentEnv_Mayor(t *testing.T) {
 	assertEnv(t, env, "GIT_CEILING_DIRECTORIES", "/town") // prevents git walking to umbrella
 	assertEnv(t, env, "NODE_OPTIONS", "")                  // cleared to prevent debugger inheritance
 	assertEnv(t, env, "CLAUDECODE", "")                    // cleared to prevent nested session detection
+	assertEnv(t, env, "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1")       // suppress TUI survey (gs-4hk)
+	assertEnv(t, env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")  // suppress auto-title / release notes
+	assertEnv(t, env, "DISABLE_AUTOUPDATER", "1")                       // suppress update prompts
 	assertNotSet(t, env, "GT_RIG")
 }
 
