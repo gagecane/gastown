@@ -208,7 +208,11 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 // IsAgentRunning checks if an agent appears to be running in the session.
 //
 // If expectedPaneCommands is non-empty, the pane's current command must match one of them.
-// If expectedPaneCommands is empty, any non-shell command counts as "agent running".
+// If expectedPaneCommands is empty, any non-shell command counts as "agent running" —
+// but a stability check is applied to avoid false positives from transient subprocesses
+// spawned by shell prompt hooks (e.g., the gastown shell-hook runs `git rev-parse` on
+// every zsh precmd, which would otherwise briefly show as pane_current_command).
+// Requires two consecutive non-shell observations before concluding "agent running".
 func (t *Tmux) IsAgentRunning(session string, expectedPaneCommands ...string) bool {
 	cmd, err := t.GetPaneCommand(session)
 	if err != nil {
@@ -225,12 +229,42 @@ func (t *Tmux) IsAgentRunning(session string, expectedPaneCommands ...string) bo
 	}
 
 	// Fallback: any non-shell command counts as running.
+	if isShellCommand(cmd) {
+		return false
+	}
+	if cmd == "" {
+		return false
+	}
+	// Stability check: a shell's prompt hook can briefly spawn a non-shell
+	// subprocess (e.g., gastown shell-hook runs `git rev-parse` in zsh precmd).
+	// Re-check after a short delay; only report "agent running" if the pane is
+	// still on a non-shell command. Real agents (claude, codex, node, etc.) run
+	// persistently and will still be the pane command after the delay.
+	time.Sleep(stabilityRecheckDelay)
+	cmd2, err := t.GetPaneCommand(session)
+	if err != nil {
+		return false
+	}
+	if isShellCommand(cmd2) || cmd2 == "" {
+		return false
+	}
+	return true
+}
+
+// stabilityRecheckDelay is the gap between the two pane-command reads used by
+// IsAgentRunning's fallback path. Tuned to outlast the typical lifetime of
+// short-lived subprocesses spawned by shell prompt hooks (git rev-parse, etc.)
+// while remaining short enough to not meaningfully slow down callers.
+const stabilityRecheckDelay = 75 * time.Millisecond
+
+// isShellCommand reports whether cmd is one of the configured supported shells.
+func isShellCommand(cmd string) bool {
 	for _, shell := range constants.SupportedShells {
 		if cmd == shell {
-			return false
+			return true
 		}
 	}
-	return cmd != ""
+	return false
 }
 
 // IsRuntimeRunning checks if a runtime appears to be running in the session.
