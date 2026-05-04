@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -914,5 +916,173 @@ exit 0
 	}
 	if info.Status != "open" {
 		t.Errorf("getBeadInfo returned status = %q, want %q", info.Status, "open")
+	}
+}
+
+// TestEnsureFormulaRequiredVars_GatesCommands verifies that gates_commands is
+// included in the required defaults for mol-polecat-work so that rigs using
+// modern gate config always have the placeholder defined.
+func TestEnsureFormulaRequiredVars_GatesCommands(t *testing.T) {
+	vars := ensureFormulaRequiredVars("mol-polecat-work", []string{"issue=gt-abc"})
+	found := false
+	for _, v := range vars {
+		if v == "gates_commands=" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ensureFormulaRequiredVars(mol-polecat-work) missing gates_commands= default; got %v", vars)
+	}
+}
+
+// TestLoadRigCommandVars_GatesCommands verifies that loadRigCommandVars generates
+// gates_commands from merge_queue.gates, filtering to pre-merge phase only and
+// sorting by gate name.
+func TestLoadRigCommandVars_GatesCommands(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrip"
+	rigDir := filepath.Join(townRoot, rigName)
+
+	// Create settings/config.json with modern gates config (no legacy *_command fields).
+	settingsDir := filepath.Join(rigDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settings := &config.RigSettings{
+		MergeQueue: &config.MergeQueueConfig{
+			Gates: map[string]*config.GateConfig{
+				"lint":      {Cmd: "golangci-lint run", Phase: "pre-merge"},
+				"vet":       {Cmd: "go vet ./..."},                            // empty phase = pre-merge
+				"build":     {Cmd: "go build ./...", Phase: "post-squash"},    // must be excluded
+				"unit-test": {Cmd: "go test ./...", Phase: "pre-merge"},
+			},
+		},
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), data, 0644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	vars := loadRigCommandVars(townRoot, rigName)
+
+	// Find gates_commands var
+	var gatesCommands string
+	for _, v := range vars {
+		if k, val, ok := strings.Cut(v, "="); ok && k == "gates_commands" {
+			gatesCommands = val
+			break
+		}
+	}
+
+	if gatesCommands == "" {
+		t.Fatalf("loadRigCommandVars did not produce gates_commands; got vars: %v", vars)
+	}
+
+	// Verify post-squash gate is excluded
+	if strings.Contains(gatesCommands, "go build ./...") {
+		t.Errorf("gates_commands should not include post-squash gate 'build', got:\n%s", gatesCommands)
+	}
+
+	// Verify pre-merge gates are included
+	for _, cmd := range []string{"golangci-lint run", "go vet ./...", "go test ./..."} {
+		if !strings.Contains(gatesCommands, cmd) {
+			t.Errorf("gates_commands missing command %q, got:\n%s", cmd, gatesCommands)
+		}
+	}
+
+	// Verify sorted order: lint < unit-test < vet alphabetically
+	lintIdx := strings.Index(gatesCommands, "# Gate: lint")
+	unitTestIdx := strings.Index(gatesCommands, "# Gate: unit-test")
+	vetIdx := strings.Index(gatesCommands, "# Gate: vet")
+	if lintIdx < 0 || unitTestIdx < 0 || vetIdx < 0 {
+		t.Fatalf("missing gate headers in gates_commands:\n%s", gatesCommands)
+	}
+	if !(lintIdx < unitTestIdx && unitTestIdx < vetIdx) {
+		t.Errorf("gates_commands not sorted: lint=%d unit-test=%d vet=%d in:\n%s",
+			lintIdx, unitTestIdx, vetIdx, gatesCommands)
+	}
+}
+
+// TestLoadRigCommandVars_NoGates verifies that gates_commands is absent when no
+// gates are configured, so the formula falls through to legacy *_command fields.
+func TestLoadRigCommandVars_NoGates(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrip"
+	rigDir := filepath.Join(townRoot, rigName)
+
+	settingsDir := filepath.Join(rigDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settings := &config.RigSettings{
+		MergeQueue: &config.MergeQueueConfig{
+			TestCommand:  "go test ./...",
+			BuildCommand: "go build ./...",
+		},
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), data, 0644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	vars := loadRigCommandVars(townRoot, rigName)
+
+	for _, v := range vars {
+		if k, _, ok := strings.Cut(v, "="); ok && k == "gates_commands" {
+			t.Errorf("gates_commands should be absent when no gates configured; got %q", v)
+		}
+	}
+
+	// Verify legacy commands are present
+	hasTest := false
+	for _, v := range vars {
+		if v == "test_command=go test ./..." {
+			hasTest = true
+		}
+	}
+	if !hasTest {
+		t.Errorf("expected test_command in vars; got %v", vars)
+	}
+}
+
+// TestLoadRigCommandVars_AllPostSquash verifies that gates_commands is absent
+// when all configured gates are post-squash (none run during pre-verify).
+func TestLoadRigCommandVars_AllPostSquash(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrip"
+	rigDir := filepath.Join(townRoot, rigName)
+
+	settingsDir := filepath.Join(rigDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settings := &config.RigSettings{
+		MergeQueue: &config.MergeQueueConfig{
+			Gates: map[string]*config.GateConfig{
+				"build": {Cmd: "go build ./...", Phase: "post-squash"},
+			},
+		},
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), data, 0644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	vars := loadRigCommandVars(townRoot, rigName)
+
+	for _, v := range vars {
+		if k, _, ok := strings.Cut(v, "="); ok && k == "gates_commands" {
+			t.Errorf("gates_commands should be absent when all gates are post-squash; got %q", v)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1240,6 +1241,7 @@ func ensureFormulaRequiredVars(formulaName string, vars []string) []string {
 		{"lint_command", ""},
 		{"test_command", ""},
 		{"build_command", ""},
+		{"gates_commands", ""},
 	}
 	for _, item := range requiredDefaults {
 		if !seen[item.Key] {
@@ -1483,6 +1485,43 @@ func loadRigCommandVars(townRoot, rig string) []string {
 	if mq.IsRequireReviewEnabled() {
 		vars = append(vars, "require_review=true")
 	}
+
+	// Build gates_commands from merge_queue.gates (pre-merge phase only).
+	// MergeSettingsCommand does not merge the Gates map, so read directly from
+	// both sources and merge by name (local overrides repo).
+	merged := make(map[string]*config.GateConfig)
+	if repoMQ != nil {
+		for name, gate := range repoMQ.Gates {
+			merged[name] = gate
+		}
+	}
+	if localMQ != nil {
+		for name, gate := range localMQ.Gates {
+			merged[name] = gate
+		}
+	}
+	if len(merged) > 0 {
+		type namedGate struct{ name, cmd string }
+		var preMerge []namedGate
+		for name, gate := range merged {
+			if gate.Phase != "post-squash" {
+				preMerge = append(preMerge, namedGate{name, gate.Cmd})
+			}
+		}
+		sort.Slice(preMerge, func(i, j int) bool { return preMerge[i].name < preMerge[j].name })
+		if len(preMerge) > 0 {
+			var sb strings.Builder
+			for _, g := range preMerge {
+				sb.WriteString("# Gate: ")
+				sb.WriteString(g.name)
+				sb.WriteString("\n")
+				sb.WriteString(g.cmd)
+				sb.WriteString("\n")
+			}
+			vars = append(vars, "gates_commands="+strings.TrimRight(sb.String(), "\n"))
+		}
+	}
+
 	return vars
 }
 

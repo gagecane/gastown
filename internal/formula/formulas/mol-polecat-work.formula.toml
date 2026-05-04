@@ -52,7 +52,7 @@ stale, the refinery falls through to normal gate execution.
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
-version = 10
+version = 11
 
 [[steps]]
 id = "load-context"
@@ -440,7 +440,19 @@ If rebase conflicts:
 
 **2. Run the full gate suite on the rebased result:**
 
-Run ALL configured gates (not just targeted tests — this is the full verification):
+Run ALL configured gates (not just targeted tests — this is the full verification).
+
+**Option A — merge_queue.gates (modern config, preferred):**
+
+If gates_commands is set, run each gate in order — stop on first failure:
+
+```bash
+{{gates_commands}}
+```
+
+If the block above is empty, this rig uses legacy command fields. Skip to Option B.
+
+**Option B — Legacy *_command fields (fallback for rigs without gates):**
 
 If build_command is set:
 ```bash
@@ -560,4 +572,8 @@ default = ""
 
 [vars.build_command]
 description = "Command to run build. Empty = skip."
+default = ""
+
+[vars.gates_commands]
+description = "Pre-merge gate commands from merge_queue.gates (sorted by name, phase!=post-squash). Empty = rig uses legacy *_command fields."
 default = ""
