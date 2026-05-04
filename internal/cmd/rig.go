@@ -642,6 +642,21 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to sync hooks for new rig: %v\n", err)
 	}
 
+	// Ensure HQ .beads/config.yaml has dolt.auto-commit defaulted to "on".
+	// Without this, ephemeral MR beads created by `gt done` land in HQ's Dolt
+	// working set but are never committed, and refineries querying from
+	// separate sessions cannot see them — silently losing merge queue work
+	// (gt-2o9eg / gu-8nbc). We only ADD the key when absent, so any value a
+	// user has explicitly set (including "off") is preserved. Other rigs'
+	// configs are intentionally not touched — `gt rig add` only sets the
+	// default for the new rig and HQ.
+	hqBeadsDir := filepath.Join(townRoot, ".beads")
+	if _, err := os.Stat(hqBeadsDir); err == nil {
+		if err := beads.EnsureDoltAutoCommitDefault(hqBeadsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: could not set dolt.auto-commit default on HQ config.yaml: %v\n", err)
+		}
+	}
+
 	// Commit town-level config changes (rigs.json, daemon.json, routes.jsonl)
 	// so they aren't reverted by git restore/checkout operations.
 	commitTownConfigChanges(townRoot, name)

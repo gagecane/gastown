@@ -88,11 +88,17 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	wantIssuePrefix := "issue-prefix: " + prefix
 	// Gas Town rigs should disable idle-monitor to use centralized Dolt server
 	wantIdleTimeout := "dolt.idle-timeout: \"0\""
+	// Gas Town rigs default dolt.auto-commit=on so that ephemeral MR beads
+	// created by `gt done` (and other Dolt writes) are actually committed
+	// and visible to other sessions (refineries, witnesses). With
+	// auto-commit=off (bd's historical default), writes sit in the working
+	// set and are silently lost across sessions. See gt-2o9eg / gu-8nbc.
+	wantAutoCommit := "dolt.auto-commit: \"on\""
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		// New config: include all Gas Town defaults
-		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n"
+		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantAutoCommit + "\n"
 		return os.WriteFile(configPath, []byte(content), 0644)
 	}
 	if err != nil {
@@ -107,6 +113,7 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	foundPrefix := false
 	foundIssuePrefix := false
 	foundIdleTimeout := false
+	foundAutoCommit := false
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -125,6 +132,12 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 			foundIdleTimeout = true
 			continue
 		}
+		// dolt.auto-commit: "add if missing" semantics — respect any
+		// user-set value ("on" or "off"), only insert when absent.
+		if strings.HasPrefix(trimmed, "dolt.auto-commit:") {
+			foundAutoCommit = true
+			continue
+		}
 	}
 
 	if !foundPrefix {
@@ -136,6 +149,9 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	if !foundIdleTimeout {
 		lines = append(lines, wantIdleTimeout)
 	}
+	if !foundAutoCommit {
+		lines = append(lines, wantAutoCommit)
+	}
 
 	newContent := strings.Join(lines, "\n")
 	if !strings.HasSuffix(newContent, "\n") {
@@ -146,4 +162,45 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	}
 
 	return os.WriteFile(configPath, []byte(newContent), 0644)
+}
+
+// EnsureDoltAutoCommitDefault ensures config.yaml at beadsDir has a
+// dolt.auto-commit setting, adding it with value "on" when absent. Existing
+// values (whether "on" or "off") are preserved. The file is created with
+// just the auto-commit key if it does not exist.
+//
+// Use this when you want to set the Gas Town auto-commit default without
+// touching unrelated config (notably: without normalizing prefix or
+// issue-prefix). This is what `gt rig add` calls on HQ's .beads/config.yaml
+// so it doesn't retroactively rewrite HQ's prefix.
+func EnsureDoltAutoCommitDefault(beadsDir string) error {
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	wantAutoCommit := "dolt.auto-commit: \"on\""
+
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		// No config.yaml at all — create one with just the auto-commit key.
+		// We intentionally do not seed prefix/issue-prefix here; callers that
+		// want full defaults should use EnsureConfigYAML.
+		return os.WriteFile(configPath, []byte(wantAutoCommit+"\n"), 0644)
+	}
+	if err != nil {
+		return err
+	}
+
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "dolt.auto-commit:") {
+			// Already set (to any value) — do not touch.
+			return nil
+		}
+	}
+
+	// Append the auto-commit key, ensuring a trailing newline.
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += wantAutoCommit + "\n"
+	return os.WriteFile(configPath, []byte(content), 0644)
 }
