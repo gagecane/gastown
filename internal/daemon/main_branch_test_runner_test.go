@@ -522,96 +522,44 @@ func TestGateEnv(t *testing.T) {
 	}
 }
 
-func TestDetectInstallCommand(t *testing.T) {
-	// Each case writes the listed files into a fresh temp dir, then asserts
-	// the detected command. The empty-command cases verify we correctly skip
-	// install for languages whose toolchains handle deps on demand (Go, Rust).
+func TestRunPreBuildInstall_SkipsWithoutSetupCommand(t *testing.T) {
+	// Core regression test for gu-pcm5: when merge_queue.setup_command is NOT
+	// set, runPreBuildInstall must be a no-op regardless of what lockfiles
+	// happen to exist in the worktree. Brazil-build rigs carry package.json
+	// + package-lock.json for IDE/type-checking purposes but rely on the gate
+	// itself (refinery-gate.sh → brazil-build) to install deps. Auto-running
+	// `npm ci` against those rigs either does redundant work or fails with
+	// E404 because package.json references Brazil-only @amzn/* deps that are
+	// not published to CodeArtifact.
 	cases := []struct {
-		name      string
-		files     []string
-		wantCmd   string
-		wantLabel string
+		name  string
+		files []string
+		cfg   *rigGateConfig
 	}{
 		{
-			name:      "bun with bun.lock",
-			files:     []string{"package.json", "bun.lock"},
-			wantCmd:   "bun install --frozen-lockfile",
-			wantLabel: "install (bun)",
+			name:  "nil cfg + full lockfile set → no-op",
+			files: []string{"package.json", "package-lock.json"},
+			cfg:   nil,
 		},
 		{
-			name:      "bun with legacy bun.lockb",
-			files:     []string{"package.json", "bun.lockb"},
-			wantCmd:   "bun install --frozen-lockfile",
-			wantLabel: "install (bun)",
+			name:  "empty setup_command + package-lock.json → no-op (brazil-build case)",
+			files: []string{"package.json", "package-lock.json"},
+			cfg:   &rigGateConfig{TestCommand: "make test"},
 		},
 		{
-			name:      "pnpm",
-			files:     []string{"package.json", "pnpm-lock.yaml"},
-			wantCmd:   "pnpm install --frozen-lockfile",
-			wantLabel: "install (pnpm)",
+			name:  "empty setup_command + pnpm-lock → no-op",
+			files: []string{"package.json", "pnpm-lock.yaml"},
+			cfg:   &rigGateConfig{TestCommand: "make test"},
 		},
 		{
-			name:      "yarn",
-			files:     []string{"package.json", "yarn.lock"},
-			wantCmd:   "yarn install --frozen-lockfile",
-			wantLabel: "install (yarn)",
+			name:  "empty setup_command + pyproject → no-op",
+			files: []string{"pyproject.toml", "uv.lock"},
+			cfg:   &rigGateConfig{TestCommand: "pytest"},
 		},
 		{
-			name:      "npm",
-			files:     []string{"package.json", "package-lock.json"},
-			wantCmd:   "npm ci",
-			wantLabel: "install (npm)",
-		},
-		{
-			name:      "uv",
-			files:     []string{"pyproject.toml", "uv.lock"},
-			wantCmd:   "uv sync",
-			wantLabel: "install (uv)",
-		},
-		{
-			name:      "poetry",
-			files:     []string{"pyproject.toml", "poetry.lock"},
-			wantCmd:   "poetry install",
-			wantLabel: "install (poetry)",
-		},
-		{
-			name:      "go rig — no install needed",
-			files:     []string{"go.mod"},
-			wantCmd:   "",
-			wantLabel: "",
-		},
-		{
-			name:      "rust rig — no install needed",
-			files:     []string{"Cargo.toml"},
-			wantCmd:   "",
-			wantLabel: "",
-		},
-		{
-			name:      "empty workdir",
-			files:     nil,
-			wantCmd:   "",
-			wantLabel: "",
-		},
-		{
-			name:      "package.json without lockfile — unknown PM, skip",
-			files:     []string{"package.json"},
-			wantCmd:   "",
-			wantLabel: "",
-		},
-		{
-			name:      "pyproject.toml without lockfile — unknown PM, skip",
-			files:     []string{"pyproject.toml"},
-			wantCmd:   "",
-			wantLabel: "",
-		},
-		{
-			// Deterministic tie-break: bun has highest priority. A leftover
-			// package-lock.json from a prior npm era does not demote the repo
-			// back to npm once a bun.lock exists.
-			name:      "bun.lock + package-lock.json — bun wins",
-			files:     []string{"package.json", "bun.lock", "package-lock.json"},
-			wantCmd:   "bun install --frozen-lockfile",
-			wantLabel: "install (bun)",
+			name:  "empty setup_command + no lockfile → no-op",
+			files: nil,
+			cfg:   &rigGateConfig{TestCommand: "go test ./..."},
 		},
 	}
 
@@ -619,18 +567,54 @@ func TestDetectInstallCommand(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			for _, f := range tc.files {
+				// Seed with a file that would fail loudly if npm/pnpm/uv were
+				// actually invoked ("{}" is not a valid package.json for npm
+				// ci, but we never get that far — the test asserts we bail
+				// before touching the filesystem).
 				if err := os.WriteFile(filepath.Join(dir, f), []byte("{}"), 0644); err != nil {
 					t.Fatal(err)
 				}
 			}
-			gotCmd, gotLabel := detectInstallCommand(dir)
-			if gotCmd != tc.wantCmd {
-				t.Errorf("cmd: got %q, want %q", gotCmd, tc.wantCmd)
+
+			d := &Daemon{
+				ctx:    context.Background(),
+				config: &Config{TownRoot: dir},
+				logger: log.New(io.Discard, "", 0),
 			}
-			if gotLabel != tc.wantLabel {
-				t.Errorf("label: got %q, want %q", gotLabel, tc.wantLabel)
+
+			err := d.runPreBuildInstall(context.Background(), "testrig", dir, tc.cfg)
+			if err != nil {
+				t.Errorf("expected nil (no-op) for no setup_command, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestRunPreBuildInstall_RunsSetupCommandWhenSet(t *testing.T) {
+	// When setup_command IS declared, it must be executed verbatim — this is
+	// the opt-in path a rig uses to say "I really do need a pre-build
+	// install." We assert the side-effect (marker file) rather than mock the
+	// executor, since runCommandOnWorktree shells out.
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "install.ran")
+
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: dir},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	cfg := &rigGateConfig{
+		SetupCommand: "touch " + marker,
+		TestCommand:  "true",
+	}
+
+	if err := d.runPreBuildInstall(context.Background(), "testrig", dir, cfg); err != nil {
+		t.Fatalf("runPreBuildInstall: unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("expected setup_command to run (marker %s missing): %v", marker, err)
 	}
 }
 

@@ -316,9 +316,12 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		}
 	}()
 
-	// Install dependencies BEFORE running gates so build/test gates in
-	// Node/Python rigs find their deps. A missing install step is the most
-	// common main_branch_test failure for lockfile-based rigs (gu-hl5w).
+	// Run the rig's opt-in setup_command (if any) BEFORE gates so gates that
+	// genuinely need pre-populated deps (pnpm install, uv sync, etc.) find
+	// them. Rigs that self-install via their gate scripts (brazil-build, go,
+	// cargo) simply leave setup_command empty and this is a no-op. See
+	// gu-hl5w for the original install-step motivation and gu-pcm5 for the
+	// opt-in inversion that made auto-detect fail for brazil-build rigs.
 	if err := d.runPreBuildInstall(ctx, rigName, worktreePath, gateCfg); err != nil {
 		return err
 	}
@@ -330,72 +333,32 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	return d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
 }
 
-// detectInstallCommand inspects the given working directory for lockfiles and
-// returns the appropriate package-manager install command. Returns the command
-// string and a short human-readable label, or ("", "") when no lockfile-driven
-// install is required (e.g., Go / Rust rigs where the toolchain handles deps
-// on demand).
-//
-// Detection order matches the table in gu-hl5w (Node lockfiles checked from
-// most-specific to least-specific, Python next, then skip-list languages).
-// The first matching lockfile wins so a repo that accidentally has two
-// lockfiles (e.g., package-lock.json left behind after migrating to bun)
-// gets a deterministic choice.
-func detectInstallCommand(workDir string) (cmd, label string) {
-	exists := func(name string) bool {
-		_, err := os.Stat(filepath.Join(workDir, name))
-		return err == nil
-	}
-
-	hasPackageJSON := exists("package.json")
-	hasPyprojectTOML := exists("pyproject.toml")
-
-	switch {
-	case hasPackageJSON && exists("bun.lock"):
-		return "bun install --frozen-lockfile", "install (bun)"
-	case hasPackageJSON && exists("bun.lockb"):
-		// Older bun lockfile format; still identifies bun as the PM.
-		return "bun install --frozen-lockfile", "install (bun)"
-	case hasPackageJSON && exists("pnpm-lock.yaml"):
-		return "pnpm install --frozen-lockfile", "install (pnpm)"
-	case hasPackageJSON && exists("yarn.lock"):
-		return "yarn install --frozen-lockfile", "install (yarn)"
-	case hasPackageJSON && exists("package-lock.json"):
-		return "npm ci", "install (npm)"
-	case hasPyprojectTOML && exists("uv.lock"):
-		return "uv sync", "install (uv)"
-	case hasPyprojectTOML && exists("poetry.lock"):
-		return "poetry install", "install (poetry)"
-	}
-
-	// Cargo / go.mod / everything else: toolchain handles deps on demand; no
-	// pre-build install is needed.
-	return "", ""
-}
-
 // runPreBuildInstall runs the dependency install step for a rig's worktree
-// before its gates/tests execute. Resolution order:
+// before its gates/tests execute. Resolution is opt-in:
 //
 //  1. If the rig config sets merge_queue.setup_command, run that verbatim.
-//     This is the operator escape hatch for monorepos, custom setup scripts,
-//     or package managers we don't auto-detect.
-//  2. Otherwise, auto-detect from the worktree's lockfiles and run the
-//     canonical install command for that package manager.
-//  3. If neither path produces a command (Go/Rust/etc.), skip silently.
+//     This is the operator's declaration that this rig needs a dedicated
+//     pre-build install (pnpm install, npm ci, uv sync, etc.).
+//  2. Otherwise, skip silently. This is the correct default for rigs whose
+//     gate commands install their own deps (brazil-build, cargo, go build,
+//     bun/deno on demand) — auto-installing from a lockfile in those rigs
+//     either does redundant work or (worse) fails with E404 because the
+//     package.json references Brazil-only @amzn/* deps that aren't published
+//     to any public registry. See gu-pcm5 for the failure mode.
+//
+// The previous implementation auto-detected a package manager from lockfiles
+// (package.json + package-lock.json → npm ci, etc.) and ran it unconditionally.
+// That guessed wrong for brazil-build rigs (8 casc_* rigs in this town) and
+// had to be worked around with setup_command=":" — an explicit no-op that
+// proves the default was inverted. Now the default IS no-op; rigs that want
+// a pre-build install declare it explicitly.
 //
 // A failed install is reported as a clearly labeled "install" failure so
 // operators see "install failed" instead of a downstream build gate whining
 // about missing deps.
 func (d *Daemon) runPreBuildInstall(ctx context.Context, rigName, workDir string, cfg *rigGateConfig) error {
-	var cmd, label string
-	if cfg != nil && cfg.SetupCommand != "" {
-		cmd = cfg.SetupCommand
-		label = "install (setup_command)"
-	} else {
-		cmd, label = detectInstallCommand(workDir)
-	}
-	if cmd == "" {
-		return nil // No install needed (no lockfile and no setup_command)
+	if cfg == nil || cfg.SetupCommand == "" {
+		return nil // No setup_command configured — opt-in only.
 	}
 
 	// Bound install with its own timeout so a wedged install doesn't eat the
@@ -403,7 +366,7 @@ func (d *Daemon) runPreBuildInstall(ctx context.Context, rigName, workDir string
 	installCtx, cancel := context.WithTimeout(ctx, defaultInstallTimeout)
 	defer cancel()
 
-	return d.runCommandOnWorktree(installCtx, rigName, workDir, label, cmd)
+	return d.runCommandOnWorktree(installCtx, rigName, workDir, "install (setup_command)", cfg.SetupCommand)
 }
 
 // runGatesOnWorktree runs all pre-merge gates sequentially on the given worktree.
