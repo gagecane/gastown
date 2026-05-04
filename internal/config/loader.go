@@ -1267,6 +1267,33 @@ func resolveAgentConfigWithOverrideInternal(townRoot, rigPath, agentOverride str
 			}
 		}
 
+		// Then check ephemeral cost-tier agents (GT_COST_TIER env var).
+		// Tier-managed aliases like "claude-sonnet" / "claude-haiku" /
+		// "groq-compound" resolve through the active tier's agent definitions
+		// when the tier is set but not persisted into town settings. This
+		// preserves the pre-existing behavior where a session spawned with
+		// GT_AGENT=<tier-alias> + GT_COST_TIER=<tier> resolves to the tier's
+		// --model flags instead of the bare preset.
+		if rc == nil {
+			if tierRC := lookupEphemeralTierAgent(agentName); tierRC != nil {
+				rc = tierRC
+			}
+		}
+
+		// Finally, try a prefix-based fallback: names like "kiro-opus" or
+		// "claude-sonnet-4" that aren't registered anywhere but share a hyphen
+		// prefix with a built-in preset resolve to that preset's runtime with
+		// a stderr warning. This keeps handoff/crew/polecat flows working when
+		// GT_AGENT carries a model-variant alias that was never registered
+		// locally (see gu-g6l1/gt-blwc). Completely unknown names (no preset
+		// prefix) still error so config typos stay loud.
+		if rc == nil {
+			if preset, presetName := resolveAgentByPrefix(agentName); preset != nil {
+				fmt.Fprintf(os.Stderr, "warning: agent %q not registered; falling back to built-in preset %q (register with 'gt config agent set %s ...' to silence)\n", agentName, presetName, agentName)
+				rc = RuntimeConfigFromPreset(AgentPreset(presetName))
+			}
+		}
+
 		if rc == nil {
 			return nil, "", fmt.Errorf("agent '%s' not found", agentName)
 		}
@@ -1329,6 +1356,58 @@ func lookupAgentConfigIfExists(name string, townSettings *TownSettings, rigSetti
 		return RuntimeConfigFromPreset(AgentPreset(name))
 	}
 
+	return nil
+}
+
+// resolveAgentByPrefix attempts to resolve an unregistered agent name to a
+// built-in preset by matching its hyphen-separated prefix (e.g., "kiro-opus"
+// → "kiro", "claude-sonnet-4.5" → "claude"). Used as a last-resort fallback
+// in the override lookup path so model-variant aliases carried in GT_AGENT
+// don't break session handoff when the variant was never registered locally.
+//
+// Matching is progressive: it tries the longest prefix first (to allow
+// future aliases like "groq-compound-fast" to resolve to "groq-compound"
+// before falling back to "groq"), then shortens one hyphen at a time.
+//
+// Returns (preset, presetName) on match, or (nil, "") if no prefix matches.
+// Names without a hyphen are never matched — those are either exact presets
+// (handled upstream) or typos that should error loudly.
+func resolveAgentByPrefix(name string) (*AgentPresetInfo, string) {
+	// Require at least one hyphen — "kiro" is an exact preset lookup, not
+	// a prefix fallback. Avoids masking simple typos like "gemni".
+	if !strings.Contains(name, "-") {
+		return nil, ""
+	}
+
+	// Try progressively shorter prefixes (longest match wins).
+	parts := strings.Split(name, "-")
+	for i := len(parts) - 1; i >= 1; i-- {
+		candidate := strings.Join(parts[:i], "-")
+		if preset := GetAgentPresetByName(candidate); preset != nil {
+			return preset, candidate
+		}
+	}
+	return nil, ""
+}
+
+// lookupEphemeralTierAgent returns the RuntimeConfig for an agent alias
+// defined by the active ephemeral cost tier (GT_COST_TIER env var), or nil
+// if no tier is active or the alias isn't tier-managed.
+//
+// This lets override resolution find tier-managed aliases like
+// "claude-sonnet" / "claude-haiku" / "groq-compound" without requiring
+// them to be persisted into TownSettings.Agents, preserving the
+// pre-existing behavior where sessions carrying GT_AGENT=<tier-alias>
+// resolve to the tier's --model flags.
+func lookupEphemeralTierAgent(agentName string) *RuntimeConfig {
+	tierName := os.Getenv("GT_COST_TIER")
+	if tierName == "" || !IsValidTier(tierName) {
+		return nil
+	}
+	agents := CostTierAgents(CostTier(tierName))
+	if rc, ok := agents[agentName]; ok && rc != nil {
+		return fillRuntimeDefaults(rc)
+	}
 	return nil
 }
 

@@ -1320,6 +1320,83 @@ func TestResolveAgentConfigWithOverride(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown override with preset prefix falls back", func(t *testing.T) {
+		// Regression for gu-g6l1 / gt-blwc: GT_AGENT=kiro-opus (and similar
+		// model-variant aliases) must not break gt handoff. Unregistered
+		// names that share a hyphen prefix with a built-in preset resolve
+		// to that preset's runtime with a stderr warning.
+		rc, name, err := ResolveAgentConfigWithOverride(townRoot, rigPath, "kiro-opus")
+		if err != nil {
+			t.Fatalf("ResolveAgentConfigWithOverride: %v (want graceful fallback)", err)
+		}
+		if name != "kiro-opus" {
+			t.Fatalf("name = %q, want %q (override name preserved for GT_AGENT round-tripping)", name, "kiro-opus")
+		}
+		if rc.Command != "kiro-cli" {
+			t.Fatalf("rc.Command = %q, want %q (resolved to kiro preset runtime)", rc.Command, "kiro-cli")
+		}
+		if rc.Provider != "kiro" {
+			t.Fatalf("rc.Provider = %q, want %q (provider reflects preset)", rc.Provider, "kiro")
+		}
+	})
+
+	t.Run("unknown override without hyphen still errors", func(t *testing.T) {
+		// "gemni" (typo of gemini) has no hyphen and no preset match —
+		// must still error so typos stay loud instead of silently
+		// falling back to some unrelated agent.
+		_, _, err := ResolveAgentConfigWithOverride(townRoot, rigPath, "gemni")
+		if err == nil {
+			t.Fatal("expected error for hyphenless unknown agent — prefix fallback must not mask typos")
+		}
+	})
+
+	t.Run("prefix fallback prefers longest match", func(t *testing.T) {
+		// "claude-sonnet-4-5" should resolve to "claude" (the registered
+		// preset) when neither "claude-sonnet-4-5", "claude-sonnet-4",
+		// nor "claude-sonnet" are registered.
+		rc, name, err := ResolveAgentConfigWithOverride(townRoot, rigPath, "claude-sonnet-4-5")
+		if err != nil {
+			t.Fatalf("ResolveAgentConfigWithOverride: %v (want fallback to claude preset)", err)
+		}
+		if name != "claude-sonnet-4-5" {
+			t.Fatalf("name = %q, want %q (original override preserved)", name, "claude-sonnet-4-5")
+		}
+		if rc.Provider != "claude" {
+			t.Fatalf("rc.Provider = %q, want %q", rc.Provider, "claude")
+		}
+	})
+
+	t.Run("ephemeral tier agent resolves before prefix fallback", func(t *testing.T) {
+		// When GT_COST_TIER is active, tier-managed aliases like
+		// "claude-sonnet" must resolve to the tier's full RuntimeConfig
+		// (with --model sonnet[1m]), NOT to the bare "claude" preset via
+		// the prefix fallback. Guards the fetcher mayor-runtime path
+		// (TestResolveMayorRuntime) that depends on this ordering.
+		t.Setenv("GT_COST_TIER", "economy")
+		freshTown := t.TempDir()
+		if err := SaveTownSettings(TownSettingsPath(freshTown), NewTownSettings()); err != nil {
+			t.Fatalf("SaveTownSettings: %v", err)
+		}
+		rc, name, err := ResolveAgentConfigWithOverride(freshTown, "", "claude-sonnet")
+		if err != nil {
+			t.Fatalf("ResolveAgentConfigWithOverride: %v", err)
+		}
+		if name != "claude-sonnet" {
+			t.Fatalf("name = %q, want %q", name, "claude-sonnet")
+		}
+		// Confirm the tier's --model flag propagated (not the bare preset).
+		foundModelFlag := false
+		for i, arg := range rc.Args {
+			if arg == "--model" && i+1 < len(rc.Args) && strings.HasPrefix(rc.Args[i+1], "sonnet") {
+				foundModelFlag = true
+				break
+			}
+		}
+		if !foundModelFlag {
+			t.Fatalf("tier-agent resolution lost --model flag; rc.Args = %v", rc.Args)
+		}
+	})
+
 	t.Run("override with subcommand", func(t *testing.T) {
 		rc, name, err := ResolveAgentConfigWithOverride(townRoot, rigPath, "opencode acp")
 		if err != nil {
