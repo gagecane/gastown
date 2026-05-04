@@ -70,12 +70,31 @@ func mainBranchTestRigs(config *DaemonPatrolConfig) []string {
 	return nil
 }
 
+// rigGate captures a single merge_queue gate's executable command and its
+// lifecycle phase. Phase mirrors refinery's GatePhase ("pre-merge" or
+// "post-squash"); empty string means "pre-merge" per refinery's default.
+type rigGate struct {
+	Cmd   string
+	Phase string // "" or "pre-merge" = pre-merge (default), "post-squash" = post-squash
+}
+
 // rigGateConfig holds the gate/test configuration extracted from a rig's config.json.
 type rigGateConfig struct {
 	TestCommand  string
-	SetupCommand string            // Optional pre-build install command (e.g., "pnpm install")
-	Gates        map[string]string // gate name → command
+	SetupCommand string             // Optional pre-build install command (e.g., "pnpm install")
+	Gates        map[string]rigGate // gate name → cmd + phase
 }
+
+// mainBranchTestPhase is the gate phase that main_branch_test is allowed to
+// run. Post-squash gates are, by definition, tied to the squash-merge
+// lifecycle and run on the merged result after the refinery has combined
+// branches. Running them in a fresh origin/main worktree is a category error:
+// many such gates assume ambient state (checked-out brazil workspace, merged
+// version-set, etc.) that a cold drift-detection worktree does not provide.
+// See gu-j1f7 for the originating failure — a casc_constructs post-squash
+// gate that fails with "Could not determine current package by 'finding up'
+// Config" when invoked outside its merge context.
+const mainBranchTestPhase = "pre-merge"
 
 // defaultInstallTimeout bounds auto-detected package-manager installs so a wedged
 // install (network issues, lock contention) does not consume the whole per-rig
@@ -160,13 +179,14 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 
 	// Extract gates (preferred over legacy test_command)
 	if len(mq.Gates) > 0 {
-		cfg.Gates = make(map[string]string, len(mq.Gates))
+		cfg.Gates = make(map[string]rigGate, len(mq.Gates))
 		for name, rawGate := range mq.Gates {
 			var gate struct {
-				Cmd string `json:"cmd"`
+				Cmd   string `json:"cmd"`
+				Phase string `json:"phase"`
 			}
 			if err := json.Unmarshal(rawGate, &gate); err == nil && gate.Cmd != "" {
-				cfg.Gates[name] = gate.Cmd
+				cfg.Gates[name] = rigGate{Cmd: gate.Cmd, Phase: gate.Phase}
 			}
 		}
 	}
@@ -386,13 +406,32 @@ func (d *Daemon) runPreBuildInstall(ctx context.Context, rigName, workDir string
 	return d.runCommandOnWorktree(installCtx, rigName, workDir, label, cmd)
 }
 
-// runGatesOnWorktree runs all configured gates sequentially on the given worktree.
-func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string, gates map[string]string) error {
+// runGatesOnWorktree runs all pre-merge gates sequentially on the given worktree.
+//
+// Post-squash gates are skipped: they are defined to run on the squash-merged
+// result in refinery's pipeline and frequently rely on ambient state
+// (checked-out brazil workspace, merged version-set) that a cold origin/main
+// worktree lacks. Running them in main_branch_test produces spurious
+// escalations that obscure real regressions. See gu-j1f7.
+func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string, gates map[string]rigGate) error {
 	var failures []string
-	for name, cmd := range gates {
-		if err := d.runCommandOnWorktree(ctx, rigName, workDir, name, cmd); err != nil {
+	var skipped []string
+	for name, gc := range gates {
+		phase := gc.Phase
+		if phase == "" {
+			phase = "pre-merge"
+		}
+		if phase != mainBranchTestPhase {
+			skipped = append(skipped, fmt.Sprintf("%s(%s)", name, phase))
+			continue
+		}
+		if err := d.runCommandOnWorktree(ctx, rigName, workDir, name, gc.Cmd); err != nil {
 			failures = append(failures, fmt.Sprintf("gate %q: %v", name, err))
 		}
+	}
+	if len(skipped) > 0 {
+		d.logger.Printf("main_branch_test: %s: skipped non-pre-merge gates: %s",
+			rigName, strings.Join(skipped, ", "))
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("%s", strings.Join(failures, "; "))

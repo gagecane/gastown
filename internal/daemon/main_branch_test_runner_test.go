@@ -1,11 +1,16 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMainBranchTestInterval(t *testing.T) {
@@ -174,8 +179,13 @@ func TestLoadRigGateConfig(t *testing.T) {
 		if len(cfg.Gates) != 3 {
 			t.Errorf("expected 3 gates, got %d", len(cfg.Gates))
 		}
-		if cfg.Gates["build"] != "go build ./..." {
-			t.Errorf("expected build gate 'go build ./...', got %q", cfg.Gates["build"])
+		if cfg.Gates["build"].Cmd != "go build ./..." {
+			t.Errorf("expected build gate 'go build ./...', got %q", cfg.Gates["build"].Cmd)
+		}
+		// Phase is omitted in this fixture, so it should round-trip as "" and
+		// be treated as pre-merge by the runner.
+		if cfg.Gates["build"].Phase != "" {
+			t.Errorf("expected build gate phase empty (pre-merge default), got %q", cfg.Gates["build"].Phase)
 		}
 	})
 
@@ -344,6 +354,48 @@ func TestLoadRigGateConfig(t *testing.T) {
 		}
 		if cfg.TestCommand != "canonical-test" {
 			t.Errorf("expected 'canonical-test', got %q", cfg.TestCommand)
+		}
+	})
+
+	t.Run("gate phase is parsed and preserved", func(t *testing.T) {
+		// Regression for gu-j1f7: main_branch_test must preserve per-gate
+		// phase so the runner can skip post-squash gates. Previously the
+		// loader dropped phase on the floor and the runner executed every
+		// gate blindly, producing spurious failures (e.g., a post-squash
+		// brazil-build gate run without its merge-squash context).
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"gates": map[string]interface{}{
+					"lint":          map[string]interface{}{"cmd": "lint.sh"}, // phase omitted
+					"build":         map[string]interface{}{"cmd": "build.sh", "phase": "pre-merge"},
+					"live-integ":    map[string]interface{}{"cmd": "integ.sh", "phase": "post-squash"},
+					"downstream-ck": map[string]interface{}{"cmd": "ds.sh", "phase": "post-squash"},
+				},
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if cfg.Gates["lint"].Phase != "" {
+			t.Errorf("lint phase: got %q, want empty (pre-merge default)", cfg.Gates["lint"].Phase)
+		}
+		if cfg.Gates["build"].Phase != "pre-merge" {
+			t.Errorf("build phase: got %q, want %q", cfg.Gates["build"].Phase, "pre-merge")
+		}
+		if cfg.Gates["live-integ"].Phase != "post-squash" {
+			t.Errorf("live-integ phase: got %q, want %q", cfg.Gates["live-integ"].Phase, "post-squash")
+		}
+		if cfg.Gates["downstream-ck"].Phase != "post-squash" {
+			t.Errorf("downstream-ck phase: got %q, want %q", cfg.Gates["downstream-ck"].Phase, "post-squash")
 		}
 	})
 }
@@ -652,4 +704,124 @@ func TestLoadRigGateConfig_SetupCommand(t *testing.T) {
 			t.Errorf("expected nil config (no runnable commands), got %+v", cfg)
 		}
 	})
+}
+
+// TestRunGatesOnWorktree_SkipsPostSquashPhase is the core regression test for
+// gu-j1f7. Post-squash gates must be skipped by main_branch_test so a rig
+// config that mixes pre-merge and post-squash gates doesn't produce spurious
+// failures from gates invoked outside their merge-squash context.
+//
+// The test relies on real shell execution (marking files) rather than mocks
+// because runCommandOnWorktree shells out; the side-effects are directly
+// observable in the filesystem.
+func TestRunGatesOnWorktree_SkipsPostSquashPhase(t *testing.T) {
+	workDir := t.TempDir()
+	marker := func(name string) string { return filepath.Join(workDir, name) }
+
+	// Capture logs so we can assert the skip message is emitted — operators
+	// rely on it to understand why a configured gate didn't execute.
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	gates := map[string]rigGate{
+		// Pre-merge (explicit) — should run.
+		"lint": {Cmd: "touch " + marker("lint.ran"), Phase: "pre-merge"},
+		// Phase omitted — defaults to pre-merge, should run.
+		"build": {Cmd: "touch " + marker("build.ran"), Phase: ""},
+		// Post-squash — must be skipped.
+		"live-integ": {Cmd: "touch " + marker("live-integ.ran"), Phase: "post-squash"},
+		// Another post-squash (mirroring the casc_constructs "downstream-check"
+		// gate that originally triggered gu-j1f7) — must also be skipped.
+		"downstream-check": {Cmd: "touch " + marker("downstream-check.ran"), Phase: "post-squash"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := d.runGatesOnWorktree(ctx, "testrig", workDir, gates); err != nil {
+		t.Fatalf("runGatesOnWorktree: unexpected error: %v", err)
+	}
+
+	mustExist := []string{"lint.ran", "build.ran"}
+	mustNotExist := []string{"live-integ.ran", "downstream-check.ran"}
+
+	for _, f := range mustExist {
+		if _, err := os.Stat(marker(f)); err != nil {
+			t.Errorf("expected pre-merge gate to run (%s): %v", f, err)
+		}
+	}
+	for _, f := range mustNotExist {
+		if _, err := os.Stat(marker(f)); !os.IsNotExist(err) {
+			t.Errorf("expected post-squash gate %s to be SKIPPED, but the marker file exists (err=%v)", f, err)
+		}
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "skipped non-pre-merge gates") {
+		t.Errorf("expected skip-log line, got:\n%s", logs)
+	}
+	// Both post-squash gates should be named in the skip log.
+	for _, gate := range []string{"live-integ", "downstream-check"} {
+		if !strings.Contains(logs, gate) {
+			t.Errorf("expected skip log to mention gate %q, got:\n%s", gate, logs)
+		}
+	}
+}
+
+// TestRunGatesOnWorktree_PropagatesPreMergeFailures guards against an
+// over-eager skip rule: pre-merge gate failures MUST still fail the patrol
+// (that's the whole point of main_branch_test). Only post-squash gates are
+// exempt.
+func TestRunGatesOnWorktree_PropagatesPreMergeFailures(t *testing.T) {
+	workDir := t.TempDir()
+
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	gates := map[string]rigGate{
+		"failing-gate": {Cmd: "exit 1", Phase: "pre-merge"},
+	}
+
+	err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates)
+	if err == nil {
+		t.Fatal("expected error from failing pre-merge gate, got nil")
+	}
+	if !strings.Contains(err.Error(), "failing-gate") {
+		t.Errorf("expected error to name failing-gate, got: %v", err)
+	}
+}
+
+// TestRunGatesOnWorktree_AllPostSquashIsNoOp ensures a rig that configures
+// only post-squash gates (and nothing else) passes main_branch_test cleanly
+// rather than failing for lack of runnable work. This is the exact scenario
+// gu-j1f7 would produce in miniature: casc_constructs has pre-merge "build"
+// but a rig could legitimately have only post-squash gates for a period
+// during migration.
+func TestRunGatesOnWorktree_AllPostSquashIsNoOp(t *testing.T) {
+	workDir := t.TempDir()
+
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	gates := map[string]rigGate{
+		"integ": {Cmd: "exit 1", Phase: "post-squash"}, // would fail if run
+	}
+
+	if err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates); err != nil {
+		t.Errorf("expected nil (all gates skipped), got: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "skipped non-pre-merge gates") {
+		t.Errorf("expected skip log, got:\n%s", logBuf.String())
+	}
 }

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`main_branch_test` runs post-squash gates in the wrong context** —
+  The main-branch drift-detection patrol loads every gate from a rig's
+  `merge_queue.gates` block and executes them in a cold origin/main
+  worktree, ignoring each gate's `phase`. Post-squash gates are defined
+  to run only after the refinery has squash-merged a branch; they
+  frequently depend on ambient state (a checked-out brazil workspace,
+  a merged version-set, post-merge side effects) that a fresh worktree
+  cannot provide. casc_constructs' `downstream-check` gate is a
+  concrete example — it failed with `Could not determine current
+  package by 'finding up' Config` every patrol cycle, producing
+  spurious escalations that drowned out real regressions. The patrol
+  now parses the `phase` field from each gate (defaulting to
+  `pre-merge`) and only executes gates whose phase is `pre-merge`. Any
+  post-squash gate is skipped with a single log line naming the gates
+  and their phases so operators can see exactly which gates were
+  deferred. See gu-j1f7.
+
 - **Refinery and other agents can no longer hang in a git editor** — Git
   subprocesses launched during merge-conflict rebases, `commit --amend`,
   `merge --no-ff`, `rebase -i`, and similar operations would open the
