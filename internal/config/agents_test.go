@@ -278,7 +278,11 @@ func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
 }
 
 func TestResolveProcessNames(t *testing.T) {
-	t.Parallel()
+	// NOT parallel: this test and its subtests mutate the shared global agent
+	// registry via RegisterAgentForTesting with well-known preset names
+	// (claude, codex, opencode). Running in parallel races with any test that
+	// reads from the registry (for example TestFillRuntimeDefaults), which
+	// observes the poisoned Args and fails. See gu-9qhf.
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
 
@@ -1515,7 +1519,7 @@ func TestKiroPreset(t *testing.T) {
 }
 
 func TestResolveACPConfig(t *testing.T) {
-	t.Parallel()
+	// NOT parallel: mutates shared global agent registry. See gu-9qhf.
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
 
@@ -1600,7 +1604,7 @@ func TestSupportsACPWithCustomAgent(t *testing.T) {
 }
 
 func TestGetACPCommand(t *testing.T) {
-	t.Parallel()
+	// NOT parallel: mutates shared global agent registry. See gu-9qhf.
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
 
