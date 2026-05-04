@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -182,6 +183,19 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 		return err
 	}
 
+	// Start background nudge-queue poller (gt-dgf). Claude's UserPromptSubmit
+	// hook only drains the queue when the agent submits a prompt. Idle agents
+	// (AFK user, waiting for input) never submit, so queued nudges deadlock.
+	// The poller breaks this cycle by polling every 10s and delivering when
+	// idle. Drain() is atomic so the poller and UserPromptSubmit hook coexist
+	// safely. Mayor was missed in the original rollout (gu-qpj8); this brings
+	// it in line with crew/witness/refinery.
+	// Only TMUX mode gets a poller — ACP mayor has its own Propeller daemon.
+	if _, pollerErr := nudge.StartPoller(m.townRoot, sessionID); pollerErr != nil {
+		// Non-fatal — nudges may be delayed but the agent still works.
+		fmt.Fprintf(os.Stderr, "Warning: could not start nudge poller for %s: %v\n", sessionID, pollerErr)
+	}
+
 	time.Sleep(session.ShutdownDelay())
 
 	return nil
@@ -342,6 +356,11 @@ func (m *Manager) Stop() error {
 	// Try graceful shutdown first (best-effort interrupt)
 	_ = t.SendKeysRaw(sessionID, "C-c")
 	time.Sleep(100 * time.Millisecond)
+
+	// Stop the background nudge poller before killing the session.
+	// Non-fatal — the poller will exit on its own when the session dies,
+	// but a proactive SIGTERM avoids orphan pollers racing against respawn.
+	_ = nudge.StopPoller(m.townRoot, sessionID)
 
 	// Kill the session and all its processes
 	if err := t.KillSessionWithProcesses(sessionID); err != nil {
