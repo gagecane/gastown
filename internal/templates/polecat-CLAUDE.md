@@ -154,7 +154,8 @@ gt dolt status                     # Check server health + latency
 4. If formula attached, steps are shown inline by `gt prime`
 5. Work through the checklist, then `gt done`
 
-**If NO work on hook and NO mail:** run `gt done` immediately.
+**If NO work on hook and NO mail:** run `gt done --status DEFERRED` immediately
+to free your slot for the next dispatched bead. Never sit idle waiting for a human.
 
 **If your assigned bead has nothing to implement** (already done, can't reproduce, not applicable):
 ```bash

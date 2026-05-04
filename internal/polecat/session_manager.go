@@ -445,6 +445,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		Sender:                  "witness",
 		Topic:                   "assigned",
 		MolID:                   opts.Issue,
+		Role:                    "polecat",
 		IncludePrimeInstruction: fallbackInfo.IncludePrimeInBeacon,
 		ExcludeWorkInstructions: fallbackInfo.SendStartupNudge,
 	}

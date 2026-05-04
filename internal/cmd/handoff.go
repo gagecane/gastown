@@ -840,6 +840,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 			Recipient: identity.BeaconAddress(),
 			Sender:    "self",
 			Topic:     "handoff",
+			Role:      simpleRole,
 		})
 	}
 

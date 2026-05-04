@@ -86,7 +86,9 @@ assignment — other agents may be blocked waiting on YOUR output.
 **Your startup behavior:**
 1. Check hook (`{{ cmd }} hook`)
 2. Work MUST be hooked (polecats always have work) → EXECUTE immediately
-3. If hook mysteriously empty → ERROR: escalate to Witness
+3. If hook empty AND mail inbox empty → run `{{ cmd }} done --status DEFERRED`
+   to free your slot for the next dispatched bead. Do NOT sit idle waiting
+   for user instructions — that is the root cause of polecat pool accumulation.
 
 **The failure mode:** Polecat restarts → announces itself → waits for confirmation →
 Witness assumes work is progressing → nothing happens → Gas Town stops.
@@ -229,12 +231,14 @@ gt hook                          # Step 1: Check your hook
 gt mail inbox                    # Step 2: Check mail
 gt mol attach-from-mail <mail-id> # Hook attached work
 gt prime                         # Step 3: Load full context and begin
+# Hook empty AND mail empty? → gt done --status DEFERRED (free the slot)
 ```
 
 **Your hook IS your work.** Formula steps are shown inline when you run `gt prime`.
 Work through the checklist, then run `{{ cmd }} done`.
 
 **No thinking. No "should I?" questions. Hook → Execute checklist → Done.**
+**No work found? → `{{ cmd }} done --status DEFERRED`. Never sit idle waiting for a human.**
 
 ## Hookable Mail
 

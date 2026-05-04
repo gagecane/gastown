@@ -54,6 +54,14 @@ type BeaconConfig struct {
 	// Used for non-hook agents where gt prime must complete first.
 	// Default (false) preserves backward compatible behavior.
 	ExcludeWorkInstructions bool
+
+	// Role is the recipient agent's role (e.g., "polecat", "crew", "mayor").
+	// When set, the beacon's no-work instruction is tailored to the role.
+	// Polecats are told to free their slot via `gt done --status DEFERRED`
+	// instead of sitting idle waiting for user input, which is the root cause
+	// of pool-init polecat accumulation (gu-xjho / gt-b2cno).
+	// Empty string preserves backward-compatible "wait for instructions" text.
+	Role string
 }
 
 // FormatStartupBeacon builds the formatted startup beacon message.
@@ -94,13 +102,23 @@ func FormatStartupBeacon(cfg BeaconConfig) string {
 	}
 
 	// For handoff, cold-start, and attach, add explicit instructions so the agent knows
-	// what to do even if hooks haven't loaded CLAUDE.md yet
+	// what to do even if hooks haven't loaded CLAUDE.md yet.
+	//
+	// The terminal instruction (step 4) is role-aware: polecats are ephemeral
+	// pool workers, and an idle polecat with no hook and no mail should free
+	// its slot via `gt done --status DEFERRED` so the dispatcher can reuse it.
+	// Previously polecats were told to "wait for instructions," which left them
+	// sitting idle forever and caused pool-init polecat accumulation (gu-xjho).
 	if cfg.Topic == "handoff" || cfg.Topic == "cold-start" || cfg.Topic == "attach" {
+		noWorkAction := "wait for instructions"
+		if cfg.Role == "polecat" {
+			noWorkAction = "run `" + cli.Name() + " done --status DEFERRED` to free your slot for the next dispatched work"
+		}
 		beacon += "\n\nCheck your hook and mail, then act on the hook if present:\n" +
 			"1. `" + cli.Name() + " hook` - shows hooked work (if any)\n" +
 			"2. `" + cli.Name() + " mail inbox` - check for messages\n" +
 			"3. If work is hooked → execute it immediately\n" +
-			"4. If nothing hooked → wait for instructions"
+			"4. If nothing hooked → " + noWorkAction
 	}
 
 	// For assigned, tell agent to prime then work on the hook.

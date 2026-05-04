@@ -375,6 +375,69 @@ func TestFormatStartupBeacon(t *testing.T) {
 				"gt mail inbox",
 			},
 		},
+		{
+			// Regression: gu-xjho / gt-b2cno. Polecats on handoff previously saw
+			// "wait for instructions" in the no-hook branch, which left them
+			// sitting idle forever and caused pool-init polecat accumulation.
+			// With Role="polecat" they should be told to free their slot.
+			name: "handoff beacon for polecat directs DEFERRED exit on empty hook",
+			cfg: BeaconConfig{
+				Recipient: BeaconRecipient("polecat", "chrome", "gastown"),
+				Sender:    "self",
+				Topic:     "handoff",
+				Role:      "polecat",
+			},
+			wantSub: []string{
+				"[GAS TOWN]",
+				"polecat chrome (rig: gastown)",
+				"handoff",
+				"gt hook",
+				"gt mail inbox",
+				"done --status DEFERRED",
+				"free your slot",
+			},
+			wantNot: []string{
+				"wait for instructions",
+			},
+		},
+		{
+			// Crew workers are persistent and user-managed; they should still
+			// see "wait for instructions" when their hook and mail are empty.
+			name: "handoff beacon for crew keeps wait-for-instructions",
+			cfg: BeaconConfig{
+				Recipient: BeaconRecipient("crew", "gus", "gastown"),
+				Sender:    "self",
+				Topic:     "handoff",
+				Role:      "crew",
+			},
+			wantSub: []string{
+				"[GAS TOWN]",
+				"crew gus (rig: gastown)",
+				"handoff",
+				"wait for instructions",
+			},
+			wantNot: []string{
+				"DEFERRED",
+			},
+		},
+		{
+			// Empty Role preserves the original behavior so callers that
+			// have not been updated keep the backward-compatible message.
+			name: "handoff beacon without role keeps wait-for-instructions",
+			cfg: BeaconConfig{
+				Recipient: "witness (rig: gastown)",
+				Sender:    "self",
+				Topic:     "handoff",
+			},
+			wantSub: []string{
+				"[GAS TOWN]",
+				"handoff",
+				"wait for instructions",
+			},
+			wantNot: []string{
+				"DEFERRED",
+			},
+		},
 	}
 
 	for _, tt := range tests {

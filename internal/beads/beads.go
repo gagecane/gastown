@@ -1820,7 +1820,10 @@ This is physics, not politeness. Gas Town is a steam engine - you are a piston.
 1. Check your hook: ` + "`gt mol status`" + `
 2. If work is hooked → EXECUTE (no announcement, no waiting)
 3. If hook empty → Check mail: ` + "`gt mail inbox`" + `
-4. Still nothing? Wait for user instructions
+4. Still nothing?
+   - **Polecats** (ephemeral pool workers): run ` + "`gt done --status DEFERRED`" + `
+     to free your slot for the next dispatched bead. Do NOT sit idle.
+   - **Crew** (persistent workers): wait for user instructions.
 
 ## Key Commands
 
