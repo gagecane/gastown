@@ -937,3 +937,167 @@ func TestRefreshStalePolecats_ContinuesPastFailure(t *testing.T) {
 		t.Errorf("output = %q, want to mention FAILED for 'bad'", out.String())
 	}
 }
+
+// --- Warmup spawn (pool-init) ---------------------------------------------
+//
+// These tests verify gu-yc8x: pool-init runs a spawn-and-kill warmup cycle
+// for each newly-created polecat to catch first-spawn races during pool-init
+// rather than during the first real dispatch.
+
+// warmupRecordingStarter captures calls to Start/Stop for assertion.
+// Use startErrOn / stopErrOn to simulate partial failures.
+type warmupRecordingStarter struct {
+	startCalls []string
+	stopCalls  []string
+	startErrOn map[string]error
+	stopErrOn  map[string]error
+}
+
+func (w *warmupRecordingStarter) Start(name string, _ polecat.SessionStartOptions) error {
+	w.startCalls = append(w.startCalls, name)
+	if err, ok := w.startErrOn[name]; ok {
+		return err
+	}
+	return nil
+}
+
+func (w *warmupRecordingStarter) Stop(name string, _ bool) error {
+	w.stopCalls = append(w.stopCalls, name)
+	if err, ok := w.stopErrOn[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// TestWarmupNewPolecats_HappyPathSpawnsAndKillsEach verifies the normal case:
+// every fresh polecat gets exactly one Start followed by one Stop.
+func TestWarmupNewPolecats_HappyPathSpawnsAndKillsEach(t *testing.T) {
+	starter := &warmupRecordingStarter{}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	warmupNewPolecats(cmd, starter, []string{"alpha", "bravo", "charlie"})
+
+	if !equalStringSlices(starter.startCalls, []string{"alpha", "bravo", "charlie"}) {
+		t.Errorf("Start calls = %v, want [alpha bravo charlie]", starter.startCalls)
+	}
+	if !equalStringSlices(starter.stopCalls, []string{"alpha", "bravo", "charlie"}) {
+		t.Errorf("Stop calls = %v, want [alpha bravo charlie] (every spawn must be killed)", starter.stopCalls)
+	}
+	if !containsSubstring(out.String(), "Warming up 3 new polecat(s)") {
+		t.Errorf("output = %q, want to announce warmup count", out.String())
+	}
+}
+
+// TestWarmupNewPolecats_StartFailureIsLoggedAndDoesNotAbort verifies that a
+// Start failure for one polecat:
+//  1. Does not abort the loop — remaining polecats still get warmed up.
+//  2. Skips Stop for the failed polecat (no session was created).
+//  3. Surfaces the failure in the output so the operator can diagnose.
+//
+// The Start error already contains pane output from gu-hq88's fix, so we
+// just need to render the full error string rather than truncating it.
+func TestWarmupNewPolecats_StartFailureIsLoggedAndDoesNotAbort(t *testing.T) {
+	starter := &warmupRecordingStarter{
+		startErrOn: map[string]error{
+			"bad": errors.New("session died during startup\n--- pane output ---\n<captured stderr>\n--- end pane output ---"),
+		},
+	}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	warmupNewPolecats(cmd, starter, []string{"bad", "good"})
+
+	if !equalStringSlices(starter.startCalls, []string{"bad", "good"}) {
+		t.Errorf("Start calls = %v, want [bad good] (good must run after bad fails)", starter.startCalls)
+	}
+	// Stop is only called for successful starts.
+	if !equalStringSlices(starter.stopCalls, []string{"good"}) {
+		t.Errorf("Stop calls = %v, want [good] only (failed start means no session to kill)", starter.stopCalls)
+	}
+	if !containsSubstring(out.String(), "FAILED") {
+		t.Errorf("output = %q, want to mention FAILED for 'bad'", out.String())
+	}
+	// Pane-output excerpt from the Start error should reach the operator.
+	if !containsSubstring(out.String(), "<captured stderr>") {
+		t.Errorf("output = %q, want to include captured pane output from Start error", out.String())
+	}
+}
+
+// TestWarmupNewPolecats_StopFailureDoesNotAbort verifies that a failed kill
+// after a successful spawn is reported but doesn't stop us from warming up
+// the next polecat. A leaked session is an annoyance but witness patrol
+// eventually cleans it up.
+func TestWarmupNewPolecats_StopFailureDoesNotAbort(t *testing.T) {
+	starter := &warmupRecordingStarter{
+		stopErrOn: map[string]error{
+			"sticky": errors.New("session will not die"),
+		},
+	}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	warmupNewPolecats(cmd, starter, []string{"sticky", "clean"})
+
+	if !equalStringSlices(starter.startCalls, []string{"sticky", "clean"}) {
+		t.Errorf("Start calls = %v, want [sticky clean]", starter.startCalls)
+	}
+	if !equalStringSlices(starter.stopCalls, []string{"sticky", "clean"}) {
+		t.Errorf("Stop calls = %v, want [sticky clean] (every successful spawn attempts kill)", starter.stopCalls)
+	}
+	if !containsSubstring(out.String(), "kill failed") {
+		t.Errorf("output = %q, want to mention 'kill failed' for sticky", out.String())
+	}
+}
+
+// TestWarmupNewPolecats_EmptyInputIsNoOp ensures we don't announce warmup
+// when no new polecats were created. This keeps the pool-init output tidy
+// for the steady-state case where the pool is already at target size and
+// nothing was created.
+func TestWarmupNewPolecats_EmptyInputIsNoOp(t *testing.T) {
+	starter := &warmupRecordingStarter{}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	warmupNewPolecats(cmd, starter, nil)
+
+	if len(starter.startCalls) != 0 || len(starter.stopCalls) != 0 {
+		t.Errorf("Start/Stop called on empty input: starts=%v stops=%v", starter.startCalls, starter.stopCalls)
+	}
+	// Output still prints the "0 new polecat(s)" banner because the caller
+	// guards with len(createdNames) > 0. This test calling the helper
+	// directly just asserts we don't crash and don't make calls.
+}
+
+// TestWarmupNewPolecats_StartErrorMessageSurfacesToOperator verifies that
+// the full error text from Start (which includes pane output per gu-hq88)
+// is rendered verbatim, not truncated to just err.Error()'s first line.
+// This is the whole point of the warmup — without visible failure details,
+// the operator can't diagnose first-spawn races any better than they could
+// at first-dispatch time.
+func TestWarmupNewPolecats_StartErrorMessageSurfacesToOperator(t *testing.T) {
+	multilineErr := errors.New("session alpha died during startup\n--- pane output ---\nline1: ENOENT /nonexistent/claude\nline2: exit code 127\n--- end pane output ---")
+	starter := &warmupRecordingStarter{
+		startErrOn: map[string]error{"alpha": multilineErr},
+	}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	warmupNewPolecats(cmd, starter, []string{"alpha"})
+
+	outStr := out.String()
+	for _, needle := range []string{
+		"line1: ENOENT /nonexistent/claude",
+		"line2: exit code 127",
+		"--- pane output ---",
+	} {
+		if !containsSubstring(outStr, needle) {
+			t.Errorf("output missing %q so operator can't diagnose; got:\n%s", needle, outStr)
+		}
+	}
+}

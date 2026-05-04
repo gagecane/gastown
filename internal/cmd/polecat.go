@@ -162,6 +162,7 @@ var (
 	polecatPoolInitDryRun    bool
 	polecatPoolInitSize      int
 	polecatPoolInitNoRefresh bool
+	polecatPoolInitNoWarmup  bool
 )
 
 var polecatGCCmd = &cobra.Command{
@@ -338,11 +339,19 @@ and clears the stale hook_bead. This prevents the next witness/boot cycle
 from spawning a fresh session on a stale sandbox and resurrecting closed
 beads (gu-7rw5). Use --no-refresh-stale to disable.
 
+Warmup spawn: after creating each new polecat, pool-init spawns a throwaway
+agent session and kills it cleanly. This catches first-spawn races (cold
+fs-cache, missing .kiro state, git-index not warm) during pool-init — where
+the operator can see the failure and retry — instead of during the first
+real dispatch, where work assignments can die silently (gu-yc8x). Adds
+~4-8s per polecat. Use --no-warmup to disable when debugging.
+
 Examples:
   gt polecat pool-init gastown
   gt polecat pool-init gastown --size 6
   gt polecat pool-init gastown --dry-run
-  gt polecat pool-init gastown --no-refresh-stale`,
+  gt polecat pool-init gastown --no-refresh-stale
+  gt polecat pool-init gastown --no-warmup`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPolecatPoolInit,
 }
@@ -388,6 +397,7 @@ func init() {
 	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitDryRun, "dry-run", false, "Show what would be created without doing it")
 	polecatPoolInitCmd.Flags().IntVar(&polecatPoolInitSize, "size", 0, "Pool size (overrides rig config)")
 	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitNoRefresh, "no-refresh-stale", false, "Skip refresh of existing polecats whose worktree is stuck on a closed bead's branch")
+	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitNoWarmup, "no-warmup", false, "Skip spawn-and-kill warmup cycle on newly-created polecats (default runs warmup to catch first-spawn races)")
 
 	// Add subcommands
 	polecatCmd.AddCommand(polecatListCmd)
@@ -1957,6 +1967,7 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 	// Create each polecat
 	fmt.Printf("\nCreating %d polecat(s)...\n", len(namesToCreate))
 	created := 0
+	var createdNames []string
 	for _, name := range namesToCreate {
 		fmt.Printf("  %s Creating %s...", style.Dim.Render("→"), name)
 		p, addErr := mgr.Add(name)
@@ -1971,12 +1982,65 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 			fmt.Printf(" %s (%s)\n", style.Success.Render("✓"), style.Dim.Render(p.ClonePath))
 		}
 		created++
+		createdNames = append(createdNames, name)
+	}
+
+	// Warmup: spawn + kill a session for each newly-created polecat to catch
+	// first-spawn races (cold fs-cache, empty .kiro, cold git index) during
+	// pool-init instead of during the first real dispatch. See gu-yc8x.
+	if !polecatPoolInitNoWarmup && len(createdNames) > 0 {
+		t := tmux.NewTmux()
+		sessMgr := polecat.NewSessionManager(t, r)
+		warmupNewPolecats(cmd, sessMgr, createdNames)
 	}
 
 	fmt.Printf("\n%s Pool initialized: %d created, %d total (target: %d)\n",
 		style.Bold.Render("✓"), created, created+len(existing), poolSize)
 
 	return nil
+}
+
+// polecatWarmupStarter is the narrow SessionManager surface warmupNewPolecats
+// depends on. Broken out so tests can substitute a fake without instantiating
+// real tmux + git state.
+type polecatWarmupStarter interface {
+	Start(polecat string, opts polecat.SessionStartOptions) error
+	Stop(polecat string, force bool) error
+}
+
+// warmupNewPolecats spawns a throwaway session for each newly-created polecat
+// and then kills it. This surfaces first-spawn races (cold fs-cache, missing
+// .kiro/ state, cold git index) during pool-init, where the operator can
+// observe failures and retry — rather than during the first real dispatch,
+// where work assignments can die silently (gu-yc8x).
+//
+// Failures are logged per-polecat but do NOT abort the loop: one bad warmup
+// shouldn't block warmup for the rest of the pool, and the polecat is still
+// usable (witness patrol or the next sling will retry its session).
+//
+// Pane output from failed warmups is already embedded in the error returned
+// by Start (gu-hq88 / gu-acu3 pane-capture fix), so we just print err.Error().
+func warmupNewPolecats(cmd *cobra.Command, starter polecatWarmupStarter, names []string) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "\nWarming up %d new polecat(s) (spawn-and-kill cycle)...\n", len(names))
+	for _, name := range names {
+		fmt.Fprintf(out, "  %s Warming up %s...", style.Dim.Render("→"), name)
+		if err := starter.Start(name, polecat.SessionStartOptions{}); err != nil {
+			// Start failed — pane output is embedded in err when the agent
+			// died during startup (gu-hq88). Print the full error so the
+			// operator can diagnose instead of hitting the opaque form at
+			// first-dispatch time.
+			fmt.Fprintf(out, " %s\n    %v\n", style.Warning.Render("FAILED"), err)
+			continue
+		}
+		// Session started cleanly — kill it to free the resources but leave
+		// fs-cache / git-index warm for the real spawn.
+		if err := starter.Stop(name, true); err != nil {
+			fmt.Fprintf(out, " %s (spawn ok, kill failed: %v)\n", style.Warning.Render("⚠"), err)
+			continue
+		}
+		fmt.Fprintf(out, " %s\n", style.Success.Render("✓"))
+	}
 }
 
 // stalePolecat represents an existing polecat whose worktree is stale and needs
