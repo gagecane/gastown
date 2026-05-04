@@ -63,6 +63,39 @@ type ScheduleOptions struct {
 	Ralph       bool     // Ralph Wiggum loop mode
 }
 
+// checkSchedulePrefixParity enforces, at enqueue time, the same cross-rig
+// prefix invariant that the dispatcher enforces at dispatch time
+// (capacity_dispatch.go: capacity.AcceptsPrefix). A bead whose ID prefix
+// does not match the target rig's registered prefix can never be
+// dispatched, so enqueueing its sling context creates an un-dispatchable
+// context that wastes heartbeat cycles and eventually trips the
+// circuit breaker silently.
+//
+// This guard is intentionally NOT bypassable by --force: the dispatcher
+// has no --force override, and letting --force create un-dispatchable
+// contexts just moves the silent failure downstream. --force exists to
+// override status/assignee sanity checks (hooked, in_progress), not
+// dispatcher invariants.
+//
+// Empty rigPrefix (capacity.AcceptsPrefix returns true) — e.g. when
+// rig config is unavailable — is treated as "unknown, accept" to match
+// the dispatcher's fail-open behavior, avoiding guard mismatches that
+// would let the dispatcher accept something the enqueue refused.
+//
+// Fixes: gu-5ooj
+func checkSchedulePrefixParity(townRoot, rigName, beadID string) error {
+	rigPath := filepath.Join(townRoot, rigName)
+	rigPrefix := rigBeadsPrefix(townRoot, rigPath, rigName)
+	if capacity.AcceptsPrefix(rigPrefix, beadID) {
+		return nil
+	}
+	gotPrefix := capacity.BeadIDPrefix(beadID)
+	return fmt.Errorf("cross-rig prefix: bead %s (prefix %q) cannot be scheduled to rig %q (prefix %q)\n"+
+		"The dispatcher will refuse this bead. Create the task from the target rig: cd %s && bd create --title=...\n"+
+		"--force cannot override this — it is a dispatcher invariant",
+		beadID, gotPrefix, rigName, rigPrefix, rigName)
+}
+
 // scheduleBead schedules a bead for deferred dispatch via the capacity scheduler.
 // Creates a sling context bead to hold scheduling state. The work bead is never modified.
 func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
@@ -77,6 +110,21 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 
 	if _, isRig := IsRigName(rigName); !isRig {
 		return fmt.Errorf("'%s' is not a known rig", rigName)
+	}
+
+	// Cross-rig-prefix parity guard (gu-5ooj). Mirrors the unconditional
+	// dispatch-time guard in capacity_dispatch.go: a bead whose ID prefix
+	// does not match the target rig's registered prefix can never be
+	// dispatched, so enqueueing its sling context is useless — the
+	// context will sit in the queue, the dispatcher will refuse on every
+	// heartbeat, and after maxDispatchFailures the circuit breaker
+	// closes silently. Previously this invariant was only enforced at
+	// dispatch time; --force would bypass the enqueue-side check
+	// (checkCrossRigGuard below), letting operators create
+	// un-dispatchable contexts. This guard runs BEFORE checkCrossRigGuard
+	// and is NOT bypassable by --force, matching dispatcher semantics.
+	if err := checkSchedulePrefixParity(townRoot, rigName, beadID); err != nil {
+		return err
 	}
 
 	if !opts.Force {
