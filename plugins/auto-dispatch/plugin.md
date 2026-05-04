@@ -36,3 +36,33 @@ Dispatch ready tasks to idle polecats across all rigs. Uses `gt sling <bead> <ri
    included epic/identity/EPIC-titled bead will be rejected with a clear error
    rather than wasting a polecat slot.
 3. Report: "Dispatched N tasks across M rigs" or "No dispatchable work" if nothing matched
+
+### Opting a Bead Out of Auto-Dispatch
+
+If a bead should NOT be auto-dispatched (e.g. a human is actively working it),
+set its status to `blocked`:
+
+```bash
+bd update <id> --status=blocked
+```
+
+**Why this works** (verified 2026-05-04 in gu-qbys / gt-n2f1n):
+
+- `bd ready` hard-codes `Status: "open"` in its filter (see `cmd/bd/ready.go`),
+  so the SQL `WHERE status = 'open'` clause excludes blocked beads from the
+  candidate set entirely. Auto-dispatch uses `bd ready` as its source (step 2c
+  above), so it inherits this exclusion.
+- Closing a blocker does **not** auto-transition a `status=blocked` bead back
+  to `open`. `GetNewlyUnblockedByClose` only *reports* newly-unblocked
+  candidates; it does not mutate their status.
+- The witness zombie patrol (`resetAbandonedBead`) and the daemon's
+  dead-polecat reaper (`reapRigDeadPolecatWisps`) only reset beads whose
+  status is `hooked` or `in_progress`. A bead with `status=blocked` is
+  untouched by either reaper.
+
+Once the human is done, transition the bead back to `open` and auto-dispatch
+will pick it up again.
+
+**Future improvement**: consider adding an explicit `do-not-auto-dispatch`
+label and filtering on it here, so the intent is first-class rather than
+relying on the `status=blocked` side effect.
