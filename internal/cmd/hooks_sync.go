@@ -164,6 +164,11 @@ func runHooksSync(cmd *cobra.Command, args []string) error {
 			//   directory (analogous to mayor/deacon, just scoped to a rig). Subdirs
 			//   under these (e.g., witness/mail/) are state, not worktrees, and must
 			//   not receive hook config files.
+			// - Dogs: town-level single-instance workers nested under deacon/dogs/.
+			//   Each dog's directory IS the working directory — same pattern as
+			//   witness/refinery. Subdirectories under a dog (e.g., gastown_upstream/)
+			//   are project worktrees for separate repos and receive their own agent
+			//   configs via rig-level sync; we must target the dog dir itself.
 			// - Polecats: worktree is nested one level below the state dir
 			//   (polecats/<name>/<rigName>/); sync targets the worktree.
 			// - Other rig roles without useSettingsDir (crew for OpenCode, etc.):

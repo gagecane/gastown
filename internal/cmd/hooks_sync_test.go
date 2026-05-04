@@ -705,3 +705,97 @@ func TestRunHooksSyncRefineryNoSubdirs(t *testing.T) {
 		t.Errorf("opencode plugin not synced to refinery role dir at %s", pluginPath)
 	}
 }
+
+// TestRunHooksSyncDogs verifies that deacon/dogs/* receive hook config files.
+// Before the fix for gu-16md, DiscoverRoleLocations did not enumerate dogs at
+// all, so gt hooks sync never touched them and per-dog .kiro/agents/gastown.json
+// (and other agent configs) drifted indefinitely.
+func TestRunHooksSyncDogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	// Put a dummy opencode binary on PATH so agent resolution doesn't fall
+	// back to claude (which uses a different sync path).
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	townRoot := filepath.Join(tmpDir, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Two dogs with different nesting scenarios:
+	//   alpha  — bare dog dir
+	//   bravo  — dog dir that also contains a project worktree subdir
+	// Both should produce hook files at the dog dir level, NOT inside subdirs.
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon", "dogs", "alpha"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "deacon", "dogs", "bravo", "some_repo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(townRoot, "mayor", "town.json"),
+		[]byte(`{"type":"town","version":1,"name":"test"}`),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure the "dog" role to use opencode.
+	townSettings := config.NewTownSettings()
+	townSettings.RoleAgents = map[string]string{"dog": "opencode"}
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"opencode": {Provider: "opencode", Command: "opencode"},
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatal(err)
+	}
+
+	base := &hooks.HooksConfig{
+		SessionStart: []hooks.HookEntry{
+			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
+		},
+	}
+	if err := hooks.SaveBase(base); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksSyncDryRun = false
+	if err := runHooksSync(nil, nil); err != nil {
+		t.Fatalf("runHooksSync failed: %v", err)
+	}
+
+	// Plugin must land in each dog's own dir.
+	for _, name := range []string{"alpha", "bravo"} {
+		pluginPath := filepath.Join(townRoot, "deacon", "dogs", name, ".opencode", "plugins", "gastown.js")
+		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+			t.Errorf("opencode plugin not synced to dog %s at %s", name, pluginPath)
+		}
+	}
+
+	// Nested subdirs under a dog are separate project worktrees; they must not
+	// receive a dog hook file (their own rig-level sync handles them).
+	stale := filepath.Join(townRoot, "deacon", "dogs", "bravo", "some_repo", ".opencode", "plugins", "gastown.js")
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("dog hook file must not be synced into nested repo %s", stale)
+	}
+}

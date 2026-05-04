@@ -983,6 +983,84 @@ func TestDiscoverRoleLocations_SkipsNonRigs(t *testing.T) {
 	}
 }
 
+// TestDiscoverRoleLocations_Dogs verifies that deacon/dogs/* are discovered as
+// town-level role="dog" locations. Without this discovery, per-dog agent configs
+// (.kiro/agents/gastown.json, .opencode/plugins/gastown.js, etc.) drift
+// indefinitely because gt hooks sync never reaches them and InstallForRole
+// skips files that already exist. See gu-16md / gt-nadji.
+func TestDiscoverRoleLocations_Dogs(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "alpha"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "bravo"), 0755)
+	// A hidden entry under dogs/ must be skipped.
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", ".tmp"), 0755)
+	// A project worktree nested inside a dog (separate repo) must not produce
+	// its own location — dog discovery returns the dog dir, not its subdirs.
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "alpha", "some_repo"), 0755)
+
+	locations, err := DiscoverRoleLocations(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverRoleLocations failed: %v", err)
+	}
+
+	var dogs []RoleLocation
+	for _, loc := range locations {
+		if loc.Role == "dog" {
+			dogs = append(dogs, loc)
+		}
+	}
+
+	if len(dogs) != 2 {
+		t.Fatalf("expected 2 dog locations, got %d: %+v", len(dogs), dogs)
+	}
+
+	seen := make(map[string]bool)
+	for _, loc := range dogs {
+		if loc.Rig != "" {
+			t.Errorf("dog location should be town-level (Rig=\"\"), got Rig=%q", loc.Rig)
+		}
+		if loc.Dir == "" {
+			t.Errorf("dog location has empty Dir")
+		}
+		seen[filepath.Base(loc.Dir)] = true
+	}
+
+	for _, name := range []string{"alpha", "bravo"} {
+		if !seen[name] {
+			t.Errorf("expected dog %q in discovered locations, got %v", name, seen)
+		}
+	}
+	if seen[".tmp"] {
+		t.Error("hidden dog dir should be skipped")
+	}
+	if seen["some_repo"] {
+		t.Error("nested repo under a dog must not be treated as a dog")
+	}
+}
+
+// TestDiscoverRoleLocations_NoDogsDir verifies that the deacon/dogs/ directory
+// is optional. Workspaces without any dogs should still enumerate the rest of
+// the roles without error.
+func TestDiscoverRoleLocations_NoDogsDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
+	// No deacon/dogs/ subdir at all.
+
+	locations, err := DiscoverRoleLocations(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverRoleLocations failed: %v", err)
+	}
+
+	for _, loc := range locations {
+		if loc.Role == "dog" {
+			t.Errorf("did not expect a dog location when deacon/dogs is absent, got %+v", loc)
+		}
+	}
+}
+
 func TestDiscoverWorktrees(t *testing.T) {
 	tmpDir := t.TempDir()
 

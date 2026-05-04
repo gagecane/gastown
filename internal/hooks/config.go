@@ -498,14 +498,13 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 	return targets, nil
 }
 
-
 // RoleLocation represents a discovered role directory in the workspace,
 // independent of any specific agent. Used by callers that need to resolve
 // agent configuration for each location (e.g., syncing non-Claude agents).
 type RoleLocation struct {
 	Dir  string // Absolute path to the role's parent directory (e.g., .../rig/crew)
 	Rig  string // Rig name, or empty for town-level roles
-	Role string // Role name: crew, polecat, witness, refinery, mayor, deacon
+	Role string // Role name: crew, polecat, witness, refinery, mayor, deacon, dog
 }
 
 // DiscoverRoleLocations finds all role directories in a workspace.
@@ -519,6 +518,27 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 		dir := filepath.Join(townRoot, role)
 		if info, err := os.Stat(dir); err == nil && info.IsDir() {
 			locations = append(locations, RoleLocation{Dir: dir, Role: role})
+		}
+	}
+
+	// Dogs: town-level workers nested under deacon/dogs/. Each dog is a
+	// single-instance daemon whose directory IS the working directory —
+	// analogous to witness/refinery, but scoped to the town rather than a rig.
+	// Without this discovery, per-dog .kiro/agents/gastown.json (and other
+	// agent configs) drift indefinitely because gt hooks sync never reaches
+	// them, and InstallForRole only writes on first creation.
+	//
+	// Subdirectories under a dog (e.g., deacon/dogs/alpha/gastown_upstream/)
+	// are project worktrees for separate repos and receive their own agent
+	// configs via rig-level sync — we must NOT descend into them here.
+	dogsDir := filepath.Join(townRoot, "deacon", "dogs")
+	if entries, err := os.ReadDir(dogsDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			dogDir := filepath.Join(dogsDir, entry.Name())
+			locations = append(locations, RoleLocation{Dir: dogDir, Role: "dog"})
 		}
 	}
 

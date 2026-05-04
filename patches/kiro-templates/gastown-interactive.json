@@ -7,7 +7,12 @@
   "hooks": {
     "agentSpawn": [
       {
-        "command": "{{GT_BIN}} prime --hook"
+        "command": "{{GT_BIN}} prime --hook && {{GT_BIN}} mail check --inject"
+      }
+    ],
+    "userPromptSubmit": [
+      {
+        "command": "{{GT_BIN}} mail check --inject"
       }
     ],
     "stop": [
