@@ -97,6 +97,12 @@ directory.
 - If integration-target merging is enabled: use MR target when present, fallback `{{ .DefaultBranch }}`
 - If integration-target merging is disabled: always use `{{ .DefaultBranch }}`
 
+**Resolved placeholders are always local branch names** (e.g. `main`), not
+remote refs. Rebase commands explicitly prefix `origin/` when a remote ref is
+needed (e.g. `git rebase origin/<rebase-target>`). Never interpolate an
+`origin/` prefix onto `<merge-target>` — doing so produces a detached HEAD and
+breaks merge-push.
+
 **Example: Handling a Conflict**
 ```bash
 git checkout -b temp origin/polecat/rictus-12345
@@ -231,11 +237,17 @@ GATE: Cannot proceed to merge without fix OR bead filed
 **merge-push**: Merge to effective target and push immediately
 ```bash
 ## Resolve <merge-target> per Target Resolution Rule above.
-git checkout <merge-target>
-git merge --ff-only temp
-git push origin <merge-target>
-git branch -d temp
-git branch -d polecat/<worker>
+## Push temp directly to remote <merge-target> — no local checkout of
+## <merge-target> needed. This avoids worktree collisions when
+## <merge-target> (e.g. main) is checked out in polecat/dog worktrees
+## that share .repo.git. HEAD refers to temp (we're on it after rebase);
+## since temp was rebased on origin/<merge-target>, the push is a fast-
+## forward on the remote side.
+git push origin HEAD:<merge-target>
+## Detach from temp so we can delete it. HEAD stays at the merged commit.
+git checkout --detach HEAD
+git branch -D temp
+git branch -D polecat/<worker>
 ```
 
 **loop-check**: More branches? Return to process-branch.
@@ -320,7 +332,7 @@ gt mail send {{ .RigName }}/witness -s "MERGE_FAILED" \
 ### Git Operations
 - `git fetch origin` — Fetch all remote branches
 - `git rebase origin/<rebase-target>` — Rebase on resolved target (per Target Resolution Rule)
-- `git push origin <merge-target>` — Push merged changes to resolved target (per Target Resolution Rule)
+- `git push origin HEAD:<merge-target>` — Push rebased temp to resolved remote target (never check out `<merge-target>` locally — it may be held by a polecat worktree)
 
 **IMPORTANT**: Merge queue source of truth is `{{ cmd }} mq list {{ .RigName }}`, NOT git branches.
 

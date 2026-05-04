@@ -595,10 +595,20 @@ Determine `<merge-target>` using the **Target Resolution Rule** above.
 
 **If merge_strategy = "direct" (default):**
 
+Push temp directly to the remote `<merge-target>` without any local
+checkout of `<merge-target>`. Since temp was rebased on
+`origin/<merge-target>` in the process-branch step, the push is a
+fast-forward on the remote side.
+
+This avoids worktree collisions: `<merge-target>` (typically `main`) is
+usually checked out in one of the polecat/dog worktrees that share
+`.repo.git` with the refinery. `git checkout <merge-target>` from the
+refinery worktree would fail (or silently detach) in that case.
+
 ```bash
-git checkout <merge-target>
-git merge --ff-only temp
-git push origin <merge-target>
+# HEAD is on temp (we rebased onto origin/<merge-target> in process-branch).
+# Push temp's tip to remote <merge-target> — never touch a local <merge-target>.
+git push origin HEAD:<merge-target>
 ```
 
 **Step 1.5 (direct only): VERIFY PUSH SUCCEEDED (CRITICAL - PATCH-003)**
@@ -606,7 +616,8 @@ git push origin <merge-target>
 Push can fail silently (network, auth, hooks). IMMEDIATELY verify:
 ```bash
 git fetch origin
-LOCAL_SHA=$(git rev-parse <merge-target>)
+# HEAD is still on temp, which now equals the merged commit we just pushed.
+LOCAL_SHA=$(git rev-parse HEAD)
 REMOTE_SHA=$(git rev-parse origin/<merge-target>)
 echo "Local:  $LOCAL_SHA"
 echo "Remote: $REMOTE_SHA"
@@ -816,8 +827,15 @@ gt mail archive <merge-ready-message-id>
 The message ID was tracked when you processed inbox-check.
 
 **Step 5: Cleanup temp branch**
+
+HEAD is still on `temp` (we never checked out `<merge-target>`). Detach
+HEAD at the same commit so we can delete the temp branch, leaving the
+refinery worktree on a detached HEAD (which is fine — the next patrol
+cycle creates a fresh `temp` from `origin/<polecat-branch>`).
+
 ```bash
-git branch -d temp
+git checkout --detach HEAD
+git branch -D temp
 ```
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:

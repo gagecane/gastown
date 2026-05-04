@@ -208,11 +208,14 @@ func TestRenderRole_Refinery_DefaultBranch(t *testing.T) {
 	if !strings.Contains(output, "git rebase origin/<rebase-target>") {
 		t.Error("output missing placeholder rebase command")
 	}
-	if !strings.Contains(output, "git checkout <merge-target>") {
-		t.Error("output missing placeholder checkout command")
+	// merge-push pushes temp directly to remote <merge-target> via HEAD:ref
+	// rather than checking out <merge-target> locally (which would collide with
+	// polecat/dog worktrees that hold <merge-target>). See gu-okjc / gt-m6fnf.
+	if !strings.Contains(output, "git push origin HEAD:<merge-target>") {
+		t.Error("output missing placeholder merge-push command (HEAD:<merge-target>)")
 	}
-	if !strings.Contains(output, "git push origin <merge-target>") {
-		t.Error("output missing placeholder push command")
+	if strings.Contains(output, "git checkout <merge-target>") {
+		t.Error("output contains 'git checkout <merge-target>' — refinery must not check out the merge target locally (worktree collision). Use 'git push origin HEAD:<merge-target>' instead.")
 	}
 
 	// Verify it does NOT contain hardcoded "main" in git commands
@@ -225,6 +228,9 @@ func TestRenderRole_Refinery_DefaultBranch(t *testing.T) {
 	}
 	if strings.Contains(output, "git push origin main") {
 		t.Error("output still contains hardcoded 'git push origin main' - should use DefaultBranch")
+	}
+	if strings.Contains(output, "git push origin HEAD:main") {
+		t.Error("output still contains hardcoded 'git push origin HEAD:main' - should use DefaultBranch placeholder")
 	}
 }
 
