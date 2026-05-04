@@ -95,8 +95,12 @@ install: check-up-to-date build
 	@mkdir -p $(INSTALL_DIR)
 	@rm -f $(INSTALL_DIR)/$(BINARY)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
-	@# Nuke any stale go-install binaries that shadow the canonical location
-	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY); do \
+	@# Nuke any stale binaries that shadow the canonical location on PATH.
+	@# Covers go-install defaults and mise-managed Go installs (any version).
+	@# gu-wcxv: without the mise path, PATH-resolved `gt` could stay on the
+	@# old binary after install, defeating the rebuild.
+	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY) \
+	            $(HOME)/.local/share/mise/installs/go/*/bin/$(BINARY); do \
 		if [ -f "$$bad" ]; then \
 			echo "Removing stale $$bad (use make install, not go install)"; \
 			rm -f "$$bad"; \
@@ -126,8 +130,12 @@ safe-install: check-up-to-date check-forward-only build
 	@# Atomic-ish replace: copy to temp then move (move is atomic on same filesystem)
 	@cp $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY).new
 	@mv $(INSTALL_DIR)/$(BINARY).new $(INSTALL_DIR)/$(BINARY)
-	@# Nuke any stale go-install binaries that shadow the canonical location
-	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY); do \
+	@# Nuke any stale binaries that shadow the canonical location on PATH.
+	@# Covers go-install defaults and mise-managed Go installs (any version).
+	@# gu-wcxv: without the mise path, PATH-resolved `gt` could stay on the
+	@# old binary after install, defeating the rebuild.
+	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY) \
+	            $(HOME)/.local/share/mise/installs/go/*/bin/$(BINARY); do \
 		if [ -f "$$bad" ]; then \
 			echo "Removing stale $$bad (use make install, not go install)"; \
 			rm -f "$$bad"; \

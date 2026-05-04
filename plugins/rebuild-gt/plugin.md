@@ -1,7 +1,7 @@
 +++
 name = "rebuild-gt"
 description = "Rebuild stale gt binary from gastown source"
-version = 2
+version = 3
 
 [gate]
 type = "cooldown"
@@ -65,6 +65,18 @@ git branch --show-current  # Must be "main"
 
 If either check fails, skip the rebuild and record a wisp.
 
+## Sync Local Checkout Before Staleness Check
+
+`gt stale` compares the binary's embedded commit to the *local* HEAD of the
+source rig. If the local checkout is behind origin/main, stale incorrectly
+reports "fresh". Before calling `gt stale`, fetch origin and fast-forward
+main (only if the repo is clean, on main, and the local tip is an ancestor
+of origin/main). If local main has diverged from origin/main, skip the
+rebuild and record a wisp — manual attention required.
+
+This was added after gu-wcxv: the plugin missed gu-j1f7 / gu-pcm5 / gu-j98v
+for hours because the local checkout lagged origin/main.
+
 ## Action
 
 Rebuild from source (the mayor/rig directory is the canonical source). The
@@ -78,6 +90,13 @@ cd ~/gt/gastown_upstream/mayor/rig && make build && make safe-install
 **IMPORTANT**: Use `make safe-install` (not `make install`) to avoid restarting
 the daemon while sessions are active. safe-install replaces the binary but does
 NOT restart the daemon — sessions will pick up the new binary on their next cycle.
+
+**Daemon restart**: The running daemon process continues executing its old
+in-memory binary until restarted. On successful install, the plugin files a
+bead with label `type:daemon-restart-pending` so mayor (or a dedicated
+daemon-restart-dog plugin) can coordinate a safe restart. Without this,
+daemon-resident logic (e.g. main_branch_test) keeps running the old code
+even after the on-disk binary is upgraded. Added for gu-wcxv.
 
 ## Record Result
 

@@ -32,6 +32,47 @@ log() { echo "[rebuild-gt] $*"; }
 # never emit a malformed label if rig discovery failed.
 RIG_LABEL="rig:${RIG_NAME:-unknown}"
 
+# --- Sync local checkout with origin/main -----------------------------------
+#
+# `gt stale` compares the binary's embedded commit to the *local* HEAD of the
+# source rig. If the local checkout is behind origin/main, stale reports
+# "fresh" even when upstream has merged fixes (gu-wcxv). Fetch origin and
+# fast-forward main BEFORE calling gt stale so the staleness check sees the
+# real picture. Refuses dirty trees and non-ff-merge to preserve existing
+# safety guarantees.
+if [ -n "$RIG_ROOT" ] && [ -d "$RIG_ROOT" ]; then
+  PREFLIGHT_DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null || echo "DIRTY_CHECK_FAILED")
+  if [ -z "$PREFLIGHT_DIRTY" ]; then
+    PREFLIGHT_BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null || echo "")
+    if [ "$PREFLIGHT_BRANCH" = "main" ]; then
+      if git -C "$RIG_ROOT" fetch origin main --quiet 2>/dev/null; then
+        LOCAL_SHA=$(git -C "$RIG_ROOT" rev-parse main 2>/dev/null || echo "")
+        REMOTE_SHA=$(git -C "$RIG_ROOT" rev-parse origin/main 2>/dev/null || echo "")
+        if [ -n "$LOCAL_SHA" ] && [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+          if git -C "$RIG_ROOT" merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA" 2>/dev/null; then
+            if git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 2>/dev/null; then
+              log "Pulled origin/main: ${LOCAL_SHA:0:8} -> ${REMOTE_SHA:0:8}"
+            else
+              log "ff-merge of origin/main failed (will let stale check proceed against local HEAD)"
+            fi
+          else
+            log "Local main diverged from origin/main — not fast-forwardable. Skipping pull."
+            bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
+              -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
+              -d "Skipped: local main diverged from origin/main (not fast-forwardable). Needs manual attention." \
+              --silent 2>/dev/null || true
+            exit 0
+          fi
+        fi
+      else
+        log "git fetch origin main failed (network?); proceeding with local state"
+      fi
+    fi
+    # If not on main, the later pre-flight check will skip with a proper wisp.
+  fi
+  # If dirty, the later pre-flight check will skip with a proper wisp.
+fi
+
 # --- Detection ---------------------------------------------------------------
 
 log "Checking binary staleness..."
@@ -101,6 +142,21 @@ if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
   log "Rebuilt: $OLD_VER -> $NEW_VER"
   bd create "rebuild-gt: $OLD_VER -> $NEW_VER" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:success" \
+    --silent 2>/dev/null || true
+
+  # The on-disk binary is new, but the running daemon is still executing its
+  # old in-memory image. main_branch_test (and other daemon-resident logic)
+  # will keep running the old code until the daemon restarts. File a bead
+  # asking mayor to restart. (gu-wcxv Part B)
+  DAEMON_PID_FILE="${GT_TOWN_ROOT:-$HOME/gt}/daemon/daemon.pid"
+  DAEMON_PID="unknown"
+  if [ -f "$DAEMON_PID_FILE" ]; then
+    DAEMON_PID=$(head -1 "$DAEMON_PID_FILE" 2>/dev/null || echo "unknown")
+  fi
+  bd create "daemon-restart-pending: gt binary upgraded to $NEW_VER" \
+    -t chore -p 2 \
+    -l "type:daemon-restart-pending,plugin:rebuild-gt,${RIG_LABEL}" \
+    -d "rebuild-gt upgraded the on-disk binary from $OLD_VER to $NEW_VER. The running daemon process (pid $DAEMON_PID) is still on the old binary. Operator action: gt daemon stop && gt daemon start" \
     --silent 2>/dev/null || true
 else
   ERROR="make build/safe-install failed"
