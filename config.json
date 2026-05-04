@@ -14,6 +14,23 @@
     "build_command": "go build ./...",
     "test_command": "go test -short -race -timeout=10m -skip=TestInitBeadsSetsIssuePrefix ./...",
     "lint_command": "go vet ./...",
-    "judgment_enabled": true
+    "judgment_enabled": true,
+    "gates": {
+      "build": {
+        "cmd": "go build ./...",
+        "phase": "post-squash"
+      },
+      "test": {
+        "cmd": "go test ./...",
+        "phase": "post-squash",
+        "timeout": "10m"
+      },
+      "vet": {
+        "cmd": "go vet ./..."
+      },
+      "lint": {
+        "cmd": "golangci-lint run --timeout=5m"
+      }
+    }
   }
 }
