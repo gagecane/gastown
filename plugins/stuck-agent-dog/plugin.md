@@ -168,8 +168,32 @@ while IFS='|' read -r RIG PREFIX; do
 done <<< "$RIG_PREFIX_MAP"
 
 echo ""
-echo "Health summary: ${#CRASHED[@]} crashed, ${#STUCK[@]} stuck, $HEALTHY healthy"
+echo "Health summary: ${#CRASHED[@]} crashed, ${#STUCK[@]} stuck, ${#STALLED[@]} stalled, ${#IDENTITY_HOOKED[@]} identity-hooked, $HEALTHY healthy"
 ```
+
+**Detection cases** (see run.sh for the full logic):
+
+| Case | Session | Agent process | Heartbeat | Hook |
+|------|---------|---------------|-----------|------|
+| CRASHED | dead | — | — | set |
+| ZOMBIE (STUCK[]) | alive | dead | — | set |
+| STALLED-ALIVE | alive | alive | stale (>10m, state≠exiting/idle/stuck) | set |
+| IDENTITY-HOOKED | alive | alive | — | identity bead (`*-refinery`, `*-witness`, `*-mayor`, `*-deacon`) |
+| HEALTHY | alive | alive | fresh | any |
+
+The **stalled-alive** case (gu-bfwa) is the subtle one: both tmux session and
+pane process are alive, but the agent has stopped making progress. The
+heartbeat file (`.runtime/heartbeats/<session>.json`, touched by every `gt`
+command) goes stale when the agent is sitting idle at its prompt. A hooked
+polecat with a stale heartbeat and state="working" is sitting on work it
+isn't making progress on — kill the session and let the witness respawn it
+with a fresh context via `gt prime`.
+
+`STUCK_STALLED_THRESHOLD` (env var, default 600s/10m) tunes the staleness
+threshold. It is deliberately more lenient than the 3-min threshold used
+inside the gt daemon (`internal/polecat/heartbeat.go`) because this plugin
+runs on a 5-min cooldown and we want at least two cycles of grace for
+legitimate long-running operations (builds, tests, LLM calls).
 
 ## Step 3: Check deacon health
 
@@ -214,10 +238,11 @@ fi
 **This is the key difference from daemon blind-kill.** For each crashed or stuck
 agent, inspect the tmux pane context to determine if restart is appropriate.
 
-**SCOPE REMINDER: You may ONLY act on entries in the `CRASHED[]` and `STUCK[]`
-arrays populated by Steps 2-3. These arrays contain ONLY polecats and deacon.
-Do NOT inspect, evaluate, or act on ANY other sessions (crew, mayor, witness,
-refinery). If you find yourself considering a session not in these arrays, STOP.**
+**SCOPE REMINDER: You may ONLY act on entries in the `CRASHED[]`, `STUCK[]`,
+`STALLED[]`, and `IDENTITY_HOOKED[]` arrays populated by Steps 2-3. These arrays
+contain ONLY polecats and deacon. Do NOT inspect, evaluate, or act on ANY other
+sessions (crew, mayor, witness, refinery). If you find yourself considering a
+session not in these arrays, STOP.**
 
 **You (the dog agent) must evaluate each case:**
 
@@ -229,6 +254,19 @@ For CRASHED agents (session dead, work on hook):
 For STUCK agents (session alive, agent dead):
 - Kill the zombie session, then restart
 - Exception: if pane output shows the agent is in a long-running build/test
+
+For STALLED-ALIVE agents (session + process alive, heartbeat stale, hook set):
+- Agent is sitting idle at its prompt with hooked work. GUPP violation.
+- Kill the session so the witness respawn can reload context via `gt prime`.
+- Hook and worktree are preserved — the new session picks up where the old left off.
+- Exception: if `heartbeat.state` is "exiting", "idle", or "stuck", the agent
+  has self-reported a benign state — do not flag.
+
+For IDENTITY-HOOKED agents (hook bead is `*-refinery`/`*-witness`/`*-mayor`/`*-deacon`):
+- Auto-dispatch's filter should have rejected this hook. A leak indicates a
+  bug elsewhere (auto-dispatch filter gap, manual hook error, sling-context leak).
+- Escalate rather than restart — restarting will just re-load the same bad hook.
+- Mayor/human must unhook manually and fix the upstream dispatch path.
 
 For DEACON stuck (stale heartbeat):
 - Capture pane output: `tmux capture-pane -t hq-deacon -p -S -20`
