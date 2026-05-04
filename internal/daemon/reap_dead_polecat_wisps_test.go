@@ -400,3 +400,56 @@ func TestReapDeadPolecatWisps_SkipsMalformedAssignee(t *testing.T) {
 		t.Errorf("unexpected update for malformed/wrong-rig bead: %s", updates[0])
 	}
 }
+
+// TestRigBDWorkingDir_PrefersMayorRig verifies that when <rig>/mayor/rig/.beads/
+// exists (the two-level Gas Town layout), the helper returns that path so bd
+// finds the real bead DB directly instead of relying on the .beads/redirect
+// file at the rig root.
+func TestRigBDWorkingDir_PrefersMayorRig(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "myrig"
+	mayorRigBeads := filepath.Join(townRoot, rigName, "mayor", "rig", ".beads")
+	if err := os.MkdirAll(mayorRigBeads, 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got := rigBDWorkingDir(townRoot, rigName)
+	want := filepath.Join(townRoot, rigName, "mayor", "rig")
+	if got != want {
+		t.Errorf("rigBDWorkingDir(%q, %q) = %q, want %q", townRoot, rigName, got, want)
+	}
+}
+
+// TestRigBDWorkingDir_FallsBackToRigRoot verifies that when the rig doesn't
+// use the mayor/rig layout (e.g. gstack_kiro, which keeps .beads/ at the rig
+// root), the helper falls back to the rig root. This preserves correct behavior
+// for rigs added before the two-level convention.
+func TestRigBDWorkingDir_FallsBackToRigRoot(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "flatrig"
+	// Only a direct .beads/ at the rig root — no mayor/rig/.beads/.
+	if err := os.MkdirAll(filepath.Join(townRoot, rigName, ".beads"), 0755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got := rigBDWorkingDir(townRoot, rigName)
+	want := filepath.Join(townRoot, rigName)
+	if got != want {
+		t.Errorf("rigBDWorkingDir(%q, %q) = %q, want %q", townRoot, rigName, got, want)
+	}
+}
+
+// TestRigBDWorkingDir_NoBeadsAnywhere verifies the helper still returns the
+// rig root (not a crash, not an empty string) when nothing is set up yet.
+// Callers may still invoke bd and get a legitimate "no beads database found"
+// error, but that's a real problem with the rig, not a daemon bug.
+func TestRigBDWorkingDir_NoBeadsAnywhere(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "emptyrig"
+
+	got := rigBDWorkingDir(townRoot, rigName)
+	want := filepath.Join(townRoot, rigName)
+	if got != want {
+		t.Errorf("rigBDWorkingDir(%q, %q) = %q, want %q", townRoot, rigName, got, want)
+	}
+}

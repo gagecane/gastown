@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -2818,6 +2819,24 @@ Restart deferred to stuck-agent-dog plugin for context-aware recovery.`,
 	}
 }
 
+// rigBDWorkingDir returns the directory to run `bd` commands in for a given
+// rig, so bd auto-discovers the rig's .beads/ via cwd. Most rigs follow the
+// `<rig>/mayor/rig/.beads/` convention (matching routes.jsonl); a few rigs
+// (e.g. gstack_kiro) keep `.beads/` at the rig root. We prefer the explicit
+// `mayor/rig` path when it exists and fall back to the rig root otherwise.
+//
+// Passing an explicit path here instead of relying on the `.beads/redirect`
+// file at the rig root is deliberate: the redirect is an implementation detail
+// of the two-level layout, and the daemon should match the routes.jsonl
+// convention so diagnostics stay comprehensible. See gu-vg97.
+func rigBDWorkingDir(townRoot, rigName string) string {
+	mayorRigDir := filepath.Join(townRoot, rigName, "mayor", "rig")
+	if _, err := os.Stat(filepath.Join(mayorRigDir, ".beads")); err == nil {
+		return mayorRigDir
+	}
+	return filepath.Join(townRoot, rigName)
+}
+
 // reapDeadPolecatWisps resets in_progress/hooked beads assigned to polecats
 // whose tmux sessions have been dead (with a stale heartbeat) for longer than
 // the configured timeout. This complements checkPolecatSessionHealth, which
@@ -2875,19 +2894,26 @@ func (d *Daemon) reapRigDeadPolecatWisps(rigName string, timeout time.Duration) 
 
 	// List candidate beads in both hooked and in_progress states. The sling
 	// flow leaves slung work as hooked; polecats flip to in_progress on claim.
-	// Run from the rig directory so bd auto-discovers the rig's .beads/
+	// Run from the rig's bead directory so bd auto-discovers the rig's .beads/
 	// (bd list has no --rig flag; passing one was a silent bug that made this
-	// reaper a no-op for years).
-	rigDir := filepath.Join(d.config.TownRoot, rigName)
+	// reaper a no-op for years — see 086dbc96).
+	rigDir := rigBDWorkingDir(d.config.TownRoot, rigName)
+	var stderrBuf bytes.Buffer
 	var candidates []beadInfo
 	for _, status := range []string{"hooked", "in_progress"} {
 		cmd := exec.Command(d.bdPath, "list", "--status="+status, "--json", "--limit=0") //nolint:gosec // G204: args are constructed internally
 		setSysProcAttr(cmd)
 		cmd.Dir = rigDir
 		cmd.Env = os.Environ()
+		stderrBuf.Reset()
+		cmd.Stderr = &stderrBuf
 		output, err := cmd.Output()
 		if err != nil {
-			d.logger.Printf("reap-dead-polecat-wisps: list %s for %s failed: %v", status, rigName, err)
+			// Capture stderr so diagnosing future failures doesn't require a
+			// manual repro. The no-stderr regression (gu-vg97) spent days
+			// invisible because errors only surfaced as `exit status 1`.
+			d.logger.Printf("reap-dead-polecat-wisps: list %s for %s failed: %v (cwd=%s, stderr=%q)",
+				status, rigName, err, rigDir, strings.TrimSpace(stderrBuf.String()))
 			continue
 		}
 		if len(output) == 0 {
@@ -2974,16 +3000,16 @@ func (d *Daemon) maybeReapDeadPolecatBead(rigName, polecatName, beadID, status, 
 	//   - The daemon already has authority to run bd update (see updateAgentHookBead).
 	//   - Keeping the reset local avoids extra mail traffic and permanent Dolt
 	//     commits on every heartbeat cycle.
-	// Same as the list call above: bd has no --rig flag, so run from the rig
-	// directory and let bd auto-discover .beads/ instead of passing the bogus
-	// argument (which would make bd print help and exit 1).
+	// Same as the list call above: bd has no --rig flag, so run from the rig's
+	// bead directory and let bd auto-discover .beads/ instead of passing a
+	// bogus argument (which would make bd print help and exit 1).
 	cmd := exec.Command(d.bdPath, "update", beadID, "--status=open", "--assignee=") //nolint:gosec // G204: args are constructed internally
 	setSysProcAttr(cmd)
-	cmd.Dir = filepath.Join(d.config.TownRoot, rigName)
+	cmd.Dir = rigBDWorkingDir(d.config.TownRoot, rigName)
 	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		d.logger.Printf("reap-dead-polecat-wisps: failed to reset %s (rig=%s polecat=%s): %v: %s",
-			beadID, rigName, polecatName, err, strings.TrimSpace(string(output)))
+		d.logger.Printf("reap-dead-polecat-wisps: failed to reset %s (rig=%s polecat=%s cwd=%s): %v: %s",
+			beadID, rigName, polecatName, cmd.Dir, err, strings.TrimSpace(string(output)))
 		return
 	}
 
