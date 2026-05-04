@@ -203,6 +203,29 @@ func IsEpicLikeTitle(title string) bool {
 	return epicLikeTitleRe.MatchString(title)
 }
 
+// EpicPhaseLabel is the label that marks a bead as a phase-style epic even
+// when issue_type disagrees. Introduced because ta-823 ("EPIC: Triage Queue")
+// was hooked to polecats despite the title guard — the bug report documents
+// `phase:epic` as a stable signal that should also gate dispatch, since a
+// parent bead with this label has child beads tracking the actual work and
+// cannot itself be "done" by a polecat (see gu-fs88 / gt-sbdhk).
+const EpicPhaseLabel = "phase:epic"
+
+// HasEpicPhaseLabel reports whether the labels slice contains the phase:epic
+// marker. This is the second leg of the epic-container detection added in
+// gu-fs88: the IsEpicLikeTitle check covers "EPIC:" / "Epic:" prefixes; this
+// helper covers beads that were typed as task/bug but flagged as phase epics
+// via label (the label is carried forward across edits that might rewrite
+// the title).
+func HasEpicPhaseLabel(labels []string) bool {
+	for _, l := range labels {
+		if l == EpicPhaseLabel {
+			return true
+		}
+	}
+	return false
+}
+
 // Issue represents a beads issue.
 type Issue struct {
 	ID          string   `json:"id"`

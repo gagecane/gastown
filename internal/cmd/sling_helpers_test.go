@@ -390,6 +390,121 @@ func TestIsEpicLikeBeadInfo(t *testing.T) {
 	}
 }
 
+// TestIsEpicLikeBeadInfo_PhaseEpicLabel verifies the gu-fs88 extension:
+// beads carrying the "phase:epic" label are epic containers even when the
+// title doesn't start with "EPIC:" and the issue_type is task/bug. ta-823
+// ("EPIC: Triage Queue") hit this path because it carried both signals and
+// the label is the one that survives title rewrites.
+func TestIsEpicLikeBeadInfo_PhaseEpicLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beadInfo
+		want bool
+	}{
+		// Positive: phase:epic label + slingable type.
+		{"task with phase:epic label", &beadInfo{
+			Title:     "Triage Queue",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"phase:epic"},
+		}, true},
+		{"bug with phase:epic label", &beadInfo{
+			Title:     "Bug triage backlog",
+			IssueType: "bug",
+			Status:    "open",
+			Labels:    []string{"phase:epic"},
+		}, true},
+		{"task with phase:epic among other labels", &beadInfo{
+			Title:     "ta-823 mirror",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"gt:coord", "phase:epic", "needs-triage"},
+		}, true},
+		// ta-823 shape: both signals present.
+		{"ta-823 shape (EPIC: title + phase:epic label)", &beadInfo{
+			Title:     "EPIC: Triage Queue",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"phase:epic"},
+		}, true},
+
+		// Negative: real epics short-circuit ahead of this helper's purpose.
+		{"real epic with phase:epic label", &beadInfo{
+			Title:     "Cleanup",
+			IssueType: "epic",
+			Status:    "open",
+			Labels:    []string{"phase:epic"},
+		}, false},
+
+		// Negative: similar-looking labels that are not the exact marker.
+		{"similar label phase:prep", &beadInfo{
+			Title:     "Prep work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"phase:prep"},
+		}, false},
+		{"label contains phase:epic substring but isn't exact", &beadInfo{
+			Title:     "Work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"phase:epics"},
+		}, false},
+		{"empty labels + non-epic title", &beadInfo{
+			Title:     "Regular work",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isEpicLikeBeadInfo(tt.info); got != tt.want {
+				t.Errorf("isEpicLikeBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsParentOfOpenChildren verifies the gu-fs88 dispatch gate for beads
+// that parent unclosed children. The helper is the dispatch-time mirror of
+// patrol_helpers.checkHasOpenChildren but routes through an injectable
+// variable so unit tests do not need a real bd subprocess.
+//
+// Key contract: errors from hasOpenChildrenFn must NOT block dispatch —
+// a transient bd failure permanently stalling the fleet is worse than
+// occasionally letting an epic through. The error is logged and the helper
+// returns false.
+func TestIsParentOfOpenChildren(t *testing.T) {
+	tests := []struct {
+		name    string
+		stubOut bool
+		stubErr error
+		want    bool
+	}{
+		{"no children -> not a parent", false, nil, false},
+		{"has open children -> parent container", true, nil, true},
+		{"bd error -> treat as no open children (don't stall dispatch)", false, fmt.Errorf("bd boom"), false},
+		{"bd error with true flag still returns false (error trumps)", true, fmt.Errorf("bd boom"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prev := hasOpenChildrenFn
+			hasOpenChildrenFn = func(id string) (bool, error) {
+				if id != "gt-test" {
+					t.Fatalf("unexpected bead id: %q", id)
+				}
+				return tt.stubOut, tt.stubErr
+			}
+			t.Cleanup(func() { hasOpenChildrenFn = prev })
+
+			if got := isParentOfOpenChildren("gt-test"); got != tt.want {
+				t.Errorf("isParentOfOpenChildren() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsSlingContextBeadInfo verifies the gu-hfr3 guard that prevents a
 // sling-context wrapper from being re-scheduled (which would nest wrappers).
 // Detection is label-based (gt:sling-context). Other label shapes and

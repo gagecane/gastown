@@ -249,6 +249,51 @@ func TestFilterIdentityBeads(t *testing.T) {
 			input:    &beads.Issue{ID: "gu-work2", Title: "Add witness support to feature", Type: "task"},
 			filtered: false,
 		},
+
+		// gu-smr1: EPIC-titled task is filtered (data-hygiene guard).
+		{
+			name:     "EPIC: task title filtered",
+			input:    &beads.Issue{ID: "gu-ta823", Title: "EPIC: Triage Queue", Type: "task"},
+			filtered: true,
+		},
+		{
+			name:     "Epic: task title filtered",
+			input:    &beads.Issue{ID: "gu-ta824", Title: "Epic: cleanup pass", Type: "task"},
+			filtered: true,
+		},
+
+		// gu-fs88: phase:epic label marks a container even without EPIC: title.
+		{
+			name:     "phase:epic label on task filtered",
+			input:    &beads.Issue{ID: "gu-ta825", Title: "Triage Queue", Type: "task", Labels: []string{"phase:epic"}},
+			filtered: true,
+		},
+		{
+			name:     "phase:epic label on bug filtered",
+			input:    &beads.Issue{ID: "gu-ta826", Title: "Bug backlog", Type: "bug", Labels: []string{"phase:epic"}},
+			filtered: true,
+		},
+		{
+			name:     "phase:epic label with other labels filtered",
+			input:    &beads.Issue{ID: "gu-ta827", Title: "Multi-phase work", Type: "task", Labels: []string{"gt:coord", "phase:epic"}},
+			filtered: true,
+		},
+		// Real epics (type=epic) are already filtered by bd ready upstream,
+		// but defense-in-depth: phase:epic on a real epic still falls through
+		// to the identity filter's "issue.Type != epic" guard and stays
+		// (upstream filter removes it first). This test just documents that
+		// behaviour.
+		{
+			name:     "phase:epic on real epic passes this filter (caught upstream)",
+			input:    &beads.Issue{ID: "gu-real-epic", Title: "Real epic", Type: "epic", Labels: []string{"phase:epic"}},
+			filtered: false,
+		},
+		// Near-miss label must not filter.
+		{
+			name:     "phase:epics (plural) does NOT filter",
+			input:    &beads.Issue{ID: "gu-plural", Title: "Normal work", Type: "task", Labels: []string{"phase:epics"}},
+			filtered: false,
+		},
 	}
 
 	for _, tt := range tests {

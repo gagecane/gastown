@@ -157,10 +157,29 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	// Epic-like title guard (gu-smr1). Batch sling and the deferred scheduler
 	// funnel through executeSling; without this check, an "EPIC: ..." bead
 	// with issue_type=task still reaches a polecat and wastes a slot.
+	//
+	// gu-fs88: also rejects beads with the phase:epic label. ta-823 carried
+	// both signals and was still being hooked despite the title check; the
+	// label is a stable secondary signal that survives title rewrites.
 	if isEpicLikeBeadInfo(info) {
-		result.ErrMsg = "epic-like title"
-		return result, fmt.Errorf("bead %s has epic-like title %q but issue_type=%q — epics are containers, not dispatchable work.\nFix the data with: bd update %s --type=epic (or rename the title)",
-			params.BeadID, info.Title, info.IssueType, params.BeadID)
+		result.ErrMsg = "epic-like"
+		return result, fmt.Errorf("bead %s is an epic container: title=%q, issue_type=%q, labels=%v — epics are not dispatchable work.\nFix the data with: bd update %s --type=epic (or rename the title / remove the phase:epic label)",
+			params.BeadID, info.Title, info.IssueType, info.Labels, params.BeadID)
+	}
+
+	// Open-children guard (gu-fs88). A bead that has any non-closed child
+	// is a container for work tracked by its children, not a work item
+	// itself. Hooking such a bead to a polecat is a known failure loop:
+	// the polecat either falsely closes the parent (implying children are
+	// done) or leaves the hook stuck, causing witness to recycle the
+	// session. Either way, wasted slots.
+	//
+	// Runs after the identity / epic guards so the common rejects
+	// short-circuit before we pay the extra `bd children` subprocess.
+	if isParentOfOpenChildren(params.BeadID) {
+		result.ErrMsg = "parent of open children"
+		return result, fmt.Errorf("bead %s has open children and is a container, not dispatchable work: %q — close or reparent the children first (see `bd show %s --children`)",
+			params.BeadID, info.Title, params.BeadID)
 	}
 
 	// Sling-context wrapper guard (gu-6dx7, follow-up to gu-hfr3). A bead

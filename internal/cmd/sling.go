@@ -617,9 +617,28 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// the type filter said "task". Polecats spawned, recognized an epic,
 	// and wasted a slot. Reject these the same way we reject true epics.
 	// Not bypassed by --force — fix the data (bd update --type=epic) first.
+	//
+	// gu-fs88 extends this to also reject beads carrying the phase:epic
+	// label (ta-823 carried both signals; the label is the stable one).
 	if isEpicLikeBeadInfo(info) {
-		return fmt.Errorf("refusing to sling bead %s: title %q begins with \"EPIC:\" but issue_type=%q — epics are containers, not dispatchable work.\nFix the data with: bd update %s --type=epic (or rename the title)",
-			beadID, info.Title, info.IssueType, beadID)
+		return fmt.Errorf("refusing to sling bead %s: %q is an epic container (title %q, issue_type=%q, labels=%v) — epics are not dispatchable work.\nFix the data with: bd update %s --type=epic (or rename the title / remove the phase:epic label)",
+			beadID, info.Title, info.Title, info.IssueType, info.Labels, beadID)
+	}
+
+	// Open-children guard (gu-fs88). A bead that is the parent of any
+	// non-closed child is a container, not a work item — the children
+	// track the actual work. Hooking such a bead to a polecat leaves the
+	// polecat unable to complete: closing the parent falsely marks all
+	// phases done; leaving it hooked causes witness to recycle the
+	// session and re-dispatch it, wasting slots indefinitely.
+	//
+	// This runs after the epic-title/label guards so the cheap checks
+	// short-circuit first. hasOpenChildrenFn is injectable so tests don't
+	// need a real bd subprocess. Not bypassed by --force — if you really
+	// want to dispatch a parent bead, close its children first.
+	if isParentOfOpenChildren(beadID) {
+		return fmt.Errorf("refusing to sling bead %s: %q has open children — it is a container for work tracked by its children, not a work item itself.\nClose or reparent the children before slinging this bead (see `bd show %s --children`)",
+			beadID, info.Title, beadID)
 	}
 
 	// Sling-context wrapper guard (gu-6dx7, follow-up to gu-hfr3). Beads

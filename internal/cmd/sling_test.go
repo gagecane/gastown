@@ -17,6 +17,19 @@ import (
 func writeBDStub(t *testing.T, binDir string, unixScript string, windowsScript string) string {
 	t.Helper()
 
+	// Tests that install a bd stub typically want to pin the bead's own
+	// bd-show shape, not wire up a realistic children response. The
+	// open-children dispatch guard (gu-fs88) calls `bd children` and
+	// would otherwise see the same bead echo and interpret it as a child,
+	// failing unrelated tests (e.g. deferred-bead rejection). Default the
+	// injected helper to "no open children" so existing tests keep
+	// asserting what they meant to assert. Tests that specifically
+	// exercise the open-children guard override hasOpenChildrenFn
+	// themselves.
+	prev := hasOpenChildrenFn
+	hasOpenChildrenFn = func(string) (bool, error) { return false, nil }
+	t.Cleanup(func() { hasOpenChildrenFn = prev })
+
 	var path string
 	if runtime.GOOS == "windows" {
 		path = filepath.Join(binDir, "bd.cmd")

@@ -200,6 +200,12 @@ func isIdentityBeadInfo(info *beadInfo) bool {
 // spawns, sees an epic, and wastes a slot. Legitimate epics (type=epic) are
 // rejected earlier by detectSchedulerIDType; this helper covers the data-
 // hygiene gap between title and type.
+//
+// gu-fs88 extension: also treats the phase:epic label as an epic marker.
+// ta-823 carried that label and was hooked to polecats even though the
+// title started with "EPIC:" — the label is a belt-and-suspenders signal
+// that stays attached across title edits and catches phase-style epics
+// that didn't adopt the "EPIC:" title convention.
 func isEpicLikeBeadInfo(info *beadInfo) bool {
 	if info == nil {
 		return false
@@ -209,7 +215,92 @@ func isEpicLikeBeadInfo(info *beadInfo) bool {
 	if info.IssueType == "epic" {
 		return false
 	}
-	return beads.IsEpicLikeTitle(info.Title)
+	if beads.IsEpicLikeTitle(info.Title) {
+		return true
+	}
+	return beads.HasEpicPhaseLabel(info.Labels)
+}
+
+// hasOpenChildrenFn queries whether a parent bead has any open (non-closed)
+// children. Injected via variable so unit tests can stub it without running
+// a real `bd` subprocess. Returns (hasOpen, err) — on error, callers should
+// treat the bead as NOT having open children (err.g. ignore) so a transient
+// CLI failure does not strand work indefinitely in the dispatcher. The caller
+// is expected to log the error for observability.
+var hasOpenChildrenFn = hasOpenChildrenViaCLI
+
+// parentChildBead is the minimal shape parsed from `bd children --json`.
+// Separate from close.go's childBead to keep sling_helpers self-contained
+// and to avoid a dependency inversion with the close command.
+type parentChildBead struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// hasOpenChildrenViaCLI calls `bd children <id> --json` and reports whether
+// any child is in a non-closed status. This is the dispatch-time mirror of
+// patrol_helpers.checkHasOpenChildren, but uses the CLI (like the rest of
+// sling_helpers) so it can route across prefixes without taking a *beads.Beads.
+//
+// gu-fs88: epics with open children must never be hooked as polecat work,
+// regardless of whether their title/label signals epic-ness. A parent whose
+// children track the real work cannot itself be "done" — the polecat would
+// either close the epic (falsely implying children are complete) or give up
+// (leaving the hook stuck, causing witness to recycle the session, repeat).
+//
+// Empty children list returns (false, nil) — leaf beads are slingable. A
+// genuine transient error (bd failure, parse failure) returns (false, err);
+// callers must log but not block dispatch on it, because the alternative is
+// permanently stuck work when the CLI flakes.
+func hasOpenChildrenViaCLI(beadID string) (bool, error) {
+	out, err := BdCmd("children", beadID, "--json", "--allow-stale").
+		Dir(resolveBeadDir(beadID)).
+		StripBeadsDir().
+		Stderr(io.Discard).
+		Output()
+	if err != nil {
+		return false, fmt.Errorf("bd children %s: %w", beadID, err)
+	}
+	if len(out) == 0 {
+		return false, nil
+	}
+	var children []parentChildBead
+	if err := json.Unmarshal(out, &children); err != nil {
+		return false, fmt.Errorf("parse bd children %s: %w", beadID, err)
+	}
+	for _, c := range children {
+		if c.Status != "closed" && c.Status != "tombstone" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// isParentOfOpenChildren reports whether the bead has any open (non-closed)
+// children. This is a pure dispatch gate — a container-style bead that was
+// never flagged as an epic (no "EPIC:" title, no phase:epic label, no
+// type=epic) but still has open children tracking the actual work must not
+// be hooked to a polecat. See gu-fs88.
+//
+// Performance: this runs AFTER the cheap identity/epic-title/label guards,
+// so the hot path (identity beads, explicit epics) short-circuits before
+// paying the extra subprocess. The cost is one `bd children` call per bead
+// that survived the earlier filters — acceptable for the ~10s dispatch
+// cadence, and dispatch already runs one `bd show` per bead.
+//
+// Errors from hasOpenChildrenFn are logged but treated as "no open children"
+// so a transient CLI hiccup does not strand every sling. The identity /
+// epic-title / label guards remain the primary defense; this is the tail
+// catch for beads that have none of those markers.
+func isParentOfOpenChildren(beadID string) bool {
+	hasOpen, err := hasOpenChildrenFn(beadID)
+	if err != nil {
+		// Log but do not block dispatch — better to occasionally let an
+		// epic through than to permanently stall the fleet on bd flakes.
+		fmt.Fprintf(os.Stderr, "warning: could not check open children for %s: %v\n", beadID, err)
+		return false
+	}
+	return hasOpen
 }
 
 // isSlingContextBeadInfo reports whether the bead is itself a sling context

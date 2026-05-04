@@ -267,6 +267,36 @@ func TestIsEpicLikeTitle(t *testing.T) {
 	}
 }
 
+// TestHasEpicPhaseLabel verifies the gu-fs88 dispatch signal: a bead carrying
+// the phase:epic label is an epic container regardless of its title or type.
+// The check must be an exact match — substrings like "phase:epics" or
+// "phase:epic-prep" are different labels and must not trigger.
+func TestHasEpicPhaseLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"nil labels", nil, false},
+		{"empty labels", []string{}, false},
+		{"only phase:epic", []string{"phase:epic"}, true},
+		{"phase:epic among others", []string{"gt:coord", "phase:epic", "needs-review"}, true},
+		{"similar but not exact — phase:epics", []string{"phase:epics"}, false},
+		{"similar but not exact — phase:epic-prep", []string{"phase:epic-prep"}, false},
+		{"prefix-only match rejected — epic", []string{"epic"}, false},
+		{"unrelated labels", []string{"gt:agent", "gt:sling-context"}, false},
+		{"case-sensitive — Phase:Epic rejected", []string{"Phase:Epic"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasEpicPhaseLabel(tt.labels); got != tt.want {
+				t.Errorf("HasEpicPhaseLabel(%v) = %v, want %v", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 	bdAllowStaleMu.Lock()
 	prevPath := bdAllowStalePath

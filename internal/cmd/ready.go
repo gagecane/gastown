@@ -472,6 +472,17 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
+		// Filter beads carrying the phase:epic label (gu-fs88). Dog
+		// dispatcher kept hooking ta-823 ("EPIC: Triage Queue") to polecats
+		// even though the title guard above should have caught it — the
+		// label provides a second, type-independent signal that also
+		// survives title rewrites. Real epics (type=epic) are already
+		// filtered by bd ready's type filter; this catches the common
+		// data-hygiene case where a task/bug carries the phase label.
+		if issue.Type != "epic" && beads.HasEpicPhaseLabel(issue.Labels) {
+			continue
+		}
+
 		filtered = append(filtered, issue)
 	}
 	return filtered
