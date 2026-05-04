@@ -698,11 +698,23 @@ func nudgeRefinery(townRoot, rigName string) error {
 	return t.NudgeSession(sessionName, "New MR available - check merge queue for pending work")
 }
 
-// notifyMayorSlotOpen nudges the Mayor that a polecat slot is now open.
-// This is critical for pipeline throughput: without it, the Mayor sits idle
-// even when open beads exist, because it never learns about the completion.
-// Prefers nudge per communication hygiene, falls back to mail if nudge
-// can't reach the Mayor (e.g., ACP session, no tmux). (GH#2727)
+// notifyMayorSlotOpen records that a polecat slot is now open and schedules
+// a nudge to the Mayor. This is critical for pipeline throughput: without
+// it, the Mayor sits idle even when open beads exist, because it never
+// learns about the completion. (GH#2727)
+//
+// Two-path delivery:
+//  1. A channel event is emitted synchronously so the Mayor's await-event
+//     path unblocks immediately (channel events are cheap and are the
+//     lossless notification mechanism).
+//  2. The tmux nudge + mail fallback are routed through a coalescer that
+//     batches SLOT_OPEN events over a short window so bursty completions
+//     (10+ polecats in under a minute) do not thundering-herd the Mayor's
+//     per-session nudge lock. (gu-ltqk / gt-7z4r0)
+//
+// Nudge and mail delivery outcomes are logged to town.log so operators can
+// diagnose contention or delivery regressions from the audit trail rather
+// than only from the `gt nudge` stderr.
 func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	townRoot, _ := workspace.Find(workDir)
 	if townRoot == "" {
@@ -710,6 +722,8 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	}
 
 	// Emit SLOT_OPEN channel event so Mayor's await-event unblocks instantly.
+	// Channel events are the lossless, low-contention notification path — we
+	// always emit them, even when the coalesced nudge is still pending.
 	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_OPEN", []string{
 		"source=witness",
 		"rig=" + rigName,
@@ -717,29 +731,86 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 		"exit=" + exitType,
 	})
 
-	// Try nudge first — lightweight, no Dolt commit.
+	// Queue the nudge/mail for coalesced delivery. The coalescer batches
+	// events over SlotOpenCoalesceWindow so the Mayor receives ≤1 nudge
+	// per window regardless of how many polecats complete in a burst.
+	getSlotOpenCoalescer().Add(workDir, rigName, polecatName, exitType)
+}
+
+// dispatchSlotOpenBatch performs the actual tmux-nudge + mail-fallback
+// delivery for a coalesced batch of SLOT_OPEN events. Invoked by the
+// coalescer when its debounce window elapses. Both success and failure are
+// recorded to town.log for audit.
+func dispatchSlotOpenBatch(events []slotOpenEvent) {
+	if len(events) == 0 {
+		return
+	}
+
+	// All events in a batch share a workDir (a single witness process is
+	// bound to one rig). Use the first event's workDir to resolve townRoot.
+	townRoot, _ := workspace.Find(events[0].WorkDir)
+	if townRoot == "" {
+		return
+	}
+
+	msg := slotOpenBatchMessage(events)
 	mayorSession := session.MayorSessionName()
 	t := tmux.NewTmux()
+
+	// Try nudge first — lightweight, no Dolt commit.
 	if running, err := t.HasSession(mayorSession); err == nil && running {
-		msg := slotOpenMessage(rigName, polecatName, exitType)
-		if err := t.NudgeSession(mayorSession, msg); err == nil {
+		nudgeErr := t.NudgeSession(mayorSession, msg)
+		if nudgeErr == nil {
 			// Record the nudge in town.log so it appears in `gt log`,
 			// `gt audit`, and operator post-mortems. Without this,
 			// witness-emitted SLOT_OPEN nudges leave no audit trail,
-			// making delivery regressions (like the stranded-text Enter
-			// race) significantly harder to diagnose. (GH#gu-harz)
+			// making delivery regressions significantly harder to
+			// diagnose. (GH#gu-harz)
 			logSlotOpenNudge(townRoot, mayorSession, msg)
 			return // Nudge delivered — no mail needed.
 		}
+		// Record the failure so thundering-herd lock contention
+		// (gu-ltqk) and other delivery regressions show up in the
+		// audit trail rather than only in `gt nudge` stderr. Fall
+		// through to mail fallback so the batch is not lost.
+		logSlotOpenNudgeFailure(townRoot, mayorSession, msg, nudgeErr)
 	}
 
 	// Nudge failed or Mayor not in tmux (e.g., ACP/Claude Code session).
-	// Fall back to mail so the completion is not silently lost.
-	subject := fmt.Sprintf("SLOT_OPEN: %s/%s completed (exit=%s)", rigName, polecatName, exitType)
-	body := fmt.Sprintf("Polecat %s/%s finished (exit=%s). Slot available for next bead.", rigName, polecatName, exitType)
+	// Fall back to mail so the completion batch is not silently lost.
+	subject := slotOpenMailSubject(events)
+	body := slotOpenMailBody(events)
 	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
 	cmd.Dir = townRoot
-	_ = cmd.Run()
+	if err := cmd.Run(); err != nil {
+		logSlotOpenMailFailure(townRoot, mayorSession, subject, err)
+	} else {
+		logSlotOpenMailFallback(townRoot, mayorSession, subject)
+	}
+}
+
+// slotOpenMailSubject formats the mail fallback subject for a batch.
+func slotOpenMailSubject(events []slotOpenEvent) string {
+	if len(events) == 1 {
+		ev := events[0]
+		return fmt.Sprintf("SLOT_OPEN: %s/%s completed (exit=%s)", ev.RigName, ev.PolecatName, ev.ExitType)
+	}
+	return fmt.Sprintf("SLOT_OPEN batch: %d slots opened", len(events))
+}
+
+// slotOpenMailBody formats the mail fallback body for a batch.
+func slotOpenMailBody(events []slotOpenEvent) string {
+	if len(events) == 1 {
+		ev := events[0]
+		return fmt.Sprintf("Polecat %s/%s finished (exit=%s). Slot available for next bead.",
+			ev.RigName, ev.PolecatName, ev.ExitType)
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d polecat slots are available for next beads:\n\n", len(events))
+	for _, ev := range events {
+		fmt.Fprintf(&sb, "- %s/%s (exit=%s)\n", ev.RigName, ev.PolecatName, ev.ExitType)
+	}
+	return sb.String()
 }
 
 // slotOpenMessage is the canonical SLOT_OPEN nudge body sent to the mayor.
@@ -762,6 +833,59 @@ func logSlotOpenNudge(townRoot, mayorSession, msg string) {
 		return
 	}
 	_ = townlog.NewLogger(townRoot).Log(townlog.EventNudge, mayorSession, msg)
+}
+
+// logSlotOpenNudgeFailure records a witness → mayor SLOT_OPEN nudge that
+// failed to deliver. Delivery failures previously went only to `gt nudge`
+// stderr, making contention regressions (gu-ltqk) invisible in `gt audit`
+// and post-mortems. Logging at the EventNudge level with a distinct
+// "FAILED" marker keeps the failure in the same stream operators already
+// grep for nudge delivery.
+//
+// Context is front-loaded with the failure marker and error class because
+// townlog truncates the EventNudge context to 50 characters in its
+// human-readable output — critical diagnostic info must appear early.
+func logSlotOpenNudgeFailure(townRoot, mayorSession, msg string, deliverErr error) {
+	if townRoot == "" {
+		return
+	}
+	ctx := fmt.Sprintf("FAILED err=%q SLOT_OPEN: %s", errorString(deliverErr), msg)
+	_ = townlog.NewLogger(townRoot).Log(townlog.EventNudge, mayorSession, ctx)
+}
+
+// logSlotOpenMailFallback records that the mail-fallback path was used
+// because the nudge path was unavailable (e.g., Mayor running under ACP).
+// Distinct from a failure — mail delivery itself succeeded.
+func logSlotOpenMailFallback(townRoot, mayorSession, subject string) {
+	if townRoot == "" {
+		return
+	}
+	ctx := fmt.Sprintf("mail-fallback %s", subject)
+	_ = townlog.NewLogger(townRoot).Log(townlog.EventNudge, mayorSession, ctx)
+}
+
+// logSlotOpenMailFailure records that both the nudge and mail-fallback
+// paths failed — a hard audit-worthy event: the Mayor may never learn
+// about the freed slots through the messaging channels, and operators
+// should investigate.
+//
+// Context is front-loaded so the 50-char truncation in townlog does not
+// hide the FAILED marker.
+func logSlotOpenMailFailure(townRoot, mayorSession, subject string, mailErr error) {
+	if townRoot == "" {
+		return
+	}
+	ctx := fmt.Sprintf("FAILED mail err=%q %s", errorString(mailErr), subject)
+	_ = townlog.NewLogger(townRoot).Log(townlog.EventNudge, mayorSession, ctx)
+}
+
+// errorString returns err.Error() for non-nil errors or "<nil>" otherwise.
+// Keeps the formatters defensive when callers pass a nil err by mistake.
+func errorString(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return err.Error()
 }
 
 // RecoveryPayload contains data for RECOVERY_NEEDED escalation.
