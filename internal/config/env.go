@@ -199,6 +199,32 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// See: https://github.com/steveyegge/beads/issues/2241
 	env["BD_BACKUP_ENABLED"] = "false"
 
+	// Force non-interactive git editor for all agents. Without this, any git
+	// subprocess that needs editor interaction (merge commit message, interactive
+	// rebase todo list, commit --amend, squash message, etc.) will launch
+	// whatever $EDITOR/$GIT_EDITOR points to — typically nano or vim — which
+	// takes over the tmux pane and blocks the agent indefinitely. Nudges and
+	// restarts can't recover because input is injected into the editor's buffer.
+	//
+	// GIT_EDITOR=true resolves to /bin/true which exits 0 immediately. Git
+	// interprets this as "user accepted the default message" — no editor,
+	// no hang.
+	//
+	// - GIT_EDITOR covers commit messages, squash messages, merge messages.
+	// - GIT_SEQUENCE_EDITOR covers the `git rebase -i` todo list editor.
+	// - EDITOR is the universal fallback git uses when GIT_EDITOR is unset.
+	// - GIT_MERGE_AUTOEDIT=no prevents `git merge` from launching an editor
+	//   to edit the merge commit message even when GIT_EDITOR is unset.
+	//
+	// Root cause: talontriage refinery hung ~8h in nano on 2026-05-02 during a
+	// merge-conflict rebase (gu-9h58). Two restarts and nudges failed because
+	// nudges injected text into nano's buffer rather than being processed by
+	// the refinery agent.
+	env["GIT_EDITOR"] = "true"
+	env["GIT_SEQUENCE_EDITOR"] = "true"
+	env["EDITOR"] = "true"
+	env["GIT_MERGE_AUTOEDIT"] = "no"
+
 	// Clear NODE_OPTIONS to prevent debugger flags (e.g., --inspect from VSCode)
 	// from being inherited through tmux into Claude's Node.js runtime.
 	// This is the PRIMARY guard: setting it here (the single source of truth

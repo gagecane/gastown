@@ -877,6 +877,52 @@ func TestAgentEnv_DisablesBdBackup(t *testing.T) {
 	}
 }
 
+// TestAgentEnv_ForcesNonInteractiveGitEditor verifies that every agent session
+// inherits non-interactive git editor settings. Without these, a git subprocess
+// that needs editor interaction (rebase conflict commit message, interactive
+// rebase todo list, commit --amend, squash message, merge commit message)
+// would launch $EDITOR (nano/vim) in the agent's tmux pane and block
+// indefinitely — nudges inject input into the editor buffer instead of the
+// agent, so recovery requires human intervention.
+//
+// Root cause: talontriage refinery hung ~8h in nano on 2026-05-02 during a
+// merge-conflict rebase (gu-9h58).
+func TestAgentEnv_ForcesNonInteractiveGitEditor(t *testing.T) {
+	t.Parallel()
+	roles := []struct {
+		role      string
+		rig       string
+		agentName string
+	}{
+		{"mayor", "", ""},
+		{"deacon", "", ""},
+		{"boot", "", ""},
+		{"witness", "myrig", ""},
+		{"refinery", "myrig", ""},
+		{"polecat", "myrig", "Toast"},
+		{"crew", "myrig", "emma"},
+	}
+	for _, r := range roles {
+		t.Run(r.role, func(t *testing.T) {
+			env := AgentEnv(AgentEnvConfig{
+				Role:      r.role,
+				Rig:       r.rig,
+				AgentName: r.agentName,
+				TownRoot:  "/town",
+			})
+			// GIT_EDITOR covers commit/squash/merge messages.
+			assertEnv(t, env, "GIT_EDITOR", "true")
+			// GIT_SEQUENCE_EDITOR covers `git rebase -i` todo list editing.
+			assertEnv(t, env, "GIT_SEQUENCE_EDITOR", "true")
+			// EDITOR is git's universal fallback when GIT_EDITOR is unset.
+			assertEnv(t, env, "EDITOR", "true")
+			// GIT_MERGE_AUTOEDIT=no prevents git merge from launching an
+			// editor for the merge commit message even when GIT_EDITOR is unset.
+			assertEnv(t, env, "GIT_MERGE_AUTOEDIT", "no")
+		})
+	}
+}
+
 // TestAgentEnv_PropagatesDoltPort verifies that GT_DOLT_PORT and BEADS_DOLT_PORT
 // are propagated from the process env to agent sessions, preventing bd from
 // auto-starting rogue Dolt instances. (GH#2412)

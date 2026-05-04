@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Refinery and other agents can no longer hang in a git editor** — Git
+  subprocesses launched during merge-conflict rebases, `commit --amend`,
+  `merge --no-ff`, `rebase -i`, and similar operations would open the
+  user's `$EDITOR` (typically nano/vim) when they needed a commit-message
+  prompt. Inside an agent's tmux session, that editor takes over the pane
+  and `gt nudge` injects text into the editor's buffer instead of reaching
+  the agent — blocking the MR until a human intervenes (talontriage
+  refinery was stuck ~8h in nano on 2026-05-02). `AgentEnv` now sets
+  `GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`, `EDITOR=true`, and
+  `GIT_MERGE_AUTOEDIT=no` for every Gas Town agent (mayor, deacon, boot,
+  witness, refinery, polecats, crew, dogs). The same env is applied
+  defense-in-depth inside `internal/git/git.go` so every git subprocess
+  spawned via the wrapper is non-interactive regardless of caller. See
+  gu-9h58.
+
 - **`gt dolt kill-imposters` false-positive on symlinked home directories** —
   On systems where `/home/<user>` is a symlink to `/local/home/<user>` (Amazon
   CloudDesktop), a running dolt sql-server may report its `--data-dir` via

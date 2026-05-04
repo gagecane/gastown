@@ -90,6 +90,46 @@ func (g *Git) IsRepo() bool {
 	return err == nil
 }
 
+// nonInteractiveGitEnv returns environment variables that force git to never
+// launch an interactive editor. Without these, a git subprocess that needs
+// editor interaction (merge commit message, interactive rebase todo list,
+// commit --amend, squash message, etc.) would launch $EDITOR (typically nano
+// or vim) and block indefinitely — with no way to send input to the editor
+// from an agent session (nudges are injected as text into the editor buffer).
+//
+// GIT_EDITOR=true points at /bin/true which exits 0 immediately; git treats
+// this as "user accepted the default message" — no editor, no hang.
+//
+//   - GIT_EDITOR covers commit/squash/merge messages.
+//   - GIT_SEQUENCE_EDITOR covers `git rebase -i` todo list editing.
+//   - EDITOR is the universal fallback git uses when GIT_EDITOR is unset.
+//   - GIT_MERGE_AUTOEDIT=no prevents `git merge` from opening an editor
+//     to edit the merge commit message even when GIT_EDITOR is unset.
+//
+// Root cause: talontriage refinery hung ~8h in nano on 2026-05-02 during a
+// merge-conflict rebase (gu-9h58).
+func nonInteractiveGitEnv() []string {
+	return []string{
+		"GIT_EDITOR=true",
+		"GIT_SEQUENCE_EDITOR=true",
+		"EDITOR=true",
+		"GIT_MERGE_AUTOEDIT=no",
+	}
+}
+
+// withNonInteractiveEnv returns an environment slice suitable for cmd.Env that
+// preserves os.Environ() and appends the non-interactive git editor settings
+// plus any extra env vars supplied by the caller. Callers pass the result
+// directly to exec.Cmd.Env.
+func withNonInteractiveEnv(extra ...string) []string {
+	base := os.Environ()
+	base = append(base, nonInteractiveGitEnv()...)
+	if len(extra) > 0 {
+		base = append(base, extra...)
+	}
+	return base
+}
+
 // run executes a git command and returns stdout.
 func (g *Git) run(args ...string) (string, error) {
 	// If gitDir is set (bare repo), prepend --git-dir flag
@@ -102,6 +142,7 @@ func (g *Git) run(args ...string) (string, error) {
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}
+	cmd.Env = withNonInteractiveEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -135,6 +176,7 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}
+	cmd.Env = withNonInteractiveEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -180,9 +222,12 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	// Always set a non-interactive git editor environment so editor-launching
+	// operations (rebase, merge, commit --amend, etc.) can never hang an
+	// agent session. Caller-supplied extraEnv is appended last so it wins
+	// ties against earlier entries, matching Go's exec.Cmd semantics where
+	// later duplicate keys override earlier ones.
+	cmd.Env = withNonInteractiveEnv(extraEnv...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -285,7 +330,7 @@ func (g *Git) cloneInternal(url, dest string, opts cloneOptions) error {
 	cmd := exec.Command("git", args...)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+	cmd.Env = withNonInteractiveEnv("GIT_CEILING_DIRECTORIES=" + tmpDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -392,6 +437,7 @@ func configureHooksPath(repoPath string) error {
 
 	cmd := exec.Command("git", "-C", repoPath, "config", "core.hooksPath", ".githooks")
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -424,6 +470,7 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 	var stderr bytes.Buffer
 	configCmd := exec.Command("git", "--git-dir", gitDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 	util.SetDetachedProcessGroup(configCmd)
+	configCmd.Env = withNonInteractiveEnv()
 	configCmd.Stderr = &stderr
 	if err := configCmd.Run(); err != nil {
 		return fmt.Errorf("configuring refspec: %s", strings.TrimSpace(stderr.String()))
@@ -439,12 +486,14 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 		var headOut bytes.Buffer
 		headCmd := exec.Command("git", "--git-dir", gitDir, "symbolic-ref", "HEAD")
 		util.SetDetachedProcessGroup(headCmd)
+		headCmd.Env = withNonInteractiveEnv()
 		headCmd.Stdout = &headOut
 		headCmd.Stderr = &stderr
 		if err := headCmd.Run(); err != nil {
 			// Fallback: if HEAD is detached, try fetching all (shouldn't happen for clones)
 			fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "--depth", "1", "origin")
 			util.SetDetachedProcessGroup(fetchCmd)
+			fetchCmd.Env = withNonInteractiveEnv()
 			fetchCmd.Stderr = &stderr
 			if fetchErr := fetchCmd.Run(); fetchErr != nil {
 				return fmt.Errorf("fetching origin: %s", strings.TrimSpace(stderr.String()))
@@ -457,6 +506,7 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 
 		fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "--depth", "1", "origin", refspec)
 		util.SetDetachedProcessGroup(fetchCmd)
+		fetchCmd.Env = withNonInteractiveEnv()
 		fetchCmd.Stderr = &stderr
 		if err := fetchCmd.Run(); err != nil {
 			return fmt.Errorf("fetching origin %s: %s", branch, strings.TrimSpace(stderr.String()))
@@ -466,6 +516,7 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 
 	fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "origin")
 	util.SetDetachedProcessGroup(fetchCmd)
+	fetchCmd.Env = withNonInteractiveEnv()
 	fetchCmd.Stderr = &stderr
 	if err := fetchCmd.Run(); err != nil {
 		return fmt.Errorf("fetching origin: %s", strings.TrimSpace(stderr.String()))
@@ -1375,6 +1426,7 @@ func (g *Git) runMergeCheck(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = g.workDir
+	cmd.Env = withNonInteractiveEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1792,6 +1844,7 @@ func isValidSubmoduleReference(repoPath string) bool {
 	// Check if shallow — git rev-parse --is-shallow-repository
 	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--is-shallow-repository")
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -1804,6 +1857,7 @@ func isValidSubmoduleReference(repoPath string) bool {
 func IsSparseCheckoutConfigured(repoPath string) bool {
 	cmd := exec.Command("git", "-C", repoPath, "config", "core.sparseCheckout")
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	output, err := cmd.Output()
 	return err == nil && strings.TrimSpace(string(output)) == "true"
 }
@@ -1814,6 +1868,7 @@ func RemoveSparseCheckout(repoPath string) error {
 	// Use git sparse-checkout disable which properly restores hidden files
 	cmd := exec.Command("git", "-C", repoPath, "sparse-checkout", "disable")
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -2544,6 +2599,7 @@ func InitSubmodules(repoPath string, referencePath ...string) error {
 
 	cmd := exec.Command("git", args...)
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -2564,6 +2620,7 @@ func hasTrackedGitmodules(repoPath string) bool {
 	}
 	// Verify .gitmodules is actually tracked in the index.
 	cmd := exec.Command("git", "-C", repoPath, "ls-files", "--error-unmatch", ".gitmodules")
+	cmd.Env = withNonInteractiveEnv()
 	return cmd.Run() == nil
 }
 
@@ -2573,6 +2630,7 @@ func InitSparseCheckout(repoPath string, paths []string) error {
 	// Initialize sparse checkout in cone mode
 	cmd := exec.Command("git", "-C", repoPath, "sparse-checkout", "init", "--cone")
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -2582,6 +2640,7 @@ func InitSparseCheckout(repoPath string, paths []string) error {
 		args := append([]string{"-C", repoPath, "sparse-checkout", "set"}, paths...)
 		cmd = exec.Command("git", args...)
 		util.SetDetachedProcessGroup(cmd)
+		cmd.Env = withNonInteractiveEnv()
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("setting sparse checkout paths: %s", strings.TrimSpace(stderr.String()))
@@ -2678,6 +2737,7 @@ func (g *Git) submoduleURL(ref, submodulePath string) (string, error) {
 	// List all submodule.<name>.path entries to find the section matching our path
 	cmd := exec.Command("git", "config", "-f", tmpFile.Name(), "--get-regexp", `^submodule\..*\.path$`)
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
@@ -2707,6 +2767,7 @@ func (g *Git) submoduleURL(ref, submodulePath string) (string, error) {
 	// Get the URL for this section
 	urlCmd := exec.Command("git", "config", "-f", tmpFile.Name(), "--get", "submodule."+sectionName+".url")
 	util.SetDetachedProcessGroup(urlCmd)
+	urlCmd.Env = withNonInteractiveEnv()
 	var urlOut bytes.Buffer
 	urlCmd.Stdout = &urlOut
 	if err := urlCmd.Run(); err != nil {
@@ -2733,6 +2794,7 @@ func (g *Git) PushSubmoduleCommit(submodulePath, sha, remote string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", absPath, "push", remote, sha+":refs/heads/"+defaultBranch)
 	util.SetDetachedProcessGroup(cmd)
+	cmd.Env = withNonInteractiveEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -2754,6 +2816,7 @@ func submoduleDefaultBranch(submodulePath, remote string) (string, error) {
 	// Try local symbolic-ref first (no network, fastest)
 	symCmd := exec.Command("git", "-C", submodulePath, "symbolic-ref", "refs/remotes/"+remote+"/HEAD")
 	util.SetDetachedProcessGroup(symCmd)
+	symCmd.Env = withNonInteractiveEnv()
 	if symOut, err := symCmd.Output(); err == nil {
 		ref := strings.TrimSpace(string(symOut))
 		// refs/remotes/origin/HEAD -> refs/remotes/origin/main -> main
@@ -2769,6 +2832,7 @@ func submoduleDefaultBranch(submodulePath, remote string) (string, error) {
 	for _, candidate := range []string{"main", "master"} {
 		check := exec.Command("git", "-C", submodulePath, "rev-parse", "--verify", "--quiet", "refs/remotes/"+remote+"/"+candidate)
 		util.SetDetachedProcessGroup(check)
+		check.Env = withNonInteractiveEnv()
 		if check.Run() == nil {
 			return candidate, nil
 		}
@@ -2778,6 +2842,7 @@ func submoduleDefaultBranch(submodulePath, remote string) (string, error) {
 	for _, candidate := range []string{"main", "master"} {
 		check := exec.Command("git", "-C", submodulePath, "ls-remote", "--exit-code", remote, "refs/heads/"+candidate)
 		util.SetDetachedProcessGroup(check)
+		check.Env = withNonInteractiveEnv()
 		if check.Run() == nil {
 			return candidate, nil
 		}

@@ -2584,3 +2584,175 @@ func TestResolveRemoteBaseline_Fallbacks(t *testing.T) {
 		t.Errorf("baseline after HEAD removal = %q, want origin/main (probe fallback)", baseline)
 	}
 }
+
+// TestNonInteractiveGitEnv verifies the helper returns the full set of
+// editor-disabling env vars expected by Gas Town agents.
+//
+// Root cause this fix prevents: talontriage refinery hung ~8h in nano on
+// 2026-05-02 during a merge-conflict rebase (gu-9h58).
+func TestNonInteractiveGitEnv(t *testing.T) {
+	t.Parallel()
+	env := nonInteractiveGitEnv()
+	want := map[string]string{
+		"GIT_EDITOR":          "true",
+		"GIT_SEQUENCE_EDITOR": "true",
+		"EDITOR":              "true",
+		"GIT_MERGE_AUTOEDIT":  "no",
+	}
+	got := map[string]string{}
+	for _, kv := range env {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			t.Fatalf("malformed env entry %q", kv)
+		}
+		got[parts[0]] = parts[1]
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s=%q, want %q", k, got[k], v)
+		}
+	}
+}
+
+// TestWithNonInteractiveEnv_OverridesParentEditor verifies that the wrapper
+// env overrides parent-process GIT_EDITOR/GIT_SEQUENCE_EDITOR/EDITOR settings.
+// Go's exec.Cmd env precedence is last-wins for duplicate keys, so our
+// helpers must append the non-interactive values AFTER the parent env.
+func TestWithNonInteractiveEnv_OverridesParentEditor(t *testing.T) {
+	// Deliberately set parent env to a value that would fail if inherited
+	// unchanged. t.Setenv restores original values on test completion.
+	t.Setenv("GIT_EDITOR", "/nonexistent/editor-that-would-fail")
+	t.Setenv("GIT_SEQUENCE_EDITOR", "/nonexistent/editor-that-would-fail")
+	t.Setenv("EDITOR", "/nonexistent/editor-that-would-fail")
+	t.Setenv("GIT_MERGE_AUTOEDIT", "yes") // opposite of our setting
+
+	env := withNonInteractiveEnv()
+
+	// Find the final (last-wins) value for each key.
+	final := map[string]string{}
+	for _, kv := range env {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		final[parts[0]] = parts[1]
+	}
+
+	want := map[string]string{
+		"GIT_EDITOR":          "true",
+		"GIT_SEQUENCE_EDITOR": "true",
+		"EDITOR":              "true",
+		"GIT_MERGE_AUTOEDIT":  "no",
+	}
+	for k, v := range want {
+		if final[k] != v {
+			t.Errorf("%s=%q after merge, want %q (parent env should be overridden)", k, final[k], v)
+		}
+	}
+}
+
+// TestWithNonInteractiveEnv_AppendsExtras verifies that caller-supplied
+// env vars are appended last and therefore win over both the parent env and
+// our non-interactive defaults. This preserves the original runWithEnv
+// contract (e.g. GT_INTEGRATION_LAND for pre-push hook bypass) without
+// accidentally un-setting our editor guards.
+func TestWithNonInteractiveEnv_AppendsExtras(t *testing.T) {
+	t.Parallel()
+	env := withNonInteractiveEnv("GIT_EDITOR=caller-wins", "GT_INTEGRATION_LAND=1")
+
+	final := map[string]string{}
+	for _, kv := range env {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		final[parts[0]] = parts[1]
+	}
+
+	// Caller override honored.
+	if final["GIT_EDITOR"] != "caller-wins" {
+		t.Errorf("GIT_EDITOR=%q, want caller-wins (caller-supplied extras should override defaults)", final["GIT_EDITOR"])
+	}
+	// Extra passthrough var honored.
+	if final["GT_INTEGRATION_LAND"] != "1" {
+		t.Errorf("GT_INTEGRATION_LAND=%q, want 1", final["GT_INTEGRATION_LAND"])
+	}
+	// Other non-interactive defaults still present (caller only overrode GIT_EDITOR).
+	if final["GIT_SEQUENCE_EDITOR"] != "true" {
+		t.Errorf("GIT_SEQUENCE_EDITOR=%q, want true", final["GIT_SEQUENCE_EDITOR"])
+	}
+}
+
+// TestMergeWithHostileEditor simulates the original incident: a merge
+// operation that would normally open an editor to edit the merge commit
+// message. With a hostile editor on the parent process env that exits
+// non-zero, the merge would fail (or, worse, hang waiting for input) if
+// our wrapper did not override it. Verifies the end-to-end plumbing from
+// Git wrapper -> git subprocess env.
+func TestMergeWithHostileEditor(t *testing.T) {
+	// Point the parent's editor env at a script that fails and writes a
+	// sentinel so we can detect if git ever tried to launch it. Our wrapper
+	// must override these with GIT_EDITOR=true etc., so git never launches
+	// the hostile editor and never creates the sentinel.
+	tmp := t.TempDir()
+	sentinel := filepath.Join(tmp, "editor-was-launched")
+	hostile := filepath.Join(tmp, "hostile-editor.sh")
+	if err := os.WriteFile(hostile, []byte("#!/bin/sh\ntouch "+sentinel+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("writing hostile editor: %v", err)
+	}
+	t.Setenv("GIT_EDITOR", hostile)
+	t.Setenv("GIT_SEQUENCE_EDITOR", hostile)
+	t.Setenv("EDITOR", hostile)
+	t.Setenv("GIT_MERGE_AUTOEDIT", "yes") // opposite of our setting
+
+	// Build a repo with a non-fast-forward merge scenario. git merge --no-ff
+	// on branches that diverged will, by default, launch the editor to edit
+	// the merge commit message (unless GIT_MERGE_AUTOEDIT=no is set).
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// Create a feature branch with its own commit.
+	if err := g.CreateBranchFrom("feature", "HEAD"); err != nil {
+		t.Fatalf("CreateBranchFrom: %v", err)
+	}
+	if err := g.Checkout("feature"); err != nil {
+		t.Fatalf("Checkout feature: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatalf("writing feature file: %v", err)
+	}
+	if _, err := g.run("add", "feature.txt"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := g.Commit("feature commit"); err != nil {
+		t.Fatalf("Commit feature: %v", err)
+	}
+
+	// Back to main and add a divergent commit so --no-ff is a real merge.
+	if err := g.Checkout("main"); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatalf("writing main file: %v", err)
+	}
+	if _, err := g.run("add", "main.txt"); err != nil {
+		t.Fatalf("git add main: %v", err)
+	}
+	if err := g.Commit("main commit"); err != nil {
+		t.Fatalf("Commit main: %v", err)
+	}
+
+	// Issue a --no-ff merge via our wrapper. If env plumbing is broken,
+	// git would launch the hostile editor which creates the sentinel and
+	// exits 1, making the merge fail. If our wrapper correctly overrides
+	// the env, git uses the default merge message and the merge succeeds.
+	if _, err := g.run("merge", "--no-ff", "feature"); err != nil {
+		t.Fatalf("merge --no-ff feature failed (env not plumbed through?): %v", err)
+	}
+
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("git launched the hostile editor — wrapper did not override parent env")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error stat-ing sentinel: %v", err)
+	}
+}
