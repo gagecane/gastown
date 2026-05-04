@@ -502,11 +502,35 @@ func isCompletedPluginRunReceipt(w *compactIssue) bool {
 			hasPluginRunType = true
 			continue
 		}
-		if label == "result:success" || label == "result:no-op" || label == "result:noop" {
+		if isNoOpResultLabel(label) {
 			hasSuccessResult = true
 		}
 	}
 	return hasPluginRunType && hasSuccessResult
+}
+
+// isNoOpResultLabel reports whether a result: label represents a successful
+// plugin run that had no work to do. Plugin authors use many variants; this
+// function matches them by pattern rather than exact string so new variants
+// don't require a code change. result:failure/warning/error are excluded.
+func isNoOpResultLabel(label string) bool {
+	const prefix = "result:"
+	if !strings.HasPrefix(label, prefix) {
+		return false
+	}
+	v := label[len(prefix):]
+	switch v {
+	case "success", "no-op", "noop", "skip", "skipped":
+		return true
+	}
+	return strings.Contains(v, "no-work") ||
+		strings.Contains(v, "no_work") ||
+		strings.Contains(v, "no-dispatchable") ||
+		strings.Contains(v, "no_dispatchable") ||
+		strings.Contains(v, "no-idle") ||
+		strings.Contains(v, "no_idle") ||
+		strings.Contains(v, "no-capacity") ||
+		strings.Contains(v, "no_capacity")
 }
 
 // wispAge returns the age of a compactIssue.

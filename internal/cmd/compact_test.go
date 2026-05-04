@@ -128,6 +128,22 @@ func TestIsCompletedPluginRunReceipt(t *testing.T) {
 		{"success alone (no plugin-run)", []string{"result:success"}, false},
 		{"unrelated labels", []string{"bug", "urgent"}, false},
 		{"plugin-run + plugin name + success", []string{"type:plugin-run", "plugin:auto-dispatch", "result:success"}, true},
+		{"plugin-run + no-idle-polecats", []string{"type:plugin-run", "result:no-idle-polecats"}, true},
+		{"plugin-run + no_idle_polecats (underscore)", []string{"type:plugin-run", "result:no_idle_polecats"}, true},
+		{"plugin-run + no-dispatchable-work", []string{"type:plugin-run", "result:no-dispatchable-work"}, true},
+		{"plugin-run + no-work", []string{"type:plugin-run", "result:no-work"}, true},
+		{"plugin-run + no-capacity", []string{"type:plugin-run", "result:no-capacity"}, true},
+		{"plugin-run + no-idle-slots", []string{"type:plugin-run", "result:no-idle-slots"}, true},
+		{"plugin-run + skip", []string{"type:plugin-run", "result:skip"}, true},
+		{"plugin-run + skipped", []string{"type:plugin-run", "result:skipped"}, true},
+		{"plugin-run + no-work-available", []string{"type:plugin-run", "result:no-work-available"}, true},
+		{"plugin-run + no_dispatchable_work", []string{"type:plugin-run", "result:no_dispatchable_work"}, true},
+		{"plugin-run + no-idle-capacity", []string{"type:plugin-run", "result:no-idle-capacity"}, true},
+		{"plugin-run + no-capacity-idle-polecats", []string{"type:plugin-run", "result:no-capacity-idle-polecats"}, true},
+		{"plugin-run + no-idle-workers", []string{"type:plugin-run", "result:no-idle-workers"}, true},
+		{"plugin-run + no-work-dispatched", []string{"type:plugin-run", "result:no-work-dispatched"}, true},
+		{"plugin-run + no-work-to-dispatch", []string{"type:plugin-run", "result:no-work-to-dispatch"}, true},
+		{"plugin-run + error (must promote)", []string{"type:plugin-run", "result:error"}, false},
 	}
 
 	for _, tc := range tests {
