@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -469,4 +473,302 @@ func equalStringSlices(a, b []string) bool {
 // and to give a single swap-point if we ever need case-insensitive checks.
 func containsSubstring(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
+}
+
+// --- Stale polecat refresh (pool-init) ------------------------------------
+//
+// These tests verify gu-7rw5: pool-init detects polecats whose agent bead
+// hook_bead points to a closed/tombstone bead and refreshes them back to
+// idle on main. They exercise pure functions (findStalePolecats,
+// refreshStalePolecats) so no real beads DB or git worktree is required.
+
+// stalePolecatBeadsFake is a lightweight fake for the staleBeadsLookup
+// interface. Unlike mockBeads, it tracks AgentFields keyed by agent bead ID so
+// we can simulate agent beads without pulling in a real Beads store.
+type stalePolecatBeadsFake struct {
+	agents map[string]*beads.AgentFields
+	issues map[string]*beads.Issue
+	// showErr/agentErr let tests simulate lookup failures, which
+	// findStalePolecats must treat as "not stale".
+	showErr  map[string]error
+	agentErr map[string]error
+}
+
+func newStalePolecatBeadsFake() *stalePolecatBeadsFake {
+	return &stalePolecatBeadsFake{
+		agents:   map[string]*beads.AgentFields{},
+		issues:   map[string]*beads.Issue{},
+		showErr:  map[string]error{},
+		agentErr: map[string]error{},
+	}
+}
+
+func (f *stalePolecatBeadsFake) GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error) {
+	if err, ok := f.agentErr[id]; ok {
+		return nil, nil, err
+	}
+	fields, ok := f.agents[id]
+	if !ok {
+		return nil, nil, beads.ErrNotFound
+	}
+	return &beads.Issue{ID: id}, fields, nil
+}
+
+func (f *stalePolecatBeadsFake) Show(id string) (*beads.Issue, error) {
+	if err, ok := f.showErr[id]; ok {
+		return nil, err
+	}
+	issue, ok := f.issues[id]
+	if !ok {
+		return nil, beads.ErrNotFound
+	}
+	return issue, nil
+}
+
+// TestFindStalePolecats_DetectsClosedHookBead covers the primary case: a
+// polecat whose hook_bead points at a closed bead is reported as stale.
+func TestFindStalePolecats_DetectsClosedHookBead(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	// Agent bead ID format: <prefix>-polecat-<name>, or collapsed when prefix==rig.
+	// Because there's no rig config on disk under a test townRoot, GetPrefixForRig
+	// falls back to "gt", so the agent ID is "gt-<rig>-polecat-<name>".
+	fake.agents["gt-testrig-polecat-shiny"] = &beads.AgentFields{HookBead: "gt-old1"}
+	fake.issues["gt-old1"] = &beads.Issue{ID: "gt-old1", Status: "closed"}
+
+	polecats := []*polecat.Polecat{
+		{Name: "shiny", Rig: "testrig"},
+	}
+
+	got := findStalePolecats(fake, t.TempDir(), polecats)
+	if len(got) != 1 {
+		t.Fatalf("findStalePolecats returned %d entries, want 1: %#v", len(got), got)
+	}
+	if got[0].Polecat.Name != "shiny" {
+		t.Errorf("stale name = %q, want %q", got[0].Polecat.Name, "shiny")
+	}
+	if got[0].HookBead != "gt-old1" {
+		t.Errorf("stale HookBead = %q, want %q", got[0].HookBead, "gt-old1")
+	}
+	if !containsSubstring(got[0].Reason, "closed") {
+		t.Errorf("stale Reason = %q, want to mention closed status", got[0].Reason)
+	}
+}
+
+// TestFindStalePolecats_DetectsTombstoneHookBead verifies that tombstone status
+// (the other terminal state per IssueStatus.IsTerminal) also qualifies.
+func TestFindStalePolecats_DetectsTombstoneHookBead(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	fake.agents["gt-testrig-polecat-rust"] = &beads.AgentFields{HookBead: "gt-ghost"}
+	fake.issues["gt-ghost"] = &beads.Issue{ID: "gt-ghost", Status: "tombstone"}
+
+	got := findStalePolecats(fake, t.TempDir(), []*polecat.Polecat{{Name: "rust", Rig: "testrig"}})
+	if len(got) != 1 {
+		t.Fatalf("findStalePolecats returned %d entries, want 1", len(got))
+	}
+	if got[0].Polecat.Name != "rust" {
+		t.Errorf("stale name = %q, want %q", got[0].Polecat.Name, "rust")
+	}
+}
+
+// TestFindStalePolecats_SkipsOpenHookBead ensures we don't disturb polecats
+// whose assigned bead is still open (actively working or queued).
+func TestFindStalePolecats_SkipsOpenHookBead(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	fake.agents["gt-testrig-polecat-chrome"] = &beads.AgentFields{HookBead: "gt-live"}
+	fake.issues["gt-live"] = &beads.Issue{ID: "gt-live", Status: "open"}
+
+	got := findStalePolecats(fake, t.TempDir(), []*polecat.Polecat{{Name: "chrome", Rig: "testrig"}})
+	if len(got) != 0 {
+		t.Fatalf("findStalePolecats returned %d entries for open bead, want 0: %#v", len(got), got)
+	}
+}
+
+// TestFindStalePolecats_SkipsInProgressHookBead ensures in_progress work
+// (actively claimed) is preserved.
+func TestFindStalePolecats_SkipsInProgressHookBead(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	fake.agents["gt-testrig-polecat-dust"] = &beads.AgentFields{HookBead: "gt-wip"}
+	fake.issues["gt-wip"] = &beads.Issue{ID: "gt-wip", Status: "in_progress"}
+
+	got := findStalePolecats(fake, t.TempDir(), []*polecat.Polecat{{Name: "dust", Rig: "testrig"}})
+	if len(got) != 0 {
+		t.Fatalf("findStalePolecats returned %d entries for in_progress bead, want 0", len(got))
+	}
+}
+
+// TestFindStalePolecats_SkipsHookedHookBead covers the hooked status, which
+// is not terminal — the polecat genuinely has work.
+func TestFindStalePolecats_SkipsHookedHookBead(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	fake.agents["gt-testrig-polecat-zeta"] = &beads.AgentFields{HookBead: "gt-hot"}
+	fake.issues["gt-hot"] = &beads.Issue{ID: "gt-hot", Status: "hooked"}
+
+	got := findStalePolecats(fake, t.TempDir(), []*polecat.Polecat{{Name: "zeta", Rig: "testrig"}})
+	if len(got) != 0 {
+		t.Fatalf("findStalePolecats returned %d entries for hooked bead, want 0", len(got))
+	}
+}
+
+// TestFindStalePolecats_HandlesEmptyHookBead verifies that polecats with no
+// hook_bead (freshly-reset pool members) are ignored.
+func TestFindStalePolecats_HandlesEmptyHookBead(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	fake.agents["gt-testrig-polecat-alpha"] = &beads.AgentFields{HookBead: ""}
+
+	got := findStalePolecats(fake, t.TempDir(), []*polecat.Polecat{{Name: "alpha", Rig: "testrig"}})
+	if len(got) != 0 {
+		t.Fatalf("findStalePolecats returned %d entries for empty hook_bead, want 0", len(got))
+	}
+}
+
+// TestFindStalePolecats_TreatsLookupErrorsAsNotStale ensures a beads outage
+// doesn't cause us to refresh worktrees speculatively. The comment on
+// findStalePolecats explicitly says errors bias toward preservation.
+func TestFindStalePolecats_TreatsLookupErrorsAsNotStale(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	fake.agentErr["gt-testrig-polecat-broken"] = errors.New("dolt offline")
+
+	got := findStalePolecats(fake, t.TempDir(), []*polecat.Polecat{{Name: "broken", Rig: "testrig"}})
+	if len(got) != 0 {
+		t.Fatalf("findStalePolecats returned %d entries on agent error, want 0", len(got))
+	}
+
+	// Also: hook bead show error.
+	fake2 := newStalePolecatBeadsFake()
+	fake2.agents["gt-testrig-polecat-broken"] = &beads.AgentFields{HookBead: "gt-missing"}
+	fake2.showErr["gt-missing"] = errors.New("not found")
+
+	got = findStalePolecats(fake2, t.TempDir(), []*polecat.Polecat{{Name: "broken", Rig: "testrig"}})
+	if len(got) != 0 {
+		t.Fatalf("findStalePolecats returned %d entries on show error, want 0", len(got))
+	}
+}
+
+// TestFindStalePolecats_PartitionsMixedPool verifies that a pool with a mix
+// of fresh, stale, and working polecats yields only the stale ones.
+func TestFindStalePolecats_PartitionsMixedPool(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	// Stale: hook points to closed bead.
+	fake.agents["gt-testrig-polecat-stale"] = &beads.AgentFields{HookBead: "gt-closed1"}
+	fake.issues["gt-closed1"] = &beads.Issue{ID: "gt-closed1", Status: "closed"}
+	// Fresh: no hook_bead.
+	fake.agents["gt-testrig-polecat-fresh"] = &beads.AgentFields{HookBead: ""}
+	// Working: hook points to open bead.
+	fake.agents["gt-testrig-polecat-busy"] = &beads.AgentFields{HookBead: "gt-live"}
+	fake.issues["gt-live"] = &beads.Issue{ID: "gt-live", Status: "open"}
+
+	polecats := []*polecat.Polecat{
+		{Name: "stale", Rig: "testrig"},
+		{Name: "fresh", Rig: "testrig"},
+		{Name: "busy", Rig: "testrig"},
+	}
+
+	got := findStalePolecats(fake, t.TempDir(), polecats)
+	if len(got) != 1 {
+		t.Fatalf("findStalePolecats returned %d entries, want 1 (just 'stale'): %#v", len(got), got)
+	}
+	if got[0].Polecat.Name != "stale" {
+		t.Errorf("stale polecat = %q, want 'stale'", got[0].Polecat.Name)
+	}
+}
+
+// TestFindStalePolecats_SkipsNilEntries documents the input hardening: a nil
+// slot from Manager.List (results from concurrent Get failures) must not
+// panic or leak into the result.
+func TestFindStalePolecats_SkipsNilEntries(t *testing.T) {
+	fake := newStalePolecatBeadsFake()
+	fake.agents["gt-testrig-polecat-shiny"] = &beads.AgentFields{HookBead: "gt-c"}
+	fake.issues["gt-c"] = &beads.Issue{ID: "gt-c", Status: "closed"}
+
+	polecats := []*polecat.Polecat{
+		nil,
+		{Name: "shiny", Rig: "testrig"},
+		nil,
+	}
+
+	got := findStalePolecats(fake, t.TempDir(), polecats)
+	if len(got) != 1 {
+		t.Fatalf("findStalePolecats returned %d entries, want 1 after skipping nils", len(got))
+	}
+}
+
+// refreshRecordingRefresher captures calls to RefreshStalePolecat for
+// assertion in tests. If failOn is set, the first call for that name returns
+// an error so we can verify partial failures don't abort the loop.
+type refreshRecordingRefresher struct {
+	calls  []string
+	failOn string
+}
+
+func (r *refreshRecordingRefresher) RefreshStalePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
+	r.calls = append(r.calls, name)
+	if r.failOn != "" && name == r.failOn {
+		return nil, errors.New("simulated refresh failure")
+	}
+	return &polecat.Polecat{Name: name, State: polecat.StateIdle}, nil
+}
+
+// TestRefreshStalePolecats_CallsManagerForEachStale verifies the happy path:
+// each stale polecat triggers exactly one RefreshStalePolecat call.
+func TestRefreshStalePolecats_CallsManagerForEachStale(t *testing.T) {
+	stale := []stalePolecat{
+		{Polecat: &polecat.Polecat{Name: "one"}, HookBead: "gt-1", Reason: "closed"},
+		{Polecat: &polecat.Polecat{Name: "two"}, HookBead: "gt-2", Reason: "closed"},
+	}
+	rec := &refreshRecordingRefresher{}
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(&strings.Builder{})
+
+	refreshStalePolecats(cmd, rec, stale, false)
+
+	if !equalStringSlices(rec.calls, []string{"one", "two"}) {
+		t.Errorf("RefreshStalePolecat calls = %v, want [one two]", rec.calls)
+	}
+}
+
+// TestRefreshStalePolecats_DryRunDoesNotCallManager ensures --dry-run mode
+// only reports intent and never mutates.
+func TestRefreshStalePolecats_DryRunDoesNotCallManager(t *testing.T) {
+	stale := []stalePolecat{
+		{Polecat: &polecat.Polecat{Name: "one"}, HookBead: "gt-1", Reason: "closed"},
+	}
+	rec := &refreshRecordingRefresher{}
+
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	refreshStalePolecats(cmd, rec, stale, true)
+
+	if len(rec.calls) != 0 {
+		t.Errorf("dry-run made RefreshStalePolecat calls: %v", rec.calls)
+	}
+	if !containsSubstring(out.String(), "Would refresh") {
+		t.Errorf("dry-run output = %q, want to contain 'Would refresh'", out.String())
+	}
+}
+
+// TestRefreshStalePolecats_ContinuesPastFailure verifies one failed refresh
+// doesn't abort the loop. Pool-init must still try the remaining polecats
+// (and still create new ones) even when a single refresh bombs.
+func TestRefreshStalePolecats_ContinuesPastFailure(t *testing.T) {
+	stale := []stalePolecat{
+		{Polecat: &polecat.Polecat{Name: "bad"}, HookBead: "gt-1", Reason: "closed"},
+		{Polecat: &polecat.Polecat{Name: "good"}, HookBead: "gt-2", Reason: "closed"},
+	}
+	rec := &refreshRecordingRefresher{failOn: "bad"}
+
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	refreshStalePolecats(cmd, rec, stale, false)
+
+	if !equalStringSlices(rec.calls, []string{"bad", "good"}) {
+		t.Errorf("RefreshStalePolecat calls = %v, want [bad good] (good must run after bad fails)", rec.calls)
+	}
+	if !containsSubstring(out.String(), "FAILED") {
+		t.Errorf("output = %q, want to mention FAILED for 'bad'", out.String())
+	}
 }

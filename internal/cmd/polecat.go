@@ -160,6 +160,7 @@ var (
 	polecatCheckRecoveryJSON bool
 	polecatPoolInitDryRun    bool
 	polecatPoolInitSize      int
+	polecatPoolInitNoRefresh bool
 )
 
 var polecatGCCmd = &cobra.Command{
@@ -329,10 +330,18 @@ Polecat names come from:
 Existing polecats are preserved — only new ones are created
 to reach the target pool size.
 
+Stale worktree refresh: if an existing polecat's worktree is still on a
+feature branch tied to a CLOSED bead (e.g. from prior completed work that
+didn't trigger cleanup), pool-init resets that worktree to the base branch
+and clears the stale hook_bead. This prevents the next witness/boot cycle
+from spawning a fresh session on a stale sandbox and resurrecting closed
+beads (gu-7rw5). Use --no-refresh-stale to disable.
+
 Examples:
   gt polecat pool-init gastown
   gt polecat pool-init gastown --size 6
-  gt polecat pool-init gastown --dry-run`,
+  gt polecat pool-init gastown --dry-run
+  gt polecat pool-init gastown --no-refresh-stale`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPolecatPoolInit,
 }
@@ -377,6 +386,7 @@ func init() {
 	// Pool-init flags
 	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitDryRun, "dry-run", false, "Show what would be created without doing it")
 	polecatPoolInitCmd.Flags().IntVar(&polecatPoolInitSize, "size", 0, "Pool size (overrides rig config)")
+	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitNoRefresh, "no-refresh-stale", false, "Skip refresh of existing polecats whose worktree is stuck on a closed bead's branch")
 
 	// Add subcommands
 	polecatCmd.AddCommand(polecatListCmd)
@@ -1848,6 +1858,12 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 // runPolecatPoolInit creates a persistent polecat pool for a rig.
 // Creates N polecats with identities and worktrees in IDLE state.
 // Existing polecats are preserved — only new ones are created.
+//
+// Stale worktree refresh (gu-7rw5): Existing polecats whose agent bead hook_bead
+// points to a closed/tombstone bead have their worktree reset back to the base
+// branch before a fresh session can spawn on top of stale feature-branch state.
+// Without this, witness/boot cycles would spawn sessions on closed-bead branches
+// and produce ghost commits against already-completed work.
 func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 
@@ -1885,6 +1901,18 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Initializing persistent polecat pool for %s (target size: %d)\n", rigName, poolSize)
 	if len(existing) > 0 {
 		fmt.Printf("  Existing polecats: %d\n", len(existing))
+	}
+
+	// Refresh stale worktrees on existing polecats. See gu-7rw5: polecats whose
+	// hook_bead points to a closed bead are sitting on a stale feature branch
+	// that will be resurrected by the next witness/boot cycle.
+	if !polecatPoolInitNoRefresh && len(existing) > 0 {
+		bd := beads.New(r.Path)
+		townRoot := filepath.Dir(r.Path)
+		stale := findStalePolecats(bd, townRoot, existing)
+		if len(stale) > 0 {
+			refreshStalePolecats(cmd, mgr, stale, polecatPoolInitDryRun)
+		}
 	}
 
 	// Build the list of names to create
@@ -1950,6 +1978,89 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 		style.Bold.Render("✓"), created, created+len(existing), poolSize)
 
 	return nil
+}
+
+// stalePolecat represents an existing polecat whose worktree is stale and needs
+// to be refreshed before a new session can safely spawn on top of it.
+type stalePolecat struct {
+	Polecat  *polecat.Polecat
+	HookBead string // The bead ID the polecat's hook still points to (closed/tombstone)
+	Reason   string // Human-readable diagnosis for logging
+}
+
+// staleBeadsLookup is the narrow beads interface findStalePolecats depends on.
+// Broken out so unit tests can substitute a fake implementation.
+type staleBeadsLookup interface {
+	GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error)
+	Show(id string) (*beads.Issue, error)
+}
+
+// findStalePolecats returns the subset of polecats whose agent bead hook_bead
+// points to a bead in terminal status (closed/tombstone). Those polecats have
+// feature branches tied to completed work — spawning a new session on them
+// would resurrect the closed bead. Failures in the beads lookup path are
+// treated as "not stale" so the caller only ever errs toward preservation.
+func findStalePolecats(bd staleBeadsLookup, townRoot string, polecats []*polecat.Polecat) []stalePolecat {
+	var stale []stalePolecat
+	for _, p := range polecats {
+		if p == nil {
+			continue
+		}
+		// Derive the agent bead ID using the same helpers the manager uses,
+		// so prefix-collapsed rigs (gu-polecat-name) and non-collapsed rigs
+		// (gt-somerig-polecat-name) both resolve correctly.
+		prefix := beads.GetPrefixForRig(townRoot, p.Rig)
+		agentID := beads.PolecatBeadIDWithPrefix(prefix, p.Rig, p.Name)
+		_, fields, err := bd.GetAgentBead(agentID)
+		if err != nil || fields == nil || fields.HookBead == "" {
+			continue
+		}
+		issue, err := bd.Show(fields.HookBead)
+		if err != nil || issue == nil {
+			continue
+		}
+		if !beads.IssueStatus(issue.Status).IsTerminal() {
+			continue
+		}
+		stale = append(stale, stalePolecat{
+			Polecat:  p,
+			HookBead: fields.HookBead,
+			Reason:   fmt.Sprintf("hook_bead %s is %s", fields.HookBead, issue.Status),
+		})
+	}
+	return stale
+}
+
+// polecatRefresher is the narrow Manager interface refreshStalePolecats uses,
+// so tests can substitute a fake.
+type polecatRefresher interface {
+	RefreshStalePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error)
+}
+
+// refreshStalePolecats resets the worktrees on all stale polecats back to the
+// base branch and clears their agent bead hook_bead. On dry-run, prints what
+// would be refreshed without mutating state. Failures are logged per-polecat
+// but don't abort the pool-init run — a polecat that fails to refresh is still
+// less broken than one that wasn't noticed at all.
+func refreshStalePolecats(cmd *cobra.Command, mgr polecatRefresher, stale []stalePolecat, dryRun bool) {
+	verb := "Refreshing"
+	if dryRun {
+		verb = "Would refresh"
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "\n%s %d stale polecat worktree(s) (closed-bead branches):\n", verb, len(stale))
+	for _, s := range stale {
+		fmt.Fprintf(out, "  %s %s (%s)", style.Dim.Render("→"), s.Polecat.Name, s.Reason)
+		if dryRun {
+			fmt.Fprintln(out)
+			continue
+		}
+		if _, err := mgr.RefreshStalePolecat(s.Polecat.Name, polecat.AddOptions{}); err != nil {
+			fmt.Fprintf(out, " %s %v\n", style.Warning.Render("FAILED"), err)
+			continue
+		}
+		fmt.Fprintf(out, " %s\n", style.Success.Render("✓"))
+	}
 }
 
 // existingNamesList extracts polecat names from a slice of Polecat pointers.

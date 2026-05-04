@@ -1761,6 +1761,143 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	}, nil
 }
 
+// RefreshStalePolecat resets an existing polecat's worktree back to the base branch
+// and clears its agent bead hook_bead, returning it to idle state. Unlike
+// ReuseIdlePolecat (which puts the polecat into spawning/working for immediate work),
+// this method is for cleanup — putting a polecat back into the idle pool without
+// assigning new work.
+//
+// Use case: `gt polecat pool-init` may be called on a rig where an existing
+// polecat's worktree is still on a feature branch tied to a CLOSED bead (i.e.
+// prior work completed but the worktree was never reset). If the witness/boot
+// cycle then spawns a fresh session on that stale worktree, the session
+// resurrects the closed bead and commits ghost work on a branch that no longer
+// has an open issue. See gu-7rw5 / gt-78dib.
+//
+// Steps:
+//  1. Kill any live tmux session for the polecat.
+//  2. Fetch origin and verify the base branch ref exists.
+//  3. Reset the worktree to origin/<base>, cleaning any stray files, and create a
+//     fresh polecat branch.
+//  4. Reset the agent bead (clears hook_bead) and set agent_state to "idle".
+//
+// Returns the refreshed polecat in StateIdle. If the polecat's worktree is
+// missing or the base branch cannot be checked out, an error is returned and
+// the caller should fall back to RepairWorktree.
+func (m *Manager) RefreshStalePolecat(name string, opts AddOptions) (*Polecat, error) {
+	// Acquire per-polecat file lock to prevent concurrent refresh/reuse/remove races.
+	fl, err := m.lockPolecat(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	if !m.exists(name) {
+		return nil, ErrPolecatNotFound
+	}
+
+	// Kill any existing session before we mutate the worktree. A live session
+	// pointing at the stale branch is the exact failure mode this method exists
+	// to prevent — see gu-7rw5.
+	if running, _ := m.polecatSessionState(name); running {
+		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+		if err := m.tmux.KillSessionWithProcesses(sessionName); err != nil {
+			return nil, fmt.Errorf("killing existing session %s for refresh: %w", sessionName, err)
+		}
+		townRoot := filepath.Dir(m.rig.Path)
+		RemoveSessionHeartbeat(townRoot, sessionName)
+	}
+
+	clonePath := m.clonePath(name)
+	if _, err := os.Stat(clonePath); err != nil {
+		return nil, fmt.Errorf("polecat worktree not found at %s: %w", clonePath, err)
+	}
+
+	polecatGit := git.NewGit(clonePath)
+
+	// Fetch latest from origin so startPoint reflects current main.
+	if repoGit, err := m.repoBase(); err == nil {
+		_ = repoGit.Fetch("origin")
+	}
+	_ = polecatGit.Fetch("origin")
+
+	// Determine start point — flag value wins, else rig config, else default.
+	var startPoint string
+	if opts.BaseBranch != "" {
+		startPoint = opts.BaseBranch
+	} else {
+		defaultBranch := "main"
+		if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
+			defaultBranch = rigCfg.DefaultBranch
+		}
+		startPoint = fmt.Sprintf("origin/%s", defaultBranch)
+	}
+
+	if exists, err := polecatGit.RefExists(startPoint); err != nil {
+		return nil, fmt.Errorf("checking ref %s: %w", startPoint, err)
+	} else if !exists {
+		return nil, fmt.Errorf("start point %s not found — fall back to full repair", startPoint)
+	}
+
+	// Reset worktree state: discard any uncommitted/untracked changes and move
+	// HEAD to the start point. Matches the cleanup pattern in ReuseIdlePolecat
+	// (GH#2536) and guards against the stale-branch resurrection bug.
+	_ = polecatGit.ResetHard(startPoint)
+	_ = polecatGit.CleanForce()
+
+	// Create a fresh polecat branch (opts.HookBead is expected to be empty for
+	// idle refresh — buildBranchName falls back to a name-only timestamped branch).
+	branchName := m.buildBranchName(name, opts.HookBead)
+	if err := polecatGit.CheckoutNewBranch(branchName, startPoint); err != nil {
+		_ = polecatGit.Checkout(startPoint)
+		if err2 := polecatGit.CheckoutNewBranch(branchName, startPoint); err2 != nil {
+			return nil, fmt.Errorf("creating branch %s from %s (retry after cleanup): %w", branchName, startPoint, err2)
+		}
+	}
+
+	if actual, err := polecatGit.CurrentBranch(); err == nil && actual != branchName {
+		return nil, fmt.Errorf("branch mismatch after checkout: expected %s, got %s", branchName, actual)
+	}
+
+	// Clear the agent bead (drops stale hook_bead) and mark as idle. We write
+	// the agent bead through the same two-step sequence used by ReuseIdlePolecat
+	// — reset-for-reuse then create-or-reopen — so callers that previously
+	// closed this agent bead (e.g. during `gt polecat remove`) still end up with
+	// an open, trackable bead.
+	agentID := m.agentBeadID(name)
+	if err := m.beads.ResetAgentBeadForReuse(agentID, "pool-init refresh"); err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			style.PrintWarning("could not reset agent bead %s: %v", agentID, err)
+		}
+	}
+
+	if err := m.createAgentBeadWithRetry(agentID, &beads.AgentFields{
+		RoleType:   "polecat",
+		Rig:        m.rig.Name,
+		AgentState: string(beads.AgentStateIdle),
+		HookBead:   "", // explicit: cleared on refresh
+	}); err != nil {
+		return nil, fmt.Errorf("agent bead required for polecat tracking: %w", err)
+	}
+
+	// Sync the structured agent_state column so dashboards agree with the
+	// description field (matches the post-write sync in ReuseIdlePolecat).
+	if err := m.beads.UpdateAgentState(agentID, string(beads.AgentStateIdle)); err != nil {
+		style.PrintWarning("could not sync agent_state column to idle: %v", err)
+	}
+
+	now := time.Now()
+	return &Polecat{
+		Name:      name,
+		Rig:       m.rig.Name,
+		State:     StateIdle,
+		ClonePath: clonePath,
+		Branch:    branchName,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil
+}
+
 // ReconcilePool derives pool InUse state from existing polecat directories and active sessions.
 // This implements ZFC: InUse is discovered from filesystem and tmux, not tracked separately.
 // Called before each allocation to ensure InUse reflects reality.
