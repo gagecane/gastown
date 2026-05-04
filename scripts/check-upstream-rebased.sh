@@ -5,11 +5,12 @@ set -euo pipefail
 
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
+UPSTREAM_URL="https://github.com/gastownhall/gastown.git"
 
+# Auto-add upstream remote if missing, so polecat worktrees work without manual setup.
 if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
-  echo "ERROR: No '$UPSTREAM_REMOTE' remote configured. Add it with:" >&2
-  echo "  git remote add $UPSTREAM_REMOTE https://github.com/gastownhall/gastown.git" >&2
-  exit 2
+  echo "Adding '$UPSTREAM_REMOTE' remote -> $UPSTREAM_URL"
+  git remote add "$UPSTREAM_REMOTE" "$UPSTREAM_URL"
 fi
 
 git fetch --quiet "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
