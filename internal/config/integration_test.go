@@ -260,39 +260,61 @@ func writeTownJSON(t *testing.T, path string, data interface{}) {
 	}
 }
 
-func pollForOutput(t *testing.T, sessionName, expected string, timeout time.Duration) (string, bool) {
+// requireIntegrationTmuxSocket returns a per-test tmux socket and skips if
+// tmux is unavailable. The socket server is killed on test cleanup so this
+// test never touches the user's default tmux server. Follows the pattern
+// used by requireNotifyTestSocket in internal/mail/router_test.go.
+func requireIntegrationTmuxSocket(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	// Use test name for unique socket per test to prevent cleanup interference.
+	// Sanitize: tmux socket names cannot contain slashes or dots.
+	safe := strings.NewReplacer("/", "-", ".", "-").Replace(t.Name())
+	socket := fmt.Sprintf("gt-config-test-%s-%d", safe, os.Getpid())
+	// intentionally bare — pre-kill any stale server on this per-test socket.
+	// Cannot use tmux.BuildCommand: the test explicitly manages its own
+	// isolated socket independent of the package-level default.
+	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	t.Cleanup(func() {
+		// intentionally bare — tear down the per-test socket.
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+	return socket
+}
+
+func pollForOutput(t *testing.T, socket, sessionName, expected string, timeout time.Duration) (string, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		output := captureTmuxPane(t, sessionName, 50)
+		output := captureTmuxPane(t, socket, sessionName, 50)
 		if strings.Contains(output, expected) {
 			return output, true
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return captureTmuxPane(t, sessionName, 50), false
+	return captureTmuxPane(t, socket, sessionName, 50), false
 }
 
 func testTmuxSessionWithStubAgent(t *testing.T, tmpDir, stubAgentPath, rigName string) {
 	t.Helper()
 
+	socket := requireIntegrationTmuxSocket(t)
 	sessionName := fmt.Sprintf("gt-test-pid%d-%d", os.Getpid(), time.Now().UnixNano())
 	workDir := tmpDir
 
-	// intentionally bare — this integration test (pre-dating the socket-aware
-	// tmux helpers) runs on the user's default tmux server rather than an
-	// isolated -L socket. Tracked as a separate test-hygiene follow-up
-	// rather than a socket-routing bug, because the config package never
-	// calls tmux.SetDefaultSocket. See gt-rw3x2 / gu-im4k audit notes.
-	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	// Operate exclusively on the per-test -L socket; the kill-server
+	// in t.Cleanup tears everything down, so per-session kills are
+	// no longer required, but we still try one defensively in case the
+	// socket already has a same-named session from a prior run.
+	// intentionally bare — operating on the per-test socket returned by
+	// requireIntegrationTmuxSocket; tmux.BuildCommand would route to the
+	// package-level default instead.
+	_ = exec.Command("tmux", "-L", socket, "kill-session", "-t", sessionName).Run()
 
-	defer func() {
-		// intentionally bare — see note above.
-		exec.Command("tmux", "kill-session", "-t", sessionName).Run()
-	}()
-
-	// intentionally bare — see note above.
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", workDir)
+	// intentionally bare — per-test socket; see kill-session note above.
+	cmd := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", sessionName, "-c", workDir)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Failed to create tmux session: %v", err)
 	}
@@ -304,21 +326,21 @@ func testTmuxSessionWithStubAgent(t *testing.T, tmpDir, stubAgentPath, rigName s
 	}
 
 	for key, val := range envVars {
-		// intentionally bare — see note above.
-		cmd := exec.Command("tmux", "set-environment", "-t", sessionName, key, val)
+		// intentionally bare — per-test socket; see kill-session note above.
+		cmd := exec.Command("tmux", "-L", socket, "set-environment", "-t", sessionName, key, val)
 		if err := cmd.Run(); err != nil {
 			t.Logf("Warning: failed to set %s: %v", key, err)
 		}
 	}
 
 	agentCmd := fmt.Sprintf("%s --test-mode --stub", stubAgentPath)
-	// intentionally bare — see note above.
-	cmd = exec.Command("tmux", "send-keys", "-t", sessionName, agentCmd, "Enter")
+	// intentionally bare — per-test socket; see kill-session note above.
+	cmd = exec.Command("tmux", "-L", socket, "send-keys", "-t", sessionName, agentCmd, "Enter")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Failed to send keys: %v", err)
 	}
 
-	output, found := pollForOutput(t, sessionName, "STUB_AGENT_STARTED", 5*time.Second)
+	output, found := pollForOutput(t, socket, sessionName, "STUB_AGENT_STARTED", 5*time.Second)
 	if !found {
 		t.Skipf("stub agent output not detected; tmux capture unreliable. Output:\n%s", output)
 	}
@@ -327,24 +349,24 @@ func testTmuxSessionWithStubAgent(t *testing.T, tmpDir, stubAgentPath, rigName s
 		t.Logf("Warning: GT_ROLE not visible in agent output (tmux env may not propagate to subshell)")
 	}
 
-	// intentionally bare — see note above.
-	cmd = exec.Command("tmux", "send-keys", "-t", sessionName, "ping", "Enter")
+	// intentionally bare — per-test socket; see kill-session note above.
+	cmd = exec.Command("tmux", "-L", socket, "send-keys", "-t", sessionName, "ping", "Enter")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Failed to send ping: %v", err)
 	}
 
-	output, found = pollForOutput(t, sessionName, "STUB_AGENT_ANSWER: pong", 3*time.Second)
+	output, found = pollForOutput(t, socket, sessionName, "STUB_AGENT_ANSWER: pong", 3*time.Second)
 	if !found {
 		t.Errorf("Expected 'pong' response, got:\n%s", output)
 	}
 
-	// intentionally bare — see note above.
-	cmd = exec.Command("tmux", "send-keys", "-t", sessionName, "exit", "Enter")
+	// intentionally bare — per-test socket; see kill-session note above.
+	cmd = exec.Command("tmux", "-L", socket, "send-keys", "-t", sessionName, "exit", "Enter")
 	if err := cmd.Run(); err != nil {
 		t.Logf("Warning: failed to send exit: %v", err)
 	}
 
-	output, found = pollForOutput(t, sessionName, "STUB_AGENT_EXITING", 2*time.Second)
+	output, found = pollForOutput(t, socket, sessionName, "STUB_AGENT_EXITING", 2*time.Second)
 	if !found {
 		t.Logf("Note: Agent may have exited before capture. Output:\n%s", output)
 	}
@@ -352,12 +374,12 @@ func testTmuxSessionWithStubAgent(t *testing.T, tmpDir, stubAgentPath, rigName s
 	t.Logf("Tmux session test completed successfully")
 }
 
-// captureTmuxPane captures the output from a tmux pane.
-func captureTmuxPane(t *testing.T, sessionName string, lines int) string {
+// captureTmuxPane captures the output from a tmux pane on the given socket.
+func captureTmuxPane(t *testing.T, socket, sessionName string, lines int) string {
 	t.Helper()
 
-	// intentionally bare — see note in testTmuxSessionWithStubAgent.
-	cmd := exec.Command("tmux", "capture-pane", "-t", sessionName, "-p", "-S", fmt.Sprintf("-%d", lines))
+	// intentionally bare — per-test socket managed by requireIntegrationTmuxSocket.
+	cmd := exec.Command("tmux", "-L", socket, "capture-pane", "-t", sessionName, "-p", "-S", fmt.Sprintf("-%d", lines))
 	output, err := cmd.Output()
 	if err != nil {
 		t.Logf("Warning: failed to capture pane: %v", err)
@@ -367,13 +389,13 @@ func captureTmuxPane(t *testing.T, sessionName string, lines int) string {
 	return string(output)
 }
 
-func waitForTmuxOutputContains(t *testing.T, sessionName, needle string, timeout time.Duration) (string, bool) {
+func waitForTmuxOutputContains(t *testing.T, socket, sessionName, needle string, timeout time.Duration) (string, bool) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	output := ""
 	for time.Now().Before(deadline) {
-		output = captureTmuxPane(t, sessionName, 200)
+		output = captureTmuxPane(t, socket, sessionName, 200)
 		if strings.Contains(output, needle) {
 			return output, true
 		}
