@@ -394,6 +394,14 @@ func (m *Manager) Stop() error {
 		return ErrNotRunning
 	}
 
+	// Clear the tracked PID file BEFORE killing the tmux session (gu-ytwg).
+	// Balances the TrackSessionPID call in Start; without this, stale entries
+	// in <townRoot>/.runtime/pids/ accumulate across witness restarts and
+	// mislead any consumer that trusts the recorded PID.
+	if townRoot := m.townRoot(); townRoot != "" {
+		session.UntrackPID(townRoot, sessionID)
+	}
+
 	// Kill the tmux session
 	return t.KillSession(sessionID)
 }

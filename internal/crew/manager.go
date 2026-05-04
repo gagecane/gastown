@@ -992,6 +992,11 @@ func (m *Manager) Stop(name string) error {
 		style.PrintWarning("could not stop nudge poller for %s: %v", name, pollerErr)
 	}
 
+	// Clear the tracked PID file before killing the session (gu-ytwg).
+	// Balances the TrackSessionPID call in Start; prevents stale .pid
+	// entries from outliving crew members across restarts.
+	session.UntrackPID(townRoot, sessionID)
+
 	// Kill the session.
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.

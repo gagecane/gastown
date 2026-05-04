@@ -202,6 +202,11 @@ func (m *Manager) Stop() error {
 	_ = t.SendKeysRaw(sessionID, "C-c")
 	time.Sleep(100 * time.Millisecond)
 
+	// Clear the tracked PID file before killing the session (gu-ytwg).
+	// Balances the TrackSessionPID call in Start; keeps stale .pid entries
+	// in <townRoot>/.runtime/pids/ from outliving the deacon.
+	session.UntrackPID(m.townRoot, sessionID)
+
 	// Kill the session.
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.

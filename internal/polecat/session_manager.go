@@ -690,6 +690,12 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 		session.WaitForSessionExit(m.tmux, sessionID, constants.GracefulShutdownTimeout)
 	}
 
+	// Clear the tracked PID file before killing the session (gu-ytwg).
+	// Balances the TrackSessionPID call in Start. Without this, stale
+	// .pid entries outlive polecat respawns and any consumer that reads
+	// the file (doctor, heartbeat, KillTrackedPIDs) may signal the wrong PID.
+	session.UntrackPID(filepath.Dir(m.rig.Path), sessionID)
+
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
 	if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {

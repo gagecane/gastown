@@ -276,3 +276,121 @@ func TestPidFile_Path(t *testing.T) {
 		t.Errorf("pidFile() = %q, want %q", got, want)
 	}
 }
+
+func TestTrackPID_AppendsHistory(t *testing.T) {
+	// Ensure TrackPID writes an audit entry to <session>.last for debugging
+	// stale-PID issues (gu-ytwg).
+	townRoot := t.TempDir()
+	originalStartFn := pidStartTimeFunc
+	t.Cleanup(func() { pidStartTimeFunc = originalStartFn })
+	pidStartTimeFunc = func(int) (string, error) { return "", nil }
+
+	if err := TrackPID(townRoot, "gt-hist", 111); err != nil {
+		t.Fatalf("TrackPID() error = %v", err)
+	}
+	if err := TrackPID(townRoot, "gt-hist", 222); err != nil {
+		t.Fatalf("TrackPID() error = %v", err)
+	}
+
+	hist, err := os.ReadFile(pidLastFile(townRoot, "gt-hist"))
+	if err != nil {
+		t.Fatalf("reading history file: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(hist), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("history has %d lines, want 2: %q", len(lines), string(hist))
+	}
+	if !strings.Contains(lines[0], "track 111") {
+		t.Errorf("first history line = %q, want 'track 111'", lines[0])
+	}
+	if !strings.Contains(lines[1], "track 222") {
+		t.Errorf("second history line = %q, want 'track 222'", lines[1])
+	}
+}
+
+func TestUntrackPID_AppendsHistory(t *testing.T) {
+	townRoot := t.TempDir()
+	originalStartFn := pidStartTimeFunc
+	t.Cleanup(func() { pidStartTimeFunc = originalStartFn })
+	pidStartTimeFunc = func(int) (string, error) { return "", nil }
+
+	if err := TrackPID(townRoot, "gt-untrack-hist", 555); err != nil {
+		t.Fatalf("TrackPID() error = %v", err)
+	}
+	UntrackPID(townRoot, "gt-untrack-hist")
+
+	hist, err := os.ReadFile(pidLastFile(townRoot, "gt-untrack-hist"))
+	if err != nil {
+		t.Fatalf("reading history file: %v", err)
+	}
+	text := string(hist)
+	if !strings.Contains(text, "track 555") {
+		t.Errorf("history missing 'track 555': %q", text)
+	}
+	if !strings.Contains(text, "untrack") {
+		t.Errorf("history missing 'untrack': %q", text)
+	}
+}
+
+func TestPidHistory_RotatesAtCap(t *testing.T) {
+	// Appending many entries must not grow the .last file without bound.
+	townRoot := t.TempDir()
+	originalStartFn := pidStartTimeFunc
+	t.Cleanup(func() { pidStartTimeFunc = originalStartFn })
+	pidStartTimeFunc = func(int) (string, error) { return "", nil }
+
+	// Write maxPidLastLines+10 entries to force rotation.
+	for i := 0; i < maxPidLastLines+10; i++ {
+		if err := TrackPID(townRoot, "gt-rot", 1000+i); err != nil {
+			t.Fatalf("TrackPID iter %d error = %v", i, err)
+		}
+	}
+
+	hist, err := os.ReadFile(pidLastFile(townRoot, "gt-rot"))
+	if err != nil {
+		t.Fatalf("reading history file: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(hist), "\n"), "\n")
+	if len(lines) > maxPidLastLines {
+		t.Errorf("history has %d lines, want ≤ %d (rotation broken)", len(lines), maxPidLastLines)
+	}
+	// Last line should be the newest entry.
+	if !strings.Contains(lines[len(lines)-1], fmt.Sprintf("track %d", 1000+maxPidLastLines+9)) {
+		t.Errorf("last line = %q, want newest entry", lines[len(lines)-1])
+	}
+}
+
+func TestKillTrackedPIDs_IgnoresLastHistoryFile(t *testing.T) {
+	// .last files must NOT be treated as PID files by the cleanup scanner
+	// (guards against future rename/suffix mistakes).
+	townRoot := t.TempDir()
+	originalStartFn := pidStartTimeFunc
+	t.Cleanup(func() { pidStartTimeFunc = originalStartFn })
+	pidStartTimeFunc = func(int) (string, error) { return "", nil }
+
+	if err := TrackPID(townRoot, "gt-ignore-last", 999); err != nil {
+		t.Fatalf("TrackPID() error = %v", err)
+	}
+	UntrackPID(townRoot, "gt-ignore-last")
+
+	// .pid removed, .last remains
+	if _, err := os.Stat(pidFile(townRoot, "gt-ignore-last")); !os.IsNotExist(err) {
+		t.Fatalf(".pid file should be removed")
+	}
+	if _, err := os.Stat(pidLastFile(townRoot, "gt-ignore-last")); err != nil {
+		t.Fatalf(".last file should still exist: %v", err)
+	}
+
+	// KillTrackedPIDs must not crash or report errors on the leftover .last file.
+	killed, errs := KillTrackedPIDs(townRoot)
+	if killed != 0 {
+		t.Errorf("killed = %d, want 0", killed)
+	}
+	if len(errs) != 0 {
+		t.Errorf("errs = %v, want empty (.last files must be ignored)", errs)
+	}
+	// .last should still exist
+	if _, err := os.Stat(pidLastFile(townRoot, "gt-ignore-last")); err != nil {
+		t.Errorf(".last file should not be removed by KillTrackedPIDs: %v", err)
+	}
+}

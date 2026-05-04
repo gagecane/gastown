@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -34,6 +35,48 @@ func pidFile(townRoot, sessionID string) string {
 	return filepath.Join(pidsDir(townRoot), sessionID+".pid")
 }
 
+// pidLastFile returns the path to the rolling-history file for a session.
+// Each call to TrackPID or UntrackPID appends a line with a timestamped
+// event, giving operators a trail to debug stale-PID issues (gu-ytwg).
+func pidLastFile(townRoot, sessionID string) string {
+	return filepath.Join(pidsDir(townRoot), sessionID+".last")
+}
+
+// maxPidLastLines caps the size of the .last history file so it cannot grow
+// unbounded across respawn cycles. Old entries are rotated out on each append.
+const maxPidLastLines = 50
+
+// appendPidHistory writes a best-effort audit entry to <session>.last.
+// Errors are swallowed because history is debug-only and must never block a
+// shutdown or spawn path.
+func appendPidHistory(townRoot, sessionID, event string) {
+	dir := pidsDir(townRoot)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	path := pidLastFile(townRoot, sessionID)
+	line := fmt.Sprintf("%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), event)
+
+	// Read existing lines, trim to maxPidLastLines-1, then append.
+	var existing []string
+	if data, err := os.ReadFile(path); err == nil {
+		existing = strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		if len(existing) == 1 && existing[0] == "" {
+			existing = nil
+		}
+		if len(existing) > maxPidLastLines-1 {
+			existing = existing[len(existing)-(maxPidLastLines-1):]
+		}
+	}
+	var buf strings.Builder
+	for _, e := range existing {
+		buf.WriteString(e)
+		buf.WriteByte('\n')
+	}
+	buf.WriteString(line)
+	_ = os.WriteFile(path, []byte(buf.String()), 0644)
+}
+
 // TrackSessionPID captures the pane PID of a tmux session and writes it
 // to a PID tracking file. This is defense-in-depth: if a session dies
 // unexpectedly and KillSessionWithProcesses can't find the tmux pane,
@@ -57,6 +100,14 @@ func TrackSessionPID(townRoot, sessionID string, t *tmux.Tmux) error {
 }
 
 // TrackPID writes a PID to a tracking file for later cleanup.
+//
+// On every call this function OVERWRITES the session's .pid file with the
+// supplied PID (and optional start-time). This is intentional: when an agent
+// is respawned in the same tmux pane, the previous PID becomes stale and must
+// be replaced — otherwise KillTrackedPIDs and other consumers may signal the
+// wrong process or falsely conclude the session is dead (gu-ytwg / gt-scrl4).
+//
+// An audit entry is also appended to <session>.last for debugging.
 func TrackPID(townRoot, sessionID string, pid int) error {
 	dir := pidsDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -68,12 +119,25 @@ func TrackPID(townRoot, sessionID string, pid int) error {
 	if start, err := pidStartTimeFunc(pid); err == nil && start != "" {
 		record = fmt.Sprintf("%d|%s", pid, start)
 	}
-	return os.WriteFile(path, []byte(record+"\n"), 0644)
+	if err := os.WriteFile(path, []byte(record+"\n"), 0644); err != nil {
+		return err
+	}
+	appendPidHistory(townRoot, sessionID, "track "+record)
+	return nil
 }
 
 // UntrackPID removes the PID tracking file for a session.
+//
+// Call this from every shutdown / teardown path that kills a tracked tmux
+// session so the PID file does not outlive the process it references. Without
+// this, stale entries accumulate and any consumer that trusts the file (e.g.
+// doctor, heartbeat, KillTrackedPIDs) may signal the wrong PID (gu-ytwg).
+//
+// Safe to call even if the file does not exist; errors are intentionally
+// swallowed because this is a best-effort cleanup.
 func UntrackPID(townRoot, sessionID string) {
 	_ = os.Remove(pidFile(townRoot, sessionID))
+	appendPidHistory(townRoot, sessionID, "untrack")
 }
 
 // KillTrackedPIDs reads all PID files and kills any processes that are

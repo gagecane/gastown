@@ -174,6 +174,11 @@ func (m *SessionManager) Stop(dogName string, force bool) error {
 		session.WaitForSessionExit(m.tmux, sessionID, constants.GracefulShutdownTimeout)
 	}
 
+	// Clear the tracked PID file before killing the session (gu-ytwg).
+	// Dogs use lifecycle.StartSession with TrackPID=true; this balances it
+	// on teardown so the .pid file never outlives the dog process.
+	session.UntrackPID(m.townRoot, sessionID)
+
 	if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
 		return fmt.Errorf("killing session: %w", err)
 	}
