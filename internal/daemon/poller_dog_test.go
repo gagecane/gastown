@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -167,7 +168,7 @@ func TestSupervisePollers_RespawnsDeadPollerForLiveSession(t *testing.T) {
 	}
 	found := false
 	for _, l := range getLogs() {
-		if contains(l, "respawned nudge-poller for") {
+		if strings.Contains(l, "respawned nudge-poller for") {
 			found = true
 			break
 		}
@@ -231,7 +232,7 @@ func TestSupervisePollers_TmuxErrorLeavesEntryAlone(t *testing.T) {
 	}
 	found := false
 	for _, l := range getLogs() {
-		if contains(l, "HasSession") {
+		if strings.Contains(l, "HasSession") {
 			found = true
 		}
 	}
@@ -252,7 +253,7 @@ func TestSupervisePollers_ListPollersErrorLogs(t *testing.T) {
 	}
 	found := false
 	for _, l := range getLogs() {
-		if contains(l, "list pollers failed") {
+		if strings.Contains(l, "list pollers failed") {
 			found = true
 		}
 	}
@@ -299,21 +300,4 @@ func TestSupervisePollers_MixedFleet(t *testing.T) {
 	if len(sup.removed) != 1 || sup.removed[0] != "gt-old-session" {
 		t.Errorf("expected stale removal for gt-old-session only, got %v", sup.removed)
 	}
-}
-
-// contains is a tiny helper to avoid pulling strings.Contains into every assertion.
-func contains(haystack, needle string) bool {
-	return len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
-}
-
-func indexOf(s, substr string) int {
-	if len(substr) == 0 {
-		return 0
-	}
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
