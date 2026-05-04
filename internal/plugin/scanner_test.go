@@ -948,3 +948,63 @@ func TestFormatMailBody_WithoutRunScript(t *testing.T) {
 		t.Error("expected mail body to NOT contain run.sh command")
 	}
 }
+
+// TestShippedPluginsHaveValidCooldownGates walks the plugins/ directory shipped
+// with the repo and, for every plugin whose gate type is "cooldown", asserts
+// that Duration is non-empty after parsing. This guards against TOML-field
+// typos like using "cooldown = ..." instead of "duration = ...", which silently
+// unset Duration and cause the cooldown check in handler.go:dispatchPlugins to
+// be skipped — leading to unbounded dispatch on every heartbeat. See gu-bc9o.
+func TestShippedPluginsHaveValidCooldownGates(t *testing.T) {
+	// Walk from the test file up to the repo root (contains "plugins/").
+	// The package lives at internal/plugin/, so ../../plugins is correct.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	pluginsDir := filepath.Join(wd, "..", "..", "plugins")
+	info, err := os.Stat(pluginsDir)
+	if err != nil || !info.IsDir() {
+		t.Skipf("plugins directory not found at %s: %v", pluginsDir, err)
+	}
+
+	entries, err := os.ReadDir(pluginsDir)
+	if err != nil {
+		t.Fatalf("reading plugins dir: %v", err)
+	}
+
+	checked := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pluginMD := filepath.Join(pluginsDir, entry.Name(), "plugin.md")
+		content, err := os.ReadFile(pluginMD)
+		if err != nil {
+			// No plugin.md in this subdir — not a plugin, skip.
+			continue
+		}
+		p, err := parsePluginMD(content, pluginMD, LocationTown, "")
+		if err != nil {
+			t.Errorf("plugin %s: parse failed: %v", entry.Name(), err)
+			continue
+		}
+		checked++
+		if p.Gate == nil {
+			// No gate is valid (manual plugins).
+			continue
+		}
+		if p.Gate.Type != GateCooldown {
+			continue
+		}
+		if p.Gate.Duration == "" {
+			t.Errorf("plugin %s: gate.type is %q but gate.duration is empty — "+
+				"check plugin.md for a typo like 'cooldown = \"...\"' instead of 'duration = \"...\"'",
+				entry.Name(), p.Gate.Type)
+		}
+	}
+
+	if checked == 0 {
+		t.Errorf("walked %s but found no plugin.md files — test is not exercising shipped plugins", pluginsDir)
+	}
+}
