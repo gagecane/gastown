@@ -300,6 +300,10 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Worktree gitdir validity (runs across all rigs, or specific rig with --rig)
 	d.Register(doctor.NewWorktreeGitdirCheck())
 
+	// Detect worktrees checked out to the rig default branch (gu-f35z:
+	// blocks refinery/mayor pushes via receive.denyCurrentBranch=refuse).
+	d.Register(doctor.NewWorktreeOnDefaultBranchCheck())
+
 	// Rig-specific checks (only when --rig is specified)
 	if doctorRig != "" {
 		d.RegisterAll(doctor.RigChecks()...)

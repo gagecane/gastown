@@ -6,11 +6,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -34,7 +36,7 @@ The worktree is created at: ~/gt/<target-rig>/crew/<source-rig>-<name>/
 
 For example, if you're gastown/crew/joe and run 'gt worktree beads':
 - Creates worktree at ~/gt/beads/crew/gastown-joe/
-- The worktree checks out main branch
+- The worktree checks out a dedicated branch starting at the rig's default branch
 - Your identity (BD_ACTOR, GT_ROLE) remains gastown/crew/joe
 
 Use --no-cd to just print the path without printing shell commands.
@@ -151,11 +153,29 @@ func runWorktree(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Warning: could not fetch from origin: %v\n", style.Warning.Render("⚠"), err)
 	}
 
-	// Create the worktree on main branch
-	// Use WorktreeAddExistingForce because main may already be checked out
-	// in other worktrees (e.g., mayor/rig). This is safe for cross-rig work.
-	if err := g.WorktreeAddExistingForce(worktreePath, "main"); err != nil {
-		return fmt.Errorf("creating worktree: %w", err)
+	// Determine the target rig's default branch. Using the rig's configured
+	// default branch (rather than a hardcoded "main") is essential because
+	// some rigs use "mainline" or "master". If we check out the default
+	// branch in a crew worktree and the process dies or gets orphaned,
+	// it blocks all pushes to that branch (git receive.denyCurrentBranch=refuse).
+	// See gu-f35z / gt-ef38s for the incident that motivated this.
+	defaultBranch := "main"
+	if rigCfg, err := rig.LoadRigConfig(targetRigInfo.Path); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
+	startPoint := fmt.Sprintf("origin/%s", defaultBranch)
+
+	// Create the worktree on a dedicated branch (NOT the rig's default branch).
+	// Using a fresh crew/<source-rig>-<name>-<timestamp> branch prevents the
+	// "worktree pinned to mainline blocks all pushes" class of failure
+	// (gu-f35z): git refuses any push that would update a branch currently
+	// checked out by a registered worktree. By always checking out a
+	// per-worktree branch instead, `gt worktree` can never accidentally
+	// become a push blocker for mainline, even if the process dies
+	// mid-operation and leaves the worktree registered.
+	branchName := fmt.Sprintf("crew/%s-%s-%d", sourceRig, crewName, time.Now().UnixMilli())
+	if err := g.WorktreeAddFromRef(worktreePath, branchName, startPoint); err != nil {
+		return fmt.Errorf("creating worktree from %s: %w", startPoint, err)
 	}
 
 	// Configure git author for identity preservation
@@ -170,11 +190,13 @@ func runWorktree(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Created worktree for cross-rig work\n", style.Success.Render("✓"))
 	fmt.Printf("  Source: %s/crew/%s\n", sourceRig, crewName)
 	fmt.Printf("  Target: %s\n", worktreePath)
-	fmt.Printf("  Branch: main\n")
+	fmt.Printf("  Branch: %s (from origin/%s)\n", branchName, defaultBranch)
 	fmt.Println()
 
-	// Pull latest main in the new worktree
-	if err := worktreeGit.Pull("origin", "main"); err != nil {
+	// Pull latest from the source branch (origin/<default-branch>) into the
+	// new worktree's dedicated branch. We use the rig's configured default
+	// branch, not a hardcoded "main", so this works on mainline/master rigs too.
+	if err := worktreeGit.Pull("origin", defaultBranch); err != nil {
 		fmt.Printf("%s Warning: could not pull latest: %v\n", style.Warning.Render("⚠"), err)
 	}
 
