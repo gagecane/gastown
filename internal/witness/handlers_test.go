@@ -2571,3 +2571,445 @@ func TestHasPendingMR_PhantomActiveMR(t *testing.T) {
 		t.Fatal("hasPendingMR with phantom active_mr = true, want false (gu-xd7i)")
 	}
 }
+
+// --- Unfiled-MR recovery (gu-j98v) ---
+
+// TestUnfiledMRState_NeedsRecovery covers the pure-logic predicate guarding
+// the recovery path.
+func TestUnfiledMRState_NeedsRecovery(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		state *UnfiledMRState
+		want  bool
+	}{
+		{"nil state", nil, false},
+		{"no commits ahead", &UnfiledMRState{Branch: "p/n", CommitsAhead: false}, false},
+		{"commits ahead, MR already exists", &UnfiledMRState{
+			Branch:       "p/n",
+			CommitsAhead: true,
+			ExistingMRID: "gt-abc",
+		}, false},
+		{"commits ahead, no MR — recover", &UnfiledMRState{
+			Branch:       "p/n",
+			CommitsAhead: true,
+			ExistingMRID: "",
+		}, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.state.NeedsRecovery(); got != tc.want {
+				t.Errorf("NeedsRecovery() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExtractBaseBranchVar covers the formula_vars parser used by
+// verifyUnfiledMR to resolve a polecat's target branch.
+func TestExtractBaseBranchVar(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"newline form", "base_branch=main\npriority=2", "main"},
+		{"comma form", "base_branch=develop,priority=2", "develop"},
+		{"whitespace around value", "base_branch = feature/x ", "feature/x"},
+		{"absent key", "priority=2\nlabel=ops", ""},
+		{"wrong prefix", "non_base_branch=oops", ""},
+		{"multiple entries, base_branch second", "priority=2\nbase_branch=feature/y", "feature/y"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractBaseBranchVar(tc.in); got != tc.want {
+				t.Errorf("extractBaseBranchVar(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExtractMRIDFromSubmit covers parsing of `gt mq submit` output so we can
+// tag recovery actions with the MR ID for operator visibility.
+func TestExtractMRIDFromSubmit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain", "✓ Submitted to merge queue\n  MR ID: gt-abc123\n  Source: polecat/foo", "gt-abc123"},
+		{"idempotent", "✓ MR already exists (idempotent)\n  MR ID: gt-existing\n", "gt-existing"},
+		{"styled output (ansi bold around id)", "  MR ID: \x1b[1mgt-styled\x1b[0m\n", "gt-styled"},
+		{"no id line", "✓ Done\nSource: foo\n", ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractMRIDFromSubmit(tc.in); got != tc.want {
+				t.Errorf("extractMRIDFromSubmit = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStripANSI covers escape-sequence removal from styled CLI output.
+func TestStripANSI(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"plain", "plain"},
+		{"\x1b[1mbold\x1b[0m", "bold"},
+		{"a\x1b[31mred\x1b[0mb", "aredb"},
+		{"\x1b[1;33mmulti\x1b[0m done", "multi done"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			if got := stripANSI(tc.in); got != tc.want {
+				t.Errorf("stripANSI(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFindOpenMRForBranchAndSHA covers the bead-query dedup used by
+// verifyUnfiledMR to avoid duplicate submissions when the polecat already
+// filed an MR before dying.
+func TestFindOpenMRForBranchAndSHA(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		queryOut  string
+		branch    string
+		commitSHA string
+		want      string
+	}{
+		{
+			name:     "no MRs in queue",
+			queryOut: "[]",
+			branch:   "polecat/nux",
+			want:     "",
+		},
+		{
+			name: "branch match, sha match",
+			queryOut: `[{"id":"gt-mr-1","description":"branch: polecat/nux\ntarget: main\n` +
+				`source_issue: gt-abc\nrig: testrig\ncommit_sha: abc123"}]`,
+			branch:    "polecat/nux",
+			commitSHA: "abc123",
+			want:      "gt-mr-1",
+		},
+		{
+			name: "branch match, sha mismatch — stale MR, do not reuse",
+			queryOut: `[{"id":"gt-mr-2","description":"branch: polecat/nux\ntarget: main\n` +
+				`source_issue: gt-abc\nrig: testrig\ncommit_sha: OLDSHA"}]`,
+			branch:    "polecat/nux",
+			commitSHA: "NEWSHA",
+			want:      "",
+		},
+		{
+			name: "branch match, legacy MR with no commit_sha — branch-only fallback",
+			queryOut: `[{"id":"gt-mr-3","description":"branch: polecat/nux\ntarget: main\n` +
+				`source_issue: gt-abc\nrig: testrig"}]`,
+			branch:    "polecat/nux",
+			commitSHA: "NEWSHA",
+			want:      "gt-mr-3",
+		},
+		{
+			name: "branch mismatch",
+			queryOut: `[{"id":"gt-mr-4","description":"branch: polecat/other\ntarget: main\n` +
+				`source_issue: gt-abc\nrig: testrig\ncommit_sha: abc123"}]`,
+			branch:    "polecat/nux",
+			commitSHA: "abc123",
+			want:      "",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd, _ := mockBd(
+				func(args []string) (string, error) {
+					if len(args) > 0 && args[0] == "query" {
+						return tc.queryOut, nil
+					}
+					return "[]", nil
+				},
+				func(args []string) error { return nil },
+			)
+			got := findOpenMRForBranchAndSHA(bd, t.TempDir(), tc.branch, tc.commitSHA)
+			if got != tc.want {
+				t.Errorf("findOpenMRForBranchAndSHA = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleZombieRestart_FilesUnfiledMRForUnpushedCommits verifies gu-j98v:
+// when the polecat has local commits ahead of origin/main and no MR bead,
+// handleZombieRestart invokes recoverUnfiledMR which must (a) push the branch,
+// (b) file the MR, (c) archive the polecat. Restart must NOT happen.
+//
+// Not parallel: overrides package-level verifyUnfiledMR and recoverUnfiledMR.
+func TestHandleZombieRestart_FilesUnfiledMRForUnpushedCommits(t *testing.T) {
+	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		return &UnfiledMRState{
+			Branch:        "polecat/nux",
+			HeadSHA:       "abc123",
+			Target:        "main",
+			CommitsAhead:  true,
+			AlreadyPushed: false,
+		}, nil
+	}
+	recoverCalled := false
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, s *UnfiledMRState) (string, error) {
+		recoverCalled = true
+		if s.AlreadyPushed {
+			t.Errorf("recover called with AlreadyPushed=true, want false for this case")
+		}
+		return "filed-mr-unpushed-commits (aa-unpushed-commits, mr=gt-mr-xyz)", nil
+	}
+	t.Cleanup(func() {
+		verifyBranchAlreadyMerged = oldVerifyMerged
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	z := &ZombieResult{PolecatName: "nux", HookBead: "gt-abc"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "nux", "gt-abc", "", z)
+
+	if !recoverCalled {
+		t.Fatal("recoverUnfiledMR not called for polecat with unfiled commits")
+	}
+	if !strings.Contains(z.Action, "filed-mr-unpushed-commits") ||
+		!strings.Contains(z.Action, "aa-unpushed-commits") {
+		t.Errorf("Action = %q, want filed-mr-unpushed-commits (aa-unpushed-commits, ...)", z.Action)
+	}
+	if strings.HasPrefix(z.Action, "restarted") || strings.HasPrefix(z.Action, "restart-") {
+		t.Errorf("Action = %q, polecat must not be restarted when MR is being filed", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_FilesUnfiledMRForPushedNoMR covers the sibling
+// failure mode: commits were pushed before the session died, but `gt mq
+// submit` never ran.
+//
+// Not parallel: overrides package-level verifyUnfiledMR and recoverUnfiledMR.
+func TestHandleZombieRestart_FilesUnfiledMRForPushedNoMR(t *testing.T) {
+	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		return &UnfiledMRState{
+			Branch:        "polecat/nux",
+			HeadSHA:       "abc123",
+			Target:        "main",
+			CommitsAhead:  true,
+			AlreadyPushed: true,
+		}, nil
+	}
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, s *UnfiledMRState) (string, error) {
+		if !s.AlreadyPushed {
+			t.Errorf("recover called with AlreadyPushed=false, want true for this case")
+		}
+		return "filed-mr-pushed-no-mr (aa-pushed-no-mr, mr=gt-mr-xyz)", nil
+	}
+	t.Cleanup(func() {
+		verifyBranchAlreadyMerged = oldVerifyMerged
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	z := &ZombieResult{PolecatName: "nux", HookBead: "gt-abc"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "nux", "gt-abc", "", z)
+
+	if !strings.Contains(z.Action, "filed-mr-pushed-no-mr") ||
+		!strings.Contains(z.Action, "aa-pushed-no-mr") {
+		t.Errorf("Action = %q, want filed-mr-pushed-no-mr (aa-pushed-no-mr, ...)", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_SkipsUnfiledCheckWhenMRExists verifies that when an
+// MR bead already exists for the branch+SHA, handleZombieRestart does NOT
+// double-submit — it falls through to the normal restart flow.
+//
+// Not parallel: overrides package-level vars.
+func TestHandleZombieRestart_SkipsUnfiledCheckWhenMRExists(t *testing.T) {
+	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		return &UnfiledMRState{
+			Branch:       "polecat/nux",
+			HeadSHA:      "abc123",
+			Target:       "main",
+			CommitsAhead: true,
+			ExistingMRID: "gt-mr-existing", // MR already there → no recovery
+		}, nil
+	}
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, _ *UnfiledMRState) (string, error) {
+		t.Fatal("recoverUnfiledMR must NOT be called when an MR already exists")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		verifyBranchAlreadyMerged = oldVerifyMerged
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	z := &ZombieResult{PolecatName: "nux", HookBead: "gt-abc"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "nux", "gt-abc", "clean", z)
+
+	if strings.Contains(z.Action, "filed-mr") || strings.Contains(z.Action, "aa-") {
+		t.Errorf("Action = %q, want no unfiled-MR recovery tag when MR exists", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_SkipsUnfiledCheckWhenNoCommits verifies that a
+// polecat with no commits ahead of target (e.g., died before doing any work)
+// falls through to the normal restart flow.
+//
+// Not parallel: overrides package-level vars.
+func TestHandleZombieRestart_SkipsUnfiledCheckWhenNoCommits(t *testing.T) {
+	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		return &UnfiledMRState{
+			Branch:       "polecat/nux",
+			CommitsAhead: false, // nothing to recover
+		}, nil
+	}
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, _ *UnfiledMRState) (string, error) {
+		t.Fatal("recoverUnfiledMR must NOT be called when no commits ahead")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		verifyBranchAlreadyMerged = oldVerifyMerged
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	z := &ZombieResult{PolecatName: "nux", HookBead: "gt-abc"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "nux", "gt-abc", "clean", z)
+
+	if strings.Contains(z.Action, "filed-mr") || strings.Contains(z.Action, "aa-unpushed") ||
+		strings.Contains(z.Action, "aa-pushed-no-mr") {
+		t.Errorf("Action = %q, want no unfiled-MR recovery tag when no commits ahead", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_AaApwBeatsUnfiledMR verifies the precedence rule:
+// aa-apw (work already merged via squash) must fire BEFORE the unfiled-MR
+// recovery path. Otherwise we would push a pre-squash HEAD and create a
+// duplicate MR for work already on main.
+//
+// Not parallel: overrides package-level vars.
+func TestHandleZombieRestart_AaApwBeatsUnfiledMR(t *testing.T) {
+	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) {
+		return true, nil // work is already merged
+	}
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		t.Fatal("verifyUnfiledMR must NOT be called when aa-apw fires")
+		return nil, nil
+	}
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, _ *UnfiledMRState) (string, error) {
+		t.Fatal("recoverUnfiledMR must NOT be called when aa-apw fires")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		verifyBranchAlreadyMerged = oldVerifyMerged
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	z := &ZombieResult{PolecatName: "nux", HookBead: "gt-abc"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "nux", "gt-abc", "has_unpushed", z)
+
+	if !strings.Contains(z.Action, "work-already-merged") {
+		t.Errorf("Action = %q, want aa-apw path to win", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_FilesUnfiledMRPropagatesRecoverError verifies that
+// when recoverUnfiledMR fails, the error flows onto zombie.Error so the patrol
+// operator sees what went wrong. The Action string still reflects the attempt.
+//
+// Not parallel: overrides package-level vars.
+func TestHandleZombieRestart_FilesUnfiledMRPropagatesRecoverError(t *testing.T) {
+	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		return &UnfiledMRState{
+			Branch:        "polecat/nux",
+			HeadSHA:       "abc123",
+			Target:        "main",
+			CommitsAhead:  true,
+			AlreadyPushed: false,
+		}, nil
+	}
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, _ *UnfiledMRState) (string, error) {
+		return "recover-failed-push (aa-unpushed-commits): boom",
+			fmt.Errorf("simulated push failure")
+	}
+	t.Cleanup(func() {
+		verifyBranchAlreadyMerged = oldVerifyMerged
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	z := &ZombieResult{PolecatName: "nux", HookBead: "gt-abc"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "nux", "gt-abc", "", z)
+
+	if z.Error == nil {
+		t.Fatal("expected zombie.Error to propagate from recoverUnfiledMR")
+	}
+	if !strings.Contains(z.Action, "recover-failed-push") {
+		t.Errorf("Action = %q, want recover-failed-push tag", z.Action)
+	}
+}

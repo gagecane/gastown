@@ -1258,6 +1258,341 @@ func cherryHasUnmergedCommits(out string) bool {
 	return false
 }
 
+// polecatWorktreePath resolves the on-disk path for a polecat's git worktree.
+// Supports both the new nested-rig layout (polecats/<name>/<rig>/) and the
+// older flat layout (polecats/<name>/). Returns the path; caller must still
+// verify it is a git repo before operating on it.
+func polecatWorktreePath(townRoot, rigName, polecatName string) string {
+	p := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		p = filepath.Join(townRoot, rigName, "polecats", polecatName)
+	}
+	return p
+}
+
+// UnfiledMRState describes an unfiled-MR condition observed on a dead polecat's
+// worktree. See gu-j98v: a polecat session can die between "commit complete"
+// and "MR filed", leaving committed fixes stranded on the local branch with
+// no visibility to the refinery merge queue.
+type UnfiledMRState struct {
+	// Branch is the current branch of the polecat's worktree.
+	Branch string
+	// HeadSHA is the commit at HEAD.
+	HeadSHA string
+	// Target is the resolved target branch (e.g., "main" or a feature branch
+	// from formula_vars base_branch).
+	Target string
+	// CommitsAhead is true if HEAD has at least one commit not on origin/<target>.
+	CommitsAhead bool
+	// AlreadyPushed is true if the polecat's branch already exists on origin
+	// and points at HeadSHA.
+	AlreadyPushed bool
+	// ExistingMRID, if non-empty, is the ID of an open MR bead that already
+	// references this branch+SHA. When set, no recovery is needed.
+	ExistingMRID string
+}
+
+// NeedsRecovery returns true if the polecat has commits ahead of the target
+// but no MR bead exists for this branch+SHA. This is the precise failure mode
+// described in gu-j98v — the committed fix is stranded with no path to the
+// merge queue.
+func (s *UnfiledMRState) NeedsRecovery() bool {
+	if s == nil {
+		return false
+	}
+	return s.CommitsAhead && s.ExistingMRID == ""
+}
+
+// verifyUnfiledMR inspects a polecat's worktree and reports whether committed
+// work is stranded without a corresponding MR bead.
+//
+// Package-level var so tests can override.
+var verifyUnfiledMR = _verifyUnfiledMR
+
+// _verifyUnfiledMR is the default implementation of verifyUnfiledMR.
+//
+// Flow (gu-j98v):
+//  1. Resolve the polecat's worktree path and target branch (formula_vars
+//     base_branch override, else rig default).
+//  2. Ask git whether HEAD has commits beyond origin/<target> (via git cherry,
+//     which is squash-aware so we don't double-count already-landed work).
+//  3. If commits exist, check whether origin/<branch> already exists at HEAD.
+//  4. Look for an open MR bead keyed by branch (+SHA when available).
+//
+// Returns nil state + nil error when the worktree can't be inspected (missing
+// git dir, unreadable remotes). Callers treat that as "no recovery needed" so
+// the normal restart path can proceed. A true error is returned only for
+// conditions the caller might want to retry later.
+func _verifyUnfiledMR(bd *BdCli, workDir, rigName, polecatName, hookBead string) (*UnfiledMRState, error) {
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		return nil, fmt.Errorf("finding town root: %v", err)
+	}
+
+	polecatPath := polecatWorktreePath(townRoot, rigName, polecatName)
+	if _, err := os.Stat(polecatPath); os.IsNotExist(err) {
+		// Worktree gone — nothing to recover.
+		return nil, nil
+	}
+
+	g := git.NewGit(polecatPath)
+	if !g.IsRepo() {
+		return nil, nil
+	}
+
+	branch, err := g.CurrentBranch()
+	if err != nil || branch == "" || branch == "HEAD" {
+		// Detached HEAD or unreadable branch — can't construct an MR.
+		return nil, nil
+	}
+
+	// Resolve target branch: prefer formula_vars base_branch on the hook bead,
+	// fall back to rig default branch.
+	target := "main"
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		target = rigCfg.DefaultBranch
+	}
+	if hookBead != "" {
+		if out, showErr := bd.Exec(workDir, "show", hookBead, "--json"); showErr == nil && out != "" {
+			var issues []struct {
+				Description string `json:"description"`
+			}
+			if json.Unmarshal([]byte(out), &issues) == nil && len(issues) > 0 {
+				if af := beads.ParseAttachmentFields(&beads.Issue{Description: issues[0].Description}); af != nil {
+					if bb := extractBaseBranchVar(af.FormulaVars); bb != "" {
+						target = bb
+					}
+				}
+			}
+		}
+	}
+
+	// Never recover onto the polecat branch itself — that would be nonsense.
+	if branch == target {
+		return nil, nil
+	}
+
+	state := &UnfiledMRState{Branch: branch, Target: target}
+
+	// Resolve HEAD SHA. Best-effort: recovery still works without it (branch-only dedup).
+	if sha, shaErr := g.Rev("HEAD"); shaErr == nil {
+		state.HeadSHA = strings.TrimSpace(sha)
+	}
+
+	// Check "commits ahead of target" via git cherry against remotes.
+	remotes, remErr := g.Remotes()
+	if remErr != nil || len(remotes) == 0 {
+		remotes = []string{"origin"}
+	}
+	commitsAhead := false
+	for _, remote := range remotes {
+		upstream := remote + "/" + target
+		out, err := g.Cherry(upstream, "HEAD")
+		if err != nil {
+			continue // try next remote
+		}
+		if cherryHasUnmergedCommits(out) {
+			commitsAhead = true
+			break
+		}
+	}
+	state.CommitsAhead = commitsAhead
+	if !commitsAhead {
+		return state, nil
+	}
+
+	// Check whether the branch is already pushed to origin at HEAD.
+	remote := "origin"
+	if len(remotes) > 0 {
+		remote = remotes[0]
+	}
+	if remoteSHA, tipErr := g.RemoteBranchTip(remote, branch); tipErr == nil && remoteSHA != "" {
+		if state.HeadSHA == "" || remoteSHA == state.HeadSHA {
+			state.AlreadyPushed = true
+		}
+	}
+
+	// Look for an existing open MR bead for this branch (+SHA when available).
+	mrID := findOpenMRForBranchAndSHA(bd, workDir, branch, state.HeadSHA)
+	state.ExistingMRID = mrID
+
+	return state, nil
+}
+
+// extractBaseBranchVar pulls base_branch=<value> out of a formula_vars string.
+// Matches the canonical newline-separated format stored in
+// AttachmentFields.FormulaVars (see internal/cmd/prime_molecule.go
+// extractFormulaVar). Accepts comma-separated entries too for forward
+// compatibility with alternate encodings seen in older beads. Returns ""
+// when the key is absent.
+func extractBaseBranchVar(formulaVars string) string {
+	// Normalize: treat newlines and commas both as entry separators.
+	for _, entry := range strings.FieldsFunc(formulaVars, func(r rune) bool {
+		return r == '\n' || r == ','
+	}) {
+		entry = strings.TrimSpace(entry)
+		if k, v, ok := strings.Cut(entry, "="); ok && strings.TrimSpace(k) == "base_branch" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// findOpenMRForBranchAndSHA queries the wisps table for an open merge-request
+// bead matching the given branch. When commitSHA is non-empty, the MR must
+// also match that SHA (stale MRs from earlier pushes are ignored so we don't
+// falsely assume recovery is unnecessary).
+func findOpenMRForBranchAndSHA(bd *BdCli, workDir, branch, commitSHA string) string {
+	out, err := bd.Exec(workDir, "query",
+		"ephemeral=true AND label=gt:merge-request AND status=open",
+		"--json")
+	if err != nil || out == "" || out == "[]" || out == "null" {
+		return ""
+	}
+	var items []struct {
+		ID          string `json:"id"`
+		Description string `json:"description"`
+	}
+	if json.Unmarshal([]byte(out), &items) != nil {
+		return ""
+	}
+	for _, item := range items {
+		mrFields := beads.ParseMRFields(&beads.Issue{Description: item.Description})
+		if mrFields == nil || mrFields.Branch != branch {
+			continue
+		}
+		// If we have both SHAs, require a match. Legacy MRs with no commit_sha
+		// fall back to branch-only match (same semantics as FindMRForBranchAndSHA).
+		if commitSHA != "" && mrFields.CommitSHA != "" && mrFields.CommitSHA != commitSHA {
+			continue
+		}
+		return item.ID
+	}
+	return ""
+}
+
+// recoverUnfiledMR pushes the polecat's branch (if not already pushed) and
+// files an MR via `gt mq submit`, then archives the polecat. This is the
+// witness-side safety net for the gu-j98v failure mode: a polecat session that
+// dies after committing work but before running `gt done`.
+//
+// Returns the action string to record on the ZombieResult (on success or
+// failure). On success the shape is:
+//
+//	"filed-mr-<reason> (<aa-tag>, mr=<id>)"  // mr id available
+//	"filed-mr-<reason> (<aa-tag>)"           // mr submit wrote to stdout but id not captured
+//
+// Where <reason> is "unpushed-commits" or "pushed-no-mr", matching the sibling
+// aa-* tags suggested in the gu-j98v design. Errors are returned so the caller
+// can decide whether to escalate; the action string is always set.
+//
+// Package-level var so tests can override.
+var recoverUnfiledMR = _recoverUnfiledMR
+
+func _recoverUnfiledMR(bd *BdCli, workDir, rigName, polecatName string, state *UnfiledMRState) (string, error) {
+	if state == nil || !state.NeedsRecovery() {
+		return "", fmt.Errorf("no recovery needed")
+	}
+
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		return "", fmt.Errorf("finding town root: %v", err)
+	}
+	polecatPath := polecatWorktreePath(townRoot, rigName, polecatName)
+	if _, statErr := os.Stat(polecatPath); os.IsNotExist(statErr) {
+		return "", fmt.Errorf("polecat worktree missing: %s", polecatPath)
+	}
+
+	reason := "pushed-no-mr"
+	aaTag := "aa-pushed-no-mr"
+	if !state.AlreadyPushed {
+		reason = "unpushed-commits"
+		aaTag = "aa-unpushed-commits"
+		g := git.NewGit(polecatPath)
+		if pushErr := g.Push("origin", state.Branch, false); pushErr != nil {
+			return fmt.Sprintf("recover-failed-push (%s): %v", aaTag, pushErr),
+				fmt.Errorf("pushing branch: %w", pushErr)
+		}
+	}
+
+	// Shell out to `gt mq submit` which encapsulates MR-bead construction,
+	// target-branch resolution, idempotency, and refinery notification.
+	// Running it inside the polecat worktree reproduces the same cwd the
+	// polecat would have had if it reached `gt done`.
+	cmd := exec.Command("gt", "mq", "submit",
+		"--branch", state.Branch,
+		"--no-cleanup", // we handle archiving here; don't let mq submit auto-nuke
+	)
+	cmd.Dir = polecatPath
+	out, submitErr := cmd.CombinedOutput()
+	if submitErr != nil {
+		return fmt.Sprintf("recover-failed-submit (%s): %v", aaTag, submitErr),
+			fmt.Errorf("submitting MR: %w (output: %s)", submitErr, strings.TrimSpace(string(out)))
+	}
+	mrID := extractMRIDFromSubmit(string(out))
+
+	// Archive the polecat now that its work is safely in the queue.
+	if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
+		tag := aaTag
+		if mrID != "" {
+			tag = fmt.Sprintf("%s, mr=%s", aaTag, mrID)
+		}
+		return fmt.Sprintf("filed-mr-%s-archive-failed (%s): %v", reason, tag, nukeErr),
+			fmt.Errorf("archive after MR: %w", nukeErr)
+	}
+
+	if mrID != "" {
+		return fmt.Sprintf("filed-mr-%s (%s, mr=%s)", reason, aaTag, mrID), nil
+	}
+	return fmt.Sprintf("filed-mr-%s (%s)", reason, aaTag), nil
+}
+
+// extractMRIDFromSubmit parses the MR ID from `gt mq submit` output. The
+// canonical success line is either "✓ MR already exists (idempotent)" followed
+// by "  MR ID: <id>", or a freshly printed "  MR ID: <id>" after submission.
+// Returns "" when no ID can be parsed (caller falls back to branch-only action).
+func extractMRIDFromSubmit(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		const prefix = "MR ID:"
+		if idx := strings.Index(line, prefix); idx >= 0 {
+			id := strings.TrimSpace(line[idx+len(prefix):])
+			// Strip ANSI escapes that style.Bold may have emitted.
+			id = stripANSI(id)
+			if id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+// stripANSI removes CSI escape sequences (colour/style) so MR IDs parsed from
+// styled CLI output aren't contaminated with control characters.
+func stripANSI(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			// Skip until final byte (0x40..0x7e).
+			j := i + 2
+			for j < len(s) {
+				c := s[j]
+				if c >= 0x40 && c <= 0x7e {
+					j++
+					break
+				}
+				j++
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 // ZombieClassification categorizes why a polecat was classified as a zombie.
 // These are distinct from AgentState — they describe the zombie detection
 // reason, not the agent's lifecycle state. See gt-tsut.
@@ -1748,6 +2083,26 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 		if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
 			zombie.Error = fmt.Errorf("archive: %w", nukeErr)
 			zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+		}
+		return
+	}
+
+	// gu-j98v: Unfiled-MR recovery. A polecat session can die after committing
+	// work but before `gt done` has a chance to push the branch and file an MR
+	// bead. In that case the fix exists on the polecat's local branch but is
+	// invisible to the refinery — the bead sits IN_PROGRESS forever while the
+	// patrol keeps reporting the rig red. Detect that state and submit the MR
+	// ourselves before archiving the polecat.
+	//
+	// Ordering note: this check MUST come after aa-apw. If the work is already
+	// merged (possibly via squash), we'd otherwise push pre-squash commits and
+	// create a duplicate MR for work already on main.
+	if state, err := verifyUnfiledMR(bd, workDir, rigName, polecatName, hookBead); err == nil &&
+		state.NeedsRecovery() {
+		action, recoverErr := recoverUnfiledMR(bd, workDir, rigName, polecatName, state)
+		zombie.Action = action
+		if recoverErr != nil {
+			zombie.Error = fmt.Errorf("unfiled-mr recovery: %w", recoverErr)
 		}
 		return
 	}
