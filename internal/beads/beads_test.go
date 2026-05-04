@@ -3286,6 +3286,14 @@ func TestNewIsolatedWithPort(t *testing.T) {
 	}
 }
 
+func TestInitPassesServerFlag(t *testing.T) {
+	b := NewIsolatedWithPort(t.TempDir(), 19999)
+	err := b.Init("covertest")
+	if err == nil {
+		t.Fatal("expected error (no bd/dolt server), got nil")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // stripEnvPrefixes tests (refactored from runWithRouting inline logic)
 // ---------------------------------------------------------------------------
@@ -3653,6 +3661,37 @@ func TestIsSubprocessCrash(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isSubprocessCrash(tt.err); got != tt.want {
 				t.Errorf("isSubprocessCrash(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveBdSubprocessTimeout verifies the timeout default + GT_BD_TIMEOUT_SEC override.
+func TestResolveBdSubprocessTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		envSet  bool
+		wantSec int
+	}{
+		{name: "default", envSet: false, wantSec: 60},
+		{name: "override 5s", envSet: true, envVal: "5", wantSec: 5},
+		{name: "override 120s", envSet: true, envVal: "120", wantSec: 120},
+		{name: "invalid falls to default", envSet: true, envVal: "abc", wantSec: 60},
+		{name: "zero falls to default", envSet: true, envVal: "0", wantSec: 60},
+		{name: "negative falls to default", envSet: true, envVal: "-1", wantSec: 60},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envSet {
+				t.Setenv("GT_BD_TIMEOUT_SEC", tt.envVal)
+			} else {
+				_ = os.Unsetenv("GT_BD_TIMEOUT_SEC")
+			}
+			got := resolveBdSubprocessTimeout()
+			want := time.Duration(tt.wantSec) * time.Second
+			if got != want {
+				t.Errorf("resolveBdSubprocessTimeout() = %v, want %v", got, want)
 			}
 		})
 	}

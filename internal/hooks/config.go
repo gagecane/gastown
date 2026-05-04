@@ -585,6 +585,11 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 // NOTE: For polecats, use DiscoverPolecatWorktrees instead. Polecat worktrees
 // are nested one level deeper (polecats/<name>/<rigName>/), so this function
 // returns the polecat *state dir*, not the actual git worktree.
+//
+// For non-polecat roles, some (e.g., crew with a nested repo clone) keep the
+// git worktree one level below the agent slot directory. When an immediate
+// child contains nested git worktree roots, prefer those nested directories so
+// hooks are synced into the real repo root instead of the slot parent.
 func DiscoverWorktrees(roleDir string) []string {
 	entries, err := os.ReadDir(roleDir)
 	if err != nil {
@@ -596,7 +601,15 @@ func DiscoverWorktrees(roleDir string) []string {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		dirs = append(dirs, filepath.Join(roleDir, entry.Name()))
+
+		path := filepath.Join(roleDir, entry.Name())
+		nested := nestedWorktreeRoots(path)
+		if len(nested) > 0 {
+			dirs = append(dirs, nested...)
+			continue
+		}
+
+		dirs = append(dirs, path)
 	}
 	return dirs
 }
@@ -655,6 +668,36 @@ func findNestedWorktree(stateDir string) string {
 		}
 	}
 	return ""
+}
+
+// nestedWorktreeRoots returns any immediate child directories of parent that
+// are themselves git worktree roots (have a `.git` file or directory). Used
+// by DiscoverWorktrees to transparently descend into nested worktrees for
+// non-polecat roles.
+func nestedWorktreeRoots(parent string) []string {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return nil
+	}
+
+	var dirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		path := filepath.Join(parent, entry.Name())
+		if isGitWorktreeRoot(path) {
+			dirs = append(dirs, path)
+		}
+	}
+
+	return dirs
+}
+
+func isGitWorktreeRoot(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 // isRig checks if a directory looks like a rig (has crew/, witness/, or polecats/ subdirectory).

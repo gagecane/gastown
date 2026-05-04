@@ -613,10 +613,31 @@ func (b *Beads) Init(prefix string) error {
 	}
 	args = append(args, "--quiet")
 	if b.serverPort > 0 {
-		args = append(args, "--server-port", fmt.Sprintf("%d", b.serverPort))
+		args = append(args, "--server", "--server-port", fmt.Sprintf("%d", b.serverPort))
 	}
 	_, err := b.run(args...)
 	return err
+}
+
+// bdSubprocessTimeout caps how long a single bd subprocess may run before
+// being killed. Without this, bd can block indefinitely waiting on a slow
+// Dolt server (e.g. paging from swap under memory pressure), and macOS
+// Jetsam may SIGKILL the orphaned bd process before it ever returns.
+// 60s is large enough to cover normal slow-path retries (Dolt MySQL client
+// retries up to 30s) but short enough to fail fast and surface to callers.
+// Override via GT_BD_TIMEOUT_SEC env var for testing or unusual workloads.
+// Investigation: dc-1pq8 (forensic report 2026-05-02).
+const bdSubprocessTimeout = 60 * time.Second
+
+// resolveBdSubprocessTimeout returns the configured timeout, honoring the
+// GT_BD_TIMEOUT_SEC env var override (must parse as a positive integer).
+func resolveBdSubprocessTimeout() time.Duration {
+	if v := os.Getenv("GT_BD_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return bdSubprocessTimeout
 }
 
 // run executes a bd command and returns stdout.
@@ -642,10 +663,16 @@ func (b *Beads) run(args ...string) (_ []byte, retErr error) {
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 
+	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
+	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
+	// The context covers both the initial attempt and the --flat retry.
+	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
+	defer cancel()
+
 	// Always explicitly set BEADS_DIR to prevent inherited env vars from
 	// causing prefix mismatches. Use explicit beadsDir if set, otherwise
 	// resolve from working directory.
-	cmd := exec.Command("bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
+	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = b.workDir
 
@@ -669,7 +696,7 @@ func (b *Beads) run(args ...string) (_ []byte, retErr error) {
 		}
 		stdout.Reset()
 		stderr.Reset()
-		cmd = exec.Command("bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
+		cmd = exec.CommandContext(ctx, "bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
 		util.SetDetachedProcessGroup(cmd)
 		cmd.Dir = b.workDir
 		cmd.Env = runEnv
@@ -707,7 +734,11 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 	runEnv := b.buildRoutingEnv()
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 
-	cmd := exec.Command("bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
+	// Bound subprocess runtime — see bdSubprocessTimeout doc comment.
+	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = b.workDir
 
