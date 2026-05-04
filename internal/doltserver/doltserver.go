@@ -3240,6 +3240,11 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 		dbToRig[k] = v
 	}
 
+	// Set of known rig directory names from mayor/rigs.json. Used below to
+	// skip orphan databases whose names do not correspond to any configured
+	// rig. (gu-nx8s)
+	knownRigs := loadKnownRigNames(townRoot)
+
 	// Group candidate database names by rig. When routes.jsonl and rigs.json
 	// use different prefixes for the same rig (e.g. "gas" vs "gt" both map to
 	// "gastown"), multiple databases may exist for the same rig. Processing
@@ -3258,6 +3263,28 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 	}
 
 	for rigName, candidates := range rigCandidates {
+		// Skip orphan databases that do not correspond to any configured rig.
+		// Without this guard, EnsureMetadata would materialize a fresh
+		// <townRoot>/<dbName>/.beads/ directory for every stray database on
+		// disk, which in turn causes openBeadsStores (beadsdk v1.0.0 hardcodes
+		// CreateIfMissing=true) to re-create the stray database if it gets
+		// cleaned up. That loop is gu-nx8s: `gt dolt cleanup --force` is
+		// undone ~seconds later by the next daemon tick.
+		//
+		// A rig is considered "known" when any of the following is true:
+		//   - rigName == "hq" (town-level beads, always legitimate)
+		//   - rigName appears in mayor/rigs.json
+		//   - the rig's .beads/ directory already exists on disk (legacy rig
+		//     not yet registered in rigs.json, or a parked rig whose rigs.json
+		//     entry was removed — either way, don't break the existing
+		//     workspace)
+		if !isKnownRig(townRoot, rigName, knownRigs) {
+			// Don't log here: EnsureAllMetadata runs every daemon heartbeat
+			// and orphan databases are normal until the next `gt dolt
+			// cleanup`. Operators surface these via `gt doctor` instead.
+			continue
+		}
+
 		// When multiple databases map to the same rig, choose one effective
 		// DB name: prefer whatever is already in metadata.json (if it's among
 		// the valid candidates) to avoid spurious mismatch warnings. Fall back
@@ -3276,6 +3303,54 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 	}
 
 	return updated, errs
+}
+
+// loadKnownRigNames reads mayor/rigs.json and returns the set of registered
+// rig directory names. Returns an empty set when rigs.json is missing or
+// unparseable — callers must handle that case (typically by falling back to
+// filesystem checks). The "hq" entry is never included here because HQ is a
+// special case handled separately by the caller.
+func loadKnownRigNames(townRoot string) map[string]bool {
+	result := make(map[string]bool)
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	data, err := os.ReadFile(rigsPath)
+	if err != nil {
+		return result
+	}
+	var parsed struct {
+		Rigs map[string]interface{} `json:"rigs"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return result
+	}
+	for rigName := range parsed.Rigs {
+		result[rigName] = true
+	}
+	return result
+}
+
+// isKnownRig reports whether rigName corresponds to a legitimate configured
+// rig. See the commentary in EnsureAllMetadata for the rationale.
+func isKnownRig(townRoot, rigName string, knownRigs map[string]bool) bool {
+	if rigName == "hq" {
+		return true
+	}
+	if knownRigs[rigName] {
+		return true
+	}
+	// Fall back to a filesystem probe: if the rig's .beads/ directory already
+	// exists, the rig was set up manually or by a tool that didn't register
+	// rigs.json yet. Maintaining its metadata is safe because we won't create
+	// anything new. Use read-only FindRigBeadsDir + Stat instead of
+	// FindOrCreateRigBeadsDir so this never materializes a new directory.
+	beadsDir := FindRigBeadsDir(townRoot, rigName)
+	if beadsDir == "" {
+		return false
+	}
+	if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+		return true
+	}
+	return false
 }
 
 // pickDBForRig selects which database name to use for a rig when multiple

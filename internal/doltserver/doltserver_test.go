@@ -765,6 +765,84 @@ func TestEnsureAllMetadata(t *testing.T) {
 	}
 }
 
+// TestEnsureAllMetadata_SkipsOrphanDatabase verifies that EnsureAllMetadata
+// does NOT materialize a <townRoot>/<dbName>/.beads/ directory for a database
+// that is not registered in rigs.json and has no pre-existing rig dir. This
+// protects against the gu-nx8s self-recreation loop: `gt dolt cleanup --force`
+// removes the stray `beads` database, then the next daemon tick (which calls
+// EnsureAllMetadata) would previously MkdirAll a fresh rig dir whose
+// metadata.json resurrected the database via beadsdk's CreateIfMissing=true.
+func TestEnsureAllMetadata_SkipsOrphanDatabase(t *testing.T) {
+	townRoot := t.TempDir()
+
+	// Create an hq database (legitimate) and an orphan "beads" database
+	// (the historical name that bd's DefaultDoltDatabase falls back to).
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	setupDoltDB(t, dataDir, "hq")
+	setupDoltDB(t, dataDir, "beads")
+
+	// Only the town-level .beads/ exists; no rigs.json registers "beads",
+	// and no <townRoot>/beads/ directory exists yet. This is the cleaned-up
+	// state right after `gt dolt cleanup --force`.
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, errs := EnsureAllMetadata(townRoot)
+	if len(errs) > 0 {
+		t.Errorf("unexpected errors: %v", errs)
+	}
+
+	// Only "hq" should be processed; "beads" must be skipped.
+	if len(updated) != 1 || updated[0] != "hq" {
+		t.Errorf("expected updated=[hq], got %v", updated)
+	}
+
+	// Most importantly, the stray rig dir must NOT have been created. If
+	// this directory exists after EnsureAllMetadata runs, the fix is broken
+	// and the gu-nx8s loop will resume on the next daemon tick.
+	strayRigDir := filepath.Join(townRoot, "beads")
+	if _, err := os.Stat(strayRigDir); err == nil {
+		t.Errorf("EnsureAllMetadata materialized a rig dir for orphan DB: %s", strayRigDir)
+	} else if !os.IsNotExist(err) {
+		t.Errorf("unexpected stat error on %s: %v", strayRigDir, err)
+	}
+}
+
+// TestEnsureAllMetadata_PreservesExistingUnregisteredRig verifies that an
+// unregistered rig (not in rigs.json) with an existing .beads/ directory is
+// still maintained. This covers legacy rigs that predate rigs.json and rigs
+// mid-registration, so we don't accidentally regress on those.
+func TestEnsureAllMetadata_PreservesExistingUnregisteredRig(t *testing.T) {
+	townRoot := t.TempDir()
+
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	setupDoltDB(t, dataDir, "hq")
+	setupDoltDB(t, dataDir, "legacy")
+
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy rig has its .beads/ directory pre-existing — EnsureAllMetadata
+	// should keep maintaining it, even though rigs.json is absent.
+	legacyBeads := filepath.Join(townRoot, "legacy", ".beads")
+	if err := os.MkdirAll(legacyBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, errs := EnsureAllMetadata(townRoot)
+	if len(errs) > 0 {
+		t.Errorf("unexpected errors: %v", errs)
+	}
+	if len(updated) != 2 {
+		t.Errorf("expected 2 updated (hq + legacy), got %d: %v", len(updated), updated)
+	}
+	// metadata.json should exist for the legacy rig
+	if _, err := os.Stat(filepath.Join(legacyBeads, "metadata.json")); err != nil {
+		t.Errorf("expected legacy metadata.json to be maintained, stat err: %v", err)
+	}
+}
+
 func TestFindRigBeadsDir(t *testing.T) {
 	townRoot := t.TempDir()
 
