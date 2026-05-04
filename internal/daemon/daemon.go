@@ -687,6 +687,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Quota dog ticker started (interval %v)", interval)
 	}
 
+	// Start poller dog ticker if configured.
+	// Supervises nudge-poller processes: respawns dead pollers whose tmux
+	// sessions are still alive, removes stale PID files for dead sessions.
+	// See gu-23z4.
+	var pollerDogTicker *time.Ticker
+	var pollerDogChan <-chan time.Time
+	if d.isPatrolActive("poller_dog") {
+		interval := pollerDogInterval(d.patrolConfig)
+		pollerDogTicker = time.NewTicker(interval)
+		pollerDogChan = pollerDogTicker.C
+		defer pollerDogTicker.Stop()
+		d.logger.Printf("Poller dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -794,6 +808,13 @@ func (d *Daemon) Run() (err error) {
 			// rotates credentials to available accounts via keychain swap.
 			if !d.isShutdownInProgress() {
 				d.runQuotaDog()
+			}
+
+		case <-pollerDogChan:
+			// Poller dog — supervises nudge-poller processes. Respawns
+			// dead pollers for live sessions and removes stale PID files.
+			if !d.isShutdownInProgress() {
+				d.runPollerDog()
 			}
 
 		case <-timer.C:
