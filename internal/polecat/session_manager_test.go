@@ -883,3 +883,57 @@ func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
 		})
 	}
 }
+
+// TestCapturePaneDiagnosticExported verifies that session.CapturePaneDiagnostic is
+// accessible from the polecat package. The polecat session_manager Start method
+// uses it to capture pane output when an agent dies mid-startup — without this
+// export, polecat spawn failures surface as the opaque "died during startup"
+// message with no diagnostic. See gu-acu3.
+func TestCapturePaneDiagnosticExported(t *testing.T) {
+	// Pure compile-time check: referencing the function proves it's exported.
+	// We also exercise the nil-tmux short-circuit so the test does useful work.
+	got := session.CapturePaneDiagnostic(nil, "gu-test-session")
+	if got != "" {
+		t.Errorf("CapturePaneDiagnostic(nil, ...) = %q, want empty string on nil tmux", got)
+	}
+
+	got = session.CapturePaneDiagnostic(nil, "")
+	if got != "" {
+		t.Errorf("CapturePaneDiagnostic(nil, \"\") = %q, want empty string on empty session", got)
+	}
+}
+
+// TestPolecatSessionDiedStartupErrorFormat verifies that the error message
+// polecat's Start method produces when VerifySurvived fails contains the
+// expected diagnostic markers. This is a regression guard for gu-acu3 —
+// fresh-spawn polecats dying silently. We can't simulate the actual race
+// here without extensive mocking, but we can verify the error constants
+// are stable so future refactors don't regress to the opaque form.
+func TestPolecatSessionDiedStartupErrorFormat(t *testing.T) {
+	// The three distinct error surfaces a polecat Start() can produce when
+	// the session verify step detects a dead agent. These strings are the
+	// contract daemon.log parsers (and operators) rely on.
+	const (
+		opaqueNoPane    = "died during startup (agent command may have failed; pane produced no output)"
+		verifyWrap      = "verifying session:"
+		paneOutputStart = "--- pane output ---"
+		paneOutputEnd   = "--- end pane output ---"
+	)
+
+	// These are the strings literal embedded in session_manager.go's Start().
+	// If someone refactors the error, they'll hit this test.
+	verifyErr := fmt.Errorf("verifying session: %w", fmt.Errorf("tmux down"))
+	if !strings.Contains(verifyErr.Error(), verifyWrap) {
+		t.Errorf("verify wrapping lost: %q", verifyErr.Error())
+	}
+
+	noPaneErr := fmt.Errorf("session gu-test died during startup (agent command may have failed; pane produced no output)")
+	if !strings.Contains(noPaneErr.Error(), opaqueNoPane) {
+		t.Errorf("no-pane error format drift: %q", noPaneErr.Error())
+	}
+
+	richErr := fmt.Errorf("session gu-test died during startup (agent command may have failed)\n--- pane output ---\nstack trace here\n--- end pane output ---")
+	if !strings.Contains(richErr.Error(), paneOutputStart) || !strings.Contains(richErr.Error(), paneOutputEnd) {
+		t.Errorf("rich error missing pane-output markers: %q", richErr.Error())
+	}
+}

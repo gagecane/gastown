@@ -204,18 +204,18 @@ func TestMergeRuntimeLivenessEnv_UsesEffectiveAgentForProcessNames(t *testing.T)
 }
 
 func TestCapturePaneDiagnostic_NilTmux(t *testing.T) {
-	got := capturePaneDiagnostic(nil, "hq-dog-test")
+	got := CapturePaneDiagnostic(nil, "hq-dog-test")
 	if got != "" {
-		t.Errorf("capturePaneDiagnostic(nil, ...) = %q, want empty", got)
+		t.Errorf("CapturePaneDiagnostic(nil, ...) = %q, want empty", got)
 	}
 }
 
 func TestCapturePaneDiagnostic_EmptySessionID(t *testing.T) {
 	// Real tmux not needed: empty session short-circuits before any tmux call.
 	// The *tmux.Tmux param is unused on this path, so a dummy pointer is fine.
-	got := capturePaneDiagnostic(nil, "")
+	got := CapturePaneDiagnostic(nil, "")
 	if got != "" {
-		t.Errorf("capturePaneDiagnostic(_, \"\") = %q, want empty", got)
+		t.Errorf("CapturePaneDiagnostic(_, \"\") = %q, want empty", got)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestCapturePaneDiagnostic_RealSessionCapturesOutput(t *testing.T) {
 
 	// Use a long-running shell so NewSessionWithCommand's health check passes.
 	// Then write a marker via send-keys and capture it — this exercises the
-	// same tmux capture-pane path used by capturePaneDiagnostic on real spawn
+	// same tmux capture-pane path used by CapturePaneDiagnostic on real spawn
 	// failures where the pane is alive but the agent has died.
 	if err := tm.NewSession(sessionID, ""); err != nil {
 		t.Fatalf("NewSession: %v", err)
@@ -253,7 +253,7 @@ func TestCapturePaneDiagnostic_RealSessionCapturesOutput(t *testing.T) {
 	// Poll for the marker to appear — shells on slow CI may take a moment.
 	var got string
 	for i := 0; i < 30; i++ {
-		got = capturePaneDiagnostic(tm, sessionID)
+		got = CapturePaneDiagnostic(tm, sessionID)
 		if strings.Contains(got, "DIAG-MARKER-12345") {
 			break
 		}
@@ -261,7 +261,7 @@ func TestCapturePaneDiagnostic_RealSessionCapturesOutput(t *testing.T) {
 		}
 	}
 	if !strings.Contains(got, "DIAG-MARKER-12345") {
-		t.Errorf("capturePaneDiagnostic did not capture marker; got %q", got)
+		t.Errorf("CapturePaneDiagnostic did not capture marker; got %q", got)
 	}
 }
 
@@ -270,9 +270,9 @@ func TestCapturePaneDiagnostic_MissingSessionReturnsEmpty(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := tmux.NewTmux()
-	got := capturePaneDiagnostic(tm, "gt-test-nonexistent-session-xyz")
+	got := CapturePaneDiagnostic(tm, "gt-test-nonexistent-session-xyz")
 	if got != "" {
-		t.Errorf("capturePaneDiagnostic on missing session = %q, want empty", got)
+		t.Errorf("CapturePaneDiagnostic on missing session = %q, want empty", got)
 	}
 }
 

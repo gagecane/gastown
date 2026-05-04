@@ -206,7 +206,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 // To preserve what little signal the dying pane produced, this helper now
 // captures pane scrollback BEFORE destroying the session and surfaces it in
 // the returned error. Callers that already wrap errors with extra context
-// (session/lifecycle.go capturePaneDiagnostic) will see the tmux-level
+// (session/lifecycle.go CapturePaneDiagnostic) will see the tmux-level
 // capture arrive via the wrapped error rather than an empty string.
 func (t *Tmux) checkSessionAfterCreate(name, command string) error {
 	// snapshotAndKill grabs pane scrollback before destroying the session so
@@ -261,7 +261,7 @@ func (t *Tmux) checkSessionAfterCreate(name, command string) error {
 
 // checkPaneDiagBytes bounds the pane scrollback surfaced in early-exit errors
 // so daemon.log lines stay readable. Matches the diagPaneCaptureBytes budget
-// used by session/lifecycle.go capturePaneDiagnostic for consistency.
+// used by session/lifecycle.go CapturePaneDiagnostic for consistency.
 const checkPaneDiagBytes = 2048
 
 // EnsureSessionFresh ensures a session is available and healthy.

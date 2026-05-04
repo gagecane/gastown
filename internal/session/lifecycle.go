@@ -248,7 +248,7 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 			if cfg.WaitFatal {
 				diag := ""
 				if cfg.DiagnosticCapture {
-					diag = capturePaneDiagnostic(t, cfg.SessionID)
+					diag = CapturePaneDiagnostic(t, cfg.SessionID)
 				}
 				_ = t.KillSessionWithProcesses(cfg.SessionID)
 				if diag != "" {
@@ -289,7 +289,12 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 			return nil, fmt.Errorf("verifying session: %w", err)
 		}
 		if !running {
-			return nil, fmt.Errorf("session %s died during startup (agent command may have failed)", cfg.SessionID)
+			// Session is truly gone — either remain-on-exit wasn't set in
+			// time (early-exit race before step 6) or something external
+			// killed the session. No pane to capture; surface a distinct
+			// "pane produced no output" marker so operators can distinguish
+			// this case from the pane-captured-no-output case below. See gu-acu3.
+			return nil, fmt.Errorf("session %s died during startup (agent command may have failed; pane produced no output)", cfg.SessionID)
 		}
 		// With DiagnosticCapture the pane has remain-on-exit set, so HasSession
 		// returns true even if the agent process already exited. Do a deeper
@@ -297,7 +302,7 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		// before killing the session. Without this, every agent crash surfaces
 		// as the opaque "died during startup" with no stderr (gu-klwv).
 		if cfg.DiagnosticCapture && !t.IsAgentAlive(cfg.SessionID) {
-			diag := capturePaneDiagnostic(t, cfg.SessionID)
+			diag := CapturePaneDiagnostic(t, cfg.SessionID)
 			_ = t.KillSessionWithProcesses(cfg.SessionID)
 			if diag != "" {
 				return nil, fmt.Errorf("session %s died during startup (agent command may have failed)\n--- pane output ---\n%s\n--- end pane output ---", cfg.SessionID, diag)
@@ -450,7 +455,7 @@ func MergeRuntimeLivenessEnv(envVars map[string]string, runtimeConfig *config.Ru
 	return envVars
 }
 
-// capturePaneDiagnostic returns the final visible pane contents for a session,
+// CapturePaneDiagnostic returns the final visible pane contents for a session,
 // used to surface agent stderr/logs when a startup probe fails. Returns an
 // empty string if the session or pane is gone or the capture fails for any
 // reason — diagnostics must never block the actual failure path. See gu-klwv.
@@ -458,7 +463,10 @@ func MergeRuntimeLivenessEnv(envVars map[string]string, runtimeConfig *config.Ru
 // The output is trimmed and capped at diagPaneCaptureBytes bytes so we don't
 // flood logs with scrollback. Blank-only output is reported as empty so the
 // caller can switch the error message to "pane produced no output".
-func capturePaneDiagnostic(t *tmux.Tmux, sessionID string) string {
+//
+// Exported so other packages (e.g., internal/polecat) can produce the same
+// structured diagnostic in their bespoke spawn paths. See gu-acu3.
+func CapturePaneDiagnostic(t *tmux.Tmux, sessionID string) string {
 	if t == nil || sessionID == "" {
 		return ""
 	}

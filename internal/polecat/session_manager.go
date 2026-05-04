@@ -523,6 +523,16 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		return fmt.Errorf("creating session: %w", err)
 	}
 
+	// Re-enable remain-on-exit so the pane survives if the agent dies during
+	// subsequent startup steps (WaitForCommand, WaitForRuntimeReady, startup
+	// nudge verification). checkSessionAfterCreate disables remain-on-exit
+	// after the 250ms early-exit window passes, but polecat startup can take
+	// several more seconds and many agent crashes happen in that window. Without
+	// remain-on-exit the pane is destroyed on agent death and the VerifySurvived
+	// check below hits the opaque "died during startup" path with no diagnostic.
+	// See gu-acu3: fresh-spawn polecats from pool-init dying silently on auto-dispatch.
+	_ = m.tmux.SetRemainOnExit(sessionID, true)
+
 	// Record agent's pane_id for ZFC-compliant liveness checks (gt-qmsx).
 	// Declared pane identity replaces process-tree inference in IsRuntimeRunning
 	// and FindAgentPane. Legacy sessions without GT_PANE_ID fall back to scanning.
@@ -595,12 +605,29 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 
 	// Verify session survived startup - if the command crashed, the session may have died.
 	// Without this check, Start() would return success even if the pane died during initialization.
+	//
+	// Dual-path diagnostics (mirrors the dog lifecycle path in session.StartSession):
+	//   1. HasSession=true + IsAgentAlive=false: remain-on-exit kept the pane alive
+	//      after the agent died. Capture pane scrollback into the error so
+	//      daemon.log carries the actual stderr/stack trace. See gu-klwv, gu-acu3.
+	//   2. HasSession=false: pane is truly gone — either something killed the
+	//      session (unlikely) or a pre-existing remain-on-exit race destroyed
+	//      it. No capture possible; report empty-pane diagnostic.
+	//   3. HasSession=true + IsAgentAlive=true: healthy startup, continue.
 	running, err = m.tmux.HasSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("verifying session: %w", err)
 	}
 	if !running {
-		return fmt.Errorf("session %s died during startup (agent command may have failed)", sessionID)
+		return fmt.Errorf("session %s died during startup (agent command may have failed; pane produced no output)", sessionID)
+	}
+	if !m.tmux.IsAgentAlive(sessionID) {
+		diag := session.CapturePaneDiagnostic(m.tmux, sessionID)
+		_ = m.tmux.KillSessionWithProcesses(sessionID)
+		if diag != "" {
+			return fmt.Errorf("session %s died during startup (agent command may have failed)\n--- pane output ---\n%s\n--- end pane output ---", sessionID, diag)
+		}
+		return fmt.Errorf("session %s died during startup (agent command may have failed; pane produced no output)", sessionID)
 	}
 
 	// Validate GT_AGENT is set. Without GT_AGENT, IsAgentAlive falls back to
