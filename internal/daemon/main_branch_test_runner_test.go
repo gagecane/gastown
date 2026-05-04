@@ -469,3 +469,187 @@ func TestGateEnv(t *testing.T) {
 		t.Errorf("PATH missing original PATH %q; got %s", orig, lastPath)
 	}
 }
+
+func TestDetectInstallCommand(t *testing.T) {
+	// Each case writes the listed files into a fresh temp dir, then asserts
+	// the detected command. The empty-command cases verify we correctly skip
+	// install for languages whose toolchains handle deps on demand (Go, Rust).
+	cases := []struct {
+		name      string
+		files     []string
+		wantCmd   string
+		wantLabel string
+	}{
+		{
+			name:      "bun with bun.lock",
+			files:     []string{"package.json", "bun.lock"},
+			wantCmd:   "bun install --frozen-lockfile",
+			wantLabel: "install (bun)",
+		},
+		{
+			name:      "bun with legacy bun.lockb",
+			files:     []string{"package.json", "bun.lockb"},
+			wantCmd:   "bun install --frozen-lockfile",
+			wantLabel: "install (bun)",
+		},
+		{
+			name:      "pnpm",
+			files:     []string{"package.json", "pnpm-lock.yaml"},
+			wantCmd:   "pnpm install --frozen-lockfile",
+			wantLabel: "install (pnpm)",
+		},
+		{
+			name:      "yarn",
+			files:     []string{"package.json", "yarn.lock"},
+			wantCmd:   "yarn install --frozen-lockfile",
+			wantLabel: "install (yarn)",
+		},
+		{
+			name:      "npm",
+			files:     []string{"package.json", "package-lock.json"},
+			wantCmd:   "npm ci",
+			wantLabel: "install (npm)",
+		},
+		{
+			name:      "uv",
+			files:     []string{"pyproject.toml", "uv.lock"},
+			wantCmd:   "uv sync",
+			wantLabel: "install (uv)",
+		},
+		{
+			name:      "poetry",
+			files:     []string{"pyproject.toml", "poetry.lock"},
+			wantCmd:   "poetry install",
+			wantLabel: "install (poetry)",
+		},
+		{
+			name:      "go rig — no install needed",
+			files:     []string{"go.mod"},
+			wantCmd:   "",
+			wantLabel: "",
+		},
+		{
+			name:      "rust rig — no install needed",
+			files:     []string{"Cargo.toml"},
+			wantCmd:   "",
+			wantLabel: "",
+		},
+		{
+			name:      "empty workdir",
+			files:     nil,
+			wantCmd:   "",
+			wantLabel: "",
+		},
+		{
+			name:      "package.json without lockfile — unknown PM, skip",
+			files:     []string{"package.json"},
+			wantCmd:   "",
+			wantLabel: "",
+		},
+		{
+			name:      "pyproject.toml without lockfile — unknown PM, skip",
+			files:     []string{"pyproject.toml"},
+			wantCmd:   "",
+			wantLabel: "",
+		},
+		{
+			// Deterministic tie-break: bun has highest priority. A leftover
+			// package-lock.json from a prior npm era does not demote the repo
+			// back to npm once a bun.lock exists.
+			name:      "bun.lock + package-lock.json — bun wins",
+			files:     []string{"package.json", "bun.lock", "package-lock.json"},
+			wantCmd:   "bun install --frozen-lockfile",
+			wantLabel: "install (bun)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("{}"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gotCmd, gotLabel := detectInstallCommand(dir)
+			if gotCmd != tc.wantCmd {
+				t.Errorf("cmd: got %q, want %q", gotCmd, tc.wantCmd)
+			}
+			if gotLabel != tc.wantLabel {
+				t.Errorf("label: got %q, want %q", gotLabel, tc.wantLabel)
+			}
+		})
+	}
+}
+
+func TestLoadRigGateConfig_SetupCommand(t *testing.T) {
+	t.Run("setup_command parsed from merge_queue", func(t *testing.T) {
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"setup_command": "pnpm install --frozen-lockfile",
+				"test_command":  "pnpm test",
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if cfg.SetupCommand != "pnpm install --frozen-lockfile" {
+			t.Errorf("expected 'pnpm install --frozen-lockfile', got %q", cfg.SetupCommand)
+		}
+	})
+
+	t.Run("setup_command omitted leaves SetupCommand empty", func(t *testing.T) {
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"test_command": "go test ./...",
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if cfg.SetupCommand != "" {
+			t.Errorf("expected empty SetupCommand, got %q", cfg.SetupCommand)
+		}
+	})
+
+	t.Run("setup_command alone is NOT enough — still needs gates or test_command", func(t *testing.T) {
+		// setup_command without any gates or test_command is not runnable;
+		// there's nothing to run after install. Config is treated as "no
+		// commands" (nil return) to match existing behavior.
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"setup_command": "pnpm install",
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Errorf("expected nil config (no runnable commands), got %+v", cfg)
+		}
+	})
+}

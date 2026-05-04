@@ -72,9 +72,15 @@ func mainBranchTestRigs(config *DaemonPatrolConfig) []string {
 
 // rigGateConfig holds the gate/test configuration extracted from a rig's config.json.
 type rigGateConfig struct {
-	TestCommand string
-	Gates       map[string]string // gate name → command
+	TestCommand  string
+	SetupCommand string            // Optional pre-build install command (e.g., "pnpm install")
+	Gates        map[string]string // gate name → command
 }
+
+// defaultInstallTimeout bounds auto-detected package-manager installs so a wedged
+// install (network issues, lock contention) does not consume the whole per-rig
+// main_branch_test budget.
+const defaultInstallTimeout = 5 * time.Minute
 
 // loadRigGateConfig reads the merge_queue section from a rig's config to
 // discover what test/gate commands to run.
@@ -142,8 +148,9 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 	}
 
 	var mq struct {
-		TestCommand *string                    `json:"test_command"`
-		Gates       map[string]json.RawMessage `json:"gates"`
+		TestCommand  *string                    `json:"test_command"`
+		SetupCommand *string                    `json:"setup_command"`
+		Gates        map[string]json.RawMessage `json:"gates"`
 	}
 	if err := json.Unmarshal(raw.MergeQueue, &mq); err != nil {
 		return nil, fmt.Errorf("parsing merge_queue: %w", err)
@@ -167,6 +174,13 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 	// Fall back to legacy test_command
 	if mq.TestCommand != nil && *mq.TestCommand != "" {
 		cfg.TestCommand = *mq.TestCommand
+	}
+
+	// Optional setup/install command (e.g., "pnpm install"). When set, this
+	// runs before gates/tests so dependency-hungry commands like build gates
+	// find node_modules / .venv / etc. already populated.
+	if mq.SetupCommand != nil && *mq.SetupCommand != "" {
+		cfg.SetupCommand = *mq.SetupCommand
 	}
 
 	if len(cfg.Gates) == 0 && cfg.TestCommand == "" {
@@ -282,11 +296,94 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		}
 	}()
 
+	// Install dependencies BEFORE running gates so build/test gates in
+	// Node/Python rigs find their deps. A missing install step is the most
+	// common main_branch_test failure for lockfile-based rigs (gu-hl5w).
+	if err := d.runPreBuildInstall(ctx, rigName, worktreePath, gateCfg); err != nil {
+		return err
+	}
+
 	// Run gates or legacy test command
 	if len(gateCfg.Gates) > 0 {
 		return d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates)
 	}
 	return d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
+}
+
+// detectInstallCommand inspects the given working directory for lockfiles and
+// returns the appropriate package-manager install command. Returns the command
+// string and a short human-readable label, or ("", "") when no lockfile-driven
+// install is required (e.g., Go / Rust rigs where the toolchain handles deps
+// on demand).
+//
+// Detection order matches the table in gu-hl5w (Node lockfiles checked from
+// most-specific to least-specific, Python next, then skip-list languages).
+// The first matching lockfile wins so a repo that accidentally has two
+// lockfiles (e.g., package-lock.json left behind after migrating to bun)
+// gets a deterministic choice.
+func detectInstallCommand(workDir string) (cmd, label string) {
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(workDir, name))
+		return err == nil
+	}
+
+	hasPackageJSON := exists("package.json")
+	hasPyprojectTOML := exists("pyproject.toml")
+
+	switch {
+	case hasPackageJSON && exists("bun.lock"):
+		return "bun install --frozen-lockfile", "install (bun)"
+	case hasPackageJSON && exists("bun.lockb"):
+		// Older bun lockfile format; still identifies bun as the PM.
+		return "bun install --frozen-lockfile", "install (bun)"
+	case hasPackageJSON && exists("pnpm-lock.yaml"):
+		return "pnpm install --frozen-lockfile", "install (pnpm)"
+	case hasPackageJSON && exists("yarn.lock"):
+		return "yarn install --frozen-lockfile", "install (yarn)"
+	case hasPackageJSON && exists("package-lock.json"):
+		return "npm ci", "install (npm)"
+	case hasPyprojectTOML && exists("uv.lock"):
+		return "uv sync", "install (uv)"
+	case hasPyprojectTOML && exists("poetry.lock"):
+		return "poetry install", "install (poetry)"
+	}
+
+	// Cargo / go.mod / everything else: toolchain handles deps on demand; no
+	// pre-build install is needed.
+	return "", ""
+}
+
+// runPreBuildInstall runs the dependency install step for a rig's worktree
+// before its gates/tests execute. Resolution order:
+//
+//  1. If the rig config sets merge_queue.setup_command, run that verbatim.
+//     This is the operator escape hatch for monorepos, custom setup scripts,
+//     or package managers we don't auto-detect.
+//  2. Otherwise, auto-detect from the worktree's lockfiles and run the
+//     canonical install command for that package manager.
+//  3. If neither path produces a command (Go/Rust/etc.), skip silently.
+//
+// A failed install is reported as a clearly labeled "install" failure so
+// operators see "install failed" instead of a downstream build gate whining
+// about missing deps.
+func (d *Daemon) runPreBuildInstall(ctx context.Context, rigName, workDir string, cfg *rigGateConfig) error {
+	var cmd, label string
+	if cfg != nil && cfg.SetupCommand != "" {
+		cmd = cfg.SetupCommand
+		label = "install (setup_command)"
+	} else {
+		cmd, label = detectInstallCommand(workDir)
+	}
+	if cmd == "" {
+		return nil // No install needed (no lockfile and no setup_command)
+	}
+
+	// Bound install with its own timeout so a wedged install doesn't eat the
+	// whole per-rig budget. Clamp to parent ctx so overall timeout still wins.
+	installCtx, cancel := context.WithTimeout(ctx, defaultInstallTimeout)
+	defer cancel()
+
+	return d.runCommandOnWorktree(installCtx, rigName, workDir, label, cmd)
 }
 
 // runGatesOnWorktree runs all configured gates sequentially on the given worktree.
