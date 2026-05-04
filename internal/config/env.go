@@ -279,6 +279,21 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 	env["DISABLE_AUTOUPDATER"] = "1"
 
+	// Enable Rust backtraces for every Gas Town agent session. kiro-cli
+	// (the default polecat runtime on some deployments) is a Rust binary
+	// that panics on startup with opaque one-line errors like:
+	//     "1: No such file or directory (os error 2)
+	//      Location: crates/chat-cli/src/cli/chat/mod.rs:1719
+	//      Backtrace omitted. Run with RUST_BACKTRACE=1 ..."
+	// Without RUST_BACKTRACE, the POLECAT_DIED pane capture (gu-hq88 / gu-acu3)
+	// has no stack trace and diagnosing the root cause requires manually
+	// reproducing the crash with the env var set — which is unreliable for
+	// spawn-context-sensitive failures. Setting it by default costs nothing
+	// on healthy runs (Rust only emits the trace on panic) and turns every
+	// future crash into a fully diagnosable report via the existing pane
+	// capture pipeline. See gu-rq8i.
+	env["RUST_BACKTRACE"] = "1"
+
 	// Read daemon.json's env block fresh at call time so newly spawned sessions
 	// pick up config updates without requiring a daemon restart (gu-kj7c). For
 	// config-sourced vars (OTEL URLs, Dolt port/host, etc.), prefer this over

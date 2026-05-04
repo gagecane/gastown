@@ -24,6 +24,7 @@ func TestAgentEnv_Mayor(t *testing.T) {
 	assertEnv(t, env, "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1")       // suppress TUI survey (gs-4hk)
 	assertEnv(t, env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")  // suppress auto-title / release notes
 	assertEnv(t, env, "DISABLE_AUTOUPDATER", "1")                       // suppress update prompts
+	assertEnv(t, env, "RUST_BACKTRACE", "1")                            // diagnose Rust agent crashes (gu-rq8i)
 	assertNotSet(t, env, "GT_RIG")
 }
 
@@ -919,6 +920,40 @@ func TestAgentEnv_ForcesNonInteractiveGitEditor(t *testing.T) {
 			// GIT_MERGE_AUTOEDIT=no prevents git merge from launching an
 			// editor for the merge commit message even when GIT_EDITOR is unset.
 			assertEnv(t, env, "GIT_MERGE_AUTOEDIT", "no")
+		})
+	}
+}
+
+// TestAgentEnv_EnablesRustBacktrace verifies that every agent session gets
+// RUST_BACKTRACE=1. Rust binaries (notably kiro-cli) panic with opaque
+// one-line errors without this; with it set, POLECAT_DIED pane captures
+// carry a full stack trace, which is what enables root-cause diagnosis
+// of startup crashes like gu-rq8i.
+func TestAgentEnv_EnablesRustBacktrace(t *testing.T) {
+	t.Parallel()
+	roles := []struct {
+		role      string
+		rig       string
+		agentName string
+	}{
+		{"mayor", "", ""},
+		{"deacon", "", ""},
+		{"boot", "", ""},
+		{"witness", "myrig", ""},
+		{"refinery", "myrig", ""},
+		{"polecat", "myrig", "Toast"},
+		{"crew", "myrig", "emma"},
+		{"dog", "", "sparky"},
+	}
+	for _, r := range roles {
+		t.Run(r.role, func(t *testing.T) {
+			env := AgentEnv(AgentEnvConfig{
+				Role:      r.role,
+				Rig:       r.rig,
+				AgentName: r.agentName,
+				TownRoot:  "/town",
+			})
+			assertEnv(t, env, "RUST_BACKTRACE", "1")
 		})
 	}
 }
