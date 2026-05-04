@@ -88,6 +88,46 @@ func TestRenderRole_Polecat(t *testing.T) {
 	}
 }
 
+// TestRenderRole_Polecat_DeferredOnNoWork verifies that the polecat template
+// directs polecats with no work to exit via `gt done --status DEFERRED` instead
+// of sitting idle waiting for user instructions. Regression for gu-xjho:
+// Polecat 'no work' prompt said 'wait for user' — should instruct DEFERRED exit.
+func TestRenderRole_Polecat_DeferredOnNoWork(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:          "polecat",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/polecats/TestCat",
+		DefaultBranch: "main",
+		Polecat:       "TestCat",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	output, err := tmpl.RenderRole("polecat", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	// Must instruct DEFERRED exit for empty hook+mail case.
+	if !strings.Contains(output, "done --status DEFERRED") {
+		t.Error("polecat template missing `gt done --status DEFERRED` instruction; " +
+			"polecats with no work must free their slot, not wait for a human (gu-xjho)")
+	}
+	// Must NOT tell polecats to ERROR/escalate on empty hook — that was the
+	// previous behavior that left them stalled.
+	if strings.Contains(output, "If hook mysteriously empty → ERROR: escalate to Witness") {
+		t.Error("polecat template still contains deprecated 'escalate to Witness' " +
+			"instruction for empty hook; should instead direct DEFERRED exit")
+	}
+}
+
 func TestRenderRole_Deacon(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {
