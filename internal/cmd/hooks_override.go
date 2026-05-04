@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -68,19 +67,11 @@ func runHooksOverride(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Open in editor
+	// Open in editor (refuses under GT_ROLE — see gu-pkf3).
 	path := hooks.OverridePath(target)
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-
-	editorCmd := exec.Command(editor, path)
-	editorCmd.Stdin = os.Stdin
-	editorCmd.Stdout = os.Stdout
-	editorCmd.Stderr = os.Stderr
-	if err := editorCmd.Run(); err != nil {
-		return fmt.Errorf("running editor: %w", err)
+	suggestion := fmt.Sprintf("use `gt hooks override %s --show` to inspect, or edit the file directly: %s", target, path)
+	if err := launchEditor(path, "gt hooks override", suggestion); err != nil {
+		return err
 	}
 
 	// Validate after editing

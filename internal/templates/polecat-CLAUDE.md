@@ -303,7 +303,7 @@ Self-initiate when:
 - **Stuck** — need fresh perspective
 
 ```bash
-gt handoff -s "Polecat work handoff" -m "Issue: <issue>
+gt handoff -y -s "Polecat work handoff" -m "Issue: <issue>
 Current step: <step>
 Progress: <what's done>"
 ```

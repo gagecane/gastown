@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -75,18 +74,10 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Created new directive: %s\n", path)
 	}
 
-	// Open in editor
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-
-	editorCmd := exec.Command(editor, path)
-	editorCmd.Stdin = os.Stdin
-	editorCmd.Stdout = os.Stdout
-	editorCmd.Stderr = os.Stderr
-	if err := editorCmd.Run(); err != nil {
-		return fmt.Errorf("running editor: %w", err)
+	// Open in editor (refuses under GT_ROLE — see gu-pkf3).
+	suggestion := fmt.Sprintf("edit the file directly, or set EDITOR and run outside GT_ROLE: %s", path)
+	if err := launchEditor(path, "gt directive edit", suggestion); err != nil {
+		return err
 	}
 
 	fmt.Printf("Directive updated: %s\n", path)

@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/tui/feed"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/term"
 )
@@ -135,8 +136,14 @@ func runFeed(cmd *cobra.Command, args []string) error {
 		return runFeedInWindow(workDir, bdArgs)
 	}
 
-	// Use TUI by default if running in a terminal and not --plain
-	useTUI := !feedPlain && term.IsTerminal(int(os.Stdout.Fd()))
+	// Use TUI by default if running in a terminal and not --plain.
+	// Under GT_ROLE (agent context), default to plain mode — pty-backed agent
+	// sessions pass term.IsTerminal but can't usefully consume a bubbletea
+	// TUI (alt-screen + escape codes spam the agent's context). Agents can
+	// still opt in explicitly by exporting GT_FEED_TUI=1. See gu-pkf3 / gt-ube24
+	// category B.
+	agentMode := util.IsAgentContext() && os.Getenv("GT_FEED_TUI") == ""
+	useTUI := !feedPlain && !agentMode && term.IsTerminal(int(os.Stdout.Fd()))
 
 	if useTUI {
 		// TUI mode: resolve --rig to a beads directory for BdActivitySource

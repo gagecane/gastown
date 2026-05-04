@@ -419,7 +419,7 @@ When your context fills up, cycle using `{{ cmd }} handoff`.
 - **Handoff mail** = Context notes for yourself (optional)
 
 ```bash
-gt handoff                                    # Simple handoff
+gt handoff -y                                 # Simple handoff (non-interactive; required under GT_ROLE)
 gt handoff -y -s "Working on auth bug" -m "..."  # With context notes
 ```
 

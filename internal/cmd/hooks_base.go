@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -56,19 +55,11 @@ func runHooksBase(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Open in editor
+	// Open in editor (refuses under GT_ROLE — see gu-pkf3).
 	path := hooks.BasePath()
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-
-	editorCmd := exec.Command(editor, path)
-	editorCmd.Stdin = os.Stdin
-	editorCmd.Stdout = os.Stdout
-	editorCmd.Stderr = os.Stderr
-	if err := editorCmd.Run(); err != nil {
-		return fmt.Errorf("running editor: %w", err)
+	suggestion := fmt.Sprintf("use `gt hooks base --show` to inspect, or edit the file directly: %s", path)
+	if err := launchEditor(path, "gt hooks base", suggestion); err != nil {
+		return err
 	}
 
 	// Validate after editing

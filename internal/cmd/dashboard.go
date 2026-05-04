@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/web"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -112,9 +113,22 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start the server with timeouts
-	// Only show the large banner if the terminal is wide enough (98 cols)
-	width, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err == nil && width >= 98 {
+	// Only show the large banner if the terminal is wide enough (98 cols).
+	// Under GT_ROLE (agent context), skip the ASCII-art banner entirely —
+	// term.GetSize returns a pty-allocated width that's often wide enough
+	// to trigger the banner, but the box-drawing characters eat the agent's
+	// context window without adding value. See gu-pkf3 / gt-ube24 category B.
+	var (
+		width      int
+		widthErr   error
+	)
+	if util.IsAgentContext() {
+		// Force the short banner path.
+		widthErr = fmt.Errorf("agent context")
+	} else {
+		width, _, widthErr = term.GetSize(int(os.Stdout.Fd()))
+	}
+	if widthErr == nil && width >= 98 {
 		fmt.Print(`
  __       __  ________  __        ______    ______   __       __  ________
 |  \  _  |  \|        \|  \      /      \  /      \ |  \     /  \|        \
