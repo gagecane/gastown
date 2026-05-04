@@ -167,6 +167,18 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Title, info.IssueType, info.Labels, params.BeadID)
 	}
 
+	// Mayor-only guard (gu-bk6e). Batch sling and deferred scheduler
+	// funnel through executeSling; without this, an escalation labeled
+	// mayor-only / no-polecat is re-dispatched every cooldown cycle after
+	// a polecat closes it no-changes. Observed as a 3+ iteration
+	// re-dispatch loop on ta-wisp-1z3. Not bypassed by --force — remove
+	// the label first if this bead really is polecat-eligible.
+	if isMayorOnlyBeadInfo(info) {
+		result.ErrMsg = "mayor-only"
+		return result, fmt.Errorf("bead %s is labeled mayor-only / no-polecat: %q — polecats cannot resolve this work (town-scope, cross-rig, or requires human intervention).\nRemove the label first: bd update %s --remove-label=mayor-only --remove-label=no-polecat",
+			params.BeadID, info.Title, params.BeadID)
+	}
+
 	// Open-children guard (gu-fs88). A bead that has any non-closed child
 	// is a container for work tracked by its children, not a work item
 	// itself. Hooking such a bead to a polecat is a known failure loop:

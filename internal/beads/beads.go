@@ -226,6 +226,41 @@ func HasEpicPhaseLabel(labels []string) bool {
 	return false
 }
 
+// MayorOnlyLabel and NoPolecatLabel flag a bead as unresolvable by a polecat.
+// Apply either label to escalations or work items that structurally require
+// mayor-scope or human intervention (town root edits, origin config changes,
+// cross-rig coordination, credentials), so the auto-dispatcher skips them
+// instead of looping them through polecats that can only close no-changes.
+//
+// gu-bk6e / gt-pb857: the dispatcher previously had no knowledge of
+// escalation ownership. A bead that a polecat had already closed
+// no-changes ("out of polecat scope") still appeared as ready/unblocked and
+// was re-slung to the next idle polecat, producing a visible 3+ iteration
+// re-dispatch loop (ta-gl9 → ta-fm2 → ta-4nr → ta-bgq on ta-wisp-1z3 alone).
+// These labels are the operator-applied first-class signal that replaces
+// that guesswork.
+const (
+	MayorOnlyLabel = "mayor-only"
+	NoPolecatLabel = "no-polecat"
+)
+
+// HasMayorOnlyLabel reports whether the labels slice carries either the
+// mayor-only or no-polecat marker. Both are accepted; mayor-only is the
+// preferred spelling (positive: "this is for mayor"), no-polecat is the
+// negative alias for operators used to the opt-out framing. See gu-bk6e.
+//
+// The check is an exact label match — substrings like "mayor-only-followup"
+// or "no-polecat-v2" are different labels and must not trigger. This mirrors
+// the HasEpicPhaseLabel semantics.
+func HasMayorOnlyLabel(labels []string) bool {
+	for _, l := range labels {
+		if l == MayorOnlyLabel || l == NoPolecatLabel {
+			return true
+		}
+	}
+	return false
+}
+
 // Issue represents a beads issue.
 type Issue struct {
 	ID          string   `json:"id"`

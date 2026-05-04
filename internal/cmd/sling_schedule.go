@@ -160,6 +160,19 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Title, info.IssueType, beadID)
 	}
 
+	// Mayor-only guard (gu-bk6e). scheduleBead is the last stop before a
+	// sling context is created and a polecat is selected. Without this
+	// guard, a bead labeled mayor-only / no-polecat that slips past the
+	// ready-filter (e.g. direct sling by an internal caller) would still
+	// generate a sling-context wrapper that the scheduler tries to feed.
+	// The polecat would then close no-changes for being out of scope, and
+	// the cycle repeats. The label is an operator assertion, not a
+	// dispatch preference — schedule refuses on both labels unconditionally.
+	if isMayorOnlyBeadInfo(info) {
+		return fmt.Errorf("bead %s is labeled mayor-only / no-polecat: %q — refusing to schedule. Polecats cannot resolve this work; remove the label first if that assessment is wrong",
+			beadID, info.Title)
+	}
+
 	// Nested-wrapper guard (gu-hfr3). Refuse to schedule a bead that is
 	// itself a sling-context wrapper. Otherwise the idempotency check
 	// below (keyed on WorkBeadID) misses, and a new wrapper is created

@@ -297,6 +297,46 @@ func TestHasEpicPhaseLabel(t *testing.T) {
 	}
 }
 
+// TestHasMayorOnlyLabel verifies the gu-bk6e dispatch signal: a bead carrying
+// either the mayor-only or no-polecat label is not dispatchable to polecats.
+// The check must be exact — substrings must not trigger, and labels from
+// unrelated namespaces must not trigger. Mirrors TestHasEpicPhaseLabel.
+func TestHasMayorOnlyLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"nil labels", nil, false},
+		{"empty labels", []string{}, false},
+		{"only mayor-only", []string{"mayor-only"}, true},
+		{"only no-polecat", []string{"no-polecat"}, true},
+		{"both labels", []string{"mayor-only", "no-polecat"}, true},
+		{"mayor-only among others", []string{"escalation", "mayor-only", "bug"}, true},
+		{"no-polecat among others", []string{"escalation", "no-polecat", "bug"}, true},
+		// Substring / prefix collisions must not trigger.
+		{"mayor-only-v2 rejected", []string{"mayor-only-v2"}, false},
+		{"mayor-onlyz rejected", []string{"mayor-onlyz"}, false},
+		{"no-polecat-prep rejected", []string{"no-polecat-prep"}, false},
+		{"polecat rejected (unrelated namespace)", []string{"polecat"}, false},
+		{"mayor rejected", []string{"mayor"}, false},
+		// Case-sensitive — the label convention is lowercase.
+		{"case-sensitive — Mayor-Only rejected", []string{"Mayor-Only"}, false},
+		{"case-sensitive — NO-POLECAT rejected", []string{"NO-POLECAT"}, false},
+		// Negatives that look related but aren't.
+		{"phase:epic alone rejected", []string{"phase:epic"}, false},
+		{"gt:agent alone rejected", []string{"gt:agent"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasMayorOnlyLabel(tt.labels); got != tt.want {
+				t.Errorf("HasMayorOnlyLabel(%v) = %v, want %v", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 	bdAllowStaleMu.Lock()
 	prevPath := bdAllowStalePath

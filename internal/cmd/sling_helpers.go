@@ -221,6 +221,30 @@ func isEpicLikeBeadInfo(info *beadInfo) bool {
 	return beads.HasEpicPhaseLabel(info.Labels)
 }
 
+// isMayorOnlyBeadInfo reports whether the bead carries the mayor-only or
+// no-polecat label, which marks it as unresolvable by a polecat.
+//
+// gu-bk6e / gt-pb857: before this guard, the auto-dispatcher would re-sling
+// escalations that no polecat can fix (town root edits, origin config,
+// cross-rig coordination) because it has no concept of escalation ownership.
+// A polecat would spawn, see the bead is outside its directory-discipline
+// scope, close no-changes, and the scheduler would immediately re-dispatch
+// to the next idle polecat. Observed at 3+ iterations on ta-wisp-1z3 alone.
+//
+// Operators attach either label to tell the dispatcher "this requires
+// mayor or human intervention — do not sling to polecats." Both labels
+// are accepted; see beads.MayorOnlyLabel / beads.NoPolecatLabel.
+//
+// Not bypassed by --force — the label is an explicit assertion about who
+// can do the work, not a dispatch preference. If a human really wants to
+// force a polecat to attempt the bead, they should remove the label first.
+func isMayorOnlyBeadInfo(info *beadInfo) bool {
+	if info == nil {
+		return false
+	}
+	return beads.HasMayorOnlyLabel(info.Labels)
+}
+
 // hasOpenChildrenFn queries whether a parent bead has any open (non-closed)
 // children. Injected via variable so unit tests can stub it without running
 // a real `bd` subprocess. Returns (hasOpen, err) — on error, callers should

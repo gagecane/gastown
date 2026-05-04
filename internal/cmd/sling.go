@@ -625,6 +625,19 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID, info.Title, info.Title, info.IssueType, info.Labels, beadID)
 	}
 
+	// Mayor-only guard (gu-bk6e). A bead carrying mayor-only or no-polecat
+	// is an explicit operator assertion that no polecat can resolve it
+	// (town root edits, origin config, cross-rig coordination, human
+	// intervention). Without this guard, the auto-dispatcher re-slings
+	// the bead every cooldown cycle because the polecat close-no-changes
+	// leaves it in the ready set. Observed as a visible 3+ iteration
+	// re-dispatch loop on ta-wisp-1z3. Not bypassed by --force — remove
+	// the label first if the work really does belong to a polecat.
+	if isMayorOnlyBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is labeled mayor-only / no-polecat — polecats cannot resolve this work (town-scope, cross-rig, or requires human intervention).\nRemove the label first if this is wrong: bd update %s --remove-label=mayor-only --remove-label=no-polecat",
+			beadID, info.Title, beadID)
+	}
+
 	// Open-children guard (gu-fs88). A bead that is the parent of any
 	// non-closed child is a container, not a work item — the children
 	// track the actual work. Hooking such a bead to a polecat leaves the

@@ -23,6 +23,11 @@ Dispatch ready tasks to idle polecats across all rigs. Uses `gt sling <bead> <ri
       - `title` starts with `EPIC:` or `Epic:` (data-hygiene guard — these are mis-typed containers; see gu-smr1)
       - labels include `phase:epic` (data-hygiene guard — phase-style epics
         that are typed as task/bug; see gu-fs88 / ta-823 recurrence)
+      - labels include `mayor-only` or `no-polecat` (operator assertion that the work
+        requires mayor-scope or human intervention — town root edits, origin
+        config, cross-rig coordination; see gu-bk6e / gt-pb857). Polecats
+        close these no-changes ("out of scope"), and without the filter the
+        scheduler re-dispatches indefinitely.
       - The bead has any open (non-closed) children — it is a parent container
         whose work is tracked by its children, not itself (gu-fs88).
       - The bead is an identity/agent bead (title matches `<prefix>-<rig>-polecat-<name>`, `<prefix>-<rig>-witness`, etc.)

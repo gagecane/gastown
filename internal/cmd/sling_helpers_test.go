@@ -465,6 +465,116 @@ func TestIsEpicLikeBeadInfo_PhaseEpicLabel(t *testing.T) {
 	}
 }
 
+// TestIsMayorOnlyBeadInfo verifies the gu-bk6e dispatch gate: beads carrying
+// the mayor-only or no-polecat label must be rejected from polecat dispatch
+// regardless of title, type, or status. The label is an operator assertion
+// that the work structurally requires mayor-scope (town root edits, origin
+// config, cross-rig coordination, human intervention) and can never be
+// resolved by a polecat's directory-discipline-bound session.
+func TestIsMayorOnlyBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &beadInfo{}, false},
+
+		// Positive: either label on a slingable-looking bead.
+		{"task with mayor-only label (ta-wisp-1z3 shape)", &beadInfo{
+			Title:     "Escalation: origin config broken",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"escalation", "mayor-only"},
+		}, true},
+		{"bug with no-polecat alias", &beadInfo{
+			Title:     "Town-root symlink drift",
+			IssueType: "bug",
+			Status:    "open",
+			Labels:    []string{"no-polecat"},
+		}, true},
+		{"both labels at once", &beadInfo{
+			Title:     "Cross-rig coordination",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"mayor-only", "no-polecat"},
+		}, true},
+		{"mayor-only among unrelated labels", &beadInfo{
+			Title:     "Fix origin",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"gt:coord", "mayor-only", "needs-review"},
+		}, true},
+		// The label asserts ownership regardless of who's already hooked or
+		// what the issue type claims — the dispatcher should never re-sling.
+		{"in_progress bead still rejected by label", &beadInfo{
+			Title:     "Requires mayor",
+			IssueType: "task",
+			Status:    "in_progress",
+			Labels:    []string{"mayor-only"},
+		}, true},
+
+		// Negative: ordinary work beads pass through.
+		{"plain task without labels", &beadInfo{
+			Title:     "Fix parser bug",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+		{"unrelated labels only", &beadInfo{
+			Title:     "Regular escalation",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"escalation", "gt:coord"},
+		}, false},
+
+		// Negative: substring / case / prefix collisions must not trigger.
+		// These mirror the TestHasMayorOnlyLabel cases to catch any future
+		// refactor that replaces the exact-match helper with a loose check.
+		{"mayor-only-v2 not matched", &beadInfo{
+			Title:     "Work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"mayor-only-v2"},
+		}, false},
+		{"no-polecat-prep not matched", &beadInfo{
+			Title:     "Work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"no-polecat-prep"},
+		}, false},
+		{"Mayor-Only (wrong case) not matched", &beadInfo{
+			Title:     "Work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"Mayor-Only"},
+		}, false},
+		{"polecat label alone not matched (unrelated namespace)", &beadInfo{
+			Title:     "Work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"polecat"},
+		}, false},
+
+		// Negative: legitimate epic-phase label must not collide. This
+		// protects against a future helper consolidation accidentally
+		// conflating mayor-only with phase:epic.
+		{"phase:epic without mayor-only", &beadInfo{
+			Title:     "Phase work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"phase:epic"},
+		}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isMayorOnlyBeadInfo(tt.info); got != tt.want {
+				t.Errorf("isMayorOnlyBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsParentOfOpenChildren verifies the gu-fs88 dispatch gate for beads
 // that parent unclosed children. The helper is the dispatch-time mirror of
 // patrol_helpers.checkHasOpenChildren but routes through an injectable

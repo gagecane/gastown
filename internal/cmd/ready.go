@@ -483,6 +483,16 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
+		// Filter beads carrying the mayor-only / no-polecat labels (gu-bk6e).
+		// These mark work that structurally requires mayor-scope or human
+		// intervention (town root edits, origin config, cross-rig). Without
+		// this filter, the auto-dispatcher pulls them via bd ready and
+		// re-slings them every cooldown; the polecat closes no-changes and
+		// the cycle repeats. Observed on ta-wisp-1z3 at 3+ iterations.
+		if beads.HasMayorOnlyLabel(issue.Labels) {
+			continue
+		}
+
 		filtered = append(filtered, issue)
 	}
 	return filtered
