@@ -129,13 +129,15 @@ func TestResolveFormula(t *testing.T) {
 func TestCheckSchedulePrefixParity(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Set up a rig named "gastown" with prefix "gt-" via mayor/rigs.json.
+	// Set up a rig named "gastown" with prefix "gt" via mayor/rigs.json.
 	// rigBeadsPrefix prefers mayor/rigs.json over the rig's config.json.
+	// Note: the prefix in rigs.json is stored WITHOUT the trailing hyphen
+	// (matching BeadIDPrefix which returns substring-before-first-hyphen).
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
 	}
-	rigsJSON := `{"version":1,"rigs":{"gastown":{"beads":{"prefix":"gt-"}},"beads":{"beads":{"prefix":"bd-"}}}}`
+	rigsJSON := `{"version":1,"rigs":{"gastown":{"beads":{"prefix":"gt"}},"beads":{"beads":{"prefix":"bd"}}}}`
 	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
 		t.Fatalf("write rigs.json: %v", err)
 	}
