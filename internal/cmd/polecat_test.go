@@ -1101,3 +1101,243 @@ func TestWarmupNewPolecats_StartErrorMessageSurfacesToOperator(t *testing.T) {
 		}
 	}
 }
+
+// --- Pre-pool-init smoke check (gu-mkz7 / mitigation 1) -------------------
+//
+// These tests verify smokeCheckFirstPolecat: before mass-creating a pool,
+// pool-init creates ONE polecat and runs a full spawn-and-kill cycle. If
+// the probe dies during startup (e.g. kiro-cli panic at chat/mod.rs:1719),
+// pool-init aborts with the captured pane output before creating N-1 more
+// polecats that would all die the same way.
+
+// smokeRecordingAdder captures Add / SetAgentState calls for
+// assertion. Use addErr / setStateErr to simulate partial failures.
+// Add returns a synthetic Polecat unless overridden, so the happy path
+// does not need to construct git/worktree state.
+//
+// removeCalls is retained for negative assertions — the smoke check
+// must NEVER remove a probe polecat, and we verify that with
+// len(adder.removeCalls) == 0 even though Remove is not on the
+// polecatSmokeAdder interface (production code has no way to call it).
+type smokeRecordingAdder struct {
+	addCalls      []string
+	setStateCalls []string // "<name>:<state>"
+	removeCalls   []string
+	addErr        map[string]error
+	setStateErr   map[string]error
+}
+
+func (s *smokeRecordingAdder) Add(name string) (*polecat.Polecat, error) {
+	s.addCalls = append(s.addCalls, name)
+	if err, ok := s.addErr[name]; ok {
+		return nil, err
+	}
+	return &polecat.Polecat{
+		Name:      name,
+		ClonePath: "/tmp/fake-worktree/" + name,
+	}, nil
+}
+
+func (s *smokeRecordingAdder) SetAgentState(name, state string) error {
+	s.setStateCalls = append(s.setStateCalls, name+":"+state)
+	if err, ok := s.setStateErr[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// TestSmokeCheckFirstPolecat_HappyPathKeepsProbe verifies the nominal case:
+// Add, SetAgentState, Start, Stop all succeed, and the probe polecat is
+// left in place (no Remove) so it can serve as the first real pool member.
+// The smoke goal "session survived known startup crash windows" is met as
+// soon as Start returns nil — per session_manager.go, Start internally
+// waits for WaitForRuntimeReady and then VerifySurvived, so a nil return
+// proves the polecat passed both the 250ms early-exit window and the
+// runtime-ready poll.
+func TestSmokeCheckFirstPolecat_HappyPathKeepsProbe(t *testing.T) {
+	adder := &smokeRecordingAdder{}
+	starter := &warmupRecordingStarter{}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	if err := smokeCheckFirstPolecat(cmd, adder, starter, "alpha"); err != nil {
+		t.Fatalf("unexpected smoke-check error: %v", err)
+	}
+
+	if !equalStringSlices(adder.addCalls, []string{"alpha"}) {
+		t.Errorf("Add calls = %v, want [alpha]", adder.addCalls)
+	}
+	if !equalStringSlices(adder.setStateCalls, []string{"alpha:idle"}) {
+		t.Errorf("SetAgentState calls = %v, want [alpha:idle]", adder.setStateCalls)
+	}
+	if !equalStringSlices(starter.startCalls, []string{"alpha"}) {
+		t.Errorf("Start calls = %v, want [alpha]", starter.startCalls)
+	}
+	if !equalStringSlices(starter.stopCalls, []string{"alpha"}) {
+		t.Errorf("Stop calls = %v, want [alpha] (spawn must be killed cleanly)", starter.stopCalls)
+	}
+	// Critical: the probe is NOT removed — it's the first real pool member.
+	if len(adder.removeCalls) != 0 {
+		t.Errorf("Remove called unexpectedly (%v); smoke-check polecat must be kept as first pool member", adder.removeCalls)
+	}
+}
+
+// TestSmokeCheckFirstPolecat_AddFailureAborts verifies that a failed Add
+// (disk full, dolt unavailable, etc.) aborts the smoke check immediately
+// with a useful error. No session is ever spawned, and no remove is
+// attempted (nothing was created).
+func TestSmokeCheckFirstPolecat_AddFailureAborts(t *testing.T) {
+	adder := &smokeRecordingAdder{
+		addErr: map[string]error{"bravo": errors.New("disk full")},
+	}
+	starter := &warmupRecordingStarter{}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	err := smokeCheckFirstPolecat(cmd, adder, starter, "bravo")
+	if err == nil {
+		t.Fatal("expected Add failure to return error, got nil")
+	}
+	if !containsSubstring(err.Error(), "disk full") {
+		t.Errorf("expected error to surface underlying Add failure, got %q", err)
+	}
+	if len(starter.startCalls) != 0 {
+		t.Errorf("Start should not be called when Add fails, got %v", starter.startCalls)
+	}
+	if len(adder.removeCalls) != 0 {
+		t.Errorf("Remove should not be called when Add fails, got %v", adder.removeCalls)
+	}
+}
+
+// TestSmokeCheckFirstPolecat_StartFailureSurfacesPaneOutput is the core
+// behaviour gu-mkz7 mitigation (1) requests: when the probe dies during
+// startup, the captured pane output (from gu-hq88 / gu-acu3 pipeline) is
+// surfaced to the operator verbatim, and the caller receives an error so
+// it can abort pool-init before creating N-1 more doomed polecats.
+//
+// We also assert the polecat is NOT removed: the operator typically wants
+// to inspect the worktree / branch / pane scrollback manually, and the
+// zombie sits there the same way a real first-dispatch death would.
+func TestSmokeCheckFirstPolecat_StartFailureSurfacesPaneOutput(t *testing.T) {
+	multilineErr := errors.New("session died during startup\n--- pane output ---\nNo such file or directory (os error 2)\nLocation: crates/chat-cli/src/cli/chat/mod.rs:1719\n--- end pane output ---")
+	adder := &smokeRecordingAdder{}
+	starter := &warmupRecordingStarter{
+		startErrOn: map[string]error{"charlie": multilineErr},
+	}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	err := smokeCheckFirstPolecat(cmd, adder, starter, "charlie")
+	if err == nil {
+		t.Fatal("expected Start failure to return error from smoke check")
+	}
+	// Verbatim pane output must be threaded through so the operator can
+	// see the actual kiro-cli panic site.
+	if !containsSubstring(out.String(), "chat/mod.rs:1719") {
+		t.Errorf("expected stdout to surface the captured pane-output excerpt, got:\n%s", out.String())
+	}
+	if !containsSubstring(err.Error(), "No such file or directory") {
+		t.Errorf("expected returned error to include pane excerpt, got %q", err)
+	}
+	// Probe polecat is NOT removed — matches the real first-dispatch death
+	// behavior and lets the operator inspect it.
+	if len(adder.removeCalls) != 0 {
+		t.Errorf("Remove called unexpectedly after Start failure (%v); probe should be left for inspection", adder.removeCalls)
+	}
+	// No Stop attempt — there was no live session to kill.
+	if len(starter.stopCalls) != 0 {
+		t.Errorf("Stop should not be called when Start failed, got %v", starter.stopCalls)
+	}
+}
+
+// TestSmokeCheckFirstPolecat_StopFailureStillSucceeds captures a subtle
+// design choice: once Start has succeeded the smoke goal is met (the
+// session survived the known crash windows). A failed Stop only leaks a
+// tmux session that the witness patrol will reap; it's not a reason to
+// abort pool-init. Without this behaviour a flaky Stop would wrongly
+// block a healthy pool-init and make the smoke check worse than nothing.
+func TestSmokeCheckFirstPolecat_StopFailureStillSucceeds(t *testing.T) {
+	adder := &smokeRecordingAdder{}
+	starter := &warmupRecordingStarter{
+		stopErrOn: map[string]error{"delta": errors.New("session will not die")},
+	}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	if err := smokeCheckFirstPolecat(cmd, adder, starter, "delta"); err != nil {
+		t.Errorf("expected smoke to succeed despite Stop failure, got %v", err)
+	}
+	// The probe polecat is kept for the pool.
+	if len(adder.removeCalls) != 0 {
+		t.Errorf("Remove called unexpectedly (%v); Stop failure must not cause probe removal", adder.removeCalls)
+	}
+	if !containsSubstring(out.String(), "kill failed") {
+		t.Errorf("expected operator-visible warning about leaked session, got:\n%s", out.String())
+	}
+}
+
+// TestSmokeCheckFirstPolecat_SetAgentStateFailureIsWarnOnly documents that
+// a failure to set the new polecat's agent state to "idle" is a warning,
+// not an abort: the polecat is still usable (reapIdlePolecats and witness
+// patrol both tolerate polecats without a clean idle marker), and there
+// is no point tearing down the polecat for a metadata-only problem.
+func TestSmokeCheckFirstPolecat_SetAgentStateFailureIsWarnOnly(t *testing.T) {
+	adder := &smokeRecordingAdder{
+		setStateErr: map[string]error{"echo": errors.New("beads unavailable")},
+	}
+	starter := &warmupRecordingStarter{}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	if err := smokeCheckFirstPolecat(cmd, adder, starter, "echo"); err != nil {
+		t.Errorf("expected smoke to succeed despite SetAgentState failure, got %v", err)
+	}
+	if !equalStringSlices(starter.startCalls, []string{"echo"}) {
+		t.Errorf("Start must still run after metadata failure, got %v", starter.startCalls)
+	}
+	if !containsSubstring(out.String(), "couldn't set idle state") {
+		t.Errorf("expected operator-visible warning about idle-state failure, got:\n%s", out.String())
+	}
+}
+
+// TestNamesAfterSmoke_ExcludesProbePreservesOrder verifies the helper that
+// threads the smoked polecat out of the later warmup pass: order is
+// preserved (so the warmup output matches the create-order the operator
+// just watched), and only the smoked name is removed.
+func TestNamesAfterSmoke_ExcludesProbePreservesOrder(t *testing.T) {
+	got := namesAfterSmoke([]string{"alpha", "bravo", "charlie", "delta"}, "bravo")
+	want := []string{"alpha", "charlie", "delta"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("namesAfterSmoke = %v, want %v", got, want)
+	}
+}
+
+// TestNamesAfterSmoke_EmptySmokedNameReturnsUnchanged documents the
+// "smoke was skipped" path: when no polecat was probed (polecatPoolInitNoSmoke
+// or polecatPoolInitNoWarmup), we must warm up ALL created polecats. Silently
+// skipping everything would be a regression of gu-yc8x.
+func TestNamesAfterSmoke_EmptySmokedNameReturnsUnchanged(t *testing.T) {
+	in := []string{"alpha", "bravo"}
+	got := namesAfterSmoke(in, "")
+	if !equalStringSlices(got, in) {
+		t.Errorf("namesAfterSmoke with empty smoked name = %v, want unchanged %v", got, in)
+	}
+}
+
+// TestNamesAfterSmoke_NonPresentSmokedNameIsNoop defensively verifies that
+// a smoked name NOT present in createdNames (logic bug in the caller, or
+// the smoked polecat's Add failed after adding to createdNames somehow)
+// doesn't silently drop any real polecat. Current caller invariant
+// guarantees presence, but the helper's contract is "remove if present."
+func TestNamesAfterSmoke_NonPresentSmokedNameIsNoop(t *testing.T) {
+	in := []string{"alpha", "bravo"}
+	got := namesAfterSmoke(in, "nonexistent")
+	if !equalStringSlices(got, in) {
+		t.Errorf("namesAfterSmoke with unknown smoked name = %v, want unchanged %v", got, in)
+	}
+}

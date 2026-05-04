@@ -163,6 +163,7 @@ var (
 	polecatPoolInitSize      int
 	polecatPoolInitNoRefresh bool
 	polecatPoolInitNoWarmup  bool
+	polecatPoolInitNoSmoke   bool
 )
 
 var polecatGCCmd = &cobra.Command{
@@ -346,12 +347,23 @@ the operator can see the failure and retry — instead of during the first
 real dispatch, where work assignments can die silently (gu-yc8x). Adds
 ~4-8s per polecat. Use --no-warmup to disable when debugging.
 
+Smoke check: before mass-creating the rest of the pool, pool-init creates
+ONE polecat and runs a full spawn-and-kill cycle on it. If that single
+probe dies during startup (e.g. the kiro-cli chat/mod.rs:1719 panic from
+gu-rq8i), pool-init aborts with the captured pane output before creating
+N-1 more polecats that would all die the same way and trigger a
+POLECAT_DIED mail storm. The smoke polecat is kept on success — it is the
+first member of the pool, not a throwaway. Use --no-smoke to skip when
+debugging a known-broken runtime. Implies --no-warmup on that one polecat
+(no point warming up twice). See gu-mkz7.
+
 Examples:
   gt polecat pool-init gastown
   gt polecat pool-init gastown --size 6
   gt polecat pool-init gastown --dry-run
   gt polecat pool-init gastown --no-refresh-stale
-  gt polecat pool-init gastown --no-warmup`,
+  gt polecat pool-init gastown --no-warmup
+  gt polecat pool-init gastown --no-smoke`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPolecatPoolInit,
 }
@@ -398,6 +410,7 @@ func init() {
 	polecatPoolInitCmd.Flags().IntVar(&polecatPoolInitSize, "size", 0, "Pool size (overrides rig config)")
 	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitNoRefresh, "no-refresh-stale", false, "Skip refresh of existing polecats whose worktree is stuck on a closed bead's branch")
 	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitNoWarmup, "no-warmup", false, "Skip spawn-and-kill warmup cycle on newly-created polecats (default runs warmup to catch first-spawn races)")
+	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitNoSmoke, "no-smoke", false, "Skip pre-init smoke check (default: spawn one polecat first, abort if it dies, before mass-creating the rest)")
 
 	// Add subcommands
 	polecatCmd.AddCommand(polecatListCmd)
@@ -1964,11 +1977,47 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Create each polecat
-	fmt.Printf("\nCreating %d polecat(s)...\n", len(namesToCreate))
+	// Pre-pool-init smoke check (gu-mkz7 mitigation 1 of gu-rq8i):
+	// Before mass-creating the rest of the pool, create ONE polecat and spawn-
+	// and-kill a session on it. If the probe dies during startup (e.g. the
+	// kiro-cli chat/mod.rs:1719 panic gu-rq8i was filed for), abort pool-init
+	// so we don't create N-1 more polecats that all die the same way and
+	// trigger a POLECAT_DIED mail storm.
+	//
+	// The smoke polecat is kept — it's the first real member of the pool, so
+	// we don't waste a slot on a pure probe. It's also omitted from the later
+	// per-polecat warmup pass (already warmed).
 	created := 0
 	var createdNames []string
-	for _, name := range namesToCreate {
+	var smokedName string
+	if !polecatPoolInitNoSmoke && !polecatPoolInitNoWarmup {
+		t := tmux.NewTmux()
+		sessMgr := polecat.NewSessionManager(t, r)
+		probeName := namesToCreate[0]
+		fmt.Printf("\nSmoke check: creating %s and verifying session survives startup...\n", probeName)
+		if err := smokeCheckFirstPolecat(cmd, mgr, sessMgr, probeName); err != nil {
+			// Abort: the probe died during startup. The operator gets the full
+			// pane output from gu-hq88's capture pipeline so they can diagnose.
+			fmt.Fprintf(cmd.ErrOrStderr(), "\n%s Pool-init aborted — smoke check failed:\n%v\n",
+				style.Error.Render("✗"), err)
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"  Use `--no-smoke` to proceed anyway (NOT RECOMMENDED — a broken runtime will mass-kill every polecat).\n")
+			return fmt.Errorf("pool-init smoke check failed: %w", err)
+		}
+		smokedName = probeName
+		created++
+		createdNames = append(createdNames, probeName)
+	}
+
+	// Create the remaining polecats.
+	remaining := namesToCreate
+	if smokedName != "" {
+		remaining = namesToCreate[1:]
+	}
+	if len(remaining) > 0 {
+		fmt.Printf("\nCreating %d polecat(s)...\n", len(remaining))
+	}
+	for _, name := range remaining {
 		fmt.Printf("  %s Creating %s...", style.Dim.Render("→"), name)
 		p, addErr := mgr.Add(name)
 		if addErr != nil {
@@ -1988,10 +2037,19 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 	// Warmup: spawn + kill a session for each newly-created polecat to catch
 	// first-spawn races (cold fs-cache, empty .kiro, cold git index) during
 	// pool-init instead of during the first real dispatch. See gu-yc8x.
+	//
+	// The smoked polecat (if any) is excluded — it's already warm, and
+	// re-spawning it would double the cost and risk of first-spawn flakiness.
 	if !polecatPoolInitNoWarmup && len(createdNames) > 0 {
 		t := tmux.NewTmux()
 		sessMgr := polecat.NewSessionManager(t, r)
-		warmupNewPolecats(cmd, sessMgr, createdNames)
+		toWarmup := createdNames
+		if smokedName != "" {
+			toWarmup = namesAfterSmoke(createdNames, smokedName)
+		}
+		if len(toWarmup) > 0 {
+			warmupNewPolecats(cmd, sessMgr, toWarmup)
+		}
 	}
 
 	fmt.Printf("\n%s Pool initialized: %d created, %d total (target: %d)\n",
@@ -2006,6 +2064,97 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 type polecatWarmupStarter interface {
 	Start(polecat string, opts polecat.SessionStartOptions) error
 	Stop(polecat string, force bool) error
+}
+
+// polecatSmokeAdder is the narrow Manager surface smokeCheckFirstPolecat
+// needs. Broken out so unit tests can inject a fake without real git/worktree
+// state. See TestSmokeCheckFirstPolecat_* for the test fixtures.
+//
+// Note: the smoke check deliberately does NOT remove the probe polecat on
+// failure — the operator typically wants to inspect the worktree / branch.
+// No Remove method is needed on this interface.
+type polecatSmokeAdder interface {
+	Add(name string) (*polecat.Polecat, error)
+	SetAgentState(name, state string) error
+}
+
+// smokeCheckFirstPolecat runs a pre-pool-init probe: create ONE polecat,
+// spawn a session on it, verify survival past the known crash windows
+// (250ms early-exit + WaitForRuntimeReady) by successfully Start-ing, then
+// kill the session cleanly.
+//
+// This is gu-mkz7 / gu-rq8i mitigation 1. The bead's motivating symptom
+// was a kiro-cli panic at chat/mod.rs:1719 that killed every freshly-
+// spawned polecat in the rig after a daemon restart. Without a pre-check,
+// pool-init cheerfully created 4+ polecats and all of them died on first
+// spawn, flooding the mayor with POLECAT_DIED mail.
+//
+// Failure contract:
+//
+//   - If Add fails: the smoke failed before spawn (e.g. disk space, dolt
+//     unavailable). We return the error with NO cleanup because no polecat
+//     was registered; the caller aborts pool-init.
+//   - If Start fails: the polecat IS registered but its first session
+//     died during startup. Pane output is already embedded in the Start
+//     error (gu-hq88 / gu-acu3 capture pipeline), so we just return it.
+//     We DO NOT remove the polecat — the operator typically wants to
+//     inspect the worktree / branch; leaving the polecat registered
+//     matches the behavior of a real first-dispatch failure.
+//   - If Start succeeds but Stop fails: we log the leak but return nil,
+//     because the smoke goal (session survived startup) was achieved.
+//     Witness patrol will eventually clean the leaked session.
+//
+// On success, the probe polecat is left in the pool as the first real
+// member. The caller is responsible for not double-warming-up this
+// polecat (see namesAfterSmoke).
+func smokeCheckFirstPolecat(cmd *cobra.Command, adder polecatSmokeAdder, starter polecatWarmupStarter, name string) error {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "  %s Creating %s...", style.Dim.Render("→"), name)
+	p, addErr := adder.Add(name)
+	if addErr != nil {
+		fmt.Fprintf(out, " %s %v\n", style.Warning.Render("FAILED"), addErr)
+		return fmt.Errorf("creating smoke polecat %s: %w", name, addErr)
+	}
+	// Set agent state to idle so the polecat is reusable as a real pool member.
+	if stateErr := adder.SetAgentState(name, "idle"); stateErr != nil {
+		fmt.Fprintf(out, " %s (created but couldn't set idle state: %v)\n", style.Warning.Render("⚠"), stateErr)
+	} else {
+		fmt.Fprintf(out, " %s (%s)\n", style.Success.Render("✓"), style.Dim.Render(p.ClonePath))
+	}
+
+	fmt.Fprintf(out, "  %s Probing %s (spawn-and-kill)...", style.Dim.Render("→"), name)
+	if err := starter.Start(name, polecat.SessionStartOptions{}); err != nil {
+		// The probe died during startup. pane output is in err (gu-hq88).
+		fmt.Fprintf(out, " %s\n    %v\n", style.Error.Render("FAILED"), err)
+		return fmt.Errorf("probe %s died during startup: %w", name, err)
+	}
+	// Session started cleanly — kill it to free the resources but leave
+	// fs-cache / git-index warm for the first real dispatch.
+	if err := starter.Stop(name, true); err != nil {
+		fmt.Fprintf(out, " %s (spawn ok, kill failed: %v; leaked session will be reaped by patrol)\n",
+			style.Warning.Render("⚠"), err)
+		return nil // Start succeeded — the smoke goal was met.
+	}
+	fmt.Fprintf(out, " %s\n", style.Success.Render("✓"))
+	return nil
+}
+
+// namesAfterSmoke returns the subset of createdNames that should still run
+// through warmupNewPolecats — i.e. every polecat other than the one that
+// already got a full spawn-and-kill cycle during the smoke check. Preserves
+// ordering so the warmup output matches the creation order the operator saw.
+func namesAfterSmoke(createdNames []string, smokedName string) []string {
+	if smokedName == "" {
+		return createdNames
+	}
+	out := make([]string, 0, len(createdNames))
+	for _, n := range createdNames {
+		if n == smokedName {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // warmupNewPolecats spawns a throwaway session for each newly-created polecat
