@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dog"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -322,6 +323,21 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			}
 			continue
 		}
+
+		// Emit daemon.plugin.dispatch audit event (additive — transport-split
+		// foundation). Best-effort; errors are swallowed (events are audit-only
+		// and must never fail a dispatch). See gu-zwui / gt-to45a and
+		// docs/design/plugin-dispatch-transport.md.
+		_ = events.LogAudit(
+			events.TypeDaemonPluginDispatch,
+			"daemon",
+			events.DaemonPluginDispatchPayload(
+				p.Name,
+				p.RigName,
+				fmt.Sprintf("deacon/dogs/%s", idleDog.Name),
+				"cooldown",
+			),
+		)
 
 		if err := sm.Start(idleDog.Name, dog.SessionStartOptions{
 			WorkDesc: workDesc,

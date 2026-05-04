@@ -448,6 +448,20 @@ func (d *Daemon) dispatchAutoDispatchForRig(rig, trigger, triggerSession, trigge
 		return fmt.Errorf("sending mail to dog %s: %w", idleDog.Name, err)
 	}
 
+	// Emit daemon.plugin.dispatch audit event (additive — transport-split
+	// foundation). Best-effort; errors are swallowed. See gu-zwui / gt-to45a
+	// and docs/design/plugin-dispatch-transport.md.
+	_ = events.LogAudit(
+		events.TypeDaemonPluginDispatch,
+		"daemon",
+		events.DaemonPluginDispatchPayload(
+			p.Name,
+			rig,
+			fmt.Sprintf("deacon/dogs/%s", idleDog.Name),
+			"event-driven",
+		),
+	)
+
 	if err := sm.Start(idleDog.Name, dog.SessionStartOptions{
 		WorkDesc: workDesc,
 	}); err != nil {

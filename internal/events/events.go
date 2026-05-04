@@ -77,6 +77,11 @@ const (
 
 	// Auto-dispatch events (event-driven refill observability)
 	TypeAutoDispatchEventTriggered = "auto_dispatch_event_triggered" // Event-driven auto-dispatch fired
+
+	// Daemon plugin dispatch events (transport-split foundation — gu-zwui / gt-to45a).
+	// Emitted additively alongside existing mail dispatch so future consumers can
+	// migrate off the mail transport one at a time. See docs/design/plugin-dispatch-transport.md.
+	TypeDaemonPluginDispatch = "daemon.plugin.dispatch" // Daemon dispatched a plugin to an agent
 )
 
 // EventsFile is the name of the raw events log.
@@ -388,6 +393,29 @@ func AutoDispatchEventTriggeredPayload(rig, trigger, triggerSession, triggerAgen
 	}
 	if triggerAgent != "" {
 		p["trigger_agent"] = triggerAgent
+	}
+	return p
+}
+
+// DaemonPluginDispatchPayload creates a payload for daemon plugin-dispatch events.
+// Emitted as audit-only observability alongside the existing mail dispatch so future
+// consumers can migrate off mail one at a time. See docs/design/plugin-dispatch-transport.md
+// (gu-zwui / gt-to45a).
+//
+// plugin: the plugin name being dispatched (e.g., "dolt-backup", "code-scout")
+// rig: the rig the plugin is scoped to, if any; empty string for town-level plugins
+// target: the agent recipient address (e.g., "deacon/dogs/alpha")
+// trigger: what caused the dispatch ("cooldown", "event-driven", "manual"); empty allowed
+func DaemonPluginDispatchPayload(plugin, rig, target, trigger string) map[string]interface{} {
+	p := map[string]interface{}{
+		"plugin": plugin,
+		"target": target,
+	}
+	if rig != "" {
+		p["rig"] = rig
+	}
+	if trigger != "" {
+		p["trigger"] = trigger
 	}
 	return p
 }

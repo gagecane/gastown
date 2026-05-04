@@ -286,3 +286,46 @@ func TestAutoDispatchEventTriggeredPayload_OmitEmptyOptional(t *testing.T) {
 		t.Errorf("required fields lost: %+v", p)
 	}
 }
+
+func TestDaemonPluginDispatchPayload_Full(t *testing.T) {
+	p := DaemonPluginDispatchPayload("code-scout", "myrig", "deacon/dogs/alpha", "event-driven")
+	if p["plugin"] != "code-scout" {
+		t.Errorf("plugin = %v, want code-scout", p["plugin"])
+	}
+	if p["target"] != "deacon/dogs/alpha" {
+		t.Errorf("target = %v, want deacon/dogs/alpha", p["target"])
+	}
+	if p["rig"] != "myrig" {
+		t.Errorf("rig = %v, want myrig", p["rig"])
+	}
+	if p["trigger"] != "event-driven" {
+		t.Errorf("trigger = %v, want event-driven", p["trigger"])
+	}
+}
+
+func TestDaemonPluginDispatchPayload_OmitEmptyOptional(t *testing.T) {
+	// Town-level plugin with unspecified trigger — rig and trigger should be omitted,
+	// required plugin/target fields preserved.
+	p := DaemonPluginDispatchPayload("dolt-backup", "", "deacon/dogs/alpha", "")
+	if p["plugin"] != "dolt-backup" {
+		t.Errorf("plugin = %v, want dolt-backup", p["plugin"])
+	}
+	if p["target"] != "deacon/dogs/alpha" {
+		t.Errorf("target = %v, want deacon/dogs/alpha", p["target"])
+	}
+	if _, ok := p["rig"]; ok {
+		t.Errorf("rig should be omitted when empty, got %v", p["rig"])
+	}
+	if _, ok := p["trigger"]; ok {
+		t.Errorf("trigger should be omitted when empty, got %v", p["trigger"])
+	}
+}
+
+func TestTypeDaemonPluginDispatch_ConstantValue(t *testing.T) {
+	// Lock in the event type string — consumers downstream (dashboards, feed
+	// readers, future consumer-migration code) will key off this exact value.
+	if TypeDaemonPluginDispatch != "daemon.plugin.dispatch" {
+		t.Errorf("TypeDaemonPluginDispatch = %q, want %q",
+			TypeDaemonPluginDispatch, "daemon.plugin.dispatch")
+	}
+}

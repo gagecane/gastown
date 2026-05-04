@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dog"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/style"
@@ -1168,6 +1169,20 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("sending plugin mail to dog: %w", err)
 	}
+
+	// Emit daemon.plugin.dispatch audit event (additive — transport-split
+	// foundation). Best-effort; errors are swallowed. See gu-zwui / gt-to45a
+	// and docs/design/plugin-dispatch-transport.md.
+	_ = events.LogAudit(
+		events.TypeDaemonPluginDispatch,
+		"deacon",
+		events.DaemonPluginDispatchPayload(
+			p.Name,
+			p.RigName,
+			dogAddress,
+			"manual",
+		),
+	)
 
 	// Ensure dog session is running so it can read the mail.
 	// Without this, dispatched work sits in mail with no session to read it.
