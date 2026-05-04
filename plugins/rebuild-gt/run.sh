@@ -8,9 +8,29 @@
 set -euo pipefail
 
 TOWN_ROOT="${GT_TOWN_ROOT:-$(gt town root 2>/dev/null)}"
-RIG_ROOT="${TOWN_ROOT}/gastown/mayor/rig"
+
+# Locate the gastown source rig. The fork ("gastown_upstream") is preferred
+# over the vanilla name for backward compat with pre-fork towns. (gu-1rae)
+RIG_ROOT=""
+RIG_NAME=""
+for candidate in gastown_upstream gastown; do
+  if [ -f "${TOWN_ROOT}/${candidate}/mayor/rig/cmd/gt/main.go" ]; then
+    RIG_ROOT="${TOWN_ROOT}/${candidate}/mayor/rig"
+    RIG_NAME="${candidate}"
+    break
+  fi
+  if [ -f "${TOWN_ROOT}/${candidate}/cmd/gt/main.go" ]; then
+    RIG_ROOT="${TOWN_ROOT}/${candidate}"
+    RIG_NAME="${candidate}"
+    break
+  fi
+done
 
 log() { echo "[rebuild-gt] $*"; }
+
+# Rig label used in plugin-run tracking wisps. Falls back to "unknown" so we
+# never emit a malformed label if rig discovery failed.
+RIG_LABEL="rig:${RIG_NAME:-unknown}"
 
 # --- Detection ---------------------------------------------------------------
 
@@ -26,7 +46,7 @@ SAFE=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.std
 if [ "$IS_STALE" != "True" ]; then
   log "Binary is fresh. Nothing to do."
   bd create "rebuild-gt: binary is fresh" -t chore --ephemeral \
-    -l type:plugin-run,plugin:rebuild-gt,rig:gastown,result:success \
+    -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:success" \
     --silent 2>/dev/null || true
   exit 0
 fi
@@ -34,7 +54,7 @@ fi
 if [ "$SAFE" != "True" ]; then
   log "Not safe to rebuild (not on main or would be a downgrade). Skipping."
   bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
-    -l type:plugin-run,plugin:rebuild-gt,rig:gastown,result:skipped \
+    -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
     -d "Skipped: not safe to rebuild" --silent 2>/dev/null || true
   exit 0
 fi
@@ -43,16 +63,21 @@ fi
 
 log "Pre-flight checks..."
 
-if [ ! -d "$RIG_ROOT" ]; then
-  log "Rig root $RIG_ROOT does not exist. Skipping."
+if [ -z "$RIG_ROOT" ] || [ ! -d "$RIG_ROOT" ]; then
+  log "Could not locate gastown source rig under $TOWN_ROOT (tried: gastown_upstream, gastown). Skipping."
+  bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
+    -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
+    -d "Skipped: gastown source rig not found under $TOWN_ROOT" --silent 2>/dev/null || true
   exit 0
 fi
+
+log "Using source rig: $RIG_ROOT (rig=$RIG_NAME)"
 
 DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null)
 if [ -n "$DIRTY" ]; then
   log "Repo is dirty, skipping rebuild."
   bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
-    -l type:plugin-run,plugin:rebuild-gt,rig:gastown,result:skipped \
+    -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
     -d "Skipped: repo has uncommitted changes" --silent 2>/dev/null || true
   exit 0
 fi
@@ -61,7 +86,7 @@ BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null)
 if [ "$BRANCH" != "main" ]; then
   log "Not on main branch (on $BRANCH), skipping rebuild."
   bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
-    -l type:plugin-run,plugin:rebuild-gt,rig:gastown,result:skipped \
+    -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
     -d "Skipped: not on main branch (on $BRANCH)" --silent 2>/dev/null || true
   exit 0
 fi
@@ -75,13 +100,13 @@ if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
   NEW_VER=$(gt version 2>/dev/null | head -1 || echo "unknown")
   log "Rebuilt: $OLD_VER -> $NEW_VER"
   bd create "rebuild-gt: $OLD_VER -> $NEW_VER" -t chore --ephemeral \
-    -l type:plugin-run,plugin:rebuild-gt,rig:gastown,result:success \
+    -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:success" \
     --silent 2>/dev/null || true
 else
   ERROR="make build/safe-install failed"
   log "FAILED: $ERROR"
   bd create "Plugin: rebuild-gt [failure]" -t chore --ephemeral \
-    -l type:plugin-run,plugin:rebuild-gt,rig:gastown,result:failure \
+    -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:failure" \
     -d "Build failed: $ERROR" --silent 2>/dev/null || true
   gt escalate "Plugin FAILED: rebuild-gt" -s medium 2>/dev/null || true
   exit 1

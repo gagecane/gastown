@@ -58,7 +58,7 @@ bd create --wisp-type patrol \
 Before building, verify the source repo is clean and on main:
 
 ```bash
-cd ~/gt/gastown/mayor/rig
+cd ~/gt/gastown_upstream/mayor/rig    # or ~/gt/gastown/mayor/rig for pre-fork towns
 git status --porcelain  # Must be clean
 git branch --show-current  # Must be "main"
 ```
@@ -67,10 +67,12 @@ If either check fails, skip the rebuild and record a wisp.
 
 ## Action
 
-Rebuild from source (the mayor/rig directory is the canonical source):
+Rebuild from source (the mayor/rig directory is the canonical source). The
+plugin auto-discovers the rig name, preferring `gastown_upstream` (the fork)
+over `gastown` for backward compat with pre-fork towns:
 
 ```bash
-cd ~/gt/gastown/mayor/rig && make build && make safe-install
+cd ~/gt/gastown_upstream/mayor/rig && make build && make safe-install
 ```
 
 **IMPORTANT**: Use `make safe-install` (not `make install`) to avoid restarting

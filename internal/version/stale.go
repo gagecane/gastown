@@ -149,18 +149,36 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 	return info
 }
 
+// gastownRigNames lists the directory names the gastown source rig may be
+// installed under, in preference order. The fork ("gastown_upstream") is
+// checked first because a town that has explicitly forked off upstream is
+// the canonical source of the local binary; vanilla "gastown" is kept for
+// backward compatibility with pre-fork towns. (gu-1rae)
+var gastownRigNames = []string{"gastown_upstream", "gastown"}
+
+// gastownRepoCandidates expands a base directory into candidate source paths,
+// trying both the rig root and the mayor/rig clone inside it for each known
+// gastown rig name.
+func gastownRepoCandidates(base string) []string {
+	candidates := make([]string, 0, len(gastownRigNames)*2)
+	for _, name := range gastownRigNames {
+		candidates = append(candidates,
+			base+"/"+name,
+			base+"/"+name+"/mayor/rig",
+		)
+	}
+	return candidates
+}
+
 // GetRepoRoot returns the git repository root for the gt source code.
-// The canonical source is the gastown repo itself ($GT_ROOT/gastown).
-// Crew rigs also contain cmd/gt/main.go but have different HEADs,
-// so we prefer the gastown repo over CWD-based git toplevel detection.
+// The canonical source is the gastown repo itself ($GT_ROOT/gastown_upstream
+// or $GT_ROOT/gastown). Crew rigs also contain cmd/gt/main.go but have
+// different HEADs, so we prefer the gastown repo over CWD-based git toplevel
+// detection.
 func GetRepoRoot() (string, error) {
 	// Check if GT_ROOT environment variable is set (agents always have this)
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		candidates := []string{
-			gtRoot + "/gastown",
-			gtRoot + "/gastown/mayor/rig",
-		}
-		for _, candidate := range candidates {
+		for _, candidate := range gastownRepoCandidates(gtRoot) {
 			if hasGtSource(candidate) {
 				return candidate, nil
 			}
@@ -170,17 +188,16 @@ func GetRepoRoot() (string, error) {
 	// Try common development paths relative to home
 	home := os.Getenv("HOME")
 	if home != "" {
-		candidates := []string{
-			home + "/gt/gastown",
-			home + "/gt/gastown/mayor/rig",
-			home + "/gastown",
-			home + "/gastown/mayor/rig",
-			home + "/src/gastown",
-			home + "/src/gastown/mayor/rig",
+		bases := []string{
+			home + "/gt",
+			home,
+			home + "/src",
 		}
-		for _, candidate := range candidates {
-			if hasGtSource(candidate) {
-				return candidate, nil
+		for _, base := range bases {
+			for _, candidate := range gastownRepoCandidates(base) {
+				if hasGtSource(candidate) {
+					return candidate, nil
+				}
 			}
 		}
 	}
