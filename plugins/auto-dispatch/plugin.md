@@ -9,16 +9,22 @@ duration = "2m"
 
 ## Auto-Dispatch
 
-Dispatch ready tasks to idle polecats across all rigs. Uses `gt sling <bead> <rig>` which auto-selects an idle polecat and starts its session.
+Sling all ready tasks across all rigs onto the scheduler queue. The scheduler
+matches queued work to polecats as slots free up. **Do NOT gate on polecat
+state** — `gt polecat list` reports stale display state ("working" even when
+hook_bead is null), which would cause this plugin to underfill the scheduler
+when polecats are actually available.
+
+`gt sling <bead> <rig>` is idempotent for already-scheduled beads (returns
+"already hooked" or reuses the existing context wisp), so calling it every
+cooldown cycle for the same bead is safe.
 
 ### Steps
 
 1. Discover rigs: parse `~/gt/mayor/rigs.json` to get rig names
 2. For each rig:
-   a. Run `gt polecat list <rig>` — count polecats in `idle` state (skip `working`, `stalled`, `zombie`). Call this `idle_count`.
-   b. If `idle_count == 0`, skip this rig
-   c. Run `cd ~/gt/<rig> && bd ready` to find open unblocked tasks
-   d. Filter out non-dispatchable beads and any that have unmet blockers. A bead is non-dispatchable if ANY of:
+   a. Run `cd ~/gt/<rig> && bd ready` to find open unblocked tasks
+   b. Filter out non-dispatchable beads and any that have unmet blockers. A bead is non-dispatchable if ANY of:
       - `issue_type` is `epic` or `convoy` (containers, not work)
       - `title` starts with `EPIC:` or `Epic:` (data-hygiene guard — these are mis-typed containers; see gu-smr1)
       - labels include `phase:epic` (data-hygiene guard — phase-style epics
@@ -33,14 +39,14 @@ Dispatch ready tasks to idle polecats across all rigs. Uses `gt sling <bead> <ri
       - The bead is an identity/agent bead (title matches `<prefix>-<rig>-polecat-<name>`, `<prefix>-<rig>-witness`, etc.)
 
       Call the remaining list `ready_tasks`.
-   e. If `ready_tasks` is empty, skip this rig
-   f. Sort `ready_tasks` by priority (P1 > P2 > P3 > P4) — highest first
-   g. Dispatch up to `min(idle_count, len(ready_tasks))` tasks by running `gt sling <task-id> <rig>` for each, iterating the sorted list from highest priority down. Each sling auto-selects a different idle polecat.
+   c. If `ready_tasks` is empty, skip this rig
+   d. Sort `ready_tasks` by priority (P1 > P2 > P3 > P4) — highest first
+   e. For each task in the sorted list, run `gt sling <task-id> <rig>`. Slinging more tasks than the rig has idle polecats is intentional — the scheduler queues them and dispatches as polecats free up. Already-scheduled tasks return cleanly without creating duplicates.
 
    Note: `gt sling` enforces the same filters server-side, so a mistakenly
    included epic/identity/EPIC-titled bead will be rejected with a clear error
-   rather than wasting a polecat slot.
-3. Report: "Dispatched N tasks across M rigs" or "No dispatchable work" if nothing matched
+   rather than wasting a queue slot.
+3. Report: "Slung N tasks across M rigs (S new, D already-scheduled)" with per-rig breakdown.
 
 ### Opting a Bead Out of Auto-Dispatch
 
