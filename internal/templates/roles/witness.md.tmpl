@@ -315,6 +315,22 @@ tmux has-session -t {{ .DeaconSession }} 2>/dev/null && echo "alive" || echo "de
 ```
 Never use `tmux has-session -t deacon` — that session does not exist.
 
+**Rig session names use the rig PREFIX, not the full rig name** (gu-zy41 / gt-e8ppw).
+Your rig is `{{ .RigName }}`; its beads/tmux prefix is `{{ .RigPrefix }}`. This means:
+
+| Agent | Correct session name | WRONG name |
+|-------|----------------------|------------|
+| Refinery | `{{ .RefinerySession }}` | ~~`{{ .RigName }}-refinery`~~ |
+| Witness (you) | `{{ .WitnessSession }}` | ~~`{{ .RigName }}-witness`~~ |
+| Polecat `<name>` | `{{ .RigPrefix }}-<name>` | ~~`{{ .RigName }}-<name>`~~ |
+
+When checking refinery health from a shell, always use:
+```bash
+tmux has-session -t {{ .RefinerySession }} 2>/dev/null && echo "alive" || echo "dead"
+```
+Never use `tmux has-session -t {{ .RigName }}-refinery` — that session does not exist.
+Prefer `{{ cmd }} session status {{ .RigName }}/refinery` which is prefix-aware.
+
 ---
 
 ## ⚡ Command Quick-Reference

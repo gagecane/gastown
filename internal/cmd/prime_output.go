@@ -71,17 +71,30 @@ func outputPrimeContext(ctx RoleContext) (string, error) {
 		}
 	}
 
+	// Derive rig-scoped tmux session names from the rig prefix registry
+	// (gu-zy41 / gt-e8ppw). Agents must use the prefix-based name
+	// (e.g. "ta-refinery"), NOT "<rigName>-refinery".
+	var rigPrefix, witnessSessionName, refinerySessionName string
+	if ctx.Rig != "" {
+		rigPrefix = session.PrefixFor(ctx.Rig)
+		witnessSessionName = session.WitnessSessionName(rigPrefix)
+		refinerySessionName = session.RefinerySessionName(rigPrefix)
+	}
+
 	data := templates.RoleData{
-		Role:          roleName,
-		RigName:       ctx.Rig,
-		TownRoot:      ctx.TownRoot,
-		TownName:      townName,
-		WorkDir:       ctx.WorkDir,
-		DefaultBranch: defaultBranch,
-		Polecat:       ctx.Polecat,
-		DogName:       ctx.Polecat, // ctx.Polecat holds the dog name for RoleDog
-		MayorSession:  session.MayorSessionName(),
-		DeaconSession: session.DeaconSessionName(),
+		Role:            roleName,
+		RigName:         ctx.Rig,
+		RigPrefix:       rigPrefix,
+		TownRoot:        ctx.TownRoot,
+		TownName:        townName,
+		WorkDir:         ctx.WorkDir,
+		DefaultBranch:   defaultBranch,
+		Polecat:         ctx.Polecat,
+		DogName:         ctx.Polecat, // ctx.Polecat holds the dog name for RoleDog
+		MayorSession:    session.MayorSessionName(),
+		DeaconSession:   session.DeaconSessionName(),
+		WitnessSession:  witnessSessionName,
+		RefinerySession: refinerySessionName,
 	}
 
 	// Render and output

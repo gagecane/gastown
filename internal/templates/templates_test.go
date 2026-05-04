@@ -728,3 +728,67 @@ func TestPolecatLifecycleMarker_StillAvailable(t *testing.T) {
 			PolecatLifecycleMarker, "IDLE POLECAT HERESY")
 	}
 }
+
+// TestRenderRole_Witness_RigPrefixedSessionNames verifies that the witness
+// role template teaches the agent the correct prefix-based tmux session
+// names for its rig (refinery, witness, polecat), not "<rigName>-<role>".
+//
+// Regression for gu-zy41 (mirror of gt-e8ppw, discovered via ta-0pk):
+// The witness was running `tmux has-session -t talontriage-refinery`
+// instead of `ta-refinery`, which is the actual session name. The check
+// always returned "no such session" and the witness reported a phantom
+// "refinery session dead" event, misleading operators. Cross-reference
+// `gt rig start` (prefix-based, e.g. "ta-refinery"): witness instructions
+// must match.
+func TestRenderRole_Witness_RigPrefixedSessionNames(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:            "witness",
+		RigName:         "talontriage",
+		RigPrefix:       "ta",
+		TownRoot:        "/test/town",
+		TownName:        "town",
+		WorkDir:         "/test/town/talontriage/witness",
+		DefaultBranch:   "mainline",
+		Polecats:        []string{"Alpha", "Beta"},
+		MayorSession:    "hq-mayor",
+		DeaconSession:   "hq-deacon",
+		WitnessSession:  "ta-witness",
+		RefinerySession: "ta-refinery",
+	}
+
+	output, err := tmpl.RenderRole("witness", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	// The rendered output MUST include the correct prefix-based refinery
+	// session name so the agent uses it in its tmux has-session checks.
+	if !strings.Contains(output, "ta-refinery") {
+		t.Error("witness template missing prefix-based refinery session name (ta-refinery); " +
+			"agent will check `<rig>-refinery` instead and report phantom session-dead events (gu-zy41)")
+	}
+	if !strings.Contains(output, "ta-witness") {
+		t.Error("witness template missing prefix-based witness session name (ta-witness)")
+	}
+
+	// The template must explicitly call out the wrong pattern so the agent
+	// doesn't fall back to `<rigName>-refinery` out of habit.
+	if !strings.Contains(output, "talontriage-refinery") {
+		t.Error("witness template missing explicit WRONG example (talontriage-refinery) that warns agents off the habitual `<rigName>-<role>` pattern")
+	}
+
+	// The template should reference the rig prefix concept explicitly.
+	if !strings.Contains(output, "PREFIX") && !strings.Contains(output, "prefix") {
+		t.Error("witness template does not mention the rig 'prefix' convention; agent may not understand why ta-refinery is correct")
+	}
+
+	// Sanity: RigName still rendered for address/nudge forms.
+	if !strings.Contains(output, "talontriage") {
+		t.Error("witness template missing RigName (talontriage) for agent-address forms like `talontriage/refinery`")
+	}
+}
