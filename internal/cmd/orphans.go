@@ -634,10 +634,7 @@ func runOrphansKill(cmd *cobra.Command, args []string) error {
 	if !orphansKillForce {
 		fmt.Printf("%s\n", style.Warning.Render("WARNING: This operation is irreversible!"))
 		total := len(filteredCommits) + len(procOrphans)
-		fmt.Printf("Remove %d orphan(s)? [y/N] ", total)
-		var response string
-		_, _ = fmt.Scanln(&response)
-		if strings.ToLower(strings.TrimSpace(response)) != "y" {
+		if !util.PromptYesNoWithTimeout(fmt.Sprintf("Remove %d orphan(s)?", total), false, util.DefaultStdinTimeout) {
 			fmt.Printf("%s Canceled\n", style.Dim.Render("ℹ"))
 			return nil
 		}
@@ -899,11 +896,7 @@ func runOrphansKillProcesses(cmd *cobra.Command, args []string) error {
 
 	// Confirm unless --force
 	if !orphansProcsForce {
-		fmt.Printf("Kill these %d process(es)? [y/N] ", len(orphans))
-		var response string
-		_, _ = fmt.Scanln(&response)
-		response = strings.ToLower(strings.TrimSpace(response))
-		if response != "y" && response != "yes" {
+		if !util.PromptYesNoWithTimeout(fmt.Sprintf("Kill these %d process(es)?", len(orphans)), false, util.DefaultStdinTimeout) {
 			fmt.Println("Aborted")
 			return nil
 		}
@@ -976,11 +969,7 @@ func runOrphansKillProcessesAggressive() error {
 
 	// Confirm unless --force
 	if !orphansProcsForce {
-		fmt.Printf("Kill these %d process(es)? [y/N] ", len(zombies))
-		var response string
-		_, _ = fmt.Scanln(&response)
-		response = strings.ToLower(strings.TrimSpace(response))
-		if response != "y" && response != "yes" {
+		if !util.PromptYesNoWithTimeout(fmt.Sprintf("Kill these %d process(es)?", len(zombies)), false, util.DefaultStdinTimeout) {
 			fmt.Println("Aborted")
 			return nil
 		}

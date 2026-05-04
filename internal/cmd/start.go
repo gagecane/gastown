@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -26,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -541,11 +541,7 @@ func runShutdown(cmd *cobra.Command, args []string) error {
 
 	// Confirmation prompt
 	if !shutdownYes && !shutdownForce {
-		fmt.Printf("Proceed with shutdown? [y/N] ")
-		reader := bufio.NewReader(os.Stdin)
-		response, _ := reader.ReadString('\n')
-		response = strings.TrimSpace(strings.ToLower(response))
-		if response != "y" && response != "yes" {
+		if !util.PromptYesNoWithTimeout("Proceed with shutdown?", false, util.DefaultStdinTimeout) {
 			fmt.Println("Shutdown canceled.")
 			return nil
 		}

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -101,31 +101,12 @@ func readStdinJSON() *hookInput {
 		return nil
 	}
 
-	// Read with timeout: some LLM runtimes pipe stdin without sending data,
-	// which would block ReadString forever. Use a goroutine + timer so we
-	// fall through to env-var / auto-generate paths after stdinReadTimeout.
-	type readResult struct {
-		line string
-		err  error
-	}
-	ch := make(chan readResult, 1)
-	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		line, err := reader.ReadString('\n')
-		ch <- readResult{line, err}
-	}()
-
-	var line string
-	select {
-	case r := <-ch:
-		if r.err != nil && r.line == "" {
-			return nil
-		}
-		line = r.line
-	case <-time.After(stdinReadTimeout):
-		// The goroutine above is still blocked on ReadString and will leak.
-		// This is intentional — gt prime is a short-lived CLI command that
-		// exits shortly after, so the goroutine is cleaned up by process exit.
+	// Use the shared timeout-safe helper. Under LLM runtimes that pipe stdin
+	// without ever writing to it, a blocking read would hang gt prime forever.
+	// See gt-ube24 / util.ReadStdinLineWithTimeout for the full pattern.
+	line, err := util.ReadStdinLineWithTimeout(stdinReadTimeout)
+	if err != nil {
+		// Timeout or EOF: caller falls through to env-var / persisted / auto-gen.
 		return nil
 	}
 

@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -15,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -141,11 +140,8 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 
 	// Interactive confirmation.
 	if !maintainForce {
-		fmt.Printf("\nProceed? [y/N] ")
-		reader := bufio.NewReader(os.Stdin)
-		answer, _ := reader.ReadString('\n')
-		answer = strings.TrimSpace(strings.ToLower(answer))
-		if answer != "y" && answer != "yes" {
+		fmt.Println()
+		if !util.PromptYesNoWithTimeout("Proceed?", false, util.DefaultStdinTimeout) {
 			fmt.Println("Aborted.")
 			return nil
 		}

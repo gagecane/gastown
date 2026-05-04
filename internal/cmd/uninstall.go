@@ -4,16 +4,15 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/shell"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/wrappers"
 )
 
@@ -72,13 +71,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Println()
-		fmt.Print("Continue? [y/N] ")
-
-		reader := bufio.NewReader(os.Stdin)
-		response, _ := reader.ReadString('\n')
-		response = strings.TrimSpace(strings.ToLower(response))
-
-		if response != "y" && response != "yes" {
+		if !util.PromptYesNoWithTimeout("Continue?", false, util.DefaultStdinTimeout) {
 			fmt.Println("Aborted.")
 			return nil
 		}

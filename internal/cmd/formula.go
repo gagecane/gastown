@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/base32"
@@ -18,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -1324,11 +1324,12 @@ func resolveFormulaLegAgent(legAgent, cliAgent, formulaAgent string) string {
 	return formulaAgent
 }
 
-// promptYesNo asks the user a yes/no question
+// promptYesNo asks the user a yes/no question.
+//
+// Uses a timeout-safe read under the hood: under LLM runtimes stdin looks
+// interactive but no human is there to type, so a blocking read would hang
+// the whole agent session. GT_ROLE-aware agents short-circuit to the default
+// (no) immediately. See gt-ube24 for the full pty-hang audit.
 func promptYesNo(question string) bool {
-	fmt.Printf("%s [y/N]: ", question)
-	reader := bufio.NewReader(os.Stdin)
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	return answer == "y" || answer == "yes"
+	return util.PromptYesNoWithTimeout(question, false, util.DefaultStdinTimeout)
 }

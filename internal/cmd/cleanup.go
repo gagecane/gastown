@@ -73,10 +73,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 	// Confirm unless --force
 	if !cleanupForce {
-		fmt.Printf("Kill these %d process(es)? [y/N] ", len(zombies))
-		var response string
-		_, _ = fmt.Scanln(&response)
-		if response != "y" && response != "Y" && response != "yes" && response != "Yes" {
+		if !util.PromptYesNoWithTimeout(fmt.Sprintf("Kill these %d process(es)?", len(zombies)), false, util.DefaultStdinTimeout) {
 			fmt.Println("Aborted")
 			return nil
 		}
