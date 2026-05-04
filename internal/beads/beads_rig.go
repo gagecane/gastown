@@ -179,7 +179,14 @@ func (b *Beads) CreateRigBead(name string, fields *RigFields) (*Issue, error) {
 	return &issue, nil
 }
 
-// GetRigBead retrieves a rig bead by name.
+// GetRigBead retrieves a rig bead by name, using the "gt" prefix.
+//
+// Deprecated: this helper assumes the "gt" prefix, so it only finds rig
+// beads for gastown-prefixed rigs. For any other rig, the lookup will
+// miss its canonical bead (e.g., talontriage's bead is ta-rig-talontriage,
+// not gt-rig-talontriage). Use GetRigByID with a prefix resolved via
+// rig.RigBeadsPrefix instead. See gu-r83v / ta-0pk #5.
+//
 // Returns ErrNotFound if the rig does not exist.
 func (b *Beads) GetRigBead(name string) (*Issue, *RigFields, error) {
 	id := RigBeadID(name)
@@ -219,6 +226,9 @@ func (b *Beads) GetRigByID(id string) (*Issue, *RigFields, error) {
 }
 
 // UpdateRigBead updates the fields for a rig bead.
+//
+// Deprecated: this helper routes through GetRigBead which assumes the "gt"
+// prefix. Same caveat as GetRigBead applies (see gu-r83v / ta-0pk #5).
 func (b *Beads) UpdateRigBead(name string, fields *RigFields) (*Issue, error) {
 	issue, _, err := b.GetRigBead(name)
 	if err != nil {
@@ -241,7 +251,11 @@ func (b *Beads) UpdateRigBead(name string, fields *RigFields) (*Issue, error) {
 	return updated, nil
 }
 
-// DeleteRigBead permanently deletes a rig bead.
+// DeleteRigBead permanently deletes a rig bead using the "gt" prefix.
+//
+// Deprecated: assumes the "gt" prefix. Use the run() helper with a bead ID
+// built from the rig's canonical prefix (via rig.RigBeadsPrefix) instead.
+// See gu-r83v / ta-0pk #5.
 func (b *Beads) DeleteRigBead(name string) error {
 	id := RigBeadID(name)
 	_, err := b.run("delete", id, "--hard", "--force")
@@ -280,8 +294,13 @@ func RigBeadIDWithPrefix(prefix, name string) string {
 	return fmt.Sprintf("%s-rig-%s", prefix, name)
 }
 
-// RigBeadID generates a rig identity bead ID using "gt" prefix.
-// For non-gastown rigs, use RigBeadIDWithPrefix with the rig's configured prefix.
+// RigBeadID generates a rig identity bead ID using the "gt" prefix.
+//
+// Deprecated: this helper assumes the gastown default "gt" prefix and so
+// produces the wrong ID for rigs whose beads prefix is different (e.g.,
+// talontriage uses "ta", casc_shared uses "cass"). Use RigBeadIDWithPrefix
+// with a prefix resolved via rig.RigBeadsPrefix (which reads the canonical
+// mapping from mayor/rigs.json). See gu-r83v / ta-0pk #5.
 func RigBeadID(name string) string {
 	return RigBeadIDWithPrefix("gt", name)
 }

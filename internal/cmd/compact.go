@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -128,11 +130,25 @@ func loadTTLConfigWithRole(townRoot, rigName string) map[string]time.Duration {
 
 // applyRigBeadTTLOverrides reads wisp_ttl_* labels from the rig identity bead
 // and applies them as overrides.
+//
+// The rig beads prefix is resolved from mayor/rigs.json (with a fallback to
+// the rig's own config.json). Hardcoding "gt" here would miss rigs whose
+// beads prefix differs from the gastown default (e.g., talontriage uses
+// "ta", casc_shared uses "cass"). See gu-r83v / ta-0pk #5.
 func applyRigBeadTTLOverrides(ttls map[string]time.Duration, townRoot, rigName string) {
 	beadsDir := beads.ResolveBeadsDir(townRoot)
 	bd := beads.NewWithBeadsDir(townRoot, beadsDir)
 
-	rigBeadID := beads.RigBeadIDWithPrefix("gt", rigName)
+	rigPath := filepath.Join(townRoot, rigName)
+	prefix := rig.RigBeadsPrefix(townRoot, rigPath, rigName)
+	if prefix == "" {
+		// No prefix resolvable — can't locate the rig's identity bead.
+		// Silently skip (TTL overrides are optional; callers fall back to
+		// layer-2a wisp config and layer-1 defaults).
+		return
+	}
+
+	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
 	issue, err := bd.Show(rigBeadID)
 	if err != nil {
 		return
