@@ -87,8 +87,17 @@ func ReadStdinLineWithTimeout(timeout time.Duration) (string, error) {
 	}
 	ch := make(chan readResult, 1)
 
+	// Snapshot stdinReader into a local before launching the goroutine.
+	// When the timeout wins, the goroutine may still be blocked on
+	// ReadString; tests restore stdinReader via t.Cleanup, which would
+	// otherwise race with the goroutine's read of the package-level var.
+	// The goroutine outliving the caller is documented (see godoc above);
+	// the package-level var access is not — and the race detector rightly
+	// flags it. Fix: the goroutine only touches its own local.
+	src := stdinReader
+
 	go func() {
-		reader := bufio.NewReader(stdinReader)
+		reader := bufio.NewReader(src)
 		line, err := reader.ReadString('\n')
 		ch <- readResult{line: line, err: err}
 	}()
