@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -233,6 +234,62 @@ func TestFindOrphanPolecatBranches_NoPolecatsDir(t *testing.T) {
 	}
 	if len(skipped) != 0 {
 		t.Errorf("expected 0 skipped, got %d", len(skipped))
+	}
+}
+
+// TestFindOrphanPolecatBranches_SkippedErrorIncludesStderr verifies that when
+// rev-list fails (e.g., because the configured default branch does not exist
+// locally or on origin), the skipped error message surfaces git's stderr
+// rather than just a bare "exit status 128".
+//
+// Regression test for gt-vja7w / gu-al8g: previously the scanner swallowed
+// stderr, so operators had no diagnostic to act on.
+func TestFindOrphanPolecatBranches_SkippedErrorIncludesStderr(t *testing.T) {
+	rigDir := t.TempDir()
+	rigName := "testrig"
+	polecatsDir := filepath.Join(rigDir, "polecats")
+
+	// Set up a polecat on a feature branch, with NO default branch (neither
+	// "main" nor "origin/main") present in the worktree. This forces both
+	// rev-list attempts in findOrphanPolecatBranches to fail.
+	polecatName := "echo"
+	worktreePath := filepath.Join(polecatsDir, polecatName)
+	if err := os.MkdirAll(worktreePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	run(t, worktreePath, "git", "init")
+	writeFile(t, filepath.Join(worktreePath, "README.md"), "# test\n")
+	run(t, worktreePath, "git", "add", ".")
+	run(t, worktreePath, "git", "commit", "-m", "initial commit")
+	// Rename only to a feature branch — no "main" ref exists anywhere.
+	run(t, worktreePath, "git", "branch", "-M", "feature/echo-work")
+
+	// Scan with defaultBranch="main" — both origin/main and main are missing,
+	// so the polecat must be reported as skipped with a useful diagnostic.
+	branches, skipped, err := findOrphanPolecatBranches(rigDir, rigName, "main")
+	if err != nil {
+		t.Fatalf("findOrphanPolecatBranches: %v", err)
+	}
+	if len(branches) != 0 {
+		t.Errorf("expected 0 branches, got %d", len(branches))
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("expected 1 skipped polecat, got %d", len(skipped))
+	}
+
+	got := skipped[0].Err
+	// The error must mention rev-list (so operators know which command failed)
+	// and must include git's actual diagnostic so they can fix the underlying
+	// issue (missing ref, misconfigured default branch, etc.).
+	if !strings.Contains(got, "rev-list failed") {
+		t.Errorf("expected error to contain %q, got: %q", "rev-list failed", got)
+	}
+	// git's stderr for an unknown revision typically says "unknown revision"
+	// or "ambiguous argument". Either is acceptable — we just need stderr to
+	// be surfaced, not swallowed.
+	if !strings.Contains(got, "unknown revision") && !strings.Contains(got, "ambiguous argument") {
+		t.Errorf("expected error to surface git stderr (unknown revision / ambiguous argument), got: %q", got)
 	}
 }
 

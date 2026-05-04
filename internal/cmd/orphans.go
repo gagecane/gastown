@@ -332,6 +332,30 @@ func resolvePolecatWorktree(polecatsDir, polecatName, rigName string) string {
 	return "" // No valid worktree found
 }
 
+// runGitCapture runs `git -C <dir> <args...>` and returns stdout on success.
+// On failure it returns an error whose message includes stderr (if any) so
+// callers can surface the underlying git diagnostic rather than a bare
+// "exit status N".
+//
+// exec.Cmd.Output() already populates (*exec.ExitError).Stderr, but only when
+// Cmd.Stderr is nil; the default Error() string does not include it. This
+// helper formats a combined message so the caller can log or display it.
+func runGitCapture(dir string, args ...string) ([]byte, error) {
+	full := append([]string{"-C", dir}, args...)
+	cmd := exec.Command("git", full...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return stdout, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
+		}
+		return stdout, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return stdout, nil
+}
+
 // findOrphanPolecatBranches scans polecat worktrees for branches with
 // commits that have not been merged to the default branch.
 func findOrphanPolecatBranches(rigPath, rigName, defaultBranch string) ([]OrphanBranch, []skippedPolecat, error) {
@@ -372,16 +396,26 @@ func findOrphanPolecatBranches(rigPath, rigName, defaultBranch string) ([]Orphan
 			continue // On default branch or detached HEAD — nothing unmerged
 		}
 
-		// Count commits ahead of default branch (try local ref, then origin/)
-		baseRef := defaultBranch
-		revListCmd := exec.Command("git", "-C", worktreePath, "rev-list", "--count", baseRef+"..HEAD")
-		countOut, err := revListCmd.Output()
-		if err != nil {
-			baseRef = "origin/" + defaultBranch
-			revListCmd = exec.Command("git", "-C", worktreePath, "rev-list", "--count", baseRef+"..HEAD")
-			countOut, err = revListCmd.Output()
-			if err != nil {
-				skipped = append(skipped, skippedPolecat{polecatName, fmt.Sprintf("rev-list failed: %v", err)})
+		// Count commits ahead of default branch. Polecat worktrees typically
+		// do not carry a local copy of the default branch (they only hold the
+		// polecat's feature branch + origin remote refs), so try origin/<default>
+		// first, then fall back to the bare ref for legacy/custom setups.
+		//
+		// We capture stderr on both attempts so diagnostics surface when both
+		// fail (the scanner previously swallowed stderr, leaving operators with
+		// a bare "exit status 128" — see gt-vja7w / gu-al8g).
+		baseRef := "origin/" + defaultBranch
+		countOut, firstErr := runGitCapture(worktreePath, "rev-list", "--count", baseRef+"..HEAD")
+		if firstErr != nil {
+			baseRef = defaultBranch
+			var secondErr error
+			countOut, secondErr = runGitCapture(worktreePath, "rev-list", "--count", baseRef+"..HEAD")
+			if secondErr != nil {
+				skipped = append(skipped, skippedPolecat{
+					polecatName,
+					fmt.Sprintf("rev-list failed: tried origin/%s (%v) then %s (%v)",
+						defaultBranch, firstErr, defaultBranch, secondErr),
+				})
 				continue
 			}
 		}
@@ -391,8 +425,7 @@ func findOrphanPolecatBranches(rigPath, rigName, defaultBranch string) ([]Orphan
 		}
 
 		// Get the latest commit subject
-		logCmd := exec.Command("git", "-C", worktreePath, "log", "-1", "--format=%s")
-		logOut, err := logCmd.Output()
+		logOut, err := runGitCapture(worktreePath, "log", "-1", "--format=%s")
 		latestSubject := ""
 		if err != nil {
 			skipped = append(skipped, skippedPolecat{polecatName, fmt.Sprintf("git log failed: %v", err)})
