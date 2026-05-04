@@ -407,7 +407,110 @@ func TestSplitLines_EmptyInput(t *testing.T) {
 	}
 }
 
-// ---- helpers ----
+// TestGetGitState_DivergentLocalCommitsUnpushed is the regression test for
+// gu-7nrd / gt-hc3e5. When the local branch has commits that are reachable
+// from NO remote ref, getGitState must report them as unpushed (Clean=false)
+// so that kill-safety checks return UNSAFE. The previous implementation
+// compared against origin/main with a content-diff short-circuit and
+// returned Unpushed=0 / CLEAN, which risked destroying unrecoverable work.
+func TestGetGitState_DivergentLocalCommitsUnpushed(t *testing.T) {
+	repo := initTestRepoWithRemote(t)
+
+	// At this point:
+	//   main = C0 (initial commit)
+	//   origin/main = C0
+	//   origin/polecat/foo = C0 -> WIP1 -> WIP2  (remote has diverged work)
+	//
+	// Checkout a local polecat branch at C0 and author a LOCAL commit that
+	// exists on no remote ref — it's not reachable from origin/main nor from
+	// origin/polecat/foo (which diverged in a different direction).
+	runGit(t, repo, "checkout", "-b", "polecat/foo", "main")
+	if err := os.WriteFile(filepath.Join(repo, "local.txt"), []byte("local only\n"), 0644); err != nil {
+		t.Fatalf("write local.txt: %v", err)
+	}
+	runGit(t, repo, "add", "local.txt")
+	runGit(t, repo, "commit", "-m", "local commit not on any remote")
+
+	got, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+
+	if got.UnpushedCommits != 1 {
+		t.Errorf("UnpushedCommits = %d, want 1 (local commit on no remote ref): %+v",
+			got.UnpushedCommits, got)
+	}
+	if got.Clean {
+		t.Errorf("Clean = true, want false when local has commits reachable from no remote: %+v", got)
+	}
+}
+
+// TestGetGitState_ContentOnMainButCommitNotPushed covers the squash-merge
+// trap: the branch content matches main (no diff) but the commit SHA lives
+// on no remote. The old content-diff short-circuit reported Unpushed=0 and
+// CLEAN in this case — but nuking the worktree would still discard the
+// local commit object. The fix treats unreachable commits as unpushed
+// regardless of whether their content is on main.
+func TestGetGitState_ContentOnMainButCommitNotPushed(t *testing.T) {
+	repo := initTestRepoWithRemote(t)
+
+	// Advance main on the remote with content X so main already contains the
+	// content that the polecat branch is about to produce independently.
+	runGit(t, repo, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("X\n"), 0644); err != nil {
+		t.Fatalf("write feature.txt on main: %v", err)
+	}
+	runGit(t, repo, "add", "feature.txt")
+	runGit(t, repo, "commit", "-m", "feature on main")
+	// Push the new main commit to origin (simulating the squash-merged state).
+	runGit(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	// Now branch off the ORIGINAL main (not the new one) and reproduce the
+	// same content. The resulting branch tip has content identical to main
+	// but is a distinct commit object that exists on no remote ref.
+	runGit(t, repo, "checkout", "-b", "polecat/squashed", "origin/polecat/foo~2") // C0
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("X\n"), 0644); err != nil {
+		t.Fatalf("write feature.txt on branch: %v", err)
+	}
+	runGit(t, repo, "add", "feature.txt")
+	runGit(t, repo, "commit", "-m", "local reproduction of feature")
+
+	got, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+
+	if got.UnpushedCommits == 0 {
+		t.Errorf("UnpushedCommits = 0, want >0: local commit exists on no remote "+
+			"ref even though its content is on main (squash-merge trap): %+v", got)
+	}
+	if got.Clean {
+		t.Errorf("Clean = true, want false for commits reachable from no remote: %+v", got)
+	}
+}
+
+// TestGetGitState_AllCommitsOnRemote verifies the positive case: when
+// every commit on HEAD is reachable from some remote branch, getGitState
+// reports Unpushed=0 and Clean=true.
+func TestGetGitState_AllCommitsOnRemote(t *testing.T) {
+	repo := initTestRepoWithRemote(t)
+
+	// main is at C0 and origin/main = C0. Nothing local-only.
+	got, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+
+	if got.UnpushedCommits != 0 {
+		t.Errorf("UnpushedCommits = %d, want 0: every commit is on origin/main: %+v",
+			got.UnpushedCommits, got)
+	}
+	if !got.Clean {
+		t.Errorf("Clean = false, want true when everything is on a remote ref: %+v", got)
+	}
+}
+
+
 
 // initTestRepo creates a temp dir, `git init`s it, configures local
 // author identity (required on hosts without a global git config), and
@@ -450,6 +553,68 @@ func initTestRepo(t *testing.T) string {
 	}
 	run("add", "README.md")
 	run("commit", "-m", "init")
+
+	return repo
+}
+
+// runGit invokes git against a repo with predictable test identity. It is a
+// convenience wrapper used by tests that need to construct multi-commit
+// scenarios without re-declaring env plumbing.
+func runGit(t *testing.T, repo string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// initTestRepoWithRemote extends initTestRepo by manufacturing a synthetic
+// "origin" remote via `git update-ref refs/remotes/origin/...`. This avoids
+// needing a real second repository on disk while still giving the rev-list
+// --remotes machinery something concrete to subtract from HEAD.
+//
+// Layout on return:
+//
+//	main         = C0 (initial "hello" commit)
+//	origin/main  = C0
+//	origin/polecat/foo = C0 -> WIP1 -> WIP2 (diverged remote work)
+//
+// Tests build on this baseline to construct the "local commits on no remote
+// ref" scenarios exercised by getGitState.
+func initTestRepoWithRemote(t *testing.T) string {
+	t.Helper()
+	repo := initTestRepo(t)
+
+	// Treat the initial commit as pushed to origin/main.
+	runGit(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	// Fabricate a diverged remote branch with two WIP checkpoints that sit
+	// on top of C0. We build them on a throwaway local branch, write them
+	// into refs/remotes/origin/polecat/foo, then reset back to main so the
+	// worktree's HEAD is unchanged by the scaffolding.
+	runGit(t, repo, "checkout", "-b", "__scaffold", "main")
+	if err := os.WriteFile(filepath.Join(repo, "wip.txt"), []byte("wip1\n"), 0644); err != nil {
+		t.Fatalf("write wip.txt: %v", err)
+	}
+	runGit(t, repo, "add", "wip.txt")
+	runGit(t, repo, "commit", "-m", "remote WIP 1")
+	if err := os.WriteFile(filepath.Join(repo, "wip.txt"), []byte("wip2\n"), 0644); err != nil {
+		t.Fatalf("write wip.txt (2): %v", err)
+	}
+	runGit(t, repo, "add", "wip.txt")
+	runGit(t, repo, "commit", "-m", "remote WIP 2")
+	runGit(t, repo, "update-ref", "refs/remotes/origin/polecat/foo", "HEAD")
+
+	// Clean up scaffolding so tests see a plain "on main" worktree.
+	runGit(t, repo, "checkout", "main")
+	runGit(t, repo, "branch", "-D", "__scaffold")
 
 	return repo
 }

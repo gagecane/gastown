@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1019,43 +1020,41 @@ func getGitState(worktreePath string) (*GitState, error) {
 		state.Clean = false
 	}
 
-	// Check for unpushed commits (git log origin/main..HEAD)
-	// We check commits first, then verify if content differs.
-	// After squash merge, commits may differ but content may be identical.
-	mainRef := "origin/main"
-	logCmd := exec.Command("git", "log", mainRef+"..HEAD", "--oneline")
-	logCmd.Dir = worktreePath
-	output, err = logCmd.Output()
-	if err != nil {
-		// origin/main might not exist - try origin/master
-		mainRef = "origin/master"
-		logCmd = exec.Command("git", "log", mainRef+"..HEAD", "--oneline")
-		logCmd.Dir = worktreePath
-		output, _ = logCmd.Output() // non-fatal: might be a new repo without remote tracking
-	}
-	if len(output) > 0 {
-		lines := splitLines(string(output))
-		count := 0
-		for _, line := range lines {
-			if line != "" {
-				count++
-			}
-		}
-		if count > 0 {
-			// Commits exist that aren't on main. But after squash merge,
-			// the content may actually be on main with different commit SHAs.
-			// Check if there's any actual diff between HEAD and main.
-			diffCmd := exec.Command("git", "diff", mainRef, "HEAD", "--quiet")
-			diffCmd.Dir = worktreePath
-			diffErr := diffCmd.Run()
-			if diffErr == nil {
-				// Exit code 0 means no diff - content IS on main (squash merged)
-				// Don't count these as unpushed
-				state.UnpushedCommits = 0
-			} else {
-				// Exit code 1 means there's a diff - truly unpushed work
-				state.UnpushedCommits = count
-				state.Clean = false
+	// Check for unpushed commits: commits reachable from HEAD that exist on
+	// NO remote branch (gu-7nrd / gt-hc3e5). The previous implementation used
+	// `git log origin/main..HEAD` and a content-diff short-circuit, which
+	// incorrectly reported CLEAN in two scenarios:
+	//   1. Local branch diverges from its origin counterpart — commits on HEAD
+	//      that exist on no remote ref (the reported bug).
+	//   2. Content of HEAD matches main (e.g. after squash-merge) even though
+	//      the local commits themselves live on no remote — those commit
+	//      objects would be lost if the worktree is nuked.
+	//
+	// `git rev-list HEAD --not --remotes --count` answers the real question:
+	// how many commits on HEAD are not reachable from any remote branch? That
+	// is exactly "commits we would lose if we nuked this worktree".
+	//
+	// Guard with a remote-existence check: a repo with no remotes (e.g. a
+	// freshly-initialised test fixture) has no remote refs to subtract, so
+	// `--not --remotes` would count every commit as unpushed. Preserve the
+	// existing contract of reporting 0 unpushed in that case.
+	remotesCheck := exec.Command("git", "for-each-ref", "--count=1", "refs/remotes/")
+	remotesCheck.Dir = worktreePath
+	remotesOut, remotesErr := remotesCheck.Output()
+	hasRemoteRefs := remotesErr == nil && len(strings.TrimSpace(string(remotesOut))) > 0
+
+	if hasRemoteRefs {
+		revListCmd := exec.Command("git", "rev-list", "--count", "HEAD", "--not", "--remotes")
+		revListCmd.Dir = worktreePath
+		revListOut, revListErr := revListCmd.Output()
+		if revListErr == nil {
+			countStr := strings.TrimSpace(string(revListOut))
+			if countStr != "" {
+				n, parseErr := strconv.Atoi(countStr)
+				if parseErr == nil && n > 0 {
+					state.UnpushedCommits = n
+					state.Clean = false
+				}
 			}
 		}
 	}
