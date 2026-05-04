@@ -64,6 +64,47 @@ dolt_query_json() {
 
 # --- Step 1: JSONL export ----------------------------------------------------
 
+# Filter the database list to only names registered in mayor/rigs.json (plus the
+# 'hq' town store). This prevents archiving of ephemeral test/experiment rigs
+# (e.g. 'testrig' from polecats exercising rig-creation code) whose beads would
+# otherwise get permanently captured here. Fail-open: if rigs.json is missing
+# or unparseable, the list is returned unchanged so real backups don't stop on
+# a transient FS glitch.
+filter_known_rigs() {
+  local rigs_json="$HOME/gt/mayor/rigs.json"
+  if [[ ! -f "$rigs_json" ]]; then
+    log "WARN: $rigs_json missing; skipping rig filter (fail-open)"
+    printf '%s\n' "$@"
+    return
+  fi
+  local registered
+  if ! registered=$(jq -r '.rigs | keys[]' "$rigs_json" 2>/dev/null); then
+    log "WARN: $rigs_json unparseable; skipping rig filter (fail-open)"
+    printf '%s\n' "$@"
+    return
+  fi
+  if [[ -z "$registered" ]]; then
+    log "WARN: $rigs_json has no registered rigs; skipping rig filter (fail-open)"
+    printf '%s\n' "$@"
+    return
+  fi
+  # Build allowlist: registered rigs + 'hq' town store.
+  local allowed
+  allowed=$(printf '%s\nhq\n' "$registered" | sort -u)
+  local db
+  local dropped=()
+  for db in "$@"; do
+    if grep -qxF "$db" <<< "$allowed"; then
+      printf '%s\n' "$db"
+    else
+      dropped+=("$db")
+    fi
+  done
+  if [[ ${#dropped[@]} -gt 0 ]]; then
+    log "Skipping ${#dropped[@]} unregistered database(s): ${dropped[*]}"
+  fi
+}
+
 # Auto-discover production databases or use the explicit list.
 if [[ "$DEFAULT_DBS" == "auto" ]]; then
   PROD_DBS=()
@@ -78,6 +119,18 @@ if [[ "$DEFAULT_DBS" == "auto" ]]; then
     log "ERROR: No production databases found via auto-discovery"
     exit 1
   fi
+  # Apply rig-registry filter only to auto-discovered lists. Explicit --databases
+  # lists are treated as authoritative — operators who ask for a specific set
+  # shouldn't be second-guessed.
+  FILTERED_DBS=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && FILTERED_DBS+=("$line")
+  done < <(filter_known_rigs "${PROD_DBS[@]}")
+  if [[ ${#FILTERED_DBS[@]} -eq 0 ]]; then
+    log "ERROR: No known-rig databases to export after filtering"
+    exit 1
+  fi
+  PROD_DBS=("${FILTERED_DBS[@]}")
 else
   IFS=',' read -ra PROD_DBS <<< "$DEFAULT_DBS"
 fi

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -116,6 +117,19 @@ func (d *Daemon) syncJsonlGitBackup() {
 	databases := config.Databases
 	if len(databases) == 0 {
 		d.logger.Printf("jsonl_git_backup: no databases configured, skipping")
+		return
+	}
+
+	// Filter out databases that aren't registered rigs. This prevents archiving
+	// of ephemeral test/experiment rigs (e.g. 'testrig' created by a polecat
+	// exercising rig-creation code paths) whose beads get permanently captured
+	// in /local/home/canewiw/gt/.dolt-archive/jsonl/. Registered rigs come from
+	// mayor/rigs.json; 'hq' is always allowed (town-level store). Fail-open: if
+	// rigs.json is unreadable, the input list is returned unchanged to avoid
+	// silently skipping real backups on FS glitches.
+	databases = d.filterKnownRigs(databases)
+	if len(databases) == 0 {
+		d.logger.Printf("jsonl_git_backup: no known-rig databases to export after filtering")
 		return
 	}
 
@@ -501,6 +515,58 @@ func spikeThreshold(config *JsonlGitBackupConfig) float64 {
 		}
 	}
 	return defaultSpikeThreshold
+}
+
+// knownRigAllowlist is the set of database names that are always archived even
+// if absent from mayor/rigs.json. 'hq' is the town-level bead store; it lives
+// at TownRoot/.beads/ and is never registered as a rig but must be backed up.
+var knownRigAllowlist = map[string]struct{}{
+	"hq": {},
+}
+
+// filterKnownRigs returns the subset of databases that are registered rigs in
+// mayor/rigs.json plus a fixed allowlist (hq). Experiment/test rigs whose names
+// never made it into rigs.json (e.g. 'testrig' from rig-creation code exercises)
+// are filtered out so their ephemeral beads are not captured permanently in
+// the JSONL archive.
+//
+// Fail-open policy: if rigs.json is missing or unreadable, the input list is
+// returned unchanged. Silently dropping every database on a transient FS glitch
+// would cause real backups to stop — that's a worse failure mode than the
+// occasional unregistered-rig file we are trying to avoid.
+func (d *Daemon) filterKnownRigs(databases []string) []string {
+	rigsPath := filepath.Join(d.config.TownRoot, "mayor", "rigs.json")
+	rigsCfg, err := config.LoadRigsConfig(rigsPath)
+	if err != nil {
+		d.logger.Printf("jsonl_git_backup: filterKnownRigs: rigs.json unreadable (%v); "+
+			"keeping full database list (fail-open)", err)
+		return databases
+	}
+	if rigsCfg == nil || len(rigsCfg.Rigs) == 0 {
+		d.logger.Printf("jsonl_git_backup: filterKnownRigs: rigs.json has no registered rigs; "+
+			"keeping full database list (fail-open)")
+		return databases
+	}
+
+	filtered := make([]string, 0, len(databases))
+	var dropped []string
+	for _, db := range databases {
+		if _, ok := knownRigAllowlist[db]; ok {
+			filtered = append(filtered, db)
+			continue
+		}
+		if _, ok := rigsCfg.Rigs[db]; ok {
+			filtered = append(filtered, db)
+			continue
+		}
+		dropped = append(dropped, db)
+	}
+	if len(dropped) > 0 {
+		sort.Strings(dropped)
+		d.logger.Printf("jsonl_git_backup: filterKnownRigs: skipping %d unregistered database(s): %s",
+			len(dropped), strings.Join(dropped, ", "))
+	}
+	return filtered
 }
 
 // isTestPollution checks if a JSONL record looks like test data that leaked into

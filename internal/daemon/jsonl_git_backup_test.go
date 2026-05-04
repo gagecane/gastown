@@ -590,3 +590,167 @@ func writeNLines(t *testing.T, path string, n int) {
 func itoa(i int) string {
 	return strconv.Itoa(i)
 }
+
+// --- filterKnownRigs tests ---
+
+// writeFilterRigsJSON writes a valid mayor/rigs.json under townRoot/mayor/ with
+// the given rig names. Each rig is given a minimal valid entry (empty git_url,
+// added_at=now). Returns the rigs.json path. Distinct from the writeRigsJSON
+// helper in kill_ghost_sessions_test.go which has a different signature.
+func writeFilterRigsJSON(t *testing.T, townRoot string, rigNames ...string) string {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	rigs := make(map[string]map[string]interface{}, len(rigNames))
+	for _, name := range rigNames {
+		rigs[name] = map[string]interface{}{
+			"git_url":  "",
+			"added_at": "2026-01-01T00:00:00Z",
+		}
+	}
+	payload := map[string]interface{}{
+		"version": 1,
+		"rigs":    rigs,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal rigs: %v", err)
+	}
+	path := filepath.Join(mayorDir, "rigs.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write rigs.json: %v", err)
+	}
+	return path
+}
+
+func newDaemonWithTownRoot(townRoot string) *Daemon {
+	return &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+}
+
+func TestFilterKnownRigs_DropsUnregistered(t *testing.T) {
+	townRoot := t.TempDir()
+	writeFilterRigsJSON(t, townRoot, "gastown_upstream", "casc_cdk")
+	d := newDaemonWithTownRoot(townRoot)
+
+	got := d.filterKnownRigs([]string{"gastown_upstream", "testrig", "casc_cdk", "unknownrig"})
+	want := []string{"gastown_upstream", "casc_cdk"}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %d entries, got %d: %v", len(want), len(got), got)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("position %d: expected %q, got %q", i, v, got[i])
+		}
+	}
+}
+
+func TestFilterKnownRigs_KeepsHqAllowlist(t *testing.T) {
+	townRoot := t.TempDir()
+	writeFilterRigsJSON(t, townRoot, "gastown_upstream")
+	d := newDaemonWithTownRoot(townRoot)
+
+	// hq is not in rigs.json but must survive filtering (town-level store).
+	got := d.filterKnownRigs([]string{"hq", "gastown_upstream", "testrig"})
+	want := []string{"hq", "gastown_upstream"}
+
+	if len(got) != len(want) {
+		t.Fatalf("expected %d entries, got %d: %v", len(want), len(got), got)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("position %d: expected %q, got %q", i, v, got[i])
+		}
+	}
+}
+
+func TestFilterKnownRigs_FailOpenOnMissingFile(t *testing.T) {
+	// No rigs.json at all — filter must return the input unchanged.
+	townRoot := t.TempDir()
+	d := newDaemonWithTownRoot(townRoot)
+
+	input := []string{"hq", "gastown_upstream", "testrig"}
+	got := d.filterKnownRigs(input)
+	if len(got) != len(input) {
+		t.Fatalf("expected %d entries (fail-open), got %d: %v", len(input), len(got), got)
+	}
+	for i, v := range input {
+		if got[i] != v {
+			t.Errorf("position %d: expected %q, got %q", i, v, got[i])
+		}
+	}
+}
+
+func TestFilterKnownRigs_FailOpenOnCorruptFile(t *testing.T) {
+	// Corrupt (non-JSON) rigs.json — filter must return the input unchanged.
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte("not json"), 0644); err != nil {
+		t.Fatalf("write corrupt rigs.json: %v", err)
+	}
+	d := newDaemonWithTownRoot(townRoot)
+
+	input := []string{"hq", "gastown_upstream", "testrig"}
+	got := d.filterKnownRigs(input)
+	if len(got) != len(input) {
+		t.Fatalf("expected %d entries (fail-open), got %d: %v", len(input), len(got), got)
+	}
+}
+
+func TestFilterKnownRigs_FailOpenOnEmptyRegistry(t *testing.T) {
+	// rigs.json exists but has zero rigs — treat as fail-open (nothing to
+	// validate against), rather than nuking every database. Prevents silent
+	// regression if someone clears rigs.json by accident.
+	townRoot := t.TempDir()
+	writeFilterRigsJSON(t, townRoot /* no rigs */)
+	d := newDaemonWithTownRoot(townRoot)
+
+	input := []string{"hq", "gastown_upstream", "testrig"}
+	got := d.filterKnownRigs(input)
+	if len(got) != len(input) {
+		t.Fatalf("expected %d entries (fail-open on empty registry), got %d: %v", len(input), len(got), got)
+	}
+}
+
+func TestFilterKnownRigs_EmptyInput(t *testing.T) {
+	townRoot := t.TempDir()
+	writeFilterRigsJSON(t, townRoot, "gastown_upstream")
+	d := newDaemonWithTownRoot(townRoot)
+
+	got := d.filterKnownRigs([]string{})
+	if len(got) != 0 {
+		t.Errorf("expected empty result, got %v", got)
+	}
+}
+
+func TestFilterKnownRigs_AllKnown(t *testing.T) {
+	townRoot := t.TempDir()
+	writeFilterRigsJSON(t, townRoot, "rig_a", "rig_b")
+	d := newDaemonWithTownRoot(townRoot)
+
+	got := d.filterKnownRigs([]string{"hq", "rig_a", "rig_b"})
+	if len(got) != 3 {
+		t.Fatalf("expected 3 entries, got %d: %v", len(got), got)
+	}
+}
+
+func TestFilterKnownRigs_AllUnknown(t *testing.T) {
+	// All databases unregistered — filter returns empty slice (not nil input).
+	// syncJsonlGitBackup guards against the empty case separately.
+	townRoot := t.TempDir()
+	writeFilterRigsJSON(t, townRoot, "rig_a")
+	d := newDaemonWithTownRoot(townRoot)
+
+	got := d.filterKnownRigs([]string{"testrig", "experiment"})
+	if len(got) != 0 {
+		t.Errorf("expected 0 entries, got %d: %v", len(got), got)
+	}
+}
