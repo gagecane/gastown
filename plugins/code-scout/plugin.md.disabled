@@ -35,18 +35,56 @@ bead to the rig that truly owns it. See Step 3 for the mechanics.
 
 1. Discover all rigs dynamically — never hardcode rig names or paths:
    - Parse `~/gt/mayor/rigs.json` to get the list of registered rigs
-     (name, `git_url`, and `beads.prefix` for each)
-   - For each rig, resolve its source root: `readlink -f ~/gt/<rig>/.beads/..`
-   - If the resolved path is under `~/gt/` (local beads, no workspace), check `/workplace/canewiw/` for a matching directory
-   - Skip any rig whose source root cannot be resolved
-   - Remember each rig's resolved source root AND its `git_url` — you will
-     use both to route beads in Step 3
+     (name, `git_url`, and `beads.prefix` for each).
+   - Build a URL-normalization function up front (used here AND in Step 3).
+     Normalize by stripping any `ssh://` / `https?://` / `file://` scheme,
+     any trailing `.git`, and any trailing `/`. Compare the resulting tail
+     (e.g. `git.amazon.com/pkg/CodegenAgentSchedulerLambda`,
+     `github.com/gagecane/gastown`, `gt-remotes/TalonTriage`) so rigs are
+     matched regardless of scheme.
+   - Build a lookup table keyed by normalized git URL → rig name.
 
-   Build a lookup table keyed by normalized git URL → rig name. Normalize by
-   stripping a trailing `.git`, a trailing `/`, and any `ssh://` / `https://`
-   scheme — compare the resulting tail (e.g. `git.amazon.com/pkg/Foo`,
-   `github.com/gagecane/gastown`, `gt-remotes/TalonTriage`) so rigs are
-   matched regardless of scheme.
+   **Resolve each rig's source root by git remote, NOT by directory name.**
+   A rig's source root is the ONE git worktree whose `origin` URL (normalized)
+   matches the rig's `git_url` (normalized). Do not pick a directory based on
+   path heuristics — for Brazil workspaces, the rig directory name does not
+   match the package name, and naive path-matching scans the entire workspace
+   and files beads against packages the rig does not own (see gt-r3jn).
+
+   Candidate directories to probe, in priority order:
+     a. `~/gt/<rig>/mayor/rig`          — Gas Town's authoritative worktree
+                                          for this rig (present for most rigs)
+     b. `$(readlink -f ~/gt/<rig>/.beads/..)` if that path is itself a git
+         worktree whose origin matches (some rigs check out the repo directly
+         at the rig root)
+     c. `/workplace/canewiw/<repo-tail>` where `<repo-tail>` is the last path
+         segment of the normalized `git_url` (e.g. `CodegenAgentSchedulerLambda`
+         for `ssh://git.amazon.com/pkg/CodegenAgentSchedulerLambda`). Brazil
+         workspaces lay packages out under `<workspace>/src/<package>`, so
+         ALSO probe `/workplace/canewiw/*/src/<repo-tail>` (glob, take the
+         first hit).
+     d. Any explicit `local_repo` field in the rig's rigs.json entry.
+
+   For each candidate, verify it is the rig's source root:
+
+   ```bash
+   candidate_toplevel=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null) || continue
+   candidate_origin=$(git -C "$candidate_toplevel" remote get-url origin 2>/dev/null) || continue
+   [[ "$(normalize_url "$candidate_origin")" == "$(normalize_url "$rig_git_url")" ]] || continue
+   # Match — use $candidate_toplevel as this rig's source root.
+   ```
+
+   **Only accept a candidate whose origin matches the rig's `git_url`.** This
+   prevents picking up a surrounding Brazil workspace (which has its own
+   `git_url` belonging to a different rig, e.g. `codegen_ws`) when resolving
+   a package-level rig like `casc_lambda`.
+
+   Skip any rig whose source root cannot be resolved by origin match. Emit a
+   diagnostic (`scout: unresolved rig <name> (git_url=<url>)`) so missing
+   rigs are visible in the cycle report rather than silently dropped.
+
+   Remember each rig's resolved source root AND its normalized `git_url` —
+   you will use both to route beads in Step 3.
 
 2. In each source root, scan for improvement opportunities. **Always walk
    git-tracked files only** — never `grep -r` the source root directly. In a
@@ -57,6 +95,14 @@ bead to the rig that truly owns it. See Step 3 for the mechanics.
    different revisions. Recursive grep picks them up and produces false
    'drift'/'duplication' findings. `git ls-files` stays in lockstep with
    `.gitignore` and needs no updates when new runtime-state dirs appear.
+
+   Because Step 1 now pins each rig's source root to the exact git worktree
+   whose origin matches the rig's `git_url`, `git ls-files` in that worktree
+   lists ONLY files owned by that rig. For Brazil workspaces this means a
+   package-level rig like `casc_lambda` scans `CodegenAgentSchedulerLambda`
+   only, not its sibling packages (`CodegenAgentSchedulerCDK`, etc.) nor the
+   surrounding workspace root (`codegen_ws`). Each sibling rig scans its own
+   worktree in its own iteration.
 
    - **TODOs/FIXMEs**: walk tracked source files via `git ls-files` and grep
      each one. Example:
@@ -153,16 +199,22 @@ bead to the rig that truly owns it. See Step 3 for the mechanics.
    bd tag <id> code-scout
    ```
 
-   The three independent routing safeguards are:
+   The four independent routing safeguards are:
+   - Step 1 pins each rig's source root to the worktree whose origin matches
+     `rigs.json[rig].git_url` (prevents scanning sibling packages in a Brazil
+     workspace, e.g. `casc_lambda` will not walk `CodegenAgentSchedulerCDK`)
    - `cd` into the owning rig (resolves `.beads/` discovery)
    - Gitignore filter (drops overlays before they reach `bd create`)
    - Git-toplevel lookup (catches overlays that slip past the gitignore
      check, e.g. when the overlay repo is nested inside an untracked
      directory rather than an explicitly ignored path)
 
-   Without all three, a scan of a workspace-root rig like `codegen_ws` will
+   Without all four, a scan of a workspace-root rig like `codegen_ws` will
    file beads into that rig for files that actually live in
-   `talontriage`, `casc_*`, `agentforge`, etc.
+   `talontriage`, `casc_*`, `agentforge`, etc.; and a scan of a package-level
+   rig like `casc_lambda` whose source root falls through to a Brazil
+   workspace will file CDK-targeted beads against the Lambda-only rig
+   (see gt-r3jn / gu-mbeo).
 
 4. Cap at 5 new beads per rig per cycle to avoid noise. Count caps against
    the **owning** rig (where the bead is filed), not the rig being scanned.
