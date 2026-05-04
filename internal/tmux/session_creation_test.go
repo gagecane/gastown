@@ -24,6 +24,56 @@ func TestNewSessionWithCommand_BadBinary(t *testing.T) {
 	}
 }
 
+// TestNewSessionWithCommand_EarlyCleanExit verifies that a command which exits
+// cleanly (status 0) within the 250ms startup window is treated as a startup
+// failure. Gastown callers only ever spawn long-lived agents (kiro-cli,
+// claude-code, shells) — a command that exits in <250ms is never what the
+// caller wanted. Previously this returned nil (success), causing
+// session/lifecycle.go VerifySurvived to later report an opaque "died during
+// startup" with no pane output. See gu-hq88 / gt-ltnxs.
+func TestNewSessionWithCommand_EarlyCleanExit(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-earlyexit-" + t.Name()
+	_ = tm.KillSession(session)
+	defer func() { _ = tm.KillSession(session) }()
+
+	// sh -c 'true' exits with status 0 well under 250ms.
+	err := tm.NewSessionWithCommand(session, "", "sh -c 'true'")
+	if err == nil {
+		t.Fatal("NewSessionWithCommand should return error when command exits early even with status 0")
+	}
+	if !strings.Contains(err.Error(), "exited early") {
+		t.Errorf("expected error to mention 'exited early', got: %v", err)
+	}
+}
+
+// TestNewSessionWithCommand_EarlyExitCapturesPaneOutput verifies that when a
+// command exits early, the error surfaces whatever the process wrote to
+// stdout/stderr. This is what makes daemon-spawned dog failures finally
+// diagnosable (gu-hq88) — the pane output is captured before the session is
+// destroyed, so downstream logs carry the actual stack trace / error message
+// rather than an opaque "died during startup".
+func TestNewSessionWithCommand_EarlyExitCapturesPaneOutput(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-earlyexit-diag-" + t.Name()
+	_ = tm.KillSession(session)
+	defer func() { _ = tm.KillSession(session) }()
+
+	marker := "GUHQ88_STDERR_MARKER"
+	// Emit a distinctive marker to stderr, then exit non-zero — mirrors the
+	// shape of an agent that crashes on startup with a stack trace.
+	err := tm.NewSessionWithCommand(session, "", `sh -c 'echo `+marker+` 1>&2; exit 7'`)
+	if err == nil {
+		t.Fatal("expected error for early exit, got nil")
+	}
+	if !strings.Contains(err.Error(), marker) {
+		t.Errorf("expected pane output marker %q in error, got: %v", marker, err)
+	}
+	if !strings.Contains(err.Error(), "--- pane output ---") {
+		t.Errorf("expected 'pane output' banner in error, got: %v", err)
+	}
+}
+
 // TestNewSessionWithCommand_BadWorkDir verifies workDir validation rejects
 // non-existent directories before creating the session.
 func TestNewSessionWithCommand_BadWorkDir(t *testing.T) {

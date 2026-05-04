@@ -191,8 +191,37 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 // checkSessionAfterCreate verifies that a newly created session's command didn't
 // fail immediately (binary not found, syntax error, etc.). Expects remain-on-exit
 // to already be enabled on the session. Checks the exit status after a brief delay.
-// Only returns an error for non-zero exits (command failures), not clean exits (status 0).
+//
+// Returns an error for ANY early exit within the 250ms startup window —
+// including status=0 (clean exit). Callers of this helper spawn long-lived
+// agent processes (kiro-cli, claude-code, shells); none should exit cleanly
+// in 250ms. The only case where that happens in practice is a daemon-spawned
+// dog whose agent dies on startup before the hook runs (gu-hq88, gt-ltnxs).
+// Returning success on early clean exits caused the pane to be destroyed
+// silently, and downstream VerifySurvived() then reported an opaque "died
+// during startup" with no pane contents — the exact diagnostic gap gu-klwv
+// was trying to close but could not, because by the time DiagnosticCapture
+// ran the session was already gone.
+//
+// To preserve what little signal the dying pane produced, this helper now
+// captures pane scrollback BEFORE destroying the session and surfaces it in
+// the returned error. Callers that already wrap errors with extra context
+// (session/lifecycle.go capturePaneDiagnostic) will see the tmux-level
+// capture arrive via the wrapped error rather than an empty string.
 func (t *Tmux) checkSessionAfterCreate(name, command string) error {
+	// snapshotAndKill grabs pane scrollback before destroying the session so
+	// the error message carries whatever the dying process wrote to stderr.
+	// Bounded at checkPaneDiagBytes to keep error lines from blowing up daemon.log.
+	snapshotAndKill := func() string {
+		raw, _ := t.CapturePaneAll(name)
+		trimmed := strings.TrimSpace(raw)
+		if len(trimmed) > checkPaneDiagBytes {
+			trimmed = "…" + trimmed[len(trimmed)-checkPaneDiagBytes:]
+		}
+		_ = t.KillSession(name)
+		return trimmed
+	}
+
 	checkPaneDead := func() (bool, error) {
 		paneDead, _ := t.run("display-message", "-p", "-t", name, "#{pane_dead}")
 		if strings.TrimSpace(paneDead) != "1" {
@@ -200,12 +229,14 @@ func (t *Tmux) checkSessionAfterCreate(name, command string) error {
 		}
 		exitStatus, _ := t.run("display-message", "-p", "-t", name, "#{pane_dead_status}")
 		status := strings.TrimSpace(exitStatus)
-		if status != "" && status != "0" {
-			_ = t.KillSession(name)
-			return true, fmt.Errorf("session %q: command exited with status %s: %s", name, status, command)
+		if status == "" {
+			status = "?"
 		}
-		_ = t.KillSession(name)
-		return true, nil
+		diag := snapshotAndKill()
+		if diag != "" {
+			return true, fmt.Errorf("session %q: command exited early with status %s: %s\n--- pane output ---\n%s\n--- end pane output ---", name, status, command, diag)
+		}
+		return true, fmt.Errorf("session %q: command exited early with status %s: %s (pane produced no output)", name, status, command)
 	}
 
 	// First check at 50ms: catches fast failures on lightly-loaded runners.
@@ -227,6 +258,11 @@ func (t *Tmux) checkSessionAfterCreate(name, command string) error {
 	_, _ = t.run("set-option", "-t", name, "remain-on-exit", "off")
 	return nil
 }
+
+// checkPaneDiagBytes bounds the pane scrollback surfaced in early-exit errors
+// so daemon.log lines stay readable. Matches the diagPaneCaptureBytes budget
+// used by session/lifecycle.go capturePaneDiagnostic for consistency.
+const checkPaneDiagBytes = 2048
 
 // EnsureSessionFresh ensures a session is available and healthy.
 // If the session exists but is a zombie (Claude not running), it kills the session first.
