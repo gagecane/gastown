@@ -23,9 +23,13 @@ This command is designed to run from a Claude Code Stop hook. It checks:
 2. Whether gt done has already run (heartbeat state is "exiting" or "idle")
 3. Whether the polecat has commits on its branch
 
-If the polecat has pending work that wasn't submitted, this command
-runs gt done to submit it. If gt done already ran or there's nothing
-to submit, it exits silently.
+Behavior:
+- Commits on a feature branch → run gt done (submits to merge queue)
+- Zero commits, or still on main/master/HEAD → run gt done --status DEFERRED
+  (closes the bead and releases the hook; prevents polecats from exiting
+  silently with their bead stuck in HOOKED state — gu-rhdt / gt-s2r96)
+- gt done already ran (heartbeat "exiting" or "idle") → exit silently
+- Not a polecat / can't determine state → exit silently
 
 Exit codes:
   0 - No action needed (not a polecat, already done, or gt done succeeded)
@@ -86,26 +90,56 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Check current branch — skip if on main/master
+	// Check current branch
 	branchCmd := exec.Command("git", "-C", cloneDir, "rev-parse", "--abbrev-ref", "HEAD")
 	branchOut, err := branchCmd.Output()
 	if err != nil {
 		return nil // Can't determine branch — exit quietly
 	}
 	branch := strings.TrimSpace(string(branchOut))
-	if branch == "main" || branch == "master" || branch == "HEAD" {
-		return nil // On default branch — nothing to submit
-	}
+	onDefaultBranch := branch == "main" || branch == "master" || branch == "HEAD"
 
-	// Check for commits ahead of origin/main
+	// Check for commits ahead of origin/main.
+	// We still check even on the default branch, because we want a single
+	// decision path: zero commits → DEFERRED, nonzero commits → normal done.
 	aheadCmd := exec.Command("git", "-C", cloneDir, "rev-list", "--count", "origin/main..HEAD")
-	aheadOut, err := aheadCmd.Output()
-	if err != nil {
+	aheadOut, aheadErr := aheadCmd.Output()
+	if aheadErr != nil {
 		return nil // Can't check — exit quietly (don't block session stop)
 	}
 	ahead := strings.TrimSpace(string(aheadOut))
-	if ahead == "0" {
-		return nil // No commits ahead — nothing to submit
+
+	// Find gt binary path
+	gtBin, execErr := os.Executable()
+	if execErr != nil || gtBin == "" {
+		gtBin = "gt"
+	}
+
+	if onDefaultBranch || ahead == "0" {
+		// Zero-commit safety net: polecat sat at prompt without running gt done.
+		// Auto-run `gt done --status DEFERRED` so the bead is closed and the
+		// slot is freed, rather than letting the session exit silently with
+		// the bead stuck in HOOKED state (gu-rhdt / gt-s2r96).
+		reason := "on default branch"
+		if !onDefaultBranch {
+			reason = fmt.Sprintf("0 commits ahead of origin/main on %s", branch)
+		}
+		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "⚠️  Polecat %s exited with no work to submit (%s)\n", polecatName, reason)
+		fmt.Fprintf(os.Stderr, "   Auto-running gt done --status DEFERRED to release the hook...\n")
+		fmt.Fprintf(os.Stderr, "\n")
+
+		deferredCmd := exec.Command(gtBin, "done", "--status", "DEFERRED")
+		deferredCmd.Dir = cloneDir
+		deferredCmd.Stdout = os.Stdout
+		deferredCmd.Stderr = os.Stderr
+		deferredCmd.Env = os.Environ()
+		if err := deferredCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Auto gt done --status DEFERRED failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "   Witness will handle cleanup.\n")
+			// Don't return error — don't block session stop
+		}
+		return nil
 	}
 
 	// Polecat has pending work! Run gt done as a safety net.
@@ -113,12 +147,6 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "⚠️  Polecat %s has %s unpushed commit(s) on branch %s\n", polecatName, ahead, branch)
 	fmt.Fprintf(os.Stderr, "   Auto-running gt done as safety net...\n")
 	fmt.Fprintf(os.Stderr, "\n")
-
-	// Find gt binary path
-	gtBin, err := os.Executable()
-	if err != nil {
-		gtBin = "gt"
-	}
 
 	// Run gt done in the polecat's worktree context
 	doneCmd := exec.Command(gtBin, "done")
