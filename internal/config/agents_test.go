@@ -1446,22 +1446,25 @@ func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
 }
 
 // TestKiroPreset verifies the Kiro built-in preset matches the fields required
-// for autonomous polecat operation (see gu-axjw, gu-xpgx). kiro-cli 2.0+
-// defaults to TUI mode which blocks non-interactive sessions; --classic
+// for autonomous polecat operation (see gu-axjw, gu-xpgx, gu-m3ne). Kiro-cli
+// 2.0+ defaults to TUI mode which blocks non-interactive sessions; --classic
 // bypasses the TUI. --no-interactive runs the full agentic loop in one turn so
 // formula steps (including `gt done`) complete without idling at the prompt.
-// The env vars disable interactive pagers and git prompts that would otherwise
-// hang background sessions.
+// As of gu-m3ne, kiro-cli is wrapped by `gt polecat-kiro-wrapper` so that
+// clean-exit-mid-task deaths (gu-ronb) get recovered via --resume instead of
+// leaving beads HOOKED and triggering scheduler respawn storms. The env vars
+// disable interactive pagers and git prompts that would otherwise hang
+// background sessions.
 func TestKiroPreset(t *testing.T) {
 	t.Parallel()
 	p := GetAgentPreset(AgentKiro)
 	if p == nil {
 		t.Fatal("GetAgentPreset(AgentKiro) returned nil")
 	}
-	if p.Command != "kiro-cli" {
-		t.Errorf("Command = %q, want kiro-cli", p.Command)
+	if p.Command != "gt" {
+		t.Errorf("Command = %q, want gt (wraps kiro-cli via polecat-kiro-wrapper)", p.Command)
 	}
-	wantArgs := []string{"chat", "--classic", "--no-interactive", "--trust-all-tools"}
+	wantArgs := []string{"polecat-kiro-wrapper", "--", "kiro-cli", "chat", "--classic", "--no-interactive", "--trust-all-tools"}
 	if len(p.Args) != len(wantArgs) {
 		t.Errorf("Args = %v, want %v", p.Args, wantArgs)
 	} else {

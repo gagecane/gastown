@@ -451,15 +451,22 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 	},
 	AgentKiro: {
 		Name:    AgentKiro,
-		Command: "kiro-cli",
-		// --classic bypasses the TUI (kiro-cli 2.0+ defaults to TUI mode which
-		// blocks non-interactive polecat sessions). --no-interactive runs the
-		// full agentic loop in one turn (analogous to Claude Code's
-		// --dangerously-skip-permissions) so formula steps — including the
-		// mandatory final `gt done` — complete without returning to the `!>`
-		// prompt and idling. --trust-all-tools auto-approves tool calls for
-		// autonomous operation.
-		Args: []string{"chat", "--classic", "--no-interactive", "--trust-all-tools"},
+		Command: "gt",
+		// Invoke the `gt polecat-kiro-wrapper` supervisor around kiro-cli
+		// instead of launching kiro-cli directly. The wrapper detects the
+		// gu-ronb clean-exit-without-gt-done bug and re-invokes kiro-cli
+		// with --resume + a continuation prompt, up to GT_KIRO_MAX_ITERATIONS
+		// (default 5). Without the wrapper, clean-exits leave beads HOOKED
+		// and trigger scheduler respawn storms (observed ta-5r5q, gu-l4uj,
+		// gu-m3ne on 2026-05-05).
+		//
+		// Kiro-cli flags (passed through by the wrapper):
+		//   --classic         bypasses TUI (kiro-cli 2.0+ defaults to TUI
+		//                     which blocks non-interactive polecats)
+		//   --no-interactive  runs full agentic loop in one turn (analogous
+		//                     to Claude Code's --dangerously-skip-permissions)
+		//   --trust-all-tools auto-approves tool calls for autonomous op
+		Args: []string{"polecat-kiro-wrapper", "--", "kiro-cli", "chat", "--classic", "--no-interactive", "--trust-all-tools"},
 		Env: map[string]string{
 			// Disable interactive git auth prompts that would hang non-interactive sessions.
 			"GIT_TERMINAL_PROMPT": "0",
