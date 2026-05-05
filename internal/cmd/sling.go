@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -1142,6 +1143,14 @@ func runSlingToRig(ctx context.Context, beadID, rigName, formulaName string, inf
 		}
 	}
 
+	// Kiro-agent warning (gu-ronb / gu-wo92): kiro-cli 2.2.1's `stop` hook does
+	// not support Claude Code block/reprompt semantics, so polecats can clean-exit
+	// mid-task without calling `gt done`. Warn the operator when the target rig's
+	// effective agent is kiro so they can route long-lived/risky work to crew or
+	// another agent preset. This is a warning, not a blocker — some workloads
+	// (short, tool-heavy) are fine on kiro polecats.
+	warnIfKiroPolecatTarget(townRoot, rigName, slingAgent)
+
 	// Auto-apply mol-polecat-work when slinging a bare bead to a rig (issue #288).
 	// Rig targets always dispatch to a polecat, so the polecat path always applies.
 	// Use --hook-raw-bead to bypass for expert/debugging scenarios.
@@ -1252,6 +1261,45 @@ func checkCrossRigGuard(beadID, targetAgent, townRoot string) error {
 	}
 
 	return nil
+}
+
+// warnIfKiroPolecatTarget prints a stderr warning when the effective agent for
+// a rig sling target is kiro. kiro-cli 2.2.1's `stop` hook does not honor
+// Claude Code's `{"decision":"block"}` reprompt semantics, so polecats can
+// exit clean status 0 mid-task before calling `gt done`. See gu-ronb.
+//
+// Resolution order for the effective agent:
+//  1. explicit --agent override (slingAgent), if non-empty
+//  2. resolved rig agent via config.ResolveAgentConfig
+//
+// This is a non-blocking advisory. Operators who know their workload is safe
+// on kiro (short, tool-heavy, single-turn) can ignore it.
+var warnIfKiroPolecatTarget = func(townRoot, rigName, agentOverride string) {
+	if townRoot == "" || rigName == "" {
+		return
+	}
+
+	effectiveAgent := strings.ToLower(strings.TrimSpace(agentOverride))
+	if effectiveAgent == "" {
+		rigPath := filepath.Join(townRoot, rigName)
+		rc := config.ResolveAgentConfig(townRoot, rigPath)
+		if rc != nil {
+			effectiveAgent = strings.ToLower(strings.TrimSpace(rc.ResolvedAgent))
+		}
+	}
+
+	if effectiveAgent != string(config.AgentKiro) {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr,
+		"%s rig %q uses the kiro agent preset. kiro-cli 2.2.1 has a known\n"+
+			"   stop-hook block gap (gu-ronb): autonomous polecats can exit clean\n"+
+			"   status 0 mid-task before calling `gt done`, losing work. Short,\n"+
+			"   tool-heavy tasks are usually fine; for long-lived or risky work,\n"+
+			"   consider `--agent claude` or slinging to a crew member instead.\n"+
+			"   See docs/HOOKS.md for details.\n",
+		style.Warning.Render("⚠️  kiro-polecat warning:"), rigName)
 }
 
 // rollbackSlingArtifactsFn is a seam for tests. Production uses rollbackSlingArtifacts.

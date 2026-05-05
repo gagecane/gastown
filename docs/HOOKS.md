@@ -56,6 +56,45 @@ Gas Town manages context injection for all supported agents. The mechanism varie
 > hook (track via `kiro-cli --version` and the hooks section of
 > `/hooks` output).
 
+> **kiro-cli stop-hook block gap (gu-ronb)**: kiro-cli 2.2.1's `stop` hook
+> does **not** support Claude Code's `{"decision":"block","reason":"..."}`
+> reprompt semantics. Per the kiro-cli hooks docs, the `stop` event only
+> recognizes exit code 0 (success) vs. non-zero (show STDERR warning) —
+> there is no documented way for a stop hook to keep the session alive.
+>
+> **Observable signature**: polecats running `kiro-cli chat --classic
+> --no-interactive --trust-all-tools` exit cleanly with status 0 mid-task
+> when the model emits a "natural completion" before calling `gt done`.
+> The tmux pane shows `Pane is dead (status 0)` with no stack trace (no
+> panic), 0 or few commits, and the bead still in `HOOKED`/`IN_PROGRESS`.
+> Distinct from the `gu-rq8i` panic signature (closed) which shows a Rust
+> stack trace at `chat/mod.rs:1719`. Repro is trivial: a `stop` hook that
+> emits valid `{"decision":"block","reason":"..."}` JSON fires cleanly but
+> kiro-cli ignores the directive and exits status 0 in ~1s.
+>
+> **Current mitigations**:
+> - Polecat role template (`internal/templates/roles/polecat.md.tmpl`)
+>   contains an explicit *Tool-Call Discipline* section instructing
+>   autonomous polecats to never end a turn with a text-only response —
+>   every turn must end with a tool call, and the final tool call should
+>   be `gt done`. This reduces but does not eliminate clean-exit deaths.
+> - Safety net: the polecat `stop` hook runs `gt tap polecat-stop-check`
+>   which auto-runs `gt done --status DEFERRED` if the session dies with
+>   the bead still hooked (see `internal/cmd/tap_polecat_stop.go`). This
+>   releases the hook but the original work is lost.
+> - **Recommendation for risky/long-lived work**: route to **crew**
+>   (persistent session) instead of a kiro polecat via `--agent claude`
+>   on the target rig, or sling to a non-kiro rig. `gt sling <bead>
+>   <kiro-rig>` emits a warning pointing at this gap.
+>
+> **Upstream status**: not filed. kiro-cli's public hooks docs
+> ([kiro.dev/docs/cli/hooks/](https://kiro.dev/docs/cli/hooks/)) document
+> the `stop` event as a post-processing hook with exit-code-only
+> semantics, so the missing block/reprompt behavior is a feature gap
+> rather than a bug in documented behavior. The Gas Town workaround
+> (wrapper supervisor, see the follow-up bead to gu-ronb) is tracked
+> separately.
+
 Gas Town manages `.claude/settings.json` files in gastown-managed parent directories
 and passes them to Claude Code via the `--settings` flag. This keeps customer repos
 clean while providing role-specific hook configuration. The hooks system provides
