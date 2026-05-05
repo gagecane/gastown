@@ -97,12 +97,27 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		return nil // Can't determine branch — exit quietly
 	}
 	branch := strings.TrimSpace(string(branchOut))
-	onDefaultBranch := branch == "main" || branch == "master" || branch == "HEAD"
 
-	// Check for commits ahead of origin/main.
+	// Resolve the rig's actual remote default branch. Hardcoding "main" breaks
+	// rigs whose default is "mainline" (e.g. talontriage, codegen_ws, casc_*):
+	// the rev-list below fails with "ambiguous argument 'origin/main..HEAD'",
+	// the code silently returns, and the safety-net gt done --status DEFERRED
+	// never runs — leaving the bead HOOKED and triggering the scheduler
+	// respawn storm (ta-5r5q / ta-nizu observed 2026-05-05).
+	defaultBranch := "main" // Fallback
+	if out, refErr := exec.Command("git", "-C", cloneDir, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD").Output(); refErr == nil {
+		if ref := strings.TrimSpace(string(out)); ref != "" {
+			if idx := strings.LastIndex(ref, "/"); idx >= 0 {
+				defaultBranch = ref[idx+1:]
+			}
+		}
+	}
+	onDefaultBranch := branch == defaultBranch || branch == "main" || branch == "master" || branch == "HEAD"
+
+	// Check for commits ahead of the remote default branch.
 	// We still check even on the default branch, because we want a single
 	// decision path: zero commits → DEFERRED, nonzero commits → normal done.
-	aheadCmd := exec.Command("git", "-C", cloneDir, "rev-list", "--count", "origin/main..HEAD")
+	aheadCmd := exec.Command("git", "-C", cloneDir, "rev-list", "--count", "origin/"+defaultBranch+"..HEAD")
 	aheadOut, aheadErr := aheadCmd.Output()
 	if aheadErr != nil {
 		return nil // Can't check — exit quietly (don't block session stop)
@@ -122,7 +137,7 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		// the bead stuck in HOOKED state (gu-rhdt / gt-s2r96).
 		reason := "on default branch"
 		if !onDefaultBranch {
-			reason = fmt.Sprintf("0 commits ahead of origin/main on %s", branch)
+			reason = fmt.Sprintf("0 commits ahead of origin/%s on %s", defaultBranch, branch)
 		}
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "⚠️  Polecat %s exited with no work to submit (%s)\n", polecatName, reason)
