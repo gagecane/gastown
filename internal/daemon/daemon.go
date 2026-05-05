@@ -701,6 +701,19 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Poller dog ticker started (interval %v)", interval)
 	}
 
+	// Start failure classifier ticker if configured.
+	// Watches main_branch_test escalations, pattern-matches against known code-issue
+	// signatures, and auto-files rig beads — reducing operator triage burden.
+	var failureClassifierTicker *time.Ticker
+	var failureClassifierChan <-chan time.Time
+	if d.isPatrolActive("failure_classifier") {
+		interval := failureClassifierInterval(d.patrolConfig)
+		failureClassifierTicker = time.NewTicker(interval)
+		failureClassifierChan = failureClassifierTicker.C
+		defer failureClassifierTicker.Stop()
+		d.logger.Printf("Failure classifier ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -815,6 +828,13 @@ func (d *Daemon) Run() (err error) {
 			// dead pollers for live sessions and removes stale PID files.
 			if !d.isShutdownInProgress() {
 				d.runPollerDog()
+			}
+
+		case <-failureClassifierChan:
+			// Failure classifier — classifies main_branch_test escalations against
+			// known code-issue signatures and auto-files rig beads for matches.
+			if !d.isShutdownInProgress() {
+				d.runFailureClassifier()
 			}
 
 		case <-timer.C:

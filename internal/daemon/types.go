@@ -132,6 +132,7 @@ type PatrolsConfig struct {
 	QuotaDog               *QuotaDogConfig                `json:"quota_dog,omitempty"`
 	PollerDog              *PollerDogConfig               `json:"poller_dog,omitempty"`
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
+	FailureClassifier      *FailureClassifierConfig       `json:"failure_classifier,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -314,6 +315,12 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.PollerDog.Enabled
+	}
+	if patrol == "failure_classifier" {
+		if config == nil || config.Patrols == nil || config.Patrols.FailureClassifier == nil {
+			return false
+		}
+		return config.Patrols.FailureClassifier.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {
