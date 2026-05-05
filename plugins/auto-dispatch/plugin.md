@@ -37,6 +37,9 @@ cooldown cycle for the same bead is safe.
       - The bead has any open (non-closed) children — it is a parent container
         whose work is tracked by its children, not itself (gu-fs88).
       - The bead is an identity/agent bead (title matches `<prefix>-<rig>-polecat-<name>`, `<prefix>-<rig>-witness`, etc.)
+      - labels include `type:plugin-run` (these are plugin-execution receipts, not work — slinging them creates feedback loops where the scheduler tries to dispatch a successful plugin run as if it were a task; observed today as gs-wisp-3rw stuck in convoy hq-cv-7lcc6 for 8+ hours)
+      - labels include `gt:message`, `gt:agent`, `gt:sling-context`, or `msg-type:notification` (system beads, not actionable work)
+      - The bead `id` matches `*-wisp-*` (defense in depth: wisps are ephemeral by definition and should not be dispatched as work, regardless of their labels)
 
       Call the remaining list `ready_tasks`.
    c. If `ready_tasks` is empty, skip this rig
