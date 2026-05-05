@@ -77,13 +77,25 @@ func TestGetProcessCwd(t *testing.T) {
 	if cwd == "" {
 		t.Fatal("getProcessCwd(self) returned empty string")
 	}
-	// Verify it matches os.Getwd
-	expected, err := os.Getwd()
+	// Verify it matches os.Getwd. Resolve symlinks on both sides: getProcessCwd
+	// reads /proc/<pid>/cwd (canonical, symlink-resolved) while os.Getwd() can
+	// return the logical path honoring $PWD. These differ on hosts where the
+	// workspace ancestor is reached via a symlink (e.g. Amazon Linux devdesks
+	// where /home/<user> -> /local/home/<user>).
+	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("os.Getwd() error: %v", err)
 	}
-	if cwd != expected {
-		t.Errorf("getProcessCwd(self) = %q, want %q", cwd, expected)
+	expected, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", wd, err)
+	}
+	got, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", cwd, err)
+	}
+	if got != expected {
+		t.Errorf("getProcessCwd(self) = %q (resolved %q), want %q", cwd, got, expected)
 	}
 }
 
