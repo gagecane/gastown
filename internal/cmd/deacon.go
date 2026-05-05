@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -882,6 +883,12 @@ func runDeaconHeartbeat(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("updating heartbeat: %w", err)
 		}
 		fmt.Printf("%s Heartbeat updated\n", style.Bold.Render("✓"))
+	}
+
+	// Also update the polecat-style session heartbeat so stuck-agent-dog can
+	// confirm liveness via JSON timestamp (not just mtime of the patrol file).
+	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
+		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatWorking, action, "")
 	}
 
 	return nil

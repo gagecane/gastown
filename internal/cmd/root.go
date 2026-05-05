@@ -198,10 +198,11 @@ func touchPolecatHeartbeat() {
 		return
 	}
 
-	// Only polecats, crew, and dogs need heartbeats — they're the ones checked
-	// by isSessionProcessDead for stale session detection.
+	// Polecats, crew, dogs, and deacon all need session heartbeats — they're the
+	// ones checked by stuck-agent-dog and the witness for liveness detection.
 	role := os.Getenv("GT_ROLE")
-	if !strings.Contains(role, "polecat") && !strings.Contains(role, "crew") && !strings.Contains(role, "dog") {
+	if !strings.Contains(role, "polecat") && !strings.Contains(role, "crew") &&
+		!strings.Contains(role, "dog") && !strings.Contains(role, "deacon") {
 		return
 	}
 

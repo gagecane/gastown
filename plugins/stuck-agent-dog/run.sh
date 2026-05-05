@@ -189,28 +189,35 @@ else
     log "  Process alive: pid=$DEACON_PID comm=$DEACON_COMM"
   fi
 
-  HEARTBEAT_FILE="$TOWN_ROOT/deacon/heartbeat.json"
-  if [ -f "$HEARTBEAT_FILE" ]; then
-    # mtime lookup: GNU coreutils (Linux) uses `stat -c %Y`, BSD/macOS uses
-    # `stat -f %m`. Naive fallback (`stat -f ... || stat -c ...`) is broken
-    # on Linux: GNU's `-f` means `--file-system` and prints filesystem info
-    # to stdout with exit 0, so the fallback never fires and HEARTBEAT_TIME
-    # ends up as a multi-line string starting with "  File: ..." — which
-    # trips `set -u` in the arithmetic below. Detect the OS once and call
-    # the right flavor.
-    if stat -c %Y / >/dev/null 2>&1; then
-      HEARTBEAT_TIME=$(stat -c %Y "$HEARTBEAT_FILE")
+  # Primary liveness check: session heartbeat (updated by any gt command, not
+  # just patrol cycles). This prevents false positives when deacon is alive and
+  # responding to nudges but its patrol cycles aren't firing (gs-peo).
+  DEACON_HB_AGE=$(heartbeat_age_seconds "$DEACON_SESSION")
+  if [ -n "$DEACON_HB_AGE" ]; then
+    if [ "$DEACON_HB_AGE" -gt 1200 ]; then
+      log "  STUCK: Deacon session heartbeat stale (${DEACON_HB_AGE}s old, >20m threshold)"
+      DEACON_ISSUE="stuck_heartbeat_${DEACON_HB_AGE}s"
     else
-      HEARTBEAT_TIME=$(stat -f %m "$HEARTBEAT_FILE")
+      log "  OK: Deacon session heartbeat ${DEACON_HB_AGE}s old"
     fi
-    NOW=$(date +%s)
-    HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
-
-    if [ "$HEARTBEAT_AGE" -gt 1200 ]; then
-      log "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >20m threshold)"
-      DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
-    else
-      log "  OK: Deacon heartbeat ${HEARTBEAT_AGE}s old"
+  else
+    # Session heartbeat absent: fall back to patrol heartbeat mtime (legacy).
+    # mtime lookup: GNU coreutils (Linux) uses `stat -c %Y`, BSD/macOS uses
+    # `stat -f %m`. Detect the OS once and call the right flavor.
+    PATROL_FILE="$TOWN_ROOT/deacon/heartbeat.json"
+    if [ -f "$PATROL_FILE" ]; then
+      if stat -c %Y / >/dev/null 2>&1; then
+        PATROL_TIME=$(stat -c %Y "$PATROL_FILE")
+      else
+        PATROL_TIME=$(stat -f %m "$PATROL_FILE")
+      fi
+      PATROL_AGE=$(( $(date +%s) - PATROL_TIME ))
+      if [ "$PATROL_AGE" -gt 1200 ]; then
+        log "  STUCK: Deacon patrol heartbeat stale (${PATROL_AGE}s old, >20m threshold, no session heartbeat)"
+        DEACON_ISSUE="stuck_heartbeat_${PATROL_AGE}s"
+      else
+        log "  OK: Deacon patrol heartbeat ${PATROL_AGE}s old"
+      fi
     fi
   fi
 fi
