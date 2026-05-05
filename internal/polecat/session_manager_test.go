@@ -563,7 +563,19 @@ func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 	_ = tm.SendKeys(sessionName, "export PS1='❯ '")
 	time.Sleep(300 * time.Millisecond)
 
-	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	// Set up a rig whose parent (townRoot) has a settings/config.json with
+	// short nudge verify delays so this test completes in seconds, not minutes.
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "test-rig")
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgJSON := `{"type":"town-settings","version":1,"operational":{"session":{"startup_nudge_verify_delay":"500ms","startup_nudge_max_retries":1}}}`
+	if err := os.WriteFile(filepath.Join(townRoot, "settings", "config.json"), []byte(cfgJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: rigPath}
 	m := NewSessionManager(tm, r)
 
 	rc := &config.RuntimeConfig{
@@ -580,9 +592,6 @@ func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 
 	// verifyStartupNudgeDelivery should detect idle state and retry.
 	// We can't easily assert the retry happened, but we verify it doesn't panic/hang.
-	// Use a goroutine with timeout to prevent test hanging.
-	// Timeout accounts for DefaultStartupNudgeVerifyDelay (25s) * DefaultStartupNudgeMaxRetries (2)
-	// plus overhead = ~60s. Use 90s for safety.
 	done := make(chan struct{})
 	go func() {
 		m.verifyStartupNudgeDelivery(sessionName, rc, "check your hook")
@@ -592,8 +601,8 @@ func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
 	select {
 	case <-done:
 		// Success - function completed
-	case <-time.After(90 * time.Second):
-		t.Fatal("verifyStartupNudgeDelivery hung (exceeded 90s timeout)")
+	case <-time.After(15 * time.Second):
+		t.Fatal("verifyStartupNudgeDelivery hung (exceeded 15s timeout)")
 	}
 }
 
