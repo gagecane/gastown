@@ -9,6 +9,7 @@ Gas Town manages context injection for all supported agents. The mechanism varie
 | Agent | Hook mechanism | Managed file |
 |-------|---------------|-------------|
 | Claude Code, Gemini | `settings.json` lifecycle hooks | `<role>/.claude/settings.json` |
+| kiro-cli | Agent-config `hooks` block | `<role>/.kiro/agents/gastown.json` |
 | OpenCode | JS plugin | `workDir/.opencode/plugins/gastown.js` |
 | GitHub Copilot | JSON lifecycle hooks | `workDir/.github/hooks/gastown.json` |
 | Codex, others | Startup nudge fallback | *(no file — nudge only)* |
@@ -18,6 +19,42 @@ Gas Town manages context injection for all supported agents. The mechanism varie
 > `.github/hooks/gastown.json`. This is the same lifecycle coverage as Claude Code,
 > delivered in Copilot's JSON format rather than Claude's `settings.json` format.
 > The `gt hooks` commands below apply to Claude Code (and Gemini) only.
+
+> **kiro-cli note**: kiro-cli 2.2.1 supports five hook events:
+> `agentSpawn`, `userPromptSubmit`, `preToolUse`, `postToolUse`, `stop`.
+> **There is no `preCompact` hook** — when kiro auto-compacts a filled context
+> window, only the agent's `resources` (AGENTS.md, steering files) and `prompt`
+> field reload. Role-specific priming (e.g. `gt prime --hook`) does NOT re-fire,
+> so the LLM may drift from its role directives after compaction.
+>
+> **Upstream status**: Feature request filed at
+> [kirodotdev/Kiro#5708](https://github.com/kirodotdev/Kiro/issues/5708)
+> ("Feature Request: Additional hook points — preCompact, sessionEnd,
+> subagentStop"). Auto-closed 2026-02-16 as duplicate-of-#5080
+> ("Manual Summarization Trigger"); duplicate label was later removed by the
+> triage bot but the issue remains in `closed / completed` state. No kiro-cli
+> release has shipped a `preCompact` event as of 2.2.1.
+>
+> **Current mitigations** (in `internal/hooks/templates/kiro/gastown-*.json`):
+> - `agentSpawn` runs `gt prime --hook` on session start (survives restart,
+>   but NOT compaction)
+> - `userPromptSubmit` runs `gt mail check --inject` every turn, so mail
+>   dispatch continues to work across compactions
+> - `resources` glob pulls AGENTS.md + `.kiro/steering/**/*.md` on every
+>   context load — this is the primary way role identity survives compaction
+>
+> **Gap**: the autonomous-mode polecat directives (propulsion principle,
+> completion protocol) live in the role prime output rather than in AGENTS.md,
+> so they are the directives most likely to fade after an auto-compact.
+> Workarounds: keep critical directives duplicated in AGENTS.md or a
+> steering file (already done for polecats), or rely on
+> `userPromptSubmit → gt mail check --inject` to surface new instructions
+> each turn.
+>
+> Re-evaluate this gap if #5708 is reopened, if a new issue is filed to
+> re-raise the request, or if a later kiro-cli release ships a compaction
+> hook (track via `kiro-cli --version` and the hooks section of
+> `/hooks` output).
 
 Gas Town manages `.claude/settings.json` files in gastown-managed parent directories
 and passes them to Claude Code via the `--settings` flag. This keeps customer repos
