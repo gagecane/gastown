@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -807,5 +808,106 @@ func TestRunGatesOnWorktree_AllPostSquashIsNoOp(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "skipped non-pre-merge gates") {
 		t.Errorf("expected skip log, got:\n%s", logBuf.String())
+	}
+}
+
+// TestRunGatesOnWorktree_DeterministicOrder is the regression test for gu-i0mb.
+// Go map iteration is randomised per-process, so a rig whose gates have
+// implicit ordering dependencies (classic case: an "install" gate that
+// populates node_modules before a "test" gate consumes them) saw ~50%
+// false-failures depending on which map key was visited first. The runner
+// must iterate gates in a stable (alphabetical) order so identical inputs
+// produce identical execution sequences.
+//
+// The test is deliberately dependency-shaped: the "test" gate FAILS unless
+// "install" ran before it (creating a sentinel file). With random iteration
+// this would flap ~50% of runs; with sorted iteration it passes every time.
+// Running the assertion in a loop guards against the case where Go's
+// randomisation happens to coincide with alphabetical order in a single run.
+func TestRunGatesOnWorktree_DeterministicOrder(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		workDir := t.TempDir()
+		sentinel := filepath.Join(workDir, "installed")
+		orderLog := filepath.Join(workDir, "order.log")
+
+		d := &Daemon{
+			ctx:    context.Background(),
+			config: &Config{TownRoot: workDir},
+			logger: log.New(io.Discard, "", 0),
+		}
+
+		// Three gates whose correct execution order (install -> lint -> test)
+		// is also the alphabetical order. "test" fails if "install" hasn't
+		// created the sentinel. "lint" is a neutral middle gate; its presence
+		// in the order log lets us verify the full sequence, not just the
+		// install<test relationship.
+		gates := map[string]rigGate{
+			"install": {
+				Cmd:   fmt.Sprintf("echo install >> %s && touch %s", orderLog, sentinel),
+				Phase: "pre-merge",
+			},
+			"lint": {
+				Cmd:   fmt.Sprintf("echo lint >> %s", orderLog),
+				Phase: "pre-merge",
+			},
+			"test": {
+				// Fails if sentinel is missing — mirrors the real-world
+				// pattern where `bun run test` needs node_modules.
+				Cmd:   fmt.Sprintf("echo test >> %s && test -f %s", orderLog, sentinel),
+				Phase: "pre-merge",
+			},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := d.runGatesOnWorktree(ctx, "testrig", workDir, gates); err != nil {
+			cancel()
+			t.Fatalf("iter %d: runGatesOnWorktree: %v (execution order was non-deterministic)", i, err)
+		}
+		cancel()
+
+		raw, err := os.ReadFile(orderLog)
+		if err != nil {
+			t.Fatalf("iter %d: reading order log: %v", i, err)
+		}
+		got := strings.TrimSpace(string(raw))
+		want := "install\nlint\ntest"
+		if got != want {
+			t.Fatalf("iter %d: execution order not deterministic\nwant:\n%s\ngot:\n%s", i, want, got)
+		}
+	}
+}
+
+// TestRunGatesOnWorktree_SkippedGatesLoggedInOrder verifies that the
+// skipped-gates log line is also emitted in a deterministic (alphabetical)
+// order. Operators grep these logs to reason about why gates didn't run;
+// randomised ordering made those greps flap and made log-diff tooling
+// (e.g. comparing cycles to find real changes) unreliable.
+func TestRunGatesOnWorktree_SkippedGatesLoggedInOrder(t *testing.T) {
+	workDir := t.TempDir()
+
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	// All post-squash (skipped). Names intentionally chosen so alphabetical
+	// order (apple, banana, cherry) is distinguishable from declaration
+	// order if the underlying iteration happens to preserve insertion.
+	gates := map[string]rigGate{
+		"cherry": {Cmd: "true", Phase: "post-squash"},
+		"apple":  {Cmd: "true", Phase: "post-squash"},
+		"banana": {Cmd: "true", Phase: "post-squash"},
+	}
+
+	if err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	logs := logBuf.String()
+	want := "apple(post-squash), banana(post-squash), cherry(post-squash)"
+	if !strings.Contains(logs, want) {
+		t.Errorf("expected skip log in alphabetical order %q, got:\n%s", want, logs)
 	}
 }

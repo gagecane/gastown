@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -376,10 +377,23 @@ func (d *Daemon) runPreBuildInstall(ctx context.Context, rigName, workDir string
 // (checked-out brazil workspace, merged version-set) that a cold origin/main
 // worktree lacks. Running them in main_branch_test produces spurious
 // escalations that obscure real regressions. See gu-j1f7.
+//
+// Gates are iterated in a deterministic order (alphabetical by name) so that
+// rigs whose gates have implicit ordering dependencies (e.g. "install" must
+// run before "test" populates node_modules) get stable behavior instead of
+// ~50% false-failures from random Go map iteration. See gu-i0mb. Rigs that
+// need a non-alphabetical order should split their work across explicit
+// lifecycle hooks (e.g. a "pretest" script) rather than rely on gate naming.
 func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string, gates map[string]rigGate) error {
 	var failures []string
 	var skipped []string
-	for name, gc := range gates {
+	names := make([]string, 0, len(gates))
+	for name := range gates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		gc := gates[name]
 		phase := gc.Phase
 		if phase == "" {
 			phase = "pre-merge"
