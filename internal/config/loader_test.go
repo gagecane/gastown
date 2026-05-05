@@ -1332,8 +1332,8 @@ func TestResolveAgentConfigWithOverride(t *testing.T) {
 		if name != "kiro-opus" {
 			t.Fatalf("name = %q, want %q (override name preserved for GT_AGENT round-tripping)", name, "kiro-opus")
 		}
-		if rc.Command != "kiro-cli" {
-			t.Fatalf("rc.Command = %q, want %q (resolved to kiro preset runtime)", rc.Command, "kiro-cli")
+		if rc.Command != "gt" {
+			t.Fatalf("rc.Command = %q, want %q (resolved to kiro preset runtime — kiro-cli is wrapped by gt polecat-kiro-wrapper per gu-m3ne)", rc.Command, "gt")
 		}
 		if rc.Provider != "kiro" {
 			t.Fatalf("rc.Provider = %q, want %q (provider reflects preset)", rc.Provider, "kiro")
