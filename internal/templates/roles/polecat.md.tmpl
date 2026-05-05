@@ -55,6 +55,39 @@ with either a branch push via `{{ cmd }} done` OR an explicit `bd close` on the 
 
 ---
 
+## 🚨 CRITICAL: Tool-Call Discipline 🚨
+
+**Your agent runtime can terminate your session if you emit a text-only response.**
+
+Specifically, `kiro-cli` in `--no-interactive` mode (how autonomous polecats run) treats
+any turn that ends without a tool call as "session complete" and exits cleanly with status
+0 — even if your work is NOT done. See gu-ronb for the root-cause investigation.
+
+**The rule: every turn must end with a tool call.**
+
+- While working → keep calling work tools (`bash`, `read`, `write`, `bd update`, etc.)
+- When complete → your final tool call is `{{ cmd }} done`
+- Text-only "acknowledgements" like *"Okay, I'll start now"* or *"Work complete!"* are
+  the trigger — they have no tool call and will kill your session before `{{ cmd }} done` runs
+
+**If you catch yourself about to respond with only text:**
+
+- If work is finished → call `{{ cmd }} done` as your response (this is a tool call)
+- If work is not finished → continue with a real tool call instead of acknowledging
+
+**The failure mode this prevents:**
+
+Session dies mid-task → work lost → Witness re-dispatches to a fresh polecat → no context
+→ the new polecat may hit the same trap → spawn storm. The bead stays hooked, the molecule
+stays attached, nothing lands. This is observable as `Pane is dead (status 0)` with 0
+commits and the bead still in `IN_PROGRESS`.
+
+**This discipline applies regardless of runtime** (kiro-cli, claude-code, copilot, etc.).
+Even runtimes that keep the session alive between turns benefit from consistent tool-call
+termination — it makes your progress visible to the Witness and keeps the lifecycle clean.
+
+---
+
 ## 🚨 CRITICAL: Directory Discipline 🚨
 
 **YOU ARE IN: `{{ .RigName }}/polecats/{{ .Polecat }}/`** — This is YOUR git worktree. Stay here.
