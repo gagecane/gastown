@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -108,6 +109,32 @@ func TestIsContextOlderThan(t *testing.T) {
 			got := isContextOlderThan(tt.ctx, now, ttl)
 			if got != tt.want {
 				t.Errorf("isContextOlderThan(%+v) = %v, want %v", tt.ctx, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsAlreadyDispatchedError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  string
+		want bool
+	}{
+		{"already hooked", "already hooked (use --force to re-sling)", true},
+		{"already in_progress", "already in_progress (use --force to re-sling)", true},
+		{"already hooked bare", "already hooked", true},
+		{"already in_progress bare", "already in_progress", true},
+		{"spawn failure", "polecat spawn failed: timeout", false},
+		{"rig parked", "rig parked", false},
+		{"identity bead", "identity bead", false},
+		{"empty error", "", false},
+		{"contains but not prefix", "bead is already hooked to X", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := fmt.Errorf("%s", tt.err)
+			if got := isAlreadyDispatchedError(err); got != tt.want {
+				t.Errorf("isAlreadyDispatchedError(%q) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

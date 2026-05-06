@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -687,9 +688,29 @@ func isDaemonDispatch() bool {
 	return os.Getenv("GT_DAEMON") == "1"
 }
 
+// isAlreadyDispatchedError returns true if the dispatch error indicates the bead
+// is already hooked or in_progress to a live agent. This is a healthy state (the
+// work is being performed), not a spawn failure — the respawn counter must NOT
+// increment for these errors. (Fixes gu-cqmw: spurious circuit-breaks from
+// convoy re-feeding beads that are actively being worked.)
+func isAlreadyDispatchedError(err error) bool {
+	msg := err.Error()
+	return strings.HasPrefix(msg, "already hooked") ||
+		strings.HasPrefix(msg, "already in_progress")
+}
+
 // recordDispatchFailure increments the dispatch failure counter on the sling context bead.
+// Skips increment for "already hooked/in_progress" errors which indicate the bead
+// is actively being worked — not a true dispatch failure (gu-cqmw).
 func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
 	if b.Context == nil {
+		return
+	}
+
+	// "Already hooked/in_progress" means the work is being performed by a live
+	// agent. This is not a failure — skip counter increment to avoid spurious
+	// circuit-breaks when convoy feeders re-feed active beads.
+	if isAlreadyDispatchedError(dispatchErr) {
 		return
 	}
 
