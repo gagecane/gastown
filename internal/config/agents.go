@@ -519,8 +519,9 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 			// PromptFlag is appended to Args (whitespace-split) for polecat
 			// role by BuildStartupCommandWithAgentOverride. --no-interactive
 			// makes kiro-cli process the prompt as a single agentic run and
-			// exit — without it, polecats idle at the interactive `!>` prompt
-			// and never call `gt done` (gu-xpgx).
+			// exit. Without it, kiro-cli stays in its interactive chat REPL
+			// after completing the task — the polecat session never terminates
+			// cleanly and never calls `gt done` (gu-xpgx).
 			PromptFlag: "--no-interactive",
 		},
 		PromptMode:           "arg",
