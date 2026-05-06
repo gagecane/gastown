@@ -449,6 +449,16 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// Detect false-positive: the gate command succeeded but post-step
+		// cleanup (container teardown, cache save) ran past the deadline.
+		// act and pre-commit both emit success markers before starting
+		// cleanup, so if the context expired AND the output shows success,
+		// this is noise — not a real regression. See gs-llj.
+		if ctx.Err() == context.DeadlineExceeded && isCleanupOnlyTimeout(output) {
+			d.logger.Printf("main_branch_test: %s: %s: timed out during post-step cleanup after successful run (ignored)", rigName, label)
+			return nil
+		}
+
 		return fmt.Errorf("%s failed: %v\n%s", label, err, formatFailureOutput(string(output), failureOutputTailSize))
 	}
 	return nil
@@ -548,6 +558,52 @@ func isGoTestFailSignal(line string) bool {
 		}
 	}
 	return false
+}
+
+// isCleanupOnlyTimeout returns true when a deadline-exceeded kill looks like a
+// false positive: the actual gate work finished successfully and the SIGKILL
+// only hit post-step cleanup (container teardown, cache saves, etc.).
+//
+// Detection relies on success markers that CI tools (act, pre-commit) emit
+// before starting cleanup. If a success marker appears in the output and no
+// failure marker follows it, the deadline fired during cleanup, not work.
+func isCleanupOnlyTimeout(output []byte) bool {
+	text := string(output)
+
+	// Locate the last success marker. act emits "✅  Success - <job>" and
+	// "[<job>] Done in <N>s"; pre-commit emits "Passed" at end of hook lines.
+	successPatterns := []string{
+		"✅  Success",  // act: per-job success line
+		"\nDone in ",  // act: final timing summary (e.g. "\nDone in 133s")
+		"...Passed\n", // pre-commit: hook passed suffix
+		"..Passed\n",  // pre-commit: shorter separator variant
+	}
+	lastSuccess := -1
+	for _, pat := range successPatterns {
+		if idx := strings.LastIndex(text, pat); idx > lastSuccess {
+			lastSuccess = idx
+		}
+	}
+	if lastSuccess < 0 {
+		return false // no success marker — real timeout or real failure
+	}
+
+	// If any failure marker appears AFTER the last success marker, the gate
+	// actually failed (later job/hook failed after an earlier one passed).
+	failurePatterns := []string{
+		"❌  Failure",
+		"...Failed\n",
+		"..Failed\n",
+		"FAILED\n",
+	}
+	tail := text[lastSuccess:]
+	for _, pat := range failurePatterns {
+		if strings.Contains(tail, pat) {
+			return false // real failure occurred after the last success
+		}
+	}
+
+	return true
 }
 
 // contains checks if a string slice contains a value.

@@ -1066,3 +1066,141 @@ func TestIsGoTestFailSignal(t *testing.T) {
 		}
 	}
 }
+
+// TestIsCleanupOnlyTimeout verifies the false-positive suppression logic for
+// deadline-exceeded kills that occur during post-step cleanup. The function
+// must only suppress errors when a success marker is present AND no failure
+// marker follows it — preventing real failures from being silently dropped.
+func TestIsCleanupOnlyTimeout(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name: "act success then cleanup — suppress",
+			output: `[Build] Running...
+[Build] ✅  Success - Build
+[Build] Done in 133s
+Cleaning up container for job Build
+`,
+			want: true,
+		},
+		{
+			name: "act Done-in line alone — suppress",
+			output: `[Lint] Running...
+[Lint] ✅  Success - Lint
+[Lint]
+Done in 42s
+Cleaning up container for job Lint
+`,
+			want: true,
+		},
+		{
+			name: "pre-commit all passed then cleanup — suppress",
+			output: `check json...............................................Passed
+fix end of files.........................................Passed
+lint.....................................................Passed
+Cleaning up container
+`,
+			want: true,
+		},
+		{
+			name: "no success marker — real timeout, don't suppress",
+			output: `[Build] Running step 1
+[Build] Running step 2
+`,
+			want: false,
+		},
+		{
+			name: "empty output — don't suppress",
+			output: "",
+			want:  false,
+		},
+		{
+			name: "act failure after success — real failure, don't suppress",
+			output: `[Build] ✅  Success - Build
+[Test] ❌  Failure - Test
+Cleaning up container for job Test
+`,
+			want: false,
+		},
+		{
+			name: "pre-commit hook failed after passed hooks — real failure, don't suppress",
+			output: `check json...............................................Passed
+lint.....................................................Failed
+`,
+			want: false,
+		},
+		{
+			name: "FAILED marker after pre-commit passed — real failure, don't suppress",
+			output: `lint.....................................................Passed
+Run FAILED
+`,
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isCleanupOnlyTimeout([]byte(tc.output))
+			if got != tc.want {
+				t.Errorf("isCleanupOnlyTimeout: got %v, want %v\noutput: %q", got, tc.want, tc.output)
+			}
+		})
+	}
+}
+
+// TestRunCommandOnWorktree_CleanupTimeoutSuppressed is the integration test
+// for gs-llj: a gate command that succeeds but whose cleanup runs past the
+// deadline must NOT be reported as a failure. We simulate this by:
+//  1. Running a script that prints the act-style success marker then sleeps
+//     (simulating cleanup) past a very short deadline.
+//  2. Asserting runCommandOnWorktree returns nil, not an error.
+func TestRunCommandOnWorktree_CleanupTimeoutSuppressed(t *testing.T) {
+	workDir := t.TempDir()
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	// Very short deadline so the sleep (cleanup simulation) hits it.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	// Script prints act-style success marker then sleeps (simulates cleanup).
+	// Sleep is longer than the deadline so the kill fires during "cleanup".
+	script := `printf '✅  Success - Build\nDone in 1s\nCleaning up container\n'; sleep 2`
+	err := d.runCommandOnWorktree(ctx, "testrig", workDir, "build", script)
+	if err != nil {
+		t.Errorf("expected nil (cleanup-only timeout suppressed), got: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "post-step cleanup") {
+		t.Errorf("expected 'post-step cleanup' in log, got:\n%s", logBuf.String())
+	}
+}
+
+// TestRunCommandOnWorktree_RealFailureNotSuppressed guards against the inverse:
+// a gate that actually fails must still propagate the error even when the
+// context times out around the same time. Without a success marker in output,
+// isCleanupOnlyTimeout returns false and the error surfaces normally.
+func TestRunCommandOnWorktree_RealFailureNotSuppressed(t *testing.T) {
+	workDir := t.TempDir()
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	// Script prints nothing recognisable then sleeps — no success markers.
+	script := `echo 'build step running'; sleep 2`
+	err := d.runCommandOnWorktree(ctx, "testrig", workDir, "build", script)
+	if err == nil {
+		t.Error("expected error (no success marker + timeout = real failure), got nil")
+	}
+}
