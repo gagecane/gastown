@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -1463,6 +1464,8 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 	// Step 1: Kill tmux session unconditionally to prevent ghost sessions
 	// when IsRunning fails to detect the session.
 	sessMgr := polecat.NewSessionManager(t, r)
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	townRoot := filepath.Dir(r.Path)
 	if err := sessMgr.Stop(polecatName, true); err != nil {
 		if !errors.Is(err, polecat.ErrSessionNotFound) {
 			fmt.Printf("  %s session kill failed: %v\n", style.Warning.Render("⚠"), err)
@@ -1470,6 +1473,16 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 	} else {
 		fmt.Printf("  %s killed session\n", style.Success.Render("✓"))
 	}
+
+	// Step 1.5: Purge runtime state files unconditionally (gu-50qv).
+	// SessionManager.Stop only runs its cleanup path when the session is
+	// actively running. For zombie polecats (dead session, orphaned state),
+	// Stop returns ErrSessionNotFound before touching .runtime files — so
+	// <townRoot>/.runtime/heartbeats/<session>.json and
+	// <townRoot>/.runtime/pids/<session>.{pid,last} accumulate indefinitely.
+	// Purge them here so nuke leaves no residue regardless of session state.
+	polecat.RemoveSessionHeartbeat(townRoot, sessionName)
+	session.PurgePIDFiles(townRoot, sessionName)
 
 	// Step 2: Get polecat info before deletion (for branch name + hooked work bead)
 	polecatInfo, getErr := mgr.Get(polecatName)

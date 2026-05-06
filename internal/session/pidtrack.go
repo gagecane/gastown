@@ -140,6 +140,19 @@ func UntrackPID(townRoot, sessionID string) {
 	appendPidHistory(townRoot, sessionID, "untrack")
 }
 
+// PurgePIDFiles deletes both the .pid tracker and the .last rolling-history
+// file for a session. Use this from destructive cleanup paths (polecat nuke,
+// zombie reap) where we want no residue. Unlike UntrackPID — which only
+// removes the .pid file and appends an "untrack" line to the .last file —
+// PurgePIDFiles removes everything related to the session in .runtime/pids/.
+//
+// Safe to call even if the files do not exist; errors are intentionally
+// swallowed because this is a best-effort cleanup. See gu-50qv.
+func PurgePIDFiles(townRoot, sessionID string) {
+	_ = os.Remove(pidFile(townRoot, sessionID))
+	_ = os.Remove(pidLastFile(townRoot, sessionID))
+}
+
 // KillTrackedPIDs reads all PID files and kills any processes that are
 // still running. Returns the number of processes killed and any session
 // names that had errors.
