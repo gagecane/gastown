@@ -881,6 +881,27 @@ func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
 			canonicalBranch: "",
 			want:            false,
 		},
+		{
+			name:            "detached HEAD triggers fresh branch",
+			currentBranch:   "HEAD",
+			issue:           "gt-abc",
+			canonicalBranch: "main",
+			want:            true,
+		},
+		{
+			name:            "detached HEAD triggers fresh even without issue",
+			currentBranch:   "HEAD",
+			issue:           "",
+			canonicalBranch: "main",
+			want:            true,
+		},
+		{
+			name:            "empty branch triggers fresh",
+			currentBranch:   "",
+			issue:           "gt-abc",
+			canonicalBranch: "main",
+			want:            true,
+		},
 	}
 
 	for _, c := range cases {

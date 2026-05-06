@@ -265,6 +265,13 @@ func (m *SessionManager) canonicalSessionStartPoint(g *git.Git) string {
 // parseFreshBranchName output and the computed canonical branch — not from
 // substring heuristics on the branch name.
 func shouldCreateFreshSessionBranch(currentBranch, issue, canonicalBranch string) bool {
+	// Detached HEAD (e.g., after a failed rebase or stale worktree) — always
+	// create a fresh branch so the polecat starts from a known-good base.
+	// Without this, polecats on detached HEAD stay stale and stall (gu-ep7f follow-up).
+	if currentBranch == "HEAD" || currentBranch == "" {
+		return true
+	}
+
 	meta := parseFreshBranchName(currentBranch)
 
 	// Same-issue respawn: keep the existing polecat branch so preserved work
