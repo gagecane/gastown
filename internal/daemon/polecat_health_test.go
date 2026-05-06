@@ -699,6 +699,26 @@ func TestCheckPolecatHealth_MassDeathFiresForIdlePolecats(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mocks for tmux and bd")
 	}
+
+	// Seed the default prefix registry so each rig in this test produces a
+	// distinct tmux session name, matching production (where mayor/rigs.json
+	// assigns every rig a unique beads prefix). Without this, the registry is
+	// empty and PolecatSessionName falls back to DefaultPrefix="gt" for every
+	// rig — which collapses the three "obsidian" polecats below into a single
+	// session name (gt-obsidian). The alarm dedup added in a965e84f (gu-50qv)
+	// then correctly treats re-detections of that one session as a single
+	// zombie, producing only 9 CRASH DETECTED lines instead of 11 and failing
+	// the test. See gu-w3ye for the regression analysis.
+	old := session.DefaultRegistry()
+	reg := session.NewPrefixRegistry()
+	reg.Register("cc", "casc_crud")
+	reg.Register("ce", "casc_e2e")
+	reg.Register("cws", "codegen_ws")
+	reg.Register("gt", "gastown_upstream")
+	reg.Register("ralph", "ralph")
+	session.SetDefaultRegistry(reg)
+	defer session.SetDefaultRegistry(old)
+
 	binDir := t.TempDir()
 	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
@@ -723,8 +743,10 @@ func TestCheckPolecatHealth_MassDeathFiresForIdlePolecats(t *testing.T) {
 	}
 
 	// Simulate 11 simultaneous idle polecat deaths (the gu-but4 evidence count).
-	// All share the same fake bd/tmux, but checkPolecatHealth builds a unique
-	// session name per (rigName, polecatName) pair via session.PolecatSessionName.
+	// Each (rig, name) pair above maps to a unique session name because the
+	// registry assigns each rig a distinct prefix. Three rigs contain a polecat
+	// named "obsidian"; they become cc-obsidian, cws-obsidian, ralph-obsidian —
+	// the real production session names we'd see during a simultaneous death.
 	polecats := []struct{ rig, name string }{
 		{"casc_crud", "obsidian"},
 		{"casc_e2e", "furiosa"},
