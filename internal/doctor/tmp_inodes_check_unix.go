@@ -23,8 +23,8 @@ func readTmpInodeUsage(path string) (tmpInodeUsage, error) {
 	// (treated as "unknown" by some filesystems), the cast wraps to a very
 	// large uint64 which then falls through the total >= free guard and
 	// leaves used at zero.
-	total := uint64(st.Files)
-	free := uint64(st.Ffree)
+	total := uint64(st.Files) //nolint:unconvert // Required for FreeBSD where Files/Ffree types differ
+	free := uint64(st.Ffree) //nolint:unconvert // Required for FreeBSD where Ffree is int64
 	var used uint64
 	if total >= free {
 		used = total - free
