@@ -73,6 +73,14 @@
       {
         "matcher": "use_aws",
         "command": "test -f '{{AIM_GUARDRAIL}}' || exit 0; '{{AIM_GUARDRAIL}}'"
+      },
+      {
+        "matcher": "execute_bash",
+        "command": "{{GT_BIN}} tap guard pr-workflow"
+      },
+      {
+        "matcher": "execute_bash",
+        "command": "{{GT_BIN}} tap guard dangerous-command"
       }
     ],
     "agentSpawn": [

@@ -566,6 +566,20 @@ func TestInstallForRole_KiroRoleAware(t *testing.T) {
 	if !strings.Contains(string(got), `"userPromptSubmit"`) {
 		t.Error("kiro autonomous: expected userPromptSubmit hook")
 	}
+	// Regression guard for gu-6f2j: autonomous template must carry execute_bash
+	// preToolUse hooks for pr-workflow and dangerous-command guards. Claude ships
+	// these as 6 Bash(pattern*) matchers; kiro collapses them into tool-level
+	// execute_bash matchers because the guards themselves parse stdin and no-op
+	// fast when the command doesn't match a blocked pattern.
+	if !strings.Contains(string(got), `"matcher": "execute_bash"`) {
+		t.Error("kiro autonomous: missing execute_bash preToolUse matcher (gu-6f2j regression)")
+	}
+	if !strings.Contains(string(got), "tap guard pr-workflow") {
+		t.Error("kiro autonomous: missing pr-workflow guard (gu-6f2j regression)")
+	}
+	if !strings.Contains(string(got), "tap guard dangerous-command") {
+		t.Error("kiro autonomous: missing dangerous-command guard (gu-6f2j regression)")
+	}
 
 	dir2 := t.TempDir()
 	err = InstallForRole("kiro", dir2, dir2, "mayor", ".kiro/agents", "gastown.json", false)
@@ -588,5 +602,17 @@ func TestInstallForRole_KiroRoleAware(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "mail check --inject") {
 		t.Error("kiro interactive: missing mail check --inject command (gu-4atk regression)")
+	}
+	// Regression guard for gu-6f2j: interactive template must also carry the
+	// execute_bash preToolUse guards. Humans running mayor/crew under kiro-cli
+	// benefit from the same PR-workflow and dangerous-command blocks.
+	if !strings.Contains(string(got), `"matcher": "execute_bash"`) {
+		t.Error("kiro interactive: missing execute_bash preToolUse matcher (gu-6f2j regression)")
+	}
+	if !strings.Contains(string(got), "tap guard pr-workflow") {
+		t.Error("kiro interactive: missing pr-workflow guard (gu-6f2j regression)")
+	}
+	if !strings.Contains(string(got), "tap guard dangerous-command") {
+		t.Error("kiro interactive: missing dangerous-command guard (gu-6f2j regression)")
 	}
 }
