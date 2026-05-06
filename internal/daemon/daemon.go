@@ -168,6 +168,35 @@ type Daemon struct {
 	// avoid the real tmux/Claude startup path (which blocks in WaitForCommand
 	// against a fake tmux binary). See gu-j0xs.
 	deaconStartFn func() error
+
+	// alarmedSessions tracks polecat sessions that have already been alarmed
+	// as dead, keyed by tmux session name. This dedups CRASH DETECTED log
+	// lines, mass-death contributions, feed events, and witness notifications
+	// so the same zombie session is not re-alarmed on every patrol cycle.
+	//
+	// Entry lifecycle:
+	//   - Inserted when a dead session is first detected by checkPolecatHealth.
+	//   - detectionCount bumped on every subsequent re-detection of the same
+	//     dead session (these re-detections do NOT log or notify).
+	//   - Removed when the session is observed alive again (spawn/respawn),
+	//     so a true future crash of the same session name re-alarms.
+	//
+	// Without this, daemon/daemon.log fires CRASH DETECTED and MASS DEATH
+	// DETECTED every patrol cycle (~30-60s) naming the same polecats that
+	// have been dead for hours, flooding both the log and the witness inbox
+	// and drowning out real fresh deaths. See gu-50qv.
+	alarmedSessionsMu sync.Mutex
+	alarmedSessions   map[string]*alarmedPolecatSession
+}
+
+// alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It
+// remembers that a particular dead session has already been alarmed so
+// subsequent patrol cycles can treat a repeat detection as a no-op (gu-50qv).
+type alarmedPolecatSession struct {
+	firstAlarmed   time.Time
+	lastDetected   time.Time
+	detectionCount int
+	kind           string // "idle" or "hooked" — audit/context only
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -2701,7 +2730,10 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	}
 
 	if sessionAlive {
-		// Session is alive - nothing to do
+		// Session is alive - nothing to do.
+		// Clear any stale alarm-dedup entry so a genuine future crash on the
+		// same session name will alarm again (gu-50qv).
+		d.clearSessionAlarmed(sessionName)
 		return
 	}
 
@@ -2753,12 +2785,23 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 			return
 		}
 
-		d.logger.Printf("CRASH DETECTED (idle): polecat %s/%s has no hook_bead but session %s is dead",
-			rigName, polecatName, sessionName)
-		d.recordSessionDeath(sessionName)
-		_ = events.LogFeed(events.TypeSessionDeath, sessionName,
-			events.SessionDeathPayload(sessionName, rigName+"/polecats/"+polecatName,
-				"idle polecat session died (no hook_bead)", "daemon"))
+		// Dedup: only log CRASH DETECTED, record the death, and emit the feed
+		// event on the first detection of this dead session. Subsequent patrol
+		// cycles that see the same zombie just bump the detection counter.
+		// See gu-50qv.
+		if firstAlarm, count := d.markSessionAlarmed(sessionName, "idle"); firstAlarm {
+			d.logger.Printf("CRASH DETECTED (idle): polecat %s/%s has no hook_bead but session %s is dead",
+				rigName, polecatName, sessionName)
+			d.recordSessionDeath(sessionName)
+			_ = events.LogFeed(events.TypeSessionDeath, sessionName,
+				events.SessionDeathPayload(sessionName, rigName+"/polecats/"+polecatName,
+					"idle polecat session died (no hook_bead)", "daemon"))
+		} else if count == 2 || count%10 == 0 {
+			// Occasional debug line so operators can still see the polecat is
+			// still a zombie if they grep the log, without flooding it.
+			d.logger.Printf("Zombie re-detected (idle): polecat %s/%s session %s still dead (%d detections)",
+				rigName, polecatName, sessionName, count)
+		}
 		// Deliberately skip notifyWitnessOfCrashedPolecat: there's no work to
 		// recover, just an orphan to clean up. The Witness's orphan patrol
 		// handles that path without needing a CRASHED_POLECAT alert.
@@ -2822,10 +2865,30 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// by another heartbeat cycle, witness, or the polecat itself.
 	sessionRevived, err := d.tmux.HasSession(sessionName)
 	if err == nil && sessionRevived {
-		return // Session came back - no restart needed
+		// Session came back - clear any stale alarm state and skip restart.
+		d.clearSessionAlarmed(sessionName)
+		return
 	}
 
 	// Polecat has work but session is dead - this is a crash!
+	//
+	// Dedup: only log CRASH DETECTED, record the death for mass-death
+	// detection, emit the feed event, and notify the witness on the first
+	// detection of this dead session. Subsequent patrol cycles that see the
+	// same zombie just bump a detection counter, preventing the per-cycle
+	// spam that floods both daemon.log and the witness inbox. See gu-50qv.
+	firstAlarm, count := d.markSessionAlarmed(sessionName, "hooked")
+	if !firstAlarm {
+		// Re-detection of a known zombie. Emit an occasional debug line so
+		// operators grepping the log still see the polecat is persistently
+		// dead, without the per-cycle CRASH DETECTED / mass-death cascade.
+		if count == 2 || count%10 == 0 {
+			d.logger.Printf("Zombie re-detected: polecat %s/%s session %s still dead (hook_bead=%s, %d detections)",
+				rigName, polecatName, sessionName, info.HookBead, count)
+		}
+		return
+	}
+
 	d.logger.Printf("CRASH DETECTED: polecat %s/%s has hook_bead=%s but session %s is dead",
 		rigName, polecatName, info.HookBead, sessionName)
 
@@ -2867,6 +2930,55 @@ func (d *Daemon) recordSessionDeath(sessionName string) {
 	if len(d.recentDeaths) >= massDeathThreshold {
 		d.emitMassDeathEvent()
 	}
+}
+
+// markSessionAlarmed records that sessionName has been alarmed as dead and
+// returns true iff this is the first alarm for the current dead state.
+// Subsequent calls for the same session (while still dead) return false and
+// simply bump a counter, preventing CRASH DETECTED / MASS DEATH DETECTED spam
+// on every patrol cycle. See gu-50qv.
+//
+// The kind argument ("idle" or "hooked") is stored for audit/debugging and
+// does not affect the dedup decision — a zombie is a zombie regardless of
+// what the agent bead said when the session first went dead.
+//
+// Call clearSessionAlarmed when the session is observed alive again so a
+// genuine future crash re-alarms.
+func (d *Daemon) markSessionAlarmed(sessionName, kind string) (firstAlarm bool, detectionCount int) {
+	d.alarmedSessionsMu.Lock()
+	defer d.alarmedSessionsMu.Unlock()
+
+	if d.alarmedSessions == nil {
+		d.alarmedSessions = make(map[string]*alarmedPolecatSession)
+	}
+
+	now := time.Now()
+	entry, ok := d.alarmedSessions[sessionName]
+	if !ok {
+		d.alarmedSessions[sessionName] = &alarmedPolecatSession{
+			firstAlarmed:   now,
+			lastDetected:   now,
+			detectionCount: 1,
+			kind:           kind,
+		}
+		return true, 1
+	}
+
+	entry.lastDetected = now
+	entry.detectionCount++
+	return false, entry.detectionCount
+}
+
+// clearSessionAlarmed removes the alarm-dedup entry for sessionName, so the
+// next time the session is seen dead it alarms again. Call this whenever the
+// session is observed alive (e.g., after a respawn). See gu-50qv.
+func (d *Daemon) clearSessionAlarmed(sessionName string) {
+	d.alarmedSessionsMu.Lock()
+	defer d.alarmedSessionsMu.Unlock()
+	if d.alarmedSessions == nil {
+		return
+	}
+	delete(d.alarmedSessions, sessionName)
 }
 
 // emitMassDeathEvent logs a mass death event when multiple sessions die in a short window.
