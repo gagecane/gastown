@@ -340,11 +340,21 @@ func TestRunEscalateDryRunNoMutations(t *testing.T) {
 		escalateRelatedBead = origRelated
 	}()
 
-	// Move to a temp dir with a .gastown workspace marker so
-	// workspace.FindFromCwdOrError succeeds.
+	// Move to a temp dir with a real workspace marker (mayor/town.json) so
+	// workspace.FindFromCwdOrError succeeds via CWD detection, not via the
+	// GT_TOWN_ROOT/GT_ROOT env var fallback. Unsetting the env vars ensures
+	// we exercise the CWD-based path even when the developer's shell has
+	// them set (which masked this test's bogus .gastown marker — it passed
+	// locally via env fallback and only surfaced in CI).
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".gastown"), 0o755); err != nil {
-		t.Fatalf("mkdir .gastown: %v", err)
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"type":"town","name":"test","version":1}`), 0o644); err != nil {
+		t.Fatalf("write mayor/town.json: %v", err)
 	}
 	origWD, _ := os.Getwd()
 	if err := os.Chdir(tmpDir); err != nil {

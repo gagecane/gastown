@@ -138,6 +138,21 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("checking bead status: %w", err)
 	}
 
+	// Guard against scheduling closed/tombstone beads (defense-in-depth, hq-ki2).
+	// Mirrors the closed-bead guards in runSling (sling.go) and executeSling
+	// (sling_dispatch.go). The daemon's stranded scan can route closed cross-prefix
+	// beads through scheduleBead in deferred dispatch mode; without this check, a
+	// fresh ghost convoy is created for already-completed work. Not bypassed by
+	// --force — if you need to re-dispatch, reopen the bead first.
+	//
+	// Run this BEFORE the identity check so the error clearly states the closed
+	// cause rather than the more general "identity bead" message (IsIdentityBead
+	// treats status=closed as an identity signal per rule 3, gu-3znx). Matches
+	// the ordering in sling.go:runSling and sling_dispatch.go:executeSling.
+	if info.Status == "closed" || info.Status == "tombstone" {
+		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
+	}
+
 	// Ghost-dispatch guard (gu-7gm + gu-3znx). Reject agent/identity beads —
 	// gt:agent label, legacy type=agent, closed status, or polecat/refinery
 	// title regex. Scheduling one causes a polecat to hook the identity bead
@@ -200,16 +215,6 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
 			style.Dim.Render("○"), beadID, existingCtx.ID)
 		return nil
-	}
-
-	// Guard against scheduling closed/tombstone beads (defense-in-depth, hq-ki2).
-	// Mirrors the closed-bead guards in runSling (sling.go) and executeSling
-	// (sling_dispatch.go). The daemon's stranded scan can route closed cross-prefix
-	// beads through scheduleBead in deferred dispatch mode; without this check, a
-	// fresh ghost convoy is created for already-completed work. Not bypassed by
-	// --force — if you need to re-dispatch, reopen the bead first.
-	if info.Status == "closed" || info.Status == "tombstone" {
-		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
 	}
 
 	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !opts.Force {
