@@ -432,6 +432,12 @@ func gateEnv(townRoot string) []string {
 	return append(os.Environ(), "CI=true", "PATH="+enriched)
 }
 
+// failureOutputTailSize is the number of trailing output lines kept verbatim
+// in runCommandOnWorktree failure messages. Signal lines (--- FAIL:, FAIL\t,
+// bare FAIL) above this window are additionally preserved by
+// formatFailureOutput.
+const failureOutputTailSize = 50
+
 // runCommandOnWorktree runs a single shell command in the given worktree directory.
 func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, label, command string) error {
 	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
@@ -443,15 +449,105 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Truncate output to last 50 lines for the error message
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		tail := lines
-		if len(tail) > 50 {
-			tail = tail[len(tail)-50:]
-		}
-		return fmt.Errorf("%s failed: %v\n%s", label, err, strings.Join(tail, "\n"))
+		return fmt.Errorf("%s failed: %v\n%s", label, err, formatFailureOutput(string(output), failureOutputTailSize))
 	}
 	return nil
+}
+
+// formatFailureOutput renders command output for inclusion in an error
+// message, preserving actionable go-test failure signal lines even when the
+// tail-truncation window would otherwise chop them off.
+//
+// Why: `go test ./...` on a large module (gastown has ~70 test packages)
+// emits one line per package ("ok <pkg>" / "FAIL <pkg>") and the
+// "--- FAIL: TestName" marker identifying the actually-failing test can sit
+// well above the last-N-lines window. Returning only the tail therefore
+// strips the single most important piece of information — which test broke —
+// leaving operators staring at a wall of "ok" plus a naked "FAIL". See
+// gu-m5w9 for the original diagnosis.
+//
+// Strategy: always include the last tailSize lines; additionally prepend any
+// go-test failure signal lines that appear in the truncated prefix so their
+// identity survives the window. A clearly labeled separator marks where the
+// tail starts so operators can tell prepended signals from in-window content.
+//
+// Signals are capped independently of the tail so a catastrophic failure
+// with thousands of FAIL lines doesn't produce an unbounded escalation body.
+func formatFailureOutput(raw string, tailSize int) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+
+	tailStart := 0
+	if tailSize > 0 && len(lines) > tailSize {
+		tailStart = len(lines) - tailSize
+	}
+	tail := lines[tailStart:]
+
+	// Only lines BEFORE the tail window need rescuing; anything already in
+	// the tail reaches the operator unmodified.
+	var signals []string
+	for _, l := range lines[:tailStart] {
+		if isGoTestFailSignal(l) {
+			signals = append(signals, l)
+		}
+	}
+
+	if len(signals) == 0 {
+		return strings.Join(tail, "\n")
+	}
+
+	const signalCap = 50
+	extraOmitted := 0
+	if len(signals) > signalCap {
+		extraOmitted = len(signals) - signalCap
+		signals = signals[:signalCap]
+	}
+
+	var b strings.Builder
+	for _, s := range signals {
+		b.WriteString(s)
+		b.WriteByte('\n')
+	}
+	if extraOmitted > 0 {
+		fmt.Fprintf(&b, "... [%d additional FAIL signal line(s) omitted] ...\n", extraOmitted)
+	}
+	fmt.Fprintf(&b, "... [truncated %d line(s) above; showing last %d] ...\n", tailStart, len(tail))
+	b.WriteString(strings.Join(tail, "\n"))
+	return b.String()
+}
+
+// isGoTestFailSignal reports whether line identifies a failing test or
+// package in `go test` output and should survive tail truncation. Matched
+// patterns:
+//
+//	"--- FAIL: TestName (0.00s)"       top-level failing test
+//	"FAIL\tgithub.com/x/y\t0.005s"     per-package failure summary
+//	"FAIL github.com/x/y 0.005s"       space-separated package summary
+//	"FAIL"                             overall go-test bailout line
+//
+// Indented lines (subtest "--- FAIL:" markers) are intentionally not matched:
+// their parent top-level "--- FAIL:" line is always emitted by the go test
+// runner and carries sufficient identity for operators. Keeping the pattern
+// strict avoids pulling in unrelated indented prose that happens to start
+// with "FAIL".
+func isGoTestFailSignal(line string) bool {
+	if strings.HasPrefix(line, "--- FAIL:") {
+		return true
+	}
+	if line == "FAIL" {
+		return true
+	}
+	// "FAIL<whitespace>..." — package-level summary.
+	if strings.HasPrefix(line, "FAIL") && len(line) > 4 {
+		c := line[4]
+		if c == ' ' || c == '\t' {
+			return true
+		}
+	}
+	return false
 }
 
 // contains checks if a string slice contains a value.

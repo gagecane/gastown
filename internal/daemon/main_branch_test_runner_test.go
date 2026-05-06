@@ -911,3 +911,158 @@ func TestRunGatesOnWorktree_SkippedGatesLoggedInOrder(t *testing.T) {
 		t.Errorf("expected skip log in alphabetical order %q, got:\n%s", want, logs)
 	}
 }
+
+// TestFormatFailureOutput_PreservesFailSignalsOnLargeGoTestOutput is the core
+// regression test for gu-m5w9: when `go test ./...` on a big module emits
+// dozens of "ok <pkg>" lines and the actually-failing test's "--- FAIL:"
+// marker lands ABOVE the 50-line tail window, the old truncation dropped it
+// and left operators with only "ok ... ok ... FAIL". The fixed formatter
+// must rescue such signal lines.
+func TestFormatFailureOutput_PreservesFailSignalsOnLargeGoTestOutput(t *testing.T) {
+	// Synthesize a realistic go-test-on-big-module output:
+	//   - 60 passing packages  (pushes the --- FAIL: line toward the tail edge)
+	//   - one top-level --- FAIL: marker with an indented subtest detail
+	//   - 60 more passing packages after the failing one (guarantees the
+	//     FAIL: marker sits above the 50-line tail window)
+	//   - a package-level FAIL summary and the bare "FAIL" line at the end
+	//     (these already fit in the tail, but we assert they survive too)
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		fmt.Fprintf(&b, "ok  \tgithub.com/example/pkg%02d\t0.005s\n", i)
+	}
+	b.WriteString("--- FAIL: TestTheRealCulprit (0.01s)\n")
+	b.WriteString("    my_test.go:42: expected 1, got 2\n")
+	for i := 60; i < 120; i++ {
+		fmt.Fprintf(&b, "ok  \tgithub.com/example/pkg%03d\t0.005s\n", i)
+	}
+	b.WriteString("FAIL\tgithub.com/example/pkgculprit\t0.012s\n")
+	b.WriteString("FAIL\n")
+
+	got := formatFailureOutput(b.String(), 50)
+
+	// The failing-test identity must survive the tail chop.
+	if !strings.Contains(got, "--- FAIL: TestTheRealCulprit") {
+		t.Errorf("expected --- FAIL: line to be rescued above the tail, got:\n%s", got)
+	}
+	// Package-level FAIL line — in the tail naturally, still required.
+	if !strings.Contains(got, "FAIL\tgithub.com/example/pkgculprit") {
+		t.Errorf("expected package-level FAIL line in output, got:\n%s", got)
+	}
+	// The tail window itself must still reach the operator.
+	if !strings.Contains(got, "github.com/example/pkg119") {
+		t.Errorf("expected last tail line present, got:\n%s", got)
+	}
+	// And a clear marker so readers can tell rescued signals from tail content.
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("expected truncation marker when prefix is dropped, got:\n%s", got)
+	}
+}
+
+// TestFormatFailureOutput_ShortOutputPassesThrough: when output fits in the
+// tail window, there's no truncation and no injected separators — the
+// operator sees the raw command output unchanged.
+func TestFormatFailureOutput_ShortOutputPassesThrough(t *testing.T) {
+	raw := "line1\nline2\nline3"
+	got := formatFailureOutput(raw, 50)
+	if got != raw {
+		t.Errorf("expected raw passthrough %q, got %q", raw, got)
+	}
+	if strings.Contains(got, "truncated") {
+		t.Errorf("no truncation expected for short input; got:\n%s", got)
+	}
+}
+
+// TestFormatFailureOutput_Empty: trivial inputs should not introduce noise.
+func TestFormatFailureOutput_Empty(t *testing.T) {
+	if got := formatFailureOutput("", 50); got != "" {
+		t.Errorf("empty input: expected empty output, got %q", got)
+	}
+	if got := formatFailureOutput("   \n\n", 50); got != "" {
+		t.Errorf("whitespace input: expected empty output after trim, got %q", got)
+	}
+}
+
+// TestFormatFailureOutput_NoSignalsOmitsTruncationMarker: when no rescue is
+// needed (no signal lines in the chopped prefix), the formatter returns just
+// the tail without the "... truncated ..." marker. This keeps the output
+// byte-compatible with the pre-gu-m5w9 behavior for non-go-test commands,
+// which don't emit FAIL-style signal lines.
+func TestFormatFailureOutput_NoSignalsOmitsTruncationMarker(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 80; i++ {
+		fmt.Fprintf(&b, "info line %d\n", i)
+	}
+	got := formatFailureOutput(b.String(), 50)
+
+	if strings.Contains(got, "truncated") {
+		t.Errorf("no signal lines above tail — truncation header should be omitted; got:\n%s", got)
+	}
+	if !strings.Contains(got, "info line 79") {
+		t.Errorf("expected last line in tail, got:\n%s", got)
+	}
+	if strings.Contains(got, "info line 0\n") {
+		t.Errorf("first line should have been truncated, got:\n%s", got)
+	}
+}
+
+// TestFormatFailureOutput_CapsSignalLines: a pathological failure with
+// thousands of FAIL signal lines must not blow up the escalation body.
+func TestFormatFailureOutput_CapsSignalLines(t *testing.T) {
+	var b strings.Builder
+	// 200 failing packages above the tail window.
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "FAIL\tgithub.com/example/pkg%03d\t0.001s\n", i)
+	}
+	// Push them all above the tail with filler.
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&b, "ok  \tgithub.com/example/okpkg%02d\t0.001s\n", i)
+	}
+	got := formatFailureOutput(b.String(), 50)
+
+	if !strings.Contains(got, "additional FAIL signal line(s) omitted") {
+		t.Errorf("expected omitted-signal marker for 200 FAIL lines, got:\n%s", got)
+	}
+	// The signal cap is 50; the 51st pkg (pkg050) must be inside the omitted
+	// bucket, not printed verbatim.
+	// Signals are emitted in encounter order (pkg000..pkg049), so pkg050 +
+	// must be absent from the signal block. They also cannot appear in the
+	// tail (which is all okpkg lines).
+	if strings.Contains(got, "pkg050\t") {
+		t.Errorf("expected signal cap to drop pkg050+, but found it; got:\n%s", got)
+	}
+	// First ~50 packages should still be present.
+	if !strings.Contains(got, "pkg000\t") {
+		t.Errorf("expected pkg000 (first signal) preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, "pkg049\t") {
+		t.Errorf("expected pkg049 (last in cap) preserved, got:\n%s", got)
+	}
+}
+
+func TestIsGoTestFailSignal(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		// Matches
+		{"--- FAIL: TestFoo (0.00s)", true},
+		{"--- FAIL: TestFoo/sub (0.00s)", true},
+		{"FAIL", true},
+		{"FAIL\tgithub.com/x/y\t0.005s", true},
+		{"FAIL github.com/x/y 0.005s", true},
+
+		// Non-matches (must NOT pull these into the rescue set)
+		{"    --- FAIL: TestFoo/sub (0.00s)", false}, // indented subtest marker
+		{"ok  \tgithub.com/x/y\t0.005s", false},
+		{"FAILED", false},       // FAILED != FAIL
+		{"FAILURE: stuff", false},
+		{"FAIL:something", false}, // colon, no whitespace after FAIL
+		{"", false},
+		{"some FAIL in the middle", false},
+	}
+	for _, tc := range cases {
+		if got := isGoTestFailSignal(tc.line); got != tc.want {
+			t.Errorf("isGoTestFailSignal(%q) = %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}
