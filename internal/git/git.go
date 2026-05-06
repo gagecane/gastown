@@ -1733,6 +1733,16 @@ func (g *Git) Cherry(upstream, head string) (string, error) {
 	return g.run("cherry", upstream, head)
 }
 
+// MergeBase returns the best common ancestor between two refs.
+func (g *Git) MergeBase(ref1, ref2 string) (string, error) {
+	return g.run("merge-base", ref1, ref2)
+}
+
+// LogOneline returns one-line log output for the given revision range (e.g., "upstream..HEAD").
+func (g *Git) LogOneline(revRange string) (string, error) {
+	return g.run("log", "--oneline", revRange)
+}
+
 // WorktreeAdd creates a new worktree at the given path with a new branch.
 // The new branch is created from the current HEAD.
 // Skips LFS smudge filter during checkout (see WorktreeAddFromRef).

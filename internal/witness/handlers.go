@@ -1193,18 +1193,40 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 //   - false, nil: work has NOT fully landed — continue with restart
 //   - false, error: couldn't verify — caller should treat as unsafe and restart
 //
+// MergeCheckResult classifies the state of a polecat's work relative to the
+// default branch. See gu-ur85: the old bool return conflated "no work produced"
+// with "work already merged," causing false-positive archive actions.
+type MergeCheckResult int
+
+const (
+	// MergeCheckNotMerged means the polecat has unmerged work.
+	MergeCheckNotMerged MergeCheckResult = iota
+	// MergeCheckEmpty means the polecat produced no commits beyond the base
+	// (HEAD == merge-base with upstream). Safe to archive as "empty."
+	MergeCheckEmpty
+	// MergeCheckMerged means the polecat's commits are already on the default
+	// branch (via fast-forward, regular merge, or squash merge).
+	MergeCheckMerged
+	// MergeCheckAutoSave means the polecat's only divergent commits are gt-pvx
+	// auto-save safety-net commits. These must NOT be auto-archived; escalate.
+	MergeCheckAutoSave
+)
+
+// autoSaveMarker is the commit message prefix used by the gt-pvx safety net.
+const autoSaveMarker = "auto-save uncommitted"
+
 // Package-level var so tests can override.
 var verifyBranchAlreadyMerged = _verifyBranchAlreadyMerged
 
-func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, error) {
-	// Fast path: reuse existing ancestor check.
-	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
-		return true, nil
-	}
+// classifyPolecatMergeState determines the merge state of a polecat's work.
+// This is the gu-ur85 replacement for the old bool-returning verifyBranchAlreadyMerged.
+// Package-level var so tests can override.
+var classifyPolecatMergeState = _classifyPolecatMergeState
 
+func _classifyPolecatMergeState(workDir, rigName, polecatName string) (MergeCheckResult, error) {
 	townRoot, err := workspace.Find(workDir)
 	if err != nil || townRoot == "" {
-		return false, fmt.Errorf("finding town root: %v", err)
+		return MergeCheckNotMerged, fmt.Errorf("finding town root: %v", err)
 	}
 
 	defaultBranch := "main"
@@ -1212,34 +1234,89 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, err
 		defaultBranch = rigCfg.DefaultBranch
 	}
 
-	polecatPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
-	if _, err := os.Stat(polecatPath); os.IsNotExist(err) {
-		polecatPath = filepath.Join(townRoot, rigName, "polecats", polecatName)
-	}
-
+	polecatPath := polecatWorktreePath(townRoot, rigName, polecatName)
 	g := git.NewGit(polecatPath)
+
+	headSHA, err := g.Rev("HEAD")
+	if err != nil {
+		return MergeCheckNotMerged, fmt.Errorf("getting polecat HEAD: %w", err)
+	}
 
 	remotes, err := g.Remotes()
 	if err != nil || len(remotes) == 0 {
 		remotes = []string{"origin"}
 	}
 
-	// git cherry marks each commit that HEAD introduces on top of <upstream>:
-	//   "+ <sha>" — patch-id not present upstream
-	//   "- <sha>" — patch-id already upstream (e.g., squash-merged)
-	// If no "+" lines remain, the work is fully landed.
+	// Check if HEAD is the same as the merge-base (polecat produced no work).
+	for _, remote := range remotes {
+		upstream := remote + "/" + defaultBranch
+		baseSHA, err := g.MergeBase(headSHA, upstream)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(baseSHA) == strings.TrimSpace(headSHA) {
+			return MergeCheckEmpty, nil
+		}
+	}
+
+	// HEAD diverges from base. Check if it's already merged.
+	// Fast path: ancestor check.
+	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+		// HEAD is on main but != merge-base, so it has commits that are on main.
+		// Before declaring "merged," check for auto-save markers.
+		if hasAutoSave, _ := polecatHasAutoSaveCommits(g, remotes, defaultBranch); hasAutoSave {
+			return MergeCheckAutoSave, nil
+		}
+		return MergeCheckMerged, nil
+	}
+
+	// Cherry path: check for squash-merged work.
 	for _, remote := range remotes {
 		upstream := remote + "/" + defaultBranch
 		out, err := g.Cherry(upstream, "HEAD")
 		if err != nil {
-			continue // try next remote
+			continue
 		}
 		if !cherryHasUnmergedCommits(out) {
-			return true, nil
+			// All patches are upstream. Check auto-save before declaring merged.
+			if hasAutoSave, _ := polecatHasAutoSaveCommits(g, remotes, defaultBranch); hasAutoSave {
+				return MergeCheckAutoSave, nil
+			}
+			return MergeCheckMerged, nil
 		}
 	}
 
-	return false, nil
+	return MergeCheckNotMerged, nil
+}
+
+// polecatHasAutoSaveCommits checks if any commits between merge-base and HEAD
+// contain the gt-pvx auto-save marker in their commit message.
+func polecatHasAutoSaveCommits(g *git.Git, remotes []string, defaultBranch string) (bool, error) {
+	for _, remote := range remotes {
+		upstream := remote + "/" + defaultBranch
+		// Get commit messages between upstream and HEAD
+		messages, err := g.LogOneline(upstream + "..HEAD")
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(messages, "\n") {
+			if strings.Contains(strings.ToLower(line), autoSaveMarker) {
+				return true, nil
+			}
+		}
+		return false, nil // checked successfully, no marker found
+	}
+	return false, fmt.Errorf("could not check commit messages against any remote")
+}
+
+func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, error) {
+	result, err := classifyPolecatMergeState(workDir, rigName, polecatName)
+	if err != nil {
+		return false, err
+	}
+	// Preserve old behavior: empty and merged both return true.
+	// The caller (handleZombieRestart) should use classifyPolecatMergeState directly.
+	return result == MergeCheckEmpty || result == MergeCheckMerged, nil
 }
 
 // cherryHasUnmergedCommits returns true if `git cherry` output contains at least
@@ -2073,18 +2150,33 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	zombie.CleanupStatus = cleanupStatus
 	skipRestart := false
 
-	// aa-apw: If this polecat's branch work is already merged into the default
-	// branch (including via squash merge, which rewrites SHAs and fools a plain
-	// ancestor check), do NOT restart. Restarting would let the polecat push its
-	// pre-squash HEAD and create a duplicate MR for work already in main.
-	// Instead archive the polecat — its work is done.
-	if merged, err := verifyBranchAlreadyMerged(workDir, rigName, polecatName); err == nil && merged {
-		zombie.Action = "archived-work-already-merged (aa-apw)"
-		if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
-			zombie.Error = fmt.Errorf("archive: %w", nukeErr)
-			zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+	// aa-apw + gu-ur85: Classify the polecat's merge state before deciding action.
+	// The old bool check conflated "empty" with "merged," causing false-positive
+	// archive actions on polecats that never produced work or only have auto-save commits.
+	if mergeState, err := classifyPolecatMergeState(workDir, rigName, polecatName); err == nil {
+		switch mergeState {
+		case MergeCheckEmpty:
+			// Polecat produced no commits beyond base. Safe to archive as empty.
+			zombie.Action = "archived-empty (aa-apw/gu-ur85)"
+			if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
+				zombie.Error = fmt.Errorf("archive-empty: %w", nukeErr)
+				zombie.Action = fmt.Sprintf("archive-failed-empty: %v", nukeErr)
+			}
+			return
+		case MergeCheckMerged:
+			// Work is genuinely on the default branch. Safe to archive.
+			zombie.Action = "archived-work-already-merged (aa-apw)"
+			if nukeErr := NukePolecat(bd, workDir, rigName, polecatName); nukeErr != nil {
+				zombie.Error = fmt.Errorf("archive: %w", nukeErr)
+				zombie.Action = fmt.Sprintf("archive-failed-work-already-merged: %v", nukeErr)
+			}
+			return
+		case MergeCheckAutoSave:
+			// gt-pvx auto-save commits detected. Do NOT archive — escalate.
+			zombie.Action = "escalate-auto-save-work (gu-ur85)"
+			return
 		}
-		return
+		// MergeCheckNotMerged: fall through to restart logic.
 	}
 
 	// gu-j98v: Unfiled-MR recovery. A polecat session can die after committing

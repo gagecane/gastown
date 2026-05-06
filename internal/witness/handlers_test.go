@@ -2495,11 +2495,11 @@ func TestCherryHasUnmergedCommits(t *testing.T) {
 //
 // Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
 func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
-	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName string) (bool, error) {
-		return true, nil
+	oldClassify := classifyPolecatMergeState
+	classifyPolecatMergeState = func(workDir, rigName, polecatName string) (MergeCheckResult, error) {
+		return MergeCheckMerged, nil
 	}
-	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+	t.Cleanup(func() { classifyPolecatMergeState = oldClassify })
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -2524,11 +2524,11 @@ func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 //
 // Not parallel: overrides the package-level verifyBranchAlreadyMerged var.
 func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
-	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName string) (bool, error) {
-		return false, nil
+	oldClassify := classifyPolecatMergeState
+	classifyPolecatMergeState = func(workDir, rigName, polecatName string) (MergeCheckResult, error) {
+		return MergeCheckNotMerged, nil
 	}
-	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
+	t.Cleanup(func() { classifyPolecatMergeState = oldClassify })
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -2907,10 +2907,10 @@ func TestFindOpenMRForBranchAndSHA(t *testing.T) {
 //
 // Not parallel: overrides package-level verifyUnfiledMR and recoverUnfiledMR.
 func TestHandleZombieRestart_FilesUnfiledMRForUnpushedCommits(t *testing.T) {
-	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldClassify := classifyPolecatMergeState
 	oldVerify := verifyUnfiledMR
 	oldRecover := recoverUnfiledMR
-	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) { return MergeCheckNotMerged, nil }
 	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
 		return &UnfiledMRState{
 			Branch:        "polecat/nux",
@@ -2929,7 +2929,7 @@ func TestHandleZombieRestart_FilesUnfiledMRForUnpushedCommits(t *testing.T) {
 		return "filed-mr-unpushed-commits (aa-unpushed-commits, mr=gt-mr-xyz)", nil
 	}
 	t.Cleanup(func() {
-		verifyBranchAlreadyMerged = oldVerifyMerged
+		classifyPolecatMergeState = oldClassify
 		verifyUnfiledMR = oldVerify
 		recoverUnfiledMR = oldRecover
 	})
@@ -2959,10 +2959,10 @@ func TestHandleZombieRestart_FilesUnfiledMRForUnpushedCommits(t *testing.T) {
 //
 // Not parallel: overrides package-level verifyUnfiledMR and recoverUnfiledMR.
 func TestHandleZombieRestart_FilesUnfiledMRForPushedNoMR(t *testing.T) {
-	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldClassify := classifyPolecatMergeState
 	oldVerify := verifyUnfiledMR
 	oldRecover := recoverUnfiledMR
-	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) { return MergeCheckNotMerged, nil }
 	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
 		return &UnfiledMRState{
 			Branch:        "polecat/nux",
@@ -2979,7 +2979,7 @@ func TestHandleZombieRestart_FilesUnfiledMRForPushedNoMR(t *testing.T) {
 		return "filed-mr-pushed-no-mr (aa-pushed-no-mr, mr=gt-mr-xyz)", nil
 	}
 	t.Cleanup(func() {
-		verifyBranchAlreadyMerged = oldVerifyMerged
+		classifyPolecatMergeState = oldClassify
 		verifyUnfiledMR = oldVerify
 		recoverUnfiledMR = oldRecover
 	})
@@ -3003,10 +3003,10 @@ func TestHandleZombieRestart_FilesUnfiledMRForPushedNoMR(t *testing.T) {
 //
 // Not parallel: overrides package-level vars.
 func TestHandleZombieRestart_SkipsUnfiledCheckWhenMRExists(t *testing.T) {
-	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldClassify := classifyPolecatMergeState
 	oldVerify := verifyUnfiledMR
 	oldRecover := recoverUnfiledMR
-	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) { return MergeCheckNotMerged, nil }
 	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
 		return &UnfiledMRState{
 			Branch:       "polecat/nux",
@@ -3021,7 +3021,7 @@ func TestHandleZombieRestart_SkipsUnfiledCheckWhenMRExists(t *testing.T) {
 		return "", nil
 	}
 	t.Cleanup(func() {
-		verifyBranchAlreadyMerged = oldVerifyMerged
+		classifyPolecatMergeState = oldClassify
 		verifyUnfiledMR = oldVerify
 		recoverUnfiledMR = oldRecover
 	})
@@ -3044,10 +3044,10 @@ func TestHandleZombieRestart_SkipsUnfiledCheckWhenMRExists(t *testing.T) {
 //
 // Not parallel: overrides package-level vars.
 func TestHandleZombieRestart_SkipsUnfiledCheckWhenNoCommits(t *testing.T) {
-	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldClassify := classifyPolecatMergeState
 	oldVerify := verifyUnfiledMR
 	oldRecover := recoverUnfiledMR
-	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) { return MergeCheckNotMerged, nil }
 	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
 		return &UnfiledMRState{
 			Branch:       "polecat/nux",
@@ -3059,7 +3059,7 @@ func TestHandleZombieRestart_SkipsUnfiledCheckWhenNoCommits(t *testing.T) {
 		return "", nil
 	}
 	t.Cleanup(func() {
-		verifyBranchAlreadyMerged = oldVerifyMerged
+		classifyPolecatMergeState = oldClassify
 		verifyUnfiledMR = oldVerify
 		recoverUnfiledMR = oldRecover
 	})
@@ -3084,11 +3084,11 @@ func TestHandleZombieRestart_SkipsUnfiledCheckWhenNoCommits(t *testing.T) {
 //
 // Not parallel: overrides package-level vars.
 func TestHandleZombieRestart_AaApwBeatsUnfiledMR(t *testing.T) {
-	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldClassify := classifyPolecatMergeState
 	oldVerify := verifyUnfiledMR
 	oldRecover := recoverUnfiledMR
-	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) {
-		return true, nil // work is already merged
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) {
+		return MergeCheckMerged, nil // work is already merged
 	}
 	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
 		t.Fatal("verifyUnfiledMR must NOT be called when aa-apw fires")
@@ -3099,7 +3099,7 @@ func TestHandleZombieRestart_AaApwBeatsUnfiledMR(t *testing.T) {
 		return "", nil
 	}
 	t.Cleanup(func() {
-		verifyBranchAlreadyMerged = oldVerifyMerged
+		classifyPolecatMergeState = oldClassify
 		verifyUnfiledMR = oldVerify
 		recoverUnfiledMR = oldRecover
 	})
@@ -3116,16 +3116,64 @@ func TestHandleZombieRestart_AaApwBeatsUnfiledMR(t *testing.T) {
 	}
 }
 
-// TestHandleZombieRestart_FilesUnfiledMRPropagatesRecoverError verifies that
+// TestHandleZombieRestart_EmptyPolecat verifies gu-ur85: a polecat that produced
+// no commits (HEAD == merge-base) is archived as "empty," not "merged."
+func TestHandleZombieRestart_EmptyPolecat(t *testing.T) {
+	oldClassify := classifyPolecatMergeState
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) {
+		return MergeCheckEmpty, nil
+	}
+	t.Cleanup(func() { classifyPolecatMergeState = oldClassify })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	z := &ZombieResult{PolecatName: "guzzle", HookBead: "gu-jq0q"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "guzzle", "gu-jq0q", "clean", z)
+
+	if !strings.Contains(z.Action, "archived-empty") && !strings.Contains(z.Action, "archive-failed-empty") {
+		t.Errorf("Action = %q, want archived-empty for polecat with no work", z.Action)
+	}
+	if strings.Contains(z.Action, "work-already-merged") {
+		t.Errorf("Action = %q, must NOT say work-already-merged for empty polecat", z.Action)
+	}
+}
+
+// TestHandleZombieRestart_AutoSaveEscalates verifies gu-ur85: a polecat whose
+// only divergent commits are gt-pvx auto-save commits is escalated, not archived.
+func TestHandleZombieRestart_AutoSaveEscalates(t *testing.T) {
+	oldClassify := classifyPolecatMergeState
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) {
+		return MergeCheckAutoSave, nil
+	}
+	t.Cleanup(func() { classifyPolecatMergeState = oldClassify })
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	z := &ZombieResult{PolecatName: "rust", HookBead: "gu-g3ks"}
+	handleZombieRestart(bd, t.TempDir(), "testrig", "rust", "gu-g3ks", "has_unpushed", z)
+
+	if !strings.Contains(z.Action, "escalate-auto-save-work") {
+		t.Errorf("Action = %q, want escalate-auto-save-work for gt-pvx commits", z.Action)
+	}
+	if strings.Contains(z.Action, "archived") && !strings.Contains(z.Action, "escalate") {
+		t.Errorf("Action = %q, must NOT archive auto-save work", z.Action)
+	}
+}
 // when recoverUnfiledMR fails, the error flows onto zombie.Error so the patrol
 // operator sees what went wrong. The Action string still reflects the attempt.
 //
 // Not parallel: overrides package-level vars.
 func TestHandleZombieRestart_FilesUnfiledMRPropagatesRecoverError(t *testing.T) {
-	oldVerifyMerged := verifyBranchAlreadyMerged
+	oldClassify := classifyPolecatMergeState
 	oldVerify := verifyUnfiledMR
 	oldRecover := recoverUnfiledMR
-	verifyBranchAlreadyMerged = func(string, string, string) (bool, error) { return false, nil }
+	classifyPolecatMergeState = func(string, string, string) (MergeCheckResult, error) { return MergeCheckNotMerged, nil }
 	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
 		return &UnfiledMRState{
 			Branch:        "polecat/nux",
@@ -3140,7 +3188,7 @@ func TestHandleZombieRestart_FilesUnfiledMRPropagatesRecoverError(t *testing.T) 
 			fmt.Errorf("simulated push failure")
 	}
 	t.Cleanup(func() {
-		verifyBranchAlreadyMerged = oldVerifyMerged
+		classifyPolecatMergeState = oldClassify
 		verifyUnfiledMR = oldVerify
 		recoverUnfiledMR = oldRecover
 	})
