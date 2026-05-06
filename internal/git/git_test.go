@@ -2756,3 +2756,130 @@ func TestMergeWithHostileEditor(t *testing.T) {
 		t.Fatalf("unexpected error stat-ing sentinel: %v", err)
 	}
 }
+
+
+// TestCloneAutoWiresHooksPath verifies that cloning a repo which ships a
+// .githooks directory auto-wires core.hooksPath=.githooks on the destination.
+// Without this, crew/polecat clones would need a manual `make hooks` or a
+// `gt doctor --fix` pass to activate shared hooks like .githooks/pre-push.
+//
+// Regression guard: if someone refactors cloneInternal and drops the
+// configureHooksPath call, this test fails loudly instead of the breakage
+// silently surviving (detected only when someone pushes without the gate
+// and CI catches the real regression hours later).
+//
+// Covers Clone, CloneBranch, CloneWithReference, CloneBranchWithReference.
+// Partial-clone variants use the same cloneInternal path so they're
+// implicitly covered too; bare clones deliberately skip configureHooksPath
+// because bare repos don't run client-side hooks.
+func TestCloneAutoWiresHooksPath(t *testing.T) {
+	// Build a source repo with a .githooks/ directory committed.
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	if err := exec.Command("git", "init", src).Run(); err != nil {
+		t.Fatalf("init src: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test User"},
+	} {
+		if err := exec.Command("git", append([]string{"-C", src}, args...)...).Run(); err != nil {
+			t.Fatalf("git config %v: %v", args, err)
+		}
+	}
+
+	hooksDir := filepath.Join(src, ".githooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir .githooks: %v", err)
+	}
+	hookContent := "#!/bin/sh\n# test pre-push hook\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(hookContent), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	if err := exec.Command("git", "-C", src, "add", ".").Run(); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := exec.Command("git", "-C", src, "commit", "-m", "init with hooks").Run(); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	// Each Clone variant should leave the destination with core.hooksPath=.githooks.
+	variants := []struct {
+		name string
+		run  func(g *Git, dest string) error
+	}{
+		{"Clone", func(g *Git, dest string) error { return g.Clone(src, dest) }},
+		{"CloneBranch", func(g *Git, dest string) error {
+			// Default branch name varies (main/master). Detect it from src HEAD.
+			out, err := exec.Command("git", "-C", src, "symbolic-ref", "--short", "HEAD").Output()
+			if err != nil {
+				return fmt.Errorf("detect default branch: %w", err)
+			}
+			return g.CloneBranch(src, dest, strings.TrimSpace(string(out)))
+		}},
+		{"CloneWithReference", func(g *Git, dest string) error {
+			return g.CloneWithReference(src, dest, src)
+		}},
+	}
+
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			dst := filepath.Join(tmp, "dst-"+v.name)
+			g := NewGit(tmp)
+			if err := v.run(g, dst); err != nil {
+				t.Fatalf("%s: %v", v.name, err)
+			}
+
+			out, err := exec.Command("git", "-C", dst, "config", "--get", "core.hooksPath").Output()
+			if err != nil {
+				t.Fatalf("reading core.hooksPath after %s: %v", v.name, err)
+			}
+			got := strings.TrimSpace(string(out))
+			if got != ".githooks" {
+				t.Errorf("%s: core.hooksPath = %q, want %q — auto-wiring regressed (see configureHooksPath in git.go)", v.name, got, ".githooks")
+			}
+		})
+	}
+}
+
+// TestCloneBareSkipsHooksPath verifies that bare clones deliberately do NOT
+// set core.hooksPath — bare repos don't have a working tree and don't run
+// client-side hooks, so wiring the config would be noise. The gastown shared
+// repo architecture uses bare clones as object stores for worktrees, and the
+// worktrees inherit core.hooksPath from the worktree's own clone config.
+func TestCloneBareSkipsHooksPath(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	if err := exec.Command("git", "init", src).Run(); err != nil {
+		t.Fatalf("init src: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test User"},
+	} {
+		_ = exec.Command("git", append([]string{"-C", src}, args...)...).Run()
+	}
+
+	// Give src a .githooks dir so configureHooksPath would fire if called.
+	if err := os.MkdirAll(filepath.Join(src, ".githooks"), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".githooks", "pre-push"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	_ = exec.Command("git", "-C", src, "add", ".").Run()
+	_ = exec.Command("git", "-C", src, "commit", "-m", "init").Run()
+
+	dst := filepath.Join(tmp, "dst.git")
+	g := NewGit(tmp)
+	if err := g.CloneBare(src, dst); err != nil {
+		t.Fatalf("CloneBare: %v", err)
+	}
+
+	// Bare clone: config is in dst itself, not dst/.git.
+	out, _ := exec.Command("git", "-C", dst, "config", "--get", "core.hooksPath").Output()
+	if got := strings.TrimSpace(string(out)); got != "" {
+		t.Errorf("CloneBare: core.hooksPath = %q, want empty — bare clones should skip hook wiring", got)
+	}
+}
