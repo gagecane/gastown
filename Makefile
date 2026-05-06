@@ -99,11 +99,16 @@ install: check-up-to-date build
 	@# Covers go-install defaults and mise-managed Go installs (any version).
 	@# gu-wcxv: without the mise path, PATH-resolved `gt` could stay on the
 	@# old binary after install, defeating the rebuild.
+	@# gu-ep7f: after removing, symlink back so agent configs referencing the
+	@# mise path still resolve to the canonical binary.
 	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY) \
 	            $(HOME)/.local/share/mise/installs/go/*/bin/$(BINARY); do \
-		if [ -f "$$bad" ]; then \
+		if [ -f "$$bad" ] && [ ! -L "$$bad" ]; then \
 			echo "Removing stale $$bad (use make install, not go install)"; \
 			rm -f "$$bad"; \
+			ln -sf $(INSTALL_DIR)/$(BINARY) "$$bad"; \
+		elif [ -L "$$bad" ]; then \
+			ln -sf $(INSTALL_DIR)/$(BINARY) "$$bad"; \
 		fi; \
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
@@ -134,11 +139,16 @@ safe-install: check-up-to-date check-forward-only build
 	@# Covers go-install defaults and mise-managed Go installs (any version).
 	@# gu-wcxv: without the mise path, PATH-resolved `gt` could stay on the
 	@# old binary after install, defeating the rebuild.
+	@# gu-ep7f: after removing, symlink back so agent configs referencing the
+	@# mise path still resolve to the canonical binary.
 	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY) \
 	            $(HOME)/.local/share/mise/installs/go/*/bin/$(BINARY); do \
-		if [ -f "$$bad" ]; then \
+		if [ -f "$$bad" ] && [ ! -L "$$bad" ]; then \
 			echo "Removing stale $$bad (use make install, not go install)"; \
 			rm -f "$$bad"; \
+			ln -sf $(INSTALL_DIR)/$(BINARY) "$$bad"; \
+		elif [ -L "$$bad" ]; then \
+			ln -sf $(INSTALL_DIR)/$(BINARY) "$$bad"; \
 		fi; \
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY) (daemon NOT restarted)"
