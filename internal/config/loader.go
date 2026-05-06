@@ -2587,6 +2587,23 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 		rc.ExecWrapper = resolveExecWrapper(rigPath)
 	}
 
+	// For polecat (autonomous) sessions, splice in the agent's
+	// NonInteractive.PromptFlag so a single preset can serve both interactive
+	// (crew) and headless (polecat) use. Upstream design intent (gu-ah42):
+	// AgentPresetInfo.NonInteractive was defined as metadata; this wires it
+	// up so splits like kiro-opus vs kiro-opus-auto aren't needed.
+	//
+	// PromptFlag is whitespace-split so presets can carry multi-flag values
+	// like "--no-interactive --trust-all-tools". Subcommand and OutputFlag
+	// are not consumed here yet — Gemini/cursor/codex autonomous invocations
+	// currently go through role_agents overrides, not this path.
+	if role == constants.RolePolecat && rc.NonInteractive != nil && rc.NonInteractive.PromptFlag != "" {
+		extra := strings.Fields(rc.NonInteractive.PromptFlag)
+		if len(extra) > 0 {
+			rc.Args = append(rc.Args, extra...)
+		}
+	}
+
 	// Copy env vars to avoid mutating caller map
 	resolvedEnv := make(map[string]string, len(envVars)+2)
 	for k, v := range envVars {

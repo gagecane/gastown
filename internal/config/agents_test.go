@@ -1446,15 +1446,14 @@ func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
 }
 
 // TestKiroPreset verifies the Kiro built-in preset matches the fields required
-// for autonomous polecat operation (see gu-axjw, gu-xpgx, gu-m3ne). Kiro-cli
-// 2.0+ defaults to TUI mode which blocks non-interactive sessions; --classic
-// bypasses the TUI. --no-interactive runs the full agentic loop in one turn so
-// formula steps (including `gt done`) complete without idling at the prompt.
-// As of gu-m3ne, kiro-cli is wrapped by `gt polecat-kiro-wrapper` so that
-// clean-exit-mid-task deaths (gu-ronb) get recovered via --resume instead of
-// leaving beads HOOKED and triggering scheduler respawn storms. The env vars
-// disable interactive pagers and git prompts that would otherwise hang
-// background sessions.
+// for autonomous polecat operation (see gu-axjw, gu-xpgx, gu-m3ne, gu-ah42).
+// Args are the interactive-safe base (--trust-all-tools for auto-approve);
+// the headless --no-interactive flag lives in NonInteractive.PromptFlag and is
+// appended by BuildStartupCommandWithAgentOverride when role=polecat. Kiro-cli
+// is wrapped by `gt polecat-kiro-wrapper` so clean-exit-mid-task deaths
+// (gu-ronb) get recovered via --resume instead of leaving beads HOOKED and
+// triggering scheduler respawn storms. The env vars disable interactive
+// pagers and git prompts that would otherwise hang background sessions.
 func TestKiroPreset(t *testing.T) {
 	t.Parallel()
 	p := GetAgentPreset(AgentKiro)
@@ -1464,7 +1463,7 @@ func TestKiroPreset(t *testing.T) {
 	if p.Command != "gt" {
 		t.Errorf("Command = %q, want gt (wraps kiro-cli via polecat-kiro-wrapper)", p.Command)
 	}
-	wantArgs := []string{"polecat-kiro-wrapper", "--", "kiro-cli", "chat", "--classic", "--no-interactive", "--trust-all-tools"}
+	wantArgs := []string{"polecat-kiro-wrapper", "--", "kiro-cli", "chat", "--trust-all-tools"}
 	if len(p.Args) != len(wantArgs) {
 		t.Errorf("Args = %v, want %v", p.Args, wantArgs)
 	} else {
@@ -1473,6 +1472,17 @@ func TestKiroPreset(t *testing.T) {
 				t.Errorf("Args[%d] = %q, want %q", i, p.Args[i], a)
 			}
 		}
+	}
+	// NonInteractive.PromptFlag carries polecat-only flags (--no-interactive)
+	// appended by BuildStartupCommandWithAgentOverride when role=polecat.
+	if p.NonInteractive == nil {
+		t.Fatal("NonInteractive is nil")
+	}
+	if p.NonInteractive.Subcommand != "chat" {
+		t.Errorf("NonInteractive.Subcommand = %q, want chat", p.NonInteractive.Subcommand)
+	}
+	if p.NonInteractive.PromptFlag != "--no-interactive" {
+		t.Errorf("NonInteractive.PromptFlag = %q, want --no-interactive", p.NonInteractive.PromptFlag)
 	}
 	wantEnv := map[string]string{
 		"GIT_TERMINAL_PROMPT": "0",

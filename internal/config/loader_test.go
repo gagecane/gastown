@@ -4685,6 +4685,78 @@ func TestBuildStartupCommandWithAgentOverride_IncludesGTRoot(t *testing.T) {
 	}
 }
 
+// TestBuildStartupCommandWithAgentOverride_PolecatAppendsNonInteractive verifies
+// gu-ah42: when role=polecat AND the resolved agent preset has a
+// NonInteractive.PromptFlag, those flag(s) are appended to Args before the
+// command is built. Non-polecat roles (crew, witness, refinery, etc.) keep
+// the interactive-safe base Args untouched.
+func TestBuildStartupCommandWithAgentOverride_PolecatAppendsNonInteractive(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	if err := SaveTownSettings(TownSettingsPath(townRoot), NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	t.Run("polecat role appends kiro --no-interactive", func(t *testing.T) {
+		cmd, err := BuildStartupCommandWithAgentOverride(
+			map[string]string{"GT_ROLE": "testrig/polecats/shiny"},
+			rigPath,
+			"",
+			"kiro",
+		)
+		if err != nil {
+			t.Fatalf("BuildStartupCommandWithAgentOverride: %v", err)
+		}
+		if !strings.Contains(cmd, "--no-interactive") {
+			t.Errorf("expected --no-interactive (from kiro NonInteractive.PromptFlag) in polecat command: %q", cmd)
+		}
+		if !strings.Contains(cmd, "--trust-all-tools") {
+			t.Errorf("expected --trust-all-tools (from base Args) in polecat command: %q", cmd)
+		}
+	})
+
+	t.Run("crew role does not append --no-interactive", func(t *testing.T) {
+		cmd, err := BuildStartupCommandWithAgentOverride(
+			map[string]string{"GT_ROLE": "testrig/crew/dom"},
+			rigPath,
+			"",
+			"kiro",
+		)
+		if err != nil {
+			t.Fatalf("BuildStartupCommandWithAgentOverride: %v", err)
+		}
+		if strings.Contains(cmd, "--no-interactive") {
+			t.Errorf("did not expect --no-interactive for crew role: %q", cmd)
+		}
+		if !strings.Contains(cmd, "--trust-all-tools") {
+			t.Errorf("expected --trust-all-tools (from base Args) in crew command: %q", cmd)
+		}
+	})
+
+	t.Run("claude polecat unchanged (NonInteractive=nil)", func(t *testing.T) {
+		// Claude preset has NonInteractive=nil (native headless via
+		// --dangerously-skip-permissions), so the polecat path must not
+		// mutate its Args.
+		cmd, err := BuildStartupCommandWithAgentOverride(
+			map[string]string{"GT_ROLE": "testrig/polecats/shiny"},
+			rigPath,
+			"",
+			"claude",
+		)
+		if err != nil {
+			t.Fatalf("BuildStartupCommandWithAgentOverride: %v", err)
+		}
+		if !strings.Contains(cmd, "--dangerously-skip-permissions") {
+			t.Errorf("expected Claude base Args intact: %q", cmd)
+		}
+	})
+}
+
 func TestQuoteForShell(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

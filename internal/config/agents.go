@@ -460,13 +460,16 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		// and trigger scheduler respawn storms (observed ta-5r5q, gu-l4uj,
 		// gu-m3ne on 2026-05-05).
 		//
-		// Kiro-cli flags (passed through by the wrapper):
-		//   --classic         bypasses TUI (kiro-cli 2.0+ defaults to TUI
-		//                     which blocks non-interactive polecats)
-		//   --no-interactive  runs full agentic loop in one turn (analogous
-		//                     to Claude Code's --dangerously-skip-permissions)
-		//   --trust-all-tools auto-approves tool calls for autonomous op
-		Args: []string{"polecat-kiro-wrapper", "--", "kiro-cli", "chat", "--classic", "--no-interactive", "--trust-all-tools"},
+		// Args are the INTERACTIVE-SAFE base — --trust-all-tools auto-approves
+		// tool calls but keeps kiro-cli in its normal interactive REPL so a
+		// crew user can chat with it directly. The headless-runner flag
+		// (--no-interactive, which makes kiro-cli execute one agentic turn
+		// and exit) is carried in NonInteractive.PromptFlag and appended by
+		// BuildStartupCommandWithAgentOverride when role=polecat (gu-ah42).
+		// Splitting the args this way means `kiro` can serve both crew and
+		// polecat roles without needing separate kiro-opus vs kiro-opus-auto
+		// preset entries.
+		Args: []string{"polecat-kiro-wrapper", "--", "kiro-cli", "chat", "--trust-all-tools"},
 		Env: map[string]string{
 			// Disable interactive git auth prompts that would hang non-interactive sessions.
 			"GIT_TERMINAL_PROMPT": "0",
@@ -485,17 +488,22 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		SupportsForkSession: false,
 		NonInteractive: &NonInteractiveConfig{
 			Subcommand: "chat",
-			PromptFlag: "--no-interactive --trust-all-tools",
+			// PromptFlag is appended to Args (whitespace-split) for polecat
+			// role by BuildStartupCommandWithAgentOverride. --no-interactive
+			// makes kiro-cli process the prompt as a single agentic run and
+			// exit — without it, polecats idle at the interactive `!>` prompt
+			// and never call `gt done` (gu-xpgx).
+			PromptFlag: "--no-interactive",
 		},
-		PromptMode:         "arg",
-		ConfigDir:          ".kiro",
-		HooksProvider:      "kiro",
-		HooksDir:           ".kiro/agents",
-		HooksSettingsFile:  "gastown.json",
-		HooksInformational: false,
+		PromptMode:           "arg",
+		ConfigDir:            ".kiro",
+		HooksProvider:        "kiro",
+		HooksDir:             ".kiro/agents",
+		HooksSettingsFile:    "gastown.json",
+		HooksInformational:   false,
 		ReadyDelayMs:         8000,
 		InstructionsFile:     "AGENTS.md",
-		ContinueFlag:        "--resume",
+		ContinueFlag:         "--resume",
 		HasTurnBoundaryDrain: true,
 	},
 	AgentPi: {
@@ -780,11 +788,20 @@ func runtimeConfigFromAgentInfo(preset AgentPreset, info *AgentPresetInfo) *Runt
 		}
 	}
 
+	// Copy NonInteractive to avoid shared references (the preset is a shared
+	// singleton; mutating it would leak across sessions).
+	var nonInteractive *NonInteractiveConfig
+	if info.NonInteractive != nil {
+		ni := *info.NonInteractive
+		nonInteractive = &ni
+	}
+
 	rc := &RuntimeConfig{
-		Provider: string(info.Name),
-		Command:  info.Command,
-		Args:     append([]string(nil), info.Args...),
-		Env:      envCopy,
+		Provider:       string(info.Name),
+		Command:        info.Command,
+		Args:           append([]string(nil), info.Args...),
+		Env:            envCopy,
+		NonInteractive: nonInteractive,
 	}
 
 	if preset == AgentClaude && rc.Command == "claude" {

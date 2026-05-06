@@ -75,7 +75,7 @@ Environment:
   GT_KIRO_MAX_ITERATIONS     override recovery cap (default 5)
 
 Usage (from gastown agent preset):
-  gt polecat-kiro-wrapper -- kiro-cli chat --classic --no-interactive \
+  gt polecat-kiro-wrapper -- kiro-cli chat --no-interactive \
       --trust-all-tools --agent gastown`
 
 func init() {

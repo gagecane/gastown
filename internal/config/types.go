@@ -818,6 +818,20 @@ type RuntimeConfig struct {
 	// Produces: exec env VAR=val ... exitbox run --profile=gastown-polecat -- claude ...
 	ExecWrapper []string `json:"exec_wrapper,omitempty"`
 
+	// NonInteractive carries the agent preset's non-interactive settings so
+	// that role-aware command building (e.g. polecat) can append headless
+	// flags (PromptFlag) or swap subcommands without requiring separate
+	// interactive/autonomous agent entries. nil means the agent has no
+	// distinct non-interactive mode (e.g. Claude which is natively headless
+	// via --dangerously-skip-permissions). Populated by
+	// runtimeConfigFromAgentInfo from AgentPresetInfo.NonInteractive and
+	// deep-copied by normalizeRuntimeConfig.
+	//
+	// Consumed by BuildStartupCommandWithAgentOverride when role=polecat:
+	// PromptFlag is whitespace-split and appended to Args before the command
+	// is built. See gu-ah42.
+	NonInteractive *NonInteractiveConfig `json:"non_interactive,omitempty"`
+
 	// ResolvedAgent is the agent name that was resolved during config lookup.
 	// Set by ResolveRoleAgentConfig / resolveAgentConfigInternal so that
 	// BuildStartupCommand can export GT_AGENT for process detection.
@@ -989,6 +1003,10 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	if rc.Instructions != nil {
 		i := *rc.Instructions
 		rc.Instructions = &i
+	}
+	if rc.NonInteractive != nil {
+		ni := *rc.NonInteractive
+		rc.NonInteractive = &ni
 	}
 
 	if rc.Provider == "" {
