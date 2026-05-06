@@ -95,4 +95,23 @@ while read local_ref local_sha remote_ref remote_sha; do
   fi
 done
 
+# Branch/integration checks passed. Now run local CI gates (build + vet + test)
+# via scripts/pre-push-check.sh. These match CI's "Test" job and catch
+# breaking changes before they reach main — where they'd otherwise only
+# surface AFTER push, since crew pushes directly to main without a PR queue.
+#
+# The script is skipped automatically if:
+#   - GT_SKIP_PREPUSH=1 is set (emergency escape)
+#   - scripts/pre-push-check.sh is missing (older checkouts)
+#   - 'go' is not on PATH (non-Go developer environments)
+#
+# See scripts/pre-push-check.sh for gate details and env hygiene.
+
+script_dir=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+if [[ -n "$script_dir" ]] && [[ -x "$script_dir/scripts/pre-push-check.sh" ]]; then
+  if ! "$script_dir/scripts/pre-push-check.sh"; then
+    exit 1
+  fi
+fi
+
 exit 0

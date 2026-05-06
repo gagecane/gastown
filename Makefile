@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag clean test test-e2e-container check-up-to-date hooks hooks-test
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-version-tag clean test test-e2e-container check-up-to-date hooks hooks-test verify verify-integration
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -189,6 +189,26 @@ clean:
 
 test:
 	go test ./...
+
+# verify: Run the same gates CI's "Test" job runs, locally, before pushing.
+# This is the last line of defense before changes reach origin/main. Identical
+# to what the .githooks/pre-push hook runs on every push. Env vars that could
+# mask test failures (GT_TOWN_ROOT, GT_ROOT) are unset so tests run with a
+# clean env matching CI. Does not run `-tags=integration` tests; use
+# `make verify-integration` for those (requires Docker).
+#
+# Usage:
+#   make verify                # before pushing, or as a sanity check
+#   GT_SKIP_PREPUSH=1 git push # emergency escape if verify is broken
+verify:
+	@bash scripts/pre-push-check.sh
+
+# verify-integration: Everything `verify` does, plus the -tags=integration
+# tests that CI's "Integration Tests" job runs. Requires Docker (tests spin
+# up a dolt container). Takes ~5min.
+verify-integration: verify
+	@echo "==> verify-integration: running -tags=integration tests (requires Docker)"
+	@go test ./... -tags=integration -count=1 -timeout 15m
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

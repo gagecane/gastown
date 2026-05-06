@@ -60,8 +60,27 @@ git add <files>       # Stage code changes
 bd sync               # Commit beads changes
 git commit -m "..."   # Commit code
 bd sync               # Commit any new beads changes
-git push              # Push to remote
+make verify           # Run local CI gates (build + vet + tests) — MANDATORY before push
+git push              # Push to remote (pre-push hook runs verify again as a backstop)
 ```
+
+### Verify before push
+
+Crew workers push directly to `main` — there is no PR queue, and breaking
+changes reach CI only AFTER they've landed on main. `make verify` runs the
+same gates CI's "Test" job runs (build, vet, full unit-test suite) with the
+developer-shell env vars unset so tests don't pass locally for the wrong
+reason (e.g. `GT_TOWN_ROOT` inherited from your shell masking a bogus
+workspace marker in a test — that's how the 2026-05-06 CI regression slipped
+through; see commit 77c54398).
+
+The `.githooks/pre-push` hook runs the same checks automatically if you've
+wired up hooks via `make hooks` (recommended). Escape hatch:
+`GT_SKIP_PREPUSH=1 git push` for emergencies.
+
+Integration tests (Docker + dolt container) are NOT in the default gate —
+run `make verify-integration` for those if you've touched scheduler, sling,
+or daemon code.
 
 ### Key Concepts
 
