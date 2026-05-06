@@ -5,8 +5,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"syscall"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestWriteAndRemoveACPPid(t *testing.T) {
@@ -83,7 +84,10 @@ func TestIsACPActive_DeadProcess(t *testing.T) {
 	}
 
 	pidPath := ACPPidFilePath(tmpDir)
-	deadPid := 999999
+	// Spawn-and-reap a child to obtain a PID that is guaranteed not to be in
+	// use. Hard-coded values like 999999 can collide with a live process on
+	// busy hosts and make IsACPActive incorrectly return true.
+	deadPid := testutil.DeadPID(t)
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(deadPid)), 0644); err != nil {
 		t.Fatalf("failed to write PID file: %v", err)
 	}
@@ -236,10 +240,11 @@ func TestRemoveACPPid_RemovesStalePid(t *testing.T) {
 		t.Fatalf("failed to create mayor dir: %v", err)
 	}
 
-	initialPid := syscall.Getpid() - 10000
-	if initialPid < 1 {
-		initialPid = 1
-	}
+	// Obtain a PID that we have just reaped, guaranteeing it is not alive.
+	// The older `syscall.Getpid() - 10000` pattern can collide with a real
+	// live process on busy hosts, which makes the "stale" PID look alive
+	// and breaks the rest of the test's assumptions.
+	initialPid := testutil.DeadPID(t)
 	pidPath := ACPPidFilePath(tmpDir)
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(initialPid)), 0644); err != nil {
 		t.Fatalf("failed to write stale PID file: %v", err)

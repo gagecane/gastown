@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestWriteAndReadPIDFile(t *testing.T) {
@@ -99,9 +101,12 @@ func TestVerifyPIDOwnership_DeadProcess(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "test.pid")
 
-	// Use a PID that's almost certainly not running (very high number)
-	// Note: on some systems, max PID is 32768 or 4194304
-	deadPID := 4194300
+	// Spawn a child process that exits immediately and grab its PID. After
+	// exec.Cmd.Run() returns, the child has been reaped and the PID is free
+	// on the kernel side. Using a dynamically-obtained dead PID avoids the
+	// fragile "pick a number near pid_max and hope nothing's using it"
+	// pattern, which fails on hosts where the PID space has wrapped.
+	deadPID := testutil.DeadPID(t)
 	if _, err := writePIDFile(pidFile, deadPID); err != nil {
 		t.Fatalf("writePIDFile: %v", err)
 	}

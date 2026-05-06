@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -420,9 +421,11 @@ func TestIsRunningFromPID_StalePIDReturnsNoError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write a PID file pointing to a process that doesn't exist.
-	// PID 2^22-1 (4194303) is extremely unlikely to be in use.
-	stalePID := 4194303
+	// Spawn a child process that exits immediately and use its (now reaped)
+	// PID as the stale PID. This is more reliable than hard-coding a high
+	// PID number, which fails on hosts where the PID space has wrapped near
+	// pid_max and a real process happens to sit at the guessed value.
+	stalePID := testutil.DeadPID(t)
 	pidFile := filepath.Join(daemonDir, "daemon.pid")
 	if _, err := writePIDFile(pidFile, stalePID); err != nil {
 		t.Fatal(err)
