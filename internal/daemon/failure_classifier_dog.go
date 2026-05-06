@@ -2,9 +2,9 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,7 +285,7 @@ func (d *Daemon) loadFailureSignatures() []FailureSignature {
 // Fingerprint dimensions: rig × signature_id.
 // Invariant under repeated escalations, rig-level drift, and patrol restarts.
 func classifierFingerprint(rigName, signatureID string) string {
-	h := sha1.New() //nolint:gosec // G401: sha1 used for stable fingerprint, not cryptography
+	h := fnv.New128a()
 	fmt.Fprintf(h, "%s::%s", rigName, signatureID)
 	return fmt.Sprintf("%x", h.Sum(nil))[:12]
 }

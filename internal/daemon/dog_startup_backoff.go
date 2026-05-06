@@ -42,7 +42,7 @@ func dogBackoffAgentID(dogName string) string {
 //
 // Returns (skip, reason). When skip is true, reason contains a human-readable
 // sentence suitable for a log line. When the daemon has no restart tracker
-// (e.g., in tests that don't initialise one), this always returns (false, "").
+// (e.g., in tests that don't initialize one), this always returns (false, "").
 func (d *Daemon) isDogInStartupBackoff(dogName string) (bool, string) {
 	if d == nil || d.restartTracker == nil {
 		return false, ""

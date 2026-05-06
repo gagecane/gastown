@@ -234,14 +234,13 @@ func (w *AutoDispatchWatcher) handleLine(line string) {
 // because it's called from tests via the line-based handler.
 func (w *AutoDispatchWatcher) processSessionDeath(ev sessionDeathEvent) {
 	caller, _ := ev.Payload["caller"].(string)
-	reason, _ := ev.Payload["reason"].(string)
 	session, _ := ev.Payload["session"].(string)
 	agent, _ := ev.Payload["agent"].(string)
 
 	// Only planned polecat exits trigger event-driven refill.
 	// Crash/reap/zombie/shutdown explicitly should NOT trigger a replacement —
 	// those indicate problems that need investigation by Witness.
-	if !isPlannedPolecatExit(caller, reason) {
+	if !isPlannedPolecatExit(caller) {
 		return
 	}
 
@@ -294,7 +293,7 @@ func (w *AutoDispatchWatcher) tryClaim(rig string) bool {
 // by `gt done` in internal/cmd/done.go. Crash detection, zombie cleanup, idle
 // reap, orphan cleanup, and town shutdown all use different callers/reasons
 // and are deliberately excluded.
-func isPlannedPolecatExit(caller, reason string) bool {
+func isPlannedPolecatExit(caller string) bool {
 	switch caller {
 	case "gt done":
 		// Polecat completed normally. reason is "self-clean: done means idle"

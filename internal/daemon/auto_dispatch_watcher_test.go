@@ -389,32 +389,31 @@ func TestIsPlannedPolecatExit(t *testing.T) {
 	tests := []struct {
 		name   string
 		caller string
-		reason string
 		want   bool
 	}{
 		// Planned polecat exits — trigger dispatch.
-		{"gt_done_completed", "gt done", "self-clean: done means idle", true},
-		{"gt_done_deferred", "gt done", "self-clean: done means idle", true}, // same reason string today
+		{"gt_done_completed", "gt done", true},
+		{"gt_done_deferred", "gt done", true},
 
 		// Daemon-originated — always skip.
-		{"daemon_crash", "daemon", "crash detected by daemon health check", false},
-		{"daemon_idle_reap", "daemon", "idle-reap: working-no-hook, idle 20m0s", false},
-		{"daemon_exiting_reap", "daemon", "idle-reap: exiting, idle 16m21s", false},
+		{"daemon_crash", "daemon", false},
+		{"daemon_idle_reap", "daemon", false},
+		{"daemon_exiting_reap", "daemon", false},
 
 		// Operator-initiated — always skip.
-		{"gt_doctor_zombie", "gt doctor", "zombie cleanup", false},
-		{"gt_doctor_orphan", "gt doctor", "orphan cleanup", false},
-		{"gt_down", "gt down", "gt down", false},
+		{"gt_doctor_zombie", "gt doctor", false},
+		{"gt_doctor_orphan", "gt doctor", false},
+		{"gt_down", "gt down", false},
 
 		// Unknown caller — skip (conservative default).
-		{"unknown_caller", "witness", "arbitrary", false},
-		{"empty_caller", "", "anything", false},
+		{"unknown_caller", "witness", false},
+		{"empty_caller", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isPlannedPolecatExit(tt.caller, tt.reason)
+			got := isPlannedPolecatExit(tt.caller)
 			if got != tt.want {
-				t.Errorf("isPlannedPolecatExit(%q, %q) = %v, want %v", tt.caller, tt.reason, got, tt.want)
+				t.Errorf("isPlannedPolecatExit(%q) = %v, want %v", tt.caller, got, tt.want)
 			}
 		})
 	}

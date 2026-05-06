@@ -16,8 +16,8 @@ func readTmpInodeUsage(path string) (tmpInodeUsage, error) {
 		return tmpInodeUsage{}, fmt.Errorf("statfs %s: %w", path, err)
 	}
 
-	total := uint64(st.Files)
-	free := uint64(st.Ffree)
+	total := st.Files
+	free := st.Ffree
 	var used uint64
 	if total >= free {
 		used = total - free

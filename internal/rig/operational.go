@@ -75,7 +75,7 @@ func IsRigParkedOrDockedE(townRoot, rigName string) (bool, string, error) {
 // an error — wisp is local filesystem state.
 func checkParkedOrDocked(townRoot, rigName string) (bool, string, error) {
 	// Layer 1: Wisp (fast, local, ephemeral). Only parked is checked here —
-	// "gt rig dock" never writes to wisp. We still recognise wisp
+	// "gt rig dock" never writes to wisp. We still recognize wisp
 	// status=docked because legacy callers (daemon.isRigOperational)
 	// treated it as authoritative.
 	wispCfg := wisp.NewConfig(townRoot, rigName)

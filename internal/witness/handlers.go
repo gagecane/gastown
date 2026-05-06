@@ -1567,7 +1567,7 @@ func extractMRIDFromSubmit(out string) string {
 	return ""
 }
 
-// stripANSI removes CSI escape sequences (colour/style) so MR IDs parsed from
+// stripANSI removes CSI escape sequences (color/style) so MR IDs parsed from
 // styled CLI output aren't contaminated with control characters.
 func stripANSI(s string) string {
 	var b strings.Builder

@@ -1058,7 +1058,7 @@ func getGitState(worktreePath string) (*GitState, error) {
 	// is exactly "commits we would lose if we nuked this worktree".
 	//
 	// Guard with a remote-existence check: a repo with no remotes (e.g. a
-	// freshly-initialised test fixture) has no remote refs to subtract, so
+	// freshly-initialized test fixture) has no remote refs to subtract, so
 	// `--not --remotes` would count every commit as unpushed. Preserve the
 	// existing contract of reporting 0 unpushed in that case.
 	remotesCheck := exec.Command("git", "for-each-ref", "--count=1", "refs/remotes/")

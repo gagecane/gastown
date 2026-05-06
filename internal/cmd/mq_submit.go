@@ -39,7 +39,7 @@ var issuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
 //
 // The issue/timestamp separator changed from "@" to "--" on 2026-04-28 for
 // compatibility with git.amazon.com pre-receive hooks that reject "@" in
-// refs. Both forms are recognised here so the merge queue, `gt done`, and
+// refs. Both forms are recognized here so the merge queue, `gt done`, and
 // refinery post-merge cleanup record the un-suffixed bead ID in the MR's
 // source_issue field (gu-y2w). Without stripping "--<ts>", the bug bead
 // stays HOOKED after merge because `bd close gu-aei--moiitf15` fails.
