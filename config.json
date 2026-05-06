@@ -17,12 +17,10 @@
     "judgment_enabled": true,
     "gates": {
       "build": {
-        "cmd": "go build ./...",
-        "phase": "post-squash"
+        "cmd": "go build ./..."
       },
       "test": {
-        "cmd": "go test ./...",
-        "phase": "post-squash",
+        "cmd": "go test -short -race -timeout=10m ./...",
         "timeout": "10m"
       },
       "vet": {

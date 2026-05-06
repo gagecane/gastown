@@ -169,3 +169,39 @@ func dropStaleBeadsDatabases() error {
 	fmt.Fprintf(os.Stderr, "[dropStaleBeadsDatabases] cleaned: %v\n", dropped)
 	return nil
 }
+
+// dropTestDatabases drops the "hq" database and all beads_* databases from the
+// shared Dolt container. Unlike cleanStaleBeadsDatabases, this can be called
+// multiple times (no sync.Once) for per-subtest isolation.
+func dropTestDatabases(t *testing.T) {
+	t.Helper()
+	port := testutil.DoltContainerPort()
+	if port == "" {
+		return
+	}
+	dsn := "root:@tcp(127.0.0.1:" + port + ")/"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return
+	}
+	_, _ = db.Exec("DROP DATABASE IF EXISTS `hq`")
+	rows, err := db.Query("SHOW DATABASES")
+	if err != nil {
+		return
+	}
+	var dbs []string
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil && strings.HasPrefix(name, "beads_") {
+			dbs = append(dbs, name)
+		}
+	}
+	rows.Close()
+	for _, name := range dbs {
+		_, _ = db.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+	}
+}

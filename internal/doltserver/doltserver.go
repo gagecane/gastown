@@ -1516,7 +1516,14 @@ func Start(townRoot string) error {
 	if running {
 		// If data directory doesn't exist, this is an orphaned server (e.g., user
 		// deleted ~/gt and re-ran gt install). Kill it so we can start fresh.
+		// Exception: when GT_DOLT_PORT is set and no local PID was found, the
+		// server is externally managed (Docker container, CI, etc.) — reuse it.
 		if _, statErr := os.Stat(config.DataDir); os.IsNotExist(statErr) {
+			if pid == 0 && os.Getenv("GT_DOLT_PORT") != "" {
+				// Externally-managed server (e.g., Docker container in CI).
+				// No local data directory needed — the server manages its own storage.
+				return nil
+			}
 			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", pid, config.DataDir)
 			if stopErr := Stop(townRoot); stopErr != nil {
 				if pid > 0 {
@@ -2359,24 +2366,36 @@ func InitRig(townRoot, rigName string) (serverWasRunning bool, created bool, err
 		// If the data directory doesn't exist, the server is orphaned (e.g., user
 		// deleted ~/gt and re-ran gt install while an old server was still running).
 		// Stop the orphaned server and fall through to the offline init path.
+		// Exception: when GT_DOLT_PORT is set and no local PID was found, the
+		// server is externally managed (Docker container, CI, etc.) — use it.
 		if _, err := os.Stat(config.DataDir); os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
-			if stopErr := Stop(townRoot); stopErr != nil {
-				// Force-kill if graceful stop fails (no PID file for orphaned server)
-				if runningPID > 0 {
-					if proc, err := os.FindProcess(runningPID); err == nil {
-						_ = proc.Kill()
+			if runningPID == 0 && os.Getenv("GT_DOLT_PORT") != "" {
+				// Externally-managed server — use CREATE DATABASE path.
+				// Data directory is inside the container, not on the host.
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
+				if stopErr := Stop(townRoot); stopErr != nil {
+					// Force-kill if graceful stop fails (no PID file for orphaned server)
+					if runningPID > 0 {
+						if proc, err := os.FindProcess(runningPID); err == nil {
+							_ = proc.Kill()
+						}
 					}
 				}
+				running = false
 			}
-			running = false
 		}
 	}
 
 	if running {
 		// Server is running: use CREATE DATABASE which both creates the
 		// directory and registers the database with the live server.
-		if err := serverExecSQL(townRoot, fmt.Sprintf("CREATE DATABASE `%s`", rigName)); err != nil {
+		// Ensure data directory exists for cmd.Dir (external servers may not
+		// have a local data directory yet).
+		if err := os.MkdirAll(config.DataDir, 0755); err != nil {
+			return true, false, fmt.Errorf("creating data directory: %w", err)
+		}
+		if err := serverExecSQL(townRoot, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", rigName)); err != nil {
 			return true, false, fmt.Errorf("creating database on running server: %w", err)
 		}
 		// Wait for the new database to appear in the server's in-memory catalog.

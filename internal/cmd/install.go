@@ -515,6 +515,18 @@ func canReuseInstallDoltServer(townRoot string, port int) bool {
 		return false
 	}
 
+	// Fresh install: town directory doesn't exist yet, so we can't verify
+	// ownership via ListDatabases/VerifyServerDataDir. If GT_DOLT_PORT was
+	// explicitly set (e.g., CI container or shared server), trust that the
+	// caller knows what they're doing and allow reuse. The install will
+	// configure this town to use the server.
+	if _, err := os.Stat(townRoot); os.IsNotExist(err) {
+		if os.Getenv("GT_DOLT_PORT") != "" {
+			return true
+		}
+		return false
+	}
+
 	// Only reuse a server that already belongs to this town. A random
 	// MySQL-compatible service or another town's Dolt server on the same port
 	// must remain a preflight failure; otherwise install can mutate the target

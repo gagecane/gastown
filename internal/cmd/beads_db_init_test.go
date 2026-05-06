@@ -137,7 +137,16 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 	configureTestGitIdentity(t, tmpDir)
 	gtBinary := buildGT(t)
 
+	// dropHQDatabase drops the shared "hq" database and any beads_* databases
+	// between subtests to prevent collisions. All subtests share one Dolt
+	// container and each gt install creates a database named "hq".
+	dropHQDatabase := func(t *testing.T) {
+		t.Helper()
+		dropTestDatabases(t)
+	}
+
 	t.Run("TrackedRepoWithExistingPrefix", func(t *testing.T) {
+		dropHQDatabase(t)
 		// GitHub Issue #72: gt rig add --adopt should detect existing prefix and init database.
 		// When a tracked beads repo has config.yaml with a prefix, adopt should detect it.
 
@@ -200,6 +209,7 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 	})
 
 	t.Run("TrackedRepoWithNoIssuesRequiresPrefix", func(t *testing.T) {
+		dropHQDatabase(t)
 		// Regression test: When a tracked beads repo has NO issues (fresh init),
 		// gt rig add must use the --prefix flag since there's nothing to detect from.
 
@@ -259,6 +269,7 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 	})
 
 	t.Run("TrackedRepoWithPrefixMismatchErrors", func(t *testing.T) {
+		dropHQDatabase(t)
 		// Test that when --prefix is explicitly provided but doesn't match
 		// the prefix detected from the database, gt rig add fails with an error.
 		// Prefix detection uses config.yaml (not metadata.json), which survives
@@ -305,6 +316,7 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 	})
 
 	t.Run("TrackedRepoWithNoIssuesFallsBackToDerivedPrefix", func(t *testing.T) {
+		dropHQDatabase(t)
 		// Test the fallback behavior: when a tracked beads repo has NO issues
 		// and NO --prefix is provided, gt rig add should derive prefix from rig name.
 
@@ -358,6 +370,7 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 	})
 
 	t.Run("MissingMetadataTriggersReInit", func(t *testing.T) {
+		dropHQDatabase(t)
 		// Exercises the rig.go:691 code path where metadata.json is missing
 		// and gt rig add --adopt must re-initialize the database.
 		// This simulates an edge case (e.g., legacy repo, manual deletion)
