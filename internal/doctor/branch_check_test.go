@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestParseWorktreeConflict(t *testing.T) {
@@ -177,13 +179,20 @@ func TestCheckoutWithWorktreeRetry_BranchNotFound(t *testing.T) {
 }
 
 // runGit is a test helper that runs git commands and fails the test on error.
+//
+// CRITICAL: Env uses testutil.CleanGitEnv to strip GIT_DIR/GIT_WORK_TREE/
+// GIT_INDEX_FILE and other repo-pointing env vars. Without this, a test
+// invoked from a git hook (e.g. pre-push running `make verify`) inherits
+// GIT_DIR pointing at the real pushing repo, and fixture pushes silently
+// land on the ambient repo. See bead gu-h2ru for the incident that
+// motivated hardening every runGit helper this way.
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(),
+	cmd.Env = testutil.CleanGitEnv(
 		"GIT_AUTHOR_NAME=Test",
 		"GIT_AUTHOR_EMAIL=test@test.com",
 		"GIT_COMMITTER_NAME=Test",

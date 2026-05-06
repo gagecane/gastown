@@ -72,6 +72,30 @@ fi
 
 unset GT_TOWN_ROOT GT_ROOT GT_SESSION GT_RIG GT_POLECAT
 
+# --- Scrub git-repo env vars so hook-inherited GIT_DIR doesn't leak -------
+#
+# When git runs a hook (e.g. pre-push), it exports GIT_DIR, GIT_WORK_TREE,
+# GIT_INDEX_FILE, etc. pointing at the pushing repo (see githooks(5) and
+# git(1) "Discussion" on environment). Those vars are inherited by every
+# child process this script spawns — including `go test ./...`, whose tests
+# run `git` via os/exec. When a test creates its own bare repo in t.TempDir()
+# and runs `git push <fixture_remote> main`, git reads GIT_DIR from the
+# environment instead of the test's cmd.Dir and silently operates on the
+# REAL pushing repo. The test's push then lands on the real .repo.git, and
+# the subsequent outer `git push origin main` propagates the pollution all
+# the way to the remote.
+#
+# This is how gu-h2ru's test-fixture commits ("add dirty.txt" by user "Test")
+# reached https://github.com/gagecane/gastown main. See the bead for the
+# full forensic trail. Unsetting these vars here matches the environment
+# that `go test ./...` sees when invoked from a plain shell.
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_NAMESPACE \
+      GIT_PREFIX GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS \
+      GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+
 # --- Gate 1: go build -----------------------------------------------------
 
 echo "pre-push: go build ./... (compile check)" >&2
