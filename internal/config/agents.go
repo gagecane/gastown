@@ -755,30 +755,46 @@ func loadAgentRegistryFromPathLocked(path string) error {
 		return err
 	}
 
-	// Merge each user override onto a clone of the appropriate base preset,
-	// so fields the user omitted are inherited instead of zero-valued.
-	// See PR #3723 (exact-name inheritance) and gu-g3ks (prefix-name
-	// inheritance for model-variant aliases like "kiro-opus-auto").
+	// First pass: peek each entry's `extends` target so we can merge in
+	// topological order rather than Go's random map-iteration order.
+	// Without this, a chain like kiro-opus-46 → kiro-opus → kiro fails
+	// non-deterministically — if kiro-opus-46 happens to iterate before
+	// kiro-opus, its extends lookup misses (kiro-opus not yet in registry)
+	// and falls back silently to the prefix-match warning path. (gu-417s)
+	extendsByName := make(map[string]string, len(userRegistry.Agents))
 	for name, rawPreset := range userRegistry.Agents {
-		// First-pass: peek at the Extends field so we know whether the
-		// user opted out of / explicitly chose a base preset. We discard
-		// any other fields from this peek — they're reapplied in the
-		// second-pass unmarshal onto the base clone.
 		var peek struct {
 			Extends string `json:"extends"`
 		}
 		if err := json.Unmarshal(rawPreset, &peek); err != nil {
-			return err
+			return fmt.Errorf("agents.json entry %q: %w", name, err)
 		}
+		extendsByName[name] = peek.Extends
+	}
 
-		base, parentName, source := resolveBasePresetLocked(name, peek.Extends)
+	order, err := topoSortUserAgents(extendsByName)
+	if err != nil {
+		return fmt.Errorf("agents.json: %w", err)
+	}
+
+	// Second pass: merge each user override onto a clone of the appropriate
+	// base preset, in topo-sorted order so user→user extends always finds
+	// its parent already present in the registry. Fields the user omitted
+	// are inherited instead of zero-valued. See PR #3723 (exact-name
+	// inheritance), gu-g3ks (prefix-name inheritance for model-variant
+	// aliases), and gu-417s (topo-sort for user→user extends chains).
+	for _, name := range order {
+		rawPreset := userRegistry.Agents[name]
+		extends := extendsByName[name]
+
+		base, parentName, source := resolveBasePresetLocked(name, extends)
 		if base == nil {
 			base = &AgentPresetInfo{}
 		}
 
-		// Second-pass: apply the user's explicit fields on top of the
-		// base clone. Scalar and map fields in the JSON override the
-		// inherited values; omitted fields keep the parent's value.
+		// Apply the user's explicit fields on top of the base clone.
+		// Scalar and map fields in the JSON override the inherited
+		// values; omitted fields keep the parent's value.
 		if err := json.Unmarshal(rawPreset, base); err != nil {
 			return err
 		}
@@ -801,6 +817,96 @@ func loadAgentRegistryFromPathLocked(path string) error {
 
 	loadedPaths[path] = true
 	return nil
+}
+
+// topoSortUserAgents returns user-agent names in an order such that for
+// any entry N with `extends: X` where X is also a user entry, X appears
+// before N. Targets that are builtins, the ExtendsNone sentinel, or
+// unknown strings impose no ordering — they resolve correctly at merge
+// time against the pre-loaded builtin registry, and unknown targets are
+// handled by resolveBasePresetLocked's warning path.
+//
+// Ties (entries with no user-entry dependency at the current level) are
+// broken alphabetically, so the emit order is deterministic even when
+// Go's map iteration would otherwise vary between runs. (gu-417s)
+//
+// Cycles return an error listing the involved entries, rather than
+// silently producing one of several possible partial orderings.
+func topoSortUserAgents(extendsByName map[string]string) ([]string, error) {
+	userSet := make(map[string]struct{}, len(extendsByName))
+	for name := range extendsByName {
+		userSet[name] = struct{}{}
+	}
+
+	// dependents[x] = user-agent names that declare extends=x. Used to
+	// decrement indegree as we emit each node. indegree[n] counts how many
+	// user-entry parents of n are still unprocessed.
+	dependents := make(map[string][]string, len(extendsByName))
+	indegree := make(map[string]int, len(extendsByName))
+	for name := range extendsByName {
+		indegree[name] = 0
+	}
+	for name, ext := range extendsByName {
+		if ext == "" || ext == ExtendsNone {
+			continue
+		}
+		if _, ok := userSet[ext]; !ok {
+			// Builtin or unknown target — already present in the global
+			// registry (builtin) or handled by the warning path (unknown).
+			// Either way, no ordering constraint.
+			continue
+		}
+		if ext == name {
+			return nil, fmt.Errorf("agent %q declares extends=%q (self-loop)", name, ext)
+		}
+		dependents[ext] = append(dependents[ext], name)
+		indegree[name]++
+	}
+
+	// Kahn's algorithm with alphabetical tie-breaker for deterministic output.
+	ready := make([]string, 0, len(extendsByName))
+	for name, d := range indegree {
+		if d == 0 {
+			ready = append(ready, name)
+		}
+	}
+	sort.Strings(ready)
+
+	order := make([]string, 0, len(extendsByName))
+	for len(ready) > 0 {
+		// Pop alphabetically-smallest ready node.
+		n := ready[0]
+		ready = ready[1:]
+		order = append(order, n)
+
+		// Sort dependents so the insertion walk below is deterministic
+		// regardless of append order from the earlier loop (which ran
+		// over a map and so varies between runs).
+		deps := dependents[n]
+		sort.Strings(deps)
+		for _, dep := range deps {
+			indegree[dep]--
+			if indegree[dep] == 0 {
+				idx := sort.SearchStrings(ready, dep)
+				ready = append(ready, "")
+				copy(ready[idx+1:], ready[idx:])
+				ready[idx] = dep
+			}
+		}
+	}
+
+	if len(order) != len(extendsByName) {
+		cyclic := make([]string, 0, len(extendsByName)-len(order))
+		for name, d := range indegree {
+			if d > 0 {
+				cyclic = append(cyclic, name)
+			}
+		}
+		sort.Strings(cyclic)
+		return nil, fmt.Errorf("extends cycle detected among user agents: %v", cyclic)
+	}
+
+	return order, nil
 }
 
 // LoadAgentRegistry loads agent definitions from a JSON file and merges with built-ins.
