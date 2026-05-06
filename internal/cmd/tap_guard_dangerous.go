@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -123,19 +122,9 @@ func printDangerousBlock(reason, originalCommand string) {
 }
 
 // extractCommand extracts the bash command from Claude Code hook input JSON.
+// Delegates to the shared helper in tap_guard_util.go.
 func extractCommand(input []byte) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var hookInput struct {
-		ToolInput struct {
-			Command string `json:"command"`
-		} `json:"tool_input"`
-	}
-	if err := json.Unmarshal(input, &hookInput); err != nil {
-		return ""
-	}
-	return hookInput.ToolInput.Command
+	return extractCommandFromHookInput(input)
 }
 
 // matchesAllFragments returns true if all fragments appear in the command.
