@@ -743,10 +743,9 @@ func TestCheckPolecatHealth_MassDeathFiresForIdlePolecats(t *testing.T) {
 	}
 
 	// Simulate 11 simultaneous idle polecat deaths (the gu-but4 evidence count).
-	// Each (rig, name) pair above maps to a unique session name because the
-	// registry assigns each rig a distinct prefix. Three rigs contain a polecat
-	// named "obsidian"; they become cc-obsidian, cws-obsidian, ralph-obsidian —
-	// the real production session names we'd see during a simultaneous death.
+	// All share the same fake bd/tmux, but checkPolecatHealth builds a unique
+	// session name per (rigName, polecatName) pair via session.PolecatSessionName
+	// (now that each rig has a distinct registered prefix above).
 	polecats := []struct{ rig, name string }{
 		{"casc_crud", "obsidian"},
 		{"casc_e2e", "furiosa"},
