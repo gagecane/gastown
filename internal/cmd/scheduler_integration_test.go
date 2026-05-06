@@ -1285,7 +1285,23 @@ func TestScheduleBead_RefusesClosed(t *testing.T) {
 
 // TestScheduleBead_RefusesTombstone verifies that scheduleBead refuses to
 // schedule a tombstoned bead. Companion to TestScheduleBead_RefusesClosed.
+//
+// SKIPPED: modern `bd` (≥1.0) no longer supports `bd close --tombstone` —
+// tombstone is not in the documented status set (open/in_progress/blocked/
+// deferred/closed). Use `bd delete` for permanent removal, which destroys
+// the bead rather than setting a tombstone status. The gastown code still
+// defensively checks `info.Status == "tombstone"` (sling_schedule.go,
+// sling.go, sling_dispatch.go) in case stale beads from older bd versions
+// appear in the wild, and the unit test TestExecuteSling_TombstoneBead
+// (sling_closed_guard_test.go) exercises that guard via a mocked bd stub
+// that returns status:"tombstone" synthetically. The integration test
+// below has no way to reliably create the input condition with modern bd.
+//
+// Remove this skip if `bd close --tombstone` is restored or if a different
+// bd command starts producing status=tombstone beads.
 func TestScheduleBead_RefusesTombstone(t *testing.T) {
+	t.Skip("modern bd no longer supports --tombstone; guard is tested via TestExecuteSling_TombstoneBead unit test")
+
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
 	beadID := createTestBead(t, rigPath, "Tombstone bead refused by scheduleBead")
