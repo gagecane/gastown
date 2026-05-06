@@ -936,6 +936,152 @@ func TestResetAbandonedBead_ResetsWhenWorkNotOnMain(t *testing.T) {
 	}
 }
 
+// TestResetAbandonedBead_MassDeathRateLimited covers the gu-pq2q acceptance
+// criterion: fire 10 simultaneous dead-session events and verify only N are
+// dispatched within the 1-minute window (N = MaxRedispatchesPerMinute cap).
+// This is the integration test that exercises the rate limiter plumbing
+// end-to-end through resetAbandonedBead.
+func TestResetAbandonedBead_MassDeathRateLimited(t *testing.T) {
+	// Not parallel: overrides package-level verifyCommitOnMain and mutates
+	// the package-level redispatch limiter registry.
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil // work NOT on main → would normally reset
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	resetRedispatchLimitersForTest()
+	t.Cleanup(resetRedispatchLimitersForTest)
+
+	// Use a dedicated rig name so we don't collide with other tests that
+	// share the package-level limiter map.
+	const rigName = "testrig-mass-death"
+
+	// Lower the cap via settings/config.json so this test runs quickly and
+	// doesn't depend on the compiled-in default. Zero disables rate limiting,
+	// so we pick a small positive cap.
+	const cap = 3
+	tmpDir := writeWitnessCapConfig(t, cap)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) >= 1 && args[0] == "show" {
+				return `[{"status":"hooked"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	const attempts = 10
+	var recovered, blocked int
+	for i := 0; i < attempts; i++ {
+		beadID := fmt.Sprintf("gt-storm-%02d", i)
+		polecat := fmt.Sprintf("alpha-%02d", i)
+		if resetAbandonedBead(bd, tmpDir, rigName, beadID, polecat, nil) {
+			recovered++
+		} else {
+			blocked++
+		}
+	}
+
+	if recovered != cap {
+		t.Errorf("recovered = %d, want %d (cap)", recovered, cap)
+	}
+	if blocked != attempts-cap {
+		t.Errorf("blocked = %d, want %d", blocked, attempts-cap)
+	}
+
+	// Exactly `cap` bd update --status=open calls must have been issued.
+	var updates int
+	for _, call := range mock.calls {
+		if strings.Contains(call, "update") && strings.Contains(call, "--status=open") {
+			updates++
+		}
+	}
+	if updates != cap {
+		t.Errorf("bd update --status=open calls = %d, want %d (rate-limited beads must NOT be reset)", updates, cap)
+	}
+}
+
+// TestResetAbandonedBead_RateLimitCooldown verifies that once rate-limited
+// beads fall outside the sliding window, the limiter allows new dispatches
+// again. We simulate window expiry by reaching into the package-level limiter
+// and pruning its state manually (we cannot mock time.Now across
+// resetAbandonedBead without a larger refactor).
+func TestResetAbandonedBead_RateLimitCooldown(t *testing.T) {
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	resetRedispatchLimitersForTest()
+	t.Cleanup(resetRedispatchLimitersForTest)
+
+	const rigName = "testrig-cooldown"
+	const cap = 2
+	tmpDir := writeWitnessCapConfig(t, cap)
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) >= 1 && args[0] == "show" {
+				return `[{"status":"hooked"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// Saturate the bucket.
+	for i := 0; i < cap; i++ {
+		if !resetAbandonedBead(bd, tmpDir, rigName, fmt.Sprintf("gt-a-%d", i), "pc", nil) {
+			t.Fatalf("setup call %d should have succeeded", i)
+		}
+	}
+	if resetAbandonedBead(bd, tmpDir, rigName, "gt-blocked", "pc", nil) {
+		t.Fatal("over-cap call should have been rate-limited")
+	}
+
+	// Expire the window by back-dating every tracked timestamp past the cutoff.
+	limiter := getRedispatchLimiter(rigName, cap)
+	limiter.mu.Lock()
+	expired := time.Now().Add(-2 * RedispatchRateLimitWindow)
+	for i := range limiter.dispatchedAt {
+		limiter.dispatchedAt[i] = expired
+	}
+	limiter.mu.Unlock()
+
+	if !resetAbandonedBead(bd, tmpDir, rigName, "gt-after-cooldown", "pc", nil) {
+		t.Error("resetAbandonedBead after window expiry = false, want true (capacity should have returned)")
+	}
+}
+
+// writeWitnessCapConfig writes a minimal settings/config.json at the returned
+// tempDir path that sets operational.witness.max_redispatches_per_minute to
+// the provided value. Used by rate-limiter integration tests to avoid
+// depending on the compiled-in default.
+func writeWitnessCapConfig(t *testing.T, cap int) string {
+	t.Helper()
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	cfg := fmt.Sprintf(`{
+  "operational": {
+    "witness": {
+      "max_redispatches_per_minute": %d
+    }
+  }
+}
+`, cap)
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	return dir
+}
+
 func TestBeadRecoveredField_DefaultFalse(t *testing.T) {
 	t.Parallel()
 	// BeadRecovered should default to false (zero value)

@@ -2935,6 +2935,21 @@ then either close the bead or reset the respawn counter.`,
 		return false
 	}
 
+	// Per-rig re-dispatch rate limiter (gu-pq2q / gu-ronb backstop).
+	// Caps how many distinct beads can trigger a RECOVERED_BEAD dispatch per
+	// rig per minute. When the cap is hit (mass-death event), we leave the
+	// bead in its hooked/in_progress state so the next patrol cycle re-
+	// discovers and retries it, and send a single consolidated
+	// SPAWN_STORM_RATE_LIMITED mail to mayor instead of per-bead mail floods.
+	maxPerMinute := config.LoadOperationalConfig(trRoot).GetWitnessConfig().MaxRedispatchesPerMinuteV()
+	limiter := getRedispatchLimiter(rigName, maxPerMinute)
+	if !limiter.Allow(hookBead, time.Now().UTC()) {
+		if limiter.ShouldSendMail() {
+			sendSpawnStormRateLimitedMail(router, rigName, polecatName, hookBead, maxPerMinute, limiter)
+		}
+		return false
+	}
+
 	// Track respawn count for audit and storm detection.
 	respawnCount := RecordBeadRespawn(workDir, hookBead)
 
@@ -2985,6 +3000,59 @@ Please re-dispatch to an available polecat.`,
 	}
 
 	return true
+}
+
+// sendSpawnStormRateLimitedMail notifies mayor that the witness has hit the
+// per-rig re-dispatch rate limit and is deferring some beads to the next
+// patrol cycle. Called at most once per rate-limited episode by
+// resetAbandonedBead() (gated on limiter.ShouldSendMail). Includes the list
+// of beads currently rate-limited so mayor can inspect without chasing a
+// flood of per-bead mails.
+//
+// Nudge fallback is the same as for RECOVERED_BEAD — mail is preferred but
+// tmux nudges are more reliable when mail is jammed.
+func sendSpawnStormRateLimitedMail(router *mail.Router, rigName, triggerPolecat, triggerBead string, maxPerMinute int, limiter *redispatchLimiter) {
+	if router == nil {
+		return
+	}
+	beads := limiter.RateLimitedBeads()
+	beadSummary := triggerBead
+	if len(beads) > 0 {
+		beadSummary = strings.Join(beads, ", ")
+	}
+	subject := fmt.Sprintf("SPAWN_STORM_RATE_LIMITED %s (cap %d/min)", rigName, maxPerMinute)
+	body := fmt.Sprintf(`Witness re-dispatch rate limit reached for rig %s.
+
+Cap: %d RECOVERED_BEAD dispatches per minute (sliding window).
+Trigger polecat: %s/%s
+Trigger bead: %s
+Rate-limited beads in this episode: %s
+
+This is a mass-death backstop (gu-ronb / gu-pq2q). Rate-limited beads remain
+hooked/in_progress and will be re-evaluated on the next witness patrol cycle.
+Additional beads that hit the limit during this episode are queued silently
+to avoid a mail flood; this message is sent at most once per episode.
+
+If you are seeing this repeatedly the underlying spawn-storm trigger
+(kiro-cli stop-hook gap, OOM, panic, etc.) needs investigation. Check
+'gt patrol scan' output and polecat death causes before raising the cap.`,
+		rigName, maxPerMinute, rigName, triggerPolecat, triggerBead, beadSummary)
+	msg := &mail.Message{
+		From:     fmt.Sprintf("%s/witness", rigName),
+		To:       "mayor/",
+		Subject:  subject,
+		Priority: mail.PriorityUrgent,
+		Body:     body,
+	}
+	if err := router.Send(msg); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: failed to send SPAWN_STORM_RATE_LIMITED mail for %s: %v, attempting nudge fallback\n", rigName, err)
+		t := tmux.NewTmux()
+		nudgeMsg := fmt.Sprintf("SPAWN_STORM_RATE_LIMITED %s (cap %d/min, trigger %s) — mail send failed, investigate",
+			rigName, maxPerMinute, triggerBead)
+		if nudgeErr := t.NudgeSession(session.MayorSessionName(), nudgeMsg); nudgeErr != nil {
+			fmt.Fprintf(os.Stderr, "witness: nudge fallback to mayor also failed for %s: %v\n", rigName, nudgeErr)
+		}
+	}
 }
 
 // OrphanedBeadResult contains a single detected orphaned bead.

@@ -485,6 +485,17 @@ type WitnessThresholds struct {
 	// and escalated to mayor instead of re-dispatched (default 3).
 	MaxBeadRespawns *int `json:"max_bead_respawns,omitempty"`
 
+	// MaxRedispatchesPerMinute is the per-rig rate limit on bead re-dispatches
+	// from the witness. When the cap is reached within a 1-minute sliding
+	// window, rate-limited beads are left in hooked/in_progress status for the
+	// next patrol cycle to retry, and a single SPAWN_STORM_RATE_LIMITED mail
+	// is sent to mayor instead of per-bead RECOVERED_BEAD notifications.
+	// This is a mass-death backstop (gu-ronb / gu-pq2q): if 10 polecats die
+	// within 1 second, we dispatch at most N fresh spawns per minute rather
+	// than hitting the deacon and kiro-cli with a concurrent burst.
+	// Default 10. Set to 0 to disable rate limiting entirely.
+	MaxRedispatchesPerMinute *int `json:"max_redispatches_per_minute,omitempty"`
+
 	// DoneIntentStuckTimeout is how long a done-intent can be active before the
 	// session is considered stuck and restarted (default "60s").
 	DoneIntentStuckTimeout string `json:"done_intent_stuck_timeout,omitempty"`

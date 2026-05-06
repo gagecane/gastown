@@ -355,6 +355,9 @@ func TestWitnessThresholds_Defaults(t *testing.T) {
 	if got := wit.MaxBeadRespawnsV(); got != DefaultWitnessMaxBeadRespawns {
 		t.Errorf("MaxBeadRespawns: got %v, want %v", got, DefaultWitnessMaxBeadRespawns)
 	}
+	if got := wit.MaxRedispatchesPerMinuteV(); got != DefaultWitnessMaxRedispatchesPerMin {
+		t.Errorf("MaxRedispatchesPerMinute: got %v, want %v", got, DefaultWitnessMaxRedispatchesPerMin)
+	}
 	if got := wit.DoneIntentStuckTimeoutD(); got != DefaultWitnessDoneIntentStuckTimeout {
 		t.Errorf("DoneIntentStuckTimeout: got %v, want %v", got, DefaultWitnessDoneIntentStuckTimeout)
 	}
@@ -367,13 +370,15 @@ func TestWitnessThresholds_Overrides(t *testing.T) {
 	t.Parallel()
 
 	maxRespawns := 5
+	maxRedispatches := 25
 	op := &OperationalConfig{
 		Witness: &WitnessThresholds{
-			StartupStallThreshold:  "2m",
-			StartupActivityGrace:   "45s",
-			MaxBeadRespawns:        &maxRespawns,
-			DoneIntentStuckTimeout: "90s",
-			DoneIntentRecentGrace:  "15s",
+			StartupStallThreshold:    "2m",
+			StartupActivityGrace:     "45s",
+			MaxBeadRespawns:          &maxRespawns,
+			MaxRedispatchesPerMinute: &maxRedispatches,
+			DoneIntentStuckTimeout:   "90s",
+			DoneIntentRecentGrace:    "15s",
 		},
 	}
 
@@ -387,11 +392,32 @@ func TestWitnessThresholds_Overrides(t *testing.T) {
 	if got := wit.MaxBeadRespawnsV(); got != 5 {
 		t.Errorf("MaxBeadRespawns: got %v, want 5", got)
 	}
+	if got := wit.MaxRedispatchesPerMinuteV(); got != 25 {
+		t.Errorf("MaxRedispatchesPerMinute: got %v, want 25", got)
+	}
 	if got := wit.DoneIntentStuckTimeoutD(); got != 90*time.Second {
 		t.Errorf("DoneIntentStuckTimeout: got %v, want 90s", got)
 	}
 	if got := wit.DoneIntentRecentGraceD(); got != 15*time.Second {
 		t.Errorf("DoneIntentRecentGrace: got %v, want 15s", got)
+	}
+}
+
+func TestWitnessThresholds_MaxRedispatchesPerMinute(t *testing.T) {
+	t.Parallel()
+
+	// Zero means disabled — must be returned verbatim, not replaced with default.
+	zero := 0
+	op := &OperationalConfig{Witness: &WitnessThresholds{MaxRedispatchesPerMinute: &zero}}
+	if got := op.GetWitnessConfig().MaxRedispatchesPerMinuteV(); got != 0 {
+		t.Errorf("explicit 0: got %v, want 0 (disabled)", got)
+	}
+
+	// Negative values are defensive-reset to the default.
+	neg := -5
+	op = &OperationalConfig{Witness: &WitnessThresholds{MaxRedispatchesPerMinute: &neg}}
+	if got := op.GetWitnessConfig().MaxRedispatchesPerMinuteV(); got != DefaultWitnessMaxRedispatchesPerMin {
+		t.Errorf("negative override: got %v, want default %v", got, DefaultWitnessMaxRedispatchesPerMin)
 	}
 }
 

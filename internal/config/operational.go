@@ -115,6 +115,7 @@ const (
 	DefaultWitnessStartupStallThreshold  = 90 * time.Second
 	DefaultWitnessStartupActivityGrace   = 60 * time.Second
 	DefaultWitnessMaxBeadRespawns        = 3
+	DefaultWitnessMaxRedispatchesPerMin  = 10
 	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
 	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
 )
@@ -734,6 +735,22 @@ func (wt *WitnessThresholds) MaxBeadRespawnsV() int {
 		return *wt.MaxBeadRespawns
 	}
 	return DefaultWitnessMaxBeadRespawns
+}
+
+// MaxRedispatchesPerMinuteV returns the configured or default per-rig
+// re-dispatch rate limit (beads per minute). A value of 0 disables rate
+// limiting. Negative values fall back to the default (defensive: a negative
+// cap is almost certainly a misconfiguration and silently disabling would
+// mask it).
+func (wt *WitnessThresholds) MaxRedispatchesPerMinuteV() int {
+	if wt != nil && wt.MaxRedispatchesPerMinute != nil {
+		v := *wt.MaxRedispatchesPerMinute
+		if v < 0 {
+			return DefaultWitnessMaxRedispatchesPerMin
+		}
+		return v
+	}
+	return DefaultWitnessMaxRedispatchesPerMin
 }
 
 // DoneIntentStuckTimeoutD returns the configured or default done-intent stuck timeout.

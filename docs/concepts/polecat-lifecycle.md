@@ -330,6 +330,34 @@ The Witness DOES:
 - Respawn crashed sessions
 - Handle escalations from stuck polecats (polecats that explicitly asked for help)
 
+### Spawn-storm protection
+
+When a whole rig loses polecats at once (mass-death event — e.g. a kiro-cli
+stop-hook gap fires on every active session in the same second, see `gu-ronb`)
+the naive recovery path is:
+
+1. Each dead polecat's bead is detected by `DetectOrphanedBeads`.
+2. `resetAbandonedBead` resets each bead and mails the deacon to re-dispatch.
+3. Deacon spawns N fresh polecats concurrently — if they hit the same trigger,
+   the storm repeats.
+
+Two layered guards prevent this amplification loop from running away:
+
+| Layer | Scope | Where | What it caps |
+|-------|-------|-------|--------------|
+| Per-bead circuit breaker | one bead | `ShouldBlockRespawn` / spawn-count ledger | How many times a *single* bead can bounce before escalation to mayor (`operational.witness.max_bead_respawns`, default 3). |
+| Per-rig rate limiter | whole rig | `redispatchLimiter` in `internal/witness/redispatch_rate_limiter.go` | How many *distinct* beads a rig can re-dispatch per minute (`operational.witness.max_redispatches_per_minute`, default 10; set to 0 to disable). Uses a sliding window. |
+
+When the per-rig cap is hit within a 1-minute window, `resetAbandonedBead`
+skips the reset+mail step for that bead — the bead stays in
+`hooked`/`in_progress` so the next patrol cycle re-discovers it and retries
+once capacity returns. Mayor receives a single consolidated
+`SPAWN_STORM_RATE_LIMITED` mail for the episode rather than a per-bead flood.
+
+This is a backstop, not the primary fix — if rate-limiting fires repeatedly,
+the underlying polecat-death trigger still needs investigation (`gt patrol
+scan`, death-cause review, runtime stop-hook debugging).
+
 ## Polecat Identity
 
 **Key insight:** Polecat *identity* is permanent; sessions are ephemeral, sandboxes are persistent.
