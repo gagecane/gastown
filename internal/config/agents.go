@@ -3,12 +3,20 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 )
+
+// ExtendsNone is the sentinel value for the `extends` field that disables
+// both explicit and implicit (prefix-match) preset inheritance. A custom
+// agent with `"extends": "none"` starts from a zero-valued preset, as if
+// no builtin existed with a related name. Useful for fully standalone
+// custom agents that happen to share a hyphen-prefix with a builtin.
+const ExtendsNone = "none"
 
 // AgentPreset identifies a supported LLM agent runtime.
 // These presets provide sensible defaults that can be overridden in config.
@@ -56,6 +64,26 @@ const (
 type AgentPresetInfo struct {
 	// Name is the preset identifier (e.g., "claude", "gemini", "codex", "cursor", "auggie", "amp", "copilot").
 	Name AgentPreset `json:"name"`
+
+	// Extends names a parent preset to inherit defaults from at load time.
+	// When set to a preset name (e.g., "kiro"), the registry loader clones
+	// that preset as the base and merges this entry's fields on top — so
+	// any field the user omits falls through to the parent's value.
+	//
+	// When empty, the loader first tries an exact name match against the
+	// builtins, then falls back to hyphen-prefix matching (longest wins):
+	// an entry named "kiro-opus-auto" automatically inherits from the
+	// builtin "kiro" preset. This lets users write minimal model-variant
+	// entries like {"args": ["--model", "opus-4.7"]} without re-declaring
+	// the full CLI invocation.
+	//
+	// Set to ExtendsNone ("none") to explicitly disable both explicit and
+	// implicit inheritance — useful for fully standalone custom agents
+	// that happen to share a hyphen-prefix with a builtin.
+	//
+	// See gu-g3ks for the rationale (silent shadowing of builtin preset
+	// changes across towns' custom agents.json files).
+	Extends string `json:"extends,omitempty"`
 
 	// Command is the CLI binary to invoke.
 	Command string `json:"command"`
@@ -644,6 +672,65 @@ func initRegistryLocked() {
 	registryInitialized = true
 }
 
+// resolveBasePresetLocked picks the base preset to clone when merging a user
+// override entry. Resolution order:
+//
+//  1. Explicit opt-out: extends == ExtendsNone ("none") → no base (fully
+//     standalone custom entry, fields default to zero).
+//  2. Explicit extends: extends names a known preset → clone that preset.
+//     Unknown extends targets log a warning and fall through to implicit
+//     resolution, so a typo in `extends` doesn't silently bypass inheritance.
+//  3. Exact name match: name == an existing preset → clone that preset
+//     (preserves the pre-existing behavior where {"opencode": {"command":
+//     "opencode"}} inherits the rest of the builtin opencode preset).
+//  4. Prefix match: name is `<preset>-<suffix>` → clone the builtin
+//     `<preset>` (longest prefix wins), e.g., "kiro-opus-auto" → "kiro".
+//
+// Returns (base clone, parent preset name, source). source is one of:
+// "none" (opt-out), "extends" (explicit), "exact" (same-name override),
+// "prefix" (auto prefix-match), or "" (no inheritance applied).
+//
+// Caller must hold registryMu.
+func resolveBasePresetLocked(name, extends string) (*AgentPresetInfo, string, string) {
+	// 1. Explicit opt-out: start from zero.
+	if extends == ExtendsNone {
+		return &AgentPresetInfo{}, "", "none"
+	}
+
+	// 2. Explicit extends: honor user's declared parent if it exists.
+	if extends != "" {
+		if parent, ok := globalRegistry.Agents[extends]; ok && parent != nil {
+			return cloneAgentPresetInfo(parent), extends, "extends"
+		}
+		// Unknown extends target: warn and fall through to implicit
+		// resolution so a typo ("extneds":"kiro") doesn't silently leave
+		// the entry with zero defaults.
+		fmt.Fprintf(os.Stderr,
+			"warning: agent %q declares extends=%q but no preset with that name exists; falling back to name-based inheritance\n",
+			name, extends)
+	}
+
+	// 3. Exact name match (existing behavior for same-name overrides).
+	if parent, ok := globalRegistry.Agents[name]; ok && parent != nil {
+		return cloneAgentPresetInfo(parent), name, "exact"
+	}
+
+	// 4. Hyphen-prefix match: "kiro-opus-auto" → "kiro".
+	// Progressive longest-match, same as resolveAgentByPrefix in loader.go.
+	if strings.Contains(name, "-") {
+		parts := strings.Split(name, "-")
+		for i := len(parts) - 1; i >= 1; i-- {
+			candidate := strings.Join(parts[:i], "-")
+			if parent, ok := globalRegistry.Agents[candidate]; ok && parent != nil {
+				return cloneAgentPresetInfo(parent), candidate, "prefix"
+			}
+		}
+	}
+
+	// No inheritance candidate found.
+	return nil, "", ""
+}
+
 // loadAgentRegistryFromPath loads agent definitions from a JSON file and merges with built-ins.
 // Caller must hold registryMu write lock.
 func loadAgentRegistryFromPathLocked(path string) error {
@@ -668,19 +755,48 @@ func loadAgentRegistryFromPathLocked(path string) error {
 		return err
 	}
 
-	// Merge each user override onto a clone of the built-in preset, so fields
-	// the user omitted (Env, ConfigDir, HooksDir, NonInteractive, etc.) are
-	// inherited instead of zero-valued. See PR #3723 (gastownhall/gastown).
+	// Merge each user override onto a clone of the appropriate base preset,
+	// so fields the user omitted are inherited instead of zero-valued.
+	// See PR #3723 (exact-name inheritance) and gu-g3ks (prefix-name
+	// inheritance for model-variant aliases like "kiro-opus-auto").
 	for name, rawPreset := range userRegistry.Agents {
-		merged := cloneAgentPresetInfo(globalRegistry.Agents[name])
-		if merged == nil {
-			merged = &AgentPresetInfo{}
+		// First-pass: peek at the Extends field so we know whether the
+		// user opted out of / explicitly chose a base preset. We discard
+		// any other fields from this peek — they're reapplied in the
+		// second-pass unmarshal onto the base clone.
+		var peek struct {
+			Extends string `json:"extends"`
 		}
-		if err := json.Unmarshal(rawPreset, merged); err != nil {
+		if err := json.Unmarshal(rawPreset, &peek); err != nil {
 			return err
 		}
-		merged.Name = AgentPreset(name)
-		globalRegistry.Agents[name] = merged
+
+		base, parentName, source := resolveBasePresetLocked(name, peek.Extends)
+		if base == nil {
+			base = &AgentPresetInfo{}
+		}
+
+		// Second-pass: apply the user's explicit fields on top of the
+		// base clone. Scalar and map fields in the JSON override the
+		// inherited values; omitted fields keep the parent's value.
+		if err := json.Unmarshal(rawPreset, base); err != nil {
+			return err
+		}
+		base.Name = AgentPreset(name)
+
+		// Make the coupling visible. Prefix-match inheritance is the most
+		// surprising case (the bug from gu-g3ks): a builtin preset change
+		// silently applies to every entry whose name starts with it. Log
+		// at load time so operators see the chain. "exact" and "extends"
+		// are intentional and don't need a warning.
+		if source == "prefix" && parentName != "" {
+			fmt.Fprintf(os.Stderr,
+				"agents.json: %q inherits from builtin preset %q (hyphen-prefix match). "+
+					"Set \"extends\":%q to make this explicit, or \"extends\":%q to opt out.\n",
+				name, parentName, parentName, ExtendsNone)
+		}
+
+		globalRegistry.Agents[name] = base
 	}
 
 	loadedPaths[path] = true
