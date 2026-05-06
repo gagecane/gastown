@@ -78,17 +78,47 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		if escalateSource != "" {
 			fmt.Printf("  Source: %s\n", escalateSource)
 		}
+		if escalateSignature != "" {
+			fmt.Printf("  Signature: %s\n", escalateSignature)
+		}
 		fmt.Printf("  Actions: %s\n", strings.Join(actions, ", "))
 		fmt.Printf("  Mail targets: %s\n", strings.Join(targets, ", "))
 		return nil
 	}
 
-	// Create escalation bead
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
+
+	// Dedup: if --dedup and --signature are set, check for an existing open
+	// escalation with the same signature. Bump its occurrence count instead of
+	// creating a new bead, keeping the HQ wisp table from growing unbounded.
+	if escalateDedup && escalateSignature != "" {
+		existing, existingFields, err := bd.FindOpenEscalationBySignature(escalateSignature)
+		if err == nil && existing != nil {
+			newCount := existingFields.OccurrenceCount + 1
+			_ = bd.BumpOccurrenceCount(existing.ID, escalateReason)
+			if escalateJSON {
+				out, _ := json.MarshalIndent(map[string]interface{}{
+					"id":               existing.ID,
+					"deduped":          true,
+					"occurrence_count": newCount,
+					"signature":        escalateSignature,
+				}, "", "  ")
+				fmt.Println(string(out))
+			} else {
+				emoji := severityEmoji(existingFields.Severity)
+				fmt.Printf("%s Escalation deduped: %s (occurrence %d)\n", emoji, existing.ID, newCount)
+			}
+			return nil
+		}
+		// Lookup failed or no match — fall through to create a new escalation.
+	}
+
+	// Create escalation bead
 	fields := &beads.EscalationFields{
 		Severity:    severity,
 		Reason:      escalateReason,
 		Source:      escalateSource,
+		Signature:   escalateSignature,
 		EscalatedBy: agentID,
 		EscalatedAt: time.Now().Format(time.RFC3339),
 		RelatedBead: escalateRelatedBead,

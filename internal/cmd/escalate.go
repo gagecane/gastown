@@ -16,7 +16,9 @@ var (
 	escalateStaleJSON   bool
 	escalateDryRun      bool
 	escalateCloseReason string
-	escalateStdin       bool // Read reason from stdin
+	escalateStdin       bool   // Read reason from stdin
+	escalateDedup       bool   // Bump existing open escalation instead of creating new one
+	escalateSignature   string // Stable dedup key (used with --dedup)
 )
 
 var escalateCmd = &cobra.Command{
@@ -145,6 +147,8 @@ func init() {
 	escalateCmd.Flags().BoolVar(&escalateJSON, "json", false, "Output as JSON")
 	escalateCmd.Flags().BoolVarP(&escalateDryRun, "dry-run", "n", false, "Show what would be done without executing")
 	escalateCmd.Flags().BoolVar(&escalateStdin, "stdin", false, "Read reason from stdin (avoids shell quoting issues)")
+	escalateCmd.Flags().BoolVar(&escalateDedup, "dedup", false, "Bump existing open escalation with matching --signature instead of creating a new one")
+	escalateCmd.Flags().StringVar(&escalateSignature, "signature", "", "Stable dedup key for recurring alerts (used with --dedup)")
 
 	// List subcommand flags
 	escalateListCmd.Flags().BoolVar(&escalateListJSON, "json", false, "Output as JSON")

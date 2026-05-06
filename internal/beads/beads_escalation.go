@@ -24,9 +24,13 @@ type EscalationFields struct {
 	ClosedReason      string // Resolution reason (empty if not closed)
 	RelatedBead       string // Optional: related bead ID (task, bug, etc.)
 	OriginalSeverity  string // Original severity before any re-escalation
-	ReescalationCount int    // Number of times this has been re-escalated
+	ReescalationCount int    // Number of times severity was bumped due to staleness
 	LastReescalatedAt string // When last re-escalated (empty if never)
 	LastReescalatedBy string // Who last re-escalated (empty if never)
+	// Dedup fields: track recurring alerts without creating N beads per cycle.
+	Signature        string // Stable dedup key for recurring alerts (e.g., "main_branch_test")
+	OccurrenceCount  int    // How many times this same alert has fired without resolution
+	LastOccurrenceAt string // When this alert last fired again (empty on first occurrence)
 }
 
 // FormatEscalationDescription creates a description string from escalation fields.
@@ -96,6 +100,19 @@ func FormatEscalationDescription(title string, fields *EscalationFields) string 
 		lines = append(lines, "last_reescalated_by: null")
 	}
 
+	// Dedup fields
+	if fields.Signature != "" {
+		lines = append(lines, fmt.Sprintf("signature: %s", fields.Signature))
+	} else {
+		lines = append(lines, "signature: null")
+	}
+	lines = append(lines, fmt.Sprintf("occurrence_count: %d", fields.OccurrenceCount))
+	if fields.LastOccurrenceAt != "" {
+		lines = append(lines, fmt.Sprintf("last_occurrence_at: %s", fields.LastOccurrenceAt))
+	} else {
+		lines = append(lines, "last_occurrence_at: null")
+	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -151,10 +168,59 @@ func ParseEscalationFields(description string) *EscalationFields {
 			fields.LastReescalatedAt = value
 		case "last_reescalated_by":
 			fields.LastReescalatedBy = value
+		case "signature":
+			fields.Signature = value
+		case "occurrence_count":
+			if n, err := strconv.Atoi(value); err == nil {
+				fields.OccurrenceCount = n
+			}
+		case "last_occurrence_at":
+			fields.LastOccurrenceAt = value
 		}
 	}
 
 	return fields
+}
+
+// FindOpenEscalationBySignature finds the first open escalation bead with a
+// matching signature field. Returns nil, nil, nil when no match is found.
+func (b *Beads) FindOpenEscalationBySignature(signature string) (*Issue, *EscalationFields, error) {
+	if signature == "" {
+		return nil, nil, nil
+	}
+	issues, err := b.ListEscalations()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, issue := range issues {
+		fields := ParseEscalationFields(issue.Description)
+		if fields.Signature == signature {
+			return issue, fields, nil
+		}
+	}
+	return nil, nil, nil
+}
+
+// BumpOccurrenceCount increments the occurrence_count on an escalation bead
+// and records the current time in last_occurrence_at. If updatedReason is
+// non-empty, the reason field is replaced with the latest occurrence details.
+func (b *Beads) BumpOccurrenceCount(id, updatedReason string) error {
+	target := b.forIssueID(id)
+	issue, err := target.Show(id)
+	if err != nil {
+		return err
+	}
+	if !HasLabel(issue, "gt:escalation") {
+		return fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
+	}
+	fields := ParseEscalationFields(issue.Description)
+	fields.OccurrenceCount++
+	fields.LastOccurrenceAt = time.Now().Format(time.RFC3339)
+	if updatedReason != "" {
+		fields.Reason = updatedReason
+	}
+	description := FormatEscalationDescription(issue.Title, fields)
+	return target.Update(id, UpdateOptions{Description: &description})
 }
 
 // CreateEscalationBead creates an escalation bead for tracking escalations.

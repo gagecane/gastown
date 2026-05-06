@@ -228,8 +228,10 @@ TOTAL_ISSUES=$(( ${#CRASHED[@]} + ${#STUCK[@]} + ${#STALLED[@]} ))
 if [ "$TOTAL_ISSUES" -ge 3 ]; then
   log ""
   log "MASS DEATH: $TOTAL_ISSUES agents down — escalating instead of restarting"
-  gt escalate "Mass agent death: $TOTAL_ISSUES agents down" \
-    -s CRITICAL 2>/dev/null || true
+  gt escalate "Mass agent death detected by stuck-agent-dog" \
+    -s CRITICAL \
+    --source=stuck-agent-dog --dedup --signature=stuck-agent-dog:mass-death \
+    -r "$TOTAL_ISSUES agents down" 2>/dev/null || true
 fi
 
 # --- Take action --------------------------------------------------------------
@@ -281,14 +283,24 @@ done
 for ENTRY in "${IDENTITY_HOOKED[@]}"; do
   IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
   log "Escalating identity-bead hook: $RIG/polecats/$PCAT -> $HOOK"
-  gt escalate "Polecat hooked to identity bead: $RIG/$PCAT -> $HOOK" \
-    -s HIGH 2>/dev/null || true
+  # Per-slot stable signature: one open escalation per hooked polecat slot.
+  SAFE_SIG="stuck-agent-dog:identity-hook:$(echo "$RIG/$PCAT" | tr '/' ':')"
+  gt escalate "Polecat hooked to identity bead: $RIG/$PCAT" \
+    -s HIGH \
+    --source=stuck-agent-dog --dedup --signature="$SAFE_SIG" \
+    -r "hook=$HOOK" 2>/dev/null || true
 done
 
-# Deacon issues: escalate
+# Deacon issues: escalate with a stable signature so repeated detections
+# (stuck_heartbeat_1234s, stuck_heartbeat_1250s, ...) map to one open bead.
 if [ -n "$DEACON_ISSUE" ]; then
   log "Escalating deacon issue: $DEACON_ISSUE"
-  gt escalate "Deacon $DEACON_ISSUE detected by stuck-agent-dog" -s HIGH 2>/dev/null || true
+  # Normalize: strip trailing numeric counter (_NNNs) to get a stable key.
+  DEACON_SIG=$(echo "$DEACON_ISSUE" | sed 's/_[0-9]*s$//')
+  gt escalate "Deacon $DEACON_SIG detected by stuck-agent-dog" \
+    -s HIGH \
+    --source=stuck-agent-dog --dedup --signature="stuck-agent-dog:deacon:$DEACON_SIG" \
+    -r "Latest detection: $DEACON_ISSUE" 2>/dev/null || true
 fi
 
 # --- Report -------------------------------------------------------------------

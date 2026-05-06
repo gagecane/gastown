@@ -514,6 +514,9 @@ func (d *Daemon) runGitCmd(dir string, timeout time.Duration, args ...string) er
 }
 
 // escalate sends an escalation message to the mayor via gt escalate.
+// Passes --dedup --signature=<source> so repeated patrol firings bump
+// occurrence_count on the existing bead instead of creating a new one,
+// keeping the HQ wisp table from growing unbounded between resolutions.
 func (d *Daemon) escalate(source, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -527,7 +530,12 @@ func (d *Daemon) escalate(source, message string) {
 	}
 	title := fmt.Sprintf("%s: %s", source, firstLine)
 
-	args := []string{"escalate", "-s", "HIGH", title}
+	args := []string{
+		"escalate", "-s", "HIGH", title,
+		"--source=" + source,
+		"--dedup",
+		"--signature=" + source,
+	}
 	if firstLine != message {
 		// Multi-line message: send the full body via --stdin to avoid any
 		// argv length / quoting concerns, and keep the title clean.

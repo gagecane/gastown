@@ -110,6 +110,39 @@ func TestFormatEscalationDescription(t *testing.T) {
 				"last_reescalated_by: deacon",
 			},
 		},
+		{
+			name:  "dedup fields",
+			title: "Recurring alert",
+			fields: &EscalationFields{
+				Severity:         "high",
+				Reason:           "CI failing again",
+				EscalatedBy:      "daemon",
+				EscalatedAt:      "2024-01-15T10:00:00Z",
+				Signature:        "main_branch_test",
+				OccurrenceCount:  3,
+				LastOccurrenceAt: "2024-01-15T11:30:00Z",
+			},
+			want: []string{
+				"signature: main_branch_test",
+				"occurrence_count: 3",
+				"last_occurrence_at: 2024-01-15T11:30:00Z",
+			},
+		},
+		{
+			name:  "null dedup fields",
+			title: "First occurrence",
+			fields: &EscalationFields{
+				Severity:    "medium",
+				Reason:      "First alert",
+				EscalatedBy: "daemon",
+				EscalatedAt: "2024-01-15T10:00:00Z",
+			},
+			want: []string{
+				"signature: null",
+				"occurrence_count: 0",
+				"last_occurrence_at: null",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -176,6 +209,29 @@ last_reescalated_by: deacon`,
 			},
 		},
 		{
+			name: "dedup fields parsed",
+			desc: `Recurring CI failure
+
+severity: high
+reason: gastown tests failing
+source: main_branch_test
+escalated_by: daemon
+escalated_at: 2024-01-15T08:00:00Z
+signature: main_branch_test
+occurrence_count: 5
+last_occurrence_at: 2024-01-15T12:00:00Z`,
+			want: &EscalationFields{
+				Severity:         "high",
+				Reason:           "gastown tests failing",
+				Source:           "main_branch_test",
+				EscalatedBy:      "daemon",
+				EscalatedAt:      "2024-01-15T08:00:00Z",
+				Signature:        "main_branch_test",
+				OccurrenceCount:  5,
+				LastOccurrenceAt: "2024-01-15T12:00:00Z",
+			},
+		},
+		{
 			name: "null values become empty strings",
 			desc: "severity: critical\nsource: null\nacked_by: null",
 			want: &EscalationFields{
@@ -239,6 +295,15 @@ last_reescalated_by: deacon`,
 			if got.LastReescalatedBy != tt.want.LastReescalatedBy {
 				t.Errorf("LastReescalatedBy = %q, want %q", got.LastReescalatedBy, tt.want.LastReescalatedBy)
 			}
+			if got.Signature != tt.want.Signature {
+				t.Errorf("Signature = %q, want %q", got.Signature, tt.want.Signature)
+			}
+			if got.OccurrenceCount != tt.want.OccurrenceCount {
+				t.Errorf("OccurrenceCount = %d, want %d", got.OccurrenceCount, tt.want.OccurrenceCount)
+			}
+			if got.LastOccurrenceAt != tt.want.LastOccurrenceAt {
+				t.Errorf("LastOccurrenceAt = %q, want %q", got.LastOccurrenceAt, tt.want.LastOccurrenceAt)
+			}
 		})
 	}
 }
@@ -257,6 +322,9 @@ func TestEscalationFieldsRoundTrip(t *testing.T) {
 		ReescalationCount: 1,
 		LastReescalatedAt: "2024-06-15T11:30:00Z",
 		LastReescalatedBy: "deacon",
+		Signature:         "patrol:witness:stuck",
+		OccurrenceCount:   4,
+		LastOccurrenceAt:  "2024-06-15T12:30:00Z",
 	}
 
 	formatted := FormatEscalationDescription("Escalation: Agent stuck", original)
@@ -297,6 +365,15 @@ func TestEscalationFieldsRoundTrip(t *testing.T) {
 	}
 	if parsed.LastReescalatedBy != original.LastReescalatedBy {
 		t.Errorf("LastReescalatedBy: got %q, want %q", parsed.LastReescalatedBy, original.LastReescalatedBy)
+	}
+	if parsed.Signature != original.Signature {
+		t.Errorf("Signature: got %q, want %q", parsed.Signature, original.Signature)
+	}
+	if parsed.OccurrenceCount != original.OccurrenceCount {
+		t.Errorf("OccurrenceCount: got %d, want %d", parsed.OccurrenceCount, original.OccurrenceCount)
+	}
+	if parsed.LastOccurrenceAt != original.LastOccurrenceAt {
+		t.Errorf("LastOccurrenceAt: got %q, want %q", parsed.LastOccurrenceAt, original.LastOccurrenceAt)
 	}
 }
 
