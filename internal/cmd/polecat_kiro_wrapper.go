@@ -240,6 +240,18 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr,
 				"polecat-kiro-wrapper: iteration %d — resuming kiro-cli with continuation prompt (gu-ronb recovery)\n",
 				iter)
+			// Before spawning iter N+1 we archive any uncommitted
+			// working-tree state from iter N. If iter N+1 crashes hard
+			// (e.g. wrapper itself dies, host reboots, OOM kill) the
+			// dirty work is still recoverable from the archive ref
+			// without needing mayor-level manual capture (gu-q319
+			// acceptance criterion; earlier gu-6jgi loss required
+			// commit 232dc03a to recover 89 lines manually).
+			if ref := captureDirtyWorkingTree(cfg.sessionName, iter-1); ref != "" {
+				fmt.Fprintf(os.Stderr,
+					"polecat-kiro-wrapper: archived dirty iter-%d tree to %s (recover with: git show %s)\n",
+					iter-1, ref, ref)
+			}
 		}
 
 		// Per-iteration timeout. Budget is the MIN of the configured
@@ -335,17 +347,191 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// captureDirtyWorkingTree snapshots any uncommitted changes in the
+// current working tree to a `refs/archive/polecat-autosave/<session>/
+// iter<N>-dirty` ref. Best-effort: failures are logged to stderr but
+// never abort the recovery loop — losing a snapshot is strictly better
+// than halting the wrapper. Returns the ref name on success, "" on
+// failure OR clean tree.
+//
+// Mechanism: `git stash create` writes a stash-style commit (merging
+// index + worktree + untracked-to-be-added) without touching the
+// worktree, the index, or the stash reflog. We then plant that commit
+// under a namespaced ref via `git update-ref`. The worktree stays
+// exactly as it was so iter N+1's kiro-cli resume sees the same files
+// the previous iteration left behind — this preserves in-progress work
+// for the resumed agent to finish, while also making it recoverable if
+// iter N+1 itself crashes.
+//
+// Without sessionName we skip capture: the ref path needs a distinct
+// scope per session to avoid collisions across concurrent polecats
+// sharing a checkout (unlikely in the worktree model, but cheap to
+// guard). gu-q319 acceptance criterion 3.
+//
+// Recovery commands for operators:
+//
+//	git show <ref>                   # see what was saved
+//	git diff <ref>^ <ref>            # inspect the snapshot as a diff
+//	git checkout <ref> -- <paths>    # restore specific files
+//	git cherry-pick -n <ref>         # replay into current worktree
+func captureDirtyWorkingTree(sessionName string, iter int) string {
+	if sessionName == "" {
+		return ""
+	}
+	// Sanitize sessionName into something git update-ref will accept.
+	// Ref components must not contain ".." or control chars; spaces
+	// and other oddballs are replaced with "-" to keep the ref path
+	// well-formed. We don't bother with full git-check-ref-format
+	// equivalence — the session names we see are tmux-safe tokens.
+	safe := sanitizeRefComponent(sessionName)
+	if safe == "" {
+		return ""
+	}
+	// `git stash create` exits 0 with empty stdout on a clean tree.
+	// We rely on that instead of a separate `git status` to avoid
+	// two subprocesses when the common case (clean tree) needs none.
+	createOut, err := exec.Command("git", "stash", "create").Output()
+	if err != nil {
+		// Not in a git repo, or git missing, or some other failure.
+		// Don't spam stderr for the nothing-to-capture case; only
+		// report when we tried and hit an unexpected condition.
+		fmt.Fprintf(os.Stderr,
+			"polecat-kiro-wrapper: dirty-tree capture skipped (iter %d): `git stash create` failed: %v\n",
+			iter, err)
+		return ""
+	}
+	sha := strings.TrimSpace(string(createOut))
+	if sha == "" {
+		// Clean tree — nothing to archive. This is the normal case
+		// when the model actually committed iter N's work, so it's
+		// silent.
+		return ""
+	}
+	ref := fmt.Sprintf("refs/archive/polecat-autosave/%s/iter%d-dirty", safe, iter)
+	logMsg := fmt.Sprintf("polecat-kiro-wrapper iter %d dirty-tree autosave", iter)
+	if err := exec.Command("git", "update-ref", "-m", logMsg, ref, sha).Run(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"polecat-kiro-wrapper: dirty-tree capture: `git update-ref %s` failed: %v\n",
+			ref, err)
+		return ""
+	}
+	return ref
+}
+
+// sanitizeRefComponent maps an arbitrary string to a form safe to use as
+// one segment of a git ref path. Replaces anything outside
+// [A-Za-z0-9._-] with "-", collapses consecutive replacements, and
+// strips leading/trailing dots or dashes (which git refuses or treats
+// specially). Returns "" for inputs that sanitize to empty — callers
+// should skip the capture in that case rather than planting a ref with
+// an empty segment.
+func sanitizeRefComponent(in string) string {
+	if in == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(in))
+	prevDash := false
+	for _, r := range in {
+		keep := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_'
+		switch {
+		case keep:
+			b.WriteRune(r)
+			prevDash = false
+		case !prevDash:
+			b.WriteRune('-')
+			prevDash = true
+		}
+	}
+	out := strings.Trim(b.String(), ".-")
+	return out
+}
+
 // buildResumeArgs constructs the iter-2+ argv with "--resume" and the
 // continuation prompt appended. If a hooked bead ID is reachable (via the
 // session heartbeat written by earlier gt commands), it's inlined into
 // the prompt so the resumed session knows exactly which work to finish.
 // Falls back to the generic prompt when no bead can be determined.
+//
+// gu-q319: the base args on iter 1 typically end with the initial
+// polecat bootstrap prompt as kiro-cli's [INPUT] positional (appended by
+// BuildCommandWithPrompt). kiro-cli chat accepts only ONE [INPUT]
+// positional, so if we blindly append "--resume <continuation>" we end
+// up with TWO positionals and clap rejects iter 2 with
+// "error: unexpected argument ... found" (exit 2). The wrapper then
+// propagates that exit code and the polecat dies with work stranded.
+// Strip the trailing INPUT before appending so the continuation prompt
+// becomes the one-and-only positional.
 func buildResumeArgs(baseArgs []string, townRoot, sessionName string) []string {
 	prompt := buildContinuePrompt(townRoot, sessionName)
-	out := make([]string, 0, len(baseArgs)+2)
-	out = append(out, baseArgs...)
+	stripped := stripTrailingInput(baseArgs)
+	out := make([]string, 0, len(stripped)+2)
+	out = append(out, stripped...)
 	out = append(out, "--resume", prompt)
 	return out
+}
+
+// stripTrailingInput returns baseArgs without its trailing positional
+// INPUT arg if one appears to be present. Used only on resume iterations
+// so the continuation prompt can take that positional slot without
+// tripping kiro-cli's "exactly one [INPUT]" constraint (gu-q319).
+//
+// Detection is conservative:
+//
+//   - If the last token starts with "-" it's a flag, not a positional.
+//     Return unchanged.
+//   - If the token immediately before the last one is a known kiro-cli
+//     flag that consumes the next arg as its VALUE (e.g. --agent, --model),
+//     the "last" token is actually that flag's value. Return unchanged.
+//   - Otherwise the last token is treated as the [INPUT] positional and
+//     stripped. This matches the shape produced by BuildCommandWithPrompt
+//     where the prompt is always appended last.
+//
+// Mutation-free: returns a slice aliasing baseArgs when no change is
+// needed, and a new trimmed slice when trimming is needed.
+func stripTrailingInput(baseArgs []string) []string {
+	if len(baseArgs) == 0 {
+		return baseArgs
+	}
+	last := baseArgs[len(baseArgs)-1]
+	if strings.HasPrefix(last, "-") {
+		return baseArgs
+	}
+	if len(baseArgs) >= 2 {
+		prev := baseArgs[len(baseArgs)-2]
+		if kiroValueConsumingFlags[prev] {
+			return baseArgs
+		}
+	}
+	return baseArgs[:len(baseArgs)-1]
+}
+
+// kiroValueConsumingFlags lists the kiro-cli chat flags that consume the
+// next positional as their VALUE (space-separated form, e.g.
+// "--agent gastown"). Used by stripTrailingInput to distinguish a flag's
+// value from a trailing [INPUT] positional. Source: `kiro-cli chat --help`.
+// The "--flag=value" form is safe here because the whole "--flag=value"
+// arrives as one token starting with "-", which stripTrailingInput's
+// dash check already filters out.
+//
+// Extend this table if the polecat preset starts passing new
+// value-taking flags. Missing entries fail OPEN — stripTrailingInput
+// would strip what's actually a flag value, making the iter-2 invocation
+// a flag short. That's still preferable to the pre-fix behavior of
+// crashing the whole wrapper, so this is a safe-by-default list.
+var kiroValueConsumingFlags = map[string]bool{
+	"--agent":          true,
+	"--model":          true,
+	"--trust-tools":    true,
+	"--format":         true,
+	"-f":               true,
+	"--wrap":           true,
+	"-w":               true,
+	"--delete-session": true,
+	"-d":               true,
+	"--session-source": true,
+	"--resume-id":      true,
 }
 
 // buildContinuePrompt returns the resume prompt to send to kiro-cli. When

@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -200,6 +201,198 @@ func TestBuildResumeArgs_AppendsResumeAndPrompt(t *testing.T) {
 	}
 }
 
+// TestBuildResumeArgs_StripsBootstrapInput_gu_q319 is the direct
+// regression test for gu-q319. Before the fix, buildResumeArgs appended
+// "--resume <continuation>" to baseArgs that already ended with the
+// initial polecat bootstrap prompt as kiro-cli's [INPUT] positional,
+// producing TWO positionals. kiro-cli's clap-based parser rejects that
+// with "error: unexpected argument ... found" and exits 2, which the
+// wrapper then propagated — killing the polecat mid-recovery on iter 2
+// and stranding any dirty work.
+//
+// Post-fix, the trailing bootstrap prompt is stripped before --resume is
+// appended, so the continuation prompt becomes the one-and-only [INPUT]
+// positional. This test asserts the invariant "at most one non-flag
+// token after `chat` in the positional slot" which is what clap actually
+// enforces.
+func TestBuildResumeArgs_StripsBootstrapInput_gu_q319(t *testing.T) {
+	// Mirrors the real preset: AgentKiro.Args = [polecat-kiro-wrapper --
+	// kiro-cli chat --trust-all-tools] + NonInteractive.PromptFlag
+	// (--no-interactive) + BuildCommandWithPrompt's trailing bootstrap
+	// prompt. By the time it reaches the wrapper, args look like this:
+	base := []string{
+		"kiro-cli", "chat",
+		"--trust-all-tools",
+		"--no-interactive",
+		"You are polecat chrome. Start your assigned work now.",
+	}
+
+	out := buildResumeArgs(base, "", "")
+
+	// The bootstrap prompt must be gone. The continuation prompt added
+	// by buildResumeArgs is the only trailing positional after --resume.
+	if got := out[len(out)-1]; !strings.Contains(got, "gt done") {
+		t.Errorf("final arg is not the continuation prompt: %q", got)
+	}
+	if got := out[len(out)-2]; got != "--resume" {
+		t.Fatalf("penultimate arg = %q, want --resume", got)
+	}
+
+	// Count non-flag tokens after "chat". kiro-cli chat accepts at most
+	// one. Anything beyond the subcommand must either be a flag
+	// (starts with "-") or a value consumed by a preceding flag.
+	trailingPositionals := countTrailingPositionalsAfterChat(out, kiroValueConsumingFlags)
+	if trailingPositionals > 1 {
+		t.Errorf("argv has %d trailing positionals after `chat`, want <= 1 (clap would reject)\nargv: %v",
+			trailingPositionals, out)
+	}
+
+	// Belt-and-suspenders: the bootstrap prompt itself must not appear
+	// in the output. If it did, clap would fail whether or not my
+	// counter got it right.
+	for _, a := range out {
+		if a == base[len(base)-1] {
+			t.Errorf("bootstrap prompt survived into iter-2 argv: %q\nfull argv: %v",
+				base[len(base)-1], out)
+			break
+		}
+	}
+}
+
+// countTrailingPositionalsAfterChat counts positional args (non-flag,
+// non-flag-value tokens) that appear after the `chat` subcommand. This
+// is the same invariant clap enforces: kiro-cli chat accepts [OPTIONS]
+// followed by at most one [INPUT]. Test helper — not used by the
+// wrapper at runtime.
+func countTrailingPositionalsAfterChat(argv []string, valueFlags map[string]bool) int {
+	// Find `chat` subcommand; count positionals after it.
+	chatIdx := -1
+	for i, a := range argv {
+		if a == "chat" {
+			chatIdx = i
+			break
+		}
+	}
+	if chatIdx < 0 {
+		return 0
+	}
+	count := 0
+	i := chatIdx + 1
+	for i < len(argv) {
+		a := argv[i]
+		if strings.HasPrefix(a, "-") {
+			// Flag. If it's a value-consuming flag and has a following
+			// token, skip that token too so we don't double-count it
+			// as a positional.
+			if valueFlags[a] && i+1 < len(argv) {
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		count++
+		i++
+	}
+	return count
+}
+
+// TestStripTrailingInput exercises the edge cases of the positional-
+// detection heuristic that keeps iter-2 invocations from tripping
+// kiro-cli's one-[INPUT] limit (gu-q319).
+func TestStripTrailingInput(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "nil",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "empty",
+			in:   []string{},
+			want: []string{},
+		},
+		{
+			name: "flag-only (no positional)",
+			in:   []string{"kiro-cli", "chat", "--trust-all-tools"},
+			want: []string{"kiro-cli", "chat", "--trust-all-tools"},
+		},
+		{
+			name: "flag-value at end — must NOT strip value",
+			in:   []string{"kiro-cli", "chat", "--agent", "gastown"},
+			want: []string{"kiro-cli", "chat", "--agent", "gastown"},
+		},
+		{
+			name: "short flag-value at end — must NOT strip value",
+			in:   []string{"kiro-cli", "chat", "-f", "json"},
+			want: []string{"kiro-cli", "chat", "-f", "json"},
+		},
+		{
+			name: "trailing INPUT — must strip",
+			in:   []string{"kiro-cli", "chat", "--trust-all-tools", "my bootstrap prompt"},
+			want: []string{"kiro-cli", "chat", "--trust-all-tools"},
+		},
+		{
+			name: "flag + value + INPUT — strip only INPUT",
+			in:   []string{"kiro-cli", "chat", "--agent", "gastown", "prompt text"},
+			want: []string{"kiro-cli", "chat", "--agent", "gastown"},
+		},
+		{
+			name: "single arg that's a flag",
+			in:   []string{"--resume"},
+			want: []string{"--resume"},
+		},
+		{
+			name: "single positional arg",
+			in:   []string{"prompt"},
+			want: []string{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripTrailingInput(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len(out) = %d, want %d\n got: %v\nwant: %v",
+					len(got), len(tc.want), got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("out[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestBuildResumeArgs_PreservesFlagsThatTakeValues guards against a
+// regression where the gu-q319 fix's stripTrailingInput would incorrectly
+// eat a flag value (e.g. "gastown" from "--agent gastown"), leaving the
+// iter-2 invocation with a dangling --agent flag and no value. clap would
+// accept that (kiro-cli would just use its default agent), but it would
+// silently break the polecat preset.
+func TestBuildResumeArgs_PreservesFlagsThatTakeValues(t *testing.T) {
+	base := []string{"kiro-cli", "chat", "--no-interactive", "--agent", "gastown"}
+	out := buildResumeArgs(base, "", "")
+
+	// All original tokens, in order, must appear at the head of out.
+	for i, a := range base {
+		if i >= len(out) {
+			t.Fatalf("out shorter than base: %v", out)
+		}
+		if out[i] != a {
+			t.Errorf("out[%d] = %q, want %q (original arg preserved)", i, out[i], a)
+		}
+	}
+	// --resume + prompt appended.
+	if len(out) != len(base)+2 {
+		t.Fatalf("len(out) = %d, want %d (base + --resume + prompt)", len(out), len(base)+2)
+	}
+}
+
 // ---------------------------------------------------------------
 // loadWrapperConfig + parseDurationEnv — env var parsing
 // ---------------------------------------------------------------
@@ -363,4 +556,227 @@ func TestDefaults_InternalConsistency(t *testing.T) {
 		t.Errorf("max-iterations × iteration-timeout = %s, less than half of total-timeout (%s) — iter cap will rarely trip",
 			product, defaultTotalTimeout)
 	}
+}
+
+// ---------------------------------------------------------------
+// Dirty-tree capture — gu-q319 acceptance criterion 3
+// ---------------------------------------------------------------
+
+// TestSanitizeRefComponent checks that arbitrary session-name-like
+// strings get mapped to forms git update-ref will accept. The wrapper
+// uses this to build the `refs/archive/polecat-autosave/<session>/...`
+// ref path; a malformed segment would make update-ref fail and lose
+// the snapshot.
+func TestSanitizeRefComponent(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"simple", "simple"},
+		{"has-dash", "has-dash"},
+		{"has_underscore", "has_underscore"},
+		{"has.dot", "has.dot"},
+		{"with spaces", "with-spaces"},
+		{"slash/in/name", "slash-in-name"},
+		{"colon:inside", "colon-inside"},
+		{"gastown_upstream.polecats.chrome.sess1", "gastown_upstream.polecats.chrome.sess1"},
+		{".leading-dot", "leading-dot"},
+		{"trailing-dash-", "trailing-dash"},
+		{"--double-dash--", "double-dash"},
+		{"", ""},
+		{".-", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := sanitizeRefComponent(tc.in); got != tc.want {
+				t.Errorf("sanitizeRefComponent(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCaptureDirtyWorkingTree_NoSession guards the early-return path:
+// without a session name we can't build a unique ref path, so capture
+// is skipped silently.
+func TestCaptureDirtyWorkingTree_NoSession(t *testing.T) {
+	if got := captureDirtyWorkingTree("", 1); got != "" {
+		t.Errorf("no session: captureDirtyWorkingTree = %q, want empty", got)
+	}
+	if got := captureDirtyWorkingTree(".-", 1); got != "" {
+		t.Errorf("session that sanitizes to empty: captureDirtyWorkingTree = %q, want empty", got)
+	}
+}
+
+// TestCaptureDirtyWorkingTree_CleanTreeSilent asserts that a clean
+// working tree produces no archive ref and no stderr spam. The wrapper
+// calls this on every iteration boundary, and the common case is a
+// clean tree (agent committed its work before clean-exiting), so silent
+// is the right behavior.
+//
+// Integration-style: builds a real temp git repo, changes cwd to it,
+// and runs the helper. Uses t.Chdir for safe restoration and t.TempDir
+// for cleanup. Requires `git` on PATH; skipped otherwise.
+func TestCaptureDirtyWorkingTree_CleanTreeSilent(t *testing.T) {
+	requireGit(t)
+	repo := makeTempGitRepo(t, true /*withInitialCommit*/)
+	t.Chdir(repo)
+
+	ref := captureDirtyWorkingTree("clean-test-session", 1)
+	if ref != "" {
+		t.Errorf("clean tree: captureDirtyWorkingTree = %q, want empty (no archive expected)", ref)
+	}
+}
+
+// TestCaptureDirtyWorkingTree_DirtyTreeWrites_gu_q319 is the direct
+// acceptance test for gu-q319 criterion 3: the wrapper preserves dirty
+// working-tree state across iteration boundaries. Modifies a tracked
+// file, calls the helper, and checks that (a) the expected ref was
+// created, (b) the worktree is still dirty afterward (the helper must
+// NOT reset the tree — iter N+1's agent needs to see the same files),
+// and (c) the snapshot commit actually contains the change.
+func TestCaptureDirtyWorkingTree_DirtyTreeWrites_gu_q319(t *testing.T) {
+	requireGit(t)
+	repo := makeTempGitRepo(t, true)
+	t.Chdir(repo)
+
+	// Add an uncommitted change (mirrors what a crashed iter 1 would
+	// leave behind — gu-6jgi's 89 lines of docs/otel-data-model.md).
+	const payload = "uncommitted line from iter 1\n"
+	writeWrapperTestFile(t, filepath.Join(repo, "README.md"), payload)
+
+	ref := captureDirtyWorkingTree("iter-boundary-test", 1)
+	if ref == "" {
+		t.Fatalf("dirty tree: captureDirtyWorkingTree returned empty, want ref")
+	}
+	wantRef := "refs/archive/polecat-autosave/iter-boundary-test/iter1-dirty"
+	if ref != wantRef {
+		t.Errorf("ref name = %q, want %q", ref, wantRef)
+	}
+
+	// Worktree must be untouched — the whole point is iter N+1 sees
+	// iter N's in-progress state, and the archive is a side channel.
+	current := readWrapperTestFile(t, filepath.Join(repo, "README.md"))
+	if current != payload {
+		t.Errorf("worktree mutated by capture: got %q, want %q (capture must not reset worktree)",
+			current, payload)
+	}
+
+	// The ref must point at a real commit object whose tree contains
+	// the payload — this is what makes the snapshot actually useful
+	// for recovery.
+	shaOut, err := runWrapperTestGit(t, repo, "rev-parse", ref)
+	if err != nil {
+		t.Fatalf("rev-parse %s: %v", ref, err)
+	}
+	sha := strings.TrimSpace(shaOut)
+	if sha == "" {
+		t.Fatalf("ref %s resolved to empty SHA", ref)
+	}
+	showOut, err := runWrapperTestGit(t, repo, "show", sha+":README.md")
+	if err != nil {
+		t.Fatalf("git show %s:README.md: %v", sha, err)
+	}
+	if showOut != payload {
+		t.Errorf("archived README.md = %q, want %q (dirty state not captured)",
+			showOut, payload)
+	}
+}
+
+// TestCaptureDirtyWorkingTree_NotAGitRepoFailsSoft asserts the
+// best-effort contract: outside a git repo the helper returns empty
+// and does NOT panic or block the wrapper loop.
+func TestCaptureDirtyWorkingTree_NotAGitRepoFailsSoft(t *testing.T) {
+	requireGit(t)
+	nonRepo := t.TempDir()
+	t.Chdir(nonRepo)
+
+	// Should just return "" — wrapper continues to the next iteration.
+	ref := captureDirtyWorkingTree("some-session", 1)
+	if ref != "" {
+		t.Errorf("non-git-repo cwd: captureDirtyWorkingTree = %q, want empty", ref)
+	}
+}
+
+// ---------------------------------------------------------------
+// Test helpers for git-based integration tests
+//
+// These are wrapper-test-local (writeWrapperTestFile, runWrapperTestGit,
+// etc.) rather than the generic writeFile/runGit declared in
+// orphans_test.go and polecat_test.go. Keeping distinct names avoids
+// the "redeclared in this block" collision and makes it obvious in
+// stack traces which suite a helper belongs to.
+// ---------------------------------------------------------------
+
+// requireGit skips the test if `git` isn't on PATH. The wrapper only
+// runs in environments with git anyway (every polecat worktree needs
+// it), so it's fine to depend on; but CI sandboxes that don't ship
+// git shouldn't fail the whole build.
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping git-integration test")
+	}
+}
+
+// makeTempGitRepo initializes a temp repo suitable for the capture
+// tests. Uses `git init -b main`, disables GPG signing, and optionally
+// writes + commits an initial file so `git stash create` has a base
+// to diff against. Returns the repo's absolute path (t.TempDir-backed,
+// auto-cleaned).
+func makeTempGitRepo(t *testing.T, withInitialCommit bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, cmd := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.email", "wrapper-test@example.com"},
+		{"config", "user.name", "Wrapper Test"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		if _, err := runWrapperTestGit(t, dir, cmd...); err != nil {
+			t.Fatalf("git %v in %s: %v", cmd, dir, err)
+		}
+	}
+	if withInitialCommit {
+		writeWrapperTestFile(t, filepath.Join(dir, "README.md"), "initial\n")
+		for _, cmd := range [][]string{
+			{"add", "README.md"},
+			{"commit", "-m", "initial"},
+		} {
+			if _, err := runWrapperTestGit(t, dir, cmd...); err != nil {
+				t.Fatalf("git %v in %s: %v", cmd, dir, err)
+			}
+		}
+	}
+	return dir
+}
+
+func runWrapperTestGit(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	// Pin identity via env so the test doesn't depend on the host's
+	// ~/.gitconfig (which may be missing in minimal CI images).
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=wrapper-test",
+		"GIT_AUTHOR_EMAIL=wrapper-test@example.com",
+		"GIT_COMMITTER_NAME=wrapper-test",
+		"GIT_COMMITTER_EMAIL=wrapper-test@example.com",
+	)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func writeWrapperTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func readWrapperTestFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
 }
