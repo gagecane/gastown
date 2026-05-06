@@ -108,7 +108,7 @@ while IFS='|' read -r RIG PREFIX; do
       # Session alive — check process
       PANE_PID=$(tmux list-panes -t "$SESSION_NAME" -F '#{pane_pid}' 2>/dev/null | head -1)
       if [ -n "$PANE_PID" ]; then
-        PROC_COMM=$(ps -o comm= -p "$PANE_PID" 2>/dev/null)
+        PROC_COMM=$(ps -o comm= -p "$PANE_PID" 2>/dev/null || true)
         if [ -z "$PROC_COMM" ]; then
           # Zombie: process dead, session alive.
           # Uses `gt hook show` — see note above on subcommand refactor.
@@ -181,7 +181,7 @@ if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
   DEACON_ISSUE="crashed"
 else
   DEACON_PID=$(tmux list-panes -t "$DEACON_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)
-  DEACON_COMM=$(ps -o comm= -p "$DEACON_PID" 2>/dev/null)
+  DEACON_COMM=$(ps -o comm= -p "$DEACON_PID" 2>/dev/null || true)
   if [ -z "$DEACON_COMM" ]; then
     log "  ZOMBIE: Deacon process dead (pid=$DEACON_PID), session alive"
     DEACON_ISSUE="zombie"
