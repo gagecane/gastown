@@ -16,8 +16,15 @@ func readTmpInodeUsage(path string) (tmpInodeUsage, error) {
 		return tmpInodeUsage{}, fmt.Errorf("statfs %s: %w", path, err)
 	}
 
-	total := st.Files
-	free := st.Ffree
+	// Normalize to uint64: on FreeBSD, Statfs_t.Ffree is declared as int64
+	// while Files is uint64. Other Unix variants (Linux, darwin) expose both
+	// as uint64. An explicit cast keeps one _unix build tag covering all of
+	// them. In the exceedingly rare case that Ffree is reported as negative
+	// (treated as "unknown" by some filesystems), the cast wraps to a very
+	// large uint64 which then falls through the total >= free guard and
+	// leaves used at zero.
+	total := uint64(st.Files)
+	free := uint64(st.Ffree)
 	var used uint64
 	if total >= free {
 		used = total - free
