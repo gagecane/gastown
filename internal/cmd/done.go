@@ -55,7 +55,8 @@ Examples:
   gt done --issue gt-abc               # Explicit issue ID
   gt done --skip-verify                # Audit-only escape hatch for non-code closes
   gt done --status ESCALATED           # Signal blocker, skip MR
-  gt done --status DEFERRED            # Pause work, skip MR`,
+  gt done --status DEFERRED            # Pause work, skip MR
+  gt done --status DEFERRED --reason "spec-unclear: need API contract for auth endpoint"`,
 	RunE:         runDone,
 	SilenceUsage: true, // Don't print usage on operational errors (confuses agents)
 }
@@ -69,6 +70,7 @@ var (
 	donePreVerified   bool
 	doneTarget        string
 	doneSkipVerify    bool
+	doneReason        string
 )
 
 // Valid exit types for gt done
@@ -91,6 +93,7 @@ func init() {
 	doneCmd.Flags().StringVar(&doneIssue, "issue", "", "Source issue ID (default: parse from branch name)")
 	doneCmd.Flags().IntVarP(&donePriority, "priority", "p", -1, "Override priority (0-4, default: inherit from issue)")
 	doneCmd.Flags().StringVar(&doneStatus, "status", ExitCompleted, "Exit status: COMPLETED, ESCALATED, or DEFERRED")
+	doneCmd.Flags().StringVar(&doneReason, "reason", "", "Reason for DEFERRED/ESCALATED exit (recorded on bead notes)")
 	doneCmd.Flags().StringVar(&doneCleanupStatus, "cleanup-status", "", "Git cleanup status: clean, uncommitted, unpushed, stash, unknown (ZFC: agent-observed)")
 	doneCmd.Flags().BoolVar(&doneResume, "resume", false, "Resume from last checkpoint (auto-detected, for Witness recovery)")
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
@@ -1772,6 +1775,21 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 		agentID := roleInfo.ActorString()
 		if found := findHookedBeadForAgent(bd, agentID); found != "" {
 			hookedBeadID = found
+		}
+	}
+
+	// Record deferred/escalated reason on the bead (gu-o1ga).
+	// This gives downstream consumers (witness, mayor, convoy-feeder) visibility
+	// into WHY the polecat exited without completing.
+	if hookedBeadID != "" && (exitType == ExitDeferred || exitType == ExitEscalated) && doneReason != "" {
+		polecatName := os.Getenv("GT_POLECAT")
+		if polecatName == "" {
+			polecatName = "unknown"
+		}
+		note := fmt.Sprintf("[polecat %s %s] %s: %s",
+			polecatName, time.Now().UTC().Format(time.RFC3339), exitType, doneReason)
+		if _, err := bd.Run("comments", "add", hookedBeadID, note); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't record %s reason on %s: %v\n", exitType, hookedBeadID, err)
 		}
 	}
 
