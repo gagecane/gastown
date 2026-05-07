@@ -220,13 +220,15 @@ func (m *Model) renderConvoys() string {
 
 	var lines []string
 
+	width := m.convoyViewport.Width
+
 	// In Progress section
 	lines = append(lines, ConvoySectionStyle.Render("IN PROGRESS"))
 	if len(m.convoyState.InProgress) == 0 {
 		lines = append(lines, "  "+AgentIdleStyle.Render("No active convoys"))
 	} else {
 		for _, c := range m.convoyState.InProgress {
-			lines = append(lines, renderConvoyLine(c, false))
+			lines = append(lines, renderConvoyLine(c, false, width))
 		}
 	}
 
@@ -238,7 +240,7 @@ func (m *Model) renderConvoys() string {
 		lines = append(lines, "  "+AgentIdleStyle.Render("No recent landings"))
 	} else {
 		for _, c := range m.convoyState.Landed {
-			lines = append(lines, renderConvoyLine(c, true))
+			lines = append(lines, renderConvoyLine(c, true, width))
 		}
 	}
 
@@ -249,42 +251,55 @@ func (m *Model) renderConvoys() string {
 		lines = append(lines, "  "+AgentIdleStyle.Render("No pending merges"))
 	} else {
 		for _, entry := range m.convoyState.MQEntries {
-			lines = append(lines, renderMQLine(entry))
+			lines = append(lines, renderMQLine(entry, width))
 		}
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-// renderConvoyLine renders a single convoy status line
-func renderConvoyLine(c Convoy, landed bool) string {
+// renderConvoyLine renders a single convoy status line.
+// width is the available pane width; the title column flexes to fill it.
+func renderConvoyLine(c Convoy, landed bool, width int) string {
 	// Format: "  hq-xyz  Title       2/4 ●●○○" or "  hq-xyz  Title       ✓ 2h ago"
 	id := ConvoyIDStyle.Render(c.ID)
 
-	// Truncate title if too long (rune-safe to avoid splitting multi-byte UTF-8)
-	title := c.Title
-	if utf8.RuneCountInString(title) > 20 {
-		runes := []rune(title)
-		title = string(runes[:17]) + "..."
-	}
-	title = ConvoyNameStyle.Render(title)
-
+	// Build the trailing status segment first so we can size the title column.
+	var trailing string
 	if landed {
-		// Show checkmark and time since landing
 		age := formatAge(time.Since(c.ClosedAt))
-		status := ConvoyLandedStyle.Render("✓") + " " + ConvoyAgeStyle.Render(age+" ago")
-		return fmt.Sprintf("  %s  %-20s  %s", id, title, status)
+		trailing = ConvoyLandedStyle.Render("✓") + " " + ConvoyAgeStyle.Render(age+" ago")
+	} else {
+		progress := renderProgressBar(c.Completed, c.Total)
+		count := ConvoyProgressStyle.Render(fmt.Sprintf("%d/%d", c.Completed, c.Total))
+		trailing = count + " " + progress
 	}
 
-	// Show progress bar
-	progress := renderProgressBar(c.Completed, c.Total)
-	count := ConvoyProgressStyle.Render(fmt.Sprintf("%d/%d", c.Completed, c.Total))
-	return fmt.Sprintf("  %s  %-20s  %s %s", id, title, count, progress)
+	// Fixed parts: leading "  " (2) + id + "  " (2) + "  " (2 before trailing).
+	fixed := 2 + lipgloss.Width(id) + 2 + 2 + lipgloss.Width(trailing)
+	titleWidth := width - fixed
+	if titleWidth < 10 {
+		titleWidth = 10
+	}
+
+	title := c.Title
+	if utf8.RuneCountInString(title) > titleWidth {
+		runes := []rune(title)
+		title = string(runes[:titleWidth-3]) + "..."
+	}
+	pad := titleWidth - utf8.RuneCountInString(title)
+	if pad < 0 {
+		pad = 0
+	}
+	titlePart := ConvoyNameStyle.Render(title) + strings.Repeat(" ", pad)
+
+	return fmt.Sprintf("  %s  %s  %s", id, titlePart, trailing)
 }
 
-// renderMQLine renders a single merge queue entry
-func renderMQLine(entry MQEntry) string {
-	// Format: "  ⚙ polecat/nux  branch-name       merging"
+// renderMQLine renders a single merge queue entry.
+// width is the available pane width; the branch column flexes to fill it.
+func renderMQLine(entry MQEntry, width int) string {
+	// Format: "  ⚙ merging  branch-name       polecat"
 	var statusStyle lipgloss.Style
 	var statusIcon string
 	switch entry.Status {
@@ -305,23 +320,32 @@ func renderMQLine(entry MQEntry) string {
 		statusIcon = "?"
 	}
 
-	// Truncate branch name if too long (rune-safe)
-	branch := entry.Branch
-	if utf8.RuneCountInString(branch) > 30 {
-		runes := []rune(branch)
-		branch = string(runes[:27]) + "..."
-	}
-
-	// Build the line
 	status := statusStyle.Render(statusIcon + " " + entry.Status)
-	branchPart := MQBranchStyle.Render(branch)
 
 	polecatPart := ""
 	if entry.Polecat != "" {
 		polecatPart = MQPolecatStyle.Render(entry.Polecat)
 	}
 
-	return fmt.Sprintf("  %s  %-30s  %s", status, branchPart, polecatPart)
+	// Fixed parts: leading "  " (2) + status + "  " (2) + "  " (2) + polecat.
+	fixed := 2 + lipgloss.Width(status) + 2 + 2 + lipgloss.Width(polecatPart)
+	branchWidth := width - fixed
+	if branchWidth < 10 {
+		branchWidth = 10
+	}
+
+	branch := entry.Branch
+	if utf8.RuneCountInString(branch) > branchWidth {
+		runes := []rune(branch)
+		branch = string(runes[:branchWidth-3]) + "..."
+	}
+	pad := branchWidth - utf8.RuneCountInString(branch)
+	if pad < 0 {
+		pad = 0
+	}
+	branchPart := MQBranchStyle.Render(branch) + strings.Repeat(" ", pad)
+
+	return fmt.Sprintf("  %s  %s  %s", status, branchPart, polecatPart)
 }
 
 // MQ panel styles
