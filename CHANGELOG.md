@@ -53,6 +53,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alive before signaling to avoid an `os: process not initialized` error when
   the process exits between discovery and termination. See gu-qhyv.
 
+## [1.1.0] - 2026-05-06
+
+### Added
+
+- **Convoy completion + cross-rig dep notifications** — Convoy completion and
+  cross-rig dependency resolution now fire notifications, surfacing milestone
+  events without polling (#3838, gt-wfs-55hsg).
+
+### Fixed
+
+- **Scheduler guards** — `scheduleBead` now skips closed and tombstone beads,
+  preventing wasted dispatch attempts and "no such bead" errors (hq-ki2,
+  #3840). Mirrors the existing `runSling` / `executeSling` guards.
+- **Mail inbox Dolt churn** — Reduced repeated Dolt commits on inbox reads
+  (gt-05ld, #3830).
+- **Polish** — Rename `DeliveryAckLabelSequenceIdempotent` to clarify intent
+  (gt-ekuh).
+- **`jsonl_git_backup` plugin** — Forward `USER`, `LOGNAME`, and `HOME` env to
+  git children so the plugin can run under uid-501 wrapper contexts (gt-zt1w).
+- **Resilience under Dolt memory pressure** — Subprocess timeout and parallel
+  rig scan so `gt status` and related commands degrade gracefully when Dolt is
+  under load instead of hanging.
+- **`bd` 1.0+ compatibility** — `bd init --prefix <X>` now persists the prefix
+  directly (previously relied on the removed `bd config set issue_prefix` call).
+- **Cross-rig mail delivery** — Delivery acks routed via bd prefix routing;
+  Create routes via BEADS_DIR instead of `--repo` to prevent pthread deadlock;
+  zero-copy fix for routed writes.
+- **Daemon hardening** — Filter messaging beads, guard cross-rig prefix, fail
+  prime fast on bad state. `hasAssignedOpenWork` checked via `--repo` (gt-fcw)
+  and before reaping working-bead-lookup-failed polecats. Legacy flat polecat
+  layout supported with regression coverage.
+- **Polecat / sling lifecycle** — Auto-burn orphan molecules from beads stuck
+  in hooked-with-no-assignee (gh-3697); use `IsAgentAlive` in `Start` zombie
+  check (hq-k1ot); accept dog pool targets in deferred mode (aa-4yf2);
+  CLOSED bead treated as terminal in `check-recovery` (aa-55d8); zombie-scan
+  skips restart if polecat branch already merged (aa-apw); persist convoy
+  fields for single-bead dispatch.
+- **Convoy** — `bdListChildren` falls back to deps table when the primary path
+  is unavailable (#3700); cross-rig wave staging regression test (hq-mtc).
+- **Doctor** — Role-aware Stop hook check for polecats (#3648); detect and
+  recover corrupt `.repo.git` bare repos (gt-61twf).
+- **Install / dolt** — Fail fast when Dolt is unavailable during install;
+  clamp Dolt idle session `wait_timeout` to prevent connection exhaustion
+  (gh-3623); switch remaining DDL call sites to server connection (#3641);
+  atomic `settings.json` write to prevent concurrent-spawn corruption (gh-3500).
+- **Hooks / agent config** — Pass agent `Args` to `ResolveProcessNames` at all
+  call sites; resolve agent process names through wrapper commands; preserve
+  built-in opencode preset fields in overrides; sync opencode hooks in nested
+  polecat worktrees (gt-hii); reject non-bead args before `bd show` (#3701).
+- **Done / safety nets** — Auto-pop orphaned stashes in gt-pvx safety net;
+  auto-save uncommitted implementation work (gt-pvx safety net); honor
+  explicit target in done contamination check (gt-nmt); verify pushed commits
+  before bead closure.
+- **Mail / archive** — Tolerate GC'd bead IDs in archive and `archive --stale`
+  (aa-6hv); clear satisfied mail reply reminders (gt-niu2); isolate
+  `NotifyMergeOutcome` tests from production mail.
+- **Plugin runner** — Explicit `gate=manual` skip in `dispatchPlugins`
+  (hq-suin); dispatcher skips idle dogs with leaked tmux sessions (gt-o24);
+  `stuck-agent-dog` uses `gt hook show` to inspect other agents' hooks.
+- **Test infrastructure** — Don't skip non-Dolt daemon tests when Docker is
+  unavailable (gt-kw4449); enforce standalone formula singleton at sling
+  boundary (gt-3kir); `gt prime` renders formula steps for both town- and
+  rig-level formulas; nightly integration test failures fixed for wl-commons
+  (closes antns1/fergus#336).
+- **Lint** — Correct British spellings to American English; `gt status` no
+  longer hangs in `bd` probe.
+- **Plugin portability** — `dolt-archive` and `dolt-backup` no longer rely on
+  the bash 4 `mapfile` builtin, restoring production DB discovery on macOS
+  systems where `/bin/bash` (3.2.57) is invoked.
+
 ## [1.0.1] - 2026-04-25
 
 ### Fixed
