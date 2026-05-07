@@ -967,3 +967,78 @@ func TestPolecatSessionDiedStartupErrorFormat(t *testing.T) {
 		t.Errorf("rich error missing pane-output markers: %q", richErr.Error())
 	}
 }
+
+// TestStart_HooksIssueBeforeSessionCreation is a regression guard for gu-bdhm.
+//
+// The race: when `gt session start --issue <id>` was called, hookIssue ran
+// AFTER NewSessionWithCommandAndEnv. The agent (Claude, kiro-cli, etc.) spawns
+// as soon as tmux starts the command and fires its SessionStart/agentSpawn
+// hook which runs `gt prime --hook`. If that agent-side hook executed before
+// the outer hookIssue completed, findAgentWork returned "no work" and the
+// polecat silently exited with DEFERRED despite having a valid assignment.
+//
+// The fix is to perform the bd-side `update --status=hooked --assignee=<id>`
+// write BEFORE any tmux session creation, so the agent's SessionStart hook
+// can never race against it. This test inspects the Start() source to
+// verify the ordering has not regressed.
+//
+// If this test fails after a refactor, ensure that inside (*SessionManager).Start
+// any call to m.hookIssue(...) appears textually (and therefore at runtime)
+// before the call to m.tmux.NewSessionWithCommandAndEnv(...).
+func TestStart_HooksIssueBeforeSessionCreation(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("runtime.Caller failed")
+	}
+	srcPath := filepath.Join(filepath.Dir(thisFile), "session_manager.go")
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", srcPath, err)
+	}
+	src := string(data)
+
+	// Find the body of func (m *SessionManager) Start(...) error { ... }.
+	const startSig = "func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {"
+	startIdx := strings.Index(src, startSig)
+	if startIdx == -1 {
+		t.Fatalf("could not locate Start signature in %s", srcPath)
+	}
+	// Walk from the opening brace to find the matching closing brace.
+	bodyStart := startIdx + len(startSig) - 1 // points at the `{`
+	depth := 0
+	bodyEnd := -1
+	for i := bodyStart; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				bodyEnd = i
+			}
+		}
+		if bodyEnd != -1 {
+			break
+		}
+	}
+	if bodyEnd == -1 {
+		t.Fatalf("could not locate end of Start body")
+	}
+	body := src[bodyStart : bodyEnd+1]
+
+	hookIdx := strings.Index(body, "m.hookIssue(")
+	sessionIdx := strings.Index(body, "m.tmux.NewSessionWithCommandAndEnv(")
+	if hookIdx == -1 {
+		t.Fatalf("expected m.hookIssue(...) call in Start body (gu-bdhm regression)")
+	}
+	if sessionIdx == -1 {
+		t.Fatalf("expected m.tmux.NewSessionWithCommandAndEnv(...) call in Start body")
+	}
+	if hookIdx > sessionIdx {
+		t.Fatalf("m.hookIssue must be called BEFORE m.tmux.NewSessionWithCommandAndEnv "+
+			"(gu-bdhm race: polecat startup fails to detect hooked work when hook "+
+			"write races against agent SessionStart hook). "+
+			"hookIssue at offset %d; NewSessionWithCommandAndEnv at offset %d",
+			hookIdx, sessionIdx)
+	}
+}

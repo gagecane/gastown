@@ -413,6 +413,31 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 	}
 
+	// Hook the issue to the polecat BEFORE creating the tmux session.
+	//
+	// Race fix (gu-bdhm): The agent's SessionStart/agentSpawn hook runs
+	// `gt prime --hook` as soon as the runtime (Claude, kiro-cli, etc.) is
+	// spawned. If hookIssue runs AFTER NewSessionWithCommandAndEnv, the agent's
+	// first `gt prime --hook` call races against the `bd update --status=hooked`
+	// write. When the agent wins the race, findAgentWork returns no work and
+	// the polecat silently exits with DEFERRED even though a valid bead was
+	// assigned. The retry loop in findAgentWork (5 attempts, ~15.5s total) is
+	// intended to cover this race but can be exceeded by slow bd calls (which
+	// have a 30s timeout), or on non-polecat roles that don't retry.
+	//
+	// By hooking BEFORE session creation, the bead is guaranteed to be in the
+	// correct state by the time the agent spawns, eliminating the race.
+	if opts.Issue != "" {
+		agentID := fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat)
+		if err := m.hookIssue(opts.Issue, agentID, workDir); err != nil {
+			// Non-fatal: if the hook write fails we still start the session so
+			// the polecat can self-diagnose via gt prime's DB-error path. A
+			// warning here mirrors the previous behavior and keeps operators
+			// in the loop.
+			style.PrintWarning("could not hook issue %s: %v", opts.Issue, err)
+		}
+	}
+
 	// Resolve runtime config for the agent that will actually run in this session.
 	// When an explicit --agent override is provided (e.g., "codex"), use it to resolve
 	// the correct agent config. Without this, ResolveRoleAgentConfig returns the default
@@ -545,14 +570,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// and FindAgentPane. Legacy sessions without GT_PANE_ID fall back to scanning.
 	if paneID, err := m.tmux.GetPaneID(sessionID); err == nil {
 		debugSession("SetEnvironment GT_PANE_ID", m.tmux.SetEnvironment(sessionID, "GT_PANE_ID", paneID))
-	}
-
-	// Hook the issue to the polecat if provided via --issue flag
-	if opts.Issue != "" {
-		agentID := fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat)
-		if err := m.hookIssue(opts.Issue, agentID, workDir); err != nil {
-			style.PrintWarning("could not hook issue %s: %v", opts.Issue, err)
-		}
 	}
 
 	// Apply theme (non-fatal)
