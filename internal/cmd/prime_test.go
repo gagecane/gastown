@@ -134,67 +134,60 @@ func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 	}
 }
 
+// TestPrimeFlagCombinations exercises validatePrimeFlags directly rather than
+// fork-execing the gt binary per case. The fork-exec form (6 cobra startups)
+// ballooned under parallel pre-push load (internal/tmux, internal/beads,
+// internal/polecat) and tripped the 5-min package timeout (gs-fil).
 func TestPrimeFlagCombinations(t *testing.T) {
-	gtBin := buildGT(t)
+	origHook := primeHookMode
+	origDryRun := primeDryRun
+	origState := primeState
+	origStateJSON := primeStateJSON
+	origExplain := primeExplain
+	defer func() {
+		primeHookMode = origHook
+		primeDryRun = origDryRun
+		primeState = origState
+		primeStateJSON = origStateJSON
+		primeExplain = origExplain
+	}()
 
 	cases := []struct {
-		name      string
-		args      []string
-		wantError bool
-		errorMsg  string
+		name     string
+		hook     bool
+		dryRun   bool
+		state    bool
+		explain  bool
+		wantErr  string // expected substring; empty means expect nil
 	}{
-		{
-			name:      "state_alone_is_valid",
-			args:      []string{"prime", "--state"},
-			wantError: false, // May fail for other reasons (not in workspace), but not flag validation
-		},
-		{
-			name:      "state_with_hook_errors",
-			args:      []string{"prime", "--state", "--hook"},
-			wantError: true,
-			errorMsg:  "--state cannot be combined with other flags",
-		},
-		{
-			name:      "state_with_dry_run_errors",
-			args:      []string{"prime", "--state", "--dry-run"},
-			wantError: true,
-			errorMsg:  "--state cannot be combined with other flags",
-		},
-		{
-			name:      "state_with_explain_errors",
-			args:      []string{"prime", "--state", "--explain"},
-			wantError: true,
-			errorMsg:  "--state cannot be combined with other flags",
-		},
-		{
-			name:      "dry_run_and_explain_valid",
-			args:      []string{"prime", "--dry-run", "--explain"},
-			wantError: false, // May fail for other reasons, but not flag validation
-		},
-		{
-			name:      "hook_and_dry_run_valid",
-			args:      []string{"prime", "--hook", "--dry-run"},
-			wantError: false, // May fail for other reasons, but not flag validation
-		},
+		{name: "state_alone_is_valid", state: true},
+		{name: "state_with_hook_errors", state: true, hook: true, wantErr: "--state cannot be combined with other flags"},
+		{name: "state_with_dry_run_errors", state: true, dryRun: true, wantErr: "--state cannot be combined with other flags"},
+		{name: "state_with_explain_errors", state: true, explain: true, wantErr: "--state cannot be combined with other flags"},
+		{name: "dry_run_and_explain_valid", dryRun: true, explain: true},
+		{name: "hook_and_dry_run_valid", hook: true, dryRun: true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(gtBin, tc.args...)
-			output, err := cmd.CombinedOutput()
+			primeHookMode = tc.hook
+			primeDryRun = tc.dryRun
+			primeState = tc.state
+			primeStateJSON = false
+			primeExplain = tc.explain
 
-			if tc.wantError {
-				if err == nil {
-					t.Fatalf("expected error, got success with output: %s", output)
+			err := validatePrimeFlags()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected nil error, got: %v", err)
 				}
-				if tc.errorMsg != "" && !strings.Contains(string(output), tc.errorMsg) {
-					t.Fatalf("expected error containing %q, got: %s", tc.errorMsg, output)
-				}
+				return
 			}
-			// For non-error cases, we don't fail on other errors (like "not in workspace")
-			// because we're only testing flag validation
-			if !tc.wantError && tc.errorMsg != "" && strings.Contains(string(output), tc.errorMsg) {
-				t.Fatalf("unexpected error message %q in output: %s", tc.errorMsg, output)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 			}
 		})
 	}
