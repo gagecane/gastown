@@ -103,8 +103,15 @@ type recorderInstruments struct {
 	molBurnTotal          metric.Int64Counter
 	beadCreateTotal       metric.Int64Counter
 
+	// polecat-kiro-wrapper (gu-6jgi)
+	kiroWrapperInvocations  metric.Int64Counter
+	kiroWrapperIterationLog metric.Int64Counter
+	kiroWrapperTerminal     metric.Int64Counter
+
 	// Histograms
-	bdDurationHist metric.Float64Histogram
+	bdDurationHist                   metric.Float64Histogram
+	kiroWrapperIterationsHist        metric.Int64Histogram
+	kiroWrapperDurationSecondsHist   metric.Float64Histogram
 }
 
 var (
@@ -217,10 +224,31 @@ func initInstruments() {
 			metric.WithDescription("Total bead creations from molecule instantiation"),
 		)
 
+		// polecat-kiro-wrapper (gu-6jgi) — observability for the gu-ronb mitigation.
+		// Captures how often the supervisor is firing, how many iterations it
+		// consumes per invocation, and what terminal state it exits in.
+		inst.kiroWrapperInvocations, _ = m.Int64Counter("gastown.polecat.kiro_wrapper.invocations.total",
+			metric.WithDescription("Total polecat-kiro-wrapper invocations (one per wrapped kiro-cli session)"),
+		)
+		inst.kiroWrapperIterationLog, _ = m.Int64Counter("gastown.polecat.kiro_wrapper.iteration_events.total",
+			metric.WithDescription("Total polecat-kiro-wrapper per-iteration events (iter_start, clean_exit_not_done, timeout_kill, …)"),
+		)
+		inst.kiroWrapperTerminal, _ = m.Int64Counter("gastown.polecat.kiro_wrapper.terminal_state.total",
+			metric.WithDescription("Polecat-kiro-wrapper terminal state counter labeled by state (done, max_iterations, total_timeout, non_zero_exit, spawn_failure)"),
+		)
+
 		// Histograms
 		inst.bdDurationHist, _ = m.Float64Histogram("gastown.bd.duration_ms",
 			metric.WithDescription("bd CLI call round-trip latency in milliseconds"),
 			metric.WithUnit("ms"),
+		)
+		inst.kiroWrapperIterationsHist, _ = m.Int64Histogram("gastown.polecat.kiro_wrapper.iterations",
+			metric.WithDescription("Iterations consumed per polecat-kiro-wrapper invocation (1=no bug hit, 2–max-1=recovery worked, max=exhausted)"),
+			metric.WithUnit("{iteration}"),
+		)
+		inst.kiroWrapperDurationSecondsHist, _ = m.Float64Histogram("gastown.polecat.kiro_wrapper.recovery_duration_seconds",
+			metric.WithDescription("Polecat-kiro-wrapper total wall-clock duration from first kiro-cli spawn to terminal exit"),
+			metric.WithUnit("s"),
 		)
 	})
 }
@@ -830,4 +858,191 @@ func RecordAgentEvent(ctx context.Context, sessionID, agentType, eventType, role
 	)
 	addRunID(ctx, &r)
 	logger.Emit(ctx, r)
+}
+
+// Polecat-kiro-wrapper terminal state labels (gu-6jgi).
+// Kept as exported string constants so the wrapper and any downstream
+// consumers (dashboard queries, alerting) reference the same vocabulary.
+// Treat these as stable telemetry labels — renaming would break queries.
+const (
+	// KiroWrapperStateDone — the wrapped polecat signaled completion
+	// (heartbeat state "exiting"/"idle") within the iteration budget.
+	// This is the happy path.
+	KiroWrapperStateDone = "done"
+	// KiroWrapperStateMaxIterations — the iteration cap was reached
+	// without the polecat reporting done. Every iter consumed budget but
+	// the recovery loop ran out of turns. Witness will clean up.
+	KiroWrapperStateMaxIterations = "max_iterations"
+	// KiroWrapperStateTotalTimeout — the total wallclock budget was
+	// exhausted before the iteration cap. The wrapper stops spawning
+	// new kiro-cli invocations and exits with best-effort cleanup.
+	KiroWrapperStateTotalTimeout = "total_timeout"
+	// KiroWrapperStateNonZeroExit — kiro-cli exited with a non-zero
+	// status that wasn't a context-timeout kill (panic, signal, real
+	// agent-reported error). Wrapper propagates the exit code.
+	KiroWrapperStateNonZeroExit = "non_zero_exit"
+	// KiroWrapperStateSpawnFailure — the wrapper failed to launch
+	// kiro-cli at all (missing binary, fork/exec error). Distinct from
+	// non_zero_exit because the child never ran.
+	KiroWrapperStateSpawnFailure = "spawn_failure"
+)
+
+// KiroWrapperIterationInfo carries per-iteration-boundary metadata emitted
+// as a structured log/metric event by the polecat-kiro-wrapper. Each
+// invocation produces 0 or more iteration events (0 when iter 1 succeeds
+// cleanly) plus exactly one RecordKiroWrapperTerminal call at process exit.
+type KiroWrapperIterationInfo struct {
+	// Iter is the 1-indexed iteration number that just finished.
+	// Iter=1 is the initial kiro-cli invocation; Iter>=2 are --resume
+	// recoveries after a gu-ronb clean-exit-mid-task.
+	Iter int
+	// MaxIter is the configured iteration cap for this invocation
+	// (GT_KIRO_MAX_ITERATIONS). Logged alongside Iter so dashboards can
+	// compute exhaustion rates without needing to join against a config
+	// source.
+	MaxIter int
+	// Event categorizes what happened at this boundary:
+	//   - "clean_exit_not_done": kiro-cli exited 0 but heartbeat says
+	//     the polecat didn't call gt done (the gu-ronb signature).
+	//   - "timeout_kill": the per-iteration context deadline fired and
+	//     the wrapper killed kiro-cli; worth retrying if budget remains.
+	//   - "resume_start": we're about to spawn the --resume retry.
+	Event string
+	// BeadID is the hooked bead for this polecat session, if the
+	// heartbeat carries one (v2 heartbeats). Empty otherwise; the
+	// wrapper still retries but with the generic prompt.
+	BeadID string
+	// SessionName is the GT_SESSION tmux pane name used for heartbeat
+	// lookup and ref-path sanitization. Empty means the wrapper is
+	// running standalone (outside a polecat session).
+	SessionName string
+	// Rig, Polecat are the GT_RIG / GT_POLECAT env values, copied
+	// through so telemetry queries can slice by rig/polecat without
+	// joining against session metadata.
+	Rig, Polecat string
+}
+
+// KiroWrapperTerminalInfo carries the final-exit metadata emitted exactly
+// once per polecat-kiro-wrapper invocation. Captures total iterations
+// consumed, which terminal state the wrapper exited in, and the total
+// wallclock duration. This is the data the acceptance dashboard panel
+// needs.
+type KiroWrapperTerminalInfo struct {
+	// IterationsConsumed is the number of kiro-cli invocations the
+	// wrapper actually ran before exiting. 1 = fast path (no bug hit);
+	// N in [2, MaxIter-1] = recovery worked on iter N; MaxIter =
+	// exhaustion. For spawn_failure or non_zero_exit on iter 1 this
+	// is still 1 (we did attempt the invocation).
+	IterationsConsumed int
+	// MaxIter is the configured iteration cap; pairs with
+	// IterationsConsumed so dashboards can compute exhaustion rate.
+	MaxIter int
+	// State is one of the KiroWrapperState* constants above. Stable
+	// label vocabulary — do not drop known states or add unlabeled ones.
+	State string
+	// Duration is the total wallclock time from the first kiro-cli
+	// spawn to the terminal exit, including per-iter work and backoff
+	// sleeps. Logged in seconds as a float histogram so dashboards can
+	// compare fast-path (iter 1, usually seconds-to-minutes) against
+	// deep-recovery (iter 2–max, potentially many minutes).
+	Duration time.Duration
+	// ExitCode is the kiro-cli exit code the wrapper propagates, for
+	// the non_zero_exit path. Zero for all other states (including
+	// done, which exits 0 regardless of the child). Helps distinguish
+	// a clap parse failure (2) from a model panic (137 / signal).
+	ExitCode int
+	// BeadID is the hooked bead for this polecat session (v2
+	// heartbeats only; empty otherwise). Propagated so terminal-state
+	// analysis can slice by bead ID / project.
+	BeadID string
+	// SessionName, Rig, Polecat mirror the KiroWrapperIterationInfo
+	// fields — carry through the same identity attributes so iteration
+	// events and terminal events can be correlated in queries without
+	// needing extra joins.
+	SessionName, Rig, Polecat string
+	// Err, if non-nil, is the wrapper-level error that caused a
+	// terminal state like spawn_failure. Passed through to the log
+	// record's `error` attribute; does not change the state label
+	// (callers choose the state explicitly).
+	Err error
+}
+
+// RecordKiroWrapperIteration emits a per-iteration-boundary structured
+// log event + counter increment for the polecat-kiro-wrapper (gu-6jgi).
+//
+// Called once per iteration-boundary event (a clean exit that isn't
+// "done", a timeout kill, or right before a resume spawn), NOT called
+// on iteration start for the initial iter=1 invocation. For terminal
+// exit, use RecordKiroWrapperTerminal instead.
+//
+// The `event` attribute categorizes what happened so queries can
+// separate "retried and worked" from "retried and gave up" without
+// joining against terminal-state rows.
+func RecordKiroWrapperIteration(ctx context.Context, info KiroWrapperIterationInfo) {
+	initInstruments()
+	attrs := metric.WithAttributes(
+		attribute.String("event", info.Event),
+		attribute.String("rig", info.Rig),
+		attribute.String("polecat", info.Polecat),
+	)
+	inst.kiroWrapperIterationLog.Add(ctx, 1, attrs)
+	emit(ctx, "polecat.kiro_wrapper.iteration", otellog.SeverityInfo,
+		otellog.String("event", info.Event),
+		otellog.Int64("iter", int64(info.Iter)),
+		otellog.Int64("max_iter", int64(info.MaxIter)),
+		otellog.String("bead_id", info.BeadID),
+		otellog.String("session_name", info.SessionName),
+		otellog.String("rig", info.Rig),
+		otellog.String("polecat", info.Polecat),
+	)
+}
+
+// RecordKiroWrapperTerminal emits the single exit-time event for a
+// polecat-kiro-wrapper invocation (gu-6jgi). Captures all three
+// histogram/counter signals at once:
+//
+//   - invocations.total             — incremented by 1
+//   - iterations (histogram)        — records IterationsConsumed
+//   - terminal_state.total          — incremented by 1, labeled by State
+//   - recovery_duration_seconds     — records Duration in seconds
+//
+// Also emits a structured log event "polecat.kiro_wrapper.terminal"
+// carrying the same fields for VictoriaLogs-based forensic queries.
+//
+// Callers must pass a stable KiroWrapperState* constant for State;
+// unknown states will still be recorded but dashboards that enumerate
+// states will miss them. Passing err only affects the log record's
+// `error` attribute and severity — the terminal state label is the
+// source of truth for dashboard categorization.
+func RecordKiroWrapperTerminal(ctx context.Context, info KiroWrapperTerminalInfo) {
+	initInstruments()
+	attrs := metric.WithAttributes(
+		attribute.String("state", info.State),
+		attribute.String("rig", info.Rig),
+		attribute.String("polecat", info.Polecat),
+	)
+	inst.kiroWrapperInvocations.Add(ctx, 1, attrs)
+	inst.kiroWrapperTerminal.Add(ctx, 1, attrs)
+	inst.kiroWrapperIterationsHist.Record(ctx, int64(info.IterationsConsumed),
+		metric.WithAttributes(
+			attribute.String("state", info.State),
+		),
+	)
+	inst.kiroWrapperDurationSecondsHist.Record(ctx, info.Duration.Seconds(),
+		metric.WithAttributes(
+			attribute.String("state", info.State),
+		),
+	)
+	emit(ctx, "polecat.kiro_wrapper.terminal", severity(info.Err),
+		otellog.String("state", info.State),
+		otellog.Int64("iterations_consumed", int64(info.IterationsConsumed)),
+		otellog.Int64("max_iter", int64(info.MaxIter)),
+		otellog.Float64("duration_seconds", info.Duration.Seconds()),
+		otellog.Int64("exit_code", int64(info.ExitCode)),
+		otellog.String("bead_id", info.BeadID),
+		otellog.String("session_name", info.SessionName),
+		otellog.String("rig", info.Rig),
+		otellog.String("polecat", info.Polecat),
+		errKV(info.Err),
+	)
 }

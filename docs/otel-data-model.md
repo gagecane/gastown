@@ -253,6 +253,76 @@ parent → child bead graph for a given molecule.
 
 ---
 
+### `polecat.kiro_wrapper.iteration`
+
+Emitted by `gt polecat-kiro-wrapper` at each iteration boundary when the wrapped
+kiro-cli either exited clean-mid-task (gu-ronb), was killed by the per-iteration
+timeout, or is about to be re-spawned with `--resume`. Not emitted for the final
+successful iteration — see `polecat.kiro_wrapper.terminal` for that. Multiple
+iteration events may be emitted per wrapper invocation (up to
+`GT_KIRO_MAX_ITERATIONS - 1`).
+
+| Attribute | Type | Description |
+|---|---|---|
+| `run.id` | string | run UUID |
+| `event` | string | `"resume_start"` · `"clean_exit_not_done"` · `"timeout_kill"` |
+| `iter` | int | 1-indexed iteration number |
+| `max_iter` | int | configured iteration cap (`GT_KIRO_MAX_ITERATIONS`) |
+| `bead_id` | string | hooked bead ID from v2 heartbeat; empty when unknown |
+| `session_name` | string | `GT_SESSION` tmux pane name |
+| `rig` | string | `GT_RIG` |
+| `polecat` | string | `GT_POLECAT` |
+
+Metric: `gastown.polecat.kiro_wrapper.iteration_events.total` (counter,
+labeled by `event` / `rig` / `polecat`).
+
+A matching human-readable line is also appended to `logs/town.log` at each
+boundary for grep-based forensics.
+
+---
+
+### `polecat.kiro_wrapper.terminal`
+
+Emitted exactly once per `gt polecat-kiro-wrapper` invocation, right before the
+process exits. Carries the iteration count consumed, the categorized terminal
+state, and the total wallclock duration — the three signals operators need to
+reason about whether the gu-ronb mitigation is holding.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `run.id` | string | run UUID |
+| `state` | string | `"done"` · `"max_iterations"` · `"total_timeout"` · `"non_zero_exit"` · `"spawn_failure"` |
+| `iterations_consumed` | int | iterations the wrapper actually ran (1 = fast path; max = exhaustion) |
+| `max_iter` | int | configured iteration cap (`GT_KIRO_MAX_ITERATIONS`) |
+| `duration_seconds` | float | total wallclock from first kiro-cli spawn to terminal exit |
+| `exit_code` | int | kiro-cli exit code for `non_zero_exit` state; 0 otherwise |
+| `bead_id` | string | hooked bead ID from v2 heartbeat; empty when unknown |
+| `session_name` | string | `GT_SESSION` tmux pane name |
+| `rig` | string | `GT_RIG` |
+| `polecat` | string | `GT_POLECAT` |
+| `error` | string | wrapper-level error message (present for `spawn_failure` / `non_zero_exit`) |
+
+Metrics:
+- `gastown.polecat.kiro_wrapper.invocations.total` (counter, labeled by
+  `state` / `rig` / `polecat`) — one increment per wrapper run.
+- `gastown.polecat.kiro_wrapper.terminal_state.total` (counter, labeled by
+  `state` / `rig` / `polecat`) — same cardinality as invocations, kept
+  separate so dashboards can slice "state × something" without cross-
+  referencing a second metric.
+- `gastown.polecat.kiro_wrapper.iterations` (histogram, labeled by `state`) —
+  iterations consumed distribution. 1 = no bug hit; 2 … max-1 = recovery
+  worked; max = exhaustion.
+- `gastown.polecat.kiro_wrapper.recovery_duration_seconds` (histogram,
+  labeled by `state`) — total wallclock duration in seconds. Distinguishes
+  fast-path (iter 1, typically seconds-to-minutes) from deep-recovery
+  (iter 2–max, potentially many minutes).
+
+A matching human-readable terminal line is also appended to `logs/town.log`
+so operators can answer "why did this polecat's wrapper give up?" without
+a VictoriaLogs round-trip.
+
+---
+
 ### Other events
 
 All carry `run.id`.

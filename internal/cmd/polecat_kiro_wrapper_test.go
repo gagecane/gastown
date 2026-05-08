@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -779,4 +780,298 @@ func readWrapperTestFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// ---------------------------------------------------------------
+// Telemetry emission — runPolecatKiroWrapper end-to-end (gu-6jgi)
+//
+// These tests exercise the full recovery loop using a fake kiro-cli
+// built from this test binary via the classic TestHelperProcess
+// pattern. The wrapper's OTel emissions go to a noop provider (no
+// telemetry.Init in test context), so assertions are made against
+// the town.log mirror — it carries the same state/iteration/duration
+// fields and is the durable operator-facing signal required by the
+// gu-6jgi acceptance criteria.
+//
+// Three paths are covered:
+//
+//   1. iter-1 clean-done       — happy path, no retries
+//   2. iter-N recovery (N=3)   — bug hits on iters 1–2, iter 3 succeeds
+//   3. iter-max exhaustion     — every iter hits the bug, wrapper gives up
+//
+// The fake kiro-cli increments a counter file on each invocation and
+// branches on GT_FAKE_KIRO_MODE:
+//
+//   - "exit-clean"   : exit 0, do nothing else (simulates gu-ronb)
+//   - "exit-and-done": exit 0, write heartbeat "idle" (simulates gt done)
+//   - "nth-done"     : on invocation N write heartbeat "idle" then exit 0;
+//                      on earlier invocations just exit 0
+//
+// The helper process self-identifies via GO_WANT_HELPER_PROCESS — when
+// that's set it runs the fake kiro-cli logic and os.Exit's before the
+// regular test machinery can run.
+// ---------------------------------------------------------------
+
+// TestHelperProcess is the subprocess entry point for the fake
+// kiro-cli used by the telemetry tests. It runs only when
+// GO_WANT_HELPER_PROCESS=1 is set in the env — otherwise it's a no-op
+// during normal test runs. Pattern lifted from exec/exec_test.go and
+// used widely in the Go stdlib.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	defer os.Exit(0)
+
+	counterPath := os.Getenv("GT_FAKE_KIRO_COUNTER")
+	if counterPath == "" {
+		os.Exit(0)
+	}
+	// Increment the invocation counter. Each kiro-cli spawn bumps it
+	// by one, so the test can assert both "we were invoked the right
+	// number of times" and "which invocation index decided what".
+	n := readIntFile(counterPath) + 1
+	writeIntFile(counterPath, n)
+
+	mode := os.Getenv("GT_FAKE_KIRO_MODE")
+	switch mode {
+	case "exit-clean":
+		// Pure gu-ronb simulation: clean exit 0 with no heartbeat flip.
+		// The wrapper sees clean-exit-mid-task and retries.
+		os.Exit(0)
+	case "exit-and-done":
+		// Simulates the happy path: agent called gt done, heartbeat
+		// is flipped to "idle" before exit.
+		writeFakeHeartbeatIdle(t)
+		os.Exit(0)
+	case "nth-done":
+		// Recovery simulation: on invocation N flip heartbeat to idle
+		// then exit. Earlier invocations just exit clean (gu-ronb).
+		target := 0
+		if _, err := fmt.Sscanf(os.Getenv("GT_FAKE_KIRO_SUCCESS_ON"), "%d", &target); err != nil || target == 0 {
+			target = 2
+		}
+		if n >= target {
+			writeFakeHeartbeatIdle(t)
+		}
+		os.Exit(0)
+	default:
+		os.Exit(0)
+	}
+}
+
+// writeFakeHeartbeatIdle flips the heartbeat file to state="idle" so
+// the wrapper's isPolecatDone check returns true and the recovery loop
+// terminates cleanly. Uses the same JSON shape as the real
+// TouchSessionHeartbeatWithState writer.
+func writeFakeHeartbeatIdle(t *testing.T) {
+	townRoot := os.Getenv("GT_TOWN_ROOT")
+	sess := os.Getenv("GT_SESSION")
+	if townRoot == "" || sess == "" {
+		return
+	}
+	hbDir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(hbDir, 0o755); err != nil {
+		_ = t // unused in subprocess path, but keep signature stable
+		return
+	}
+	hb := map[string]any{
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"state":     "idle",
+	}
+	data, _ := json.Marshal(hb)
+	_ = os.WriteFile(filepath.Join(hbDir, sess+".json"), data, 0o644)
+}
+
+func readIntFile(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	_, _ = fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &n)
+	return n
+}
+
+func writeIntFile(path string, n int) {
+	_ = os.WriteFile(path, []byte(fmt.Sprintf("%d\n", n)), 0o644)
+}
+
+// wrapperIntegrationCase bundles the fake-kiro-cli config a single
+// integration test needs. Each case becomes one runPolecatKiroWrapper
+// invocation end-to-end, asserting the resulting town.log records.
+type wrapperIntegrationCase struct {
+	name       string
+	mode       string // GT_FAKE_KIRO_MODE
+	successOn  int    // for nth-done, which iter succeeds
+	maxIter    string // GT_KIRO_MAX_ITERATIONS override
+	wantState  string // expected terminal state label in town.log
+	wantInvocs int    // expected fake-kiro spawn count
+}
+
+// setupWrapperIntegrationEnv prepares the minimal env + temp dirs a
+// wrapper integration case needs. Returns the townRoot (so tests can
+// read town.log) and the counter path. All state lives under
+// t.TempDir() so cleanup is automatic and tests don't pollute each
+// other's heartbeat state.
+func setupWrapperIntegrationEnv(t *testing.T, maxIter string) (townRoot, sessName, counterPath string) {
+	t.Helper()
+	townRoot = t.TempDir()
+	sessName = "wrapper-integration-sess"
+	counterPath = filepath.Join(t.TempDir(), "invocation-count")
+
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+	t.Setenv("GT_SESSION", sessName)
+	t.Setenv("GT_FAKE_KIRO_COUNTER", counterPath)
+	// Shorten all knobs so the test finishes in sub-second wall time.
+	// The per-iter timeout must be long enough that a normal
+	// subprocess startup (TestHelperProcess) doesn't race the deadline.
+	t.Setenv("GT_KIRO_MAX_ITERATIONS", maxIter)
+	t.Setenv("GT_KIRO_ITERATION_TIMEOUT", "5s")
+	t.Setenv("GT_KIRO_TOTAL_TIMEOUT", "30s")
+	t.Setenv("GT_KIRO_RETRY_BACKOFF", "1ms")
+	// Neutralize rig/polecat names so the town.log "agent" field is
+	// predictable across test hosts.
+	t.Setenv("GT_RIG", "testrig")
+	t.Setenv("GT_POLECAT", "testcat")
+	return
+}
+
+// invokeWrapperWithFakeKiro runs runPolecatKiroWrapper with the current
+// test binary masquerading as kiro-cli via TestHelperProcess. Returns
+// the error the wrapper returned plus the town.log contents.
+func invokeWrapperWithFakeKiro(t *testing.T, townRoot string, mode string, successOn int) (error, string) {
+	t.Helper()
+	t.Setenv("GT_FAKE_KIRO_MODE", mode)
+	if successOn > 0 {
+		t.Setenv("GT_FAKE_KIRO_SUCCESS_ON", fmt.Sprintf("%d", successOn))
+	} else {
+		t.Setenv("GT_FAKE_KIRO_SUCCESS_ON", "")
+	}
+	// Build the argv the wrapper receives. First arg is the "binary"
+	// (this test's own path); subsequent args are what a real
+	// polecat preset would send: kiro-cli chat + flags + bootstrap
+	// prompt. The prompt is the trailing positional so the gu-q319
+	// stripTrailingInput logic has something to strip on iter 2+.
+	argv := []string{
+		os.Args[0],
+		"-test.run=TestHelperProcess",
+		"--",
+		"chat",
+		"--trust-all-tools",
+		"--no-interactive",
+		"bootstrap prompt",
+	}
+	// Also export GO_WANT_HELPER_PROCESS so the spawned subprocess
+	// knows to run the helper logic instead of the test suite.
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+
+	err := runPolecatKiroWrapper(nil, argv)
+	// Read town.log (may be absent if townRoot is empty — but all
+	// integration cases set it).
+	logPath := filepath.Join(townRoot, "logs", "town.log")
+	data, _ := os.ReadFile(logPath)
+	return err, string(data)
+}
+
+// TestKiroWrapperTerminal_CleanDoneOnIter1 exercises the happy path:
+// kiro-cli exits 0 on iter 1 AND flips the heartbeat to idle, so the
+// wrapper's isPolecatDone check returns true and no retry happens.
+// Expected terminal state: "done", iterations=1.
+func TestKiroWrapperTerminal_CleanDoneOnIter1(t *testing.T) {
+	townRoot, _, counterPath := setupWrapperIntegrationEnv(t, "5")
+	err, townLog := invokeWrapperWithFakeKiro(t, townRoot, "exit-and-done", 0)
+	if err != nil {
+		t.Fatalf("runPolecatKiroWrapper returned unexpected error: %v", err)
+	}
+
+	n := readIntFile(counterPath)
+	if n != 1 {
+		t.Errorf("fake kiro invoked %d times, want 1 (happy path should not retry)", n)
+	}
+
+	if !strings.Contains(townLog, "state=done") {
+		t.Errorf("town.log missing `state=done` terminal record:\n%s", townLog)
+	}
+	if !strings.Contains(townLog, "iter=1/5") {
+		t.Errorf("town.log should record iter=1/5 for happy path, got:\n%s", townLog)
+	}
+}
+
+// TestKiroWrapperTerminal_RecoveryAtIter3 exercises the mid-recovery
+// path: iters 1–2 hit the gu-ronb bug (clean exit, no gt done), iter 3
+// succeeds. Expected terminal state: "done", iterations=3, and two
+// "clean_exit_not_done" iteration events preceding the terminal record.
+func TestKiroWrapperTerminal_RecoveryAtIter3(t *testing.T) {
+	townRoot, _, counterPath := setupWrapperIntegrationEnv(t, "5")
+	err, townLog := invokeWrapperWithFakeKiro(t, townRoot, "nth-done", 3)
+	if err != nil {
+		t.Fatalf("runPolecatKiroWrapper returned unexpected error: %v", err)
+	}
+
+	n := readIntFile(counterPath)
+	if n != 3 {
+		t.Errorf("fake kiro invoked %d times, want 3 (should recover on iter 3)", n)
+	}
+
+	// Count per-iteration "clean_exit_not_done" events — must see 2
+	// (for the two failed iters before iter 3 succeeds). The wrapper
+	// does not emit clean_exit_not_done for the final successful iter.
+	cleanExits := strings.Count(townLog, "event=clean_exit_not_done")
+	if cleanExits != 2 {
+		t.Errorf("town.log has %d `event=clean_exit_not_done` iteration events, want 2\n%s",
+			cleanExits, townLog)
+	}
+
+	// Terminal record must show iterations=3 and state=done.
+	if !strings.Contains(townLog, "state=done") {
+		t.Errorf("town.log missing `state=done` terminal record:\n%s", townLog)
+	}
+	if !strings.Contains(townLog, "iter=3/5") {
+		t.Errorf("town.log should record iter=3/5 after recovery, got:\n%s", townLog)
+	}
+
+	// Two resume_start events are emitted for iters 2 and 3 (the
+	// wrapper emits it right before each --resume spawn).
+	resumeStarts := strings.Count(townLog, "event=resume_start")
+	if resumeStarts != 2 {
+		t.Errorf("town.log has %d `event=resume_start` iteration events, want 2\n%s",
+			resumeStarts, townLog)
+	}
+}
+
+// TestKiroWrapperTerminal_ExhaustionAtIterMax exercises the iteration-
+// cap path: every iter hits the gu-ronb bug, wrapper gives up after
+// maxIterations. Expected terminal state: "max_iterations",
+// iterations=max, and maxIter-1 "clean_exit_not_done" iteration events.
+func TestKiroWrapperTerminal_ExhaustionAtIterMax(t *testing.T) {
+	const maxIter = 3
+	townRoot, _, counterPath := setupWrapperIntegrationEnv(t, fmt.Sprintf("%d", maxIter))
+	err, townLog := invokeWrapperWithFakeKiro(t, townRoot, "exit-clean", 0)
+	if err != nil {
+		t.Fatalf("runPolecatKiroWrapper returned unexpected error: %v (max-iter exhaustion returns nil)", err)
+	}
+
+	n := readIntFile(counterPath)
+	if n != maxIter {
+		t.Errorf("fake kiro invoked %d times, want %d (every iter should fail and retry)", n, maxIter)
+	}
+
+	// maxIter "clean_exit_not_done" events — one per failed iter,
+	// including the last one (we emit before checking iter < maxIter
+	// for the backoff decision).
+	cleanExits := strings.Count(townLog, "event=clean_exit_not_done")
+	if cleanExits != maxIter {
+		t.Errorf("town.log has %d `event=clean_exit_not_done` iteration events, want %d\n%s",
+			cleanExits, maxIter, townLog)
+	}
+
+	// Terminal record: state=max_iterations, iter=max/max.
+	if !strings.Contains(townLog, "state=max_iterations") {
+		t.Errorf("town.log missing `state=max_iterations` terminal record:\n%s", townLog)
+	}
+	expectedIter := fmt.Sprintf("iter=%d/%d", maxIter, maxIter)
+	if !strings.Contains(townLog, expectedIter) {
+		t.Errorf("town.log should record %s after exhaustion, got:\n%s", expectedIter, townLog)
+	}
 }

@@ -294,3 +294,96 @@ func TestRecordBeadCreate(t *testing.T) {
 	RecordBeadCreate(ctx, "gt-abc12.s01", "gt-abc12", "mol-polecat-work")
 	RecordBeadCreate(ctx, "gt-def34.s01", "gt-def34", "mol-review")
 }
+
+// ------------------------------------------------------------------
+// polecat-kiro-wrapper recorder functions (gu-6jgi)
+// ------------------------------------------------------------------
+
+// The recorder tests exercise the noop-provider code paths — we can't
+// assert on exported counter values (OTel SDK histogram/counter APIs
+// don't expose per-instrument state without a manual reader), so the
+// bar these tests enforce is:
+//
+//   1. Calls never panic, even with zero-valued inputs.
+//   2. Every documented KiroWrapperState* label is a valid input.
+//   3. Context with a run.id threads through both emissions.
+//
+// Actual metric-value assertions are handled in cmd/polecat_kiro_wrapper_test
+// via a fake kiro-cli binary end-to-end — that layer owns the "wrapper
+// emits the right state for path X" contract.
+
+func TestRecordKiroWrapperIteration_NoPanic(t *testing.T) {
+	resetInstruments(t)
+	ctx := context.Background()
+
+	// Representative iteration events — vocabulary is intentionally
+	// small and stable (see runPolecatKiroWrapper.emitIterationEvent).
+	for _, event := range []string{"resume_start", "clean_exit_not_done", "timeout_kill"} {
+		RecordKiroWrapperIteration(ctx, KiroWrapperIterationInfo{
+			Iter: 2, MaxIter: 5, Event: event,
+			BeadID: "gu-6jgi", SessionName: "gt-polecat-rust",
+			Rig: "gastown_upstream", Polecat: "rust",
+		})
+	}
+
+	// Zero-valued / empty inputs must not panic either — the wrapper
+	// may run without GT_RIG/GT_POLECAT set in ad-hoc debugging.
+	RecordKiroWrapperIteration(ctx, KiroWrapperIterationInfo{})
+}
+
+func TestRecordKiroWrapperTerminal_AllKnownStates(t *testing.T) {
+	resetInstruments(t)
+	ctx := WithRunID(context.Background(), "run-kiro-term-test")
+
+	// Every terminal state label documented on KiroWrapperState* must
+	// be recordable. This is a regression guard: if someone drops a
+	// constant or renames it without updating this list, the test
+	// catches the omission.
+	allStates := []string{
+		KiroWrapperStateDone,
+		KiroWrapperStateMaxIterations,
+		KiroWrapperStateTotalTimeout,
+		KiroWrapperStateNonZeroExit,
+		KiroWrapperStateSpawnFailure,
+	}
+	for _, st := range allStates {
+		RecordKiroWrapperTerminal(ctx, KiroWrapperTerminalInfo{
+			IterationsConsumed: 3, MaxIter: 5, State: st,
+			Duration: 42 * 1_000_000_000, // 42s expressed as time.Duration nanos
+			ExitCode: 0,
+			BeadID:   "gu-6jgi", SessionName: "gt-polecat-rust",
+			Rig: "gastown_upstream", Polecat: "rust",
+		})
+	}
+}
+
+func TestRecordKiroWrapperTerminal_NonZeroExitCarriesCode(t *testing.T) {
+	resetInstruments(t)
+	ctx := context.Background()
+
+	// Exit code 2 is the classic clap-parse-error signature (gu-q319);
+	// 137 is OOM-kill. The recorder must accept both and not coerce.
+	RecordKiroWrapperTerminal(ctx, KiroWrapperTerminalInfo{
+		IterationsConsumed: 1, MaxIter: 5,
+		State: KiroWrapperStateNonZeroExit, ExitCode: 2,
+		Err: errors.New("clap parse error"),
+	})
+	RecordKiroWrapperTerminal(ctx, KiroWrapperTerminalInfo{
+		IterationsConsumed: 4, MaxIter: 5,
+		State: KiroWrapperStateNonZeroExit, ExitCode: 137,
+	})
+}
+
+func TestRecordKiroWrapperTerminal_ZeroDurationAccepted(t *testing.T) {
+	resetInstruments(t)
+	ctx := context.Background()
+
+	// Total-timeout exit at iter 1 with a misconfigured tiny total
+	// budget produces a near-zero wallclock duration. Histogram must
+	// accept zero without error.
+	RecordKiroWrapperTerminal(ctx, KiroWrapperTerminalInfo{
+		IterationsConsumed: 1, MaxIter: 5,
+		State:    KiroWrapperStateTotalTimeout,
+		Duration: 0,
+	})
+}

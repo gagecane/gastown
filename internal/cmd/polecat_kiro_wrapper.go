@@ -22,6 +22,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -218,10 +220,66 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 	cfg := loadWrapperConfig()
 	start := time.Now()
 
+	// Telemetry context: root.go has already called telemetry.Init, so
+	// global providers are wired up. We only need to thread run.id
+	// (GT_RUN) through so iteration + terminal events correlate with
+	// the rest of this polecat session in VictoriaLogs.
+	tctx := telemetry.WithRunID(context.Background(), os.Getenv("GT_RUN"))
+	rig := os.Getenv("GT_RIG")
+	polecatName := os.Getenv("GT_POLECAT")
+
+	// Terminal info is mutated throughout the loop and flushed exactly
+	// once by the deferred emitter below. This is the gu-6jgi acceptance
+	// signal: every wrapper invocation produces one terminal record,
+	// with iteration count + wallclock duration + categorized state,
+	// regardless of which exit path we take.
+	var term = telemetry.KiroWrapperTerminalInfo{
+		MaxIter:     cfg.maxIterations,
+		SessionName: cfg.sessionName,
+		Rig:         rig,
+		Polecat:     polecatName,
+	}
+	defer func() {
+		term.Duration = time.Since(start)
+		// If nothing set the state we got here via a panic-like path;
+		// record it as a spawn_failure so dashboards surface it rather
+		// than silently dropping the invocation.
+		if term.State == "" {
+			term.State = telemetry.KiroWrapperStateSpawnFailure
+		}
+		if term.BeadID == "" {
+			// Best-effort re-read at exit in case the heartbeat only
+			// acquired a bead mid-run. Cheap — ReadSessionHeartbeat
+			// returns nil on any error. Only do this for non-terminal-
+			// state paths; for known states we trust what the loop
+			// recorded.
+			term.BeadID = hookedBeadID(cfg.townRoot, cfg.sessionName)
+		}
+		telemetry.RecordKiroWrapperTerminal(tctx, term)
+		// Persist a single terminal record to town.log as well so
+		// operators can grep for wrapper exits without VictoriaLogs
+		// access. Best-effort: the wrapper must not fail just because
+		// the log file is unwritable.
+		if cfg.townRoot != "" {
+			agent := strings.TrimSpace(rig + "/polecats/" + polecatName)
+			if agent == "/polecats/" {
+				agent = "polecat-kiro-wrapper"
+			}
+			logCtx := fmt.Sprintf(
+				"kiro-wrapper terminal state=%s iter=%d/%d duration=%s exit_code=%d bead=%s session=%s",
+				term.State, term.IterationsConsumed, term.MaxIter,
+				term.Duration.Round(time.Millisecond),
+				term.ExitCode, term.BeadID, term.SessionName)
+			_ = townlog.NewLogger(cfg.townRoot).Log(townlog.EventCallback, agent, logCtx)
+		}
+	}()
+
 	// Base args for iteration 1 — pass through exactly as received.
 	// On iteration 2+, append "--resume" (resumes most recent conversation
 	// in cwd) and a continuation prompt (becomes the INPUT positional arg).
 	for iter := 1; iter <= cfg.maxIterations; iter++ {
+		term.IterationsConsumed = iter
+
 		// Wallclock guard at the top of the iteration: if the total
 		// budget is already exhausted we don't even start a new kiro-cli
 		// invocation. This is checked BEFORE we compute the per-iteration
@@ -231,6 +289,14 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr,
 				"polecat-kiro-wrapper: total timeout (%s) reached before iter %d — giving up; witness will clean up\n",
 				cfg.totalTimeout, iter)
+			// iter hasn't actually run — record the iteration count as
+			// the last one that DID run (iter-1), floored at 1 for the
+			// edge case where iter 1 itself is gated by a tiny total.
+			term.IterationsConsumed = iter - 1
+			if term.IterationsConsumed < 1 {
+				term.IterationsConsumed = 1
+			}
+			term.State = telemetry.KiroWrapperStateTotalTimeout
 			return nil
 		}
 
@@ -240,6 +306,7 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr,
 				"polecat-kiro-wrapper: iteration %d — resuming kiro-cli with continuation prompt (gu-ronb recovery)\n",
 				iter)
+			emitIterationEvent(tctx, cfg, rig, polecatName, iter, "resume_start")
 			// Before spawning iter N+1 we archive any uncommitted
 			// working-tree state from iter N. If iter N+1 crashes hard
 			// (e.g. wrapper itself dies, host reboots, OOM kill) the
@@ -292,14 +359,23 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 					fmt.Fprintf(os.Stderr,
 						"polecat-kiro-wrapper: kiro-cli exceeded per-iteration timeout (%s) on iter %d/%d — killed\n",
 						iterDeadline, iter, cfg.maxIterations)
+					emitIterationEvent(tctx, cfg, rig, polecatName, iter, "timeout_kill")
 				} else if exitCode != 0 {
 					// Real non-zero exit (panic, signal other than our
-					// kill, etc.) — propagate. Resume-and-retry is only
-					// for the clean-exit-mid-task bug.
-					os.Exit(exitCode) //nolint:revive // deep-exit is appropriate here; we must propagate the child's exit status.
+					// kill, etc.) — propagate via SilentExit so our
+					// deferred terminal emitter still fires. Exit codes
+					// from kiro-cli: 2=clap parse error, 137=OOM kill,
+					// etc. The dashboard slices by exit_code to tell
+					// these apart.
+					term.State = telemetry.KiroWrapperStateNonZeroExit
+					term.ExitCode = exitCode
+					term.Err = fmt.Errorf("kiro-cli exited %d on iter %d", exitCode, iter)
+					return NewSilentExit(exitCode)
 				}
 			} else {
 				// Spawn/IO failure — not a normal exit. Propagate.
+				term.State = telemetry.KiroWrapperStateSpawnFailure
+				term.Err = runErr
 				return fmt.Errorf("launching kiro-cli (iter %d): %w", iter, runErr)
 			}
 		}
@@ -309,6 +385,7 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 		time.Sleep(heartbeatSettleDelay)
 
 		if !timedOut && isPolecatDone(cfg.townRoot, cfg.sessionName) {
+			term.State = telemetry.KiroWrapperStateDone
 			return nil
 		}
 
@@ -319,6 +396,7 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr,
 				"polecat-kiro-wrapper: kiro-cli exited clean but polecat not done (iter %d/%d)\n",
 				iter, cfg.maxIterations)
+			emitIterationEvent(tctx, cfg, rig, polecatName, iter, "clean_exit_not_done")
 		}
 		if iter < cfg.maxIterations && cfg.retryBackoff > 0 {
 			// Cap the backoff at the remaining budget so we don't sleep
@@ -341,10 +419,48 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr,
 		"polecat-kiro-wrapper: max iterations (%d) reached without completion — giving up; witness will clean up\n",
 		cfg.maxIterations)
+	term.State = telemetry.KiroWrapperStateMaxIterations
 	// Return success so the tmux session closes cleanly; deacon/witness
 	// will detect the polecat is stalled and handle recovery (nuke or
 	// escalate). Returning non-zero would just add noise.
 	return nil
+}
+
+// emitIterationEvent centralizes the per-iteration-boundary telemetry
+// emission: an OTEL log/counter event via the recorder, plus a structured
+// line appended to logs/town.log for out-of-band forensic grep. Best-
+// effort: both sinks absorb their own errors so this function never
+// blocks the recovery loop.
+//
+// `event` is one of "resume_start", "clean_exit_not_done", "timeout_kill".
+// Use the same vocabulary as the KiroWrapperStateXxx terminal-state
+// labels so queries that correlate iteration transitions with terminal
+// state can filter on a stable enum.
+func emitIterationEvent(tctx context.Context, cfg wrapperConfig, rig, polecatName string, iter int, event string) {
+	info := telemetry.KiroWrapperIterationInfo{
+		Iter:        iter,
+		MaxIter:     cfg.maxIterations,
+		Event:       event,
+		BeadID:      hookedBeadID(cfg.townRoot, cfg.sessionName),
+		SessionName: cfg.sessionName,
+		Rig:         rig,
+		Polecat:     polecatName,
+	}
+	telemetry.RecordKiroWrapperIteration(tctx, info)
+
+	// town.log gives operators a persisted grep target without needing
+	// VictoriaLogs access. The wrapper runs inside a polecat subprocess,
+	// so we build the logger on the fly with the resolved townRoot.
+	if cfg.townRoot == "" {
+		return
+	}
+	agent := strings.TrimSpace(rig + "/polecats/" + polecatName)
+	if agent == "/polecats/" {
+		agent = "polecat-kiro-wrapper"
+	}
+	ctx := fmt.Sprintf("kiro-wrapper event=%s iter=%d/%d bead=%s session=%s",
+		event, iter, cfg.maxIterations, info.BeadID, cfg.sessionName)
+	_ = townlog.NewLogger(cfg.townRoot).Log(townlog.EventCallback, agent, ctx)
 }
 
 // captureDirtyWorkingTree snapshots any uncommitted changes in the
