@@ -420,6 +420,15 @@ func (d *testDAG) Setup(t *testing.T) (townRoot, logPath string) {
 	// Inject bin/ into PATH.
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
+	// Suppress beads SDK auto-start of an embedded dolt sql-server in the test's
+	// .beads/dolt/. Production paths like createStagedConvoy → addTrackingRelation
+	// open a beads store; without this, the SDK spawns a dolt sql-server inside
+	// t.TempDir() that gets reparented to PID 1 when t.TempDir cleanup deletes
+	// its cwd, leaking the process indefinitely (gs-4yf). The store-open call
+	// fails fast and addTrackingRelation falls back to the bd stub, which is
+	// what every test using this helper already expects.
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
 	// Change cwd to town root with cleanup.
 	cwd, err := os.Getwd()
 	if err != nil {
