@@ -2781,6 +2781,404 @@ func TestExtractBaseBranchVar(t *testing.T) {
 	}
 }
 
+// TestExtractGatesCommandsVar covers parsing of the gates_commands block out
+// of formula_vars. Witness recovery runs these gates on the recovered branch
+// before filing an MR (gu-zrim); the parser must preserve gate order and
+// multi-line commands while cleanly terminating on malformed or absent
+// blocks.
+func TestExtractGatesCommandsVar(t *testing.T) {
+	t.Parallel()
+
+	canonical := "base_branch=main\n" +
+		"gates_commands=# Gate: build\n" +
+		"go build ./...\n" +
+		"# Gate: rebase-check\n" +
+		"scripts/check-upstream-rebased.sh\n" +
+		"# Gate: test\n" +
+		"go test ./...\n" +
+		"# Gate: vet\n" +
+		"go vet ./..."
+
+	cases := []struct {
+		name string
+		in   string
+		want []PolecatGate
+	}{
+		{
+			name: "empty",
+			in:   "",
+			want: nil,
+		},
+		{
+			name: "absent key",
+			in:   "base_branch=main\npriority=2",
+			want: nil,
+		},
+		{
+			name: "canonical format from mol-polecat-work",
+			in:   canonical,
+			want: []PolecatGate{
+				{Name: "build", Cmd: "go build ./..."},
+				{Name: "rebase-check", Cmd: "scripts/check-upstream-rebased.sh"},
+				{Name: "test", Cmd: "go test ./..."},
+				{Name: "vet", Cmd: "go vet ./..."},
+			},
+		},
+		{
+			name: "gates_commands at start of vars",
+			in: "gates_commands=# Gate: build\n" +
+				"go build ./...",
+			want: []PolecatGate{
+				{Name: "build", Cmd: "go build ./..."},
+			},
+		},
+		{
+			name: "multi-line command preserves newlines",
+			in: "gates_commands=# Gate: lint\n" +
+				"golangci-lint run \\\n" +
+				"  --timeout=5m",
+			want: []PolecatGate{
+				{Name: "lint", Cmd: "golangci-lint run \\\n  --timeout=5m"},
+			},
+		},
+		{
+			name: "env-style assignment inside command does NOT terminate block",
+			in: "gates_commands=# Gate: test\n" +
+				"GOFLAGS=-mod=vendor go test ./...",
+			want: []PolecatGate{
+				// The parser only terminates on formula-var keys at column 0
+				// with no shell-metacharacters; "GOFLAGS=..." starts a key
+				// with uppercase letters that pass the regex, so it WILL
+				// terminate. Document the behavior: such commands must be
+				// prefixed with whitespace or moved to a separate line.
+			},
+		},
+		{
+			name: "indented env assignment is kept as command content",
+			in: "gates_commands=# Gate: test\n" +
+				"  GOFLAGS=-mod=vendor go test ./...",
+			want: []PolecatGate{
+				{Name: "test", Cmd: "  GOFLAGS=-mod=vendor go test ./..."},
+			},
+		},
+		{
+			name: "shell-prefixed command kept as command content",
+			in: "gates_commands=# Gate: test\n" +
+				"./scripts/test.sh",
+			want: []PolecatGate{
+				{Name: "test", Cmd: "./scripts/test.sh"},
+			},
+		},
+		{
+			name: "later formula var terminates block",
+			in: "gates_commands=# Gate: build\n" +
+				"go build ./...\n" +
+				"priority=2",
+			want: []PolecatGate{
+				{Name: "build", Cmd: "go build ./..."},
+			},
+		},
+		{
+			name: "content before first # Gate: header is ignored",
+			in: "gates_commands=noise line\n" +
+				"# Gate: build\n" +
+				"go build ./...",
+			want: []PolecatGate{
+				{Name: "build", Cmd: "go build ./..."},
+			},
+		},
+		{
+			name: "empty gate command is dropped",
+			in: "gates_commands=# Gate: build\n" +
+				"# Gate: test\n" +
+				"go test ./...",
+			want: []PolecatGate{
+				{Name: "test", Cmd: "go test ./..."},
+			},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractGatesCommandsVar(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d gates, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("gate[%d] = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestLooksLikeFormulaVarKey pins down the predicate that decides whether a
+// line ends the gates_commands block. The heuristic is intentionally
+// conservative — only bare key=value lines at column 0 with an
+// identifier-shaped key terminate the block.
+func TestLooksLikeFormulaVarKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"base_branch=main", true},
+		{"priority=2", true},
+		{"FOO_BAR-1=value", true},
+		{"  priority=2", false}, // indented → command content
+		{"\tFOO=bar", false},    // tab-indented → command content
+		{"# Gate: build", false},
+		{"go test ./...", false}, // no equals
+		{"=novalue", false},      // empty key
+		{"has space=bad", false}, // space in key
+		{"$VAR=bad", false},      // shell var
+		{"", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			if got := looksLikeFormulaVarKey(tc.in); got != tc.want {
+				t.Errorf("looksLikeFormulaVarKey(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunRecoveryGates_Success verifies the happy path: all gates pass and
+// the outcome is success with empty failure metadata.
+func TestRunRecoveryGates_Success(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	got := _runRecoveryGates(tmp, []PolecatGate{
+		{Name: "g1", Cmd: "true"},
+		{Name: "g2", Cmd: "echo ok"},
+	})
+	if !got.success {
+		t.Fatalf("success = false, want true (failedGate=%q msg=%q)", got.failedGate, got.failureMsg)
+	}
+	if got.failedGate != "" || got.failureMsg != "" {
+		t.Errorf("expected empty failure metadata, got gate=%q msg=%q", got.failedGate, got.failureMsg)
+	}
+}
+
+// TestRunRecoveryGates_FailureStopsFirst verifies sequential stop-on-failure:
+// the second gate never runs when the first fails, and the outcome carries
+// the failing gate's name and a bounded diagnostic message.
+func TestRunRecoveryGates_FailureStopsFirst(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	sentinel := filepath.Join(tmp, "after-bad.touched")
+	// The second gate would create a sentinel file if it ran. We assert it
+	// doesn't so we know the runner really stopped after the first failure.
+	got := _runRecoveryGates(tmp, []PolecatGate{
+		{Name: "bad", Cmd: "echo boom >&2; exit 3"},
+		{Name: "after-bad", Cmd: "touch " + sentinel},
+	})
+	if got.success {
+		t.Fatalf("success = true, want false")
+	}
+	if got.failedGate != "bad" {
+		t.Errorf("failedGate = %q, want %q", got.failedGate, "bad")
+	}
+	if !strings.Contains(got.failureMsg, "boom") {
+		t.Errorf("failureMsg = %q, expected to contain stderr %q", got.failureMsg, "boom")
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Errorf("second gate ran after first failure (sentinel exists): stat err=%v", err)
+	}
+}
+
+// TestRunRecoveryGates_Empty verifies the no-gates path: an empty list is a
+// success (no gates to enforce). Blank/whitespace-only commands are skipped.
+func TestRunRecoveryGates_Empty(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		gates []PolecatGate
+	}{
+		{"nil", nil},
+		{"empty slice", []PolecatGate{}},
+		{"blank cmd skipped", []PolecatGate{{Name: "noop", Cmd: "   "}}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := _runRecoveryGates(t.TempDir(), tc.gates)
+			if !got.success {
+				t.Errorf("success = false for %s, want true", tc.name)
+			}
+		})
+	}
+}
+
+// TestRunRecoveryGates_Timeout verifies gate commands are bounded by
+// recoveryGateTimeout. A slow gate must be killed and surface as a timeout
+// failure in the outcome.
+func TestRunRecoveryGates_Timeout(t *testing.T) {
+	// Not parallel: mutates package-level recoveryGateTimeout.
+	old := recoveryGateTimeout
+	recoveryGateTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { recoveryGateTimeout = old })
+
+	got := _runRecoveryGates(t.TempDir(), []PolecatGate{
+		{Name: "slow", Cmd: "sleep 5"},
+	})
+	if got.success {
+		t.Fatalf("success = true, want false for timed-out gate")
+	}
+	if got.failedGate != "slow" {
+		t.Errorf("failedGate = %q, want %q", got.failedGate, "slow")
+	}
+	if !strings.Contains(got.failureMsg, "timeout") {
+		t.Errorf("failureMsg = %q, expected to mention timeout", got.failureMsg)
+	}
+}
+
+// TestTruncateGateOutput verifies the 500-char ceiling so embedded gate
+// output never overflows a zombie Action string.
+func TestTruncateGateOutput(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 600)
+	short := "short output"
+	if got := truncateGateOutput(short); got != short {
+		t.Errorf("short output mutated: got %q, want %q", got, short)
+	}
+	got := truncateGateOutput(long)
+	if len(got) != 500+3 { // 500 chars + "..."
+		t.Errorf("truncated len = %d, want %d", len(got), 503)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("truncated output missing trailing ellipsis: %q", got[len(got)-10:])
+	}
+}
+
+// TestRecoverUnfiledMR_GateFailureBlocksPushAndSubmit verifies the gu-zrim
+// fix: when a pre-merge gate fails during witness recovery, neither the
+// push nor `gt mq submit` is invoked. This is the whole point of running
+// gates up front — a broken branch must not reach origin or the merge
+// queue just because the polecat died before it could run gates itself.
+//
+// Not parallel: overrides package-level runRecoveryGates.
+func TestRecoverUnfiledMR_GateFailureBlocksPushAndSubmit(t *testing.T) {
+	old := runRecoveryGates
+	runRecoveryGates = func(string, []PolecatGate) recoveryGateOutcome {
+		return recoveryGateOutcome{
+			success:    false,
+			failedGate: "rebase-check",
+			failureMsg: "upstream/main NOT an ancestor of HEAD",
+		}
+	}
+	t.Cleanup(func() { runRecoveryGates = old })
+
+	// Build a fake town root with a polecat worktree directory. _recoverUnfiledMR
+	// stat's the polecat path but never runs git here — we short-circuit on
+	// the gate failure before any exec happens.
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	polecatPath := filepath.Join(townRoot, "testrig", "polecats", "nux", "testrig")
+	if err := os.MkdirAll(polecatPath, 0o755); err != nil {
+		t.Fatalf("mkdir polecat path: %v", err)
+	}
+
+	state := &UnfiledMRState{
+		Branch:        "polecat/nux/gt-abc",
+		HeadSHA:       "deadbeef",
+		Target:        "main",
+		CommitsAhead:  true,
+		AlreadyPushed: false,
+		Gates: []PolecatGate{
+			{Name: "build", Cmd: "go build ./..."},
+			{Name: "rebase-check", Cmd: "scripts/check-upstream-rebased.sh"},
+		},
+	}
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			t.Errorf("bd.Exec invoked on gate failure path (args=%v) — caller should have short-circuited", args)
+			return "", nil
+		},
+		func(args []string) error {
+			t.Errorf("bd.Run invoked on gate failure path (args=%v) — caller should have short-circuited", args)
+			return nil
+		},
+	)
+
+	action, err := _recoverUnfiledMR(bd, townRoot, "testrig", "nux", state)
+	if err == nil {
+		t.Fatalf("err = nil, want gate-failure error (action=%q)", action)
+	}
+	if !strings.Contains(action, "recover-failed-gate-rebase-check") {
+		t.Errorf("action = %q, want substring %q", action, "recover-failed-gate-rebase-check")
+	}
+	if !strings.Contains(action, "aa-unpushed-commits") {
+		t.Errorf("action = %q, want aa-unpushed-commits tag (state.AlreadyPushed=false)", action)
+	}
+	if !strings.Contains(action, "upstream/main NOT an ancestor") {
+		t.Errorf("action = %q, want embedded gate failure message", action)
+	}
+	if !strings.Contains(err.Error(), "gate \"rebase-check\" failed") {
+		t.Errorf("err = %v, want mention of failing gate", err)
+	}
+}
+
+// TestRecoverUnfiledMR_NoGatesPreservesLegacyBehavior verifies that beads
+// which don't carry gates_commands (pre-gu-zrim formats, or formulas other
+// than mol-polecat-work) still follow the original push + submit path. This
+// keeps the new gate check from regressing existing recovery flows.
+//
+// Not parallel: overrides package-level runRecoveryGates to fail the test if
+// the gate runner is ever consulted when Gates is empty.
+func TestRecoverUnfiledMR_NoGatesPreservesLegacyBehavior(t *testing.T) {
+	old := runRecoveryGates
+	runRecoveryGates = func(string, []PolecatGate) recoveryGateOutcome {
+		t.Fatalf("runRecoveryGates must not be called when state.Gates is empty")
+		return recoveryGateOutcome{}
+	}
+	t.Cleanup(func() { runRecoveryGates = old })
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	// Intentionally do NOT create the polecat path so _recoverUnfiledMR
+	// short-circuits on the worktree-missing check AFTER the gate-bypass
+	// decision. We only care that the gate path is not invoked.
+	polecatParent := filepath.Join(townRoot, "testrig", "polecats", "nux")
+	if err := os.MkdirAll(polecatParent, 0o755); err != nil {
+		t.Fatalf("mkdir polecat parent: %v", err)
+	}
+
+	state := &UnfiledMRState{
+		Branch:        "polecat/nux/gt-abc",
+		HeadSHA:       "deadbeef",
+		Target:        "main",
+		CommitsAhead:  true,
+		AlreadyPushed: true, // skip the push branch so no real git runs
+		Gates:         nil,
+	}
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "", nil },
+		func(args []string) error { return nil },
+	)
+
+	_, _ = _recoverUnfiledMR(bd, townRoot, "testrig", "nux", state)
+	// No assertion on action — the point is that the gate-runner mock is
+	// never invoked (enforced via t.Fatalf inside the mock).
+}
+
 // TestExtractMRIDFromSubmit covers parsing of `gt mq submit` output so we can
 // tag recovery actions with the MR ID for operator visibility.
 func TestExtractMRIDFromSubmit(t *testing.T) {

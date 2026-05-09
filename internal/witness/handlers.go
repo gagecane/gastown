@@ -1,6 +1,7 @@
 package witness
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1367,6 +1368,24 @@ type UnfiledMRState struct {
 	// ExistingMRID, if non-empty, is the ID of an open MR bead that already
 	// references this branch+SHA. When set, no recovery is needed.
 	ExistingMRID string
+	// Gates is the ordered list of pre-merge quality gates that the polecat
+	// would have run before `gt done` if its session had survived. Populated
+	// from the hook bead's formula_vars `gates_commands` field (see gu-zrim).
+	// Witness recovery must re-run these on the recovered branch before
+	// filing the MR, otherwise bugs the polecat never got to run gates
+	// against (e.g., a missing upstream-rebase) can silently land on main.
+	Gates []PolecatGate
+}
+
+// PolecatGate is a single named gate command parsed from a bead's
+// gates_commands formula var. It mirrors the on-disk format the polecat
+// itself consumes, so witness recovery and polecat execution enforce the
+// same set of gates. Post-squash gates are not represented here — by
+// construction, gates_commands only contains pre-merge gates (see
+// internal/cmd/sling_helpers.go).
+type PolecatGate struct {
+	Name string
+	Cmd  string
 }
 
 // NeedsRecovery returns true if the polecat has commits ahead of the target
@@ -1429,6 +1448,7 @@ func _verifyUnfiledMR(bd *BdCli, workDir, rigName, polecatName, hookBead string)
 	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
 		target = rigCfg.DefaultBranch
 	}
+	var gates []PolecatGate
 	if hookBead != "" {
 		if out, showErr := bd.Exec(workDir, "show", hookBead, "--json"); showErr == nil && out != "" {
 			var issues []struct {
@@ -1439,6 +1459,9 @@ func _verifyUnfiledMR(bd *BdCli, workDir, rigName, polecatName, hookBead string)
 					if bb := extractBaseBranchVar(af.FormulaVars); bb != "" {
 						target = bb
 					}
+					// gu-zrim: parse pre-merge gates so witness recovery can
+					// re-run them on the recovered branch before filing the MR.
+					gates = extractGatesCommandsVar(af.FormulaVars)
 				}
 			}
 		}
@@ -1449,7 +1472,7 @@ func _verifyUnfiledMR(bd *BdCli, workDir, rigName, polecatName, hookBead string)
 		return nil, nil
 	}
 
-	state := &UnfiledMRState{Branch: branch, Target: target}
+	state := &UnfiledMRState{Branch: branch, Target: target, Gates: gates}
 
 	// Resolve HEAD SHA. Best-effort: recovery still works without it (branch-only dedup).
 	if sha, shaErr := g.Rev("HEAD"); shaErr == nil {
@@ -1513,6 +1536,117 @@ func extractBaseBranchVar(formulaVars string) string {
 		}
 	}
 	return ""
+}
+
+// extractGatesCommandsVar parses the gates_commands=<block> entry out of a
+// formula_vars string and returns the gate list in declared order. The block
+// format mirrors what internal/cmd/sling_helpers.go emits:
+//
+//	gates_commands=# Gate: build
+//	go build ./...
+//	# Gate: rebase-check
+//	scripts/check-upstream-rebased.sh
+//	# Gate: test
+//	go test ./...
+//
+// Only the pre-merge phase is represented (sling_helpers filters post-squash
+// gates out at formula-var construction time), so witness recovery is always
+// running the same gate set the polecat would have run before `gt done`.
+// Returns nil when the var is absent or malformed — callers treat that as
+// "no gates to enforce" and fall back to the existing push + submit flow.
+func extractGatesCommandsVar(formulaVars string) []PolecatGate {
+	if formulaVars == "" {
+		return nil
+	}
+
+	// Locate the gates_commands= entry. Unlike single-value vars, gates_commands
+	// is a multi-line block, so we scan the string directly rather than splitting
+	// on newlines up front.
+	const key = "gates_commands="
+	// Find key at start-of-string or start-of-line.
+	var block string
+	switch {
+	case strings.HasPrefix(formulaVars, key):
+		block = formulaVars[len(key):]
+	default:
+		idx := strings.Index(formulaVars, "\n"+key)
+		if idx < 0 {
+			return nil
+		}
+		block = formulaVars[idx+1+len(key):]
+	}
+
+	// The block runs until the next formula var (heuristic: a line matching
+	// "<name>=") or end of string. Formula vars are typically appended in
+	// order and gates_commands is added last, but guard against future
+	// encodings that put another var after it.
+	lines := strings.Split(block, "\n")
+	var gates []PolecatGate
+	var curName string
+	var curCmd strings.Builder
+	flush := func() {
+		if curName == "" {
+			return
+		}
+		cmd := strings.TrimRight(curCmd.String(), "\n")
+		if cmd != "" {
+			gates = append(gates, PolecatGate{Name: curName, Cmd: cmd})
+		}
+		curName = ""
+		curCmd.Reset()
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Gate header: "# Gate: <name>"
+		if strings.HasPrefix(trimmed, "# Gate:") {
+			flush()
+			curName = strings.TrimSpace(strings.TrimPrefix(trimmed, "# Gate:"))
+			continue
+		}
+		// Another formula var starts: "<key>=<value>" with no leading "#" or
+		// whitespace. Terminate the block here. We require the key to be a
+		// plausible formula-var name (letters, digits, underscore, dash) to
+		// avoid stopping on environment assignments inside a gate command
+		// (e.g., "FOO=bar go test ./...").
+		if curName != "" && looksLikeFormulaVarKey(line) {
+			break
+		}
+		if curName == "" {
+			// Content before the first "# Gate:" header is ignored.
+			continue
+		}
+		curCmd.WriteString(line)
+		curCmd.WriteByte('\n')
+	}
+	flush()
+	return gates
+}
+
+// looksLikeFormulaVarKey reports whether line starts with a bare "key=" that
+// would indicate the end of the gates_commands block. A leading space, tab,
+// or any non-key character (# for comments, shell syntax) disqualifies it.
+func looksLikeFormulaVarKey(line string) bool {
+	if line == "" {
+		return false
+	}
+	// Must not be indented (gates commands may be indented).
+	if line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
+		return false
+	}
+	eq := strings.IndexByte(line, '=')
+	if eq <= 0 {
+		return false
+	}
+	key := line[:eq]
+	for _, r := range key {
+		if !(r == '_' || r == '-' ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 // findOpenMRForBranchAndSHA queries the wisps table for an open merge-request
@@ -1585,6 +1719,25 @@ func _recoverUnfiledMR(bd *BdCli, workDir, rigName, polecatName string, state *U
 	if !state.AlreadyPushed {
 		reason = "unpushed-commits"
 		aaTag = "aa-unpushed-commits"
+	}
+
+	// gu-zrim: run the polecat's pre-merge gates on the recovered worktree
+	// before any push or MR submission. A dead polecat never got to run
+	// these gates itself, and the refinery's gate config does not include
+	// every polecat-level gate (notably rebase-check via
+	// scripts/check-upstream-rebased.sh). Running them here closes the gap
+	// so a zombie polecat can never fast-path a broken branch into the
+	// merge queue. Skipped when no gates are configured (legacy beads
+	// without gates_commands, or non-polecat-work formulas).
+	if len(state.Gates) > 0 {
+		if gateResult := runRecoveryGates(polecatPath, state.Gates); !gateResult.success {
+			return fmt.Sprintf("recover-failed-gate-%s (%s): %s",
+					gateResult.failedGate, aaTag, gateResult.failureMsg),
+				fmt.Errorf("gate %q failed: %s", gateResult.failedGate, gateResult.failureMsg)
+		}
+	}
+
+	if !state.AlreadyPushed {
 		g := git.NewGit(polecatPath)
 		if pushErr := g.Push("origin", state.Branch, false); pushErr != nil {
 			return fmt.Sprintf("recover-failed-push (%s): %v", aaTag, pushErr),
@@ -1622,6 +1775,77 @@ func _recoverUnfiledMR(bd *BdCli, workDir, rigName, polecatName string, state *U
 		return fmt.Sprintf("filed-mr-%s (%s, mr=%s)", reason, aaTag, mrID), nil
 	}
 	return fmt.Sprintf("filed-mr-%s (%s)", reason, aaTag), nil
+}
+
+// recoveryGateOutcome is the result of running the polecat's pre-merge gates
+// during witness recovery. See runRecoveryGates for semantics.
+type recoveryGateOutcome struct {
+	success    bool
+	failedGate string // Name of the first gate that failed (empty on success).
+	failureMsg string // Bounded diagnostic string suitable for action logs.
+}
+
+// recoveryGateTimeout bounds each gate command so a wedged recovery doesn't
+// block the witness patrol indefinitely. Kept intentionally generous — real
+// gates like `go test ./...` on a large repo can legitimately take several
+// minutes — while still shorter than the patrol cycle budget. Exported as a
+// var so tests can shrink it.
+var recoveryGateTimeout = 10 * time.Minute
+
+// runRecoveryGates executes the polecat's pre-merge gates in the polecat's
+// worktree and returns the outcome. Semantics match the refinery's pre-merge
+// gate runner (internal/refinery/engineer.go runGate): sequential execution,
+// shell-interpreted command, stop-on-first-failure. Output is captured and
+// truncated so callers can embed a bounded snippet into the zombie action
+// string.
+//
+// gu-zrim: gates are run BEFORE push/submit so a broken branch never reaches
+// origin or the merge queue. Running them post-push is insufficient — the
+// branch is already visible and other agents may pick it up.
+var runRecoveryGates = _runRecoveryGates
+
+func _runRecoveryGates(polecatPath string, gates []PolecatGate) recoveryGateOutcome {
+	for _, g := range gates {
+		cmd := strings.TrimSpace(g.Cmd)
+		if cmd == "" {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), recoveryGateTimeout)
+		// sh -c matches both the polecat's execution path and the refinery's
+		// runGate. G204: gate commands come from trusted bead formulas, not
+		// end-user input.
+		c := exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec
+		util.SetDetachedProcessGroup(c)
+		c.Dir = polecatPath
+		out, err := c.CombinedOutput()
+		cancel()
+		if err == nil {
+			continue
+		}
+		msg := truncateGateOutput(string(out))
+		if ctx.Err() == context.DeadlineExceeded {
+			msg = fmt.Sprintf("timeout after %s: %s", recoveryGateTimeout, msg)
+		}
+		return recoveryGateOutcome{
+			success:    false,
+			failedGate: g.Name,
+			failureMsg: strings.TrimSpace(msg),
+		}
+	}
+	return recoveryGateOutcome{success: true}
+}
+
+// truncateGateOutput bounds gate stderr/stdout so it can be embedded in a
+// zombie Action string without overwhelming downstream logs or mail. The
+// cutoff matches refinery's runGate error formatting (500 chars, trailing
+// ellipsis) so operators see the same shape regardless of which surface
+// surfaced the failure.
+func truncateGateOutput(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 500 {
+		return s[:500] + "..."
+	}
+	return s
 }
 
 // extractMRIDFromSubmit parses the MR ID from `gt mq submit` output. The

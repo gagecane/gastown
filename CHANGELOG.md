@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Witness recovery runs pre-merge gates on recovered branches** (gu-zrim) —
+  When a polecat session died between "commit complete" and `gt done`, the
+  witness' `_recoverUnfiledMR` path pushed the stranded branch and submitted
+  an MR via `gt mq submit` without re-running the polecat's pre-merge gates.
+  The refinery's gate config does not include every polecat-level gate —
+  most notably `scripts/check-upstream-rebased.sh` (the rebase-check gate),
+  which is defined in the `mol-polecat-work` formula's `gates_commands` but
+  not in any rig's `merge_queue.gates` block. So a zombie polecat could
+  fast-path a branch into the merge queue despite never having run its own
+  gates, and the rebase-check gap is how the gu-9yi3 → gu-reo2 fork-sync
+  recurrence auto-closed a broken convoy. Witness recovery now parses
+  `gates_commands` out of the hook bead's `formula_vars`, runs each gate in
+  the polecat's worktree (10m timeout, sh-interpreted, bounded output),
+  stops on first failure, and short-circuits before push + submit when any
+  gate fails. Failure actions read `recover-failed-gate-<name>
+  (aa-unpushed-commits|aa-pushed-no-mr): <truncated stderr>` so operators
+  see the same error shape whether the polecat or the witness surfaced it.
+  Beads without `gates_commands` (legacy formulas, non-polecat-work
+  molecules) skip the gate step and preserve the previous push + submit
+  behavior. Witness-driven fork-sync recoveries now fail closed at the
+  rebase-check gate instead of quietly landing a squash-mutated merge.
+
 - **Refinery squash-merge no longer destroys fork-sync ancestor topology** —
   When a polecat branch integrated `upstream/<target>` via a merge commit
   (the gu-nt9z fork-sync pattern), refinery's default squash merge dropped
