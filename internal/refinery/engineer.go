@@ -723,8 +723,30 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not get original commit message: %v\n", msgErr)
 		}
 	}
-	_, _ = fmt.Fprintf(e.output, "[Engineer] Squash merging with message: %s\n", strings.TrimSpace(originalMsg))
-	if err := e.git.MergeSquash(branch, originalMsg); err != nil {
+	// gu-9yi3: detect fork-sync MRs (polecat branches that have integrated
+	// upstream/<target> via a merge commit) and preserve merge topology via
+	// `git merge --no-ff` instead of `git merge --squash`. Squashing a
+	// fork-sync branch destroys the second-parent edge to upstream, which
+	// breaks `git merge-base --is-ancestor upstream/<target> HEAD` checks
+	// and fires rebase-check escalations. See internal/refinery/fork_sync.go
+	// for the full detection rules and rationale.
+	//
+	// Fail-safe: if detection errors (unexpected git failure), we log and
+	// fall back to the squash path rather than blocking the merge.
+	forkSync, forkSyncErr := preserveForkSyncTopology(e.git, branch, target)
+	if forkSyncErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: fork-sync detection failed (%v) — using squash merge\n", forkSyncErr)
+	}
+
+	var mergeErr error
+	if forkSync.Preserve {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Fork-sync detected (%s) — using no-ff merge: %s\n", forkSync.Reason, strings.TrimSpace(originalMsg))
+		mergeErr = e.git.MergeNoFF(branch, originalMsg)
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Squash merging with message: %s\n", strings.TrimSpace(originalMsg))
+		mergeErr = e.git.MergeSquash(branch, originalMsg)
+	}
+	if mergeErr != nil {
 		// ZFC: Use git's porcelain output to detect conflicts instead of parsing stderr.
 		// GetConflictingFiles() uses `git diff --diff-filter=U` which is proper.
 		conflicts, conflictErr := e.git.GetConflictingFiles()
@@ -740,7 +762,7 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		_ = e.git.AbortMerge()
 		return ProcessResult{
 			Success: false,
-			Error:   fmt.Sprintf("merge failed: %v", err),
+			Error:   fmt.Sprintf("merge failed: %v", mergeErr),
 		}
 	}
 

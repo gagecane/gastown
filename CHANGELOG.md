@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Refinery squash-merge no longer destroys fork-sync ancestor topology** —
+  When a polecat branch integrated `upstream/<target>` via a merge commit
+  (the gu-nt9z fork-sync pattern), refinery's default squash merge dropped
+  the second-parent edge to upstream. The file content survived, but
+  `git merge-base --is-ancestor upstream/<target> HEAD` failed on mainline
+  after the merge landed, which fired `scripts/check-upstream-rebased.sh`
+  escalations every ~30 minutes. Refinery now inspects the branch before
+  merging: when `upstream/<target>` is an ancestor of the branch but not
+  yet of `origin/<target>`, it uses `git merge --no-ff` instead of
+  `--squash`, preserving the topology and keeping the rebase-check gate
+  green. Non-fork repos (no `upstream` remote) and regular feature
+  branches are unaffected — they hit the unchanged squash path. See
+  gu-9yi3 and the new `preserveForkSyncTopology` helper for the full
+  decision matrix.
+
 - **`main_branch_test` runs post-squash gates in the wrong context** —
   The main-branch drift-detection patrol loads every gate from a rig's
   `merge_queue.gates` block and executes them in a cold origin/main
