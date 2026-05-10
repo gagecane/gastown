@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -299,7 +300,7 @@ func runRefineryStart(cmd *cobra.Command, args []string) error {
 		rigName = args[0]
 	}
 
-	mgr, _, rigName, err := getRefineryManager(rigName)
+	mgr, r, rigName, err := getRefineryManager(rigName)
 	if err != nil {
 		return err
 	}
@@ -313,10 +314,20 @@ func runRefineryStart(cmd *cobra.Command, args []string) error {
 	if err := mgr.Start(refineryForeground, refineryAgentOverride); err != nil {
 		if err == refinery.ErrAlreadyRunning {
 			fmt.Printf("%s Refinery is already running\n", style.Dim.Render("⚠"))
+			// Still clear the operator-stop flag — the refinery is running
+			// and the operator's intent here is "I want it running", so
+			// leaving a stale stop flag would cause the daemon to kill it
+			// on the next heartbeat.
+			clearRefineryOperatorStop(r, rigName)
 			return nil
 		}
 		return fmt.Errorf("starting refinery: %w", err)
 	}
+
+	// Clear the operator-stop flag now that the refinery is running again.
+	// Without this, the daemon's next heartbeat would see the lingering flag
+	// and immediately kill the newly-started session. See gu-8ug1.
+	clearRefineryOperatorStop(r, rigName)
 
 	if refineryForeground {
 		// This will block until stopped
@@ -334,21 +345,62 @@ func runRefineryStop(cmd *cobra.Command, args []string) error {
 		rigName = args[0]
 	}
 
-	mgr, _, rigName, err := getRefineryManager(rigName)
+	mgr, r, rigName, err := getRefineryManager(rigName)
 	if err != nil {
 		return err
 	}
 
-	if err := mgr.Stop(); err != nil {
-		if err == refinery.ErrNotRunning {
-			fmt.Printf("%s Refinery is not running\n", style.Dim.Render("⚠"))
-			return nil
-		}
-		return fmt.Errorf("stopping refinery: %w", err)
+	stopErr := mgr.Stop()
+	if stopErr != nil && stopErr != refinery.ErrNotRunning {
+		return fmt.Errorf("stopping refinery: %w", stopErr)
+	}
+
+	// Record operator intent BEFORE reporting success so the daemon's next
+	// heartbeat (which can fire immediately) reads the freshly-set flag and
+	// does not resurrect the refinery. This is the fix for the SSH cert
+	// expiry escalation loop: without it, `gt refinery stop` and the
+	// daemon's `ensureRefineryRunning` fight each other every 3 minutes,
+	// producing duplicate git-auth-failed escalations. See gu-8ug1.
+	setRefineryOperatorStop(r, rigName)
+
+	if stopErr == refinery.ErrNotRunning {
+		fmt.Printf("%s Refinery is not running (flagged as operator-stopped so daemon will not auto-start)\n", style.Dim.Render("⚠"))
+		return nil
 	}
 
 	fmt.Printf("%s Refinery stopped for %s\n", style.Bold.Render("✓"), rigName)
+	fmt.Printf("  %s\n", style.Dim.Render("Daemon will not auto-restart. Run 'gt refinery start "+rigName+"' to resume."))
 	return nil
+}
+
+// setRefineryOperatorStop records explicit operator-stop intent in the rig's
+// wisp so the daemon's auto-restart path will skip this rig until the
+// operator runs `gt refinery start`. Failures are logged but not returned —
+// the Stop() itself already succeeded, and a missing flag only degrades back
+// to the pre-fix behavior (daemon may resurrect the refinery on next tick).
+func setRefineryOperatorStop(r *rig.Rig, rigName string) {
+	if r == nil {
+		return
+	}
+	townRoot := filepath.Dir(r.Path)
+	if err := rig.SetRefineryStoppedByOperator(townRoot, rigName); err != nil {
+		style.PrintWarning("could not persist operator-stop intent for %s: %v", rigName, err)
+	}
+}
+
+// clearRefineryOperatorStop removes the operator-stop flag. Best-effort:
+// a failure here means a daemon heartbeat between now and the next
+// successful clear may kill the refinery, which the operator can fix by
+// re-running `gt refinery start`. Still logged so the surprising behavior
+// is traceable.
+func clearRefineryOperatorStop(r *rig.Rig, rigName string) {
+	if r == nil {
+		return
+	}
+	townRoot := filepath.Dir(r.Path)
+	if err := rig.ClearRefineryStoppedByOperator(townRoot, rigName); err != nil {
+		style.PrintWarning("could not clear operator-stop flag for %s: %v", rigName, err)
+	}
 }
 
 // RefineryStatusOutput is the JSON output format for refinery status.
@@ -531,7 +583,7 @@ func runRefineryRestart(cmd *cobra.Command, args []string) error {
 		rigName = args[0]
 	}
 
-	mgr, _, rigName, err := getRefineryManager(rigName)
+	mgr, r, rigName, err := getRefineryManager(rigName)
 	if err != nil {
 		return err
 	}
@@ -551,6 +603,14 @@ func runRefineryRestart(cmd *cobra.Command, args []string) error {
 	if err := mgr.Start(false, refineryAgentOverride); err != nil {
 		return fmt.Errorf("starting refinery: %w", err)
 	}
+
+	// `gt refinery restart` is an explicit "I want this running" intent, so
+	// it must clear any operator-stop flag that a previous `gt refinery stop`
+	// may have persisted. Otherwise the daemon's next heartbeat would kill
+	// the freshly-restarted session. (Stop in this function is called on
+	// the Manager directly, bypassing runRefineryStop's flag-setter, so no
+	// flag is newly introduced here — we only clear pre-existing state.)
+	clearRefineryOperatorStop(r, rigName)
 
 	fmt.Printf("%s Refinery restarted for %s\n", style.Bold.Render("✓"), rigName)
 	fmt.Printf("  %s\n", style.Dim.Render("Use 'gt refinery attach' to connect"))

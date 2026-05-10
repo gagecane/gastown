@@ -141,6 +141,16 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	missingRigBeadLogged map[string]bool
 
+	// operatorStoppedRefineryLogged tracks which rig names have already
+	// emitted the "refinery stopped by operator, skipping auto-restart"
+	// message for the current stopped episode. Cleared when a rig is
+	// observed no longer stopped, so a fresh `gt refinery stop` re-logs
+	// once. Without this, the heartbeat would emit the skip line every
+	// ~3 min per stopped rig for as long as the operator leaves it
+	// stopped (hours to days for SSH cert recovery). See gu-8ug1.
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	operatorStoppedRefineryLogged map[string]bool
+
 	// rigStatusCache memoizes the last-known parked/docked state per rig so
 	// that transient Dolt errors (build mismatch, CGO hiccup, server restart)
 	// do not silently exclude the rig from every patrol cycle until Dolt
@@ -1854,9 +1864,58 @@ func (d *Daemon) ensureRefineriesRunning() {
 	})
 }
 
+// logOperatorStoppedSkip logs that the refinery for rigName is being skipped
+// by the auto-restart path because of an explicit operator stop, but only
+// once per contiguous "stopped" episode. Subsequent heartbeats against the
+// same rig are silent until the operator starts the refinery again (which
+// clears the log dedup in clearOperatorStoppedLog), at which point a fresh
+// stop will re-emit the line. This matches the pattern of missingRigBeadLogged
+// and keeps daemon.log readable during long SSH-cert-expired periods.
+func (d *Daemon) logOperatorStoppedSkip(rigName string) {
+	if d.operatorStoppedRefineryLogged[rigName] {
+		return
+	}
+	if d.operatorStoppedRefineryLogged == nil {
+		d.operatorStoppedRefineryLogged = make(map[string]bool)
+	}
+	d.operatorStoppedRefineryLogged[rigName] = true
+	d.logger.Printf("Skipping refinery auto-start for %s: operator-stopped (run 'gt refinery start %s' to resume)",
+		rigName, rigName)
+}
+
+// clearOperatorStoppedLog resets the once-per-episode log dedup for rigName
+// so a future operator-stop will re-emit the skip line. Called when the
+// daemon observes the flag cleared (operator ran `gt refinery start`). This
+// keeps the dedup tied to the stopped episode rather than the daemon
+// process lifetime.
+func (d *Daemon) clearOperatorStoppedLog(rigName string) {
+	if d.operatorStoppedRefineryLogged == nil {
+		return
+	}
+	delete(d.operatorStoppedRefineryLogged, rigName)
+}
+
 // ensureRefineryRunning ensures the refinery for a specific rig is running.
 // Discover, don't track: uses Manager.Start() which checks tmux directly (gt-zecmc).
 func (d *Daemon) ensureRefineryRunning(rigName string) {
+	// Respect explicit operator stop. `gt refinery stop` persists intent in
+	// the rig's wisp so the daemon does not immediately undo a manual stop
+	// on the next heartbeat. Without this, an operator stopping a refinery
+	// because its prerequisites are broken (e.g. expired SSH cert) would
+	// see the refinery promptly resurrected and fail the same way, filing
+	// fresh escalations each cycle. See gu-8ug1.
+	//
+	// This check comes BEFORE isRigOperational's leftover-session cleanup
+	// because the operator-stop path already killed the tmux session and
+	// should not be confused with the docked/parked cleanup contract.
+	if rig.IsRefineryStoppedByOperator(d.config.TownRoot, rigName) {
+		d.logOperatorStoppedSkip(rigName)
+		return
+	}
+	// Flag cleared (operator started again, or never stopped) — allow a
+	// future stop to re-log exactly once.
+	d.clearOperatorStoppedLog(rigName)
+
 	// Check rig operational state before auto-starting
 	if operational, reason := d.isRigOperational(rigName); !operational {
 		d.logger.Printf("Skipping refinery auto-start for %s: %s", rigName, reason)
