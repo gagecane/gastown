@@ -917,6 +917,56 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		if pushErr != nil {
+			// Orphan-commit recovery (gu-0l56): all branch:branch pushes failed.
+			// A common cause is the detached-HEAD scenario from gu-h5pr: an
+			// auto-save commit landed on detached HEAD, the local branch ref
+			// was deleted, and branch:branch now fails with "src refspec does
+			// not match any" — even though the commit itself is fine.
+			//
+			// Two recovery paths, in order:
+			//   (a) Check origin/<branch>: if it already points at our HEAD
+			//       commit, a prior push delivered the commit. Treat as no-op
+			//       success so the MR bead still gets filed.
+			//   (b) Retry with an explicit SHA refspec (<sha>:refs/heads/<branch>).
+			//       This pushes the commit from the local object DB to the
+			//       named branch ref on origin, even when no local branch ref
+			//       exists. Works for detached HEAD.
+			//
+			// Without this, polecats that land in the detached-HEAD trap see
+			// "push failed", skip MR creation, and leave their work orphaned
+			// on origin with no merge request — exactly the gu-br8a failure.
+			if pushedCommitSHA != "" {
+				if tip, tipErr := g.RemoteBranchTip("origin", branch); tipErr == nil && tip != "" && tip == pushedCommitSHA {
+					fmt.Printf("%s Branch already at expected commit on origin (orphan-commit recovery: prior push delivered SHA)\n", style.Bold.Render("✓"))
+					pushErr = nil
+				}
+			}
+			if pushErr != nil && pushedCommitSHA != "" {
+				style.PrintWarning("attempting SHA-refspec recovery (branch ref may be missing locally)...")
+				shaErr := g.PushSHA("origin", pushedCommitSHA, branch, false)
+				if shaErr == nil {
+					fmt.Printf("%s Branch pushed via SHA-refspec recovery\n", style.Bold.Render("✓"))
+					pushErr = nil
+				} else {
+					style.PrintWarning("SHA-refspec recovery also failed: %v", shaErr)
+					// Try the bare repo with SHA refspec too — it shares the
+					// object DB with the worktree, so the commit SHA is valid
+					// there even when the worktree's git context is broken.
+					bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
+					if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+						bareGit := git.NewGitWithDir(bareRepoPath, "")
+						if bareErr := bareGit.PushSHA("origin", pushedCommitSHA, branch, false); bareErr == nil {
+							fmt.Printf("%s Branch pushed via bare repo + SHA-refspec recovery\n", style.Bold.Render("✓"))
+							pushErr = nil
+						} else {
+							style.PrintWarning("bare repo SHA-refspec recovery also failed: %v", bareErr)
+						}
+					}
+				}
+			}
+		}
+
+		if pushErr != nil {
 			// All push attempts failed
 			pushFailed = true
 			errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
