@@ -196,13 +196,23 @@ func TestNewSessionWithCommand_Concurrent(t *testing.T) {
 
 // TestWaitForCommand_Timeout verifies WaitForCommand returns an error when the
 // pane command remains a shell (agent never started).
+//
+// Uses `bash --norc --noprofile` rather than bare `bash` so startup doesn't
+// load /etc/bash.bashrc or ~/.bashrc. On memory-pressured CI runners, rc-file
+// subprocesses (nvm, git prompt helpers, etc.) occasionally get SIGKILL'd by
+// the OOM killer, taking bash down with them before the 250ms health check in
+// NewSessionWithCommand completes — which the health check then surfaces as
+// `command exited early with status ?: bash / Pane is dead (signal 9, …)`.
+// The `--norc --noprofile` flags keep pane_current_command == "bash" (so
+// WaitForCommand's exclude list still matches) while eliminating the flake.
+// See gu-soq5.
 func TestWaitForCommand_Timeout(t *testing.T) {
 	tm := newTestTmux(t)
 	session := "gt-test-waitcmd-" + t.Name()
 	_ = tm.KillSession(session)
 	defer func() { _ = tm.KillSession(session) }()
 
-	if err := tm.NewSessionWithCommand(session, "", "bash"); err != nil {
+	if err := tm.NewSessionWithCommand(session, "", "bash --norc --noprofile"); err != nil {
 		t.Fatalf("session creation: %v", err)
 	}
 
