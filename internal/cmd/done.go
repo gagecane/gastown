@@ -418,6 +418,34 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// COMPLETED branch check, the uncommitted-changes block) still fire
 		// and refuse to submit. The agent sees the warning and can recover.
 	} else if cwdAvailable && doneCleanupStatus == "uncommitted" {
+		// HARD GUARD (gu-h5pr): Refuse to auto-commit on detached HEAD.
+		// A commit on detached HEAD produces an orphaned object: no branch
+		// ref advances, so the subsequent `git push origin <branch>:<branch>`
+		// fails with "src refspec does not match any" — and the work-loss
+		// warning fires falsely while refinery gets no MR.
+		//
+		// Observed sequence (gu-br8a completion, 2026-05-10):
+		//   1. polecat commits work on its branch, pushes manually
+		//   2. gt done starts — for reasons we don't yet fully understand,
+		//      the branch ref has been lost and HEAD is detached
+		//   3. Without this guard, auto-commit lands on detached HEAD,
+		//      orphaning the work and breaking the branch push
+		//
+		// We treat detached HEAD the same way we treat the default-branch
+		// case above: print a warning and leave doneCleanupStatus unchanged
+		// so the downstream COMPLETED check still refuses to submit. The
+		// polecat's uncommitted files remain in the working tree so they
+		// can be recovered manually (`git branch <name> HEAD` to re-attach,
+		// then commit normally).
+		if detached, detErr := g.IsDetachedHEAD(); detErr == nil && detached {
+			style.PrintWarning("auto-commit safety net refused: HEAD is detached")
+			fmt.Fprintf(os.Stderr, "  A commit here would orphan the work (no branch ref to advance).\n")
+			fmt.Fprintf(os.Stderr, "  Recover manually: git branch %s HEAD && git checkout %s && git commit ...\n", branch, branch)
+			fmt.Fprintf(os.Stderr, "  Then re-run gt done.\n\n")
+			// Leave doneCleanupStatus == "uncommitted" so the COMPLETED
+			// preflight rejects the submit and the agent sees the warning.
+			goto afterSafetyNet
+		}
 		// Re-check to get file details (cleanup detection already confirmed uncommitted changes)
 		workStatus, err := g.CheckUncommittedWork()
 		if err == nil && workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
@@ -466,6 +494,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 		}
 	}
+
+afterSafetyNet:
 
 	// Parse branch info
 	info := parseBranchName(branch)
@@ -2206,4 +2236,41 @@ func purgeClosedEphemeralBeads(bd *beads.Beads) {
 	if outStr != "" && outStr != "0" {
 		fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads: %s\n", outStr)
 	}
+}
+
+// autoSaveRefusalReason returns a non-empty string if the auto-save safety-net
+// commit should be refused, or empty string if the commit can proceed.
+//
+// The caller is expected to have already determined the working tree has
+// uncommitted changes; this helper does NOT check that. It only evaluates
+// the guards that protect against creating a commit in the wrong place.
+//
+// Guards applied (in order):
+//   - "detached HEAD" — commits on detached HEAD produce orphaned objects.
+//     Observed bug (gu-h5pr): auto-save committed on detached HEAD, the
+//     subsequent branch push failed with "src refspec does not match any",
+//     and no MR was filed. Protect by refusing the commit and leaving the
+//     uncommitted files in place for manual recovery.
+//   - "default branch" — committing to main/master bypasses the merge queue
+//     (see gu-cfb). The caller normally catches this before invoking the
+//     helper, but the guard is kept here as defense-in-depth.
+//
+// Returns empty string when the commit is safe to proceed.
+func autoSaveRefusalReason(g autoSaveGit, branch, defaultBranch string) string {
+	// Detached HEAD: commit would orphan.
+	if detached, detErr := g.IsDetachedHEAD(); detErr == nil && detached {
+		return "detached HEAD"
+	}
+	// Default branch: commit would bypass the merge queue.
+	if isDefaultBranchName(branch, defaultBranch) {
+		return "default branch"
+	}
+	return ""
+}
+
+// autoSaveGit is the subset of *git.Git that autoSaveRefusalReason needs.
+// Declared as an interface so tests can drive the decision logic without
+// standing up a real git repo for each case.
+type autoSaveGit interface {
+	IsDetachedHEAD() (bool, error)
 }
