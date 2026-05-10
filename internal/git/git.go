@@ -2178,6 +2178,63 @@ func (g *Git) StashPop(ref string) error {
 	return nil
 }
 
+// StashParentSHA returns the SHA of the commit HEAD pointed at when the stash
+// was created — i.e. `git rev-parse <ref>^1`. A stash commit's first parent is
+// the "base" commit the diff is measured against; callers compare this against
+// current HEAD to detect stale stashes (gu-vtkn).
+//
+// Returns an error if the ref is empty, invalid, or has no first parent.
+func (g *Git) StashParentSHA(ref string) (string, error) {
+	if ref == "" {
+		return "", fmt.Errorf("stash ref required")
+	}
+	out, err := g.run("rev-parse", ref+"^1")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse %s^1: %w", ref, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// HeadSHA returns the current HEAD commit SHA (`git rev-parse HEAD`).
+// In detached-HEAD state this returns the detached commit's SHA, not an error.
+func (g *Git) HeadSHA() (string, error) {
+	out, err := g.run("rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// IsStashStale reports whether the given stash was created at a different
+// commit than current HEAD. A "stale" stash is one whose parent (HEAD at
+// stash-time) no longer matches current HEAD — meaning one or more commits
+// have landed on this branch since the stash was created.
+//
+// Stale stashes are dangerous to auto-pop because the pop's diff is measured
+// against the stash's base tree, not current HEAD. If intervening commits
+// added files the stash didn't know about, or modified files the stash
+// touched, popping can produce phantom deletions or silently revert work
+// that was already committed. See gu-vtkn (near-miss: rust stashed WIP,
+// committed testenv_test.go files, died; nitro inherited both and auto-pop
+// would have committed deletions that reverted rust's fix).
+//
+// Returns (stale, parentSHA, currentHeadSHA, err). The SHAs are returned for
+// diagnostic reporting by callers (both as trimmed full-length SHAs).
+// A stash is considered non-stale only when parentSHA == currentHeadSHA.
+// On any error resolving the SHAs, the stash is reported as stale — err on
+// the side of refusing risky auto-pops.
+func (g *Git) IsStashStale(ref string) (stale bool, parentSHA, headSHA string, err error) {
+	headSHA, headErr := g.HeadSHA()
+	if headErr != nil {
+		return true, "", "", fmt.Errorf("resolving HEAD for stash staleness check: %w", headErr)
+	}
+	parentSHA, parentErr := g.StashParentSHA(ref)
+	if parentErr != nil {
+		return true, "", headSHA, fmt.Errorf("resolving stash parent for staleness check: %w", parentErr)
+	}
+	return parentSHA != headSHA, parentSHA, headSHA, nil
+}
+
 // UnpushedCommits returns the number of commits that are not pushed to the remote.
 // It checks if the current branch has an upstream and counts commits ahead.
 // Returns 0 if there is no upstream configured.

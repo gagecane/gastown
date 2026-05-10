@@ -89,6 +89,17 @@ func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	return "origin/" + targetBranch
 }
 
+// shortSHA abbreviates a git SHA for human-readable diagnostic output.
+// Returns the first 8 characters, or the full value if shorter. Used by
+// the gu-vtkn staleness guard to report stash-parent vs. HEAD divergence.
+func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
 func init() {
 	doneCmd.Flags().StringVar(&doneIssue, "issue", "", "Source issue ID (default: parse from branch name)")
 	doneCmd.Flags().IntVarP(&donePriority, "priority", "p", -1, "Override priority (0-4, default: inherit from issue)")
@@ -356,8 +367,44 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				style.Bold.Render("⚠"), len(entries))
 			// Pop oldest first: iterate in reverse so newest lands on top.
 			popFailed := false
+			staleSkipped := 0
 			for i := len(entries) - 1; i >= 0; i-- {
 				e := entries[i]
+
+				// STALENESS GUARD (gu-vtkn): Refuse to auto-pop a stash whose
+				// parent commit (HEAD at stash-time) differs from current HEAD.
+				// When HEAD has advanced past the stash's base, pops can
+				// introduce phantom deletions of files that intervening commits
+				// added — silently reverting committed work. The rust→nitro
+				// near-miss: rust stashed WIP, committed testenv_test.go files,
+				// died; the stash's diff (measured against pre-commit HEAD)
+				// would have deleted those files when popped against the
+				// post-commit HEAD. Refusing the pop and surfacing the stash
+				// for manual review is strictly safer than auto-popping and
+				// relying on the StagedDeletions unstage + detached-HEAD guard
+				// as the last line of defense.
+				stale, stashParent, headSHA, staleErr := g.IsStashStale(e.Ref)
+				if staleErr != nil {
+					style.PrintWarning("auto-pop %s skipped: staleness check failed: %v", e.Ref, staleErr)
+					style.PrintWarning("  Manual handling required — inspect with: git stash show -p %s", e.Ref)
+					staleSkipped++
+					popFailed = true
+					break
+				}
+				if stale {
+					style.PrintWarning("auto-pop %s skipped: stale stash (gu-vtkn guard)", e.Ref)
+					fmt.Fprintf(os.Stderr, "  Stash parent: %s\n", shortSHA(stashParent))
+					fmt.Fprintf(os.Stderr, "  Current HEAD: %s\n", shortSHA(headSHA))
+					fmt.Fprintf(os.Stderr, "  HEAD has moved since this stash was created. Popping could\n")
+					fmt.Fprintf(os.Stderr, "  introduce phantom deletions of files added by intervening commits.\n")
+					fmt.Fprintf(os.Stderr, "  Inspect manually: git stash show -p %s\n", e.Ref)
+					fmt.Fprintf(os.Stderr, "  Then either: git stash drop %s  (discard)\n", e.Ref)
+					fmt.Fprintf(os.Stderr, "           or: git stash pop %s   (apply, accepting risk)\n\n", e.Ref)
+					staleSkipped++
+					popFailed = true
+					break
+				}
+
 				fmt.Printf("  popping %s — %s\n", e.Ref, e.Message)
 				if popErr := g.StashPop(e.Ref); popErr != nil {
 					style.PrintWarning("auto-pop %s failed (likely conflict): %v", e.Ref, popErr)
@@ -384,6 +431,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					// already merged). Recompute status normally.
 					doneCleanupStatus = ""
 				}
+			} else if staleSkipped > 0 {
+				// Preserve "stash" status so downstream cleanup-wisp accounting
+				// reflects that stashes remain on the branch. The stale stash
+				// stays in place for manual handling; do not let the auto-commit
+				// block below fire against a working tree we don't own.
+				doneCleanupStatus = "stash"
 			}
 		}
 	}

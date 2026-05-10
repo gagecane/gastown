@@ -1558,6 +1558,83 @@ func TestSyncGuardWithUncommittedChanges(t *testing.T) {
 	}
 }
 
+// TestStalePopGuard_ReproducesGuVtknNearMiss exercises the gu-vtkn staleness
+// guard end-to-end at the git-helper layer used by done.go's auto-pop loop.
+// Scenario: a WIP stash is captured at commit A; a subsequent commit B adds
+// files that the stash diff predates. Without the guard, `git stash pop`
+// would bring the stash's view of the world — missing those files — into
+// the working tree, producing phantom deletions that an auto-commit could
+// revert. The guard must report stale=true so the pop is refused and the
+// stash is surfaced for human/witness handling.
+func TestStalePopGuard_ReproducesGuVtknNearMiss(t *testing.T) {
+	dir := t.TempDir()
+	testRunGit(t, dir, "init")
+	testRunGit(t, dir, "config", "user.email", "test@test.com")
+	testRunGit(t, dir, "config", "user.name", "Test")
+
+	// Commit A: initial state the stash will be based on.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testRunGit(t, dir, "add", ".")
+	testRunGit(t, dir, "commit", "-m", "A: initial")
+
+	// "rust" stashes WIP work at commit A.
+	if err := os.WriteFile(filepath.Join(dir, "wip.go"), []byte("package x // wip\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testRunGit(t, dir, "add", "wip.go")
+	testRunGit(t, dir, "stash", "push", "-m", "rust WIP pre-commit")
+
+	// Commit B: "rust" then commits new testenv_test.go files — the
+	// very files the stash predates. After this, HEAD = B, stash base = A.
+	for _, p := range []string{"deacon/testenv_test.go", "proxy/testenv_test.go", "refinery/testenv_test.go"} {
+		full := filepath.Join(dir, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("package x // ea733ad2\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testRunGit(t, dir, "add", ".")
+	testRunGit(t, dir, "commit", "-m", "B: add testenv_test.go init hooks (ea733ad2)")
+
+	g := gitpkg.NewGit(dir)
+
+	// "nitro" inherits the branch + stash. The guard must see the stash as
+	// stale (parent A != HEAD B) and refuse the auto-pop.
+	stale, parent, head, err := g.IsStashStale("stash@{0}")
+	if err != nil {
+		t.Fatalf("IsStashStale: %v", err)
+	}
+	if !stale {
+		t.Errorf("expected stash to be stale after HEAD advances past its base; parent=%s head=%s", parent, head)
+	}
+	if parent == head {
+		t.Errorf("parent %q unexpectedly equals head %q — test did not set up divergence", parent, head)
+	}
+
+	// The stash must still be present — the guard refuses, it does not drop.
+	entries, err := g.StashListForBranch()
+	if err != nil {
+		t.Fatalf("StashListForBranch: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("stash list length = %d, want 1 (guard must not drop the stash)", len(entries))
+	}
+
+	// The testenv_test.go files added by commit B must still be tracked —
+	// the guard prevented the pop that would have deleted them from the
+	// working tree. (Belt-and-suspenders: this would fail if someone later
+	// changes the guard to fall through and pop anyway.)
+	for _, p := range []string{"deacon/testenv_test.go", "proxy/testenv_test.go", "refinery/testenv_test.go"} {
+		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
+			t.Errorf("expected %s to remain in worktree after stale-pop guard; got: %v", p, err)
+		}
+	}
+}
+
 func testRunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	fullArgs := append([]string{"-c", "protocol.file.allow=always"}, args...)

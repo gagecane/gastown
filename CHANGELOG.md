@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gt done` gt-pvx refuses to auto-pop stale stashes** (gu-vtkn) — When a
+  polecat inherited a stash whose base commit no longer matched current
+  HEAD (e.g. a prior polecat stashed WIP, committed, died, and the stash
+  survived), `gt done`'s gt-pvx safety net auto-popped the stash blindly.
+  The pop's diff was measured against the stash's now-old base, so any
+  files added to HEAD by intervening commits landed in the working tree
+  as phantom deletions. Observed near-miss (rust→nitro inheritance): a
+  stash predating three `testenv_test.go` files added by rust's gu-ywxr
+  fix would have committed deletions reverting that fix onto mainline —
+  saved only by the gu-h5pr detached-HEAD guard kicking in last. Auto-pop
+  now computes `git rev-parse <ref>^1` and compares against current HEAD;
+  any mismatch skips the pop, surfaces the stash with recovery commands
+  (`git stash show -p`, `git stash drop`, `git stash pop`), and preserves
+  the `stash` cleanup status so downstream wisps reflect that the stash
+  remains. Fresh recovery stashes (parent == HEAD, the intended use case
+  from gu-br8a) continue to auto-pop as before.
+
 - **Witness recovery runs pre-merge gates on recovered branches** (gu-zrim) —
   When a polecat session died between "commit complete" and `gt done`, the
   witness' `_recoverUnfiledMR` path pushed the stranded branch and submitted

@@ -1852,6 +1852,168 @@ func TestStashPop(t *testing.T) {
 	}
 }
 
+// TestIsStashStale_FreshStashIsNotStale verifies that a stash created on
+// the current HEAD (no intervening commits) is reported as non-stale —
+// the recovery scenario the gt-pvx auto-pop was designed for.
+func TestIsStashStale_FreshStashIsNotStale(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// Create a stash at current HEAD.
+	if err := os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("wip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "stash", "push", "-m", "fresh")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git stash: %v", err)
+	}
+
+	stale, parent, head, err := g.IsStashStale("stash@{0}")
+	if err != nil {
+		t.Fatalf("IsStashStale: %v", err)
+	}
+	if stale {
+		t.Errorf("fresh stash should not be stale (parent %s, head %s)", parent, head)
+	}
+	if parent != head {
+		t.Errorf("parent %q != head %q for fresh stash", parent, head)
+	}
+}
+
+// TestIsStashStale_CommitsSinceStashMakesItStale reproduces the gu-vtkn
+// near-miss: rust stashes WIP, commits new files, dies; inheriting polecat
+// sees HEAD advanced past the stash's base. Auto-pop must refuse.
+func TestIsStashStale_CommitsSinceStashMakesItStale(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// Stash WIP work at the initial commit.
+	if err := os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("wip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "stash", "push", "-m", "pre-advance")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git stash: %v", err)
+	}
+
+	// Advance HEAD with a new commit (simulates rust's ea733ad2).
+	if err := os.WriteFile(filepath.Join(dir, "testenv_test.go"), []byte("package x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "add testenv_test.go")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	stale, parent, head, err := g.IsStashStale("stash@{0}")
+	if err != nil {
+		t.Fatalf("IsStashStale: %v", err)
+	}
+	if !stale {
+		t.Errorf("stash should be stale after HEAD advances (parent %s == head %s?)", parent, head)
+	}
+	if parent == head {
+		t.Errorf("parent %q should differ from head %q after a commit", parent, head)
+	}
+}
+
+// TestIsStashStale_InvalidRefReportsStale verifies the err-on-the-side-
+// of-caution posture: any resolution failure (bad ref, missing parent)
+// is reported as stale so callers refuse to auto-pop.
+func TestIsStashStale_InvalidRefReportsStale(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	stale, _, _, err := g.IsStashStale("stash@{99}")
+	if err == nil {
+		t.Error("expected error for non-existent stash ref")
+	}
+	if !stale {
+		t.Error("staleness check should default to stale=true on resolution failure")
+	}
+}
+
+// TestStashParentSHA_MatchesRevParse verifies StashParentSHA returns the
+// same SHA as `git rev-parse <ref>^1`.
+func TestStashParentSHA_MatchesRevParse(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// Remember HEAD before the stash is created.
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	headBefore, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	wantParent := strings.TrimSpace(string(headBefore))
+
+	// Create a stash; its first parent should be HEAD-at-stash-time.
+	if err := os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("wip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "stash", "push", "-m", "check-parent")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git stash: %v", err)
+	}
+
+	gotParent, err := g.StashParentSHA("stash@{0}")
+	if err != nil {
+		t.Fatalf("StashParentSHA: %v", err)
+	}
+	if gotParent != wantParent {
+		t.Errorf("StashParentSHA = %q, want %q", gotParent, wantParent)
+	}
+
+	// Empty ref must error.
+	if _, err := g.StashParentSHA(""); err == nil {
+		t.Error("StashParentSHA(\"\") should error")
+	}
+}
+
+// TestHeadSHA_MatchesRevParse verifies HeadSHA returns the same SHA as
+// `git rev-parse HEAD`.
+func TestHeadSHA_MatchesRevParse(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	want, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+
+	got, err := g.HeadSHA()
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Errorf("HeadSHA = %q, want %q", got, strings.TrimSpace(string(want)))
+	}
+}
+
 func TestClearPushURL(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)
