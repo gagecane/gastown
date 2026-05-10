@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -883,72 +882,6 @@ func TestDiscoverTargets_RoleNames(t *testing.T) {
 			t.Errorf("target %q: Role = %q, want %q", key, gotRole, wantRole)
 		}
 	}
-}
-
-// TestDiscoverTargets_PerRigMayor verifies that <rig>/mayor/rig/ is enumerated
-// as a per-rig mayor target. Without this, .claude/settings.json in the rig's
-// canonical git clone drifts indefinitely (see gu-jq0q audit and gu-83d5).
-func TestDiscoverTargets_PerRigMayor(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
-	// rig1 has mayor/rig (the canonical checkout); rig2 does not.
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "crew", "alice"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "rig1", "mayor", "rig"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "rig2", "crew", "bob"), 0755)
-
-	targets, err := DiscoverTargets(tmpDir)
-	if err != nil {
-		t.Fatalf("DiscoverTargets failed: %v", err)
-	}
-
-	byKey := make(map[string]Target)
-	for _, tgt := range targets {
-		byKey[tgt.Key] = tgt
-	}
-
-	// rig1 must have a per-rig mayor target with the correct fields.
-	tgt, ok := byKey["rig1/mayor"]
-	if !ok {
-		t.Fatalf("expected target %q for per-rig mayor, not found. All keys: %v",
-			"rig1/mayor", keysOf(byKey))
-	}
-	wantPath := filepath.Join(tmpDir, "rig1", "mayor", "rig", ".claude", "settings.json")
-	if tgt.Path != wantPath {
-		t.Errorf("rig1/mayor Path = %q, want %q", tgt.Path, wantPath)
-	}
-	if tgt.Rig != "rig1" {
-		t.Errorf("rig1/mayor Rig = %q, want %q", tgt.Rig, "rig1")
-	}
-	if tgt.Role != "mayor" {
-		t.Errorf("rig1/mayor Role = %q, want %q", tgt.Role, "mayor")
-	}
-
-	// The town-level mayor target must still exist and be distinct from the
-	// per-rig mayor (Key="mayor" vs Key="rig1/mayor").
-	townMayor, ok := byKey["mayor"]
-	if !ok {
-		t.Error("town-level mayor target not found")
-	}
-	if townMayor.Rig != "" {
-		t.Errorf("town-level mayor Rig = %q, want empty string", townMayor.Rig)
-	}
-
-	// rig2 lacks mayor/rig/, so no per-rig mayor target should exist for it.
-	if _, ok := byKey["rig2/mayor"]; ok {
-		t.Errorf("unexpected target %q — rig2 has no mayor/rig directory", "rig2/mayor")
-	}
-}
-
-// keysOf returns the sorted keys of a map for stable test diagnostics.
-func keysOf(m map[string]Target) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func TestDiscoverTargets_ReturnsOnlyClaude(t *testing.T) {

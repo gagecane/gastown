@@ -12,8 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // HookEntry represents a single hook matcher with its associated hooks.
@@ -492,21 +490,6 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 				Key:  rigName + "/refinery",
 				Rig:  rigName,
 				Role: "refinery",
-			})
-		}
-
-		// Per-rig mayor — <rig>/mayor/rig is the canonical rig checkout
-		// that crew/polecat worktrees are created from. Without this,
-		// its .claude/settings.json drifts indefinitely because gt hooks
-		// sync never reaches it. Distinguished from the town-level mayor
-		// (Key="mayor") by the "<rig>/mayor" key. See gu-jq0q audit.
-		mayorRigDir := constants.RigMayorPath(rigPath)
-		if info, err := os.Stat(mayorRigDir); err == nil && info.IsDir() {
-			targets = append(targets, Target{
-				Path: filepath.Join(mayorRigDir, ".claude", "settings.json"),
-				Key:  rigName + "/mayor",
-				Rig:  rigName,
-				Role: "mayor",
 			})
 		}
 
