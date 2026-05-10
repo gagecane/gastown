@@ -1061,6 +1061,97 @@ func TestDiscoverRoleLocations_NoDogsDir(t *testing.T) {
 	}
 }
 
+// TestDiscoverRoleLocations_PerRigMayor verifies that <rig>/mayor/rig/
+// directories are enumerated as role="mayor" locations with Rig set to the
+// rig name. Without this, gt hooks sync never reaches per-rig mayor
+// .kiro/agents/gastown.json (and similar non-Claude agent configs), so they
+// drift indefinitely after InstallForRole writes them on first creation.
+// See gu-ubtr / gu-jq0q audit.
+func TestDiscoverRoleLocations_PerRigMayor(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Town-level mayor (already covered by other tests, but include for realism).
+	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
+
+	// rig1 has mayor/rig/ — should appear as a per-rig mayor location.
+	os.MkdirAll(filepath.Join(tmpDir, "rig1", "crew"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "rig1", "mayor", "rig"), 0755)
+
+	// rig2 has no mayor/rig/ — should NOT produce a per-rig mayor location.
+	os.MkdirAll(filepath.Join(tmpDir, "rig2", "crew"), 0755)
+
+	locations, err := DiscoverRoleLocations(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverRoleLocations failed: %v", err)
+	}
+
+	var perRigMayors []RoleLocation
+	var townMayors []RoleLocation
+	for _, loc := range locations {
+		if loc.Role != "mayor" {
+			continue
+		}
+		if loc.Rig == "" {
+			townMayors = append(townMayors, loc)
+		} else {
+			perRigMayors = append(perRigMayors, loc)
+		}
+	}
+
+	// Town-level mayor should still be present and distinct from per-rig mayors.
+	if len(townMayors) != 1 {
+		t.Errorf("expected exactly 1 town-level mayor location (Rig=\"\"), got %d: %+v",
+			len(townMayors), townMayors)
+	}
+
+	// Exactly one per-rig mayor: rig1.
+	if len(perRigMayors) != 1 {
+		t.Fatalf("expected 1 per-rig mayor location, got %d: %+v", len(perRigMayors), perRigMayors)
+	}
+
+	got := perRigMayors[0]
+	if got.Rig != "rig1" {
+		t.Errorf("per-rig mayor Rig = %q, want %q", got.Rig, "rig1")
+	}
+	wantDir := filepath.Join(tmpDir, "rig1", "mayor", "rig")
+	if got.Dir != wantDir {
+		t.Errorf("per-rig mayor Dir = %q, want %q", got.Dir, wantDir)
+	}
+
+	// Sanity: rig2 (no mayor/rig) must not have produced a mayor entry.
+	for _, loc := range perRigMayors {
+		if loc.Rig == "rig2" {
+			t.Errorf("rig2 has no mayor/rig/ subdir but got per-rig mayor location: %+v", loc)
+		}
+	}
+}
+
+// TestDiscoverRoleLocations_PerRigMayor_FileInsteadOfDir verifies that a
+// <rig>/mayor path that exists as a file (or where mayor/rig is a file)
+// does not produce a spurious per-rig mayor location. This mirrors the
+// IsDir guard on the town-level and rig-role enumerations.
+func TestDiscoverRoleLocations_PerRigMayor_FileInsteadOfDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Make rig1 a valid rig (has crew/) but place a FILE at mayor/rig.
+	os.MkdirAll(filepath.Join(tmpDir, "rig1", "crew"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "rig1", "mayor"), 0755)
+	if err := os.WriteFile(filepath.Join(tmpDir, "rig1", "mayor", "rig"), []byte("not a dir"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	locations, err := DiscoverRoleLocations(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverRoleLocations failed: %v", err)
+	}
+
+	for _, loc := range locations {
+		if loc.Role == "mayor" && loc.Rig == "rig1" {
+			t.Errorf("expected no per-rig mayor location when mayor/rig is a file, got %+v", loc)
+		}
+	}
+}
+
 func TestDiscoverWorktrees(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // HookEntry represents a single hook matcher with its associated hooks.
@@ -572,6 +574,26 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 			if info, err := os.Stat(dir); err == nil && info.IsDir() {
 				locations = append(locations, RoleLocation{Dir: dir, Rig: rigName, Role: sub.role})
 			}
+		}
+
+		// Per-rig mayor — <rig>/mayor/rig is the canonical rig checkout,
+		// paired with DiscoverTargets for Claude-specific settings. Without
+		// enumeration here, gt hooks sync never reaches
+		// <rig>/mayor/rig/.kiro/agents/gastown.json and related non-Claude
+		// agent configs, so they drift indefinitely after InstallForRole
+		// writes them on first creation.
+		//
+		// Note: town-level mayor already produces
+		// RoleLocation{Dir: <townRoot>/mayor, Rig: "", Role: "mayor"} above.
+		// Per-rig mayor has Rig=<rigName>, so callers that branch on Rig
+		// empty-vs-set continue to distinguish the two cases.
+		mayorRigDir := constants.RigMayorPath(rigPath)
+		if info, err := os.Stat(mayorRigDir); err == nil && info.IsDir() {
+			locations = append(locations, RoleLocation{
+				Dir:  mayorRigDir,
+				Rig:  rigName,
+				Role: "mayor",
+			})
 		}
 	}
 
