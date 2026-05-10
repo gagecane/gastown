@@ -2453,6 +2453,80 @@ func TestVerifyPushedCommit(t *testing.T) {
 	}
 }
 
+// TestPushSHA_DetachedHEADRecovery exercises the orphan-commit recovery path
+// used by `gt done` after a detached-HEAD auto-save deletes the local branch
+// ref (gu-0l56, root cause gu-h5pr). Even with no local branch ref, PushSHA
+// must be able to deliver the commit from the object DB to refs/heads/<branch>
+// on the remote.
+func TestPushSHA_DetachedHEADRecovery(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	// Create a feature branch and a commit on it.
+	if err := g.CreateBranch("polecat/sha-recovery"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout("polecat/sha-recovery"); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "work.txt"), []byte("orphan-recovery\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("work.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("orphan commit"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	sha, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev: %v", err)
+	}
+
+	// Simulate the gu-h5pr failure mode: detach HEAD at the commit and delete
+	// the local branch ref. The commit still lives in the object DB.
+	if err := g.Checkout(sha); err != nil {
+		t.Fatalf("Checkout to sha: %v", err)
+	}
+	if err := g.DeleteBranch("polecat/sha-recovery", true); err != nil {
+		t.Fatalf("DeleteBranch: %v", err)
+	}
+
+	// Standard branch:branch push must fail — local ref is gone.
+	if err := g.Push("origin", "polecat/sha-recovery:polecat/sha-recovery", false); err == nil {
+		t.Fatalf("Push with branch:branch refspec should fail when local branch is missing")
+	}
+
+	// PushSHA should succeed: git only needs the commit SHA in the object DB.
+	if err := g.PushSHA("origin", sha, "polecat/sha-recovery", false); err != nil {
+		t.Fatalf("PushSHA: %v", err)
+	}
+
+	// The remote branch should now point at our commit.
+	if err := g.VerifyPushedCommit("origin", "polecat/sha-recovery", sha); err != nil {
+		t.Fatalf("VerifyPushedCommit after PushSHA: %v", err)
+	}
+}
+
+// TestPushSHA_ValidatesInputs ensures PushSHA rejects empty SHA and empty
+// target branch before shelling out to git. This protects against callers
+// that may construct an empty refspec when HEAD cannot be resolved.
+func TestPushSHA_ValidatesInputs(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := g.PushSHA("origin", "", "polecat/x", false); err == nil {
+		t.Fatal("PushSHA should reject empty sha")
+	}
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev: %v", err)
+	}
+	if err := g.PushSHA("origin", head, "", false); err == nil {
+		t.Fatal("PushSHA should reject empty target branch")
+	}
+}
+
 func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)

@@ -654,6 +654,34 @@ func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error
 	return err
 }
 
+// PushSHA pushes a specific commit SHA to a named branch ref on the remote.
+// Unlike Push(remote, "branch:branch", ...), this works even when the local
+// branch ref has been deleted (e.g., after a detached-HEAD auto-save landed
+// an orphan commit). The refspec "<sha>:refs/heads/<branch>" instructs git
+// to fetch the commit from the local object database (the SHA need not be
+// a named local ref) and deliver it to refs/heads/<branch> on the remote.
+//
+// Used as a recovery path in `gt done` when the primary branch:branch push
+// fails with "src refspec does not match any" — a signal that the local
+// branch ref is missing but the commit itself is still in the object DB. See
+// gu-0l56 (and the root-cause gu-h5pr) for the full failure scenario.
+func (g *Git) PushSHA(remote, sha, targetBranch string, force bool) error {
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return fmt.Errorf("PushSHA: empty sha")
+	}
+	if targetBranch == "" {
+		return fmt.Errorf("PushSHA: empty targetBranch")
+	}
+	refspec := sha + ":refs/heads/" + targetBranch
+	args := []string{"push", remote, refspec}
+	if force {
+		args = append(args, "--force")
+	}
+	_, err := g.runWithTimeout(pushTimeout, args...)
+	return err
+}
+
 // Add stages files for commit.
 func (g *Git) Add(paths ...string) error {
 	args := append([]string{"add"}, paths...)
