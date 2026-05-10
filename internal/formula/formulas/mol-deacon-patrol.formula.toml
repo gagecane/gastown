@@ -72,7 +72,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -593,6 +593,37 @@ handled separately by `gt deacon health-check` (which uses immediate delivery).
 | Witness | State: running, recent activity | State: not running, no heartbeat |
 | Refinery | State: running, queue processing | Queue stuck, merge failures |
 
+**IMPORTANT: Detect operator-stopped refineries before treating as unresponsive**
+
+A refinery with `operator_stopped: true` is INTENTIONALLY offline — typically
+because an operator (mayor or human) ran `gt refinery stop <rig>` after a
+prerequisite broke (expired SSH/Midway cert, broken git remote, etc.). This
+is a THIRD state, distinct from "running" and "unresponsive/dead":
+
+- `running: true`                       → healthy, no action
+- `running: false, operator_stopped: false` → possibly unresponsive / dead
+- `running: false, operator_stopped: true`  → intentionally stopped — LEAVE IT ALONE
+
+Before deciding a refinery is "unresponsive" and attempting restart, check:
+
+```bash
+gt refinery status --json <rig>
+```
+
+The JSON output includes `"operator_stopped": true|false`. If `operator_stopped`
+is true:
+- Do NOT increment `unresponsive_cycles` for this rig's refinery.
+- Do NOT run `gt refinery restart <rig>` or `gt refinery start <rig>`
+  (both clear the stop flag and would cause the Sisyphus loop the flag
+  exists to prevent — see gu-i1z2).
+- Do NOT escalate as "unresponsive". The operator already knows.
+- Note in patrol state: "refinery operator-stopped (operator intent preserved)".
+
+If `operator_stopped` is true for many consecutive cycles AND a human hasn't
+addressed the underlying issue (e.g., still waiting on `mwinit -o`), you MAY
+send a LOW-severity reminder to Mayor once per long period — but only as
+informational, never as a "restart attempt failed" escalation.
+
 **Tracking unresponsive cycles:**
 
 Maintain in your patrol state (persisted across cycles):
@@ -605,6 +636,7 @@ health_state:
     refinery:
       unresponsive_cycles: 0
       last_seen_healthy: <timestamp>
+      operator_stopped: false   # mirror of gt refinery status --json
 ```
 
 **Decision matrix** (you decide the thresholds based on context):
@@ -618,8 +650,16 @@ health_state:
 **Restart commands:**
 ```bash
 gt witness restart <rig>
-gt refinery restart <rig>
+gt refinery restart <rig>      # ONLY if operator_stopped=false
 ```
+
+**NEVER run `gt refinery restart` or `gt refinery start` when the rig's
+`gt refinery status --json` reports `operator_stopped: true`.** Both commands
+clear the operator-stop flag by design (explicit human "I want this running"
+intent), so when patrol automation invokes them the daemon's auto-restart
+guard is nullified on the next heartbeat and the refinery is resurrected into
+its broken prerequisite, re-triggering the escalation loop that gu-8ug1 fixed.
+See gu-i1z2.
 
 **Escalation:**
 ```bash
