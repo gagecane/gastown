@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,4 +90,57 @@ func TestRefineryOperatorStopHelpers_NilRig(t *testing.T) {
 	// Must not panic. No assertion needed beyond "didn't crash".
 	setRefineryOperatorStop(nil, "whatever")
 	clearRefineryOperatorStop(nil, "whatever")
+}
+
+// TestRefineryStatusOutput_OperatorStoppedField guards the JSON contract
+// surfaced by `gt refinery status --json`. Automation (deacon patrol) and
+// operators both rely on the `operator_stopped` key to distinguish
+// intentionally-stopped refineries from unresponsive/crashed ones. If this
+// field ever disappears or is renamed silently, the deacon patrol reverts
+// to the gu-i1z2 bug where it "heals" operator-stopped refineries by
+// running `gt refinery restart`, re-triggering the SSH-cert escalation
+// loop that gu-8ug1 fixed.
+//
+// Intentionally tests the public JSON shape, not the private Go field:
+// downstream consumers (scripts, formulas) parse the JSON and depend on
+// the stable key name.
+func TestRefineryStatusOutput_OperatorStoppedField(t *testing.T) {
+	// Case 1: flag NOT set → JSON key present and false.
+	notStopped := RefineryStatusOutput{
+		Running:         false,
+		RigName:         "foo",
+		QueueLength:     0,
+		OperatorStopped: false,
+	}
+	data, err := json.MarshalIndent(notStopped, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal not-stopped: %v", err)
+	}
+	if !strings.Contains(string(data), `"operator_stopped": false`) {
+		t.Errorf("expected JSON to contain \"operator_stopped\": false, got:\n%s", data)
+	}
+
+	// Case 2: flag set → JSON key present and true. This is the signal the
+	// deacon patrol keys off of to skip restart.
+	stopped := RefineryStatusOutput{
+		Running:         false,
+		RigName:         "foo",
+		QueueLength:     0,
+		OperatorStopped: true,
+	}
+	data, err = json.MarshalIndent(stopped, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal stopped: %v", err)
+	}
+	if !strings.Contains(string(data), `"operator_stopped": true`) {
+		t.Errorf("expected JSON to contain \"operator_stopped\": true, got:\n%s", data)
+	}
+
+	// Case 3: key must be present even when field is false (omitempty would
+	// be a subtle regression that makes the deacon's existence check flaky
+	// because "key absent" and "key=false" would look different to a shell
+	// `jq` script that pipes the field through truthiness).
+	if !strings.Contains(string(data), `"operator_stopped"`) {
+		t.Errorf("operator_stopped must always be present in JSON output, got:\n%s", data)
+	}
 }

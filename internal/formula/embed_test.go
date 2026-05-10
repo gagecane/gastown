@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -980,5 +981,167 @@ func TestGetEmbeddedFormulaContent(t *testing.T) {
 	_, err = GetEmbeddedFormulaContent("nonexistent-formula")
 	if err == nil {
 		t.Error("expected error for non-existent formula")
+	}
+}
+
+// TestWitnessPatrolFormula_RespectsOperatorStop guards against a regression
+// of gu-i1z2: the witness patrol previously restarted the refinery
+// unconditionally when it observed "not running AND MRs pending", which
+// cleared the `refinery_stopped=true` wisp flag that `gt refinery stop`
+// persists. That reopened the SSH-cert escalation loop gu-8ug1 fixed
+// (daemon → refinery start → git fetch fails → escalation → mayor stops
+// → witness restarts → loop).
+//
+// The check-refinery step MUST:
+//  1. Read `gt refinery status --json` (not `gt session status`) so the
+//     `operator_stopped` field is visible.
+//  2. Explicitly skip `gt refinery start`/`gt refinery restart` when
+//     `operator_stopped: true`.
+//
+// This test reads the embedded formula and asserts those invariants in
+// the check-refinery step's description. It is intentionally string-based
+// against the human-readable instructions the Claude-LLM witness consumes,
+// because that is the actual behavior contract.
+func TestWitnessPatrolFormula_RespectsOperatorStop(t *testing.T) {
+	content, err := GetEmbeddedFormulaContent("mol-witness-patrol")
+	if err != nil {
+		t.Fatalf("loading embedded witness patrol formula: %v", err)
+	}
+
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing embedded witness patrol formula: %v", err)
+	}
+
+	var checkRefinery *Step
+	for i := range f.Steps {
+		if f.Steps[i].ID == "check-refinery" {
+			checkRefinery = &f.Steps[i]
+			break
+		}
+	}
+	if checkRefinery == nil {
+		t.Fatal("witness patrol formula has no step id=check-refinery — the " +
+			"refinery-health check must remain part of the patrol loop")
+	}
+
+	desc := checkRefinery.Description
+
+	// Invariant 1: status read must include operator_stopped. The only
+	// status command that surfaces that field is `gt refinery status --json`.
+	if !strings.Contains(desc, "gt refinery status --json") {
+		t.Errorf("check-refinery description must invoke `gt refinery status --json` " +
+			"(the only command that surfaces `operator_stopped`); got description " +
+			"without that command. This reopens gu-i1z2.")
+	}
+
+	// Invariant 2: description must mention `operator_stopped` so the LLM
+	// knows to read the field and branch on it.
+	if !strings.Contains(desc, "operator_stopped") {
+		t.Errorf("check-refinery description must reference the `operator_stopped` " +
+			"field so the witness conditions restart on it; got description " +
+			"without that reference. This reopens gu-i1z2.")
+	}
+
+	// Invariant 3: description must explicitly forbid `gt refinery start`
+	// / `gt refinery restart` when `operator_stopped: true`. We look for a
+	// "Do NOT" directive in the same description so the agent sees a clear
+	// instruction, not just a note.
+	if !strings.Contains(desc, "Do NOT run `gt refinery start") &&
+		!strings.Contains(desc, "Do NOT run `gt refinery restart") {
+		t.Errorf("check-refinery description must explicitly forbid " +
+			"`gt refinery start`/`gt refinery restart` when `operator_stopped: true`; " +
+			"without that directive the witness clears the stop flag and " +
+			"reopens gu-i1z2.")
+	}
+
+	// Invariant 4: recurrence reference. Future editors should see WHY the
+	// check is here. gu-i1z2 anchors the bug report.
+	if !strings.Contains(desc, "gu-i1z2") {
+		t.Errorf("check-refinery description should reference gu-i1z2 so future " +
+			"edits understand the operator-stop check exists to prevent a known " +
+			"recurrence; got description without that reference.")
+	}
+}
+
+// TestDeaconPatrolFormula_RespectsOperatorStop is the deacon-side twin of
+// TestWitnessPatrolFormula_RespectsOperatorStop. The deacon patrol's
+// health-scan step used to treat a stopped refinery as "unresponsive" and
+// invoke `gt refinery restart` to heal it. `gt refinery restart` clears
+// the operator-stop flag by design (it is a "human wants this running"
+// intent), so when the deacon ran it during an SSH-cert outage the
+// refinery came back to life, failed its next git fetch, escalated
+// again, mayor stopped it again, and the deacon "healed" it again on
+// the next 5-minute heartbeat. See gu-i1z2.
+//
+// The deacon patrol MUST:
+//  1. Read `gt refinery status --json` so it sees `operator_stopped`.
+//  2. Explicitly refuse to run `gt refinery restart` / `gt refinery start`
+//     when `operator_stopped: true`.
+//
+// Mirrors the witness test; any new restart path added to the deacon
+// formula must also obey the operator-stop guard.
+func TestDeaconPatrolFormula_RespectsOperatorStop(t *testing.T) {
+	content, err := GetEmbeddedFormulaContent("mol-deacon-patrol")
+	if err != nil {
+		t.Fatalf("loading embedded deacon patrol formula: %v", err)
+	}
+
+	f, err := Parse(content)
+	if err != nil {
+		t.Fatalf("parsing embedded deacon patrol formula: %v", err)
+	}
+
+	// Find the health-scan step (or whatever step owns refinery restart
+	// decisions). If the step id ever gets renamed, this test should fail
+	// loudly rather than silently skip.
+	var healthScan *Step
+	for i := range f.Steps {
+		if f.Steps[i].ID == "health-scan" {
+			healthScan = &f.Steps[i]
+			break
+		}
+	}
+	if healthScan == nil {
+		t.Fatal("deacon patrol formula has no step id=health-scan — the " +
+			"component health check must remain part of the patrol loop")
+	}
+
+	desc := healthScan.Description
+
+	// Invariant 1: JSON status command must appear so the deacon has a way
+	// to see `operator_stopped`. `gt refinery status` (human output) alone
+	// is insufficient for an automated read path.
+	if !strings.Contains(desc, "gt refinery status --json") {
+		t.Errorf("health-scan description must invoke `gt refinery status --json` " +
+			"(the only command that surfaces `operator_stopped`); got description " +
+			"without that command. This reopens gu-i1z2.")
+	}
+
+	// Invariant 2: `operator_stopped` must be referenced so the LLM keys
+	// its decision on the flag.
+	if !strings.Contains(desc, "operator_stopped") {
+		t.Errorf("health-scan description must reference the `operator_stopped` " +
+			"field so the deacon conditions restart on it; got description " +
+			"without that reference. This reopens gu-i1z2.")
+	}
+
+	// Invariant 3: explicit "Do NOT" directive against the flag-clearing
+	// commands. Either start or restart is acceptable wording — what matters
+	// is that the patrol is told in direct, unambiguous terms not to do it.
+	if !strings.Contains(desc, "NEVER run `gt refinery restart`") &&
+		!strings.Contains(desc, "Do NOT run `gt refinery restart") {
+		t.Errorf("health-scan description must explicitly forbid " +
+			"`gt refinery restart` (and `gt refinery start`) when " +
+			"`operator_stopped: true`; without that directive the deacon " +
+			"clears the stop flag and reopens gu-i1z2.")
+	}
+
+	// Invariant 4: recurrence reference so future editors don't innocently
+	// strip the guard.
+	if !strings.Contains(desc, "gu-i1z2") {
+		t.Errorf("health-scan description should reference gu-i1z2 so future " +
+			"edits understand the operator-stop check exists to prevent a known " +
+			"recurrence; got description without that reference.")
 	}
 }

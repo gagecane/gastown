@@ -404,11 +404,23 @@ func clearRefineryOperatorStop(r *rig.Rig, rigName string) {
 }
 
 // RefineryStatusOutput is the JSON output format for refinery status.
+//
+// OperatorStopped surfaces the `refinery_stopped=true` flag that
+// `gt refinery stop` persists in the rig's wisp. It is a distinct third
+// state from Running (true/false) — a stopped-by-operator refinery is NOT
+// "unresponsive"; it is intentionally offline (typically because an
+// upstream prerequisite like SSH/Midway cert is broken). Automation such
+// as the deacon patrol MUST check this field before deciding to restart,
+// otherwise it re-creates the very SSH-cert escalation loop that gu-8ug1
+// fixed (deacon → `gt refinery restart` → clears stop flag → refinery
+// immediately fails git fetch → escalation spam → mayor stops again →
+// deacon restarts again). See gu-i1z2 for the recurrence.
 type RefineryStatusOutput struct {
-	Running     bool   `json:"running"`
-	RigName     string `json:"rig_name"`
-	Session     string `json:"session,omitempty"`
-	QueueLength int    `json:"queue_length"`
+	Running         bool   `json:"running"`
+	RigName         string `json:"rig_name"`
+	Session         string `json:"session,omitempty"`
+	QueueLength     int    `json:"queue_length"`
+	OperatorStopped bool   `json:"operator_stopped"`
 }
 
 func runRefineryStatus(cmd *cobra.Command, args []string) error {
@@ -417,7 +429,7 @@ func runRefineryStatus(cmd *cobra.Command, args []string) error {
 		rigName = args[0]
 	}
 
-	mgr, _, rigName, err := getRefineryManager(rigName)
+	mgr, r, rigName, err := getRefineryManager(rigName)
 	if err != nil {
 		return err
 	}
@@ -430,12 +442,25 @@ func runRefineryStatus(cmd *cobra.Command, args []string) error {
 	queue, _ := mgr.Queue()
 	queueLen := len(queue)
 
+	// Report operator-stop intent alongside running state so automation (the
+	// deacon patrol in particular) can distinguish "intentionally stopped"
+	// from "unresponsive / crashed". Read from the rig's wisp via the same
+	// helper the daemon's auto-restart path uses, so there is a single
+	// source of truth for operator intent. Best-effort: if r is nil (rig
+	// couldn't be resolved for some reason), we still report running state.
+	operatorStopped := false
+	if r != nil {
+		townRoot := filepath.Dir(r.Path)
+		operatorStopped = rig.IsRefineryStoppedByOperator(townRoot, rigName)
+	}
+
 	// JSON output
 	if refineryStatusJSON {
 		output := RefineryStatusOutput{
-			Running:     running,
-			RigName:     rigName,
-			QueueLength: queueLen,
+			Running:         running,
+			RigName:         rigName,
+			QueueLength:     queueLen,
+			OperatorStopped: operatorStopped,
 		}
 		if sessionInfo != nil {
 			output.Session = sessionInfo.Name
@@ -453,6 +478,13 @@ func runRefineryStatus(cmd *cobra.Command, args []string) error {
 		if sessionInfo != nil {
 			fmt.Printf("  Session: %s\n", sessionInfo.Name)
 		}
+	} else if operatorStopped {
+		// Distinguish intentionally-stopped from dead/missing: surfaces
+		// clearly in `gt refinery status` so the deacon patrol (and any
+		// operator troubleshooting) reads the correct signal and does not
+		// "heal" an intentional stop by restarting. See gu-i1z2.
+		fmt.Printf("  State: %s\n", style.Dim.Render("○ stopped (operator-stopped)"))
+		fmt.Printf("  %s\n", style.Dim.Render("Run 'gt refinery start "+rigName+"' to resume."))
 	} else {
 		fmt.Printf("  State: %s\n", style.Dim.Render("○ stopped"))
 	}
