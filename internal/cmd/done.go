@@ -765,19 +765,12 @@ afterSafetyNet:
 					// G15 fix: Force-close bypasses molecule dependency checks.
 					// The polecat is about to be nuked — open wisps should not block closure.
 					// Retry with backoff handles transient dolt lock contention (A2).
-					var closeErr error
-					for attempt := 1; attempt <= 3; attempt++ {
-						closeErr = bd.ForceCloseWithReason(closeReason, issueID)
-						if closeErr == nil {
-							fmt.Printf("%s Issue %s closed (no MR needed)\n", style.Bold.Render("✓"), issueID)
-							break
-						}
-						if attempt < 3 {
-							style.PrintWarning("close attempt %d/3 failed: %v (retrying in %ds)", attempt, closeErr, attempt*2)
-							time.Sleep(time.Duration(attempt*2) * time.Second)
-						}
-					}
-					if closeErr != nil {
+					// Shares forceCloseWithRetry with the merged path (gu-z93z) so both
+					// close paths have identical robustness.
+					closeErr := forceCloseWithRetry(bd, issueID, closeReason)
+					if closeErr == nil {
+						fmt.Printf("%s Issue %s closed (no MR needed)\n", style.Bold.Render("✓"), issueID)
+					} else {
 						style.PrintWarning("could not close issue %s after 3 attempts: %v (issue may be left HOOKED)", issueID, closeErr)
 					}
 				}
@@ -1679,6 +1672,41 @@ func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, c
 	return verifyErr
 }
 
+// closeHookedBeadBackoff is the sleep used by forceCloseWithRetry between
+// attempts. Production uses real time.Sleep; tests override to time.Duration(0)
+// for speed. Keep as a package var so only the close retries are fast in tests —
+// other timing logic is unaffected.
+var closeHookedBeadBackoff = func(d time.Duration) { time.Sleep(d) }
+
+// forceCloseWithRetry closes an issue via bd.ForceCloseWithReason with up to
+// 3 attempts and exponential-ish backoff (2s, 4s) between attempts. Returns
+// nil on success or the final error on exhaustion.
+//
+// Bug fix (gu-z93z): The close-on-successful-merge path in updateAgentStateOnDone
+// previously used plain bd.Close with no force and no retry. Transient dolt-lock
+// contention or lingering dependency checks silently failed the close and left
+// the hooked bead stuck IN_PROGRESS after gt done + merge queue landed the branch.
+// This helper mirrors the robust pattern already used by the no-MR close path
+// (line ~768) so both paths behave consistently.
+//
+// Force semantics are intentional: the polecat is about to transition to IDLE —
+// open wisps or molecule steps should not block closure. Witness handles any
+// orphaned descendants.
+func forceCloseWithRetry(bd *beads.Beads, issueID, closeReason string) error {
+	var closeErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		closeErr = bd.ForceCloseWithReason(closeReason, issueID)
+		if closeErr == nil {
+			return nil
+		}
+		if attempt < 3 {
+			style.PrintWarning("close attempt %d/3 failed for %s: %v (retrying in %ds)", attempt, issueID, closeErr, attempt*2)
+			closeHookedBeadBackoff(time.Duration(attempt*2) * time.Second)
+		}
+	}
+	return closeErr
+}
+
 // setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead
 // EARLY in gt done, before push/MR. This allows the Witness to detect polecats that
 // crashed mid-gt-done: if the session is dead but done-intent exists, the polecat was
@@ -1952,9 +1980,26 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 			if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
-			} else if err := bd.Close(hookedBeadID); err != nil {
-				// Non-fatal: warn but continue
-				fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
+			} else {
+				// BUG FIX (gu-z93z): Use force-close + retry pattern to match the
+				// no-MR close path (see forceCloseWithRetry docstring). Previously
+				// this was a single non-force bd.Close — if it hit a transient dolt
+				// lock or lingering dep, the bead was left stuck IN_PROGRESS after
+				// gt done, even though the merge queue landed the branch. The
+				// refinery is a backstop but cannot be relied on: if refinery's
+				// own close call also fails, nothing closes the bead and it
+				// pollutes bd ready/list output forever.
+				closeReason := fmt.Sprintf("Completed via gt done (exit=%s)", exitType)
+				if err := forceCloseWithRetry(bd, hookedBeadID, closeReason); err != nil {
+					// Refinery is still a backstop — when the MR lands it will attempt
+					// its own ForceCloseWithReason("Merged in ..."). Surface this
+					// failure clearly so operators can tell the difference between
+					// "polecat closed it" and "refinery had to close it".
+					fmt.Fprintf(os.Stderr, "ERROR: gt done could not close hooked bead %s after 3 attempts: %v\n", hookedBeadID, err)
+					fmt.Fprintf(os.Stderr, "  Refinery will attempt close when the MR merges; otherwise manual intervention required.\n")
+				} else {
+					fmt.Printf("%s Hooked bead %s closed (gt done)\n", style.Bold.Render("✓"), hookedBeadID)
+				}
 			}
 		}
 	}
