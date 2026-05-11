@@ -80,6 +80,41 @@ const (
 	ExitDeferred  = "DEFERRED"
 )
 
+// defaultDeferredRetryWindow is how long a bead stays hidden from bd ready /
+// dispatch queries after a polecat exits with --status DEFERRED and no
+// explicit retry-in override (gu-vty0). Without a minimum window, the
+// convoy stranded scan and witness re-dispatch paths rehook the bead on the
+// next patrol cycle — producing the exact spawn storm this default prevents.
+const defaultDeferredRetryWindow = 24 * time.Hour
+
+// parseRetryInReason extracts an optional "retry-in:<duration>" token from a
+// --reason string and returns the parsed duration. Recognized prefixes:
+//   retry-in:1h transient rate limit
+//   retry-in:30m ...
+// The duration must be a positive value parseable by time.ParseDuration.
+// Returns (0, false) when the reason doesn't start with retry-in: or when
+// the duration token is malformed.
+func parseRetryInReason(reason string) (time.Duration, bool) {
+	const prefix = "retry-in:"
+	trimmed := strings.TrimSpace(reason)
+	if !strings.HasPrefix(trimmed, prefix) {
+		return 0, false
+	}
+	rest := trimmed[len(prefix):]
+	// Stop at first whitespace — everything after is free-form context.
+	if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+		rest = rest[:idx]
+	}
+	if rest == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(rest)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
 func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	targetBranch := defaultBranch
 	if explicitTarget != "" {
@@ -1896,6 +1931,32 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 			polecatName, time.Now().UTC().Format(time.RFC3339), exitType, doneReason)
 		if _, err := bd.Run("comments", "add", hookedBeadID, note); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: couldn't record %s reason on %s: %v\n", exitType, hookedBeadID, err)
+		}
+	}
+
+	// Set defer_until on DEFERRED exits so the bead isn't immediately
+	// re-dispatched (gu-vty0). Without a defer window, the convoy stranded
+	// scan and witness re-dispatch paths can rehook the same bead within
+	// minutes, causing repeated DEFERRED exits from fresh polecats (spawn
+	// storm). A 24h default gives the next oncall/mayor cycle time to triage
+	// the underlying blocker before a re-dispatch.
+	//
+	// Callers can override via --reason prefix "retry-in:<duration>" (e.g.
+	// "retry-in:1h transient rate limit"). Durations must be parseable by
+	// time.ParseDuration.
+	if hookedBeadID != "" && exitType == ExitDeferred {
+		deferWindow := defaultDeferredRetryWindow
+		if doneReason != "" {
+			if d, ok := parseRetryInReason(doneReason); ok {
+				deferWindow = d
+			}
+		}
+		deferUntil := time.Now().UTC().Add(deferWindow).Format("2006-01-02T15:04:05Z")
+		if _, err := bd.Run("update", hookedBeadID, "--defer", deferUntil); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't set defer_until on %s (bead may be re-dispatched immediately): %v\n", hookedBeadID, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Deferred %s until %s (retry in %s)\n",
+				hookedBeadID, deferUntil, deferWindow.Round(time.Second))
 		}
 	}
 

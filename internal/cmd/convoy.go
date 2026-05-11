@@ -1602,6 +1602,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 // - status = "open" AND (no assignee OR assignee session is dead)
 // - OR status = "in_progress"/"hooked" AND assignee session is dead (orphaned molecule)
 // - AND not blocked (cross-rig-aware from issue details)
+// - AND not deferred (defer_until in the future; gu-vty0)
 // scheduledSet is a pre-computed set of bead IDs with open sling contexts (from areScheduled).
 func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	// Closed issues are never ready
@@ -1611,6 +1612,15 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 
 	// Must not be blocked
 	if t.Blocked {
+		return false
+	}
+
+	// Deferred beads (defer_until in the future) are not ready for dispatch.
+	// Polecats that exit with --status DEFERRED set this to hide the bead
+	// from dispatch for a retry window (default 24h). Without this check,
+	// the stranded scan can rehook a deferred bead within one patrol cycle
+	// and trigger a spawn storm of DEFERRED-ing polecats (gu-vty0).
+	if isDeferUntilInFuture(t.DeferUntil) {
 		return false
 	}
 
@@ -1649,6 +1659,26 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	}
 
 	return false // Session exists = worker is active
+}
+
+// isDeferUntilInFuture parses a defer_until string (RFC3339 or the "2006-01-02
+// 15:04:05" form Dolt can emit) and returns true when the timestamp lies in
+// the future. An empty or unparseable value is treated as "not deferred" so
+// that existing beads without the column set continue to dispatch normally.
+func isDeferUntilInFuture(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	// Try common formats. The canonical form is RFC3339 (e.g.
+	// "2026-08-04T18:51:20Z"), but Dolt/MySQL datetime columns sometimes
+	// serialize as "2006-01-02 15:04:05" through intermediate JSON layers.
+	for _, layout := range []string{time.RFC3339, time.RFC3339Nano, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if ts, err := time.Parse(layout, raw); err == nil {
+			return ts.After(time.Now())
+		}
+	}
+	return false
 }
 
 // isSlingableBead reports whether a bead can be dispatched via gt sling.
@@ -2218,16 +2248,17 @@ func formatConvoyStatus(status string) string {
 
 // trackedIssueInfo holds info about an issue being tracked by a convoy.
 type trackedIssueInfo struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Type      string   `json:"dependency_type"`
-	IssueType string   `json:"issue_type"`
-	Blocked   bool     `json:"blocked,omitempty"`    // True if issue currently has blockers
-	Assignee  string   `json:"assignee,omitempty"`   // Assigned agent (e.g., gastown/polecats/goose)
-	Labels    []string `json:"labels,omitempty"`     // Bead labels (propagated from trackedDependency)
-	Worker    string   `json:"worker,omitempty"`     // Worker currently assigned (e.g., gastown/nux)
-	WorkerAge string   `json:"worker_age,omitempty"` // How long worker has been on this issue
+	ID         string   `json:"id"`
+	Title      string   `json:"title"`
+	Status     string   `json:"status"`
+	Type       string   `json:"dependency_type"`
+	IssueType  string   `json:"issue_type"`
+	Blocked    bool     `json:"blocked,omitempty"`     // True if issue currently has blockers
+	Assignee   string   `json:"assignee,omitempty"`    // Assigned agent (e.g., gastown/polecats/goose)
+	Labels     []string `json:"labels,omitempty"`      // Bead labels (propagated from trackedDependency)
+	Worker     string   `json:"worker,omitempty"`      // Worker currently assigned (e.g., gastown/nux)
+	WorkerAge  string   `json:"worker_age,omitempty"`  // How long worker has been on this issue
+	DeferUntil string   `json:"defer_until,omitempty"` // RFC3339 timestamp; when non-empty and in the future, hides from stranded dispatch (gu-vty0)
 }
 
 // trackedDependency is dep-list data enriched with fresh issue details.
@@ -2240,6 +2271,7 @@ type trackedDependency struct {
 	DependencyType string   `json:"dependency_type"`
 	Labels         []string `json:"labels"`
 	Blocked        bool     `json:"-"`
+	DeferUntil     string   `json:"-"`
 }
 
 func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
@@ -2261,6 +2293,7 @@ func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
 	// labels are empty clears stale queue labels that would otherwise
 	// suppress stranded issue detection.
 	dep.Labels = details.Labels
+	dep.DeferUntil = details.DeferUntil
 }
 
 // getTrackedIssues gets issues tracked by a convoy with fresh cross-rig details.
@@ -2331,14 +2364,15 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 	var tracked []trackedIssueInfo
 	for _, dep := range deps {
 		info := trackedIssueInfo{
-			ID:        dep.ID,
-			Title:     dep.Title,
-			Status:    dep.Status,
-			Type:      dep.DependencyType,
-			IssueType: dep.IssueType,
-			Blocked:   dep.Blocked,
-			Assignee:  dep.Assignee,
-			Labels:    dep.Labels,
+			ID:         dep.ID,
+			Title:      dep.Title,
+			Status:     dep.Status,
+			Type:       dep.DependencyType,
+			IssueType:  dep.IssueType,
+			Blocked:    dep.Blocked,
+			Assignee:   dep.Assignee,
+			Labels:     dep.Labels,
+			DeferUntil: dep.DeferUntil,
 		}
 
 		// Add worker info if available
@@ -2433,6 +2467,7 @@ type issueDetailsJSON struct {
 	BlockedBy      []string          `json:"blocked_by"`
 	BlockedByCount int               `json:"blocked_by_count"`
 	Dependencies   []issueDependency `json:"dependencies"`
+	DeferUntil     string            `json:"defer_until,omitempty"`
 }
 
 func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
@@ -2446,6 +2481,7 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 		BlockedBy:      issue.BlockedBy,
 		BlockedByCount: issue.BlockedByCount,
 		Dependencies:   issue.Dependencies,
+		DeferUntil:     issue.DeferUntil,
 	}
 }
 
@@ -2498,6 +2534,7 @@ type issueDetails struct {
 	BlockedBy      []string
 	BlockedByCount int
 	Dependencies   []issueDependency
+	DeferUntil     string
 }
 
 func (d issueDetails) IsBlocked() bool {

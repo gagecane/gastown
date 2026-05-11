@@ -1687,3 +1687,53 @@ func TestNudgeRefineryGuardLogic(t *testing.T) {
 	}
 }
 
+
+// TestParseRetryInReason covers the retry-in:<duration> prefix parser used by
+// gt done to let callers override the default DEFERRED retry window (gu-vty0).
+func TestParseRetryInReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		reason     string
+		wantOK     bool
+		wantWindow time.Duration
+	}{
+		{name: "empty string", reason: "", wantOK: false},
+		{name: "no prefix", reason: "spec unclear", wantOK: false},
+		{name: "prefix only, no duration", reason: "retry-in:", wantOK: false},
+		{name: "invalid duration", reason: "retry-in:nope", wantOK: false},
+		{name: "zero duration rejected", reason: "retry-in:0s", wantOK: false},
+		{name: "negative duration rejected", reason: "retry-in:-1h", wantOK: false},
+		{name: "plain hours", reason: "retry-in:1h", wantOK: true, wantWindow: 1 * time.Hour},
+		{name: "minutes with context", reason: "retry-in:30m waiting for review", wantOK: true, wantWindow: 30 * time.Minute},
+		{name: "hours with context", reason: "retry-in:4h transient rate limit", wantOK: true, wantWindow: 4 * time.Hour},
+		{name: "sub-hour composite", reason: "retry-in:1h30m", wantOK: true, wantWindow: 90 * time.Minute},
+		{name: "leading/trailing whitespace", reason: "  retry-in:2h  further context", wantOK: true, wantWindow: 2 * time.Hour},
+		{name: "tab separated context", reason: "retry-in:15m\tqueue backup", wantOK: true, wantWindow: 15 * time.Minute},
+		{name: "default window fits 24h token", reason: "retry-in:24h routine pause", wantOK: true, wantWindow: 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseRetryInReason(tt.reason)
+			if ok != tt.wantOK {
+				t.Fatalf("parseRetryInReason(%q) ok = %v, want %v (got window %s)", tt.reason, ok, tt.wantOK, got)
+			}
+			if ok && got != tt.wantWindow {
+				t.Errorf("parseRetryInReason(%q) window = %s, want %s", tt.reason, got, tt.wantWindow)
+			}
+		})
+	}
+}
+
+// TestDefaultDeferredRetryWindow documents the contract that the default retry
+// window stays within a 15m–7d band (gu-vty0). A too-short window would
+// reintroduce the spawn storm; too long would hold work the polecat pool
+// could otherwise handle after short-lived blockers clear.
+func TestDefaultDeferredRetryWindow(t *testing.T) {
+	if defaultDeferredRetryWindow < 15*time.Minute {
+		t.Errorf("default retry window %s is too short; spawn storms reappear below 15m", defaultDeferredRetryWindow)
+	}
+	if defaultDeferredRetryWindow > 7*24*time.Hour {
+		t.Errorf("default retry window %s is too long; work stays invisible beyond a week", defaultDeferredRetryWindow)
+	}
+}
