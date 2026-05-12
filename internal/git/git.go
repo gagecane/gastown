@@ -642,6 +642,23 @@ func (g *Git) Push(remote, branch string, force bool) error {
 	return err
 }
 
+// PushSkipPrePush is Push with GT_SKIP_PREPUSH=1 set so the repo's pre-push
+// hook (scripts/pre-push-check.sh) skips its build+vet+test gates. Used by
+// `gt done --pre-verified`, where the polecat already ran the full gate
+// suite on the rebased branch — re-running them in the hook is pure waste,
+// and a 2-5 minute silent hang during push is the dominant polecat-stall
+// failure mode (gu-d416). The hook's branch-name and integration-branch
+// guardrails still run (they're upstream of the gate-skip check); only the
+// slow gates are bypassed. Use Push (not this) when gates have NOT been run.
+func (g *Git) PushSkipPrePush(remote, branch string, force bool) error {
+	args := []string{"push", remote, branch}
+	if force {
+		args = append(args, "--force")
+	}
+	_, err := g.runWithEnvAndTimeout(args, []string{"GT_SKIP_PREPUSH=1"}, pushTimeout)
+	return err
+}
+
 // PushWithEnv pushes with additional environment variables.
 // Used by gt mq integration land to set GT_INTEGRATION_LAND=1, which the
 // pre-push hook checks to allow integration branch content landing on main.
@@ -666,6 +683,16 @@ func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error
 // branch ref is missing but the commit itself is still in the object DB. See
 // gu-0l56 (and the root-cause gu-h5pr) for the full failure scenario.
 func (g *Git) PushSHA(remote, sha, targetBranch string, force bool) error {
+	return g.pushSHAInternal(remote, sha, targetBranch, force, false)
+}
+
+// PushSHASkipPrePush is PushSHA with GT_SKIP_PREPUSH=1 set. See
+// PushSkipPrePush for the rationale.
+func (g *Git) PushSHASkipPrePush(remote, sha, targetBranch string, force bool) error {
+	return g.pushSHAInternal(remote, sha, targetBranch, force, true)
+}
+
+func (g *Git) pushSHAInternal(remote, sha, targetBranch string, force, skipPrePush bool) error {
 	sha = strings.TrimSpace(sha)
 	if sha == "" {
 		return fmt.Errorf("PushSHA: empty sha")
@@ -677,6 +704,10 @@ func (g *Git) PushSHA(remote, sha, targetBranch string, force bool) error {
 	args := []string{"push", remote, refspec}
 	if force {
 		args = append(args, "--force")
+	}
+	if skipPrePush {
+		_, err := g.runWithEnvAndTimeout(args, []string{"GT_SKIP_PREPUSH=1"}, pushTimeout)
+		return err
 	}
 	_, err := g.runWithTimeout(pushTimeout, args...)
 	return err

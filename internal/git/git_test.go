@@ -2527,6 +2527,85 @@ func TestPushSHA_ValidatesInputs(t *testing.T) {
 	}
 }
 
+// TestPushSkipPrePush_BypassesHookGates installs a pre-push hook that fails
+// unless GT_SKIP_PREPUSH=1 is in the environment. This mirrors the real
+// scripts/pre-push-check.sh check (line 45 of that script). It verifies that:
+//
+//  1. Push() does NOT bypass the hook (hook runs, push fails),
+//  2. PushSkipPrePush() DOES bypass it (hook short-circuits, push succeeds),
+//  3. PushSHASkipPrePush() also bypasses it.
+//
+// Regression guard for gu-d416: --pre-verified must skip the slow hook gates
+// the polecat already ran, otherwise git push hangs minutes and the witness
+// force-kills the polecat losing unpushed commits.
+func TestPushSkipPrePush_BypassesHookGates(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	// Install a pre-push hook that fails unless GT_SKIP_PREPUSH=1.
+	hookPath := filepath.Join(localDir, ".git", "hooks", "pre-push")
+	hookScript := `#!/bin/sh
+if [ "$GT_SKIP_PREPUSH" = "1" ]; then
+  exit 0
+fi
+echo "pre-push: gates would run here (slow)" >&2
+exit 1
+`
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	// Make a commit on a polecat branch.
+	if err := g.CreateBranch("polecat/skip-prepush"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout("polecat/skip-prepush"); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "work.txt"), []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("work.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("v1"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// (1) Plain Push must fail — hook rejects without GT_SKIP_PREPUSH.
+	if err := g.Push("origin", "polecat/skip-prepush:polecat/skip-prepush", false); err == nil {
+		t.Fatal("Push should fail when pre-push hook rejects (no GT_SKIP_PREPUSH=1)")
+	}
+
+	// (2) PushSkipPrePush must succeed — hook sees GT_SKIP_PREPUSH=1 and exits 0.
+	if err := g.PushSkipPrePush("origin", "polecat/skip-prepush:polecat/skip-prepush", false); err != nil {
+		t.Fatalf("PushSkipPrePush should succeed when GT_SKIP_PREPUSH=1: %v", err)
+	}
+
+	// Add another commit, drop the local branch ref to test the SHA variant.
+	if err := os.WriteFile(filepath.Join(localDir, "work.txt"), []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	if err := g.Add("work.txt"); err != nil {
+		t.Fatalf("Add v2: %v", err)
+	}
+	if err := g.Commit("v2"); err != nil {
+		t.Fatalf("Commit v2: %v", err)
+	}
+	sha, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev: %v", err)
+	}
+
+	// (3) PushSHASkipPrePush must also bypass the hook.
+	if err := g.PushSHASkipPrePush("origin", sha, "polecat/skip-prepush", false); err != nil {
+		t.Fatalf("PushSHASkipPrePush should succeed when GT_SKIP_PREPUSH=1: %v", err)
+	}
+	if err := g.VerifyPushedCommit("origin", "polecat/skip-prepush", sha); err != nil {
+		t.Fatalf("VerifyPushedCommit after PushSHASkipPrePush: %v", err)
+	}
+}
+
 func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)

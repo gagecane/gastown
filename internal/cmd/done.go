@@ -96,6 +96,28 @@ func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	return "origin/" + targetBranch
 }
 
+// pushForDone wraps git.Push, opting into GT_SKIP_PREPUSH=1 when the polecat
+// declared --pre-verified. The repo's pre-push hook re-runs build+vet+test
+// (~2-5min), which during gt done routinely exceeds the witness's idle timeout
+// and triggers a force-kill that loses unpushed commits (gu-d416). When
+// --pre-verified, the polecat already ran the same gates on the rebased
+// branch (formula step 7), so the hook's gates are pure waste. The hook's
+// branch-name and integration-branch guardrails still run.
+func pushForDone(g *git.Git, remote, refspec string, force bool) error {
+	if donePreVerified {
+		return g.PushSkipPrePush(remote, refspec, force)
+	}
+	return g.Push(remote, refspec, force)
+}
+
+// pushSHAForDone is the orphan-commit recovery counterpart of pushForDone.
+func pushSHAForDone(g *git.Git, remote, sha, branch string, force bool) error {
+	if donePreVerified {
+		return g.PushSHASkipPrePush(remote, sha, branch, force)
+	}
+	return g.PushSHA(remote, sha, branch, force)
+}
+
 // shortSHA abbreviates a git SHA for human-readable diagnostic output.
 // Returns the first 8 characters, or the full value if shorter. Used by
 // the gu-vtkn staleness guard to report stash-parent vs. HEAD divergence.
@@ -871,7 +893,7 @@ afterSafetyNet:
 			// Push submodule changes before direct push (gt-dzs)
 			pushSubmoduleChanges(g, defaultBranch)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			directPushErr := pushForDone(g, "origin", directRefspec, false)
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
@@ -968,7 +990,7 @@ afterSafetyNet:
 			goto notifyWitness
 		}
 		pushedCommitSHA, _ = g.Rev("HEAD")
-		pushErr = g.Push("origin", refspec, false)
+		pushErr = pushForDone(g, "origin", refspec, false)
 		if pushErr != nil {
 			// Primary push failed — try fallback from the bare repo (GH #1348).
 			// When polecat sessions are reused or worktrees are stale, the worktree's
@@ -979,7 +1001,7 @@ afterSafetyNet:
 			bareRepoPath := filepath.Join(rigPath, ".repo.git")
 			if _, statErr := os.Stat(bareRepoPath); statErr == nil {
 				bareGit := git.NewGitWithDir(bareRepoPath, "")
-				pushErr = bareGit.Push("origin", refspec, false)
+				pushErr = pushForDone(bareGit, "origin", refspec, false)
 				if pushErr != nil {
 					style.PrintWarning("bare repo push also failed: %v", pushErr)
 				} else {
@@ -990,7 +1012,7 @@ afterSafetyNet:
 				mayorPath := filepath.Join(rigPath, "mayor", "rig")
 				if _, statErr := os.Stat(mayorPath); statErr == nil {
 					mayorGit := git.NewGit(mayorPath)
-					pushErr = mayorGit.Push("origin", refspec, false)
+					pushErr = pushForDone(mayorGit, "origin", refspec, false)
 					if pushErr != nil {
 						style.PrintWarning("mayor/rig push also failed: %v", pushErr)
 					} else {
@@ -1027,7 +1049,7 @@ afterSafetyNet:
 			}
 			if pushErr != nil && pushedCommitSHA != "" {
 				style.PrintWarning("attempting SHA-refspec recovery (branch ref may be missing locally)...")
-				shaErr := g.PushSHA("origin", pushedCommitSHA, branch, false)
+				shaErr := pushSHAForDone(g, "origin", pushedCommitSHA, branch, false)
 				if shaErr == nil {
 					fmt.Printf("%s Branch pushed via SHA-refspec recovery\n", style.Bold.Render("✓"))
 					pushErr = nil
@@ -1039,7 +1061,7 @@ afterSafetyNet:
 					bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
 					if _, statErr := os.Stat(bareRepoPath); statErr == nil {
 						bareGit := git.NewGitWithDir(bareRepoPath, "")
-						if bareErr := bareGit.PushSHA("origin", pushedCommitSHA, branch, false); bareErr == nil {
+						if bareErr := pushSHAForDone(bareGit, "origin", pushedCommitSHA, branch, false); bareErr == nil {
 							fmt.Printf("%s Branch pushed via bare repo + SHA-refspec recovery\n", style.Bold.Render("✓"))
 							pushErr = nil
 						} else {
@@ -1213,7 +1235,7 @@ afterSafetyNet:
 
 			// Push branch directly to main (the earlier push went to origin/<branch>)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := g.Push("origin", directRefspec, false)
+			directPushErr := pushForDone(g, "origin", directRefspec, false)
 			if directPushErr != nil {
 				// Direct push failed — fall through to normal MR creation
 				style.PrintWarning("late direct push to %s failed: %v — falling through to MR", defaultBranch, directPushErr)
