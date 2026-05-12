@@ -57,6 +57,14 @@ const (
 	// tmpfs, long enough to avoid racing with an in-flight test run.
 	tmpCleanupAge = 1 * time.Hour
 
+	// tmpHexHmCleanupAge is the minimum age of leaked .<16-hex>-00000000.hm
+	// files before the fix will remove them. Kept short because the leak
+	// rate is high (~3 files/sec from bunx running on every Claude Code
+	// statusLine refresh, see gs-a9n) and the files are never reused after
+	// creation — bun abandons them. A 5-minute floor is enough to skip
+	// anything an in-flight bunx invocation might still be writing to.
+	tmpHexHmCleanupAge = 5 * time.Minute
+
 	// tmpDirToCheck is the path the check inspects. Hoisted to a variable
 	// so tests can point the check at a fake filesystem.
 	tmpDirToCheck = "/tmp"
@@ -92,9 +100,10 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 			Details: []string{
 				"Inode exhaustion on /tmp causes Go test failures:",
 				"  TempDir: mkdir /tmp/TestXxx: no space left on device",
-				"Stale /tmp/Test* dirs from previous test runs are the usual cause.",
+				"Common causes: stale /tmp/Test* dirs from test runs, or leaked",
+				"zero-byte .<hex>-00000000.hm files from bun (Claude statusLine).",
 			},
-			FixHint: "gt doctor --fix (removes stale /tmp/Test* dirs older than 1h)",
+			FixHint: "gt doctor --fix (removes stale Test* dirs and leaked .hex-00000000.hm files)",
 		}
 
 	case pct >= tmpInodesWarnPercent:
@@ -104,7 +113,7 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 			Message: msg,
 			Details: []string{
 				"Large Go test runs may start failing soon if inode usage grows.",
-				"Consider running 'gt doctor --fix' to reclaim stale /tmp/Test* dirs.",
+				"Run 'gt doctor --fix' to reclaim stale Test* dirs and leaked .hex-00000000.hm files.",
 			},
 		}
 
@@ -117,26 +126,39 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// Fix reclaims inodes by removing leftover /tmp/Test* directories from
-// previous Go test runs that are at least tmpCleanupAge old.
+// Fix reclaims inodes by removing two classes of debris from /tmp:
 //
-// We deliberately scope the cleanup to entries matching Go's t.TempDir()
-// naming convention ("TestSomething1234567") to avoid touching anything
-// else a user or tool may have written to /tmp. Anything younger than
-// tmpCleanupAge is left alone so we don't race with an active test run.
+//  1. Leftover /tmp/Test* directories from previous Go test runs (the
+//     original motivating cause, gu-k3xh).
+//  2. Leaked zero-byte ".<16-hex>-00000000.hm" files created by bun
+//     when it's invoked as a Claude Code statusLine command (~3 files/sec
+//     observed; see gs-a9n for the bpftrace investigation).
+//
+// Both cleanups are scoped to specific naming patterns to avoid touching
+// anything else in /tmp, and both have an age filter to avoid racing
+// with in-flight writers.
 func (c *TmpInodesCheck) Fix(ctx *CheckContext) error {
 	if ctx != nil && ctx.ReadOnly {
 		return nil
 	}
 
-	removed, skipped, firstErr := cleanupStaleGoTestTempDirs(tmpDirPath, tmpCleanupAge, time.Now())
+	now := time.Now()
+	removedDirs, skippedDirs, dirErr := cleanupStaleGoTestTempDirs(tmpDirPath, tmpCleanupAge, now)
+	removedHm, skippedHm, hmErr := cleanupStaleHexHmFiles(tmpDirPath, tmpHexHmCleanupAge, now)
 
 	// Report at most one error, but always surface progress via the re-run of
-	// Run() that the doctor framework does after Fix(). If every single entry
-	// errors and none are removed, propagate the first error so the user sees
-	// something went wrong. Otherwise swallow per-entry errors (a test run
-	// racing with us will sometimes rename/unlink entries mid-iteration).
-	if removed == 0 && skipped == 0 && firstErr != nil {
+	// Run() that the doctor framework does after Fix(). If both sub-cleanups
+	// removed nothing and skipped nothing, propagate the first error so the
+	// user sees something went wrong. Otherwise swallow per-entry errors (a
+	// concurrent writer racing with us will sometimes rename/unlink entries
+	// mid-iteration).
+	totalRemoved := removedDirs + removedHm
+	totalSkipped := skippedDirs + skippedHm
+	firstErr := dirErr
+	if firstErr == nil {
+		firstErr = hmErr
+	}
+	if totalRemoved == 0 && totalSkipped == 0 && firstErr != nil {
 		return fmt.Errorf("tmp-inodes fix failed: %w", firstErr)
 	}
 	return nil
@@ -225,6 +247,91 @@ func cleanupStaleGoTestTempDirs(dir string, maxAge time.Duration, now time.Time)
 
 		if err := os.RemoveAll(full); err != nil {
 			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+
+	return removed, skipped, firstErr
+}
+
+// isLeakedHexHmFile reports whether name matches the leaked-bun-tempfile
+// pattern ".<16-hex>-00000000.hm" — a 16-character lowercase or uppercase
+// hex prefix, the literal suffix "-00000000.hm", a leading dot, and a
+// total length of exactly 29 characters. See gs-a9n for the root cause.
+func isLeakedHexHmFile(name string) bool {
+	const want = len(".") + 16 + len("-00000000.hm")
+	if len(name) != want {
+		return false
+	}
+	if name[0] != '.' {
+		return false
+	}
+	for i := 1; i <= 16; i++ {
+		c := name[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return name[17:] == "-00000000.hm"
+}
+
+// cleanupStaleHexHmFiles removes regular files under dir whose names match
+// isLeakedHexHmFile, are zero bytes, and have mtime older than now - maxAge.
+// The zero-byte check is a defensive guard — bun's leaked files are always
+// empty, so a non-empty file with this name shape is something else and
+// we leave it alone.
+// Returns (removed, skipped, firstErr).
+func cleanupStaleHexHmFiles(dir string, maxAge time.Duration, now time.Time) (int, int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	cutoff := now.Add(-maxAge)
+
+	var (
+		removed  int
+		skipped  int
+		firstErr error
+	)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !isLeakedHexHmFile(entry.Name()) {
+			continue
+		}
+
+		full := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			// Entry disappeared between ReadDir and Info — fine, someone
+			// else (or the next doctor run) cleaned it up first.
+			if firstErr == nil && !os.IsNotExist(err) {
+				firstErr = err
+			}
+			continue
+		}
+		if info.Size() != 0 {
+			// Non-empty file with this name shape — not the bun leak. Skip.
+			skipped++
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			skipped++
+			continue
+		}
+
+		if err := os.Remove(full); err != nil {
+			if firstErr == nil && !os.IsNotExist(err) {
 				firstErr = err
 			}
 			continue

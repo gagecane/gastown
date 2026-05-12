@@ -226,6 +226,154 @@ func TestTmpInodesCheck_Fix_ReadOnlyContext(t *testing.T) {
 	}
 }
 
+func TestIsLeakedHexHmFile(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		// Real samples from the gs-a9n investigation (lowercase hex).
+		{".18aba7d5df27fe9b-00000000.hm", true},
+		{".fcfef3abcbdd763b-00000000.hm", true},
+		{".98affab6bfed7cbd-00000000.hm", true},
+		// Uppercase hex — accept defensively, the pattern is the same.
+		{".ABCDEF0123456789-00000000.hm", true},
+
+		// Wrong shapes.
+		{"18aba7d5df27fe9b-00000000.hm", false},   // missing leading dot
+		{".18aba7d5df27fe9b-00000001.hm", false},  // non-zero counter suffix
+		{".18aba7d5df27fe9b-00000000.hmm", false}, // wrong extension
+		{".18aba7d5df27fe9-00000000.hm", false},   // 15-char prefix (too short)
+		{".18aba7d5df27fe9bb-00000000.hm", false}, // 17-char prefix (too long)
+		{".gggggggggggggggg-00000000.hm", false},  // non-hex prefix
+		{".18aba7d5df27fe9b_00000000.hm", false},  // wrong separator
+		{".18aba7d5df27fe9b-00000000.tmp", false}, // wrong extension
+		{"TestFoo1234", false},                    // Go test dir
+		{".hidden", false},                        // unrelated dotfile
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		got := isLeakedHexHmFile(tc.name)
+		if got != tc.want {
+			t.Errorf("isLeakedHexHmFile(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCleanupStaleHexHmFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+
+	oldMtime := now.Add(-30 * time.Minute)
+	freshMtime := now.Add(-1 * time.Minute)
+
+	writeFile := func(name string, size int, mtime time.Time) string {
+		full := filepath.Join(dir, name)
+		var data []byte
+		if size > 0 {
+			data = make([]byte, size)
+		}
+		if err := os.WriteFile(full, data, 0o664); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
+		if err := os.Chtimes(full, mtime, mtime); err != nil {
+			t.Fatalf("chtimes %s: %v", full, err)
+		}
+		return full
+	}
+
+	// Fixture:
+	//   .aaaaaaaaaaaaaaaa-00000000.hm  — stale, zero-byte, should be removed
+	//   .bbbbbbbbbbbbbbbb-00000000.hm  — stale, zero-byte, should be removed
+	//   .cccccccccccccccc-00000000.hm  — fresh, zero-byte, should be kept
+	//   .dddddddddddddddd-00000000.hm  — stale, non-empty, should be kept
+	//   .notpattern.hm                 — wrong shape, kept
+	//   regular.txt                    — unrelated, kept
+	staleA := writeFile(".aaaaaaaaaaaaaaaa-00000000.hm", 0, oldMtime)
+	staleB := writeFile(".bbbbbbbbbbbbbbbb-00000000.hm", 0, oldMtime)
+	freshC := writeFile(".cccccccccccccccc-00000000.hm", 0, freshMtime)
+	nonemptyD := writeFile(".dddddddddddddddd-00000000.hm", 7, oldMtime)
+	notPattern := writeFile(".notpattern.hm", 0, oldMtime)
+	regular := writeFile("regular.txt", 4, oldMtime)
+
+	// Also a directory with a name that matches the pattern — should be ignored
+	// because we only target regular files.
+	dirEntry := filepath.Join(dir, ".eeeeeeeeeeeeeeee-00000000.hm")
+	if err := os.Mkdir(dirEntry, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dirEntry, err)
+	}
+
+	removed, skipped, err := cleanupStaleHexHmFiles(dir, 5*time.Minute, now)
+	if err != nil {
+		t.Fatalf("cleanupStaleHexHmFiles: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+	// skipped counts the fresh zero-byte file and the stale non-empty file.
+	if skipped != 2 {
+		t.Errorf("skipped = %d, want 2 (fresh + non-empty)", skipped)
+	}
+
+	for _, p := range []string{staleA, staleB} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed (err=%v)", p, err)
+		}
+	}
+	for _, p := range []string{freshC, nonemptyD, notPattern, regular, dirEntry} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s should have been kept (err=%v)", p, err)
+		}
+	}
+}
+
+func TestCleanupStaleHexHmFiles_MissingDir(t *testing.T) {
+	removed, skipped, err := cleanupStaleHexHmFiles("/nonexistent/doctor/hex-hm-test", time.Minute, time.Now())
+	if err == nil {
+		t.Error("expected error for nonexistent dir, got nil")
+	}
+	if removed != 0 || skipped != 0 {
+		t.Errorf("removed=%d skipped=%d, want both 0 on error", removed, skipped)
+	}
+}
+
+func TestTmpInodesCheck_Fix_RemovesBothLeakTypes(t *testing.T) {
+	dir := t.TempDir()
+	withTmpDirPath(t, dir)
+
+	oldMtime := time.Now().Add(-2 * time.Hour)
+
+	// Stale Go test dir.
+	staleDir := filepath.Join(dir, "TestStale1234")
+	if err := os.Mkdir(staleDir, 0o755); err != nil {
+		t.Fatalf("mkdir staleDir: %v", err)
+	}
+	if err := os.Chtimes(staleDir, oldMtime, oldMtime); err != nil {
+		t.Fatalf("chtimes staleDir: %v", err)
+	}
+
+	// Stale leaked .hm file.
+	staleHm := filepath.Join(dir, ".0123456789abcdef-00000000.hm")
+	if err := os.WriteFile(staleHm, nil, 0o664); err != nil {
+		t.Fatalf("write staleHm: %v", err)
+	}
+	if err := os.Chtimes(staleHm, oldMtime, oldMtime); err != nil {
+		t.Fatalf("chtimes staleHm: %v", err)
+	}
+
+	check := NewTmpInodesCheck()
+	if err := check.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix() failed: %v", err)
+	}
+
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Errorf("stale Test* dir should have been removed (err=%v)", err)
+	}
+	if _, err := os.Stat(staleHm); !os.IsNotExist(err) {
+		t.Errorf("stale .hex-00000000.hm file should have been removed (err=%v)", err)
+	}
+}
+
 func TestTmpInodeUsage_UsedPercent(t *testing.T) {
 	cases := []struct {
 		name string
