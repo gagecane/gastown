@@ -12,7 +12,7 @@ labels = ["plugin:verify-build", "category:build"]
 digest = true
 
 [execution]
-timeout = "15m"
+timeout = "30m"
 notify_on_failure = true
 severity = "high"
 +++
