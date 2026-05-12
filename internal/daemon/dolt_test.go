@@ -375,7 +375,7 @@ func TestClearUnhealthySignal_NoFireWhenNotUnhealthy(t *testing.T) {
 // writeUnhealthySignal: overwrite behavior
 // ============================================================================
 
-func TestWriteUnhealthySignal_Overwrites(t *testing.T) {
+func TestWriteUnhealthySignal_PreservesFirstWrite(t *testing.T) {
 	tmpDir := t.TempDir()
 	daemonDir := filepath.Join(tmpDir, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -388,19 +388,28 @@ func TestWriteUnhealthySignal_Overwrites(t *testing.T) {
 		logger:   func(format string, v ...interface{}) {},
 	}
 
-	m.writeUnhealthySignal("reason_one", "detail_one")
-	m.writeUnhealthySignal("reason_two", "detail_two")
+	// Upstream (2eafac97 lineage) switched writeUnhealthySignal to O_EXCL so
+	// repeated unhealthy signals within a single incident preserve the
+	// original timestamp and reason — preventing health-tick spam from
+	// re-triggering diagnostics. The first call returns true (new signal),
+	// subsequent calls return false (existing signal preserved).
+	if wrote := m.writeUnhealthySignal("reason_one", "detail_one"); !wrote {
+		t.Error("expected first writeUnhealthySignal to report success")
+	}
+	if wrote := m.writeUnhealthySignal("reason_two", "detail_two"); wrote {
+		t.Error("expected second writeUnhealthySignal to preserve existing file (return false)")
+	}
 
 	data, err := os.ReadFile(m.unhealthySignalFile())
 	if err != nil {
 		t.Fatalf("expected signal file: %v", err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "reason_two") {
-		t.Errorf("expected latest reason 'reason_two' in file, got: %s", content)
+	if !strings.Contains(content, "reason_one") {
+		t.Errorf("expected original reason 'reason_one' preserved, got: %s", content)
 	}
-	if strings.Contains(content, "reason_one") {
-		t.Errorf("old signal content should be overwritten, got: %s", content)
+	if strings.Contains(content, "reason_two") {
+		t.Errorf("expected second write to be suppressed, got: %s", content)
 	}
 }
 
@@ -473,8 +482,10 @@ func TestWriteDaemonDoltConfig_ContainsTimeouts(t *testing.T) {
 	if !strings.Contains(content, "auto_gc_behavior") {
 		t.Error("expected auto_gc_behavior in config (GC path coverage)")
 	}
-	if !strings.Contains(content, "enable: true") {
-		t.Error("expected GC enable: true")
+	// Upstream 2eafac97 disabled Dolt auto-gc to prevent DB lockups during
+	// heavy operations; expectation flipped from enable: true to enable: false.
+	if !strings.Contains(content, "enable: false") {
+		t.Error("expected GC enable: false (upstream 2eafac97 disabled auto-gc)")
 	}
 }
 
