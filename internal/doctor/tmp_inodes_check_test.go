@@ -226,6 +226,163 @@ func TestTmpInodesCheck_Fix_ReadOnlyContext(t *testing.T) {
 	}
 }
 
+func TestIsLeakedBunTempFile(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		// Real samples from the wild (gs-a9n bpftrace + ls output).
+		{".18aba7d5df27fe9b-00000000.hm", true},
+		{".fcfef3abcbdd763b-00000000.hm", true},
+		{".98affab6bfed7cbd-00000000.hm", true},
+		{".0000000000000000-00000000.hm", true},
+		{".ffffffffffffffff-00000000.hm", true},
+
+		// Wrong shape — must not match.
+		{"18aba7d5df27fe9b-00000000.hm", false}, // missing leading dot
+		{".18aba7d5df27fe9b-00000000.HM", false}, // uppercase ext
+		{".18aba7d5df27fe9b-00000001.hm", false}, // wrong suffix counter
+		{".18aba7d5df27fe9-00000000.hm", false},  // 15 hex digits
+		{".18aba7d5df27fe9bb-00000000.hm", false}, // 17 hex digits
+		{".18aba7d5df27feZb-00000000.hm", false},  // non-hex char
+		{".18aba7d5DF27fe9b-00000000.hm", false},  // uppercase hex (bun uses lowercase)
+		{".", false},
+		{"", false},
+		{".hm", false},
+		{"-00000000.hm", false},
+	}
+
+	for _, tc := range cases {
+		got := isLeakedBunTempFile(tc.name)
+		if got != tc.want {
+			t.Errorf("isLeakedBunTempFile(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCleanupLeakedBunTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	oldMtime := now.Add(-2 * time.Hour)
+	freshMtime := now.Add(-5 * time.Minute)
+
+	writeFile := func(name string, size int, mtime time.Time) string {
+		full := filepath.Join(dir, name)
+		data := make([]byte, size)
+		if err := os.WriteFile(full, data, 0o664); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
+		if err := os.Chtimes(full, mtime, mtime); err != nil {
+			t.Fatalf("chtimes %s: %v", full, err)
+		}
+		return full
+	}
+
+	// Fixture:
+	staleA := writeFile(".18aba7d5df27fe9b-00000000.hm", 0, oldMtime) // remove
+	staleB := writeFile(".fcfef3abcbdd763b-00000000.hm", 0, oldMtime) // remove
+	fresh := writeFile(".aaaaaaaaaaaaaaaa-00000000.hm", 0, freshMtime) // keep (too young)
+	nonEmpty := writeFile(".bbbbbbbbbbbbbbbb-00000000.hm", 42, oldMtime) // keep (not the bun leak)
+	wrongName := writeFile(".dolt-cache.hm", 0, oldMtime)            // keep (wrong shape)
+	unrelated := writeFile("dump.txt", 100, oldMtime)                // keep (wrong shape)
+
+	// Also a subdirectory with the matching name — must not be treated as a file.
+	dirNamedLikeLeak := filepath.Join(dir, ".cccccccccccccccc-00000000.hm")
+	if err := os.Mkdir(dirNamedLikeLeak, 0o755); err != nil {
+		t.Fatalf("mkdir lookalike dir: %v", err)
+	}
+
+	removed, skipped, err := cleanupLeakedBunTempFiles(dir, 1*time.Hour, now)
+	if err != nil {
+		t.Fatalf("cleanupLeakedBunTempFiles: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d, want 1 (the fresh leak), got %d", skipped, skipped)
+	}
+
+	for _, p := range []string{staleA, staleB} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed (err=%v)", p, err)
+		}
+	}
+	for _, p := range []string{fresh, nonEmpty, wrongName, unrelated, dirNamedLikeLeak} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s should have been kept (err=%v)", p, err)
+		}
+	}
+}
+
+func TestCleanupLeakedBunTempFiles_MissingDir(t *testing.T) {
+	removed, skipped, err := cleanupLeakedBunTempFiles("/nonexistent/doctor/tmp-inodes-bun-test", time.Hour, time.Now())
+	if err == nil {
+		t.Error("expected error for nonexistent dir, got nil")
+	}
+	if removed != 0 || skipped != 0 {
+		t.Errorf("removed=%d skipped=%d, want both 0 on error", removed, skipped)
+	}
+}
+
+func TestTmpInodesCheck_Fix_RemovesBothKinds(t *testing.T) {
+	dir := t.TempDir()
+	withTmpDirPath(t, dir)
+	oldMtime := time.Now().Add(-2 * time.Hour)
+
+	// Stale Go test dir.
+	staleDir := filepath.Join(dir, "TestStale1234")
+	if err := os.Mkdir(staleDir, 0o755); err != nil {
+		t.Fatalf("mkdir stale dir: %v", err)
+	}
+	if err := os.Chtimes(staleDir, oldMtime, oldMtime); err != nil {
+		t.Fatalf("chtimes stale dir: %v", err)
+	}
+
+	// Stale bun leak.
+	staleLeak := filepath.Join(dir, ".deadbeefcafebabe-00000000.hm")
+	if err := os.WriteFile(staleLeak, nil, 0o664); err != nil {
+		t.Fatalf("write stale leak: %v", err)
+	}
+	if err := os.Chtimes(staleLeak, oldMtime, oldMtime); err != nil {
+		t.Fatalf("chtimes stale leak: %v", err)
+	}
+
+	check := NewTmpInodesCheck()
+	if err := check.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix() failed: %v", err)
+	}
+
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Errorf("stale Go test dir should have been removed (err=%v)", err)
+	}
+	if _, err := os.Stat(staleLeak); !os.IsNotExist(err) {
+		t.Errorf("stale bun .hm leak should have been removed (err=%v)", err)
+	}
+}
+
+func TestTmpInodesCheck_Fix_ReadOnlyContext_LeavesBunLeaks(t *testing.T) {
+	dir := t.TempDir()
+	withTmpDirPath(t, dir)
+
+	staleLeak := filepath.Join(dir, ".0123456789abcdef-00000000.hm")
+	if err := os.WriteFile(staleLeak, nil, 0o664); err != nil {
+		t.Fatalf("write stale leak: %v", err)
+	}
+	oldMtime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(staleLeak, oldMtime, oldMtime); err != nil {
+		t.Fatalf("chtimes stale leak: %v", err)
+	}
+
+	check := NewTmpInodesCheck()
+	if err := check.Fix(&CheckContext{ReadOnly: true}); err != nil {
+		t.Fatalf("Fix(read-only) should be a no-op, got err=%v", err)
+	}
+	if _, err := os.Stat(staleLeak); err != nil {
+		t.Errorf("bun leak should be untouched in read-only mode: %v", err)
+	}
+}
+
 func TestTmpInodeUsage_UsedPercent(t *testing.T) {
 	cases := []struct {
 		name string

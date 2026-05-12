@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// leakedBunTempSuffix is the constant suffix on the .hm tempfiles bun leaks
+// into /tmp on every invocation (see gs-a9n). Pattern: ".<16-hex>-00000000.hm",
+// zero-byte, owned by the running user.
+const leakedBunTempSuffix = "-00000000.hm"
+
 // TmpInodesCheck verifies that the tmpfs backing /tmp has free inodes.
 //
 // Background: On Linux hosts with tmpfs mounted at /tmp, the default inode
@@ -92,9 +97,10 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 			Details: []string{
 				"Inode exhaustion on /tmp causes Go test failures:",
 				"  TempDir: mkdir /tmp/TestXxx: no space left on device",
-				"Stale /tmp/Test* dirs from previous test runs are the usual cause.",
+				"Common causes: stale /tmp/Test* dirs from Go test runs, and",
+				"leaked .<hex>-00000000.hm files from the bun runtime (see gs-a9n).",
 			},
-			FixHint: "gt doctor --fix (removes stale /tmp/Test* dirs older than 1h)",
+			FixHint: "gt doctor --fix (removes stale /tmp/Test* dirs and leaked bun .hm tempfiles older than 1h)",
 		}
 
 	case pct >= tmpInodesWarnPercent:
@@ -104,7 +110,8 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 			Message: msg,
 			Details: []string{
 				"Large Go test runs may start failing soon if inode usage grows.",
-				"Consider running 'gt doctor --fix' to reclaim stale /tmp/Test* dirs.",
+				"Consider running 'gt doctor --fix' to reclaim stale /tmp/Test* dirs",
+				"and leaked .<hex>-00000000.hm tempfiles from the bun runtime (gs-a9n).",
 			},
 		}
 
@@ -117,26 +124,35 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// Fix reclaims inodes by removing leftover /tmp/Test* directories from
-// previous Go test runs that are at least tmpCleanupAge old.
+// Fix reclaims inodes by removing two kinds of stale tmpfs leftovers:
 //
-// We deliberately scope the cleanup to entries matching Go's t.TempDir()
-// naming convention ("TestSomething1234567") to avoid touching anything
-// else a user or tool may have written to /tmp. Anything younger than
-// tmpCleanupAge is left alone so we don't race with an active test run.
+//  1. Go t.TempDir() directories ("TestSomething1234567") from prior test runs.
+//  2. Zero-byte ".<16-hex>-00000000.hm" tempfiles leaked by the bun runtime
+//     (per gs-a9n: bun's tempfile creation in CWD is not unlink-on-close, and
+//     bunx is invoked every 10s by the Claude Code statusLine, so a single
+//     host accumulates ~3 of these per second).
+//
+// Both cleanups are scoped to entries matching a specific naming convention
+// and skip anything younger than tmpCleanupAge so we don't race in-flight
+// work. The .hm cleanup additionally requires the file be zero-byte — a
+// non-empty file with this name is not the bun leak and we leave it alone.
 func (c *TmpInodesCheck) Fix(ctx *CheckContext) error {
 	if ctx != nil && ctx.ReadOnly {
 		return nil
 	}
 
-	removed, skipped, firstErr := cleanupStaleGoTestTempDirs(tmpDirPath, tmpCleanupAge, time.Now())
+	now := time.Now()
+	dirRemoved, dirSkipped, dirErr := cleanupStaleGoTestTempDirs(tmpDirPath, tmpCleanupAge, now)
+	fileRemoved, fileSkipped, fileErr := cleanupLeakedBunTempFiles(tmpDirPath, tmpCleanupAge, now)
 
-	// Report at most one error, but always surface progress via the re-run of
-	// Run() that the doctor framework does after Fix(). If every single entry
-	// errors and none are removed, propagate the first error so the user sees
-	// something went wrong. Otherwise swallow per-entry errors (a test run
-	// racing with us will sometimes rename/unlink entries mid-iteration).
-	if removed == 0 && skipped == 0 && firstErr != nil {
+	firstErr := dirErr
+	if firstErr == nil {
+		firstErr = fileErr
+	}
+
+	// If nothing was removed or skipped at all and we saw an error, surface it.
+	// Otherwise swallow per-entry errors — racing cleanup is benign.
+	if dirRemoved+dirSkipped+fileRemoved+fileSkipped == 0 && firstErr != nil {
 		return fmt.Errorf("tmp-inodes fix failed: %w", firstErr)
 	}
 	return nil
@@ -225,6 +241,90 @@ func cleanupStaleGoTestTempDirs(dir string, maxAge time.Duration, now time.Time)
 
 		if err := os.RemoveAll(full); err != nil {
 			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+
+	return removed, skipped, firstErr
+}
+
+// isLeakedBunTempFile reports whether name matches the bun runtime's leaked
+// tempfile pattern: a literal '.' followed by exactly 16 lowercase hex digits,
+// then "-00000000.hm". See gs-a9n for the bpftrace evidence pinning these to
+// bun.
+func isLeakedBunTempFile(name string) bool {
+	if !strings.HasPrefix(name, ".") {
+		return false
+	}
+	if !strings.HasSuffix(name, leakedBunTempSuffix) {
+		return false
+	}
+	hex := name[1 : len(name)-len(leakedBunTempSuffix)]
+	if len(hex) != 16 {
+		return false
+	}
+	for i := 0; i < len(hex); i++ {
+		c := hex[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// cleanupLeakedBunTempFiles removes zero-byte files in dir whose names match
+// isLeakedBunTempFile and whose mtime is older than now - maxAge.
+// Non-zero-byte files are skipped — same name but non-empty means it's not
+// the bun leak. Returns (removed, skipped, firstErr).
+func cleanupLeakedBunTempFiles(dir string, maxAge time.Duration, now time.Time) (int, int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	cutoff := now.Add(-maxAge)
+
+	var (
+		removed  int
+		skipped  int
+		firstErr error
+	)
+
+	for _, entry := range entries {
+		// Must be a regular file (not a dir, not a symlink, etc.).
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		if !isLeakedBunTempFile(entry.Name()) {
+			continue
+		}
+
+		full := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			if firstErr == nil && !os.IsNotExist(err) {
+				firstErr = err
+			}
+			continue
+		}
+		// Bun leak is always zero-byte. A non-empty file with this name is
+		// something else — leave it alone.
+		if info.Size() != 0 {
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			skipped++
+			continue
+		}
+
+		if err := os.Remove(full); err != nil {
+			if firstErr == nil && !os.IsNotExist(err) {
 				firstErr = err
 			}
 			continue
