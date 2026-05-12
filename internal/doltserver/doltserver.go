@@ -163,6 +163,17 @@ const (
 	// in gh-3623 and is far longer than any healthy bd query takes.
 	// Override with GT_DOLT_WAIT_TIMEOUT.
 	DefaultWaitTimeoutSec = 30
+
+	// DefaultTimeZone is the MySQL `time_zone` server variable, set after
+	// startup. UTC keeps server-side `NOW()`/`CURRENT_TIMESTAMP` consistent
+	// with Go-side `time.Now().UTC()` writes. Without this, columns populated
+	// by SQL (e.g. `closed_at = NOW()` in reaper.go) and columns populated
+	// by Go drivers disagree by the host TZ offset, breaking age comparisons
+	// in ad-hoc queries. The reaper itself binds Go-side UTC values so its
+	// math is unaffected, but humans triaging via `dolt sql` get misled.
+	// See hq-57jr8.
+	// Override with GT_DOLT_TIME_ZONE; set to empty to skip the override.
+	DefaultTimeZone = "+00:00"
 )
 
 // doltConfigYAML represents the subset of Dolt's config.yaml that we need to read.
@@ -255,6 +266,12 @@ type Config struct {
 	// Set to 0 to skip the override and let Dolt use its 8-hour default.
 	WaitTimeoutSec int
 
+	// TimeZone is the MySQL `time_zone` server variable, set via
+	// `SET GLOBAL time_zone = '...'` after the server is reachable. Empty
+	// string skips the override and lets Dolt inherit the host TZ.
+	// See hq-57jr8 and DefaultTimeZone.
+	TimeZone string
+
 	// LogLevel is the Dolt server log level (trace, debug, info, warning, error, fatal).
 	// Default is "warning" to suppress connection open/close noise. Override with
 	// GT_DOLT_LOGLEVEL=info (or debug) for diagnostics.
@@ -289,6 +306,7 @@ func DefaultConfig(townRoot string) *Config {
 		ReadTimeoutMs:  DefaultReadTimeoutMs,
 		WriteTimeoutMs: DefaultWriteTimeoutMs,
 		WaitTimeoutSec: DefaultWaitTimeoutSec,
+		TimeZone:       DefaultTimeZone,
 		LogLevel:       "warning",
 	}
 
@@ -302,6 +320,12 @@ func DefaultConfig(townRoot string) *Config {
 				config.WaitTimeoutSec = n
 			}
 		}
+	}
+
+	// Optional override for the server timezone. Empty value disables the
+	// post-start `SET GLOBAL time_zone` and lets Dolt inherit the host TZ.
+	if v, ok := os.LookupEnv("GT_DOLT_TIME_ZONE"); ok {
+		config.TimeZone = v
 	}
 
 	if h := os.Getenv("GT_DOLT_HOST"); h != "" {
@@ -1677,6 +1701,7 @@ func Start(townRoot string) error {
 		// runs gt dolt stop + gt dolt start. (gt-nq1)
 		if len(databases) == 0 {
 			applyWaitTimeout(townRoot, config) // Best-effort; see gh-3623.
+			applyTimeZone(townRoot, config)    // Best-effort; see hq-57jr8.
 			return nil                         // Nothing to verify — fresh install or empty data dir
 		}
 		_, missing, verifyErr := VerifyDatabases(townRoot)
@@ -1686,6 +1711,7 @@ func Start(townRoot string) error {
 		}
 		if len(missing) == 0 {
 			applyWaitTimeout(townRoot, config) // Best-effort; see gh-3623.
+			applyTimeZone(townRoot, config)    // Best-effort; see hq-57jr8.
 			return nil                         // Server is up and serving every expected database
 		}
 		lastErr = fmt.Errorf("server is reachable but %d/%d databases not yet served (missing: %v)",
@@ -3880,6 +3906,35 @@ func applyWaitTimeout(townRoot string, config *Config) {
 // dispatches. Extracted for direct testability.
 func buildWaitTimeoutQuery(seconds int) string {
 	return fmt.Sprintf("SET GLOBAL wait_timeout = %d", seconds)
+}
+
+// applyTimeZoneFn is the SQL-exec seam used by applyTimeZone. Tests override
+// it to verify policy + query-formatting without spawning a real dolt subprocess.
+var applyTimeZoneFn = serverExecSQL
+
+// applyTimeZone sets MySQL's `time_zone` server variable on the running Dolt
+// server so server-side `NOW()` and `CURRENT_TIMESTAMP` agree with Go-side
+// `time.Now().UTC()` writes. Without this override Dolt inherits the host TZ,
+// which makes ad-hoc `dolt sql` queries against `created_at`/`closed_at`
+// produce nonsense diffs (e.g. wisps appear hours in the future). The reaper
+// itself binds Go-side UTC values and is unaffected, but humans triaging
+// wisp lifecycle issues are routinely misled — see hq-57jr8.
+//
+// Best-effort: a failure here is logged but does not fail the start.
+func applyTimeZone(townRoot string, config *Config) {
+	if config.TimeZone == "" {
+		return
+	}
+	query := buildTimeZoneQuery(config.TimeZone)
+	if err := applyTimeZoneFn(townRoot, query); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not set Dolt time_zone=%q: %v\n", config.TimeZone, err)
+	}
+}
+
+// buildTimeZoneQuery returns the SET GLOBAL statement applyTimeZone dispatches.
+// Extracted for direct testability.
+func buildTimeZoneQuery(tz string) string {
+	return fmt.Sprintf("SET GLOBAL time_zone = '%s'", tz)
 }
 
 // disk but does NOT register them with the live server catalog. This caused
