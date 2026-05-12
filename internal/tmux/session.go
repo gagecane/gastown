@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
@@ -60,12 +61,23 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 		return err
 	}
 
-	// Defense-in-depth: remove CLAUDECODE from the tmux server's global
-	// environment so new sessions don't inherit it. Claude Code sets this
-	// variable on startup and the tmux server inherits it if started from
-	// within a Claude Code session. This causes nested-session detection
-	// failures in all subsequently created sessions.
+	// Defense-in-depth: remove CLAUDECODE and agent-identity vars from the
+	// tmux server's global environment so new sessions don't inherit them.
+	// CLAUDECODE: Claude Code sets this variable on startup and the tmux
+	// server inherits it if started from within a Claude Code session.
+	// This causes nested-session detection failures in all subsequently
+	// created sessions.
+	// IdentityEnvVars (GT_ROLE, BD_ACTOR, GIT_AUTHOR_NAME, etc.): the daemon
+	// process sets BD_ACTOR=daemon; if the tmux server was started from the
+	// daemon's context the global env inherits that value. Polecat sessions
+	// then inherit BD_ACTOR=daemon and gt done rejects them with "you are daemon"
+	// (pa-xyr, upstream). Clearing these here ensures every session gets
+	// identity vars only from its own startup command / -e flags, not from
+	// a stale global.
 	_, _ = t.run("set-environment", "-g", "-u", "CLAUDECODE")
+	for _, k := range config.IdentityEnvVars {
+		_, _ = t.run("set-environment", "-g", "-u", k)
+	}
 
 	// Two-step creation: create session with default shell first, configure
 	// remain-on-exit, then replace the shell with the actual command. This
@@ -896,6 +908,24 @@ func (t *Tmux) GetSessionCreatedUnix(session string) (int64, error) {
 		return 0, fmt.Errorf("parsing session_created %q: %w", out, err)
 	}
 	return ts, nil
+}
+
+// GetSessionCreatedTime returns the creation time of a tmux session.
+// Uses #{session_created} (Unix timestamp) from tmux list-sessions.
+// Introduced upstream as part of gt-uk7 (never-heartbeated zombie detection).
+func (t *Tmux) GetSessionCreatedTime(name string) (time.Time, error) {
+	out, err := t.run("list-sessions", "-F", "#{session_created}", "-f", fmt.Sprintf("#{==:#{session_name},%s}", name))
+	if err != nil {
+		return time.Time{}, err
+	}
+	if out == "" {
+		return time.Time{}, ErrSessionNotFound
+	}
+	var unix int64
+	if _, err := fmt.Sscanf(strings.TrimSpace(out), "%d", &unix); err != nil {
+		return time.Time{}, fmt.Errorf("parsing session created time %q: %w", out, err)
+	}
+	return time.Unix(unix, 0), nil
 }
 
 // CurrentSessionName returns the tmux session name for the current process.
