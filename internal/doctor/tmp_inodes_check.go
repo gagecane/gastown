@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -57,10 +58,26 @@ const (
 	// tmpfs, long enough to avoid racing with an in-flight test run.
 	tmpCleanupAge = 1 * time.Hour
 
+	// bunHmLeakCleanupAge is the minimum age of leaked bun .hm files before
+	// the fix will remove them. These files have no legitimate purpose —
+	// they're zero-byte tempfile leftovers from bun (observed via bpftrace
+	// during bunx ccstatusline invocations, see gs-a9n). A short cutoff is
+	// safe because bun closes the fd before the file is even visible to us,
+	// but we still leave a small grace window in case a future bun version
+	// reuses the file before unlinking.
+	bunHmLeakCleanupAge = 10 * time.Minute
+
 	// tmpDirToCheck is the path the check inspects. Hoisted to a variable
 	// so tests can point the check at a fake filesystem.
 	tmpDirToCheck = "/tmp"
 )
+
+// bunHmLeakPattern matches the leaked bun tempfile naming convention:
+// a dot-prefixed 16-char lowercase hex identifier followed by the constant
+// "-00000000.hm" suffix. The suffix is invariant across all observed leaks,
+// so anchoring on it keeps the pattern from colliding with anything else a
+// user or tool might place in /tmp.
+var bunHmLeakPattern = regexp.MustCompile(`^\.[0-9a-f]{16}-00000000\.hm$`)
 
 // tmpDirPath is overridable so tests can target an isolated directory
 // without touching the real /tmp.
@@ -92,9 +109,10 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 			Details: []string{
 				"Inode exhaustion on /tmp causes Go test failures:",
 				"  TempDir: mkdir /tmp/TestXxx: no space left on device",
-				"Stale /tmp/Test* dirs from previous test runs are the usual cause.",
+				"Stale /tmp/Test* dirs from previous test runs are one cause.",
+				"Leaked bun tempfiles (.<hex>-00000000.hm, from bunx ccstatusline) are another — see gs-a9n.",
 			},
-			FixHint: "gt doctor --fix (removes stale /tmp/Test* dirs older than 1h)",
+			FixHint: "gt doctor --fix (removes stale /tmp/Test* dirs and leaked bun .hm files)",
 		}
 
 	case pct >= tmpInodesWarnPercent:
@@ -104,7 +122,7 @@ func (c *TmpInodesCheck) Run(ctx *CheckContext) *CheckResult {
 			Message: msg,
 			Details: []string{
 				"Large Go test runs may start failing soon if inode usage grows.",
-				"Consider running 'gt doctor --fix' to reclaim stale /tmp/Test* dirs.",
+				"Run 'gt doctor --fix' to reclaim stale /tmp/Test* dirs and leaked bun .hm files.",
 			},
 		}
 
@@ -129,14 +147,22 @@ func (c *TmpInodesCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	removed, skipped, firstErr := cleanupStaleGoTestTempDirs(tmpDirPath, tmpCleanupAge, time.Now())
+	now := time.Now()
+	removedDirs, skippedDirs, firstErr := cleanupStaleGoTestTempDirs(tmpDirPath, tmpCleanupAge, now)
+
+	removedHm, skippedHm, hmErr := cleanupLeakedBunHmFiles(tmpDirPath, bunHmLeakCleanupAge, now)
+	if firstErr == nil {
+		firstErr = hmErr
+	}
 
 	// Report at most one error, but always surface progress via the re-run of
 	// Run() that the doctor framework does after Fix(). If every single entry
 	// errors and none are removed, propagate the first error so the user sees
 	// something went wrong. Otherwise swallow per-entry errors (a test run
 	// racing with us will sometimes rename/unlink entries mid-iteration).
-	if removed == 0 && skipped == 0 && firstErr != nil {
+	totalRemoved := removedDirs + removedHm
+	totalSkipped := skippedDirs + skippedHm
+	if totalRemoved == 0 && totalSkipped == 0 && firstErr != nil {
 		return fmt.Errorf("tmp-inodes fix failed: %w", firstErr)
 	}
 	return nil
@@ -225,6 +251,71 @@ func cleanupStaleGoTestTempDirs(dir string, maxAge time.Duration, now time.Time)
 
 		if err := os.RemoveAll(full); err != nil {
 			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+
+	return removed, skipped, firstErr
+}
+
+// cleanupLeakedBunHmFiles removes zero-byte files under dir whose names
+// match the leaked-bun-tempfile pattern (.<16-hex>-00000000.hm) and whose
+// mtime is older than now - maxAge. Returns (removed, skipped, firstErr).
+//
+// See gs-a9n for the root cause: bun (invoked via 'bunx -y ccstatusline')
+// creates these as O_CREAT|O_EXCL tempfiles relative to /tmp and exits
+// without unlinking them, leaking one inode per statusLine refresh per
+// Claude Code instance. At steady state this is the dominant inode
+// consumer on hosts running multiple Gas Town agents.
+//
+// We require a zero-byte size as a safety belt: the leaked files are
+// always 0 bytes (the fd is closed before any write), and we never want
+// to touch a file that has user data in it even if it accidentally
+// matches the name pattern.
+func cleanupLeakedBunHmFiles(dir string, maxAge time.Duration, now time.Time) (int, int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	cutoff := now.Add(-maxAge)
+
+	var (
+		removed  int
+		skipped  int
+		firstErr error
+	)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !bunHmLeakPattern.MatchString(entry.Name()) {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			if firstErr == nil && !os.IsNotExist(err) {
+				firstErr = err
+			}
+			continue
+		}
+		if info.Size() != 0 {
+			// Same-named file with content — leave it alone.
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			skipped++
+			continue
+		}
+
+		full := filepath.Join(dir, entry.Name())
+		if err := os.Remove(full); err != nil {
+			if firstErr == nil && !os.IsNotExist(err) {
 				firstErr = err
 			}
 			continue
