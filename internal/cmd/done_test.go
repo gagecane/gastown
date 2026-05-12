@@ -366,6 +366,25 @@ func TestIsPolecatActor(t *testing.T) {
 	}
 }
 
+// TestDeferredOffsetFlag verifies the --defer-until flag is registered on
+// `gt done` and that the default offset is non-empty (gu-vty0). Without a
+// non-empty default, DEFERRED beads would be reopened by deacon's stale-hooks
+// patrol with no defer date, causing `bd ready` to immediately re-surface
+// them and the auto-dispatcher to loop fresh polecats through the same bead.
+func TestDeferredOffsetFlag(t *testing.T) {
+	if defaultDeferredOffset == "" {
+		t.Fatal("defaultDeferredOffset must be non-empty to suppress re-dispatch loop")
+	}
+
+	flag := doneCmd.Flags().Lookup("defer-until")
+	if flag == nil {
+		t.Fatal("doneCmd missing --defer-until flag")
+	}
+	if !strings.Contains(flag.Usage, defaultDeferredOffset) {
+		t.Errorf("--defer-until usage should mention default %q, got: %q", defaultDeferredOffset, flag.Usage)
+	}
+}
+
 // TestDoneIntentLabelFormat verifies the done-intent label format matches
 // the expected pattern: done-intent:<type>:<unix-ts>
 func TestDoneIntentLabelFormat(t *testing.T) {

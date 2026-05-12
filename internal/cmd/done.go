@@ -71,7 +71,14 @@ var (
 	doneTarget        string
 	doneSkipVerify    bool
 	doneReason        string
+	doneDeferUntil    string
 )
+
+// defaultDeferredOffset is the cooldown applied to DEFERRED beads when the
+// polecat does not specify --defer-until. Without this, deacon's stale-hooks
+// patrol would reopen the bead immediately and `bd ready` would re-surface it
+// to the auto-dispatcher within seconds, causing a re-dispatch loop (gu-vty0).
+const defaultDeferredOffset = "+1d"
 
 // Valid exit types for gt done
 const (
@@ -110,6 +117,7 @@ func init() {
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
+	doneCmd.Flags().StringVar(&doneDeferUntil, "defer-until", "", "For --status=DEFERRED: when the bead becomes dispatchable again (e.g., +6h, +1d, tomorrow). Default: "+defaultDeferredOffset)
 
 	rootCmd.AddCommand(doneCmd)
 }
@@ -1982,6 +1990,24 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 	// paused for resumption". Close them on DEFERRED so the convoy can advance
 	// (upstream #3867).
 	isWorkflowStep := strings.Contains(hookedBeadID, "-wfs-")
+
+	// Apply defer cooldown for DEFERRED exits on non-workflow beads (gu-vty0).
+	// Without this, the stale-hooks patrol reopens the bead (status=open) and
+	// `bd ready` re-surfaces it to the auto-dispatcher within seconds, looping
+	// failed work through fresh polecats. Setting --defer hides it from
+	// `bd ready` for the cooldown window without altering status semantics, so
+	// witness/mayor still see it via `bd list` and can intervene.
+	if hookedBeadID != "" && exitType == ExitDeferred && !isWorkflowStep {
+		deferUntil := doneDeferUntil
+		if deferUntil == "" {
+			deferUntil = defaultDeferredOffset
+		}
+		if _, err := bd.Run("update", hookedBeadID, "--defer="+deferUntil); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't set defer=%s on %s: %v\n", deferUntil, hookedBeadID, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Deferred %s until %s (suppresses re-dispatch loop)\n", hookedBeadID, deferUntil)
+		}
+	}
 
 	if hookedBeadID != "" && (exitType != ExitDeferred || isWorkflowStep) {
 		// BUG FIX (gt-pftz): Close hooked bead unless already terminal (closed/tombstone).
