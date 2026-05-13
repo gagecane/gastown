@@ -3287,10 +3287,20 @@ func TestNewIsolatedWithPort(t *testing.T) {
 }
 
 func TestInitPassesServerFlag(t *testing.T) {
+	// Use a mock bd so the real bd binary doesn't spawn a dolt sql-server
+	// that survives the test as an orphan on a random port (gs-i9t).
+	logPath := installMockBDRecorder(t)
+
 	b := NewIsolatedWithPort(t.TempDir(), 19999)
-	err := b.Init("covertest")
-	if err == nil {
-		t.Fatal("expected error (no bd/dolt server), got nil")
+	if err := b.Init("covertest"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	got := readMockBDLog(t, logPath)
+	for _, want := range []string{"init", "--prefix covertest", "--server", "--server-port 19999"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bd init args missing %q\n  got: %s", want, got)
+		}
 	}
 }
 
