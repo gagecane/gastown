@@ -704,3 +704,62 @@ func TestMailboxLegacyAtomicArchive(t *testing.T) {
 	}
 }
 
+func TestAppendBeadsMessagesIfDedupAndStatusFilter(t *testing.T) {
+	src := []BeadsMessage{
+		{ID: "a", Status: "open"},
+		{ID: "b", Status: "hooked"},
+		{ID: "c", Status: "closed"},
+		{ID: "a", Status: "open"}, // duplicate ID
+	}
+
+	t.Run("open-or-hooked accepts both", func(t *testing.T) {
+		var dst []*Message
+		seen := map[string]bool{}
+		appendBeadsMessagesIf(&dst, seen, src, isOpenOrHooked)
+		if got, want := ids(dst), []string{"a", "b"}; !equalStrings(got, want) {
+			t.Errorf("ids = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("open rejects hooked", func(t *testing.T) {
+		var dst []*Message
+		seen := map[string]bool{}
+		appendBeadsMessagesIf(&dst, seen, src, isOpen)
+		if got, want := ids(dst), []string{"a"}; !equalStrings(got, want) {
+			t.Errorf("ids = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("seen map blocks earlier matches from later passes", func(t *testing.T) {
+		var dst []*Message
+		seen := map[string]bool{}
+		// First pass: assignee-style — picks up "a" (open).
+		appendBeadsMessagesIf(&dst, seen, []BeadsMessage{{ID: "a", Status: "open"}}, isOpenOrHooked)
+		// Second pass: CC-style — sees "a" again, must skip.
+		appendBeadsMessagesIf(&dst, seen, []BeadsMessage{{ID: "a", Status: "open"}}, isOpen)
+		if got, want := ids(dst), []string{"a"}; !equalStrings(got, want) {
+			t.Errorf("ids = %v, want %v (duplicate not deduped)", got, want)
+		}
+	})
+}
+
+func ids(msgs []*Message) []string {
+	out := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, m.ID)
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
