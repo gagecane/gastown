@@ -108,12 +108,25 @@ func (g *Git) IsRepo() bool {
 //
 // Root cause: talontriage refinery hung ~8h in nano on 2026-05-02 during a
 // merge-conflict rebase (gu-9h58).
+//
+// Credential prompts are blocked too (gu-1ord). GIT_TERMINAL_PROMPT=0 makes
+// git fail fast on missing HTTPS credentials instead of opening /dev/tty for
+// a username prompt that no agent runtime can answer. GIT_ASKPASS=true and
+// SSH_ASKPASS=true short-circuit any askpass helper that git/ssh would
+// otherwise invoke. Without these, an HTTPS push to a remote with expired
+// credentials hangs indefinitely — the symptom mistakenly attributed to a
+// "hidden interactive confirmation prompt" in `gt polecat nuke --force` (the
+// nuke path's best-effort push runs through these helpers).
 func nonInteractiveGitEnv() []string {
 	return []string{
 		"GIT_EDITOR=true",
 		"GIT_SEQUENCE_EDITOR=true",
 		"EDITOR=true",
 		"GIT_MERGE_AUTOEDIT=no",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=true",
+		"SSH_ASKPASS=true",
+		"SSH_ASKPASS_REQUIRE=never",
 	}
 }
 

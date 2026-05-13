@@ -1113,6 +1113,14 @@ func AutoNukeIfClean(workDir, rigName, polecatName string) *NukePolecatResult {
 // This is a package-level var so tests can override it.
 var verifyCommitOnMain = _verifyCommitOnMain
 
+// VerifyCommitOnMain is the public wrapper around verifyCommitOnMain so other
+// packages (e.g. cmd/polecat_helpers safety checks) can reuse the same
+// "is this polecat's HEAD on the default branch?" logic without forking it.
+// Tests in this package still override the unexported var.
+func VerifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
+	return verifyCommitOnMain(workDir, rigName, polecatName)
+}
+
 func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 	// Find town root from workDir
 	townRoot, err := workspace.Find(workDir)
@@ -2354,6 +2362,18 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if hookFound && (hookStatus == "closed" || hookStatus == "") {
 			return ZombieResult{}, false
 		}
+	}
+
+	// gu-1ord: belt-and-suspenders for already-recovered work. If the
+	// polecat's HEAD is on the rig default branch, the work has already
+	// landed — the dead session is expected. DiscoverPostHocCompletions
+	// (run earlier in the patrol cycle) closes the hook bead in this case,
+	// but if that close failed transiently (Dolt hiccup, routing error), we
+	// must not still flag the polecat as a zombie and restart it. Restarting
+	// a polecat whose branch has merged just kicks off another `gt done` on
+	// merged work, which loops on the next patrol cycle.
+	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+		return ZombieResult{}, false
 	}
 
 	// TOCTOU guard: verify session wasn't recreated since detection.

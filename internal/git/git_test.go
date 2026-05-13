@@ -2901,18 +2901,23 @@ func TestResolveRemoteBaseline_Fallbacks(t *testing.T) {
 }
 
 // TestNonInteractiveGitEnv verifies the helper returns the full set of
-// editor-disabling env vars expected by Gas Town agents.
+// editor- and prompt-disabling env vars expected by Gas Town agents.
 //
 // Root cause this fix prevents: talontriage refinery hung ~8h in nano on
-// 2026-05-02 during a merge-conflict rebase (gu-9h58).
+// 2026-05-02 during a merge-conflict rebase (gu-9h58); credential-prompt
+// hangs from HTTPS pushes with stale credentials (gu-1ord).
 func TestNonInteractiveGitEnv(t *testing.T) {
 	t.Parallel()
 	env := nonInteractiveGitEnv()
 	want := map[string]string{
-		"GIT_EDITOR":          "true",
-		"GIT_SEQUENCE_EDITOR": "true",
-		"EDITOR":              "true",
-		"GIT_MERGE_AUTOEDIT":  "no",
+		"GIT_EDITOR":           "true",
+		"GIT_SEQUENCE_EDITOR":  "true",
+		"EDITOR":               "true",
+		"GIT_MERGE_AUTOEDIT":   "no",
+		"GIT_TERMINAL_PROMPT":  "0",
+		"GIT_ASKPASS":          "true",
+		"SSH_ASKPASS":          "true",
+		"SSH_ASKPASS_REQUIRE":  "never",
 	}
 	got := map[string]string{}
 	for _, kv := range env {

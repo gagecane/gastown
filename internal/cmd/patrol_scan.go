@@ -166,17 +166,21 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 
-	// Run all three detection passes.
+	// Run all four detection passes.
 	// Note: DetectZombiePolecats takes a router param but does NOT send mail
 	// internally — it only uses the router for workspace context. Notifications
 	// are sent exclusively below via --notify, avoiding double-send.
+	//
+	// Ordering matters (gu-1ord): DiscoverPostHocCompletions runs BEFORE
+	// DetectZombiePolecats so that polecats whose work has already merged to
+	// mainline have their hook bead closed first. Otherwise the zombie scan
+	// sees an open hook bead and a dead session, classifies the polecat as
+	// ZombieSessionDeadActive, and emits POLECAT_DIED escalations for work
+	// that has already landed — the spawn-storm loop documented on this bead.
+	completionResult := witness.DiscoverCompletions(bd, workDir, rigName, router)
+	postHocResult := witness.DiscoverPostHocCompletions(bd, workDir, rigName)
 	zombieResult := witness.DetectZombiePolecats(bd, workDir, rigName, router)
 	stallResult := witness.DetectStalledPolecats(workDir, rigName)
-	completionResult := witness.DiscoverCompletions(bd, workDir, rigName, router)
-	// gu-jr8: run AFTER DiscoverCompletions so normal gt-done completions take precedence.
-	// Catches polecats whose branch was merged to mainline but whose session died
-	// before running gt done (so no exit_type metadata was written).
-	postHocResult := witness.DiscoverPostHocCompletions(bd, workDir, rigName)
 
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)

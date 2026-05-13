@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 // polecatTarget represents a polecat to operate on.
@@ -154,7 +155,21 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			hookedIssue, err := bd.Show(hookBead)
 			if err == nil && hookedIssue != nil {
 				if hookedIssue.Status != "closed" {
-					result.Reasons = append(result.Reasons, fmt.Sprintf("has work on hook (%s)", hookBead))
+					// gu-1ord: an open hook bead does NOT mean unfinished work
+					// when the polecat's HEAD has already landed on the default
+					// branch. Manual recovery (witness pushes the polecat's
+					// commit out-of-band) leaves the hook bead open until the
+					// next post-hoc completion sweep — but the polecat is
+					// genuinely safe to nuke once its commits are merged.
+					// Treating this as "active work" forces operators to add
+					// --force on every recovery, which both breaks the safety
+					// guard's intent and (until the nuke prompt was hardened)
+					// risked the interactive-prompt hang the mayor flagged.
+					if landed, _ := workIsLandedOnMain(target.r.Path, target.rigName, target.polecatName); landed {
+						result.HookStale = true
+					} else {
+						result.Reasons = append(result.Reasons, fmt.Sprintf("has work on hook (%s)", hookBead))
+					}
 				} else {
 					result.HookStale = true
 				}
@@ -175,6 +190,19 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 
 	result.Blocked = len(result.Reasons) > 0
 	return result
+}
+
+// workIsLandedOnMain reports whether the polecat's worktree HEAD is already on
+// the rig's default branch (per any configured remote). This is the same check
+// witness uses for post-hoc completion detection (gu-jr8) and zombie scan
+// recovery awareness (gu-1ord). Errors are swallowed and surfaced as `false`
+// so the safety check fails closed (assume work is at risk).
+//
+// rigPath is the path to the rig directory (e.g. /local/home/.../gastown_upstream).
+// witness.VerifyCommitOnMain expects a workDir that workspace.Find can resolve
+// to the town root, which any path inside the town qualifies as.
+func workIsLandedOnMain(rigPath, rigName, polecatName string) (bool, error) {
+	return witness.VerifyCommitOnMain(rigPath, rigName, polecatName)
 }
 
 func rigPrefix(r *rig.Rig) string {
