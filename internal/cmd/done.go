@@ -103,11 +103,11 @@ func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 // --pre-verified, the polecat already ran the same gates on the rebased
 // branch (formula step 7), so the hook's gates are pure waste. The hook's
 // branch-name and integration-branch guardrails still run.
-func pushForDone(g *git.Git, refspec string, force bool) error {
+func pushForDone(g *git.Git, refspec string) error {
 	if donePreVerified {
-		return g.PushSkipPrePush("origin", refspec, force)
+		return g.PushSkipPrePush("origin", refspec, false)
 	}
-	return g.Push("origin", refspec, force)
+	return g.Push("origin", refspec, false)
 }
 
 // pushSHAForDone is the orphan-commit recovery counterpart of pushForDone.
@@ -893,7 +893,7 @@ afterSafetyNet:
 			// Push submodule changes before direct push (gt-dzs)
 			pushSubmoduleChanges(g, defaultBranch)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := pushForDone(g, directRefspec, false)
+			directPushErr := pushForDone(g, directRefspec)
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
@@ -990,7 +990,7 @@ afterSafetyNet:
 			goto notifyWitness
 		}
 		pushedCommitSHA, _ = g.Rev("HEAD")
-		pushErr = pushForDone(g, refspec, false)
+		pushErr = pushForDone(g, refspec)
 		if pushErr != nil {
 			// Primary push failed — try fallback from the bare repo (GH #1348).
 			// When polecat sessions are reused or worktrees are stale, the worktree's
@@ -1001,7 +1001,7 @@ afterSafetyNet:
 			bareRepoPath := filepath.Join(rigPath, ".repo.git")
 			if _, statErr := os.Stat(bareRepoPath); statErr == nil {
 				bareGit := git.NewGitWithDir(bareRepoPath, "")
-				pushErr = pushForDone(bareGit, refspec, false)
+				pushErr = pushForDone(bareGit, refspec)
 				if pushErr != nil {
 					style.PrintWarning("bare repo push also failed: %v", pushErr)
 				} else {
@@ -1012,7 +1012,7 @@ afterSafetyNet:
 				mayorPath := filepath.Join(rigPath, "mayor", "rig")
 				if _, statErr := os.Stat(mayorPath); statErr == nil {
 					mayorGit := git.NewGit(mayorPath)
-					pushErr = pushForDone(mayorGit, refspec, false)
+					pushErr = pushForDone(mayorGit, refspec)
 					if pushErr != nil {
 						style.PrintWarning("mayor/rig push also failed: %v", pushErr)
 					} else {
@@ -1235,7 +1235,7 @@ afterSafetyNet:
 
 			// Push branch directly to main (the earlier push went to origin/<branch>)
 			directRefspec := branch + ":" + defaultBranch
-			directPushErr := pushForDone(g, directRefspec, false)
+			directPushErr := pushForDone(g, directRefspec)
 			if directPushErr != nil {
 				// Direct push failed — fall through to normal MR creation
 				style.PrintWarning("late direct push to %s failed: %v — falling through to MR", defaultBranch, directPushErr)
