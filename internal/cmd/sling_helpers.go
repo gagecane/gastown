@@ -351,6 +351,49 @@ func isSlingContextBeadInfo(info *beadInfo) bool {
 	return false
 }
 
+func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
+	if len(args) != 2 {
+		return args, nil
+	}
+	rigName, isRig := IsRigName(args[1])
+	if !isRig {
+		return args, nil
+	}
+	info, err := getBeadInfo(args[0])
+	if err != nil {
+		return args, nil
+	}
+	target := workflowStepTargetFromDescription(info.Description, rigName)
+	if target == "" || target == args[1] {
+		return args, nil
+	}
+	if err := ValidateTarget(target); err != nil {
+		return args, fmt.Errorf("invalid %s for %s: %w", workflowTargetField, args[0], err)
+	}
+	redirected := append([]string(nil), args...)
+	redirected[1] = target
+	fmt.Printf("%s Workflow step target: %s\n", style.Dim.Render("→"), target)
+	return redirected, nil
+}
+
+func workflowStepTargetFromDescription(description, targetRig string) string {
+	for _, line := range strings.Split(description, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(key), workflowTargetField) {
+			continue
+		}
+		target := strings.TrimSpace(value)
+		if target == "" || target == "rig" {
+			return targetRig
+		}
+		return target
+	}
+	return ""
+}
+
 // isOrphanMolecule reports whether a bead's existing attached molecule(s)
 // can be safely burned at sling time without operator confirmation. Used
 // to gate the auto-burn path that lets sling self-heal from stale state.
