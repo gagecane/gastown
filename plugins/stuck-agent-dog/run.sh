@@ -236,9 +236,27 @@ fi
 
 # --- Take action --------------------------------------------------------------
 
+# has_recovery_marker checks for an active manual-recovery awareness flag (gu-v5mk).
+# When the witness/mayor performs an out-of-band recovery (e.g. manual --no-verify
+# push), they set this marker so we don't re-run already-pushed work via
+# RESTART_POLECAT and re-hit the original hang. Returns 0 if a fresh marker exists.
+has_recovery_marker() {
+  local rig="$1" pcat="$2"
+  gt polecat is-recovered "$rig/$pcat" >/dev/null 2>&1
+}
+
 # Crashed polecats: notify witness to restart
 for ENTRY in "${CRASHED[@]:-}"; do
   IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
+  if has_recovery_marker "$RIG" "$PCAT"; then
+    log "SKIP RESTART for $RIG/polecats/$PCAT: manual-recovery marker active (gu-v5mk)"
+    gt mail send "$RIG/witness" -s "NUKE_PENDING: $RIG/$PCAT (manual-recovery marker)" --stdin <<BODY
+Polecat $PCAT crashed but has an active manual-recovery marker.
+hook_bead: $HOOK
+action: skipped RESTART_POLECAT — work already recovered out-of-band; nuke when convenient
+BODY
+    continue
+  fi
   log "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK)"
   gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY
 Polecat $PCAT crash confirmed by stuck-agent-dog plugin.
@@ -250,6 +268,17 @@ done
 # Zombie polecats: kill zombie session, then request restart
 for ENTRY in "${STUCK[@]:-}"; do
   IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
+  if has_recovery_marker "$RIG" "$PCAT"; then
+    log "SKIP RESTART for $RIG/polecats/$PCAT (zombie): manual-recovery marker active (gu-v5mk)"
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    gt mail send "$RIG/witness" -s "NUKE_PENDING: $RIG/$PCAT (zombie + manual-recovery marker)" --stdin <<BODY
+Polecat $PCAT zombie session cleared but has an active manual-recovery marker.
+hook_bead: $HOOK
+reason: $REASON
+action: skipped RESTART_POLECAT — work already recovered out-of-band; nuke when convenient
+BODY
+    continue
+  fi
   log "Killing zombie session $SESSION and requesting restart"
   tmux kill-session -t "$SESSION" 2>/dev/null || true
   gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY
@@ -266,6 +295,17 @@ done
 # `gt prime`. The hook and worktree are preserved.
 for ENTRY in "${STALLED[@]}"; do
   IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
+  if has_recovery_marker "$RIG" "$PCAT"; then
+    log "SKIP RESTART for $RIG/polecats/$PCAT (stalled): manual-recovery marker active (gu-v5mk)"
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    gt mail send "$RIG/witness" -s "NUKE_PENDING: $RIG/$PCAT (stalled + manual-recovery marker)" --stdin <<BODY
+Polecat $PCAT was stalled-alive but has an active manual-recovery marker.
+hook_bead: $HOOK
+reason: $REASON
+action: session killed; skipped RESTART_POLECAT — nuke when convenient
+BODY
+    continue
+  fi
   log "Killing stalled session $SESSION and requesting restart"
   tmux kill-session -t "$SESSION" 2>/dev/null || true
   gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (stalled-alive cleared)" --stdin <<BODY

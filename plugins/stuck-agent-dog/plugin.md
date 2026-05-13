@@ -279,6 +279,17 @@ For DEACON stuck (stale heartbeat):
 2. If agent shows recent activity in pane → nudge first, check again next cycle
 3. If agent has been stuck for >15 minutes with no pane activity → restart
 4. If mass death detected (>3 crashes in same cycle) → escalate, don't restart
+5. If polecat has an active manual-recovery marker (gu-v5mk) → skip RESTART_POLECAT
+   and emit NUKE_PENDING instead. The witness/mayor sets this marker (via
+   `gt polecat mark-recovered <rig>/<polecat>`) after performing an out-of-band
+   recovery (e.g. manual `--no-verify` push) so we don't blindly re-run
+   already-pushed work and re-hit the same hang.
+
+The marker lives at `<town_root>/.runtime/recovery_markers/<session>.json` and
+expires after 30 minutes by default so a forgotten flag can't permanently
+disable auto-restart for a slot. `run.sh` checks it via
+`gt polecat is-recovered <rig>/<polecat>` (exit 0 = active marker) before
+issuing each RESTART_POLECAT.
 
 ## Step 5: Take action
 
