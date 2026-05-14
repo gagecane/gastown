@@ -446,7 +446,14 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return m.git.CloneBareWithBranch(opts.GitURL, bareRepoPath, branch)
 	}
 
+	emptyRepoError := func() error {
+		return fmt.Errorf("repository %s is empty (no commits). Push at least one commit before adding it as a rig", opts.GitURL)
+	}
+
 	if err := cloneBareWith(opts.DefaultBranch); err != nil {
+		if hasRefs, refsErr := m.git.RemoteHasRefs(opts.GitURL); refsErr == nil && !hasRefs {
+			return nil, emptyRepoError()
+		}
 		return nil, wrapCloneError(err, opts.GitURL)
 	}
 	if opts.CloneFilter != "" {
@@ -462,7 +469,14 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	if empty, err := bareGit.IsEmpty(); err != nil {
 		return nil, fmt.Errorf("checking if repository is empty: %w", err)
 	} else if empty {
-		return nil, fmt.Errorf("repository %s is empty (no commits). Push at least one commit before adding it as a rig", opts.GitURL)
+		hasRefs, refsErr := m.git.RemoteHasRefs(opts.GitURL)
+		if refsErr != nil {
+			return nil, fmt.Errorf("checking if repository is empty: %w", refsErr)
+		}
+		if !hasRefs {
+			return nil, emptyRepoError()
+		}
+		return nil, fmt.Errorf("repository %s has refs, but no default branch could be cloned. Ensure the remote HEAD points to a branch, or pass --branch <branch>", opts.GitURL)
 	}
 
 	// Configure push URL if provided (for read-only upstream repos)
@@ -598,10 +612,14 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		// When metadata.json exists but the Dolt server database doesn't (fresh clone
 		// to a new workspace), we still need to run bd init to create the server-side
 		// database and set issue_prefix. Always ensure issue_prefix is set afterward.
+		sourceBdEnv := bdSubprocessEnv(sourceBeadsDir, opts.Name)
 		if !bdDatabaseExists(sourceBeadsDir) {
 			initArgs := []string{"init"}
 			if opts.BeadsPrefix != "" {
 				initArgs = append(initArgs, "--prefix", opts.BeadsPrefix)
+			}
+			if opts.Name != "" {
+				initArgs = append(initArgs, "--database", opts.Name)
 			}
 			initArgs = append(initArgs, "--server")
 			// Always pass --server-port so bd connects to gt's central Dolt
@@ -611,6 +629,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			initArgs = append(initArgs, "--server-port", strconv.Itoa(doltCfg.Port))
 			cmd := exec.Command("bd", initArgs...)
 			cmd.Dir = mayorRigPath
+			cmd.Env = sourceBdEnv
 			if output, err := cmd.CombinedOutput(); err != nil {
 				fmt.Printf("  Warning: Could not init bd database: %v (%s)\n", err, strings.TrimSpace(string(output)))
 			}
@@ -627,13 +646,13 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		// the server-side database has issue_prefix set for this workspace.
 		configCmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
 		configCmd.Dir = mayorRigPath
+		configCmd.Env = sourceBdEnv
 		_, _ = configCmd.CombinedOutput() // Ignore errors - older beads don't need this
 
-		prefixInitArgs := []string{"init", "--server", "--prefix", opts.BeadsPrefix,
-			"--server-port", strconv.Itoa(doltserver.DefaultConfig(m.townRoot).Port), "--force"}
-		prefixInitCmd := exec.Command("bd", prefixInitArgs...)
-		prefixInitCmd.Dir = mayorRigPath
-		if prefixOutput, prefixErr := prefixInitCmd.CombinedOutput(); prefixErr != nil {
+		prefixSetCmd := exec.Command("bd", "config", "set", "issue_prefix", opts.BeadsPrefix)
+		prefixSetCmd.Dir = mayorRigPath
+		prefixSetCmd.Env = sourceBdEnv
+		if prefixOutput, prefixErr := prefixSetCmd.CombinedOutput(); prefixErr != nil {
 			fmt.Printf("  Warning: Could not set issue_prefix: %v (%s)\n", prefixErr, strings.TrimSpace(string(prefixOutput)))
 		}
 	}
@@ -694,14 +713,11 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// because this is a fresh rig with no existing agent config to lose.
 	{
 		resolvedBeadsDir := beads.ResolveBeadsDir(rigPath)
-		bdEnv := append(os.Environ(), "BEADS_DIR="+resolvedBeadsDir)
-		doltCfg := doltserver.DefaultConfig(m.townRoot)
-		initArgs := []string{"init", "--server", "--prefix", opts.BeadsPrefix,
-			"--server-port", strconv.Itoa(doltCfg.Port), "--force"}
-		initCmd := exec.Command("bd", initArgs...)
-		initCmd.Dir = rigPath
-		initCmd.Env = bdEnv
-		if out, err := initCmd.CombinedOutput(); err != nil {
+		bdEnv := bdSubprocessEnv(resolvedBeadsDir, opts.Name)
+		prefixCmd := exec.Command("bd", "config", "set", "issue_prefix", opts.BeadsPrefix)
+		prefixCmd.Dir = rigPath
+		prefixCmd.Env = bdEnv
+		if out, err := prefixCmd.CombinedOutput(); err != nil {
 			fmt.Printf("  Warning: Could not set issue_prefix on rig database: %v (%s)\n", err, strings.TrimSpace(string(out)))
 		}
 		typesCmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
@@ -1193,13 +1209,16 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	// Build environment with explicit BEADS_DIR to prevent bd from
 	// finding a parent directory's .beads/ database
 	env := os.Environ()
-	filteredEnv := make([]string, 0, len(env)+1)
+	filteredEnv := make([]string, 0, len(env)+2)
 	for _, e := range env {
-		if !strings.HasPrefix(e, "BEADS_DIR=") {
+		if !strings.HasPrefix(e, "BEADS_DIR=") && !strings.HasPrefix(e, "BEADS_DB=") && !strings.HasPrefix(e, "BEADS_DOLT_SERVER_DATABASE=") {
 			filteredEnv = append(filteredEnv, e)
 		}
 	}
 	filteredEnv = append(filteredEnv, "BEADS_DIR="+beadsDir)
+	if rigName != "" {
+		filteredEnv = append(filteredEnv, "BEADS_DOLT_SERVER_DATABASE="+rigName)
+	}
 
 	// Ensure BEADS_DOLT_PORT and BEADS_DOLT_SERVER_HOST are set when their GT_
 	// counterparts are present, so that bd subprocesses connect to the correct
@@ -1233,6 +1252,9 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	initArgs := []string{"init"}
 	if prefix != "" {
 		initArgs = append(initArgs, "--prefix", prefix)
+	}
+	if rigName != "" {
+		initArgs = append(initArgs, "--database", rigName)
 	}
 	initArgs = append(initArgs, "--server")
 	// Always pass --server-port so bd connects to gt's central Dolt server.
@@ -1292,6 +1314,11 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 
 	if err := beads.EnsureConfigYAML(beadsDir, prefix); err != nil {
 		return fmt.Errorf("ensuring config.yaml: %w", err)
+	}
+	if rigName != "" {
+		if err := doltserver.EnsureMetadataForBeadsDir(m.townRoot, beadsDir, rigName, rigName); err != nil {
+			return fmt.Errorf("ensuring metadata.json: %w", err)
+		}
 	}
 
 	// Ensure database has repository fingerprint (GH #25).
@@ -1515,6 +1542,23 @@ var beadsPrefixRegexp = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{0,19}$`)
 // malicious config files.
 func isValidBeadsPrefix(prefix string) bool {
 	return beadsPrefixRegexp.MatchString(prefix)
+}
+
+func bdSubprocessEnv(beadsDir, database string) []string {
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "BEADS_DIR=") || strings.HasPrefix(e, "BEADS_DB=") || strings.HasPrefix(e, "BEADS_DOLT_SERVER_DATABASE=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	if beadsDir != "" {
+		env = append(env, "BEADS_DIR="+beadsDir)
+	}
+	if database != "" {
+		env = append(env, "BEADS_DOLT_SERVER_DATABASE="+database)
+	}
+	return env
 }
 
 // isStandardBeadHash checks if a string looks like a standard 5-char bead hash.

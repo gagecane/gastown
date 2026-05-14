@@ -507,6 +507,14 @@ type Beads struct {
 	// Populated on first call to getTownRoot() to avoid filesystem walk on every operation.
 	townRoot     string
 	townRootOnce sync.Once
+
+	// noRoute disables prefix-based routing for this Beads instance.
+	// Used for agent-bead operations: agent beads (gt:agent label) live in
+	// the town database regardless of their ID prefix, so prefix routing
+	// (which assumes "za-*" → zack DB) misroutes them. When set, Show()
+	// and forIssueID() skip ResolveRoutingTarget and operate against
+	// beadsDir directly.
+	noRoute bool
 }
 
 // New creates a new Beads wrapper for the given directory.
@@ -543,6 +551,48 @@ func (b *Beads) TownRoot() string {
 	return b.getTownRoot()
 }
 
+// ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
+//
+// Agent beads (labeled gt:agent) live in the TOWN database, but their IDs
+// are prefixed with the rig prefix (e.g. "za-zack-polecat-furiosa"). The
+// default prefix routing in routes.jsonl maps "za-" → zack rig database, so
+// any agent-bead operation issued from a rig context (or any context that
+// triggers routing) gets sent to the wrong DB and fails with "issue not
+// found". This silently breaks gt done's hook clearing, agent state
+// transition, completion metadata, etc.
+//
+// ForAgentBead bypasses that:
+//   - Re-roots the wrapper at the town's .beads directory (so bd CLI itself
+//     opens the town/hq Dolt database where agent beads live).
+//   - Sets noRoute=true so the Go-side routing helpers (Show,
+//     ResolveRoutingTarget, forIssueID) do not redirect lookups by prefix.
+//
+// If the town root cannot be determined, returns the original wrapper to
+// preserve current behavior.
+func (b *Beads) ForAgentBead() *Beads {
+	townRoot := b.getTownRoot()
+	if townRoot == "" {
+		return b
+	}
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	return &Beads{
+		workDir:    townRoot,
+		beadsDir:   townBeadsDir,
+		isolated:   b.isolated,
+		serverPort: b.serverPort,
+		store:      b.store,
+		townRoot:   townRoot,
+		noRoute:    true,
+	}
+}
+
+func (b *Beads) agentBeadTarget() *Beads {
+	if b.noRoute {
+		return b
+	}
+	return b.ForAgentBead()
+}
+
 // getActor returns the BD_ACTOR value for this context.
 // Returns empty string when in isolated mode (tests) to prevent
 // inherited actors from routing to production databases.
@@ -568,14 +618,40 @@ func (b *Beads) getTownRoot() string {
 // This follows any redirects and returns the actual beads directory path.
 func (b *Beads) getResolvedBeadsDir() string {
 	if b.beadsDir != "" {
-		return b.beadsDir
+		return ResolveBeadsDir(b.beadsDir)
 	}
 	return ResolveBeadsDir(b.workDir)
+}
+
+// targetBeadsDirForCreate returns the database a create operation should use.
+// Rig is authoritative for MR/conflict-task creates; otherwise parent-prefixed
+// children should land beside their parent so bd can resolve the relationship.
+func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) string {
+	fallback := b.getResolvedBeadsDir()
+	townRoot := b.getTownRoot()
+
+	if opts.Rig != "" && townRoot != "" {
+		if rigDir := GetRigDirForName(townRoot, opts.Rig); rigDir != "" {
+			if targetDir := ResolveBeadsDir(rigDir); targetDir != "" {
+				return targetDir
+			}
+		}
+	}
+
+	if opts.Parent != "" {
+		return ResolveRoutingTarget(townRoot, opts.Parent, fallback)
+	}
+
+	return fallback
 }
 
 // forIssueID returns a Beads wrapper bound to the correct beads directory for
 // the given issue ID. This is needed for cross-rig write operations that use an
 // ID to determine the owning database.
+//
+// When noRoute is set (see ForAgentBead), routing is skipped: the wrapper is
+// returned unchanged. Used for agent-bead operations whose IDs share the rig
+// prefix but whose data lives in the town DB.
 func (b *Beads) forIssueID(id string) *Beads {
 	return b.ForIssueID(id)
 }
@@ -588,6 +664,9 @@ func (b *Beads) forIssueID(id string) *Beads {
 // (e.g., gt mol detach, gt doctor --fix) that need to perform lookups/updates
 // on beads owned by a rig other than the caller's cwd.
 func (b *Beads) ForIssueID(id string) *Beads {
+	if b.noRoute {
+		return b
+	}
 	resolved := ResolveBeadsDirForID(b.getResolvedBeadsDir(), id)
 	if resolved == "" || resolved == b.getResolvedBeadsDir() {
 		return b
@@ -656,10 +735,7 @@ func (b *Beads) run(args ...string) (_ []byte, retErr error) {
 
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
 	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
-	beadsDir := b.beadsDir
-	if beadsDir == "" {
-		beadsDir = ResolveBeadsDir(b.workDir)
-	}
+	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 
@@ -1322,10 +1398,13 @@ func (b *Beads) ReadyWithType(issueType string) ([]*Issue, error) {
 func (b *Beads) Show(id string) (*Issue, error) {
 	// Route cross-rig queries via routes.jsonl so that rig-level bead IDs
 	// (e.g., "gt-abc123") resolve to the correct rig database.
-	targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
-	if targetDir != b.getResolvedBeadsDir() {
-		target := NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
-		return target.Show(id)
+	// noRoute (see ForAgentBead) bypasses this for agent-bead lookups.
+	if !b.noRoute {
+		targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
+		if targetDir != b.getResolvedBeadsDir() {
+			target := NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
+			return target.Show(id)
+		}
 	}
 
 	return b.showLocal(id)
@@ -1460,6 +1539,17 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
 	}
 
+	targetDir := b.targetBeadsDirForCreate(opts)
+	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
+		bdForCreate := &Beads{
+			workDir:    b.workDir,
+			beadsDir:   targetDir,
+			serverPort: b.serverPort,
+			isolated:   b.isolated,
+		}
+		return bdForCreate.Create(opts)
+	}
+
 	if b.store != nil && !opts.Ephemeral {
 		return b.storeCreate(opts)
 	}
@@ -1489,29 +1579,6 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 	if opts.Ephemeral {
 		args = append(args, "--ephemeral")
 	}
-	// When Rig is set, route to the rig's .beads dir via BEADS_DIR rather than
-	// passing --repo=<rigDir>. Using --repo causes bd to open the target database
-	// as a second connection while BEADS_DIR already holds one, triggering a
-	// pthread_cond_wait deadlock when both paths resolve to the same database
-	// (e.g., a polecat running gt done on its own rig's issue). (hq-1uf2)
-	bdForCreate := b
-	if opts.Rig != "" {
-		if townRoot := b.getTownRoot(); townRoot != "" {
-			if rigDir := GetRigDirForName(townRoot, opts.Rig); rigDir != "" {
-				rigBeadsDir := filepath.Join(rigDir, ".beads")
-				if _, statErr := os.Stat(rigBeadsDir); statErr == nil {
-					bdForCreate = &Beads{
-						workDir:    b.workDir,
-						beadsDir:   rigBeadsDir,
-						serverPort: b.serverPort,
-						isolated:   b.isolated,
-					}
-				}
-				// If .beads dir doesn't exist, fall through using b (no --repo flag).
-				// bd will auto-route from BEADS_DIR, which is better than hanging.
-			}
-		}
-	}
 	// Default Actor from BD_ACTOR env var if not specified
 	// Uses getActor() to respect isolated mode (tests)
 	actor := opts.Actor
@@ -1522,7 +1589,7 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 		args = append(args, "--actor="+actor)
 	}
 
-	out, err := bdForCreate.run(args...)
+	out, err := b.run(args...)
 	if err != nil {
 		return nil, err
 	}

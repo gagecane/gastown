@@ -1575,7 +1575,7 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 	// a close/reopen cycle.
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
 	bd := beads.New(r.Path)
-	if err := bd.ResetAgentBeadForReuse(agentBeadID, "nuked"); err != nil {
+	if err := bd.ForAgentBead().ResetAgentBeadForReuse(agentBeadID, "nuked"); err != nil {
 		// Bead may not exist (first spawn failed, or test environment)
 		fmt.Printf("  %s agent bead not found or already cleaned\n", style.Dim.Render("○"))
 	} else {

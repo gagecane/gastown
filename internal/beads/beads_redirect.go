@@ -121,7 +121,7 @@ func cleanBeadsRuntimeFiles(beadsDir string) error {
 		// Daemon runtime
 		"daemon.lock", "daemon.log", "daemon.pid", "bd.sock",
 		// Sync state
-		"last-touched", "metadata.json",
+		"last-touched",
 		// Version tracking
 		".local_version",
 		// Redirect file (we're about to recreate it)
@@ -160,9 +160,24 @@ func cleanBeadsRuntimeFiles(beadsDir string) error {
 // Returns the redirect target path (e.g., "../../.beads" or "../../mayor/rig/.beads"),
 // or an error if the path is invalid or no beads location exists.
 func ComputeRedirectTarget(townRoot, worktreePath string) (string, error) {
+	townRootAbs, err := filepath.Abs(townRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolving town root: %w", err)
+	}
+	worktreeAbs, err := filepath.Abs(worktreePath)
+	if err != nil {
+		return "", fmt.Errorf("resolving worktree path: %w", err)
+	}
+	if worktreeAbs == townRootAbs {
+		return "", fmt.Errorf("cannot create redirect at town root")
+	}
+	if rel, err := filepath.Rel(townRootAbs, worktreeAbs); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("worktree path %s is outside town root %s", worktreePath, townRoot)
+	}
+
 	// Get rig root from worktree path
 	// worktreePath = <town>/<rig>/crew/<name> or <town>/<rig>/refinery/rig etc.
-	relPath, err := filepath.Rel(townRoot, worktreePath)
+	relPath, err := filepath.Rel(townRootAbs, worktreeAbs)
 	if err != nil {
 		return "", fmt.Errorf("computing relative path: %w", err)
 	}
@@ -180,17 +195,22 @@ func ComputeRedirectTarget(townRoot, worktreePath string) (string, error) {
 	}
 
 	rigName := parts[0]
-	rigRoot := filepath.Join(townRoot, rigName)
-	townBeadsPath := filepath.Join(townRoot, ".beads")
+	rigRoot := filepath.Join(townRootAbs, rigName)
+	townBeadsPath := filepath.Join(townRootAbs, ".beads")
 	rigBeadsPath := filepath.Join(rigRoot, ".beads")
 	mayorBeadsPath := filepath.Join(rigRoot, "mayor", "rig", ".beads")
 
 	// Check rig-level .beads first: if the rig has its own database
 	// (metadata.json with dolt_database), crew must use rig-level beads
 	// so they see the correct prefix (e.g., lc- for laneassist, not hq-).
+	// If the rig-level .beads is itself a redirect, flatten it here: bd does
+	// not support redirect chains and will ignore the worktree redirect.
 	if rigHasOwnDB(rigBeadsPath) {
 		depth := len(parts) - 1
 		upPath := strings.Repeat("../", depth)
+		if redirectPath, ok := directRigRedirectTarget(upPath, filepath.Join(rigBeadsPath, "redirect")); ok {
+			return redirectPath, nil
+		}
 		return upPath + ".beads", nil
 	}
 
@@ -266,23 +286,30 @@ func ComputeRedirectTarget(townRoot, worktreePath string) (string, error) {
 		// Check if rig-level beads has a redirect (tracked beads case).
 		// If so, redirect directly to the final destination to avoid chains.
 		// The bd CLI doesn't support redirect chains, so we must skip intermediate hops.
-		rigRedirectPath := filepath.Join(rigBeadsPath, "redirect")
-		if data, err := os.ReadFile(rigRedirectPath); err == nil {
-			rigRedirectTarget := strings.TrimSpace(string(data))
-			if rigRedirectTarget != "" {
-				if filepath.IsAbs(rigRedirectTarget) {
-					// Absolute redirect — pass through as-is (ResolveBeadsDir handles it)
-					redirectPath = rigRedirectTarget
-				} else {
-					// Relative redirect (e.g., "mayor/rig/.beads" for tracked beads).
-					// Redirect worktree directly to the final destination.
-					redirectPath = upPath + rigRedirectTarget
-				}
-			}
+		if target, ok := directRigRedirectTarget(upPath, filepath.Join(rigBeadsPath, "redirect")); ok {
+			redirectPath = target
 		}
 	}
 
 	return redirectPath, nil
+}
+
+func directRigRedirectTarget(upPath, rigRedirectPath string) (string, bool) {
+	data, err := os.ReadFile(rigRedirectPath) //nolint:gosec // G304: path is constructed internally
+	if err != nil {
+		return "", false
+	}
+	rigRedirectTarget := strings.TrimSpace(string(data))
+	if rigRedirectTarget == "" {
+		return "", false
+	}
+	if filepath.IsAbs(rigRedirectTarget) {
+		// Absolute redirect — pass through as-is (ResolveBeadsDir handles it).
+		return rigRedirectTarget, true
+	}
+	// Relative redirect (e.g., "mayor/rig/.beads" for tracked beads).
+	// Redirect worktree directly to the final destination.
+	return upPath + rigRedirectTarget, true
 }
 
 // SetupRedirect creates a .beads/redirect file for a worktree to point to the rig's shared beads.

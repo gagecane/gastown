@@ -62,7 +62,9 @@ func (b *bdCmd) WithBeadsDir(dir string) *bdCmd {
 	return b
 }
 
-// Dir sets the working directory for the command.
+// Dir sets the working directory for the command. When a directory is provided,
+// bd is also pinned to that directory's resolved .beads database unless
+// WithBeadsDir supplies a more specific database.
 func (b *bdCmd) Dir(dir string) *bdCmd {
 	b.dir = dir
 	return b
@@ -70,8 +72,9 @@ func (b *bdCmd) Dir(dir string) *bdCmd {
 
 // StripBeadsDir removes any inherited BEADS_DIR from the environment.
 // Use this when the command relies on Dir() for routing and an inherited
-// BEADS_DIR would incorrectly override the working-directory-based database
-// discovery. This fixes rig-prefixed bead resolution (GH#2126).
+// BEADS_DIR would incorrectly override the resolved database. If Dir() is set,
+// buildEnv will still add an explicit BEADS_DIR for that directory; this method
+// only strips inherited values from the parent process.
 func (b *bdCmd) StripBeadsDir() *bdCmd {
 	b.env = filterEnvKey(b.env, "BEADS_DIR")
 	return b
@@ -123,6 +126,9 @@ func (b *bdCmd) buildEnv() []string {
 	if b.beadsDir != "" {
 		env = filterEnvKey(env, "BEADS_DIR")
 		env = append(env, "BEADS_DIR="+b.beadsDir)
+	} else if b.dir != "" {
+		env = filterEnvKey(env, "BEADS_DIR")
+		env = append(env, "BEADS_DIR="+beads.ResolveBeadsDir(b.dir))
 	}
 
 	return env

@@ -655,6 +655,34 @@ func TestCloneBareHasOriginRefs(t *testing.T) {
 	}
 }
 
+func TestCloneBareEmptyRepoSkipsMissingHeadFetch(t *testing.T) {
+	tmp := t.TempDir()
+	remoteDir := filepath.Join(tmp, "remote")
+	if err := os.MkdirAll(remoteDir, 0755); err != nil {
+		t.Fatalf("mkdir remote: %v", err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = remoteDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	bareDir := filepath.Join(tmp, "bare.git")
+	g := NewGit(tmp)
+	if err := g.CloneBare(remoteDir, bareDir); err != nil {
+		t.Fatalf("CloneBare empty repo: %v", err)
+	}
+
+	bareGit := NewGitWithDir(bareDir, "")
+	empty, err := bareGit.IsEmpty()
+	if err != nil {
+		t.Fatalf("IsEmpty: %v", err)
+	}
+	if !empty {
+		t.Error("expected bare clone of empty repo to be empty")
+	}
+}
+
 func TestIsEmpty_EmptyRepo(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command("git", "init")
@@ -2684,6 +2712,48 @@ func TestBranchPushedToRemote_SplitURL(t *testing.T) {
 	}
 	if unpushed != 0 {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want 0", unpushed)
+	}
+}
+
+func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/already-pushed"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "work.go"), []byte("package work\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("work.go"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("polecat work"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	runGit(t, localDir, "branch", "--set-upstream-to=origin/"+mainBranch, branch)
+
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits: %v", err)
+	}
+	if unpushed != 0 {
+		t.Fatalf("UnpushedCommits = %d, want 0 for pushed branch tracking origin/%s", unpushed, mainBranch)
+	}
+
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		t.Fatalf("CheckUncommittedWork: %v", err)
+	}
+	if !status.Clean() {
+		t.Fatalf("CheckUncommittedWork should be clean, got %s", status)
 	}
 }
 

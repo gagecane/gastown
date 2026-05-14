@@ -246,7 +246,10 @@ has_recovery_marker() {
 }
 
 # Crashed polecats: notify witness to restart
-for ENTRY in "${CRASHED[@]:-}"; do
+# Note: `"${arr[@]:-}"` expands an empty array to a single empty string under
+# `set -u`, which would fire a phantom `RESTART_POLECAT: /` notification. The
+# `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is empty.
+for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"}; do
   IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
   if has_recovery_marker "$RIG" "$PCAT"; then
     log "SKIP RESTART for $RIG/polecats/$PCAT: manual-recovery marker active (gu-v5mk)"
@@ -266,7 +269,7 @@ BODY
 done
 
 # Zombie polecats: kill zombie session, then request restart
-for ENTRY in "${STUCK[@]:-}"; do
+for ENTRY in ${STUCK[@]+"${STUCK[@]}"}; do
   IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
   if has_recovery_marker "$RIG" "$PCAT"; then
     log "SKIP RESTART for $RIG/polecats/$PCAT (zombie): manual-recovery marker active (gu-v5mk)"

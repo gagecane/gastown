@@ -112,6 +112,9 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	if _, isRig := IsRigName(rigName); !isRig {
 		return fmt.Errorf("'%s' is not a known rig", rigName)
 	}
+	if err := verifyBeadExistsInTargetRigDatabase(beadID, rigName, townRoot); err != nil {
+		return err
+	}
 
 	// Cross-rig-prefix parity guard (gu-5ooj). Mirrors the unconditional
 	// dispatch-time guard in capacity_dispatch.go: a bead whose ID prefix

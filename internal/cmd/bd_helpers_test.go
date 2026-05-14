@@ -33,7 +33,9 @@ func TestBdCmd_Build(t *testing.T) {
 			},
 			wantArgs: []string{"bd", "list"},
 			wantDir:  "/some/path",
-			wantEnv:  map[string]string{},
+			wantEnv: map[string]string{
+				"BEADS_DIR": "/some/path/.beads",
+			},
 		},
 		{
 			name: "with auto commit",
@@ -68,6 +70,7 @@ func TestBdCmd_Build(t *testing.T) {
 			wantEnv: map[string]string{
 				"BD_DOLT_AUTO_COMMIT": "on",
 				"GT_ROOT":             "/town/root",
+				"BEADS_DIR":           "/work/dir/.beads",
 			},
 		},
 	}
@@ -412,6 +415,35 @@ func TestBdCmd_WithBeadsDir_SetsEnv(t *testing.T) {
 	}
 }
 
+func TestBdCmd_DirPinsResolvedBeadsDir(t *testing.T) {
+	// Dir should pin bd to that directory's resolved .beads database so ambient
+	// discovery cannot select HQ or an inherited rig database.
+	baseEnv := []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads", "HOME=/home/user"}
+
+	bdc := &bdCmd{
+		args:   []string{"mol", "wisp", "mol-polecat-work"},
+		env:    baseEnv,
+		stderr: os.Stderr,
+	}
+	bdc.Dir("/town/gastown/mayor/rig")
+	cmd := bdc.Build()
+	envMap := parseEnv(cmd.Env)
+
+	if envMap["BEADS_DIR"] != "/town/gastown/mayor/rig/.beads" {
+		t.Errorf("BEADS_DIR = %q, want %q", envMap["BEADS_DIR"], "/town/gastown/mayor/rig/.beads")
+	}
+
+	count := 0
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, "BEADS_DIR=") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("found %d BEADS_DIR entries, want 1", count)
+	}
+}
+
 func TestBdCmd_WithBeadsDir_OverridesInherited(t *testing.T) {
 	// WithBeadsDir should override an inherited BEADS_DIR from the parent
 	// process. This is the core fix for gt-ctir: without overriding,
@@ -466,8 +498,8 @@ func TestBdCmd_WithBeadsDir_Chaining(t *testing.T) {
 }
 
 func TestBdCmd_StripBeadsDir_RemovesInherited(t *testing.T) {
-	// StripBeadsDir should remove inherited BEADS_DIR from the environment
-	// so that bd discovers the database from Dir() instead (GH#2126).
+	// StripBeadsDir should remove inherited BEADS_DIR from the environment.
+	// Dir() still pins BEADS_DIR to the resolved target database.
 	bdc := &bdCmd{
 		args:   []string{"show", "myproject-abc", "--json"},
 		env:    []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads", "HOME=/home/user"},
@@ -476,10 +508,9 @@ func TestBdCmd_StripBeadsDir_RemovesInherited(t *testing.T) {
 	bdc.Dir("/town/myproject/mayor/rig").StripBeadsDir()
 	cmd := bdc.Build()
 
-	for _, e := range cmd.Env {
-		if strings.HasPrefix(e, "BEADS_DIR=") {
-			t.Errorf("StripBeadsDir should remove BEADS_DIR, found: %s", e)
-		}
+	envMap := parseEnv(cmd.Env)
+	if envMap["BEADS_DIR"] != "/town/myproject/mayor/rig/.beads" {
+		t.Errorf("BEADS_DIR = %q, want %q", envMap["BEADS_DIR"], "/town/myproject/mayor/rig/.beads")
 	}
 
 	if cmd.Dir != "/town/myproject/mayor/rig" {
@@ -488,7 +519,8 @@ func TestBdCmd_StripBeadsDir_RemovesInherited(t *testing.T) {
 }
 
 func TestBdCmd_StripBeadsDir_NoOpWhenAbsent(t *testing.T) {
-	// StripBeadsDir should be harmless when BEADS_DIR is not set.
+	// StripBeadsDir should be harmless when BEADS_DIR is not set; Dir() still
+	// pins the target database.
 	bdc := &bdCmd{
 		args:   []string{"show", "hq-abc"},
 		env:    []string{"PATH=/usr/bin", "HOME=/home/user"},
@@ -497,8 +529,9 @@ func TestBdCmd_StripBeadsDir_NoOpWhenAbsent(t *testing.T) {
 	bdc.Dir("/town").StripBeadsDir()
 	cmd := bdc.Build()
 
-	if len(cmd.Env) != 2 {
-		t.Errorf("expected 2 env entries, got %d", len(cmd.Env))
+	envMap := parseEnv(cmd.Env)
+	if envMap["BEADS_DIR"] != "/town/.beads" {
+		t.Errorf("BEADS_DIR = %q, want %q", envMap["BEADS_DIR"], "/town/.beads")
 	}
 }
 

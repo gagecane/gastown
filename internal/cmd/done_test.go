@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -78,6 +79,47 @@ func TestDoneUsesResolveBeadsDir(t *testing.T) {
 			t.Errorf("ResolveBeadsDir(%s) = %s, want %s", localDir, resolvedDir, mayorRigBeadsDir)
 		}
 	})
+}
+
+func TestForceCloseIssueWithRetryClosesNoMergeIssue(t *testing.T) {
+	var gotReason string
+	var gotIDs []string
+	calls := 0
+
+	err := forceCloseIssueWithRetry(func(reason string, ids ...string) error {
+		calls++
+		gotReason = reason
+		gotIDs = append([]string(nil), ids...)
+		return nil
+	}, "gt-abc", "No-merge work completed; merge queue skipped", "Issue %s closed (no-merge)")
+	if err != nil {
+		t.Fatalf("forceCloseIssueWithRetry returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("close calls = %d, want 1", calls)
+	}
+	if gotReason != "No-merge work completed; merge queue skipped" {
+		t.Errorf("reason = %q", gotReason)
+	}
+	if len(gotIDs) != 1 || gotIDs[0] != "gt-abc" {
+		t.Errorf("ids = %v, want [gt-abc]", gotIDs)
+	}
+}
+
+func TestForceCloseIssueWithRetryReturnsFinalError(t *testing.T) {
+	wantErr := errors.New("dolt locked")
+	calls := 0
+
+	err := forceCloseIssueWithRetrySleep(func(string, ...string) error {
+		calls++
+		return wantErr
+	}, "gt-abc", "No-merge work completed; merge queue skipped", "Issue %s closed (no-merge)", func(time.Duration) {})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if calls != 3 {
+		t.Fatalf("close calls = %d, want 3", calls)
+	}
 }
 
 // TestDoneBeadsInitWithoutRedirect verifies that beads initialization works
@@ -1705,4 +1747,3 @@ func TestNudgeRefineryGuardLogic(t *testing.T) {
 		})
 	}
 }
-

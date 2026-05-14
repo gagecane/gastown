@@ -197,6 +197,10 @@ type Daemon struct {
 	// and drowning out real fresh deaths. See gu-50qv.
 	alarmedSessionsMu sync.Mutex
 	alarmedSessions   map[string]*alarmedPolecatSession
+
+	// legacySocketCleanupOnce ensures upgrade cleanup only runs once per daemon
+	// lifetime, before any patrol agent can be started on the current socket.
+	legacySocketCleanupOnce sync.Once
 }
 
 // alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It
@@ -251,6 +255,12 @@ type rigStatusCacheEntry struct {
 const beadsModulePath = "github.com/steveyegge/beads"
 
 var semverPattern = regexp.MustCompile(`v?(\d+\.\d+\.\d+)`)
+
+var cleanupLegacySocketsForDaemon = func(townRoot string) (int, int) {
+	defaultCleaned := session.CleanupLegacyDefaultSocket()
+	baseCleaned := session.CleanupLegacyBaseSocket(townRoot)
+	return defaultCleaned, baseCleaned
+}
 
 // New creates a new daemon instance.
 func New(config *Config) (*Daemon, error) {
@@ -460,7 +470,7 @@ func New(config *Config) (*Daemon, error) {
 		}
 	}
 
-	return &Daemon{
+	d := &Daemon{
 		config:          config,
 		patrolConfig:    patrolConfig,
 		disabledPatrols: disabledPatrols,
@@ -475,7 +485,20 @@ func New(config *Config) (*Daemon, error) {
 		otelProvider:    otelProvider,
 		metrics:         dm,
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
-	}, nil
+	}
+	return d, nil
+}
+
+func (d *Daemon) cleanupLegacySocketSessions() {
+	d.legacySocketCleanupOnce.Do(func() {
+		defaultCleaned, baseCleaned := cleanupLegacySocketsForDaemon(d.config.TownRoot)
+		if defaultCleaned > 0 {
+			d.logger.Printf("legacy_socket_cleanup: cleaned %d session(s) from default socket", defaultCleaned)
+		}
+		if baseCleaned > 0 {
+			d.logger.Printf("legacy_socket_cleanup: cleaned %d session(s) from basename socket", baseCleaned)
+		}
+	})
 }
 
 // Run starts the daemon main loop.
@@ -566,6 +589,11 @@ func (d *Daemon) Run() (err error) {
 	if err != nil {
 		return err
 	}
+
+	// Clean sessions left behind on legacy tmux sockets after daemon startup has
+	// passed fatal preflight checks but before any patrol agents can be spawned.
+	d.cleanupLegacySocketSessions()
+
 	isRigParked := func(rigName string) bool {
 		ok, _ := d.isRigOperational(rigName)
 		return !ok
@@ -1447,6 +1475,17 @@ func (d *Daemon) ensureBootRunning() {
 	}
 
 	b := boot.New(d.config.TownRoot)
+
+	// Idle suppression: if Boot's last run found deacon healthy ("nothing"),
+	// suppress spawning for longer to avoid burning API calls. (fixes gt-qu883c)
+	idleSuppression := d.loadOperationalConfig().GetDaemonConfig().BootIdleSuppressionD()
+	if status, err := b.LoadStatus(); err == nil && status.LastAction == "nothing" {
+		if !status.CompletedAt.IsZero() && time.Since(status.CompletedAt) < idleSuppression {
+			d.logger.Printf("Boot last reported 'nothing' %s ago, within idle suppression (%s), skipping",
+				time.Since(status.CompletedAt).Round(time.Second), idleSuppression)
+			return
+		}
+	}
 
 	// Check for degraded mode
 	degraded := os.Getenv("GT_DEGRADED") == "true"

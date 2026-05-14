@@ -489,6 +489,21 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 		return fmt.Errorf("configuring refspec: %s", strings.TrimSpace(stderr.String()))
 	}
 
+	// Empty remotes clone successfully but have no refs to fetch. Let callers
+	// perform their own empty-repository validation instead of returning a
+	// misleading "couldn't find remote ref" error from the fetch below.
+	var refsStderr bytes.Buffer
+	refsCmd := exec.Command("git", "--git-dir", gitDir, "show-ref", "--quiet")
+	util.SetDetachedProcessGroup(refsCmd)
+	refsCmd.Stderr = &refsStderr
+	if err := refsCmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil
+		}
+		return fmt.Errorf("checking refs: %s", strings.TrimSpace(refsStderr.String()))
+	}
+
 	if singleBranch {
 		// For shallow single-branch clones, fetch only the HEAD branch to create
 		// the origin/<branch> ref that worktrees need. A full `git fetch origin`
@@ -1437,6 +1452,17 @@ func (g *Git) ListRemoteRefs(remote, prefix string) ([]string, error) {
 	return refs, nil
 }
 
+// RemoteHasRefs reports whether a remote has any refs at all. It deliberately
+// includes tags so callers can distinguish a truly empty repo from a non-empty
+// repo with no branch refs or a broken remote HEAD.
+func (g *Git) RemoteHasRefs(remote string) (bool, error) {
+	out, err := g.run("ls-remote", "--refs", remote)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // ListPushRemoteRefs lists remote refs from the push URL when it differs from
 // the fetch URL. With a fork-based workflow (pushurl configured), branches are
 // pushed to the fork but ls-remote reads from the fetch URL (upstream). This
@@ -2308,20 +2334,39 @@ func (g *Git) IsStashStale(ref string) (stale bool, parentSHA, headSHA string, e
 }
 
 // UnpushedCommits returns the number of commits that are not pushed to the remote.
-// It checks if the current branch has an upstream and counts commits ahead.
-// Returns 0 if there is no upstream configured.
+// It prefers the exact remote branch when one exists, because polecat branches may
+// track origin/main while pushing work to origin/<current-branch>.
+// Returns 0 if there is no upstream or exact remote branch configured.
 func (g *Git) UnpushedCommits() (int, error) {
+	branch, branchErr := g.CurrentBranch()
+	hasBranch := branchErr == nil && branch != "" && branch != "HEAD"
+
 	// Get the upstream branch
 	upstream, err := g.run("rev-parse", "--abbrev-ref", "@{u}")
-	if err != nil {
-		// No upstream configured - this is common for polecat branches
-		// Check if we can compare against origin/main instead
-		// If we can't get any reference, return 0 (benefit of the doubt)
-		return 0, nil
+	if err == nil {
+		if !hasBranch || upstream == "origin/"+branch {
+			return g.countCommitsAhead(upstream)
+		}
+
+		if count, found, remoteErr := g.unpushedFromExactRemoteBranch(branch, "origin"); remoteErr == nil && found {
+			return count, nil
+		}
+		return g.countCommitsAhead(upstream)
 	}
 
-	// Count commits between upstream and HEAD
-	out, err := g.run("rev-list", "--count", upstream+"..HEAD")
+	if hasBranch {
+		if count, found, remoteErr := g.unpushedFromExactRemoteBranch(branch, "origin"); remoteErr == nil && found {
+			return count, nil
+		}
+	}
+
+	// No upstream configured - this is common for polecat branches.
+	// If there is no exact remote branch either, return 0 (benefit of the doubt).
+	return 0, nil
+}
+
+func (g *Git) countCommitsAhead(base string) (int, error) {
+	out, err := g.run("rev-list", "--count", base+"..HEAD")
 	if err != nil {
 		return 0, err
 	}
@@ -2333,6 +2378,16 @@ func (g *Git) UnpushedCommits() (int, error) {
 	}
 
 	return count, nil
+}
+
+func (g *Git) unpushedFromExactRemoteBranch(localBranch, remote string) (int, bool, error) {
+	remoteSHA, err := g.PushRemoteBranchTip(remote, localBranch)
+	if err != nil || remoteSHA == "" {
+		return 0, false, err
+	}
+
+	count, err := g.countCommitsAhead(remoteSHA)
+	return count, true, err
 }
 
 // UncommittedWorkStatus contains information about uncommitted work in a repo.
