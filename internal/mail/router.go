@@ -708,45 +708,63 @@ func (r *Router) resolveAgentsByRig(rig string) ([]string, error) {
 
 // queryAgents queries agent beads using bd list with description filtering.
 // Searches both town-level and rig-level beads to find all agents.
+//
+// The town-level scan and each rig-level scan run concurrently: each rig is an
+// independent bd subprocess invocation, and serializing them stretched wall
+// clock enough that a single slow query under refinery merge-cycle load could
+// trip its 60s context timeout and surface as "signal: killed" in the
+// dispatcher path (gs-e9d). This mirrors the gs-5di fan-out fix for
+// listFromDir, applied to the send/validate path.
 func (r *Router) queryAgents(descContains string) []*agentBead {
-	var allAgents []*agentBead
-
-	// Query town-level beads
+	// Collect the set of beads dirs to scan. Index 0 is town; the rest are
+	// rigs in routes.jsonl order. The dedup pass below preserves the same
+	// precedence the previous sequential implementation had: town first, then
+	// rigs in route order.
 	townBeadsDir := r.resolveBeadsDir()
-	townAgents, err := r.queryAgentsInDir(townBeadsDir, descContains)
-	if err != nil {
-		// Don't fail yet - rig beads might still have results
-		townAgents = nil
-	}
-	allAgents = append(allAgents, townAgents...)
-
-	// Also query rig-level beads via routes.jsonl
+	beadsDirs := []string{townBeadsDir}
 	if r.townRoot != "" {
 		routesDir := filepath.Join(r.townRoot, ".beads")
-		routes, routeErr := beads.LoadRoutes(routesDir)
-		if routeErr == nil {
+		if routes, routeErr := beads.LoadRoutes(routesDir); routeErr == nil {
 			for _, route := range routes {
 				// Skip hq- routes (town-level, already queried)
 				if strings.HasPrefix(route.Prefix, "hq-") {
 					continue
 				}
-				rigBeadsDir := filepath.Join(r.townRoot, route.Path, ".beads")
-				rigAgents, rigErr := r.queryAgentsInDir(rigBeadsDir, descContains)
-				if rigErr != nil {
-					continue // Skip rigs with errors
-				}
-				allAgents = append(allAgents, rigAgents...)
+				beadsDirs = append(beadsDirs, filepath.Join(r.townRoot, route.Path, ".beads"))
 			}
 		}
 	}
 
-	// Deduplicate by ID
+	results := make([][]*agentBead, len(beadsDirs))
+	var wg sync.WaitGroup
+	for i, dir := range beadsDirs {
+		i, dir := i, dir
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rigAgents, err := r.queryAgentsInDir(dir, descContains)
+			if err != nil {
+				// Swallow errors to preserve prior best-effort semantics; the
+				// caller (validateRecipient) has its own per-rig error scan
+				// that surfaces failures back to the user when no agent is
+				// found.
+				return
+			}
+			results[i] = rigAgents
+		}()
+	}
+	wg.Wait()
+
+	// Deduplicate by ID, preserving the town-first, route-order precedence of
+	// the previous sequential implementation.
 	seen := make(map[string]bool)
 	var unique []*agentBead
-	for _, agent := range allAgents {
-		if !seen[agent.ID] {
-			seen[agent.ID] = true
-			unique = append(unique, agent)
+	for _, rigAgents := range results {
+		for _, agent := range rigAgents {
+			if !seen[agent.ID] {
+				seen[agent.ID] = true
+				unique = append(unique, agent)
+			}
 		}
 	}
 
@@ -755,6 +773,12 @@ func (r *Router) queryAgents(descContains string) []*agentBead {
 
 // queryAgentsInDir queries agent beads in a specific beads directory with optional description filtering.
 // Queries both the issues and wisps tables, merging results.
+//
+// The two bd subprocess invocations (issues + wisps) run concurrently so wall
+// clock tracks the slower of the pair rather than their sum. Serializing them
+// contributed to the gs-e9d dispatcher-path SIGKILL: each `gt mail send`
+// validates the recipient by scanning every rig, and every rig scan paid the
+// 2× sequential cost.
 func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, error) {
 	args := []string{"list", "--label=gt:agent", "--include-infra", "--json", "--flat", "--limit=0"}
 
@@ -764,14 +788,26 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 
 	ctx, cancel := bdReadCtx()
 	defer cancel()
-
-	// Query issues table (backward compat during migration)
-	stdout, issuesErr := runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
-
-	// Also query wisps table for migrated agent beads (best-effort)
 	wispCtx, wispCancel := bdReadCtx()
 	defer wispCancel()
-	wispOut, _ := runBdCommand(wispCtx, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
+
+	var (
+		stdout, wispOut []byte
+		issuesErr       error
+		wg              sync.WaitGroup
+	)
+	wg.Add(2)
+	// Query issues table (backward compat during migration)
+	go func() {
+		defer wg.Done()
+		stdout, issuesErr = runBdCommand(ctx, args, filepath.Dir(beadsDir), beadsDir)
+	}()
+	// Also query wisps table for migrated agent beads (best-effort)
+	go func() {
+		defer wg.Done()
+		wispOut, _ = runBdCommand(wispCtx, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
+	}()
+	wg.Wait()
 
 	// Merge results: collect agent beads from both sources
 	seenIDs := make(map[string]bool)
@@ -980,25 +1016,49 @@ func (r *Router) validateRecipient(identity string) error {
 		}
 	}
 
-	// Query agents from rig-level beads via routes.jsonl
+	// Query agents from rig-level beads via routes.jsonl. queryAgents() above
+	// already scans every rig and aggregates results, so this loop's only
+	// remaining purpose is to surface per-rig query errors when the recipient
+	// is missing from the aggregate. Fan the per-rig probes out concurrently
+	// to keep wall clock bounded — the previous sequential loop was a major
+	// contributor to gs-e9d's dispatcher-path SIGKILL.
 	var routeQueryErr error
 	if r.townRoot != "" {
 		townBeadsDir := filepath.Join(r.townRoot, ".beads")
 		routes, err := beads.LoadRoutes(townBeadsDir)
 		if err == nil {
-			var queryErrors []string
+			type rigProbe struct {
+				path   string
+				agents []*agentBead
+				err    error
+			}
+			var probes []*rigProbe
 			for _, route := range routes {
 				// Skip hq- routes (town-level, already queried)
 				if strings.HasPrefix(route.Prefix, "hq-") {
 					continue
 				}
-				rigBeadsDir := filepath.Join(r.townRoot, route.Path, ".beads")
-				rigAgents, err := r.queryAgentsFromDir(rigBeadsDir)
-				if err != nil {
-					queryErrors = append(queryErrors, fmt.Sprintf("%s: %v", route.Path, err))
+				probes = append(probes, &rigProbe{path: route.Path})
+			}
+			var wg sync.WaitGroup
+			for _, p := range probes {
+				p := p
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					rigBeadsDir := filepath.Join(r.townRoot, p.path, ".beads")
+					p.agents, p.err = r.queryAgentsFromDir(rigBeadsDir)
+				}()
+			}
+			wg.Wait()
+
+			var queryErrors []string
+			for _, p := range probes {
+				if p.err != nil {
+					queryErrors = append(queryErrors, fmt.Sprintf("%s: %v", p.path, p.err))
 					continue
 				}
-				for _, agent := range rigAgents {
+				for _, agent := range p.agents {
 					if agentBeadToAddress(agent) == identity {
 						return nil // Found matching agent
 					}
