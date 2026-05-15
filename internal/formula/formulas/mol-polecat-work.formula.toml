@@ -52,7 +52,7 @@ stale, the refinery falls through to normal gate execution.
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
-version = 11
+version = 12
 
 [[steps]]
 id = "load-context"
@@ -76,13 +76,27 @@ If Dolt is down: `gt escalate -s HIGH "Dolt: <symptom>"` — do NOT restart it y
 
 The hook_bead is your assigned issue. Read the output of `bd show` carefully.
 
-**3. Check inbox for additional context:**
+**3. Refresh remote refs BEFORE evaluating dependencies (gu-c13x):**
+
+```bash
+git fetch origin
+```
+
+Polecats self-defer when their assigned bead's blocking deps appear unmerged.
+That evaluation MUST be done against fetched refs, NOT against stale local
+mainline. Without an explicit fetch, `git log {{base_branch}}..<dep-branch>`
+and `git merge-base --is-ancestor` answer questions about a snapshot from the
+last time this worktree was synced — which can be hours stale on a persistent
+polecat. The dep was already merged on origin; deferring at this point burns
+a slot and re-dispatches the same bead next cycle. Fetch first, then decide.
+
+**4. Check inbox for additional context:**
 ```bash
 gt mail inbox
 # Read any HANDOFF or assignment messages
 ```
 
-**4. Check for prior merge failure context:**
+**5. Check for prior merge failure context:**
 
 If the bead notes contain "MERGE REJECTION", a previous polecat's work was
 rejected by the refinery. Read the failure details carefully:
@@ -99,15 +113,16 @@ git branch -a | grep <branch-from-notes>
 
 This lets you make a targeted fix rather than starting from scratch.
 
-**5. Understand the requirements:**
+**6. Understand the requirements:**
 - What exactly needs to be done?
 - What files are likely involved?
 - Are there dependencies or blockers?
 - What does "done" look like?
 - If this is a rework: what specifically failed and why?
 
-**6. Verify you can proceed:**
-- No unresolved blockers on the issue
+**7. Verify you can proceed:**
+- No unresolved blockers on the issue (verify against fetched refs from step 3,
+  not local mainline — see gu-c13x)
 - You understand what to do
 - Required resources are available
 
