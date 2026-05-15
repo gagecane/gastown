@@ -199,6 +199,7 @@ clean:
 
 test-makefile:
 	bash scripts/check-install-path_test.sh
+	bash scripts/check-lockfile-mirror_test.sh
 
 # verify: Run the same gates CI's "Test" job runs, locally, before pushing.
 # This is the last line of defense before changes reach origin/main. Identical
