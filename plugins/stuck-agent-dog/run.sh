@@ -50,6 +50,69 @@ heartbeat_state() {
   jq -r '.state // empty' "$hb_file" 2>/dev/null
 }
 
+# polecat_agent_bead_id returns the agent bead ID for a polecat using the
+# AgentBeadIDWithPrefix collapsed-form rules (internal/beads/agent_ids.go):
+# when the rig prefix equals the rig name, the rig component is omitted.
+polecat_agent_bead_id() {
+  local prefix="$1" rig="$2" pcat="$3"
+  if [ "$prefix" = "$rig" ]; then
+    echo "${prefix}-polecat-${pcat}"
+  else
+    echo "${prefix}-${rig}-polecat-${pcat}"
+  fi
+}
+
+# polecat_clean_exit_signal echoes a non-empty token if the polecat's agent
+# bead shows evidence of a deliberate, clean completion. Empty output means
+# "no clean-exit signal — proceed with crash detection".
+#
+# Recognized signals (mirrors witness logic in internal/witness/handlers.go):
+#   - exit_type set to COMPLETED, ESCALATED, DEFERRED, or PHASE_COMPLETE:
+#     gt done wrote completion metadata before the session exited.
+#   - agent_state set to done, nuked, or idle: intentional shutdown.
+#   - status closed on the agent bead: polecat was nuked/retired.
+polecat_clean_exit_signal() {
+  local agent_bead="$1"
+  [ -n "$agent_bead" ] || return 0
+  local snap
+  snap=$(bd show "$agent_bead" --json 2>/dev/null) || return 0
+  [ -n "$snap" ] && [ "$snap" != "null" ] && [ "$snap" != "[]" ] || return 0
+
+  local status agent_state exit_type
+  status=$(echo "$snap" | jq -r '.[0].status // empty' 2>/dev/null)
+  if [ "$status" = "closed" ]; then
+    echo "agent_bead_closed"
+    return 0
+  fi
+  agent_state=$(echo "$snap" \
+    | jq -r '.[0].description // ""' 2>/dev/null \
+    | awk -F': *' '/^agent_state:/ {print $2; exit}')
+  case "$agent_state" in
+    done|nuked|idle) echo "agent_state_${agent_state}"; return 0 ;;
+  esac
+  exit_type=$(echo "$snap" \
+    | jq -r '.[0].description // ""' 2>/dev/null \
+    | awk -F': *' '/^exit_type:/ {print $2; exit}')
+  case "$exit_type" in
+    COMPLETED|ESCALATED|DEFERRED|PHASE_COMPLETE) echo "exit_type_${exit_type}"; return 0 ;;
+  esac
+  return 0
+}
+
+# polecat_has_open_cleanup_wisp returns 0 if a cleanup wisp is already open for
+# this polecat (witness already classified it as POLECAT_DIED), 1 otherwise.
+# Mirrors findAnyCleanupWisp in internal/witness/handlers.go so we don't
+# re-flag the same dead session on every 5m cycle and trip mass-death.
+polecat_has_open_cleanup_wisp() {
+  local pcat="$1"
+  local out
+  out=$(bd list --label "cleanup,polecat:${pcat}" --status open --json 2>/dev/null) || return 1
+  [ -n "$out" ] && [ "$out" != "[]" ] && [ "$out" != "null" ] || return 1
+  local count
+  count=$(echo "$out" | jq 'length' 2>/dev/null)
+  [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null
+}
+
 # --- Enumerate agents ---------------------------------------------------------
 
 log "=== Checking agent health ==="
@@ -93,13 +156,33 @@ while IFS='|' read -r RIG PREFIX; do
       HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
 
       if [ -n "$HOOK_BEAD" ]; then
-        # Check agent_state
-        AGENT_STATE=$(bd show "$HOOK_BEAD" --json 2>/dev/null \
-          | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('status',''))" 2>/dev/null || echo "")
+        # Filter 1: hook bead already closed → polecat completed normally.
+        HOOK_STATUS=$(bd show "$HOOK_BEAD" --json 2>/dev/null \
+          | jq -r '.[0].status // empty' 2>/dev/null || echo "")
+        if [ "$HOOK_STATUS" = "closed" ]; then
+          log "  SKIP $SESSION_NAME: hook bead closed (completed normally)"
+          continue
+        fi
 
-        case "$AGENT_STATE" in
-          closed) log "  SKIP $SESSION_NAME: bead closed (completed normally)"; continue ;;
-        esac
+        # Filter 2 (gu-w9or): consult the polecat's own agent bead for clean-exit
+        # signals. A polecat that ran `gt done` writes exit_type/completion_time
+        # to its agent bead before the session dies; the hook bead may still be
+        # open (refinery hasn't merged the MR yet). Without this filter, every
+        # legitimate completion within a 5m cycle counts as CRASHED, and 3+ in
+        # one cycle trips MASS DEATH → spurious CRITICAL escalation.
+        AGENT_BEAD=$(polecat_agent_bead_id "$PREFIX" "$RIG" "$PCAT_NAME")
+        CLEAN_SIGNAL=$(polecat_clean_exit_signal "$AGENT_BEAD")
+        if [ -n "$CLEAN_SIGNAL" ]; then
+          log "  SKIP $SESSION_NAME: clean exit (${CLEAN_SIGNAL}, agent_bead=$AGENT_BEAD)"
+          continue
+        fi
+
+        # Filter 3 (gu-w9or): witness already filed a cleanup wisp for this
+        # polecat — it has been classified, no need to re-CRASH on each cycle.
+        if polecat_has_open_cleanup_wisp "$PCAT_NAME"; then
+          log "  SKIP $SESSION_NAME: cleanup wisp already open"
+          continue
+        fi
 
         CRASHED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
         log "  CRASHED: $SESSION_NAME (hook=$HOOK_BEAD)"
