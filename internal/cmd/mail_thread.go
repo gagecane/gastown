@@ -149,6 +149,11 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 	if err := router.ClearReplyReminders(from, reply.ThreadID); err != nil {
 		style.PrintWarning("could not clear satisfied reply reminders: %v", err)
 	}
+	// Subject-based fallback: covers reminders queued without a ThreadID
+	// or whose ThreadID does not match the reply's thread (gu-1hsu).
+	if err := router.ClearReplyRemindersBySubject(from, original.From, subject); err != nil {
+		style.PrintWarning("could not clear satisfied reply reminders: %v", err)
+	}
 
 	fmt.Printf("%s Reply sent to %s\n", style.Bold.Render("✓"), original.From)
 	fmt.Printf("  Subject: %s\n", subject)

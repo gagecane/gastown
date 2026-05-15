@@ -652,6 +652,109 @@ func TestRemoveKindByThread(t *testing.T) {
 	}
 }
 
+func TestNormalizeReplySubject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"task ready", "task ready"},
+		{"Re: task ready", "task ready"},
+		{"re: task ready", "task ready"},
+		{"RE:task ready", "task ready"},
+		{"Re: Re: nested", "nested"},
+		{"  re:  spaces  ", "spaces"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizeReplySubject(c.in); got != c.want {
+			t.Errorf("NormalizeReplySubject(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestRemoveKindByOriginal_MatchesAcrossThreadIDs proves the gu-1hsu fix:
+// a fresh-thread reply (no --reply-to) clears the queued reminder when the
+// (kind, original-from, normalized-subject) triple matches.
+func TestRemoveKindByOriginal_MatchesAcrossThreadIDs(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-remove-by-original"
+
+	reminder := QueuedNudge{
+		Sender: "system", Message: "Remember to reply to mayor/ ...",
+		Kind: "reply-reminder", ThreadID: "thread-original",
+		OriginalFrom: "mayor/", OriginalSubject: "task ready",
+	}
+	keepDifferentSender := QueuedNudge{
+		Sender: "system", Message: "different sender",
+		Kind: "reply-reminder", ThreadID: "thread-other",
+		OriginalFrom: "witness/", OriginalSubject: "task ready",
+	}
+	keepDifferentSubject := QueuedNudge{
+		Sender: "system", Message: "different subject",
+		Kind: "reply-reminder", ThreadID: "thread-x",
+		OriginalFrom: "mayor/", OriginalSubject: "other topic",
+	}
+	keepDifferentKind := QueuedNudge{
+		Sender: "system", Message: "different kind",
+		Kind:         "mail",
+		OriginalFrom: "mayor/", OriginalSubject: "task ready",
+	}
+
+	for _, n := range []QueuedNudge{reminder, keepDifferentSender, keepDifferentSubject, keepDifferentKind} {
+		if err := Enqueue(townRoot, session, n); err != nil {
+			t.Fatalf("Enqueue(%q): %v", n.Message, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Simulate the agent sending a "Re: task ready" mail to mayor/. The
+	// originalFrom argument is case-insensitive — pass "Mayor/" to verify.
+	removed, err := RemoveKindByOriginal(townRoot, session, "reply-reminder", "Mayor/", "Re: task ready")
+	if err != nil {
+		t.Fatalf("RemoveKindByOriginal: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	nudges, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 3 {
+		t.Fatalf("Drain returned %d nudges, want 3 (only matching reminder should be removed)", len(nudges))
+	}
+	for _, n := range nudges {
+		if n.Message == reminder.Message {
+			t.Fatalf("matched reminder was not removed: %+v", n)
+		}
+	}
+}
+
+// TestRemoveKindByOriginal_GuardsEmptyArgs verifies the safety guards.
+func TestRemoveKindByOriginal_GuardsEmptyArgs(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-remove-guards"
+
+	if err := Enqueue(townRoot, session, QueuedNudge{
+		Sender: "system", Message: "x", Kind: "reply-reminder",
+		OriginalFrom: "mayor/", OriginalSubject: "task",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range []struct{ kind, from, subject string }{
+		{"", "mayor/", "task"},
+		{"reply-reminder", "", "task"},
+		{"reply-reminder", "mayor/", ""},
+	} {
+		removed, err := RemoveKindByOriginal(townRoot, session, args.kind, args.from, args.subject)
+		if err != nil {
+			t.Fatalf("RemoveKindByOriginal(%v): %v", args, err)
+		}
+		if removed != 0 {
+			t.Fatalf("RemoveKindByOriginal(%v) removed = %d, want 0", args, removed)
+		}
+	}
+}
+
 // TestDeferredNudgeDeliveredAfterDelay uses a very short DeliverAfter to confirm
 // that the same nudge is skipped on first Drain and delivered on a second Drain
 // after the deadline elapses.

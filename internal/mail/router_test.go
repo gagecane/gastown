@@ -1941,6 +1941,48 @@ func TestClearReplyReminders(t *testing.T) {
 	}
 }
 
+// TestClearReplyRemindersBySubject verifies the gu-1hsu fix: a reminder
+// queued for an inbound mail is cleared when the recipient sends a "Re: ..."
+// reply via plain `gt mail send` (no --reply-to / fresh thread ID).
+func TestClearReplyRemindersBySubject(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+	sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
+
+	// One match plus three non-matches that must survive.
+	for _, n := range []nudge.QueuedNudge{
+		{Sender: "system", Kind: "reply-reminder", ThreadID: "thread-orig",
+			OriginalFrom: "mayor/", OriginalSubject: "task ready", Message: "match"},
+		{Sender: "system", Kind: "reply-reminder", ThreadID: "thread-other",
+			OriginalFrom: "witness/", OriginalSubject: "task ready", Message: "different sender"},
+		{Sender: "system", Kind: "reply-reminder", ThreadID: "thread-x",
+			OriginalFrom: "mayor/", OriginalSubject: "other topic", Message: "different subject"},
+		{Sender: "system", Kind: "mail", ThreadID: "thread-y",
+			OriginalFrom: "mayor/", OriginalSubject: "task ready", Message: "different kind"},
+	} {
+		if err := nudge.Enqueue(townRoot, sessionID, n); err != nil {
+			t.Fatalf("Enqueue(%q): %v", n.Message, err)
+		}
+	}
+
+	if err := r.ClearReplyRemindersBySubject("gastown/crew/bob", "mayor/", "Re: task ready"); err != nil {
+		t.Fatalf("ClearReplyRemindersBySubject: %v", err)
+	}
+
+	nudges, err := nudge.Drain(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 3 {
+		t.Fatalf("Drain returned %d nudges, want 3 (only matching reminder should be removed)", len(nudges))
+	}
+	for _, n := range nudges {
+		if n.Message == "match" {
+			t.Fatalf("matching reminder was not removed: %+v", n)
+		}
+	}
+}
+
 // TestEnqueueReplyReminder_SkipsReply verifies that reply-type messages do not
 // trigger a reply reminder (would be redundant noise).
 func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {

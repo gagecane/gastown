@@ -223,6 +223,18 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 			style.PrintWarning("could not clear satisfied reply reminders: %v", err)
 		}
 	}
+	// Subject-based fallback: an agent who replies as an ad-hoc
+	// `gt mail send <addr> -s "Re: <subject>"` (no --reply-to) generates a
+	// fresh thread ID, so ThreadID-based clearing won't find the queued
+	// reminder. Clear by (recipient, normalized subject) for every successful
+	// "Re:" send. See gu-1hsu.
+	if isReplySubject(mailSubject) {
+		for _, addr := range recipientAddrs {
+			if err := router.ClearReplyRemindersBySubject(from, addr, mailSubject); err != nil {
+				style.PrintWarning("could not clear satisfied reply reminders: %v", err)
+			}
+		}
+	}
 
 	// Log mail event to activity feed
 	_ = events.LogFeed(events.TypeMail, from, events.MailPayload(to, mailSubject))
@@ -243,6 +255,16 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// isReplySubject reports whether subject begins with a "Re:" prefix
+// (case-insensitive, after trimming leading whitespace).
+func isReplySubject(subject string) bool {
+	s := strings.TrimSpace(subject)
+	if len(s) < 3 {
+		return false
+	}
+	return strings.EqualFold(s[:3], "Re:")
 }
 
 // generateThreadID creates a random thread ID for new message threads.

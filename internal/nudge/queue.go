@@ -68,6 +68,12 @@ type QueuedNudge struct {
 	// DeliverAfter, if non-zero, defers delivery until this time has passed.
 	// Drain skips (but does not discard) the nudge until the deadline is met.
 	DeliverAfter time.Time `json:"deliver_after,omitempty"`
+	// OriginalFrom and OriginalSubject describe the upstream mail that
+	// motivated this nudge. Reply-reminders use them so a satisfied reply
+	// can clear them even when no thread ID is available — agents commonly
+	// send ad-hoc "Re: <subject>" mails without --reply-to. See gu-1hsu.
+	OriginalFrom    string `json:"original_from,omitempty"`
+	OriginalSubject string `json:"original_subject,omitempty"`
 }
 
 // queueDir returns the nudge queue directory for a given session.
@@ -350,6 +356,89 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 			continue
 		}
 		if n.Kind != kind || n.ThreadID != threadID {
+			continue
+		}
+
+		if err := os.Remove(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return removed, fmt.Errorf("removing queued nudge %s: %w", entry.Name(), err)
+		}
+		removed++
+	}
+
+	return removed, nil
+}
+
+// NormalizeReplySubject strips any number of leading "Re:" prefixes (any
+// case, with optional whitespace) and trims the result. Used to match a
+// satisfied reply against a queued reply-reminder when no thread ID is
+// available — agents commonly send replies as ad-hoc "Re: <subject>" mails
+// rather than via `--reply-to`. See gu-1hsu.
+func NormalizeReplySubject(s string) string {
+	s = strings.TrimSpace(s)
+	for {
+		if len(s) < 3 {
+			break
+		}
+		if strings.EqualFold(s[:3], "Re:") {
+			s = strings.TrimSpace(s[3:])
+			continue
+		}
+		break
+	}
+	return s
+}
+
+// RemoveKindByOriginal deletes queued nudges for a session that match the
+// kind, the original sender (case-insensitive), and the normalized subject
+// (with any leading "Re:" prefixes stripped). Returns the number removed.
+//
+// This is the subject-based fallback for reply-reminder clearing when an
+// agent sends a reply as an ad-hoc "Re: <subject>" mail without --reply-to,
+// so the new send carries a fresh thread ID. See gu-1hsu.
+func RemoveKindByOriginal(townRoot, session, kind, originalFrom, originalSubject string) (int, error) {
+	if kind == "" || originalFrom == "" || originalSubject == "" {
+		return 0, nil
+	}
+
+	dir := queueDir(townRoot, session)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading nudge queue: %w", err)
+	}
+
+	wantSubject := NormalizeReplySubject(originalSubject)
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return removed, fmt.Errorf("reading queued nudge %s: %w", entry.Name(), err)
+		}
+
+		var n QueuedNudge
+		if err := json.Unmarshal(data, &n); err != nil {
+			continue
+		}
+		if n.Kind != kind {
+			continue
+		}
+		if !strings.EqualFold(n.OriginalFrom, originalFrom) {
+			continue
+		}
+		if NormalizeReplySubject(n.OriginalSubject) != wantSubject {
 			continue
 		}
 

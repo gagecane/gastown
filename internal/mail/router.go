@@ -1847,12 +1847,14 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 		return // Disabled by config
 	}
 	reminder := nudge.QueuedNudge{
-		Sender:       "system",
-		Message:      fmt.Sprintf("Remember to reply to %s (subject: %q) via `gt mail send %s` — not in chat.", msg.From, msg.Subject, msg.From),
-		Priority:     nudge.PriorityNormal,
-		Kind:         "reply-reminder",
-		ThreadID:     msg.ThreadID,
-		DeliverAfter: time.Now().Add(delay),
+		Sender:          "system",
+		Message:         fmt.Sprintf("Remember to reply to %s (subject: %q) via `gt mail send %s` — not in chat.", msg.From, msg.Subject, msg.From),
+		Priority:        nudge.PriorityNormal,
+		Kind:            "reply-reminder",
+		ThreadID:        msg.ThreadID,
+		DeliverAfter:    time.Now().Add(delay),
+		OriginalFrom:    msg.From,
+		OriginalSubject: msg.Subject,
 	}
 	if err := nudge.Enqueue(r.townRoot, sessionID, reminder); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to enqueue reply reminder for %s: %v\n", sessionID, err)
@@ -1870,6 +1872,29 @@ func (r *Router) ClearReplyReminders(address, threadID string) error {
 	var firstErr error
 	for _, sessionID := range AddressToSessionIDs(address) {
 		if _, err := nudge.RemoveKindByThread(r.townRoot, sessionID, "reply-reminder", threadID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// ClearReplyRemindersBySubject removes queued reply-reminder nudges that match
+// (originalFrom, originalSubject) under the sender's session. Used when an
+// agent sends an ad-hoc "Re: <subject>" reply without --reply-to: the new
+// send has a fresh thread ID, so ThreadID-based matching cannot find the
+// reminder. Subject normalization strips any number of "Re:" prefixes.
+//
+// sender is the agent address that just sent the reply (whose nudge queue
+// holds the reminder). recipient is the address the reply was sent to —
+// this is the OriginalFrom recorded on the queued reminder. See gu-1hsu.
+func (r *Router) ClearReplyRemindersBySubject(sender, recipient, subject string) error {
+	if r.townRoot == "" || recipient == "" || subject == "" {
+		return nil
+	}
+
+	var firstErr error
+	for _, sessionID := range AddressToSessionIDs(sender) {
+		if _, err := nudge.RemoveKindByOriginal(r.townRoot, sessionID, "reply-reminder", recipient, subject); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
