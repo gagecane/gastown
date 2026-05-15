@@ -11,12 +11,55 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// patrolFormulaRequiredRole returns the role that owns a patrol formula, or
+// RoleUnknown for non-patrol formulas. Patrol formulas are pinned to a single
+// owning role: a witness can't run a deacon patrol, a polecat can't run a
+// refinery patrol, etc.
+func patrolFormulaRequiredRole(formulaName string) Role {
+	switch formulaName {
+	case constants.MolDeaconPatrol:
+		return RoleDeacon
+	case constants.MolWitnessPatrol:
+		return RoleWitness
+	case constants.MolRefineryPatrol:
+		return RoleRefinery
+	default:
+		return RoleUnknown
+	}
+}
+
+// validatePatrolFormulaTarget rejects patrol-formula slings whose resolved
+// agent target does not match the formula's owning role. Without this guard,
+// e.g. `gt sling mol-deacon-patrol gastown/polecats/furiosa` silently hooks a
+// deacon patrol onto a polecat that has no idea how to run it — the wisp's
+// formula fails to materialize (0/0 steps), the polecat stalls, and the
+// witness re-dispatches in a loop. See gs-i6u for the originating incident.
+//
+// Non-patrol formulas (mol-polecat-work, mol-evolve, user formulas) are not
+// constrained here — they may legitimately target any agent. Dog formulas
+// (mol-dog-*) are dispatched via the dog scheduler, not this code path.
+func validatePatrolFormulaTarget(formulaName, targetAgent string) error {
+	required := patrolFormulaRequiredRole(formulaName)
+	if required == RoleUnknown {
+		return nil
+	}
+	actual, _, _ := parseRoleString(targetAgent)
+	if actual == required {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to sling patrol formula %s to %q: patrol formulas may only target their owning role (require %s, got %s)",
+		formulaName, targetAgent, required, actual,
+	)
+}
 
 type wispCreateJSON struct {
 	NewEpicID string `json:"new_epic_id"`
@@ -138,15 +181,23 @@ func runSlingFormula(ctx context.Context, args []string) error {
 	delayedDogInfo := resolved.DelayedDogInfo
 	isSelfSling := resolved.IsSelfSling
 
-	fmt.Printf("%s Slinging formula %s to %s...\n", style.Bold.Render("🎯"), formulaName, targetAgent)
-
-	rollbackSpawned := func(beadID string) {
+	rollbackSpawned := func() {
 		if resolved.NewPolecatInfo == nil {
 			return
 		}
 		fmt.Printf("%s Rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), resolved.NewPolecatInfo.PolecatName)
-		rollbackSlingArtifactsFn(resolved.NewPolecatInfo, beadID, formulaWorkDir, "")
+		rollbackSlingArtifactsFn(resolved.NewPolecatInfo, "", formulaWorkDir, "")
 	}
+
+	// Reject patrol formulas slung at the wrong role before we cook a wisp or
+	// hook anything. If resolveTarget spawned a fresh polecat for what turned
+	// out to be a misrouted deacon/witness/refinery patrol, roll it back.
+	if err := validatePatrolFormulaTarget(formulaName, targetAgent); err != nil {
+		rollbackSpawned()
+		return err
+	}
+
+	fmt.Printf("%s Slinging formula %s to %s...\n", style.Bold.Render("🎯"), formulaName, targetAgent)
 
 	// Resolve working directory for bd commands (routes to correct rig beads)
 	// Fall back to townRoot (HQ beads) if no specific rig directory was determined
@@ -198,7 +249,7 @@ func runSlingFormula(ctx context.Context, args []string) error {
 		WithGTRoot(townRoot).
 		Run(); err != nil {
 		telemetry.RecordMolCook(ctx, formulaName, err)
-		rollbackSpawned("")
+		rollbackSpawned()
 		return fmt.Errorf("cooking formula: %w", err)
 	}
 	telemetry.RecordMolCook(ctx, formulaName, nil)
@@ -217,7 +268,7 @@ func runSlingFormula(ctx context.Context, args []string) error {
 		WithGTRoot(townRoot).
 		Output()
 	if err != nil {
-		rollbackSpawned("")
+		rollbackSpawned()
 		return fmt.Errorf("creating wisp: %w", err)
 	}
 
@@ -225,7 +276,7 @@ func runSlingFormula(ctx context.Context, args []string) error {
 	wispRootID, err := parseWispIDFromJSON(wispOut)
 	if err != nil {
 		telemetry.RecordMolWisp(ctx, formulaName, "", "", err)
-		rollbackSpawned("")
+		rollbackSpawned()
 		return fmt.Errorf("parsing wisp output: %w", err)
 	}
 	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, "", nil)
