@@ -148,6 +148,57 @@ exit 0
 	}
 }
 
+// TestExecuteSling_IdentityBead_RigLabel verifies that executeSling rejects
+// rig identity beads (e.g. gs-rig-gastown). These have:
+//   - id pattern: <prefix>-rig-<name>
+//   - title: just the rig name (e.g. "gastown") — does NOT match the identity
+//     title regex
+//   - issue_type: "rig"
+//   - labels: gt:rig
+//
+// Prior to gs-2j6, the auto-dispatch plugin and gt sling missed them because
+// none of the existing filters caught the rig-bead shape. Auto-dispatch slung
+// them every 3 seconds, producing zombie convoys at 0/1 progress for hours.
+func TestExecuteSling_IdentityBead_RigLabel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	bdScript := `#!/bin/sh
+case "$1" in
+  show)
+    echo '[{"title":"gastown","status":"open","assignee":"","description":"","labels":["gt:rig"],"issue_type":"rig"}]'
+    ;;
+esac
+exit 0
+`
+	writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	params := SlingParams{
+		BeadID:   "gs-rig-gastown",
+		RigName:  "testrig",
+		TownRoot: townRoot,
+	}
+
+	_, err := executeSling(params)
+	if err == nil {
+		t.Fatal("expected error when slinging rig identity bead, got nil")
+	}
+	if !strings.Contains(err.Error(), "identity/system bead") {
+		t.Errorf("error should mention identity bead: %v", err)
+	}
+}
+
 // TestExecuteSling_RealTaskDispatches verifies the negative case: a real task
 // bead (open status, no gt:agent label, plain title) is NOT mistakenly
 // classified as an identity bead. We stop checking the outcome once dispatch

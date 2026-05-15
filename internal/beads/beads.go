@@ -382,9 +382,11 @@ func IsIdentityBeadTitle(title string) bool {
 // dispatch, deferred scheduler). Matches any of:
 //
 //  1. label "gt:agent" (explicit identity marker)
-//  2. legacy issue_type == "agent" (pre-migration beads)
-//  3. status == "closed" (closed beads must never dispatch)
-//  4. title matches identity/system naming convention (polecat/refinery/
+//  2. label "gt:rig" (rig identity bead, e.g. gs-rig-gastown — gs-2j6)
+//  3. label "gt:role" (role definition bead, e.g. hq-crew-role)
+//  4. legacy issue_type == "agent" / "rig" / "role" (pre-migration / typed beads)
+//  5. status == "closed" (closed beads must never dispatch)
+//  6. title matches identity/system naming convention (polecat/refinery/
 //     witness/deacon/mayor/crew beads)
 //
 // The title regex is defense-in-depth: labels and status are often stale in
@@ -401,25 +403,43 @@ func IsIdentityBead(issue *Issue) bool {
 	if IsAgentBead(issue) {
 		return true
 	}
+	if issue.Type == "rig" || issue.Type == "role" {
+		return true
+	}
 	if issue.Status == "closed" {
 		return true
 	}
-	return IsIdentityBeadTitle(issue.Title)
+	return IsIdentityBeadFieldsLabels(issue.Labels) || IsIdentityBeadTitle(issue.Title)
 }
 
 // IsIdentityBeadFields is the fields-based variant of IsIdentityBead. Callers
 // that have decomposed title/status/labels (e.g. convoy tracked issues or
 // cmd/sling beadInfo) use this to avoid constructing a full Issue.
 func IsIdentityBeadFields(title, status string, labels []string) bool {
-	for _, l := range labels {
-		if l == "gt:agent" {
-			return true
-		}
+	if IsIdentityBeadFieldsLabels(labels) {
+		return true
 	}
 	if status == "closed" {
 		return true
 	}
 	return IsIdentityBeadTitle(title)
+}
+
+// IsIdentityBeadFieldsLabels reports whether any label marks the bead as an
+// identity/system bead. Covers the three label families that gate dispatch:
+//
+//   - gt:agent — polecat/witness/refinery/mayor/dog state beads
+//   - gt:rig   — rig identity beads (gs-2j6: auto-dispatch was slinging these
+//     because none of the prior signals matched their pattern)
+//   - gt:role  — role definition beads (e.g. hq-crew-role)
+func IsIdentityBeadFieldsLabels(labels []string) bool {
+	for _, l := range labels {
+		switch l {
+		case "gt:agent", "gt:rig", "gt:role":
+			return true
+		}
+	}
+	return false
 }
 
 // IsProtectedBead checks if a bead has any protection labels that should

@@ -172,8 +172,10 @@ func isAgentBead(info *beadInfo) bool {
 // isIdentityBeadInfo is the beadInfo-backed dispatch filter. It mirrors
 // beads.IsIdentityBead for the compact status/title/labels shape used by
 // sling's bd-show wrapper. Returns true when the bead is an agent identity
-// bead (label gt:agent OR legacy issue_type=agent), is closed, or has a title
-// matching the identity naming convention (^<prefix>-.+-(polecat-.+|refinery)$).
+// bead (label gt:agent OR legacy issue_type=agent), a rig identity bead
+// (label gt:rig OR issue_type=rig — gs-2j6), a role definition bead
+// (label gt:role OR issue_type=role), is closed, or has a title matching
+// the identity naming convention (^<prefix>-.+-(polecat-.+|refinery)$).
 //
 // Every dispatch path (runSling, executeSling, scheduleBead) consults this
 // helper to guarantee identity beads never hook a polecat. This closes the
@@ -184,6 +186,12 @@ func isIdentityBeadInfo(info *beadInfo) bool {
 		return false
 	}
 	if isAgentBead(info) {
+		return true
+	}
+	if info.IssueType == "rig" || info.IssueType == "role" {
+		return true
+	}
+	if beads.IsIdentityBeadFieldsLabels(info.Labels) {
 		return true
 	}
 	if info.Status == "closed" {

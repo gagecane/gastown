@@ -3325,6 +3325,15 @@ func TestIsIdentityBeadFields(t *testing.T) {
 		{"empty title does not match", "", "open", nil, false},
 		{"refinery without rig prefix does not match", "refinery", "open", nil, false},
 
+		// Rig identity beads (gs-2j6). Title is just the rig name, so the
+		// title regex above does not match — must be caught by the gt:rig label.
+		{"gt:rig label", "gastown", "open", []string{"gt:rig"}, true},
+		{"gt:rig among others", "lia_web", "open", []string{"priority-high", "gt:rig"}, true},
+		{"gt:rigid does not match", "any", "open", []string{"gt:rigid"}, false},
+
+		// Role definition beads.
+		{"gt:role label", "crew", "open", []string{"gt:role"}, true},
+
 		// Combined / none
 		{"real task bead not identity", "Fix bug in parser", "open", []string{"priority-high"}, false},
 		{"all three criteria together", "af-agentforge-polecat-quartz", "closed", []string{"gt:agent"}, true},
@@ -3379,6 +3388,22 @@ func TestIsIdentityBead(t *testing.T) {
 		{
 			name:  "refinery title regex",
 			issue: &Issue{Title: "cadk-casc_cdk-refinery", Status: "open", Type: "task"},
+			want:  true,
+		},
+		// Rig identity beads (gs-2j6).
+		{
+			name:  "rig identity by gt:rig label",
+			issue: &Issue{Title: "gastown", Status: "open", Type: "rig", Labels: []string{"gt:rig"}},
+			want:  true,
+		},
+		{
+			name:  "rig identity by type alone",
+			issue: &Issue{Title: "lia_iac", Status: "open", Type: "rig"},
+			want:  true,
+		},
+		{
+			name:  "role definition bead",
+			issue: &Issue{Title: "crew", Status: "open", Type: "role", Labels: []string{"gt:role"}},
 			want:  true,
 		},
 	}

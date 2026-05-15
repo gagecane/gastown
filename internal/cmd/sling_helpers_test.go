@@ -311,9 +311,20 @@ func TestIsIdentityBeadInfo(t *testing.T) {
 		{"label + closed", &beadInfo{Title: "any", Status: "closed", Labels: []string{"gt:agent"}}, true},
 		{"all three criteria", &beadInfo{Title: "af-agentforge-polecat-quartz", Status: "closed", Labels: []string{"gt:agent"}, IssueType: "agent"}, true},
 
+		// Rig identity beads (gs-2j6). Title is just the rig name, which the
+		// identity title regex does not match — must be caught by label/type.
+		{"gt:rig label", &beadInfo{Title: "gastown", Status: "open", IssueType: "rig", Labels: []string{"gt:rig"}}, true},
+		{"rig type alone", &beadInfo{Title: "lia_web", Status: "open", IssueType: "rig"}, true},
+		{"gt:rig label, missing type", &beadInfo{Title: "lia_iac", Status: "open", IssueType: "task", Labels: []string{"gt:rig"}}, true},
+
+		// Role definition beads.
+		{"gt:role label", &beadInfo{Title: "crew", Status: "open", IssueType: "role", Labels: []string{"gt:role"}}, true},
+		{"role type alone", &beadInfo{Title: "deacon", Status: "open", IssueType: "role"}, true},
+
 		// Near misses.
 		{"title has refinery mid-string but not at end", &beadInfo{Title: "af-refinery-feature-work", Status: "open", IssueType: "task"}, false},
 		{"label looks like agent but is not", &beadInfo{Title: "Regular work", Status: "open", Labels: []string{"gt:agentless"}}, false},
+		{"label looks like rig but is not", &beadInfo{Title: "Regular work", Status: "open", Labels: []string{"gt:rigid"}}, false},
 	}
 
 	for _, tt := range tests {
