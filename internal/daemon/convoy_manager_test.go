@@ -2446,3 +2446,250 @@ func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
 		})
 	}
 }
+
+// TestFeedFirstReady_PerIssueCooldown_SkipsRepeat verifies that a ready issue
+// slung within feedDispatchCooldown is skipped on the next scan even though
+// `gt convoy stranded` still reports it as ready. This is the gu-iygf fix:
+// in_progress beads with a dead assignee no longer hot-loop every scan tick.
+func TestFeedFirstReady_PerIssueCooldown_SkipsRepeat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	// First call: dispatches gt-loop1.
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Hot Loop",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-loop1"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log after first feed: %v", err)
+	}
+	if !strings.Contains(string(data), "gt-loop1") {
+		t.Fatalf("expected first call to dispatch gt-loop1, got: %q", data)
+	}
+	firstSize := len(data)
+
+	// Second call (immediately): cooldown should suppress re-dispatch.
+	logged = nil
+	m.feedFirstReady(c)
+
+	data2, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log after second feed: %v", err)
+	}
+	if len(data2) != firstSize {
+		t.Errorf("expected no new sling call within cooldown, got: %q", data2)
+	}
+
+	cooldownLogged := false
+	for _, s := range logged {
+		if strings.Contains(s, "feed cooldown") && strings.Contains(s, "gt-loop1") {
+			cooldownLogged = true
+			break
+		}
+	}
+	if !cooldownLogged {
+		t.Errorf("expected 'feed cooldown' log for gt-loop1, got: %v", logged)
+	}
+}
+
+// TestFeedFirstReady_CooldownExpires_AllowsRedispatch verifies that once the
+// cooldown window passes, a ready issue is slung again. Uses an injectable
+// clock to avoid waiting feedDispatchCooldown in real time.
+func TestFeedFirstReady_CooldownExpires_AllowsRedispatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Drive the clock manually.
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Cooldown Expires",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-expire1"},
+	}
+
+	m.feedFirstReady(c) // first dispatch
+	current = current.Add(feedDispatchCooldown + time.Second)
+	m.feedFirstReady(c) // cooldown elapsed
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	count := strings.Count(string(data), "gt-expire1")
+	if count != 2 {
+		t.Errorf("expected 2 dispatches across cooldown boundary, got %d: %q", count, data)
+	}
+}
+
+// TestFeedFirstReady_CooldownPerIssue verifies that the cooldown is per-issue,
+// not global: an unrelated issue may still be dispatched while another is in
+// cooldown.
+func TestFeedFirstReady_CooldownPerIssue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	// First convoy: dispatches gt-a (puts gt-a in cooldown).
+	m.feedFirstReady(strandedConvoyInfo{
+		ID: "hq-cv1", Title: "A", ReadyCount: 1, ReadyIssues: []string{"gt-a"},
+	})
+	// Second convoy: gt-a still in cooldown but gt-b is fresh — gt-b dispatches.
+	m.feedFirstReady(strandedConvoyInfo{
+		ID: "hq-cv2", Title: "AB", ReadyCount: 2, ReadyIssues: []string{"gt-a", "gt-b"},
+	})
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	content := string(data)
+	if strings.Count(content, "gt-a") != 1 {
+		t.Errorf("expected gt-a slung exactly once (cooldown), got: %q", content)
+	}
+	if !strings.Contains(content, "gt-b") {
+		t.Errorf("expected gt-b dispatch (fresh issue, no cooldown), got: %q", content)
+	}
+}
+
+// TestFeedFirstReady_FailedSling_StillCoolsDown verifies the cooldown is
+// recorded even when the sling subprocess exits non-zero. The recurring
+// failure mode in gu-iygf was a sling that kept failing every ~2 minutes;
+// the cooldown must apply to failed attempts too, otherwise we'd retry
+// forever on every tick.
+func TestFeedFirstReady_FailedSling_StillCoolsDown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	// Sling always fails — simulates the dead-polecat in_progress retry loop.
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  echo "boom" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Fail Loop", ReadyCount: 1, ReadyIssues: []string{"gt-fail-loop"},
+	}
+	m.feedFirstReady(c)
+	m.feedFirstReady(c)
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if got := strings.Count(string(data), "gt-fail-loop"); got != 1 {
+		t.Errorf("expected exactly 1 sling attempt under cooldown despite failure, got %d: %q", got, data)
+	}
+}

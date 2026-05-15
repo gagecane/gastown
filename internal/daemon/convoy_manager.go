@@ -30,6 +30,14 @@ const (
 	// auto-close. This prevents a race where the daemon's stranded scan
 	// fires before the sling's bd dep add is visible in Dolt. See GH#2303.
 	convoyGracePeriod = 5 * time.Minute
+
+	// feedDispatchCooldown is the minimum time between sling attempts for the
+	// same ready issue from the stranded scan. Without it, a bead that is
+	// in_progress to a dead polecat is re-slung every scan tick (~30s) — and
+	// if the new polecat also dies quickly (or sling itself fails), the loop
+	// repeats indefinitely, creating spawn storms and pummelling Dolt with
+	// repeated assignment writes. See gu-iygf / hq/gt-sfo6q.
+	feedDispatchCooldown = 5 * time.Minute
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -112,6 +120,16 @@ type ConvoyManager struct {
 	// been handled. This allows the 1s overlap window above without replaying
 	// the same lifecycle events on every poll.
 	processedLifecycleEvents sync.Map // map[string]bool
+
+	// lastFeedAttempt tracks the most recent sling attempt time per ready
+	// issue ID. Entries older than feedDispatchCooldown are ignored (and
+	// overwritten on the next attempt). Used to suppress hot-loop re-slings
+	// of the same in_progress bead with a dead assignee. See gu-iygf.
+	lastFeedAttempt sync.Map // map[string]time.Time
+
+	// now returns the current time. Overridable for tests; defaults to
+	// time.Now. Only used by the feed-cooldown logic.
+	now func() time.Time
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -140,6 +158,7 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		openStores:   openStores,
 		isRigParked:  isRigParked,
 		gtPath:       gtPath,
+		now:          time.Now,
 	}
 }
 
@@ -558,7 +577,23 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		// Per-issue dispatch cooldown (gu-iygf). A bead that's in_progress to
+		// a dead polecat reappears in `gt convoy stranded` every scan tick.
+		// Re-slinging on every tick produces a spawn storm when sling itself
+		// fails or the new polecat dies fast. Skip this issue (try the next
+		// ready one) if we slung it within feedDispatchCooldown.
+		if m.inFeedCooldown(issueID) {
+			m.logger("Convoy %s: %s in feed cooldown, skipping", c.ID, issueID)
+			continue
+		}
+
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
+
+		// Record the attempt before invoking sling so a hung/slow sling still
+		// counts toward cooldown. Failures intentionally also occupy the
+		// cooldown window — repeating an immediately-failing sling every tick
+		// is exactly the loop we're suppressing.
+		m.recordFeedAttempt(issueID)
 
 		slingArgs := []string{"sling", issueID, rig, "--no-boot"}
 		if c.BaseBranch != "" {
@@ -608,6 +643,35 @@ func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	if err := cmd.Run(); err != nil {
 		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(stderr.String()))
 	}
+}
+
+// inFeedCooldown reports whether issueID was slung within feedDispatchCooldown.
+// Stale entries (older than the cooldown) are pruned in place to bound the
+// lastFeedAttempt map. See gu-iygf.
+func (m *ConvoyManager) inFeedCooldown(issueID string) bool {
+	v, ok := m.lastFeedAttempt.Load(issueID)
+	if !ok {
+		return false
+	}
+	last, ok := v.(time.Time)
+	if !ok {
+		m.lastFeedAttempt.Delete(issueID)
+		return false
+	}
+	if m.now().Sub(last) < feedDispatchCooldown {
+		return true
+	}
+	// Cooldown expired — drop the entry so the map doesn't grow unbounded
+	// across an infinite stream of one-shot issue IDs. The entry will be
+	// rewritten by recordFeedAttempt on the next dispatch.
+	m.lastFeedAttempt.Delete(issueID)
+	return false
+}
+
+// recordFeedAttempt stamps issueID with the current time so subsequent scans
+// within feedDispatchCooldown skip it. See gu-iygf.
+func (m *ConvoyManager) recordFeedAttempt(issueID string) {
+	m.lastFeedAttempt.Store(issueID, m.now())
 }
 
 // runStartupSweep runs one convoy check pass after a brief delay to catch
