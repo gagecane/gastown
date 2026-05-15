@@ -204,6 +204,50 @@ func containsHelper(s, substr string) bool {
 	return false
 }
 
+// TestClosePluginReceiptsQueriesWispsTables verifies that ClosePluginReceipts
+// targets the wisps/wisp_labels tables, not issues/labels. Patrol-receipt
+// wisps (RESTART_POLECAT, stuck-agent-dog, dolt-backup, mol-dog-*) live in
+// the wisps table; the previous implementation queried issues/labels and
+// matched nothing, letting receipts accumulate past the alert threshold
+// (gs-g9k).
+func TestClosePluginReceiptsQueriesWispsTables(t *testing.T) {
+	sourcePath := "reaper.go"
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sourcePath, err)
+	}
+	source := string(data)
+
+	start := strings.Index(source, "func ClosePluginReceipts(")
+	if start == -1 {
+		t.Fatalf("could not find ClosePluginReceipts in %s", sourcePath)
+	}
+	end := strings.Index(source[start:], "\nfunc ")
+	if end == -1 {
+		end = len(source) - start
+	}
+	body := source[start : start+end]
+
+	if !strings.Contains(body, "FROM wisps w") {
+		t.Errorf("ClosePluginReceipts must SELECT FROM wisps (patrol receipts live there), got:\n%s", body)
+	}
+	if !strings.Contains(body, "wisp_labels") {
+		t.Errorf("ClosePluginReceipts must JOIN wisp_labels, got:\n%s", body)
+	}
+	if strings.Contains(body, ".issues i") || strings.Contains(body, "FROM `") {
+		t.Errorf("ClosePluginReceipts must not query the issues table or use db-qualified tables, got:\n%s", body)
+	}
+	if !strings.Contains(body, "'type:plugin-run'") {
+		t.Errorf("ClosePluginReceipts must filter by 'type:plugin-run' label, got:\n%s", body)
+	}
+	if !strings.Contains(body, "UPDATE wisps SET status='closed'") {
+		t.Errorf("ClosePluginReceipts must UPDATE wisps, got:\n%s", body)
+	}
+	if !strings.Contains(body, "w.issue_type != 'agent'") {
+		t.Errorf("ClosePluginReceipts must exclude agent beads, got:\n%s", body)
+	}
+}
+
 // TestReapExcludesAgentBeads verifies that the Reap function excludes agent beads
 // from being closed, regardless of their age. This is a regression test for the bug
 // where the wisp reaper was closing agent beads (hq-mayor, hq-deacon, witness, refinery,

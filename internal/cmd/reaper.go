@@ -35,10 +35,11 @@ formula. They execute SQL operations but leave eligibility decisions to the
 Dog agent or daemon orchestrator.
 
 When run by a Dog:
-  gt reaper scan --db=gastown          # Discover candidates
-  gt reaper reap --db=gastown          # Close stale wisps
-  gt reaper purge --db=gastown         # Delete old closed wisps + mail
-  gt reaper auto-close --db=gastown    # Close stale issues`,
+  gt reaper scan --db=gastown                  # Discover candidates
+  gt reaper reap --db=gastown                  # Close stale wisps
+  gt reaper purge --db=gastown                 # Delete old closed wisps + mail
+  gt reaper auto-close --db=gastown            # Close stale issues
+  gt reaper close-plugin-receipts --db=gastown # Close stale plugin-run wisps (fast-track)`,
 	RunE: requireSubcommand,
 }
 
@@ -607,6 +608,99 @@ Use --dry-run to preview closures without applying them.`,
 	},
 }
 
+var reaperPluginReceiptAge string
+
+var reaperClosePluginReceiptsCmd = &cobra.Command{
+	Use:   "close-plugin-receipts",
+	Short: "Close stale plugin-run receipt wisps",
+	Long: `Close open wisps labeled "type:plugin-run" older than --max-age.
+
+These are transient run receipts created by deacon dog plugins and patrol
+scripts (RESTART_POLECAT, stuck-agent-dog, dolt-backup, mol-dog-*, etc.).
+They exist only for audit/cooldown-gate purposes and should be closed
+shortly after creation. The standard reap path uses 24h max_age, which
+lets receipts accumulate past the alert_threshold during normal-volume
+daemon activity (gs-g9k).
+
+Operates on the wisps/wisp_labels tables.
+
+When --db is provided, operates on a single database. When omitted,
+auto-discovers all databases on the Dolt server.
+
+Use --dry-run to preview closures without applying them.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		maxAge, err := time.ParseDuration(reaperPluginReceiptAge)
+		if err != nil {
+			return fmt.Errorf("invalid --max-age: %w", err)
+		}
+
+		databases := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		if reaperDB != "" {
+			databases = strings.Split(reaperDB, ",")
+		}
+
+		var results []*reaper.ClosePluginReceiptResult
+		for _, dbName := range databases {
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				continue
+			}
+
+			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				continue
+			}
+
+			if ok, err := reaper.HasReaperSchema(db); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
+				db.Close()
+				continue
+			} else if !ok {
+				db.Close()
+				continue
+			}
+
+			result, err := reaper.ClosePluginReceipts(db, dbName, maxAge, reaperDryRun)
+			db.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: close-plugin-receipts error: %v\n", dbName, err)
+				continue
+			}
+			results = append(results, result)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(results))
+		} else {
+			var totalClosed int
+			for _, r := range results {
+				prefix := ""
+				verb := "closed"
+				if r.DryRun {
+					prefix = "[DRY RUN] would "
+					verb = "close"
+				}
+				fmt.Printf("%s: %s%s %d plugin-run receipt(s)\n",
+					r.Database, prefix, verb, r.Closed)
+				for _, a := range r.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+				totalClosed += r.Closed
+			}
+			if len(results) > 1 {
+				prefix := ""
+				if reaperDryRun {
+					prefix = "[DRY RUN] "
+				}
+				fmt.Printf("\n%sClose-plugin-receipts summary (%d databases): closed %d\n",
+					prefix, len(results), totalClosed)
+			}
+		}
+		return nil
+	},
+}
+
 var reaperRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run full reaper cycle across all databases",
@@ -783,7 +877,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -791,9 +885,11 @@ func init() {
 	}
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
+
+	reaperClosePluginReceiptsCmd.Flags().StringVar(&reaperPluginReceiptAge, "max-age", "1h", "Max plugin-receipt age before closing")
 
 	// Threshold flags
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperRunCmd} {
@@ -822,6 +918,7 @@ func init() {
 	reaperCmd.AddCommand(reaperAutoCloseCmd)
 	reaperCmd.AddCommand(reaperReapHookedMailCmd)
 	reaperCmd.AddCommand(reaperReapOpenMailCmd)
+	reaperCmd.AddCommand(reaperClosePluginReceiptsCmd)
 	reaperCmd.AddCommand(reaperRunCmd)
 
 	rootCmd.AddCommand(reaperCmd)

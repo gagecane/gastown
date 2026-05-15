@@ -112,9 +112,44 @@ log a warning and consider escalating.
 **Exit criteria:** All stale wisps closed (or dry-run counts reported)."""
 
 [[steps]]
+id = "close-plugin-receipts"
+title = "Fast-track close plugin-run receipt wisps (gs-g9k)"
+needs = ["reap"]
+description = """
+Close transient plugin-run receipt wisps past the fast-track TTL.
+
+Context: Daemon dog plugins and patrol scripts (RESTART_POLECAT,
+stuck-agent-dog, dolt-backup, mol-dog-*, etc.) create wisps labeled
+`type:plugin-run` to record successful or no-op runs. The standard reap
+step closes these after 24h, but at ~13 receipts/h × 24h the open-wisp
+count can drift past {{alert_threshold}} during normal operation. This
+step closes them after {{plugin_receipt_age}} (default 1h), matching the
+fast-track path the daemon's inline fallback already uses.
+
+**1. For each database:**
+```bash
+gt reaper close-plugin-receipts --db=<name> --port={{dolt_port}} \\
+  --max-age={{plugin_receipt_age}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**2. Inspect results:**
+- If closed count is large (e.g., >500 in one cycle), a receipt-producer
+  may have spiked — note it but do not escalate; the close itself is the
+  remedy.
+- The Reap step (24h max_age) is a safety net for any receipts that lack
+  the `type:plugin-run` label.
+
+**Exclusions:**
+- Agent heartbeat wisps (issue_type='agent') — never closed by this step
+- Wisps without the `type:plugin-run` label — handled by the reap step
+
+**Exit criteria:** Stale plugin-run receipts closed."""
+
+[[steps]]
 id = "purge"
 title = "Purge old closed wisps and mail"
-needs = ["reap"]
+needs = ["close-plugin-receipts"]
 description = """
 Delete closed wisps past purge_age and closed mail past mail_delete_age.
 
@@ -265,6 +300,10 @@ default = "24h"
 [vars.purge_age]
 description = "Max closed wisp age before purging (e.g., '168h' = 7 days)"
 default = "168h"
+
+[vars.plugin_receipt_age]
+description = "Max plugin-run receipt age before fast-track close (gs-g9k; default 1h)"
+default = "1h"
 
 [vars.stale_issue_age]
 description = "Max issue staleness before auto-close (e.g., '720h' = 30 days)"

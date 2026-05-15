@@ -772,11 +772,18 @@ type ClosePluginReceiptResult struct {
 	Anomalies []Anomaly `json:"anomalies,omitempty"`
 }
 
-// ClosePluginReceipts closes open issues labeled "type:plugin-run" that are
+// ClosePluginReceipts closes open wisps labeled "type:plugin-run" that are
 // older than maxAge. These are transient run receipts created by deacon dog
-// plugins; they should be closed shortly after creation since they exist only
-// for audit/cooldown-gate purposes. The standard AutoClose path requires 7 days
-// of staleness, which lets plugin receipts accumulate into the hundreds.
+// plugins and patrol scripts (RESTART_POLECAT, stuck-agent-dog, dolt-backup,
+// mol-dog-*, etc.); they should be closed shortly after creation since they
+// exist only for audit/cooldown-gate purposes. The standard reap path uses
+// 24h max_age, which lets receipts accumulate past the alert_threshold
+// during normal-volume daemon activity (gs-g9k).
+//
+// Patrol receipts live in the wisps table (not issues), so this function
+// queries wisps/wisp_labels. Agent beads (issue_type='agent') are excluded
+// for symmetry with Reap(), even though receipts are not expected to use
+// that issue_type.
 func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
 	defer cancel()
@@ -784,13 +791,14 @@ func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun
 	cutoff := time.Now().UTC().Add(-maxAge)
 	result := &ClosePluginReceiptResult{Database: dbName, DryRun: dryRun}
 
-	// Find open issues with the "type:plugin-run" label older than maxAge.
-	selectQuery := fmt.Sprintf(`
-		SELECT i.id FROM `+"`%s`"+`.issues i
-		INNER JOIN `+"`%s`"+`.labels l ON i.id = l.issue_id
-		WHERE i.status IN ('open', 'in_progress')
-		AND l.label = 'type:plugin-run'
-		AND i.created_at < ?`, dbName, dbName)
+	// Find open wisps with the "type:plugin-run" label older than maxAge.
+	selectQuery := `
+		SELECT w.id FROM wisps w
+		INNER JOIN wisp_labels wl ON w.id = wl.issue_id
+		WHERE w.status IN ('open', 'hooked', 'in_progress')
+		AND wl.label = 'type:plugin-run'
+		AND w.issue_type != 'agent'
+		AND w.created_at < ?`
 
 	rows, err := db.QueryContext(ctx, selectQuery, cutoff)
 	if err != nil {
@@ -829,8 +837,8 @@ func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun
 		args[i] = id
 	}
 	updateQuery := fmt.Sprintf(
-		"UPDATE `%s`.issues SET status = 'closed', closed_at = NOW() WHERE id IN (%s)",
-		dbName, strings.Join(placeholders, ","))
+		"UPDATE wisps SET status='closed', closed_at=NOW() WHERE id IN (%s)",
+		strings.Join(placeholders, ","))
 	if _, err := db.ExecContext(ctx, updateQuery, args...); err != nil {
 		return nil, fmt.Errorf("close plugin receipts: %w", err)
 	}
