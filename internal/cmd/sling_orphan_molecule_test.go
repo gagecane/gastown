@@ -75,6 +75,34 @@ func TestIsOrphanMolecule_TableDriven(t *testing.T) {
 			deadFn:   func(string) bool { return true },
 			expected: true,
 		},
+		// gu-koi7: operator workaround `bd update --assignee none` stores the
+		// literal string "none". Without normalization, isHookedAgentDeadFn("none")
+		// returns false (unknown format), so the bead would refuse re-sling.
+		// Status=open is itself sufficient to declare the molecule orphan.
+		{
+			name:     "open, assignee=none — operator reset workaround (gu-koi7)",
+			info:     &beadInfo{Status: "open", Assignee: "none"},
+			deadFn:   func(string) bool { return false },
+			expected: true,
+		},
+		{
+			name:     "open, assignee=NONE (case) — operator reset workaround (gu-koi7)",
+			info:     &beadInfo{Status: "open", Assignee: "NONE"},
+			deadFn:   func(string) bool { return false },
+			expected: true,
+		},
+		{
+			name:     "open, stale assignee from prior dead polecat — gu-koi7",
+			info:     &beadInfo{Status: "open", Assignee: "rig/polecats/dead"},
+			deadFn:   func(string) bool { return false }, // even if not detected dead
+			expected: true,
+		},
+		{
+			name:     "in_progress, assignee=none — sentinel honored",
+			info:     &beadInfo{Status: "in_progress", Assignee: "none"},
+			deadFn:   func(string) bool { return false },
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {

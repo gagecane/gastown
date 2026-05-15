@@ -399,10 +399,15 @@ func workflowStepTargetFromDescription(description, targetRig string) string {
 // to gate the auto-burn path that lets sling self-heal from stale state.
 //
 // A molecule is treated as orphaned when:
-//   - the bead has no assignee but is in an active status (open/in_progress)
-//     or stuck in `hooked` with no assignee — the latter covers gh-3697,
-//     where one orphan wisp would otherwise wedge every subsequent sling
-//     to the rig with "bead already has N attached molecule(s)"; or
+//   - the bead has status `open` — semantically "no live worker owns this",
+//     regardless of any stale assignee value. Covers gu-koi7, where the
+//     operator workaround `bd update --assignee none` left the literal
+//     string "none" in the assignee field, defeating the empty-string and
+//     dead-session checks below;
+//   - the bead has no (or sentinel) assignee and is in_progress, or stuck
+//     in `hooked` with no assignee — the latter covers gh-3697, where one
+//     orphan wisp would otherwise wedge every subsequent sling to the rig
+//     with "bead already has N attached molecule(s)"; or
 //   - the bead has an assignee but that assignee's tmux session is dead.
 //
 // `closed` and `blocked` deliberately fall through to the refuse path:
@@ -412,14 +417,35 @@ func isOrphanMolecule(info *beadInfo) bool {
 	if info == nil {
 		return false
 	}
-	if info.Assignee == "" {
+	// status=open means the bead is awaiting dispatch — by definition no live
+	// worker owns it, so any attached molecule is stale. This path covers
+	// operator/witness reset-to-open flows even when the assignee field still
+	// carries a stale value (empty, "none", or a dead agent address).
+	if info.Status == "open" {
+		return true
+	}
+	if isEmptyAssignee(info.Assignee) {
 		switch info.Status {
-		case "open", "in_progress", "hooked":
+		case "in_progress", "hooked":
 			return true
 		}
 		return false
 	}
 	return isHookedAgentDeadFn(info.Assignee)
+}
+
+// isEmptyAssignee reports whether the assignee field is unset. Treats the
+// literal sentinel "none" as empty: the operator workaround for clearing an
+// assignee was `bd update --assignee none`, which stores the string "none"
+// rather than clearing the field. Without this normalization, dispatch paths
+// (sling auto-burn, dead-session detection) read "none" as a real address
+// and fail to recognize the bead as unassigned.
+func isEmptyAssignee(assignee string) bool {
+	switch strings.ToLower(strings.TrimSpace(assignee)) {
+	case "", "none":
+		return true
+	}
+	return false
 }
 
 // collectExistingMolecules returns all molecule wisp IDs attached to a bead.

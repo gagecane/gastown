@@ -277,12 +277,12 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	if params.FormulaName != "" {
 		existingMolecules := collectExistingMolecules(info)
 		if len(existingMolecules) > 0 {
-			// Auto-burn when bead is unassigned (molecules are definitionally stale),
-			// or when the assigned agent's session is dead. This unblocks the daemon's
-			// stranded convoy scan which never passes --force.
-			stale := params.Force ||
-				(info.Assignee == "" && (info.Status == "open" || info.Status == "in_progress")) ||
-				(info.Assignee != "" && isHookedAgentDeadFn(info.Assignee))
+			// Auto-burn when --force, or when isOrphanMolecule decides the
+			// attached molecule is no longer owned by a live worker (status=open,
+			// unassigned + active status, or assignee with a dead tmux session).
+			// This unblocks the daemon's stranded convoy scan which never passes
+			// --force, and the operator reset-to-open recovery path (gu-koi7).
+			stale := params.Force || isOrphanMolecule(info)
 			if stale {
 				fmt.Printf("  %s Burning %d stale molecule(s): %s\n",
 					style.Warning.Render("⚠"), len(existingMolecules), strings.Join(existingMolecules, ", "))
