@@ -71,6 +71,9 @@ type RoleData struct {
 	DeaconSession   string   // e.g., "gt-ai-deacon" - dynamic deacon session name
 	WitnessSession  string   // e.g., "ta-witness" - tmux session name for this rig's witness
 	RefinerySession string   // e.g., "ta-refinery" - tmux session name for this rig's refinery
+	IsForkRig       bool     // true when upstream_url != "" (rig is a fork of an upstream)
+	UpstreamURL     string   // upstream repo URL when IsForkRig is true
+
 }
 
 // SpawnData contains information for spawn assignment messages.
