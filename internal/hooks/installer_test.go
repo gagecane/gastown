@@ -280,7 +280,6 @@ func TestOpenCodeTemplateUsesHookModeAndCompoundRoles(t *testing.T) {
 		"GT_HOOK_SOURCE=",
 		"GT_SESSION_ID=",
 		`parts[1] === "polecats"`,
-		"mail check --inject",
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("OpenCode template missing %q", want)
@@ -288,6 +287,9 @@ func TestOpenCodeTemplateUsesHookModeAndCompoundRoles(t *testing.T) {
 	}
 	if strings.Contains(s, "{{GT_BIN}}") {
 		t.Fatal("OpenCode template contains unresolved {{GT_BIN}}")
+	}
+	if strings.Contains(s, "mail check --inject") {
+		t.Fatal("OpenCode template should not duplicate startup mail injection")
 	}
 }
 

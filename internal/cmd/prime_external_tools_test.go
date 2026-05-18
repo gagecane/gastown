@@ -85,7 +85,7 @@ esac
 `)
 
 	start := time.Now()
-	output := captureStdout(t, func() { runPrimeExternalTools(workDir) })
+	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RolePolecat}, workDir) })
 	assertElapsedUnder(t, time.Since(start), time.Second)
 	assertPrimeToolCalled(t, "bd:prime")
 	assertPrimeToolCalled(t, "bd:kv list --json")
@@ -122,7 +122,7 @@ esac
 	t.Setenv("PRIME_CHILD_SURVIVED", survivedPath)
 
 	start := time.Now()
-	output := captureStdout(t, func() { runPrimeExternalTools(workDir) })
+	output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: RolePolecat}, workDir) })
 	assertElapsedUnder(t, time.Since(start), time.Second)
 	assertPrimeToolCalled(t, "bd:prime")
 	assertPrimeToolCalled(t, "bd:kv list --json")
@@ -143,6 +143,37 @@ esac
 		t.Fatalf("child process survived command timeout and wrote %s", survivedPath)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("check survived marker: %v", err)
+	}
+}
+
+func TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles(t *testing.T) {
+	for _, role := range []string{string(RoleWitness), string(RoleRefinery), string(RoleDeacon), string(RoleBoot)} {
+		t.Run(role, func(t *testing.T) {
+			workDir := setupPrimeExternalToolTest(t, `
+case "$*" in
+  "prime") printf '%s\n' 'BD PRIME OUTPUT'; exit 0 ;;
+  "kv list --json") printf '%s\n' '{}'; exit 0 ;;
+esac
+`, `
+case "$*" in
+  "mail check --inject") printf '%s\n' 'MAIL OUTPUT'; exit 0 ;;
+esac
+`)
+
+			output := captureStdout(t, func() { runPrimeExternalTools(RoleContext{Role: Role(role)}, workDir) })
+			assertPrimeToolCalled(t, "bd:prime")
+			assertPrimeToolCalled(t, "bd:kv list --json")
+			logData, err := os.ReadFile(os.Getenv("PRIME_TOOL_CALL_LOG"))
+			if err != nil {
+				t.Fatalf("read call log: %v", err)
+			}
+			if strings.Contains(string(logData), "gt:mail check --inject") {
+				t.Fatalf("patrol role %s should not run startup mail check:\n%s", role, string(logData))
+			}
+			if strings.Contains(output, "MAIL OUTPUT") {
+				t.Fatalf("patrol role %s injected mail output: %q", role, output)
+			}
+		})
 	}
 }
 

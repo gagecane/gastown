@@ -227,7 +227,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 	outputMoleculeContext(ctx)
 	outputCheckpointContext(ctx)
-	runPrimeExternalTools(cwd)
+	runPrimeExternalTools(ctx, cwd)
 
 	if ctx.Role == RoleMayor {
 		checkPendingEscalations(ctx)
@@ -538,7 +538,7 @@ func outputRoleContext(ctx RoleContext) (string, error) {
 
 // runPrimeExternalTools runs bd prime, memory injection, and gt mail check --inject.
 // Skipped in dry-run mode with explain output.
-func runPrimeExternalTools(cwd string) {
+func runPrimeExternalTools(ctx RoleContext, cwd string) {
 	if primeDryRun {
 		explain(true, "bd prime: skipped in dry-run mode")
 		explain(true, "memory injection: skipped in dry-run mode")
@@ -547,7 +547,20 @@ func runPrimeExternalTools(cwd string) {
 	}
 	runBdPrime(cwd)
 	runMemoryInject(cwd)
+	if shouldSkipStartupMailInject(string(ctx.Role)) {
+		explain(true, fmt.Sprintf("gt mail check --inject: skipped for patrol role %s", ctx.Role))
+		return
+	}
 	runMailCheckInject(cwd)
+}
+
+func shouldSkipStartupMailInject(role string) bool {
+	switch strings.ToLower(role) {
+	case string(RoleWitness), string(RoleRefinery), string(RoleDeacon), string(RoleBoot):
+		return true
+	default:
+		return false
+	}
 }
 
 func runPrimeExternalCommand(workDir, name string, args ...string) (bytes.Buffer, bytes.Buffer, error) {

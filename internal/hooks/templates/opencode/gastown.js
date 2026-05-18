@@ -106,12 +106,6 @@ export const GasTown = async ({ $, directory }) => {
       env.push(`GT_SESSION_ID=${shellQuote(sessionID)}`);
     }
     let context = await captureRun(`${env.join(" ")} ${shellQuote(gtBin)} prime --hook`);
-    if (autonomousRoles.has(simpleRole(role))) {
-      const mail = await captureRun(`${shellQuote(gtBin)} mail check --inject`);
-      if (mail) {
-        context += "\n" + mail;
-      }
-    }
     // NOTE: session-started nudge to deacon removed — it interrupted
     // the deacon's await-signal backoff. Deacon wakes on beads activity.
     return context;

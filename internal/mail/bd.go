@@ -73,7 +73,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	cmd.Dir = workDir
 	util.SetDetachedProcessGroup(cmd)
 
-	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, extraEnv)
+	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, isMailBdReadCommand(args), extraEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -119,8 +119,10 @@ func firstArg(args []string) string {
 	return ""
 }
 
-func bdSubprocessEnv(baseEnv []string, beadsDir string, extraEnv []string) []string {
+func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv []string) []string {
 	env := filterBdTargetEnv(baseEnv)
+	env = filterEnvKey(env, "BD_READONLY")
+	extraEnv = filterEnvKey(extraEnv, "BD_READONLY")
 	if beadsDir != "" {
 		env = append(env, "BEADS_DIR="+beadsDir)
 		if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
@@ -128,9 +130,52 @@ func bdSubprocessEnv(baseEnv []string, beadsDir string, extraEnv []string) []str
 		}
 	}
 	env = append(env, "BEADS_NO_AUTO_IMPORT=1")
+	env = append(env, "BD_EXPORT_AUTO=false", "BD_BACKUP_ENABLED=false")
 	env = append(env, extraEnv...)
+	if readOnly {
+		env = filterEnvKey(env, "BD_READONLY")
+		env = append(env, "BD_READONLY=true")
+	}
 	env = append(env, telemetry.OTELEnvForSubprocess()...)
 	return env
+}
+
+func filterEnvKey(env []string, key string) []string {
+	prefix := key + "="
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func isMailBdReadCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "list", "show", "search":
+		return true
+	case "message":
+		return len(args) >= 2 && args[1] == "thread"
+	case "mol":
+		return len(args) >= 3 && args[1] == "wisp" && args[2] == "list"
+	case "sql":
+		query := ""
+		for i := len(args) - 1; i >= 1; i-- {
+			if !strings.HasPrefix(args[i], "-") {
+				query = args[i]
+				break
+			}
+		}
+		q := strings.ToLower(strings.TrimSpace(query))
+		return strings.HasPrefix(q, "select") || strings.HasPrefix(q, "show") || strings.HasPrefix(q, "explain") || strings.HasPrefix(q, "describe") || strings.HasPrefix(q, "with")
+	default:
+		return false
+	}
 }
 
 func filterBdTargetEnv(env []string) []string {
@@ -138,7 +183,10 @@ func filterBdTargetEnv(env []string) []string {
 	for _, entry := range env {
 		if strings.HasPrefix(entry, "BEADS_DIR=") ||
 			strings.HasPrefix(entry, "BEADS_DB=") ||
-			strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") {
+			strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") ||
+			strings.HasPrefix(entry, "BEADS_DOLT_SERVER_HOST=") ||
+			strings.HasPrefix(entry, "BEADS_DOLT_SERVER_PORT=") ||
+			strings.HasPrefix(entry, "BEADS_DOLT_PORT=") {
 			continue
 		}
 		filtered = append(filtered, entry)
