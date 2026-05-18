@@ -199,6 +199,52 @@ exit 0
 	}
 }
 
+// TestExecuteSling_IdentityBead_TOMLWrapperTitle verifies that executeSling
+// rejects wrapper beads whose title is a leaked TOML `id = "<agent-id>"` line
+// pointing at an identity bead. gs-udi observed gs-1xu — a task-typed bead
+// with no labels and title literally `id = "gs-gastown-refinery"` — getting
+// dispatched to polecat nux because every prior filter (label, type, status,
+// strict identity-title regex) missed the wrapper shape.
+func TestExecuteSling_IdentityBead_TOMLWrapperTitle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	bdScript := `#!/bin/sh
+case "$1" in
+  show)
+    echo '[{"title":"id = \"gs-gastown-refinery\"","status":"open","assignee":"","description":"","labels":[],"issue_type":"task"}]'
+    ;;
+esac
+exit 0
+`
+	writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	params := SlingParams{
+		BeadID:   "gs-1xu",
+		RigName:  "testrig",
+		TownRoot: townRoot,
+	}
+
+	_, err := executeSling(params)
+	if err == nil {
+		t.Fatal("expected error when slinging TOML-wrapper identity bead, got nil")
+	}
+	if !strings.Contains(err.Error(), "identity/system bead") {
+		t.Errorf("error should mention identity bead: %v", err)
+	}
+}
+
 // TestExecuteSling_RealTaskDispatches verifies the negative case: a real task
 // bead (open status, no gt:agent label, plain title) is NOT mistakenly
 // classified as an identity bead. We stop checking the outcome once dispatch

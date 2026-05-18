@@ -3286,6 +3286,24 @@ func TestIsIdentityBeadTitle(t *testing.T) {
 		// No match — similar-looking but not identity patterns
 		{"gu-gastown-dogfood-feature", false}, // dog-.+ must come directly after prefix
 		{"gt-refinery-proposal", false},       // refinery must follow "<rig>-"
+
+		// Match — TOML-wrapper titles whose inner ID names an identity bead
+		// (gs-udi). The auto-dispatch plugin observed `id = "gs-gastown-refinery"`
+		// as a real bead title — a formula-step → bead conversion leaked the
+		// TOML `id = ...` line into the title field. The wrapper itself carries
+		// no labels, so it must be caught by title shape alone.
+		{`id = "gs-gastown-refinery"`, true},
+		{`id = "gu-gastown-polecat-nux"`, true},
+		{`id = "hq-mayor"`, true},
+		{`id="gs-gastown-witness"`, true},   // no spaces
+		{`id  =  "gt-deacon"`, true},        // extra whitespace
+		{`id = 'gs-gastown-refinery'`, true}, // single quotes
+
+		// No match — TOML-wrapper shape but inner value is a real task ID
+		{`id = "some-feature-task"`, false},
+		{`id = "fix-parser-bug"`, false},
+		// No match — wrapper-shape with empty inner value
+		{`id = ""`, false},
 	}
 
 	for _, tt := range tests {
@@ -3333,6 +3351,12 @@ func TestIsIdentityBeadFields(t *testing.T) {
 
 		// Role definition beads.
 		{"gt:role label", "crew", "open", []string{"gt:role"}, true},
+
+		// TOML-wrapper title (gs-udi). The wrapper bead has no labels and
+		// a task-shaped type, so the title is the only signal.
+		{"toml-wrapper title around refinery agent", `id = "gs-gastown-refinery"`, "open", nil, true},
+		{"toml-wrapper around polecat agent", `id = "gu-gastown-polecat-nux"`, "open", nil, true},
+		{"toml-wrapper around real task does not trip", `id = "some-feature-task"`, "open", nil, false},
 
 		// Combined / none
 		{"real task bead not identity", "Fix bug in parser", "open", []string{"priority-high"}, false},

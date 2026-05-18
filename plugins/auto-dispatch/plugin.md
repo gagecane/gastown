@@ -39,6 +39,7 @@ cooldown cycle for the same bead is safe.
       - The bead is an identity/agent bead (title matches `<prefix>-<rig>-polecat-<name>`, `<prefix>-<rig>-witness`, etc.)
       - The bead is a rig identity bead (id matches `<prefix>-rig-<name>`, `issue_type` is `rig`, or labels include `gt:rig`). Title is just the rig name (e.g. "gastown") so the title regex above misses it (gs-2j6).
       - The bead is a role definition bead (`issue_type` is `role` or labels include `gt:role`).
+      - The bead is a TOML-wrapper around an agent identity bead — title matches `id = "<some-identity-bead-id>"` where the inner ID is an identity bead naming pattern (e.g. `id = "gs-gastown-refinery"`). Formula-step parsing has been observed to leak a step's `id = ...` line into a bead title; the wrapper itself has no labels so this title-shape filter is what catches it (gs-udi).
       - labels include `type:plugin-run` (these are plugin-execution receipts, not work — slinging them creates feedback loops where the scheduler tries to dispatch a successful plugin run as if it were a task; observed today as gs-wisp-3rw stuck in convoy hq-cv-7lcc6 for 8+ hours)
       - labels include `gt:message`, `gt:agent`, `gt:rig`, `gt:role`, `gt:sling-context`, or `msg-type:notification` (system beads, not actionable work)
       - The bead `id` matches `*-wisp-*` (defense in depth: wisps are ephemeral by definition and should not be dispatched as work, regardless of their labels)

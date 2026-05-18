@@ -366,6 +366,16 @@ func IsAgentBead(issue *Issue) bool {
 // AgentBeadIDWithPrefix.
 var identityBeadTitleRe = regexp.MustCompile(`^[a-z]+-(.+-(polecat-.+|crew-.+|refinery|witness)|dog-.+|mayor|deacon)$`)
 
+// identityBeadWrapperTitleRe matches malformed "wrapper" titles where a TOML
+// key=value line leaked into the title field — e.g. `id = "gs-gastown-refinery"`.
+// gs-udi observed a polecat being dispatched a bead whose title was literally
+// that string. The inner ID points at an agent identity bead but the wrapper
+// itself carries no gt:agent label / no agent issue_type, so every prior filter
+// missed it. We capture the inner value and re-check it against the standard
+// identity title regex so the wrapper is rejected on the same grounds as the
+// underlying agent bead.
+var identityBeadWrapperTitleRe = regexp.MustCompile(`^id\s*=\s*["']([^"']+)["']$`)
+
 // IsIdentityBeadTitle reports whether a title matches the identity/system
 // naming convention (prefix-rig-role[-name]). Exported for callers that only
 // have a title string (e.g. dep metadata snapshots).
@@ -373,7 +383,13 @@ func IsIdentityBeadTitle(title string) bool {
 	if title == "" {
 		return false
 	}
-	return identityBeadTitleRe.MatchString(title)
+	if identityBeadTitleRe.MatchString(title) {
+		return true
+	}
+	if m := identityBeadWrapperTitleRe.FindStringSubmatch(title); m != nil {
+		return identityBeadTitleRe.MatchString(m[1])
+	}
+	return false
 }
 
 // IsIdentityBead reports whether an issue is an identity/system bead that
