@@ -35,7 +35,7 @@ const (
 	// same ready issue from the stranded scan. Without it, a bead that is
 	// in_progress to a dead polecat is re-slung every scan tick (~30s) — and
 	// if the new polecat also dies quickly (or sling itself fails), the loop
-	// repeats indefinitely, creating spawn storms and pummelling Dolt with
+	// repeats indefinitely, creating spawn storms and pummeling Dolt with
 	// repeated assignment writes. See gu-iygf / hq/gt-sfo6q.
 	feedDispatchCooldown = 5 * time.Minute
 )
