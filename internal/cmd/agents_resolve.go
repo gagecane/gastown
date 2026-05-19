@@ -114,10 +114,7 @@ func runAgentsResolve(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	candidates, err := findAgentBeadCandidates(townRoot, agentsResolveRig, agentsResolveRole)
-	if err != nil {
-		return err
-	}
+	candidates := findAgentBeadCandidates(townRoot, agentsResolveRig, agentsResolveRole)
 
 	// Pick the best match using the preference order documented above.
 	match := pickBestAgentBead(candidates)
@@ -162,7 +159,7 @@ func resolveResolveTownRoot() (string, error) {
 
 // findAgentBeadCandidates searches the four (table, db) sources for agent
 // beads matching the given role and rig.
-func findAgentBeadCandidates(townRoot, rig, role string) ([]agentBeadCandidate, error) {
+func findAgentBeadCandidates(townRoot, rig, role string) []agentBeadCandidate {
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 
 	// Build the list of beads dirs to search: town + rig (if specified and different).
@@ -200,7 +197,7 @@ func findAgentBeadCandidates(townRoot, rig, role string) ([]agentBeadCandidate, 
 		}
 	}
 
-	return candidates, nil
+	return candidates
 }
 
 // searchAgentBeadsInDir runs bd against a single beads dir and returns
@@ -249,7 +246,7 @@ func searchAgentBeadsInDir(beadsDir string, wisps bool, role, rig string) []agen
 
 	var matches []agentBeadCandidate
 	for _, e := range entries {
-		if !entryMatchesRole(e.Description, e.Labels, e.Type, role) {
+		if !entryMatchesRole(e.Description, role) {
 			continue
 		}
 		if rig != "" && !entryMatchesRig(e.Description, e.ID, rig) {
@@ -265,9 +262,9 @@ func searchAgentBeadsInDir(beadsDir string, wisps bool, role, rig string) []agen
 	return matches
 }
 
-// entryMatchesRole returns true if the bead description, labels, or type
-// match the requested role.
-func entryMatchesRole(description string, labels []string, issueType, role string) bool {
+// entryMatchesRole returns true if the bead description matches the
+// requested role (via a "role_type: <role>" line).
+func entryMatchesRole(description, role string) bool {
 	if role == "" {
 		return true
 	}

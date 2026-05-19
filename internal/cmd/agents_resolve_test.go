@@ -123,7 +123,7 @@ func TestEntryMatchesRole(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := entryMatchesRole(tc.desc, nil, "", tc.role); got != tc.want {
+			if got := entryMatchesRole(tc.desc, tc.role); got != tc.want {
 				t.Fatalf("entryMatchesRole(%q, role=%q) = %v, want %v", tc.desc, tc.role, got, tc.want)
 			}
 		})
