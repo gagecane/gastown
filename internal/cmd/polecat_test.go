@@ -1341,3 +1341,36 @@ func TestNamesAfterSmoke_NonPresentSmokedNameIsNoop(t *testing.T) {
 		t.Errorf("namesAfterSmoke with unknown smoked name = %v, want unchanged %v", got, in)
 	}
 }
+// TestBestEffortPushDecision codifies the gu-e7r3 invariant: --force MUST
+// take precedence over every other branch check, because --force is the
+// user's explicit "discard this work" signal. Pushing the branch in that
+// mode would leak the regression we are throwing away to origin where the
+// refinery may pick it up before the caller can manually clean up. The
+// other cases mirror the previously-tested guardrails (gt-4vr, gu-ge1s).
+func TestBestEffortPushDecision(t *testing.T) {
+	tests := []struct {
+		name   string
+		force  bool
+		branch string
+		want   pushDecision
+	}{
+		{"empty branch always skips", false, "", pushDecisionSkipEmpty},
+		{"empty branch wins over force (nothing to do)", true, "", pushDecisionSkipEmpty},
+		{"force on polecat branch skips push (gu-e7r3)", true, "polecat/chrome/gu-foo", pushDecisionSkipForce},
+		{"force on HEAD skips push (gu-e7r3)", true, "HEAD", pushDecisionSkipForce},
+		{"force on non-polecat branch skips push (gu-e7r3)", true, "main", pushDecisionSkipForce},
+		{"non-force HEAD skips (gu-ge1s)", false, "HEAD", pushDecisionSkipDetachedHead},
+		{"non-force non-polecat branch skips", false, "main", pushDecisionSkipNonPolecat},
+		{"non-force polecat branch attempts push (gt-4vr)", false, "polecat/chrome/gu-foo", pushDecisionAttempt},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bestEffortPushDecision(tt.force, tt.branch)
+			if got != tt.want {
+				t.Errorf("bestEffortPushDecision(force=%v, branch=%q) = %v, want %v",
+					tt.force, tt.branch, got, tt.want)
+			}
+		})
+	}
+}

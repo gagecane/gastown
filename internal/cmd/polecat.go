@@ -204,7 +204,10 @@ SAFETY CHECKS: The command refuses to nuke a polecat if:
   - Polecat has an open merge request (MR bead)
   - Polecat has work on its hook
 
-Use --force to bypass safety checks (LOSES WORK).
+Use --force to bypass safety checks (LOSES WORK). --force also skips the
+best-effort branch push, since "force-nuke" means you've decided to discard
+the worktree contents — pushing first would leak the regression you're
+trying to throw away to origin (gu-e7r3).
 Use --dry-run to see what would happen and safety check status.
 
 Examples:
@@ -1507,7 +1510,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Nuking %s/%s...\n", p.rigName, p.polecatName)
 		}
 
-		if err := nukePolecatFull(p.polecatName, p.rigName, p.mgr, p.r); err != nil {
+		if err := nukePolecatFull(p.polecatName, p.rigName, p.mgr, p.r, polecatNukeForce); err != nil {
 			nukeErrors = append(nukeErrors, fmt.Sprintf("%s/%s: %v", p.rigName, p.polecatName, err))
 			continue
 		}
@@ -1545,13 +1548,54 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// pushDecision encodes the outcome of evaluating whether nukePolecatFull
+// should attempt the best-effort branch push. Pulled out of nukePolecatFull
+// so the gating logic — the part that determines whether --force leaks
+// content to origin — is unit-testable without a tmux session, beads, or a
+// real git worktree (gu-e7r3).
+type pushDecision int
+
+const (
+	pushDecisionSkipEmpty         pushDecision = iota // branch unset → nothing to push
+	pushDecisionSkipForce                              // --force was set → discard, don't push
+	pushDecisionSkipDetachedHead                       // branch is literal "HEAD"
+	pushDecisionSkipNonPolecat                         // branch isn't under polecat/ prefix
+	pushDecisionAttempt                                // safe to attempt the push
+)
+
+// bestEffortPushDecision returns the pushDecision for the given inputs.
+//
+// Order matters: --force takes precedence over every other check because the
+// caller has explicitly asked to discard the worktree contents. Pushing in
+// that mode would leak the regression we are throwing away to origin (where
+// a fast refinery might pick it up before the caller can clean up).
+func bestEffortPushDecision(force bool, branch string) pushDecision {
+	if branch == "" {
+		return pushDecisionSkipEmpty
+	}
+	if force {
+		return pushDecisionSkipForce
+	}
+	if branch == "HEAD" {
+		return pushDecisionSkipDetachedHead
+	}
+	if !strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
+		return pushDecisionSkipNonPolecat
+	}
+	return pushDecisionAttempt
+}
+
 // nukePolecatFull performs the complete cleanup sequence for a single polecat:
 // 1. Kill tmux session
 // 2. Delete worktree (via RemoveWithOptions with nuclear=true)
 // 3. Delete git branch
 // 4. Close agent bead
 // This is the canonical cleanup path used by both `polecat nuke` and `polecat stale --cleanup`.
-func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig) error {
+//
+// When force is true, the best-effort push of the polecat's branch is skipped.
+// --force is the user's explicit "discard this work" signal — auto-pushing in
+// that mode would leak the regression we are trying to throw away (gu-e7r3).
+func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, force bool) error {
 	t := tmux.NewTmux()
 
 	// Step 1: Kill tmux session unconditionally to prevent ghost sessions
@@ -1594,13 +1638,25 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 
 	// Step 2.75: Best-effort push before nuke (gt-4vr guardrail).
 	// Try to preserve any unpushed commits on the branch. If push fails,
-	// proceed — --force already means "I accept data loss".
+	// proceed — non-force nuke is the "preserve work if possible" path.
+	//
+	// gu-e7r3: When --force is set, the user has explicitly asked to discard
+	// the worktree contents. Auto-pushing would leak the regression we are
+	// throwing away to origin, where the refinery may pick it up before the
+	// caller can manually delete the remote branch. Skip the push entirely in
+	// --force mode and let the user re-push by hand if they change their mind.
 	//
 	// gu-ge1s: Refuse to push the literal "HEAD" or empty branch names —
 	// those happen when polecatInfo.Branch was recorded from a detached-HEAD
 	// worktree (loadFromBeads calls polecatGit.CurrentBranch()). Pushing
 	// "HEAD:HEAD" here creates refs/heads/HEAD pollution on origin.
-	if branchToDelete != "" && branchToDelete != "HEAD" && strings.HasPrefix(branchToDelete, constants.BranchPolecatPrefix) {
+	decision := bestEffortPushDecision(force, branchToDelete)
+	switch decision {
+	case pushDecisionSkipForce:
+		if branchToDelete != "" {
+			fmt.Printf("  %s skipping best-effort push: --force discards the branch\n", style.Dim.Render("○"))
+		}
+	case pushDecisionAttempt:
 		var pushGit *git.Git
 		// Try worktree first (may still exist), then bare repo fallback.
 		// Use ClonePath from the polecat record — the worktree lives at
@@ -1624,10 +1680,12 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 				fmt.Printf("  %s pushed branch %s before nuke\n", style.Success.Render("✓"), branchToDelete)
 			}
 		}
-	} else if branchToDelete == "HEAD" {
+	case pushDecisionSkipDetachedHead:
 		fmt.Printf("  %s skipping best-effort push: branch is literal %q (detached HEAD state)\n", style.Dim.Render("○"), branchToDelete)
-	} else if branchToDelete != "" && !strings.HasPrefix(branchToDelete, constants.BranchPolecatPrefix) {
+	case pushDecisionSkipNonPolecat:
 		fmt.Printf("  %s skipping best-effort push: %q is not a polecat branch\n", style.Dim.Render("○"), branchToDelete)
+	case pushDecisionSkipEmpty:
+		// No branch recorded — nothing to push, nothing to print.
 	}
 
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)
@@ -1875,7 +1933,7 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 					continue
 				}
 				fmt.Printf("Nuking %s...\n", info.Name)
-				if err := nukePolecatFull(info.Name, rigName, mgr, r); err != nil {
+				if err := nukePolecatFull(info.Name, rigName, mgr, r, false); err != nil {
 					fmt.Printf("  %s (%v)\n", style.Error.Render("failed"), err)
 				} else {
 					nuked++
