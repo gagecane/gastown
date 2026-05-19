@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -218,9 +219,10 @@ func modifyAgentState(agentBead, beadsDir string, hasIncr bool) error {
 		args = append(args, "--set-labels=")
 	}
 
-	// Execute bd update
+	// Execute bd update — route to the DB where the agent bead actually lives.
+	// Without this, writes from a rig worktree miss legacy hq.wisps beads (aa-b2tm).
 	cmd := exec.Command("bd", args...)
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+resolveAgentBeadsDir(agentBead, beadsDir))
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -265,15 +267,93 @@ func getAgentLabels(agentBead, beadsDir string) (map[string]string, error) {
 // ceiling prevents await-event/await-signal from stalling past the patrol timeout.
 const bdCallTimeout = 30 * time.Second
 
+// resolveAgentBeadsDir returns the .beads directory where the given agent bead
+// can be found, with cross-DB fallback to the town database.
+//
+// Background (aa-b2tm): Refinery/witness worktrees resolve to the rig DB via
+// findLocalBeadsDir+ResolveBeadsDir. Legacy refinery agent beads (e.g.
+// au-wisp-0ti, aa-wisp-a4v) live in hq.wisps (town DB), not the rig DB, so
+// `bd show` against the rig DB fails with "not found". Modern agent beads
+// (e.g. au-alleago_ui-refinery) live in the rig DB. This helper probes the
+// passed beadsDir first, and on miss falls back to the town's .beads
+// directory so legacy IDs continue to resolve transparently.
+//
+// Returns the resolved beadsDir (or the input beadsDir if no town fallback
+// exists or both directories miss).
+func resolveAgentBeadsDir(agentBead, beadsDir string) string {
+	if beadsDir == "" || agentBead == "" {
+		return beadsDir
+	}
+	if agentBeadExistsIn(agentBead, beadsDir) {
+		return beadsDir
+	}
+	townBeads := townBeadsDirFrom(beadsDir)
+	if townBeads == "" || townBeads == beadsDir {
+		return beadsDir
+	}
+	if agentBeadExistsIn(agentBead, townBeads) {
+		return townBeads
+	}
+	return beadsDir
+}
+
+// townBeadsDirFrom returns the town's .beads directory by walking up from the
+// given beadsDir looking for mayor/town.json. Returns "" if no town root found.
+func townBeadsDirFrom(beadsDir string) string {
+	if beadsDir == "" {
+		return ""
+	}
+	start := filepath.Dir(beadsDir)
+	townRoot := beads.FindTownRoot(start)
+	if townRoot == "" {
+		return ""
+	}
+	return filepath.Join(townRoot, ".beads")
+}
+
+// agentBeadExistsIn returns true if `bd show <agentBead>` succeeds against the
+// given beads directory. Uses a short timeout so callers don't hang on a
+// wedged backend during the fallback probe.
+func agentBeadExistsIn(agentBead, beadsDir string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bd", "show", agentBead, "--json") //nolint:gosec // G204: bd is a trusted internal tool
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+
+	// Even with exit 0, bd may return an empty array if the bead isn't found.
+	var issues []struct {
+		ID string `json:"id"`
+	}
+	if jsonErr := json.Unmarshal(stdout.Bytes(), &issues); jsonErr != nil {
+		return false
+	}
+	return len(issues) > 0
+}
+
 // getAllAgentLabels retrieves all labels (including non-state) from an agent bead.
+//
+// Falls back to the town .beads directory when the agent bead cannot be found
+// in the passed beadsDir. This handles legacy refinery/witness agent beads
+// (au-wisp-*, aa-wisp-*) stranded in hq.wisps after the rig DB migration.
+// See aa-b2tm.
 func getAllAgentLabels(agentBead, beadsDir string) ([]string, error) {
+	resolvedDir := resolveAgentBeadsDir(agentBead, beadsDir)
 	args := []string{"show", agentBead, "--json"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdCallTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+resolvedDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

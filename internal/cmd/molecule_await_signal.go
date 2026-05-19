@@ -449,6 +449,10 @@ func parseIntSimple(s string) (int, error) {
 //
 // bd agent heartbeat was never shipped (steveyegge/beads#2828). We use the same
 // read-modify-write label pattern as setAgentIdleCycles instead.
+//
+// Routes writes to the same .beads directory where the agent bead is actually
+// stored, falling back to the town DB for legacy beads stranded in hq.wisps
+// (aa-b2tm).
 func updateAgentHeartbeat(agentBead, beadsDir string) error {
 	allLabels, err := getAllAgentLabels(agentBead, beadsDir)
 	if err != nil {
@@ -473,7 +477,7 @@ func updateAgentHeartbeat(agentBead, beadsDir string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+resolveAgentBeadsDir(agentBead, beadsDir))
 	return cmd.Run()
 }
 
@@ -509,7 +513,7 @@ func setAgentIdleCycles(agentBead, beadsDir string, cycles int) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+resolveAgentBeadsDir(agentBead, beadsDir))
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("setting idle label: %w", err)
@@ -545,7 +549,7 @@ func setAgentBackoffUntil(agentBead, beadsDir string, until time.Time) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+resolveAgentBeadsDir(agentBead, beadsDir))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("setting backoff-until label: %w", err)
 	}
@@ -587,7 +591,7 @@ func clearAgentBackoffUntil(agentBead, beadsDir string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+resolveAgentBeadsDir(agentBead, beadsDir))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("clearing backoff-until label: %w", err)
 	}

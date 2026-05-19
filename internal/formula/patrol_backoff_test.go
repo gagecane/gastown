@@ -210,11 +210,17 @@ func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 				t.Fatalf("%s: loop step not found or has empty description", name)
 			}
 
-			// Must use dynamic resolution via bd list
-			if !strings.Contains(loopDesc, "bd list --label=gt:agent") {
-				t.Errorf("%s loop step missing dynamic agent bead resolution (bd list --label=gt:agent).\n"+
-					"Agent bead IDs must be resolved at runtime, not hardcoded.\n"+
-					"See hq-9xs.",
+			// Must use dynamic resolution. Accept either the legacy
+			// `bd list --label=gt:agent` query or the new
+			// `gt agents resolve` helper (preferred, since it sees
+			// wisps AND issues across rig+town DBs — fixes aa-b2tm).
+			hasBdList := strings.Contains(loopDesc, "bd list --label=gt:agent")
+			hasResolveHelper := strings.Contains(loopDesc, "gt agents resolve")
+			if !hasBdList && !hasResolveHelper {
+				t.Errorf("%s loop step missing dynamic agent bead resolution.\n"+
+					"Agent bead IDs must be resolved at runtime via either\n"+
+					"`gt agents resolve` (preferred) or `bd list --label=gt:agent`.\n"+
+					"See hq-9xs and aa-b2tm.",
 					name)
 			}
 

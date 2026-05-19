@@ -1273,9 +1273,25 @@ End of patrol cycle decision. Use the signals from context-check to decide.
 
 Resolve your agent bead ID for this patrol cycle. You MUST replace `<YOUR_RIG>` below with your actual rig name (e.g., `beads`, `town`) before running:
 ```bash
+gt agents resolve --role refinery --rig <YOUR_RIG>
+```
+
+`gt agents resolve` searches both the wisps and issues tables in both the rig
+and town databases, so it finds:
+  - modern wisps-table agent beads in the rig DB (preferred)
+  - legacy refinery beads stranded in hq.wisps after the rig migration (aa-b2tm)
+
+If it prints nothing, STOP and report an error — verify the rig name. If it
+prints multiple lines, STOP — only one bead should match. Use the single
+resolved bead ID as YOUR_AGENT_BEAD in the commands below.
+
+For backward compatibility with older builds (no `gt agents resolve`), fall
+back to:
+```bash
 bd list --label=gt:agent --status=all --desc-contains="role_type: refinery" --json | jq -r '.[] | select(.status != "closed") | select(.description | test("(?m)^\\\\s*rig: <YOUR_RIG>\\\\s*$")) | .id'
 ```
-This must return exactly one bead ID. If it returns zero results, STOP and report an error — verify you substituted `<YOUR_RIG>` correctly. If it returns multiple results, STOP and report an error — manual disambiguation is required. Use the single resolved bead ID as YOUR_AGENT_BEAD in the commands below.
+Note: this fallback only sees issues-table beads in the local DB and will miss
+legacy hq.wisps beads (see aa-b2tm).
 
 Then use await-event to subscribe to the refinery event channel with exponential backoff:
 
