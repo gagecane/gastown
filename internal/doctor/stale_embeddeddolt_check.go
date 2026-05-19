@@ -38,7 +38,7 @@ func (c *StaleEmbeddeddoltCheck) Run(ctx *CheckContext) *CheckResult {
 	c.staleEmbeddeddolts = nil
 
 	// Check town root .beads
-	c.checkBeadsDir(ctx.TownRoot, filepath.Join(ctx.TownRoot, ".beads"))
+	c.checkBeadsDir(filepath.Join(ctx.TownRoot, ".beads"))
 
 	// Check rigs
 	rigsConfig := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
@@ -49,11 +49,11 @@ func (c *StaleEmbeddeddoltCheck) Run(ctx *CheckContext) *CheckResult {
 		if json.Unmarshal(data, &rigs) == nil {
 			for rigName := range rigs.Rigs {
 				rigBeadsPath := filepath.Join(ctx.TownRoot, rigName, ".beads")
-				c.checkBeadsDir(ctx.TownRoot, rigBeadsPath)
+				c.checkBeadsDir(rigBeadsPath)
 
 				// Also check mayor/rig/.beads
 				maybeBeadsPath := filepath.Join(ctx.TownRoot, rigName, "mayor", "rig", ".beads")
-				c.checkBeadsDir(ctx.TownRoot, maybeBeadsPath)
+				c.checkBeadsDir(maybeBeadsPath)
 			}
 		}
 	}
@@ -93,7 +93,7 @@ func (c *StaleEmbeddeddoltCheck) Fix(ctx *CheckContext) error {
 }
 
 // checkBeadsDir checks if a .beads directory has both embeddeddolt/ and server-mode metadata.json.
-func (c *StaleEmbeddeddoltCheck) checkBeadsDir(townRoot string, beadsPath string) {
+func (c *StaleEmbeddeddoltCheck) checkBeadsDir(beadsPath string) {
 	// Check if .beads directory exists
 	if _, err := os.Stat(beadsPath); os.IsNotExist(err) {
 		return
