@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
+	worktreeintegrity "github.com/steveyegge/gastown/internal/worktree"
 )
 
 var primeHookMode bool
@@ -148,6 +149,14 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return nil // Silent exit - not in workspace and not enabled
 	}
 
+	roleInfo, err := GetRoleWithContext(cwd, townRoot)
+	if err != nil {
+		return fmt.Errorf("detecting role: %w", err)
+	}
+	if err := ensureRoleWorktreeIntegrity(cwd, townRoot, roleInfo.Role); err != nil {
+		return err
+	}
+
 	if primeHookMode {
 		primeDeadline = time.Now().Add(primeHookDeadline)
 		handlePrimeHookMode(townRoot, cwd)
@@ -158,11 +167,6 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		checkHandoffMarkerDryRun(cwd)
 	} else {
 		checkHandoffMarker(cwd)
-	}
-
-	roleInfo, err := GetRoleWithContext(cwd, townRoot)
-	if err != nil {
-		return fmt.Errorf("detecting role: %w", err)
 	}
 
 	warnRoleMismatch(roleInfo, cwd)
@@ -251,6 +255,25 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	return nil
+}
+
+func ensureRoleWorktreeIntegrity(cwd, townRoot string, role Role) error {
+	if err := worktreeintegrity.Validate(cwd, worktreeintegrity.IntegrityOptions{
+		TownRoot: townRoot,
+		Require:  roleRequiresWorktreeIntegrity(role),
+	}); err != nil {
+		return fmt.Errorf("%w\nRemediation: stop using this worktree and run `gt doctor --fix`", err)
+	}
+	return nil
+}
+
+func roleRequiresWorktreeIntegrity(role Role) bool {
+	switch role {
+	case RolePolecat, RoleCrew, RoleWitness, RoleRefinery, RoleDog, RoleBoot:
+		return true
+	default:
+		return false
+	}
 }
 
 // runPrimeCompactResume runs a lighter prime after compaction or resume.

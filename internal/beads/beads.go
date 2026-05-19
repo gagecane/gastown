@@ -756,7 +756,15 @@ func resolveBdSubprocessTimeout() time.Duration {
 }
 
 // run executes a bd command and returns stdout.
-func (b *Beads) run(args ...string) (_ []byte, retErr error) {
+func (b *Beads) run(args ...string) ([]byte, error) {
+	return b.runWithStdin(nil, args...)
+}
+
+// runWithStdin executes a bd command, optionally piping stdinData to bd's stdin.
+// When stdinData is nil, behaves identically to run. Use this for flags like
+// --body-file=- that read multi-line content from stdin (avoids embedding
+// newlines in --description, which bd 1.0.3+ rejects).
+func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr error) {
 	start := time.Now()
 	// Declare buffers before defer so the closure captures them after cmd.Run.
 	var stdout, stderr bytes.Buffer
@@ -793,6 +801,9 @@ func (b *Beads) run(args ...string) (_ []byte, retErr error) {
 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if stdinData != nil {
+		cmd.Stdin = bytes.NewReader(stdinData)
+	}
 
 	err := cmd.Run()
 
@@ -815,6 +826,9 @@ func (b *Beads) run(args ...string) (_ []byte, retErr error) {
 		cmd.Env = append(cmd.Env, telemetry.OTELEnvForSubprocess()...)
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
+		if stdinData != nil {
+			cmd.Stdin = bytes.NewReader(stdinData)
+		}
 		err = cmd.Run()
 	}
 

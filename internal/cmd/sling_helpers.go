@@ -637,6 +637,7 @@ func verifyBeadExistsInTargetRigDatabase(beadID, targetRig, townRoot string) err
 	return nil
 }
 
+
 // getBeadInfo returns status and assignee for a bead.
 // Resolves the rig directory from the bead's prefix for correct dolt access.
 //

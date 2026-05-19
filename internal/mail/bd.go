@@ -73,13 +73,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	cmd.Dir = workDir
 	util.SetDetachedProcessGroup(cmd)
 
-	env := append(cmd.Environ(), "BEADS_DIR="+beadsDir)
-	if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
-		env = append(env, dbEnv)
-	}
-	env = append(env, extraEnv...)
-	env = append(env, telemetry.OTELEnvForSubprocess()...)
-	cmd.Env = env
+	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, extraEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -101,7 +95,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 		retryCmd := exec.CommandContext(ctx, "bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
 		retryCmd.Dir = workDir
 		util.SetDetachedProcessGroup(retryCmd)
-		retryCmd.Env = env
+		retryCmd.Env = cmd.Env
 		retryCmd.Stdout = &stdout
 		retryCmd.Stderr = &stderr
 		runErr = retryCmd.Run()
@@ -123,6 +117,33 @@ func firstArg(args []string) string {
 		return args[0]
 	}
 	return ""
+}
+
+func bdSubprocessEnv(baseEnv []string, beadsDir string, extraEnv []string) []string {
+	env := filterBdTargetEnv(baseEnv)
+	if beadsDir != "" {
+		env = append(env, "BEADS_DIR="+beadsDir)
+		if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
+			env = append(env, dbEnv)
+		}
+	}
+	env = append(env, "BEADS_NO_AUTO_IMPORT=1")
+	env = append(env, extraEnv...)
+	env = append(env, telemetry.OTELEnvForSubprocess()...)
+	return env
+}
+
+func filterBdTargetEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "BEADS_DIR=") ||
+			strings.HasPrefix(entry, "BEADS_DB=") ||
+			strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 // bdReadCtx returns a context with the standard bd read timeout.

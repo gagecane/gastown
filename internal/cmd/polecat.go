@@ -436,6 +436,10 @@ type PolecatListItem struct {
 	Name           string        `json:"name"`
 	State          polecat.State `json:"state"`
 	Issue          string        `json:"issue,omitempty"`
+	CleanupStatus  string        `json:"cleanup_status,omitempty"`
+	ActiveMR       string        `json:"active_mr,omitempty"`
+	Branch         string        `json:"branch,omitempty"`
+	ReuseStatus    string        `json:"reuse_status,omitempty"`
 	SessionRunning bool          `json:"session_running"`
 	Zombie         bool          `json:"zombie,omitempty"`
 	SessionName    string        `json:"session_name,omitempty"`
@@ -488,6 +492,41 @@ func sessionLabel(item PolecatListItem) string {
 	return "session: dead"
 }
 
+type reuseMRShower interface {
+	Show(issueID string) (*beads.Issue, error)
+}
+
+func activeMRBlocksReuse(bd reuseMRShower, mrID string) bool {
+	if mrID == "" {
+		return false
+	}
+	if bd == nil {
+		return true
+	}
+	mr, err := bd.Show(mrID)
+	if err != nil || mr == nil {
+		return true
+	}
+	return !beads.IssueStatus(mr.Status).IsTerminal()
+}
+
+func polecatReuseStatus(state polecat.State, cleanupStatus, activeMR, branch string, activeMRBlocks bool) string {
+	if state != polecat.StateIdle {
+		return ""
+	}
+	status := polecat.CleanupStatus(cleanupStatus)
+	if cleanupStatus == "" || status == polecat.CleanupUnknown || status.RequiresRecovery() {
+		return "idle-recovery-needed"
+	}
+	if activeMR != "" && activeMRBlocks {
+		return "idle-pr-open"
+	}
+	if strings.HasPrefix(branch, "polecat/") {
+		return "idle-preserved"
+	}
+	return "idle-clean"
+}
+
 // getPolecatManager creates a polecat manager for the given rig.
 func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 	_, r, err := getRig(rigName)
@@ -532,6 +571,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		polecatGit := git.NewGit(r.Path)
 		mgr := polecat.NewManager(r, polecatGit, t)
 		polecatMgr := polecat.NewSessionManager(t, r)
+		bd := beads.New(r.Path)
 
 		polecats, err := mgr.List()
 		if err != nil {
@@ -543,11 +583,26 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		knownNames := make(map[string]bool)
 		for _, p := range polecats {
 			running, _ := polecatMgr.IsRunning(p.Name)
+			cleanupStatus := ""
+			activeMR := ""
+			agentBeadID := polecatBeadIDForRig(r, r.Name, p.Name)
+			if _, fields, err := bd.GetAgentBead(agentBeadID); err == nil && fields != nil {
+				cleanupStatus = fields.CleanupStatus
+				activeMR = fields.ActiveMR
+			}
+			state := effectivePolecatState(PolecatListItem{
+				State:          p.State,
+				SessionRunning: running,
+			})
 			allPolecats = append(allPolecats, PolecatListItem{
 				Rig:            r.Name,
 				Name:           p.Name,
-				State:          p.State,
+				State:          state,
 				Issue:          p.Issue,
+				CleanupStatus:  cleanupStatus,
+				ActiveMR:       activeMR,
+				Branch:         p.Branch,
+				ReuseStatus:    polecatReuseStatus(state, cleanupStatus, activeMR, p.Branch, activeMRBlocksReuse(bd, activeMR)),
 				SessionRunning: running,
 			})
 			knownNames[p.Name] = true
@@ -643,6 +698,16 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s %s/%s  %s  %s\n", sessionStatus, p.Rig, p.Name, stateStr, renderedSessionLabel)
 		if p.Issue != "" {
 			fmt.Printf("    %s\n", style.Dim.Render(p.Issue))
+		}
+		if p.ReuseStatus != "" {
+			details := "reuse: " + p.ReuseStatus
+			if p.CleanupStatus != "" {
+				details += " cleanup=" + p.CleanupStatus
+			}
+			if p.ActiveMR != "" {
+				details += " active_mr=" + p.ActiveMR
+			}
+			fmt.Printf("    %s\n", style.Dim.Render(details))
 		}
 		if p.Zombie && p.SessionName != "" {
 			fmt.Printf("    %s\n", style.Dim.Render("session: "+p.SessionName+" (no worktree)"))
@@ -1107,7 +1172,7 @@ type RecoveryStatus struct {
 	Verdict       string                `json:"verdict"` // SAFE_TO_NUKE, NEEDS_RECOVERY, or NEEDS_MQ_SUBMIT
 	Branch        string                `json:"branch,omitempty"`
 	Issue         string                `json:"issue,omitempty"`
-	MQStatus      string                `json:"mq_status,omitempty"` // "submitted", "not_submitted", "unknown"
+	MQStatus      string                `json:"mq_status,omitempty"` // "submitted", "not_submitted", "not_required", "unknown"
 }
 
 func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
@@ -1169,7 +1234,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	} else {
 		// Use cleanup_status from agent bead
 		status.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
-		if status.CleanupStatus.IsSafe() && fields.ActiveMR == "" {
+		if status.CleanupStatus.IsSafe() && isActiveMRTerminal(bd, fields.ActiveMR) {
 			status.NeedsRecovery = false
 			status.Verdict = "SAFE_TO_NUKE"
 		} else {
@@ -1193,7 +1258,9 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	if status.Verdict == "SAFE_TO_NUKE" && status.Branch != "" {
 		mqBd := beads.New(r.Path)
 		beadTerminal := isAssignedBeadTerminal(mqBd, status.Issue)
-		applyMQCheck(&status, mqBd, beadTerminal)
+		gitState, gitErr := getGitState(p.ClonePath)
+		hasSubmittableWork := gitErr != nil || gitState.UnpushedCommits > 0
+		applyMQCheck(&status, mqBd, beadTerminal, hasSubmittableWork)
 	}
 
 	// JSON output
@@ -1238,6 +1305,24 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+type issueShower interface {
+	Show(issueID string) (*beads.Issue, error)
+}
+
+func isActiveMRTerminal(bd issueShower, mrID string) bool {
+	if mrID == "" {
+		return true
+	}
+	if bd == nil {
+		return false
+	}
+	mr, err := bd.Show(mrID)
+	if err != nil || mr == nil {
+		return false
+	}
+	return beads.IssueStatus(mr.Status).IsTerminal()
+}
+
 // mrFinder is the subset of *beads.Beads that applyMQCheck needs. It lets us
 // unit-test the verdict logic without a real bd binary.
 type mrFinder interface {
@@ -1266,10 +1351,17 @@ func isAssignedBeadTerminal(bd *beads.Beads, issueID string) bool {
 // This guard fixes the zombie-restart loop documented in bead aa-55d8:
 // a closed "no-op audit" bead (e.g. aa-xtee) used to report NEEDS_MQ_SUBMIT
 // forever, causing witness patrols to restart the polecat on every cycle.
-func applyMQCheck(status *RecoveryStatus, bd mrFinder, beadTerminal bool) {
+func applyMQCheck(status *RecoveryStatus, bd mrFinder, beadTerminal, hasSubmittableWork bool) {
 	if beadTerminal {
 		// Nothing to submit — the bead is already terminal.
 		status.MQStatus = "submitted"
+		return
+	}
+	if !hasSubmittableWork {
+		// No commits/content ahead of the integration branch means gt done had
+		// nothing to enqueue; treating that as missing MQ submission causes
+		// recovery loops on no-op/report-only assignments.
+		status.MQStatus = "not_required"
 		return
 	}
 	mr, mrErr := bd.FindMRForBranchAny(status.Branch)
@@ -1848,16 +1940,20 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 		fmt.Println("Pruning remote polecat branches...")
 
 		defaultBranch := repoGit.RemoteDefaultBranch()
-		remoteRefs, lsErr := repoGit.ListPushRemoteRefs("origin", "refs/heads/polecat/")
+		remoteRefs, lsErr := repoGit.ListPushRemoteRefsWithHashes("origin", "refs/heads/polecat/")
 		if lsErr != nil {
 			return fmt.Errorf("listing remote refs: %w", lsErr)
 		}
 
 		remotePruned := 0
 		for _, ref := range remoteRefs {
-			branch := strings.TrimPrefix(ref, "refs/heads/")
-			// Check if merged to main
-			merged, mergeErr := repoGit.IsAncestor(branch, "origin/"+defaultBranch)
+			if !strings.HasPrefix(ref.Name, "refs/heads/") {
+				continue
+			}
+			branch := strings.TrimPrefix(ref.Name, "refs/heads/")
+			// Use the listed remote tip, not the short branch name, so remote-only
+			// branches can be classified without a local branch.
+			merged, mergeErr := repoGit.IsAncestor(ref.Hash, "origin/"+defaultBranch)
 			if mergeErr != nil {
 				continue
 			}

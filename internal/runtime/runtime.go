@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/hookutil"
 	"github.com/steveyegge/gastown/internal/templates/commands"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // EnsureSettingsForRole provisions all agent-specific configuration for a role.
@@ -66,10 +67,16 @@ func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.Runtime
 	// polluting the customer repo with gastown slash commands that could otherwise
 	// accidentally be committed. For other agents (no directory traversal support),
 	// commands must live in workDir where the agent looks for them.
+	//
+	// When falling back to workDir, skip provisioning if commands are already
+	// inherited from a town root via Claude Code's path-hierarchy traversal —
+	// duplicate copies make each command appear twice in the agent UI.
 	if commands.IsKnownAgent(provider) {
 		commandsDir := workDir
 		if useSettingsDir && settingsDir != "" {
 			commandsDir = settingsDir
+		} else if commandsInherited(workDir) {
+			return nil
 		}
 		if err := commands.ProvisionFor(commandsDir, provider); err != nil {
 			return err
@@ -130,6 +137,47 @@ func ensureGeminiContextFile(workDir string) error {
 
 func pointsToAgentsMD(target string) bool {
 	return filepath.Base(filepath.Clean(target)) == "AGENTS.md"
+}
+
+// commandsInherited reports whether workDir will receive slash commands via
+// Claude Code's path-hierarchy traversal without explicit provisioning.
+// Commands are inherited when workDir is inside a Gas Town workspace root and
+// not separated from it by a nested git repo. Crew and polecat workdirs are
+// nested repos, so they still get their own command provisioning.
+func commandsInherited(workDir string) bool {
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" || samePath(townRoot, workDir) {
+		return false
+	}
+
+	gitRoot := gitRootOf(workDir)
+	if gitRoot != "" && !samePath(gitRoot, townRoot) {
+		return false
+	}
+	return true
+}
+
+func samePath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		return filepath.Clean(absA) == filepath.Clean(absB)
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// gitRootOf walks up from dir to find the nearest ancestor directory containing
+// a .git entry (file or directory). Returns empty string if none found.
+func gitRootOf(dir string) string {
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return ""
+		}
+	}
 }
 
 type startupPromptSession interface {

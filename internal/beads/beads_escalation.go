@@ -233,9 +233,13 @@ func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*I
 
 	description := FormatEscalationDescription(title, fields)
 
+	// Pass description via stdin (--body-file=-) instead of --description=...
+	// to avoid embedding newlines in a flag value. bd 1.0.3+ rejects newline-
+	// containing flag values, which broke `gt escalate` for any escalation
+	// with structured YAML metadata in the description.
 	args := []string{"create", "--json",
 		"--title=" + title,
-		"--description=" + description,
+		"--body-file=-",
 		"--type=task",
 		"--ephemeral",
 		"--wisp-type=escalation",
@@ -253,7 +257,7 @@ func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*I
 		args = append(args, "--actor="+actor)
 	}
 
-	out, err := b.run(args...)
+	out, err := b.runWithStdin([]byte(description), args...)
 	if err != nil {
 		return nil, err
 	}

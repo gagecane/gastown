@@ -1747,3 +1747,4 @@ func TestNudgeRefineryGuardLogic(t *testing.T) {
 		})
 	}
 }
+

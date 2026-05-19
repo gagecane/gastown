@@ -1356,6 +1356,40 @@ func TestFindAgentPane_SinglePane(t *testing.T) {
 	}
 }
 
+func TestFindAgentPane_IgnoresPaneIDFromOtherSession(t *testing.T) {
+	tm := newTestTmux(t)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+	targetSession := "gt-test-findagent-target-" + suffix
+	otherSession := "gt-test-findagent-other-" + suffix
+
+	_ = tm.KillSession(targetSession)
+	_ = tm.KillSession(otherSession)
+	if err := tm.NewSession(targetSession, ""); err != nil {
+		t.Fatalf("NewSession target: %v", err)
+	}
+	defer func() { _ = tm.KillSession(targetSession) }()
+	if err := tm.NewSession(otherSession, ""); err != nil {
+		t.Fatalf("NewSession other: %v", err)
+	}
+	defer func() { _ = tm.KillSession(otherSession) }()
+
+	otherPane, err := tm.GetPaneID(otherSession)
+	if err != nil {
+		t.Fatalf("GetPaneID other: %v", err)
+	}
+	if err := tm.SetEnvironment(targetSession, "GT_PANE_ID", otherPane); err != nil {
+		t.Fatalf("SetEnvironment GT_PANE_ID: %v", err)
+	}
+
+	paneID, err := tm.FindAgentPane(targetSession)
+	if err != nil {
+		t.Fatalf("FindAgentPane: %v", err)
+	}
+	if paneID == otherPane {
+		t.Fatalf("FindAgentPane returned pane %q from another session", paneID)
+	}
+}
+
 func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
 	tm := newTestTmux(t)
 	sessionName := "gt-test-findagent-multi-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)

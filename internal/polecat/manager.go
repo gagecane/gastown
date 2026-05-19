@@ -38,6 +38,7 @@ const (
 	doltMaxRetries  = 10
 	doltBaseBackoff = 500 * time.Millisecond
 	doltBackoffMax  = 30 * time.Second
+	setupCmdTimeout = 30 * time.Minute
 
 	// doltStateRetries is a reduced retry count for SetAgentStateWithRetry.
 	// Agent state is a monitoring concern, not a correctness requirement (see
@@ -883,6 +884,10 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	if err := rig.RunSetupHooks(m.rig.Path, clonePath); err != nil {
 		style.PrintWarning("could not run setup hooks: %v", err)
 	}
+	if err := m.runSetupCommand(clonePath); err != nil {
+		cleanupOnError()
+		return nil, err
+	}
 
 	agentID := m.agentBeadID(name)
 	if err = m.createAgentBeadWithRetry(agentID, &beads.AgentFields{
@@ -1110,6 +1115,10 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	if err := rig.RunSetupHooks(m.rig.Path, clonePath); err != nil {
 		// Non-fatal - log warning but continue
 		style.PrintWarning("could not run setup hooks: %v", err)
+	}
+	if err := m.runSetupCommand(clonePath); err != nil {
+		cleanupOnError()
+		return nil, err
 	}
 
 	// NOTE: Slash commands (.claude/commands/) are provisioned at town level by gt install.
@@ -1595,6 +1604,15 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	}
 
 	// New worktree created successfully — now safe to remove old worktree and reset bead.
+	// Kill the existing session first: its cwd is about to disappear, and leaving
+	// a live idle session around makes SessionManager.Start return ErrSessionRunning
+	// instead of creating a fresh session for the repaired worktree.
+	if err := m.killExistingPolecatSession(name, "repair"); err != nil {
+		_ = repoGit.WorktreeRemove(tmpClonePath, true)
+		_ = os.RemoveAll(tmpClonePath)
+		return nil, err
+	}
+
 	// Remove old worktree BEFORE resetting bead to prevent name collision if a new
 	// spawn sees the clean bead while the old worktree still exists.
 	if err := repoGit.WorktreeRemove(oldClonePath, true); err != nil {
@@ -1651,6 +1669,12 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	}
 
 	// NOTE: Slash commands inherited from town level - no per-workspace copies needed.
+	if err := m.runSetupCommand(newClonePath); err != nil {
+		_ = repoGit.WorktreeRemove(newClonePath, true)
+		_ = os.RemoveAll(newClonePath)
+		_ = os.RemoveAll(polecatDir)
+		return nil, err
+	}
 
 	// Create or reopen agent bead for ZFC compliance
 	// HookBead is set atomically at recreation time if provided.
@@ -1718,20 +1742,31 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// session lifecycle (e.g. a compact/resume hook refreshes the heartbeat while
 	// the session is functionally idle), leaving the old session alive and the
 	// new work undiscovered.
-	if running, _ := m.polecatSessionState(name); running {
-		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
-		if err := m.tmux.KillSessionWithProcesses(sessionName); err != nil {
-			return nil, fmt.Errorf("killing existing session %s for reuse: %w", sessionName, err)
-		}
-		// Remove stale heartbeat so SessionManager.Start doesn't see leftover data.
-		townRoot := filepath.Dir(m.rig.Path)
-		RemoveSessionHeartbeat(townRoot, sessionName)
+	if err := m.killExistingPolecatSession(name, "reuse"); err != nil {
+		return nil, err
 	}
 
 	// Get worktree path (must already exist for reuse)
 	clonePath := m.clonePath(name)
 	if _, err := os.Stat(clonePath); err != nil {
 		return nil, fmt.Errorf("idle polecat worktree not found at %s: %w", clonePath, err)
+	}
+
+	// hq-x0v7v: per-bead target/ clean hook.
+	// Rust polecats accumulate huge target/ dirs (30-50 GB each) when reused
+	// across many beads; the dipgt daemon has hit 100% disk twice from this.
+	// Policy is per-town config (polecat.target_clean_policy). target/ is
+	// gitignored, so the subsequent reset/clean below won't touch it on its own.
+	// Errors are logged as warnings — reuse must not fail because a cleanup did.
+	{
+		policy := m.targetCleanPolicy()
+		polecatDir := m.polecatDir(name)
+		msg, err := RunTargetCleanHook(polecatDir, clonePath, policy)
+		if err != nil {
+			style.PrintWarning("target-clean hook for %s: %v", name, err)
+		} else if msg != "" {
+			fmt.Println(msg)
+		}
 	}
 
 	polecatGit := git.NewGit(clonePath)
@@ -1816,6 +1851,12 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// Verify the worktree is actually on the expected branch
 	if actual, err := polecatGit.CurrentBranch(); err == nil && actual != branchName {
 		return nil, fmt.Errorf("branch mismatch after checkout: expected %s, got %s", branchName, actual)
+	}
+
+	if err := m.runSetupCommand(clonePath); err != nil {
+		_ = polecatGit.ResetHard(startPoint)
+		_ = polecatGit.CleanForce()
+		return nil, err
 	}
 
 	// Reset agent bead for reuse
@@ -1993,6 +2034,29 @@ func (m *Manager) RefreshStalePolecat(name string, opts AddOptions) (*Polecat, e
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
+}
+
+// killExistingPolecatSession clears an existing tmux session before reusing or
+// repairing its worktree. The next SessionManager.Start call will create a fresh
+// session with the current hook and startup prompt.
+func (m *Manager) killExistingPolecatSession(name, action string) error {
+	if m.tmux == nil {
+		return nil
+	}
+
+	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	running, err := m.tmux.HasSession(sessionName)
+	if err != nil || !running {
+		return nil
+	}
+	if err := m.tmux.KillSessionWithProcesses(sessionName); err != nil {
+		return fmt.Errorf("killing existing session %s for %s: %w", sessionName, action, err)
+	}
+
+	// Remove stale heartbeat so SessionManager.Start doesn't see leftover data.
+	townRoot := filepath.Dir(m.rig.Path)
+	RemoveSessionHeartbeat(townRoot, sessionName)
+	return nil
 }
 
 // ReconcilePool derives pool InUse state from existing polecat directories and active sessions.
@@ -2644,6 +2708,77 @@ func (m *Manager) setupSharedBeads(clonePath string) error {
 	_ = cmd.Run()
 
 	return nil
+}
+
+func (m *Manager) resolveSetupCommand(worktreePath string) string {
+	if result := m.rig.GetConfigWithSource("setup_command"); result.Source != rig.SourceNone && result.Source != rig.SourceSystem {
+		if result.Source == rig.SourceBlocked {
+			return ""
+		}
+		if setup, ok := result.Value.(string); ok && strings.TrimSpace(setup) != "" {
+			return strings.TrimSpace(setup)
+		}
+	}
+
+	var repoMQ *config.MergeQueueConfig
+	if repoSettings, err := config.LoadRepoSettings(worktreePath); err == nil && repoSettings != nil {
+		repoMQ = repoSettings.MergeQueue
+	}
+
+	var localMQ *config.MergeQueueConfig
+	settingsPath := filepath.Join(m.rig.Path, "settings", "config.json")
+	if localSettings, err := config.LoadRigSettings(settingsPath); err == nil && localSettings != nil {
+		localMQ = localSettings.MergeQueue
+	}
+
+	mq := config.MergeSettingsCommand(repoMQ, localMQ)
+	if mq == nil {
+		return ""
+	}
+	return strings.TrimSpace(mq.SetupCommand)
+}
+
+func (m *Manager) runSetupCommand(worktreePath string) error {
+	setupCmd := m.resolveSetupCommand(worktreePath)
+	if setupCmd == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), setupCmdTimeout)
+	defer cancel()
+
+	shell, args := setupShellCommand(setupCmd)
+	cmd := exec.CommandContext(ctx, shell, args...) //nolint:gosec // setup_command is operator-controlled rig configuration.
+	util.SetProcessGroup(cmd)
+	cmd.Dir = worktreePath
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("GT_WORKTREE_PATH=%s", worktreePath),
+		fmt.Sprintf("GT_RIG_PATH=%s", m.rig.Path),
+	)
+
+	fmt.Println("Running setup_command...")
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("setup_command timed out after %s", setupCmdTimeout)
+		}
+		return fmt.Errorf("setup_command failed: %w", err)
+	}
+	fmt.Println("Ran setup_command")
+	return nil
+}
+
+func setupShellCommand(command string) (string, []string) {
+	if os.PathSeparator == '\\' {
+		return "cmd", []string{"/C", command}
+	}
+
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	return shell, []string{"-c", command}
 }
 
 // CleanupStaleBranches removes orphaned polecat branches that are no longer in use.

@@ -209,6 +209,9 @@ func runHookClear(cmd *cobra.Command, args []string) error {
 
 func runHook(_ *cobra.Command, args []string) error {
 	beadID := args[0]
+	if err := ensureCurrentHookWorktreeIntegrity(); err != nil {
+		return err
+	}
 
 	// Reject non-bead-shaped first args before passing to bd show, which would
 	// emit a confusing "bead 'set' not found" error. cobra has already failed to
@@ -468,6 +471,10 @@ func checkPinnedBeadComplete(b *beads.Beads, issue *beads.Issue) (isComplete boo
 
 // runHookShow displays another agent's hook in compact one-line format.
 func runHookShow(cmd *cobra.Command, args []string) error {
+	if err := ensureCurrentHookWorktreeIntegrity(); err != nil {
+		return err
+	}
+
 	var target string
 	if len(args) > 0 {
 		target = normalizeHookShowTarget(args[0])
@@ -573,6 +580,19 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 	bead := hookedBeads[0]
 	fmt.Printf("%s: %s '%s' [%s]\n", target, bead.ID, bead.Title, bead.Status)
 	return nil
+}
+
+func ensureCurrentHookWorktreeIntegrity() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting current directory: %w", err)
+	}
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return nil
+	}
+	roleCtx := detectRole(cwd, townRoot)
+	return ensureRoleWorktreeIntegrity(cwd, townRoot, roleCtx.Role)
 }
 
 // normalizeHookShowTarget resolves target aliases/shorthand to canonical agent IDs.

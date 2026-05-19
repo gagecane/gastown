@@ -1185,6 +1185,125 @@ func TestAddWithOptions_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestAllocateAndAdd_RunsWispSetupCommand(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("setup-marker"))
+
+	_, polecat, err := mgr.AllocateAndAdd(AddOptions{})
+	if err != nil {
+		t.Fatalf("AllocateAndAdd: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(polecat.ClonePath, "setup-marker"))
+	if err != nil {
+		t.Fatalf("setup command marker was not created: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "setup" {
+		t.Fatalf("setup marker = %q, want setup", got)
+	}
+}
+
+func TestAddWithOptions_SetupCommandFailureRollsBack(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+	writeWispSetupCommand(t, mgr, setupCommandFail())
+
+	_, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err == nil {
+		t.Fatal("AddWithOptions should fail when setup_command fails")
+	}
+	if !strings.Contains(err.Error(), "setup_command failed") {
+		t.Fatalf("error = %q, want setup_command failure", err.Error())
+	}
+
+	polecatDir := filepath.Join(mgr.rig.Path, "polecats", "toast")
+	if _, statErr := os.Stat(polecatDir); !os.IsNotExist(statErr) {
+		t.Fatalf("polecat dir %s still exists after setup_command rollback", polecatDir)
+	}
+}
+
+func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("reuse-setup-marker"))
+
+	reused, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
+	if err != nil {
+		t.Fatalf("ReuseIdlePolecat: %v", err)
+	}
+	if reused.ClonePath != polecat.ClonePath {
+		t.Fatalf("reused clone path = %q, want %q", reused.ClonePath, polecat.ClonePath)
+	}
+
+	data, err := os.ReadFile(filepath.Join(reused.ClonePath, "reuse-setup-marker"))
+	if err != nil {
+		t.Fatalf("reuse setup command marker was not created: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "setup" {
+		t.Fatalf("reuse setup marker = %q, want setup", got)
+	}
+}
+
+func TestReuseIdlePolecat_SetupCommandFailureCleansWorktree(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	if _, err := mgr.AddWithOptions("toast", AddOptions{}); err != nil {
+		t.Fatalf("AddWithOptions: %v", err)
+	}
+	writeWispSetupCommand(t, mgr, setupCommandWriteMarkerAndFail("dirty-setup-marker"))
+
+	_, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
+	if err == nil {
+		t.Fatal("ReuseIdlePolecat should fail when setup_command fails")
+	}
+	if !strings.Contains(err.Error(), "setup_command failed") {
+		t.Fatalf("error = %q, want setup_command failure", err.Error())
+	}
+
+	dirtyPath := filepath.Join(mgr.clonePath("toast"), "dirty-setup-marker")
+	if _, statErr := os.Stat(dirtyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("dirty setup marker %s still exists after setup_command cleanup", dirtyPath)
+	}
+}
+
+func writeWispSetupCommand(t *testing.T, mgr *Manager, command string) {
+	t.Helper()
+
+	townRoot := filepath.Dir(mgr.rig.Path)
+	wispDir := filepath.Join(townRoot, ".beads-wisp", "config")
+	if err := os.MkdirAll(wispDir, 0755); err != nil {
+		t.Fatalf("mkdir wisp config: %v", err)
+	}
+	cfg := fmt.Sprintf(`{"rig":"%s","values":{"setup_command":%q},"blocked":[]}`, mgr.rig.Name, command)
+	if err := os.WriteFile(filepath.Join(wispDir, mgr.rig.Name+".json"), []byte(cfg), 0644); err != nil {
+		t.Fatalf("write wisp config: %v", err)
+	}
+}
+
+func setupCommandWriteMarker(marker string) string {
+	if os.PathSeparator == '\\' {
+		return "echo setup> " + marker
+	}
+	return "printf setup > " + marker
+}
+
+func setupCommandFail() string {
+	if os.PathSeparator == '\\' {
+		return "exit /b 7"
+	}
+	return "exit 7"
+}
+
+func setupCommandWriteMarkerAndFail(marker string) string {
+	if os.PathSeparator == '\\' {
+		return "echo dirty> " + marker + " & exit /b 7"
+	}
+	return "printf dirty > " + marker + "; exit 7"
+}
+
 func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
@@ -2154,8 +2273,8 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 
 	// Verify it did NOT return ErrSessionRunning (the old buggy behavior)
 	if errors.Is(reuseErr, ErrSessionRunning) {
-		t.Fatalf("ReuseIdlePolecat returned ErrSessionRunning for live session — "+
-			"this is the sling-reuse-stale-session bug: idle polecats with live "+
+		t.Fatalf("ReuseIdlePolecat returned ErrSessionRunning for live session — " +
+			"this is the sling-reuse-stale-session bug: idle polecats with live " +
 			"sessions must have their session killed, not rejected")
 	}
 
@@ -2176,6 +2295,92 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 	// Verify heartbeat was cleaned up
 	if hb := ReadSessionHeartbeat(townRoot, sessionName); hb != nil {
 		t.Error("heartbeat should have been removed after session kill")
+	}
+}
+
+func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	installMockBd(t)
+
+	townRoot := t.TempDir()
+	rigName := "testrepair"
+	rigPath := filepath.Join(townRoot, rigName)
+	mayorRig := filepath.Join(rigPath, "mayor", "rig")
+	if err := os.MkdirAll(mayorRig, 0755); err != nil {
+		t.Fatalf("mkdir mayor rig: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir rig beads: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(mayorRig, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir mayor beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write beads redirect: %v", err)
+	}
+
+	cmd := exec.Command("git", "init", "-b", "main")
+	cmd.Dir = mayorRig
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(mayorRig, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	mayorGit := git.NewGit(mayorRig)
+	if err := mayorGit.Add("README.md"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := mayorGit.Commit("Initial commit"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
+	cmd.Dir = mayorRig
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
+	cmd.Dir = mayorRig
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git update-ref: %v\n%s", err, out)
+	}
+
+	polecatName := "toast"
+	oldClonePath := filepath.Join(rigPath, "polecats", polecatName, rigName)
+	if err := mayorGit.WorktreeAddFromRef(oldClonePath, "old-toast", "HEAD"); err != nil {
+		t.Fatalf("create old worktree: %v", err)
+	}
+
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", rigName)
+	old := session.DefaultRegistry()
+	session.SetDefaultRegistry(reg)
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+
+	tm := tmux.NewTmux()
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	if err := tm.NewSessionWithCommand(sessionName, oldClonePath, "sleep 300"); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSessionWithProcesses(sessionName) })
+	TouchSessionHeartbeat(townRoot, sessionName)
+
+	mgr := NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tm)
+	if _, err := mgr.RepairWorktreeWithOptions(polecatName, true, AddOptions{HookBead: "gt-next"}); err != nil {
+		t.Fatalf("RepairWorktreeWithOptions: %v", err)
+	}
+
+	running, _ := tm.HasSession(sessionName)
+	if running {
+		t.Error("session should have been killed by RepairWorktreeWithOptions")
+	}
+	if hb := ReadSessionHeartbeat(townRoot, sessionName); hb != nil {
+		t.Error("heartbeat should have been removed after repair session kill")
 	}
 }
 

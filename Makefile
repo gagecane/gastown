@@ -197,6 +197,9 @@ check-version-tag:
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
+test: test-makefile
+	go test ./...
+
 test-makefile:
 	bash scripts/check-install-path_test.sh
 	bash scripts/check-lockfile-mirror_test.sh
