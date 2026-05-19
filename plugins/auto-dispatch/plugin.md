@@ -43,6 +43,7 @@ cooldown cycle for the same bead is safe.
       - labels include `type:plugin-run` (these are plugin-execution receipts, not work — slinging them creates feedback loops where the scheduler tries to dispatch a successful plugin run as if it were a task; observed today as gs-wisp-3rw stuck in convoy hq-cv-7lcc6 for 8+ hours)
       - labels include `gt:message`, `gt:agent`, `gt:rig`, `gt:role`, `gt:sling-context`, or `msg-type:notification` (system beads, not actionable work)
       - The bead `id` matches `*-wisp-*` (defense in depth: wisps are ephemeral by definition and should not be dispatched as work, regardless of their labels)
+      - The bead `owner` address matches `<rig>/polecats/<name>` — these are polecat self-created beads, which violate the polecat contract (polecats execute work, they do not dispatch it). Auto-slinging them produces racing duplicates with user-filed work for the same change (gu-gal8 / cala-akl vs cala-xnv 2026-05-19 incident).
 
       Call the remaining list `ready_tasks`.
    c. If `ready_tasks` is empty, skip this rig

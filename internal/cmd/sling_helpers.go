@@ -90,6 +90,7 @@ type beadInfo struct {
 	Title        string           `json:"title"`
 	Status       string           `json:"status"`
 	Assignee     string           `json:"assignee"`
+	Owner        string           `json:"owner,omitempty"`
 	Description  string           `json:"description"`
 	Labels       []string         `json:"labels,omitempty"`
 	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
@@ -357,6 +358,47 @@ func isSlingContextBeadInfo(info *beadInfo) bool {
 		}
 	}
 	return false
+}
+
+// isPolecatOwnedBeadInfo reports whether the bead's owner address identifies
+// a polecat ("<rig>/polecats/<name>"). Polecats are not allowed to dispatch
+// work — their job is to execute a slung task and return — so a bead they
+// filed must never be auto-slung back to a polecat.
+//
+// gu-gal8: a polecat (casc_lambda/obsidian) self-created a bead (cala-akl)
+// for the same work as a user-filed bead (cala-xnv) that was already slung
+// to a different polecat. Both polecats raced to land the same change.
+// Self-created polecat beads bypass the existing identity / epic / label
+// filters because their shape (owner-only signal) was unguarded; this
+// helper closes that gap by parsing the owner field for the canonical
+// "<rig>/polecats/<name>" address.
+//
+// The owner is checked exactly — same parsing as isPolecatTarget — so
+// addresses with extra path segments (e.g. "rig/polecats/name/sub") or
+// non-polecat sublevels ("rig/witness", "rig/refinery") do not match.
+// Plain user owners (e.g. email addresses) are unaffected.
+//
+// Not bypassed by --force — the contract violation is independent of
+// dispatch intent. If a polecat genuinely needs to file work, that work
+// should be filed by a human or the mayor.
+func isPolecatOwnedBeadInfo(info *beadInfo) bool {
+	if info == nil {
+		return false
+	}
+	owner := strings.TrimSpace(info.Owner)
+	if owner == "" {
+		return false
+	}
+	parts := strings.Split(owner, "/")
+	// Canonical polecat address has exactly 3 segments: rig, "polecats", name.
+	// Each must be non-empty.
+	if len(parts) != 3 {
+		return false
+	}
+	if parts[1] != "polecats" {
+		return false
+	}
+	return parts[0] != "" && parts[2] != ""
 }
 
 func applyWorkflowStepTargetOverride(args []string) ([]string, error) {

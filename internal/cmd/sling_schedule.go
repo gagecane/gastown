@@ -203,6 +203,17 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("bead %s is a sling-context wrapper (label %s): %q — refusing to schedule (would create nested wrapper)", beadID, capacity.LabelSlingContext, info.Title)
 	}
 
+	// Polecat-owned bead guard (gu-gal8). scheduleBead is a dispatch entry
+	// point used by deferred / convoy paths; without this guard, a polecat
+	// self-filed bead would be queued and eventually fed to another polecat,
+	// racing whatever real (user-filed) work tracks the same change.
+	// Mirrors the same guard in runSling (sling.go) and executeSling
+	// (sling_dispatch.go) so all dispatch paths share one filter.
+	if isPolecatOwnedBeadInfo(info) {
+		return fmt.Errorf("bead %s is owned by a polecat (%s): %q — refusing to schedule. Polecats may not dispatch their own work; reassign the owner first",
+			beadID, info.Owner, info.Title)
+	}
+
 	// Idempotency: check for existing open sling context for this work bead.
 	// Fail fast on errors to avoid creating duplicate contexts on transient DB failures.
 	//

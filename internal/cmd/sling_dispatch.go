@@ -208,6 +208,18 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		return result, fmt.Errorf("bead %s is a sling-context wrapper (label gt:sling-context): %q — not a work item", params.BeadID, info.Title)
 	}
 
+	// Polecat-owned bead guard (gu-gal8). A bead whose owner address matches
+	// "<rig>/polecats/<name>" was self-filed by a polecat. Polecats execute
+	// work, they do not dispatch it; auto-slinging their self-created beads
+	// produces racing duplicates with user-filed work (see cala-akl vs
+	// cala-xnv 2026-05-19 incident). Not bypassed by --force — owner is a
+	// data-shape signal, not a dispatch preference.
+	if isPolecatOwnedBeadInfo(info) {
+		result.ErrMsg = "polecat-owned"
+		return result, fmt.Errorf("bead %s is owned by a polecat (%s): %q — polecats may not dispatch their own work. Reassign the owner (e.g. to a human or mayor) before re-slinging",
+			params.BeadID, info.Owner, info.Title)
+	}
+
 	// Save explicit force state before dead-agent auto-force, so the deferred
 	// gate below still requires an explicit --force for deferred beads.
 	explicitForce := params.Force

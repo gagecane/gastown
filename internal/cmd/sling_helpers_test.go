@@ -1097,3 +1097,87 @@ func TestLoadRigCommandVars_AllPostSquash(t *testing.T) {
 		}
 	}
 }
+
+// TestIsPolecatOwnedBeadInfo verifies the gu-gal8 dispatch gate: beads whose
+// owner address matches "<rig>/polecats/<name>" must be rejected from polecat
+// dispatch. The owner field is parsed exactly — no substring or prefix match
+// — so adjacent shapes (witness/refinery sublevels, deeper paths, plain user
+// emails) must not trigger the filter.
+func TestIsPolecatOwnedBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty info", &beadInfo{}, false},
+
+		// Positive: canonical "<rig>/polecats/<name>" addresses.
+		{"casc_lambda obsidian (cala-akl shape)", &beadInfo{
+			Title: "Replace SigV4 stub",
+			Owner: "casc_lambda/polecats/obsidian",
+		}, true},
+		{"gastown_upstream fury", &beadInfo{
+			Title: "Some bead",
+			Owner: "gastown_upstream/polecats/fury",
+		}, true},
+		{"hyphenated rig + name", &beadInfo{
+			Owner: "my-rig/polecats/quartz-2",
+		}, true},
+
+		// Negative: plain user owners (the common case).
+		{"email owner", &beadInfo{
+			Title: "Real work",
+			Owner: "canewiw@amazon.com",
+		}, false},
+		{"mayor owner (trailing slash, 2 segments)", &beadInfo{
+			Owner: "mayor/",
+		}, false},
+		{"empty owner", &beadInfo{
+			Title: "No owner set",
+			Owner: "",
+		}, false},
+		{"whitespace-only owner", &beadInfo{
+			Owner: "   ",
+		}, false},
+
+		// Negative: non-polecat sublevels under a rig.
+		{"witness sublevel", &beadInfo{
+			Owner: "gastown/witness",
+		}, false},
+		{"refinery sublevel", &beadInfo{
+			Owner: "gastown/refinery",
+		}, false},
+		{"crew (3 segments, but middle segment is not 'polecats')", &beadInfo{
+			Owner: "gastown/crew/canewiw",
+		}, false},
+
+		// Negative: malformed shapes that look polecat-ish but aren't canonical.
+		{"deeper path beyond 3 segments", &beadInfo{
+			Owner: "rig/polecats/name/extra",
+		}, false},
+		{"missing rig segment", &beadInfo{
+			Owner: "/polecats/name",
+		}, false},
+		{"missing polecat name segment", &beadInfo{
+			Owner: "rig/polecats/",
+		}, false},
+		{"polecats-prefixed but not the literal segment", &beadInfo{
+			Owner: "rig/polecats-and-friends/name",
+		}, false},
+		{"plural typo (polecat singular)", &beadInfo{
+			Owner: "rig/polecat/name",
+		}, false},
+		{"capitalization differs (Polecats)", &beadInfo{
+			Owner: "rig/Polecats/name",
+		}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPolecatOwnedBeadInfo(tt.info); got != tt.want {
+				t.Errorf("isPolecatOwnedBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
