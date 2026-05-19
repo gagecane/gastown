@@ -204,22 +204,67 @@ func TestNewSessionWithCommand_Concurrent(t *testing.T) {
 // NewSessionWithCommand completes — which the health check then surfaces as
 // `command exited early with status ?: bash / Pane is dead (signal 9, …)`.
 // The `--norc --noprofile` flags keep pane_current_command == "bash" (so
-// WaitForCommand's exclude list still matches) while eliminating the flake.
-// See gu-soq5.
+// WaitForCommand's exclude list still matches) while eliminating most of
+// the flake (gu-soq5).
+//
+// gu-cu3d follow-up: even with --norc --noprofile, sufficiently
+// memory-pressured CI runners can still SIGKILL bash itself before the 250ms
+// health check completes (the bare bash process is what the OOM-killer reaps
+// when the runner is under genuine memory pressure, not just a forky rc-file
+// chain). When that happens the test setup — not the assertion — fails
+// spuriously. Wrap the session-creation step in a bounded retry that ONLY
+// triggers on the SIGKILL signature ("status ?" + the bash command). The
+// assertion the test exists to verify (WaitForCommand returns error when the
+// pane is still a shell) is unchanged. Real session-creation regressions
+// (bad binary, missing workdir, etc.) still fail loudly because their error
+// strings don't match the SIGKILL pattern.
 func TestWaitForCommand_Timeout(t *testing.T) {
 	tm := newTestTmux(t)
 	session := "gt-test-waitcmd-" + t.Name()
 	_ = tm.KillSession(session)
 	defer func() { _ = tm.KillSession(session) }()
 
-	if err := tm.NewSessionWithCommand(session, "", "bash --norc --noprofile"); err != nil {
-		t.Fatalf("session creation: %v", err)
+	const shellCmd = "bash --norc --noprofile"
+	const maxAttempts = 3
+	var setupErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		setupErr = tm.NewSessionWithCommand(session, "", shellCmd)
+		if setupErr == nil {
+			break
+		}
+		// Only retry on the OOM SIGKILL signature: "exited early with status ?"
+		// for the bash command we just spawned. Any other error (validateCommandBinary
+		// failure, tmux command not found, syntax error, etc.) is a real failure
+		// and should surface immediately.
+		if !isOOMKillSignature(setupErr.Error(), shellCmd) {
+			t.Fatalf("session creation: %v", setupErr)
+		}
+		t.Logf("session creation attempt %d/%d hit OOM-kill signature, retrying: %v",
+			attempt, maxAttempts, setupErr)
+		// Make sure the dead session is cleared before the next attempt; the
+		// health check kills it on early-exit but be defensive.
+		_ = tm.KillSession(session)
+		// Tiny backoff lets the OS recover memory between attempts.
+		time.Sleep(100 * time.Millisecond)
+	}
+	if setupErr != nil {
+		t.Fatalf("session creation: %v (after %d attempts)", setupErr, maxAttempts)
 	}
 
 	err := tm.WaitForCommand(session, []string{"bash", "zsh", "sh"}, 500*time.Millisecond)
 	if err == nil {
 		t.Error("WaitForCommand should timeout when shell is still running")
 	}
+}
+
+// isOOMKillSignature reports whether errMsg matches the
+// "exited early with status ?" + cmd pattern produced by checkSessionAfterCreate
+// when the pane process was SIGKILL'd before the 250ms health check completed.
+// Used by TestWaitForCommand_Timeout to distinguish environmental OOM-kills
+// (worth retrying) from real session-creation regressions (worth failing).
+func isOOMKillSignature(errMsg, cmd string) bool {
+	return strings.Contains(errMsg, "exited early with status ?") &&
+		strings.Contains(errMsg, cmd)
 }
 
 // TestSanitizeNudgeMessage verifies control character stripping.
