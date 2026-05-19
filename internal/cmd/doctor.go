@@ -108,6 +108,7 @@ Dolt checks:
   - dolt-metadata            Check dolt metadata tables exist
   - dolt-server-reachable    Check dolt sql-server is reachable
   - dolt-orphaned-databases  Detect orphaned dolt databases
+  - stale-embeddeddolt       Detect stale embeddeddolt/ directories (fixable)
 
 Patrol checks:
   - patrol-molecules-exist   Verify patrol molecules exist
@@ -209,8 +210,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewPrefixConflictCheck())
 	d.Register(doctor.NewRigNameMismatchCheck())
 	d.Register(doctor.NewRigConfigSyncCheck()) // Check all registered rigs have config.json
-	d.Register(doctor.NewStaleDoltPortCheck())      // Check for stale Dolt port files
-	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
+	d.Register(doctor.NewStaleDoltPortCheck())           // Check for stale Dolt port files
+	d.Register(doctor.NewStaleSQLServerInfoCheck())      // Check for stale sql-server.info files (GH#2770)
+	d.Register(doctor.NewStaleEmbeddeddoltCheck())       // Check for stale embeddeddolt/ directories
 	d.Register(doctor.NewPrefixMismatchCheck())
 	d.Register(doctor.NewDatabasePrefixCheck())
 	d.Register(doctor.NewIdleTimeoutCheck()) // Verify dolt.idle-timeout: "0" for all rigs
