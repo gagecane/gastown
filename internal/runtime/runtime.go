@@ -71,12 +71,10 @@ func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.Runtime
 	// When falling back to workDir, skip provisioning if commands are already
 	// inherited from a town root via Claude Code's path-hierarchy traversal —
 	// duplicate copies make each command appear twice in the agent UI.
-	if commands.IsKnownAgent(provider) {
+	if commands.IsKnownAgent(provider) && !commandsInherited(workDir) {
 		commandsDir := workDir
 		if useSettingsDir && settingsDir != "" {
 			commandsDir = settingsDir
-		} else if commandsInherited(workDir) {
-			return nil
 		}
 		if err := commands.ProvisionFor(commandsDir, provider); err != nil {
 			return err

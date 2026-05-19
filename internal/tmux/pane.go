@@ -39,11 +39,20 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 	// ZFC: read declared pane identity set at session startup (gt-qmsx).
 	// This replaces process-tree inference for sessions that record GT_PANE_ID.
 	if declaredPane, err := t.GetEnvironment(session, "GT_PANE_ID"); err == nil && declaredPane != "" {
-		// Verify the pane still exists in tmux (it may have been killed/respawned).
-		if _, verifyErr := t.run("display-message", "-t", declaredPane, "-p", "#{pane_id}"); verifyErr == nil {
+		targetSession := session
+		if sessionOut, sessionErr := t.run("display-message", "-t", session, "-p", "#{session_name}"); sessionErr == nil {
+			if resolved := strings.TrimSpace(sessionOut); resolved != "" {
+				targetSession = resolved
+			}
+		}
+
+		// Verify the pane still exists in the target session. Pane IDs are tmux-global,
+		// so a stale GT_PANE_ID may still resolve in a different restarted session
+		// (gt-gh-3563).
+		if paneSession, verifyErr := t.run("display-message", "-t", declaredPane, "-p", "#{session_name}"); verifyErr == nil && strings.TrimSpace(paneSession) == targetSession {
 			return declaredPane, nil
 		}
-		// Declared pane is gone — fall through to scan.
+		// Declared pane is gone or belongs to another session — fall through to scan.
 	}
 
 	// Fallback: scan all panes for legacy sessions without GT_PANE_ID.
