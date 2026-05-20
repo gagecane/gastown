@@ -96,10 +96,24 @@ func runClose(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// After successful close, check convoy completion for each closed issue.
-	// This is best-effort: failures are silently ignored since the daemon's
-	// event polling and deacon patrol serve as backup mechanisms.
 	beadIDs := extractBeadIDs(filteredArgs)
+
+	// After successful close, auto-attach a wrong-rig:<closing-rig> label
+	// when the close reason indicates the bead was wrongly routed. This
+	// implements Layer 2 of the auto-dispatch wrong-rig feedback loop:
+	// the matching guard that respects the label lives in sling and the
+	// auto-dispatch run.sh filter (gu-mhfs Layer 1). Best-effort.
+	if len(beadIDs) > 0 {
+		if reason := extractCloseReason(convertedArgs); reason != "" {
+			applyWrongRigLabels(beadIDs, reason)
+		}
+	}
+
+	// Check convoy completion for each closed issue. This implements the
+	// ZFC principle: the closure event propagates at the source (bd close)
+	// rather than relying solely on daemon event polling. Best-effort:
+	// failures are silently ignored since the daemon's event polling and
+	// deacon patrol serve as backup mechanisms.
 	if len(beadIDs) > 0 {
 		checkConvoyCompletion(beadIDs)
 	}
