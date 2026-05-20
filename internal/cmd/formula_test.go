@@ -319,3 +319,67 @@ func TestAttachmentFormulaVarsPrefersAttachedVars(t *testing.T) {
 		t.Fatalf("attachmentFormulaVars() = %#v, want %#v", got, want)
 	}
 }
+
+// TestFormulaResolution_ShinyEnterprise is a regression test for gu-deat:
+// formulas authored with `extends` + `compose.expand` previously failed at
+// `gt formula run` time with "has no steps" because runFormulaRun parsed the
+// formula but never invoked formula.Resolve(). After the fix, parsing the
+// canonical shiny-enterprise formula and running it through Resolve() must
+// produce the merged + expanded step list (5 from shiny - 1 replaced + 5
+// from rule-of-five = 9 steps).
+func TestFormulaResolution_ShinyEnterprise(t *testing.T) {
+	t.Parallel()
+
+	data, err := formula.GetEmbeddedFormulaContent("shiny-enterprise")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+
+	f, err := formula.Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if len(f.Extends) == 0 {
+		t.Fatal("expected shiny-enterprise to declare extends")
+	}
+	if len(f.Steps) != 0 {
+		t.Fatalf("expected shiny-enterprise to have no inline steps before resolve; got %d", len(f.Steps))
+	}
+
+	resolved, err := formula.Resolve(f, formulaSearchPaths())
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if len(resolved.Steps) == 0 {
+		t.Fatal("expected resolved formula to have steps after Resolve()")
+	}
+	// shiny has 5 steps; rule-of-five expands implement into 5 -> 9 total.
+	if got := len(resolved.Steps); got != 9 {
+		t.Errorf("expected 9 steps after resolution, got %d", got)
+	}
+}
+
+// TestFormulaResolution_NoOpForPlainFormula verifies that formulas without
+// extends/compose pass through Resolve() unchanged. This guards the
+// short-circuit branch in runFormulaRun: only formulas that actually use
+// composition pay the resolution cost.
+func TestFormulaResolution_NoOpForPlainFormula(t *testing.T) {
+	t.Parallel()
+
+	data, err := formula.GetEmbeddedFormulaContent("shiny")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	f, err := formula.Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(f.Extends) != 0 || f.Compose != nil {
+		t.Fatal("shiny should have no extends/compose")
+	}
+	if len(f.Steps) == 0 {
+		t.Fatal("shiny should have inline steps")
+	}
+}

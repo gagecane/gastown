@@ -282,6 +282,19 @@ func runFormulaRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("parsing formula: %w", err)
 	}
 
+	// Resolve `extends` and `compose.expand` so inherited steps are
+	// materialized into f.Steps before execution. Without this, formulas
+	// authored with the documented composition pattern (extends + compose)
+	// would fail at executeWorkflowFormula() with "has no steps" because
+	// their parent's [[steps]] live in a sibling file (gu-deat).
+	if len(f.Extends) > 0 || f.Compose != nil {
+		resolved, rerr := formula.Resolve(f, formulaSearchPaths())
+		if rerr != nil {
+			return fmt.Errorf("resolving formula composition: %w", rerr)
+		}
+		f = resolved
+	}
+
 	// Handle dry-run mode
 	if formulaRunDryRun {
 		return dryRunFormula(f, formulaName, targetRig)
@@ -1037,7 +1050,27 @@ func substituteFormulaVars(text string, vars map[string]interface{}) string {
 
 // findFormulaFile searches for a formula file by name
 func findFormulaFile(name string) (string, error) {
-	// Search paths in order
+	searchPaths := formulaSearchPaths()
+
+	// Try each path with common extensions
+	extensions := []string{".formula.toml", ".formula.json"}
+	for _, basePath := range searchPaths {
+		for _, ext := range extensions {
+			path := filepath.Join(basePath, name+ext)
+			if _, err := os.Stat(path); err == nil {
+				return path, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("formula '%s' not found in search paths", name)
+}
+
+// formulaSearchPaths returns the directories that gt searches for formula
+// TOML files, in priority order. The same paths feed formula.Resolve() so
+// that on-disk parents referenced via `extends` resolve identically whether
+// they live on disk or are embedded in the binary (gu-deat).
+func formulaSearchPaths() []string {
 	searchPaths := []string{}
 
 	// 1. Project .beads/formulas/
@@ -1055,18 +1088,7 @@ func findFormulaFile(name string) (string, error) {
 		searchPaths = append(searchPaths, filepath.Join(home, ".beads", "formulas"))
 	}
 
-	// Try each path with common extensions
-	extensions := []string{".formula.toml", ".formula.json"}
-	for _, basePath := range searchPaths {
-		for _, ext := range extensions {
-			path := filepath.Join(basePath, name+ext)
-			if _, err := os.Stat(path); err == nil {
-				return path, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("formula '%s' not found in search paths", name)
+	return searchPaths
 }
 
 // parseFormulaFile parses a formula file using the formula package's TOML parser.
