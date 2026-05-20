@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,7 +17,23 @@ var (
 	removeTrackingRelationFn = removeTrackingRelation
 )
 
+// normalizeTownRoot accepts either a town root or a town .beads directory and
+// returns the town root. Some callers (formula.go, sling_convoy.go) historically
+// pass `filepath.Join(townRoot, ".beads")` while others (convoy.go via
+// getTownBeadsDir, synthesis.go) pass the town root itself. Without this
+// normalization, trackingDependsOnID's call to beads.GetRigNameForPrefix would
+// resolve routes against `<townRoot>/.beads/.beads`, return empty, and cause
+// cross-rig leg IDs (e.g. cacr-leg-xxx) to be passed to the store as if they
+// lived in HQ — producing a spurious "issue not found" error (gu-7xqy).
+func normalizeTownRoot(townRoot string) string {
+	if filepath.Base(townRoot) == ".beads" {
+		return filepath.Dir(townRoot)
+	}
+	return townRoot
+}
+
 func addTrackingRelation(townRoot, trackerID, issueID string) error {
+	townRoot = normalizeTownRoot(townRoot)
 	if err := mutateTrackingRelationViaStore(townRoot, trackerID, issueID, true); err != nil {
 		return fallbackTrackingRelation(townRoot, trackerID, issueID, true, err)
 	}
@@ -24,6 +41,7 @@ func addTrackingRelation(townRoot, trackerID, issueID string) error {
 }
 
 func removeTrackingRelation(townRoot, trackerID, issueID string) error {
+	townRoot = normalizeTownRoot(townRoot)
 	if err := mutateTrackingRelationViaStore(townRoot, trackerID, issueID, false); err != nil {
 		return fallbackTrackingRelation(townRoot, trackerID, issueID, false, err)
 	}

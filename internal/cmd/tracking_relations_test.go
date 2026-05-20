@@ -29,3 +29,56 @@ func TestTrackingDependsOnID_HQStaysLocal(t *testing.T) {
 		t.Fatalf("trackingDependsOnID() = %q, want %q", got, "hq-cv-test")
 	}
 }
+
+// TestNormalizeTownRoot_AcceptsBothForms regression-tests gu-7xqy. Some callers
+// (formula.go, sling_convoy.go) pass <townRoot>/.beads while others pass the
+// town root itself. The helper must accept both, otherwise route lookup ends up
+// at <townRoot>/.beads/.beads which doesn't exist and silently fails — causing
+// cross-rig convoy leg tracking to report "issue not found".
+func TestNormalizeTownRoot_AcceptsBothForms(t *testing.T) {
+	townRoot := t.TempDir()
+
+	t.Run("plain town root passthrough", func(t *testing.T) {
+		got := normalizeTownRoot(townRoot)
+		if got != townRoot {
+			t.Fatalf("normalizeTownRoot(%q) = %q, want %q", townRoot, got, townRoot)
+		}
+	})
+
+	t.Run("townRoot with .beads suffix is stripped", func(t *testing.T) {
+		got := normalizeTownRoot(filepath.Join(townRoot, ".beads"))
+		if got != townRoot {
+			t.Fatalf("normalizeTownRoot(%q/.beads) = %q, want %q",
+				townRoot, got, townRoot)
+		}
+	})
+}
+
+// TestAddTrackingRelation_AcceptsBeadsDirAsTownRoot regression-tests gu-7xqy by
+// simulating a formula-style caller that passes a .beads directory in place of
+// the town root. The resulting cross-rig issue ID must still be wrapped as
+// "external:<prefix>:<id>" — proving the helper is no longer fooled by the
+// trailing .beads segment when looking up routes.
+func TestAddTrackingRelation_AcceptsBeadsDirAsTownRoot(t *testing.T) {
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"),
+		[]byte(`{"prefix":"cacr-","path":"casc_crud/mayor/rig"}`+"\n"),
+		0o644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	// Calling trackingDependsOnID with the .beads-suffixed townRoot must still
+	// resolve the cross-rig prefix correctly. Before the fix this returned the
+	// bare bead ID (because route lookup ran against townRoot/.beads/.beads),
+	// which made store.AddDependency look for the leg in HQ and fail with
+	// "issue not found".
+	got := trackingDependsOnID(normalizeTownRoot(beadsDir), "cacr-leg-chqp2")
+	want := "external:cacr:cacr-leg-chqp2"
+	if got != want {
+		t.Fatalf("trackingDependsOnID(beadsDir, leg) = %q, want %q", got, want)
+	}
+}
