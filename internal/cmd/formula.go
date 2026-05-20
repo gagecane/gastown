@@ -1035,9 +1035,11 @@ func substituteFormulaVars(text string, vars map[string]interface{}) string {
 	})
 }
 
-// findFormulaFile searches for a formula file by name
-func findFormulaFile(name string) (string, error) {
-	// Search paths in order
+// formulaSearchPaths returns the on-disk directories where formulas may live,
+// in priority order: project .beads/formulas, town .beads/formulas, and the
+// user's ~/.beads/formulas. Used for both finding a formula file by name and
+// for resolving extends/compose references that aren't in the embedded FS.
+func formulaSearchPaths() []string {
 	searchPaths := []string{}
 
 	// 1. Project .beads/formulas/
@@ -1055,6 +1057,13 @@ func findFormulaFile(name string) (string, error) {
 		searchPaths = append(searchPaths, filepath.Join(home, ".beads", "formulas"))
 	}
 
+	return searchPaths
+}
+
+// findFormulaFile searches for a formula file by name
+func findFormulaFile(name string) (string, error) {
+	searchPaths := formulaSearchPaths()
+
 	// Try each path with common extensions
 	extensions := []string{".formula.toml", ".formula.json"}
 	for _, basePath := range searchPaths {
@@ -1069,9 +1078,26 @@ func findFormulaFile(name string) (string, error) {
 	return "", fmt.Errorf("formula '%s' not found in search paths", name)
 }
 
-// parseFormulaFile parses a formula file using the formula package's TOML parser.
+// parseFormulaFile parses a formula file using the formula package's TOML
+// parser. If the parsed formula uses extends or compose, it is resolved
+// against the embedded formula FS plus on-disk search paths so that callers
+// always see a fully-materialized Steps list.
+//
+// Resolution is the difference between `gt formula show` (which works on a
+// raw parse) and `gt formula run` (which needs concrete steps to execute).
+// Without this, composition formulas fail at run time with
+// "workflow formula 'X' has no steps" — see gu-deat.
 func parseFormulaFile(path string) (*formula.Formula, error) {
-	return formula.ParseFile(path)
+	f, err := formula.ParseFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Pass-through if there's nothing to resolve. Resolve() is a no-op in
+	// that case but skipping avoids unnecessary re-validation.
+	if len(f.Extends) == 0 && f.Compose == nil {
+		return f, nil
+	}
+	return formula.Resolve(f, formulaSearchPaths())
 }
 
 // renderTemplate renders a Go text/template with the given context map
