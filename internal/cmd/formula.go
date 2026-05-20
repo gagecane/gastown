@@ -1035,9 +1035,10 @@ func substituteFormulaVars(text string, vars map[string]interface{}) string {
 	})
 }
 
-// findFormulaFile searches for a formula file by name
-func findFormulaFile(name string) (string, error) {
-	// Search paths in order
+// formulaSearchPaths returns the on-disk search paths used to locate formulas
+// and to resolve their extends/expansion parents. Order matches findFormulaFile:
+// project .beads/formulas/, town .beads/formulas/, user ~/.beads/formulas/.
+func formulaSearchPaths() []string {
 	searchPaths := []string{}
 
 	// 1. Project .beads/formulas/
@@ -1055,9 +1056,14 @@ func findFormulaFile(name string) (string, error) {
 		searchPaths = append(searchPaths, filepath.Join(home, ".beads", "formulas"))
 	}
 
+	return searchPaths
+}
+
+// findFormulaFile searches for a formula file by name
+func findFormulaFile(name string) (string, error) {
 	// Try each path with common extensions
 	extensions := []string{".formula.toml", ".formula.json"}
-	for _, basePath := range searchPaths {
+	for _, basePath := range formulaSearchPaths() {
 		for _, ext := range extensions {
 			path := filepath.Join(basePath, name+ext)
 			if _, err := os.Stat(path); err == nil {
@@ -1069,9 +1075,21 @@ func findFormulaFile(name string) (string, error) {
 	return "", fmt.Errorf("formula '%s' not found in search paths", name)
 }
 
-// parseFormulaFile parses a formula file using the formula package's TOML parser.
+// parseFormulaFile parses a formula file using the formula package's TOML parser
+// and resolves any extends/compose composition. Resolution merges parent formula
+// steps into the child and applies compose.expand rules so callers see a fully
+// materialized step list — matching what `formula show` describes the formula to
+// be. For plain formulas (no extends, no compose) Resolve is a no-op pass-through.
 func parseFormulaFile(path string) (*formula.Formula, error) {
-	return formula.ParseFile(path)
+	f, err := formula.ParseFile(path)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := formula.Resolve(f, formulaSearchPaths())
+	if err != nil {
+		return nil, fmt.Errorf("resolving formula composition: %w", err)
+	}
+	return resolved, nil
 }
 
 // renderTemplate renders a Go text/template with the given context map
