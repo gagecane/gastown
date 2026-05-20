@@ -612,3 +612,80 @@ func TestValidateRequiredFormulaVars_EmptyValueFails(t *testing.T) {
 		t.Fatal("expected error for empty required var value, got nil")
 	}
 }
+
+// TestDeriveDesignID verifies the convoy-ID → design_id derivation used by
+// the design convoy formula. Regression for gu-g764: previously the formula
+// referenced {{.design_id}} but no derivation existed, so output paths
+// rendered as ".designs/<no value>/" and polecats invented their own
+// subdirectory names, scattering files across worktrees.
+func TestDeriveDesignID(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		convoyID string
+		want     string
+	}{
+		{name: "standard convoy id", convoyID: "cacr-cv-j23uo", want: "cv-j23uo"},
+		{name: "short rig prefix", convoyID: "gu-cv-abc12", want: "cv-abc12"},
+		{name: "hq prefix", convoyID: "hq-cv-x9y8z", want: "cv-x9y8z"},
+		{name: "empty input", convoyID: "", want: ""},
+		{name: "no dash returns input", convoyID: "weirdid", want: "weirdid"},
+		{name: "trailing dash returns input", convoyID: "rig-", want: "rig-"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := deriveDesignID(tc.convoyID)
+			if got != tc.want {
+				t.Errorf("deriveDesignID(%q) = %q, want %q", tc.convoyID, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderTemplate_DesignIDSubstitutes verifies that injecting design_id
+// into the template context produces a deterministic output path instead
+// of the "<no value>" sentinel that triggered gu-g764.
+func TestRenderTemplate_DesignIDSubstitutes(t *testing.T) {
+	t.Parallel()
+
+	tmpl := ".designs/{{.design_id}}"
+	ctx := map[string]interface{}{
+		"design_id": "cv-j23uo",
+	}
+
+	got, err := renderTemplate(tmpl, ctx)
+	if err != nil {
+		t.Fatalf("renderTemplate failed: %v", err)
+	}
+	want := ".designs/cv-j23uo"
+	if got != want {
+		t.Errorf("renderTemplate = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "<no value>") {
+		t.Errorf("rendered template still contains <no value>: %q", got)
+	}
+}
+
+// TestRenderTemplate_MissingDesignIDLeavesSentinel documents the underlying
+// text/template behavior that gu-g764 exposed: when the variable is absent
+// from the context, Go's default missingkey policy renders "<no value>".
+// The fix in executeConvoyFormula prevents this by always injecting
+// design_id; this test pins the behavior so future refactors are explicit.
+func TestRenderTemplate_MissingDesignIDLeavesSentinel(t *testing.T) {
+	t.Parallel()
+
+	tmpl := ".designs/{{.design_id}}"
+	ctx := map[string]interface{}{} // design_id intentionally omitted
+
+	got, err := renderTemplate(tmpl, ctx)
+	if err != nil {
+		t.Fatalf("renderTemplate failed: %v", err)
+	}
+	if !strings.Contains(got, "<no value>") {
+		t.Fatalf("expected <no value> sentinel for missing design_id, got %q", got)
+	}
+}

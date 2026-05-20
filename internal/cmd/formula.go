@@ -371,14 +371,19 @@ func dryRunFormula(f *formula.Formula, formulaName, targetRig string) error {
 		// Show output directory if configured
 		var outputDir string
 		if f.Output != nil && f.Output.Directory != "" {
+			// In dry-run we don't have a real convoy bead yet, so use the
+			// preview reviewID as the design_id placeholder. This keeps the
+			// preview path stable instead of rendering as "<no value>" (gu-g764).
 			dirCtx := map[string]interface{}{
 				"review_id":    reviewID,
 				"formula_name": formulaName,
+				"design_id":    "cv-" + reviewID,
 			}
 			for k, v := range setVars {
 				dirCtx[k] = v
 			}
 			outputDir = renderTemplateOrDefault(f.Output.Directory, dirCtx, ".reviews/"+reviewID)
+			warnIfTemplateLeftMissing("Output directory", outputDir)
 			fmt.Printf("\n  Output directory: %s\n", outputDir)
 		}
 
@@ -390,6 +395,7 @@ func dryRunFormula(f *formula.Formula, formulaName, targetRig string) error {
 					"formula_name":       formulaName,
 					"target_description": targetDescription,
 					"review_id":          reviewID,
+					"design_id":          "cv-" + reviewID,
 					"pr_number":          formulaRunPR,
 					"pr_title":           prTitle,
 					"leg": map[string]interface{}{
@@ -535,6 +541,12 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		prTitle, changedFiles = fetchPRInfo(formulaRunPR)
 	}
 
+	// Derive design_id from the convoy bead ID. This gives every convoy
+	// a deterministic output path tied to its bead, fixing gu-g764 where
+	// formulas referencing {{.design_id}} rendered as "<no value>" and
+	// polecats scattered output across invented subdirectories.
+	designID := deriveDesignID(convoyID)
+
 	// Create output directory if configured
 	var outputDir string
 	if f.Output != nil && f.Output.Directory != "" {
@@ -542,8 +554,10 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		dirCtx := map[string]interface{}{
 			"review_id":    reviewID,
 			"formula_name": formulaName,
+			"design_id":    designID,
 		}
 		outputDir = renderTemplateOrDefault(f.Output.Directory, dirCtx, ".reviews/"+reviewID)
+		warnIfTemplateLeftMissing("Output directory", outputDir)
 
 		// Create the directory
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -571,6 +585,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 					"formula_name":       formulaName,
 					"target_description": targetDescription,
 					"review_id":          reviewID,
+					"design_id":          designID,
 					"pr_number":          formulaRunPR,
 					"pr_title":           prTitle,
 					"leg": map[string]interface{}{
@@ -649,6 +664,29 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		synDesc := f.Synthesis.Description
 		if synDesc == "" {
 			synDesc = "Synthesize findings from all legs into unified output"
+		} else if f.Output != nil {
+			// Render the synthesis description with the same template context
+			// the legs receive, so {{.design_id}} / {{.output.directory}} resolve
+			// instead of leaking "<no value>" into the bead description (gu-g764).
+			synCtx := map[string]interface{}{
+				"formula_name":       formulaName,
+				"target_description": targetDescription,
+				"review_id":          reviewID,
+				"design_id":          designID,
+				"pr_number":          formulaRunPR,
+				"pr_title":           prTitle,
+				"output": map[string]interface{}{
+					"directory": outputDir,
+					"synthesis": f.Output.Synthesis,
+				},
+			}
+			for k, v := range setVars {
+				synCtx[k] = v
+			}
+			if rendered, err := renderTemplate(synDesc, synCtx); err == nil {
+				synDesc = rendered
+				warnIfTemplateLeftMissing("Synthesis description", synDesc)
+			}
 		}
 
 		synArgs := []string{
@@ -1228,6 +1266,40 @@ func generateFormulaShortID() string {
 	b := make([]byte, 3)
 	_, _ = rand.Read(b)
 	return strings.ToLower(base32.StdEncoding.EncodeToString(b)[:5])
+}
+
+// deriveDesignID derives a stable, human-readable design_id from a convoy
+// bead ID by stripping the rig prefix. For example:
+//
+//	"cacr-cv-j23uo" → "cv-j23uo"
+//	"gu-cv-abc12"   → "cv-abc12"
+//	""              → "" (caller must guard)
+//
+// This gives every convoy run a deterministic, unique output path tied to its
+// bead, fixing the gu-g764 bug where {{.design_id}} rendered as "<no value>"
+// and polecats scattered output into invented subdirectories.
+func deriveDesignID(convoyID string) string {
+	if convoyID == "" {
+		return ""
+	}
+	// Strip the leading "<rig-prefix>-" so the design_id is short and
+	// portable. Convoy IDs are shaped as "<rigPrefix>-cv-<short>" so the
+	// first dash separates the prefix from the identifier we want.
+	if idx := strings.Index(convoyID, "-"); idx >= 0 && idx < len(convoyID)-1 {
+		return convoyID[idx+1:]
+	}
+	return convoyID
+}
+
+// warnIfTemplateLeftMissing emits a warning if a rendered template still
+// contains the Go text/template "<no value>" sentinel, which indicates a
+// referenced variable was undefined. This is a defense-in-depth guard for
+// the gu-g764 class of bug: silent rendering of broken paths.
+func warnIfTemplateLeftMissing(label, rendered string) {
+	if strings.Contains(rendered, "<no value>") {
+		fmt.Printf("%s %s contains undefined template variables: %q\n",
+			style.Dim.Render("Warning:"), label, rendered)
+	}
 }
 
 // runFormulaCreate creates a new formula template
