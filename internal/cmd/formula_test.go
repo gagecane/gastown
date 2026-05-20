@@ -473,3 +473,142 @@ func TestParseFormulaFile_PassThroughForSimpleFormulas(t *testing.T) {
 		t.Fatalf("steps = %v, want %v", gotIDs, wantIDs)
 	}
 }
+
+// TestSubstituteStepFields verifies that {{var}} placeholders in step fields
+// (Title, Description, Acceptance, ConsumerBeadID) are substituted from the
+// var map. Locks in the fix for gu-uiax: shiny-tdd was leaking unrendered
+// {{feature}} into dispatched bead titles because executeWorkflowFormula
+// substituted step.Description but not step.Title.
+func TestSubstituteStepFields(t *testing.T) {
+	t.Parallel()
+
+	step := formula.Step{
+		ID:             "implement",
+		Title:          "Implement {{feature}}",
+		Description:    "Build the code for {{feature}} per design.",
+		Acceptance:     "{{feature}} ships behind a flag",
+		ConsumerBeadID: "consumer-{{feature}}",
+	}
+	vars := map[string]interface{}{"feature": "auth-redesign"}
+
+	got := substituteStepFields(step, vars)
+
+	if got.Title != "Implement auth-redesign" {
+		t.Errorf("Title = %q, want %q", got.Title, "Implement auth-redesign")
+	}
+	if got.Description != "Build the code for auth-redesign per design." {
+		t.Errorf("Description = %q, want %q", got.Description, "Build the code for auth-redesign per design.")
+	}
+	if got.Acceptance != "auth-redesign ships behind a flag" {
+		t.Errorf("Acceptance = %q, want %q", got.Acceptance, "auth-redesign ships behind a flag")
+	}
+	if got.ConsumerBeadID != "consumer-auth-redesign" {
+		t.Errorf("ConsumerBeadID = %q, want %q", got.ConsumerBeadID, "consumer-auth-redesign")
+	}
+	// Original step must not be mutated (caller may iterate over f.Steps).
+	if step.Title != "Implement {{feature}}" {
+		t.Errorf("input step.Title was mutated: %q", step.Title)
+	}
+}
+
+// TestSubstituteStepFields_LeavesUnknownPlaceholders confirms that placeholders
+// for vars not in the map are left untouched (matching substituteFormulaVars
+// semantics). This is the failure surface that triggered gu-uiax — when a
+// required var is unset, the placeholder reaches the dispatched bead.
+// validateRequiredFormulaVars is the gate that prevents that case.
+func TestSubstituteStepFields_LeavesUnknownPlaceholders(t *testing.T) {
+	t.Parallel()
+
+	step := formula.Step{
+		ID:    "design",
+		Title: "Design {{feature}}",
+	}
+	got := substituteStepFields(step, map[string]interface{}{})
+
+	if got.Title != "Design {{feature}}" {
+		t.Errorf("Title = %q, want unchanged %q", got.Title, "Design {{feature}}")
+	}
+}
+
+// TestValidateRequiredFormulaVars_MissingFeature locks in the second half of
+// gu-uiax acceptance: when a formula declares a required var (e.g. shiny's
+// `feature`) and it is not provided at sling time, the dispatcher must refuse
+// rather than letting `{{feature}}` placeholders leak into bead titles.
+func TestValidateRequiredFormulaVars_MissingFeature(t *testing.T) {
+	t.Parallel()
+
+	f := &formula.Formula{
+		Vars: map[string]formula.Var{
+			"feature":  {Description: "The feature being implemented", Required: true},
+			"assignee": {Description: "Who is assigned"},
+		},
+	}
+
+	err := validateRequiredFormulaVars(f, map[string]interface{}{})
+	if err == nil {
+		t.Fatal("expected error for missing required var, got nil")
+	}
+	if !strings.Contains(err.Error(), "feature") {
+		t.Errorf("error should name the missing var, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--set") {
+		t.Errorf("error should suggest --set flag, got: %v", err)
+	}
+}
+
+// TestValidateRequiredFormulaVars_AllProvided is the positive case: when every
+// required var has a value, validation passes.
+func TestValidateRequiredFormulaVars_AllProvided(t *testing.T) {
+	t.Parallel()
+
+	f := &formula.Formula{
+		Vars: map[string]formula.Var{
+			"feature":  {Required: true},
+			"assignee": {},
+		},
+	}
+
+	err := validateRequiredFormulaVars(f, map[string]interface{}{
+		"feature": "auth-redesign",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+}
+
+// TestValidateRequiredFormulaVars_DefaultSatisfiesRequired confirms that a
+// required var with a non-empty default is treated as satisfied. This matches
+// the existing prime_molecule.go behavior where defaults seed the var map.
+func TestValidateRequiredFormulaVars_DefaultSatisfiesRequired(t *testing.T) {
+	t.Parallel()
+
+	f := &formula.Formula{
+		Vars: map[string]formula.Var{
+			"feature": {Required: true, Default: "untitled-feature"},
+		},
+	}
+
+	err := validateRequiredFormulaVars(f, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("expected default to satisfy required var, got: %v", err)
+	}
+}
+
+// TestValidateRequiredFormulaVars_EmptyValueFails closes a footgun: passing
+// `--set feature=` should not satisfy a required var. An empty string would
+// expand to an empty placeholder, producing dispatched bead titles like
+// "Design " — almost as bad as the leaked-placeholder symptom from gu-uiax.
+func TestValidateRequiredFormulaVars_EmptyValueFails(t *testing.T) {
+	t.Parallel()
+
+	f := &formula.Formula{
+		Vars: map[string]formula.Var{
+			"feature": {Required: true},
+		},
+	}
+
+	err := validateRequiredFormulaVars(f, map[string]interface{}{"feature": ""})
+	if err == nil {
+		t.Fatal("expected error for empty required var value, got nil")
+	}
+}

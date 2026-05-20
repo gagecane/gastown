@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -285,6 +286,13 @@ func runFormulaRun(cmd *cobra.Command, args []string) error {
 	// Handle dry-run mode
 	if formulaRunDryRun {
 		return dryRunFormula(f, formulaName, targetRig)
+	}
+
+	// Refuse to dispatch when a formula declares required vars that the caller
+	// has not provided. Without this, formulas like shiny / shiny-tdd silently
+	// dispatched beads titled "Design {{feature}}" — see gu-uiax.
+	if err := validateRequiredFormulaVars(f, parseSetVars(formulaRunSet)); err != nil {
+		return err
 	}
 
 	switch f.Type {
@@ -797,8 +805,13 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 	setVars := parseSetVars(formulaRunSet)
 
 	for _, step := range f.Steps {
+		// Render {{var}} placeholders in step fields before they reach the
+		// dispatched bead. Previously only step.Description was substituted,
+		// so step.Title flowed through as a literal "Design {{feature}}" —
+		// see gu-uiax.
+		rendered := substituteStepFields(step, setVars)
 		stepBeadID := fmt.Sprintf("%s-wfs-%s", rigPrefix, generateFormulaShortID())
-		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars))
+		stepDescription := workflowStepDescription(rendered, rendered.Description)
 
 		// Use --body-file=- (stdin) for the description to avoid CLI arg
 		// length limits and quoting issues with large markdown descriptions.
@@ -806,7 +819,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 			"create",
 			"--type=task",
 			"--id=" + stepBeadID,
-			"--title=" + step.Title,
+			"--title=" + rendered.Title,
 			"--body-file=-",
 		}
 		if beads.NeedsForceForID(stepBeadID) {
@@ -900,10 +913,11 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		if stepAgent == "" {
 			stepAgent = f.Agent
 		}
-		stepTarget := workflowStepTarget(step, targetRig)
-		stepDescription := workflowStepDescription(step, substituteFormulaVars(step.Description, setVars))
+		rendered := substituteStepFields(step, setVars)
+		stepTarget := workflowStepTarget(rendered, targetRig)
+		stepDescription := workflowStepDescription(rendered, rendered.Description)
 
-		slingArgs := buildWorkflowStepSlingArgs(stepBeadID, stepTarget, stepDescription, step.Title, stepAgent)
+		slingArgs := buildWorkflowStepSlingArgs(stepBeadID, stepTarget, stepDescription, rendered.Title, stepAgent)
 
 		slingCmd := exec.Command("gt", slingArgs...)
 		slingCmd.Stdout = os.Stdout
@@ -1033,6 +1047,56 @@ func substituteFormulaVars(text string, vars map[string]interface{}) string {
 		}
 		return fmt.Sprint(v)
 	})
+}
+
+// substituteStepFields returns a copy of step with {{var}} placeholders in its
+// Title, Description, Acceptance, and ConsumerBeadID rendered using vars. The
+// input step is not mutated. This is the substitution pass that was missing
+// from executeWorkflowFormula step.Title (gu-uiax): step.Description was
+// rendered via substituteFormulaVars but step.Title (and other rendered
+// fields) flowed straight to bead creation, so dispatched bead titles like
+// "Design {{feature}}" reached polecats with the placeholder still literal.
+func substituteStepFields(step formula.Step, vars map[string]interface{}) formula.Step {
+	step.Title = substituteFormulaVars(step.Title, vars)
+	step.Description = substituteFormulaVars(step.Description, vars)
+	step.Acceptance = substituteFormulaVars(step.Acceptance, vars)
+	step.ConsumerBeadID = substituteFormulaVars(step.ConsumerBeadID, vars)
+	return step
+}
+
+// validateRequiredFormulaVars returns an error naming any required var on the
+// formula that has no usable value in vars. A var is satisfied when it has a
+// non-empty default, or vars[name] is present and stringifies to a non-empty
+// value. Empty values are rejected because an empty substitution leaks into
+// dispatched bead titles ("Design ") almost as badly as the literal placeholder
+// did before the fix in gu-uiax.
+func validateRequiredFormulaVars(f *formula.Formula, vars map[string]interface{}) error {
+	if f == nil || len(f.Vars) == 0 {
+		return nil
+	}
+	var missing []string
+	for name, def := range f.Vars {
+		if !def.Required {
+			continue
+		}
+		if def.Default != "" {
+			continue
+		}
+		v, ok := vars[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		if fmt.Sprint(v) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf("missing required formula vars: %s (provide via --set %s=<value>)",
+		strings.Join(missing, ", "), missing[0])
 }
 
 // formulaSearchPaths returns the on-disk search paths used to locate formulas
