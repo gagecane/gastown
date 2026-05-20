@@ -270,6 +270,57 @@ func HasMayorOnlyLabel(labels []string) bool {
 	return false
 }
 
+// WrongRigLabelPrefix marks a bead as already-routed-to-the-wrong-rig once.
+// Apply as 'wrong-rig:<rig>' (e.g. 'wrong-rig:casc_lambda') after a polecat in
+// that rig closes the bead no-changes because the work belongs elsewhere.
+//
+// gu-mhfs / cala-7e9 / cala-tl5 (2026-05-19/20): the auto-dispatcher had no
+// memory of previous mis-routes. A failing integration test (auth-enforcement)
+// kept routing to the SQS-only rig because the test-file-to-rig heuristic
+// chose the wrong rig and nothing fed the no-changes signal back to the
+// router. Each cooldown re-dispatched the same bead to the same rig; each
+// polecat closed it 'no-changes — wrong rig' and the loop continued.
+//
+// This label is the operator/polecat-applied first-class signal that breaks
+// the loop: auto-dispatch refuses to sling a bead to a rig listed in any of
+// its 'wrong-rig:<rig>' labels, regardless of how routing chose the target.
+// Multiple labels stack — a bead that was wrong in two rigs carries two
+// labels and is only routed to a third (or held for human triage).
+//
+// Layer 2 (router learns the correct rig from close reasons) is tracked
+// separately; this label is the cheap immediate guardrail.
+const WrongRigLabelPrefix = "wrong-rig:"
+
+// HasWrongRigLabelFor reports whether labels contain 'wrong-rig:<targetRig>'.
+// The check is exact match on the trimmed rig segment; substrings like
+// 'wrong-rig:casc_lambda_old' do not match 'casc_lambda'. Empty targetRig
+// returns false (we never treat an unspecified rig as wrong).
+func HasWrongRigLabelFor(labels []string, targetRig string) bool {
+	if targetRig == "" {
+		return false
+	}
+	want := WrongRigLabelPrefix + targetRig
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
+}
+
+// WrongRigsFromLabels returns the set of rigs marked 'wrong-rig:<rig>' on
+// the bead, in the order they appear. Used by close-reason text mining and
+// diagnostic output.
+func WrongRigsFromLabels(labels []string) []string {
+	var out []string
+	for _, l := range labels {
+		if rig, ok := strings.CutPrefix(l, WrongRigLabelPrefix); ok && rig != "" {
+			out = append(out, rig)
+		}
+	}
+	return out
+}
+
 // Issue represents a beads issue.
 type Issue struct {
 	ID          string   `json:"id"`

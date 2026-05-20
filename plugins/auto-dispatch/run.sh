@@ -114,12 +114,14 @@ for rig in "${RIGS[@]}"; do
   fi
 
   # Sort by priority (P1 first; treat missing priority as 99 so it sinks).
-  # Output: tab-separated id<TAB>owner<TAB>description (description is the rest of the line).
+  # Output: tab-separated id<TAB>owner<TAB>labels<TAB>description (description is the rest of the line).
+  # Labels are joined with commas and wrapped in commas (",foo,bar,") so substring
+  # checks like ",wrong-rig:${rig}," cannot accidentally match a label prefix.
   # We tolerate missing fields by defaulting to "".
   bead_lines=$(jq -r '
     sort_by(.priority // 99)
     | .[]
-    | [.id, (.owner // ""), (.description // "" | gsub("\n"; ""))]
+    | [.id, (.owner // ""), ((.labels // []) | join(",")), (.description // "" | gsub("\n"; ""))]
     | @tsv
   ' <<<"$ready_json") || {
     log "rig=$rig: failed to parse bd ready output"
@@ -133,7 +135,7 @@ for rig in "${RIGS[@]}"; do
   rig_skipped=0
   rig_failed=0
 
-  while IFS=$'\t' read -r bead_id owner description; do
+  while IFS=$'\t' read -r bead_id owner labels description; do
     [[ -z "$bead_id" ]] && continue
 
     # Restore newlines that we tunneled through tsv.
@@ -142,6 +144,17 @@ for rig in "${RIGS[@]}"; do
     # Client-side filter: agent-owned beads (orchestrator state — owning agent
     # handles them, not a polecat). See gs-myq.
     if is_agent_owner "$owner"; then
+      rig_skipped=$((rig_skipped + 1))
+      continue
+    fi
+
+    # Client-side filter: bead is labeled wrong-rig:<this-rig> — a polecat
+    # in this rig (or an operator) has already asserted that the work does
+    # not belong here. Re-routing would bounce the bead right back. See
+    # gu-mhfs / cala-7e9 / cala-tl5 (auth-enforcement test mis-routed to
+    # casc_lambda twice in 24h). The match is comma-bounded so a label like
+    # "wrong-rig:foo_bar" cannot accidentally match rig "foo".
+    if [[ ",${labels},"  == *",wrong-rig:${rig},"* ]]; then
       rig_skipped=$((rig_skipped + 1))
       continue
     fi

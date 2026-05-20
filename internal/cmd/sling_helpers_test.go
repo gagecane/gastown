@@ -1232,3 +1232,88 @@ exit 1
 		t.Fatalf("bd update invoked %s times, want 1", got)
 	}
 }
+
+// TestIsWrongRigBeadForTarget verifies the gu-mhfs cross-rig mis-routing
+// guard at the sling-helper level: dispatching to a rig already labeled
+// "wrong-rig:<rig>" must be refused, while dispatching to other rigs must
+// remain unaffected. Mirrors the structure of TestIsMayorOnlyBeadInfo.
+func TestIsWrongRigBeadForTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		info      *beadInfo
+		targetRig string
+		want      bool
+	}{
+		{"nil info", nil, "casc_lambda", false},
+		{"empty target rig", &beadInfo{Labels: []string{"wrong-rig:casc_lambda"}}, "", false},
+		{
+			"matching wrong-rig label",
+			&beadInfo{
+				Title:  "auth-enforcement test failing",
+				Labels: []string{"wrong-rig:casc_lambda"},
+			},
+			"casc_lambda",
+			true,
+		},
+		{
+			"different rig — should still dispatch",
+			&beadInfo{
+				Title:  "auth-enforcement test failing",
+				Labels: []string{"wrong-rig:casc_lambda"},
+			},
+			"casc_crud",
+			false,
+		},
+		{
+			"multiple wrong rigs, target matches one",
+			&beadInfo{
+				Labels: []string{"wrong-rig:casc_lambda", "wrong-rig:casc_crud"},
+			},
+			"casc_lambda",
+			true,
+		},
+		{
+			"multiple wrong rigs, target unaffected",
+			&beadInfo{
+				Labels: []string{"wrong-rig:casc_lambda", "wrong-rig:casc_crud"},
+			},
+			"casc_cdk",
+			false,
+		},
+		// Substring collisions must not trigger (parity with TestHasWrongRigLabelFor).
+		{
+			"label rig is substring of target — no match",
+			&beadInfo{Labels: []string{"wrong-rig:casc"}},
+			"casc_lambda",
+			false,
+		},
+		{
+			"target is substring of label rig — no match",
+			&beadInfo{Labels: []string{"wrong-rig:casc_lambda_old"}},
+			"casc_lambda",
+			false,
+		},
+		// Negatives: unrelated labels must not trigger.
+		{
+			"only mayor-only — no match",
+			&beadInfo{Labels: []string{"mayor-only"}},
+			"casc_lambda",
+			false,
+		},
+		{
+			"empty labels — no match",
+			&beadInfo{Labels: []string{}},
+			"casc_lambda",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWrongRigBeadForTarget(tt.info, tt.targetRig); got != tt.want {
+				t.Errorf("isWrongRigBeadForTarget(%+v, %q) = %v, want %v",
+					tt.info, tt.targetRig, got, tt.want)
+			}
+		})
+	}
+}
