@@ -2092,6 +2092,101 @@ func TestEnqueueReplyReminder_SkipsPluginDispatch(t *testing.T) {
 	}
 }
 
+// TestEnqueueReplyReminder_SkipsSystemNotification verifies that
+// system-generated notification subjects (convoy-complete, wisp-compaction,
+// agent-killed, etc.) do not enqueue a reply reminder. See gs-md9 — these
+// notifications were producing reminder/ack loops that burned recipient
+// context.
+func TestEnqueueReplyReminder_SkipsSystemNotification(t *testing.T) {
+	subjects := []string{
+		"Convoy complete: gs-abc123 (refinery)",
+		"Wisp Compaction: 2026-05-19",
+		"Weekly Wisp Compaction: 2026-05-12 to 2026-05-19",
+		"Agent killed: gastown/polecats/furiosa",
+		"PRD Review Complete: foo",
+		"Plugin run: stuck-agent-dog",
+	}
+
+	for _, subject := range subjects {
+		subject := subject
+		t.Run(subject, func(t *testing.T) {
+			townRoot := t.TempDir()
+			settingsDir := filepath.Join(townRoot, "settings")
+			if err := os.MkdirAll(settingsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			configJSON := `{"operational":{"mail":{"reply_reminder_delay":"30s"}}}`
+			if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(configJSON), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+			msg := &Message{
+				From:    "system",
+				To:      "gastown/crew/alice",
+				Subject: subject,
+				Type:    TypeNotification,
+			}
+			sessionID := "gt-gastown-crew-alice"
+
+			r.enqueueReplyReminder(msg, sessionID)
+
+			pending, err := nudge.Pending(townRoot, sessionID)
+			if err != nil {
+				t.Fatalf("Pending: %v", err)
+			}
+			if pending != 0 {
+				t.Errorf("system-notification subject %q should skip reply reminder, got %d pending", subject, pending)
+			}
+
+			nudges, err := nudge.Drain(townRoot, sessionID)
+			if err != nil {
+				t.Fatalf("Drain: %v", err)
+			}
+			if len(nudges) != 0 {
+				t.Errorf("system-notification subject %q should not enqueue anything drainable, got %d", subject, len(nudges))
+			}
+		})
+	}
+}
+
+// TestIsSystemNotificationSubject table-tests the helper that identifies
+// system-generated notification subjects. See gs-md9.
+func TestIsSystemNotificationSubject(t *testing.T) {
+	cases := []struct {
+		name    string
+		subject string
+		want    bool
+	}{
+		// Matches — observed in the wild
+		{"convoy complete", "Convoy complete: gs-abc (refinery)", true},
+		{"wisp compaction daily", "Wisp Compaction: 2026-05-19", true},
+		{"wisp compaction weekly", "Weekly Wisp Compaction: 2026-05-12 to 2026-05-19", true},
+		{"agent killed", "Agent killed: gastown/polecats/furiosa", true},
+		{"prd review complete", "PRD Review Complete: design-doc-foo", true},
+		{"plugin run", "Plugin run: stuck-agent-dog", true},
+
+		// Non-matches
+		{"empty subject", "", false},
+		{"lowercase prefix", "convoy complete: x", false},
+		{"prefix mid-subject", "Re: Convoy complete: x", false},
+		{"leading space", " Convoy complete: x", false},
+		{"unrelated subject", "You have new mail", false},
+		{"plugin dispatch (different prefix)", "Plugin: stuck-agent-dog", false},
+		{"genuine agent mail", "Question about routing", false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := isSystemNotificationSubject(tc.subject)
+			if got != tc.want {
+				t.Errorf("isSystemNotificationSubject(%q) = %v, want %v", tc.subject, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestIsPluginDispatchSubject table-tests the helper that identifies
 // plugin-dispatch subjects. Mirrors the check used in cmd/dog.go (see
 // gt-swirk). Subjects must have the exact prefix "Plugin: " (with a trailing

@@ -1812,6 +1812,34 @@ func isPluginDispatchSubject(subject string) bool {
 	return strings.HasPrefix(subject, "Plugin: ")
 }
 
+// systemNotificationSubjectPrefixes lists subject prefixes used by
+// system-generated notifications that carry no reply expectation. Adding a
+// new auto-notification? Add its subject prefix here so the reply-reminder
+// nudge is suppressed.
+var systemNotificationSubjectPrefixes = []string{
+	"Convoy complete:",       // cmd/convoy.go
+	"Wisp Compaction:",       // cmd/compact_report.go (daily)
+	"Weekly Wisp Compaction:", // cmd/compact_report.go (weekly rollup)
+	"Agent killed:",          // cmd/deacon.go
+	"PRD Review Complete:",   // workflow step durable artifact — no reply expected
+	"Plugin run:",            // plugin/recording.go
+}
+
+// isSystemNotificationSubject returns true when the message subject is a
+// system-generated notification (convoy-complete, wisp-compaction,
+// agent-killed, etc.). These notifications are informational and carry no
+// reply expectation, so reminder nudges should be suppressed for them.
+// See gs-md9 — system notifications were producing reminder/ack loops that
+// burned recipient context.
+func isSystemNotificationSubject(subject string) bool {
+	for _, prefix := range systemNotificationSubjectPrefixes {
+		if strings.HasPrefix(subject, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func prioritySeverityLabel(priority Priority) string {
 	switch priority {
 	case PriorityUrgent:
@@ -1841,6 +1869,9 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	}
 	if isPluginDispatchSubject(msg.Subject) {
 		return // Plugin-dispatch is informational — no reply expected. See gt-swirk.
+	}
+	if isSystemNotificationSubject(msg.Subject) {
+		return // System notifications carry no reply expectation. See gs-md9.
 	}
 	delay := config.LoadOperationalConfig(r.townRoot).GetMailConfig().ReplyReminderDelayD()
 	if delay <= 0 {
