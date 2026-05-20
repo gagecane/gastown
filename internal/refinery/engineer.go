@@ -27,17 +27,6 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-func stripEnvKey(env []string, key string) []string {
-	prefix := key + "="
-	filtered := env[:0]
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			filtered = append(filtered, entry)
-		}
-	}
-	return filtered
-}
-
 // shortSHA returns at most 8 characters of a SHA for display.
 func shortSHA(sha string) string {
 	if len(sha) > 8 {
@@ -2061,14 +2050,14 @@ func refineryHasLabel(labels []string, target string) bool {
 // checkAndCloseCompletedConvoys finds and closes convoys where all tracked issues
 // are complete. Returns the list of convoys that were closed.
 func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []convoyInfo {
-	bdEnv := stripEnvKey(os.Environ(), "BEADS_DIR")
+	townReadEnv := beads.BuildReadOnlyPinnedBDEnv(os.Environ(), townBeads)
+	townMutationEnv := beads.BuildMutationPinnedBDEnv(os.Environ(), townBeads)
+	routingReadEnv := beads.BuildReadOnlyRoutingBDEnv(os.Environ(), townBeads)
 
 	// List all open issues and filter locally so legacy type=convoy beads remain visible.
-	listArgs := beads.MaybePrependAllowStaleWithEnv(bdEnv, []string{"list", "--status=open", "--json", "--limit=0"})
-	listCmd := exec.Command("bd", listArgs...)
-	util.SetDetachedProcessGroup(listCmd)
-	listCmd.Dir = townBeads
-	listCmd.Env = bdEnv
+	listArgs := beads.InjectFlatForListJSON([]string{"list", "--status=open", "--json", "--limit=0"})
+	listArgs = beads.MaybePrependAllowStaleWithEnv(townReadEnv, listArgs)
+	listCmd := beads.Command(townBeads, townBeads, beads.ReadOnlyPinned, listArgs...)
 	var stdout bytes.Buffer
 	listCmd.Stdout = &stdout
 
@@ -2097,11 +2086,8 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 			continue
 		}
 		// Get tracked issues for this convoy via bd dep list
-		depArgs := beads.MaybePrependAllowStaleWithEnv(bdEnv, []string{"dep", "list", convoy.ID, "--direction=down", "--type=tracks", "--json"})
-		depCmd := exec.Command("bd", depArgs...)
-		util.SetDetachedProcessGroup(depCmd)
-		depCmd.Dir = townRoot
-		depCmd.Env = bdEnv
+		depArgs := beads.MaybePrependAllowStaleWithEnv(townReadEnv, []string{"dep", "list", convoy.ID, "--direction=down", "--type=tracks", "--json"})
+		depCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyPinned, depArgs...)
 		var depOut bytes.Buffer
 		depCmd.Stdout = &depOut
 
@@ -2130,11 +2116,8 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 			}
 
 			// Get fresh status from home rig via bd show with routing
-			showArgs := beads.MaybePrependAllowStaleWithEnv(bdEnv, []string{"show", depID, "--json"})
-			showCmd := exec.Command("bd", showArgs...)
-			util.SetDetachedProcessGroup(showCmd)
-			showCmd.Dir = townRoot
-			showCmd.Env = bdEnv
+			showArgs := beads.MaybePrependAllowStaleWithEnv(routingReadEnv, []string{"show", depID, "--json"})
+			showCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyRouting, showArgs...)
 			var showOut bytes.Buffer
 			showCmd.Stdout = &showOut
 
@@ -2168,11 +2151,8 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 			reason = "Empty convoy — auto-closed as definitionally complete"
 		}
 
-		closeArgs := beads.MaybePrependAllowStaleWithEnv(bdEnv, []string{"close", convoy.ID, "-r", reason})
-		closeCmd := exec.Command("bd", closeArgs...)
-		util.SetDetachedProcessGroup(closeCmd)
-		closeCmd.Dir = townBeads
-		closeCmd.Env = bdEnv
+		closeArgs := beads.MaybePrependAllowStaleWithEnv(townMutationEnv, []string{"close", convoy.ID, "-r", reason})
+		closeCmd := beads.Command(townBeads, townBeads, beads.MutationPinned, closeArgs...)
 
 		if err := closeCmd.Run(); err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close convoy %s: %v\n", convoy.ID, err)

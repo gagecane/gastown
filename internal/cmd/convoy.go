@@ -449,24 +449,10 @@ func getTownBeadsDir() (string, error) {
 // "exit status 1". BEADS_DIR is stripped from the subprocess environment to
 // prevent stale overrides from interfering with bd's workspace detection.
 func runBdJSON(dir string, args ...string) ([]byte, error) {
-	// Strip --allow-stale if bd doesn't support it (version mismatch).
-	if !beads.BdSupportsAllowStale() {
-		filtered := make([]string, 0, len(args))
-		for _, a := range args {
-			if a != "--allow-stale" {
-				filtered = append(filtered, a)
-			}
-		}
-		args = filtered
-	}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
-	// Strip BEADS_DIR so bd discovers the correct database from cmd.Dir
-	// rather than using an inherited (possibly wrong) override.
-	cmd.Env = stripEnvKey(os.Environ(), "BEADS_DIR")
 	var stdout, stderr bytes.Buffer
+	cmd := BdCmd(args...).Dir(dir).StripBeadsDir().Stderr(&stderr).Build()
+	cmd.Dir = dir
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
 		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
@@ -936,10 +922,7 @@ func closeConvoyIfComplete(townBeads, convoyID, title string, tracked []trackedI
 
 	reason := "All tracked issues completed"
 	closeArgs := []string{"close", convoyID, "-r", reason}
-	closeCmd := exec.Command("bd", closeArgs...)
-	closeCmd.Dir = townBeads
-
-	if err := closeCmd.Run(); err != nil {
+	if err := BdCmd(closeArgs...).Dir(townBeads).WithAutoCommit().Run(); err != nil {
 		return false, fmt.Errorf("closing convoy: %w", err)
 	}
 
@@ -950,14 +933,8 @@ func closeConvoyIfComplete(townBeads, convoyID, title string, tracked []trackedI
 
 // checkSingleConvoy checks a specific convoy and closes it if all tracked issues are complete.
 func checkSingleConvoy(townBeads, convoyID string, dryRun bool) error {
-	// Get convoy details
-	showArgs := []string{"show", convoyID, "--json"}
-	showCmd := exec.Command("bd", showArgs...)
-	showCmd.Dir = townBeads
-	var stdout bytes.Buffer
-	showCmd.Stdout = &stdout
-
-	if err := showCmd.Run(); err != nil {
+	stdout, err := runBdJSON(townBeads, "show", convoyID, "--json")
+	if err != nil {
 		return fmt.Errorf("convoy '%s' not found", convoyID)
 	}
 
@@ -969,7 +946,7 @@ func checkSingleConvoy(townBeads, convoyID string, dryRun bool) error {
 		Description string   `json:"description"`
 		Labels      []string `json:"labels"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil {
+	if err := json.Unmarshal(stdout, &convoys); err != nil {
 		return fmt.Errorf("parsing convoy data: %w", err)
 	}
 
@@ -1011,14 +988,8 @@ func runConvoyClose(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Get convoy details
-	showArgs := []string{"show", convoyID, "--json"}
-	showCmd := exec.Command("bd", showArgs...)
-	showCmd.Dir = townBeads
-	var stdout bytes.Buffer
-	showCmd.Stdout = &stdout
-
-	if err := showCmd.Run(); err != nil {
+	stdout, err := runBdJSON(townBeads, "show", convoyID, "--json")
+	if err != nil {
 		return fmt.Errorf("convoy '%s' not found", convoyID)
 	}
 
@@ -1030,7 +1001,7 @@ func runConvoyClose(cmd *cobra.Command, args []string) error {
 		Description string   `json:"description"`
 		Labels      []string `json:"labels"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil {
+	if err := json.Unmarshal(stdout, &convoys); err != nil {
 		return fmt.Errorf("parsing convoy data: %w", err)
 	}
 
@@ -1101,10 +1072,7 @@ func runConvoyClose(cmd *cobra.Command, args []string) error {
 
 	// Close the convoy
 	closeArgs := []string{"close", convoyID, "-r", reason}
-	closeCmd := exec.Command("bd", closeArgs...)
-	closeCmd.Dir = townBeads
-
-	if err := closeCmd.Run(); err != nil {
+	if err := BdCmd(closeArgs...).Dir(townBeads).WithAutoCommit().Run(); err != nil {
 		return fmt.Errorf("closing convoy: %w", err)
 	}
 
@@ -1170,14 +1138,8 @@ func runConvoyLand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Get convoy details
-	showArgs := []string{"show", convoyID, "--json"}
-	showCmd := exec.Command("bd", showArgs...)
-	showCmd.Dir = townBeads
-	var stdout bytes.Buffer
-	showCmd.Stdout = &stdout
-
-	if err := showCmd.Run(); err != nil {
+	stdout, err := runBdJSON(townBeads, "show", convoyID, "--json")
+	if err != nil {
 		return fmt.Errorf("convoy '%s' not found", convoyID)
 	}
 
@@ -1189,7 +1151,7 @@ func runConvoyLand(cmd *cobra.Command, args []string) error {
 		Description string   `json:"description"`
 		Labels      []string `json:"labels,omitempty"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil {
+	if err := json.Unmarshal(stdout, &convoys); err != nil {
 		return fmt.Errorf("parsing convoy data: %w", err)
 	}
 
@@ -1283,10 +1245,7 @@ func runConvoyLand(cmd *cobra.Command, args []string) error {
 	// Phase 2: Close the convoy
 	reason := "Landed by owner"
 	closeArgs := []string{"close", convoyID, "-r", reason}
-	closeCmd := exec.Command("bd", closeArgs...)
-	closeCmd.Dir = townBeads
-
-	if err := closeCmd.Run(); err != nil {
+	if err := BdCmd(closeArgs...).Dir(townBeads).WithAutoCommit().Run(); err != nil {
 		return fmt.Errorf("closing convoy: %w", err)
 	}
 
@@ -1689,14 +1648,8 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 
 // notifyConvoyCompletion sends notifications to owner, any notify addresses, and mayor/.
 func notifyConvoyCompletion(townBeads, convoyID, title string) {
-	// Get convoy description + creation time for notification enrichment.
-	showArgs := []string{"show", convoyID, "--json"}
-	showCmd := exec.Command("bd", showArgs...)
-	showCmd.Dir = townBeads
-	var stdout bytes.Buffer
-	showCmd.Stdout = &stdout
-
-	if err := showCmd.Run(); err != nil {
+	stdout, err := runBdJSON(townBeads, "show", convoyID, "--json")
+	if err != nil {
 		return
 	}
 
@@ -1704,7 +1657,7 @@ func notifyConvoyCompletion(townBeads, convoyID, title string) {
 		Description string `json:"description"`
 		CreatedAt   string `json:"created_at"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil || len(convoys) == 0 {
+	if err := json.Unmarshal(stdout, &convoys); err != nil || len(convoys) == 0 {
 		return
 	}
 
@@ -2159,6 +2112,7 @@ func listConvoyIssues(townBeads, status string, all bool, extraLabels ...string)
 		args = append(args, "--all")
 	}
 
+	args = beads.InjectFlatForListJSON(args)
 	convoys, err := readConvoyIssues(townBeads, args...)
 	if err != nil {
 		return nil, err
@@ -2174,6 +2128,7 @@ func listConvoyIssues(townBeads, status string, all bool, extraLabels ...string)
 	} else if all {
 		legacyArgs = append(legacyArgs, "--all")
 	}
+	legacyArgs = beads.InjectFlatForListJSON(legacyArgs)
 	legacy, err := readConvoyIssues(townBeads, legacyArgs...)
 	if err != nil {
 		return nil, err
@@ -2487,22 +2442,16 @@ func getExternalIssueDetails(townBeads, rigName, issueID string) *issueDetails {
 		return nil
 	}
 
-	// Query the rig database by running bd show from the rig directory
-	showArgs := beads.MaybePrependAllowStale([]string{"show", issueID, "--json"})
-	showCmd := exec.Command("bd", showArgs...)
-	showCmd.Dir = rigDir // Set working directory to rig directory
-	var stdout bytes.Buffer
-	showCmd.Stdout = &stdout
-
-	if err := showCmd.Run(); err != nil {
+	out, err := BdCmd("show", issueID, "--json").Dir(rigDir).StripBeadsDir().Stderr(io.Discard).Output()
+	if err != nil {
 		return nil
 	}
-	if stdout.Len() == 0 {
+	if len(out) == 0 {
 		return nil
 	}
 
 	var issues []issueDetailsJSON
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
+	if err := json.Unmarshal(out, &issues); err != nil {
 		return nil
 	}
 	if len(issues) == 0 {
@@ -2555,15 +2504,12 @@ func getIssueDetailsBatch(issueIDs []string) map[string]*issueDetails {
 	// Run from town root so bd's prefix routing (routes.jsonl) can dispatch
 	// to the correct rig database for cross-rig bead lookups. (GH#2960)
 	townRoot, _ := workspace.FindFromCwdOrError()
-	showCmd := exec.Command("bd", args...)
+	bdc := BdCmd(args...).Stderr(io.Discard)
 	if townRoot != "" {
-		showCmd.Dir = townRoot
-		showCmd.Env = stripEnvKey(os.Environ(), "BEADS_DIR")
+		bdc.Dir(townRoot).WithRouting()
 	}
-	var stdout bytes.Buffer
-	showCmd.Stdout = &stdout
-
-	if err := showCmd.Run(); err != nil {
+	out, err := bdc.Output()
+	if err != nil {
 		// Batch failed - fall back to individual lookups for robustness
 		// This handles cases where some IDs are invalid/missing
 		for _, id := range issueIDs {
@@ -2575,7 +2521,7 @@ func getIssueDetailsBatch(issueIDs []string) map[string]*issueDetails {
 	}
 
 	var issues []issueDetailsJSON
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
+	if err := json.Unmarshal(out, &issues); err != nil {
 		return result
 	}
 
@@ -2594,24 +2540,21 @@ func getIssueDetails(issueID string) *issueDetails {
 	// Without Dir + StripBeadsDir, bd inherits CWD/BEADS_DIR which may
 	// point to a rig that doesn't contain the target bead. (GH#2960)
 	townRoot, _ := workspace.FindFromCwdOrError()
-	showCmd := exec.Command("bd", "show", issueID, "--json")
+	bdc := BdCmd("show", issueID, "--json").Stderr(io.Discard)
 	if townRoot != "" {
-		showCmd.Dir = townRoot
-		showCmd.Env = stripEnvKey(os.Environ(), "BEADS_DIR")
+		bdc.Dir(townRoot).WithRouting()
 	}
-	var stdout bytes.Buffer
-	showCmd.Stdout = &stdout
-
-	if err := showCmd.Run(); err != nil {
+	out, err := bdc.Output()
+	if err != nil {
 		return nil
 	}
 	// Handle bd exit 0 bug: empty stdout means not found
-	if stdout.Len() == 0 {
+	if len(out) == 0 {
 		return nil
 	}
 
 	var issues []issueDetailsJSON
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil || len(issues) == 0 {
+	if err := json.Unmarshal(out, &issues); err != nil || len(issues) == 0 {
 		return nil
 	}
 
@@ -2676,20 +2619,21 @@ func getWorkersForIssues(issueIDs []string) map[string]*workerInfo {
 
 	for _, dir := range beadsDirs {
 		wg.Add(1)
-		go func(beadsDir string) {
+		go func(workDir string) {
 			defer wg.Done()
 
-			cmd := exec.Command("bd", "list", "--label=gt:agent", "--include-infra", "--status=open", "--json", "--limit=0")
-			cmd.Dir = beadsDir
-			var stdout bytes.Buffer
-			cmd.Stdout = &stdout
-			if err := cmd.Run(); err != nil {
+			out, err := BdCmd("list", "--label=gt:agent", "--include-infra", "--status=open", "--json", "--limit=0", "--flat").
+				Dir(workDir).
+				StripBeadsDir().
+				Stderr(io.Discard).
+				Output()
+			if err != nil {
 				resultChan <- rigResult{}
 				return
 			}
 
 			var rr rigResult
-			if err := json.Unmarshal(stdout.Bytes(), &rr.agents); err != nil {
+			if err := json.Unmarshal(out, &rr.agents); err != nil {
 				resultChan <- rigResult{}
 				return
 			}

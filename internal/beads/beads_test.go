@@ -87,6 +87,240 @@ func TestCreateOptionsRig(t *testing.T) {
 	}
 }
 
+func TestBuildPinnedBDEnvUsesSelectedMetadata(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{
+		"PATH=/usr/bin",
+		"BEADS_DIR=/wrong",
+		"BEADS_DB=/wrong.db",
+		"BD_DB=/wrong.bd",
+		"BEADS_DOLT_SERVER_DATABASE=hq",
+		"BEADS_DOLT_SERVER_HOST=wrong-host",
+		"BEADS_DOLT_SERVER_PORT=9999",
+		"BEADS_DOLT_PORT=9999",
+		"BEADS_DOLT_DATA_DIR=/wrong/data",
+		"BEADS_DOLT_AUTO_START=0",
+	}, beadsDir)
+	got := envMap(env)
+
+	if got["BEADS_DIR"] != beadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q in %v", got["BEADS_DIR"], beadsDir, env)
+	}
+	if got["BEADS_DOLT_SERVER_DATABASE"] != "rigdb" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want rigdb in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.1 in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
+		t.Fatalf("ports = server:%q legacy:%q, want 4407 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	}
+	for _, key := range []string{"BEADS_DB", "BD_DB", "BEADS_DOLT_DATA_DIR"} {
+		if value, ok := got[key]; ok {
+			t.Fatalf("%s should be stripped, got %q in %v", key, value, env)
+		}
+	}
+	if got["BEADS_DOLT_AUTO_START"] != "0" {
+		t.Fatalf("BEADS_DOLT_AUTO_START should be preserved, got %q in %v", got["BEADS_DOLT_AUTO_START"], env)
+	}
+}
+
+func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildRoutingBDEnv([]string{
+		"PATH=/usr/bin",
+		"BEADS_DIR=/wrong",
+		"BEADS_DOLT_SERVER_DATABASE=hq",
+		"BEADS_DOLT_SERVER_HOST=wrong-host",
+		"BEADS_DOLT_SERVER_PORT=9999",
+		"BEADS_DOLT_PORT=9999",
+	}, beadsDir)
+	got := envMap(env)
+	for _, key := range []string{"BEADS_DIR", "BEADS_DOLT_SERVER_DATABASE"} {
+		if value, ok := got[key]; ok {
+			t.Fatalf("%s should be absent for routed env, got %q in %v", key, value, env)
+		}
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" || got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
+		t.Fatalf("routing env did not use selected connection, got %v", env)
+	}
+}
+
+func TestBuildPinnedBDEnvFallsBackToGTDoltPort(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"rigdb"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{
+		"PATH=/usr/bin",
+		"GT_DOLT_HOST=127.0.0.2",
+		"GT_DOLT_PORT=5507",
+	}, beadsDir)
+	got := envMap(env)
+	if got["BEADS_DOLT_SERVER_DATABASE"] != "rigdb" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want rigdb in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+	}
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want GT_DOLT_HOST fallback in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
+		t.Fatalf("ports = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+	}
+}
+
+func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
+	env := SuppressBDSideEffects([]string{
+		"PATH=/usr/bin",
+		"BD_EXPORT_AUTO=true",
+		"BD_BACKUP_ENABLED=true",
+		"BD_DOLT_AUTO_PUSH=true",
+		"BD_NO_PUSH=false",
+		"BD_EXPORT_GIT_ADD=true",
+		"BD_NO_GIT_OPS=false",
+	})
+	got := envMap(env)
+	for key, want := range map[string]string{
+		"BEADS_NO_AUTO_IMPORT": "1",
+		"BD_EXPORT_AUTO":       "false",
+		"BD_BACKUP_ENABLED":    "false",
+		"BD_DOLT_AUTO_PUSH":    "false",
+		"BD_NO_PUSH":           "true",
+		"BD_EXPORT_GIT_ADD":    "false",
+		"BD_NO_GIT_OPS":        "true",
+	} {
+		if got[key] != want {
+			t.Fatalf("%s = %q, want %q in %v", key, got[key], want, env)
+		}
+	}
+}
+
+func TestBuildReadOnlyBDEnvForcesReadOnly(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildReadOnlyRoutingBDEnv([]string{
+		"PATH=/usr/bin",
+		"BD_DOLT_AUTO_COMMIT=on",
+		"BD_READONLY=false",
+		"BEADS_DOLT_SERVER_DATABASE=wrong",
+	}, beadsDir)
+	got := envMap(env)
+
+	if got["BD_DOLT_AUTO_COMMIT"] != "off" {
+		t.Fatalf("BD_DOLT_AUTO_COMMIT = %q, want off in %v", got["BD_DOLT_AUTO_COMMIT"], env)
+	}
+	if got["BD_READONLY"] != "true" {
+		t.Fatalf("BD_READONLY = %q, want true in %v", got["BD_READONLY"], env)
+	}
+	if _, ok := got["BEADS_DOLT_SERVER_DATABASE"]; ok {
+		t.Fatalf("routing read-only env should not pin database: %v", env)
+	}
+}
+
+func TestBuildMutationBDEnvForcesWritableCommit(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildMutationPinnedBDEnv([]string{
+		"PATH=/usr/bin",
+		"BD_DOLT_AUTO_COMMIT=off",
+		"BD_READONLY=true",
+		"BEADS_DIR=/wrong",
+	}, beadsDir)
+	got := envMap(env)
+
+	if got["BEADS_DIR"] != beadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q in %v", got["BEADS_DIR"], beadsDir, env)
+	}
+	if got["BD_DOLT_AUTO_COMMIT"] != "on" {
+		t.Fatalf("BD_DOLT_AUTO_COMMIT = %q, want on in %v", got["BD_DOLT_AUTO_COMMIT"], env)
+	}
+	if _, ok := got["BD_READONLY"]; ok {
+		t.Fatalf("BD_READONLY should be absent for mutation env, got %q in %v", got["BD_READONLY"], env)
+	}
+}
+
+func TestArgsAreReadOnlyClassifiesKnownReadCommands(t *testing.T) {
+	cases := [][]string{
+		{"show", "gt-123", "--json"},
+		{"--allow-stale", "show", "gt-123", "--json"},
+		{"query", "merge-request", "--json"},
+		{"dep", "list", "hq-cv-123", "--json"},
+		{"mol", "wisp", "list", "--json"},
+		{"sql", "SELECT 1"},
+		{"sql", "--csv", "SELECT 1"},
+		{"config", "get", "issue_prefix"},
+	}
+	for _, args := range cases {
+		if !ArgsAreReadOnly(args) {
+			t.Fatalf("ArgsAreReadOnly(%v) = false, want true", args)
+		}
+		if got := SubprocessModeForArgs(args); got != ReadOnlyRouting {
+			t.Fatalf("SubprocessModeForArgs(%v) = %v, want ReadOnlyRouting", args, got)
+		}
+	}
+}
+
+func TestArgsAreReadOnlyFailsClosedForMutations(t *testing.T) {
+	cases := [][]string{
+		{"update", "gt-123", "--status=open"},
+		{"close", "gt-123"},
+		{"mol", "wisp", "formula"},
+		{"sql", "UPDATE issues SET status='open'"},
+		{"config", "set", "issue_prefix", "gt"},
+	}
+	for _, args := range cases {
+		if ArgsAreReadOnly(args) {
+			t.Fatalf("ArgsAreReadOnly(%v) = true, want false", args)
+		}
+		if got := SubprocessModeForArgs(args); got != MutationRouting {
+			t.Fatalf("SubprocessModeForArgs(%v) = %v, want MutationRouting", args, got)
+		}
+	}
+}
+
+func envMap(env []string) map[string]string {
+	out := make(map[string]string)
+	for _, entry := range env {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) == 2 {
+			out[parts[0]] = parts[1]
+		}
+	}
+	return out
+}
+
 // TestCreateRoutesSameDatabaseViaBEADSDIR verifies that when opts.Rig resolves
 // to a .beads dir that exists, Create routes via BEADS_DIR (not --repo). (hq-1uf2)
 //

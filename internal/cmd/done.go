@@ -1319,26 +1319,28 @@ afterSafetyNet:
 		// Determine target branch for the MR.
 		// Priority: explicit --target flag > formula_vars base_branch > integration branch auto-detect > rig default.
 		target := defaultBranch
+		explicitTarget := false
 
 		// 1. Explicit --target flag (highest priority — polecat knows its base branch).
 		// This is the most reliable path: the formula passes {{base_branch}} directly,
 		// avoiding any dependency on bd.Show() or Dolt availability.
-		if doneTarget != "" && doneTarget != defaultBranch {
+		if doneTarget != "" {
 			target = doneTarget
+			explicitTarget = true
 			fmt.Printf("  Target branch: %s (from --target flag)\n", target)
 		}
 
 		// 2. Check for --base-branch override in formula vars (stored on bead at sling time).
 		// Fallback for polecats dispatched before --target flag existed, or when
 		// the formula doesn't pass --target explicitly.
-		if target == defaultBranch && sourceIssueForNoMerge != nil {
+		if !explicitTarget && target == defaultBranch && sourceIssueForNoMerge != nil {
 			if af := beads.ParseAttachmentFields(sourceIssueForNoMerge); af != nil {
 				if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != defaultBranch {
 					target = bb
 					fmt.Printf("  Target branch override: %s (from formula_vars)\n", target)
 				}
 			}
-		} else if target == defaultBranch && sourceIssueForNoMerge == nil && issueID != "" {
+		} else if !explicitTarget && target == defaultBranch && sourceIssueForNoMerge == nil && issueID != "" {
 			// sourceIssueForNoMerge is nil — bd.Show(issueID) failed earlier.
 			// This is the silent failure path that caused 150+ procedure beads to
 			// target main instead of feat/contract-review-procedure.
@@ -1347,7 +1349,7 @@ afterSafetyNet:
 
 		// 3. Auto-detect integration branch from epic hierarchy (if enabled).
 		// Only overrides if no explicit target was set above.
-		if target == defaultBranch {
+		if !explicitTarget && target == defaultBranch {
 			refineryEnabled := true
 			settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
 			if settings, err := config.LoadRigSettings(settingsPath); err == nil && settings.MergeQueue != nil {
@@ -1616,13 +1618,6 @@ notifyWitness:
 		}
 	}
 
-	// Nudge witness via tmux (observability, not critical path).
-	// Self-managed completion (gt-1qlg): witness no longer processes routine completions.
-	// The nudge is kept for observability — witness logs the event but doesn't
-	// need to act on it. Nudges are free (no Dolt commit).
-	nudgeWitness(rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", polecatName, exitType))
-	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), exitType)
-
 	// Write witness notification checkpoint for resume (gt-aufru)
 	if agentBeadID != "" {
 		// Agent bead lives in town DB despite rig prefix — bypass routing.
@@ -1640,6 +1635,12 @@ notifyWitness:
 
 	// Update agent bead state (ZFC: self-report completion)
 	updateAgentStateOnDone(cwd, townRoot, exitType, issueID)
+
+	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
+	// evaluate slot availability against stale hook_bead or cleanup_status and emit
+	// false SLOT_BLOCKED/SLOT_OPEN signals.
+	nudgeWitness(rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", polecatName, exitType))
+	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), exitType)
 
 	// Persistent polecat model (gt-hdf8): polecats transition to IDLE after completion.
 	// Session stays alive, sandbox preserved, worktree synced to main for reuse.
@@ -1671,7 +1672,7 @@ notifyWitness:
 				fmt.Printf("  Files: %s\n", ws.String())
 			}
 		}
-		if cwdAvailable && !pushFailed && syncSafe {
+		if cwdAvailable && !pushFailed && !mrFailed && syncSafe {
 			// Remember the old branch so we can delete it after switching
 			oldBranch := branch
 

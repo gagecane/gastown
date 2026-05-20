@@ -3,6 +3,7 @@
 export const GasTown = async ({ $, directory }) => {
   const role = (process.env.GT_ROLE || "").toLowerCase();
   const autonomousRoles = new Set(["polecat", "witness", "refinery", "deacon"]);
+  const gtBin = "{{GT_BIN}}";
   let didInit = false;
 
   // Promise-based context loading ensures the system transform hook can
@@ -76,6 +77,19 @@ export const GasTown = async ({ $, directory }) => {
     console.error(lines.join("\n"));
   };
 
+  const simpleRole = (value) => {
+    if (!value) return "";
+    const parts = value.split("/").filter(Boolean);
+    if (parts.length >= 2 && parts[1] === "polecats") return "polecat";
+    if (parts.length >= 2 && parts[1] === "crew") return "crew";
+    if (parts.length >= 2) return parts[1];
+    return parts[0];
+  };
+
+  const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
+  const eventSessionID = (event) => event?.properties?.info?.id || event?.sessionID || event?.session?.id || "";
+
   const captureRun = async (cmd) => {
     try {
       // .text() captures stdout as a string and suppresses terminal echo.
@@ -86,14 +100,12 @@ export const GasTown = async ({ $, directory }) => {
     }
   };
 
-  const loadPrime = async () => {
-    let context = await captureRun("gt prime");
-    if (autonomousRoles.has(role)) {
-      const mail = await captureRun("gt mail check --inject");
-      if (mail) {
-        context += "\n" + mail;
-      }
+  const loadPrime = async (source = "startup", sessionID = "") => {
+    const env = [`GT_HOOK_SOURCE=${shellQuote(source)}`];
+    if (sessionID) {
+      env.push(`GT_SESSION_ID=${shellQuote(sessionID)}`);
     }
+    let context = await captureRun(`${env.join(" ")} ${shellQuote(gtBin)} prime --hook`);
     // NOTE: session-started nudge to deacon removed — it interrupted
     // the deacon's await-signal backoff. Deacon wakes on beads activity.
     return context;
@@ -105,23 +117,23 @@ export const GasTown = async ({ $, directory }) => {
         if (didInit) return;
         didInit = true;
         // Start loading prime context early; system.transform will await it.
-        primePromise = loadPrime();
+        primePromise = loadPrime("startup", eventSessionID(event));
       }
       if (event?.type === "session.compacted") {
         // Reset so next system.transform gets fresh context.
-        primePromise = loadPrime();
+        primePromise = loadPrime("compact", eventSessionID(event));
       }
       if (event?.type === "session.deleted") {
         const sessionID = event.properties?.info?.id;
         if (sessionID) {
-          await $`gt costs record --session ${sessionID}`.catch(() => {});
+          await captureRun(`${shellQuote(gtBin)} costs record --session ${shellQuote(sessionID)}`);
         }
       }
     },
     "experimental.chat.system.transform": async (input, output) => {
       // If session.created hasn't fired yet, start loading now.
       if (!primePromise) {
-        primePromise = loadPrime();
+        primePromise = loadPrime("startup");
       }
       const context = await primePromise;
       if (context) {
@@ -136,7 +148,7 @@ export const GasTown = async ({ $, directory }) => {
       output.context.push(`
 ## Gas Town Multi-Agent System
 
-**After Compaction:** Run \`gt prime\` to restore full context.
+**After Compaction:** Run \`gt prime --hook\` to restore full context.
 **Check Hook:** \`gt hook\` - if work present, execute immediately (GUPP).
 **Role:** ${roleDisplay}
 `);

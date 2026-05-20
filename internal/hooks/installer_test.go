@@ -236,10 +236,60 @@ func TestInstallForRole_UpgradesStaleExportPath(t *testing.T) {
 	if strings.Contains(string(got), "export PATH=") {
 		t.Error("stale export PATH pattern was not upgraded")
 	}
-	// Should now match the current template
-	template, _ := templateFS.ReadFile("templates/opencode/gastown.js")
+	// Should now match the current template after placeholder substitution.
+	template, _ := resolveAndSubstitute("opencode", "gastown.js", "crew")
 	if string(got) != string(template) {
 		t.Error("upgraded file does not match current template")
+	}
+}
+
+func TestInstallForRole_UpgradesStaleOpenCodePrimeHook(t *testing.T) {
+	dir := t.TempDir()
+	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
+	os.MkdirAll(filepath.Dir(hooksPath), 0755)
+
+	os.WriteFile(hooksPath, []byte(`// Gas Town OpenCode plugin: hooks SessionStart/Compaction via events.
+export const GasTown = async ({ $ }) => {
+  await $`+"`"+`gt prime`+"`"+`
+}`), 0644)
+
+	if err := InstallForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", false); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	got, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read upgraded hook: %v", err)
+	}
+	if strings.Contains(string(got), "captureRun(\"gt prime\")") || strings.Contains(string(got), "$`gt prime`") {
+		t.Fatal("stale bare gt prime was not upgraded")
+	}
+	if !strings.Contains(string(got), "prime --hook") {
+		t.Fatal("upgraded OpenCode hook does not run prime --hook")
+	}
+}
+
+func TestOpenCodeTemplateUsesHookModeAndCompoundRoles(t *testing.T) {
+	content, err := resolveAndSubstitute("opencode", "gastown.js", "polecat")
+	if err != nil {
+		t.Fatalf("resolveAndSubstitute: %v", err)
+	}
+	s := string(content)
+	for _, want := range []string{
+		"prime --hook",
+		"GT_HOOK_SOURCE=",
+		"GT_SESSION_ID=",
+		`parts[1] === "polecats"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("OpenCode template missing %q", want)
+		}
+	}
+	if strings.Contains(s, "{{GT_BIN}}") {
+		t.Fatal("OpenCode template contains unresolved {{GT_BIN}}")
+	}
+	if strings.Contains(s, "mail check --inject") {
+		t.Fatal("OpenCode template should not duplicate startup mail injection")
 	}
 }
 
@@ -262,8 +312,8 @@ func TestSyncForRole_UpdatesStaleContent(t *testing.T) {
 		t.Error("stale file was not updated")
 	}
 
-	// Should match the template
-	template, _ := templateFS.ReadFile("templates/opencode/gastown.js")
+	// Should match the template after placeholder substitution.
+	template, _ := resolveAndSubstitute("opencode", "gastown.js", "crew")
 	if string(got) != string(template) {
 		t.Error("updated file does not match current template")
 	}
@@ -274,8 +324,8 @@ func TestSyncForRole_SkipsMatchingContent(t *testing.T) {
 	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
 
-	// Write the actual template content — should report unchanged
-	template, _ := templateFS.ReadFile("templates/opencode/gastown.js")
+	// Write the actual installed template content — should report unchanged.
+	template, _ := resolveAndSubstitute("opencode", "gastown.js", "crew")
 	os.WriteFile(hooksPath, template, 0644)
 
 	result, err := SyncForRole("opencode", dir, dir, "crew", ".opencode/plugins", "gastown.js", false)

@@ -143,6 +143,12 @@ func TestIsActiveMRTerminal(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "reaped active MR is terminal",
+			mrID: "mr-1",
+			bd:   fakeIssueShower{err: beads.ErrNotFound},
+			want: true,
+		},
+		{
 			name: "lookup error is not terminal",
 			mrID: "mr-1",
 			bd:   fakeIssueShower{err: errors.New("bd exploded")},

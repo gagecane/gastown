@@ -946,11 +946,9 @@ func (b *Beads) buildRunEnv() []string {
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 		}
-		return env
+		return SuppressBDSideEffects(env)
 	}
-	env := stripEnvPrefixes(os.Environ(), "BEADS_DIR=")
-	env = overrideDoltEnvFromBeadsDir(env, b.getResolvedBeadsDir())
-	return translateDoltPort(env)
+	return BuildPinnedBDEnv(os.Environ(), b.getResolvedBeadsDir())
 }
 
 // buildRoutingEnv builds the environment for runWithRouting() calls.
@@ -963,11 +961,9 @@ func (b *Beads) buildRoutingEnv() []string {
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 		}
-		return env
+		return SuppressBDSideEffects(env)
 	}
-	env := stripEnvPrefixes(os.Environ(), "BEADS_DIR=")
-	env = overrideDoltEnvFromBeadsDir(env, b.getResolvedBeadsDir())
-	return translateDoltPort(env)
+	return BuildRoutingBDEnv(os.Environ(), b.getResolvedBeadsDir())
 }
 
 // filterBeadsEnv removes beads-related environment variables from the given

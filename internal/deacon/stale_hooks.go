@@ -6,15 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // StaleHookConfig holds configurable parameters for stale hook detection.
@@ -44,19 +43,19 @@ type HookedBead struct {
 
 // StaleHookResult represents the result of processing a stale hooked bead.
 type StaleHookResult struct {
-	BeadID      string `json:"bead_id"`
-	Title       string `json:"title"`
-	Assignee    string `json:"assignee"`
-	Age         string `json:"age"`
-	AgentAlive  bool   `json:"agent_alive"`
-	Unhooked    bool   `json:"unhooked"`
-	Error       string `json:"error,omitempty"`
+	BeadID     string `json:"bead_id"`
+	Title      string `json:"title"`
+	Assignee   string `json:"assignee"`
+	Age        string `json:"age"`
+	AgentAlive bool   `json:"agent_alive"`
+	Unhooked   bool   `json:"unhooked"`
+	Error      string `json:"error,omitempty"`
 	// PartialWork indicates uncommitted changes or unpushed commits were found
 	// in the agent's worktree before unhooking.
-	PartialWork    bool   `json:"partial_work,omitempty"`
-	WorktreeDirty  bool   `json:"worktree_dirty,omitempty"`
-	UnpushedCount  int    `json:"unpushed_count,omitempty"`
-	WorktreeError  string `json:"worktree_error,omitempty"`
+	PartialWork   bool   `json:"partial_work,omitempty"`
+	WorktreeDirty bool   `json:"worktree_dirty,omitempty"`
+	UnpushedCount int    `json:"unpushed_count,omitempty"`
+	WorktreeError string `json:"worktree_error,omitempty"`
 }
 
 // StaleHookScanResult contains the full results of a stale hook scan.
@@ -156,9 +155,7 @@ func ScanStaleHooks(townRoot string, cfg *StaleHookConfig) (*StaleHookScanResult
 
 // listHookedBeads returns all beads with status=hooked.
 func listHookedBeads(townRoot string) ([]*HookedBead, error) {
-	cmd := exec.Command("bd", "list", "--status=hooked", "--json", "--flat", "--limit=0")
-	cmd.Dir = townRoot
-	util.SetDetachedProcessGroup(cmd)
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.ReadOnlyRouting, "list", "--status=hooked", "--json", "--flat", "--limit=0")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -252,8 +249,6 @@ func assigneeToWorktreePath(townRoot, assignee string) string {
 
 // unhookBead sets a bead's status back to 'open'.
 func unhookBead(townRoot, beadID string) error {
-	cmd := exec.Command("bd", "update", beadID, "--status=open")
-	cmd.Dir = townRoot
-	util.SetDetachedProcessGroup(cmd)
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.MutationRouting, "update", beadID, "--status=open")
 	return cmd.Run()
 }

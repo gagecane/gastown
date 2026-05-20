@@ -95,12 +95,12 @@ const ModelEscalationConfigPath = ".gastown/model-escalation.json"
 
 // RedispatchResult describes the outcome of a re-dispatch attempt.
 type RedispatchResult struct {
-	BeadID     string `json:"bead_id"`
-	Action     string `json:"action"` // "redispatched", "cooldown", "escalated", "error"
-	TargetRig  string `json:"target_rig,omitempty"`
-	Attempts   int    `json:"attempts"`
-	Message    string `json:"message,omitempty"`
-	Error      error  `json:"error,omitempty"`
+	BeadID    string `json:"bead_id"`
+	Action    string `json:"action"` // "redispatched", "cooldown", "escalated", "error"
+	TargetRig string `json:"target_rig,omitempty"`
+	Attempts  int    `json:"attempts"`
+	Message   string `json:"message,omitempty"`
+	Error     error  `json:"error,omitempty"`
 }
 
 // RedispatchStateFile returns the path to the re-dispatch state file.
@@ -376,9 +376,7 @@ func resolveRigFromBead(townRoot, beadID string) string {
 
 // getBeadStatusForRedispatch returns the current status of a bead.
 func getBeadStatusForRedispatch(townRoot, beadID string) string {
-	cmd := exec.Command("bd", "show", beadID, "--json")
-	cmd.Dir = townRoot
-	util.SetDetachedProcessGroup(cmd)
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.ReadOnlyRouting, "show", beadID, "--json")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -453,6 +451,7 @@ func slingBead(townRoot, beadID, rig, agent string) error {
 	}
 	cmd := exec.Command("gt", args...)
 	cmd.Dir = townRoot
+	cmd.Env = deaconMutationRoutingEnv(townRoot)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -484,6 +483,7 @@ Please investigate and either:
 
 	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
 	cmd.Dir = townRoot
+	cmd.Env = deaconMutationRoutingEnv(townRoot)
 	util.SetDetachedProcessGroup(cmd)
 	return cmd.Run()
 }

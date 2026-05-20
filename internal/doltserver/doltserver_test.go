@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // =============================================================================
@@ -3924,6 +3926,86 @@ func TestDefaultConfig_InvalidPortIgnored(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_ConfigYAMLBeatsDaemonJSON(t *testing.T) {
+	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  port: 4407\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(`{"env":{"GT_DOLT_PORT":"5507"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	config := DefaultConfig(townRoot)
+	if config.Port != 4407 {
+		t.Errorf("Port = %d, want config.yaml port 4407", config.Port)
+	}
+}
+
+func TestDefaultConfig_DaemonJSONFallbackWithoutConfigOrEnv(t *testing.T) {
+	townRoot := t.TempDir()
+	t.Setenv("GT_DOLT_PORT", "")
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(`{"env":{"GT_DOLT_PORT":"5507"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	config := DefaultConfig(townRoot)
+	if config.Port != 5507 {
+		t.Errorf("Port = %d, want daemon.json port 5507", config.Port)
+	}
+}
+
+func TestDefaultConfig_IgnoreConfigUsesEnvPort(t *testing.T) {
+	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  port: 4407\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "1")
+	t.Setenv("GT_DOLT_PORT", "5507")
+
+	config := DefaultConfig(townRoot)
+	if config.Port != 5507 {
+		t.Errorf("Port = %d, want env port 5507 when config ignored", config.Port)
+	}
+}
+
+func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
+	townRoot := t.TempDir()
+
+	config := DefaultConfig(townRoot)
+	if config.EventScheduler != "OFF" {
+		t.Errorf("EventScheduler = %q, want OFF", config.EventScheduler)
+	}
+	if config.DoltStatsEnabled != "0" {
+		t.Errorf("DoltStatsEnabled = %q, want 0", config.DoltStatsEnabled)
+	}
+
+	t.Setenv("GT_DOLT_STATS_ENABLED", "omit")
+	t.Setenv("GT_DOLT_EVENT_SCHEDULER", "omit")
+	config = DefaultConfig(townRoot)
+	if config.DoltStatsEnabled != "omit" {
+		t.Errorf("DoltStatsEnabled = %q, want omit", config.DoltStatsEnabled)
+	}
+	if config.EventScheduler != "omit" {
+		t.Errorf("EventScheduler = %q, want omit", config.EventScheduler)
+	}
+}
+
 func TestBuildDoltSQLCmd_Local(t *testing.T) {
 	config := &Config{
 		Host:    "",
@@ -4367,11 +4449,72 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 		"data_dir: \"" + dir + "\"",
 		"log_level: warning",
 		"auto_gc_behavior:",
+		"event_scheduler: \"OFF\"",
+		"system_variables:",
+		"dolt_stats_enabled: 0",
 	}
 	for _, want := range checks {
 		if !strings.Contains(content, want) {
 			t.Errorf("config missing %q\nfull content:\n%s", want, content)
 		}
+	}
+
+	var parsed struct {
+		LogLevel string `yaml:"log_level"`
+		Listener struct {
+			Port               int `yaml:"port"`
+			MaxConnections     int `yaml:"max_connections"`
+			ReadTimeoutMillis  int `yaml:"read_timeout_millis"`
+			WriteTimeoutMillis int `yaml:"write_timeout_millis"`
+		} `yaml:"listener"`
+		DataDir  string `yaml:"data_dir"`
+		Behavior struct {
+			DoltTransactionCommit bool    `yaml:"dolt_transaction_commit"`
+			EventScheduler        *string `yaml:"event_scheduler"`
+			AutoGCBehavior        struct {
+				Enable       bool `yaml:"enable"`
+				ArchiveLevel int  `yaml:"archive_level"`
+			} `yaml:"auto_gc_behavior"`
+		} `yaml:"behavior"`
+		SystemVariables struct {
+			DoltStatsEnabled *int `yaml:"dolt_stats_enabled"`
+		} `yaml:"system_variables"`
+	}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("generated config is invalid YAML: %v\n%s", err, content)
+	}
+	if parsed.LogLevel != "warning" {
+		t.Errorf("log_level = %q, want warning", parsed.LogLevel)
+	}
+	if parsed.Listener.Port != 3307 {
+		t.Errorf("listener.port = %d, want 3307", parsed.Listener.Port)
+	}
+	if parsed.Listener.MaxConnections != 1000 {
+		t.Errorf("listener.max_connections = %d, want 1000", parsed.Listener.MaxConnections)
+	}
+	if parsed.Listener.ReadTimeoutMillis != DefaultReadTimeoutMs {
+		t.Errorf("listener.read_timeout_millis = %d, want %d", parsed.Listener.ReadTimeoutMillis, DefaultReadTimeoutMs)
+	}
+	if parsed.Listener.WriteTimeoutMillis != DefaultWriteTimeoutMs {
+		t.Errorf("listener.write_timeout_millis = %d, want %d", parsed.Listener.WriteTimeoutMillis, DefaultWriteTimeoutMs)
+	}
+	if parsed.DataDir != dir {
+		t.Errorf("data_dir = %q, want %q", parsed.DataDir, dir)
+	}
+	if parsed.Behavior.DoltTransactionCommit {
+		t.Error("behavior.dolt_transaction_commit = true, want false")
+	}
+	if parsed.Behavior.EventScheduler == nil || *parsed.Behavior.EventScheduler != "OFF" {
+		t.Fatalf("behavior.event_scheduler = %v, want OFF", parsed.Behavior.EventScheduler)
+	}
+	if parsed.Behavior.AutoGCBehavior.Enable {
+		t.Error("behavior.auto_gc_behavior.enable = true, want false")
+	}
+	if parsed.Behavior.AutoGCBehavior.ArchiveLevel != 0 {
+		t.Errorf("behavior.auto_gc_behavior.archive_level = %d, want 0", parsed.Behavior.AutoGCBehavior.ArchiveLevel)
+	}
+	if parsed.SystemVariables.DoltStatsEnabled == nil || *parsed.SystemVariables.DoltStatsEnabled != 0 {
+		t.Fatalf("system_variables.dolt_stats_enabled = %v, want 0", parsed.SystemVariables.DoltStatsEnabled)
 	}
 }
 
@@ -4434,6 +4577,33 @@ func TestWriteServerConfig_ZeroTimeoutsOmitted(t *testing.T) {
 	}
 	if strings.Contains(content, "write_timeout_millis") {
 		t.Error("zero WriteTimeoutMs should not write write_timeout_millis")
+	}
+}
+
+func TestWriteServerConfig_StatsAndSchedulerCanBeOmitted(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	config := &Config{
+		Port:             3307,
+		DataDir:          dir,
+		DoltStatsEnabled: "omit",
+		EventScheduler:   "omit",
+	}
+	if err := writeServerConfig(config, configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Contains(content, "dolt_stats_enabled") {
+		t.Fatalf("dolt_stats_enabled should be omitted:\n%s", content)
+	}
+	if strings.Contains(content, "event_scheduler") {
+		t.Fatalf("event_scheduler should be omitted:\n%s", content)
 	}
 }
 

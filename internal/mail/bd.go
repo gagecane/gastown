@@ -73,7 +73,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	cmd.Dir = workDir
 	util.SetDetachedProcessGroup(cmd)
 
-	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, extraEnv)
+	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, isMailBdReadCommand(args), extraEnv)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -119,31 +119,64 @@ func firstArg(args []string) string {
 	return ""
 }
 
-func bdSubprocessEnv(baseEnv []string, beadsDir string, extraEnv []string) []string {
-	env := filterBdTargetEnv(baseEnv)
+func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv []string) []string {
+	base := append(append([]string{}, baseEnv...), extraEnv...)
+	mode := beads.MutationRouting
+	if readOnly {
+		mode = beads.ReadOnlyRouting
+	}
 	if beadsDir != "" {
-		env = append(env, "BEADS_DIR="+beadsDir)
-		if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
-			env = append(env, dbEnv)
+		if readOnly {
+			mode = beads.ReadOnlyPinned
+		} else {
+			mode = beads.MutationPinned
 		}
 	}
-	env = append(env, "BEADS_NO_AUTO_IMPORT=1")
-	env = append(env, extraEnv...)
+	env := beads.EnvForSubprocessMode(base, beadsDir, mode)
 	env = append(env, telemetry.OTELEnvForSubprocess()...)
 	return env
 }
 
-func filterBdTargetEnv(env []string) []string {
+func filterEnvKey(env []string, key string) []string {
+	prefix := key + "="
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {
-		if strings.HasPrefix(entry, "BEADS_DIR=") ||
-			strings.HasPrefix(entry, "BEADS_DB=") ||
-			strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") {
+		if strings.HasPrefix(entry, prefix) {
 			continue
 		}
 		filtered = append(filtered, entry)
 	}
 	return filtered
+}
+
+func isMailBdReadCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "list", "show", "search":
+		return true
+	case "message":
+		return len(args) >= 2 && args[1] == "thread"
+	case "mol":
+		return len(args) >= 3 && args[1] == "wisp" && args[2] == "list"
+	case "sql":
+		query := ""
+		for i := len(args) - 1; i >= 1; i-- {
+			if !strings.HasPrefix(args[i], "-") {
+				query = args[i]
+				break
+			}
+		}
+		q := strings.ToLower(strings.TrimSpace(query))
+		return strings.HasPrefix(q, "select") || strings.HasPrefix(q, "show") || strings.HasPrefix(q, "explain") || strings.HasPrefix(q, "describe") || strings.HasPrefix(q, "with")
+	default:
+		return false
+	}
+}
+
+func filterBdTargetEnv(env []string) []string {
+	return beads.StripBDTargetEnv(env)
 }
 
 // bdReadCtx returns a context with the standard bd read timeout.

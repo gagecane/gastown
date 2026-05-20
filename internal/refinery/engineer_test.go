@@ -1019,7 +1019,7 @@ func TestPostMergeConvoyCheck_NoTownBeads(t *testing.T) {
 	}
 }
 
-func TestCheckAndCloseCompletedConvoys_StripsBeadsDir(t *testing.T) {
+func TestCheckAndCloseCompletedConvoys_UsesHardenedBDEnvs(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows - shell stubs")
 	}
@@ -1038,36 +1038,58 @@ func TestCheckAndCloseCompletedConvoys_StripsBeadsDir(t *testing.T) {
 	binDir := t.TempDir()
 	bdPath := filepath.Join(binDir, "bd")
 	script := `#!/bin/sh
+assert_town_read_env() {
+  if [ "$BEADS_DIR" != "$TOWN_BEADS" ]; then
+    echo "BEADS_DIR = $BEADS_DIR, want $TOWN_BEADS" >&2
+    exit 1
+  fi
+  if [ "$BD_READONLY" != "true" ] || [ "$BD_DOLT_AUTO_COMMIT" != "off" ]; then
+    echo "read env not read-only: BD_READONLY=$BD_READONLY BD_DOLT_AUTO_COMMIT=$BD_DOLT_AUTO_COMMIT" >&2
+    exit 1
+  fi
+  if [ -n "$BEADS_DOLT_SERVER_DATABASE" ] || [ -n "$BEADS_DB" ] || [ -n "$BD_DB" ] || [ -n "$BEADS_DOLT_DATA_DIR" ]; then
+    echo "stale target env leaked" >&2
+    exit 1
+  fi
+}
+assert_town_write_env() {
+  if [ "$BEADS_DIR" != "$TOWN_BEADS" ]; then
+    echo "BEADS_DIR = $BEADS_DIR, want $TOWN_BEADS" >&2
+    exit 1
+  fi
+  if [ -n "$BD_READONLY" ] || [ "$BD_DOLT_AUTO_COMMIT" != "on" ]; then
+    echo "write env not mutable: BD_READONLY=$BD_READONLY BD_DOLT_AUTO_COMMIT=$BD_DOLT_AUTO_COMMIT" >&2
+    exit 1
+  fi
+}
+assert_routing_read_env() {
+  if [ -n "$BEADS_DIR" ] || [ -n "$BEADS_DOLT_SERVER_DATABASE" ]; then
+    echo "routing env pinned target: BEADS_DIR=$BEADS_DIR DB=$BEADS_DOLT_SERVER_DATABASE" >&2
+    exit 1
+  fi
+  if [ "$BD_READONLY" != "true" ] || [ "$BD_DOLT_AUTO_COMMIT" != "off" ]; then
+    echo "routing read env not read-only: BD_READONLY=$BD_READONLY BD_DOLT_AUTO_COMMIT=$BD_DOLT_AUTO_COMMIT" >&2
+    exit 1
+  fi
+}
 case "$*" in
   "--allow-stale version")
     exit 0
     ;;
-	  "--allow-stale list --status=open --json --limit=0"|"list --status=open --json --limit=0")
-    if [ -n "$BEADS_DIR" ]; then
-      echo "BEADS_DIR leaked: $BEADS_DIR" >&2
-      exit 1
-    fi
+	  "--allow-stale list --status=open --json --limit=0 --flat"|"list --status=open --json --limit=0 --flat")
+	assert_town_read_env
 	    echo '[{"id":"hq-cv-l9","title":"Cross-rig convoy","status":"open","description":"","issue_type":"convoy"}]'
     ;;
   "--allow-stale dep list hq-cv-l9 --direction=down --type=tracks --json"|"dep list hq-cv-l9 --direction=down --type=tracks --json")
-    if [ -n "$BEADS_DIR" ]; then
-      echo "BEADS_DIR leaked: $BEADS_DIR" >&2
-      exit 1
-    fi
+    assert_town_read_env
     echo '[{"id":"external:l9:l9-123","status":"closed"}]'
     ;;
   "--allow-stale show l9-123 --json"|"show l9-123 --json")
-    if [ -n "$BEADS_DIR" ]; then
-      echo "BEADS_DIR leaked: $BEADS_DIR" >&2
-      exit 1
-    fi
+    assert_routing_read_env
     echo '[{"status":"closed"}]'
     ;;
   "--allow-stale close hq-cv-l9 -r All tracked issues completed"|"close hq-cv-l9 -r All tracked issues completed")
-    if [ -n "$BEADS_DIR" ]; then
-      echo "BEADS_DIR leaked: $BEADS_DIR" >&2
-      exit 1
-    fi
+    assert_town_write_env
     exit 0
     ;;
   *)
@@ -1080,7 +1102,14 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TOWN_BEADS", townBeads)
 	t.Setenv("BEADS_DIR", "/wrong/.beads")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong")
+	t.Setenv("BEADS_DB", "/wrong.db")
+	t.Setenv("BD_DB", "/wrong.bd")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "/wrong/data")
+	t.Setenv("BD_READONLY", "true")
+	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
 
 	e := NewEngineer(&rig.Rig{
 		Name: "l9",

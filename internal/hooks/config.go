@@ -321,6 +321,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Without this, witnesses could accidentally create permanent patrol molecules
 		// that survive session restarts and accumulate unbounded.
 		"witness": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
 					Matcher: "Bash(*bd mol pour*patrol*)",
@@ -352,9 +353,13 @@ func DefaultOverrides() map[string]*HooksConfig {
 				},
 			},
 		},
+		"boot": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
+		},
 		// Deacon roles: patrol-formula-guard (same as witness).
 		// Deacons also run patrols and must use wisps, not persistent molecules.
 		"deacon": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
 					Matcher: "Bash(*for *seq*)",
@@ -410,6 +415,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Refinery roles: patrol-formula-guard (same as witness).
 		// Refineries also run patrols and must use wisps, not persistent molecules.
 		"refinery": {
+			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
 					Matcher: "Bash(*bd mol pour*patrol*)",

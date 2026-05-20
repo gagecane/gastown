@@ -16,6 +16,47 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := filepath.Join(townRoot, "gastown", "witness")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
+
+	events, err := filepath.Glob(filepath.Join(townRoot, "events", "mayor", "*.event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %v, want one SLOT_BLOCKED event", events)
+	}
+	data, err := os.ReadFile(events[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Type    string            `json:"type"`
+		Payload map[string]string `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "SLOT_BLOCKED" {
+		t.Fatalf("event type = %q, want SLOT_BLOCKED", event.Type)
+	}
+	if event.Payload["reason"] != "exit-deferred" {
+		t.Fatalf("reason = %q, want exit-deferred", event.Payload["reason"])
+	}
+}
+
 func TestHandlePolecatDoneFromBead_NilFields(t *testing.T) {
 	t.Parallel()
 	result := HandlePolecatDoneFromBead(DefaultBdCli(), "/tmp", "testrig", "nux", nil, nil)

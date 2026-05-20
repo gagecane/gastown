@@ -1495,6 +1495,7 @@ func hookBeadWithRetry(beadID, targetAgent, hookDir string) error {
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		err := BdCmd("update", beadID, "--status=hooked", "--assignee="+targetAgent).
 			Dir(hookDir).
+			WithAutoCommit().
 			Run()
 		if err != nil {
 			lastErr = err
@@ -1544,6 +1545,8 @@ func hookBeadWithRetry(beadID, targetAgent, hookDir string) error {
 
 	return nil
 }
+
+var hookBeadWithRetryFn = hookBeadWithRetry
 
 // slingBackoff calculates exponential backoff with ±25% jitter for a given attempt (1-indexed).
 // Formula: base * 2^(attempt-1) * (1 ± 25% random), capped at max.

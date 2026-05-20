@@ -91,8 +91,19 @@ case "$cmd" in
     exit 0
     ;;
   show)
-    echo '{"error":"not found"}' >&2
-    exit 1
+    id=""
+    seen_show=0
+    for arg in "$@"; do
+      if [ "$seen_show" = 0 ]; then
+        [ "$arg" = "show" ] && seen_show=1
+        continue
+      fi
+      case "$arg" in --*) continue ;; esac
+      id="$arg"
+      break
+    done
+    printf '[{"id":"%s","title":"agent","issue_type":"agent","description":"agent\\n\\nrole_type: polecat\\nagent_state: idle\\nhook_bead: null\\ncleanup_status: clean"}]\n' "$id"
+    exit 0
     ;;
   *)
     exit 0
@@ -1228,6 +1239,7 @@ func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddWithOptions: %v", err)
 	}
+	_ = git.NewGit(polecat.ClonePath).CleanForce()
 	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("reuse-setup-marker"))
 
 	reused, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
@@ -1250,12 +1262,14 @@ func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 func TestReuseIdlePolecat_SetupCommandFailureCleansWorktree(t *testing.T) {
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
-	if _, err := mgr.AddWithOptions("toast", AddOptions{}); err != nil {
+	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
+	if err != nil {
 		t.Fatalf("AddWithOptions: %v", err)
 	}
+	_ = git.NewGit(polecat.ClonePath).CleanForce()
 	writeWispSetupCommand(t, mgr, setupCommandWriteMarkerAndFail("dirty-setup-marker"))
 
-	_, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
+	_, err = mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
 	if err == nil {
 		t.Fatal("ReuseIdlePolecat should fail when setup_command fails")
 	}
@@ -1320,26 +1334,20 @@ func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 
 	staleSHA := createStalePolecatCommit(t, polecat.ClonePath, "HEAD", "polecat/toast-stale")
 
-	reused, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
+	_, err = mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
+	if !errors.Is(err, ErrPolecatNeedsRecovery) {
+		t.Fatalf("ReuseIdlePolecat error = %v, want ErrPolecatNeedsRecovery", err)
+	}
+	worktreeGit := git.NewGit(polecat.ClonePath)
+	currentSHA, err := worktreeGit.Rev("HEAD")
 	if err != nil {
-		t.Fatalf("ReuseIdlePolecat: %v", err)
+		t.Fatalf("resolve current HEAD: %v", err)
 	}
-
-	worktreeGit := git.NewGit(reused.ClonePath)
-	staleAncestor, err := worktreeGit.IsAncestor(staleSHA, reused.Branch)
-	if err != nil {
-		t.Fatalf("check stale ancestry: %v", err)
+	if currentSHA != staleSHA {
+		t.Fatalf("reuse should preserve stale local commit %s, got HEAD %s", staleSHA, currentSHA)
 	}
-	if staleAncestor {
-		t.Fatalf("reused polecat branch %q unexpectedly includes stale local commit %s", reused.Branch, staleSHA)
-	}
-
-	baseAncestor, err := worktreeGit.IsAncestor(baseSHA, reused.Branch)
-	if err != nil {
-		t.Fatalf("check canonical ancestry: %v", err)
-	}
-	if !baseAncestor {
-		t.Fatalf("reused polecat branch %q should descend from origin/main commit %s", reused.Branch, baseSHA)
+	if baseSHA == "" {
+		t.Fatal("base SHA unexpectedly empty")
 	}
 }
 
