@@ -54,7 +54,11 @@ Abbreviated patrol rules:
 - **health-scan**: Quick `gt witness status` / `gt refinery status` only. Skip nudges.
 - **dolt-health**: SKIP.
 - **zombie-scan**: SKIP.
-- **plugin-run**: SKIP.
+- **plugin-run**: SKIP. This applies ONLY to the in-patrol plugin-run batch
+  step below — the abbreviated-mode SKIP rule MUST NOT be applied to
+  daemon-dispatched plugin mail ("Plugin: <name>" messages from the daemon).
+  Daemon dispatches arrive out-of-band and are NEVER subject to abbreviated
+  patrol skip rules; execute them whenever they appear, regardless of mode.
 - **dog-pool-maintenance**: SKIP.
 - **dog-health-check**: SKIP.
 - **orphan-check**: SKIP.
@@ -811,6 +815,12 @@ needs = ["zombie-scan"]
 description = """
 Execute registered plugins.
 
+**Scope of this step:** the abbreviated-patrol SKIP rule for `plugin-run`
+applies ONLY to this batch step (the patrol scanning loop below). It does
+NOT apply to daemon-dispatched plugin mail ("Plugin: <name>" messages sent
+by the daemon to your inbox). Daemon dispatches arrive out-of-band and
+must be executed whenever they appear, regardless of patrol mode.
+
 Scan $GT_ROOT/plugins/ for plugin directories. Each plugin has a plugin.md with TOML frontmatter defining its gate (when to run) and instructions (what to do).
 
 See docs/deacon-plugins.md for full documentation.
@@ -1277,10 +1287,13 @@ After await-signal returns, check the EFFORT directive in the output:
 **If `EFFORT: reduced`** — Run ABBREVIATED patrol:
 - heartbeat: ALWAYS run
 - inbox-check: Quick drain only, skip individual messages unless HELP/RECOVERED_BEAD
+  or a daemon plugin dispatch ("Plugin: <name>" mail). Daemon-dispatched plugins
+  are NEVER skipped — execute them regardless of patrol mode.
 - orphan-process-cleanup through fire-notifications: SKIP all
 - heartbeat-mid: SKIP
 - health-scan: Quick status checks only, skip nudges
-- dolt-health through session-gc: SKIP all
+- dolt-health through session-gc: SKIP all (plugin-run SKIP applies ONLY to the
+  in-patrol batch scan; daemon-dispatched plugin mail is always executed)
 - wisp-compact through log-maintenance: SKIP all
 - patrol-cleanup: Quick inbox check only
 - context-check: One-sentence self-assessment
