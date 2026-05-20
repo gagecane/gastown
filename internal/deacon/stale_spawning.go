@@ -5,14 +5,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // StaleSpawningConfig holds configurable parameters for stale spawning-agent
@@ -179,7 +177,8 @@ func ScanStaleSpawning(townRoot string, cfg *StaleSpawningConfig) (*StaleSpawnin
 // relatively few (dozens, not thousands) so parsing every description
 // per-scan is acceptable.
 func listSpawningAgentBeads(townRoot string) ([]spawningBead, error) {
-	cmd := exec.Command("bd", "list",
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.ReadOnlyRouting,
+		"list",
 		"--label=gt:agent",
 		"--include-infra",
 		"--status=open,in_progress,blocked,hooked,pinned",
@@ -187,8 +186,6 @@ func listSpawningAgentBeads(townRoot string) ([]spawningBead, error) {
 		"--flat",
 		"--limit=0",
 	)
-	cmd.Dir = townRoot
-	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -298,9 +295,9 @@ func closeSpawningBead(townRoot, beadID string, maxAge time.Duration) error {
 		"spawn-failed: agent bead stuck in spawning state for >%s with no live session (gu-iabm)",
 		maxAge.Round(time.Minute),
 	)
-	cmd := exec.Command("bd", "close", beadID, "--reason", reason)
-	cmd.Dir = townRoot
-	util.SetDetachedProcessGroup(cmd)
+	cmd := beads.Command(townRoot, townBeadsDir(townRoot), beads.MutationRouting,
+		"close", beadID, "--reason", reason,
+	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}

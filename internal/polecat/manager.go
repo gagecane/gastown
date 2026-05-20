@@ -1730,13 +1730,6 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if !m.exists(name) {
 		return nil, ErrPolecatNotFound
 	}
-	current, err := m.loadFromBeads(name)
-	if err != nil {
-		return nil, err
-	}
-	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
-		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
-	}
 
 	// Kill any existing session unconditionally before reuse.
 	// The polecat was found idle (no hooked work), so even a "live" session is
@@ -1749,8 +1742,21 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// session lifecycle (e.g. a compact/resume hook refreshes the heartbeat while
 	// the session is functionally idle), leaving the old session alive and the
 	// new work undiscovered.
+	//
+	// gu-3n5u: kill BEFORE the recovery decision. A live tmux session also makes
+	// loadFromBeads classify the polecat as StateWorking, which would short-circuit
+	// the recovery gate to "not-idle" and skip the kill. Removing the session first
+	// lets the gate evaluate beads/git state on its own merits.
 	if err := m.killExistingPolecatSession(name, "reuse"); err != nil {
 		return nil, err
+	}
+
+	current, err := m.loadFromBeads(name)
+	if err != nil {
+		return nil, err
+	}
+	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
+		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
 	}
 
 	// Get worktree path (must already exist for reuse)
@@ -2411,6 +2417,20 @@ func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDec
 			}
 		} else {
 			input.GitCheckFailed = true
+		}
+		// gu-3n5u: BranchPushedToRemote treats a remote ref by the same name as
+		// "pushed" — but in idle-polecat reuse we also have to detect commits
+		// that exist only on a feature/stale branch and are NOT yet on origin's
+		// canonical default branch. ReuseIdlePolecat is about to reset the
+		// worktree onto that default branch, so any commit not reachable from
+		// origin/<default> is work-at-risk that the slot-reuse decision must
+		// honor.
+		if defaultBranch := g.RemoteDefaultBranch(); defaultBranch != "" {
+			if ahead, err := g.CommitsAhead("origin/"+defaultBranch, "HEAD"); err == nil {
+				if ahead > input.UnpushedCommits {
+					input.UnpushedCommits = ahead
+				}
+			}
 		}
 	}
 	// Legacy/test polecats can lack agent cleanup metadata. If git proves there is
