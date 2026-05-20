@@ -311,8 +311,12 @@ git log origin/{{base_branch}}..HEAD --oneline
 This MUST show at least 1 commit. If it shows NOTHING:
 - You have NOT completed your implementation. Do NOT close this step.
 - Go back to the implement step and do the work.
-- If the task genuinely requires no code changes (already fixed upstream, etc.),
-  run `gt done --status DEFERRED` and skip remaining steps.
+- **Report-only / review_only task** (audit, PRD review, plan review, code review):
+  zero commits is expected. Run plain `gt done` (NOT `--status DEFERRED`). The
+  hooked bead is flagged review_only/no_merge so `gt done` will close it via
+  the no-MR close path. Skip the remaining steps.
+- **Bug already fixed upstream / nothing to do**: run `gt done --status DEFERRED`
+  and skip remaining steps.
 - Do NOT proceed to review or build with zero commits.
 
 **5. VERIFY clean working tree:**
@@ -534,7 +538,14 @@ gt done --pre-verified --target {{base_branch}}
 # For code tasks without pre-verification (gates skipped or failed):
 gt done --target {{base_branch}}
 
-# For report-only tasks (no commits — audits, reviews, research):
+# For report-only / review_only tasks (no commits — audits, PRD/plan/code reviews):
+# The bead is flagged review_only/no_merge, so plain `gt done` takes the no-MR
+# close path and closes the bead. Do NOT use --status DEFERRED here — that
+# routes through the defer-cooldown path and leaves the bead DEFERRED, which
+# blocks convoy synthesis (gu-ybjb).
+gt done
+
+# For bugs already fixed upstream / nothing to do (NOT a review_only task):
 gt done --status DEFERRED
 ```
 

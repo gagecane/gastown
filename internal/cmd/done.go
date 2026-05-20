@@ -2108,13 +2108,31 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 	// (upstream #3867).
 	isWorkflowStep := strings.Contains(hookedBeadID, "-wfs-")
 
-	// Apply defer cooldown for DEFERRED exits on non-workflow beads (gu-vty0).
+	// Review-only and no-merge beads (gu-ybjb): analysis-only legs (review_only=true,
+	// e.g. mol-prd-review / mol-plan-review / mol-polecat-code-review) and
+	// no-code tasks (no_merge=true, e.g. email/research) finish with zero commits
+	// by design. mol-polecat-work historically advised these polecats to run
+	// `gt done --status DEFERRED`, which sent them down the defer-cooldown path
+	// instead of closing — leaving the bead DEFERRED and blocking convoy
+	// synthesis. Treat DEFERRED on a review_only/no_merge bead like a workflow
+	// step: close, don't defer-cooldown. This is a safety net so the close path
+	// is reliable regardless of which exit flag the polecat used.
+	isReviewOrNoMergeBead := false
+	if hookedBeadID != "" {
+		if hb, err := bd.Show(hookedBeadID); err == nil {
+			if af := beads.ParseAttachmentFields(hb); af != nil && (af.ReviewOnly || af.NoMerge) {
+				isReviewOrNoMergeBead = true
+			}
+		}
+	}
+
+	// Apply defer cooldown for DEFERRED exits on non-workflow, non-review beads (gu-vty0).
 	// Without this, the stale-hooks patrol reopens the bead (status=open) and
 	// `bd ready` re-surfaces it to the auto-dispatcher within seconds, looping
 	// failed work through fresh polecats. Setting --defer hides it from
 	// `bd ready` for the cooldown window without altering status semantics, so
 	// witness/mayor still see it via `bd list` and can intervene.
-	if hookedBeadID != "" && exitType == ExitDeferred && !isWorkflowStep {
+	if hookedBeadID != "" && exitType == ExitDeferred && !isWorkflowStep && !isReviewOrNoMergeBead {
 		deferUntil := doneDeferUntil
 		if deferUntil == "" {
 			deferUntil = defaultDeferredOffset
@@ -2126,7 +2144,7 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 		}
 	}
 
-	if hookedBeadID != "" && (exitType != ExitDeferred || isWorkflowStep) {
+	if hookedBeadID != "" && (exitType != ExitDeferred || isWorkflowStep || isReviewOrNoMergeBead) {
 		// BUG FIX (gt-pftz): Close hooked bead unless already terminal (closed/tombstone).
 		// Previously checked hookedBead.Status == StatusHooked, but polecats update
 		// their work bead to in_progress during work. The exact-match check caused
