@@ -440,6 +440,93 @@ func TestHasMayorOnlyLabel(t *testing.T) {
 	}
 }
 
+// TestHasWrongRigLabelFor verifies the gu-mhfs cross-rig mis-routing guard:
+// a bead carrying wrong-rig:<rig> must be excluded from re-dispatch to that
+// rig, but routing to other rigs must remain unaffected. The check is exact
+// match on the trimmed rig segment so substring collisions ("rig" vs
+// "rig_test") cannot accidentally trigger.
+func TestHasWrongRigLabelFor(t *testing.T) {
+	tests := []struct {
+		name      string
+		labels    []string
+		targetRig string
+		want      bool
+	}{
+		{"nil labels", nil, "casc_lambda", false},
+		{"empty labels", []string{}, "casc_lambda", false},
+		{"empty target rig", []string{"wrong-rig:casc_lambda"}, "", false},
+		{"matching label", []string{"wrong-rig:casc_lambda"}, "casc_lambda", true},
+		{"matching among others", []string{"bug", "wrong-rig:casc_lambda", "p2"}, "casc_lambda", true},
+		{"different rig", []string{"wrong-rig:casc_crud"}, "casc_lambda", false},
+		// Substring / prefix collisions must not trigger.
+		{"label rig is substring of target", []string{"wrong-rig:casc"}, "casc_lambda", false},
+		{"target is substring of label rig", []string{"wrong-rig:casc_lambda_old"}, "casc_lambda", false},
+		// Case-sensitive — rig names are lowercase by convention.
+		{"case-sensitive — uppercase rejected", []string{"wrong-rig:Casc_Lambda"}, "casc_lambda", false},
+		// Multiple wrong-rig labels: exact rig wins.
+		{"multiple wrong rigs, target matches one", []string{"wrong-rig:casc_lambda", "wrong-rig:casc_crud"}, "casc_crud", true},
+		{"multiple wrong rigs, target matches none", []string{"wrong-rig:casc_lambda", "wrong-rig:casc_crud"}, "casc_cdk", false},
+		// Negatives that look related but aren't.
+		{"missing colon rejected", []string{"wrong-rigcasc_lambda"}, "casc_lambda", false},
+		{"prefix-only rejected", []string{"wrong-rig:"}, "casc_lambda", false},
+		{"unrelated namespace rejected", []string{"rig:casc_lambda"}, "casc_lambda", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasWrongRigLabelFor(tt.labels, tt.targetRig); got != tt.want {
+				t.Errorf("HasWrongRigLabelFor(%v, %q) = %v, want %v",
+					tt.labels, tt.targetRig, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWrongRigsFromLabels verifies extraction of rig names from wrong-rig:*
+// labels. Used by close-reason text mining (Layer 2, future) and by error
+// messages that report the full set of mis-routed rigs.
+func TestWrongRigsFromLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   []string
+	}{
+		{"nil labels", nil, nil},
+		{"empty labels", []string{}, nil},
+		{"single wrong rig", []string{"wrong-rig:casc_lambda"}, []string{"casc_lambda"}},
+		{
+			"two wrong rigs preserve order",
+			[]string{"wrong-rig:casc_lambda", "wrong-rig:casc_crud"},
+			[]string{"casc_lambda", "casc_crud"},
+		},
+		{
+			"wrong-rig mixed with other labels",
+			[]string{"bug", "wrong-rig:casc_lambda", "p2", "wrong-rig:casc_crud"},
+			[]string{"casc_lambda", "casc_crud"},
+		},
+		// Empty-suffix label is malformed — drop it.
+		{"empty suffix dropped", []string{"wrong-rig:"}, nil},
+		// Unrelated labels ignored.
+		{"unrelated labels ignored", []string{"mayor-only", "phase:epic"}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := WrongRigsFromLabels(tt.labels)
+			if len(got) != len(tt.want) {
+				t.Errorf("WrongRigsFromLabels(%v) = %v, want %v", tt.labels, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("WrongRigsFromLabels(%v)[%d] = %q, want %q",
+						tt.labels, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 	bdAllowStaleMu.Lock()
 	prevPath := bdAllowStalePath

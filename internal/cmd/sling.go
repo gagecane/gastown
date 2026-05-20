@@ -787,6 +787,18 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// branch below only handles non-rig targets (dogs, mayor, crew, self-sling,
 	// existing polecats, and dead-polecat fallback), which executeSling does not cover.
 	if rigName, isRig := IsRigName(target); isRig {
+		// Wrong-rig label guard (gu-mhfs). Catch the mis-route up front in
+		// the CLI path so operators see a clear message before the per-bead
+		// flock release and executeSling re-entry. executeSling enforces this
+		// again as defense-in-depth (so direct callers — batch sling, queue
+		// dispatch — also benefit), but doing it here keeps the failure stack
+		// simple for the common `gt sling <bead> <rig>` invocation.
+		if isWrongRigBeadForTarget(info, rigName) {
+			return fmt.Errorf("refusing to sling bead %s to rig %q: %q carries label %s%s asserting that rig already mis-routed this bead.\nWrong rigs on this bead: %v.\nRemove the label first if the prior assessment was incorrect: bd update %s --remove-label=%s%s",
+				beadID, rigName, info.Title, beads.WrongRigLabelPrefix, rigName,
+				beads.WrongRigsFromLabels(info.Labels),
+				beadID, beads.WrongRigLabelPrefix, rigName)
+		}
 		// Release the per-bead sling lock before handing off to executeSling,
 		// which acquires its own lock. Holding both would deadlock (flock is
 		// non-blocking and returns "already being slung").

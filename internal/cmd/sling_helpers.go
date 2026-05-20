@@ -360,6 +360,39 @@ func isSlingContextBeadInfo(info *beadInfo) bool {
 	return false
 }
 
+// isWrongRigBeadForTarget reports whether the bead carries a
+// wrong-rig:<targetRig> label. The label is the cheap-loop-breaker for the
+// auto-router's owning-package mis-attribution problem (gu-mhfs).
+//
+// Background: when an integration test fails, the failure-classifier picks a
+// rig from the test's source path. For tests that exercise a service whose
+// code lives across multiple rigs (e.g. casc_lambda holds the SQS handler but
+// the auth wiring lives in casc_cdk and the HTTP handler in casc_crud), the
+// classifier's first guess can be persistently wrong. A polecat in the wrong
+// rig closes the bead "no-changes — wrong rig," but nothing fed that signal
+// back to the router; the next dispatch cycle re-routed the same bead the
+// same way (cala-7e9 → obsidian, then cala-tl5 → obsidian, both wrong-rig).
+//
+// Operators (or, in time, the close-reason text-miner — see Layer 2 in
+// gu-mhfs) attach 'wrong-rig:<rig>' labels to assert "this bead has already
+// been routed to <rig> and that rig was wrong." This guard then refuses to
+// re-route it to the same rig regardless of how routing chose the target.
+//
+// Multiple labels stack: a bead that's been wrong in two rigs carries two
+// labels. If every plausible rig is labeled wrong, the bead falls through
+// for human triage rather than re-cycling through polecats.
+//
+// Not bypassed by --force — the label is an explicit assertion about
+// owning-package, not a dispatch preference. Operators who want to override
+// must remove the label first (which also serves as a moment to think about
+// whether the labelers were right).
+func isWrongRigBeadForTarget(info *beadInfo, targetRig string) bool {
+	if info == nil {
+		return false
+	}
+	return beads.HasWrongRigLabelFor(info.Labels, targetRig)
+}
+
 // isPolecatOwnedBeadInfo reports whether the bead's owner address identifies
 // a polecat ("<rig>/polecats/<name>"). Polecats are not allowed to dispatch
 // work — their job is to execute a slung task and return — so a bead they

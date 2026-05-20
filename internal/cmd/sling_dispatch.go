@@ -220,6 +220,22 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Owner, info.Title)
 	}
 
+	// Wrong-rig label guard (gu-mhfs). When a bead carries a wrong-rig:<rig>
+	// label asserting that prior dispatch to that rig was wrong (e.g. polecat
+	// closed it "no-changes — belongs in another rig"), refuse to re-dispatch
+	// to the same rig. Without this guard the auto-router re-cycles cross-rig
+	// test failures (cala-7e9 → obsidian, then cala-tl5 → obsidian, both
+	// wrong-rig casc_lambda) every cooldown because the no-changes signal
+	// never fed back into routing. Not bypassed by --force — operators who
+	// want to override must remove the label first.
+	if params.RigName != "" && isWrongRigBeadForTarget(info, params.RigName) {
+		result.ErrMsg = "wrong-rig"
+		return result, fmt.Errorf("bead %s carries label %s%s: %q — refusing to re-route to a rig already marked wrong.\nWrong rigs on this bead: %v.\nRemove the label first if the prior assessment was incorrect: bd update %s --remove-label=%s%s",
+			params.BeadID, beads.WrongRigLabelPrefix, params.RigName, info.Title,
+			beads.WrongRigsFromLabels(info.Labels),
+			params.BeadID, beads.WrongRigLabelPrefix, params.RigName)
+	}
+
 	// Save explicit force state before dead-agent auto-force, so the deferred
 	// gate below still requires an explicit --force for deferred beads.
 	explicitForce := params.Force
