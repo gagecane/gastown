@@ -72,6 +72,14 @@ const (
 	GatePhasePostSquash GatePhase = "post-squash"
 )
 
+// rebaseCheckGateName is the canonical gate name for the upstream-rebased
+// invariant check (scripts/check-upstream-rebased.sh). Defined as a constant
+// because gu-ofsg's fork-sync bypass needs to skip this exact gate by name —
+// see doMerge's pre-merge gate execution path. Configured rigs use this exact
+// name in `merge_queue.gates` (see scripts/check-upstream-rebased.sh and the
+// gates_commands formula var in internal/cmd/sling_helpers.go).
+const rebaseCheckGateName = "rebase-check"
+
 type GateConfig struct {
 	// Cmd is the shell command to execute.
 	Cmd string `json:"cmd"`
@@ -650,6 +658,26 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Pushed %d submodule(s)\n", len(subChanges))
 	}
 
+	// gu-ofsg: detect fork-sync MRs BEFORE running pre-merge gates so we can
+	// skip rebase-check (which checks `upstream/<target>` is an ancestor of
+	// `origin/<target>`). For a fork-sync MR — whose entire purpose is to
+	// rebase the fork onto upstream — that invariant is false pre-merge and
+	// is restored by the merge itself. Running rebase-check here would
+	// deadlock the MR (the gate blocks the very change that resolves it).
+	//
+	// Detection uses the same predicate as the post-merge topology preservation
+	// path below, so the two stay in lockstep: if we skip rebase-check, we will
+	// also use a no-ff merge, and the post-merge invariant check at the end of
+	// this function asserts the gate would now pass. See internal/refinery/fork_sync.go.
+	//
+	// Fail-safe: detection errors degrade to "not fork-sync", letting the
+	// existing rebase-check gate fire as it would today.
+	forkSync, forkSyncErr := preserveForkSyncTopology(e.git, branch, target)
+	if forkSyncErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: fork-sync detection failed (%v) — using squash merge\n", forkSyncErr)
+		forkSync = forkSyncDecision{}
+	}
+
 	// Step 4: Run quality gates (or legacy tests) if configured.
 	// Phase 3 fast-path: if skipGates is true (pre-verified MR with matching base),
 	// skip all gate execution — the polecat already ran gates after rebasing.
@@ -657,8 +685,15 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 	if shouldSkipGates {
 		_, _ = fmt.Fprintln(e.output, "[Engineer] Skipping gates (pre-verified by polecat)")
 	} else if len(e.config.Gates) > 0 {
-		// New gates system: run configured quality gates
-		gateResult := e.runGates(ctx)
+		// New gates system: run configured quality gates. When a fork-sync MR
+		// is detected, drop the rebase-check gate from this run — the merge
+		// itself satisfies that gate's invariant (and we verify it post-merge).
+		var preSkip map[string]bool
+		if forkSync.Preserve {
+			preSkip = map[string]bool{rebaseCheckGateName: true}
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Fork-sync detected (%s) — bypassing %s gate (gu-ofsg)\n", forkSync.Reason, rebaseCheckGateName)
+		}
+		gateResult := e.runGatesForPhaseSkipping(ctx, GatePhasePreMerge, preSkip)
 		if !gateResult.Success {
 			return gateResult
 		}
@@ -711,21 +746,13 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not get original commit message: %v\n", msgErr)
 		}
 	}
-	// gu-9yi3: detect fork-sync MRs (polecat branches that have integrated
-	// upstream/<target> via a merge commit) and preserve merge topology via
-	// `git merge --no-ff` instead of `git merge --squash`. Squashing a
-	// fork-sync branch destroys the second-parent edge to upstream, which
-	// breaks `git merge-base --is-ancestor upstream/<target> HEAD` checks
-	// and fires rebase-check escalations. See internal/refinery/fork_sync.go
-	// for the full detection rules and rationale.
-	//
-	// Fail-safe: if detection errors (unexpected git failure), we log and
-	// fall back to the squash path rather than blocking the merge.
-	forkSync, forkSyncErr := preserveForkSyncTopology(e.git, branch, target)
-	if forkSyncErr != nil {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: fork-sync detection failed (%v) — using squash merge\n", forkSyncErr)
-	}
-
+	// gu-9yi3: fork-sync MRs (polecat branches that have integrated
+	// upstream/<target> via a merge commit) are merged with `git merge --no-ff`
+	// instead of `git merge --squash`. Squashing destroys the second-parent
+	// edge to upstream, which breaks `git merge-base --is-ancestor
+	// upstream/<target> HEAD` checks and fires rebase-check escalations.
+	// Detection happened earlier (before pre-merge gates) so we could also
+	// bypass rebase-check pre-merge — see gu-ofsg note above.
 	var mergeErr error
 	if forkSync.Preserve {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Fork-sync detected (%s) — using no-ff merge: %s\n", forkSync.Reason, strings.TrimSpace(originalMsg))
@@ -752,6 +779,37 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			Success: false,
 			Error:   fmt.Sprintf("merge failed: %v", mergeErr),
 		}
+	}
+
+	// gu-ofsg: when rebase-check was bypassed pre-merge, verify post-merge
+	// that the merge actually restored the invariant. The no-ff merge above
+	// should have made `forkSync.UpstreamRef` an ancestor of HEAD; if not,
+	// something is wrong (e.g., wrong branch tip, partial merge), and we
+	// must NOT push the result.
+	if forkSync.Preserve && forkSync.UpstreamRef != "" {
+		isAnc, ancErr := e.git.IsAncestor(forkSync.UpstreamRef, "HEAD")
+		if ancErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: post-merge ancestry check failed (%v) — resetting and aborting fork-sync\n", ancErr)
+			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after ancestry check error: %v\n", target, resetErr)
+			}
+			return ProcessResult{
+				Success: false,
+				Error:   fmt.Sprintf("post-merge ancestry check failed: %v", ancErr),
+			}
+		}
+		if !isAnc {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] ERROR: fork-sync merge did not make %s an ancestor of HEAD — resetting\n", forkSync.UpstreamRef)
+			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after invariant violation: %v\n", target, resetErr)
+			}
+			return ProcessResult{
+				Success:     false,
+				TestsFailed: true,
+				Error:       fmt.Sprintf("fork-sync invariant violated: %s is not an ancestor of merged HEAD", forkSync.UpstreamRef),
+			}
+		}
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Fork-sync invariant verified: %s is now an ancestor of HEAD\n", forkSync.UpstreamRef)
 	}
 
 	// Step 5.5: Run post-squash gates on the merged result.
@@ -1121,16 +1179,37 @@ func (e *Engineer) runGates(ctx context.Context) ProcessResult {
 // Gates run in parallel if GatesParallel is true; otherwise sequentially.
 // Any single gate failure means overall failure.
 func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) ProcessResult {
+	return e.runGatesForPhaseSkipping(ctx, phase, nil)
+}
+
+// runGatesForPhaseSkipping is like runGatesForPhase but omits any gate whose
+// name appears in the skip set. Used by gu-ofsg to bypass the rebase-check
+// gate when processing a fork-sync MR — the gate's invariant is restored by
+// the merge itself, so checking it pre-merge would deadlock the MR.
+//
+// A nil or empty skip set is equivalent to runGatesForPhase. Skipped gates
+// are logged so operators can see which gates were filtered and why.
+func (e *Engineer) runGatesForPhaseSkipping(ctx context.Context, phase GatePhase, skip map[string]bool) ProcessResult {
 	// Filter gates for this phase. Empty phase is treated as pre-merge (default).
 	gates := make(map[string]*GateConfig)
+	var skipped []string
 	for name, gc := range e.config.Gates {
 		gatePhase := gc.Phase
 		if gatePhase == "" {
 			gatePhase = GatePhasePreMerge
 		}
-		if gatePhase == phase {
-			gates[name] = gc
+		if gatePhase != phase {
+			continue
 		}
+		if skip[name] {
+			skipped = append(skipped, name)
+			continue
+		}
+		gates[name] = gc
+	}
+	if len(skipped) > 0 {
+		sort.Strings(skipped)
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Skipping %s gate(s): %s\n", phase, strings.Join(skipped, ", "))
 	}
 	if len(gates) == 0 {
 		return ProcessResult{Success: true}

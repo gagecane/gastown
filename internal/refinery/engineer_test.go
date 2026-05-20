@@ -1351,3 +1351,52 @@ func TestIsClaimStale(t *testing.T) {
 		})
 	}
 }
+
+func TestRunGatesForPhaseSkipping_FiltersByName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell commands")
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	e := NewEngineer(r)
+	e.workDir = t.TempDir()
+	e.output = io.Discard
+
+	// rebase-check would fail if it ran; the skip must prevent that.
+	// build still runs and passes.
+	markerDir := t.TempDir()
+	e.config.Gates = map[string]*GateConfig{
+		"rebase-check": {Cmd: "exit 1", Phase: GatePhasePreMerge},
+		"build":        {Cmd: fmt.Sprintf("touch %s/build", markerDir), Phase: GatePhasePreMerge},
+	}
+	e.config.GatesParallel = false
+
+	skip := map[string]bool{"rebase-check": true}
+	result := e.runGatesForPhaseSkipping(context.Background(), GatePhasePreMerge, skip)
+	if !result.Success {
+		t.Fatalf("expected success when failing gate is skipped, got: %s", result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(markerDir, "build")); os.IsNotExist(err) {
+		t.Error("non-skipped gate 'build' should have run")
+	}
+}
+
+func TestRunGatesForPhaseSkipping_NilSkipEqualsRunAll(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell commands")
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	e := NewEngineer(r)
+	e.workDir = t.TempDir()
+	e.output = io.Discard
+	e.config.Gates = map[string]*GateConfig{
+		"a":    {Cmd: "true", Phase: GatePhasePreMerge},
+		"fail": {Cmd: "exit 1", Phase: GatePhasePreMerge},
+	}
+
+	result := e.runGatesForPhaseSkipping(context.Background(), GatePhasePreMerge, nil)
+	if result.Success {
+		t.Error("expected failure: with nil skip set, the failing gate must run")
+	}
+}
