@@ -319,3 +319,157 @@ func TestAttachmentFormulaVarsPrefersAttachedVars(t *testing.T) {
 		t.Fatalf("attachmentFormulaVars() = %#v, want %#v", got, want)
 	}
 }
+
+// writeEmbeddedFormulaToTempDir copies the embedded formula <name> to a fresh
+// temp directory and returns its on-disk path. Used by parseFormulaFile tests
+// that need a real file path (parseFormulaFile reads from disk).
+func writeEmbeddedFormulaToTempDir(t *testing.T, name string) string {
+	t.Helper()
+	data, err := formula.GetEmbeddedFormulaContent(name)
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent(%q): %v", name, err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, name+".formula.toml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write formula to tempdir: %v", err)
+	}
+	return path
+}
+
+// TestParseFormulaFile_ResolvesShinyEnterprise locks in the gu-deat fix:
+// parseFormulaFile MUST return a fully-resolved formula for compositions
+// that use extends + compose.expand. Without resolution, executeWorkflowFormula
+// fails with "workflow formula 'X' has no steps" because the parent's [[steps]]
+// were never merged into the child.
+//
+// shiny-enterprise extends shiny (5 steps) and expands "implement" with
+// rule-of-five (5 template steps). Resolved result: 9 steps total.
+func TestParseFormulaFile_ResolvesShinyEnterprise(t *testing.T) {
+	t.Parallel()
+
+	path := writeEmbeddedFormulaToTempDir(t, "shiny-enterprise")
+
+	f, err := parseFormulaFile(path)
+	if err != nil {
+		t.Fatalf("parseFormulaFile: %v", err)
+	}
+
+	if f.Type != formula.TypeWorkflow {
+		t.Errorf("Type = %q, want %q", f.Type, formula.TypeWorkflow)
+	}
+
+	wantIDs := []string{
+		"design",
+		"implement.draft",
+		"implement.refine-1",
+		"implement.refine-2",
+		"implement.refine-3",
+		"implement.refine-4",
+		"review",
+		"test",
+		"submit",
+	}
+	gotIDs := make([]string, len(f.Steps))
+	for i, s := range f.Steps {
+		gotIDs[i] = s.ID
+	}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("resolved step IDs = %v, want %v", gotIDs, wantIDs)
+	}
+
+	// review must depend on the last expanded step, not the replaced "implement".
+	var reviewStep *formula.Step
+	for i := range f.Steps {
+		if f.Steps[i].ID == "review" {
+			reviewStep = &f.Steps[i]
+			break
+		}
+	}
+	if reviewStep == nil {
+		t.Fatal("review step missing from resolved formula")
+	}
+	if !slices.Contains(reviewStep.Needs, "implement.refine-4") {
+		t.Errorf("review.Needs = %v, want to contain %q", reviewStep.Needs, "implement.refine-4")
+	}
+	if slices.Contains(reviewStep.Needs, "implement") {
+		t.Errorf("review.Needs still references replaced step %q: %v", "implement", reviewStep.Needs)
+	}
+}
+
+// TestParseFormulaFile_ResolvesMonorepoTDD locks in the same fix for the second
+// canonical example called out in gu-deat: mol-polecat-work-monorepo-tdd.
+//
+// mol-polecat-work-monorepo has 10 steps; expanding "implement" with tdd-cycle
+// (5 template steps) replaces 1 step with 5 → 14 steps total.
+func TestParseFormulaFile_ResolvesMonorepoTDD(t *testing.T) {
+	t.Parallel()
+
+	path := writeEmbeddedFormulaToTempDir(t, "mol-polecat-work-monorepo-tdd")
+
+	f, err := parseFormulaFile(path)
+	if err != nil {
+		t.Fatalf("parseFormulaFile: %v", err)
+	}
+
+	if f.Type != formula.TypeWorkflow {
+		t.Errorf("Type = %q, want %q", f.Type, formula.TypeWorkflow)
+	}
+	if len(f.Steps) != 14 {
+		ids := make([]string, len(f.Steps))
+		for i, s := range f.Steps {
+			ids[i] = s.ID
+		}
+		t.Fatalf("len(Steps) = %d, want 14: %v", len(f.Steps), ids)
+	}
+
+	// The replaced "implement" step must be gone, with tdd-cycle steps in its place.
+	wantTDDIDs := []string{
+		"implement.write-tests",
+		"implement.verify-red",
+		"implement.implement",
+		"implement.verify-green",
+		"implement.refactor",
+	}
+	for _, id := range wantTDDIDs {
+		found := false
+		for _, s := range f.Steps {
+			if s.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expanded step %q missing from resolved steps", id)
+		}
+	}
+	for _, s := range f.Steps {
+		if s.ID == "implement" {
+			t.Errorf("replaced step %q still present after expansion", "implement")
+		}
+	}
+}
+
+// TestParseFormulaFile_PassThroughForSimpleFormulas guards against the fix
+// over-reaching: formulas without extends or compose must pass through with
+// the same Steps list as a raw Parse() call. Resolution should be a no-op
+// for plain workflow formulas like shiny.
+func TestParseFormulaFile_PassThroughForSimpleFormulas(t *testing.T) {
+	t.Parallel()
+
+	path := writeEmbeddedFormulaToTempDir(t, "shiny")
+
+	f, err := parseFormulaFile(path)
+	if err != nil {
+		t.Fatalf("parseFormulaFile: %v", err)
+	}
+
+	wantIDs := []string{"design", "implement", "review", "test", "submit"}
+	gotIDs := make([]string, len(f.Steps))
+	for i, s := range f.Steps {
+		gotIDs[i] = s.ID
+	}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("steps = %v, want %v", gotIDs, wantIDs)
+	}
+}
