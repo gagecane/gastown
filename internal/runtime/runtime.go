@@ -184,7 +184,14 @@ type startupPromptSession interface {
 
 // SessionIDFromEnv returns the runtime session ID, if present.
 // It checks GT_SESSION_ID_ENV first, then resolves from the current agent's preset,
-// and falls back to CLAUDE_SESSION_ID for backwards compatibility.
+// and falls back to CLAUDE_CODE_SESSION_ID (current Claude Code env var) and
+// CLAUDE_SESSION_ID (legacy) for backwards compatibility.
+//
+// The CLAUDE_CODE_SESSION_ID fallback exists because Claude Code only exposes
+// the session ID as CLAUDE_CODE_SESSION_ID, but already-running agent sessions
+// may have GT_SESSION_ID_ENV=CLAUDE_SESSION_ID baked into their tmux env from
+// an older config. Without this fallback those sessions return "" for every
+// caller (bead close metadata, mail store, checkpoints, etc.) — see gs-fgb.
 func SessionIDFromEnv() string {
 	if envName := os.Getenv("GT_SESSION_ID_ENV"); envName != "" {
 		if sessionID := os.Getenv(envName); sessionID != "" {
@@ -199,7 +206,9 @@ func SessionIDFromEnv() string {
 			}
 		}
 	}
-	// Backwards-compatible fallback for sessions without GT_AGENT
+	if sessionID := os.Getenv("CLAUDE_CODE_SESSION_ID"); sessionID != "" {
+		return sessionID
+	}
 	return os.Getenv("CLAUDE_SESSION_ID")
 }
 

@@ -25,7 +25,7 @@ Use this skill when working **in this repository** with the **`cursor`** agent p
 
 ## Resume semantics
 
-The Cursor preset uses **`--resume <chatId>`** style resume (`ResumeStyle: flag`). Session identity is not carried in a dedicated env var in the same way as Claude’s `CLAUDE_SESSION_ID`; follow the preset fields in `internal/config/agents.go` (`ResumeFlag`, `ResumeStyle`).
+The Cursor preset uses **`--resume <chatId>`** style resume (`ResumeStyle: flag`). Session identity is not carried in a dedicated env var in the same way as Claude’s `CLAUDE_CODE_SESSION_ID`; follow the preset fields in `internal/config/agents.go` (`ResumeFlag`, `ResumeStyle`).
 
 ## Read more
 

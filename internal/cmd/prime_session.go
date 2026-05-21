@@ -30,7 +30,7 @@ type hookInput struct {
 // readHookSessionID reads session ID from available sources in hook mode.
 //
 // Priority (env vars first so non-Claude runtimes skip the stdin read entirely):
-//  1. GT_SESSION_ID / CLAUDE_SESSION_ID env var  — set by the hook command
+//  1. GT_SESSION_ID / CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID env var
 //  2. Stdin JSON (Claude Code format)            — Claude sends {"session_id":…,"source":…}
 //  3. Persisted .runtime/session_id              — written by a prior SessionStart hook
 //  4. Auto-generate UUID
@@ -48,8 +48,13 @@ func readHookSessionID() (sessionID, source string) {
 	// Check env first so it's available even when stdin provides the session ID.
 	source = os.Getenv("GT_HOOK_SOURCE")
 
-	// 1. Environment variables (fast path — skips stdin read entirely)
+	// 1. Environment variables (fast path — skips stdin read entirely).
+	//    CLAUDE_CODE_SESSION_ID is Claude Code's current env var; CLAUDE_SESSION_ID
+	//    is the legacy name. Both are checked for backwards compat (gs-fgb).
 	if id := os.Getenv("GT_SESSION_ID"); id != "" {
+		return id, source
+	}
+	if id := os.Getenv("CLAUDE_CODE_SESSION_ID"); id != "" {
 		return id, source
 	}
 	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
@@ -174,9 +179,10 @@ func readSessionFile(dir string) string {
 }
 
 // resolveSessionIDForPrime finds the session ID from available sources.
-// Priority: GT_SESSION_ID env, CLAUDE_SESSION_ID env, persisted file, fallback.
+// Priority: GT_SESSION_ID env, CLAUDE_CODE_SESSION_ID/CLAUDE_SESSION_ID env,
+// persisted file, fallback.
 func resolveSessionIDForPrime(actor string) string {
-	// 1. Try runtime's session ID lookup (checks GT_SESSION_ID_ENV, then CLAUDE_SESSION_ID)
+	// 1. Try runtime's session ID lookup (checks GT_SESSION_ID_ENV, then preset, then CLAUDE_CODE_SESSION_ID/CLAUDE_SESSION_ID)
 	if id := runtime.SessionIDFromEnv(); id != "" {
 		return id
 	}

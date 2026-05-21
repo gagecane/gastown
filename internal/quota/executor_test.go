@@ -781,7 +781,7 @@ func TestExecute_WithResume(t *testing.T) {
 		envVars: map[string]map[string]string{
 			"gt-crew-bear": {
 				"CLAUDE_CONFIG_DIR": "/home/user/.claude-accounts/work",
-				"CLAUDE_SESSION_ID": "test-session-abc123",
+				"CLAUDE_CODE_SESSION_ID": "test-session-abc123",
 			},
 		},
 	}
@@ -871,7 +871,7 @@ func TestExecute_ResumeSymlinkFails_FallsBack(t *testing.T) {
 		envVars: map[string]map[string]string{
 			"gt-test": {
 				"CLAUDE_CONFIG_DIR": "/home/.claude/work",
-				"CLAUDE_SESSION_ID": "session-xyz",
+				"CLAUDE_CODE_SESSION_ID": "session-xyz",
 			},
 		},
 	}

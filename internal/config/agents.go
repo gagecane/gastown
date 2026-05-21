@@ -300,7 +300,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		Command:             "claude",
 		Args:                []string{"--dangerously-skip-permissions"},
 		ProcessNames:        []string{"node", "claude"}, // Claude runs as Node.js
-		SessionIDEnv:        "CLAUDE_SESSION_ID",
+		SessionIDEnv:        "CLAUDE_CODE_SESSION_ID",
 		ResumeFlag:          "--resume",
 		ContinueFlag:        "--continue",
 		ResumeStyle:         "flag",

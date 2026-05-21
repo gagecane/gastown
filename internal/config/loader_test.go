@@ -999,8 +999,8 @@ func TestRuntimeConfigDefaults(t *testing.T) {
 	if len(rc.Args) != 1 || rc.Args[0] != "--dangerously-skip-permissions" {
 		t.Errorf("Args = %v, want [--dangerously-skip-permissions]", rc.Args)
 	}
-	if rc.Session == nil || rc.Session.SessionIDEnv != "CLAUDE_SESSION_ID" {
-		t.Errorf("SessionIDEnv = %q, want %q", rc.Session.SessionIDEnv, "CLAUDE_SESSION_ID")
+	if rc.Session == nil || rc.Session.SessionIDEnv != "CLAUDE_CODE_SESSION_ID" {
+		t.Errorf("SessionIDEnv = %q, want %q", rc.Session.SessionIDEnv, "CLAUDE_CODE_SESSION_ID")
 	}
 }
 
@@ -3326,8 +3326,8 @@ func TestFillRuntimeDefaults(t *testing.T) {
 		// Session is auto-filled from preset so handoffs can propagate GT_SESSION_ID_ENV.
 		if result.Session == nil {
 			t.Error("Session should be auto-filled for claude command")
-		} else if result.Session.SessionIDEnv != "CLAUDE_SESSION_ID" {
-			t.Errorf("Session.SessionIDEnv = %q, want CLAUDE_SESSION_ID", result.Session.SessionIDEnv)
+		} else if result.Session.SessionIDEnv != "CLAUDE_CODE_SESSION_ID" {
+			t.Errorf("Session.SessionIDEnv = %q, want CLAUDE_CODE_SESSION_ID", result.Session.SessionIDEnv)
 		}
 		// Tmux is auto-filled from preset so WaitForRuntimeReady uses prompt detection.
 		if result.Tmux == nil {
@@ -3464,8 +3464,8 @@ func TestFillRuntimeDefaults(t *testing.T) {
 		if result.Session == nil {
 			t.Fatal("Session should be auto-filled for claude command")
 		}
-		if result.Session.SessionIDEnv != "CLAUDE_SESSION_ID" {
-			t.Errorf("Session.SessionIDEnv = %q, want CLAUDE_SESSION_ID", result.Session.SessionIDEnv)
+		if result.Session.SessionIDEnv != "CLAUDE_CODE_SESSION_ID" {
+			t.Errorf("Session.SessionIDEnv = %q, want CLAUDE_CODE_SESSION_ID", result.Session.SessionIDEnv)
 		}
 		if result.Tmux == nil {
 			t.Fatal("Tmux should be auto-filled for claude command")

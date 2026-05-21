@@ -99,10 +99,11 @@ HOOK MODE (--hook):
 
   Session ID resolution (first match wins):
     1. GT_SESSION_ID env var
-    2. CLAUDE_SESSION_ID env var
-    3. Persisted .runtime/session_id (from prior SessionStart)
+    2. CLAUDE_CODE_SESSION_ID env var (Claude Code current)
+    3. CLAUDE_SESSION_ID env var (legacy)
     4. Stdin JSON (Claude Code format)
-    5. Auto-generated UUID
+    5. Persisted .runtime/session_id (from prior SessionStart)
+    6. Auto-generated UUID
 
   Source resolution: GT_HOOK_SOURCE env var, then stdin JSON "source" field.
 
@@ -357,7 +358,8 @@ func handlePrimeHookMode(townRoot, cwd string) {
 		}
 	}
 	_ = os.Setenv("GT_SESSION_ID", sessionID)
-	_ = os.Setenv("CLAUDE_SESSION_ID", sessionID) // Legacy compatibility
+	_ = os.Setenv("CLAUDE_CODE_SESSION_ID", sessionID) // Claude Code's current env var
+	_ = os.Setenv("CLAUDE_SESSION_ID", sessionID)      // Legacy compatibility
 
 	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
 	// WaitForCommand polls for this instead of probing the process tree.
