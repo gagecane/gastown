@@ -1098,6 +1098,15 @@ func restartPolecatWithBackoff(workDir, rigName, polecatName string) error {
 	if skip, reason := IsPolecatInStartupBackoff(workDir, rigName, polecatName); skip {
 		return fmt.Errorf("%w: %s", ErrPolecatInStartupBackoff, reason)
 	}
+	// gs-549 fix #2: refuse to kill a session that just spawned. A polecat
+	// killed mid-startup never writes its first heartbeat, which the dog
+	// then re-flags as stalled — the feedback loop that caused 14 polecat
+	// deaths in lia_bac on 2026-05-19. Dead sessions are not gated: the
+	// helper returns skip=false when no session exists.
+	if skip, age := IsPolecatSessionTooYoung(rigName, polecatName); skip {
+		return fmt.Errorf("%w: %s", ErrPolecatSessionTooYoung,
+			formatSessionTooYoungReason(rigName, polecatName, age))
+	}
 	if err := RestartPolecatSession(workDir, rigName, polecatName); err != nil {
 		RecordPolecatStartFailure(workDir, rigName, polecatName)
 		return err
@@ -1105,11 +1114,12 @@ func restartPolecatWithBackoff(workDir, rigName, polecatName string) error {
 	return nil
 }
 
-// isPolecatBackoffSkip reports whether err represents a backoff skip rather
-// than a real restart failure. Used by zombie detectors to format the
-// ZombieResult.Action differently (no failure connotation).
-func isPolecatBackoffSkip(err error) bool {
-	return err != nil && errors.Is(err, ErrPolecatInStartupBackoff)
+// isPolecatRestartSkip reports whether err represents a deliberate restart
+// skip (startup backoff or session-too-young) rather than a real restart
+// failure. Used by zombie detectors to format the ZombieResult.Action
+// without failure connotation.
+func isPolecatRestartSkip(err error) bool {
+	return err != nil && (errors.Is(err, ErrPolecatInStartupBackoff) || errors.Is(err, ErrPolecatSessionTooYoung))
 }
 
 // NukePolecat executes the actual nuke operation for a polecat.
@@ -2248,7 +2258,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		// gu-mkz7: restartPolecatWithBackoff gates this call so a persistently
 		// crashing polecat doesn't get re-spawned on every patrol cycle.
 		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
-			if isPolecatBackoffSkip(err) {
+			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart-stuck-session: %v", err)
 			} else {
 				zombie.Error = err
@@ -2275,7 +2285,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			return ZombieResult{}, false
 		}
 		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
-			if isPolecatBackoffSkip(err) {
+			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart-agent-dead-session: %v", err)
 			} else {
 				zombie.Error = err
@@ -2303,7 +2313,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			return ZombieResult{}, false
 		}
 		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
-			if isPolecatBackoffSkip(err) {
+			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart-bead-closed: %v", err)
 			} else {
 				zombie.Error = err
@@ -2488,7 +2498,7 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			Action:         fmt.Sprintf("restarted (done-intent age=%v, type=%s)", age.Round(time.Second), doneIntent.ExitType),
 		}
 		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
-			if isPolecatBackoffSkip(err) {
+			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart (done-intent age=%v, type=%s): %v", age.Round(time.Second), doneIntent.ExitType, err)
 			} else {
 				zombie.Error = err
@@ -2723,7 +2733,7 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	// gu-mkz7: Gated through restartPolecatWithBackoff so a polecat that keeps
 	// dying immediately doesn't get respawned on every patrol cycle.
 	if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
-		if isPolecatBackoffSkip(err) {
+		if isPolecatRestartSkip(err) {
 			// Backoff skip is not a failure to record on zombie.Error.
 			// The Action already reflects what the caller intended ("restarted",
 			// "restarted-dirty (...)"); overwrite with the skip reason so the
