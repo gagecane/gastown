@@ -524,6 +524,78 @@ func TestParsePluginMD_PipelineMonitorDriftResistantDedupe(t *testing.T) {
 	}
 }
 
+func TestParsePluginMD_PipelineMonitorBuildDeployDedupeAndMainlineSkip(t *testing.T) {
+	// Verify the pipeline-monitor plugin encodes the v5 Build/Deploy ID dedupe
+	// (Step 5.0) and mainline-aware skip (Step 5h) design (gu-pllw).
+	//
+	// This test guards against regressions that would revert the plugin to
+	// fingerprint-only dedupe, which let the same Build/Deploy ID f973e2a9
+	// (CodegenAgentSchedulerCDK Gamma DeletionPolicy) re-dispatch 6 times in
+	// 24h on 2026-05-20 because the analyzer summary drifted across cycles
+	// even though the underlying failure record did not.
+	content, err := os.ReadFile(filepath.Join("..", "..", "plugins", "pipeline-monitor", "plugin.md"))
+	if err != nil {
+		t.Skipf("pipeline-monitor plugin not found (expected in plugins/): %v", err)
+	}
+
+	plugin, err := parsePluginMD(content, "/test/pipeline-monitor", LocationRig, "gastown")
+	if err != nil {
+		t.Fatalf("parsePluginMD failed: %v", err)
+	}
+
+	if plugin.Version < 5 {
+		t.Errorf("expected version >= 5 (v5 introduced Build/Deploy ID dedupe + mainline-aware skip), got %d", plugin.Version)
+	}
+
+	// The v5 design contract: deterministic per-run dedupe key (Build/Deploy
+	// ID) and a mainline-aware skip. These strings are the agent-readable
+	// contract — the plugin agent reads them to construct labels and the
+	// merge-base check.
+	wantSubstrings := []string{
+		// Step 5.0: Build/Deploy ID dedupe
+		"5.0",
+		"deploy_id",
+		"build_id",
+		"Build/Deploy ID dedupe",
+		// Step 5h: mainline-aware skip
+		"5h",
+		"Mainline-aware",
+		"merge-base --is-ancestor",
+		"FAILURE_COMMIT",
+		"mainline-past-failure",
+		// New self-check scenarios
+		"S12",
+		"S13",
+		// v5 rationale must mention the cadk-* loop (anchor for why this exists)
+		"f973e2a9",
+		"3365add",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(plugin.Instructions, want) {
+			t.Errorf("expected plugin instructions to contain %q; this is a required\n"+
+				"element of the v5 Build/Deploy ID dedupe + mainline-aware skip design "+
+				"(gu-pllw). If you removed it, update the plugin or this test with "+
+				"justification.", want)
+		}
+	}
+
+	// Legacy fingerprint-only dedupe language must not be presented as the
+	// FIRST dedupe step: v5 explicitly runs Build/Deploy ID dedupe BEFORE
+	// fingerprint matching. Check by ensuring Step 5.0 appears before Step 5a
+	// in the instructions.
+	idx50 := strings.Index(plugin.Instructions, "5.0")
+	idx5a := strings.Index(plugin.Instructions, "5a.")
+	if idx50 < 0 || idx5a < 0 {
+		t.Fatalf("could not locate both 5.0 and 5a markers (idx50=%d idx5a=%d)", idx50, idx5a)
+	}
+	if idx50 > idx5a {
+		t.Errorf("Step 5.0 (Build/Deploy ID dedupe) must come before Step 5a "+
+			"(fingerprint match) in v5 — got 5.0 at %d, 5a at %d. The v5 design "+
+			"requires the deterministic per-run key to short-circuit before the "+
+			"drift-prone fingerprint match.", idx50, idx5a)
+	}
+}
+
 func TestParsePluginMD_WithRunScript(t *testing.T) {
 	// Use a temp dir with a fixture plugin.md and run.sh so the test
 	// doesn't depend on the local filesystem layout (fails in CI).

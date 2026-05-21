@@ -1,7 +1,7 @@
 +++
 name = "pipeline-monitor"
 description = "Check Amazon Pipeline health and file P1 beads for blockers, routed to the package-owning rig, with drift-resistant cross-rig dedupe"
-version = 4
+version = 5
 
 [gate]
 type = "cooldown"
@@ -20,6 +20,11 @@ severity = "high"
 # Pipeline Monitor
 
 Check pipeline health and file actionable beads in the rig that **owns the fix** (not necessarily the rig whose package appears on the failure line), so a polecat in that rig can push the change.
+
+**v5 — Build/Deploy ID dedupe + mainline-aware skip.** Two additions on top of v4:
+
+- **Build/Deploy ID dedupe (Step 5.0, runs first):** A bead's fingerprint can drift across cycles when the analyzer summary lands in `unknown` (raw-summary captures a varying hash, timestamp, or stack frame). Step 5.0 hits *first* with a deterministic key — `{rig, build_or_deploy_id}` — and skips dispatch when any rig has a bead carrying that label in `open`, `in_progress`, or closed/deferred within the 7-day grace window. The CFN failure detector (CodegenAgentSchedulerCDK Gamma DeletionPolicy, Build/Deploy ID `f973e2a9`) re-dispatched 6 times in 24h on 2026-05-20 because the fingerprint hash changed every cycle (`937a1b053323` vs `bcadd3efedb8`) for the same Build/Deploy ID; Step 5.0 is the structural fix.
+- **Mainline-aware skip (Step 5h, runs last before file-new):** When the failure embeds a commit SHA *and* the rig's mainline HEAD has commits past that SHA (the failure commit is a strict ancestor of HEAD), the failure is by definition stale — something newer shipped after the failed pipeline run. Skip dispatch in that case. The cadk-* loop kept firing even after the underlying fix shipped at `3365add22e3bc5add3608d82525e1d7997e721c9` because the detector never compared mainline HEAD against the failure commit.
 
 **v4 — Runtime-error routing + close-resistant dedupe.** Two additions on top of v3:
 
@@ -236,11 +241,91 @@ FP_HASH="$(printf '%s' "$FP_STRING" | sha1sum | cut -c1-12)"
 FP_LABEL="fingerprint:${FP_HASH}"
 ```
 
+### Build/Deploy ID label
+
+In addition to the fingerprint, capture the **Build/Deploy ID** as a label and a description field. The Build/Deploy ID is a per-pipeline-run identifier (for example, the `requestId` from `GetPipelineDetails`, the deployment ID from `includeFailedDeployments`, or the build request ID from the analyzer tool). Unlike the fingerprint, it is stable across all cycles that observe the **same failed pipeline run** (a single failed deployment can sit in the pipeline indefinitely) — so it works as a deterministic dedupe key even when the analyzer summary drifts and the fingerprint root-cause category lands in `unknown`.
+
+```bash
+# Examples (whichever the failure exposes — pick the most specific)
+DEPLOY_ID="<deployment id from includeFailedDeployments>"   # for deploy failures
+BUILD_ID="<build request id from includeFailedBuilds>"      # for build failures
+DEPLOY_ID_LABEL="deploy_id:${DEPLOY_ID:-none}"
+BUILD_ID_LABEL="build_id:${BUILD_ID:-none}"
+```
+
+Carry both labels through Steps 5–7. Step 5.0 dedupes on these directly. Step 7 records them on the new bead so the next cycle can find it via Step 5.0 even if the fingerprint drifts.
+
+### Failure commit SHA (for Step 5h)
+
+When the failure source identifies the commit being built or deployed (for example, the `revision` field on a deployment, the `commit` on a build summary, or a `git sha` line in the analyzer output), capture it. Empty / unknown is acceptable — Step 5h is gated on it being present. Do NOT compute or guess this; only use what the failure source explicitly reports.
+
+```bash
+FAILURE_COMMIT="<full SHA from pipeline metadata, or empty if not exposed>"
+```
+
 ## Step 5: Dedupe — Cross-Rig Search
 
-Search **every rig** for an existing open bead with the same fingerprint. The
-registry of rigs lives in `~/gt/rigs.json`; iterate through its keys plus the
-town root (`.`). Missing rigs are skipped.
+Search **every rig** for an existing bead that matches the failure. Steps run in
+order; the **first** hit short-circuits the rest. The registry of rigs lives in
+`~/gt/rigs.json`; iterate through its keys plus the town root (`.`). Missing
+rigs are skipped.
+
+The order matters. Step 5.0 (Build/Deploy ID) and Step 5h (mainline-aware skip)
+flank the fingerprint-based steps because they are stronger dedupe signals than
+fingerprint matching:
+
+- **5.0 runs first** because Build/Deploy ID is a deterministic per-run key — if
+  any rig has a bead for *this* failed pipeline run, that bead is the right
+  answer regardless of whether fingerprints have drifted.
+- **5h runs last (before file-new)** because the mainline-aware check needs
+  network access (`git fetch`) and is the slowest step; only pay that cost when
+  no other dedupe step matched.
+
+### 5.0. Build/Deploy ID dedupe (deterministic per-run key)
+
+This step exists because a single failed pipeline run (one deployment, one
+build) can sit in pipeline metadata for hours-to-days, producing one
+detection cycle per cooldown interval. Each cycle observes the **same
+underlying failure**, but the analyzer's `unknown`-category summary line can
+drift across cycles (different timestamps, stack frames, or hash captures
+leak in), which drifts the fingerprint and defeats Steps 5a/5c. The
+Build/Deploy ID does not drift, so it is the strongest dedupe signal we have.
+
+Skip this sub-step only if the failure exposes neither a Build ID nor a
+Deploy ID (extremely rare — proceed to 5a in that case).
+
+```bash
+# Pick whichever ID the failure source provided.
+ID_LABEL=""
+if [ -n "${DEPLOY_ID:-}" ]; then
+  ID_LABEL="deploy_id:${DEPLOY_ID}"
+elif [ -n "${BUILD_ID:-}" ]; then
+  ID_LABEL="build_id:${BUILD_ID}"
+fi
+
+if [ -n "$ID_LABEL" ]; then
+  GRACE_CUTOFF="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+  for RIG in $(jq -r '.rigs | keys[]' ~/gt/rigs.json) .; do
+    DIR="$HOME/gt/$RIG"
+    [ -d "$DIR/.beads" ] || continue
+    cd "$DIR" && bd list         --label "${ID_LABEL},plugin:pipeline-monitor"         --status open,in_progress,closed,deferred         --json       | jq -r --arg rig "$RIG" --arg cutoff "$GRACE_CUTOFF"           '.[] | select((.status == "open") or (.status == "in_progress")
+                         or ((.updated_at // "") >= $cutoff))
+               | [$rig, .id, .title, .status] | @tsv'
+  done
+fi
+```
+
+**If any match is found → treat as a dedupe hit.** This includes closed and
+deferred beads that were updated within the 7-day grace window — those
+indicate "we already saw this exact pipeline run; the response (close,
+defer, or in-progress) is the team's standing answer for it." Append a
+drift-history note describing the new cycle (Step 6 path), and skip Steps
+5a–5h, 7. Audit-trail (Step 8) records the hit with the dedupe reason
+`build-deploy-id`.
+
+**If no match → fall through to Step 5a.** The first time a Build/Deploy ID
+is observed, it has no bead yet; Steps 5a–5h decide whether to reuse a
+prior bead (different Build/Deploy ID, same root cause) or file new.
 
 ### 5a. Primary lookup: fingerprint label (active beads)
 
@@ -432,6 +517,64 @@ The rationale: the point of dedupe is to avoid duplicate work. Re-filing in the
 "correct" rig creates the duplicate we're trying to prevent. A human (or a
 follow-up cleanup task) can migrate the bead if the new routing is permanent.
 
+### 5h. Mainline-aware skip (failure commit already past on mainline)
+
+Last-chance dedupe before filing a new bead. If the failure metadata exposes
+the commit being built or deployed, and the **rig's mainline HEAD has already
+moved past that commit**, then the failure is by definition stale: a newer
+commit shipped after the failed run, which means either (a) a fix has landed
+and the pipeline simply hasn't replayed yet, or (b) the failed deployment
+record is being re-detected long after the team moved on. Filing a fresh
+P1 bead in either case is noise.
+
+This is the structural fix for the cadk-* loop: the underlying setuptools
+removal landed at `3365add22e3bc5add3608d82525e1d7997e721c9` on
+`casc_cdk/mainline`, but the failed deployment record (Build/Deploy ID
+`f973e2a9`, DeletionPolicy on Gamma) sat in the pipeline and was re-detected
+6 times in 24h. Step 5.0 catches future cycles. Step 5h catches the
+*first* cycle after a fix lands so even the initial bead doesn't fire when
+the fix is already in place.
+
+```bash
+if [ -n "${FAILURE_COMMIT:-}" ]; then
+  RIG_DIR="$HOME/gt/$CHOSEN_RIG"
+  if [ -d "$RIG_DIR/.git" ] || [ -f "$RIG_DIR/.git" ]; then
+    # Fetch quietly; missing/private remote is non-fatal — just skip the check.
+    git -C "$RIG_DIR" fetch --quiet origin main 2>/dev/null ||       git -C "$RIG_DIR" fetch --quiet origin mainline 2>/dev/null || true
+
+    # Determine the mainline ref for this rig.
+    MAINLINE_REF=""
+    if git -C "$RIG_DIR" rev-parse --verify --quiet origin/main >/dev/null; then
+      MAINLINE_REF="origin/main"
+    elif git -C "$RIG_DIR" rev-parse --verify --quiet origin/mainline >/dev/null; then
+      MAINLINE_REF="origin/mainline"
+    fi
+
+    if [ -n "$MAINLINE_REF" ] &&        git -C "$RIG_DIR" cat-file -e "${FAILURE_COMMIT}^{commit}" 2>/dev/null; then
+      # Is FAILURE_COMMIT a strict ancestor of mainline HEAD?
+      # (--is-ancestor returns 0 if A is ancestor of B; we also need HEAD != commit.)
+      MAINLINE_HEAD="$(git -C "$RIG_DIR" rev-parse "$MAINLINE_REF")"
+      if [ "$MAINLINE_HEAD" != "$FAILURE_COMMIT" ] &&          git -C "$RIG_DIR" merge-base --is-ancestor "$FAILURE_COMMIT" "$MAINLINE_REF" 2>/dev/null; then
+        echo "SKIP: mainline-aware. failure_commit=$FAILURE_COMMIT is strict ancestor of $MAINLINE_REF=$MAINLINE_HEAD on $CHOSEN_RIG; failure is stale."
+        STALE_BY_MAINLINE=1
+      fi
+    fi
+  fi
+fi
+```
+
+**If `STALE_BY_MAINLINE=1` → do NOT file a new bead.** Skip to Step 8 and
+record the skip in the audit bead with the reason `mainline-past-failure`,
+including the failure commit, mainline HEAD, and the rig that was checked.
+This makes the skip auditable so a human can spot a misfire (the wrong
+mainline ref, the wrong rig, or a force-push that retroactively un-included
+the fix).
+
+**If the rig has no `.git`, no mainline ref, the failure commit is missing
+from the rig's object store, or `FAILURE_COMMIT` was empty:** skip 5h
+silently and proceed to file the bead. The check is best-effort; we never
+suppress a P1 dispatch on the basis of a check that didn't actually run.
+
 ### 5f. No match anywhere → file new bead (Step 7)
 
 ## Step 6: Reuse Existing Bead
@@ -444,8 +587,26 @@ cd "$HOME/gt/$FOUND_RIG" && bd note "$FOUND_ID" \
 Build/Deploy ID: <new_id>. \
 Title-at-cycle: \"<current_summary_line>\". \
 Version-at-cycle: <version_string_if_any>. \
-fingerprint=${FP_HASH}"
+Failure commit: ${FAILURE_COMMIT:-unknown}. \
+fingerprint=${FP_HASH} dedupe_via=<5.0|5a|5b|5c|5d>"
 ```
+
+**Also keep the deterministic dedupe labels current.** When the reused bead
+was found via Step 5a–5d (fingerprint or legacy match) and the *new* cycle
+exposes a fresh Build/Deploy ID, add the new ID label so future cycles can
+short-circuit on Step 5.0 instead of re-walking 5a–5d:
+
+```bash
+if [ -n "${DEPLOY_ID:-}" ]; then
+  cd "$HOME/gt/$FOUND_RIG" && bd update "$FOUND_ID" --add-label "deploy_id:${DEPLOY_ID}"
+fi
+if [ -n "${BUILD_ID:-}" ]; then
+  cd "$HOME/gt/$FOUND_RIG" && bd update "$FOUND_ID" --add-label "build_id:${BUILD_ID}"
+fi
+```
+
+When the reused bead was found via Step 5.0 itself, the matching ID label is
+already there — skip the update (no-op) and just append the cycle note.
 
 **What goes in the note:**
 - Current cycle timestamp
@@ -469,7 +630,7 @@ cd "$HOME/gt/$CHOSEN_RIG" && bd create \
   "<short description of failure>" \
   -p P1 \
   -t task \
-  -l "pipeline-blocker,plugin:pipeline-monitor,fingerprint:${FP_HASH}" \
+  -l "pipeline-blocker,plugin:pipeline-monitor,fingerprint:${FP_HASH}${DEPLOY_ID:+,deploy_id:${DEPLOY_ID}}${BUILD_ID:+,build_id:${BUILD_ID}}" \
   -d "Pipeline: <name>
 Failure type: <build|deploy|test>
 Package: <resolved owning package — see Resolution chain below if differs from failing-line package>
@@ -479,6 +640,8 @@ Fingerprint hash: ${FP_HASH}
 
 Current cycle:
   Build/Deploy ID: <id>
+  Failure commit: ${FAILURE_COMMIT:-unknown}
+  Mainline-aware check: <skipped (no commit) | not-ancestor (filed normally) | not-applicable (no rig git)>
   Summary: <one-line summary from analysis>
   URL: <build.amazon.com or pipelines.amazon.dev link>
 
@@ -522,9 +685,10 @@ cd "$HOME/gt/codegen_ws" && bd create \
   -l "type:plugin-run,plugin:pipeline-monitor,result:success,fingerprint:${FP_HASH}" \
   -d "Pipelines checked: <list>
 Blockers found: <count>
-  - Reused bead: <rig>/<id>  fingerprint=${FP_HASH}
-  - New bead: <rig>/<id>     fingerprint=${FP_HASH}
-Rig-mismatch warnings: <any from Step 5c>" \
+  - Reused bead: <rig>/<id>  fingerprint=${FP_HASH}  dedupe_via=<5.0|5a|5b|5c|5d>  build_or_deploy_id=<id>
+  - New bead: <rig>/<id>     fingerprint=${FP_HASH}  build_or_deploy_id=<id>  failure_commit=<sha>
+  - Skipped (mainline-aware): <rig>  failure_commit=<sha>  mainline_head=<sha>  reason=mainline-past-failure
+Rig-mismatch warnings: <any from Step 5e>" \
   --silent
 ```
 
@@ -629,6 +793,24 @@ documents the reference resolution.
 - Next human-review cycle sees the note and can either reopen or file an explicit sentinel.
 - Pre-v4 behavior: filed a duplicate cait-* every hour. Observed ≥5 duplicates in 24h on 2026-05-06; the hand-rolled cait-x10 sentinel was the pre-fix workaround.
 
+### S12: Same Build/Deploy ID re-detected across cycles
+
+- Pipeline metadata holds a failed Gamma deployment (Build/Deploy ID `f973e2a9`, CodegenAgentSchedulerCDK DeletionPolicy violation).
+- Cycle N: analyzer summary captures hash `937a1b053323` in the raw text; root_cause_category falls through to `unknown`. Fingerprint `FP-A` derived; bead `cadk-w8k` filed in `casc_cdk` with labels `fingerprint:FP-A`, `deploy_id:f973e2a9`.
+- Cycle N+1 (same Deploy ID, different captured hash): analyzer summary captures `bcadd3efedb8` → fingerprint `FP-B` (different from `FP-A`). Step 5a misses on fingerprint, but Step 5.0 finds `cadk-w8k` via the `deploy_id:f973e2a9` label and short-circuits.
+- Result: append cycle note to `cadk-w8k`, no new bead. Audit bead records `dedupe_via=5.0`.
+- Pre-v5 behavior (observed 2026-05-20): 6 duplicate cadk-* beads in 24h for the same Deploy ID; this is the structural fix.
+
+### S13: Mainline-aware skip prevents stale-deployment refile
+
+- Same failed deployment as S12 (Build/Deploy ID `f973e2a9`, failure_commit `<old SHA>` in `casc_cdk/mainline`).
+- Underlying setuptools fix lands at `3365add22e3bc5add3608d82525e1d7997e721c9` on `casc_cdk/mainline`. Pipeline has not re-deployed yet, so the failed deployment record persists.
+- Cycle N+5: Step 5.0 misses (the Deploy ID had no prior bead in the current run because all cadk-* duplicates were closed/deferred and either fall outside the 7d window or the polecat never added the deploy_id label to legacy beads).
+- Steps 5a–5e: no fingerprint match, no sentinel, no grace-window match.
+- Step 5h: `casc_cdk` worktree's `origin/mainline` is at `3365add...`. The failure commit `<old SHA>` is a strict ancestor of `3365add...`. → SKIP, set `STALE_BY_MAINLINE=1`.
+- Result: no new bead. Audit bead records `mainline-past-failure` with both SHAs and the rig that was checked.
+- This case is observable as the *first* cycle after a fix lands; without 5h, even a perfectly-routed P1 dispatch would noisy-fire once until 5.0 catches subsequent cycles.
+
 ## Rationale
 
 Filing pipeline-blocker beads in the rig that owns the code lets polecats in
@@ -693,7 +875,72 @@ The v4 dedupe fix closes both holes:
    bead (not auto-reopened — humans decide). This is the safety net for when
    nobody filed a sentinel but the close-and-refile loop is starting.
 
+**Why Build/Deploy ID dedupe (v5 change):** The fingerprint string is *almost*
+drift-resistant — its weakness is the `unknown` root-cause-category bucket.
+When the analyzer summary doesn't fit one of the listed categories, the bead
+body carries the raw summary, and any per-cycle drift (timestamps, hashes,
+stack frames) ends up in the `unknown`-bucket fallback. Two cycles can
+produce two different fingerprints for the literal same failure record.
+Observed on CodegenAgentSchedulerCDK Gamma 2026-05-20: a single failed
+deployment (Build/Deploy ID `f973e2a9`, DeletionPolicy violation) re-fingered
+to `937a1b053323` and `bcadd3efedb8` across cycles, fired 6 distinct cadk-*
+beads in 24h. The Build/Deploy ID is a per-pipeline-run identifier exposed
+by the pipeline metadata; it does not drift. Step 5.0 keys dedupe on
+`{rig, build_or_deploy_id}` and runs **before** the fingerprint steps, so
+even if the fingerprint drifts, the same failed pipeline run produces one
+bead. Step 7 records the Build/Deploy ID label on every new bead, so once
+v5 is live the next cycle hits 5.0 cleanly.
+
+**Why mainline-aware skip (v5 change):** A failed pipeline record can sit in
+pipeline metadata for hours-to-days after the underlying fix has shipped to
+mainline. Two of the six cadk-* beads were no-op closed with `already fixed,
+commit 3365add` — confirmation that the fix was on mainline before those
+beads were even filed. The detector had no way to see that and kept
+generating beads anyway. Step 5h is the structural check: if the rig's
+`origin/main` (or `origin/mainline`) HEAD has commits past the failure
+commit, the failure is by definition stale. The check is best-effort —
+missing remotes, private repos, or absent failure-commit metadata all
+silently skip 5h, so we never suppress a real P1 dispatch on the basis of a
+check that didn't actually run.
+
+**Why ordering matters (v5 change):** Step 5.0 first, fingerprint steps in
+the middle, mainline check last.
+- 5.0 first because Build/Deploy ID is the strongest dedupe signal — a
+  match here is unambiguous (same pipeline run, same failure record).
+- Fingerprint steps in the middle because they catch *related* failures
+  across different pipeline runs (multiple Build/Deploy IDs, same root
+  cause). 5.0 misses these by design.
+- 5h last because it requires `git fetch` and is the slowest step. We only
+  pay that cost when no other dedupe step matched, and only when the
+  failure exposed a commit SHA. The check fails open: any error or missing
+  data falls through to file-new.
+
 ## Migration Notes
+
+**Backfilling the Build/Deploy ID label on legacy beads:** Beads filed by v4 do
+not carry `deploy_id:` / `build_id:` labels. The first v5 cycle that
+re-detects the same failed pipeline run will miss Step 5.0 (the legacy
+bead has no matching label), fall through to Step 5a (fingerprint match,
+if the legacy fingerprint is still valid), and via Step 6 will add the
+Build/Deploy ID label to the legacy bead. Subsequent cycles short-circuit
+on Step 5.0. No manual backfill needed — the migration completes
+opportunistically, one cycle per legacy bead. The cadk-* pile (cadk-7ry,
+12z, w8k, yxw, f13, 4f2) is closed/deferred and outside the 7d grace
+window, so the migration there is a no-op: Step 5.0 will not match on
+those beads, but Step 5h will catch the next cycle once mainline is past
+the failure commit. After one clean cycle, the loop is broken.
+
+**Removing this v5 plugin if 5.0/5h misroute:** Both checks fail open by
+design. If 5.0 false-matches an unrelated bead (extremely unlikely — Build
+IDs and Deploy IDs are pipeline-globally unique), close the bead manually
+and add the suppression labels (Step 5b sentinel pattern) so future
+cycles honor the human decision. If 5h false-skips a real P1 (failure
+commit metadata wrong, or rig mainline ref divergent), the audit bead
+records the skip with both SHAs and the reason — a human reviewer can
+spot the misfire and re-dispatch manually. We do not auto-rollback v5
+behavior on a single misfire; the operating cost of the cadk-* loop
+(6+ duplicates per day) is much higher than the cost of an occasional
+audit-trail-visible miss.
 
 **Removing the cait-x10 workaround:** Once v4 is live in the hot pipeline-monitor
 agent and S9+S11 have been observed to work end-to-end (i.e., a Step 3b
