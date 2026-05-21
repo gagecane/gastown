@@ -163,7 +163,17 @@ the rig's per-rig cooldown has elapsed):
    any candidate whose path appears in `<rig>-auto-test-state.
    rejection_log[].target_path` within the last 21 days. This honors
    the PRD's "avoid retargeting that file for some cooldown period"
-   without requiring per-cycle human input.
+   without requiring per-cycle human input. **Within-file churn-proximity
+   ranking (PRD Non-Goal NG5 fix):** once a target file is selected, the
+   dispatch envelope's `uncovered_branches[]` is sorted by line-distance
+   to recent-churn line ranges (from `git log -L` / `git blame` over the
+   30-day window) so the polecat preferentially writes tests for
+   *recently-changed* uncovered branches rather than legacy untouched
+   code in the same file. This keeps the mechanism greenfield-aligned
+   per PRD Non-Goal "Not retroactive coverage cleanup" — without it, a
+   churning file with one new function and 50 untouched legacy branches
+   could send the polecat to backfill legacy tests, which the PRD
+   explicitly rejects.
 5. CAS-transition `picking → dispatched`; file the dispatch bead;
    sling-attach to the polecat pool with a strict priority floor
    (lowest bucket).
@@ -185,7 +195,7 @@ and the commit step, plus a final allow-list verification step:
 | 4c | flakiness rerun (`go test -count=10 -run="<exact-test-names>" ./<direct-package>` only) | hard fail if any flake |
 | 4d | tautology linter — see expanded heuristic below: (i) ≥1 assertion must depend on the function-under-test's return value or observable side effect; (ii) reject tests where every assertion is literal-vs-literal (e.g. `assert.Equal("x", "x")` or constant-vs-constant); (iii) reject tests whose only assertions against the SUT are `NotNil`/`NotEmpty`/truthy checks; (iv) reject `assert(true)` / `expect(x).toBe(x)` / zero-assertion tests | hard fail |
 | 4e | pre-push gitleaks scan (`gitleaks detect --no-banner --redact`) | hard fail; SEV-2 per Q6 |
-| 4f | output allow-list verifier — every changed file in the diff matches `**/*_test.go` AND is NOT under `integration/`, `e2e/`, or `test/` (only same-package `_test.go` files allowed) AND has no `//go:build integration` build tag | hard fail |
+| 4f | output allow-list verifier — every changed file in the diff matches `**/*_test.go` AND is NOT under `integration/`, `e2e/`, or `test/` (only same-package `_test.go` files allowed) AND has no `//go:build integration` build tag AND every newly-added top-level test function in the diff matches `func Test*(t *testing.T)` (reject `Benchmark*`, `Example*`, `Fuzz*` and any non-`Test*` test-form — these are not unit tests per PRD Non-Goal NG2) | hard fail |
 
 Each gate runs through a **hardened sandbox wrapper** that strips
 credential env vars (`AWS_*`, `GITHUB_TOKEN`, `BD_*`, `DOLT_*`,
@@ -250,7 +260,14 @@ the cross-leg conflict resolution.
 
 - `.gt/auto-test-pr/conventions.md` — human-authored guide for the
   bot. Required to exist before opt-in flip; polecat refuses to run
-  without it (per ux/integration leg's hard fail).
+  without it (per ux/integration leg's hard fail). **Template MUST
+  include explicit forbid-list per PRD Non-Goal NG2:** integration
+  tests, end-to-end tests, load tests, benchmarks (`Benchmark*`),
+  examples (`Example*`), and fuzz tests (`Fuzz*`) are out of scope —
+  unit tests only. The template MUST also call out that the polecat
+  should prefer uncovered branches geographically near recent-churn
+  line ranges within the targeted file (per PRD Non-Goal NG5 — not
+  retroactive coverage cleanup).
 - `.gt/auto-test-pr/mr-template.md` — the banner template, machine-
   filled per cycle.
 
@@ -441,6 +458,21 @@ normally. Once the rig is back at `cooled-down` AND `enabled=false`,
 no further cycles fire. This honors the PRD's "any in-flight PR is
 left alone" semantics without introducing a polecat-side cancellation
 pathway (which would be racy against the Refinery merge handler).
+
+**D2b. Per-rig Refinery-vs-external-PR mode detection is N/A in v1.**
+**PRD Constraint C2 scope clarification.** PRD §Constraints requires
+"the mechanism must detect which mode applies per rig" between Refinery
+and external-PR (`gh pr create`) modes. Q1 cut external-PR mode entirely
+from v1; the pilot rig (`gastown_upstream`) is Refinery-only by
+construction. Resolution: v1 hard-codes Refinery mode; the
+`mol-auto-test-pr-cycle` formula has no mode-detection step. v2 (when
+external-PR mode lands per the deferred bead) MUST add a per-rig
+`auto_test_pr.merge_mode ∈ {refinery, external-pr}` config key and a
+detection step at cycle entry. Documenting this here so a future reader
+of C2 doesn't think the constraint was forgotten — it was satisfied by
+removing the alternative, not by implementing detection. The v1 CLI's
+`enable` already rejects rigs that aren't Refinery-resident with a
+pointer to the v2 follow-up bead (per Q1).
 
 **D3. New molecule + new polecat-work variant** (integration Option
 1). Two new formulas instead of one mega-molecule. Each is small and
@@ -667,6 +699,8 @@ look identical to any other polecat commit, and the
 | R17 | G4 (revision on same branch) is unreachable during Phase-1 pilot | Medium | D17 manual revision CLI `gt auto-test-pr revise`; documented in MR banner as Phase-1 fallback path; Phase-2 automation supersedes but CLI persists as escape hatch |
 | R18 | Polecat encodes a buggy current behavior as "correct" via a passing test, papering over a real bug | Medium | Bug-discovery NOTES protocol: polecat exits with structured `BUG-DISCOVERED:` NOTES on test-fails-on-main; Mayor's cycle-close handler files a separate P2 bug bead. No test-only MR is opened on the buggy area |
 | R19 | Allow-list `**/*_test.go` admits integration tests (Non-Goal violation) | Medium | Gate 4f extended to reject files under `integration/`/`e2e/`/`test/` and tests with `//go:build integration` build tag; conventions sheet template forbids integration tests |
+| R20 | Polecat writes a `Benchmark*`/`Example*`/`Fuzz*` function in a same-package `*_test.go` (slips past gate 4f directory/build-tag check; violates Non-Goal NG2 "unit tests only / no load tests") | Medium | Gate 4f extended (round 2) to reject any newly-added test-form other than `func Test*(t *testing.T)`; conventions sheet template forbids non-unit test forms |
+| R21 | Target file is recently-churned but the polecat writes tests for legacy untouched branches in the same file (Non-Goal NG5 violation: de-facto retroactive cleanup) | Medium | Within-file churn-proximity ranking on `uncovered_branches[]` in the dispatch envelope (round 2 fix in cycle step 4); conventions sheet template directs the polecat to prefer recent-churn-adjacent branches |
 
 ## Implementation Plan
 
@@ -864,6 +898,9 @@ records cross-dimension decisions and resolves conflicts.
 | Refinery default-merge vs. PRD G1 "not auto-merged" | plan said Refinery is unmodified; PRD requires human review | Default-true `require_review_approval` flag; Refinery refuses to merge `gt:auto-test-pr`-labeled MRs without `approved-by:<user>` label | D15 (PRD-align round 1) |
 | Phase-2-only revision routing vs. PRD G4 | plan deferred routing to Phase 2; G4 must work end-to-end on pilot | Manual `gt auto-test-pr revise` CLI fallback in Phase 1; Phase 2 automation supersedes but CLI persists | D17 (PRD-align round 1) |
 | Plan pilot exit criteria vs. PRD pilot success criteria | plan said "≥2 consecutive merged"; PRD said "≥60% over 5 PRs / weeks 2-6" | PRD criteria adopted verbatim; plan's "≥2 consecutive non-intervention" demoted to graduation sub-criterion | Phase 1 exit criteria (PRD-align round 1) |
+| C2 (Refinery vs external-PR mode detection) vs. Q1 (v1 cut external-PR) | constraints reviewer flagged C2 as "v1 implementation missing" | C2 satisfied by *scope removal*, not by detection; v2 must add detection step | D2b (PRD-align round 2) |
+| Gate 4f only checks file paths/build tags, not test-function form | non-goals reviewer flagged that `Benchmark*`/`Example*`/`Fuzz*` slip past gate 4f → violates NG2 | Gate 4f extended to require `func Test*(t *testing.T)` form on every newly-added test function | Gate 4f (PRD-align round 2) |
+| Within-file target ranking treats all uncovered branches equally | non-goals reviewer flagged that legacy branches in churned file get backfilled → violates NG5 (greenfield only) | Cycle step 4 ranks `uncovered_branches[]` by line-distance to recent-churn ranges; conventions sheet directs polecat to prefer churn-adjacent | Cycle step 4 (PRD-align round 2) |
 
 ## Sources
 
@@ -887,3 +924,8 @@ records cross-dimension decisions and resolves conflicts.
   tightenings, Phase 0 tasks 9-11, Phase 1 step 12a, Phase 1 exit
   criteria rewrite, target-pick rejection-cooldown, bug-discovery
   NOTES protocol)
+- `.plan-reviews/auto-test-pr/prd-align-round-2.md` — PRD-alignment
+  round 2 (constraints + non-goals); applied 3 fixes to this synthesis
+  (D2b scope-clarification, gate 4f Test*-form check, cycle step 4
+  within-file churn-proximity ranking; conventions sheet template
+  amendments; R20/R21 risk-register additions)
