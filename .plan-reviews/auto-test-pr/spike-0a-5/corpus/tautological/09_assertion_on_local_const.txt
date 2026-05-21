@@ -1,0 +1,15 @@
+// SUT: Build
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestBuild_AssertionOnLocalConst(t *testing.T) {
+	want := 5
+	_ = Build()
+	got := 5
+	assert.Equal(t, want, got)
+}

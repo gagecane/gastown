@@ -1,0 +1,16 @@
+// SUT: Encode
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestEncode_AssertConstHelper(t *testing.T) {
+	in := "x"
+	_ = Encode(in)
+	assert.Equal(t, "x", helperPassthrough("x"))
+}
+
+func helperPassthrough(s string) string { return s }

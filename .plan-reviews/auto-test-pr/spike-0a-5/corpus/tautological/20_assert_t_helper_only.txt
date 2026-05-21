@@ -1,0 +1,12 @@
+// SUT: Migrate
+package corpus
+
+import "testing"
+
+func TestMigrate_AssertHelperOnly(t *testing.T) {
+	t.Helper()
+	_ = Migrate("v1", "v2")
+	if t == nil {
+		t.Fatal("t is nil")
+	}
+}

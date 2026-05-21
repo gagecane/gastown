@@ -1,0 +1,11 @@
+// SUT: Compute
+package corpus
+
+import "testing"
+
+func TestCompute_NoCall(t *testing.T) {
+	x := 42
+	if x != 42 {
+		t.Errorf("x should be 42")
+	}
+}

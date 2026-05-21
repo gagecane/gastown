@@ -1,0 +1,14 @@
+// SUT: Classify
+package corpus
+
+import "testing"
+
+func TestClassify_Branching(t *testing.T) {
+	got := Classify(50)
+	switch got {
+	case "low", "high":
+		// ok
+	default:
+		t.Errorf("unexpected classification: %s", got)
+	}
+}

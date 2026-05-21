@@ -1,0 +1,18 @@
+// SUT: Square
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSquare_Table(t *testing.T) {
+	cases := []struct {
+		in, want int
+	}{{0, 0}, {2, 4}, {3, 9}}
+	for _, c := range cases {
+		got := Square(c.in)
+		assert.Equal(t, c.want, got)
+	}
+}

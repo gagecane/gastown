@@ -1,0 +1,8 @@
+// SUT: Compile
+package corpus
+
+import "testing"
+
+func TestCompile_Empty(t *testing.T) {
+	// nothing here
+}

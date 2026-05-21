@@ -1,0 +1,14 @@
+// SUT: Compute
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestCompute_Propagated(t *testing.T) {
+	raw := Compute(10)
+	doubled := raw * 2
+	assert.Equal(t, 20, doubled)
+}

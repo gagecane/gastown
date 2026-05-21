@@ -1,0 +1,16 @@
+// SUT: Login
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestLogin_AssertArgsIgnoreReturn(t *testing.T) {
+	user := "alice"
+	pass := "secret"
+	_, _ = Login(user, pass)
+	assert.Equal(t, "alice", user)
+	assert.Equal(t, "secret", pass)
+}

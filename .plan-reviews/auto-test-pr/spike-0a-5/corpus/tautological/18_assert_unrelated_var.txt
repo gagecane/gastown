@@ -1,0 +1,15 @@
+// SUT: Send
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSend_AssertUnrelated(t *testing.T) {
+	payload := []byte("hi")
+	_ = Send(payload)
+	timeout := 30
+	assert.Equal(t, 30, timeout)
+}

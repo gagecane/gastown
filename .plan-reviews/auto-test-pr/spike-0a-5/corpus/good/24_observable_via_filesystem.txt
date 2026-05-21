@@ -1,0 +1,20 @@
+// SUT: WriteConfig
+package corpus
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestWriteConfig_FileExists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, WriteConfig(path, "x: 1"))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "x: 1")
+}

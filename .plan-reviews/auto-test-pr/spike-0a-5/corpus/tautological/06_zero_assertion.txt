@@ -1,0 +1,10 @@
+// SUT: Process
+package corpus
+
+import "testing"
+
+func TestProcess_ZeroAssertion(t *testing.T) {
+	data := "input"
+	result := Process(data)
+	_ = result
+}

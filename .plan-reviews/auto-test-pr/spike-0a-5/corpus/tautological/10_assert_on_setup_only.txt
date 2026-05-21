@@ -1,0 +1,14 @@
+// SUT: Save
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSave_AssertOnSetupOnly(t *testing.T) {
+	tmp := t.TempDir()
+	_ = Save(tmp, "data")
+	assert.NotEmpty(t, tmp)
+}

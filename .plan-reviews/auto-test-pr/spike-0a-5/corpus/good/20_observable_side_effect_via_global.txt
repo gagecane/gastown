@@ -1,0 +1,16 @@
+// SUT: Increment
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+var counter = 0
+
+func TestIncrement_GlobalSideEffect(t *testing.T) {
+	before := counter
+	Increment()
+	assert.Equal(t, before+1, counter)
+}

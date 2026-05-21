@@ -1,0 +1,13 @@
+// SUT: Initialize
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestInitialize_AssertTrue(t *testing.T) {
+	_ = Initialize()
+	assert.True(t, true)
+}

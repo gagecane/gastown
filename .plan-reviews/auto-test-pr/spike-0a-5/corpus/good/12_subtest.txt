@@ -1,0 +1,15 @@
+// SUT: ParseInt
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestParseInt_Subtest(t *testing.T) {
+	t.Run("positive", func(t *testing.T) {
+		got, _ := ParseInt("42")
+		assert.Equal(t, 42, got)
+	})
+}

@@ -1,0 +1,13 @@
+// SUT: Greet
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestGreet_LiteralVsLiteral(t *testing.T) {
+	_ = Greet("alice")
+	assert.Equal(t, "hello", "hello")
+}

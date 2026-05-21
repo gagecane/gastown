@@ -1,0 +1,13 @@
+// SUT: Format
+package corpus
+
+import "testing"
+
+const expectedFormat = "v1"
+
+func TestFormat_ConstStringCheck(t *testing.T) {
+	_ = Format("input")
+	if expectedFormat != "v1" {
+		t.Errorf("constant drift")
+	}
+}

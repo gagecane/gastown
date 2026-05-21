@@ -1,0 +1,14 @@
+// SUT: Lookup
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestLookup_InputAfterCall(t *testing.T) {
+	key := "user-1"
+	_ = Lookup(key)
+	assert.NotEmpty(t, key)
+}

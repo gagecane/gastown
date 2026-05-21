@@ -1,0 +1,13 @@
+// SUT: Split
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSplit_Index(t *testing.T) {
+	parts := Split("a,b,c", ",")
+	assert.Equal(t, "b", parts[1])
+}

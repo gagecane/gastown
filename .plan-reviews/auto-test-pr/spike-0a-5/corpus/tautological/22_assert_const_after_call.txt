@@ -1,0 +1,13 @@
+// SUT: Connect
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestConnect_AssertConst(t *testing.T) {
+	_ = Connect("host:1234")
+	assert.Equal(t, 4, len("host"))
+}

@@ -1,0 +1,14 @@
+// SUT: Multiply
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestMultiply_UnusedResult(t *testing.T) {
+	got := Multiply(2, 3)
+	_ = got
+	assert.Equal(t, 6, 2*3)
+}

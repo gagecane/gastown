@@ -1,0 +1,15 @@
+// SUT: Parse
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestParse_OkAndValue(t *testing.T) {
+	v, err := Parse("42")
+	require.NoError(t, err)
+	assert.Equal(t, 42, v)
+}

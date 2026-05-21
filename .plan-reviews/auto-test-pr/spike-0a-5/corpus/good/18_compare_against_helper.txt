@@ -1,0 +1,15 @@
+// SUT: Canonical
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestCanonical_AgainstHelper(t *testing.T) {
+	got := Canonical("Foo Bar")
+	assert.Equal(t, expectedCanonical("Foo Bar"), got)
+}
+
+func expectedCanonical(s string) string { return "foo-bar" }

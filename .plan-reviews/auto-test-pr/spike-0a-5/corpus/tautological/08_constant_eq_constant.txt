@@ -1,0 +1,14 @@
+// SUT: ParseConfig
+package corpus
+
+import "testing"
+
+const expectedKey = "key"
+const wantKey = "key"
+
+func TestParseConfig_ConstEqConst(t *testing.T) {
+	_, _ = ParseConfig("input")
+	if expectedKey != wantKey {
+		t.Errorf("constants drifted")
+	}
+}

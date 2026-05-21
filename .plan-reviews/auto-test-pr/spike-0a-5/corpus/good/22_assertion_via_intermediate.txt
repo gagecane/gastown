@@ -1,0 +1,14 @@
+// SUT: Encode
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestEncode_ViaLength(t *testing.T) {
+	out := Encode("hello")
+	n := len(out)
+	assert.Equal(t, 8, n)
+}

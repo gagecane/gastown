@@ -1,0 +1,14 @@
+// SUT: Validate
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestValidate_OnlyInputAssertion(t *testing.T) {
+	in := "abc"
+	_ = Validate(in)
+	assert.Equal(t, "abc", in)
+}

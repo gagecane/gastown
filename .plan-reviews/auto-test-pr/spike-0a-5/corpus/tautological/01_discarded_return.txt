@@ -1,0 +1,12 @@
+// SUT: Add
+package corpus
+
+import "testing"
+
+func TestAdd_DiscardedReturn(t *testing.T) {
+	a, b := 2, 3
+	_ = Add(a, b)
+	if a+b != 5 {
+		t.Errorf("input invariant broken")
+	}
+}

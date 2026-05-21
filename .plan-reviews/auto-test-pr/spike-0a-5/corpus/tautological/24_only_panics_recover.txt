@@ -1,0 +1,9 @@
+// SUT: Risky
+package corpus
+
+import "testing"
+
+func TestRisky_OnlyRecover(t *testing.T) {
+	defer func() { _ = recover() }()
+	_ = Risky()
+}

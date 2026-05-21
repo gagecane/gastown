@@ -1,0 +1,13 @@
+// SUT: Divide
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestDivide_ErrorPath(t *testing.T) {
+	_, err := Divide(1, 0)
+	assert.Error(t, err)
+}

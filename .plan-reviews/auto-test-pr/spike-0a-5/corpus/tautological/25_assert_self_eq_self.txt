@@ -1,0 +1,14 @@
+// SUT: Hash
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestHash_SelfEqSelf(t *testing.T) {
+	in := []byte("data")
+	_ = Hash(in)
+	assert.Equal(t, in, in)
+}

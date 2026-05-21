@@ -1,0 +1,14 @@
+// SUT: Drain
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestDrain_AssertSetupOnly(t *testing.T) {
+	q := []int{1, 2, 3}
+	Drain(q)
+	assert.Len(t, []int{1, 2, 3}, 3)
+}

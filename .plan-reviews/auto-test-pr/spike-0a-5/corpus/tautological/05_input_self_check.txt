@@ -1,0 +1,15 @@
+// SUT: Sort
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSort_InputSelfCheck(t *testing.T) {
+	input := []int{3, 1, 2}
+	Sort(input)
+	expected := []int{3, 1, 2}
+	assert.Equal(t, expected, []int{3, 1, 2})
+}

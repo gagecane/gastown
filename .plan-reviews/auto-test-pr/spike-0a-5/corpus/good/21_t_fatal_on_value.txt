@@ -1,0 +1,14 @@
+// SUT: ReadFile
+package corpus
+
+import "testing"
+
+func TestReadFile_Fatal(t *testing.T) {
+	data, err := ReadFile("/tmp/x")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("data empty")
+	}
+}

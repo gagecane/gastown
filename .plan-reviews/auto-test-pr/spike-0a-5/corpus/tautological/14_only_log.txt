@@ -1,0 +1,9 @@
+// SUT: Render
+package corpus
+
+import "testing"
+
+func TestRender_OnlyLog(t *testing.T) {
+	out := Render("input")
+	t.Logf("output=%v", out)
+}

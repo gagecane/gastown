@@ -1,0 +1,14 @@
+// SUT: Append
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestAppend_PointerMutation(t *testing.T) {
+	var s []int
+	Append(&s, 7)
+	assert.Equal(t, []int{7}, s)
+}

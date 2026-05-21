@@ -1,0 +1,15 @@
+// SUT: Build
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+type built struct{ Name string }
+
+func TestBuild_FieldAccess(t *testing.T) {
+	b := Build("alice")
+	assert.Equal(t, "alice", b.Name)
+}

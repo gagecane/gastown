@@ -1,0 +1,20 @@
+// SUT: Push
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+type stack struct{ items []int }
+
+func (s *stack) Push(v int) { s.items = append(s.items, v) }
+func (s *stack) Len() int   { return len(s.items) }
+
+func TestPush_LenIncreases(t *testing.T) {
+	s := &stack{}
+	s.Push(1)
+	s.Push(2)
+	assert.Equal(t, 2, s.Len())
+}

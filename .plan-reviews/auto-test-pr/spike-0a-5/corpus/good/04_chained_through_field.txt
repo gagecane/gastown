@@ -1,0 +1,15 @@
+// SUT: NewServer
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+type srv struct{ port int }
+
+func TestNewServer_FieldAssertion(t *testing.T) {
+	s := NewServer(8080)
+	assert.Equal(t, 8080, s.port)
+}

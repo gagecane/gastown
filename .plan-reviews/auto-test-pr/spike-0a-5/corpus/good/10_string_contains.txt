@@ -1,0 +1,14 @@
+// SUT: Render
+package corpus
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestRender_Contains(t *testing.T) {
+	out := Render("alice")
+	assert.True(t, strings.Contains(out, "alice"))
+}

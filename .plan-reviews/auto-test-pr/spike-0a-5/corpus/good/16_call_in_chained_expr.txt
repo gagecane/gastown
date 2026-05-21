@@ -1,0 +1,12 @@
+// SUT: Sign
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSign_NonZeroLength(t *testing.T) {
+	assert.NotZero(t, len(Sign([]byte("payload"))))
+}

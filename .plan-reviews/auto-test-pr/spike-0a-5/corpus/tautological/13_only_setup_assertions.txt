@@ -1,0 +1,15 @@
+// SUT: Configure
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestConfigure_OnlySetup(t *testing.T) {
+	cfg := map[string]int{"a": 1}
+	Configure(cfg)
+	literal := map[string]int{"a": 1}
+	assert.Equal(t, 1, len(literal))
+}

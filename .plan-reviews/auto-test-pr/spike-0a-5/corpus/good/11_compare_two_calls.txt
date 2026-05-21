@@ -1,0 +1,14 @@
+// SUT: Reverse
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestReverse_Idempotent(t *testing.T) {
+	once := Reverse("abc")
+	twice := Reverse(once)
+	assert.Equal(t, "abc", twice)
+}

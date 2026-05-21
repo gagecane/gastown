@@ -1,0 +1,14 @@
+// SUT: Marshal
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestMarshal_OkAndShape(t *testing.T) {
+	b, err := Marshal(struct{ A int }{A: 1})
+	assert.NoError(t, err)
+	assert.Contains(t, string(b), "1")
+}

@@ -1,0 +1,13 @@
+// SUT: Headers
+package corpus
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestHeaders_MapLookup(t *testing.T) {
+	h := Headers("v1")
+	assert.Equal(t, "v1", h["api-version"])
+}
