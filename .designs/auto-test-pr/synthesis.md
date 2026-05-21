@@ -196,6 +196,7 @@ and the commit step, plus a final allow-list verification step:
 | 4d | tautology linter — see expanded heuristic below: (i) ≥1 assertion must depend on the function-under-test's return value or observable side effect; (ii) reject tests where every assertion is literal-vs-literal (e.g. `assert.Equal("x", "x")` or constant-vs-constant); (iii) reject tests whose only assertions against the SUT are `NotNil`/`NotEmpty`/truthy checks; (iv) reject `assert(true)` / `expect(x).toBe(x)` / zero-assertion tests | hard fail |
 | 4e | pre-push gitleaks scan (`gitleaks detect --no-banner --redact`) | hard fail; SEV-2 per Q6 |
 | 4f | output allow-list verifier — every changed file in the diff matches `**/*_test.go` AND is NOT under `integration/`, `e2e/`, or `test/` (only same-package `_test.go` files allowed) AND has no `//go:build integration` build tag AND every newly-added top-level test function in the diff matches `func Test*(t *testing.T)` (reject `Benchmark*`, `Example*`, `Fuzz*` and any non-`Test*` test-form — these are not unit tests per PRD Non-Goal NG2) | hard fail |
+| 4g | size-budget enforcer — count files added/modified in the diff and added test LOC; hard fail if `files > size_budget.max_files` (default 3) or `added_test_loc > size_budget.max_loc` (default 200) | hard fail |
 
 Each gate runs through a **hardened sandbox wrapper** that strips
 credential env vars (`AWS_*`, `GITHUB_TOKEN`, `BD_*`, `DOLT_*`,
@@ -404,13 +405,18 @@ the lifecycle table is the most useful surface here:
 
 **State machine** (Q7):
 ```
-idle → picking → dispatched → mr-pending → cooled-down
-                                    ↓ ↑
+idle → picking → dispatched → mr-pending → cooled-down → idle
+                                    ↓ ↑                     (after cadence_days)
                                 mr-revising
 ```
 Transitions are append-only on the `transitions[]` array on the per-
 rig bead. CAS uses Dolt SERIALIZABLE-class isolation on the bead's
-single row.
+single row. **Cooldown release (PRD S1 fix):** the `cooled-down →
+idle` edge fires when Mayor's tick observes
+`now - last_transition.at >= cadence_days * 24h` AND the rig is still
+`enabled=true`. Without this transition the cycle would never re-fire
+after the first MR — S1's "twice a week the mechanism wakes up"
+requires an automatic cooldown-release path. See **D18**.
 
 **Schema versioning:** every JSON blob carries `schema_version`. v2
 readers tolerate v1 blobs (defaults for new fields); v1 readers
@@ -584,6 +590,66 @@ automated routing lands, the manual CLI is preserved as an escape
 hatch for cases the patrol misses. The CLI is documented in the MR
 banner as the Phase-1 fallback path so maintainers can find it.
 
+**D18. Cooldown-release transition is automatic and Mayor-driven.**
+**PRD S1 fix.** PRD scenario S1 ("Twice a week the mechanism wakes
+up...No PR is open when the next cycle ticks; a new one gets opened.")
+requires the cycle to re-fire on a per-rig cadence after a prior MR
+lands. The state machine as drawn (round 1) has no edge out of
+`cooled-down`, so the rig would enter `cooled-down` once and never
+again be eligible to fire. Resolution: Mayor's hourly cycle tick adds
+a step *before* state-read: for each opted-in rig in `cooled-down`,
+if `now - last_transition.at >= cadence_days * 24h`, CAS-transition
+`cooled-down → idle`. Failed CAS (concurrent transition) is benign —
+next tick retries. Polecat is uninvolved (gu-gal8). The transition
+record names Mayor as actor and `cadence-elapsed` as the trigger.
+Cycles in `paused-by-circuit-breaker` (D16) do **not** auto-release
+— they require explicit `gt auto-test-pr resume`. Added **R22** to
+the risk register (cadence-release miss → silent pilot stall).
+
+**D19. Reviewer comment threads are replied to in revise mode.**
+**PRD S3 fix.** PRD scenario S3 explicitly requires "the comment
+thread is replied to" after a revision lands. The plan's revise mode
+(via D17 manual CLI in Phase 1, via `mol-pr-feedback-patrol` in
+Phase 2) writes a follow-up commit to the same branch but does NOT
+specify a reply mechanism on the originating comment thread, so a
+maintainer who left a comment has no signal that the polecat acted on
+it. Resolution: `mol-polecat-work-test-improver` in `mode=revise`
+emits a structured reply on each comment thread referenced in
+`args.revision.comments[]` after the new commit is pushed. The reply
+is a templated banner that names: (a) the new commit SHA, (b) which
+gates passed, (c) a one-line summary of what the polecat changed in
+response to that comment. Replies go through the same channel as the
+MR (Refinery in v1: a follow-up bead-comment threaded against the
+review-comment bead; v2 external mode: a GitHub PR review reply).
+For `mode=revise` invocations triggered by `gt auto-test-pr revise
+--mr=<id>` without `--comment-id`, the polecat picks the most recent
+non-resolved comment thread and replies there with a generic
+"manual revision dispatched by <user>" template. Phase 1 task 12a
+(manual CLI) and Phase 2 task 14 (feedback-patrol routing) both
+ship this reply step. Added **R23** to the risk register
+(silent-revise → maintainer thinks comment was ignored).
+
+**D20. PR size cap is enforced as a quality gate, not as a polecat
+self-check.** **PRD OQ2 fix.** PRD Open Question 2 asks "PR size cap
+— exactly what?...Need to decide whether this is enforced by the
+polecat itself (refuses to write more) or by a post-check that
+discards over-budget candidates." The plan's dispatch envelope carries
+`size_budget.max_files=3` / `max_loc=200` (Q5) but **no gate verifies
+the polecat actually respects it** — a polecat that ignores the
+budget would get past every gate. Resolution: add **gate 4g
+(size-budget enforcer)** to `mol-polecat-work-test-improver`. After
+the test files are written but before MR creation, the gate counts
+files added/modified in the diff and added test LOC; hard-fails if
+either exceeds the dispatched envelope's budget (defaults: 3 files,
+200 added test LOC). Failure exits the polecat with NOTES; no MR is
+opened. Rationale for "post-check" over "polecat-self-enforcement":
+the gate is structural and unforgeable; self-enforcement relies on
+model judgment under prompt-injection pressure. The polecat is still
+*told* the budget in the dispatch envelope (so it tries to stay
+within it), but the gate is the source of truth. Added **R24** to
+the risk register (size-budget bypass → reviewer fatigue from
+oversized MRs).
+
 ### Open Questions
 
 These need either human input or follow-on cross-team agreement before
@@ -701,6 +767,9 @@ look identical to any other polecat commit, and the
 | R19 | Allow-list `**/*_test.go` admits integration tests (Non-Goal violation) | Medium | Gate 4f extended to reject files under `integration/`/`e2e/`/`test/` and tests with `//go:build integration` build tag; conventions sheet template forbids integration tests |
 | R20 | Polecat writes a `Benchmark*`/`Example*`/`Fuzz*` function in a same-package `*_test.go` (slips past gate 4f directory/build-tag check; violates Non-Goal NG2 "unit tests only / no load tests") | Medium | Gate 4f extended (round 2) to reject any newly-added test-form other than `func Test*(t *testing.T)`; conventions sheet template forbids non-unit test forms |
 | R21 | Target file is recently-churned but the polecat writes tests for legacy untouched branches in the same file (Non-Goal NG5 violation: de-facto retroactive cleanup) | Medium | Within-file churn-proximity ranking on `uncovered_branches[]` in the dispatch envelope (round 2 fix in cycle step 4); conventions sheet template directs the polecat to prefer recent-churn-adjacent branches |
+| R22 | State machine has no `cooled-down → idle` edge; pilot rig fires once and never again (PRD S1 violation: "twice a week the mechanism wakes up") | High | D18 cadence-elapsed auto-release: Mayor's tick CAS-transitions `cooled-down → idle` when `now - last_transition.at >= cadence_days * 24h` and `enabled=true`; `paused-by-circuit-breaker` requires explicit resume |
+| R23 | Polecat pushes a revision commit but never replies to the originating review-comment thread; maintainer thinks the comment was ignored (PRD S3 violation) | Medium | D19 reply step in `mol-polecat-work-test-improver mode=revise`: emit templated bead-comment / GH PR review reply on each thread in `args.revision.comments[]` with new commit SHA + gates passed + one-line summary; `gt auto-test-pr revise` without `--comment-id` replies on most-recent non-resolved thread |
+| R24 | Polecat ignores the `size_budget` envelope and writes a 500-LOC / 8-file test diff; reviewer fatigue (PRD G5 / OQ2 unresolved) | Medium | D20 gate 4g size-budget enforcer: post-implement, pre-MR-creation diff count of files added/modified and added test LOC; hard fail if either exceeds dispatched budget; structural enforcement, not polecat self-judgment |
 
 ## Implementation Plan
 
@@ -898,6 +967,9 @@ records cross-dimension decisions and resolves conflicts.
 | Refinery default-merge vs. PRD G1 "not auto-merged" | plan said Refinery is unmodified; PRD requires human review | Default-true `require_review_approval` flag; Refinery refuses to merge `gt:auto-test-pr`-labeled MRs without `approved-by:<user>` label | D15 (PRD-align round 1) |
 | Phase-2-only revision routing vs. PRD G4 | plan deferred routing to Phase 2; G4 must work end-to-end on pilot | Manual `gt auto-test-pr revise` CLI fallback in Phase 1; Phase 2 automation supersedes but CLI persists | D17 (PRD-align round 1) |
 | Plan pilot exit criteria vs. PRD pilot success criteria | plan said "≥2 consecutive merged"; PRD said "≥60% over 5 PRs / weeks 2-6" | PRD criteria adopted verbatim; plan's "≥2 consecutive non-intervention" demoted to graduation sub-criterion | Phase 1 exit criteria (PRD-align round 1) |
+| State machine missing `cooled-down → idle` edge vs. PRD S1 "twice a week wakes up" | plan's state machine had no cooldown-release path; cycle would fire once per rig and never again | Mayor cadence-elapsed CAS-transition `cooled-down → idle` after `cadence_days * 24h`; paused-by-circuit-breaker requires explicit resume | D18 (PRD-align round 3) |
+| Revise mode pushes commits but doesn't reply to comment threads vs. PRD S3 "the comment thread is replied to" | plan handled routing but never specified a reply mechanism; maintainer would see no signal | Templated reply on each `args.revision.comments[]` thread (bead-comment in v1, GH review-reply in v2) with new SHA + gates + summary | D19 (PRD-align round 3) |
+| `size_budget` envelope vs. PRD OQ2 "polecat self-enforces or post-check?" | plan dispatched the budget but no gate verified compliance; polecat could ignore it | Gate 4g post-implement diff-count enforcement; structural, not model-judgment | D20 (PRD-align round 3) |
 | C2 (Refinery vs external-PR mode detection) vs. Q1 (v1 cut external-PR) | constraints reviewer flagged C2 as "v1 implementation missing" | C2 satisfied by *scope removal*, not by detection; v2 must add detection step | D2b (PRD-align round 2) |
 | Gate 4f only checks file paths/build tags, not test-function form | non-goals reviewer flagged that `Benchmark*`/`Example*`/`Fuzz*` slip past gate 4f → violates NG2 | Gate 4f extended to require `func Test*(t *testing.T)` form on every newly-added test function | Gate 4f (PRD-align round 2) |
 | Within-file target ranking treats all uncovered branches equally | non-goals reviewer flagged that legacy branches in churned file get backfilled → violates NG5 (greenfield only) | Cycle step 4 ranks `uncovered_branches[]` by line-distance to recent-churn ranges; conventions sheet directs polecat to prefer churn-adjacent | Cycle step 4 (PRD-align round 2) |
@@ -929,3 +1001,9 @@ records cross-dimension decisions and resolves conflicts.
   (D2b scope-clarification, gate 4f Test*-form check, cycle step 4
   within-file churn-proximity ranking; conventions sheet template
   amendments; R20/R21 risk-register additions)
+- `.plan-reviews/auto-test-pr/prd-align-round-3.md` — PRD-alignment
+  round 3 (user-stories + open-questions); applied 3 must-fix items
+  to this synthesis (D18 cooldown-release transition + state-machine
+  edge, D19 reviewer-comment-thread reply step in revise mode, D20
+  gate 4g size-budget enforcer; R22-R24 added to risk register;
+  cross-leg conflicts table extended)
