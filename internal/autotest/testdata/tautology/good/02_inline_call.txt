@@ -1,0 +1,12 @@
+// SUT: Greet
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestGreet_inlineCall(t *testing.T) {
+	assert.Equal(t, "hello, world", Greet("world"))
+}

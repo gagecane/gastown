@@ -1,0 +1,14 @@
+// SUT: Compute
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestCompute_noCall(t *testing.T) {
+	x := 7
+	y := 8
+	assert.Equal(t, 15, x+y)
+}

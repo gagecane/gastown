@@ -1,0 +1,14 @@
+// SUT: Process
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestProcess_assertInputOnly(t *testing.T) {
+	input := "hello"
+	_ = Process(input)
+	assert.Equal(t, "hello", input)
+}

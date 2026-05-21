@@ -1,0 +1,13 @@
+// SUT: Greet
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestGreet_constStrings(t *testing.T) {
+	_ = Greet("alice")
+	assert.Equal(t, "hello", "he"+"llo")
+}

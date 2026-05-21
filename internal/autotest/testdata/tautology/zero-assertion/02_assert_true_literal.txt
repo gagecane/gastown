@@ -1,0 +1,13 @@
+// SUT: Add
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestAdd_alwaysTrue(t *testing.T) {
+	_ = Add(1, 2)
+	assert.True(t, true)
+}

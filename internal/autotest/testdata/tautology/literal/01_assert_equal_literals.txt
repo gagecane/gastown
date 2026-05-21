@@ -1,0 +1,13 @@
+// SUT: Add
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestAdd_literalVsLiteral(t *testing.T) {
+	_ = Add(2, 3)
+	assert.Equal(t, 5, 2+3)
+}

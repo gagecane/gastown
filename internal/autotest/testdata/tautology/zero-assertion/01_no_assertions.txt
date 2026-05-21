@@ -1,0 +1,8 @@
+// SUT: Add
+package fixture
+
+import "testing"
+
+func TestAdd_doesNothing(t *testing.T) {
+	_ = Add(1, 2)
+}

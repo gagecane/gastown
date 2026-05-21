@@ -1,0 +1,13 @@
+// SUT: NewClient
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNewClient_onlyNotNil(t *testing.T) {
+	c := NewClient("https://example")
+	assert.NotNil(t, c)
+}

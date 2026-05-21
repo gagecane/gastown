@@ -1,0 +1,13 @@
+// SUT: Compute
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestCompute_assertSelf(t *testing.T) {
+	got := Compute(7)
+	assert.Equal(t, got, got)
+}

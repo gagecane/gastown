@@ -1,0 +1,13 @@
+// SUT: Build
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestBuild_onlyTruthy(t *testing.T) {
+	result := Build()
+	assert.True(t, result != nil)
+}

@@ -1,0 +1,14 @@
+// SUT: Increment
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestIncrement_mutatesPointer(t *testing.T) {
+	x := 5
+	Increment(&x)
+	assert.Equal(t, 6, x)
+}

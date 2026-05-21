@@ -1,0 +1,14 @@
+// SUT: ListUsers
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestListUsers_notEmpty(t *testing.T) {
+	users := ListUsers()
+	assert.NotEmpty(t, users)
+	assert.NotNil(t, users)
+}

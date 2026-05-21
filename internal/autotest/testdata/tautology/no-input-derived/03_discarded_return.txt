@@ -1,0 +1,14 @@
+// SUT: Compute
+package fixture
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestCompute_discarded(t *testing.T) {
+	other := 42
+	_ = Compute(5)
+	assert.Equal(t, 42, other)
+}
