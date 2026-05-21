@@ -37,6 +37,14 @@ diagnostics:
 `sql-server` after SIGQUIT; only use it if the current Dolt version has been
 verified not to exit on that signal.
 
+> **Why:** Earlier versions of this guide instructed agents to send SIGQUIT
+> to the Dolt server PID to capture a goroutine dump and described it as
+> "safe — does not kill the process." That was wrong: in Dolt 1.86.5
+> SIGQUIT terminates the server. See incident `gc-wisp-2yc7` (2026-05-21)
+> — an agent followed the documented protocol during a Dolt hang and
+> inadvertently killed the data plane mid-investigation. Use
+> `{{cmd}} dolt dump` instead; it never signals the process.
+
 **Escalation path** (any agent can do this):
 ```bash
 {{cmd}} escalate -s HIGH "Dolt: <describe symptom>"     # Most failures
