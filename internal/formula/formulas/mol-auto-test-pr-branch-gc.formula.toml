@@ -1,0 +1,440 @@
+description = """
+Branch garbage collector for auto-test-pr stale branches.
+
+Standing patrol that lists `refs/heads/auto-test/*/*` branches across all
+opted-in rigs, cross-references each branch against the rig's auto-test
+state bead and any open MR beads, and deletes branches older than the
+configured stale threshold (default 7 days) when no associated open MR
+or in-flight cycle bead is found.
+
+This formula implements Phase 0 task 9 of the auto-test-pr design
+(`.designs/auto-test-pr/synthesis.md`). Without it, abandoned branches
+in the `auto-test/<rig>/<bead-id>` namespace would accumulate
+indefinitely — the cycle's state machine has no orphan-cleanup edge of
+its own (per the PRD's "Branch GC for stale auto-test/<rig>/... branches
+with no PR after 7 days" promoted-MUST item).
+
+## Why a Standalone Patrol
+
+The auto-test-pr cycle itself is intentionally narrow: it dispatches
+work, the polecat pushes a branch, Refinery merges or the MR is closed,
+the state bead transitions to `cooled-down`. Three failure modes leave
+orphaned branches behind:
+
+1. **Polecat push but no MR bead** — process death between `git push`
+   and the MR-bead create.
+2. **MR bead closed but branch retention not deleted** — refinery
+   merge succeeded with `delete_merged_branches=false`, or close-
+   unmerged path didn't delete.
+3. **Cycle abandoned mid-flight** — sandbox cap hit, gates failed,
+   polecat exited without MR creation.
+
+In all three cases the rig state bead returns to `cooled-down` (or the
+cycle never advanced past `dispatched`) and no further actor owns the
+branch. This patrol is that actor.
+
+## Branch Naming Contract (C-SEC-6)
+
+The cycle produces ONLY branches matching `refs/heads/auto-test/<rig>/<bead-id>`.
+This patrol is scoped to that prefix and will not touch branches
+outside it. The branch-protection rule (Phase 0 task 13) restricts
+push access to that prefix; the GC is the cleanup half of the same
+contract.
+
+## Cross-References (Skip Conditions)
+
+A branch is **kept** (not deleted) if ANY of the following is true:
+
+1. An MR bead with label `gt:auto-test-pr` referencing this branch is
+   open (status != closed).
+2. The bead-id segment of the branch name matches an open
+   (status ∈ {open, in_progress, hooked, blocked}) bead in the rig.
+3. The rig's `<rig>-auto-test-state` pinned bead names this bead-id in
+   any in-flight transition (state ∈ {picking, dispatched, mr-pending,
+   mr-revising}).
+4. The branch's most recent commit is younger than the stale-threshold
+   (default 7 days). Age is measured against the branch tip's committer
+   timestamp on `origin`, not local mtime.
+
+A branch is **deleted** only if ALL skip conditions fail AND the patrol
+is in `delete` mode. In `dry-run` mode, deletion candidates are
+reported but no `git push --delete` is issued.
+
+## Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| wisp_type | patrol | Type of wisp — patrol loops continuously |
+| dry_run | true | If true, log deletion candidates without deleting (acceptance gate) |
+| stale_days | 7 | Age threshold; branches with tip commit older than this AND no skip condition are deletion candidates |
+| scan_interval_seconds | 86400 | Seconds between patrol cycles (default daily) |
+| branch_prefix | auto-test/ | Branch prefix to scan; do NOT widen — C-SEC-6 contract |
+| auto_test_label | gt:auto-test-pr | Bead label identifying auto-test-pr MR/cycle beads |
+| max_deletes_per_cycle | 50 | Safety valve — stop deleting after this many in one cycle |
+
+## Acceptance Criteria
+
+This formula is the implementation half of these task acceptance criteria
+(per .designs/auto-test-pr/synthesis.md Phase 0 exit criteria):
+
+- Branch-GC patrol deletes a fixture stale branch in dry-run.
+- Patrol skips branches with active MRs / in-flight beads.
+
+In dry-run mode the `delete-stale-branches` step lists every candidate;
+in delete mode it issues `git push --delete origin <ref>` for each."""
+
+formula = "mol-auto-test-pr-branch-gc"
+version = 1
+
+[vars]
+[vars.wisp_type]
+description = "Type of wisp created for this molecule"
+default = "patrol"
+
+[vars.dry_run]
+description = "If true, log deletion candidates without performing the delete (acceptance gate)"
+default = "true"
+
+[vars.stale_days]
+description = "Age threshold in days; branches older than this AND lacking a skip condition are deletion candidates"
+default = "7"
+
+[vars.scan_interval_seconds]
+description = "Seconds to sleep between patrol cycles (default 86400 = once daily)"
+default = "86400"
+
+[vars.branch_prefix]
+description = "Branch prefix to scan. Must remain auto-test/ — C-SEC-6 (branch-namespace) contract."
+default = "auto-test/"
+
+[vars.auto_test_label]
+description = "Bead label identifying auto-test-pr MR / cycle beads (used to find open MRs)"
+default = "gt:auto-test-pr"
+
+[vars.max_deletes_per_cycle]
+description = "Safety valve — stop deleting after this many candidates in one cycle"
+default = "50"
+
+[[steps]]
+id = "enumerate-opted-in-rigs"
+title = "Enumerate rigs opted in to auto-test-pr"
+description = """
+List every rig that has `auto_test_pr.enabled=true` in its settings JSON.
+Only those rigs' branch namespaces are in scope for this patrol.
+
+**1. List all rigs:**
+```bash
+gt rig list --json > /tmp/atpr-gc-all-rigs.json
+```
+
+**2. Filter to auto-test-pr-opted-in rigs:**
+The rig's settings JSON is the authoritative source for opt-in (per D2 of
+the synthesis). Read each rig's settings JSON and select those with
+`auto_test_pr.enabled=true`:
+```bash
+: > /tmp/atpr-gc-rigs.txt
+jq -r '.[] | .name' /tmp/atpr-gc-all-rigs.json | while read RIG; do
+  SETTINGS="$HOME/gt/${RIG}/settings.json"
+  if [ ! -f "$SETTINGS" ]; then
+    continue
+  fi
+  ENABLED=$(jq -r '.auto_test_pr.enabled // false' "$SETTINGS" 2>/dev/null)
+  if [ "$ENABLED" = "true" ]; then
+    echo "$RIG" >> /tmp/atpr-gc-rigs.txt
+  fi
+done
+```
+
+**3. Handle empty result:**
+```bash
+if [ ! -s /tmp/atpr-gc-rigs.txt ]; then
+  echo "No rigs opted in to auto-test-pr — nothing to patrol."
+  # Skip remaining steps for this cycle.
+fi
+```
+
+If `/tmp/atpr-gc-rigs.txt` is empty, jump to `loop-or-exit` (no work).
+
+**Exit criteria:** `/tmp/atpr-gc-rigs.txt` contains the names of all
+opted-in rigs (zero or more lines)."""
+
+[[steps]]
+id = "list-auto-test-branches"
+title = "List candidate auto-test/* branches per rig"
+needs = ["enumerate-opted-in-rigs"]
+description = """
+For each opted-in rig, enumerate `refs/heads/{{branch_prefix}}*/*` branches
+on the rig's origin remote. Record each candidate with its tip commit
+timestamp so the age check in `classify-branches` can reason about staleness.
+
+**1. Per-rig branch enumeration:**
+```bash
+: > /tmp/atpr-gc-candidates.tsv
+while read RIG; do
+  RIG_REPO="$HOME/gt/${RIG}/refinery/rig"
+  if [ ! -d "$RIG_REPO/.git" ]; then
+    echo "Skipping ${RIG}: no refinery clone at ${RIG_REPO}"
+    continue
+  fi
+
+  # Refresh remote refs so we see branches pushed since the last cycle.
+  git -C "$RIG_REPO" fetch --prune origin >/dev/null 2>&1 || true
+
+  # List remote refs matching the prefix; emit
+  # rig<TAB>full-ref<TAB>bead-id<TAB>committer-unix-ts
+  git -C "$RIG_REPO" for-each-ref \\
+      --format='%(refname:short)\\t%(committerdate:unix)' \\
+      "refs/remotes/origin/{{branch_prefix}}*" \\
+      | while IFS=$'\\t' read -r SHORT TS; do
+        # SHORT looks like origin/auto-test/<rig>/<bead-id>
+        REF="${SHORT#origin/}"
+        BEAD_ID=$(echo "$REF" | awk -F/ '{print $NF}')
+        # Sanity: branch must have at least 3 segments after the prefix
+        case "$REF" in
+          {{branch_prefix}}*/*)
+            echo -e "${RIG}\\t${REF}\\t${BEAD_ID}\\t${TS}" \\
+              >> /tmp/atpr-gc-candidates.tsv
+            ;;
+          *)
+            # Defensive: shouldn't happen given the for-each-ref glob, but
+            # guard against malformed refs we wouldn't know how to parse.
+            echo "WARN: skipping malformed ref ${REF} in ${RIG}" >&2
+            ;;
+        esac
+      done
+done < /tmp/atpr-gc-rigs.txt
+
+CANDIDATE_COUNT=$(wc -l < /tmp/atpr-gc-candidates.tsv)
+echo "Found ${CANDIDATE_COUNT} candidate auto-test branches across opted-in rigs"
+```
+
+**Branch-name discipline (C-SEC-6):** The for-each-ref glob is anchored to
+`refs/remotes/origin/{{branch_prefix}}*` — we MUST NOT widen this to other
+prefixes. The GC is scoped to the auto-test-pr namespace only.
+
+**Exit criteria:** `/tmp/atpr-gc-candidates.tsv` lists every auto-test
+branch on every opted-in rig with rig, ref, bead-id, and committer unix
+timestamp."""
+
+[[steps]]
+id = "classify-branches"
+title = "Classify candidates: keep vs. delete"
+needs = ["list-auto-test-branches"]
+description = """
+For each candidate branch, run the four skip conditions in order. The
+first condition that fires moves the branch to `keep`; if all four fail,
+the branch goes to `delete`.
+
+**1. Compute the staleness cutoff once (avoids per-branch clock drift):**
+```bash
+NOW=$(date +%s)
+CUTOFF=$(( NOW - {{stale_days}} * 86400 ))
+echo "Staleness cutoff: ${CUTOFF} ($(( {{stale_days}} )) days ago)"
+```
+
+**2. Walk every candidate; classify and record reason:**
+```bash
+: > /tmp/atpr-gc-keep.tsv
+: > /tmp/atpr-gc-delete.tsv
+
+while IFS=$'\\t' read -r RIG REF BEAD_ID TS; do
+  REASON=""
+
+  # Skip condition 1: branch tip is younger than the stale threshold.
+  if [ "$TS" -gt "$CUTOFF" ]; then
+    AGE_DAYS=$(( ( NOW - TS ) / 86400 ))
+    REASON="young (${AGE_DAYS}d < {{stale_days}}d)"
+  fi
+
+  # Skip condition 2: an MR bead labeled {{auto_test_label}} for this
+  # bead-id is open. Any non-closed status counts as in-flight.
+  if [ -z "$REASON" ]; then
+    OPEN_MR=$(bd list \\
+                --label "{{auto_test_label}}" \\
+                --status open \\
+                --status in_progress \\
+                --status hooked \\
+                --status blocked \\
+                --format ids 2>/dev/null \\
+              | grep -F -x "$BEAD_ID" || true)
+    if [ -n "$OPEN_MR" ]; then
+      REASON="open MR/cycle bead ${BEAD_ID}"
+    fi
+  fi
+
+  # Skip condition 3: the bead-id (parsed from the branch name) is itself
+  # an open bead even without the auto-test label — covers the case where
+  # the dispatch bead is open but the MR-bead hasn't been created yet
+  # (polecat between git-push and MR-bead-create).
+  if [ -z "$REASON" ]; then
+    BD_STATUS=$(bd show "$BEAD_ID" --format json 2>/dev/null \\
+                | jq -r '.status // empty')
+    case "$BD_STATUS" in
+      open|in_progress|hooked|blocked)
+        REASON="cycle bead ${BEAD_ID} still ${BD_STATUS}"
+        ;;
+    esac
+  fi
+
+  # Skip condition 4: the rig's <rig>-auto-test-state pinned bead names
+  # this bead-id in any in-flight transition. Mayor owns this bead per
+  # gu-gal8 — we only read it.
+  if [ -z "$REASON" ]; then
+    STATE_BEAD="${RIG}-auto-test-state"
+    IN_FLIGHT=$(bd show "$STATE_BEAD" --format json 2>/dev/null \\
+                | jq -r '.metadata.current_cycle.bead_id // empty
+                         | select(. == "'"$BEAD_ID"'")')
+    if [ -n "$IN_FLIGHT" ]; then
+      REASON="rig state bead ${STATE_BEAD} reports cycle in flight"
+    fi
+  fi
+
+  if [ -n "$REASON" ]; then
+    echo -e "${RIG}\\t${REF}\\t${BEAD_ID}\\t${TS}\\t${REASON}" \\
+      >> /tmp/atpr-gc-keep.tsv
+  else
+    AGE_DAYS=$(( ( NOW - TS ) / 86400 ))
+    echo -e "${RIG}\\t${REF}\\t${BEAD_ID}\\t${TS}\\t${AGE_DAYS}d" \\
+      >> /tmp/atpr-gc-delete.tsv
+  fi
+done < /tmp/atpr-gc-candidates.tsv
+
+KEEP_N=$(wc -l < /tmp/atpr-gc-keep.tsv)
+DELETE_N=$(wc -l < /tmp/atpr-gc-delete.tsv)
+echo "Classification: ${KEEP_N} keep, ${DELETE_N} delete-candidate"
+```
+
+**Note on skip-condition ordering:** Condition 1 (age) is checked first
+because it requires no bead lookup — keeps the patrol cheap on the
+common case (most auto-test branches are young). Conditions 2-4 each
+issue at most one `bd` call per surviving candidate.
+
+**Exit criteria:** Every line of `/tmp/atpr-gc-candidates.tsv` is in
+exactly one of `/tmp/atpr-gc-keep.tsv` or `/tmp/atpr-gc-delete.tsv`."""
+
+[[steps]]
+id = "delete-stale-branches"
+title = "Delete (or report) stale branches"
+needs = ["classify-branches"]
+# Lifecycle (gu-hhqk-style): This step issues `git push --delete` against
+# origin for each delete-candidate. There is no consumer bead — the side
+# effect is the deletion itself. In dry_run=true mode no remote mutation
+# occurs (acceptance-gate path).
+description = """
+Apply the deletion decision. In `dry_run=true` mode, log every candidate
+without mutating any remote. In `dry_run=false` mode, push-delete each
+candidate, capped by `max_deletes_per_cycle`.
+
+**1. Print the report header (always):**
+```bash
+echo "=== auto-test-pr branch GC report ==="
+echo "dry_run: {{dry_run}}"
+echo "stale_days: {{stale_days}}"
+echo "kept (skip-condition matched):"
+if [ -s /tmp/atpr-gc-keep.tsv ]; then
+  awk -F'\\t' '{ printf "  %s/%s — %s\\n", $1, $2, $5 }' /tmp/atpr-gc-keep.tsv
+else
+  echo "  (none)"
+fi
+echo
+echo "delete candidates:"
+if [ -s /tmp/atpr-gc-delete.tsv ]; then
+  awk -F'\\t' '{ printf "  %s/%s (age=%s)\\n", $1, $2, $5 }' /tmp/atpr-gc-delete.tsv
+else
+  echo "  (none)"
+fi
+```
+
+**2. Dry-run path:**
+```bash
+if [ "{{dry_run}}" = "true" ]; then
+  echo
+  echo "dry_run=true — no branches deleted."
+  # Acceptance gate: dry-run path completes here with the report only.
+fi
+```
+
+**3. Delete path:**
+```bash
+if [ "{{dry_run}}" != "true" ]; then
+  DELETED=0
+  CAP={{max_deletes_per_cycle}}
+  while IFS=$'\\t' read -r RIG REF BEAD_ID TS AGE; do
+    if [ "$DELETED" -ge "$CAP" ]; then
+      echo "max_deletes_per_cycle (${CAP}) reached — stopping"
+      break
+    fi
+    RIG_REPO="$HOME/gt/${RIG}/refinery/rig"
+    if [ ! -d "$RIG_REPO/.git" ]; then
+      echo "WARN: cannot delete ${RIG}/${REF} — refinery clone missing"
+      continue
+    fi
+    echo "deleting ${RIG}/${REF} (age=${AGE})"
+    if git -C "$RIG_REPO" push origin --delete "$REF"; then
+      DELETED=$(( DELETED + 1 ))
+    else
+      echo "WARN: push --delete failed for ${RIG}/${REF}"
+    fi
+  done < /tmp/atpr-gc-delete.tsv
+  echo "deleted ${DELETED} branch(es)"
+fi
+```
+
+**Why `git push --delete` (not local `branch -D`):**
+The branches live on origin. The remote ref is what accumulates over
+time; deleting only the local tracking ref would leak. We push-delete
+the remote and let the next `fetch --prune` clear local tracking refs.
+
+**Why we don't sling a polecat per delete:**
+A delete is a single-shot remote mutation, not work that needs an agent.
+The Mayor's patrol process executes the push directly. Slinging a
+polecat per-deletion would burn a token budget and create dispatch
+beads for transient work (gu-gal8: keep bookkeeping off polecats).
+
+**Exit criteria:**
+- dry_run=true: report printed, no remote mutation.
+- dry_run=false: every candidate either deleted or logged with a WARN,
+  capped by `max_deletes_per_cycle`."""
+
+[[steps]]
+id = "loop-or-exit"
+title = "Sleep then respawn for next patrol cycle"
+needs = ["delete-stale-branches"]
+# Lifecycle: Patrol respawns daily by default ({{scan_interval_seconds}}=86400).
+# The respawn reuses the patrol molecule (no new bead created); the daemon's
+# zombie-scan handles the case where respawn never happens.
+wisp_ttl = "30m"
+consumer_bead_id = "next branch-GC patrol cycle (self-respawn)"
+description = """
+Clean up temp files and either sleep for the next cycle or hand off if
+the session is near context capacity.
+
+**1. Clean up temp files from this cycle:**
+```bash
+rm -f /tmp/atpr-gc-all-rigs.json
+rm -f /tmp/atpr-gc-rigs.txt
+rm -f /tmp/atpr-gc-candidates.tsv
+rm -f /tmp/atpr-gc-keep.tsv
+rm -f /tmp/atpr-gc-delete.tsv
+```
+
+**2. Sleep before next cycle:**
+```bash
+echo "Branch-GC cycle complete. Sleeping {{scan_interval_seconds}}s before next cycle."
+sleep {{scan_interval_seconds}}
+```
+
+**3. Respawn by looping back to enumerate-opted-in-rigs:**
+```bash
+bd mol step respawn --target enumerate-opted-in-rigs
+```
+
+**Context filling:** If the session is near context capacity, hand off
+rather than respawning:
+```bash
+gt handoff -y \\
+  -s "auto-test-pr branch-GC cycling" \\
+  -m "Next cycle: scan auto-test/* branches for stale candidates."
+```
+
+**Exit criteria:** Next patrol cycle initiated (via respawn or handoff)."""
