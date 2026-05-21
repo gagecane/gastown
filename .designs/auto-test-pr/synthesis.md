@@ -405,18 +405,65 @@ the lifecycle table is the most useful surface here:
 
 **State machine** (Q7):
 ```
-idle → picking → dispatched → mr-pending → cooled-down → idle
-                                    ↓ ↑                     (after cadence_days)
-                                mr-revising
+   ┌──────────────────────────────────────────────────────┐
+   │                                                      │
+   ▼                                                      │
+ idle ──[mayor-dispatch]──► picking ──► dispatched        │
+                                          │                │
+                                          ▼                │
+                              ┌─── mr-pending ◄──┐         │
+                              │       │  ▲       │         │
+                              │       ▼  │       │         │
+                              │   mr-revising    │         │
+                              │       │          │         │
+                  [merge-handler]     │ [revise-handler]   │
+                              │       │          │         │
+                              └──────►┴──────────┘         │
+                                      │                    │
+                                      ▼                    │
+                                cooled-down ───────────────┘
+                                      │       [cadence-elapsed]
+                                      │
+                                ANY-STATE
+                                      │
+                                      ▼
+                          paused-by-circuit-breaker
+                                      │
+                                      ▼
+                       (no auto-edge — operator-only)
+                          [gt auto-test-pr resume
+                           --override-circuit-breaker]
+                                      │
+                                      └──► idle
 ```
+
+The seven states and their transition triggers:
+
+| From | To | Trigger | Actor |
+|------|-----|---------|-------|
+| `idle` | `picking` | mayor-dispatch (rig opted in, cooldown elapsed) | Mayor |
+| `picking` | `dispatched` | dispatch bead filed | Mayor |
+| `dispatched` | `mr-pending` | polecat `gt done` → MR bead exists | (transition observed by Mayor) |
+| `mr-pending` | `cooled-down` | merge-handler (merged or closed-unmerged) | Mayor cycle-close handler |
+| `mr-pending` | `mr-revising` | revise-handler (manual D17 CLI or D3 patrol) | Mayor / patrol |
+| `mr-revising` | `mr-pending` | polecat re-pushes commit | (transition observed) |
+| `cooled-down` | `idle` | cadence-elapsed (D18: `now − last_transition.at ≥ cadence_days · 24h`) | Mayor tick |
+| any state | `paused-by-circuit-breaker` | ci-break-handler (D16 SEV-1) OR cycle-close handler (3 closes in 7d, Q6 SEV-2) | Mayor |
+| `paused-by-circuit-breaker` | `idle` | operator `gt auto-test-pr resume --override-circuit-breaker` (D16 — no auto-release) | Operator |
+
 Transitions are append-only on the `transitions[]` array on the per-
 rig bead. CAS uses Dolt SERIALIZABLE-class isolation on the bead's
 single row. **Cooldown release (PRD S1 fix):** the `cooled-down →
 idle` edge fires when Mayor's tick observes
-`now - last_transition.at >= cadence_days * 24h` AND the rig is still
+`now − last_transition.at >= cadence_days * 24h` AND the rig is still
 `enabled=true`. Without this transition the cycle would never re-fire
 after the first MR — S1's "twice a week the mechanism wakes up"
 requires an automatic cooldown-release path. See **D18**.
+**`paused-by-circuit-breaker` is explicitly excluded from cadence-
+elapsed auto-release** (D16 / D18) — only operator action via
+`gt auto-test-pr resume --override-circuit-breaker` exits this
+state, which is the design contract for the SEV-1 manual-recovery
+path.
 
 **Schema versioning:** every JSON blob carries `schema_version`. v2
 readers tolerate v1 blobs (defaults for new fields); v1 readers
@@ -697,9 +744,12 @@ Phase 1 → Phase 2.
 
 **OQ7. Pre-existing intent-comment exception in TALON-style codebases.**
 TALON team conventions forbid comments in test code. The provenance
-marker (D8) is a hard exception. Document this explicitly in the
-conventions sheet template so future rigs that adopt TALON style
-don't reject it via auto-CR rules.
+marker (D8) is a hard exception. **v2 follow-up (round 2 fix #11):**
+NOT included in the v1 conventions-sheet template — the v1 pilot
+rig (`gastown_upstream`) is not TALON-convention. When a TALON-
+convention rig opts in for the first time (Phase 3 second-rig
+work), the template is amended to include the marker exception so
+that rig's auto-CR rules don't reject the provenance marker.
 
 ### Trade-offs
 
@@ -770,21 +820,109 @@ look identical to any other polecat commit, and the
 | R22 | State machine has no `cooled-down → idle` edge; pilot rig fires once and never again (PRD S1 violation: "twice a week the mechanism wakes up") | High | D18 cadence-elapsed auto-release: Mayor's tick CAS-transitions `cooled-down → idle` when `now - last_transition.at >= cadence_days * 24h` and `enabled=true`; `paused-by-circuit-breaker` requires explicit resume |
 | R23 | Polecat pushes a revision commit but never replies to the originating review-comment thread; maintainer thinks the comment was ignored (PRD S3 violation) | Medium | D19 reply step in `mol-polecat-work-test-improver mode=revise`: emit templated bead-comment / GH PR review reply on each thread in `args.revision.comments[]` with new commit SHA + gates passed + one-line summary; `gt auto-test-pr revise` without `--comment-id` replies on most-recent non-resolved thread |
 | R24 | Polecat ignores the `size_budget` envelope and writes a 500-LOC / 8-file test diff; reviewer fatigue (PRD G5 / OQ2 unresolved) | Medium | D20 gate 4g size-budget enforcer: post-implement, pre-MR-creation diff count of files added/modified and added test LOC; hard fail if either exceeds dispatched budget; structural enforcement, not polecat self-judgment |
+| R25 | Go AST footgun in tasks 6b (mutant runner) and 6c (tautology linter) → silent false-negative on mutation/tautology gates (positions vs. line/col, comment handling, generic type parameters in 1.18+, build-tag-dependent files) | Medium | Knowledge-prep sub-step on each task (round 2 fix #9): assigned polecat MUST read `golang.org/x/tools/go/ast/astutil` package docs and at least one real-world AST tool (`go vet`, `staticcheck`, or `errcheck`) before implementation; MUST use `go/parser` + `go/ast` directly (no shelling to `gofmt`/`goimports`); fixture coverage for build-tag-dependent files |
+| R26 | `mol-auto-test-pr-cycle` panics on partial Phase 0 revert (town bead absent) → patrol blocks every other patrol | Medium | Round 2 fix #10: missing-town-bead integration test in Phase 0 exit criteria; cycle exits with structured warning, not panic, when `town-auto-test-pr-state` cannot be read |
+| R27 | Tautology sub-rule (i) precision/recall below threshold → gate ships with three syntactic sub-rules only; reduced protection against tautological tests | Low (mitigated by spike) | Phase 0a-5 spike with ≥85% precision / ≥75% recall acceptance gate (round 2 fix #4); if threshold not met, sub-rule (i) is omitted from gate 4d with rationale recorded in conventions sheet template; the three syntactic sub-rules remain unconditional |
+| R28 | Refinery label-query / `approved-by:<user>` semantics, Mayor main-CI-break subscription, or pinned-bead `Issue.Metadata` durability turn out to be missing/insufficient → Phase 0 cannot complete | High (if hit) / Low (likelihood; mitigated upfront) | Phase 0a (round 2 fix #2) verifies all three before Phase 0 starts; any FAIL files a prerequisite bead and re-shapes the affected Phase 0 task before substrate work begins |
 
 ## Implementation Plan
 
-Three phases. Each ships independently; each reverts independently
-by reverting one PR. Phase 0 tasks are deliberately small (the
+**Four** phases. Phase 0a is a small prerequisite-verification
+phase added in plan-self-review round 2 to surface unknowns
+*before* Phase 0 commits to ~2 weeks of substrate work. Phase 0,
+1, 2 each ship independently; each reverts independently by
+reverting one PR. Phase 0 tasks are deliberately small (the
 round-1 self-review split fused tasks 2/5/6/3 into independent
 sub-tasks); the **Phase 0 dependency graph** below shows what can
 parallelize.
+
+### Phase 0a: Prerequisite verification + spikes
+
+Goal: answer every "does X already exist?" / "does the substrate
+support Y?" question *before* Phase 0 begins. Each task is
+independently fast (hours, not days). Any FAIL outcome reshapes
+Phase 0 and is captured by a prerequisite bead before Phase 0
+begins. Plan-self-review round 2 added this phase because the
+round-1 split of task 10 / task 11 into "verify + wire" left the
+verify-step buried mid-Phase-0; if Refinery or Mayor lacks the
+required infra, ~2 weeks of Phase 0 substrate work would have
+been spent before discovering Phase 0 cannot complete.
+
+0a-1. **Verify Refinery per-MR-bead label query and
+      `approved-by:<user>` semantics exist** (D15 prerequisite).
+      Inspect `internal/refinery/` and confirm: (a) Refinery's
+      merge handler can be conditioned on the presence of a label
+      on the MR bead; (b) `bd update <mr-bead> --add-label
+      approved-by:<user>` is canonical (or there is an existing
+      equivalent). Acceptance: a fixture MR-bead labeled
+      `gt:auto-test-pr` *without* `approved-by:<user>` is held by
+      Refinery's merge handler (does not merge). If FAIL, FILE a
+      prerequisite bead naming the missing infra and re-shape
+      Phase 0 task 10 accordingly.
+
+0a-2. **Verify Mayor today subscribes to main-CI-break events for
+      opted-in rigs** (D16 prerequisite). Inspect Mayor's patrol
+      registration and confirm the event type, the rig-filter
+      semantics, and the subscription callback shape. Acceptance:
+      a fixture main-CI-break event triggers a Mayor callback
+      that can read the attributing commit's MR-bead. If FAIL,
+      FILE a prerequisite bead and re-shape Phase 0 task 11.
+
+0a-3. **Pinned-bead `Issue.Metadata` reliability spike** (OQ4
+      promoted to must-fix per round 2). Write a synthetic 5KB
+      JSON blob (sized at the upper bound of `transition_log[≤50]
+      + rejection_log[≤200]`) to a test bead's `Issue.Metadata`,
+      read back, verify byte-for-byte. Run 100 round-trips
+      concurrently to stress CAS isolation. Acceptance: 100/100
+      pass byte-for-byte AND no CAS lost-update detected. If
+      FAIL, FILE a prerequisite bead for the
+      metadata-attachment-bead fallback (data-leg's documented
+      fallback in OQ4) and re-shape Phase 0 task 8 + Phase 1
+      task 15.
+
+0a-4. **Answer OQ1: does the rig's settings JSON exist as a
+      distinct artifact today, or is "rig settings" the same as
+      `config.json`?** D2 above assumes settings JSON is a
+      separate operator-authority surface. Outcome dictates Phase
+      0 task 1's loader path. If settings JSON exists: proceed.
+      If not: either (a) create one in Phase 0 task 1 (adds ~3
+      days), or (b) fall back to in-repo `config.json` with a
+      CODEOWNERS rule on `auto_test_pr.*` keys (re-litigates D2
+      security trade-off; FILE a prerequisite bead before Phase
+      0 begins).
+
+0a-5. **Tautology sub-rule (i) precision/recall spike.** Build a
+      50-test corpus (25 known-tautological, 25 known-good)
+      sampled from real Go test files in `gastown_upstream`. Run
+      the candidate flow-sensitive analysis (does any assertion's
+      argument depend on a value returned from the
+      function-under-test?). Acceptance: ≥85% precision (≤15%
+      false-positive on known-good) AND ≥75% recall (≤25%
+      false-negative on known-tautological). If threshold met,
+      sub-rule (i) ships in gate 4d. If threshold NOT met,
+      sub-rule (i) is **omitted from gate 4d**; the gate ships
+      with the three syntactic sub-rules (ii/iii/iv) only and
+      the conventions sheet template records the omission with
+      rationale. Phase 0 task 6c's description is updated to
+      reflect the spike outcome.
+
+**Phase 0a exit criteria:**
+- All five tasks complete with PASS, or any FAIL has filed a
+  prerequisite bead and re-planned the affected Phase 0 task.
+- Spike outcomes (0a-3, 0a-5) recorded in
+  `.plan-reviews/auto-test-pr/phase-0a-spikes.md` (one-page
+  summary per spike).
+- No Phase 0 task is started until 0a is complete (this is the
+  whole point of 0a).
 
 ### Phase 0: Substrate prep (no behavior change, no opt-in)
 
 Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
 
 1. Add `auto_test_pr.*` keys to per-rig settings JSON loader. Default
-   absent → disabled. **OQ1 must be answered first.**
+   absent → disabled. **Phase 0a-4 must be PASS first** (settings JSON
+   path is the loader's input).
+
 2a. Ship `gt auto-test-pr enable` and `gt auto-test-pr disable` CLI
     commands. `enable` validates language (`go` only in v1) and rig
     (`gastown_upstream` only in v1); other inputs return static errors
@@ -807,10 +945,16 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     conventions.md` and `gt auto-test-pr show-template` (read-only).
     Template includes the NG2 forbid-list (no integration/e2e/load
     tests; no `Benchmark*`/`Example*`/`Fuzz*`), the NG5
-    churn-proximity preference, the OQ7 TALON-style comment
-    exception, the provenance-marker requirement (D8), and
-    placeholders for rig-specific test conventions (e.g., 'no
-    `time.Sleep` in tests', 'use table-driven where ≥3 cases').
+    churn-proximity preference, the provenance-marker requirement
+    (D8), and placeholders for rig-specific test conventions (e.g.,
+    'no `time.Sleep` in tests', 'use table-driven where ≥3 cases').
+    **Round 2 fix #11: OQ7 TALON-style-comment-exception language is
+    NOT included in the v1 template** — the pilot rig
+    (`gastown_upstream`) is not a TALON-convention codebase, so the
+    exception serves a hypothetical future rig. OQ7 itself stays in
+    the Open Questions list with a `v2 follow-up` note: when a
+    TALON-convention rig opts in for the first time, the template is
+    amended to include the marker exception.
 3a. Land `mol-polecat-work-test-improver` formula skeleton extending
     `mol-polecat-work` with the **`mode=create` path**: the five
     quality-gate steps (4a-g), the bug-discovery NOTES protocol, and
@@ -845,13 +989,32 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
    patrol set, but the first step is `if no rig has
    auto_test_pr.enabled == true → exit 0`. Inert.
 5a. Implement sandbox wrapper **credential-strip + CWD-pin**
-    component (`gt sandbox` helper or equivalent). Strips
-    `AWS_*`, `GITHUB_TOKEN`, `BD_*`, `DOLT_*`, `GIT_AUTHOR_*`,
-    `GIT_COMMITTER_*`; pins CWD to the worktree.
+    component. **Round 2 fix #5: ADR sub-step `5a-pre` runs first.**
+    Decide and document whether the sandbox is (a) a wrapper command
+    (`gt sandbox <cmd>...`), (b) a library
+    (`internal/autotest/sandbox`), or (c) inline per-gate code.
+    Recommended: **(b) — a library** used by both the polecat
+    formula and the gate runners, because it composes with
+    `os/exec.Cmd` and avoids spawning a child process per gate. ADR
+    is a one-page note in the rig's design notes, committed
+    alongside `internal/autotest/sandbox/doc.go`. 5a, 5b, 5c all
+    consume the ADR's chosen substrate; deviation requires ADR
+    amendment first.
+
+    After the ADR commits, 5a strips `AWS_*`, `GITHUB_TOKEN`, `BD_*`,
+    `DOLT_*`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*`; pins CWD to the
+    worktree.
 5b. Implement sandbox **network-drop** with module-cache warm-up
-    (`go mod download` runs before egress is dropped; verify
-    `go test -count=10` does not trigger fresh fetch — security
-    open question 1).
+    (`go mod download` runs before egress is dropped). **Round 2
+    fix #7 acceptance:** a fixture package on which `go mod download
+    && drop-net && go test -count=10 ./...` succeeds 10/10 times
+    with no fresh network fetch (verified by `tcpdump` or `strace
+    -e connect`). If even one rerun triggers a fetch (e.g., a test
+    imports a transitively-missing package), the warm-up step is
+    amended to also run `go test -count=1 -run='^$' ./...` (a no-op
+    test pass that triggers the same package compile graph as the
+    test execution does). This subsumes security-leg's open
+    question 1.
 5c. Implement sandbox **wall-clock cap** (5-min per-target,
     cycle-wide 30-min cap per D10) and integration test of the
     combined wrapper (5a + 5b + 5c) on a hand-rolled fixture.
@@ -863,11 +1026,43 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
 6b. Land **AST-aware mutant runner** (`internal/autotest/mutant.go`).
     Bounded to ≤5 mutants per test (D11); copies package directory
     to `os.MkdirTemp` (D6); runs through sandbox (depends on 5c).
+    **Mutation selection (round 2 fix #3):** the runner mutates *only*
+    lines marked covered-by-the-test in the test's own coverage
+    profile, drawn from a fixed mutation grammar of (i)
+    comment-out-line (the gate's literal D6 spec), (ii) negate-boolean
+    (flip `!` / swap `==` ↔ `!=`), (iii) return-zero-value (replace
+    the first `return` in the function with the type's zero value).
+    Selection is deterministic given the file SHA + test name
+    (seedable) so reruns are reproducible. ≤5 mutants per test is
+    enforced over the *union* of (i)/(ii)/(iii); if more than 5
+    mutation candidates exist, the runner picks the 5 with greatest
+    expected blast radius (lines with most coverage hits across the
+    test suite) so a passing mutant is maximally likely to indicate a
+    tautological test. Unit tests cover each grammar form on a
+    hand-rolled fixture. **Knowledge-prep (round 2 fix #9):** before
+    implementation, the assigned polecat MUST read
+    `golang.org/x/tools/go/ast/astutil` package docs and at least one
+    real-world AST tool (`go vet`, `staticcheck`, or `errcheck`) to
+    absorb conventions for position-handling, comment-handling, and
+    build-tag exclusion. Implementation MUST NOT shell out to `gofmt`
+    or `goimports` for AST traversal — use `go/parser` + `go/ast`
+    directly so the analysis is robust against unparseable input.
 6c. Land **tautology linter** (`internal/autotest/tautology.go`)
     implementing the four gate-4d sub-rules. Each sub-rule has
     its own test fixture set under
     `internal/autotest/testdata/tautology/{literal,notnil,
-    no-input-derived,zero-assertion}/`.
+    no-input-derived,zero-assertion}/`. **Sub-rule (i)
+    ("≥1 assertion must depend on the function-under-test's return
+    value or observable side effect") is spike-gated by Phase 0a-5**
+    (round 2 fix #4): if the spike's precision/recall thresholds are
+    met (≥85% precision / ≥75% recall on the 50-test corpus), sub-
+    rule (i) ships in the gate; if not, the gate ships with sub-rules
+    (ii/iii/iv) only and the conventions-sheet template records the
+    omission with rationale. The other three sub-rules are syntactic
+    and trivially decidable — they ship unconditionally.
+    **Knowledge-prep (round 2 fix #9):** same as 6b — read
+    `golang.org/x/tools/go/ast/astutil` and one real AST tool before
+    implementation; use `go/parser` + `go/ast` directly.
 7. Ship sling priority-floor mechanism if not present (D13).
 8. Provision `town-auto-test-pr-state` pinned bead with `enabled_rigs:
    []`. Mayor-owned.
@@ -877,11 +1072,8 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
    rig's state bead and any open MRs, and deletes branches >7 days
    old with no associated open MR or in-flight bead.
 10. **Wire D15 maintainer-approval gate into Refinery's merge
-    handler.** (a) **Verify** Refinery supports per-MR-bead label
-    query (`bd list --label gt:auto-test-pr` or equivalent) and
-    `approved-by:<user>` label semantics. If yes, proceed with the
-    merge-gate wiring. If no, FILE a prerequisite bead and DEFER
-    this task; Phase 0 cannot complete without it. (b) **Wire** the
+    handler.** **Verification of label-query + `approved-by:<user>`
+    semantics moved to Phase 0a-1** (round 2 fix). Wire the
     merge-gate: Refinery refuses to merge an MR bead with label
     `gt:auto-test-pr` unless an `approved-by:<user>` label is also
     present, when the source rig has
@@ -889,10 +1081,8 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     Backwards-compatible: MR beads without the auto-test label
     behave unchanged.
 11. **Wire D16 SEV-1 auto-revert into Mayor's main-CI-break
-    subscription.** (a) **Verify** Mayor today subscribes to
-    main-CI-break events for opted-in rigs (existing patrol
-    infrastructure assumed in D16). If yes, proceed. If no, FILE
-    a prerequisite bead and DEFER this task. (b) **Wire**: on a
+    subscription.** **Verification of Mayor's main-CI-break event
+    subscription moved to Phase 0a-2** (round 2 fix). Wire: on a
     main-CI-break whose attributing commit's MR-bead carries
     `gt:auto-test-pr`: file revert MR + transition rig state bead
     to `paused-by-circuit-breaker` (7d cooldown) + increment town
@@ -946,15 +1136,17 @@ Serial chain (critical path):
   3b  formula mode=revise + D19 reply    ├─ parallel after 6a/b/c
   3c  Mayor cycle-close handler          ┘
    ↓
-  10  Refinery approval gate (verify + wire)  ┐
-  11  Mayor SEV-1 auto-revert (verify + wire) ┘ — parallel after 3a/b/c
+  10  Refinery approval gate (wire-only; verify in Phase 0a-1)  ┐
+  11  Mayor SEV-1 auto-revert (wire-only; verify in Phase 0a-2) ┘ — parallel after 3a/b/c
 
 Critical-path length (with parallelism):
-  5a → 5b → 5c → {6a,6b,6c parallel} → {3a,3b,3c parallel}
-  → {10, 11 parallel}
-  ≈ 7 task-times serialized; with single agent ≈ 19 tasks total.
-  Mayor SHOULD dispatch ~6 polecats in parallel for batch A and the
-  parallel groups; expected wall-clock reduction ≈ 3-4×.
+  Phase 0a (5 prereq spikes, parallel) → 5a → 5b → 5c
+  → {6a,6b,6c parallel} → {3a,3b,3c parallel} → {10, 11 parallel}
+  ≈ 8 task-times serialized (1 for 0a + 7 for 0); with single agent
+  ≈ 24 tasks total (5 in 0a + 19 in 0). Mayor SHOULD dispatch
+  Phase 0a's 5 spikes in parallel (each is hours, not days) and
+  ~6 polecats in parallel for Phase 0 batch A and the parallel
+  groups; expected wall-clock reduction ≈ 3-4×.
 ```
 
 **Phase 0 exit criteria:**
@@ -978,6 +1170,14 @@ Critical-path length (with parallelism):
 - All new Go packages pass `go vet ./...`, `go build ./...`,
   `go test ./...`, and `scripts/check-upstream-rebased.sh` (the
   rig's standard refinery gates).
+- **`mol-auto-test-pr-cycle` integration test** (round 2 fix #10)
+  covers both the missing-town-bead path (cycle exits with a
+  structured warning, not a panic — protects against partial Phase
+  0 revert) AND the no-rigs-enabled path (cycle exits 0).
+- **5b network-drop acceptance** (round 2 fix #7): a fixture
+  package with `go mod download && drop-net && go test -count=10
+  ./...` passes 10/10 with no fresh fetch (verified by `tcpdump`
+  / `strace -e connect`).
 
 ### Phase 1: Pilot opt-in (`gastown_upstream` only)
 
@@ -1055,15 +1255,35 @@ without human intervention.
 
 ### Phase 3 (deferred): Generalization
 
-Out of scope for this design but the design must not preclude it.
+**v2 / v3 follow-on work, captured here for design continuity only —
+not committed in v1.** Round 2 fix #6 demoted the previous
+numbered tasks (24-27) to narrative bullets because numbered tasks
+read as commitments, and the v1 PRD explicitly defers everything in
+this section. The v1 implementation-plan task ledger ends at task
+23 (Phase 2's last integration step).
 
-24. Add a second rig opt-in (e.g., a TS rig). Add TypeScript to the
-    language allow-list (CR-gated, Overseer sign-off per Q4).
-25. Land the v2 PRD for external-PR mode + GitHub App identity.
-26. Migrate state-bead schema to v2 (additive; new states for
-    `pr-pending`/`pr-revising`).
-27. Tap-guard amendment for `gh pr create` on auto-test polecats
-    (OQ5).
+The v1 design is forward-compatible with these follow-ons; do not
+build them in v1, but do not paint v1 into a corner that precludes
+them either:
+
+- **Second-rig opt-in.** Adding a second rig (e.g., a TypeScript
+  rig) requires extending the language allow-list (CR-gated,
+  Overseer sign-off per Q4) and the per-rig opt-in template
+  (branch-protection rule, conventions sheet, settings-JSON
+  block). Not committed in v1.
+- **External-PR mode.** A separate v2 PRD covers `gh pr create`
+  mode (for rigs not on Refinery) and GitHub App identity. v1's
+  D2b explicitly removes external-PR mode from scope; v2 must
+  add a per-rig `auto_test_pr.merge_mode ∈ {refinery,
+  external-pr}` config key and a detection step at cycle entry.
+- **State-bead schema migration.** v2 will add new states for
+  `pr-pending` / `pr-revising` (external-PR mode). The migration
+  is additive — v1 readers tolerate v2 blobs via the
+  `schema_version` field.
+- **Tap-guard amendment.** `internal/cmd/tap_guard.go` blocks
+  ad-hoc `gh pr create` invocations today. When external-PR
+  mode lands in v2, the guard must learn to allow the auto-test-
+  pr polecat. v1 does not modify the guard (per OQ5).
 
 ### Reverting
 
@@ -1136,6 +1356,17 @@ records cross-dimension decisions and resolves conflicts.
 | Refinery label-query and `approved-by:<user>` semantics asserted but unverified | plan-self-review round 1 (completeness) flagged that D15 assumes pre-existing infra | Task 10 split into (a) verify + (b) wire; same pattern applied to task 11 (Mayor main-CI-break subscription) | Phase 0 tasks 10 + 11 (plan-self-review round 1) |
 | Phase 1 entry has no documented precondition on Phase 0 safety net | plan-self-review round 1 (sequencing) flagged that partial Phase 0 rollout could ship cycle without merge gate | Phase 1 entry precondition: tasks 10 + 11 integration tests must pass before flipping `enabled=true` | Phase 1 entry precondition (plan-self-review round 1) |
 | `mode=revise` formula support implicit but never tasked | plan-self-review round 1 (completeness) flagged that Phase 1 step 18 + Phase 2 step 19 silently depend on it | Phase 0 task 3b explicitly tasks `mode=revise` path with D19 reply step + tests for both `--comment-id` and most-recent-thread fallback | Phase 0 task 3b (plan-self-review round 1) |
+| `paused-by-circuit-breaker` state referenced eight times in the body but missing from the §Data Model state-machine diagram | plan-self-review round 2 (risk) flagged documentation correctness — reader of diagram alone wouldn't know the state exists | State-machine diagram extended (§Data Model) with the seventh state, its inbound trigger (D16 ci-break / Q6 3-closes), and its only outbound edge (operator `gt auto-test-pr resume --override-circuit-breaker`); annotated transition-trigger table added | §Data Model state machine (plan-self-review round 2) |
+| Phase 0 task 10/11 verify-step buried mid-Phase-0; Refinery / Mayor infra unknowns could waste ~2 weeks of substrate work | plan-self-review round 2 (risk) flagged that round-1's "verify + wire" split was structurally right but scheduled wrong | New **Phase 0a** prerequisite-verification phase added (tasks 0a-1 through 0a-5); Phase 0 tasks 10 + 11 reduced to wire-only; Phase 0 cannot start until 0a is complete | Phase 0a + tasks 10/11 (plan-self-review round 2) |
+| Mutant runner mutation-selection algorithm unspecified; three implementers would ship three runners with different gate-4b false-positive rates | plan-self-review round 2 (risk) flagged D11's count cap without a selection rule | Task 6b extended with explicit mutation grammar: (i) comment-out-line, (ii) negate-boolean, (iii) return-zero-value; deterministic selection seeded by file SHA + test name; ≤5-mutant cap enforced over the union with blast-radius-ranked tiebreak | Phase 0 task 6b (plan-self-review round 2) |
+| Tautology sub-rule (i) requires non-trivial Go AST data-flow analysis; if naively implemented, false-positive/negative rates could exceed 30% | plan-self-review round 2 (risk) flagged that gate 4d's main protection sub-rule needs feasibility validation | Phase 0a-5 spike with 50-test corpus; ≥85% precision / ≥75% recall acceptance gate; if threshold not met, sub-rule (i) omitted from gate 4d (other three sub-rules unconditional) | Phase 0a-5 + task 6c (plan-self-review round 2) |
+| `gt sandbox or equivalent` phrasing leaves implementation strategy uncommitted; tasks 5a/5b/5c could target three different substrates | plan-self-review round 2 (risk) flagged composability risk for the integration test | ADR sub-step `5a-pre` decides wrapper-vs-library-vs-inline (recommended: library at `internal/autotest/sandbox`); committed before 5a/5b/5c implementation | Phase 0 task 5a (plan-self-review round 2) |
+| Phase 3 numbered tasks 24-27 read as commitments despite "out of scope" header | plan-self-review round 2 (scope-creep) flagged that numbering blurs the v1 contract | Phase 3 rewritten as narrative bullets with no task numbers; v1 task ledger ends at task 23 | Phase 3 narrative (plan-self-review round 2) |
+| OQ7 TALON-style-comment-exception language in v1 conventions template is gold-plating for hypothetical future v2 rig | plan-self-review round 2 (scope-creep) flagged that pilot rig is not TALON-convention | OQ7 language removed from v1 template; OQ7 entry annotated with `v2 follow-up` note for first TALON-rig opt-in | Phase 0 task 2d + OQ7 (plan-self-review round 2) |
+| 5b acceptance criterion implicit; could ship without verifying `go test -count=10` post-warm-up network drop | plan-self-review round 2 (risk) flagged subsumption of security-leg open question 1 | Task 5b body + Phase 0 exit criteria add 10/10-rerun acceptance with `tcpdump`/`strace` verification; warm-up amended on FAIL | Phase 0 task 5b + exit criteria (plan-self-review round 2) |
+| Pinned-bead `Issue.Metadata` reliability open (OQ4) but Phase 0 tasks 8 + 14 depend on it for ~5KB JSON round-trips | plan-self-review round 2 (risk) flagged that fallback (metadata-attachment-bead) is materially different work | OQ4 promoted to Phase 0a-3 spike (100 round-trips, byte-for-byte verification, CAS isolation stress); FAIL files prerequisite bead and re-shapes tasks 8 + 14 | Phase 0a-3 (plan-self-review round 2) |
+| Tasks 6b / 6c require Go AST expertise not named in the plan; AST footguns could cause silent gate false-negatives | plan-self-review round 2 (risk) flagged knowledge gap on AST work | Knowledge-prep sub-step on each task: assigned polecat MUST read `golang.org/x/tools/go/ast/astutil` and one real-world AST tool before implementation; MUST use `go/parser` + `go/ast` directly | Phase 0 task 6b + 6c (plan-self-review round 2) |
+| `mol-auto-test-pr-cycle` would panic on partial Phase 0 revert (town bead absent); patrol blocks every other patrol | plan-self-review round 2 (risk) flagged rollback safety | Missing-town-bead integration test added to Phase 0 exit criteria; cycle exits with structured warning, not panic | Phase 0 exit criteria (plan-self-review round 2) |
 
 ## Sources
 
@@ -1181,3 +1412,13 @@ records cross-dimension decisions and resolves conflicts.
   exit-criteria additions, `--override-circuit-breaker` flag
   surfacing, Refinery + Mayor pre-existing-infra verification
   sub-steps in tasks 10 + 11)
+
+- `.plan-reviews/auto-test-pr/review-round-2.md` — plan self-review
+  round 2 (risk + scope-creep); applied 6 must-fix and 5 should-fix
+  items to this synthesis (Phase 0a prerequisite phase with tasks
+  0a-1 through 0a-5; state-machine diagram extension covering
+  `paused-by-circuit-breaker`; mutant grammar in task 6b; tautology
+  sub-rule (i) spike-gating; sandbox ADR sub-step in 5a; Phase 3
+  rewritten as narrative; OQ7 removed from v1 template;
+  R25/R26/R27/R28 added to risk register; missing-town-bead
+  integration test in Phase 0 exit criteria)
