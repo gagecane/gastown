@@ -624,8 +624,8 @@ review-comment bead; v2 external mode: a GitHub PR review reply).
 For `mode=revise` invocations triggered by `gt auto-test-pr revise
 --mr=<id>` without `--comment-id`, the polecat picks the most recent
 non-resolved comment thread and replies there with a generic
-"manual revision dispatched by <user>" template. Phase 1 task 12a
-(manual CLI) and Phase 2 task 14 (feedback-patrol routing) both
+"manual revision dispatched by <user>" template. Phase 1 task 18
+(manual CLI) and Phase 2 task 19 (feedback-patrol routing) both
 ship this reply step. Added **R23** to the risk register
 (silent-revise → maintainer thinks comment was ignored).
 
@@ -774,7 +774,10 @@ look identical to any other polecat commit, and the
 ## Implementation Plan
 
 Three phases. Each ships independently; each reverts independently
-by reverting one PR.
+by reverting one PR. Phase 0 tasks are deliberately small (the
+round-1 self-review split fused tasks 2/5/6/3 into independent
+sub-tasks); the **Phase 0 dependency graph** below shows what can
+parallelize.
 
 ### Phase 0: Substrate prep (no behavior change, no opt-in)
 
@@ -782,27 +785,89 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
 
 1. Add `auto_test_pr.*` keys to per-rig settings JSON loader. Default
    absent → disabled. **OQ1 must be answered first.**
-2. Ship `gt auto-test-pr {enable,disable,pause,resume,status,show,
-   history,revise}` CLI commands. `status` reports "no rigs opted in"
-   when the town bead has zero entries. `pause --all` and `resume
-   --all` write to the town bead but no patrol consumes them yet.
-   **`revise --mr=<id> [--comment-id=<id>]`** is the manual-fallback
-   from D17 (Phase-1 revision pathway when feedback-patrol routing is
-   not yet live).
-3. Land `mol-polecat-work-test-improver` formula extending
-   `mol-polecat-work` with the five quality-gate steps, the bug-
-   discovery NOTES protocol, and the sandbox wrapper. **No molecule
-   registers it yet.**
+2a. Ship `gt auto-test-pr enable` and `gt auto-test-pr disable` CLI
+    commands. `enable` validates language (`go` only in v1) and rig
+    (`gastown_upstream` only in v1); other inputs return static errors
+    pointing at the v2 follow-up bead. `disable` writes the
+    settings-JSON flag and DOES NOT cancel in-flight work (D2a).
+2b. Ship `gt auto-test-pr {pause,resume,status,show,history}` CLI
+    commands. `status` reports "no rigs opted in" when the town bead
+    has zero entries. `pause --all` and `resume --all` write to the
+    town bead but no patrol consumes them yet. `resume --rig=<rig>
+    [--override-circuit-breaker]` and `resume --all`: the override
+    flag bypasses the `paused-by-circuit-breaker` state per D16 and
+    emits an audit-log entry naming the operator and timestamp.
+2c. Ship `gt auto-test-pr revise --mr=<id> [--comment-id=<id>]` CLI
+    command — the manual-fallback from D17 (Phase-1 revision pathway
+    when feedback-patrol routing is not yet live).
+2d. **Conventions-sheet template ships with `gt`.** Land
+    `internal/autotestpr/conventions_template.md` checked into the
+    `gt` binary and exposed via two CLI verbs:
+    `gt auto-test-pr enable --emit-template > .gt/auto-test-pr/
+    conventions.md` and `gt auto-test-pr show-template` (read-only).
+    Template includes the NG2 forbid-list (no integration/e2e/load
+    tests; no `Benchmark*`/`Example*`/`Fuzz*`), the NG5
+    churn-proximity preference, the OQ7 TALON-style comment
+    exception, the provenance-marker requirement (D8), and
+    placeholders for rig-specific test conventions (e.g., 'no
+    `time.Sleep` in tests', 'use table-driven where ≥3 cases').
+3a. Land `mol-polecat-work-test-improver` formula skeleton extending
+    `mol-polecat-work` with the **`mode=create` path**: the five
+    quality-gate steps (4a-g), the bug-discovery NOTES protocol, and
+    the sandbox-wrapper integration (depends on task 5c). **No
+    molecule registers it yet.**
+3b. Extend `mol-polecat-work-test-improver` with the **`mode=revise`
+    path**: reads `args.revision` from the dispatch envelope (prior
+    comment thread + last commit SHA + branch name), runs the same
+    five gates, and emits the **D19 reply step** on each
+    `args.revision.comments[]` thread after the new commit is
+    pushed (templated banner: new commit SHA + gates passed +
+    one-line summary). For `mode=revise` invocations triggered by
+    `gt auto-test-pr revise --mr=<id>` without `--comment-id`, the
+    polecat picks the most recent non-resolved comment thread and
+    replies there with the "manual revision dispatched by <user>"
+    template. Unit tests cover both `--comment-id`-targeted and
+    most-recent-thread fallback paths.
+3c. **Implement Mayor cycle-close handler.** Subscribes to MR-bead
+    state-change events for beads labeled `gt:auto-test-pr`. On
+    merged → CAS-transition the rig's state bead `mr-pending →
+    cooled-down` and append a transition record. On
+    closed-unmerged → CAS-transition `mr-pending → cooled-down`,
+    append both a transition record and a rejection record (with
+    `target_path` for the per-file 21d cooldown), and increment the
+    town-bead circuit-breaker counter; if the rig has ≥3 closes in
+    any rolling 7-day window, CAS-transition to
+    `paused-by-circuit-breaker` and nudge Overseer (Q6 SEV-2). On
+    either path, parse any `BUG-DISCOVERED:` NOTES and file a P2
+    bug bead in the rig (`<rig>-bug-from-auto-test-NNN`) linked to
+    the cycle's MR bead.
 4. Land `mol-auto-test-pr-cycle` formula. Registered in Mayor's
    patrol set, but the first step is `if no rig has
    auto_test_pr.enabled == true → exit 0`. Inert.
-5. Implement the sandbox wrapper (`gt sandbox` helper or equivalent)
-   — credential strip + network drop + CWD pin + wall-clock cap.
-6. Land coverage-delta parser (`internal/autotest/coverage.go` —
-   **branch-mode** parser per gate 4a fix), AST-aware mutant runner
-   (`internal/autotest/mutant.go`), tautology linter
-   (`internal/autotest/tautology.go` — implementing the four
-   sub-rules from gate 4d), with full unit tests.
+5a. Implement sandbox wrapper **credential-strip + CWD-pin**
+    component (`gt sandbox` helper or equivalent). Strips
+    `AWS_*`, `GITHUB_TOKEN`, `BD_*`, `DOLT_*`, `GIT_AUTHOR_*`,
+    `GIT_COMMITTER_*`; pins CWD to the worktree.
+5b. Implement sandbox **network-drop** with module-cache warm-up
+    (`go mod download` runs before egress is dropped; verify
+    `go test -count=10` does not trigger fresh fetch — security
+    open question 1).
+5c. Implement sandbox **wall-clock cap** (5-min per-target,
+    cycle-wide 30-min cap per D10) and integration test of the
+    combined wrapper (5a + 5b + 5c) on a hand-rolled fixture.
+6a. Land coverage-delta **branch-mode** parser
+    (`internal/autotest/coverage.go`) per gate 4a fix. Parses
+    `golang.org/x/tools/cover` branch-mode profiles. Unit tests
+    cover the four sub-rules of gate 4d (literal-vs-literal,
+    NotNil-only, no-input-derived assertion, zero-assertion).
+6b. Land **AST-aware mutant runner** (`internal/autotest/mutant.go`).
+    Bounded to ≤5 mutants per test (D11); copies package directory
+    to `os.MkdirTemp` (D6); runs through sandbox (depends on 5c).
+6c. Land **tautology linter** (`internal/autotest/tautology.go`)
+    implementing the four gate-4d sub-rules. Each sub-rule has
+    its own test fixture set under
+    `internal/autotest/testdata/tautology/{literal,notnil,
+    no-input-derived,zero-assertion}/`.
 7. Ship sling priority-floor mechanism if not present (D13).
 8. Provision `town-auto-test-pr-state` pinned bead with `enabled_rigs:
    []`. Mayor-owned.
@@ -812,86 +877,176 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
    rig's state bead and any open MRs, and deletes branches >7 days
    old with no associated open MR or in-flight bead.
 10. **Wire D15 maintainer-approval gate into Refinery's merge
-    handler.** Refinery refuses to merge an MR bead with label
+    handler.** (a) **Verify** Refinery supports per-MR-bead label
+    query (`bd list --label gt:auto-test-pr` or equivalent) and
+    `approved-by:<user>` label semantics. If yes, proceed with the
+    merge-gate wiring. If no, FILE a prerequisite bead and DEFER
+    this task; Phase 0 cannot complete without it. (b) **Wire** the
+    merge-gate: Refinery refuses to merge an MR bead with label
     `gt:auto-test-pr` unless an `approved-by:<user>` label is also
     present, when the source rig has
     `auto_test_pr.require_review_approval=true` (default-true).
     Backwards-compatible: MR beads without the auto-test label
     behave unchanged.
 11. **Wire D16 SEV-1 auto-revert into Mayor's main-CI-break
-    subscription.** On a main-CI-break whose attributing commit's
-    MR-bead carries `gt:auto-test-pr`: file revert MR + transition
-    rig state bead to `paused-by-circuit-breaker` (7d cooldown) +
-    increment town circuit-breaker counter + nudge Overseer with
-    SEV-1 payload.
+    subscription.** (a) **Verify** Mayor today subscribes to
+    main-CI-break events for opted-in rigs (existing patrol
+    infrastructure assumed in D16). If yes, proceed. If no, FILE
+    a prerequisite bead and DEFER this task. (b) **Wire**: on a
+    main-CI-break whose attributing commit's MR-bead carries
+    `gt:auto-test-pr`: file revert MR + transition rig state bead
+    to `paused-by-circuit-breaker` (7d cooldown) + increment town
+    circuit-breaker counter + nudge Overseer with SEV-1 payload.
+12. Document Overseer SEV-1 response runbook at
+    `.gt/auto-test-pr/sev1-runbook.md` (in the `gt` repo, not the
+    pilot rig). Steps: (1) confirm the auto-filed revert MR landed
+    and main is green; (2) verify the rig's state bead is
+    `paused-by-circuit-breaker` with a 7d cooldown; (3) decide
+    whether to file an investigation bead for the test that broke
+    main; (4) decide whether to override the circuit breaker via
+    `gt auto-test-pr resume --rig=<rig> --override-circuit-breaker`
+    or to wait out the cooldown; (5) record the decision in the
+    rig's state bead's `incidents[]` log via `gt auto-test-pr show
+    --rig=<rig> --raw`.
+13. Configure branch-protection rule on `gastown_upstream`'s origin
+    for `refs/heads/auto-test/*/*` — only the cycle-agent / Refinery
+    service identity may push (R11 / C-SEC-6 implementation).
+    Verified via attempting a push from a non-service identity (must
+    fail). For multi-rig v2, this rule is captured in the per-rig
+    opt-in template so new rigs inherit it on enable.
 
-**Phase 0 exit criteria:** All formulas parse; all gates have unit
-tests (including the four gate-4d sub-rules and gate-4a branch-mode
-parser); CLI verbs round-trip through Mayor without dispatching work;
-sandbox wrapper works on a hand-rolled fixture; branch-GC patrol
-deletes a fixture stale branch in dry-run; Refinery approval gate
-unit-tests cover both labeled-and-approved (merges) and labeled-and-
-unapproved (refuses) cases; SEV-1 path unit-tests cover both labeled
-break (auto-reverts) and unlabeled break (no action).
+#### Phase 0 dependency graph
+
+```
+Independent / parallelizable (batch A — start immediately):
+  1   settings-JSON loader
+  2a  enable/disable CLI
+  2b  pause/resume/status/show/history CLI
+  2c  revise CLI
+  2d  conventions-sheet template + emit-template/show-template verbs
+  4   mol-auto-test-pr-cycle (inert formula)
+  7   sling priority floor
+  8   town-state pinned bead provisioning
+  9   mol-auto-test-pr-branch-gc patrol
+  12  SEV-1 runbook (doc-only)
+  13  branch-protection rule
+
+Serial chain (critical path):
+  5a  sandbox: cred-strip + CWD-pin
+   ↓
+  5b  sandbox: network-drop + module-cache warm-up
+   ↓
+  5c  sandbox: wall-clock cap + integration test
+   ↓
+  6a  coverage-delta branch-mode parser  ┐
+  6b  AST-aware mutant runner            ├─ parallel after 5c
+  6c  tautology linter (4 sub-rules)     ┘
+   ↓
+  3a  formula mode=create                ┐
+  3b  formula mode=revise + D19 reply    ├─ parallel after 6a/b/c
+  3c  Mayor cycle-close handler          ┘
+   ↓
+  10  Refinery approval gate (verify + wire)  ┐
+  11  Mayor SEV-1 auto-revert (verify + wire) ┘ — parallel after 3a/b/c
+
+Critical-path length (with parallelism):
+  5a → 5b → 5c → {6a,6b,6c parallel} → {3a,3b,3c parallel}
+  → {10, 11 parallel}
+  ≈ 7 task-times serialized; with single agent ≈ 19 tasks total.
+  Mayor SHOULD dispatch ~6 polecats in parallel for batch A and the
+  parallel groups; expected wall-clock reduction ≈ 3-4×.
+```
+
+**Phase 0 exit criteria:**
+
+- All formulas parse; all gates have unit tests (including the four
+  gate-4d sub-rules and gate-4a branch-mode parser).
+- CLI verbs round-trip through Mayor without dispatching work.
+- Sandbox wrapper works on a hand-rolled fixture (5c integration
+  test green).
+- Branch-GC patrol deletes a fixture stale branch in dry-run.
+- Refinery approval gate unit-tests cover both labeled-and-approved
+  (merges) and labeled-and-unapproved (refuses) cases.
+- SEV-1 path unit-tests cover both labeled break (auto-reverts) and
+  unlabeled break (no action).
+- **Mayor cycle-close handler** unit tests cover four paths: merged
+  → cooled-down, closed-unmerged → cooled-down + rejection-log
+  append, 3-closes-in-7d → `paused-by-circuit-breaker`, and
+  `BUG-DISCOVERED:` NOTES → P2 bug bead filed.
+- **`mode=revise` polecat formula** unit tests cover both
+  `--comment-id`-targeted reply and most-recent-thread fallback.
+- All new Go packages pass `go vet ./...`, `go build ./...`,
+  `go test ./...`, and `scripts/check-upstream-rebased.sh` (the
+  rig's standard refinery gates).
 
 ### Phase 1: Pilot opt-in (`gastown_upstream` only)
 
 Goal: produce 2+ consecutive merged auto-test MRs without
 intervention, no SEV-1/SEV-2 incidents.
 
-9. Author and commit `.gt/auto-test-pr/conventions.md` and
-   `.gt/auto-test-pr/mr-template.md` to `gastown_upstream`. Manual
-   author by a Go-fluent maintainer; reviewed via PR.
-10. Provision `<rig>-auto-test-state` pinned bead for
+**Phase 1 entry precondition:** Phase 1 may not begin until **Phase 0
+tasks 10 (approval gate) AND 11 (SEV-1 auto-revert) integration
+tests pass.** This is the minimum-viable safety net before flipping
+`enabled=true`. Phase 0 other tasks (e.g., branch-GC, runbook,
+branch-protection) are desirable but non-blocking for Phase 1
+entry — they SHOULD ship before Phase 1 but don't gate it.
+
+14. Author and commit `.gt/auto-test-pr/conventions.md` and
+    `.gt/auto-test-pr/mr-template.md` to `gastown_upstream`. Run
+    `gt auto-test-pr enable --emit-template`, customize for
+    `gastown_upstream`, commit via PR. Reviewed via standard PR
+    review.
+15. Provision `<rig>-auto-test-state` pinned bead for
     `gastown_upstream`. Initial state `idle`.
-11. Flip `auto_test_pr.enabled=true` in `gastown_upstream`'s settings
+16. Flip `auto_test_pr.enabled=true` in `gastown_upstream`'s settings
     JSON. Cadence: 7 days.
-12. **Five-week (weeks 2-6) observation window.** Each cycle:
+17. **Five-week (weeks 2-6) observation window.** Each cycle:
     - Watched live by an on-call human; first 5 MRs reviewed in real
       time.
     - Wall-clock, gate pass/fail, and reject reasons logged to
       Overseer's channel.
-12a. **Manual revision pathway during Phase 1.** Until Phase 2 lands
-     the feedback-patrol routing, comment-driven revision is invoked
-     manually via `gt auto-test-pr revise --mr=<id>
-     [--comment-id=<id>]`. The CLI files a sling-context bead with
-     the prior comment thread + last commit SHA, transitions the rig
-     state bead from `mr-pending → mr-revising`, and dispatches a
-     `mol-polecat-work-test-improver` polecat in `mode=revise`. This
-     is the documented G4 fallback for Phase 1; it does NOT count as
-     "no operator intervention" against the Phase 2 graduation
-     sub-criterion below, but DOES count as a normal cycle for the
-     PRD-aligned merge-rate criterion.
-13. **Phase 1 exit criteria** (PRD pilot-success-criteria fix —
-    adopting PRD bar verbatim):
-    - **≥60% merge rate over the first 5 MRs** (≥3 of 5 merged, per
-      PRD).
-    - **Zero SEV-1 and zero SEV-2 incidents.**
-    - **Rejection rate <40% sustained over weeks 2-6** (5-week
-      window).
-    - *Sub-criterion (graduation gate to Phase 2):* ≥2 consecutive
-      merged MRs **with no operator intervention** (no manual
-      revisions via `gt auto-test-pr revise`, no manual gate
-      overrides). Phase 2 may not start until this sub-criterion is
-      also met.
+18. **Manual revision pathway during Phase 1.** Until Phase 2 lands
+    the feedback-patrol routing, comment-driven revision is invoked
+    manually via `gt auto-test-pr revise --mr=<id>
+    [--comment-id=<id>]`. The CLI files a sling-context bead with
+    the prior comment thread + last commit SHA, transitions the rig
+    state bead from `mr-pending → mr-revising`, and dispatches a
+    `mol-polecat-work-test-improver` polecat in `mode=revise`. This
+    is the documented G4 fallback for Phase 1; it does NOT count as
+    "no operator intervention" against the Phase 2 graduation
+    sub-criterion below, but DOES count as a normal cycle for the
+    PRD-aligned merge-rate criterion.
+
+**Phase 1 exit criteria** (PRD pilot-success-criteria fix —
+adopting PRD bar verbatim):
+- **≥60% merge rate over the first 5 MRs** (≥3 of 5 merged, per
+  PRD).
+- **Zero SEV-1 and zero SEV-2 incidents.**
+- **Rejection rate <40% sustained over weeks 2-6** (5-week
+  window).
+- *Sub-criterion (graduation gate to Phase 2):* ≥2 consecutive
+  merged MRs **with no operator intervention** (no manual
+  revisions via `gt auto-test-pr revise`, no manual gate
+  overrides). Phase 2 may not start until this sub-criterion is
+  also met.
 
 ### Phase 2: Feedback-patrol integration
 
 Goal: revision cycles work without human dispatch.
 
-14. Extend `mol-pr-feedback-patrol`'s `dispatch-work` step with
+19. Extend `mol-pr-feedback-patrol`'s `dispatch-work` step with
     label-keyed dispatch (D3). Label `gt:auto-test-pr` →
     `mol-polecat-work-test-improver` formula in `mode=revise`.
     Default-other-labels keep current behavior. Behind feature flag
     `feature_flags.auto_test_pr_revision_routing=false` until tested.
-15. Ship reviewer magic phrase parsing (D9) in
+20. Ship reviewer magic phrase parsing (D9) in
     `mol-pr-feedback-patrol`. Token: `gt auto-test-pr: pause-rig-7d`.
     Patrol writes the pause to the rig's state bead.
-16. Integration tests: fixture MR with label → revision dispatched;
+21. Integration tests: fixture MR with label → revision dispatched;
     fixture MR without label → generic dispatch (regression).
-17. Flip `feature_flags.auto_test_pr_revision_routing=true` on
+22. Flip `feature_flags.auto_test_pr_revision_routing=true` on
     `gastown_upstream` only.
-18. Watch for one full revision cycle (reviewer comment → polecat
+23. Watch for one full revision cycle (reviewer comment → polecat
     revision → re-review → merge). Verify state bead transitions
     `mr-pending → mr-revising → mr-pending → cooled-down`.
 
@@ -902,12 +1057,12 @@ without human intervention.
 
 Out of scope for this design but the design must not preclude it.
 
-19. Add a second rig opt-in (e.g., a TS rig). Add TypeScript to the
+24. Add a second rig opt-in (e.g., a TS rig). Add TypeScript to the
     language allow-list (CR-gated, Overseer sign-off per Q4).
-20. Land the v2 PRD for external-PR mode + GitHub App identity.
-21. Migrate state-bead schema to v2 (additive; new states for
+25. Land the v2 PRD for external-PR mode + GitHub App identity.
+26. Migrate state-bead schema to v2 (additive; new states for
     `pr-pending`/`pr-revising`).
-22. Tap-guard amendment for `gh pr create` on auto-test polecats
+27. Tap-guard amendment for `gh pr create` on auto-test polecats
     (OQ5).
 
 ### Reverting
@@ -916,7 +1071,7 @@ Each phase reverts independently:
 
 - **Phase 2 revert:** flip `feature_flags.auto_test_pr_revision_routing
   =false`. Patrol stops routing revisions; in-flight MRs require
-  manual revision dispatch.
+  manual revision dispatch (Phase 1 task 18 CLI).
 - **Phase 1 revert:** `gt auto-test-pr disable --rig=gastown_upstream`.
   Cycle's first step exits on next tick. In-flight MR completes (or
   is closed manually); revision routing remains live but inert.
@@ -973,6 +1128,14 @@ records cross-dimension decisions and resolves conflicts.
 | C2 (Refinery vs external-PR mode detection) vs. Q1 (v1 cut external-PR) | constraints reviewer flagged C2 as "v1 implementation missing" | C2 satisfied by *scope removal*, not by detection; v2 must add detection step | D2b (PRD-align round 2) |
 | Gate 4f only checks file paths/build tags, not test-function form | non-goals reviewer flagged that `Benchmark*`/`Example*`/`Fuzz*` slip past gate 4f → violates NG2 | Gate 4f extended to require `func Test*(t *testing.T)` form on every newly-added test function | Gate 4f (PRD-align round 2) |
 | Within-file target ranking treats all uncovered branches equally | non-goals reviewer flagged that legacy branches in churned file get backfilled → violates NG5 (greenfield only) | Cycle step 4 ranks `uncovered_branches[]` by line-distance to recent-churn ranges; conventions sheet directs polecat to prefer churn-adjacent | Cycle step 4 (PRD-align round 2) |
+| Phase 0 tasks 2/5/6/3 too coarse-grained (each fuses multi-day work) | plan-self-review round 1 (completeness) flagged that bundled tasks obscure dependencies and parallelism | Split task 2 → 2a-d; task 3 → 3a-c; task 5 → 5a-c; task 6 → 6a-c. Phase 0 dependency graph documents critical path | Phase 0 task list + dep graph (plan-self-review round 1) |
+| Mayor cycle-close handler implied throughout but never tasked | plan-self-review round 1 (completeness) flagged that D2a, Q6, S1, bug-discovery NOTES all depend on a handler with no Phase 0 task | Phase 0 task 3c implements handler with all four paths (merged, closed-unmerged, 3-closes-trips-CB, BUG-DISCOVERED parsing); exit criteria covers all four | Phase 0 task 3c (plan-self-review round 1) |
+| Phase 0 / Phase 1 task numbers collide (both have 9, 10, 11) | plan-self-review round 1 (sequencing) flagged that cross-references are ambiguous | Phase 1 renumbered to start at 14, Phase 2 at 19, Phase 3 at 24; 12a promoted to peer task 18 | Phase 1/2/3 numbering (plan-self-review round 1) |
+| Conventions-sheet template not shipped with `gt`; every rig re-derives constraints | plan-self-review round 1 (completeness) flagged drift risk and brittle "refuse to run without conventions" check | Phase 0 task 2d ships `internal/autotestpr/conventions_template.md` + `gt auto-test-pr enable --emit-template` and `gt auto-test-pr show-template` verbs | Phase 0 task 2d (plan-self-review round 1) |
+| `--override-circuit-breaker` flag named in D16 but missing from CLI task | plan-self-review round 1 (completeness) flagged that SEV-1 has no manual recovery path | Task 2b explicitly lists `resume --rig=<rig> [--override-circuit-breaker]` with audit-log entry | Phase 0 task 2b (plan-self-review round 1) |
+| Refinery label-query and `approved-by:<user>` semantics asserted but unverified | plan-self-review round 1 (completeness) flagged that D15 assumes pre-existing infra | Task 10 split into (a) verify + (b) wire; same pattern applied to task 11 (Mayor main-CI-break subscription) | Phase 0 tasks 10 + 11 (plan-self-review round 1) |
+| Phase 1 entry has no documented precondition on Phase 0 safety net | plan-self-review round 1 (sequencing) flagged that partial Phase 0 rollout could ship cycle without merge gate | Phase 1 entry precondition: tasks 10 + 11 integration tests must pass before flipping `enabled=true` | Phase 1 entry precondition (plan-self-review round 1) |
+| `mode=revise` formula support implicit but never tasked | plan-self-review round 1 (completeness) flagged that Phase 1 step 18 + Phase 2 step 19 silently depend on it | Phase 0 task 3b explicitly tasks `mode=revise` path with D19 reply step + tests for both `--comment-id` and most-recent-thread fallback | Phase 0 task 3b (plan-self-review round 1) |
 
 ## Sources
 
@@ -1007,3 +1170,14 @@ records cross-dimension decisions and resolves conflicts.
   edge, D19 reviewer-comment-thread reply step in revise mode, D20
   gate 4g size-budget enforcer; R22-R24 added to risk register;
   cross-leg conflicts table extended)
+
+- `.plan-reviews/auto-test-pr/review-round-1.md` — plan self-review
+  round 1 (completeness + sequencing); applied 8 must-fix and 4
+  should-fix items to this synthesis (Phase 0 task splits 2a-d /
+  3a-c / 5a-c / 6a-c, new Phase 0 tasks 3c [Mayor cycle-close
+  handler] + 12 [SEV-1 runbook] + 13 [branch-protection], renumber
+  Phase 1/2/3 to start at 14/19/24, Phase 1 entry precondition,
+  Phase 0 dependency graph documenting critical path, gate-test
+  exit-criteria additions, `--override-circuit-breaker` flag
+  surfacing, Refinery + Mayor pre-existing-infra verification
+  sub-steps in tasks 10 + 11)
