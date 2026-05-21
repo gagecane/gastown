@@ -159,6 +159,11 @@ the rig's per-rig cooldown has elapsed):
    Dolt SERIALIZABLE-class isolation on row updates).
 4. Compute target candidates: `git log --since=30d` × coverage profile
    from `go test -coverprofile`, ranked by `(churn × uncovered_branches)`.
+   **Per-file rejection cooldown (PRD S4 fix):** before ranking, drop
+   any candidate whose path appears in `<rig>-auto-test-state.
+   rejection_log[].target_path` within the last 21 days. This honors
+   the PRD's "avoid retargeting that file for some cooldown period"
+   without requiring per-cycle human input.
 5. CAS-transition `picking → dispatched`; file the dispatch bead;
    sling-attach to the polecat pool with a strict priority floor
    (lowest bucket).
@@ -175,12 +180,12 @@ and the commit step, plus a final allow-list verification step:
 
 | Step | Gate | Mode |
 |------|------|------|
-| 4a | coverage-delta (computed from `go tool cover` parsed via `golang.org/x/tools/cover`) | hard fail if delta ≤ 0 |
+| 4a | coverage-delta — **branch coverage** delta (parsed via `golang.org/x/tools/cover`, branch mode) | hard fail if branch delta ≤ 0; the marker comment alone does not satisfy this |
 | 4b | synthetic-mutant sanity (≤5 mutants per test, AST-aware, runs in `os.MkdirTemp` outside worktree) | hard fail if any new test still passes when its target line is commented out |
 | 4c | flakiness rerun (`go test -count=10 -run="<exact-test-names>" ./<direct-package>` only) | hard fail if any flake |
-| 4d | tautology linter (heuristic: rejects `assert(true)`, literal-equality, missing-assertion tests) | hard fail |
+| 4d | tautology linter — see expanded heuristic below: (i) ≥1 assertion must depend on the function-under-test's return value or observable side effect; (ii) reject tests where every assertion is literal-vs-literal (e.g. `assert.Equal("x", "x")` or constant-vs-constant); (iii) reject tests whose only assertions against the SUT are `NotNil`/`NotEmpty`/truthy checks; (iv) reject `assert(true)` / `expect(x).toBe(x)` / zero-assertion tests | hard fail |
 | 4e | pre-push gitleaks scan (`gitleaks detect --no-banner --redact`) | hard fail; SEV-2 per Q6 |
-| 4f | output allow-list verifier — every changed file in the diff matches `**/*_test.go` | hard fail |
+| 4f | output allow-list verifier — every changed file in the diff matches `**/*_test.go` AND is NOT under `integration/`, `e2e/`, or `test/` (only same-package `_test.go` files allowed) AND has no `//go:build integration` build tag | hard fail |
 
 Each gate runs through a **hardened sandbox wrapper** that strips
 credential env vars (`AWS_*`, `GITHUB_TOKEN`, `BD_*`, `DOLT_*`,
@@ -190,6 +195,20 @@ per-target at 5 min (cycle-wide cap 30 min — see Decisions).
 
 The molecule honors the existing `--pre-verified` rebase step from
 `mol-polecat-work` so the Refinery can fast-path the merge.
+
+**Bug-discovery NOTES protocol (PRD Non-Goal "not a code-fixing tool"
+fix):** if, while iterating, the polecat writes a candidate test that
+fails on `main` *as written* (i.e., the test appears to encode correct
+behavior but the source is buggy), the polecat MUST exit with a
+structured NOTES section under heading `BUG-DISCOVERED:` containing
+(a) the file:line, (b) the failing assertion's expected vs. actual,
+(c) the candidate test source. The polecat does NOT push a fix and
+does NOT open a test-only MR for the buggy area (that would
+encode-as-correct a behavior that is actually wrong). Mayor's
+cycle-close handler parses any `BUG-DISCOVERED:` NOTES and files a
+separate P2 bug bead in the rig (`<rig>-bug-from-auto-test-NNN`),
+linked to the cycle's MR bead for audit trail. This is the explicit
+boundary between "test improvement" and "code fixing" the PRD draws.
 
 **3. State beads (Mayor-owned)**
 
@@ -411,6 +430,18 @@ existing rig-settings loader, which already exists. The conventions
 sheet, by contrast, **is** code (instructions to a code-writing bot)
 and stays in-repo at `.gt/auto-test-pr/conventions.md`.
 
+**D2a. `disable` does NOT cancel in-flight work.** **PRD S6 fix.** When
+a rig owner runs `gt auto-test-pr disable --rig=<rig>` while a cycle is
+in-flight (state ∈ {`picking`, `dispatched`, `mr-pending`,
+`mr-revising`}), the state bead is left as-is; the cycle's first step
+(read `auto_test_pr.enabled`) exits on the *next tick*. The in-flight
+MR completes its lifecycle (merged or closed by human); Mayor's
+existing transition handlers move the state bead through `cooled-down`
+normally. Once the rig is back at `cooled-down` AND `enabled=false`,
+no further cycles fire. This honors the PRD's "any in-flight PR is
+left alone" semantics without introducing a polecat-side cancellation
+pathway (which would be racy against the Refinery merge handler).
+
 **D3. New molecule + new polecat-work variant** (integration Option
 1). Two new formulas instead of one mega-molecule. Each is small and
 reviewable; the existing `mol-pr-feedback-patrol` is extended
@@ -475,6 +506,51 @@ test work is the lowest-priority bucket — never starves user work.
 **D14. The `gt:auto-test-pr` label is bead-applied, not PR-applied.**
 (integration constraint #6.) v1 has no GitHub PR; the label lives on
 the dispatch and MR beads. Feedback-patrol queries beads by label.
+
+**D15. Auto-test MRs require explicit maintainer approval before
+Refinery merges.** **PRD G1 fix.** PRD says "gated by ordinary human
+PR review (not auto-merged)." Refinery is unmodified, so by default it
+would merge any polecat MR whose gates pass — that violates G1.
+Resolution: per-rig config key
+`auto_test_pr.require_review_approval=true` (default-true on opted-in
+rigs); Refinery's merge handler reads the bead label
+`gt:auto-test-pr` and refuses to merge until a maintainer-approval
+record exists on the MR bead (mirrors the existing approval mechanism
+used for human-authored MRs in repos that require review). Approval
+is recorded by a `bd update <mr-bead> --add-label approved-by:<user>`
+or equivalent (canonical mechanism per existing Refinery convention).
+v2 may permit a `confidence-merge` mode behind explicit Overseer
+opt-in. Without this gate, the system "lands net-new tests
+autonomously" — directly violating the "not auto-merged" half of G1.
+
+**D16. SEV-1 incident-response path is automated.** **PRD Q6 fix.**
+PRD Q6 SEV-1: "auto-test PR breaks main CI on any rig (revert
+immediately, pause that rig 7d, notify Overseer)." The plan must
+implement the detect → revert → pause → notify chain, not just name
+the SEV. Resolution: Mayor subscribes to main-CI-break events for
+opted-in rigs (existing patrol infrastructure). On a main-CI-break
+whose attributing commit's MR-bead carries the `gt:auto-test-pr`
+label, Mayor automatically (a) files a revert MR via the existing
+revert-MR formula, (b) CAS-transitions the rig's state bead to a new
+terminal-ish state `paused-by-circuit-breaker` with a 7-day cooldown,
+(c) increments the town-wide circuit-breaker counter, (d) sends a
+high-priority nudge to the Overseer with the SEV-1 payload. This is
+not a backstop — it's the *primary* SEV-1 response. Manual override
+is `gt auto-test-pr resume --rig=<rig> --override-circuit-breaker`.
+
+**D17. Phase-1 manual revision CLI fallback.** **PRD G4 fix.** PRD G4
+requires "feedback-driven revision on the same PR." The plan's
+automated revision routing lives in Phase 2 via `mol-pr-feedback-
+patrol`. To prevent G4 from being unreachable during Phase 1's pilot,
+v1 ships a *manual* fallback: `gt auto-test-pr revise --mr=<id>
+[--comment-id=<id>]` lets a maintainer trigger the revision polecat
+directly. The CLI: (a) reads the MR bead, (b) extracts comment thread
++ last commit SHA, (c) CAS-transitions rig state bead `mr-pending →
+mr-revising`, (d) files a sling-context bead with `args.mode=revise`,
+(e) dispatches `mol-polecat-work-test-improver`. After Phase 2's
+automated routing lands, the manual CLI is preserved as an escape
+hatch for cases the patrol misses. The CLI is documented in the MR
+banner as the Phase-1 fallback path so maintainers can find it.
 
 ### Open Questions
 
@@ -586,6 +662,11 @@ look identical to any other polecat commit, and the
 | R12 | Module-cache cold-start triggers re-fetch after network is dropped | Low | Sandbox warms `go mod download` before dropping network; verify `go test -count=10` doesn't trigger a fresh fetch (security open question 1) |
 | R13 | Rejection record leaks internal-only file paths in v2 multi-rig federation | Deferred to v2 | v1 is one internal pilot rig; data leg flagged for v2 anonymization |
 | R14 | `gt auto-test-pr` is misleading in v1 (no PR is opened) | Low | Document explicitly in CLI help, README, and MR banner that "PR" is a generic term and v1 produces an MR; rename rejected as mid-v1 churn |
+| R15 | Auto-test MR breaks `main` CI on a rig and cascades to other patrols | High | D16 SEV-1 path: Mayor subscribes to main-CI-break events; auto-files revert MR + 7d circuit-breaker pause + Overseer SEV-1 nudge. Phase 0 task #11 implements; tested with both labeled-break (auto-reverts) and unlabeled-break (no action) fixtures |
+| R16 | Auto-test MR auto-merges before any human reviewer sees it (G1 violation) | High | D15 maintainer-approval gate; Refinery refuses to merge label=`gt:auto-test-pr` MRs without `approved-by:<user>` label when `auto_test_pr.require_review_approval=true` (default-true); Phase 0 task #10 implements |
+| R17 | G4 (revision on same branch) is unreachable during Phase-1 pilot | Medium | D17 manual revision CLI `gt auto-test-pr revise`; documented in MR banner as Phase-1 fallback path; Phase-2 automation supersedes but CLI persists as escape hatch |
+| R18 | Polecat encodes a buggy current behavior as "correct" via a passing test, papering over a real bug | Medium | Bug-discovery NOTES protocol: polecat exits with structured `BUG-DISCOVERED:` NOTES on test-fails-on-main; Mayor's cycle-close handler files a separate P2 bug bead. No test-only MR is opened on the buggy area |
+| R19 | Allow-list `**/*_test.go` admits integration tests (Non-Goal violation) | Medium | Gate 4f extended to reject files under `integration/`/`e2e/`/`test/` and tests with `//go:build integration` build tag; conventions sheet template forbids integration tests |
 
 ## Implementation Plan
 
@@ -599,27 +680,56 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
 1. Add `auto_test_pr.*` keys to per-rig settings JSON loader. Default
    absent → disabled. **OQ1 must be answered first.**
 2. Ship `gt auto-test-pr {enable,disable,pause,resume,status,show,
-   history}` CLI commands. `status` reports "no rigs opted in"
+   history,revise}` CLI commands. `status` reports "no rigs opted in"
    when the town bead has zero entries. `pause --all` and `resume
    --all` write to the town bead but no patrol consumes them yet.
+   **`revise --mr=<id> [--comment-id=<id>]`** is the manual-fallback
+   from D17 (Phase-1 revision pathway when feedback-patrol routing is
+   not yet live).
 3. Land `mol-polecat-work-test-improver` formula extending
-   `mol-polecat-work` with the five quality-gate steps and the
-   sandbox wrapper. **No molecule registers it yet.**
+   `mol-polecat-work` with the five quality-gate steps, the bug-
+   discovery NOTES protocol, and the sandbox wrapper. **No molecule
+   registers it yet.**
 4. Land `mol-auto-test-pr-cycle` formula. Registered in Mayor's
    patrol set, but the first step is `if no rig has
    auto_test_pr.enabled == true → exit 0`. Inert.
 5. Implement the sandbox wrapper (`gt sandbox` helper or equivalent)
    — credential strip + network drop + CWD pin + wall-clock cap.
-6. Land coverage-delta parser (`internal/autotest/coverage.go`),
-   AST-aware mutant runner (`internal/autotest/mutant.go`), tautology
-   linter (`internal/autotest/tautology.go`), with full unit tests.
+6. Land coverage-delta parser (`internal/autotest/coverage.go` —
+   **branch-mode** parser per gate 4a fix), AST-aware mutant runner
+   (`internal/autotest/mutant.go`), tautology linter
+   (`internal/autotest/tautology.go` — implementing the four
+   sub-rules from gate 4d), with full unit tests.
 7. Ship sling priority-floor mechanism if not present (D13).
 8. Provision `town-auto-test-pr-state` pinned bead with `enabled_rigs:
    []`. Mayor-owned.
+9. **Land `mol-auto-test-pr-branch-gc` patrol** (PRD promoted-MUST
+   fix). Standing patrol that lists `refs/heads/auto-test/*/*`
+   branches across all opted-in rigs, cross-references against each
+   rig's state bead and any open MRs, and deletes branches >7 days
+   old with no associated open MR or in-flight bead.
+10. **Wire D15 maintainer-approval gate into Refinery's merge
+    handler.** Refinery refuses to merge an MR bead with label
+    `gt:auto-test-pr` unless an `approved-by:<user>` label is also
+    present, when the source rig has
+    `auto_test_pr.require_review_approval=true` (default-true).
+    Backwards-compatible: MR beads without the auto-test label
+    behave unchanged.
+11. **Wire D16 SEV-1 auto-revert into Mayor's main-CI-break
+    subscription.** On a main-CI-break whose attributing commit's
+    MR-bead carries `gt:auto-test-pr`: file revert MR + transition
+    rig state bead to `paused-by-circuit-breaker` (7d cooldown) +
+    increment town circuit-breaker counter + nudge Overseer with
+    SEV-1 payload.
 
 **Phase 0 exit criteria:** All formulas parse; all gates have unit
-tests; CLI verbs round-trip through Mayor without dispatching work;
-sandbox wrapper works on a hand-rolled fixture.
+tests (including the four gate-4d sub-rules and gate-4a branch-mode
+parser); CLI verbs round-trip through Mayor without dispatching work;
+sandbox wrapper works on a hand-rolled fixture; branch-GC patrol
+deletes a fixture stale branch in dry-run; Refinery approval gate
+unit-tests cover both labeled-and-approved (merges) and labeled-and-
+unapproved (refuses) cases; SEV-1 path unit-tests cover both labeled
+break (auto-reverts) and unlabeled break (no action).
 
 ### Phase 1: Pilot opt-in (`gastown_upstream` only)
 
@@ -633,15 +743,34 @@ intervention, no SEV-1/SEV-2 incidents.
     `gastown_upstream`. Initial state `idle`.
 11. Flip `auto_test_pr.enabled=true` in `gastown_upstream`'s settings
     JSON. Cadence: 7 days.
-12. **Two-week observation window.** Each cycle:
+12. **Five-week (weeks 2-6) observation window.** Each cycle:
     - Watched live by an on-call human; first 5 MRs reviewed in real
       time.
     - Wall-clock, gate pass/fail, and reject reasons logged to
       Overseer's channel.
-13. **Phase 1 exit criteria:** ≥2 consecutive merged MRs with no
-    operator intervention (no manual revisions, no manual gate
-    overrides); zero SEV-1/SEV-2; rejection rate <40% over the
-    observation window.
+12a. **Manual revision pathway during Phase 1.** Until Phase 2 lands
+     the feedback-patrol routing, comment-driven revision is invoked
+     manually via `gt auto-test-pr revise --mr=<id>
+     [--comment-id=<id>]`. The CLI files a sling-context bead with
+     the prior comment thread + last commit SHA, transitions the rig
+     state bead from `mr-pending → mr-revising`, and dispatches a
+     `mol-polecat-work-test-improver` polecat in `mode=revise`. This
+     is the documented G4 fallback for Phase 1; it does NOT count as
+     "no operator intervention" against the Phase 2 graduation
+     sub-criterion below, but DOES count as a normal cycle for the
+     PRD-aligned merge-rate criterion.
+13. **Phase 1 exit criteria** (PRD pilot-success-criteria fix —
+    adopting PRD bar verbatim):
+    - **≥60% merge rate over the first 5 MRs** (≥3 of 5 merged, per
+      PRD).
+    - **Zero SEV-1 and zero SEV-2 incidents.**
+    - **Rejection rate <40% sustained over weeks 2-6** (5-week
+      window).
+    - *Sub-criterion (graduation gate to Phase 2):* ≥2 consecutive
+      merged MRs **with no operator intervention** (no manual
+      revisions via `gt auto-test-pr revise`, no manual gate
+      overrides). Phase 2 may not start until this sub-criterion is
+      also met.
 
 ### Phase 2: Feedback-patrol integration
 
@@ -732,6 +861,9 @@ records cross-dimension decisions and resolves conflicts.
 | Mutant tmpdir scope | scale (single tmpdir per cycle, faster) vs. security (separate tmpdir per mutant, safer) | Separate tmpdir per mutant in v1; consolidate in v2 once we have container isolation | D6 |
 | User-facing state names | data uses `mr-pending`, ux uses `MR submitted` | Use `mr-pending` raw (advanced); show "MR submitted" in `gt auto-test-pr status` table; expose raw via `--verbose` | ux leg constraint |
 | Provenance marker vs. TALON "no comments in tests" | ux + api want marker; some rigs forbid test comments | Marker is mandatory; document the exception in the conventions sheet template | OQ7 |
+| Refinery default-merge vs. PRD G1 "not auto-merged" | plan said Refinery is unmodified; PRD requires human review | Default-true `require_review_approval` flag; Refinery refuses to merge `gt:auto-test-pr`-labeled MRs without `approved-by:<user>` label | D15 (PRD-align round 1) |
+| Phase-2-only revision routing vs. PRD G4 | plan deferred routing to Phase 2; G4 must work end-to-end on pilot | Manual `gt auto-test-pr revise` CLI fallback in Phase 1; Phase 2 automation supersedes but CLI persists | D17 (PRD-align round 1) |
+| Plan pilot exit criteria vs. PRD pilot success criteria | plan said "≥2 consecutive merged"; PRD said "≥60% over 5 PRs / weeks 2-6" | PRD criteria adopted verbatim; plan's "≥2 consecutive non-intervention" demoted to graduation sub-criterion | Phase 1 exit criteria (PRD-align round 1) |
 
 ## Sources
 
@@ -749,3 +881,9 @@ records cross-dimension decisions and resolves conflicts.
   origin/main from a sibling polecat's MR; quoted via the leg's
   output as authoritative
 - `.designs/auto-test-pr/ux.md` (gu-leg-nehua)
+- `.plan-reviews/auto-test-pr/prd-align-round-1.md` — PRD-alignment
+  round 1 (requirements + goals); applied 6 must-fix and 4 should-fix
+  items to this synthesis (D2a, D15, D16, D17, R15-R19, gate 4a/4d/4f
+  tightenings, Phase 0 tasks 9-11, Phase 1 step 12a, Phase 1 exit
+  criteria rewrite, target-pick rejection-cooldown, bug-discovery
+  NOTES protocol)
