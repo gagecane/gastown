@@ -731,6 +731,12 @@ type RigSettings struct {
 	// from the town-wide scheduler.max_polecats cap — it lets operators cap
 	// fast or flaky rigs independently so they don't starve other rigs.
 	Polecat *PolecatPoolConfig `json:"polecat,omitempty"`
+
+	// AutoTestPR configures per-rig auto-test-pr behavior. Default-absent
+	// (nil) means disabled. See .designs/auto-test-pr/synthesis.md for the
+	// full design. The block is operator-authored in the rig's settings JSON
+	// (operator/Mayor authority), not in the in-repo rig manifest.
+	AutoTestPR *AutoTestPRConfig `json:"auto_test_pr,omitempty"`
 }
 
 // PolecatPoolConfig represents per-rig polecat pool settings.
@@ -771,6 +777,111 @@ func (s *RigSettings) GetPolecatMaxConcurrent() int {
 		return 0
 	}
 	return s.Polecat.GetMaxConcurrent()
+}
+
+// DefaultAutoTestPRCadenceDays is the default cadence in days between
+// auto-test-pr cycles for an opted-in rig. Aligns with the synthesis-doc
+// guidance of "≤1 cycle per rig per 7-day window".
+const DefaultAutoTestPRCadenceDays = 7
+
+// DefaultAutoTestPRConventionsPath is the default in-repo path to the
+// rig's auto-test-pr conventions sheet (rendered from the gt-shipped
+// template). Required to exist before opt-in is honored at run time;
+// the loader does not check existence — that is the runtime polecat's
+// hard fail per design.
+const DefaultAutoTestPRConventionsPath = ".gt/auto-test-pr/conventions.md"
+
+// AutoTestPRSupportedLanguages is the v1 language allow-list. Per
+// PRD Q4 / synthesis decision D? the v1 pilot is Go-only; unknown
+// values are rejected by validation as a typed error so callers can
+// distinguish "unknown language" from "malformed JSON".
+var AutoTestPRSupportedLanguages = []string{"go"}
+
+// AutoTestPRConfig represents per-rig auto-test-pr configuration. It
+// lives in the rig's settings JSON (operator authority), NOT in the
+// in-repo rig manifest. Default-absent (nil pointer on RigSettings)
+// means the feature is disabled for the rig.
+//
+// See .designs/auto-test-pr/synthesis.md §"Per-rig config" for the
+// authoritative shape. Phase 0 task 1 is wiring only — no consumer
+// in this commit; the loader simply parses and validates the block.
+type AutoTestPRConfig struct {
+	// Enabled is the master switch for this rig. Default false.
+	// `gt auto-test-pr enable/disable` is the operator-facing path
+	// that flips this; the polecat formula honors the value at
+	// dispatch time.
+	Enabled bool `json:"enabled"`
+
+	// Language is the v1 language allow-list selector. Only "go" is
+	// accepted in v1; other values fail validation with a typed
+	// error (not a panic) so the CLI can route users to the v2
+	// follow-up bead. Empty string is allowed when Enabled=false to
+	// support a "shape ships, opt-in deferred" stanza.
+	Language string `json:"language,omitempty"`
+
+	// CadenceDays is the minimum number of days between auto-test-pr
+	// cycles for this rig. 0 (the JSON-absent default) means
+	// DefaultAutoTestPRCadenceDays. Negative values fail validation.
+	CadenceDays int `json:"cadence_days,omitempty"`
+
+	// ConventionsPath is the in-repo path to the rig's auto-test-pr
+	// conventions sheet. Empty string defaults to
+	// DefaultAutoTestPRConventionsPath. The loader does not stat the
+	// path; the polecat formula hard-fails at runtime if the file is
+	// missing.
+	ConventionsPath string `json:"conventions_path,omitempty"`
+
+	// SkipDirs is a list of repo-relative directories the polecat
+	// must not target for new tests (e.g. generated code, vendored
+	// trees). Nil/empty means no skip list. Entries are stored as
+	// authored; normalization is the consumer's responsibility.
+	SkipDirs []string `json:"skip_dirs,omitempty"`
+}
+
+// IsEnabled reports whether auto-test-pr is enabled for this rig.
+// Nil-safe: a nil pointer means "block absent" → disabled.
+func (c *AutoTestPRConfig) IsEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.Enabled
+}
+
+// GetCadenceDays returns the configured cadence in days, applying the
+// default when unset (zero). Nil-safe.
+func (c *AutoTestPRConfig) GetCadenceDays() int {
+	if c == nil || c.CadenceDays == 0 {
+		return DefaultAutoTestPRCadenceDays
+	}
+	return c.CadenceDays
+}
+
+// GetConventionsPath returns the configured conventions-sheet path,
+// applying the default when unset. Nil-safe.
+func (c *AutoTestPRConfig) GetConventionsPath() string {
+	if c == nil || c.ConventionsPath == "" {
+		return DefaultAutoTestPRConventionsPath
+	}
+	return c.ConventionsPath
+}
+
+// GetSkipDirs returns the configured skip-dirs list, or an empty slice
+// when unset. Nil-safe; never returns nil so callers can range without
+// guarding.
+func (c *AutoTestPRConfig) GetSkipDirs() []string {
+	if c == nil || len(c.SkipDirs) == 0 {
+		return []string{}
+	}
+	return c.SkipDirs
+}
+
+// GetAutoTestPR returns the rig's AutoTestPRConfig. Nil-safe; returns
+// nil when the rig has no settings or no auto_test_pr block.
+func (s *RigSettings) GetAutoTestPR() *AutoTestPRConfig {
+	if s == nil {
+		return nil
+	}
+	return s.AutoTestPR
 }
 
 // CrewConfig represents crew workspace settings for a rig.
