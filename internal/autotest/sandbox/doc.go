@@ -70,9 +70,34 @@
 //     traversal, absolute paths, or symlinks that resolve outside
 //     the worktree).
 //
-// 5b adds network-drop + module-cache warm-up. 5c adds the wall-clock
-// cap and an integration test of the combined wrapper. Both extend
-// the same Sandbox value defined here.
+// # Surface area (Phase 0 task 5b)
+//
+// 5b adds two primitives, layered on the 5a Sandbox value:
+//
+//   - Network-drop (ApplyOffline): an Apply variant that additionally
+//     starts the subprocess in a fresh user + network namespace
+//     (Linux only; netDropSupported reports false on other GOOSes).
+//     The user namespace is required because the kernel only permits
+//     unprivileged netns creation in combination with userns; identity
+//     uid/gid mappings keep the in-namespace user identical to the
+//     caller. Inside the namespace, only loopback exists (and starts
+//     DOWN), so any TCP/UDP dial returns "network is unreachable".
+//     Resolves the security leg's open question 1 and the synthesis
+//     Round 2 fix #7 acceptance criterion that gates run with no
+//     fresh network fetch.
+//   - Module-cache warm-up (WarmUpGoModules): runs `go mod download`
+//     followed by `go test -count=1 -run='^$' ./...` (a no-op test
+//     pass that compiles the same package graph the real test run
+//     will execute), both under Apply (network ON). The compile-only
+//     pass is invoked unconditionally rather than as a fallback,
+//     because the synthesis Round 2 fix #7 documents that
+//     `go mod download` alone does not always populate transitively-
+//     missing test-only imports. Doing both up-front guarantees the
+//     subsequent ApplyOffline `go test -count=10 ./...` makes zero
+//     network calls.
+//
+// 5c adds the wall-clock cap and an integration test of the combined
+// wrapper. It extends the same Sandbox value.
 //
 // # Usage
 //
@@ -80,8 +105,13 @@
 //	if err != nil {
 //	    return err
 //	}
-//	cmd := exec.CommandContext(ctx, "go", "test", "./...")
-//	if err := sb.Apply(cmd); err != nil {
+//	// Warm up while network is still available.
+//	if err := sb.WarmUpGoModules(ctx, "go"); err != nil {
+//	    return err
+//	}
+//	// Run gates with no network access.
+//	cmd := exec.CommandContext(ctx, "go", "test", "-count=10", "./...")
+//	if err := sb.ApplyOffline(cmd); err != nil {
 //	    return err
 //	}
 //	if err := cmd.Run(); err != nil {
@@ -91,6 +121,8 @@
 // # Thread safety
 //
 // A Sandbox value is immutable after New returns; methods are safe
-// for concurrent use across goroutines. Apply mutates only the
-// caller-provided *exec.Cmd.
+// for concurrent use across goroutines. Apply, ApplyOffline, and
+// WarmUpGoModules mutate only the caller-provided *exec.Cmd (or, in
+// the case of WarmUpGoModules, exec.Cmd values it constructs
+// internally).
 package sandbox
