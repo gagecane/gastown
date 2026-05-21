@@ -91,6 +91,7 @@ type beadInfo struct {
 	Status       string           `json:"status"`
 	Assignee     string           `json:"assignee"`
 	Owner        string           `json:"owner,omitempty"`
+	CreatedBy    string           `json:"created_by,omitempty"`
 	Description  string           `json:"description"`
 	Labels       []string         `json:"labels,omitempty"`
 	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
@@ -360,36 +361,58 @@ func isSlingContextBeadInfo(info *beadInfo) bool {
 	return false
 }
 
-// isPolecatOwnedBeadInfo reports whether the bead's owner address identifies
-// a polecat ("<rig>/polecats/<name>"). Polecats are not allowed to dispatch
-// work — their job is to execute a slung task and return — so a bead they
-// filed must never be auto-slung back to a polecat.
+// isPolecatOwnedBeadInfo reports whether a bead was filed by a polecat
+// (either via owner = "<rig>/polecats/<name>" or via created_by =
+// "<rig>/polecats/<name>"). Polecats are not allowed to dispatch work —
+// their job is to execute a slung task and return — so a bead they filed
+// must never be auto-slung back to a polecat.
 //
 // gu-gal8: a polecat (casc_lambda/obsidian) self-created a bead (cala-akl)
 // for the same work as a user-filed bead (cala-xnv) that was already slung
 // to a different polecat. Both polecats raced to land the same change.
-// Self-created polecat beads bypass the existing identity / epic / label
-// filters because their shape (owner-only signal) was unguarded; this
-// helper closes that gap by parsing the owner field for the canonical
-// "<rig>/polecats/<name>" address.
+// The original gu-gal8 fix added an owner-based filter; this caught the
+// case where the polecat had explicitly set owner=<rig>/polecats/<name>.
 //
-// The owner is checked exactly — same parsing as isPolecatTarget — so
-// addresses with extra path segments (e.g. "rig/polecats/name/sub") or
-// non-polecat sublevels ("rig/witness", "rig/refinery") do not match.
-// Plain user owners (e.g. email addresses) are unaffected.
+// gu-pxxs (regression discovered in the auto-test-pr planning run on
+// 2026-05-21): four polecat-filed beads (gu-grkl, gu-h1fn, gu-2s03,
+// gu-id33) slipped past the owner-only filter because plain `bd create`
+// from inside a polecat session leaves owner as the polecat's git-config
+// email (a human address) and only stamps the polecat-shaped address
+// into the created_by field (populated from BD_ACTOR). The leaked beads
+// then became "ready" and the auto-dispatch loop slung them back to
+// polecats — exactly the contract violation gu-gal8 was supposed to
+// prevent. Extending the same address parser to also check created_by
+// closes that gap without disturbing the owner-only positive cases.
+//
+// Both fields are checked with identical parsing — same shape as
+// isPolecatTarget — so addresses with extra path segments (e.g.
+// "rig/polecats/name/sub") or non-polecat sublevels ("rig/witness",
+// "rig/refinery") do not match. Plain user owners (e.g. email addresses)
+// are unaffected.
 //
 // Not bypassed by --force — the contract violation is independent of
 // dispatch intent. If a polecat genuinely needs to file work, that work
-// should be filed by a human or the mayor.
+// should be filed by a human or the mayor (gt done --status ESCALATED is
+// the legitimate path when a polecat hits a missing prerequisite).
 func isPolecatOwnedBeadInfo(info *beadInfo) bool {
 	if info == nil {
 		return false
 	}
-	owner := strings.TrimSpace(info.Owner)
-	if owner == "" {
+	return isPolecatAddress(info.Owner) || isPolecatAddress(info.CreatedBy)
+}
+
+// isPolecatAddress reports whether s is exactly a canonical polecat
+// address: three slash-separated, non-empty segments where the middle
+// segment is the literal "polecats" — i.e. "<rig>/polecats/<name>".
+// Empty / whitespace-only / longer / shorter / mis-cased forms all
+// return false. Used by both the owner and created_by checks in
+// isPolecatOwnedBeadInfo (gu-gal8 / gu-pxxs).
+func isPolecatAddress(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
 		return false
 	}
-	parts := strings.Split(owner, "/")
+	parts := strings.Split(s, "/")
 	// Canonical polecat address has exactly 3 segments: rig, "polecats", name.
 	// Each must be non-empty.
 	if len(parts) != 3 {

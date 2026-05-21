@@ -1098,11 +1098,16 @@ func TestLoadRigCommandVars_AllPostSquash(t *testing.T) {
 	}
 }
 
-// TestIsPolecatOwnedBeadInfo verifies the gu-gal8 dispatch gate: beads whose
-// owner address matches "<rig>/polecats/<name>" must be rejected from polecat
-// dispatch. The owner field is parsed exactly — no substring or prefix match
-// — so adjacent shapes (witness/refinery sublevels, deeper paths, plain user
-// emails) must not trigger the filter.
+// TestIsPolecatOwnedBeadInfo verifies the gu-gal8 / gu-pxxs dispatch gate:
+// beads whose owner OR created_by address matches "<rig>/polecats/<name>"
+// must be rejected from polecat dispatch. Both fields are parsed exactly
+// — no substring or prefix match — so adjacent shapes (witness/refinery
+// sublevels, deeper paths, plain user emails) must not trigger the
+// filter. The created_by axis was added in gu-pxxs after four leaked
+// beads (gu-grkl, gu-h1fn, gu-2s03, gu-id33) showed that plain
+// `bd create` from a polecat session leaves owner as the human's git
+// email and only stamps the polecat address into created_by (via
+// BD_ACTOR).
 func TestIsPolecatOwnedBeadInfo(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1112,64 +1117,116 @@ func TestIsPolecatOwnedBeadInfo(t *testing.T) {
 		{"nil", nil, false},
 		{"empty info", &beadInfo{}, false},
 
-		// Positive: canonical "<rig>/polecats/<name>" addresses.
-		{"casc_lambda obsidian (cala-akl shape)", &beadInfo{
+		// Positive: canonical "<rig>/polecats/<name>" in owner.
+		{"owner: casc_lambda obsidian (cala-akl shape)", &beadInfo{
 			Title: "Replace SigV4 stub",
 			Owner: "casc_lambda/polecats/obsidian",
 		}, true},
-		{"gastown_upstream fury", &beadInfo{
+		{"owner: gastown_upstream fury", &beadInfo{
 			Title: "Some bead",
 			Owner: "gastown_upstream/polecats/fury",
 		}, true},
-		{"hyphenated rig + name", &beadInfo{
+		{"owner: hyphenated rig + name", &beadInfo{
 			Owner: "my-rig/polecats/quartz-2",
 		}, true},
 
-		// Negative: plain user owners (the common case).
-		{"email owner", &beadInfo{
-			Title: "Real work",
-			Owner: "canewiw@amazon.com",
+		// Positive: canonical "<rig>/polecats/<name>" in created_by — the
+		// gu-pxxs case. Owner is a plain human email; only created_by carries
+		// the polecat address (populated from BD_ACTOR by bd create).
+		{"created_by: gu-grkl shape (rust filed, owner=human)", &beadInfo{
+			Title:     "Prerequisite for Phase 0 task 11",
+			Owner:     "canewiw@amazon.com",
+			CreatedBy: "gastown_upstream/polecats/rust",
+		}, true},
+		{"created_by: gu-h1fn shape (chrome filed, owner=human)", &beadInfo{
+			Title:     "Prerequisite for Phase 0 task 3c",
+			Owner:     "canewiw@amazon.com",
+			CreatedBy: "gastown_upstream/polecats/chrome",
+		}, true},
+		{"created_by alone (no owner)", &beadInfo{
+			CreatedBy: "gastown_upstream/polecats/shiny",
+		}, true},
+		{"both fields polecat-shaped", &beadInfo{
+			Owner:     "rig/polecats/a",
+			CreatedBy: "rig/polecats/b",
+		}, true},
+
+		// Negative: plain user owners (the common case) AND a non-polecat
+		// created_by (mayor, witness, deacon, empty). Both axes are clean.
+		{"email owner, mayor created_by", &beadInfo{
+			Title:     "Real work",
+			Owner:     "canewiw@amazon.com",
+			CreatedBy: "mayor",
+		}, false},
+		{"email owner, empty created_by", &beadInfo{
+			Title:     "Real work",
+			Owner:     "canewiw@amazon.com",
+			CreatedBy: "",
 		}, false},
 		{"mayor owner (trailing slash, 2 segments)", &beadInfo{
 			Owner: "mayor/",
 		}, false},
-		{"empty owner", &beadInfo{
+		{"empty owner and created_by", &beadInfo{
 			Title: "No owner set",
-			Owner: "",
 		}, false},
-		{"whitespace-only owner", &beadInfo{
-			Owner: "   ",
+		{"whitespace-only owner and created_by", &beadInfo{
+			Owner:     "   ",
+			CreatedBy: "   ",
 		}, false},
 
-		// Negative: non-polecat sublevels under a rig.
-		{"witness sublevel", &beadInfo{
+		// Negative: created_by with non-polecat sublevels under a rig.
+		// (Mayor / witness / refinery / deacon authors are all legitimate.)
+		{"created_by: witness sublevel", &beadInfo{
+			CreatedBy: "gastown/witness",
+		}, false},
+		{"created_by: refinery sublevel", &beadInfo{
+			CreatedBy: "gastown/refinery",
+		}, false},
+		{"created_by: crew (3 segments, middle is 'crew')", &beadInfo{
+			CreatedBy: "gastown/crew/canewiw",
+		}, false},
+		{"created_by: bare mayor", &beadInfo{
+			CreatedBy: "mayor",
+		}, false},
+		{"created_by: deacon dog", &beadInfo{
+			CreatedBy: "deacon/dogs/cyc",
+		}, false},
+
+		// Negative: non-polecat sublevels under a rig (owner axis).
+		{"owner: witness sublevel", &beadInfo{
 			Owner: "gastown/witness",
 		}, false},
-		{"refinery sublevel", &beadInfo{
+		{"owner: refinery sublevel", &beadInfo{
 			Owner: "gastown/refinery",
 		}, false},
-		{"crew (3 segments, but middle segment is not 'polecats')", &beadInfo{
+		{"owner: crew (3 segments, middle is 'crew')", &beadInfo{
 			Owner: "gastown/crew/canewiw",
 		}, false},
 
 		// Negative: malformed shapes that look polecat-ish but aren't canonical.
-		{"deeper path beyond 3 segments", &beadInfo{
+		{"owner: deeper path beyond 3 segments", &beadInfo{
 			Owner: "rig/polecats/name/extra",
 		}, false},
-		{"missing rig segment", &beadInfo{
+		{"owner: missing rig segment", &beadInfo{
 			Owner: "/polecats/name",
 		}, false},
-		{"missing polecat name segment", &beadInfo{
+		{"owner: missing polecat name segment", &beadInfo{
 			Owner: "rig/polecats/",
 		}, false},
-		{"polecats-prefixed but not the literal segment", &beadInfo{
+		{"owner: polecats-prefixed but not the literal segment", &beadInfo{
 			Owner: "rig/polecats-and-friends/name",
 		}, false},
-		{"plural typo (polecat singular)", &beadInfo{
+		{"owner: plural typo (polecat singular)", &beadInfo{
 			Owner: "rig/polecat/name",
 		}, false},
-		{"capitalization differs (Polecats)", &beadInfo{
+		{"owner: capitalization differs (Polecats)", &beadInfo{
 			Owner: "rig/Polecats/name",
+		}, false},
+		{"created_by: deeper path beyond 3 segments", &beadInfo{
+			CreatedBy: "rig/polecats/name/extra",
+		}, false},
+		{"created_by: capitalization differs (Polecats)", &beadInfo{
+			CreatedBy: "rig/Polecats/name",
 		}, false},
 	}
 

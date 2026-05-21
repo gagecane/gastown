@@ -66,6 +66,25 @@ is_agent_owner() {
   return 1
 }
 
+# is_polecat_address <s> — exact match for the canonical polecat address shape
+# "<rig>/polecats/<name>" (3 non-empty segments, middle segment is the literal
+# "polecats"). Mirrors isPolecatAddress in internal/cmd/sling_helpers.go.
+# Used to detect both owner and created_by polecat self-attributions, since
+# `bd create` from a polecat session leaves owner as the human's git email
+# but stamps the polecat address into created_by via BD_ACTOR (gu-pxxs).
+is_polecat_address() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  [[ -z "$s" ]] && return 1
+  local seg1 seg2 seg3 seg4
+  IFS='/' read -r seg1 seg2 seg3 seg4 <<<"$s"
+  if [[ -n "$seg4" || -z "$seg1" || -z "$seg3" || "$seg2" != "polecats" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 # is_known_rig <name> — checks $RIGS array for membership.
 is_known_rig() {
   local name="$1"
@@ -114,12 +133,13 @@ for rig in "${RIGS[@]}"; do
   fi
 
   # Sort by priority (P1 first; treat missing priority as 99 so it sinks).
-  # Output: tab-separated id<TAB>owner<TAB>description (description is the rest of the line).
-  # We tolerate missing fields by defaulting to "".
+  # Output: tab-separated id<TAB>owner<TAB>created_by<TAB>description (description is the rest of the line).
+  # We tolerate missing fields by defaulting to "". created_by is needed to
+  # detect polecat-filed beads whose owner is a human email (gu-pxxs).
   bead_lines=$(jq -r '
     sort_by(.priority // 99)
     | .[]
-    | [.id, (.owner // ""), (.description // "" | gsub("\n"; ""))]
+    | [.id, (.owner // ""), (.created_by // ""), (.description // "" | gsub("\n"; ""))]
     | @tsv
   ' <<<"$ready_json") || {
     log "rig=$rig: failed to parse bd ready output"
@@ -133,7 +153,7 @@ for rig in "${RIGS[@]}"; do
   rig_skipped=0
   rig_failed=0
 
-  while IFS=$'\t' read -r bead_id owner description; do
+  while IFS=$'\t' read -r bead_id owner created_by description; do
     [[ -z "$bead_id" ]] && continue
 
     # Restore newlines that we tunneled through tsv.
@@ -142,6 +162,18 @@ for rig in "${RIGS[@]}"; do
     # Client-side filter: agent-owned beads (orchestrator state — owning agent
     # handles them, not a polecat). See gs-myq.
     if is_agent_owner "$owner"; then
+      rig_skipped=$((rig_skipped + 1))
+      continue
+    fi
+
+    # Client-side filter: polecat-filed beads (self-creation contract violation).
+    # Polecats execute work, they do not dispatch it. The original gu-gal8 fix
+    # caught the owner axis; gu-pxxs added the created_by axis after four
+    # polecat-filed beads (gu-grkl, gu-h1fn, gu-2s03, gu-id33) leaked through
+    # with a human owner (the polecat’s git email) and a polecat created_by
+    # (populated from BD_ACTOR by `bd create`). `gt sling` enforces the same
+    # check server-side; this client-side skip just avoids the noisy error.
+    if is_polecat_address "$owner" || is_polecat_address "$created_by"; then
       rig_skipped=$((rig_skipped + 1))
       continue
     fi

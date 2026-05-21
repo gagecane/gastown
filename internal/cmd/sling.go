@@ -699,15 +699,17 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("refusing to sling bead %s: %q is a sling-context wrapper (label gt:sling-context) — not a work item", beadID, info.Title)
 	}
 
-	// Polecat-owned bead guard (gu-gal8). A bead whose owner address matches
-	// "<rig>/polecats/<name>" was self-filed by a polecat. Polecats execute
-	// work, they do not dispatch it; auto-slinging their self-created beads
-	// produces racing duplicates with user-filed work for the same change
-	// (cala-akl vs cala-xnv 2026-05-19 incident). Not bypassed by --force —
-	// the contract violation is independent of dispatch intent.
+	// Polecat-filed bead guard (gu-gal8 / gu-pxxs). A bead whose owner OR
+	// created_by address matches "<rig>/polecats/<name>" was self-filed by
+	// a polecat. Polecats execute work, they do not dispatch it;
+	// auto-slinging their self-created beads produces racing duplicates
+	// with user-filed work for the same change (cala-akl vs cala-xnv
+	// 2026-05-19 incident; gu-grkl/gu-h1fn/gu-2s03/gu-id33 2026-05-21
+	// auto-test-pr planning regression). Not bypassed by --force — the
+	// contract violation is independent of dispatch intent.
 	if isPolecatOwnedBeadInfo(info) {
-		return fmt.Errorf("refusing to sling bead %s: %q is owned by a polecat (%s) — polecats may not dispatch their own work.\nReassign the owner first if this bead really should be dispatched",
-			beadID, info.Title, info.Owner)
+		return fmt.Errorf("refusing to sling bead %s: %q was filed by a polecat (owner=%q, created_by=%q) — polecats may not dispatch their own work.\nReassign the owner / re-file as a human or mayor if this bead really should be dispatched",
+			beadID, info.Title, info.Owner, info.CreatedBy)
 	}
 
 	// Guard against slinging deferred beads (gt-1326mw).
