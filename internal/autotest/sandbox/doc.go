@@ -2,8 +2,8 @@
 // auto-test-pr quality gates (coverage-delta, mutant runner, flakiness
 // rerun, tautology linter, gitleaks). It strips credential environment
 // variables, pins each subprocess's working directory to the polecat
-// worktree, and (in later phases) drops network egress and enforces
-// per-target wall-clock caps.
+// worktree, drops network egress (after a module-cache warm-up), and
+// enforces per-target and cycle-wide wall-clock caps.
 //
 // # ADR — sandbox substrate (Phase 0 task 5a-pre)
 //
@@ -50,8 +50,8 @@
 //     consumed from any gate runner without creating import cycles.
 //   - Callers retain ownership of the *exec.Cmd lifecycle; the
 //     sandbox does not Run/Start the command itself, only configures
-//     it. This keeps composition with context.Context, cmd.Stdout
-//     wiring, and process-group handling under the caller's control.
+//     it (5a/5b) or runs it through a thin wall-clock wrapper that
+//     still hands back the *exec.Cmd lifecycle to the caller (5c).
 //
 // # Surface area (Phase 0 task 5a)
 //
@@ -96,8 +96,44 @@
 //     subsequent ApplyOffline `go test -count=10 ./...` makes zero
 //     network calls.
 //
-// 5c adds the wall-clock cap and an integration test of the combined
-// wrapper. It extends the same Sandbox value.
+// # Surface area (Phase 0 task 5c)
+//
+// 5c adds wall-clock enforcement layered on top of 5a/5b. The
+// synthesis (D10) fixes the v1 budget: 5-min per-target, 30-min
+// cycle-wide; D12 adds the rule that an overrun does not consume
+// the per-rig cadence budget. 5c provides three primitives the
+// gate runners compose into a single "run subprocess under cap"
+// idiom:
+//
+//   - RunWithTimeout: starts an *exec.Cmd configured by Apply or
+//     ApplyOffline, enforces a per-target wall-clock cap, and
+//     reaps the entire subprocess group on overrun (so
+//     `go test`'s test-binary children don't survive the kill).
+//     Distinguishes per-target overrun (ErrPerTargetTimeout) from
+//     caller-supplied ctx cancellation (returns the ctx error
+//     unchanged). Returns whatever output the subprocess wrote
+//     before the kill so diagnostics survive.
+//   - CycleBudget: tracks accumulated wall-clock across a full
+//     cycle. Acquire returns the cap to apply for the next run
+//     (truncating to remaining-budget); Charge debits the actual
+//     elapsed wall-clock. Once exhausted, Acquire returns
+//     ErrCycleBudgetExhausted and further runs are refused before
+//     exec.
+//   - RunWithBudget: composes RunWithTimeout with a CycleBudget so
+//     gate runners pass a single Budget through the cycle and get
+//     per-target cap + cycle-wide enforcement for free.
+//
+// Defaults are exported as DefaultPerTargetCap = 5*time.Minute and
+// DefaultCycleBudget = 30*time.Minute, matching D10 verbatim. Gate
+// runners are expected to use these defaults unless an upstream
+// formula override flows in.
+//
+// 5c also ships an integration test
+// (TestIntegration_5a5b5c_HandRolledFixture) that exercises the
+// combined 5a + 5b + 5c wrapper against a hand-rolled stdlib-only
+// Go fixture: a fast test passes under all three primitives, a
+// slow test is killed by the per-target cap, and a third run on an
+// already-exhausted cycle budget is refused before exec.
 //
 // # Usage
 //
@@ -109,12 +145,14 @@
 //	if err := sb.WarmUpGoModules(ctx, "go"); err != nil {
 //	    return err
 //	}
-//	// Run gates with no network access.
+//	budget := sandbox.NewCycleBudget(sandbox.DefaultCycleBudget)
+//	// Run a gate with no network access and a per-target cap.
 //	cmd := exec.CommandContext(ctx, "go", "test", "-count=10", "./...")
 //	if err := sb.ApplyOffline(cmd); err != nil {
 //	    return err
 //	}
-//	if err := cmd.Run(); err != nil {
+//	out, err := sandbox.RunWithBudget(ctx, cmd, budget, sandbox.DefaultPerTargetCap)
+//	if err != nil {
 //	    return err
 //	}
 //
@@ -124,5 +162,7 @@
 // for concurrent use across goroutines. Apply, ApplyOffline, and
 // WarmUpGoModules mutate only the caller-provided *exec.Cmd (or, in
 // the case of WarmUpGoModules, exec.Cmd values it constructs
-// internally).
+// internally). CycleBudget is protected by an internal mutex so
+// the rare concurrent gate (e.g. flakiness rerun spawned in a
+// goroutine) is safe.
 package sandbox
