@@ -1150,6 +1150,14 @@ func (d *Daemon) heartbeat(state *State) {
 	// This reaper bridges that gap with a conservative timeout. See gu-1x0j.
 	d.reapDeadPolecatWisps()
 
+	// 12a-ii. Reap stuck in_progress/hooked wisps belonging to dead witness or
+	// refinery sessions. Same shape as the polecat reaper above but for the
+	// rig-level agents that don't write heartbeat files: when a witness or
+	// refinery tmux session dies between patrol cycles, its hooked patrol
+	// wisp stays HOOKED forever and freezes the next patrol cycle. Uses
+	// bead.updated_at age as the staleness proxy. See gu-s009.
+	d.reapDeadAgentWisps()
+
 	// 12b. Reap idle polecat sessions to prevent API slot burn.
 	// Polecats transition to IDLE after gt done but sessions stay alive.
 	// Kill sessions that have been idle longer than the configured threshold.

@@ -328,6 +328,14 @@ type DaemonThresholds struct {
 	// its Stop hook to signal completion. See gu-1x0j.
 	DeadPolecatReapTimeout string `json:"dead_polecat_reap_timeout,omitempty"`
 
+	// DeadAgentReapTimeout is how long a witness/refinery's tmux session must be
+	// dead AND its hooked patrol wisp's last update must be aged before the wisp
+	// is auto-reset to open (default "2h"). Witness/refinery roles do not write
+	// heartbeat files, so the staleness proxy is bead.updated_at age. Prevents
+	// stuck patrol wisps from freezing the role's patrol cadence when its tmux
+	// session dies between cycles. A value <=0 disables. See gu-s009.
+	DeadAgentReapTimeout string `json:"dead_agent_reap_timeout,omitempty"`
+
 	// PolecatSelfTerminate controls whether polecats kill their own session after
 	// gt done completes (default false). When true, polecats terminate 3 seconds
 	// after work submission instead of transitioning to IDLE. This gives fresh

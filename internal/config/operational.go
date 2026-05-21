@@ -47,6 +47,12 @@ const (
 	// when a polecat hard-crashes (OOM, tmux kill) and can't run its Stop hook.
 	// See gu-1x0j.
 	DefaultDeadPolecatReapTimeout          = 1 * time.Hour
+	// DefaultDeadAgentReapTimeout is how long a witness/refinery's tmux session must be
+	// dead AND its hooked patrol wisp's last update must be aged before the wisp is
+	// auto-reset to open. Witness/refinery roles do not write heartbeat files, so the
+	// staleness proxy is bead.updated_at age. Prevents stuck patrol wisps from freezing
+	// the role's patrol cadence when its tmux session dies between cycles. See gu-s009.
+	DefaultDeadAgentReapTimeout            = 2 * time.Hour
 	DefaultMaxDogPoolSize                  = 4
 	DefaultMaxLifecycleMessageAge          = 6 * time.Hour
 	DefaultSyncFailureEscalationThreshold  = 3
@@ -344,6 +350,19 @@ func (d *DaemonThresholds) DeadPolecatReapTimeoutD() time.Duration {
 		return ParseDurationOrDefault(d.DeadPolecatReapTimeout, DefaultDeadPolecatReapTimeout)
 	}
 	return DefaultDeadPolecatReapTimeout
+}
+
+// DeadAgentReapTimeoutD returns the configured or default dead-agent reap timeout
+// for non-polecat agents (witness, refinery). When such an agent's tmux session
+// has been dead AND its hooked patrol wisp's last update is older than this
+// threshold, the wisp is auto-reset to open with cleared assignee so the role's
+// next session can pick up a fresh patrol. Default 2 hours. A value <=0 disables
+// the reaper. See gu-s009.
+func (d *DaemonThresholds) DeadAgentReapTimeoutD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.DeadAgentReapTimeout, DefaultDeadAgentReapTimeout)
+	}
+	return DefaultDeadAgentReapTimeout
 }
 
 // DogIdleRemoveTimeoutD returns the configured or default dog idle remove timeout.
