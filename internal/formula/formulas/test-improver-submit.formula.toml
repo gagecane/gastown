@@ -1,0 +1,118 @@
+description = """
+Submit-step expansion for `mol-polecat-work-test-improver`. Replaces the
+parent's generic `submit-and-exit` with an Auto-Test-PR-specific variant
+that pins the two MR-bead labels mandated by `.designs/auto-test-pr/
+synthesis.md` Round 3 fix #6:
+
+- `gt:auto-test-pr` — audit-trail backstop, branch-GC scope.
+- `rig:<target_rig>` — O(1) lookup key from MR-bead to per-rig state bead
+  used by Mayor's 3c cycle-close handler.
+
+The base `gt:merge-request` label is added unconditionally by
+`gt done` itself (see `internal/cmd/done.go::buildMRLabels` and the
+`done_mr_labels_test.go` contract test). The polecat passes the
+auto-test-pr-specific labels via `--label`; `buildMRLabels` dedups and
+validates them."""
+
+formula = "test-improver-submit"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "{target}"
+title = "Submit auto-test-pr work and self-clean"
+acceptance = """
+`gt done --pre-verified --target {{base_branch}} --label gt:auto-test-pr
+--label rig:{{target_rig}}` ran to completion. The resulting MR bead
+carries all three labels (`gt:merge-request` + the two passed via
+`--label`); the polecat's session has exited.
+"""
+description = """
+Submit your work and clean up. You cease to exist after this step.
+
+**Pre-flight: Verify you have actual work to submit (HARD GATE):**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline
+```
+This MUST show at least 1 commit. If it shows nothing, do NOT run
+`gt done` — the seven gates rejected every candidate test, no MR is
+warranted. Run `gt done --status DEFERRED` instead so the dispatch
+bead enters the cooldown path and Mayor's per-file 21d rejection
+window kicks in.
+
+**Pre-flight: Verify `target_rig` is set (HARD GATE — Round 3 fix #6):**
+The dispatch envelope MUST have populated `target_rig` so the 3c
+cycle-close handler can do an O(1) state-bead lookup off the
+`rig:<value>` label. If `{{target_rig}}` is empty or unresolved
+(template literal still showing braces), DO NOT submit. Mail Witness:
+```bash
+gt mail send <rig>/witness -s "HELP: target_rig unset on auto-test-pr cycle" \\
+  -m "Issue: {{issue}}\\nDispatch envelope missing target_rig — \\
+cannot label MR for 3c cycle-close handler."
+```
+
+**Run gt done with the auto-test-pr label contract:**
+
+```bash
+gt done --pre-verified --target {{base_branch}} \\
+  --label gt:auto-test-pr \\
+  --label rig:{{target_rig}}
+```
+
+The two `--label` flags ensure the resulting MR bead carries:
+
+1. `gt:merge-request` — added unconditionally by `gt done` (the
+   refinery's queue marker; see `internal/cmd/done.go::buildMRLabels`).
+2. `gt:auto-test-pr` — audit-trail backstop, also used by
+   `mol-auto-test-pr-branch-gc` to scope its sweep to auto-test-pr
+   branches only.
+3. `rig:{{target_rig}}` — O(1) linkage to the per-rig state bead. The
+   3c cycle-close handler reads this label off the MR bead at merge /
+   close-unmerged time and CAS-transitions the rig's
+   `<target_rig>-auto-test-state` accordingly. Without it, the handler
+   must walk the bead graph back through the dispatch bead.
+
+Unit tests in `internal/cmd/done_mr_labels_test.go` lock in the
+contract: `buildMRLabels(["gt:auto-test-pr", "rig:<rig>"])` MUST return
+`["gt:merge-request", "gt:auto-test-pr", "rig:<rig>"]` (in that order,
+deduplicated).
+
+You should see output like:
+```
+✓ Work submitted to merge queue
+  MR ID: gt-xxxxx
+  Source: auto-test/{{target_rig}}/{{issue}}
+  Target: {{base_branch}}
+  Labels: gt:merge-request, gt:auto-test-pr, rig:{{target_rig}}
+✓ Sandbox nuked
+✓ Session exiting
+```
+
+**What happens next (not your concern):**
+
+- Refinery batches MRs and runs gates on the merged stack.
+- On merge: Mayor's 3c cycle-close handler reads the `rig:{{target_rig}}`
+  label off the MR bead, CAS-transitions
+  `<target_rig>-auto-test-state` from `mr-pending` → `cooled-down`,
+  and parses any `BUG-DISCOVERED:` NOTES on the work bead (filing a
+  P2 bug bead in the rig if present).
+- On close-unmerged: 3c handler appends a rejection record (with
+  `target_path` for the per-file 21d cooldown) and increments the
+  town-bead circuit-breaker counter; ≥3 closes in any rolling 7-day
+  window auto-pauses the rig (Q6 SEV-2).
+
+You are NOT involved in any of that. You're gone. Done means gone.
+"""
+
+[vars]
+[vars.issue]
+description = "Inherited from parent mol-polecat-work — the work bead ID."
+required = true
+
+[vars.base_branch]
+description = "Inherited from parent mol-polecat-work — base branch (default main)."
+default = "main"
+
+[vars.target_rig]
+description = "Rig the auto-test-pr cycle is targeting (e.g. gastown_upstream). Read from dispatch envelope."
+required = true

@@ -1,0 +1,92 @@
+description = """
+Polecat workflow for the Auto-Test-PR cycle (Phase 0 task 3a, mode=create).
+
+Extends `mol-polecat-work` and replaces the parent's `implement` step with
+the seven hard quality gates plus the bug-discovery NOTES protocol from
+`test-improver-quality-gates.formula.toml`. This is the `mode=create`
+path; `mode=revise` will be added in Phase 0 task 3b.
+
+## What This Formula Skeleton Is
+
+This file lands the formula but **no molecule registers it** (per the bead
+acceptance criterion). It is wired up by:
+
+- `mol-auto-test-pr-cycle` (Phase 0 task 4) — Mayor's standing patrol that
+  picks targets and dispatches work to a polecat with this formula.
+- `mol-pr-feedback-patrol` (Phase 0 task 7 / Phase 2) — re-dispatches in
+  `mode=revise` on reviewer comments.
+
+Until those land, this formula is inert: no automated dispatcher attaches
+it, the test suite covers it, and the embedded formula resolution path
+(`extends = ["mol-polecat-work"]` + `compose.expand`) is exercised by the
+formula-validation tests.
+
+## Round 3 fix #6 — Label Contract
+
+At `gt done` time the polecat MUST label the resulting MR-bead with BOTH:
+
+1. `gt:auto-test-pr` — the audit-trail backstop, also used by the branch
+   GC patrol (`mol-auto-test-pr-branch-gc`) to scope its work.
+2. `rig:<target_rig>` — the O(1) linkage from MR-bead to per-rig state
+   bead used by the 3c cycle-close handler. Without it the handler would
+   have to walk the bead graph back through the dispatch bead.
+
+This is enforced via the `--label` flag on `gt done`:
+
+```bash
+gt done --pre-verified --target {{base_branch}} \\
+  --label gt:auto-test-pr \\
+  --label rig:{{target_rig}}
+```
+
+The base `gt:merge-request` label is added unconditionally by `gt done`
+itself (see `internal/cmd/done.go::buildMRLabels`). Unit tests in
+`internal/cmd/done_mr_labels_test.go` lock in the contract.
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Any of gates 4a-4g fails | HARD FAIL — exit cycle, no MR. The dispatch bead stays open; Mayor's circuit-breaker counts the close-unmerged. |
+| Source under test is buggy (test-of-correct-behavior fails on `main`) | Emit `BUG-DISCOVERED:` NOTES via `bd update --notes` (synthesis §3a). DO NOT push a fix; let Mayor's 3c handler file a P2 bug bead. |
+| Sandbox wall-clock cap hit | Sandbox wrapper kills the gate process. Cycle exits with no MR; branch GC patrol cleans up the stale `auto-test/<rig>/<bead>` branch after 7d. |
+| `target_rig` formula var missing | Polecat MUST refuse to call `gt done` — without the rig label the 3c handler cannot find the state bead. Mail Witness with HELP. |
+
+## Variables
+
+In addition to the parent `mol-polecat-work` vars (`issue`, `base_branch`,
+`setup_command`, `typecheck_command`, `test_command`, `lint_command`,
+`build_command`, `gates_commands`), this formula adds:
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| target_rig | dispatch envelope | Rig the auto-test-pr cycle is targeting (e.g., `gastown_upstream`). Used as the `rig:<value>` label on the resulting MR bead. Required — the formula refuses to submit without it. |"""
+
+formula = "mol-polecat-work-test-improver"
+extends = ["mol-polecat-work"]
+type = "workflow"
+version = 1
+
+[compose]
+[[compose.expand]]
+target = "implement"
+with = "test-improver-quality-gates"
+
+[[compose.expand]]
+target = "submit-and-exit"
+with = "test-improver-submit"
+
+[vars]
+[vars.base_branch]
+description = "Inherited from parent mol-polecat-work — base branch (default main)."
+default = "main"
+
+[vars.target_rig]
+description = """
+The rig this auto-test-pr cycle targets. Read from the dispatch envelope's
+`target_rig` field. The polecat passes it to `gt done` as
+`--label rig:<target_rig>` so Mayor's 3c cycle-close handler can resolve
+the per-rig state bead in O(1). Required: the formula's submit step
+refuses to run without it (Round 3 fix #6 in
+.designs/auto-test-pr/synthesis.md)."""
+required = true

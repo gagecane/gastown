@@ -72,7 +72,47 @@ var (
 	doneSkipVerify    bool
 	doneReason        string
 	doneDeferUntil    string
+	doneExtraLabels   []string
 )
+
+// MRBaseLabel is the canonical label every merge-request bead carries. It is
+// the queue marker the refinery scans for and MUST always be present on any
+// MR bead created by `gt done`. Extra labels (passed via --label) are appended
+// alongside but never replace it. See buildMRLabels.
+const MRBaseLabel = "gt:merge-request"
+
+// buildMRLabels assembles the label set written onto a merge-request bead at
+// `gt done` time. The base "gt:merge-request" label is always present (it is
+// the queue marker the refinery scans for); extras passed via --label
+// (typically by formulas like mol-polecat-work-test-improver that need
+// downstream lookups via "gt:auto-test-pr" + "rig:<target_rig>", per Round 3
+// fix #6 in .designs/auto-test-pr/synthesis.md) are appended in order.
+//
+// Empty / whitespace-only entries are dropped silently so a formula passing
+// an unset variable like --label "rig:" doesn't poison the bead. Duplicates
+// (including duplicates of MRBaseLabel itself) are removed; first occurrence
+// wins so the slice order is stable and tests can assert by index. The
+// returned slice is always non-nil and starts with MRBaseLabel.
+func buildMRLabels(extras []string) []string {
+	labels := make([]string, 0, 1+len(extras))
+	seen := make(map[string]struct{}, 1+len(extras))
+	add := func(label string) {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			return
+		}
+		if _, dup := seen[label]; dup {
+			return
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	add(MRBaseLabel)
+	for _, l := range extras {
+		add(l)
+	}
+	return labels
+}
 
 // defaultDeferredOffset is the cooldown applied to DEFERRED beads when the
 // polecat does not specify --defer-until. Without this, deacon's stale-hooks
@@ -140,6 +180,10 @@ func init() {
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
 	doneCmd.Flags().StringVar(&doneDeferUntil, "defer-until", "", "For --status=DEFERRED: when the bead becomes dispatchable again (e.g., +6h, +1d, tomorrow). Default: "+defaultDeferredOffset)
+	doneCmd.Flags().StringSliceVar(&doneExtraLabels, "label", nil,
+		"Extra label to add to the MR bead (repeatable, e.g. --label gt:auto-test-pr "+
+			"--label rig:gastown_upstream). The base \"gt:merge-request\" label is "+
+			"always added.")
 
 	rootCmd.AddCommand(doneCmd)
 }
@@ -1461,7 +1505,7 @@ afterSafetyNet:
 
 			mrIssue, err := bd.Create(beads.CreateOptions{
 				Title:       title,
-				Labels:      []string{"gt:merge-request"},
+				Labels:      buildMRLabels(doneExtraLabels),
 				Priority:    priority,
 				Description: description,
 				Ephemeral:   true,

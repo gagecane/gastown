@@ -1,0 +1,318 @@
+description = """
+Quality-gate expansion for `mol-polecat-work-test-improver` (Phase 0 task 3a).
+
+Replaces the parent's `implement` step with the seven hard gates plus the
+bug-discovery NOTES protocol mandated by `.designs/auto-test-pr/synthesis.md`.
+This is the `mode=create` path: the polecat reads its dispatch envelope,
+writes new `*_test.go` files only, and walks the gates in order. Every gate
+is a HARD FAIL — a single failure terminates the cycle without producing an
+MR.
+
+## Gate Contract (synthesis §"Polecat formula", table 4a-4g)
+
+| Step | Gate | Fail mode |
+|------|------|-----------|
+| 4a   | coverage-delta (branch coverage) | hard fail if Δ ≤ 0 |
+| 4b   | synthetic-mutant sanity (≤5 mutants/test, AST-aware) | hard fail if any mutant survives |
+| 4c   | flakiness rerun (`go test -count=10 -run="<exact-test-names>"`) | hard fail on any flake |
+| 4d   | tautology linter (4 sub-rules) | hard fail |
+| 4e   | pre-push gitleaks scan | hard fail; SEV-2 (Q6) |
+| 4f   | output allow-list verifier | hard fail |
+| 4g   | size-budget enforcer (≤3 files, ≤200 added test LOC) | hard fail |
+
+All gates run through the hardened sandbox wrapper (`internal/autotest/sandbox`,
+Phase 0 tasks 5a-c): credential-strip + CWD-pin + network-drop after warm-up
++ 5-min wall-clock per target / 30-min cycle-wide cap.
+
+## Bug-Discovery NOTES Protocol (synthesis §3a, PRD Non-Goal "not a code-fixing tool")
+
+If, while iterating, the polecat writes a candidate test that fails on `main`
+*as written* (i.e., the test encodes correct behavior but the source is
+buggy), the polecat MUST exit with a structured `BUG-DISCOVERED:` NOTES
+section instead of pushing a fix. Mayor's 3c cycle-close handler parses the
+NOTES and files a separate `<rig>-bug-from-auto-test-NNN` P2 bead linked to
+the cycle's MR bead. This is the explicit boundary between "test improvement"
+and "code fixing"."""
+
+formula = "test-improver-quality-gates"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "{target}.write-tests"
+title = "Write candidate unit tests"
+acceptance = """
+Candidate `*_test.go` files staged in the worktree, each newly-added
+top-level `Test*` function carrying the provenance marker
+`// gt:auto-test-pr origin=<bead-id> covers=<file:line>`.
+"""
+description = """
+Read the dispatch envelope (`args.targets[]`, `conventions_sheet_path`,
+`size_budget`, `language`) and the rig's
+`.gt/auto-test-pr/conventions.md` BEFORE writing anything. The conventions
+sheet is the source of truth for what the polecat may emit:
+
+- **Unit tests only** — `Benchmark*`, `Example*`, `Fuzz*`, integration,
+  e2e, and load tests are OUT (PRD Non-Goal NG2). Gate 4f rejects them.
+- **Same-package `*_test.go` only** — never under `integration/`, `e2e/`,
+  `test/`, or with `//go:build integration`. Gate 4f rejects them.
+- **Churn-proximity preference** (PRD Non-Goal NG5) — for each target
+  file, the dispatch envelope sorts `uncovered_branches[]` by line-distance
+  to recent-churn ranges. Walk them in that order; do not chase legacy
+  uncovered branches geographically far from recent churn.
+- **Provenance marker on EVERY new top-level test function** (D8):
+  ```go
+  // gt:auto-test-pr origin=<bead-id> covers=<file:line>
+  func TestX_<scenario>(t *testing.T) { ... }
+  ```
+  This is the audit-trail backstop; gate 4f and the marker test in
+  `internal/autotestpr/template_test.go` enforce it.
+- **Size budget** — at most `args.size_budget.max_files` files (default 3)
+  and `args.size_budget.max_loc` added test LOC (default 200). Gate 4g
+  enforces this.
+
+Write the tests; do NOT commit them yet. Gates 4a-g run on the staged diff
+so a single failure does not pollute the branch history.
+
+If, while writing a candidate test, the test fails on the unmodified `main`
+*as written* — meaning the source under test is buggy and your test encodes
+the correct behavior — STOP. Do NOT push a fix. Go to the
+`bug-discovered` step instead and emit the structured NOTES section.
+"""
+
+[[template]]
+id = "{target}.gate-coverage-delta"
+title = "Gate 4a — coverage-delta (branch mode)"
+needs = ["{target}.write-tests"]
+acceptance = """
+`internal/autotest/coverage` reports a positive **branch** coverage delta
+for every target file in `args.targets[]`. The provenance marker comment
+alone does not satisfy this — the coverage tool must observe new branches
+exercised by the new tests.
+"""
+description = """
+HARD FAIL gate. Run the coverage-delta tool against the staged diff in
+branch mode (parsed via `golang.org/x/tools/cover`):
+
+```bash
+go test -coverprofile=/tmp/cover.before.out -covermode=count ./<package>...
+# stage the candidate tests
+go test -coverprofile=/tmp/cover.after.out -covermode=count ./<package>...
+# delta tool walks both profiles in branch mode
+```
+
+If branch delta is `≤ 0` for ANY targeted file, the gate fails. A test that
+runs the function-under-test but does not assert on a NEW branch is a
+covered-line increase without a covered-branch increase and MUST be
+rejected — that is the "tautology around a covered line" failure mode the
+PRD calls out.
+
+Gate runs through the sandbox wrapper (`internal/autotest/sandbox`); test
+execution happens after the network-drop step so a flaky test cannot reach
+out to live services. See Phase 0 tasks 5a-c."""
+
+[[template]]
+id = "{target}.gate-synthetic-mutant"
+title = "Gate 4b — synthetic-mutant sanity"
+needs = ["{target}.gate-coverage-delta"]
+acceptance = """
+For every newly-added test function, the AST-aware mutant runner generates
+≤5 mutants on the function-under-test and confirms that at least one mutant
+makes the new test fail. If a test still passes when its target line is
+mutated, that test is not actually exercising what it claims to.
+"""
+description = """
+HARD FAIL gate. Run `internal/autotest/mutant` (Phase 0 task 6b) against
+the staged tests:
+
+1. Parse the function(s) under test via `go/ast`.
+2. Generate ≤5 simple mutants per test (e.g., flip boolean literals,
+   substitute return values, invert comparisons). The mutant runner is
+   AST-aware so it does not mutate fields the test does not actually
+   assert on.
+3. Run the new tests against each mutant in `os.MkdirTemp` (NOT the
+   worktree — keeps `git status` clean and prevents accidental commits of
+   mutated source).
+4. PASS if at least one mutant fails the new test. FAIL if every mutant
+   still passes — the new test is a tautology.
+
+Sandbox wrapper: same as gate 4a."""
+
+[[template]]
+id = "{target}.gate-flakiness"
+title = "Gate 4c — flakiness rerun (count=10, exact tests, direct package only)"
+needs = ["{target}.gate-synthetic-mutant"]
+acceptance = """
+`go test -count=10 -run="<exact-test-names>" ./<direct-package>` passes
+10/10 times. Any flake — even one fail in ten — fails the gate.
+"""
+description = """
+HARD FAIL gate. Run ONLY the new tests, ten times, in the direct package:
+
+```bash
+go test -count=10 -run='^(TestX_a|TestX_b|TestX_c)$' ./internal/cmd/foo
+```
+
+- `-count=10`: rerun ten times to surface time/order-dependent flakes.
+- `-run='^(...)$'`: exact-match the new test names. Do NOT widen the
+  pattern — running the whole suite ten times is the Refinery's job, not
+  the polecat's.
+- `./<direct-package>`: only the package containing the new tests. The
+  full repo is the MQ's responsibility.
+
+Gates pass only on a 10/10 green bar. Sandbox wrapper applies — the
+network is dropped after `go mod download` so flakes from a flaky
+upstream service cannot mask test bugs."""
+
+[[template]]
+id = "{target}.gate-tautology-linter"
+title = "Gate 4d — tautology linter (4 sub-rules)"
+needs = ["{target}.gate-flakiness"]
+acceptance = """
+`internal/autotest/tautology` (Phase 0 task 6c) reports zero violations
+across all four sub-rules on every newly-added test function.
+"""
+description = """
+HARD FAIL gate. The tautology linter rejects tests that do not actually
+assert on the function under test. Four sub-rules:
+
+(i)  At least one assertion in the test must depend on the SUT's return
+     value or an observable side effect (e.g. a stub/mock receiver). A
+     test that calls the SUT and then asserts only on inputs is
+     tautological.
+(ii) Reject tests whose every assertion is literal-vs-literal (e.g.
+     `assert.Equal("x", "x")` or constant-vs-constant). These pass
+     regardless of what the SUT does.
+(iii)Reject tests whose ONLY assertions against the SUT's output are
+     `NotNil` / `NotEmpty` / truthy. These pass for almost any
+     implementation including the buggy one.
+(iv) Reject `assert(true)` / `expect(x).toBe(x)` / zero-assertion tests.
+
+The linter runs on the AST of every newly-added top-level `Test*`
+function. Sandbox wrapper applies."""
+
+[[template]]
+id = "{target}.gate-gitleaks"
+title = "Gate 4e — pre-push gitleaks scan"
+needs = ["{target}.gate-tautology-linter"]
+acceptance = """
+`gitleaks detect --no-banner --redact` reports zero findings on the
+staged diff.
+"""
+description = """
+HARD FAIL gate. SEV-2 (Q6 in synthesis). Run gitleaks on the staged diff
+(NOT the whole repo — that is a separate audit job):
+
+```bash
+gitleaks detect --no-banner --redact --staged
+```
+
+If any secret is detected, fail immediately and emit a `BUG-DISCOVERED:`
+NOTES section describing the leak (without echoing the secret value into
+the bead body — gitleaks `--redact` is for the polecat's terminal; the
+NOTES must reference the leak by file:line only). Mayor's cycle-close
+handler files a SEV-2 bug bead.
+
+Sandbox wrapper applies — gitleaks runs offline against the staged diff."""
+
+[[template]]
+id = "{target}.gate-output-allowlist"
+title = "Gate 4f — output allow-list verifier"
+needs = ["{target}.gate-gitleaks"]
+acceptance = """
+Every changed file in the staged diff matches `**/*_test.go` AND is NOT
+under `integration/`, `e2e/`, or `test/` AND has no `//go:build
+integration` build tag. Every newly-added top-level test function matches
+`func Test*(t *testing.T)`.
+"""
+description = """
+HARD FAIL gate. The polecat is constrained to writing same-package unit
+tests ONLY. Walk the staged diff:
+
+1. Reject any file path that does not match `**/*_test.go`. A polecat
+   that touches non-test source code is out of scope (PRD Non-Goal:
+   "not a code-fixing tool") — see the bug-discovered protocol instead.
+2. Reject any file under `integration/`, `e2e/`, `test/`, or with
+   `//go:build integration`. Per PRD Non-Goal NG2, integration / e2e /
+   load tests are OUT.
+3. For each newly-added top-level test function, reject anything that
+   does not match the regex `^Test[A-Z_].*\\(t \\*testing\\.T\\)$`:
+   `Benchmark*`, `Example*`, `Fuzz*`, table-driven helpers — none are
+   permitted at the top level.
+4. Verify the provenance marker (D8) appears on every newly-added top-
+   level test function exactly once.
+
+Sandbox wrapper applies."""
+
+[[template]]
+id = "{target}.gate-size-budget"
+title = "Gate 4g — size-budget enforcer"
+needs = ["{target}.gate-output-allowlist"]
+acceptance = """
+The staged diff has ≤ `args.size_budget.max_files` files added or modified
+(default 3) and ≤ `args.size_budget.max_loc` added test LOC (default 200).
+"""
+description = """
+HARD FAIL gate. Count files-added-or-modified and added test LOC in the
+staged diff. Reject if either exceeds the dispatch envelope's
+`size_budget`. Defaults from the synthesis: 3 files, 200 added test LOC.
+
+Why a size budget at all: an auto-test-pr cycle that ships hundreds of
+LOC is a review-burden grenade. The size cap forces the polecat to slice
+work into small, reviewable cycles — multiple cycles over time beat one
+unreviewable mega-MR. If the polecat hits the cap mid-cycle, it commits
+what passed all gates so far and exits — Mayor's per-file 21-day rejection
+cooldown ensures the same target file does not re-dispatch in a tight loop."""
+
+[[template]]
+id = "{target}.bug-discovered"
+title = "Bug-discovery NOTES protocol (synthesis §3a)"
+needs = ["{target}.gate-size-budget"]
+acceptance = """
+If during gates a candidate test failed on unmodified `main` (the source
+is buggy, the test encodes correct behavior), a structured
+`BUG-DISCOVERED:` NOTES section is persisted to the work bead via
+`bd update <issue> --notes` BEFORE `gt done` runs. If no bug was found,
+this step is a no-op.
+"""
+description = """
+NOT a gate — a protocol step. The synthesis §3a explicitly draws the
+boundary between "test improvement" and "code fixing": the polecat is
+NEVER allowed to ship a source-code fix on the auto-test-pr branch. If
+the polecat's candidate test failed on unmodified `main` *as written*,
+the source under test is buggy and the polecat MUST emit:
+
+```bash
+bd update {{issue}} --notes "BUG-DISCOVERED:
+  file: <path>:<line>
+  expected: <what the test asserted>
+  actual: <observed buggy behavior>
+  candidate_test: |
+    <full candidate test source>"
+```
+
+Then continue to `gt done`. Mayor's 3c cycle-close handler parses any
+`BUG-DISCOVERED:` NOTES and files a separate P2 bug bead in the rig
+(`<rig>-bug-from-auto-test-NNN`), linked to the cycle's MR bead for audit
+trail.
+
+The polecat does NOT push a fix and does NOT open a test-only MR for the
+buggy area — encoding-as-correct a behavior that is actually wrong would
+HIDE the bug for future readers. This is the explicit boundary the PRD
+draws.
+
+If no bug was discovered, this step is a no-op — proceed to commit
+the staged tests and continue to the parent's `commit-changes` step."""
+
+[vars]
+[vars.issue]
+description = "Inherited from parent mol-polecat-work — the work bead ID."
+required = true
+
+[vars.base_branch]
+description = "Inherited from parent mol-polecat-work — base branch (default main)."
+default = "main"
+
+[vars.target_rig]
+description = "Rig the auto-test-pr cycle is targeting (e.g. gastown_upstream). Read from dispatch envelope."
+required = true
