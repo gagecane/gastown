@@ -69,7 +69,7 @@ type rigAttributionEntry struct {
 	LastRunAt string `json:"last_run_at,omitempty"`
 }
 
-// stateFileMu serialises read/modify/write of the state file. Single-process
+// stateFileMu serializes read/modify/write of the state file. Single-process
 // daemon today, but a mutex makes multiple concurrent rig results from a
 // future per-rig goroutine fan-out safe-by-default.
 var stateFileMu sync.Mutex
@@ -109,7 +109,7 @@ func saveMainBranchTestState(townRoot string, state *mainBranchTestState) error 
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshalling state: %w", err)
+		return fmt.Errorf("marshaling state: %w", err)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil { //nolint:gosec // G306: state file, not a secret
