@@ -219,3 +219,157 @@ as a wire-only change adding two `beads.HasLabel` calls at the
 `engineer.go:1733`-area filter site, gated behind the
 `auto_test_pr.require_review_approval` config flag (default-true per
 D15).
+
+---
+
+## 0a-2. (TBD)
+
+## 0a-3. (TBD)
+
+## 0a-5. (TBD)
+
+## 0a-6. Does a substrate exist for the Mayor cycle-close handler (task 3c) to subscribe to MR-bead state-change events?
+
+**Outcome: FAIL — file prerequisite bead `gu-h1fn`; re-shape Phase 0
+task 3c (gu-xrxm6) from 'wire-only' to 'consume daemon-dog poller +
+implement four cycle-close paths'.**
+
+### Question
+
+Phase 0 task 3c (gu-xrxm6) in `.designs/auto-test-pr/synthesis.md`
+specifies the handler "Subscribes to MR-bead state-change events for
+beads labeled `gt:auto-test-pr`." This assumes a subscription / event /
+change-feed primitive exists on bead state today. Phase 0a-2 (gu-g3hm3)
+already verified the analogous assumption for main-CI-break events
+(task 11) FAILED — Mayor is a tmux/ACP session manager, not a
+programmatic event consumer; that failure spawned `gu-grkl` as a
+prerequisite. OQ-3c asks whether the same architectural problem
+applies to MR-bead state-change events.
+
+### Evidence
+
+**1. No native subscribe / watch / change-feed APIs in `internal/beads/`:**
+The `Beads` type exposes `List`, `Show`, `ListMergeRequests`,
+`Create`, `Update`, `Close`, `CloseWithReason`, `ForceCloseWithReason`,
+etc. There is no `Watch`, `Subscribe`, `Listen`, `Stream`, `Tail`, or
+`Since` method. The convoy `AddWatcher` / `AddNudgeWatcher`
+(`internal/beads/fields.go`) are subscriber-list **fields stored on a
+convoy bead** used by the convoy completion-nudge code — they do **not**
+emit on bead state changes; they are address lists, not a primitive.
+
+**2. No Dolt change-feed primitive in `internal/doltserver/`:**
+the package exposes server lifecycle, port/config, identity, and SQL
+plumbing. No commit hook, no label-change trigger, no notification
+channel.
+
+**3. The activity-events log declares the types but has no producer:**
+`internal/events/events.go` declares `TypeMergeStarted`, `TypeMerged`,
+`TypeMergeFailed`, `TypeMergeSkipped` and a `MergePayload(...)` helper.
+Consumers exist (`internal/feed/curator.go:507` →
+`events.TypeMerged`/`TypeMergeFailed`; `internal/cmd/audit.go:458`;
+`internal/cmd/activity.go:136`). But across all of `internal/refinery/`,
+the only `events.Log*` call is **one** `events.LogFeed(events.TypeMail,
+…, MailPayload("deacon/", "CONVOY_NEEDS_FEEDING …"))` at
+`internal/refinery/engineer.go:2031`. The merge-event consumers are
+listening to a producer that doesn't fire.
+
+**4. The actual MR close path emits no event and no callable hook:**
+`internal/refinery/engineer.go:1263` `HandleMRInfoSuccess` is the
+post-merge handler. On successful merge it (a) updates `mrFields`
+`MergeCommit` + `CloseReason='merged'`, (b) calls
+`beads.CloseWithReason("merged", mr.ID)`, (c) fires a transient
+`gt nudge mayor/ "MERGED: <id> issue=<x> branch=<y>"`. The nudge is
+ephemeral (no Dolt commit, by design — GH#2434), targets only `mayor/`,
+and is **not** label-filterable. The symmetric failure path
+(`HandleMRInfoFailure`, line 1388) sends `MERGE_FAILED` over the same
+nudge channel — the MR stays open in queue, so the
+"closed-unmerged" final state for an auto-test-pr cycle would
+arrive via a separate path (admin reject at `manager.go:585` or a
+GitHub PR close), neither of which emits anything locally beyond a
+`bd close` write.
+
+**5. `internal/mayor/` is not an event consumer:** the package contains
+ACP/session lifecycle helpers (`cleanup.go`, `manager.go`,
+`process_unix.go`). There is no event loop; nothing in `mayor/`
+listens for bead changes. Same finding as 0a-2 / `gu-grkl`: the
+realistic Town-level consumer is a daemon-dog, not "Mayor".
+
+**6. The only working substrate is poll-list-by-label:**
+`Beads.ListMergeRequests(ListOptions{Label, Status})`
+(`internal/beads/beads.go:1261`) joins the issues + wisps tables and
+filters by label + status. Refinery uses it in 4 places.
+`internal/daemon/failure_classifier_dog.go` (line 316) is the canonical
+**poll-and-ack-via-label** pattern in this codebase: tick → list-unacked
+escalations → classify → file rig bead → ack via fingerprint label
+(`classifierFingerprint`, `fpLabel`) written back on the source bead.
+The same pattern transposes cleanly to MR-bead cycle close.
+
+### What the design assumed vs. what exists
+
+| Synthesis assumption (3c)                        | Reality                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| MR-bead state-change emits an event              | No — the close path writes the bead and fires a transient nudge to mayor/ |
+| Mayor subscribes to those events                 | No — `internal/mayor/` is ACP/session helpers, no event loop              |
+| `rig:<target_rig>` label drives O(1) state lookup | Sound — but the *consumer* still has to exist; label alone is inert       |
+
+### Prerequisite bead filed
+
+`gu-h1fn` — "Prerequisite for Phase 0 task 3c: build MR-bead
+cycle-close daemon-dog substrate". Acceptance:
+
+1. Daemon-dog poller (extension of `failure_classifier_dog` or a
+   sibling file in `internal/daemon/`) lists MR beads by
+   label=`gt:auto-test-pr` + status=`closed` on a 30–60s tick and
+   ack-dedups via a fingerprint-style label written back on the MR
+   bead.
+2. Test fixture (closed MR bead with labels `gt:auto-test-pr` +
+   `rig:gastown_upstream` + `close_reason=merged`) is dispatched
+   exactly once across N ticks (idempotency).
+3. The poller's classified output exposes a `(mr_id, target_rig,
+   close_reason, body)` struct that the 3c handler consumes directly.
+4. Phase 0 task 3c (gu-xrxm6) updated to `depends_on=gu-h1fn` and
+   re-shaped from "subscribe to MR-bead state-change events" to
+   "consume the dog's classified output and implement the four
+   cycle-close paths".
+5. Optional follow-up: emit
+   `events.LogAudit(events.TypeMerged, …)` from
+   `HandleMRInfoSuccess` so the existing dead consumers in
+   `feed/curator` and `activity` start seeing real merge events.
+   Independent of the 3c critical path; file separately if not done
+   here.
+
+### Implication for Phase 0 task 3c
+
+`gu-xrxm6` is no longer "wire-only". It now runs after `gu-h1fn`
+and consumes the dog's output. The four cycle-close paths
+(merged → cooled-down, closed-unmerged → cooled-down + rejection,
+3-closes-in-7d → paused-by-circuit-breaker + Overseer nudge,
+BUG-DISCOVERED parsing → P2 bug bead) themselves stay the same
+complexity as the synthesis describes; only the substrate changes
+from "subscription primitive" to "daemon-dog poll + ack-via-label".
+Estimated effort delta: +1 task-time (the substrate); the four
+handler paths land on top of it.
+
+### Why this matches Phase 0a-2 / `gu-grkl`
+
+The two failures are structurally identical:
+
+| Phase 0a-2 (task 11 / main-CI-break) | Phase 0a-6 (task 3c / MR cycle-close) |
+| ------------------------------------ | ------------------------------------- |
+| "Mayor subscribes to main-CI-break events" assumed an event substrate that didn't exist | "Mayor subscribes to MR-bead state-change events" assumed an event substrate that didn't exist |
+| Resolution: `gu-grkl` adds attribution + daemon-dog routing on top of `runMainBranchTests` escalations | Resolution: `gu-h1fn` adds daemon-dog poll-and-ack on top of `ListMergeRequests({Label, Status})` |
+| Realistic owner: a daemon-dog (extend `failure_classifier_dog`) | Realistic owner: a daemon-dog (extend `failure_classifier_dog` or sibling) |
+
+Both confirm: gastown today has no programmatic subscribe-on-bead-state
+primitive; the realistic substrate is daemon-dog polling of
+`ListMergeRequests` (or analog) with idempotency via labels written
+back on the bead.
+
+### Recorded artifacts
+
+- Work bead: `gu-id33` (this spike) — full audit in `bd show gu-id33` notes
+- Prerequisite bead: `gu-h1fn` — substrate work
+- Re-shaped task: `gu-xrxm6` — depends-on `gu-h1fn` updated; notes
+  appended explaining the new shape
+
+---
