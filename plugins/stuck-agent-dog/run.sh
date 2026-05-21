@@ -16,6 +16,21 @@ RIGS_JSON_PATH="${TOWN_ROOT}/mayor/rigs.json"
 # The dog runs every 5m, so 10m gives 2 cycles of grace before flagging.
 STUCK_STALLED_THRESHOLD="${STUCK_STALLED_THRESHOLD:-600}"
 
+# STUCK_LOAD_DEFER_RATIO is the 1-minute-load-average-per-CPU threshold
+# above which the dog defers RESTART_POLECAT actions entirely (gs-549 fix #3).
+# Restarting under high load is what fed the 2026-05-19 mass-death cascade
+# in lia_bac: a kill+respawn under sustained load (avg ~25 on 12 CPUs)
+# inherits the same load + still-stalling tool calls, the polecat re-stalls
+# inside one dog cycle, and the loop drains the slot pool. When the
+# environment is overloaded, the right answer is "wait it out" — every
+# polecat in the rig is operating under the same pressure, so the failure
+# is environmental rather than per-polecat.
+#
+# Default ratio 2.0 = "load avg > 2x CPU count" — well above the normal
+# steady-state for a busy box, below the runaway range observed in the
+# incident. Set to 0 to disable the defer entirely.
+STUCK_LOAD_DEFER_RATIO="${STUCK_LOAD_DEFER_RATIO:-2.0}"
+
 # Identity-bead hook anomaly: a polecat should NEVER be hooked to an identity
 # bead (refinery/witness/mayor/deacon). Auto-dispatch's filter excludes these,
 # but if one leaks through (e.g. manual `gt hook` error, sling-context bug),
@@ -319,6 +334,40 @@ fi
 
 # --- Take action --------------------------------------------------------------
 
+# load_too_high reports whether the 1-minute load average exceeds
+# STUCK_LOAD_DEFER_RATIO × CPU_count. Echoes a non-empty diagnostic string
+# (e.g. "load=25.4 cpus=12 ratio=2.12 threshold=2.00") when over the bar;
+# empty when under it or when the ratio is disabled (=0).
+#
+# Falls back to "" (proceed with restart) on any platform we can't query —
+# the dog should never WORSEN a situation it can't observe, but it must
+# remain functional on unfamiliar systems where /proc/loadavg is absent.
+#
+# Linux: /proc/loadavg + nproc. macOS: sysctl. Otherwise: silent passthrough.
+load_too_high() {
+  local ratio="${STUCK_LOAD_DEFER_RATIO}"
+  # Disabled.
+  awk "BEGIN { exit !($ratio > 0) }" 2>/dev/null || return 0
+
+  local load1=""
+  local cpus=""
+
+  if [ -r /proc/loadavg ]; then
+    load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+    cpus=$(nproc 2>/dev/null || echo "")
+  elif command -v sysctl >/dev/null 2>&1; then
+    # macOS: vm.loadavg → "{ 1.23 4.56 7.89 }"
+    load1=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
+    cpus=$(sysctl -n hw.ncpu 2>/dev/null || echo "")
+  fi
+
+  [ -n "$load1" ] && [ -n "$cpus" ] && [ "$cpus" -gt 0 ] 2>/dev/null || return 0
+
+  # Compare load1/cpus > ratio. Use awk for float math (POSIX shell has none).
+  awk -v l="$load1" -v c="$cpus" -v r="$ratio" \
+    'BEGIN { lpc = l / c; if (lpc > r) printf("load=%.2f cpus=%d ratio=%.2f threshold=%.2f", l, c, lpc, r); }'
+}
+
 # has_recovery_marker checks for an active manual-recovery awareness flag (gu-v5mk).
 # When the witness/mayor performs an out-of-band recovery (e.g. manual --no-verify
 # push), they set this marker so we don't re-run already-pushed work via
@@ -328,11 +377,33 @@ has_recovery_marker() {
   gt polecat is-recovered "$rig/$pcat" >/dev/null 2>&1
 }
 
+# gs-549 fix #3: defer RESTART_POLECAT actions under sustained load. The dog
+# is the upstream of the cascade that killed 14 polecats in lia_bac on
+# 2026-05-19 — restarting under high load inherits the same load and re-stalls
+# the new session inside a single dog cycle. When the box is genuinely
+# overloaded, EVERY polecat in the rig is stalling, so the per-polecat
+# RESTART action is the wrong tool. Wait it out instead.
+#
+# Computed once and shared across CRASHED/STUCK/STALLED loops so operators
+# see a single deferral message rather than one per polecat.
+LOAD_DEFER_REASON=$(load_too_high)
+if [ -n "$LOAD_DEFER_REASON" ]; then
+  TOTAL_DEFERRED=$(( ${#CRASHED[@]} + ${#STUCK[@]} + ${#STALLED[@]} ))
+  if [ "$TOTAL_DEFERRED" -gt 0 ]; then
+    log "DEFER: load too high, deferring $TOTAL_DEFERRED RESTART_POLECAT action(s) ($LOAD_DEFER_REASON)"
+  else
+    log "load too high but no restart actions queued ($LOAD_DEFER_REASON)"
+  fi
+fi
+
 # Crashed polecats: notify witness to restart
 # Note: `"${arr[@]:-}"` expands an empty array to a single empty string under
 # `set -u`, which would fire a phantom `RESTART_POLECAT: /` notification. The
 # `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is empty.
 for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"}; do
+  if [ -n "$LOAD_DEFER_REASON" ]; then
+    continue
+  fi
   IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
   if has_recovery_marker "$RIG" "$PCAT"; then
     log "SKIP RESTART for $RIG/polecats/$PCAT: manual-recovery marker active (gu-v5mk)"
@@ -353,6 +424,9 @@ done
 
 # Zombie polecats: kill zombie session, then request restart
 for ENTRY in ${STUCK[@]+"${STUCK[@]}"}; do
+  if [ -n "$LOAD_DEFER_REASON" ]; then
+    continue
+  fi
   IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
   if has_recovery_marker "$RIG" "$PCAT"; then
     log "SKIP RESTART for $RIG/polecats/$PCAT (zombie): manual-recovery marker active (gu-v5mk)"
@@ -380,6 +454,9 @@ done
 # so the witness respawn can give it a fresh session and reload context via
 # `gt prime`. The hook and worktree are preserved.
 for ENTRY in "${STALLED[@]}"; do
+  if [ -n "$LOAD_DEFER_REASON" ]; then
+    continue
+  fi
   IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
   if has_recovery_marker "$RIG" "$PCAT"; then
     log "SKIP RESTART for $RIG/polecats/$PCAT (stalled): manual-recovery marker active (gu-v5mk)"
