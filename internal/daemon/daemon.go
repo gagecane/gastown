@@ -201,6 +201,14 @@ type Daemon struct {
 	// legacySocketCleanupOnce ensures upgrade cleanup only runs once per daemon
 	// lifetime, before any patrol agent can be started on the current socket.
 	legacySocketCleanupOnce sync.Once
+
+	// mrCycleCloseHandler is invoked by mr_cycle_close_dog once per closed
+	// gt:auto-test-pr MR bead. Phase 0 task 3c (gu-xrxm6) wires the Mayor
+	// cycle-close handler in via SetMRCycleCloseHandler. Nil means "use the
+	// noop handler" — the dog still runs, dedups, and writes ack labels;
+	// it just logs and drops events. Only accessed from the heartbeat
+	// goroutine (where the patrol fires), so no sync needed.
+	mrCycleCloseHandler MRCycleCloseHandler
 }
 
 // alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It
@@ -838,6 +846,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Failure classifier ticker started (interval %v)", interval)
 	}
 
+	// Start MR cycle-close ticker if configured.
+	// Polls closed merge-request beads labeled gt:auto-test-pr and dispatches
+	// to the registered cycle-close handler — the substrate for Phase 0
+	// task 3c (Mayor cycle-close handler) per gu-h1fn.
+	var mrCycleCloseTicker *time.Ticker
+	var mrCycleCloseChan <-chan time.Time
+	if d.isPatrolActive("mr_cycle_close") {
+		interval := mrCycleCloseInterval(d.patrolConfig)
+		mrCycleCloseTicker = time.NewTicker(interval)
+		mrCycleCloseChan = mrCycleCloseTicker.C
+		defer mrCycleCloseTicker.Stop()
+		d.logger.Printf("MR cycle-close dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -959,6 +981,13 @@ func (d *Daemon) Run() (err error) {
 			// known code-issue signatures and auto-files rig beads for matches.
 			if !d.isShutdownInProgress() {
 				d.runFailureClassifier()
+			}
+
+		case <-mrCycleCloseChan:
+			// MR cycle-close dog — polls closed gt:auto-test-pr MR beads and
+			// dispatches cycle-close events to the registered handler.
+			if !d.isShutdownInProgress() {
+				d.runMRCycleCloseDog()
 			}
 
 		case <-timer.C:

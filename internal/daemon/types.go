@@ -133,6 +133,7 @@ type PatrolsConfig struct {
 	PollerDog              *PollerDogConfig               `json:"poller_dog,omitempty"`
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
 	FailureClassifier      *FailureClassifierConfig       `json:"failure_classifier,omitempty"`
+	MRCycleClose           *MRCycleCloseConfig            `json:"mr_cycle_close,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -321,6 +322,12 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.FailureClassifier.Enabled
+	}
+	if patrol == "mr_cycle_close" {
+		if config == nil || config.Patrols == nil || config.Patrols.MRCycleClose == nil {
+			return false
+		}
+		return config.Patrols.MRCycleClose.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {
