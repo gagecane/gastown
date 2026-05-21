@@ -213,6 +213,13 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 
 // runMainBranchTests runs quality gates on each rig's main branch.
 // It fetches the latest main, runs configured gates/tests, and escalates failures.
+//
+// On failure, each rig's section in the escalation body carries structured
+// `commit:` / `previous_commit:` lines naming the SHA that broke and the most
+// recent SHA that previously passed. A downstream daemon dog (Phase 0 task 11
+// of the auto-test-pr design) parses those lines to resolve the breaking
+// commit back to its merge-request bead and decide whether a SEV-1
+// auto-revert chain fires.
 func (d *Daemon) runMainBranchTests() {
 	if !d.isPatrolActive("main_branch_test") {
 		return
@@ -233,9 +240,19 @@ func (d *Daemon) runMainBranchTests() {
 
 	for _, rigName := range rigNames {
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
-		if err := d.testRigMainBranch(rigName, rigPath, timeout); err != nil {
-			d.logger.Printf("main_branch_test: %s: FAILED: %v", rigName, err)
-			failures = append(failures, fmt.Sprintf("%s: %v", rigName, err))
+		currentSHA, runErr := d.testRigMainBranch(rigName, rigPath, timeout)
+
+		// Persist outcome BEFORE escalation emission so a crash between the
+		// gate suite and the bd-call still advances the per-rig baseline.
+		// recordAttributionRun is best-effort: a state-write failure does not
+		// stall the patrol — the next successful cycle re-establishes the
+		// baseline and any intermediate failure escalates with
+		// previous_commit: unknown until then.
+		recordAttributionRun(d.config.TownRoot, rigName, currentSHA, runErr == nil, time.Now())
+
+		if runErr != nil {
+			d.logger.Printf("main_branch_test: %s: FAILED: %v", rigName, runErr)
+			failures = append(failures, formatRigFailureSection(rigName, currentSHA, d.config.TownRoot, runErr))
 			failed++
 		} else {
 			d.logger.Printf("main_branch_test: %s: passed", rigName)
@@ -252,16 +269,53 @@ func (d *Daemon) runMainBranchTests() {
 	d.logger.Printf("main_branch_test: patrol cycle complete (%d tested, %d failed)", tested, failed)
 }
 
-// testRigMainBranch tests a single rig's main branch.
-func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duration) error {
+// formatRigFailureSection renders a single rig's entry in the
+// main_branch_test escalation body. The shape is:
+//
+//	<rig>: <error>
+//	commit: <sha>
+//	previous_commit: <sha or "unknown">
+//
+// The first line preserves the legacy "<rig>: <err>" format so existing
+// consumers (failure_classifier_dog parses the rig name from this prefix,
+// downstream signature regexes match against the failure body) keep working
+// unchanged. The trailing attribution lines are additive.
+//
+// When the runner could not capture a current SHA (e.g. fetch failed before
+// rev-parse, missing bare repo), attribution lines are omitted entirely.
+// Emitting `commit: ` with an empty value would create a false positive for
+// downstream parsers that treat prefix presence as "we have a SHA to work
+// with".
+func formatRigFailureSection(rigName, currentSHA, townRoot string, runErr error) string {
+	body := fmt.Sprintf("%s: %v", rigName, runErr)
+	if currentSHA == "" {
+		return body
+	}
+	previousSHA := readPreviousPassingSHA(townRoot, rigName)
+	attribution := formatAttributionLines(currentSHA, previousSHA)
+	if attribution == "" {
+		return body
+	}
+	return body + "\n" + attribution
+}
+
+// testRigMainBranch tests a single rig's main branch. Returns the
+// origin/<default_branch> SHA the patrol ran against (empty when the SHA
+// could not be captured — typically because the bare repo or fetch step
+// failed before rev-parse) and the gate-suite outcome.
+//
+// The SHA is returned regardless of pass/fail so callers can: (a) emit
+// `commit:` attribution on failure, and (b) update the per-rig last-passing
+// baseline on success.
+func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duration) (string, error) {
 	// Load gate config from the rig's config.json
 	gateCfg, err := loadRigGateConfig(rigPath)
 	if err != nil {
-		return fmt.Errorf("loading gate config: %w", err)
+		return "", fmt.Errorf("loading gate config: %w", err)
 	}
 	if gateCfg == nil {
 		d.logger.Printf("main_branch_test: %s: no test commands configured, skipping", rigName)
-		return nil
+		return "", nil
 	}
 
 	// Determine default branch
@@ -277,7 +331,7 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 
 	// Verify bare repo exists
 	if _, err := os.Stat(bareRepoPath); os.IsNotExist(err) {
-		return fmt.Errorf("bare repo not found at %s", bareRepoPath)
+		return "", fmt.Errorf("bare repo not found at %s", bareRepoPath)
 	}
 
 	// Clean up stale worktree if it exists
@@ -296,7 +350,20 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	fetchCmd.Dir = bareRepoPath
 	util.SetDetachedProcessGroup(fetchCmd)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git fetch failed: %v (%s)", err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("git fetch failed: %v (%s)", err, strings.TrimSpace(string(output)))
+	}
+
+	// Capture the SHA we're about to test against. This is the value that
+	// will appear in `commit:` attribution if the gate suite fails. Capture
+	// AFTER fetch so it reflects post-fetch HEAD, BEFORE worktree creation
+	// so a worktree-add failure doesn't poison attribution. A capture
+	// failure here is non-fatal — we still run the gates and emit the
+	// failure escalation, just without attribution lines.
+	currentSHA, shaErr := captureRigHeadSHA(ctx, rigPath, defaultBranch)
+	if shaErr != nil {
+		d.logger.Printf("main_branch_test: %s: warning: could not capture HEAD SHA for attribution: %v",
+			rigName, shaErr)
+		currentSHA = ""
 	}
 
 	// Create temporary worktree at origin/<default_branch>
@@ -304,7 +371,7 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	addCmd.Dir = bareRepoPath
 	util.SetDetachedProcessGroup(addCmd)
 	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git worktree add failed: %v (%s)", err, strings.TrimSpace(string(output)))
+		return currentSHA, fmt.Errorf("git worktree add failed: %v (%s)", err, strings.TrimSpace(string(output)))
 	}
 
 	// Always clean up the worktree
@@ -324,14 +391,14 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	// gu-hl5w for the original install-step motivation and gu-pcm5 for the
 	// opt-in inversion that made auto-detect fail for brazil-build rigs.
 	if err := d.runPreBuildInstall(ctx, rigName, worktreePath, gateCfg); err != nil {
-		return err
+		return currentSHA, err
 	}
 
 	// Run gates or legacy test command
 	if len(gateCfg.Gates) > 0 {
-		return d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates)
+		return currentSHA, d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates)
 	}
-	return d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
+	return currentSHA, d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
 }
 
 // runPreBuildInstall runs the dependency install step for a rig's worktree
