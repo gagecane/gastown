@@ -381,6 +381,9 @@ Quality gates passed:
   ✓ tautology linter
   ✓ gitleaks (no secrets)
 
+To approve for merge: bd update <mr-bead> --add-label approved-by:$USER
+                      (Refinery refuses to merge without this label
+                      when auto_test_pr.require_review_approval=true; D15)
 To pause this rig:    gt auto-test-pr pause --rig=gastown_upstream
                       (or paste this in a comment: `gt auto-test-pr: pause-rig-7d`)
 To turn it off:       gt auto-test-pr disable --rig=gastown_upstream
@@ -394,7 +397,7 @@ the lifecycle table is the most useful surface here:
 
 | Data | Substrate | Lifecycle | Authority |
 |------|-----------|-----------|-----------|
-| `<rig>-auto-test-state` pinned bead (state machine, transition log ≤50, rejection log ≤200, FIFO eviction) | Beads / Dolt | Per opted-in rig, persists for opt-in duration | Mayor only |
+| `<rig>-auto-test-state` pinned bead (state machine, transition log ≤50, rejection log ≤200, **incidents log ≤20** [round 3 fix #3], FIFO eviction) | Beads / Dolt | Per opted-in rig, persists for opt-in duration | Mayor only |
 | `town-auto-test-pr-state` pinned bead (global pause, circuit-breaker counter, denormalized rig summary) | Beads / Dolt | One, town-wide | Mayor only |
 | `auto_test_pr.*` config block | Per-rig settings JSON | Per-rig, edited via `gt auto-test-pr enable`/`disable` | Rig owner / town admin via `gt` CLI |
 | Conventions sheet | In-repo `.gt/auto-test-pr/conventions.md` | Per-rig, source-controlled | Rig maintainers via PR review |
@@ -921,13 +924,27 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
 
 1. Add `auto_test_pr.*` keys to per-rig settings JSON loader. Default
    absent → disabled. **Phase 0a-4 must be PASS first** (settings JSON
-   path is the loader's input).
+   path is the loader's input). **Round 3 fix #7 — acceptance:** unit
+   tests cover (a) absent `auto_test_pr` block → returns disabled
+   config with default cadence/skip_dirs; (b) well-formed block →
+   returns parsed `auto_test_pr.*` keys; (c) malformed JSON or
+   unknown `language` value → returns typed error (not a panic).
 
 2a. Ship `gt auto-test-pr enable` and `gt auto-test-pr disable` CLI
     commands. `enable` validates language (`go` only in v1) and rig
     (`gastown_upstream` only in v1); other inputs return static errors
     pointing at the v2 follow-up bead. `disable` writes the
     settings-JSON flag and DOES NOT cancel in-flight work (D2a).
+    **Round 3 fix #4 — `enabled_rigs[]` sync.** Both verbs operate on
+    *two* surfaces atomically: (i) the per-rig settings JSON (durable
+    record of intent) AND (ii) `town-auto-test-pr-state.enabled_rigs[]`
+    (denormalized read-cache used by `status`). `enable` writes the
+    flag THEN CAS-appends `target_rig` to `enabled_rigs[]`; `disable`
+    writes the flag false THEN CAS-removes from `enabled_rigs[]`. If
+    the second step fails after the first commits, the CLI exits
+    non-zero with a "settings-JSON updated but town bead out-of-sync"
+    notice; Mayor's tick reconciles on next iteration (per task 4
+    update). Settings-JSON remains authoritative ground truth.
 2b. Ship `gt auto-test-pr {pause,resume,status,show,history}` CLI
     commands. `status` reports "no rigs opted in" when the town bead
     has zero entries. `pause --all` and `resume --all` write to the
@@ -954,12 +971,28 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     exception serves a hypothetical future rig. OQ7 itself stays in
     the Open Questions list with a `v2 follow-up` note: when a
     TALON-convention rig opts in for the first time, the template is
-    amended to include the marker exception.
+    amended to include the marker exception. **Round 3 fix #8 —
+    acceptance:** snapshot (golden-file) test of `gt auto-test-pr
+    show-template` output verifies the NG2 forbid-list (Benchmark/
+    Example/Fuzz/integration/e2e/load), the NG5 churn-proximity
+    preference paragraph, the D8 provenance-marker requirement,
+    and the D15 approval-line instruction (per round 3 fix #5)
+    are all present. Snapshot file lives at
+    `internal/autotestpr/testdata/conventions_template.golden.md`;
+    drift fails CI.
 3a. Land `mol-polecat-work-test-improver` formula skeleton extending
     `mol-polecat-work` with the **`mode=create` path**: the five
     quality-gate steps (4a-g), the bug-discovery NOTES protocol, and
     the sandbox-wrapper integration (depends on task 5c). **No
-    molecule registers it yet.**
+    molecule registers it yet.** **Round 3 fix #6:** at `gt done`
+    time, the polecat MUST label the resulting MR-bead with both
+    `gt:auto-test-pr` AND `rig:<target_rig>` (the latter read from
+    the dispatch envelope). The `rig:<target_rig>` label is the
+    O(1) linkage from MR-bead to per-rig state bead used by the 3c
+    cycle-close handler — without it, the handler must walk the
+    bead graph back through the dispatch bead to resolve which rig
+    the MR belongs to. Unit tests verify both labels are present on
+    the MR-bead at `gt done` exit.
 3b. Extend `mol-polecat-work-test-improver` with the **`mode=revise`
     path**: reads `args.revision` from the dispatch envelope (prior
     comment thread + last commit SHA + branch name), runs the same
@@ -971,9 +1004,16 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     polecat picks the most recent non-resolved comment thread and
     replies there with the "manual revision dispatched by <user>"
     template. Unit tests cover both `--comment-id`-targeted and
-    most-recent-thread fallback paths.
+    most-recent-thread fallback paths. **Round 3 fix #6:** the
+    revise-pushed commit's MR-bead state-change event also resolves
+    via the existing `rig:<target_rig>` label set in task 3a — the
+    MR-bead is the same bead across the create-revise lifecycle, so
+    the label is set once at create time and persists.
 3c. **Implement Mayor cycle-close handler.** Subscribes to MR-bead
-    state-change events for beads labeled `gt:auto-test-pr`. On
+    state-change events for beads labeled `gt:auto-test-pr`.
+    **Round 3 fix #6:** the handler reads the `rig:<target_rig>`
+    label off the MR-bead at event time and looks up
+    `<target_rig>-auto-test-state` in O(1). On
     merged → CAS-transition the rig's state bead `mr-pending →
     cooled-down` and append a transition record. On
     closed-unmerged → CAS-transition `mr-pending → cooled-down`,
@@ -987,7 +1027,14 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     the cycle's MR bead.
 4. Land `mol-auto-test-pr-cycle` formula. Registered in Mayor's
    patrol set, but the first step is `if no rig has
-   auto_test_pr.enabled == true → exit 0`. Inert.
+   auto_test_pr.enabled == true → exit 0`. Inert. **Round 3 fix #4 —
+   reconcile `enabled_rigs[]`.** Each tick begins with a reconcile
+   step: walk all rigs' settings JSON, compute the set of
+   `auto_test_pr.enabled=true` rigs, CAS-update
+   `town-auto-test-pr-state.enabled_rigs[]` to match. This is
+   self-healing for partial-failure cases from task 2a's two-step
+   write and for partial Phase 0 reverts. The reconcile is idempotent
+   and adds <100ms per tick at the v1 rig count.
 5a. Implement sandbox wrapper **credential-strip + CWD-pin**
     component. **Round 2 fix #5: ADR sub-step `5a-pre` runs first.**
     Decide and document whether the sandbox is (a) a wrapper command
@@ -1020,9 +1067,16 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     combined wrapper (5a + 5b + 5c) on a hand-rolled fixture.
 6a. Land coverage-delta **branch-mode** parser
     (`internal/autotest/coverage.go`) per gate 4a fix. Parses
-    `golang.org/x/tools/cover` branch-mode profiles. Unit tests
-    cover the four sub-rules of gate 4d (literal-vs-literal,
-    NotNil-only, no-input-derived assertion, zero-assertion).
+    `golang.org/x/tools/cover` branch-mode profiles. **Round 3 fix
+    #1:** unit tests cover the parser on hand-rolled cover-profile
+    fixtures: branch-mode profile with all branches covered → returns
+    0 delta; profile with one new test exercising one branch → returns
+    +1 covered branch; profile with the comment-only marker present
+    but the branch still uncovered → returns 0 delta (the marker
+    alone does not satisfy the gate, per gate 4a's hard-fail rule);
+    malformed profile → typed error. (Round 1 mistakenly attached the
+    gate-4d sub-rule list to this task; those sub-rules are tested in
+    task 6c.)
 6b. Land **AST-aware mutant runner** (`internal/autotest/mutant.go`).
     Bounded to ≤5 mutants per test (D11); copies package directory
     to `os.MkdirTemp` (D6); runs through sandbox (depends on 5c).
@@ -1064,8 +1118,18 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     `golang.org/x/tools/go/ast/astutil` and one real AST tool before
     implementation; use `go/parser` + `go/ast` directly.
 7. Ship sling priority-floor mechanism if not present (D13).
+   **Round 3 fix #9 — acceptance:** integration test enqueues two
+   beads through `sling --priority-floor=lowest` for an auto-test
+   bead and `sling --priority=normal` for a fixture user bead; the
+   dispatcher returns the user bead first regardless of submission
+   order. If the floor mechanism does not exist pre-this-task,
+   ship it; if it exists, write the integration test and confirm
+   the existing implementation honors the floor.
 8. Provision `town-auto-test-pr-state` pinned bead with `enabled_rigs:
-   []`. Mayor-owned.
+   []`. Mayor-owned. **Round 3 fix #10 — acceptance:** post-task,
+   `gt auto-test-pr status --format=json` returns
+   `{enabled_rigs:[], paused:false, circuit_breaker:{count:0}}`
+   (the town-wide row of the status table).
 9. **Land `mol-auto-test-pr-branch-gc` patrol** (PRD promoted-MUST
    fix). Standing patrol that lists `refs/heads/auto-test/*/*`
    branches across all opted-in rigs, cross-references against each
@@ -1096,14 +1160,45 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     main; (4) decide whether to override the circuit breaker via
     `gt auto-test-pr resume --rig=<rig> --override-circuit-breaker`
     or to wait out the cooldown; (5) record the decision in the
-    rig's state bead's `incidents[]` log via `gt auto-test-pr show
-    --rig=<rig> --raw`.
+    rig's state bead's `incidents[]` log via `bd update <rig>-auto-
+    test-state --append-metadata 'incidents=[{ts:..., actor:...,
+    decision:...}]'` (consistent with the `bd update --add-label
+    approved-by:<user>` write pattern from D15 / task 10; the
+    read-only `gt auto-test-pr show --rig=<rig> --raw` verb is for
+    *reading* the resulting log entry, not writing it). **Round 3
+    fix #3:** `incidents[]` field is added to the per-rig state bead
+    schema in §Data Model lifecycle table.
 13. Configure branch-protection rule on `gastown_upstream`'s origin
     for `refs/heads/auto-test/*/*` — only the cycle-agent / Refinery
     service identity may push (R11 / C-SEC-6 implementation).
     Verified via attempting a push from a non-service identity (must
     fail). For multi-rig v2, this rule is captured in the per-rig
-    opt-in template so new rigs inherit it on enable.
+    opt-in template so new rigs inherit it on enable. ("Cycle-agent"
+    here is the polecat / Mayor identity that pushes
+    `auto-test/<rig>/<bead-id>` branches at `gt done` time, as
+    documented in the rig's identity manifest.)
+13a. **Round 3 fix #2 — Phase-0 e2e fixture integration test.** Build
+    a fixture rig under `internal/autotest/testdata/fixturerig/`
+    containing 1 churned Go file with 2 uncovered branches and a
+    `.gt/auto-test-pr/conventions.md`. Drive a single end-to-end
+    cycle in-process: stub Mayor's tick fires → cycle reads fixture's
+    state bead (`idle`) → dispatches in-process polecat → polecat
+    writes a new `*_test.go` file → all 7 gates (4a-g) run through
+    the real sandbox library (per the 5a ADR substrate) → mock
+    Refinery merge handler observes the in-memory MR-bead (with
+    `gt:auto-test-pr` and `rig:<target_rig>` labels per round 3
+    fix #6) → 3c cycle-close handler transitions state bead
+    `mr-pending → cooled-down (merged)`. **Acceptance:** state bead
+    ends in `cooled-down (merged)`; the new test file has the D8
+    provenance marker; all 7 gates emit pass records on the
+    transitions log; the cycle's wall-clock <30 min on the fixture.
+    Re-run the same fixture with one gate forced to fail (e.g.,
+    gate 4d sub-rule (ii) literal-vs-literal fails) and verify the
+    polecat exits with NOTES and no MR-bead is created. This is the
+    cheapest way to find wiring bugs *before* the pilot burns weeks
+    of observation wall-clock. Depends on tasks 3a/b/c + 5a/b/c +
+    6a/b/c + 10 + 11 — runs after sandbox + gates + merge-gate +
+    SEV-1 wires are in place. Critical path's final task.
 
 #### Phase 0 dependency graph
 
@@ -1138,12 +1233,19 @@ Serial chain (critical path):
    ↓
   10  Refinery approval gate (wire-only; verify in Phase 0a-1)  ┐
   11  Mayor SEV-1 auto-revert (wire-only; verify in Phase 0a-2) ┘ — parallel after 3a/b/c
+   ↓
+  13a Phase-0 e2e fixture integration test (round 3 fix #2)
+      — final critical-path task; depends on 3a/b/c + 5a/b/c +
+        6a/b/c + 10 + 11
 
 Critical-path length (with parallelism):
   Phase 0a (5 prereq spikes, parallel) → 5a → 5b → 5c
   → {6a,6b,6c parallel} → {3a,3b,3c parallel} → {10, 11 parallel}
-  ≈ 8 task-times serialized (1 for 0a + 7 for 0); with single agent
-  ≈ 24 tasks total (5 in 0a + 19 in 0). Mayor SHOULD dispatch
+  → 13a (e2e integration)
+  ≈ 9 task-times serialized (1 for 0a + 8 for 0; round 3 fix #11
+  count update). Phase 0 task count = 23 (was 22 pre-fix-2: tasks
+  1, 2a-d, 3a-c, 4, 5a-c, 6a-c, 7, 8, 9, 10, 11, 12, 13, 13a);
+  Phase 0a = 5; total Phase 0 + 0a = 28. Mayor SHOULD dispatch
   Phase 0a's 5 spikes in parallel (each is hours, not days) and
   ~6 polecats in parallel for Phase 0 batch A and the parallel
   groups; expected wall-clock reduction ≈ 3-4×.
@@ -1164,7 +1266,10 @@ Critical-path length (with parallelism):
 - **Mayor cycle-close handler** unit tests cover four paths: merged
   → cooled-down, closed-unmerged → cooled-down + rejection-log
   append, 3-closes-in-7d → `paused-by-circuit-breaker`, and
-  `BUG-DISCOVERED:` NOTES → P2 bug bead filed.
+  `BUG-DISCOVERED:` NOTES → P2 bug bead filed. **Round 3 fix #6:**
+  unit tests also verify the `rig:<target_rig>`-label-based lookup
+  resolves to the correct per-rig state bead on a fixture MR-bead
+  with `rig:gastown_upstream`.
 - **`mode=revise` polecat formula** unit tests cover both
   `--comment-id`-targeted reply and most-recent-thread fallback.
 - All new Go packages pass `go vet ./...`, `go build ./...`,
@@ -1178,6 +1283,26 @@ Critical-path length (with parallelism):
   package with `go mod download && drop-net && go test -count=10
   ./...` passes 10/10 with no fresh fetch (verified by `tcpdump`
   / `strace -e connect`).
+- **Phase-0 e2e fixture integration test** (round 3 fix #2 — task
+  13a) green: the happy path drives state bead from `idle` →
+  `cooled-down (merged)` with the D8 provenance marker, all 7 gates
+  passing, and wall-clock <30 min on the fixture; the gate-fail
+  variant exits with NOTES and creates no MR-bead.
+- **Phase 0 task 1 acceptance** (round 3 fix #7): settings-JSON
+  loader unit tests cover absent block, well-formed block, malformed
+  JSON, and unknown-language inputs.
+- **Phase 0 task 2d acceptance** (round 3 fix #8): conventions-
+  template golden-file snapshot test green.
+- **Phase 0 task 7 acceptance** (round 3 fix #9): sling priority-
+  floor integration test confirms user beads dispatched ahead of
+  auto-test beads regardless of submission order.
+- **Phase 0 task 8 acceptance** (round 3 fix #10): town-state
+  bead returns the documented empty-state JSON via
+  `gt auto-test-pr status --format=json`.
+- **`enabled_rigs[]` reconcile** (round 3 fix #4): Phase 0 exit
+  test confirms a stale `enabled_rigs[]` (rig present in cache but
+  `auto_test_pr.enabled=false` in settings JSON, or vice versa) is
+  reconciled by `mol-auto-test-pr-cycle`'s tick within one tick.
 
 ### Phase 1: Pilot opt-in (`gastown_upstream` only)
 
