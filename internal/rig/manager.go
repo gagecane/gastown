@@ -392,9 +392,11 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 
 	// Track cleanup on failure, but only if this invocation still owns the path.
 	cleanup := func() { removeRigPathIfOwned(rigPath, ownershipStamp) }
+	routeRollback := func() {}
 	success := false
 	defer func() {
 		if !success {
+			routeRollback()
 			cleanup()
 		}
 	}()
@@ -591,6 +593,9 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			// Only error on mismatch if user explicitly provided --prefix
 			if userProvidedPrefix && strings.TrimSuffix(opts.BeadsPrefix, "-") != strings.TrimSuffix(sourcePrefix, "-") {
 				return nil, fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided; use --prefix %s to match existing issues", sourcePrefix, opts.BeadsPrefix, sourcePrefix)
+			}
+			if err := beads.CheckPrefixAvailable(m.townRoot, sourcePrefix+"-", opts.Name); err != nil {
+				return nil, fmt.Errorf("prefix collision (source repo prefix %q): %w", sourcePrefix, err)
 			}
 			// Use detected prefix (overrides derived prefix)
 			opts.BeadsPrefix = sourcePrefix
@@ -884,8 +889,14 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 			Prefix: opts.BeadsPrefix + "-",
 			Path:   routePath,
 		}
-		if err := beads.AppendRoute(m.townRoot, route); err != nil {
-			fmt.Printf("  Warning: Could not update routes.jsonl: %v\n", err)
+		previousRoute, err := beads.AppendRouteIfPrefixAvailable(m.townRoot, route)
+		if err != nil {
+			return nil, fmt.Errorf("registering rig route: %w", err)
+		}
+		routeRollback = func() {
+			if err := beads.RestoreRouteIfCurrent(m.townRoot, route, previousRoute); err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: Could not roll back route %s -> %s: %v\n", route.Prefix, route.Path, err)
+			}
 		}
 	}
 

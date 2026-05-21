@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
+	gtlock "github.com/steveyegge/gastown/internal/lock"
 )
 
 // Route represents a prefix-to-path routing rule.
@@ -63,6 +64,106 @@ func LoadRoutes(beadsDir string) ([]Route, error) {
 func AppendRoute(townRoot string, route Route) error {
 	beadsDir := filepath.Join(townRoot, ".beads")
 	return AppendRouteToDir(beadsDir, route)
+}
+
+// AppendRouteIfPrefixAvailable appends or updates a route only when the prefix
+// is unused or already belongs to the same rig. It returns the previous route
+// for rollback, or nil when this call added a new route.
+func AppendRouteIfPrefixAvailable(townRoot string, route Route) (*Route, error) {
+	beadsDir := filepath.Join(townRoot, ".beads")
+	return AppendRouteToDirIfPrefixAvailable(beadsDir, route)
+}
+
+// AppendRouteToDirIfPrefixAvailable is AppendRouteToDir with a same-rig guard.
+func AppendRouteToDirIfPrefixAvailable(beadsDir string, route Route) (*Route, error) {
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating beads directory: %w", err)
+	}
+	unlock, err := gtlock.FlockAcquire(filepath.Join(beadsDir, RoutesFileName+".flock"))
+	if err != nil {
+		return nil, fmt.Errorf("acquiring routes lock: %w", err)
+	}
+	defer unlock()
+
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		return nil, fmt.Errorf("loading routes: %w", err)
+	}
+
+	newRig := strings.SplitN(route.Path, "/", 2)[0]
+	var previous *Route
+	for _, r := range routes {
+		if r.Prefix != route.Prefix {
+			continue
+		}
+		existingRig := strings.SplitN(r.Path, "/", 2)[0]
+		if existingRig != newRig {
+			return nil, fmt.Errorf("prefix %q is already used by %s (path: %s); use --prefix to specify a different prefix", route.Prefix, existingRig, r.Path)
+		}
+		if previous == nil {
+			prev := r
+			previous = &prev
+		}
+	}
+
+	updated := make([]Route, 0, len(routes)+1)
+	replaced := false
+	for _, r := range routes {
+		if r.Prefix == route.Prefix {
+			if !replaced {
+				updated = append(updated, route)
+				replaced = true
+			}
+			continue
+		}
+		updated = append(updated, r)
+	}
+	if !replaced {
+		updated = append(updated, route)
+	}
+
+	return previous, WriteRoutes(beadsDir, updated)
+}
+
+// RestoreRouteIfCurrent restores or removes a route only if it still matches
+// the route written by this caller. This avoids clobbering another add/repair.
+func RestoreRouteIfCurrent(townRoot string, route Route, previous *Route) error {
+	beadsDir := filepath.Join(townRoot, ".beads")
+	return RestoreRouteInDirIfCurrent(beadsDir, route, previous)
+}
+
+// RestoreRouteInDirIfCurrent restores or removes a route only if it still matches.
+func RestoreRouteInDirIfCurrent(beadsDir string, route Route, previous *Route) error {
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		return fmt.Errorf("creating beads directory: %w", err)
+	}
+	unlock, err := gtlock.FlockAcquire(filepath.Join(beadsDir, RoutesFileName+".flock"))
+	if err != nil {
+		return fmt.Errorf("acquiring routes lock: %w", err)
+	}
+	defer unlock()
+
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		return fmt.Errorf("loading routes: %w", err)
+	}
+
+	for i, r := range routes {
+		if r.Prefix != route.Prefix {
+			continue
+		}
+		if r.Path != route.Path {
+			return nil
+		}
+		if previous == nil {
+			routes = append(routes[:i], routes[i+1:]...)
+		} else {
+			routes[i] = *previous
+		}
+		return WriteRoutes(beadsDir, routes)
+	}
+
+	return nil
 }
 
 // AppendRouteToDir appends a route to routes.jsonl in the given beads directory.
