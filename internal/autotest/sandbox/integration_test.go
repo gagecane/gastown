@@ -55,10 +55,11 @@ func TestIntegration_5a5b5c_HandRolledFixture(t *testing.T) {
 
 	// Build a single CycleBudget large enough for the fast and
 	// per-target test cases but small enough that the third-run
-	// case can deliberately exhaust it. 6 seconds: ~1s for the fast
-	// run, ~750ms for the per-target run, then we manually charge
-	// the rest to drive the budget to exhaustion.
-	budget := NewCycleBudget(6 * time.Second)
+	// case can deliberately exhaust it. 10 seconds: ~5s headroom
+	// for the fast run (RunWithBudget charges actual elapsed, not
+	// the cap), ~750ms for the per-target run, then we manually
+	// charge the rest to drive the budget to exhaustion.
+	budget := NewCycleBudget(10 * time.Second)
 
 	t.Run("fast_test_passes_under_5a_5b_5c", func(t *testing.T) {
 		runIntegrationFastSubtest(t, sb, goBin, budget)
@@ -86,7 +87,14 @@ func runIntegrationFastSubtest(t *testing.T, sb *Sandbox, goBin string, budget *
 		}
 		t.Fatalf("ApplyOffline: %v", err)
 	}
-	out, err := RunWithBudget(ctx, cmd, budget, 750*time.Millisecond)
+	// 5s cap (not 750ms) because this subtest only asserts the
+	// cap does NOT fire on a healthy fast test — it's not bounding
+	// performance. Under stripped env (e.g. the pre-push hook clears
+	// GOCACHE-relevant vars), cold `go test` startup + binary
+	// lookup + run can spike past 750ms intermittently (~30% flake
+	// rate observed). RunWithBudget charges actual elapsed back to
+	// the CycleBudget, so a larger cap does not consume more budget.
+	out, err := RunWithBudget(ctx, cmd, budget, 5*time.Second)
 	if err != nil {
 		s := string(out)
 		if strings.Contains(s, "operation not permitted") || strings.Contains(s, "permission denied") {
