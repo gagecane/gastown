@@ -426,13 +426,26 @@ Migration from v1 → v2:
 
 These need cross-dimension or human input:
 
-1. **Pinned-bead Metadata field reliability.** `Issue.Metadata` is
-   `json.RawMessage` and is described in beads.go:303-305 as an
-   "extension point" — used for delegation state and merge-slot
-   state. Is it intended for arbitrary structured payload of this
-   size (~5KB after 50 transitions + 200 rejections), or should we
-   use a separate bead-attachment surface? Cross-check with
-   integration leg and with whoever owns `internal/beads/`.
+1. **Pinned-bead Metadata field reliability — RESOLVED (FAIL → fallback adopted).**
+   The Phase 0a-3 spike (`gu-g9ufm`,
+   `internal/cmd/metadata_reliability_integration_test.go`) PASSED
+   sequential round-trip fidelity at ~7-8KB but FAILED concurrent CAS
+   (~60/100 lost-update under the production RMW pattern). Per the
+   prerequisite bead `gu-2s03`, the **transition log and rejection
+   log have moved to attachment beads** (one bead per entry, labeled
+   `gt:auto-test-pr-attachment` + `kind:{transition,rejection}` +
+   `rig:<rig>`, depends-on the parent state bead). The pinned
+   `<rig>-auto-test-state` bead's `Issue.Metadata` retains only
+   single-writer fields (`schema_version`, `state`, `current_cycle`,
+   `last_cycle_at`, `last_cycle_outcome`, `paused_until`,
+   `incidents[]≤20`); the multi-writer logs are no longer in the
+   blob, so the lost-update class is sidestepped entirely. See
+   `.designs/auto-test-pr/synthesis.md` §Data Model "OQ4 fallback"
+   for the full schema, materialize-from-attachments read path, and
+   retention rules. The data-model schema in this file (§Concrete
+   schema, "Pinned state bead", lines ~165-205) is **superseded by
+   that synthesis subsection** — the in-blob `transitions[]` and
+   `rejections[]` arrays it shows are NOT what v1 ships.
 
 2. **Where does `AutoTestPRConfig` actually live in v1?** Two options:
    (a) extend `RigSettings` (the per-rig `settings/config.json`,

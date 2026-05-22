@@ -160,10 +160,13 @@ the rig's per-rig cooldown has elapsed):
 4. Compute target candidates: `git log --since=30d` × coverage profile
    from `go test -coverprofile`, ranked by `(churn × uncovered_branches)`.
    **Per-file rejection cooldown (PRD S4 fix):** before ranking, drop
-   any candidate whose path appears in `<rig>-auto-test-state.
-   rejection_log[].target_path` within the last 21 days. This honors
-   the PRD's "avoid retargeting that file for some cooldown period"
-   without requiring per-cycle human input. **Within-file churn-proximity
+   any candidate whose path appears in a rejection attachment bead
+   (`gt:auto-test-pr-attachment` + `kind:rejection` + `rig:<rig>`)
+   with `cooldown_until > now` per the OQ4-fallback materializer.
+   This honors the PRD's "avoid retargeting that file for some
+   cooldown period" without requiring per-cycle human input — and
+   without RMW into the parent state bead's `Issue.Metadata`, which
+   the spike (`gu-g9ufm`) showed is unreliable under concurrency. **Within-file churn-proximity
    ranking (PRD Non-Goal NG5 fix):** once a target file is selected, the
    dispatch envelope's `uncovered_branches[]` is sorted by line-distance
    to recent-churn line ranges (from `git log -L` / `git blame` over the
@@ -178,9 +181,11 @@ the rig's per-rig cooldown has elapsed):
    sling-attach to the polecat pool with a strict priority floor
    (lowest bucket).
 6. Refinery's merge handler observes MR closure (merged or rejected)
-   and emits a nudge → Mayor transitions `mr-pending → cooled-down`,
-   appending a transition record and (on close-unmerged) a rejection
-   record.
+   and emits a nudge → Mayor transitions `mr-pending → cooled-down`
+   AND files an attachment bead per the OQ4 fallback: a
+   `kind:transition` attachment on every closure, plus a
+   `kind:rejection` attachment on close-unmerged. Both go through
+   `bd create` (CAS-safe; see §Data Model "OQ4 fallback").
 
 **2. Polecat formula (`mol-polecat-work-test-improver`)**
 
@@ -228,6 +233,21 @@ Per rig: `<rig>-auto-test-state` (pinned). Town-wide:
 `Issue.Metadata` field. The per-rig bead is **authoritative**; the
 town bead is a **denormalized read-cache** for `gt auto-test-pr
 status` plus the global pause flag and circuit-breaker counter.
+
+The per-rig bead's `Issue.Metadata` is **bounded to single-writer
+fields only** — `schema_version`, `state`, `current_cycle`,
+`last_cycle_at`, `last_cycle_outcome`, `paused_until`, and the
+≤20-entry `incidents[]` log (operator-authored, also single-writer).
+The high-cardinality `transition_log` and `rejection_log` move to
+**attachment beads** per the **OQ4 fallback** (see §Data Model
+"OQ4 fallback" subsection): each transition / rejection is a new
+immutable bead linked to the parent state bead. The cycle-close
+handler creates these via `bd create`, which is naturally CAS-safe;
+reads materialize the logs by listing attachment beads filtered by
+`rig:<rig>` + `kind:{transition,rejection}` labels and folding by
+timestamp. This sidesteps the lost-update class that the OQ4 spike
+(`gu-g9ufm`) demonstrated against `Issue.Metadata` RMW under
+concurrency (~60/100 writers' contributions clobbered).
 
 **4. CLI surface (`gt auto-test-pr`)**
 
@@ -397,7 +417,9 @@ the lifecycle table is the most useful surface here:
 
 | Data | Substrate | Lifecycle | Authority |
 |------|-----------|-----------|-----------|
-| `<rig>-auto-test-state` pinned bead (state machine, transition log ≤50, rejection log ≤200, **incidents log ≤20** [round 3 fix #3], FIFO eviction) | Beads / Dolt | Per opted-in rig, persists for opt-in duration | Mayor only |
+| `<rig>-auto-test-state` pinned bead (state machine + **single-writer config** only: `schema_version`, `state`, `current_cycle`, `last_cycle_at`, `last_cycle_outcome`, `paused_until`, **incidents log ≤20** [round 3 fix #3]; transition_log and rejection_log moved to attachment beads — see **OQ4 fallback** below) | Beads / Dolt | Per opted-in rig, persists for opt-in duration | Mayor only |
+| **Transition attachment bead** (per-transition immutable bead, labels `gt:auto-test-pr-attachment` + `kind:transition` + `rig:<rig>`, depends-on `<rig>-auto-test-state`; `Issue.Metadata` carries `{from,to,at,actor,context}`) — replaces `transition_log` per OQ4 fallback | Beads / Dolt | Append-only; cycle-close handler creates one per state transition; closed by branch-GC patrol after 60d (see OQ4 retention) | Mayor only |
+| **Rejection attachment bead** (per-rejection immutable bead, labels `gt:auto-test-pr-attachment` + `kind:rejection` + `rig:<rig>`, depends-on `<rig>-auto-test-state`; `Issue.Metadata` carries `{file,rejected_at,reason,cooldown_until}`) — replaces `rejection_log` per OQ4 fallback | Beads / Dolt | Append-only; cycle-close handler creates one on close-unmerged; closed by branch-GC patrol 30d after `cooldown_until` | Mayor only |
 | `town-auto-test-pr-state` pinned bead (global pause, circuit-breaker counter, denormalized rig summary) | Beads / Dolt | One, town-wide | Mayor only |
 | `auto_test_pr.*` config block | Per-rig settings JSON | Per-rig, edited via `gt auto-test-pr enable`/`disable` | Rig owner / town admin via `gt` CLI |
 | Conventions sheet | In-repo `.gt/auto-test-pr/conventions.md` | Per-rig, source-controlled | Rig maintainers via PR review |
@@ -454,14 +476,25 @@ The seven states and their transition triggers:
 | any state | `paused-by-circuit-breaker` | ci-break-handler (D16 SEV-1) OR cycle-close handler (3 closes in 7d, Q6 SEV-2) | Mayor |
 | `paused-by-circuit-breaker` | `idle` | operator `gt auto-test-pr resume --override-circuit-breaker` (D16 — no auto-release) | Operator |
 
-Transitions are append-only on the `transitions[]` array on the per-
-rig bead. CAS uses Dolt SERIALIZABLE-class isolation on the bead's
-single row. **Cooldown release (PRD S1 fix):** the `cooled-down →
-idle` edge fires when Mayor's tick observes
-`now − last_transition.at >= cadence_days * 24h` AND the rig is still
-`enabled=true`. Without this transition the cycle would never re-fire
-after the first MR — S1's "twice a week the mechanism wakes up"
-requires an automatic cooldown-release path. See **D18**.
+Transitions are append-only as **attachment beads** (one bead per
+transition, labels `gt:auto-test-pr-attachment` + `kind:transition`
++ `rig:<rig>`, depends-on the parent state bead) per the **OQ4
+fallback** above. Each `bd create` mints a new ID, so there is no
+shared row to clobber under concurrent writers — this fixes the
+spike's acceptance #2 failure (`gu-g9ufm`). The state-machine field
+on the parent pinned bead (`state`, `current_cycle`) IS still updated
+in place; that surface IS reliable per the spike's acceptance #1
+(single-writer sequential round-trips PASS) and the cycle-close
+handler is the only writer to it, serialized through Dolt
+SERIALIZABLE-class isolation on the bead's row. **Cooldown release
+(PRD S1 fix):** the `cooled-down → idle` edge fires when Mayor's
+tick observes the most-recent transition attachment for the rig has
+`at + cadence_days * 24h <= now` AND the rig is still `enabled=true`
+(read via the materializer over the rig's transition attachments;
+see §Data Model "OQ4 fallback"). Without this transition the cycle
+would never re-fire after the first MR — S1's "twice a week the
+mechanism wakes up" requires an automatic cooldown-release path. See
+**D18**.
 **`paused-by-circuit-breaker` is explicitly excluded from cadence-
 elapsed auto-release** (D16 / D18) — only operator action via
 `gt auto-test-pr resume --override-circuit-breaker` exits this
@@ -471,6 +504,182 @@ path.
 **Schema versioning:** every JSON blob carries `schema_version`. v2
 readers tolerate v1 blobs (defaults for new fields); v1 readers
 tolerate v2 blobs (round-trip unknown fields via `json.RawMessage`).
+
+
+### OQ4 fallback: metadata-attachment-bead pattern
+
+The Phase 0a-3 spike (`gu-g9ufm`,
+`internal/cmd/metadata_reliability_integration_test.go`) **PASSED**
+acceptance #1 (100/100 sequential ~7-8KB blob round-trips
+byte-for-byte equal — `Issue.Metadata` is a faithful storage surface)
+but **FAILED** acceptance #2: under 100 concurrent goroutines using
+the production read-modify-write pattern from
+`internal/beads/store.go::mergeMetadataKey`, ~60/100 writers'
+contributions were lost to clobber. `Issue.Metadata` is *not*
+reliable as a multi-writer surface without external CAS. The
+Auto-Test-PR design's `transition_log` / `rejection_log` writes
+sit exactly on that pattern (Mayor patrol + revision-routed
+polecats both writing to the same bead), so this fallback re-shapes
+those two logs to use the **metadata-attachment-bead** pattern that
+data-leg OQ4 always pointed to as the safe alternative.
+
+**Why this works:** `bd create` mints a new ID per call. There is
+nothing to clobber. Append-only history is what the design's two
+logs actually want — they are *audit logs*, not mutable state —
+and the read-side cost is tolerable at v1 scale (≤50 transitions
++ ≤200 rejections per opted-in rig, with one opted-in rig in
+Phase 1).
+
+**Attachment-bead schema.** Each transition or rejection is a single
+new bead. The bead carries:
+
+| Field | Purpose |
+|-------|---------|
+| `Issue.Title` | One-line human-readable summary, e.g., `auto-test-pr transition gastown_upstream: mr-pending → cooled-down @ 2026-05-21T14:23:00Z` |
+| `Issue.Type` | `task` (standard bead type; not `pinned`) |
+| `Issue.Labels` | MUST contain all of: `gt:auto-test-pr-attachment` (umbrella discriminator), `kind:transition` OR `kind:rejection`, `rig:<rig>` (e.g., `rig:gastown_upstream`), and the parent's `gt:auto-test-pr` umbrella |
+| `Issue.Metadata` | Versioned JSON payload — see schema below per kind. Single-writer (Mayor cycle-close handler only); never RMW |
+| `Issue.Status` | `open` while within the retention window; `closed` after retention elapses (branch-GC patrol). Closed attachments stay readable; closure does not delete the row |
+| Dependency edge | The attachment bead `depends_on` the parent `<rig>-auto-test-state` pinned bead, so `bd show <state-bead>` walks naturally show recent attachments and so the dependency graph documents lineage |
+| Created by | Mayor identity (`actor=mayor`) — gu-gal8 forbids polecat-owned bookkeeping beads, and this rule extends to the attachments |
+
+**Per-kind metadata payloads** (mirror the previous in-blob entries):
+
+```json
+// kind:transition
+{
+  "schema_version": 1,
+  "rig": "gastown_upstream",
+  "from": "mr-pending",
+  "to":   "cooled-down",
+  "at":   "2026-05-21T14:23:00Z",
+  "actor": "refinery",
+  "context": {"mr_id": "gu-mr-abc12", "merged_sha": "abc1234"}
+}
+```
+
+```json
+// kind:rejection
+{
+  "schema_version": 1,
+  "rig": "gastown_upstream",
+  "file": "internal/foo/bar.go",
+  "rejected_at": "2026-05-19T10:00:00Z",
+  "reason": "wrong-target",
+  "cooldown_until": "2026-06-02T10:00:00Z",
+  "mr_id": "gu-mr-abc09"
+}
+```
+
+**Materialize-from-attachments read path.** The materializer is a pure
+function over a list-by-label query plus a recency window. It does
+not mutate any bead.
+
+```go
+// MaterializeAutoTestState reads the per-rig logs by listing
+// attachment beads. Returns the same shape the previous in-blob
+// transition_log[] / rejection_log[] returned, so callers don't
+// branch on storage form.
+func MaterializeAutoTestState(b *beads.Beads, rig string) (
+    transitions []TransitionRecord,
+    rejections  []RejectionRecord,
+    err error,
+) {
+    // One server-side label query per kind. Both queries fan out
+    // through the existing `bd list --label=...` path which already
+    // exists in beads.go::List.
+    txAtt, err := b.List(beads.ListOptions{
+        Label: "gt:auto-test-pr-attachment",
+        // status=all so closed (retired) attachments still surface
+        // for audit reads.
+        Status: "all",
+    })
+    if err != nil { return nil, nil, err }
+
+    for _, a := range txAtt {
+        // Defensive: filter by the kind:* and rig:* label pair on
+        // the client because List() takes one --label flag.
+        if !hasLabel(a, "rig:"+rig) { continue }
+        switch {
+        case hasLabel(a, "kind:transition"):
+            tr, perr := parseTransition(a.Metadata)
+            if perr != nil { continue } // skip schema drift
+            transitions = append(transitions, tr)
+        case hasLabel(a, "kind:rejection"):
+            rj, perr := parseRejection(a.Metadata)
+            if perr != nil { continue }
+            rejections = append(rejections, rj)
+        }
+    }
+    // Newest-first ordering by attachment's `at` / `rejected_at`.
+    sort.Slice(transitions, func(i, j int) bool {
+        return transitions[i].At.After(transitions[j].At)
+    })
+    sort.Slice(rejections, func(i, j int) bool {
+        return rejections[i].RejectedAt.After(rejections[j].RejectedAt)
+    })
+    // Recency window — keep the same caps the in-blob logs had.
+    if len(transitions) > 50  { transitions = transitions[:50] }
+    if len(rejections)  > 200 { rejections  = rejections[:200] }
+    return transitions, rejections, nil
+}
+```
+
+**Bounds:** identical to the previous in-blob bounds (transitions: 50
+newest by `at`; rejections: 200 newest by `rejected_at`). The cap is
+enforced by the materializer's slice, not by deletion — old
+attachments simply fall out of the window. Per-file rejection cooldown
+(synthesis §"Per-file rejection cooldown") still uses
+`rejected_at + 21d > now`; closed attachments past the cooldown are
+ignored by ranking.
+
+**Retention / GC.** The existing `mol-auto-test-pr-branch-gc` patrol
+(Phase 0 task 9) gains a second responsibility: close (not delete)
+attachment beads outside their retention window.
+
+| Kind | Retention rule |
+|------|----------------|
+| `transition` | Close at age > 60d (lookback covers the rolling-7d circuit-breaker window with comfortable margin) |
+| `rejection`  | Close at `cooldown_until + 30d` (lookback covers the 21d per-file cooldown plus margin for late audits) |
+
+Beads' append-only model means closed attachments are still readable;
+closure just trims them from the materializer's `status=open` view by
+default. Audit trails survive forever.
+
+**Concurrency contract** (the whole point of this fallback):
+
+- `bd create` is the only write to attachment beads. It mints a new
+  ID per call; there is no shared row to clobber.
+- The pinned bead's `Issue.Metadata` is **single-writer-only**: the
+  cycle-close handler is the sole writer, and only between
+  state-machine transitions of the parent bead, which itself runs
+  under Dolt SERIALIZABLE-class isolation on the bead's row. The
+  RMW pattern that failed acceptance #2 is no longer used for
+  high-cardinality logs.
+- Reads through the materializer take a list-by-label snapshot;
+  concurrent attachment creation during a read just changes which
+  attachments appear — there is no inconsistent state because each
+  attachment is itself immutable.
+
+**Acceptance test.** A new integration test (mirror of the OQ4 spike
+harness) launches 100 concurrent goroutines that each call `bd create`
+to file an attachment bead against the same parent state bead. After
+all goroutines finish, materializing the logs MUST recover all 100
+attachments. Lives at
+`internal/cmd/metadata_attachment_bead_integration_test.go`, gated
+by `GT_RUN_OQ4_SPIKE=1` so it does not run in default integration
+runs (it shares the spike's host requirement of a real Dolt
+container). This satisfies the prerequisite bead `gu-2s03` acceptance
+criterion #5.
+
+**Migration.** v1 ships the attachment-bead pattern from day one
+(Phase 0 task 8 provisions the pinned bead with bounded single-writer
+fields only; no transition/rejection arrays ever exist on the pinned
+bead). There is no v0 → v1 migration because Phase 0 is the first
+ship. Schema-evolution policy (§Schema versioning) applies to both
+the pinned-bead payload and to attachment metadata payloads: every
+JSON blob carries `schema_version`; readers tolerate forward-version
+fields by round-tripping through `json.RawMessage`.
 
 ## Trade-offs and Decisions
 
@@ -726,11 +935,21 @@ but the label namespace is operator-trusted. Recommend a town-level
 "reserved labels" registry; defer enforcement to a small follow-up
 bead.
 
-**OQ4. Pinned-bead Metadata reliability.** `Issue.Metadata` is
-described in `internal/beads/beads.go:303-305` as an "extension
-point." Is it safe to round-trip ~5KB JSON blobs (transition log +
-rejection log) on every state transition? Verify before Phase 0;
-fallback is a separate metadata-bead-attachment bead per rig.
+**OQ4. Pinned-bead Metadata reliability — RESOLVED (FAIL → fallback adopted).**
+Phase 0a-3 spike (`gu-g9ufm`,
+`internal/cmd/metadata_reliability_integration_test.go`) **PASSED**
+acceptance #1 (100/100 sequential ~7-8KB blob round-trips
+byte-for-byte equal — `Issue.Metadata` IS faithful as a single-writer
+storage surface) but **FAILED** acceptance #2 (concurrent CAS):
+~60/100 writers' contributions are lost to clobber under the
+production RMW pattern (`internal/beads/store.go::mergeMetadataKey`).
+The fallback prerequisite bead `gu-2s03` re-shapes Phase 0 task 8 +
+Phase 1 task 15 to use the **metadata-attachment-bead** pattern for
+`transition_log` and `rejection_log`; the pinned bead retains only
+single-writer config in `Issue.Metadata` (`schema_version`, `state`,
+`current_cycle`, `last_cycle_at`, `last_cycle_outcome`,
+`paused_until`, `incidents[]≤20`). See §Data Model "OQ4 fallback"
+subsection above for schema, materialize-path, and retention rules.
 
 **OQ5. v1 → v2 mode migration.** When v2 lands external-PR mode, the
 existing `gh pr create` tap-guard (`internal/cmd/tap_guard.go`) must
@@ -915,6 +1134,12 @@ been spent before discovering Phase 0 cannot complete.
 - Spike outcomes (0a-3, 0a-5) recorded in
   `.plan-reviews/auto-test-pr/phase-0a-spikes.md` (one-page
   summary per spike).
+- **0a-3 outcome:** FAILED acceptance #2 (concurrent CAS); fallback
+  prerequisite bead `gu-2s03` filed; this synthesis updated to
+  re-shape Phase 0 task 8 + Phase 1 task 15 + Phase 0 step 3c
+  (cycle-close handler) to use the **metadata-attachment-bead**
+  pattern documented in §Data Model "OQ4 fallback" (this file).
+  Phase 0a-3's open question is closed.
 - No Phase 0 task is started until 0a is complete (this is the
   whole point of 0a).
 
@@ -1015,16 +1240,38 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
     label off the MR-bead at event time and looks up
     `<target_rig>-auto-test-state` in O(1). On
     merged → CAS-transition the rig's state bead `mr-pending →
-    cooled-down` and append a transition record. On
-    closed-unmerged → CAS-transition `mr-pending → cooled-down`,
-    append both a transition record and a rejection record (with
-    `target_path` for the per-file 21d cooldown), and increment the
-    town-bead circuit-breaker counter; if the rig has ≥3 closes in
-    any rolling 7-day window, CAS-transition to
+    cooled-down` AND **`bd create` a transition attachment bead**
+    (labels `gt:auto-test-pr-attachment` + `kind:transition` +
+    `rig:<target_rig>`, depends-on the rig state bead, metadata =
+    `{schema_version:1, rig, from:"mr-pending", to:"cooled-down",
+    at, actor:"refinery", context:{mr_id, merged_sha}}`) per the
+    OQ4 fallback. On closed-unmerged → CAS-transition `mr-pending →
+    cooled-down`, **`bd create` BOTH a transition attachment AND a
+    rejection attachment** (rejection labels
+    `gt:auto-test-pr-attachment` + `kind:rejection` +
+    `rig:<target_rig>`, metadata =
+    `{schema_version:1, rig, file:target_path, rejected_at, reason,
+    cooldown_until = rejected_at + 21d, mr_id}`), and increment the
+    town-bead circuit-breaker counter (the town bead's counter is a
+    single-writer field on a single row — Mayor's cycle-close handler
+    is the sole writer, so it remains in `Issue.Metadata` per OQ4
+    spike acceptance #1); if the rig has ≥3 closes in any rolling
+    7-day window (computed by materializing the rig's transition
+    attachments over the window), CAS-transition to
     `paused-by-circuit-breaker` and nudge Overseer (Q6 SEV-2). On
     either path, parse any `BUG-DISCOVERED:` NOTES and file a P2
     bug bead in the rig (`<rig>-bug-from-auto-test-NNN`) linked to
     the cycle's MR bead.
+    **Round-3-fix#6+OQ4 fallback wiring:** attachment-bead writes go
+    through the same in-process `beadsdk.Storage` the handler already
+    holds (no `bd` subprocess fan-out per cycle); the writes are
+    independent across the merged / closed-unmerged paths so
+    partial-failure semantics are simple — if the transition
+    attachment commits but the rejection attachment fails, the next
+    tick re-checks the MR-bead state and re-files only the missing
+    attachment (idempotent, since attachment IDs are
+    cycle-derived: title `auto-test-pr <kind> <rig>: <from>→<to>
+    @ <iso8601>` plus the parent MR-bead ID in the dependency edge).
 4. Land `mol-auto-test-pr-cycle` formula. Registered in Mayor's
    patrol set, but the first step is `if no rig has
    auto_test_pr.enabled == true → exit 0`. Inert. **Round 3 fix #4 —
@@ -1125,16 +1372,51 @@ Goal: ship all the wiring inert, so Phase 1 is a single-flag flip.
    order. If the floor mechanism does not exist pre-this-task,
    ship it; if it exists, write the integration test and confirm
    the existing implementation honors the floor.
-8. Provision `town-auto-test-pr-state` pinned bead with `enabled_rigs:
-   []`. Mayor-owned. **Round 3 fix #10 — acceptance:** post-task,
+8. Provision the **two state beads**: `town-auto-test-pr-state`
+   (single-writer fields: `schema_version`, `global_pause_until`,
+   `circuit_breaker.{consecutive_closes_townwide, window_started_at,
+   tripped_until}`, `enabled_rigs[]`, `rig_summary{}`; Mayor-only
+   writer) AND, when the first rig opts in, the per-rig
+   `<rig>-auto-test-state` pinned bead with **single-writer
+   metadata only** (`schema_version`, `state`, `current_cycle`,
+   `last_cycle_at`, `last_cycle_outcome`, `paused_until`,
+   `incidents[]≤20`). **No `transition_log[]` or `rejection_log[]`
+   on either bead** — those move to attachment beads per the OQ4
+   fallback (this section, Phase 0a-3 outcome). Mayor-owned.
+   **Round 3 fix #10 — acceptance:** post-task,
    `gt auto-test-pr status --format=json` returns
    `{enabled_rigs:[], paused:false, circuit_breaker:{count:0}}`
-   (the town-wide row of the status table).
+   (the town-wide row of the status table). **OQ4 fallback
+   acceptance:** unit tests cover (a) materializer over zero
+   attachment beads returns empty `transitions[]` /
+   `rejections[]`; (b) materializer over a single transition
+   attachment returns the same record shape the previous in-blob
+   `transition_log[]` returned (so callers don't branch on storage
+   form); (c) cycle-close handler `bd create` round-trips: file a
+   transition attachment, materialize, see it in `transitions[]`;
+   (d) the parent state bead's `Issue.Metadata` post-cycle does
+   NOT contain `transition_log[]` or `rejection_log[]` keys (guard
+   against accidental regression to the RMW pattern).
 9. **Land `mol-auto-test-pr-branch-gc` patrol** (PRD promoted-MUST
-   fix). Standing patrol that lists `refs/heads/auto-test/*/*`
-   branches across all opted-in rigs, cross-references against each
-   rig's state bead and any open MRs, and deletes branches >7 days
-   old with no associated open MR or in-flight bead.
+   fix). Standing patrol with **two responsibilities** under the OQ4
+   fallback:
+   (a) **Branch GC** — list `refs/heads/auto-test/*/*` branches
+   across all opted-in rigs, cross-reference against each rig's
+   state bead and any open MRs, and delete branches >7 days old
+   with no associated open MR or in-flight bead.
+   (b) **Attachment-bead retention** — list attachment beads via
+   the `gt:auto-test-pr-attachment` label query and CLOSE (do NOT
+   delete; beads are append-only audit) attachments outside their
+   retention window: `kind:transition` attachments at `at + 60d <
+   now`; `kind:rejection` attachments at `cooldown_until + 30d <
+   now`. Closure trims them from the materializer's default
+   `status=open` view; closed attachments remain readable for audit.
+   **Acceptance:** integration test seeds 3 transition attachments
+   (one fresh, one 30d old, one 90d old) and 3 rejection
+   attachments (cooldowns at +21d / -10d / -45d relative to now),
+   runs the patrol, and verifies (i) the 90d transition is
+   `status=closed`, (ii) the rejection with `cooldown_until = -45d
+   ago` is `status=closed`, (iii) the others remain `status=open`.
 10. **Wire D15 maintainer-approval gate into Refinery's merge
     handler.** **Verification of label-query + `approved-by:<user>`
     semantics moved to Phase 0a-1** (round 2 fix). Wire the
@@ -1303,6 +1585,24 @@ Critical-path length (with parallelism):
   test confirms a stale `enabled_rigs[]` (rig present in cache but
   `auto_test_pr.enabled=false` in settings JSON, or vice versa) is
   reconciled by `mol-auto-test-pr-cycle`'s tick within one tick.
+- **OQ4 fallback acceptance** (gu-2s03 — this section §"OQ4
+  fallback"): the `mol-auto-test-pr-cycle` cycle-close handler files
+  attachment beads (NOT RMW into the parent state bead's
+  `Issue.Metadata`) for both transitions and rejections; unit tests
+  cover the materializer over zero / one / many attachments and the
+  empty / well-formed / missing-rig-label edge cases; the parent
+  state bead's `Issue.Metadata` post-cycle does NOT contain
+  `transition_log[]` or `rejection_log[]` keys (regression guard
+  against accidental return to the RMW pattern). The 100-concurrent-
+  writer harness in `internal/cmd/metadata_attachment_bead_integration_test.go`
+  (gated by `GT_RUN_OQ4_SPIKE=1`) is run once at Phase 0 close to
+  re-validate the fallback against any beads-SDK bump that lands
+  between Phase 0a-3 and Phase 0 close.
+- **Branch-GC patrol attachment retention** (task 9 fix per OQ4
+  fallback): integration test seeds 3 transition + 3 rejection
+  attachments at varying ages and verifies the patrol closes only
+  the out-of-window attachments, leaves recent ones `status=open`,
+  and never deletes any (audit trail preservation).
 
 ### Phase 1: Pilot opt-in (`gastown_upstream` only)
 
@@ -1322,7 +1622,24 @@ entry — they SHOULD ship before Phase 1 but don't gate it.
     `gastown_upstream`, commit via PR. Reviewed via standard PR
     review.
 15. Provision `<rig>-auto-test-state` pinned bead for
-    `gastown_upstream`. Initial state `idle`.
+    `gastown_upstream`. Initial `Issue.Metadata`:
+    `{schema_version:1, rig:"gastown_upstream", state:"idle",
+    current_cycle:null, last_cycle_at:null, last_cycle_outcome:null,
+    paused_until:null, incidents:[]}` — **single-writer fields
+    only** per the OQ4 fallback. The pinned bead does NOT carry a
+    `transition_log[]` or `rejection_log[]`; reads of those go
+    through the materializer over attachment beads filtered by
+    `rig:gastown_upstream` + `kind:{transition,rejection}` labels
+    (see Phase 0 task 8 + §Data Model "OQ4 fallback"). The town
+    bead's `enabled_rigs[]` is updated atomically with the rig's
+    settings-JSON `enabled=true` flip in Phase 1 task 16 per Round
+    3 fix #4 (CAS-append; reconcile in `mol-auto-test-pr-cycle`
+    handles partial-failure cases). **OQ4 fallback acceptance:**
+    materializer query against the freshly-provisioned bead returns
+    empty `transitions[]` / `rejections[]`; the first cycle's
+    cycle-close handler files a transition attachment which then
+    surfaces in the materialized list (proves the read-path is
+    wired before the pilot opt-in flip).
 16. Flip `auto_test_pr.enabled=true` in `gastown_upstream`'s settings
     JSON. Cadence: 7 days.
 17. **Five-week (weeks 2-6) observation window.** Each cycle:
