@@ -366,6 +366,17 @@ type DaemonThresholds struct {
 	// DeaconGracePeriod is time to wait after starting Deacon before checking heartbeat (default "5m").
 	DeaconGracePeriod string `json:"deacon_grace_period,omitempty"`
 
+	// DeaconMaxSessionAge is the maximum age of the Deacon's Claude session
+	// before the daemon schedules a preventative restart. Long-running Claude
+	// sessions lose propulsion discipline as context grows (gs-a0x); a
+	// periodic restart restores fresh context. Empty string or "0" disables
+	// the scheduled restart entirely (default: disabled). Recommended starting
+	// value when enabling: "3h" — well under the ~5h observed stall onset.
+	// The actual restart is deferred while active work is in flight; a hard
+	// cap at 2× this value forces restart even with active work, to escape
+	// the stuck-on-work pathology this knob is meant to prevent.
+	DeaconMaxSessionAge string `json:"deacon_max_session_age,omitempty"`
+
 	// PressureCPUThreshold is the per-core load average above which new
 	// non-infrastructure spawns are deferred. Disabled by default (0).
 	// Recommended starting value: 3.0 (only trips under severe load).

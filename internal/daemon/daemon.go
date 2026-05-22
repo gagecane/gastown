@@ -1079,6 +1079,10 @@ func (d *Daemon) heartbeat(state *State) {
 	// Only run if Deacon patrol is enabled
 	if d.isPatrolActive("deacon") {
 		d.checkDeaconHeartbeat()
+		// Preventative scheduled restart for long-running deacon sessions
+		// (gs-a0x). Disabled by default; opt-in via
+		// operational.daemon.deacon_max_session_age.
+		d.checkDeaconAge()
 	}
 
 	// 4. Ensure Witnesses are running for all rigs (restart if dead)
@@ -1881,6 +1885,56 @@ func (d *Daemon) restartStuckDeacon(sessionName, reason string) {
 
 	d.logger.Printf("Stuck-agent-dog: Deacon restarted successfully")
 	d.notifySlack("admin", "high", fmt.Sprintf("Deacon was stuck (%s) — auto-restarted successfully", reason))
+}
+
+// checkDeaconAge schedules a preventative deacon restart when the current
+// Claude session has been running longer than the configured maximum age.
+// Disabled when operational.daemon.deacon_max_session_age is zero/unset.
+// See gs-a0x for rationale.
+//
+// Trigger logic:
+//   - age <= max:                 no-op
+//   - max < age <= 2*max (soft):  restart only if no active work in flight,
+//                                 otherwise defer to a later tick
+//   - age > 2*max (hard cap):     force restart regardless of active work,
+//                                 to escape the stuck-on-work pathology this
+//                                 knob is meant to prevent
+//
+// The actuation path is the same restartStuckDeacon used by the stuck-agent-
+// dog, so backoff, crash-loop guard, and usage-limit detection all apply.
+func (d *Daemon) checkDeaconAge() {
+	maxAge := d.loadOperationalConfig().GetDaemonConfig().DeaconMaxSessionAgeD()
+	if maxAge <= 0 {
+		return // disabled
+	}
+	if d.deaconLastStarted.IsZero() {
+		return // never started — let the heartbeat/ensure path handle it
+	}
+
+	age := time.Since(d.deaconLastStarted)
+	if age <= maxAge {
+		return
+	}
+
+	sessionName := d.getDeaconSessionName()
+	hardCap := 2 * maxAge
+
+	if age > hardCap {
+		d.logger.Printf("Scheduled deacon restart (HARD CAP): session age %s exceeds %s, forcing restart even with active work",
+			age.Round(time.Minute), hardCap.Round(time.Minute))
+		d.restartStuckDeacon(sessionName, fmt.Sprintf("scheduled age-based restart (hard cap, age=%s)", age.Round(time.Minute)))
+		return
+	}
+
+	if d.hasActiveWork() {
+		d.logger.Printf("Scheduled deacon restart deferred: session age %s exceeds %s but active work in flight (hard cap at %s)",
+			age.Round(time.Minute), maxAge.Round(time.Minute), hardCap.Round(time.Minute))
+		return
+	}
+
+	d.logger.Printf("Scheduled deacon restart: session age %s exceeds %s, no active work — restarting",
+		age.Round(time.Minute), maxAge.Round(time.Minute))
+	d.restartStuckDeacon(sessionName, fmt.Sprintf("scheduled age-based restart (age=%s)", age.Round(time.Minute)))
 }
 
 // notifySlack sends a notification via gt-notify (zero token cost).

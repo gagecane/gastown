@@ -55,6 +55,10 @@ const (
 	DefaultBootSpawnCooldown               = 2 * time.Minute
 	DefaultBootIdleSuppression             = 15 * time.Minute
 	DefaultDeaconGracePeriod               = 5 * time.Minute
+	// DefaultDeaconMaxSessionAge is the default for the preventative scheduled
+	// deacon restart. Disabled by default (0); operators opt in per-deployment
+	// by setting operational.daemon.deacon_max_session_age. See gs-a0x.
+	DefaultDeaconMaxSessionAge             = 0 * time.Second
 
 	// Pressure check defaults — fully opt-in. All zero = disabled.
 	// Configure in settings/config.json under operational.daemon to enable.
@@ -421,6 +425,15 @@ func (d *DaemonThresholds) DeaconGracePeriodD() time.Duration {
 		return ParseDurationOrDefault(d.DeaconGracePeriod, DefaultDeaconGracePeriod)
 	}
 	return DefaultDeaconGracePeriod
+}
+
+// DeaconMaxSessionAgeD returns the configured or default max deacon session
+// age before a preventative scheduled restart. Zero means disabled.
+func (d *DaemonThresholds) DeaconMaxSessionAgeD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.DeaconMaxSessionAge, DefaultDeaconMaxSessionAge)
+	}
+	return DefaultDeaconMaxSessionAge
 }
 
 // PressureCPUThresholdV returns the configured or default CPU pressure threshold (load per core).
