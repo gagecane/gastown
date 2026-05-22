@@ -105,7 +105,7 @@ func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
 		t.Skipf("bd init unavailable in test environment: %v", err)
 	}
 
@@ -220,7 +220,7 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
 		t.Skipf("bd init unavailable: %v", err)
 	}
 
@@ -275,7 +275,7 @@ func TestManager_PostMerge_StripsTimestampSuffix(t *testing.T) {
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
 		t.Skipf("bd init unavailable: %v", err)
 	}
 
@@ -328,7 +328,7 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
 		t.Skipf("bd init unavailable: %v", err)
 	}
 

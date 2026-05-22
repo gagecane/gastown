@@ -1087,7 +1087,7 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 		testutil.RequireDoltContainer(t)
 		port, _ := strconv.Atoi(testutil.DoltContainerPort())
 		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
+		if err := bd.Init(testutil.UniqueTestPrefix(t)); err != nil {
 			t.Fatalf("bd init: %v", err)
 		}
 	} else {
@@ -1437,7 +1437,7 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 		testutil.RequireDoltContainer(t)
 		port, _ := strconv.Atoi(testutil.DoltContainerPort())
 		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
+		if err := bd.Init(testutil.UniqueTestPrefix(t)); err != nil {
 			t.Fatalf("bd init: %v", err)
 		}
 	} else {
@@ -1583,7 +1583,7 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 		testutil.RequireDoltContainer(t)
 		port, _ := strconv.Atoi(testutil.DoltContainerPort())
 		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
+		if err := bd.Init(testutil.UniqueTestPrefix(t)); err != nil {
 			t.Fatalf("bd init: %v", err)
 		}
 	} else {
