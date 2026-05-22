@@ -111,7 +111,7 @@ func RunWithTimeout(ctx context.Context, cmd *exec.Cmd, cap time.Duration) ([]by
 
 	select {
 	case <-runCtx.Done():
-		// Timeout (or caller-cancelled). Kill the process group
+		// Timeout (or caller-canceled). Kill the process group
 		// (or the process) and drain Wait so the goroutine
 		// terminates and pipes are closed.
 		killProcessGroup(cmd)
