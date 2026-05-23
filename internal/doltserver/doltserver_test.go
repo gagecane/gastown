@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -5082,5 +5083,150 @@ func TestHealthMetrics_CommitFreshnessFields(t *testing.T) {
 	metrics := GetHealthMetrics(townRoot)
 	if metrics.LastCommitAge < 0 {
 		t.Errorf("LastCommitAge = %v, want >= 0", metrics.LastCommitAge)
+	}
+}
+
+// =============================================================================
+// Lock-holder sidecar tests (gu-g14c)
+// =============================================================================
+//
+// These tests exercise the sidecar PID file used by Start() to detect
+// whether the dolt.lock holder is still alive before forcibly removing the
+// lock. The previous code force-removed the lock on every timeout, then
+// recreated it at a new inode and acquired flock on the new inode — letting
+// two peers each "hold" the lock simultaneously and race each other through
+// the imposter-kill path. (See bead gu-g14c for the 22-restart flap on
+// 2026-05-22 that this defends against.)
+
+func TestLockHolderPath_AppendsHolderSuffix(t *testing.T) {
+	got := lockHolderPath("/tmp/daemon/dolt.lock")
+	want := "/tmp/daemon/dolt.lock.holder"
+	if got != want {
+		t.Errorf("lockHolderPath = %q, want %q", got, want)
+	}
+}
+
+func TestWriteAndReadLockHolder_RoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockFile := filepath.Join(tmpDir, "dolt.lock")
+
+	// No sidecar yet — read returns 0 ("unknown holder").
+	if got := readLockHolder(lockFile); got != 0 {
+		t.Errorf("readLockHolder before write: got %d, want 0", got)
+	}
+
+	writeLockHolder(lockFile)
+
+	// Sidecar should contain THIS process's PID.
+	if got := readLockHolder(lockFile); got != os.Getpid() {
+		t.Errorf("readLockHolder after write: got %d, want %d", got, os.Getpid())
+	}
+
+	removeLockHolder(lockFile)
+
+	// After removal, read returns 0 again.
+	if got := readLockHolder(lockFile); got != 0 {
+		t.Errorf("readLockHolder after remove: got %d, want 0", got)
+	}
+}
+
+func TestReadLockHolder_GarbageContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockFile := filepath.Join(tmpDir, "dolt.lock")
+
+	// Write garbage into the sidecar file. readLockHolder must not panic
+	// and must return 0 ("unknown holder") so the caller treats it
+	// conservatively rather than misclassifying a live holder as dead.
+	if err := os.WriteFile(lockHolderPath(lockFile), []byte("not-a-pid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLockHolder(lockFile); got != 0 {
+		t.Errorf("readLockHolder garbage: got %d, want 0", got)
+	}
+
+	// Negative PID — also rejected.
+	if err := os.WriteFile(lockHolderPath(lockFile), []byte("-1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLockHolder(lockFile); got != 0 {
+		t.Errorf("readLockHolder negative: got %d, want 0", got)
+	}
+
+	// Zero PID — also rejected (no real process has PID 0).
+	if err := os.WriteFile(lockHolderPath(lockFile), []byte("0"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLockHolder(lockFile); got != 0 {
+		t.Errorf("readLockHolder zero: got %d, want 0", got)
+	}
+}
+
+func TestReadLockHolder_TrimsWhitespace(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockFile := filepath.Join(tmpDir, "dolt.lock")
+
+	// Sidecar with trailing newline (writeLockHolder doesn't add one, but
+	// be defensive — the file may be hand-edited or written by a future
+	// version that pretty-prints).
+	if err := os.WriteFile(lockHolderPath(lockFile), []byte("12345\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLockHolder(lockFile); got != 12345 {
+		t.Errorf("readLockHolder with newline: got %d, want 12345", got)
+	}
+}
+
+func TestRemoveLockHolder_NoopWhenMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockFile := filepath.Join(tmpDir, "dolt.lock")
+
+	// Must not panic or error when sidecar doesn't exist. Start()'s defer
+	// always calls removeLockHolder — including on the unhappy path where
+	// we never wrote the sidecar in the first place.
+	removeLockHolder(lockFile)
+}
+
+func TestLockHolder_DetectsLiveHolder(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockFile := filepath.Join(tmpDir, "dolt.lock")
+
+	// Simulate a peer that wrote its (this test process's) PID into the
+	// sidecar and is still running. The recovery path in Start() must
+	// classify this holder as alive and refuse to forcibly remove the lock.
+	writeLockHolder(lockFile)
+
+	holderPID := readLockHolder(lockFile)
+	if holderPID == 0 {
+		t.Fatal("expected non-zero holder PID after writeLockHolder")
+	}
+	if !processIsAlive(holderPID) {
+		t.Errorf("processIsAlive(%d) = false, want true (this test's own PID)", holderPID)
+	}
+}
+
+func TestLockHolder_DetectsDeadHolder(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockFile := filepath.Join(tmpDir, "dolt.lock")
+
+	// Find a PID that almost certainly doesn't exist. PID 1 is init —
+	// always alive. We want a high, unallocated PID. The sysctl default
+	// max PID on Linux is 32768 and on macOS is 99998; pick a value above
+	// both that the kernel is unlikely to have allocated. Skip the test
+	// if it happens to be live.
+	deadPID := 999999
+	if processIsAlive(deadPID) {
+		t.Skipf("PID %d unexpectedly alive — skipping", deadPID)
+	}
+
+	if err := os.WriteFile(lockHolderPath(lockFile), []byte(strconv.Itoa(deadPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readLockHolder(lockFile)
+	if got != deadPID {
+		t.Fatalf("readLockHolder = %d, want %d", got, deadPID)
+	}
+	if processIsAlive(got) {
+		t.Errorf("processIsAlive(%d) = true, want false", got)
 	}
 }

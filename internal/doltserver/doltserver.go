@@ -1552,6 +1552,48 @@ behavior:
 	return os.WriteFile(configPath, []byte(content), 0600)
 }
 
+// lockHolderPath returns the path of the sidecar file recording the PID of
+// the current dolt.lock holder. It lives next to dolt.lock and is written
+// after acquiring the flock. This lets concurrent peers detect whether the
+// lock holder is still alive without relying on POSIX flock inode semantics,
+// which the previous "remove + recreate" recovery path silently bypassed —
+// letting two peers each "hold" the lock simultaneously and race each other
+// through the imposter-kill path. (gu-g14c)
+func lockHolderPath(lockFile string) string {
+	return lockFile + ".holder"
+}
+
+// writeLockHolder records the current process's PID into the lock-holder
+// sidecar file. Best-effort: a failure to write does not block lock
+// acquisition (the flock itself is the synchronization primitive; the
+// sidecar is purely a hint for liveness checks).
+func writeLockHolder(lockFile string) {
+	holder := lockHolderPath(lockFile)
+	pid := strconv.Itoa(os.Getpid())
+	_ = os.WriteFile(holder, []byte(pid), 0600)
+}
+
+// removeLockHolder removes the lock-holder sidecar file. Called when the
+// flock is released so that subsequent peers do not see a stale PID.
+func removeLockHolder(lockFile string) {
+	_ = os.Remove(lockHolderPath(lockFile))
+}
+
+// readLockHolder returns the PID recorded in the lock-holder sidecar file,
+// or 0 if the file is missing or unreadable. A return of 0 means "unknown
+// holder" — callers should treat this as "do not assume the holder is dead".
+func readLockHolder(lockFile string) int {
+	data, err := os.ReadFile(lockHolderPath(lockFile))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
 // Start starts the Dolt SQL server.
 func Start(townRoot string) error {
 	config := DefaultConfig(townRoot)
@@ -1564,13 +1606,14 @@ func Start(townRoot string) error {
 
 	// Acquire exclusive lock to prevent concurrent starts (same pattern as gt daemon).
 	// If the lock is held, retry briefly — the holder may be finishing up. If still
-	// held after retries, check if the holding process is alive. (gt-tosjp)
+	// held after retries, check if the holding process is alive. (gt-tosjp, gu-g14c)
 	lockFile := filepath.Join(daemonDir, "dolt.lock")
 	fileLock := flock.New(lockFile)
 	locked, err := fileLock.TryLock()
 	if err != nil {
 		// Lock file may be corrupted — remove and retry once
 		_ = os.Remove(lockFile)
+		removeLockHolder(lockFile)
 		locked, err = fileLock.TryLock()
 		if err != nil {
 			return fmt.Errorf("acquiring lock: %w", err)
@@ -1605,10 +1648,28 @@ func Start(townRoot string) error {
 			if already, _, _ := IsRunning(townRoot); already {
 				return nil
 			}
+			// At this point: lock is held, Dolt is not yet up. Two cases:
+			//   (a) Holder is alive — still spawning Dolt. Force-removing the
+			//       lock here would let us recreate dolt.lock at a NEW inode
+			//       and acquire flock on it concurrently with the holder
+			//       (whose flock is on the original inode). We would then race
+			//       the holder through KillImposters() — observed as 22 dolt
+			//       restarts in 4 hours on 2026-05-22. (gu-g14c)
+			//   (b) Holder is dead — POSIX flock has auto-released, but the
+			//       sidecar PID file may be stale. Cleanup is safe.
+			holderPID := readLockHolder(lockFile)
+			if holderPID > 0 && processIsAlive(holderPID) {
+				return fmt.Errorf("another gt dolt start (PID %d) is in progress; "+
+					"waited %s without acquiring lock and Dolt is not yet listening — "+
+					"refusing to race the holder through imposter-kill (gu-g14c)",
+					holderPID, lockTimeout.Round(time.Second))
+			}
 			// POSIX flocks auto-release on process death. We timed out waiting,
-			// so forcibly remove the stale lock and retry once. (gt-tosjp)
-			fmt.Fprintf(os.Stderr, "Warning: dolt.lock held for >%s — removing stale lock\n", lockTimeout.Round(time.Second))
+			// so the holder is dead (or was never recorded). Remove the stale
+			// lock and retry once. (gt-tosjp)
+			fmt.Fprintf(os.Stderr, "Warning: dolt.lock held for >%s with no live holder — removing stale lock\n", lockTimeout.Round(time.Second))
 			_ = os.Remove(lockFile)
+			removeLockHolder(lockFile)
 			fileLock = flock.New(lockFile)
 			locked, err = fileLock.TryLock()
 			if err != nil || !locked {
@@ -1616,7 +1677,13 @@ func Start(townRoot string) error {
 			}
 		}
 	}
-	defer func() { _ = fileLock.Unlock() }()
+	// Record our PID so concurrent peers can detect whether we are still
+	// alive without depending on POSIX flock inode semantics. (gu-g14c)
+	writeLockHolder(lockFile)
+	defer func() {
+		removeLockHolder(lockFile)
+		_ = fileLock.Unlock()
+	}()
 
 	// Stop idle-monitor processes first. These background processes auto-spawn
 	// rogue Dolt servers and will immediately respawn an imposter if we kill
