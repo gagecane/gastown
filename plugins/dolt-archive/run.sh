@@ -38,7 +38,14 @@ done
 # --- Helpers -----------------------------------------------------------------
 
 log() {
-  echo "[dolt-archive] $*"
+  # Write to stderr so log() never poisons stdout-captured data
+  # (e.g. `< <(filter_known_rigs ...)`). Previously, log lines emitted
+  # inside filter_known_rigs leaked into FILTERED_DBS and were passed as
+  # `dolt --use-db "<log line>"`, producing misleading
+  # "database not found: [dolt-archive] Skipping ..." entries in
+  # dolt.log that confused multiple Dolt-instability investigations
+  # (gu-l0y3, gc-ymdip, gc-dvcxc).
+  echo "[dolt-archive] $*" >&2
 }
 
 LOGFILE=$(mktemp /tmp/dolt-archive-stderr.XXXXXX)
