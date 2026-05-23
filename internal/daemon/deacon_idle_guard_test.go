@@ -53,6 +53,16 @@ if [[ "$cmd" == "has-session" ]]; then
   exit 0
 fi
 
+# list-sessions: when TMUX_SESSION_CREATED is set, emit it as the session_created
+# Unix timestamp. Used by gs-3ee tests that exercise the checkDeaconAge fallback
+# via GetSessionCreatedTime. Empty by default so other tests see "no session".
+if [[ "$cmd" == "list-sessions" ]]; then
+  if [[ -n "${TMUX_SESSION_CREATED:-}" ]]; then
+    echo "${TMUX_SESSION_CREATED}"
+  fi
+  exit 0
+fi
+
 exit 0
 `
 	path := filepath.Join(dir, "tmux")

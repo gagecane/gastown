@@ -79,6 +79,13 @@ type Daemon struct {
 	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
 	deaconLastStarted time.Time
 
+	// deaconAgeFallbackLogged tracks whether we've already logged the one-time
+	// notice that checkDeaconAge had to recover deaconLastStarted from the tmux
+	// session creation time (because the deacon was started via a path that
+	// bypasses Daemon.startDeacon, e.g. `gt deacon restart`). See gs-3ee.
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	deaconAgeFallbackLogged bool
+
 	// syncFailures tracks consecutive git pull failures per workdir.
 	// Used to escalate logging from WARN to ERROR after repeated failures.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
@@ -1915,8 +1922,23 @@ func (d *Daemon) checkDeaconAge() {
 	if maxAge <= 0 {
 		return // disabled
 	}
+	sessionName := d.getDeaconSessionName()
+
 	if d.deaconLastStarted.IsZero() {
-		return // never started — let the heartbeat/ensure path handle it
+		// The deacon may have been (re)started via a path that bypasses
+		// Daemon.startDeacon (e.g. `gt deacon restart`, which drives tmux
+		// directly from internal/cmd/deacon.go). Fall back to the tmux
+		// session creation time so the age-based restart still arms. See gs-3ee.
+		created, err := d.tmux.GetSessionCreatedTime(sessionName)
+		if err != nil || created.IsZero() {
+			return // no live session — let the heartbeat/ensure path handle it
+		}
+		if !d.deaconAgeFallbackLogged {
+			d.logger.Printf("checkDeaconAge: deaconLastStarted unset, falling back to tmux session_created for %s (created=%s); deacon was likely started outside Daemon.startDeacon",
+				sessionName, created.Format(time.RFC3339))
+			d.deaconAgeFallbackLogged = true
+		}
+		d.deaconLastStarted = created
 	}
 
 	age := time.Since(d.deaconLastStarted)
@@ -1924,7 +1946,6 @@ func (d *Daemon) checkDeaconAge() {
 		return
 	}
 
-	sessionName := d.getDeaconSessionName()
 	hardCap := 2 * maxAge
 
 	if age > hardCap {

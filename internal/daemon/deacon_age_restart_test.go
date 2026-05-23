@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,8 +168,9 @@ func TestCheckDeaconAge(t *testing.T) {
 }
 
 // TestCheckDeaconAge_NeverStarted verifies the no-op early return when
-// deaconLastStarted is zero — there's nothing to restart yet, and the
-// existing ensure/heartbeat path will start it on the next tick.
+// deaconLastStarted is zero AND no live tmux session exists to fall back to —
+// there's nothing to restart yet, and the existing ensure/heartbeat path will
+// start it on the next tick.
 func TestCheckDeaconAge_NeverStarted(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows — fake tmux requires bash")
@@ -183,6 +185,7 @@ func TestCheckDeaconAge_NeverStarted(t *testing.T) {
 	writeFakeTmuxWithSession(t, fakeBinDir)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX_LOG", tmuxLog)
+	// TMUX_SESSION_CREATED unset → list-sessions returns empty → no fallback.
 	writeMaxSessionAge(t, townRoot, "1h")
 
 	d := &Daemon{
@@ -201,6 +204,144 @@ func TestCheckDeaconAge_NeverStarted(t *testing.T) {
 
 	if got := countKillSession(t, tmuxLog); got != 0 {
 		t.Errorf("kill-session count = %d, want 0 (never started)\nlog:\n%s", got, logBuf.String())
+	}
+}
+
+// TestCheckDeaconAge_ManualRestartFallback covers gs-3ee: when the deacon was
+// started via a path that bypasses Daemon.startDeacon (e.g. `gt deacon restart`,
+// which calls internal/cmd/deacon.go:startDeaconSession() directly via tmux),
+// deaconLastStarted stays zero — but the daemon should still arm the
+// scheduled age-based restart by falling back to the tmux session creation time.
+func TestCheckDeaconAge_ManualRestartFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows — fake tmux requires bash")
+	}
+
+	tests := []struct {
+		name             string
+		maxAge           string
+		sessionAgeFromTmux time.Duration // how old the tmux session_created reports
+		stores           map[string]beadsdk.Storage
+		wantKillSessions int
+		wantLogContains  []string
+	}{
+		{
+			name:               "fallback: old tmux session, idle — restart fires",
+			maxAge:             "3h",
+			sessionAgeFromTmux: 4 * time.Hour,
+			stores:             emptyStores(),
+			wantKillSessions:   1,
+			wantLogContains:    []string{"falling back to tmux session_created", "Scheduled deacon restart:"},
+		},
+		{
+			name:               "fallback: old tmux session, busy — deferred",
+			maxAge:             "3h",
+			sessionAgeFromTmux: 4 * time.Hour,
+			stores:             storesWithInProgress(),
+			wantKillSessions:   0,
+			wantLogContains:    []string{"falling back to tmux session_created", "deferred"},
+		},
+		{
+			name:               "fallback: young tmux session — no-op",
+			maxAge:             "3h",
+			sessionAgeFromTmux: 1 * time.Hour,
+			stores:             emptyStores(),
+			wantKillSessions:   0,
+			wantLogContains:    []string{"falling back to tmux session_created"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			fakeBinDir := t.TempDir()
+			tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+			if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
+				t.Fatalf("create tmux log: %v", err)
+			}
+
+			writeFakeTmuxWithSession(t, fakeBinDir)
+			t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("TMUX_LOG", tmuxLog)
+			created := time.Now().Add(-tc.sessionAgeFromTmux).Unix()
+			t.Setenv("TMUX_SESSION_CREATED", strconv.FormatInt(created, 10))
+
+			writeMaxSessionAge(t, townRoot, tc.maxAge)
+
+			d := &Daemon{
+				config:      &Config{TownRoot: townRoot},
+				logger:      log.New(io.Discard, "", 0),
+				tmux:        tmux.NewTmux(),
+				beadsStores: tc.stores,
+				ctx:         context.Background(),
+				// deaconLastStarted intentionally left zero — simulating
+				// the `gt deacon restart` CLI path that never sets it.
+				deaconStartFn: func() error { return deacon.ErrAlreadyRunning },
+			}
+
+			logBuf := &strings.Builder{}
+			d.logger = log.New(logBuf, "", 0)
+
+			d.checkDeaconAge()
+
+			gotKills := countKillSession(t, tmuxLog)
+			if gotKills != tc.wantKillSessions {
+				t.Errorf("kill-session count = %d, want %d\nlog:\n%s",
+					gotKills, tc.wantKillSessions, logBuf.String())
+			}
+			for _, want := range tc.wantLogContains {
+				if !strings.Contains(logBuf.String(), want) {
+					t.Errorf("log missing %q\nlog:\n%s", want, logBuf.String())
+				}
+			}
+			if d.deaconLastStarted.IsZero() {
+				t.Errorf("deaconLastStarted still zero after fallback; expected to be set from tmux session_created")
+			}
+		})
+	}
+}
+
+// TestCheckDeaconAge_FallbackLogOnce verifies the fallback notice is logged
+// exactly once across multiple ticks, even though the fallback path itself
+// continues to fire each tick until startDeacon updates deaconLastStarted.
+func TestCheckDeaconAge_FallbackLogOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows — fake tmux requires bash")
+	}
+	townRoot := t.TempDir()
+	fakeBinDir := t.TempDir()
+	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
+		t.Fatalf("create tmux log: %v", err)
+	}
+
+	writeFakeTmuxWithSession(t, fakeBinDir)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TMUX_LOG", tmuxLog)
+	// 1h-old session, max=3h → no restart on either tick, just fallback set.
+	t.Setenv("TMUX_SESSION_CREATED", strconv.FormatInt(time.Now().Add(-1*time.Hour).Unix(), 10))
+	writeMaxSessionAge(t, townRoot, "3h")
+
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		tmux:          tmux.NewTmux(),
+		beadsStores:   emptyStores(),
+		ctx:           context.Background(),
+		deaconStartFn: func() error { return deacon.ErrAlreadyRunning },
+	}
+
+	logBuf := &strings.Builder{}
+	d.logger = log.New(logBuf, "", 0)
+
+	d.checkDeaconAge()
+	// Reset deaconLastStarted so the fallback path runs again on the next tick
+	// (simulates a fresh process that lost the in-memory state).
+	d.deaconLastStarted = time.Time{}
+	d.checkDeaconAge()
+
+	occurrences := strings.Count(logBuf.String(), "falling back to tmux session_created")
+	if occurrences != 1 {
+		t.Errorf("expected fallback log exactly once, got %d\nlog:\n%s", occurrences, logBuf.String())
 	}
 }
 
