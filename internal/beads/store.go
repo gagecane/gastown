@@ -289,6 +289,7 @@ func (b *Beads) storeCreate(opts CreateOptions) (*Issue, error) {
 		Description: opts.Description,
 		Priority:    opts.Priority,
 		Ephemeral:   opts.Ephemeral,
+		Metadata:    opts.Metadata,
 	}
 
 	// Set issue type from Labels, Label, or Type (same precedence as CLI path)
@@ -346,6 +347,9 @@ func (b *Beads) storeUpdate(id string, opts UpdateOptions) error {
 	}
 	if opts.Assignee != nil {
 		updates["assignee"] = *opts.Assignee
+	}
+	if len(opts.Metadata) > 0 {
+		updates["metadata"] = opts.Metadata
 	}
 
 	actor := b.getActor()

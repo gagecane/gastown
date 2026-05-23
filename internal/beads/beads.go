@@ -509,6 +509,17 @@ type CreateOptions struct {
 	Actor       string // Who is creating this issue (populates created_by)
 	Ephemeral   bool   // Create as ephemeral (wisp) - not synced to git
 	Rig         string // Target rig database (e.g., "gantry"). When set, routes bd create to the rig's directory via --repo.
+
+	// Metadata is the initial value of Issue.Metadata. When non-empty,
+	// the JSON bytes are written verbatim via bd create --metadata.
+	// Empty/nil means "do not set metadata at create time" (the bead's
+	// metadata column stays empty, which decodes as a zero value per
+	// the encoding/json convention). Used by the auto-test-pr Phase 0
+	// task 8 town-state provisioner. The bd CLI accepts --metadata=
+	// for both create and update; this field exposes that on the
+	// create path so we can write the default state in a single
+	// command rather than create-then-update.
+	Metadata json.RawMessage
 }
 
 // UpdateOptions specifies options for updating an issue.
@@ -521,6 +532,16 @@ type UpdateOptions struct {
 	AddLabels    []string // Labels to add
 	RemoveLabels []string // Labels to remove
 	SetLabels    []string // Labels to set (replaces all existing)
+
+	// Metadata, when non-nil, replaces the entire Issue.Metadata blob
+	// with the given JSON bytes via bd update --metadata. This is a
+	// whole-blob REPLACE, not a per-key merge — concurrent callers
+	// using this surface will lose updates per the OQ4 spike
+	// (gu-g9ufm). For the auto-test-pr state beads, the design's OQ4
+	// fallback means callers are single-writer (Mayor cycle handlers
+	// only) and the lost-update class does not apply. Other use cases
+	// MUST use the per-key merge helpers (storeDelegationSet etc.).
+	Metadata json.RawMessage
 }
 
 // Beads wraps bd CLI operations for a working directory.
@@ -1625,6 +1646,9 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 	if opts.Ephemeral {
 		args = append(args, "--ephemeral")
 	}
+	if len(opts.Metadata) > 0 {
+		args = append(args, "--metadata="+string(opts.Metadata))
+	}
 	// Default Actor from BD_ACTOR env var if not specified
 	// Uses getActor() to respect isolated mode (tests)
 	actor := opts.Actor
@@ -1681,6 +1705,9 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 	}
 	if opts.Parent != "" {
 		args = append(args, "--parent="+opts.Parent)
+	}
+	if len(opts.Metadata) > 0 {
+		args = append(args, "--metadata="+string(opts.Metadata))
 	}
 	// Default Actor from BD_ACTOR env var if not specified
 	// Uses getActor() to respect isolated mode (tests)
@@ -1853,6 +1880,9 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 		for _, label := range opts.RemoveLabels {
 			args = append(args, "--remove-label="+label)
 		}
+	}
+	if len(opts.Metadata) > 0 {
+		args = append(args, "--metadata="+string(opts.Metadata))
 	}
 
 	_, err := b.run(args...)
