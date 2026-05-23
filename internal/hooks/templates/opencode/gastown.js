@@ -69,7 +69,7 @@ export const GasTown = async ({ $, directory }) => {
     if (isDoltBackedCommand(cmd)) {
       lines.push(`dolt_status_tail:\n${outputTail(await captureDoltStatus())}`);
       lines.push(
-        "suggested_recovery: If Dolt is unhealthy or another gt/bd command is hanging, capture SIGQUIT and `gt dolt status` diagnostics before escalating; otherwise retry after the timeout clears."
+        "suggested_recovery: If Dolt is unhealthy or another gt/bd command is hanging, capture `gt dolt dump` and `gt dolt status` diagnostics before escalating; otherwise retry after the timeout clears. Do NOT send SIGQUIT to the Dolt PID — Dolt 1.86.5 terminates on SIGQUIT (incident gc-wisp-2yc7)."
       );
     } else {
       lines.push("suggested_recovery: Inspect the command, stdout/stderr tails, and retry once the timeout or process failure is resolved.");
