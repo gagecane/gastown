@@ -15,12 +15,32 @@ import (
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
 // DOLT_ROOT_HOST=% tells the entrypoint to create root@'%' (available
 // since Dolt 1.46.0), which lets testcontainers connect via TCP.
 const DoltDockerImage = "dolthub/dolt-sql-server:1.83.0"
+
+// doltContainerStartupTimeout overrides the testcontainers-go dolt module's
+// default 60s wait-for-log deadline. Under concurrent test load (multiple
+// polecat workspaces each spinning up Dolt containers, plus shared Dolt
+// server contention on port 3307), 60s is not enough for the
+// "Server ready. Accepting connections." log line to appear, causing
+// pre-push gate flakes like:
+//
+//	`Server ready. Accepting connections.` matched 0 times, expected 1
+//
+// 3 minutes gives the container enough headroom under load while still
+// failing fast for genuinely broken images. See bead gu-y2al.
+const doltContainerStartupTimeout = 3 * time.Minute
+
+// doltContainerReadyLog is the log line the dolt sql-server prints when it
+// is accepting connections. Mirrors the literal used internally by the
+// testcontainers-go dolt module so we can build our own wait strategy with
+// a tunable deadline.
+const doltContainerReadyLog = "Server ready. Accepting connections."
 
 var (
 	doltCtr     *dolt.DoltContainer
@@ -48,8 +68,37 @@ func isReaperRemovingErr(err error) bool {
 		strings.Contains(err.Error(), "removing")
 }
 
-// runDoltContainerWithRetry calls dolt.Run, retrying on transient reaper
-// "removing" errors up to 3 times with exponential backoff.
+// isLogWaitTimeoutErr returns true if the error is the testcontainers-go
+// wait-for-log strategy giving up because the ready line never appeared
+// before the deadline. Under concurrent test load Dolt sometimes takes
+// longer than the wait deadline to print the ready line, so this error
+// is transient and worth retrying.
+//
+// Format from testcontainers-go/wait/log.go:
+//
+//	"...some text..." matched 0 times, expected 1
+func isLogWaitTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "matched 0 times") &&
+		strings.Contains(msg, doltContainerReadyLog)
+}
+
+// isTransientStartupErr returns true for errors that are worth retrying
+// when starting a Dolt test container.
+func isTransientStartupErr(err error) bool {
+	return isReaperRemovingErr(err) || isLogWaitTimeoutErr(err)
+}
+
+// runDoltContainerWithRetry calls dolt.Run, retrying on transient errors
+// (reaper "removing" status and wait-for-log timeouts) up to 3 times with
+// exponential backoff.
+//
+// We override the dolt module's default 60s wait deadline with a longer
+// timeout via WithAdditionalWaitStrategyAndDeadline so concurrent test
+// runs don't flake when the container is slow to come up under load.
 func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error) {
 	const maxRetries = 3
 	delay := 2 * time.Second
@@ -58,12 +107,21 @@ func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error)
 		ctr, err := dolt.Run(ctx, DoltDockerImage,
 			dolt.WithDatabase("gt_test"),
 			testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
+			// Replace the dolt module's default 60s wait deadline.
+			// We use WithWaitStrategyAndDeadline (not Additional) so the
+			// dolt module's existing wait strategy is REPLACED, not
+			// stacked — stacking would force us to wait the maximum of
+			// both deadlines and would double-poll the same log line.
+			testcontainers.WithWaitStrategyAndDeadline(
+				doltContainerStartupTimeout,
+				wait.ForLog(doltContainerReadyLog),
+			),
 		)
 		if err == nil {
 			return ctr, nil
 		}
 		lastErr = err
-		if !isReaperRemovingErr(err) {
+		if !isTransientStartupErr(err) {
 			return nil, err
 		}
 		if attempt < maxRetries-1 {
