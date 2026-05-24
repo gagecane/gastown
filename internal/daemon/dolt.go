@@ -141,6 +141,11 @@ type DoltServerManager struct {
 	// Protected by mu.
 	onRecoveryFn func()
 
+	// alertWg tracks fire-and-forget alert goroutines (escalation, crash,
+	// unhealthy, read-only). Stop() waits on this so daemon shutdown does not
+	// drop in-flight `gt mail send` subprocesses on the floor.
+	alertWg sync.WaitGroup
+
 	// Test hooks (nil = use real implementations; set only in tests)
 	healthCheckFn     func() error
 	writeProbeCheckFn func() error
@@ -648,7 +653,9 @@ Action needed: Investigate and fix the root cause, then restart the daemon or th
 	townRoot := m.townRoot
 	logger := m.logger
 
+	m.alertWg.Add(1)
 	go func() {
+		defer m.alertWg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "gt", "mail", "send", "mayor/", "-s", subject, "-m", body) //nolint:gosec // G204: args are constructed internally
@@ -691,7 +698,9 @@ Check the log file for crash details. If crashes recur, the daemon will escalate
 	townRoot := m.townRoot
 	logger := m.logger
 
+	m.alertWg.Add(1)
 	go func() {
+		defer m.alertWg.Done()
 		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
 		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
 	}()
@@ -721,7 +730,9 @@ This may indicate high load, connection exhaustion, or internal server errors.`,
 	townRoot := m.townRoot
 	logger := m.logger
 
+	m.alertWg.Add(1)
 	go func() {
+		defer m.alertWg.Done()
 		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
 		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
 	}()
@@ -978,11 +989,19 @@ func (m *DoltServerManager) startLocked() error {
 	return nil
 }
 
-// Stop stops the Dolt SQL server.
+// Stop stops the Dolt SQL server. After stopping the process, it waits for
+// any outstanding alert goroutines (escalation/crash/unhealthy/read-only mails)
+// to finish so the daemon's shutdown path does not abandon in-flight
+// `gt mail send` subprocesses.
 func (m *DoltServerManager) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.stopLocked()
+	m.mu.Unlock()
+	// Wait for outstanding alert goroutines OUTSIDE the mutex. Alert
+	// goroutines do not take m.mu themselves, but waiting under the lock
+	// would block any caller that tries to fire a fresh alert in parallel
+	// (and would deadlock if a future change ever made one acquire mu).
+	m.alertWg.Wait()
 	return nil
 }
 
@@ -1459,7 +1478,9 @@ concurrent polecat count or staggering write-heavy operations.`,
 	townRoot := m.townRoot
 	logger := m.logger
 
+	m.alertWg.Add(1)
 	go func() {
+		defer m.alertWg.Done()
 		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
 		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
 	}()

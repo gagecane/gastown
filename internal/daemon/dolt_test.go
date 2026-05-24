@@ -1101,3 +1101,79 @@ func BenchmarkFilterEnvKey(b *testing.B) {
 
 // Ensure fmt is actually used (prevents accidental import removal).
 var _ = fmt.Sprintf
+
+// ============================================================================
+// alertWg: Stop() waits for in-flight alert goroutines (gu-fnd9)
+// ============================================================================
+
+// TestStop_WaitsForInFlightAlerts verifies that Stop() blocks until any
+// in-flight alert goroutines have finished. Without alertWg, daemon shutdown
+// would race against `gt mail send` subprocesses launched from
+// sendCrashAlert / sendUnhealthyAlert / sendReadOnlyAlert / sendEscalationMail
+// and could abandon them mid-flight, losing alerts.
+func TestStop_WaitsForInFlightAlerts(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "daemon"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	m := &DoltServerManager{
+		config:   &DoltServerConfig{Port: 13306, Host: "127.0.0.1"},
+		townRoot: tmpDir,
+		logger:   func(format string, v ...interface{}) { t.Logf(format, v...) },
+		stopFn:   func() {},
+	}
+
+	// Simulate an in-flight alert: hold the WaitGroup ourselves and only
+	// release it after a short delay. Stop() must not return before then.
+	const hold = 50 * time.Millisecond
+	m.alertWg.Add(1)
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(hold)
+		close(released)
+		m.alertWg.Done()
+	}()
+
+	start := time.Now()
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop() returned error: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	select {
+	case <-released:
+		// good — goroutine ran to completion before Stop() returned
+	default:
+		t.Fatal("Stop() returned before alert goroutine completed")
+	}
+	if elapsed < hold {
+		t.Errorf("Stop() returned after %v, expected at least %v", elapsed, hold)
+	}
+}
+
+// TestStop_NoInFlightAlerts_DoesNotBlock verifies that Stop() returns
+// promptly when there are no outstanding alert goroutines (i.e., the
+// alertWg.Wait() call doesn't introduce latency on the common path).
+func TestStop_NoInFlightAlerts_DoesNotBlock(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "daemon"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	m := &DoltServerManager{
+		config:   &DoltServerConfig{Port: 13306, Host: "127.0.0.1"},
+		townRoot: tmpDir,
+		logger:   func(format string, v ...interface{}) { t.Logf(format, v...) },
+		stopFn:   func() {},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = m.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() blocked even though no alert goroutines were in flight")
+	}
+}
