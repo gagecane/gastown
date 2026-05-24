@@ -93,9 +93,10 @@ Common flows:
 
   ` + autoTestPRShowTemplateExample + `
 
-The full pause/resume/status/show/history/revise surface ships in
-subsequent Phase 0 tasks. See .designs/auto-test-pr/synthesis.md for
-the v1 plan.`,
+The pause/resume/status/show/history runtime-control verbs ship
+alongside enable/disable in Phase 0 (gu-uez5w). The revise verb (D17
+manual-fallback) ships in Phase 0 task 2c. See
+.designs/auto-test-pr/synthesis.md for the v1 plan.`,
 	RunE: requireSubcommand,
 }
 
