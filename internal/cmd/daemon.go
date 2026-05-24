@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/autotestpr"
+	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
@@ -384,7 +386,42 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating daemon: %w", err)
 	}
 
+	// Phase 0 task 3c (gu-xrxm6): wire the Mayor cycle-close handler into
+	// the mr_cycle_close_dog substrate. The dog (in internal/daemon, from
+	// gu-h1fn) already polls for closed gt:auto-test-pr MR beads and
+	// classifies them; this wiring installs the Mayor handler that
+	// implements the four cycle-close paths (merged, closed-unmerged,
+	// circuit-breaker trip, BUG-DISCOVERED bug-bead filing).
+	wireAutoTestPRCycleCloseHandler(d, townRoot)
+
 	return d.Run()
+}
+
+// wireAutoTestPRCycleCloseHandler attaches the autotestpr cycle-close
+// handler to the daemon's MR-cycle-close dog. Wiring lives in cmd/ rather
+// than the daemon package itself so the daemon stays decoupled from the
+// auto-test-pr feature surface (no import cycle, no daemon-package
+// dependency on the autotestpr package).
+//
+// The handler is best-effort. On wiring errors (e.g., beads handle fails
+// to construct) we log and continue — the dog still runs with the noop
+// handler, which means closed MRs get ack labels but no state-bead
+// transitions. That is safer than refusing to start the daemon.
+func wireAutoTestPRCycleCloseHandler(d *daemon.Daemon, townRoot string) {
+	b := beads.New(townRoot)
+	beadsClient := autotestpr.NewBeadsClient(b)
+	notifier := autotestpr.NewNudgeNotifier(d.GtPath())
+	handler := autotestpr.NewCycleCloseHandler(beadsClient, notifier)
+	d.SetMRCycleCloseHandler(func(ev daemon.MRCycleCloseEvent) {
+		if err := handler.Handle(autotestpr.CycleCloseEvent{
+			MRID:        ev.MRID,
+			TargetRig:   ev.TargetRig,
+			CloseReason: ev.CloseReason,
+			Body:        ev.Body,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "auto-test-pr cycle-close: %v\n", err)
+		}
+	})
 }
 
 func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {

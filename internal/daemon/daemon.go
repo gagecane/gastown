@@ -518,6 +518,23 @@ func New(config *Config) (*Daemon, error) {
 	return d, nil
 }
 
+// TownRoot returns the daemon's configured town root directory. Exposed so
+// outside callers (cmd/daemon.go) can construct dependencies that need the
+// path — e.g., the auto-test-pr cycle-close handler.
+func (d *Daemon) TownRoot() string {
+	if d.config == nil {
+		return ""
+	}
+	return d.config.TownRoot
+}
+
+// GtPath returns the resolved gt binary path. Same wiring contract as
+// TownRoot — exposed for outside-package wiring of subsystems that shell
+// out via gt.
+func (d *Daemon) GtPath() string {
+	return d.gtPath
+}
+
 func (d *Daemon) cleanupLegacySocketSessions() {
 	d.legacySocketCleanupOnce.Do(func() {
 		defaultCleaned, baseCleaned := cleanupLegacySocketsForDaemon(d.config.TownRoot)
