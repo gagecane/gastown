@@ -316,7 +316,7 @@ func runFeedTUI(workDir string, problemsView bool) error {
 	// Best-effort: seeding errors are swallowed so a transient Dolt hiccup
 	// doesn't prevent the feed from launching. The tree still populates
 	// from events as usual.
-	if townSrc, rigSrcs := discoverAgentBeadSources(townRoot); len(rigSrcs) > 0 || townSrc != nil {
+	if townSrc, rigSrcs := discoverAgentBeadSources(townRoot); len(rigSrcs) > 0 {
 		m.SeedAgents(townSrc, rigSrcs)
 	}
 
