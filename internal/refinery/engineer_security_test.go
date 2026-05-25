@@ -1,6 +1,7 @@
 package refinery
 
 import (
+	"context"
 	"testing"
 )
 
@@ -61,7 +62,7 @@ func TestRunTests_EmptyCommand(t *testing.T) {
 		},
 	}
 
-	result := e.runTests(nil)
+	result := e.runTests(context.Background())
 	if result.Success {
 		t.Error("expected failure for empty test command, got success")
 	}
@@ -77,7 +78,7 @@ func TestRunTests_WhitespaceCommand(t *testing.T) {
 		},
 	}
 
-	result := e.runTests(nil)
+	result := e.runTests(context.Background())
 	if result.Success {
 		t.Error("expected failure for whitespace-only test command, got success")
 	}
