@@ -518,7 +518,7 @@ func readPendingEventsBounded(ctx context.Context, dir string, budget time.Durat
 
 // readPendingEvents reads all .event files from the directory.
 // It checks ctx between file reads so that a stuck filesystem cannot
-// prevent the goroutine from returning once the context is cancelled.
+// prevent the goroutine from returning once the context is canceled.
 func readPendingEvents(ctx context.Context, dir string) ([]EventFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
