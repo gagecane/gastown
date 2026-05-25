@@ -38,6 +38,7 @@ Dolt manages these files itself; external interference is never safe.
 This molecule detects and escalates only — it never removes files."""
 formula = "mol-dog-phantom-db"
 version = 1
+required_role = "dog"
 
 [squash]
 trigger = "on_complete"

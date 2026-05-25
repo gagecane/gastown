@@ -40,6 +40,7 @@ are identified by rig metadata.json references and are never touched.
 Uses the same safety logic as gt dolt cleanup."""
 formula = "mol-dog-stale-db"
 version = 1
+required_role = "dog"
 
 [squash]
 trigger = "on_complete"

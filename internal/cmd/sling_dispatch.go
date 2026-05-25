@@ -285,6 +285,22 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 
+	// 1b. Formula role guard (gu-0h3f). Reject formulas dispatched to the wrong
+	// role before spawning a polecat. This catches formulas with required_role
+	// (e.g. mol-session-gc requires deacon) and patrol formulas hardcoded by name.
+	// executeSling always targets a rig (polecats), so the target role is always
+	// "polecat" here. The check is cheap (embedded FS read + TOML parse, no subprocess).
+	if params.FormulaName != "" && params.RigName != "" {
+		// executeSling always spawns a polecat in the target rig, so the resolved
+		// target agent will be "<rig>/polecats/<name>". Construct a representative
+		// target for the role guard check.
+		syntheticTarget := params.RigName + "/polecats/_pending"
+		if err := validateFormulaRoleTarget(params.FormulaName, syntheticTarget); err != nil {
+			result.ErrMsg = "formula-role-mismatch"
+			return result, err
+		}
+	}
+
 	// 2. Burn stale molecules (if formula applies)
 	if params.FormulaName != "" {
 		existingMolecules := collectExistingMolecules(info)

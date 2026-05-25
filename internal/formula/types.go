@@ -27,13 +27,14 @@ const (
 // Formula represents a parsed formula.toml file.
 type Formula struct {
 	// Common fields
-	Name        string      `toml:"formula"`
-	Description string      `toml:"description"`
-	Type        FormulaType `toml:"type"`
-	Version     int         `toml:"version"`
-	Pour        bool        `toml:"pour"`        // If true, steps are materialized as sub-wisps with checkpoint recovery. Default false (inline/root-only).
-	Agent       string      `toml:"agent"`       // Default agent for all legs (GH#2118)
-	ReviewOnly  bool        `toml:"review_only"` // If true, all legs are analysis-only — no code commits expected (gt-kvf)
+	Name         string      `toml:"formula"`
+	Description  string      `toml:"description"`
+	Type         FormulaType `toml:"type"`
+	Version      int         `toml:"version"`
+	Pour         bool        `toml:"pour"`          // If true, steps are materialized as sub-wisps with checkpoint recovery. Default false (inline/root-only).
+	Agent        string      `toml:"agent"`         // Default agent for all legs (GH#2118)
+	ReviewOnly   bool        `toml:"review_only"`   // If true, all legs are analysis-only — no code commits expected (gt-kvf)
+	RequiredRole string      `toml:"required_role"` // If set, formula may only be dispatched to agents with this role (e.g. "deacon", "witness"). Prevents mis-routing to polecats. (gu-0h3f)
 
 	// Convoy-specific
 	Inputs    map[string]Input  `toml:"inputs"`

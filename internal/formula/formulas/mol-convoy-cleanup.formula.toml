@@ -32,6 +32,7 @@ This is infrastructure work. You:
 | Mail send fails | Retry once, then proceed anyway |"""
 formula = "mol-convoy-cleanup"
 version = 1
+required_role = "dog"
 
 [squash]
 trigger = "on_complete"

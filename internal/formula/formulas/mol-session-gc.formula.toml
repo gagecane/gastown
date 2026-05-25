@@ -33,6 +33,7 @@ Running `gt doctor --fix` handles most of this. This formula wraps it with
 reporting and multi-rig scope."""
 formula = "mol-session-gc"
 version = 1
+required_role = "dog"
 
 [squash]
 trigger = "on_complete"

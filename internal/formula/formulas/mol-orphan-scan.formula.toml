@@ -34,6 +34,7 @@ Orphan scanning requires multi-rig access and may need to interact with
 multiple Witnesses. Dogs have the cross-rig worktrees needed for this."""
 formula = "mol-orphan-scan"
 version = 2
+required_role = "dog"
 
 [squash]
 trigger = "on_complete"

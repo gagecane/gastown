@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -60,6 +61,68 @@ func validatePatrolFormulaTarget(formulaName, targetAgent string) error {
 		formulaName, targetAgent, required, actual,
 	)
 }
+
+// validateFormulaRoleTarget is the generalized role guard for formula dispatch.
+// It checks both the hardcoded patrol-formula mapping (validatePatrolFormulaTarget)
+// AND the formula's required_role TOML field (gu-0h3f).
+//
+// A formula with required_role = "deacon" cannot be dispatched to a polecat.
+// This prevents mis-routing of formulas that require capabilities (like gt sling)
+// that only specific roles possess.
+//
+// The function loads the formula from embedded FS to read its required_role field.
+// This is lightweight (no subprocess, just an embed.FS read + TOML parse).
+func validateFormulaRoleTarget(formulaName, targetAgent string) error {
+	// First: check hardcoded patrol mapping (backward compatibility).
+	if err := validatePatrolFormulaTarget(formulaName, targetAgent); err != nil {
+		return err
+	}
+
+	// Second: check the formula's required_role TOML field.
+	required := loadFormulaRequiredRoleFn(formulaName)
+	if required == RoleUnknown {
+		return nil
+	}
+	actual := resolveTargetRole(targetAgent)
+	if actual == required {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to sling formula %s to %q: formula declares required_role=%s (got %s)",
+		formulaName, targetAgent, required, actual,
+	)
+}
+
+// resolveTargetRole determines the role of a sling target, handling special
+// cases like dog targets (deacon/dogs/...) that parseRoleString doesn't cover.
+func resolveTargetRole(targetAgent string) Role {
+	// Dog targets: "deacon/dogs", "deacon/dogs/<name>", "dog:<name>"
+	if _, isDog := IsDogTarget(targetAgent); isDog {
+		return RoleDog
+	}
+	role, _, _ := parseRoleString(targetAgent)
+	return role
+}
+
+// loadFormulaRequiredRole loads a formula and returns its required_role as a Role.
+// Returns RoleUnknown if the formula cannot be loaded or has no required_role set.
+func loadFormulaRequiredRole(formulaName string) Role {
+	data, err := formula.GetEmbeddedFormulaContent(formulaName)
+	if err != nil {
+		return RoleUnknown
+	}
+	f, err := formula.Parse(data)
+	if err != nil {
+		return RoleUnknown
+	}
+	if f.RequiredRole == "" {
+		return RoleUnknown
+	}
+	return Role(f.RequiredRole)
+}
+
+// loadFormulaRequiredRoleFn is a seam for testing.
+var loadFormulaRequiredRoleFn = loadFormulaRequiredRole
 
 type wispCreateJSON struct {
 	NewEpicID string `json:"new_epic_id"`
@@ -204,10 +267,11 @@ func runSlingFormula(ctx context.Context, args []string) error {
 		rollbackSlingArtifactsFn(resolved.NewPolecatInfo, "", formulaWorkDir, "")
 	}
 
-	// Reject patrol formulas slung at the wrong role before we cook a wisp or
+	// Reject formulas slung at the wrong role before we cook a wisp or
 	// hook anything. If resolveTarget spawned a fresh polecat for what turned
-	// out to be a misrouted deacon/witness/refinery patrol, roll it back.
-	if err := validatePatrolFormulaTarget(formulaName, targetAgent); err != nil {
+	// out to be a misrouted deacon/witness/refinery formula, roll it back.
+	// Checks both hardcoded patrol mapping and formula required_role field (gu-0h3f).
+	if err := validateFormulaRoleTarget(formulaName, targetAgent); err != nil {
 		rollbackSpawned()
 		return err
 	}
