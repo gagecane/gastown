@@ -1716,16 +1716,20 @@ notifyWitness:
 	// instead of transitioning to IDLE. This gives fresh context windows
 	// per task, reduces token waste, and eliminates stale state bugs.
 	// Must be the LAST thing gt done does — everything above must complete first.
+	//
+	// Uses a detached subprocess instead of a goroutine (gu-fr85): the
+	// goroutine ran inside the process being killed by the tmux session
+	// destroy, creating a race where the kill might never execute. A
+	// detached subprocess survives the parent's exit independently.
 	if isPolecat {
 		daemonCfg := config.LoadOperationalConfig(townRoot).GetDaemonConfig()
 		if daemonCfg.PolecatSelfTerminate != nil && *daemonCfg.PolecatSelfTerminate {
 			fmt.Printf("%s Self-terminating session (polecat_self_terminate=true)\n", style.Bold.Render("✓"))
 			sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
-			go func() {
-				time.Sleep(3 * time.Second)
-				t := tmux.NewTmux()
-				_ = t.KillSessionWithProcesses(sessionName)
-			}()
+			t := tmux.NewTmux()
+			if err := t.DetachedKillSessionWithProcesses(sessionName, 3*time.Second); err != nil {
+				style.PrintWarning("could not spawn detached session kill: %v", err)
+			}
 		}
 	}
 

@@ -700,24 +700,19 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 	//
 	// We disable remain-on-exit first — otherwise kill-session leaves a
 	// dead pane that the deacon's health-check reports as an orphan.
+	//
+	// Uses a detached subprocess instead of a goroutine (gu-fr85): the
+	// goroutine ran inside the process being killed by the tmux session
+	// destroy, creating a race where the kill might never execute. A
+	// detached subprocess survives the parent's exit independently.
 	sessionID := fmt.Sprintf("hq-dog-%s", name)
 	t := tmux.NewTmux()
 	_ = t.SetRemainOnExit(sessionID, false)
 	fmt.Printf("  Session %s will terminate in 3s\n", sessionID)
 
-	// Kill the tmux session after a short delay using a goroutine.
-	// Previous approach used bash -c "sleep 3 && tmux kill-session" which
-	// fails silently on Windows. The goroutine is cross-platform and uses
-	// the tmux package which handles the socket name automatically.
-	go func() {
-		time.Sleep(3 * time.Second)
-		if err := t.KillSession(sessionID); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to kill session %s: %v\n", sessionID, err)
-		}
-	}()
-
-	// Wait for the goroutine to finish (the process will exit after kill).
-	time.Sleep(4 * time.Second)
+	if err := t.DetachedKillSession(sessionID, 3*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to spawn detached session kill for %s: %v\n", sessionID, err)
+	}
 
 	return nil
 }
