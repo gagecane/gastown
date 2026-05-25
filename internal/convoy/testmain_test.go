@@ -22,6 +22,9 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
+	// Close the shared store opened by useSharedStore (if any tests used it).
+	closeSharedStore()
+
 	testutil.TerminateDoltContainer()
 	os.Exit(code)
 }

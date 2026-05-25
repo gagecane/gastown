@@ -288,8 +288,7 @@ func TestBlockingDepTypes_ExactSize(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsIssueBlocked_NoDeps(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -313,8 +312,7 @@ func TestIsIssueBlocked_NoDeps(t *testing.T) {
 }
 
 func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -381,8 +379,7 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 }
 
 func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -432,8 +429,7 @@ func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
 }
 
 func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -482,8 +478,7 @@ func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
 }
 
 func TestIsIssueBlocked_FailOpenOnNonexistentIssue(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 
@@ -498,8 +493,7 @@ func TestIsIssueBlocked_FailOpenOnNonexistentIssue(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -555,8 +549,7 @@ func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing
 }
 
 func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -612,8 +605,7 @@ func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
 }
 
 func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -825,8 +817,7 @@ func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -916,8 +907,7 @@ func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -995,8 +985,7 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1103,8 +1092,7 @@ func TestFeedNextReadyIssue_NoReadyIssues_LogsMessage(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1180,8 +1168,7 @@ func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1258,8 +1245,7 @@ func TestFeedNextReadyIssue_SkipsIdentityBeads(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1396,8 +1382,7 @@ func TestDispatchIssue_Failure(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1487,8 +1472,7 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1576,8 +1560,7 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1748,8 +1731,7 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -1883,15 +1865,13 @@ func TestFireCrossRigDepNotifications_NilStores(t *testing.T) {
 
 func TestFireCrossRigDepNotifications_EmptyClosedID(t *testing.T) {
 	// Should not panic with empty closed issue ID.
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 	FireCrossRigDepNotifications(context.Background(), "", "/tmp", map[string]beadsdk.Storage{"test": store}, nil)
 }
 
 func TestFireCrossRigDepNotifications_EmptyPrefix(t *testing.T) {
 	// Issue ID without a recognizable prefix should not panic.
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 	FireCrossRigDepNotifications(context.Background(), "noprefixid", "/tmp", map[string]beadsdk.Storage{"test": store}, nil)
 }
 
@@ -1902,8 +1882,7 @@ func TestFireCrossRigDepNotifications_NotifiesWitnessOnCrossRigBlocker(t *testin
 
 	// Set up a real store that simulates the "gastown" rig.
 	// In it we create gt-dep which is blocked by external:bd:bd-closed.
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	store := useSharedStore(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC()

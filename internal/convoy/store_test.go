@@ -4,15 +4,98 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
 )
 
+// ---------------------------------------------------------------------------
+// Shared test store (process-wide singleton)
+//
+// All convoy tests share one beads store opened once via sync.Once.
+// Each test uses unique issue IDs so there is no cross-test interference.
+// This eliminates the ~300ms per-call cost of beadsdk.Open that previously
+// made operations_test.go slow (21 calls × 300ms ≈ 6s pure overhead).
+// ---------------------------------------------------------------------------
+
+var (
+	sharedStoreOnce    sync.Once
+	sharedStoreInst    beadsdk.Storage
+	sharedStoreErr     error
+	sharedStoreSkipMsg string
+	sharedStoreTmpDir  string
+)
+
+// initSharedStore opens the shared store exactly once.
+func initSharedStore() {
+	os.Setenv("BEADS_TEST_MODE", "1") //nolint:tenv // process-wide, called from sync.Once
+
+	dir, err := os.MkdirTemp("", "convoy-shared-store-*")
+	if err != nil {
+		sharedStoreErr = err
+		sharedStoreSkipMsg = "cannot create shared store temp dir: " + err.Error()
+		return
+	}
+	sharedStoreTmpDir = dir
+
+	beadsDir := filepath.Join(dir, ".beads")
+	doltPath := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltPath, 0755); err != nil {
+		sharedStoreSkipMsg = "cannot create shared store dir: " + err.Error()
+		sharedStoreErr = err
+		return
+	}
+
+	ctx := context.Background()
+	store, err := beadsdk.Open(ctx, doltPath)
+	if err != nil {
+		sharedStoreSkipMsg = "beads store unavailable (CGO/Dolt required): " + err.Error()
+		sharedStoreErr = err
+		return
+	}
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		_ = store.Close()
+		sharedStoreSkipMsg = "SetConfig issue_prefix: " + err.Error()
+		sharedStoreErr = err
+		return
+	}
+
+	sharedStoreInst = store
+}
+
+// closeSharedStore closes the shared store and removes its temp directory.
+// Called from TestMain after m.Run().
+func closeSharedStore() {
+	if sharedStoreInst != nil {
+		_ = sharedStoreInst.Close()
+		sharedStoreInst = nil
+	}
+	if sharedStoreTmpDir != "" {
+		_ = os.RemoveAll(sharedStoreTmpDir)
+	}
+}
+
+// useSharedStore returns the process-wide shared store, skipping the test if
+// the store cannot be opened. This replaces setupTestStore for tests that
+// use unique issue IDs and don't require a pristine database.
+func useSharedStore(t *testing.T) beadsdk.Storage {
+	t.Helper()
+	sharedStoreOnce.Do(initSharedStore)
+	if sharedStoreErr != nil {
+		t.Skip(sharedStoreSkipMsg)
+	}
+	return sharedStoreInst
+}
+
 // setupTestStore opens a real beads database in a temp dir for integration tests.
 // Skips the test if the store cannot be opened (e.g. no CGO, no Dolt).
 // Caller must run the returned cleanup when done.
+//
+// Prefer useSharedStore(t) for tests that use unique issue IDs. This function
+// remains for tests in store_test.go that validate store setup itself.
 func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 	t.Helper()
 
