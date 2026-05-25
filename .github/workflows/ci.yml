@@ -167,7 +167,7 @@ jobs:
           curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
 
       - name: Pre-pull Dolt Docker image
-        run: docker pull dolthub/dolt-sql-server:1.83.0
+        run: docker pull dolthub/dolt-sql-server:1.86.5
 
       - name: Cache beads (bd)
         id: cache-beads-int
