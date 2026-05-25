@@ -814,7 +814,22 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	wg.Wait()
+	// Wait for all fetches OR request cancellation, whichever comes first.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All fetches completed normally.
+	case <-r.Context().Done():
+		// Client disconnected or request timed out — no point writing a
+		// response. The goroutines will drain on their own since their
+		// CommandContext is derived from r.Context().
+		return
+	}
 
 	// Update cache
 	h.optionsCacheMu.Lock()
@@ -2306,7 +2321,18 @@ func (h *APIHandler) computeDashboardHash(ctx context.Context) string {
 		}
 	}()
 
-	wg.Wait()
+	// Wait for all fetches OR context cancellation.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ""
+	}
 
 	if len(parts) == 0 {
 		return ""
