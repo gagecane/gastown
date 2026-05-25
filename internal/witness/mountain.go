@@ -101,29 +101,25 @@ func TrackConvoyFailure(bd *BdCli, workDir, issueID string) *ConvoyFailureResult
 		return nil
 	}
 
-	// Check each convoy for the "mountain" label
-	for _, convoyID := range convoyIDs {
-		labels := getBeadLabels(bd, workDir, convoyID)
-		isMountain := hasLabel(labels, "mountain")
+	// Process first matching convoy (an issue typically belongs to at most
+	// one active convoy).
+	convoyID := convoyIDs[0]
+	labels := getBeadLabels(bd, workDir, convoyID)
+	isMountain := hasLabel(labels, "mountain")
 
-		result := &ConvoyFailureResult{
-			IssueID:    issueID,
-			ConvoyID:   convoyID,
-			IsMountain: isMountain,
-		}
-
-		if isMountain {
-			result.Error = trackMountainFailure(bd, workDir, issueID, result)
-		} else {
-			result.Warning = fmt.Sprintf("polecat failure on convoy-tracked issue %s (convoy %s)", issueID, convoyID)
-		}
-
-		// Return after processing first matching convoy (an issue typically
-		// belongs to at most one active convoy).
-		return result
+	result := &ConvoyFailureResult{
+		IssueID:    issueID,
+		ConvoyID:   convoyID,
+		IsMountain: isMountain,
 	}
 
-	return nil
+	if isMountain {
+		result.Error = trackMountainFailure(bd, workDir, issueID, result)
+	} else {
+		result.Warning = fmt.Sprintf("polecat failure on convoy-tracked issue %s (convoy %s)", issueID, convoyID)
+	}
+
+	return result
 }
 
 // trackMountainFailure increments the failure count for a mountain-tracked

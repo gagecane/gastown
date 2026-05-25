@@ -292,8 +292,8 @@ func findCriticalPath(dag *DAGInfo) []string {
 
 	// Find longest path starting from tier 0 nodes
 	var criticalPath []string
-	for _, tierNodes := range dag.TierGroups {
-		for _, id := range tierNodes {
+	if len(dag.TierGroups) > 0 {
+		for _, id := range dag.TierGroups[0] {
 			if dag.Nodes[id].Tier == 0 {
 				path := dfs(id)
 				if len(path) > len(criticalPath) {
@@ -301,7 +301,6 @@ func findCriticalPath(dag *DAGInfo) []string {
 				}
 			}
 		}
-		break // Only check tier 0
 	}
 
 	return criticalPath
