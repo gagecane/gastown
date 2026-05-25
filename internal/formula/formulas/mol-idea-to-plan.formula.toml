@@ -265,10 +265,10 @@ First PRD-alignment round. Dispatch 2 polecats to check the plan against the PRD
 
 Polecat A — **requirements-coverage**:
 ```bash
-gt sling --prompt="Review an implementation plan for PRD alignment.
-
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read the plan: .designs/<design-id>/design-doc.md
+gt formula run mol-review-leg \
+  --focus="requirements-coverage" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md" \
+  --prompt="Review an implementation plan for PRD alignment.
 
 Walk through every REQUIREMENT in the PRD (Problem Statement, Goals, Acceptance
 Criteria, any explicitly stated requirements). For each, verify the plan has a
@@ -279,16 +279,15 @@ Report format:
 - GAP: <requirement> — not addressed in plan. Suggested fix: ...
 - PARTIAL: <requirement> — partially addressed. Missing: ...
 
-Classify each GAP/PARTIAL as must-fix or should-fix.
-Mail your full report back when done." --mail-back
+Classify each GAP/PARTIAL as must-fix or should-fix."
 ```
 
 Polecat B — **goals-alignment**:
 ```bash
-gt sling --prompt="Review an implementation plan for PRD alignment.
-
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read the plan: .designs/<design-id>/design-doc.md
+gt formula run mol-review-leg \
+  --focus="goals-alignment" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md" \
+  --prompt="Review an implementation plan for PRD alignment.
 
 Walk through every GOAL in the PRD. For each, trace through the plan and verify
 that executing the plan as written will achieve this goal.
@@ -298,8 +297,7 @@ Report format:
 - MISALIGNED: <goal> — the plan won't achieve this because... Suggested fix: ...
 - PARTIAL: <goal> — partially achieved. Gap: ...
 
-Classify each MISALIGNED/PARTIAL as must-fix or should-fix.
-Mail your full report back when done." --mail-back
+Classify each MISALIGNED/PARTIAL as must-fix or should-fix."
 ```
 
 **2. Await reports:**
@@ -326,11 +324,10 @@ Second PRD-alignment round. The plan has been updated from round 1 findings.
 
 Polecat A — **constraints-compliance**:
 ```bash
-gt sling --prompt="Review an implementation plan for PRD alignment (round 2).
-
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read the plan: .designs/<design-id>/design-doc.md
-Read round 1 changes: .plan-reviews/{{review_id}}/prd-align-round-1.md
+gt formula run mol-review-leg \
+  --focus="constraints-compliance" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md" \
+  --prompt="Review an implementation plan for PRD alignment (round 2).
 
 Check every CONSTRAINT in the PRD (technical, business, timeline, resource).
 Verify the plan respects each constraint. Flag any plan items that violate or
@@ -341,17 +338,15 @@ Report format:
 - VIOLATED: <constraint> — plan violates this at <section>. Suggested fix: ...
 - UNADDRESSED: <constraint> — plan doesn't account for this. Risk: ...
 
-Classify each as must-fix or should-fix.
-Mail your full report back when done." --mail-back
+Classify each as must-fix or should-fix."
 ```
 
 Polecat B — **non-goals-enforcement**:
 ```bash
-gt sling --prompt="Review an implementation plan for PRD alignment (round 2).
-
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read the plan: .designs/<design-id>/design-doc.md
-Read round 1 changes: .plan-reviews/{{review_id}}/prd-align-round-1.md
+gt formula run mol-review-leg \
+  --focus="non-goals-enforcement" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md" \
+  --prompt="Review an implementation plan for PRD alignment (round 2).
 
 Check the PRD's Non-Goals section. Verify the plan does NOT include work that
 falls into non-goal territory. Flag scope creep — tasks that go beyond what
@@ -362,8 +357,7 @@ Report format:
 - SCOPE-CREEP: <plan section> — this work falls under non-goal '<non-goal>'. Cut or justify.
 - BORDERLINE: <plan section> — could be interpreted as in/out of scope. Recommendation: ...
 
-Classify each SCOPE-CREEP as must-fix. BORDERLINE as should-fix.
-Mail your full report back when done." --mail-back
+Classify each SCOPE-CREEP as must-fix. BORDERLINE as should-fix."
 ```
 
 **2. Await reports:**
@@ -389,11 +383,10 @@ Third and final PRD-alignment round. Plan has been updated from rounds 1-2.
 
 Polecat A — **user-stories-coverage**:
 ```bash
-gt sling --prompt="Review an implementation plan for PRD alignment (round 3).
-
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read the plan: .designs/<design-id>/design-doc.md
-Read prior changes: .plan-reviews/{{review_id}}/prd-align-round-1.md and round-2.md
+gt formula run mol-review-leg \
+  --focus="user-stories-coverage" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md" \
+  --prompt="Review an implementation plan for PRD alignment (round 3).
 
 Walk through every USER STORY and SCENARIO in the PRD. For each, trace the
 end-to-end user journey through the plan. Verify every step in the scenario
@@ -404,17 +397,15 @@ Report format:
 - GAP: <user story> — step '<step>' has no corresponding plan task. Fix: ...
 - PARTIAL: <user story> — happy path covered but <edge case> is missing. Fix: ...
 
-Classify each as must-fix or should-fix.
-Mail your full report back when done." --mail-back
+Classify each as must-fix or should-fix."
 ```
 
 Polecat B — **open-questions-resolution**:
 ```bash
-gt sling --prompt="Review an implementation plan for PRD alignment (round 3).
-
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read the plan: .designs/<design-id>/design-doc.md
-Read prior changes: .plan-reviews/{{review_id}}/prd-align-round-1.md and round-2.md
+gt formula run mol-review-leg \
+  --focus="open-questions-resolution" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md" \
+  --prompt="Review an implementation plan for PRD alignment (round 3).
 
 Check every OPEN QUESTION from the PRD (both the original Open Questions section
 and any questions raised in the Clarifications from Human Review section).
@@ -427,8 +418,7 @@ Report format:
 - UNRESOLVED: <question> — not addressed anywhere. Suggested resolution: ...
 - DEFERRED-OK: <question> — explicitly deferred with task to resolve later
 
-Classify UNRESOLVED as must-fix.
-Mail your full report back when done." --mail-back
+Classify UNRESOLVED as must-fix."
 ```
 
 **2. Await reports:**
@@ -473,10 +463,10 @@ Now review the plan itself for internal quality.
 
 Polecat A — **completeness**:
 ```bash
-gt sling --prompt="Review an implementation plan for completeness.
-
-Read the plan: .designs/<design-id>/design-doc.md
-Read the PRD alignment logs: .plan-reviews/{{review_id}}/prd-align-round-*.md
+gt formula run mol-review-leg \
+  --focus="completeness" \
+  --artifacts=".designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md,.plan-reviews/{{review_id}}/prd-align-round-3.md" \
+  --prompt="Review an implementation plan for completeness.
 
 Is the plan complete? Check for:
 - Missing infrastructure setup (build config, CI, env vars, feature flags)
@@ -490,16 +480,15 @@ Is the plan complete? Check for:
 Report format for each finding:
 - FINDING: <what's missing or incomplete>
   Severity: must-fix | should-fix
-  Suggested addition: <specific task or expansion to add>
-
-Mail your full report back when done." --mail-back
+  Suggested addition: <specific task or expansion to add>"
 ```
 
 Polecat B — **sequencing**:
 ```bash
-gt sling --prompt="Review an implementation plan for correct sequencing.
-
-Read the plan: .designs/<design-id>/design-doc.md
+gt formula run mol-review-leg \
+  --focus="sequencing" \
+  --artifacts=".designs/<design-id>/design-doc.md" \
+  --prompt="Review an implementation plan for correct sequencing.
 
 Check the ordering and dependencies of all plan phases and tasks:
 - Are tasks in the right order? Would any task fail if executed in sequence?
@@ -511,9 +500,7 @@ Check the ordering and dependencies of all plan phases and tasks:
 Report format for each finding:
 - FINDING: <sequencing issue>
   Severity: must-fix | should-fix
-  Suggested reorder: <how to fix the sequence>
-
-Mail your full report back when done." --mail-back
+  Suggested reorder: <how to fix the sequence>"
 ```
 
 **2. Await reports:**
@@ -538,10 +525,10 @@ Second plan self-review round.
 
 Polecat A — **risk**:
 ```bash
-gt sling --prompt="Review an implementation plan for risk.
-
-Read the plan: .designs/<design-id>/design-doc.md
-Read prior review changes: .plan-reviews/{{review_id}}/review-round-1.md
+gt formula run mol-review-leg \
+  --focus="risk" \
+  --artifacts=".designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/review-round-1.md" \
+  --prompt="Review an implementation plan for risk.
 
 Identify risks in the plan:
 - Technical risks: unproven approaches, complex integrations, performance unknowns
@@ -555,18 +542,15 @@ Report format for each risk:
   Impact: HIGH | MEDIUM | LOW
   Likelihood: HIGH | MEDIUM | LOW
   Mitigation: must-fix | should-fix
-  Suggested action: <add spike, add fallback plan, add monitoring, etc.>
-
-Mail your full report back when done." --mail-back
+  Suggested action: <add spike, add fallback plan, add monitoring, etc.>"
 ```
 
 Polecat B — **scope-creep**:
 ```bash
-gt sling --prompt="Review an implementation plan for scope creep.
-
-Read the plan: .designs/<design-id>/design-doc.md
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read prior review changes: .plan-reviews/{{review_id}}/review-round-1.md
+gt formula run mol-review-leg \
+  --focus="scope-creep" \
+  --artifacts=".designs/<design-id>/design-doc.md,.prd-reviews/{{review_id}}/prd-draft.md,.plan-reviews/{{review_id}}/review-round-1.md" \
+  --prompt="Review an implementation plan for scope creep.
 
 Look for unnecessary work in the plan:
 - Gold-plating: tasks that go beyond what's needed for the stated goals
@@ -580,8 +564,7 @@ Report format:
 - SIMPLIFY: <task/section> — over-engineered. Simpler approach: ...
 - DEFER: <task/section> — not needed for MVP. Move to follow-up.
 
-Classify each as must-fix or should-fix.
-Mail your full report back when done." --mail-back
+Classify each as must-fix or should-fix."
 ```
 
 **2. Await reports:**
@@ -607,10 +590,10 @@ Third and final plan self-review round.
 
 Polecat A — **testability**:
 ```bash
-gt sling --prompt="Review an implementation plan for testability.
-
-Read the plan: .designs/<design-id>/design-doc.md
-Read prior review changes: .plan-reviews/{{review_id}}/review-round-1.md and round-2.md
+gt formula run mol-review-leg \
+  --focus="testability" \
+  --artifacts=".designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/review-round-1.md,.plan-reviews/{{review_id}}/review-round-2.md" \
+  --prompt="Review an implementation plan for testability.
 
 For each task/phase in the plan, check:
 - Does it have clear acceptance criteria? (How do we know it's done?)
@@ -624,17 +607,15 @@ Report format:
 - MISSING-TEST: <task> — needs a test task added. Suggested: ...
 - VAGUE-CRITERIA: <task> — acceptance criteria too vague. Suggested rewrite: ...
 
-Classify each as must-fix or should-fix.
-Mail your full report back when done." --mail-back
+Classify each as must-fix or should-fix."
 ```
 
 Polecat B — **coherence**:
 ```bash
-gt sling --prompt="Review an implementation plan for overall coherence.
-
-Read the plan: .designs/<design-id>/design-doc.md
-Read the PRD: .prd-reviews/{{review_id}}/prd-draft.md
-Read ALL prior review changes: .plan-reviews/{{review_id}}/*.md
+gt formula run mol-review-leg \
+  --focus="coherence" \
+  --artifacts=".designs/<design-id>/design-doc.md,.prd-reviews/{{review_id}}/prd-draft.md,.plan-reviews/{{review_id}}/review-round-1.md,.plan-reviews/{{review_id}}/review-round-2.md" \
+  --prompt="Review an implementation plan for overall coherence.
 
 This is the final review pass. Check the plan holistically:
 - Internal contradictions: do any tasks conflict with each other?
@@ -647,9 +628,7 @@ This is the final review pass. Check the plan holistically:
 Report format:
 - ISSUE: <description>
   Severity: must-fix | should-fix
-  Suggested fix: <specific change>
-
-Mail your full report back when done." --mail-back
+  Suggested fix: <specific change>"
 ```
 
 **2. Await reports:**

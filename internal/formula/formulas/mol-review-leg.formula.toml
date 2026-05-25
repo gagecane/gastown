@@ -1,0 +1,178 @@
+review_only = true  # Analysis-only — findings stored on bead, no code commits expected
+
+description = """
+Generic review-leg helper for planning workflows.
+
+Use this when a coordinator wants to fan out analysis work to polecats without
+feature-branch/refinery behavior. The assignment details are passed as formula
+inputs; the worker performs the analysis, persists the full report to the bead
+notes, and mails the coordinator when complete.
+
+This keeps review findings durable in beads instead of transient pane output
+or per-worktree scratch files.
+
+## Usage
+
+Dispatched from orchestrator formulas (e.g., mol-idea-to-plan) via:
+```bash
+gt formula run mol-review-leg \
+  --focus="requirements-coverage" \
+  --prompt="Walk through every requirement..." \
+  --artifacts=".prd-reviews/slug/prd-draft.md,.designs/slug/design-doc.md"
+```
+
+## Execution Model
+1. Worker reads the prompt and referenced artifacts
+2. Performs the requested analysis
+3. Persists the FULL report to the bead notes
+4. Mails the coordinator (whoever dispatched this formula)
+5. Signals done and drains the session
+"""
+formula = "mol-review-leg"
+version = 1
+
+[vars]
+[vars.issue]
+description = "The review task bead assigned to this worker (auto-populated by dispatch)"
+required = true
+
+[vars.focus]
+description = "The review dimension or angle (e.g., requirements-coverage, goals-alignment, risk)"
+required = true
+
+[vars.prompt]
+description = "The full review instructions — what to analyze, report format, what to look for"
+required = true
+
+[vars.artifacts]
+description = "Comma-separated file paths to read before reviewing (PRD, plan, prior round logs)"
+required = false
+default = ""
+
+[vars.coordinator]
+description = "Mail address of the coordinating agent to notify on completion (default: dispatching agent)"
+required = false
+default = ""
+
+[[steps]]
+id = "load-assignment"
+title = "Read the review assignment and artifacts"
+description = """
+Prime your environment and read all referenced artifacts.
+
+**1. Prime:**
+```bash
+gt prime
+bd prime
+```
+
+**2. Read the assignment bead:**
+```bash
+bd show {{issue}}
+```
+
+**3. Read the referenced artifacts:**
+
+Read each file listed in `{{artifacts}}` (comma-separated paths):
+```bash
+# Read each artifact file referenced in the assignment
+cat <artifact-path-1>
+cat <artifact-path-2>
+# ... for each comma-separated path in {{artifacts}}
+```
+
+If any artifact file is missing, note it in your report but continue with
+what is available. Do not fail the entire review for a missing file.
+
+**4. Understand the scope:**
+
+Your review dimension is: **{{focus}}**
+
+Your full instructions are:
+{{prompt}}
+
+Follow the instructions exactly. Do not invent a different scope, format,
+or deliverable. The prompt is the source of truth for what you produce.
+
+**Exit criteria:** You understand the assignment and have read all available artifacts.
+"""
+
+[[steps]]
+id = "write-report"
+title = "Perform the analysis and store the full report on the bead"
+needs = ["load-assignment"]
+description = """
+Do the requested review work. Then write the FULL report into the bead notes.
+
+Use a structured report following the format specified in your prompt.
+Preserve the substance of your findings so the coordinator can read them
+after your session exits.
+
+**Write findings to the bead:**
+```bash
+bd update {{issue}} --notes "$(cat <<'EOF'
+# Review: {{focus}}
+
+## Summary
+<1-2 paragraph overview of findings>
+
+## Findings
+<structured findings per the report format in your prompt>
+
+## Recommendations
+<prioritized list of must-fix and should-fix items>
+EOF
+)"
+```
+
+If the prompt asked for a specific report structure, use that exact structure
+in the notes. The notes ARE the deliverable.
+
+If you discover a blocker that prevents completing the review, document the
+blocker in the notes before escalating:
+```bash
+bd update {{issue}} --notes "BLOCKED: <description of blocker>"
+gt escalate -s HIGH "Review leg blocked: {{focus}} on {{issue}}"
+```
+
+**Exit criteria:** Full report is persisted in the bead notes.
+"""
+
+[[steps]]
+id = "notify-close"
+title = "Notify the coordinator and signal done"
+needs = ["write-report"]
+description = """
+After the report is stored on the bead, notify the coordinator and close out.
+
+**1. Determine coordinator address:**
+
+If `{{coordinator}}` is set, use that. Otherwise, mail your rig's witness
+(the dispatching agent receives completion notification automatically via
+`gt done`).
+
+**2. Mail completion notification:**
+```bash
+gt mail send {{coordinator}} -s "Review leg complete: {{focus}}" --stdin <<'BODY'
+Review leg complete.
+
+Bead: {{issue}}
+Focus: {{focus}}
+
+Read the bead notes for the full report:
+  bd show {{issue}}
+BODY
+```
+
+If `{{coordinator}}` is empty, skip the mail — `gt done` handles notification.
+
+**3. Signal done:**
+```bash
+gt done
+```
+
+Do NOT overwrite the bead notes with a short "done" summary. The notes are the
+deliverable — they must contain the full report.
+
+**Exit criteria:** Coordinator notified (if address provided). Session exiting via gt done.
+"""
