@@ -3,9 +3,12 @@ package beads
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	gtlock "github.com/steveyegge/gastown/internal/lock"
 )
 
 func TestGetPrefixForRig(t *testing.T) {
@@ -502,6 +505,190 @@ func TestCheckPrefixAvailable_NoRoutes(t *testing.T) {
 	err := CheckPrefixAvailable(tmpDir, "gt-", "gastown")
 	if err != nil {
 		t.Errorf("expected no error with no routes file, got: %v", err)
+	}
+}
+
+func TestCheckPrefixAvailableScansDuplicatePrefixes(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := WriteRoutes(beadsDir, []Route{
+		{Prefix: "gt-", Path: "gastown"},
+		{Prefix: "gt-", Path: "secondrig"},
+	}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	if err := CheckPrefixAvailable(tmpDir, "gt-", "gastown/mayor/rig"); err == nil {
+		t.Fatal("CheckPrefixAvailable succeeded with duplicate different-rig prefix")
+	}
+
+	if err := WriteRoutes(beadsDir, []Route{
+		{Prefix: "gt-", Path: "gastown"},
+		{Prefix: "gt-", Path: "gastown/mayor/rig"},
+	}); err != nil {
+		t.Fatalf("write same-rig routes: %v", err)
+	}
+	if err := CheckPrefixAvailable(tmpDir, "gt-", "gastown/mayor/rig"); err != nil {
+		t.Fatalf("CheckPrefixAvailable rejected same-rig duplicates: %v", err)
+	}
+}
+
+func TestWriteRoutesWaitsForRoutesLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("flock is a no-op on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	unlock, err := gtlock.FlockAcquire(routesLockPath(beadsDir))
+	if err != nil {
+		t.Fatalf("acquire routes lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WriteRoutes(beadsDir, []Route{{Prefix: "gt-", Path: "gastown"}})
+	}()
+
+	select {
+	case err := <-done:
+		unlock()
+		if err != nil {
+			t.Fatalf("WriteRoutes returned early with error: %v", err)
+		}
+		t.Fatal("WriteRoutes completed while routes lock was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WriteRoutes after releasing lock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WriteRoutes did not complete after releasing routes lock")
+	}
+
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		t.Fatalf("load routes: %v", err)
+	}
+	if len(routes) != 1 || routes[0].Prefix != "gt-" || routes[0].Path != "gastown" {
+		t.Fatalf("routes = %#v, want gt- -> gastown", routes)
+	}
+}
+
+func TestAppendRouteIfPrefixAvailable(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := WriteRoutes(beadsDir, []Route{{Prefix: "gt-", Path: "gastown/mayor/rig"}}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	if _, err := AppendRouteIfPrefixAvailable(tmpDir, Route{Prefix: "gt-", Path: "secondrig/mayor/rig"}); err == nil {
+		t.Fatal("AppendRouteIfPrefixAvailable succeeded for different-rig prefix collision")
+	}
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		t.Fatalf("load routes: %v", err)
+	}
+	if len(routes) != 1 || routes[0].Path != "gastown/mayor/rig" {
+		t.Fatalf("route changed after rejected collision: %#v", routes)
+	}
+
+	previous, err := AppendRouteIfPrefixAvailable(tmpDir, Route{Prefix: "gt-", Path: "gastown"})
+	if err != nil {
+		t.Fatalf("AppendRouteIfPrefixAvailable same rig: %v", err)
+	}
+	if previous == nil || previous.Path != "gastown/mayor/rig" {
+		t.Fatalf("previous route = %#v, want gastown/mayor/rig", previous)
+	}
+	if err := RestoreRouteIfCurrent(tmpDir, Route{Prefix: "gt-", Path: "gastown"}, previous); err != nil {
+		t.Fatalf("restore previous route: %v", err)
+	}
+	routes, err = LoadRoutes(beadsDir)
+	if err != nil {
+		t.Fatalf("load restored routes: %v", err)
+	}
+	if len(routes) != 1 || routes[0].Path != "gastown/mayor/rig" {
+		t.Fatalf("route was not restored: %#v", routes)
+	}
+
+	previous, err = AppendRouteIfPrefixAvailable(tmpDir, Route{Prefix: "cr-", Path: "crucible"})
+	if err != nil {
+		t.Fatalf("AppendRouteIfPrefixAvailable new route: %v", err)
+	}
+	if previous != nil {
+		t.Fatalf("previous route = %#v, want nil for new route", previous)
+	}
+	if err := RestoreRouteIfCurrent(tmpDir, Route{Prefix: "cr-", Path: "crucible"}, previous); err != nil {
+		t.Fatalf("remove new route rollback: %v", err)
+	}
+	routes, err = LoadRoutes(beadsDir)
+	if err != nil {
+		t.Fatalf("load routes after rollback: %v", err)
+	}
+	if len(routes) != 1 || routes[0].Prefix != "gt-" {
+		t.Fatalf("new route was not removed on rollback: %#v", routes)
+	}
+}
+
+func TestAppendRouteRejectsCrossRigPrefixRewrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := WriteRoutes(beadsDir, []Route{{Prefix: "gt-", Path: "gastown/mayor/rig"}}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	if err := AppendRoute(tmpDir, Route{Prefix: "gt-", Path: "secondrig/mayor/rig"}); err == nil {
+		t.Fatal("AppendRoute succeeded for different-rig prefix collision")
+	}
+	if err := AppendRoute(tmpDir, Route{Prefix: "gt-", Path: "gastown"}); err != nil {
+		t.Fatalf("AppendRoute rejected same-rig path variant: %v", err)
+	}
+
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		t.Fatalf("load routes: %v", err)
+	}
+	if len(routes) != 1 || routes[0].Prefix != "gt-" || routes[0].Path != "gastown" {
+		t.Fatalf("routes = %#v, want gt- -> gastown", routes)
+	}
+}
+
+func TestAppendRouteIfPrefixAvailableScansDuplicatePrefixes(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := WriteRoutes(beadsDir, []Route{
+		{Prefix: "gt-", Path: "gastown"},
+		{Prefix: "gt-", Path: "secondrig"},
+	}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	if _, err := AppendRouteIfPrefixAvailable(tmpDir, Route{Prefix: "gt-", Path: "gastown/mayor/rig"}); err == nil {
+		t.Fatal("AppendRouteIfPrefixAvailable succeeded with duplicate different-rig prefix")
+	}
+
+	if err := WriteRoutes(beadsDir, []Route{
+		{Prefix: "gt-", Path: "gastown"},
+		{Prefix: "gt-", Path: "gastown/mayor/rig"},
+	}); err != nil {
+		t.Fatalf("write same-rig duplicates: %v", err)
+	}
+	if _, err := AppendRouteIfPrefixAvailable(tmpDir, Route{Prefix: "gt-", Path: "gastown/mayor/rig"}); err != nil {
+		t.Fatalf("AppendRouteIfPrefixAvailable same-rig duplicates: %v", err)
+	}
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		t.Fatalf("load routes: %v", err)
+	}
+	if len(routes) != 1 || routes[0].Prefix != "gt-" || routes[0].Path != "gastown/mayor/rig" {
+		t.Fatalf("same-rig duplicates were not collapsed: %#v", routes)
 	}
 }
 

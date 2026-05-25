@@ -131,8 +131,13 @@ func TestExtractIssueID(t *testing.T) {
 	}
 }
 
-func TestSlingFormulaOnBeadRoutesBDCommandsToTargetRig(t *testing.T) {
+func TestSlingNewlyCreatedRigBeadRoutesBDCommandsToTargetRig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows: shell stub redacts multiline descriptions")
+	}
+
 	townRoot := t.TempDir()
+	newBeadID := "gt-new123"
 
 	// Minimal workspace marker so workspace.FindFromCwd() succeeds.
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
@@ -156,7 +161,8 @@ func TestSlingFormulaOnBeadRoutesBDCommandsToTargetRig(t *testing.T) {
 		t.Fatalf("write routes.jsonl: %v", err)
 	}
 
-	// Stub bd so we can observe the working directory for cook/wisp/bond.
+	// Stub bd so we can observe that a newly-created rig bead's formula,
+	// hook, and metadata writes all resolve to the target rig database.
 	binDir := filepath.Join(townRoot, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatalf("mkdir binDir: %v", err)
@@ -164,12 +170,30 @@ func TestSlingFormulaOnBeadRoutesBDCommandsToTargetRig(t *testing.T) {
 	logPath := filepath.Join(townRoot, "bd.log")
 	bdScript := `#!/bin/sh
 set -e
-echo "$(pwd)|${BEADS_DIR:-}|$*" >> "${BD_LOG}"
+log_args=""
+for arg in "$@"; do
+  case "$arg" in
+    --description=*attached_molecule:*gt-wisp-xyz*attached_formula:*mol-polecat-work*) arg="--description=<attached-molecule-and-formula-fields>" ;;
+    --description=*) arg="--description=<redacted>" ;;
+  esac
+  log_args="${log_args}${log_args:+ }${arg}"
+done
+printf '%s|%s|%s\n' "$(pwd)" "${BEADS_DIR:-}" "$log_args" >> "${BD_LOG}"
 cmd="$1"
 shift || true
+while [ "$cmd" = "--db" ] || [ "$cmd" = "--allow-stale" ]; do
+  if [ "$cmd" = "--db" ]; then
+    shift || true
+  fi
+  cmd="$1"
+  shift || true
+done
 case "$cmd" in
   show)
     echo '[{"title":"Test issue","status":"open","assignee":"","description":""}]'
+    ;;
+  create)
+    echo '{"id":"gt-new123","title":"New sling smoke","status":"open","assignee":""}'
     ;;
   formula)
     # formula show <name> - must output something for verifyFormulaExists
@@ -190,6 +214,9 @@ case "$cmd" in
         echo '{"root_id":"gt-wisp-xyz"}'
         ;;
     esac
+    ;;
+  update)
+    exit 0
     ;;
 esac
 exit 0
@@ -223,8 +250,6 @@ exit /b 0
 	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
 
 	t.Setenv("BD_LOG", logPath)
-	attachedLogPath := filepath.Join(townRoot, "attached-molecule.log")
-	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", attachedLogPath)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(EnvGTRole, "mayor")
 	t.Setenv("GT_POLECAT", "")
@@ -245,24 +270,52 @@ exit /b 0
 	prevVars := slingVars
 	prevDryRun := slingDryRun
 	prevNoConvoy := slingNoConvoy
+	prevResolveTargetAgent := resolveTargetAgentFn
 	t.Cleanup(func() {
 		slingOnTarget = prevOn
 		slingVars = prevVars
 		slingDryRun = prevDryRun
 		slingNoConvoy = prevNoConvoy
+		resolveTargetAgentFn = prevResolveTargetAgent
 	})
 
 	slingDryRun = false
 	slingNoConvoy = true
 	slingVars = nil
-	slingOnTarget = "gt-abc123"
+	slingOnTarget = ""
+	resolveTargetAgentFn = func(target string) (agentID string, pane string, hookRoot string, err error) {
+		if target != "gastown/polecats/toast" {
+			t.Fatalf("resolveTargetAgent target = %q, want gastown/polecats/toast", target)
+		}
+		return "gastown/polecats/toast", "", filepath.Join(townRoot, "gastown", "polecats", "toast", "gastown"), nil
+	}
 
 	// Prevent real tmux nudge from firing during tests (causes agent self-interruption)
 	t.Setenv("GT_TEST_NO_NUDGE", "1")
 	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1") // Stub bd doesn't track state
+	// Poison the ambient beads target: all mutating commands must override this
+	// with the route-resolved target rig database.
+	t.Setenv("BEADS_DIR", filepath.Join(townRoot, ".beads"))
 
-	if err := runSling(nil, []string{"mol-review"}); err != nil {
+	createOut, err := BdCmd("create", "--json", "--title=New sling smoke", "--type=task").
+		Dir(rigDir).
+		Output()
+	if err != nil {
+		t.Fatalf("create new rig bead: %v", err)
+	}
+	if !strings.Contains(string(createOut), newBeadID) {
+		t.Fatalf("created bead output = %q, want %s", createOut, newBeadID)
+	}
+
+	if err := runSling(nil, []string{newBeadID, "gastown/polecats/toast"}); err != nil {
 		t.Fatalf("runSling: %v", err)
+	}
+
+	// Also exercise the explicit formula-on-bead path; this is the older
+	// --on-style route that must use the same target rig database.
+	slingOnTarget = newBeadID
+	if err := runSling(nil, []string{"mol-review"}); err != nil {
+		t.Fatalf("runSling --on: %v", err)
 	}
 
 	logBytes, err := os.ReadFile(logPath)
@@ -279,9 +332,24 @@ exit /b 0
 	if resolved, err := filepath.EvalSymlinks(wantBeadsDir); err == nil {
 		wantBeadsDir = resolved
 	}
-	gotCook := false
-	gotWisp := false
-	gotBond := false
+	gotPolecatCook := false
+	gotPolecatWisp := false
+	gotReviewCook := false
+	gotReviewWisp := false
+	gotBondCount := 0
+	gotCreate := false
+	gotTargetDBCheck := false
+	gotHook := false
+	gotMetadata := false
+	assertTargetRig := func(kind, dir, beadsDir, args string) {
+		t.Helper()
+		if dir != wantDir {
+			t.Fatalf("bd %s ran in %q, want %q (args: %q)", kind, dir, wantDir, args)
+		}
+		if beadsDir != wantBeadsDir {
+			t.Fatalf("bd %s used BEADS_DIR %q, want %q (args: %q)", kind, beadsDir, wantBeadsDir, args)
+		}
+	}
 
 	for _, line := range logLines {
 		parts := strings.SplitN(line, "|", 3)
@@ -299,30 +367,49 @@ exit /b 0
 		args := parts[2]
 
 		switch {
+		case strings.Contains(args, "create "):
+			gotCreate = true
+			assertTargetRig("create", dir, beadsDir, args)
+		case strings.Contains(args, "--db ") && strings.Contains(args, " show "+newBeadID):
+			gotTargetDBCheck = true
+			if !strings.Contains(args, "--db "+wantBeadsDir) {
+				t.Fatalf("target rig DB check args = %q, want --db %q", args, wantBeadsDir)
+			}
 		case strings.Contains(args, "cook "):
-			gotCook = true
-			// cook doesn't need database context, runs from cwd
+			switch {
+			case strings.Contains(args, "mol-polecat-work"):
+				gotPolecatCook = true
+			case strings.Contains(args, "mol-review"):
+				gotReviewCook = true
+			default:
+				t.Fatalf("bd cook args = %q, want expected formula", args)
+			}
+			assertTargetRig("cook", dir, beadsDir, args)
 		case strings.Contains(args, "mol wisp "):
-			gotWisp = true
-			if dir != wantDir {
-				t.Fatalf("bd mol wisp ran in %q, want %q (args: %q)", dir, wantDir, args)
+			switch {
+			case strings.Contains(args, "mol-polecat-work"):
+				gotPolecatWisp = true
+			case strings.Contains(args, "mol-review"):
+				gotReviewWisp = true
+			default:
+				t.Fatalf("bd mol wisp args = %q, want expected formula", args)
 			}
-			if beadsDir != wantBeadsDir {
-				t.Fatalf("bd mol wisp used BEADS_DIR %q, want %q (args: %q)", beadsDir, wantBeadsDir, args)
-			}
+			assertTargetRig("mol wisp", dir, beadsDir, args)
 		case strings.Contains(args, "mol bond "):
-			gotBond = true
-			if dir != wantDir {
-				t.Fatalf("bd mol bond ran in %q, want %q (args: %q)", dir, wantDir, args)
-			}
-			if beadsDir != wantBeadsDir {
-				t.Fatalf("bd mol bond used BEADS_DIR %q, want %q (args: %q)", beadsDir, wantBeadsDir, args)
-			}
+			gotBondCount++
+			assertTargetRig("mol bond", dir, beadsDir, args)
+		case strings.Contains(args, "update "+newBeadID) && strings.Contains(args, "--status=hooked"):
+			gotHook = true
+			assertTargetRig("hook update", dir, beadsDir, args)
+		case strings.Contains(args, "update "+newBeadID) && strings.Contains(args, "--description=<attached-molecule-and-formula-fields>"):
+			gotMetadata = true
+			assertTargetRig("metadata update", dir, beadsDir, args)
 		}
 	}
 
-	if !gotCook || !gotWisp || !gotBond {
-		t.Fatalf("missing expected bd commands: cook=%v wisp=%v bond=%v (log: %q)", gotCook, gotWisp, gotBond, string(logBytes))
+	if !gotCreate || !gotTargetDBCheck || !gotPolecatCook || !gotPolecatWisp || !gotReviewCook || !gotReviewWisp || gotBondCount < 2 || !gotHook || !gotMetadata {
+		t.Fatalf("missing expected bd commands: create=%v targetDBCheck=%v polecat(cook=%v wisp=%v) review(cook=%v wisp=%v) bondCount=%d hook=%v metadata=%v (log: %q)",
+			gotCreate, gotTargetDBCheck, gotPolecatCook, gotPolecatWisp, gotReviewCook, gotReviewWisp, gotBondCount, gotHook, gotMetadata, string(logBytes))
 	}
 }
 
