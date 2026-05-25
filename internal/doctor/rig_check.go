@@ -1663,7 +1663,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 					}
 					configWarning = fmt.Sprintf("git remote query failed (push: %v, fetch: %v)", pushErr, fetchErr)
 				} else {
-					actualFetch = strings.TrimSpace(actualFetch)
+					_ = actualFetch // fetched for future parity check; currently only push URL is validated
 					if cfgPushURL != "" {
 						// Config specifies a push URL — it should match actual
 						if actualPush != cfgPushURL {

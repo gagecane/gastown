@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/cli"
@@ -221,7 +220,7 @@ func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
 		return nil
 	}
 
-	role = strings.ToLower(role)
+	_ = role // previously used for role-specific commands; kept as param for API compat
 	command := "gt prime"
 	// NOTE: session-started nudge to deacon removed — it interrupted
 	// the deacon's await-signal backoff (exponential sleep). The deacon
