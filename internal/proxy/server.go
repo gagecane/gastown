@@ -284,6 +284,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// mayor). Binding to 127.0.0.1 keeps it off-network; any process on the same
 	// host can reach it, which is the intended access model.
 	var adminSrv *http.Server
+	var adminWg sync.WaitGroup
 	if s.cfg.AdminListenAddr != "" {
 		adminMux := http.NewServeMux()
 		adminMux.HandleFunc("/v1/admin/deny-cert", s.handleDenyCert)
@@ -306,7 +307,9 @@ func (s *Server) Start(ctx context.Context) error {
 		s.lnMu.Unlock()
 
 		s.log.Info("gt-proxy-server: admin listening", "addr", adminLn.Addr())
+		adminWg.Add(1)
 		go func() {
+			defer adminWg.Done()
 			if err := adminSrv.Serve(adminLn); err != nil && err != http.ErrServerClosed {
 				s.log.Error("admin server error", "err", err)
 			}
@@ -321,7 +324,11 @@ func (s *Server) Start(ctx context.Context) error {
 		if adminSrv != nil {
 			_ = adminSrv.Shutdown(shutCtx)
 		}
-		return srv.Shutdown(shutCtx)
+		err := srv.Shutdown(shutCtx)
+		// Wait for the admin server goroutine to exit so we don't return
+		// while it is still running (clean shutdown).
+		adminWg.Wait()
+		return err
 	case err := <-errCh:
 		return err
 	}
