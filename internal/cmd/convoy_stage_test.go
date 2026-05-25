@@ -1300,7 +1300,7 @@ func TestRenderDAGTree_EpicTree(t *testing.T) {
 	subEpicIndent := -1
 	task2Indent := -1
 	for _, line := range lines {
-		trimmed := strings.TrimLeft(line, " │├└──")
+		trimmed := strings.TrimLeft(line, " │├└─")
 		indent := len(line) - len(trimmed)
 		if strings.Contains(line, "sub-epic") {
 			subEpicIndent = indent
