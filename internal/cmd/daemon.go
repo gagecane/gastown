@@ -12,8 +12,10 @@ import (
 	"github.com/spf13/cobra"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -144,6 +146,23 @@ Examples:
 	RunE: runDaemonClearBackoff,
 }
 
+var daemonPruneStateCmd = &cobra.Command{
+	Use:   "prune-state",
+	Short: "Remove stale entries from daemon state files",
+	Long: `Prune restart_state.json of entries for agents whose sessions no longer exist.
+
+Over time, ephemeral polecat sessions accumulate entries in the restart
+tracker. This command removes entries for agents that have no active tmux
+session, keeping the state file lean.
+
+Examples:
+  gt daemon prune-state             # Prune dead session entries
+  gt daemon prune-state --dry-run   # Show what would be pruned`,
+	RunE: runDaemonPruneState,
+}
+
+var daemonPruneStateDryRun bool
+
 var (
 	daemonLogLines  int
 	daemonLogFollow bool
@@ -158,10 +177,12 @@ func init() {
 	daemonCmd.AddCommand(daemonEnableSupervisorCmd)
 	daemonCmd.AddCommand(daemonClearBackoffCmd)
 	daemonCmd.AddCommand(daemonRotateLogsCmd)
+	daemonCmd.AddCommand(daemonPruneStateCmd)
 
 	daemonLogsCmd.Flags().IntVarP(&daemonLogLines, "lines", "n", 50, "Number of lines to show")
 	daemonLogsCmd.Flags().BoolVarP(&daemonLogFollow, "follow", "f", false, "Follow log output")
 	daemonRotateLogsCmd.Flags().BoolVar(&daemonRotateLogsForce, "force", false, "Rotate all logs regardless of size")
+	daemonPruneStateCmd.Flags().BoolVar(&daemonPruneStateDryRun, "dry-run", false, "Show what would be pruned without making changes")
 
 	rootCmd.AddCommand(daemonCmd)
 }
@@ -472,6 +493,80 @@ func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
 
 	if len(result.Rotated) == 0 && len(result.Errors) == 0 {
 		fmt.Printf("%s No logs needed rotation\n", style.Bold.Render("✓"))
+	}
+
+	return nil
+}
+
+func runDaemonPruneState(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// List active tmux sessions
+	t := tmux.NewTmux()
+	activeSessions, err := t.ListSessions()
+	if err != nil {
+		return fmt.Errorf("listing tmux sessions: %w", err)
+	}
+
+	// Build a resolver that maps agent IDs (as stored in restart_state.json)
+	// to tmux session names. Agent IDs are simple identifiers like "deacon".
+	resolveSession := func(agentID string) string {
+		switch agentID {
+		case "mayor":
+			return session.MayorSessionName()
+		case "deacon":
+			return session.DeaconSessionName()
+		default:
+			// For other agents, assume the agentID is the session name directly.
+			// This handles cases where future code stores session names as-is.
+			return agentID
+		}
+	}
+
+	if daemonPruneStateDryRun {
+		// Dry-run: preview what would be pruned without modifying disk
+		result, err := daemon.PreviewPruneStaleState(townRoot, activeSessions, resolveSession)
+		if err != nil {
+			return err
+		}
+		if result.Total == 0 {
+			fmt.Printf("%s No entries in restart state\n", style.Bold.Render("✓"))
+			return nil
+		}
+		fmt.Printf("Restart state has %d entries:\n", result.Total)
+		for _, id := range result.Kept {
+			fmt.Printf("  %s %s (session active)\n", style.Bold.Render("●"), id)
+		}
+		for _, id := range result.Pruned {
+			fmt.Printf("  %s %s (would prune — session dead)\n", style.Dim.Render("○"), id)
+		}
+		return nil
+	}
+
+	result, err := daemon.PruneStaleState(townRoot, activeSessions, resolveSession)
+	if err != nil {
+		return err
+	}
+
+	if result.Total == 0 {
+		fmt.Printf("%s No entries in restart state\n", style.Bold.Render("✓"))
+		return nil
+	}
+
+	for _, id := range result.Pruned {
+		fmt.Printf("%s Pruned %s (session dead)\n", style.Bold.Render("✓"), id)
+	}
+	for _, id := range result.Kept {
+		fmt.Printf("  %s %s (session active)\n", style.Dim.Render("·"), id)
+	}
+
+	if len(result.Pruned) == 0 {
+		fmt.Printf("%s All %d entries are active, nothing to prune\n", style.Bold.Render("✓"), result.Total)
+	} else {
+		fmt.Printf("%s Pruned %d of %d entries\n", style.Bold.Render("✓"), len(result.Pruned), result.Total)
 	}
 
 	return nil
