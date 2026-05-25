@@ -1730,6 +1730,41 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if !m.exists(name) {
 		return nil, ErrPolecatNotFound
 	}
+	current, err := m.loadFromBeads(name)
+	if err != nil {
+		return nil, err
+	}
+	if (current.State == StateWorking || current.State == StateStalled) && current.Issue == "" {
+		current = &Polecat{
+			Name:      current.Name,
+			Rig:       current.Rig,
+			State:     StateIdle,
+			ClonePath: current.ClonePath,
+			Branch:    current.Branch,
+			Issue:     current.Issue,
+			CreatedAt: current.CreatedAt,
+			UpdatedAt: current.UpdatedAt,
+		}
+	}
+	if current.State != StateIdle {
+		return nil, fmt.Errorf("%w: polecat is %s", ErrPolecatNeedsRecovery, current.State)
+	}
+	state, err := m.evaluateWorkStateForPolecat(name, current)
+	if err != nil {
+		return nil, err
+	}
+	if !state.Reusable {
+		if !strings.Contains(state.Reason, "agent-bead-lookup-failed") {
+			return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, state.Reason)
+		}
+		// Legacy/test slots can lack agent beads while still having a live dead-prompt
+		// session. Clear that session before returning the recovery verdict so it
+		// does not keep consuming capacity or block later repair.
+		if err := m.killExistingPolecatSession(name, "reuse"); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, state.Reason)
+	}
 
 	// Kill any existing session unconditionally before reuse.
 	// The polecat was found idle (no hooked work), so even a "live" session is
@@ -1749,14 +1784,6 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// lets the gate evaluate beads/git state on its own merits.
 	if err := m.killExistingPolecatSession(name, "reuse"); err != nil {
 		return nil, err
-	}
-
-	current, err := m.loadFromBeads(name)
-	if err != nil {
-		return nil, err
-	}
-	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
-		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
 	}
 
 	// Get worktree path (must already exist for reuse)
@@ -2441,6 +2468,7 @@ func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDec
 	}
 	return DecideSlotReuse(input)
 }
+
 
 // Get returns a specific polecat by name.
 // State is derived from beads assignee field + tmux session state:

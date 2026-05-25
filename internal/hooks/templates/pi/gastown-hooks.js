@@ -5,7 +5,7 @@
 // Events mapped:
 //   session_start       → gt prime --hook (capture context)
 //   before_agent_start  → inject captured context + check mail every prompt
-//   tool_call           → gt tap guard pr-workflow (on git push/pr create)
+//   tool_call           → gt tap guard pr-workflow (on pr create/branch create)
 //   session_shutdown    → gt costs record
 //
 // Enhancement over upstream: mail is checked on every prompt (throttled to
@@ -89,14 +89,14 @@ export default (pi) => {
     }
   });
 
-  // PreToolUse equivalent — guard dangerous git operations
+  // PreToolUse equivalent — guard PR workflow operations
   pi.on("tool_call", async (event, context) => {
     if (event.toolName === "bash" && event.input?.command) {
       const cmd = event.input.command;
       if (
-        cmd.includes("git push") ||
         cmd.includes("gh pr create") ||
-        cmd.includes("git checkout -b")
+        cmd.includes("git checkout -b") ||
+        cmd.includes("git switch -c")
       ) {
         try {
           const result = await pi.exec("gt", ["tap", "guard", "pr-workflow"]);

@@ -48,7 +48,7 @@ setup_repos() {
 run_hook() {
   # Simulate pre-push stdin: local_ref local_sha remote_ref remote_sha
   local local_ref=$1 local_sha=$2 remote_ref=$3 remote_sha=$4
-  echo "$local_ref $local_sha $remote_ref $remote_sha" | bash "$HOOK" "origin" 2>&1
+  echo "$local_ref $local_sha $remote_ref $remote_sha" | bash "$HOOK" "${PUSH_REMOTE:-origin}" 2>&1
 }
 
 get_sha() {
@@ -82,15 +82,15 @@ assert_block() {
 echo "=== Pre-push hook test suite ==="
 echo ""
 
-# Test 1: Normal push to default branch (no integration content)
-echo "Test 1: Normal push to default branch (no integration content)"
+# Test 1: Normal push to default branch without fork workflow (no integration content)
+echo "Test 1: Normal push to default branch without fork workflow (no integration content)"
 setup_repos
 cd "$TMPDIR/local"
 remote_sha=$(get_sha HEAD)
 echo "change1" >> file.txt
 git add file.txt && git commit -m "normal change" >/dev/null 2>&1
 local_sha=$(get_sha HEAD)
-assert_pass "Normal push allowed" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+assert_pass "Normal direct push allowed without fork workflow" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
 # Test 2: Push to polecat/* branch
@@ -130,12 +130,53 @@ cleanup
 echo "Test 5: Push to feature/* with upstream remote"
 setup_repos
 cd "$TMPDIR/local"
+git init --bare "$TMPDIR/upstream.git" >/dev/null 2>&1
+git remote set-url origin "$TMPDIR/fork.git" >/dev/null 2>&1
 git remote add upstream "$TMPDIR/remote.git" >/dev/null 2>&1
 git checkout -b feature/thing >/dev/null 2>&1
 echo "feature" >> file.txt
 git add file.txt && git commit -m "feature" >/dev/null 2>&1
 local_sha=$(get_sha HEAD)
 assert_pass "Feature branch allowed (upstream exists)" run_hook "refs/heads/feature/thing" "$local_sha" "refs/heads/feature/thing" "0000000000000000000000000000000000000000"
+cleanup
+
+# Test 5b: Push to feature/* with fork remote (allowed)
+echo "Test 5b: Push to feature/* with fork remote"
+setup_repos
+cd "$TMPDIR/local"
+git init --bare "$TMPDIR/fork.git" >/dev/null 2>&1
+git remote add fork "$TMPDIR/fork.git" >/dev/null 2>&1
+git checkout -b feature/fork-thing >/dev/null 2>&1
+echo "feature" >> file.txt
+git add file.txt && git commit -m "feature" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+PUSH_REMOTE=fork assert_pass "Feature branch allowed (push to fork)" run_hook "refs/heads/feature/fork-thing" "$local_sha" "refs/heads/feature/fork-thing" "0000000000000000000000000000000000000000"
+cleanup
+
+# Test 5c: Push to feature/* to origin while fork remote exists (blocked)
+echo "Test 5c: Push to feature/* to origin while fork remote exists"
+setup_repos
+cd "$TMPDIR/local"
+git init --bare "$TMPDIR/fork.git" >/dev/null 2>&1
+git remote add fork "$TMPDIR/fork.git" >/dev/null 2>&1
+git checkout -b feature/origin-thing >/dev/null 2>&1
+echo "feature" >> file.txt
+git add file.txt && git commit -m "feature" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Feature branch to origin blocked when fork exists" run_hook "refs/heads/feature/origin-thing" "$local_sha" "refs/heads/feature/origin-thing" "0000000000000000000000000000000000000000"
+cleanup
+
+# Test 5d: Push to default branch with fork remote (blocked)
+echo "Test 5d: Push to default branch with fork remote"
+setup_repos
+cd "$TMPDIR/local"
+git init --bare "$TMPDIR/fork.git" >/dev/null 2>&1
+git remote add fork "$TMPDIR/fork.git" >/dev/null 2>&1
+remote_sha=$(get_sha HEAD)
+echo "change fork main" >> file.txt
+git add file.txt && git commit -m "fork main change" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Default branch blocked in fork workflow" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
 # Test 6: Push to default branch with integration merge (no env var) — BLOCKED

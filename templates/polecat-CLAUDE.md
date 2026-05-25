@@ -65,9 +65,9 @@ formula checklist (from `mol-polecat-work`, shown inline at prime time) and sign
 1. Receive work via your hook (formula checklist + issue)
 2. Work through formula steps in order (shown inline at prime time)
 3. Complete and self-clean (`gt done`) — you exit AND nuke yourself
-4. Refinery merges your work from the MQ
+4. The configured landing path (MQ, fork PR, or review-only) carries the work forward
 
-**Self-cleaning model:** `gt done` pushes your branch, submits to MQ, nukes sandbox, exits session.
+**Self-cleaning model:** `gt done` completes the configured workflow, nukes sandbox, exits session.
 
 **Three operating states:**
 - **Working** — actively doing assigned work (normal)
@@ -201,25 +201,26 @@ the project's definition of done. Many projects require a specific test harness
 (not just `go test` or `dotnet test`). If AGENTS.md exists, its "Core rule"
 section defines what "done" means for this project.
 
-The `gt done` command pushes your branch, creates an MR bead in the MQ, nukes
-your sandbox, and exits your session. **You are gone after `gt done`.**
+The `gt done` command completes the workflow configured for this rig: internal
+MQ, fork PR, or review-only/no-merge. **You are gone after `gt done`.**
 
 ### Do NOT Push Directly to Main
 
 **You are a polecat. You NEVER push directly to main.**
 
-Your work goes through the merge queue:
-1. You work on your branch
-2. `gt done` pushes your branch and submits an MR to the merge queue
-3. Refinery merges to main after Witness verification
+Use the active landing mode for the rig:
+1. MQ mode: work on your branch; `gt done` submits an MR bead to Refinery
+2. Fork-PR mode: push only a feature branch to the fork remote and open a PR
+3. Review-only/no-merge mode: leave the branch for the requested reviewer
 
-**Do NOT create GitHub PRs either.** The merge queue handles everything.
+Only create GitHub PRs when the assignment or rig policy explicitly requires
+fork-PR mode. Never use a GitHub PR as a substitute for `gt done` in MQ mode.
 
 ### The Landing Rule
 
-> **Work is NOT landed until it's in the Refinery MQ.**
+> **Work is NOT landed until it is in the configured landing path.**
 
-**Local branch → `gt done` → MR in queue → Refinery merges → LANDED**
+**Local branch → configured MQ/fork-PR/review path → maintainer/Refinery lands**
 
 ---
 

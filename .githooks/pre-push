@@ -1,7 +1,7 @@
 #!/bin/bash
-# Block PRs by preventing pushes to arbitrary feature branches.
-# Gas Town agents push to main (crew) or polecat/* branches (polecats).
-# PRs are for external contributors only.
+# Enforce the active landing policy.
+# Internal MQ/direct workflows may push approved branches; fork-PR workflows may
+# push feature branches but must not push directly to the upstream default branch.
 #
 # Also enforces integration branch landing guardrails: pushes to the default
 # branch that introduce integration branch content are blocked unless
@@ -13,6 +13,7 @@
 # 2. origin/master (if it exists)
 # 3. origin/main (final fallback)
 default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's#refs/remotes/origin/##')
+push_remote="${1:-origin}"
 if [[ -z "$default_branch" ]]; then
   if git rev-parse --verify origin/master &>/dev/null; then
     default_branch=master
@@ -21,8 +22,44 @@ if [[ -z "$default_branch" ]]; then
   fi
 fi
 
+has_fork_pr_remote=0
+origin_url=$(git remote get-url origin 2>/dev/null || true)
+origin_push_url=$(git remote get-url --push origin 2>/dev/null || true)
+fork_url=$(git remote get-url fork 2>/dev/null || true)
+upstream_url=$(git remote get-url upstream 2>/dev/null || true)
+
+if [[ -n "$fork_url" || -n "$upstream_url" ]]; then
+  has_fork_pr_remote=1
+elif [[ -n "$origin_url" && -n "$origin_push_url" && "$origin_url" != "$origin_push_url" ]]; then
+  has_fork_pr_remote=1
+fi
+
+is_fork_push_target=0
+push_remote_url=$(git remote get-url "$push_remote" 2>/dev/null || true)
+case "$push_remote" in
+  fork)
+    is_fork_push_target=1
+    ;;
+  origin)
+    if [[ -n "$origin_url" && -n "$origin_push_url" && "$origin_url" != "$origin_push_url" ]]; then
+      is_fork_push_target=1
+    elif [[ -n "$upstream_url" && -n "$origin_url" && "$origin_url" != "$upstream_url" ]]; then
+      # Traditional contributor setup: origin=fork, upstream=maintainer.
+      is_fork_push_target=1
+    fi
+    ;;
+  upstream)
+    is_fork_push_target=0
+    ;;
+  *)
+    if [[ -n "$push_remote_url" && "$push_remote_url" != "$origin_url" && "$push_remote_url" != "$upstream_url" ]]; then
+      is_fork_push_target=1
+    fi
+    ;;
+esac
+
 # Allowed patterns:
-#   <default_branch>, beads-sync  - Direct work branches
+#   <default_branch>, beads-sync  - Direct work branches (unless fork-PR mode)
 #   polecat/*                     - Polecat working branches (Refinery merges these)
 #   integration/*                 - Integration branches (created by gt mq integration)
 
@@ -35,25 +72,32 @@ while read local_ref local_sha remote_ref remote_sha; do
   branch="${remote_ref#refs/heads/}"
 
   case "$branch" in
-    "${default_branch}"|beads-sync|polecat/*|integration/*)
+    "${default_branch}")
+      if [[ "$has_fork_pr_remote" == "1" && "$GT_INTEGRATION_LAND" != "1" && "$GT_ALLOW_DIRECT_MAIN" != "1" ]]; then
+        echo "ERROR: Direct push to $default_branch blocked in fork-PR workflow."
+        echo ""
+        echo "Push a feature branch to your fork and open a PR instead."
+        echo "Use GT_ALLOW_DIRECT_MAIN=1 only for intentional maintainer/release operations."
+        exit 1
+      fi
+      ;;
+    beads-sync|polecat/*|integration/*)
       # Allowed branches
       ;;
     *)
-      # Allow feature branches when contributing to upstream (fork workflow).
-      # If an 'upstream' remote exists, this is a contribution setup where
-      # feature branches are needed for PRs. See: #848
-      if ! git remote get-url upstream &>/dev/null; then
+      # Allow feature branches only when pushing to the configured fork/non-maintainer target.
+      if [[ "$has_fork_pr_remote" != "1" || "$is_fork_push_target" != "1" ]]; then
         echo "ERROR: Invalid branch for Gas Town agents."
         echo ""
         echo "Blocked push to: $branch"
         echo ""
         echo "Allowed branches:"
-        echo "  ${default_branch}        - Crew workers push here directly"
+        echo "  ${default_branch}        - Allowed only when the active workflow permits it"
         echo "  polecat/*   - Polecat working branches"
         echo "  integration/* - Integration branches"
         echo "  beads-sync  - Beads synchronization"
         echo ""
-        echo "Do NOT create PRs. Push to main or let Refinery merge polecat work."
+        echo "Feature branches require pushing to a fork/non-maintainer remote. Otherwise use approved direct/MQ branches."
         exit 1
       fi
       ;;
