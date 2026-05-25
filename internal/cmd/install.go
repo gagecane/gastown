@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -660,14 +659,6 @@ Your role is set by the GT_ROLE environment variable and injected by ` + "`" + c
 	return anyCreated, nil
 }
 
-func writeJSON(path string, data interface{}) error {
-	content, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, content, 0644)
-}
-
 // buildBdInitArgs returns the arguments for `bd init` including the correct
 // --server-port derived from the town's Dolt configuration.
 //
@@ -835,20 +826,6 @@ func withBeadsDirEnv(beadsDir string) []string {
 		filtered = append(filtered, dbEnv)
 	}
 	return filtered
-}
-
-// ensureCustomTypes registers Gas Town custom issue types with beads.
-// Beads core only supports built-in types (bug, feature, task, etc.).
-// Gas Town needs custom types: agent, role, rig, convoy, slot.
-// This is idempotent - safe to call multiple times.
-func ensureCustomTypes(beadsPath string) error {
-	cmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
-	cmd.Dir = beadsPath
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("bd config set types.custom: %s", strings.TrimSpace(string(output)))
-	}
-	return nil
 }
 
 // initTownAgentBeads creates town-level agent beads using hq- prefix.

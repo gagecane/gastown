@@ -191,32 +191,6 @@ func issueFilterFromListOpts(opts ListOptions) beadsdk.IssueFilter {
 	return f
 }
 
-// workFilterFromListOpts builds a beadsdk WorkFilter from ListOptions.
-func workFilterFromListOpts(opts ListOptions) beadsdk.WorkFilter {
-	f := beadsdk.WorkFilter{
-		Limit: opts.Limit,
-	}
-
-	if opts.Label != "" {
-		f.Labels = []string{opts.Label}
-	} else if opts.Type != "" {
-		f.Labels = []string{"gt:" + opts.Type}
-	}
-
-	if opts.Priority >= 0 {
-		f.Priority = &opts.Priority
-	}
-
-	if opts.Assignee != "" {
-		f.Assignee = &opts.Assignee
-	}
-
-	if opts.NoAssignee {
-		f.Unassigned = true
-	}
-
-	return f
-}
 
 // storeList implements List using the in-process store.
 func (b *Beads) storeList(opts ListOptions) ([]*Issue, error) {
@@ -503,30 +477,6 @@ func (b *Beads) storeRemoveDependency(issue, dependsOn string) error {
 	defer cancel()
 
 	return b.store.RemoveDependency(ctx, issue, dependsOn, b.getActor())
-}
-
-// storeAddLabel implements AddLabel using the in-process store.
-func (b *Beads) storeAddLabel(id, label string) error {
-	ctx, cancel := storeCtx()
-	defer cancel()
-
-	return b.store.AddLabel(ctx, id, label, b.getActor())
-}
-
-// storeRemoveLabel implements RemoveLabel using the in-process store.
-func (b *Beads) storeRemoveLabel(id, label string) error {
-	ctx, cancel := storeCtx()
-	defer cancel()
-
-	return b.store.RemoveLabel(ctx, id, label, b.getActor())
-}
-
-// storeGetLabels implements GetLabels using the in-process store.
-func (b *Beads) storeGetLabels(id string) ([]string, error) {
-	ctx, cancel := storeCtx()
-	defer cancel()
-
-	return b.store.GetLabels(ctx, id)
 }
 
 // storeDelegationSet stores delegation data in the issue's metadata under the

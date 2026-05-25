@@ -2406,69 +2406,6 @@ func (m *Manager) FindIdlePolecats() ([]*Polecat, error) {
 	return idle, nil
 }
 
-func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDecision {
-	input := SlotReuseInput{State: state, CleanupStatus: CleanupUnknown}
-	agentID := m.agentBeadID(name)
-	_, fields, err := m.agentBeads().GetAgentBead(agentID)
-	if err != nil {
-		input.GitCheckFailed = true
-	}
-	if err == nil && fields != nil {
-		input.HookBead = fields.HookBead
-		input.PushFailed = fields.PushFailed
-		input.MRFailed = fields.MRFailed
-		if fields.CleanupStatus != "" {
-			input.CleanupStatus = CleanupStatus(fields.CleanupStatus)
-		}
-	}
-
-	clonePath := m.clonePath(name)
-	g := git.NewGit(clonePath)
-	branch, branchErr := g.CurrentBranch()
-	if branchErr != nil {
-		input.GitCheckFailed = true
-	} else {
-		input.Branch = branch
-	}
-	if status, err := g.CheckUncommittedWork(); err == nil {
-		input.GitDirty = !status.CleanExcludingRuntime()
-		input.StashCount = status.StashCount
-		input.UnpushedCommits = status.UnpushedCommits
-	} else {
-		input.GitCheckFailed = true
-	}
-	if branch != "" {
-		if pushed, unpushed, err := g.BranchPushedToRemote(branch, "origin"); err == nil {
-			if !pushed && unpushed > input.UnpushedCommits {
-				input.UnpushedCommits = unpushed
-			}
-		} else {
-			input.GitCheckFailed = true
-		}
-		// gu-3n5u: BranchPushedToRemote treats a remote ref by the same name as
-		// "pushed" — but in idle-polecat reuse we also have to detect commits
-		// that exist only on a feature/stale branch and are NOT yet on origin's
-		// canonical default branch. ReuseIdlePolecat is about to reset the
-		// worktree onto that default branch, so any commit not reachable from
-		// origin/<default> is work-at-risk that the slot-reuse decision must
-		// honor.
-		if defaultBranch := g.RemoteDefaultBranch(); defaultBranch != "" {
-			if ahead, err := g.CommitsAhead("origin/"+defaultBranch, "HEAD"); err == nil {
-				if ahead > input.UnpushedCommits {
-					input.UnpushedCommits = ahead
-				}
-			}
-		}
-	}
-	// Legacy/test polecats can lack agent cleanup metadata. If git proves there is
-	// no local work at risk, treat the missing cleanup_status as clean; otherwise
-	// DecideSlotReuse will continue to fail closed on CleanupUnknown.
-	if input.CleanupStatus == CleanupUnknown && !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0 {
-		input.CleanupStatus = CleanupClean
-	}
-	return DecideSlotReuse(input)
-}
-
 
 // Get returns a specific polecat by name.
 // State is derived from beads assignee field + tmux session state:

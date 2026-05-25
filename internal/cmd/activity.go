@@ -12,17 +12,16 @@ import (
 
 // Activity emit command flags
 var (
-	activityEventType string
-	activityActor     string
-	activityRig       string
-	activityPolecat   string
-	activityTarget    string
-	activityReason    string
-	activityMessage   string
-	activityStatus    string
-	activityIssue     string
-	activityTo        string
-	activityCount     int
+	activityActor   string
+	activityRig     string
+	activityPolecat string
+	activityTarget  string
+	activityReason  string
+	activityMessage string
+	activityStatus  string
+	activityIssue   string
+	activityTo      string
+	activityCount   int
 )
 
 var activityCmd = &cobra.Command{

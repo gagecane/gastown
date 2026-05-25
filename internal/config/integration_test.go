@@ -389,21 +389,6 @@ func captureTmuxPane(t *testing.T, socket, sessionName string, lines int) string
 	return string(output)
 }
 
-func waitForTmuxOutputContains(t *testing.T, socket, sessionName, needle string, timeout time.Duration) (string, bool) {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	output := ""
-	for time.Now().Before(deadline) {
-		output = captureTmuxPane(t, socket, sessionName, 200)
-		if strings.Contains(output, needle) {
-			return output, true
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	return output, false
-}
-
 // TestRigAgentOverridesTownAgent verifies rig agents take precedence over town agents.
 func TestRigAgentOverridesTownAgent(t *testing.T) {
 	t.Parallel()

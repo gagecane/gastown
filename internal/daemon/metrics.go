@@ -182,16 +182,6 @@ func (dm *daemonMetrics) recordRestart(ctx context.Context, agentType string) {
 	)
 }
 
-// recordPolecatSpawn increments the polecat spawn counter, labeled with the rig name.
-func (dm *daemonMetrics) recordPolecatSpawn(ctx context.Context, rigName string) {
-	if dm == nil {
-		return
-	}
-	dm.polecatSpawns.Add(ctx, 1,
-		metric.WithAttributes(attribute.String("rig", rigName)),
-	)
-}
-
 // updateDoltHealth stores the latest Dolt health snapshot for observable gauges.
 func (dm *daemonMetrics) updateDoltHealth(conns, maxConns int64, latencyMs float64, diskBytes int64, healthy bool) {
 	if dm == nil {

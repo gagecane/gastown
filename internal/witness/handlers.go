@@ -1294,9 +1294,6 @@ const (
 // autoSaveMarker is the commit message prefix used by the gt-pvx safety net.
 const autoSaveMarker = "auto-save uncommitted"
 
-// Package-level var so tests can override.
-var verifyBranchAlreadyMerged = _verifyBranchAlreadyMerged
-
 // classifyPolecatMergeState determines the merge state of a polecat's work.
 // This is the gu-ur85 replacement for the old bool-returning verifyBranchAlreadyMerged.
 // Package-level var so tests can override.
@@ -1386,16 +1383,6 @@ func polecatHasAutoSaveCommits(g *git.Git, remotes []string, defaultBranch strin
 		return false, nil // checked successfully, no marker found
 	}
 	return false, fmt.Errorf("could not check commit messages against any remote")
-}
-
-func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, error) {
-	result, err := classifyPolecatMergeState(workDir, rigName, polecatName)
-	if err != nil {
-		return false, err
-	}
-	// Preserve old behavior: empty and merged both return true.
-	// The caller (handleZombieRestart) should use classifyPolecatMergeState directly.
-	return result == MergeCheckEmpty || result == MergeCheckMerged, nil
 }
 
 // cherryHasUnmergedCommits returns true if `git cherry` output contains at least
@@ -3341,34 +3328,6 @@ func getAgentBeadState(bd *BdCli, workDir, agentBeadID string) (agentState, hook
 	}
 
 	return beads.ResolveAgentState(issues[0].Description, issues[0].AgentState), issues[0].HookBead
-}
-
-// getAgentBeadAge returns the time since the agent bead was last updated.
-// Used to determine how long a polecat has been in its current state (e.g.,
-// spawning). Returns a large duration if the bead can't be queried, so callers
-// don't accidentally skip zombie detection on query failure. See GH#2036.
-func getAgentBeadAge(bd *BdCli, workDir, agentBeadID string) time.Duration {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return 24 * time.Hour // Fail open: treat as old so zombie detection proceeds
-	}
-
-	var issues []struct {
-		UpdatedAt string `json:"updated_at"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return 24 * time.Hour
-	}
-
-	updatedAt, err := time.Parse(time.RFC3339, issues[0].UpdatedAt)
-	if err != nil {
-		// Try common alternative formats
-		updatedAt, err = time.Parse("2006-01-02 15:04:05", issues[0].UpdatedAt)
-		if err != nil {
-			return 24 * time.Hour
-		}
-	}
-	return time.Since(updatedAt)
 }
 
 // getBeadStatus returns the status of a bead (e.g., "open", "closed", "hooked").

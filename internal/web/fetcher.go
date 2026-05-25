@@ -236,14 +236,6 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 	}, nil
 }
 
-// tmuxArgs prepends -L socketName to tmux args when a custom socket is configured.
-func (f *LiveConvoyFetcher) tmuxArgs(args ...string) []string {
-	if f.tmuxSocket != "" {
-		return append([]string{"-L", f.tmuxSocket}, args...)
-	}
-	return args
-}
-
 // FetchConvoys fetches all open convoys with their activity data.
 // Uses a circuit breaker to avoid hammering bd/dolt when listing fails
 // persistently (e.g., "invalid issue type: convoy" schema mismatch).
@@ -1042,20 +1034,6 @@ func (f *LiveConvoyFetcher) FetchMail() ([]MailRow, error) {
 	})
 
 	return rows, nil
-}
-
-// formatMailAge returns a human-readable age string.
-func formatMailAge(d time.Duration) string {
-	if d < time.Minute {
-		return "just now"
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	}
-	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 }
 
 // formatTimestamp formats a time as "Jan 26, 3:45 PM" (or "Jan 26 2006, 3:45 PM" if different year).

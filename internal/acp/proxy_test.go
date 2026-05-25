@@ -394,12 +394,6 @@ func TestProxy_AgentDone(t *testing.T) {
 	}
 }
 
-type nopWriteCloser struct {
-	io.Writer
-}
-
-func (nopWriteCloser) Close() error { return nil }
-
 func TestJSONRPCError(t *testing.T) {
 	rpcErr := &JSONRPCError{
 		Code:    -32600,
@@ -643,7 +637,6 @@ type MockAgent struct {
 	capabilities map[string]any
 	in           *bufio.Reader
 	out          io.Writer
-	err          io.Writer
 
 	// mu protects the fields below
 	mu sync.Mutex

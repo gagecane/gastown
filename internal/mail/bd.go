@@ -137,18 +137,6 @@ func bdSubprocessEnv(baseEnv []string, beadsDir string, readOnly bool, extraEnv 
 	return env
 }
 
-func filterEnvKey(env []string, key string) []string {
-	prefix := key + "="
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
-}
-
 func isMailBdReadCommand(args []string) bool {
 	if len(args) == 0 {
 		return false
@@ -173,10 +161,6 @@ func isMailBdReadCommand(args []string) bool {
 	default:
 		return false
 	}
-}
-
-func filterBdTargetEnv(env []string) []string {
-	return beads.StripBDTargetEnv(env)
 }
 
 // bdReadCtx returns a context with the standard bd read timeout.

@@ -1360,13 +1360,6 @@ type strandedConvoyInfo struct {
 	BaseBranch   string   `json:"base_branch,omitempty"`
 }
 
-// readyIssueInfo holds info about a ready (stranded) issue.
-type readyIssueInfo struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Priority string `json:"priority"`
-}
-
 func runConvoyStranded(cmd *cobra.Command, args []string) error {
 	townBeads, err := getTownBeadsDir()
 	if err != nil {
@@ -2427,38 +2420,6 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 		BlockedByCount: issue.BlockedByCount,
 		Dependencies:   issue.Dependencies,
 	}
-}
-
-// getExternalIssueDetails fetches issue details from an external rig database.
-// townBeads: path to town .beads directory
-// rigName: name of the rig (e.g., "claycantrell")
-// issueID: the issue ID to look up
-func getExternalIssueDetails(townBeads, rigName, issueID string) *issueDetails {
-	// Resolve rig directory path: townBeads is the town root
-	rigDir := filepath.Join(townBeads, rigName)
-
-	// Check if rig directory exists
-	if _, err := os.Stat(rigDir); os.IsNotExist(err) {
-		return nil
-	}
-
-	out, err := BdCmd("show", issueID, "--json").Dir(rigDir).StripBeadsDir().Stderr(io.Discard).Output()
-	if err != nil {
-		return nil
-	}
-	if len(out) == 0 {
-		return nil
-	}
-
-	var issues []issueDetailsJSON
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil
-	}
-	if len(issues) == 0 {
-		return nil
-	}
-
-	return issues[0].toIssueDetails()
 }
 
 // issueDetails holds basic issue info.
