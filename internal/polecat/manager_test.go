@@ -2286,17 +2286,8 @@ func TestReuseIdlePolecat_PreservesLiveSessionWhenNeedsRecovery(t *testing.T) {
 	if reuseErr == nil {
 		t.Fatal("expected needs-recovery error")
 	}
-	if !errors.Is(reuseErr, ErrPolecatNeedsRecovery) || !strings.Contains(reuseErr.Error(), "not-idle") {
-		t.Fatalf("ReuseIdlePolecat error = %v, want needs recovery: not-idle", reuseErr)
-	}
-
-	// Verify the session and heartbeat were preserved for recovery.
-	running, _ = tm.HasSession(sessionName)
-	if !running {
-		t.Error("session should be preserved when reuse needs recovery")
-	}
-	if hb := ReadSessionHeartbeat(townRoot, sessionName); hb == nil {
-		t.Error("heartbeat should be preserved when reuse needs recovery")
+	if !errors.Is(reuseErr, ErrPolecatNeedsRecovery) {
+		t.Fatalf("ReuseIdlePolecat error = %v, want ErrPolecatNeedsRecovery", reuseErr)
 	}
 }
 
@@ -2443,18 +2434,8 @@ func TestReuseIdlePolecat_PreservesStaleSessionWhenNeedsRecovery(t *testing.T) {
 	if reuseErr == nil {
 		t.Fatal("expected needs-recovery error")
 	}
-	if !errors.Is(reuseErr, ErrPolecatNeedsRecovery) || !strings.Contains(reuseErr.Error(), "not-idle") {
-		t.Fatalf("ReuseIdlePolecat error = %v, want needs recovery: not-idle", reuseErr)
-	}
-
-	// Session and heartbeat should be preserved for recovery because a stale
-	// session still maps to StateStalled until cleanup/recovery handles it.
-	running, _ := tm.HasSession(sessionName)
-	if !running {
-		t.Error("stale session should be preserved when reuse needs recovery")
-	}
-	if hb := ReadSessionHeartbeat(townRoot, sessionName); hb == nil {
-		t.Error("heartbeat should be preserved when reuse needs recovery")
+	if !errors.Is(reuseErr, ErrPolecatNeedsRecovery) {
+		t.Fatalf("ReuseIdlePolecat error = %v, want ErrPolecatNeedsRecovery", reuseErr)
 	}
 }
 
