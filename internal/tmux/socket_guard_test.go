@@ -22,10 +22,13 @@
 package tmux
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -65,6 +68,31 @@ func repoRootFromHere(t *testing.T) string {
 	}
 }
 
+// skipDirs is the set of directory basenames that can never contain
+// relevant .go files. Skipping these avoids descending into large
+// irrelevant subtrees (VCS metadata, vendored deps, build artifacts,
+// generated code, documentation, and the tmux helper package itself).
+var skipDirs = map[string]bool{
+	".git":         true,
+	".beads":       true,
+	".dolt":        true,
+	"vendor":       true,
+	"node_modules": true,
+	"testdata":     true,
+	"dist":         true,
+	"gen":          true,
+	"generated":    true,
+	"third_party":  true,
+}
+
+// prelimContains are the byte sequences that MUST appear in a file for
+// the regex to have any chance of matching. Used as a fast-path filter:
+// if none of these substrings appear, we skip the expensive regex scan.
+var prelimContains = [][]byte{
+	[]byte(`exec.Command`),
+	[]byte(`exec.CommandContext`),
+}
+
 // TestNoBareTmuxExec walks the repo and fails if any .go file outside
 // internal/tmux/ calls exec.Command("tmux", ...) / exec.CommandContext(...,
 // "tmux", ...) without an `intentionally bare` annotation nearby.
@@ -73,10 +101,18 @@ func repoRootFromHere(t *testing.T) string {
 // package allowed to issue bare tmux exec calls (it defines the helpers
 // that wrap them). Keeping the guard co-located with the helpers means
 // the rule travels with the rule-maker.
+//
+// Performance: uses preliminary bytes.Contains check to skip files that
+// cannot possibly match, and processes matching files in parallel via a
+// bounded goroutine pool.
 func TestNoBareTmuxExec(t *testing.T) {
 	repoRoot := repoRootFromHere(t)
+	tmuxDir := filepath.Join("internal", "tmux")
 
-	var violations []string
+	// Phase 1: Walk the tree and collect candidate .go file paths.
+	// The walk itself is fast (directory enumeration only); heavy I/O
+	// and regex scanning happen in phase 2.
+	var candidates []string
 
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -84,15 +120,12 @@ func TestNoBareTmuxExec(t *testing.T) {
 		}
 		if info.IsDir() {
 			name := info.Name()
-			// Skip vendored code, VCS metadata, build caches, and the
-			// tmux helper package itself (which is allowed to call exec
-			// directly — that's the whole point).
-			if name == "vendor" || name == ".git" || name == ".beads" || name == "node_modules" {
+			if skipDirs[name] {
 				return filepath.SkipDir
 			}
 			// Skip internal/tmux/ — this is the helper package.
 			rel, err := filepath.Rel(repoRoot, path)
-			if err == nil && rel == filepath.Join("internal", "tmux") {
+			if err == nil && rel == tmuxDir {
 				return filepath.SkipDir
 			}
 			return nil
@@ -105,34 +138,86 @@ func TestNoBareTmuxExec(t *testing.T) {
 		if strings.HasSuffix(path, "socket_guard_test.go") {
 			return nil
 		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
-			if !bareTmuxExec.MatchString(line) {
-				continue
-			}
-			// Ignore pure comment lines: the pattern appears in docstrings
-			// and regex literals that describe the rule itself. We only
-			// want to flag actual executable call sites.
-			if isCommentLine(line) {
-				continue
-			}
-			if hasIntentionalBareMarker(lines, i) {
-				continue
-			}
-			rel, _ := filepath.Rel(repoRoot, path)
-			violations = append(violations,
-				rel+":"+itoa(i+1)+": bare tmux exec without `intentionally bare` annotation: "+strings.TrimSpace(line))
-		}
+		candidates = append(candidates, path)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk repo: %v", err)
 	}
+
+	// Phase 2: Process candidate files in parallel. Each worker reads a
+	// file, applies a cheap bytes.Contains prelim filter, and only falls
+	// through to regex scanning if the file could possibly match.
+	type violation struct {
+		msg string
+	}
+
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers < 1 {
+		numWorkers = 4
+	}
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
+
+	work := make(chan string, len(candidates))
+	for _, c := range candidates {
+		work <- c
+	}
+	close(work)
+
+	var mu sync.Mutex
+	var violations []string
+	var wg sync.WaitGroup
+
+	wg.Add(numWorkers)
+	for range numWorkers {
+		go func() {
+			defer wg.Done()
+			for path := range work {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					// Non-fatal: file might have been deleted between
+					// walk and read (rare but possible in concurrent
+					// development).
+					continue
+				}
+
+				// Fast-path: if the file doesn't contain any of the
+				// preliminary byte sequences, it cannot match the regex.
+				hasPrelim := false
+				for _, needle := range prelimContains {
+					if bytes.Contains(data, needle) {
+						hasPrelim = true
+						break
+					}
+				}
+				if !hasPrelim {
+					continue
+				}
+
+				// Slow path: line-by-line regex scan.
+				lines := strings.Split(string(data), "\n")
+				for i, line := range lines {
+					if !bareTmuxExec.MatchString(line) {
+						continue
+					}
+					if isCommentLine(line) {
+						continue
+					}
+					if hasIntentionalBareMarker(lines, i) {
+						continue
+					}
+					rel, _ := filepath.Rel(repoRoot, path)
+					msg := rel + ":" + itoa(i+1) + ": bare tmux exec without `intentionally bare` annotation: " + strings.TrimSpace(line)
+					mu.Lock()
+					violations = append(violations, msg)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
 
 	if len(violations) > 0 {
 		t.Fatalf(
