@@ -135,6 +135,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	// HQ beads (hq-* prefix) stored in townRoot/.beads, not the rig's database.
 	// Without this, gt unsling can't find or clear these beads, even though
 	// gt mol status / gt hook (display) can see them. (gt-dtq7)
+	foundInTownBeads := false
 	if hookedBeadID == "" && !isTownLevelRole(agentID) && townRoot != "" {
 		townB := beads.New(filepath.Join(townRoot, ".beads"))
 		// Search with the exact agent ID
@@ -144,6 +145,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 			Priority: -1,
 		}); err == nil && len(townHooked) > 0 {
 			hookedBeadID = townHooked[0].ID
+			foundInTownBeads = true
 		} else {
 			// Also search with normalized identity (mail beads use normalized form)
 			normalizedID := mailNormalizedAgentID(agentID)
@@ -154,6 +156,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 					Priority: -1,
 				}); err == nil && len(townHooked) > 0 {
 					hookedBeadID = townHooked[0].ID
+					foundInTownBeads = true
 				}
 			}
 		}
@@ -182,7 +185,15 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	// Get the hooked bead to check completion and show title.
 	// The hooked bead may be in a different database than the agent bead
 	// (e.g., agent in rig db, hooked bead in town db), so resolve its path separately.
-	hookedBeadPath := beads.ResolveHookDir(townRoot, hookedBeadID, beadsPath)
+	// When the bead was discovered via town-fallback search, use town beads path
+	// directly — ResolveHookDir would re-derive via prefix which fails for unroutable
+	// prefixes like gc-* (gu-gnqu).
+	var hookedBeadPath string
+	if foundInTownBeads {
+		hookedBeadPath = filepath.Join(townRoot, ".beads")
+	} else {
+		hookedBeadPath = beads.ResolveHookDir(townRoot, hookedBeadID, beadsPath)
+	}
 	hookedB := b
 	if hookedBeadPath != beadsPath {
 		hookedB = beads.New(hookedBeadPath)
@@ -193,8 +204,10 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		if !force {
 			return fmt.Errorf("getting hooked bead %s: %w\n  Use --force to unsling anyway", hookedBeadID, err)
 		}
-		// Force mode - proceed without the bead details
-		hookedBead = &beads.Issue{ID: hookedBeadID, Title: "(unknown)"}
+		// Force mode - proceed without the bead details.
+		// Set Status to "hooked" so the status update logic below fires correctly.
+		// Previously this defaulted to empty string, silently skipping the update (gu-gnqu).
+		hookedBead = &beads.Issue{ID: hookedBeadID, Title: "(unknown)", Status: beads.StatusHooked}
 	}
 
 	// Check if work is complete (warn if not, unless --force)
@@ -278,6 +291,10 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b *beads.Beads, agentID, targetBe
 	// Also search town-level beads for rig-level agents (gt-dtq7).
 	// HQ beads (hq-* prefix) live in townRoot/.beads, not the rig database.
 	// Without this, stale HQ beads hooked to crew/polecats are invisible to cleanup.
+	// Track which bead IDs came from town beads so we can resolve their path correctly
+	// instead of relying on prefix-based routing which fails for unroutable prefixes
+	// like gc-* (gu-gnqu).
+	townBeadIDs := make(map[string]bool)
 	if !isTownLevelRole(agentID) && townRoot != "" {
 		townBeadsPath := filepath.Join(townRoot, ".beads")
 		if townBeadsPath != beadsPath {
@@ -288,6 +305,9 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b *beads.Beads, agentID, targetBe
 				Assignee: agentID,
 				Priority: -1,
 			}); err == nil {
+				for _, ts := range townStale {
+					townBeadIDs[ts.ID] = true
+				}
 				staleBeads = append(staleBeads, townStale...)
 			}
 			// Also search with normalized identity (mail beads use normalized form)
@@ -298,6 +318,9 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b *beads.Beads, agentID, targetBe
 					Assignee: normalizedID,
 					Priority: -1,
 				}); err == nil {
+					for _, ts := range townStale {
+						townBeadIDs[ts.ID] = true
+					}
 					staleBeads = append(staleBeads, townStale...)
 				}
 			}
@@ -333,8 +356,15 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b *beads.Beads, agentID, targetBe
 	for _, sb := range staleBeads {
 		fmt.Printf("%s Cleaning up stale hooked bead %s...\n", style.Bold.Render("🪝"), sb.ID)
 
-		// Resolve the correct beads directory for this bead
-		stalePath := beads.ResolveHookDir(townRoot, sb.ID, beadsPath)
+		// Resolve the correct beads directory for this bead.
+		// If the bead was found in town beads, use that path directly instead of
+		// relying on prefix-based routing which fails for unroutable prefixes (gu-gnqu).
+		var stalePath string
+		if townBeadIDs[sb.ID] {
+			stalePath = filepath.Join(townRoot, ".beads")
+		} else {
+			stalePath = beads.ResolveHookDir(townRoot, sb.ID, beadsPath)
+		}
 		staleB := b
 		if stalePath != beadsPath {
 			staleB = beads.New(stalePath)
