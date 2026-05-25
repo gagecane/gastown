@@ -172,7 +172,7 @@ func TestErrRigBeadNotFound_Identity(t *testing.T) {
 	// Confirm it is NOT the same as beads.ErrNotFound — callers that want
 	// to handle both must check each explicitly. Keeping them distinct
 	// avoids leaking beads-layer semantics into rig-layer callers.
-	if errors.Is(beads.ErrNotFound, ErrRigBeadNotFound) {
+	if errors.Is(ErrRigBeadNotFound, beads.ErrNotFound) {
 		t.Error("ErrRigBeadNotFound must be distinct from beads.ErrNotFound")
 	}
 }
