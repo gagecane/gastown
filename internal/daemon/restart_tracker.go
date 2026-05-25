@@ -301,3 +301,100 @@ func ClearAgentBackoff(townRoot, agentID string) error {
 	rt.ClearCrashLoop(agentID)
 	return rt.Save()
 }
+
+// PruneResult holds the result of a state pruning operation.
+type PruneResult struct {
+	Pruned  []string // Agent IDs removed from state
+	Kept    []string // Agent IDs retained (session still exists)
+	Total   int      // Total entries before pruning
+}
+
+// PruneStaleAgents removes entries from restart_state.json for agents
+// whose tmux sessions no longer exist. This prevents unbounded growth
+// of the state file from ephemeral polecat sessions.
+//
+// The activeSessions set should contain all current tmux session names.
+// Agent IDs in the tracker are matched against sessions using a provided
+// resolver function that maps agent IDs to session names.
+func (rt *RestartTracker) PruneStaleAgents(activeSessions map[string]bool, resolveSession func(string) string) *PruneResult {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	result := &PruneResult{
+		Total: len(rt.state.Agents),
+	}
+
+	for agentID := range rt.state.Agents {
+		sessionName := resolveSession(agentID)
+		if sessionName == "" || !activeSessions[sessionName] {
+			result.Pruned = append(result.Pruned, agentID)
+		} else {
+			result.Kept = append(result.Kept, agentID)
+		}
+	}
+
+	for _, agentID := range result.Pruned {
+		delete(rt.state.Agents, agentID)
+	}
+
+	return result
+}
+
+// PruneStaleState removes entries from restart_state.json for agents whose
+// tmux sessions no longer exist. Called by 'gt daemon prune-state'.
+// The resolveSession function maps agent IDs (as stored in the tracker)
+// to tmux session names for liveness checking.
+func PruneStaleState(townRoot string, activeSessions []string, resolveSession func(string) string) (*PruneResult, error) {
+	rt := NewRestartTracker(townRoot, RestartTrackerConfig{})
+	if err := rt.Load(); err != nil {
+		return nil, fmt.Errorf("loading restart state: %w", err)
+	}
+
+	sessionSet := make(map[string]bool, len(activeSessions))
+	for _, s := range activeSessions {
+		sessionSet[s] = true
+	}
+
+	result := rt.PruneStaleAgents(sessionSet, resolveSession)
+
+	if len(result.Pruned) > 0 {
+		if err := rt.Save(); err != nil {
+			return result, fmt.Errorf("saving pruned state: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// PreviewPruneStaleState returns what PruneStaleState would prune without
+// modifying state on disk. Used for --dry-run.
+func PreviewPruneStaleState(townRoot string, activeSessions []string, resolveSession func(string) string) (*PruneResult, error) {
+	rt := NewRestartTracker(townRoot, RestartTrackerConfig{})
+	if err := rt.Load(); err != nil {
+		return nil, fmt.Errorf("loading restart state: %w", err)
+	}
+
+	sessionSet := make(map[string]bool, len(activeSessions))
+	for _, s := range activeSessions {
+		sessionSet[s] = true
+	}
+
+	// Compute what would be pruned without modifying the tracker
+	result := &PruneResult{
+		Total: len(rt.state.Agents),
+	}
+
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+
+	for agentID := range rt.state.Agents {
+		sessionName := resolveSession(agentID)
+		if sessionName == "" || !sessionSet[sessionName] {
+			result.Pruned = append(result.Pruned, agentID)
+		} else {
+			result.Kept = append(result.Kept, agentID)
+		}
+	}
+
+	return result, nil
+}
