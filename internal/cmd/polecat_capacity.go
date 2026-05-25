@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -337,12 +336,5 @@ func cleanupStalePolecatAdmissionReservationsWithLock(townRoot string, now time.
 	return cleanupStalePolecatAdmissionReservations(townRoot, now)
 }
 
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		return false
-	}
-	return true
-}
+// processAlive is defined in platform-specific files:
+// polecat_capacity_unix.go and polecat_capacity_windows.go
