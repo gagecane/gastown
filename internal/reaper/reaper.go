@@ -57,7 +57,7 @@ func DiscoverDatabases(host string, port int) []string {
 	if err != nil {
 		return DefaultDatabases
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -66,7 +66,7 @@ func DiscoverDatabases(host string, port int) []string {
 	if err != nil {
 		return DefaultDatabases
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var databases []string
 	for rows.Next() {
@@ -369,12 +369,14 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return nil, fmt.Errorf("scan wisp id: %w", err)
 			}
 			ids = append(ids, id)
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close reap rows: %w", err)
+		}
 
 		if len(ids) == 0 {
 			break
@@ -473,12 +475,14 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		var wtype string
 		var cnt int
 		if err := rows.Scan(&wtype, &cnt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, nil, fmt.Errorf("digest scan: %w", err)
 		}
 		digestTotal += cnt
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return 0, nil, fmt.Errorf("close digest rows: %w", err)
+	}
 
 	if digestTotal == 0 {
 		return 0, anomalies, nil
@@ -632,12 +636,14 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.id, &c.title, &c.updatedAt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan stale id: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close stale rows: %w", err)
+	}
 
 	// Build per-issue closure log entries.
 	now := time.Now().UTC()
@@ -720,12 +726,14 @@ func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg 
 		for idRows.Next() {
 			var id string
 			if err := idRows.Scan(&id); err != nil {
-				idRows.Close()
+				_ = idRows.Close()
 				return totalDeleted, fmt.Errorf("scan id: %w", err)
 			}
 			ids = append(ids, id)
 		}
-		idRows.Close()
+		if err := idRows.Close(); err != nil {
+			return totalDeleted, fmt.Errorf("close batch rows: %w", err)
+		}
 
 		if len(ids) == 0 {
 			break
@@ -811,12 +819,14 @@ func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan plugin receipt id: %w", err)
 		}
 		ids = append(ids, id)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close plugin receipt rows: %w", err)
+	}
 
 	result.Closed = len(ids)
 	if len(ids) == 0 || dryRun {
@@ -899,12 +909,14 @@ func ClosePluginDispatches(db *sql.DB, dbName string, maxAge time.Duration, dryR
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan plugin dispatch id: %w", err)
 		}
 		ids = append(ids, id)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close plugin dispatch rows: %w", err)
+	}
 
 	result.Closed = len(ids)
 	if len(ids) == 0 || dryRun {

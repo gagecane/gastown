@@ -184,12 +184,14 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 		for rows.Next() {
 			var c candidate
 			if err := rows.Scan(&c.id, &c.title, &c.createdAt); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return nil, fmt.Errorf("scan hooked mail row: %w", err)
 			}
 			batch = append(batch, c)
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close hooked mail rows: %w", err)
+		}
 
 		if len(batch) == 0 {
 			break
@@ -424,12 +426,14 @@ func ReapOpenMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (*O
 		for rows.Next() {
 			var c candidate
 			if err := rows.Scan(&c.id, &c.title, &c.createdAt); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return nil, fmt.Errorf("scan open mail row: %w", err)
 			}
 			batch = append(batch, c)
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close open mail rows: %w", err)
+		}
 
 		if len(batch) == 0 {
 			break
