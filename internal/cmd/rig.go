@@ -1590,12 +1590,6 @@ func assigneeToSessionName(assignee string) (sessionName string, isPersistent bo
 	}
 }
 
-// Helper to check if path exists
-func pathExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 func isAgentSessionHealthy(t *tmux.Tmux, sessionName string) bool {
 	return t.CheckSessionHealth(sessionName, 0) == tmux.SessionHealthy
 }

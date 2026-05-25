@@ -1153,10 +1153,6 @@ func splitAttrs(attrs string) []string {
 	return parts
 }
 
-func containsStr(s, sub string) bool {
-	return strings.Contains(s, sub)
-}
-
 // ---------------------------------------------------------------------------
 // Dolt port injection tests (GH #2405 / GH #2406)
 // ---------------------------------------------------------------------------

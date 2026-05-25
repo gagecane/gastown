@@ -215,14 +215,6 @@ func GetRepoRoot() (string, error) {
 	return "", fmt.Errorf("cannot locate gt source repository")
 }
 
-// isGitRepo checks if a directory is a git repository.
-func isGitRepo(dir string) bool {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Dir = dir
-	util.SetDetachedProcessGroup(cmd)
-	return cmd.Run() == nil
-}
-
 // hasGtSource checks if a directory contains the gt source code.
 // We look for cmd/gt/main.go as the definitive marker.
 func hasGtSource(dir string) bool {

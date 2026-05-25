@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -65,26 +64,3 @@ func execAgent(cfg *config.RuntimeConfig, prompt string) error {
 	return syscall.Exec(agentPath, args, os.Environ())
 }
 
-// execRuntime execs the runtime CLI, replacing the current process.
-// Used when we're already in the target session and just need to start the runtime.
-// If prompt is provided, it's passed according to the runtime's prompt mode.
-func execRuntime(prompt, rigPath, configDir string) error {
-	townRoot := filepath.Dir(rigPath)
-	runtimeConfig := config.ResolveRoleAgentConfig("crew", townRoot, rigPath)
-	args := runtimeConfig.BuildArgsWithPrompt(prompt)
-	if len(args) == 0 {
-		return fmt.Errorf("runtime command not configured")
-	}
-
-	binPath, err := exec.LookPath(args[0])
-	if err != nil {
-		return fmt.Errorf("runtime command not found: %w", err)
-	}
-
-	env := os.Environ()
-	if runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && configDir != "" {
-		env = append(env, fmt.Sprintf("%s=%s", runtimeConfig.Session.ConfigDirEnv, configDir))
-	}
-
-	return syscall.Exec(binPath, args, env)
-}

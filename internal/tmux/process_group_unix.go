@@ -5,15 +5,7 @@ package tmux
 import (
 	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 )
-
-func killProcessGroup(pgid int) {
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	time.Sleep(100 * time.Millisecond)
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-}
 
 // getParentPID returns the parent process ID (PPID) for a given PID.
 // Returns empty string if the process doesn't exist or PPID can't be determined.

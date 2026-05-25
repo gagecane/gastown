@@ -585,20 +585,6 @@ func (d *Daemon) surgicalCleanupBase(db *sql.DB, baseBranch string) {
 	_, _ = db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_BRANCH('-D', '%s')", baseBranch))
 }
 
-// compactorCleanup attempts to switch back to main and delete the temp branch.
-// Called on error during compaction to leave the database in a clean state.
-func (d *Daemon) compactorCleanup(db *sql.DB, dbName string) {
-	ctx, cancel := context.WithTimeout(context.Background(), compactorQueryTimeout)
-	defer cancel()
-
-	d.logger.Printf("compactor_dog: %s: cleaning up compaction branch", dbName)
-
-	// Try to get back to main.
-	_, _ = db.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')")
-	// Delete the compaction branch.
-	_, _ = db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_BRANCH('-D', '%s')", compactorBranchName))
-}
-
 // compactorOpenDB opens a connection to the Dolt server for the given database.
 func (d *Daemon) compactorOpenDB(dbName string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s",

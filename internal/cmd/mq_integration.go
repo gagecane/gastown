@@ -54,11 +54,6 @@ func buildIntegrationBranchName(template, epicID, epicTitle string) string {
 	return beads.BuildIntegrationBranchName(template, epicID, epicTitle)
 }
 
-// extractEpicPrefix wraps beads.ExtractEpicPrefix for local callers.
-func extractEpicPrefix(epicID string) string {
-	return beads.ExtractEpicPrefix(epicID)
-}
-
 // validateBranchName checks if a branch name is valid for git.
 // Returns an error if the branch name contains invalid characters.
 // maxBranchNameLen is the maximum allowed branch name length.

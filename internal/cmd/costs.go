@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -159,9 +158,6 @@ type CostsOutput struct {
 	ByRig    map[string]float64 `json:"by_rig,omitempty"`
 	Period   string             `json:"period,omitempty"`
 }
-
-// costRegex matches cost patterns like "$1.23" or "$12.34"
-var costRegex = regexp.MustCompile(`\$(\d+\.\d{2})`)
 
 // TranscriptMessage represents a message from a Claude Code transcript file.
 type TranscriptMessage struct {
@@ -657,27 +653,6 @@ func parseSessionName(sess string) (role, rig, worker string) {
 	default:
 		return "unknown", identity.Rig, identity.Name
 	}
-}
-
-// extractCost finds the most recent cost value in pane content.
-// DEPRECATED: Claude Code no longer displays cost in a scrapable format.
-// This is kept for backwards compatibility but always returns 0.0.
-// Use extractCostFromTranscript instead.
-func extractCost(content string) float64 {
-	matches := costRegex.FindAllStringSubmatch(content, -1)
-	if len(matches) == 0 {
-		return 0.0
-	}
-
-	// Get the last (most recent) match
-	lastMatch := matches[len(matches)-1]
-	if len(lastMatch) < 2 {
-		return 0.0
-	}
-
-	var cost float64
-	_, _ = fmt.Sscanf(lastMatch[1], "%f", &cost)
-	return cost
 }
 
 // getClaudeProjectDir returns the Claude Code project directory for a working directory.

@@ -432,26 +432,6 @@ func listScheduledBeads(townRoot string) []scheduledBeadInfo {
 	return result
 }
 
-// listAllScheduledBeadIDs returns the work bead IDs of all scheduled beads.
-func listAllScheduledBeadIDs(townRoot string) []string {
-	allContexts := listAllSlingContexts(townRoot)
-
-	var ids []string
-	seen := make(map[string]bool)
-	for _, ctx := range allContexts {
-		fields := beads.ParseSlingContextFields(ctx.Description)
-		if fields == nil {
-			continue
-		}
-		if !seen[fields.WorkBeadID] {
-			seen[fields.WorkBeadID] = true
-			ids = append(ids, fields.WorkBeadID)
-		}
-	}
-
-	return ids
-}
-
 // beadsSearchDirs returns directories to scan for scheduled beads:
 // the town root plus any rig directories that have a .beads/ subdirectory.
 func beadsSearchDirs(townRoot string) []string {
@@ -505,24 +485,6 @@ func countActivePolecats() int {
 		}
 	}
 	return count
-}
-
-// countWorkingPolecats counts polecat sessions that are actively working.
-// A polecat is "working" if its agent bead has a non-null hook_bead.
-// Idle polecats (completed work, hook_bead=null) don't count toward capacity
-// since they're available for re-sling under the persistent polecat model.
-func countWorkingPolecats() int {
-	counts, ok := countWorkingPolecatsByRig()
-	if !ok {
-		// Preserve historical fallback: if we can't look up hook state
-		// (e.g., no town root, tmux unavailable), use total active count.
-		return countActivePolecats()
-	}
-	total := 0
-	for _, n := range counts {
-		total += n
-	}
-	return total
 }
 
 // countWorkingPolecatsInRig counts polecat sessions that are actively working

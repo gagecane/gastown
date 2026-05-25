@@ -487,13 +487,6 @@ func areScheduled(beadIDs []string) map[string]bool {
 	return result
 }
 
-// isScheduled checks if a single bead has an open sling context.
-// For batch checks in loops, use areScheduled() instead.
-func isScheduled(beadID string) bool {
-	scheduled := areScheduled([]string{beadID})
-	return scheduled[beadID]
-}
-
 // detectSchedulerIDType determines what kind of ID was passed for scheduling.
 // Returns "convoy", "epic", or "task".
 func detectSchedulerIDType(id string) (string, error) {

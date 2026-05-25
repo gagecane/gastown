@@ -897,18 +897,6 @@ func writeIntFile(path string, n int) {
 	_ = os.WriteFile(path, []byte(fmt.Sprintf("%d\n", n)), 0o644)
 }
 
-// wrapperIntegrationCase bundles the fake-kiro-cli config a single
-// integration test needs. Each case becomes one runPolecatKiroWrapper
-// invocation end-to-end, asserting the resulting town.log records.
-type wrapperIntegrationCase struct {
-	name       string
-	mode       string // GT_FAKE_KIRO_MODE
-	successOn  int    // for nth-done, which iter succeeds
-	maxIter    string // GT_KIRO_MAX_ITERATIONS override
-	wantState  string // expected terminal state label in town.log
-	wantInvocs int    // expected fake-kiro spawn count
-}
-
 // setupWrapperIntegrationEnv prepares the minimal env + temp dirs a
 // wrapper integration case needs. Returns the townRoot (so tests can
 // read town.log) and the counter path. All state lives under

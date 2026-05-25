@@ -34,11 +34,6 @@ const (
 	startupPromptStateFailed    = "failed"
 )
 
-// startupPromptTimeout is the maximum time to wait for the agent to respond
-// to the startup prompt. If the agent doesn't respond within this time,
-// the startup prompt is marked as failed and the proxy continues.
-const startupPromptTimeout = 60 * time.Second
-
 type Proxy struct {
 	cmd                *exec.Cmd
 	agentStdin         io.WriteCloser
@@ -79,7 +74,6 @@ type Proxy struct {
 	// Stderr monitoring for pipe saturation
 	stderrBytesDropped   atomic.Int64
 	stderrLinesTruncated atomic.Int64
-	stderrLastLogTime    atomic.Int64
 }
 
 // SetTownRoot sets the town root for logging important events to town.log.

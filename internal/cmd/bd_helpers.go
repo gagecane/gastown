@@ -116,10 +116,6 @@ func filterEnvKey(env []string, key string) []string {
 	return result
 }
 
-func filterBdTargetEnv(env []string) []string {
-	return beads.StripBDTargetEnv(env)
-}
-
 func pinBeadsDirEnv(env []string, beadsDir string) []string {
 	if beadsDir == "" {
 		return beads.StripBDTargetEnv(env)

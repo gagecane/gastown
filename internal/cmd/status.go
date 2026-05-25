@@ -1492,18 +1492,6 @@ func buildStatusIndicator(agent AgentRuntime) string {
 	return indicator
 }
 
-// formatHookInfo formats the hook bead and title for display
-func formatHookInfo(hookBead, title string, maxLen int) string {
-	if hookBead == "" {
-		return ""
-	}
-	if title == "" {
-		return fmt.Sprintf(" → %s", hookBead)
-	}
-	title = truncateWithEllipsis(title, maxLen)
-	return fmt.Sprintf(" → %s", title)
-}
-
 // truncateWithEllipsis shortens a string to maxLen, adding "..." if truncated
 func truncateWithEllipsis(s string, maxLen int) string {
 	if len(s) <= maxLen {
@@ -1929,30 +1917,3 @@ func getMQSummary(r *rig.Rig) *MQSummary {
 	}
 }
 
-// getAgentHook retrieves hook status for a specific agent.
-func getAgentHook(b *beads.Beads, role, agentAddress, roleType string) AgentHookInfo {
-	hook := AgentHookInfo{
-		Agent: agentAddress,
-		Role:  roleType,
-	}
-
-	// Find handoff bead for this role
-	handoff, err := b.FindHandoffBead(role)
-	if err != nil || handoff == nil {
-		return hook
-	}
-
-	// Check for attachment
-	attachment := beads.ParseAttachmentFields(handoff)
-	if attachment != nil && attachment.AttachedMolecule != "" {
-		hook.HasWork = true
-		hook.Molecule = attachment.AttachedMolecule
-		hook.Title = handoff.Title
-	} else if handoff.Description != "" {
-		// Has content but no molecule - still has work
-		hook.HasWork = true
-		hook.Title = handoff.Title
-	}
-
-	return hook
-}

@@ -932,36 +932,6 @@ func (d *Daemon) identityToAgentBeadID(identity string) string {
 // Agent liveness is now discovered from tmux, not recorded in beads.
 // "Discover, don't track" principle: observable state should not be recorded.
 
-// identityToBDActor converts a daemon identity to BD_ACTOR format (with slashes).
-// Uses parseIdentity to extract components, then builds the slash format.
-func identityToBDActor(identity string) string {
-	// Handle already-slash-formatted identities
-	if strings.Contains(identity, "/polecats/") || strings.Contains(identity, "/crew/") ||
-		strings.Contains(identity, "/witness") || strings.Contains(identity, "/refinery") {
-		return identity
-	}
-
-	parsed, err := parseIdentity(identity)
-	if err != nil {
-		return identity // Unknown format - return as-is
-	}
-
-	switch parsed.RoleType {
-	case constants.RoleMayor, constants.RoleDeacon:
-		return parsed.RoleType
-	case constants.RoleWitness:
-		return parsed.RigName + "/witness"
-	case constants.RoleRefinery:
-		return parsed.RigName + "/refinery"
-	case constants.RoleCrew:
-		return parsed.RigName + "/crew/" + parsed.AgentName
-	case constants.RolePolecat:
-		return parsed.RigName + "/polecats/" + parsed.AgentName
-	default:
-		return identity
-	}
-}
-
 // GUPPViolationTimeout is the canonical GUPP violation threshold.
 // Defined in constants package — this alias avoids updating all call sites.
 const GUPPViolationTimeout = constants.GUPPViolationTimeout
@@ -1254,18 +1224,6 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 
 		d.notifyWitnessOfOrphanedWork(rigName, agent.ID, currentHookBead)
 	}
-}
-
-// extractRigFromAgentID extracts the rig name from a polecat agent ID.
-// Example: gt-gastown-polecat-max → gastown
-func (d *Daemon) extractRigFromAgentID(agentID string) string {
-	// Use the beads package helper to correctly parse agent bead IDs.
-	// Pattern: <prefix>-<rig>-polecat-<name> (e.g., gt-gastown-polecat-Toast)
-	rig, role, _, ok := beads.ParseAgentBeadID(agentID)
-	if !ok || role != constants.RolePolecat {
-		return ""
-	}
-	return rig
 }
 
 // notifyWitnessOfOrphanedWork sends a mail to the rig's witness about orphaned work.

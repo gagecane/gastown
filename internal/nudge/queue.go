@@ -44,10 +44,6 @@ const (
 
 	// MaxQueueDepth is the maximum number of pending nudges per session.
 	MaxQueueDepth = 50
-
-	// staleClaimThreshold is how long a .claimed file must be untouched
-	// before Drain considers it orphaned (from a crashed drainer) and removes it.
-	staleClaimThreshold = 5 * time.Minute
 )
 
 // nudgeConfig loads nudge-specific thresholds from town settings.

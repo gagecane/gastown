@@ -867,46 +867,6 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	return stripStdoutWarnings(stdout.Bytes()), nil
 }
 
-// runWithRouting executes a bd command without setting BEADS_DIR, allowing bd's
-// native prefix-based routing via routes.jsonl to resolve cross-prefix beads.
-// This is needed for slot operations that reference beads with different prefixes
-// (e.g., setting an hq-* hook bead on a gt-* agent bead).
-// See: sling_helpers.go verifyBeadExists/hookBeadWithRetry for the same pattern.
-func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //nolint:unparam // mirrors run() signature for consistency
-	start := time.Now()
-	var stdout, stderr bytes.Buffer
-	defer func() {
-		telemetry.RecordBDCall(context.Background(), args, float64(time.Since(start).Milliseconds()), retErr, stdout.Bytes(), stderr.String())
-	}()
-	runEnv := b.buildRoutingEnv()
-	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
-
-	// Bound subprocess runtime — see bdSubprocessTimeout doc comment.
-	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = b.workDir
-
-	cmd.Env = runEnv
-	cmd.Env = append(cmd.Env, telemetry.OTELEnvForSubprocess()...)
-
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		return nil, b.wrapError(err, stderr.String(), args)
-	}
-
-	if stdout.Len() == 0 && stderr.Len() > 0 {
-		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
-	}
-
-	return stripStdoutWarnings(stdout.Bytes()), nil
-}
-
 // Run executes a bd command and returns stdout.
 // This is a public wrapper around the internal run method for cases where
 // callers need to run arbitrary bd commands.
@@ -1048,55 +1008,6 @@ func translateDoltPort(env []string) []string {
 		env = append(env, "BEADS_DOLT_SERVER_HOST="+gtHost)
 	}
 	return env
-}
-
-// overrideDoltEnvFromBeadsDir replaces inherited BEADS_DOLT_* values with the
-// authoritative connection data for the selected beads directory when present.
-// This prevents a parent shell's stale Dolt port from routing bd commands to
-// the wrong server when the command explicitly targets another rig's .beads dir.
-func overrideDoltEnvFromBeadsDir(env []string, beadsDir string) []string {
-	port, host := doltConnectionFromBeadsDir(beadsDir)
-	if port != "" {
-		env = stripEnvPrefixes(env, "BEADS_DOLT_PORT=")
-		env = append(env, "BEADS_DOLT_PORT="+port)
-	}
-	if host != "" {
-		env = stripEnvPrefixes(env, "BEADS_DOLT_SERVER_HOST=")
-		env = append(env, "BEADS_DOLT_SERVER_HOST="+host)
-	}
-	return env
-}
-
-// doltConnectionFromBeadsDir reads the preferred Dolt connection info for a
-// beads directory. The per-directory port file is authoritative when present;
-// metadata.json is used as a fallback and to supply the server host.
-func doltConnectionFromBeadsDir(beadsDir string) (port string, host string) {
-	if beadsDir == "" {
-		return "", ""
-	}
-
-	if data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port")); err == nil {
-		port = strings.TrimSpace(string(data))
-	}
-
-	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
-	if err != nil {
-		return port, ""
-	}
-
-	var meta struct {
-		DoltServerPort int    `json:"dolt_server_port"`
-		DoltServerHost string `json:"dolt_server_host"`
-	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return port, ""
-	}
-
-	if port == "" && meta.DoltServerPort > 0 {
-		port = strconv.Itoa(meta.DoltServerPort)
-	}
-	host = strings.TrimSpace(meta.DoltServerHost)
-	return port, host
 }
 
 // stripEnvPrefixes removes entries matching any of the given prefixes from an

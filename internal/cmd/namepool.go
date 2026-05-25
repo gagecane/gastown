@@ -15,7 +15,6 @@ import (
 
 var (
 	namepoolListFlag     bool
-	namepoolThemeFlag    string
 	namepoolFromFileFlag string
 )
 
