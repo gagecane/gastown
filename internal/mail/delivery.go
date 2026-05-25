@@ -92,9 +92,12 @@ func AcknowledgeDeliveryBead(workDir, beadsDir, beadID, recipientIdentity string
 
 	for _, label := range deliveryAckLabelsToWrite(recipientIdentity, timeNow().UTC(), existingLabels) {
 		args := []string{"label", "add", beadID, label}
-		ctx, cancel := bdWriteCtx()
-		_, err := runBdCommand(ctx, args, workDir, beadsDir)
-		cancel()
+		err := func() error {
+			ctx, cancel := bdWriteCtx()
+			defer cancel()
+			_, e := runBdCommand(ctx, args, workDir, beadsDir)
+			return e
+		}()
 		if err == nil {
 			continue // bd label add silently succeeds on duplicate labels.
 		}

@@ -2310,19 +2310,25 @@ func VerifyExpectedDatabasesAtConfig(config *Config, expected []string) (served,
 	const maxBackoff = 8 * time.Second
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		cmd := buildServerSQLCmd(ctx, config, "-r", "json", "-q", "SHOW DATABASES")
-		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
-		output, queryErr := cmd.Output()
-		cancel()
-		if queryErr != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			errDetail := strings.TrimSpace(string(output))
-			if stderrMsg != "" {
-				errDetail = errDetail + " (stderr: " + stderrMsg + ")"
+		output, queryErr := func() ([]byte, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := buildServerSQLCmd(ctx, config, "-r", "json", "-q", "SHOW DATABASES")
+			var stderrBuf bytes.Buffer
+			cmd.Stderr = &stderrBuf
+			out, err := cmd.Output()
+			if err != nil {
+				stderrMsg := strings.TrimSpace(stderrBuf.String())
+				errDetail := strings.TrimSpace(string(out))
+				if stderrMsg != "" {
+					errDetail = errDetail + " (stderr: " + stderrMsg + ")"
+				}
+				return nil, fmt.Errorf("querying SHOW DATABASES: %w (output: %s)", err, errDetail)
 			}
-			lastErr = fmt.Errorf("querying SHOW DATABASES: %w (output: %s)", queryErr, errDetail)
+			return out, nil
+		}()
+		if queryErr != nil {
+			lastErr = queryErr
 			if attempt < 3 {
 				backoff := baseBackoff
 				for i := 1; i < attempt; i++ {
@@ -2387,29 +2393,35 @@ func verifyDatabasesWithRetry(townRoot string, maxAttempts int) (served, missing
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		// SHOW DATABASES is catalog-scoped; embedded mode sees the on-disk catalog
-		// rather than the running server's, which is the exact bug #3518/#3641 fix.
-		cmd := buildServerSQLCmd(ctx, config,
-			"-r", "json",
-			"-q", "SHOW DATABASES",
-		)
+		output, queryErr := func() ([]byte, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			// SHOW DATABASES is catalog-scoped; embedded mode sees the on-disk catalog
+			// rather than the running server's, which is the exact bug #3518/#3641 fix.
+			cmd := buildServerSQLCmd(ctx, config,
+				"-r", "json",
+				"-q", "SHOW DATABASES",
+			)
 
-		// Capture stderr separately so it doesn't corrupt JSON parsing.
-		// Dolt commonly writes deprecation/manifest warnings to stderr.
-		// See also daemon/dolt.go:listDatabases() which uses cmd.Output()
-		// for the same reason.
-		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
-		output, queryErr := cmd.Output()
-		cancel()
-		if queryErr != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			errDetail := strings.TrimSpace(string(output))
-			if stderrMsg != "" {
-				errDetail = errDetail + " (stderr: " + stderrMsg + ")"
+			// Capture stderr separately so it doesn't corrupt JSON parsing.
+			// Dolt commonly writes deprecation/manifest warnings to stderr.
+			// See also daemon/dolt.go:listDatabases() which uses cmd.Output()
+			// for the same reason.
+			var stderrBuf bytes.Buffer
+			cmd.Stderr = &stderrBuf
+			out, err := cmd.Output()
+			if err != nil {
+				stderrMsg := strings.TrimSpace(stderrBuf.String())
+				errDetail := strings.TrimSpace(string(out))
+				if stderrMsg != "" {
+					errDetail = errDetail + " (stderr: " + stderrMsg + ")"
+				}
+				return nil, fmt.Errorf("querying SHOW DATABASES: %w (output: %s)", err, errDetail)
 			}
-			lastErr = fmt.Errorf("querying SHOW DATABASES: %w (output: %s)", queryErr, errDetail)
+			return out, nil
+		}()
+		if queryErr != nil {
+			lastErr = queryErr
 			if attempt < maxAttempts {
 				backoff := baseBackoff
 				for i := 1; i < attempt; i++ {

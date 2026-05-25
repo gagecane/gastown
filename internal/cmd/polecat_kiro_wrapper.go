@@ -331,21 +331,19 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 		if remaining := cfg.totalTimeout - elapsed; remaining < iterDeadline {
 			iterDeadline = remaining
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), iterDeadline)
+		runErr, timedOut := func() (error, bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), iterDeadline)
+			defer cancel()
 
-		c := exec.CommandContext(ctx, iterArgs[0], iterArgs[1:]...) //nolint:gosec // G204: args come from the agent preset config, same trust boundary as a direct kiro-cli invocation.
-		c.Stdin = os.Stdin
-		c.Stdout = os.Stdout
-		c.Stderr = os.Stderr
-		c.Env = os.Environ()
+			c := exec.CommandContext(ctx, iterArgs[0], iterArgs[1:]...) //nolint:gosec // G204: args come from the agent preset config, same trust boundary as a direct kiro-cli invocation.
+			c.Stdin = os.Stdin
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			c.Env = os.Environ()
 
-		runErr := c.Run()
-		// Cancel the context as soon as the process returns. Deferring
-		// would leak N contexts across the loop; explicit cancel keeps
-		// resource use bounded.
-		cancel()
-
-		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+			err := c.Run()
+			return err, errors.Is(ctx.Err(), context.DeadlineExceeded)
+		}()
 
 		if runErr != nil {
 			var exitErr *exec.ExitError

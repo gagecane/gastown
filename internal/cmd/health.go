@@ -207,20 +207,21 @@ func checkDatabaseHealth(port int) []DatabaseHealth {
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 
-		// Issue counts
-		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&dh.Issues)
-		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE status IN ('open','in_progress')").Scan(&dh.OpenIssues)
+			// Issue counts
+			_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&dh.Issues)
+			_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE status IN ('open','in_progress')").Scan(&dh.OpenIssues)
 
-		// Wisp counts
-		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps").Scan(&dh.Wisps)
-		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps WHERE status IN ('open','hooked','in_progress')").Scan(&dh.OpenWisps)
+			// Wisp counts
+			_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps").Scan(&dh.Wisps)
+			_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps WHERE status IN ('open','hooked','in_progress')").Scan(&dh.OpenWisps)
 
-		// Commit count
-		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&dh.Commits)
-
-		cancel()
+			// Commit count
+			_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&dh.Commits)
+		}()
 		db.Close()
 		results = append(results, dh)
 	}
@@ -258,30 +259,31 @@ func checkPollution(port int) []PollutionRecord {
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 
-		for _, c := range checks {
-			query := fmt.Sprintf("SELECT id, COALESCE(title,'') FROM issues WHERE (%s) AND status != 'closed' LIMIT 10", c.where)
-			rows, err := db.QueryContext(ctx, query)
-			if err != nil {
-				continue
-			}
-			for rows.Next() {
-				var id, title string
-				if err := rows.Scan(&id, &title); err != nil {
+			for _, c := range checks {
+				query := fmt.Sprintf("SELECT id, COALESCE(title,'') FROM issues WHERE (%s) AND status != 'closed' LIMIT 10", c.where)
+				rows, err := db.QueryContext(ctx, query)
+				if err != nil {
 					continue
 				}
-				records = append(records, PollutionRecord{
-					Database: dbName,
-					ID:       id,
-					Title:    title,
-					Pattern:  c.pattern,
-				})
+				for rows.Next() {
+					var id, title string
+					if err := rows.Scan(&id, &title); err != nil {
+						continue
+					}
+					records = append(records, PollutionRecord{
+						Database: dbName,
+						ID:       id,
+						Title:    title,
+						Pattern:  c.pattern,
+					})
+				}
+				rows.Close()
 			}
-			rows.Close()
-		}
-
-		cancel()
+		}()
 		db.Close()
 	}
 

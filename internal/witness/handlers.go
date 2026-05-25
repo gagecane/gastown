@@ -1888,20 +1888,23 @@ func _runRecoveryGates(polecatPath string, gates []PolecatGate) recoveryGateOutc
 		if cmd == "" {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), recoveryGateTimeout)
-		// sh -c matches both the polecat's execution path and the refinery's
-		// runGate. G204: gate commands come from trusted bead formulas, not
-		// end-user input.
-		c := exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec
-		util.SetDetachedProcessGroup(c)
-		c.Dir = polecatPath
-		out, err := c.CombinedOutput()
-		cancel()
+		out, err, didTimeout := func() ([]byte, error, bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), recoveryGateTimeout)
+			defer cancel()
+			// sh -c matches both the polecat's execution path and the refinery's
+			// runGate. G204: gate commands come from trusted bead formulas, not
+			// end-user input.
+			c := exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec
+			util.SetDetachedProcessGroup(c)
+			c.Dir = polecatPath
+			o, e := c.CombinedOutput()
+			return o, e, ctx.Err() == context.DeadlineExceeded
+		}()
 		if err == nil {
 			continue
 		}
 		msg := truncateGateOutput(string(out))
-		if ctx.Err() == context.DeadlineExceeded {
+		if didTimeout {
 			msg = fmt.Sprintf("timeout after %s: %s", recoveryGateTimeout, msg)
 		}
 		return recoveryGateOutcome{
