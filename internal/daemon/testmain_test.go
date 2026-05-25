@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"go.uber.org/goleak"
+
 	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -50,5 +52,16 @@ func TestMain(m *testing.M) {
 		_ = os.Remove(socketPath)
 	}
 	testutil.TerminateDoltContainer()
-	os.Exit(code)
+
+	if code != 0 {
+		os.Exit(code)
+	}
+
+	// Verify no goroutine leaks after all tests and cleanup complete.
+	if err := goleak.Find(); err != nil {
+		fmt.Fprintf(os.Stderr, "goleak: goroutine leak detected:\n%v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(0)
 }
