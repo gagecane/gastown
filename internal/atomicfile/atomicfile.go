@@ -6,6 +6,7 @@ package atomicfile
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -66,23 +67,33 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	tmpName := f.Name()
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmpName)
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("atomicfile: close during rollback: %v", closeErr)
+		}
+		if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("atomicfile: remove temp during rollback: %v", rmErr)
+		}
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpName)
+		if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("atomicfile: remove temp during rollback: %v", rmErr)
+		}
 		return err
 	}
 
 	// CreateTemp uses 0600 by default; apply the caller's permissions.
 	if err := os.Chmod(tmpName, perm); err != nil {
-		os.Remove(tmpName)
+		if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("atomicfile: remove temp during rollback: %v", rmErr)
+		}
 		return err
 	}
 
 	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
+		if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("atomicfile: remove temp during rollback: %v", rmErr)
+		}
 		return err
 	}
 
