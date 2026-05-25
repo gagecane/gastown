@@ -1028,14 +1028,11 @@ func (m *DoltServerManager) stopLocked() {
 		m.logger("Warning: failed to send termination signal: %v", err)
 	}
 
-	// Wait for graceful shutdown (up to 5 seconds)
+	// Poll until the process exits or the timeout fires.
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 50; i++ {
-			if !isProcessAlive(process) {
-				close(done)
-				return
-			}
+		defer close(done)
+		for isProcessAlive(process) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}()
