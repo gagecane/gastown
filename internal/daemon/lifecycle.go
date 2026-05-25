@@ -417,9 +417,8 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	d.applySessionTheme(sessionName, parsed)
 
 	// Wait for Claude to start, then accept startup dialogs if they appear.
-	if err := d.tmux.WaitForCommand(sessionName, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
-		// Non-fatal - Claude might still start
-	}
+	// Non-fatal: Claude might still start even if wait times out.
+	_ = d.tmux.WaitForCommand(sessionName, constants.SupportedShells, constants.ClaudeStartTimeout)
 	_ = d.tmux.AcceptStartupDialogs(sessionName)
 	time.Sleep(constants.ShutdownNotifyDelay)
 

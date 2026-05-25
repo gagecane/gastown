@@ -365,13 +365,12 @@ func TestPatrolNotStuckCheck_Run_DoltFailureReportsError(t *testing.T) {
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 
-	// Should report warning with Dolt failure detail (not silently OK)
-	if result.Status == StatusOK && len(result.Details) == 0 {
-		// If bd is not installed, the check reports the error; if bd is installed
-		// but no database exists, it also reports an error. Either way, we should
-		// see details about the failure unless the check happens to return no stuck wisps.
-		// This is acceptable — the key behavior is that we DON'T silently fall back to JSONL.
-	}
+	// Should report warning with Dolt failure detail (not silently OK).
+	// If bd is not installed, the check reports the error; if bd is installed
+	// but no database exists, it also reports an error. Either way, we should
+	// see details about the failure unless the check happens to return no stuck wisps.
+	// This is acceptable — the key behavior is that we DON'T silently fall back to JSONL.
+	_ = result
 }
 
 // Suppress unused import warning for fmt (used in test output formatting).

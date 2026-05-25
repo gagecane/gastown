@@ -158,12 +158,7 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 				}
 			}
 
-			// Clear mail directory if it exists
-			mailDir := filepath.Join(crewPath, "mail")
-			if _, err := os.Stat(mailDir); err == nil {
-				// Mail dir was removed with the workspace, so nothing to do
-				// But if we want to be extra thorough, we could look in town beads
-			}
+			// Mail dir (if any) was removed with the workspace — no cleanup needed.
 		} else {
 			// Default: CLOSE the agent bead (preserves CV history)
 			closeArgs := []string{"close", agentBeadID, "--reason=Crew workspace removed"}

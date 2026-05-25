@@ -747,10 +747,7 @@ func findOrphanProcesses() ([]OrphanProcess, error) {
 	var orphans []OrphanProcess
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 
-	// Skip header line
-	if scanner.Scan() {
-		// First line is header, skip it
-	}
+	scanner.Scan() // skip header line
 
 	for scanner.Scan() {
 		line := scanner.Text()

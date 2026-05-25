@@ -1668,12 +1668,11 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 						if actualPush != cfgPushURL {
 							c.pushURLMismatch = true
 						}
-					} else {
-						// Config has no push URL — this may be a legacy config that
-						// predates the push_url feature. Don't flag a mismatch; the
-						// existing git push URL (if any) may be intentionally set.
-						// RegisterRig will auto-detect and sync to config.json on next run.
 					}
+					// If config has no push URL, this may be a legacy config that
+					// predates the push_url feature. Don't flag a mismatch; the
+					// existing git push URL (if any) may be intentionally set.
+					// RegisterRig will auto-detect and sync to config.json on next run.
 				}
 			}
 		}
@@ -1822,11 +1821,10 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 				if err := bareGit.ConfigurePushURL("origin", cfgPushURL); err != nil {
 					return fmt.Errorf("updating push URL on .repo.git: %w", err)
 				}
-			} else {
-				// Config has no push URL — this may be a legacy config that
-				// predates the push_url feature. Don't clear; the existing
-				// git push URL (if any) may be intentionally set.
 			}
+			// If config has no push URL, this may be a legacy config that
+			// predates the push_url feature. Don't clear; the existing
+			// git push URL (if any) may be intentionally set.
 		}
 	}
 

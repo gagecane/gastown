@@ -243,11 +243,9 @@ func TestCleanGitEnv_IdempotentWithoutGitEnv(t *testing.T) {
 	env := CleanGitEnv()
 	// The returned env must be a proper subset of os.Environ() (identity
 	// when no repo-pointing vars are set, at least the same size).
-	if len(env) < len(os.Environ()) {
-		// Accept strictly-less only if the process had repo-pointing vars
-		// set from elsewhere (which the loop above tried to clear).
-		// Don't fail — just sanity-check no stripped entries remain.
-	}
+	// If len(env) < len(os.Environ()), that's acceptable only if the process
+	// had repo-pointing vars set from elsewhere (which the loop above tried
+	// to clear). Don't fail — just sanity-check no stripped entries remain.
 	for _, e := range env {
 		if strings.HasPrefix(e, "GIT_DIR=") {
 			t.Errorf("CleanGitEnv leaked GIT_DIR: %q", e)

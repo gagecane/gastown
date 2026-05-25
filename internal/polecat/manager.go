@@ -2471,11 +2471,10 @@ func (m *Manager) SetState(name string, state State) error {
 			}
 		}
 	case StateStuck:
-		// Mark issue as blocked if supported, otherwise just note in issue
-		if issue != nil {
-			// For now, just keep the assignment - the issue's blocked_by would indicate stuck
-			// We could add a status="blocked" here if beads supports it
-		}
+		// For now, just keep the assignment — the issue's blocked_by field
+		// indicates stuck status. A future enhancement could set status="blocked"
+		// here if beads adds support for it.
+		_ = issue
 	}
 
 	return nil

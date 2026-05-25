@@ -570,7 +570,7 @@ func TestHandoffPolecatEnvCheck(t *testing.T) {
 			output := captureStdout(t, func() {
 				defer func() {
 					if r := recover(); r != nil {
-						// Panic means we got past the guard — not blocked
+						_ = r // Panic means we got past the guard — not blocked
 					}
 				}()
 				runHandoff(handoffCmd, nil)

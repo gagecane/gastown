@@ -579,9 +579,8 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 			return totalDeleted, fmt.Errorf("sql commit: %w", err)
 		}
 		commitMsg := fmt.Sprintf("reaper: purge %d old mail from %s", totalDeleted, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// Non-fatal.
-		}
+		// Non-fatal: Dolt commit failure doesn't lose the SQL deletes.
+		_, _ = db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)) //nolint:gosec // G201: commitMsg from safe values
 	}
 
 	return totalDeleted, nil
@@ -749,16 +748,14 @@ func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg 
 
 		for _, tbl := range auxTables {
 			delAux := fmt.Sprintf("DELETE FROM `%s` WHERE issue_id IN %s", tbl, inClause) //nolint:gosec // G201: tbl is internal
-			if _, err := db.ExecContext(ctx, delAux, args...); err != nil {
-				// Non-fatal: log and continue.
-			}
+			// Non-fatal: best-effort cleanup of auxiliary tables.
+			_, _ = db.ExecContext(ctx, delAux, args...)
 		}
 
 		// Clean up reverse dependency references to prevent dangling parent refs.
+		// Non-fatal: primary delete below is what matters.
 		delReverse := fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_id IN %s", inClause)
-		if _, err := db.ExecContext(ctx, delReverse, args...); err != nil {
-			// Non-fatal.
-		}
+		_, _ = db.ExecContext(ctx, delReverse, args...)
 
 		delPrimary := fmt.Sprintf("DELETE FROM `%s` WHERE id IN %s", primaryTable, inClause) //nolint:gosec // G201: primaryTable is internal
 		sqlResult, err := db.ExecContext(ctx, delPrimary, args...)

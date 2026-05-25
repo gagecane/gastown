@@ -52,7 +52,7 @@ func setupTestTownForConfig(t *testing.T) string {
 func TestConfigAgentList(t *testing.T) {
 	t.Run("lists built-in agents", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
-		settingsPath := config.TownSettingsPath(townRoot)
+		_ = config.TownSettingsPath(townRoot) // settings file is optional — list works without it
 
 		// Change to town root so workspace.FindFromCwd works
 		originalWd, _ := os.Getwd()
@@ -67,11 +67,6 @@ func TestConfigAgentList(t *testing.T) {
 		err := runConfigAgentList(cmd, args)
 		if err != nil {
 			t.Fatalf("runConfigAgentList failed: %v", err)
-		}
-
-		// Verify settings file was created (LoadOrCreate creates it)
-		if _, err := os.Stat(settingsPath); err != nil {
-			// This is OK - list command works without settings file
 		}
 	})
 

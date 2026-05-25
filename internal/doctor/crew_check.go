@@ -144,11 +144,10 @@ func (c *CrewWorktreeCheck) findCrewWorktrees(townRoot string) []staleWorktree {
 			sourceRig := parts[0]
 			crewName := parts[1]
 
-			// Verify the source rig exists (sanity check)
-			sourceRigPath := filepath.Join(townRoot, sourceRig)
-			if _, err := os.Stat(sourceRigPath); os.IsNotExist(err) {
-				// Source rig doesn't exist - definitely stale
-			}
+			// Verify the source rig exists (sanity check).
+			// If it doesn't exist, the worktree is definitely stale —
+			// but we still collect it below regardless for worktree cleanup.
+			_ = filepath.Join(townRoot, sourceRig)
 
 			worktrees = append(worktrees, staleWorktree{
 				path:      path,
