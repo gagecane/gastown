@@ -719,7 +719,31 @@ func TestModeAStartupVerifyIsNonBlocking(t *testing.T) {
 	_ = tm.SendKeys(sessionName, "export PS1='❯ '")
 	time.Sleep(300 * time.Millisecond)
 
-	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+	// Set up a town root with fast operational config so the verify goroutine
+	// uses 50ms delay and 1 retry instead of the default 25s * 2 = 50s.
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("MkdirAll rigPath: %v", err)
+	}
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(`{
+		"type": "town-settings",
+		"version": 1,
+		"operational": {
+			"session": {
+				"startup_nudge_verify_delay": "50ms",
+				"startup_nudge_max_retries": 1
+			}
+		}
+	}`), 0644); err != nil {
+		t.Fatalf("WriteFile config.json: %v", err)
+	}
+
+	r := &rig.Rig{Name: "test-rig", Path: rigPath}
 	m := NewSessionManager(tm, r)
 
 	rc := &config.RuntimeConfig{
@@ -755,11 +779,11 @@ func TestModeAStartupVerifyIsNonBlocking(t *testing.T) {
 	}
 
 	// Goroutine side: must complete within (maxRetries * verifyDelay) + overhead.
-	// Default: 2 retries * 25s = 50s. Allow 90s for slow CI.
+	// With test config: 1 retry * 50ms = 50ms. Allow 5s for slow CI.
 	select {
 	case <-goroutineDone:
-	case <-time.After(90 * time.Second):
-		t.Fatal("Mode A verifyStartupNudgeDelivery goroutine hung (exceeded 90s timeout)")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Mode A verifyStartupNudgeDelivery goroutine hung (exceeded 5s timeout)")
 	}
 }
 
