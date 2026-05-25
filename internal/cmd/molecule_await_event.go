@@ -391,7 +391,7 @@ func calculateEventTimeout(idleCycles int) (time.Duration, error) {
 // accumulation during long idle periods.
 func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter time.Duration) (*AwaitEventResult, error) {
 	// Check for already-pending events
-	events, err := readPendingEvents(eventDir)
+	events, err := readPendingEvents(ctx, eventDir)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +467,7 @@ func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter t
 			}
 			ch := make(chan readRes, 1)
 			go func() {
-				ev, er := readPendingEvents(eventDir)
+				ev, er := readPendingEvents(ctx, eventDir)
 				ch <- readRes{events: ev, err: er}
 			}()
 			select {
@@ -496,7 +496,7 @@ func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter t
 func readPendingEventsBounded(ctx context.Context, dir string, budget time.Duration) []EventFile {
 	ch := make(chan []EventFile, 1)
 	go func() {
-		events, _ := readPendingEvents(dir)
+		events, _ := readPendingEvents(ctx, dir)
 		ch <- events
 	}()
 	select {
@@ -517,7 +517,9 @@ func readPendingEventsBounded(ctx context.Context, dir string, budget time.Durat
 }
 
 // readPendingEvents reads all .event files from the directory.
-func readPendingEvents(dir string) ([]EventFile, error) {
+// It checks ctx between file reads so that a stuck filesystem cannot
+// prevent the goroutine from returning once the context is cancelled.
+func readPendingEvents(ctx context.Context, dir string) ([]EventFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -539,6 +541,13 @@ func readPendingEvents(dir string) ([]EventFile, error) {
 	sort.Strings(paths) // oldest first
 
 	for _, path := range paths {
+		// Check context before each file read so we bail promptly on
+		// cancellation rather than blocking on a stuck/slow filesystem.
+		select {
+		case <-ctx.Done():
+			return events, ctx.Err()
+		default:
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue // skip unreadable files

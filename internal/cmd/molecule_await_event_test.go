@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -173,7 +174,7 @@ func TestAwaitEventResult(t *testing.T) {
 func TestReadPendingEvents(t *testing.T) {
 	t.Run("empty directory", func(t *testing.T) {
 		dir := t.TempDir()
-		events, err := readPendingEvents(dir)
+		events, err := readPendingEvents(context.Background(), dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -183,7 +184,7 @@ func TestReadPendingEvents(t *testing.T) {
 	})
 
 	t.Run("nonexistent directory", func(t *testing.T) {
-		events, err := readPendingEvents("/tmp/nonexistent-dir-test-" + t.Name())
+		events, err := readPendingEvents(context.Background(), "/tmp/nonexistent-dir-test-"+t.Name())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -199,7 +200,7 @@ func TestReadPendingEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		events, err := readPendingEvents(dir)
+		events, err := readPendingEvents(context.Background(), dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -225,7 +226,7 @@ func TestReadPendingEvents(t *testing.T) {
 			}
 		}
 
-		events, err := readPendingEvents(dir)
+		events, err := readPendingEvents(context.Background(), dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -248,12 +249,35 @@ func TestReadPendingEvents(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "002.json"), []byte(`{"type":"B"}`), 0644)
 		os.Mkdir(filepath.Join(dir, "subdir.event"), 0755) // directory, not file
 
-		events, err := readPendingEvents(dir)
+		events, err := readPendingEvents(context.Background(), dir)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(events) != 1 {
 			t.Errorf("expected 1 event (only .event files), got %d", len(events))
+		}
+	})
+
+	t.Run("cancelled context returns early", func(t *testing.T) {
+		dir := t.TempDir()
+		// Write multiple event files
+		for i := 0; i < 5; i++ {
+			name := fmt.Sprintf("%03d.event", i)
+			os.WriteFile(filepath.Join(dir, name), []byte(`{"type":"X"}`), 0644)
+		}
+
+		// Cancel context before calling
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		events, err := readPendingEvents(ctx, dir)
+		// Should return context.Canceled error
+		if err != context.Canceled {
+			t.Errorf("expected context.Canceled error, got %v", err)
+		}
+		// Should have read zero events (cancelled before first read)
+		if len(events) != 0 {
+			t.Logf("got %d events (partial read before cancellation detected)", len(events))
 		}
 	})
 }
