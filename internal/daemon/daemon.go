@@ -853,6 +853,11 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Failure classifier ticker started (interval %v)", interval)
 	}
 
+	// Wire the Mayor cycle-close handler (Phase 0 task 3c, gu-xrxm6).
+	// Must be registered BEFORE the ticker starts so events dispatched on
+	// the first tick go to the real handler, not the noop.
+	d.initMRCycleCloseHandler()
+
 	// Start MR cycle-close ticker if configured.
 	// Polls closed merge-request beads labeled gt:auto-test-pr and dispatches
 	// to the registered cycle-close handler — the substrate for Phase 0
