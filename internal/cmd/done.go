@@ -659,7 +659,6 @@ afterSafetyNet:
 	var mrID string
 	var pushFailed bool
 	var mrFailed bool
-	var doneErrors []string
 	var convoyInfo *ConvoyInfo // Populated if issue is tracked by a convoy
 	if exitType == ExitCompleted {
 		if branch == defaultBranch || branch == "master" {
@@ -847,8 +846,6 @@ afterSafetyNet:
 			}
 			if rebased {
 				fmt.Printf("%s Branch rebased onto %s\n", style.Bold.Render("✓"), contaminationBase)
-				// Recompute commits ahead since rebase rewrote history.
-				aheadCount, _ = g.CommitsAhead("origin/"+defaultBranch, "HEAD")
 			} else if skipReason != "" {
 				style.PrintWarning("branch is %d commits behind %s but %s; skipping auto-rebase", contam.Behind, contaminationBase, skipReason)
 			}
@@ -857,10 +854,7 @@ afterSafetyNet:
 		// Strip Gas Town overlay from CLAUDE.md / CLAUDE.local.md (gt-p35).
 		// Polecats commit the overlay (polecat lifecycle boilerplate) into repos,
 		// overwriting project-specific CLAUDE.md content. Detect and revert before push.
-		if stripped := stripOverlayCLAUDEmd(g, defaultBranch); stripped {
-			// Recalculate commits ahead since we added a cleanup commit
-			aheadCount, _ = g.CommitsAhead("origin/"+defaultBranch, "HEAD")
-		}
+		stripOverlayCLAUDEmd(g, defaultBranch)
 
 		// Determine merge strategy from convoy (gt-myofa.3)
 		// Convoys can override the default MR-based workflow:
@@ -900,7 +894,6 @@ afterSafetyNet:
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
-				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s", errMsg)
 				goto notifyWitness
 			}
@@ -910,7 +903,6 @@ afterSafetyNet:
 			} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
-				doneErrors = append(doneErrors, errMsg)
 				noteVerifiedPushFailure(cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
 				style.PrintWarning("%s\nDirect merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
 				goto notifyWitness
@@ -988,7 +980,6 @@ afterSafetyNet:
 			pushErr = fmt.Errorf("refusing to push %q: branch is the rig's default branch; polecat work must go through the merge queue", branch)
 			pushFailed = true
 			errMsg := pushErr.Error()
-			doneErrors = append(doneErrors, errMsg)
 			style.PrintWarning("%s", errMsg)
 			goto notifyWitness
 		}
@@ -1079,7 +1070,6 @@ afterSafetyNet:
 			// All push attempts failed
 			pushFailed = true
 			errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
-			doneErrors = append(doneErrors, errMsg)
 			style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
 			goto notifyWitness
 		}
@@ -1095,7 +1085,6 @@ afterSafetyNet:
 		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
 			pushFailed = true
 			errMsg := verifyErr.Error()
-			doneErrors = append(doneErrors, errMsg)
 			noteVerifiedPushFailure(cwd, issueID, branch, pushedCommitSHA, verifyErr)
 			style.PrintWarning("%s\nCommits exist locally but verified push failed. Witness will be notified.", errMsg)
 			goto notifyWitness
@@ -1285,7 +1274,6 @@ afterSafetyNet:
 				} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, lateDirectCommitSHA); verifyErr != nil {
 					pushFailed = true
 					errMsg := verifyErr.Error()
-					doneErrors = append(doneErrors, errMsg)
 					noteVerifiedPushFailure(cwd, issueID, defaultBranch, lateDirectCommitSHA, verifyErr)
 					style.PrintWarning("%s\nLate direct merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
 					goto notifyWitness
@@ -1473,7 +1461,6 @@ afterSafetyNet:
 				// Set mrFailed so the witness knows not to send MERGE_READY.
 				mrFailed = true
 				errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
-				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
 				goto notifyWitness
 			}
@@ -1484,7 +1471,6 @@ afterSafetyNet:
 			if mrID == "" {
 				mrFailed = true
 				errMsg := "MR bead creation returned empty ID"
-				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nBranch is pushed but MR bead has no ID. Witness will be notified.", errMsg)
 				goto notifyWitness
 			}
@@ -1496,7 +1482,6 @@ afterSafetyNet:
 			if verifiedMR, verifyErr := bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
 				mrFailed = true
 				errMsg := fmt.Sprintf("MR bead created but verification read-back failed (id=%s): %v", mrID, verifyErr)
-				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nBranch is pushed but MR bead not confirmed. Preserving worktree.", errMsg)
 				goto notifyWitness
 			}
