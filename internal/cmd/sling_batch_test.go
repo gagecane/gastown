@@ -864,12 +864,10 @@ func TestCreateAutoConvoy_BasicSuccess(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	logPath := filepath.Join(t.TempDir(), "placeholder") // overwritten below
 	bdScript := `#!/bin/sh
 echo "CMD:$*" >> "LOGPATH"
 exit 0
 `
-	// We need logPath before the script, so build it in two steps.
 	townRoot, logPath := setupTownWithBdStub(t, "")
 	// Rewrite bd with the actual logPath baked in.
 	bdScript = strings.ReplaceAll(bdScript, "LOGPATH", logPath)

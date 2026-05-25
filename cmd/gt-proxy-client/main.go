@@ -79,11 +79,9 @@ func main() {
 		Transport: &http.Transport{TLSClientConfig: tlsCfg},
 	}
 
-	// Determine argv: prepend the binary name so the server knows which tool we are.
-	argv := os.Args // os.Args[0] is the binary path; the server needs the tool name as argv[0].
-	// Replace argv[0] with the tool name (gt or bd) based on the binary name.
+	// Determine argv: prepend the tool name so the server knows which tool we are.
 	toolName := toolNameFromArg0(os.Args[0])
-	argv = append([]string{toolName}, os.Args[1:]...)
+	argv := append([]string{toolName}, os.Args[1:]...)
 
 	body, err := json.Marshal(execRequest{Argv: argv})
 	if err != nil {
