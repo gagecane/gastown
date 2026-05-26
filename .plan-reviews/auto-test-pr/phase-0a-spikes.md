@@ -226,7 +226,110 @@ D15).
 
 ## 0a-3. (TBD)
 
-## 0a-5. (TBD)
+## 0a-5. Tautology sub-rule (i) precision/recall spike
+
+**Outcome: PASS — sub-rule (i) ships in gate 4d.**
+
+### Question
+
+Can a flow-sensitive taint analysis detect tautological assertions (where
+the expected value depends on the function-under-test's return value) with
+sufficient precision and recall to be useful as an automated gate?
+
+Thresholds:
+- Precision ≥ 85% (≤15% false-positive on known-good tests)
+- Recall ≥ 75% (≤25% false-negative on known-tautological tests)
+
+### Method
+
+1. Built a 50-test corpus (25 known-tautological, 25 known-good) sampled
+   from real Go test patterns found in gastown_upstream. Corpus lives at
+   `internal/autotestpr/tautology/testdata/corpus/`.
+
+2. Implemented a flow-sensitive taint analyzer
+   (`internal/autotestpr/tautology/analyzer.go`) that:
+   - Tracks taint flow from function-under-test (FUT) return values through
+     assignments, selectors, index expressions, slice operations, type
+     assertions, range variables, and intermediate variable chains
+   - Identifies testify `assert.*` / `require.*` assertions
+   - Flags assertions where the "expected" argument (first non-t arg) is
+     tainted by a FUT call
+   - Handles multi-value returns, struct field access, method calls on FUT
+     objects, and stdlib pass-through functions (len, append, string
+     conversions, fmt, etc.)
+
+3. Ran the analyzer against:
+   - The curated 50-test corpus (precision/recall measurement)
+   - 20 real test files from gastown_upstream (248 test functions) to
+     validate false-positive rate in the wild
+
+### Results
+
+| Metric | Value | Threshold | Status |
+|--------|-------|-----------|--------|
+| Precision | 100.0% | ≥ 85% | ✓ PASS |
+| Recall | 100.0% | ≥ 75% | ✓ PASS |
+| Real-world FP rate | 0.0% (0/248) | Low | ✓ PASS |
+
+Detailed breakdown:
+- True Positives: 25 (all tautological tests correctly flagged)
+- False Negatives: 0 (no tautological tests missed)
+- False Positives: 0 (no good tests incorrectly flagged)
+- True Negatives: 25 (all good tests correctly passed)
+
+### Tautological patterns detected (25 corpus samples)
+
+1. Same field compared to itself (`result.Name == result.Name`)
+2. FUT return stored in variable then compared back to same field
+3. Method on FUT return compared to same method call
+4. Multi-return variable compared to itself
+5. Index into FUT slice stored then compared to same index
+6. Two calls to same FUT compared ("idempotency" non-test)
+7. Type assertion on FUT return compared to same assertion
+8. Taint through intermediate variable chain
+9. Same method called twice on FUT object
+10. `assert.True(a == b)` where both from same FUT
+11. Range variable from FUT collection compared to itself
+12. Deep selector chain both sides from same root
+13. Stored vs. fresh call to same FUT with same args
+14. Error message from FUT compared to itself
+15. Sub-struct field accessed via different paths from same root
+16. Same FUT called twice as "consistency" check
+17. Map lookup stored then compared to same key
+18. FUT return stored conditionally then asserted
+19. Both sides from wrapper function over FUT output
+20. Different vars storing same FUT call compared
+21. Struct field compared to itself (direct)
+22. Interface method on FUT called twice
+23. Slice operation on FUT compared to same slice
+24. Same field via different access path variables
+25. Encode/Decode/Encode round-trip (taint propagation through calls)
+
+### Good patterns NOT flagged (25 corpus samples)
+
+String/numeric/boolean literals, table-driven test structs, independently
+constructed fixtures, package-level constants, `assert.Empty`/`NotNil`
+(single-arg), `assert.Len` with literal, env vars, file fixtures,
+`assert.Contains` with literal substring, input (not output) as expected,
+`assert.False` with result, map/slice literals, `len(input)` (not
+`len(output)`), and `ElementsMatch` with independent slice.
+
+### Implication for Phase 0 task 6c
+
+Sub-rule (i) — "Does any assertion's argument depend on a value returned
+from the function-under-test?" — **ships in gate 4d** alongside sub-rules
+(ii), (iii), and (iv).
+
+The analyzer implementation at `internal/autotestpr/tautology/analyzer.go`
+is production-ready for integration into the tautology linter gate.
+
+### Artifacts
+
+- Analyzer: `internal/autotestpr/tautology/analyzer.go`
+- Spike test: `internal/autotestpr/tautology/spike_test.go`
+- Real-world validation: `internal/autotestpr/tautology/realworld_test.go`
+- Corpus (tautological): `internal/autotestpr/tautology/testdata/corpus/tautological_test.go`
+- Corpus (good): `internal/autotestpr/tautology/testdata/corpus/good_test.go`
 
 ## 0a-6. Does a substrate exist for the Mayor cycle-close handler (task 3c) to subscribe to MR-bead state-change events?
 
