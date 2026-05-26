@@ -5,6 +5,23 @@ This molecule guides a polecat through a complete work assignment. Each step
 has clear entry/exit criteria and specific commands to run. A polecat can
 crash after any step and resume from the last completed step.
 
+## 🚨 NON-NEGOTIABLE: `gt done` IS YOUR FINAL ACTION 🚨
+
+Every polecat session MUST end by invoking `gt done` (or `gt done --status=<exit>`).
+There is no other terminal state. There is no "submitted, awaiting" state. There
+is no idle-after-success state. If you push a branch, create an MR, or finish
+your assignment, the very next action is `gt done`.
+
+Failure mode this prevents (gs-30s, gs-fqs): polecat submits MR → prints
+"Submitted." in chat → sits at the idle Claude prompt → scheduler counts the
+slot as `recovery_blocked` → dispatch freezes. The Stop hook (gs-lrz) is a
+backstop, not a substitute — you are the primary actor responsible for calling
+`gt done`.
+
+**If you catch yourself about to print a "done"-style summary without a tool
+call, replace that turn with `gt done` instead. The tool call IS the
+acknowledgement.**
+
 ## Polecat Contract (Self-Cleaning Model)
 
 You are a self-cleaning worker. You:
@@ -15,6 +32,10 @@ You are a self-cleaning worker. You:
 
 **Self-cleaning:** When you run `gt done`, you push your work, submit to MQ,
 nuke your sandbox, and exit. There is no idle state. Done means gone.
+
+**Do NOT** push manually with `git push origin <branch>` and stop there — `gt
+done` performs the push and the MQ enqueue atomically. A manual push without
+`gt done` leaves a phantom branch and zombies your session.
 
 **Important:** This formula defines the workflow template. Steps are shown inline
 when you run `gt prime` — there are no separate step beads to close. Work through
@@ -52,7 +73,7 @@ stale, the refinery falls through to normal gate execution.
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
-version = 12
+version = 13
 
 [[steps]]
 id = "load-context"
@@ -511,10 +532,16 @@ The refinery will run gates normally (slower but still correct).
 
 [[steps]]
 id = "submit-and-exit"
-title = "Submit work and self-clean"
+title = "Submit work via `gt done` (MANDATORY FINAL STEP)"
 needs = ["pre-verify"]
 description = """
-Submit your work and clean up. You cease to exist after this step.
+🚨 **This step terminates in exactly one way: a `gt done` invocation.** 🚨
+
+If you finish this step's work and your next action is anything OTHER than a
+`gt done` tool call, you have failed the step — even if the MR went out, even
+if the branch is pushed, even if you've already typed "Submitted." in chat.
+The polecat zombie pattern (gs-30s) is exactly this: work submitted, then no
+`gt done`, then idle-prompt session hang.
 
 **Self-Cleaning Model:**
 Once you run `gt done`, you're gone. The command:
@@ -522,6 +549,11 @@ Once you run `gt done`, you're gone. The command:
 2. Creates an MR bead in the merge queue
 3. Nukes your sandbox (worktree removal)
 4. Exits your session immediately
+
+You do NOT push manually first. You do NOT open the PR yourself for MQ rigs.
+`gt done` performs the push + MQ enqueue atomically. Calling `git push` and
+then stopping is the failure mode — it leaves a phantom branch and zombies
+the slot.
 
 **Pre-flight: Verify you have actual work to submit (HARD GATE):**
 ```bash
@@ -569,7 +601,11 @@ You should see output like:
 
 You are NOT involved in any of that. You're gone. Done means gone.
 
-**Exit criteria:** Work submitted, sandbox nuked, session exited."""
+**Exit criteria (HARD GATE — read carefully):** You have invoked `gt done`
+(any variant: bare, `--pre-verified`, `--status DEFERRED`, `--status
+ESCALATED`). The tool call ITSELF satisfies this step — there is no "I'll
+run it next turn" half-state. If `gt done` errors, fix the error and re-run
+`gt done`; do NOT abandon the step and report "ready to submit"."""
 
 [vars]
 [vars.issue]
