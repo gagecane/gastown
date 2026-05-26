@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/autotestpr"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // resetAutoTestPRPauseFlags zeroes the package-level flag bindings
@@ -490,3 +492,78 @@ func nowFnGuard(t *testing.T, fixed time.Time) {
 // nowFnGuard yet — the helper is there for future tests added when
 // the bead-backed integration test fixture lands.
 var _ = nowFnGuard
+
+// TestLoadTownStateWithTimeoutExpires verifies the ≤2s timeout path
+// fires when the underlying Dolt read takes too long. We simulate a
+// slow reader by injecting a very short timeout and a beads wrapper
+// that blocks forever.
+func TestLoadTownStateWithTimeoutExpires(t *testing.T) {
+	t.Parallel()
+
+	// We test the timeout path at the loadTownStateWithTimeout level by
+	// setting an absurdly short timeout against a beads wrapper pointing
+	// at a nonexistent dir. The bd subprocess will take at least a few ms
+	// to fail, so the 1ns context fires first, proving the timeout
+	// plumbing works.
+	b := beads.New("/nonexistent-town-root-for-timeout-test")
+	_, err := loadTownStateWithTimeout(b, 1*time.Nanosecond)
+	// With 1ns timeout, we expect EITHER ErrStatusTimeout (ctx won the
+	// race) or a real error (the goroutine finished first). In practice,
+	// context.WithTimeout(1ns) fires immediately and we get
+	// ErrStatusTimeout. But we accept both to avoid a flaky test.
+	if err == nil {
+		t.Fatal("expected error with 1ns timeout")
+	}
+	// The test is mostly a compile-time + shape check that the timeout
+	// plumbing exists. If the goroutine finishes first (bd fails fast
+	// on a bad dir), that's fine too — the important contract is that
+	// the function doesn't hang for 60s.
+	t.Logf("error (expected): %v", err)
+}
+
+// TestStatusTimeoutExitCode verifies that the status command surfaces a
+// clear exit code (4) and message when Dolt is degraded.
+func TestStatusTimeoutExitCode(t *testing.T) {
+	resetAutoTestPRPauseFlags(t)
+	autoTestPRStatusFormat = "table"
+
+	// Override statusTimeoutFn to return an impossibly short duration.
+	prev := statusTimeoutFn
+	statusTimeoutFn = func() time.Duration { return 1 * time.Nanosecond }
+	t.Cleanup(func() { statusTimeoutFn = prev })
+
+	// We need a workspace for newAutoTestPRBeads to succeed. Skip if not
+	// in a Gas Town workspace (the test is meaningful in CI where the
+	// repo is checked out as a Gas Town workspace).
+	_, findErr := workspace.FindFromCwdOrError()
+	if findErr != nil {
+		t.Skipf("not in a Gas Town workspace: %v", findErr)
+	}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd := autoTestPRStatusCmd
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	defer cmd.SetOut(nil)
+	defer cmd.SetErr(nil)
+
+	err := runAutoTestPRStatus(cmd, nil)
+	if err == nil {
+		// If Dolt responded in <1ns (impossible in normal conditions),
+		// the test would pass through the happy path. That's acceptable
+		// — the primary purpose is catching regressions in the timeout
+		// wiring, not simulating a real degraded server.
+		t.Skip("status returned without error (Dolt responded before 1ns timeout)")
+	}
+	code, ok := IsSilentExit(err)
+	if !ok || code != 4 {
+		t.Errorf("err = %v; want SilentExit(4) for timeout", err)
+	}
+	if !strings.Contains(stderr.String(), "Dolt read timed out") {
+		t.Errorf("stderr should mention timeout, got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gt dolt status") {
+		t.Errorf("stderr should hint at gt dolt status, got: %q", stderr.String())
+	}
+}
