@@ -349,3 +349,17 @@ func mutateTownState(b *beads.Beads, mutate func(*TownState) error) error {
 
 	return fmt.Errorf("%w: last error: %v", ErrTownStateCASExhausted, lastErr)
 }
+
+// MutateTownStateForRevise is the exported CAS-safe mutator for the
+// revise CLI verb (Phase 0 task 2c). It shares the same read-modify-write
+// loop as the internal mutateTownState but is exported so the cmd package
+// can perform the rig state CAS transition (mr-pending → mr-revising)
+// without duplicating the retry logic.
+//
+// The mutate callback receives a pointer to a freshly-loaded TownState
+// on each attempt. Return nil to commit, or any error to abort. The
+// errSkipUpdate sentinel is NOT available to external callers — if you
+// don't want to write, return any non-nil error.
+func MutateTownStateForRevise(b *beads.Beads, mutate func(*TownState) error) error {
+	return mutateTownState(b, mutate)
+}
