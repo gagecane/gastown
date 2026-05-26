@@ -134,6 +134,7 @@ type PatrolsConfig struct {
 	RestartTracker         *RestartTrackerConfig          `json:"restart_tracker,omitempty"`
 	FailureClassifier      *FailureClassifierConfig       `json:"failure_classifier,omitempty"`
 	MRCycleClose           *MRCycleCloseConfig            `json:"mr_cycle_close,omitempty"`
+	MainCIBreak            *MainCIBreakConfig             `json:"main_ci_break,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.

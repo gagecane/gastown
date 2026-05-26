@@ -216,6 +216,13 @@ type Daemon struct {
 	// it just logs and drops events. Only accessed from the heartbeat
 	// goroutine (where the patrol fires), so no sync needed.
 	mrCycleCloseHandler MRCycleCloseHandler
+
+	// mainCIBreakHandler is invoked by main_ci_break_dog once per qualifying
+	// main_branch_test escalation (commit attributed, MR bead carries
+	// gt:auto-test-pr). Phase 0 task 11 Part B (gu-smn4) wires the D16
+	// auto-revert handler in via SetMainCIBreakHandler. Nil means "use the
+	// noop handler." Only accessed from the heartbeat goroutine.
+	mainCIBreakHandler MainCIBreakHandler
 }
 
 // alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It
@@ -872,6 +879,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("MR cycle-close dog ticker started (interval %v)", interval)
 	}
 
+	// Start main CI-break ticker if configured.
+	// Watches main_branch_test escalations, resolves commit → MR bead,
+	// checks gt:auto-test-pr opt-in, and dispatches to the D16 handler.
+	// This is the substrate for Phase 0 task 11 / D16 SEV-1 auto-revert.
+	var mainCIBreakTicker *time.Ticker
+	var mainCIBreakChan <-chan time.Time
+	if d.isPatrolActive("main_ci_break") {
+		interval := mainCIBreakInterval(d.patrolConfig)
+		mainCIBreakTicker = time.NewTicker(interval)
+		mainCIBreakChan = mainCIBreakTicker.C
+		defer mainCIBreakTicker.Stop()
+		d.logger.Printf("Main CI-break dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1000,6 +1021,13 @@ func (d *Daemon) Run() (err error) {
 			// dispatches cycle-close events to the registered handler.
 			if !d.isShutdownInProgress() {
 				d.runMRCycleCloseDog()
+			}
+
+		case <-mainCIBreakChan:
+			// Main CI-break dog — watches main_branch_test escalations, resolves
+			// commit → MR bead, checks auto-test-pr opt-in, dispatches to D16 handler.
+			if !d.isShutdownInProgress() {
+				d.runMainCIBreakDog()
 			}
 
 		case <-timer.C:
