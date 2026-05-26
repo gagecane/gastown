@@ -608,8 +608,26 @@ refinery worktree would fail (or silently detach) in that case.
 ```bash
 # HEAD is on temp (we rebased onto origin/<merge-target> in process-branch).
 # Push temp's tip to remote <merge-target> — never touch a local <merge-target>.
-git push origin HEAD:<merge-target>
+#
+# GT_ALLOW_DIRECT_MAIN=1 is REQUIRED here. The repo's .githooks/pre-push
+# blocks direct pushes to the default branch when the worktree has both
+# `origin` and `upstream` remotes (fork-PR workflow). Refinery worktrees
+# always have both, so the hook would reject this push without the env var.
+# This is the documented escape hatch — see .githooks/pre-push line ~76.
+GT_ALLOW_DIRECT_MAIN=1 git push origin HEAD:<merge-target>
 ```
+
+**⚠️ DO NOT WORKAROUND HOOK REJECTIONS WITH `git update-ref` (gu-xml5)**
+
+If the push fails with "Direct push to <branch> blocked in fork-PR workflow",
+the fix is `GT_ALLOW_DIRECT_MAIN=1` (above), NOT `git update-ref
+refs/heads/<merge-target>`. `update-ref` only updates your local ref;
+origin never receives the merge, polecats and crew see a stale base, and
+the work appears merged in beads while silently sitting in your worktree.
+
+This bug stranded 14 commits on 2026-05-26 and is the root cause of gu-w1w6.
+Always run `git push` and let it fail loudly if there's a real problem —
+do not silently substitute a local-only operation.
 
 **Step 1.5 (direct only): VERIFY PUSH SUCCEEDED (CRITICAL - PATCH-003)**
 
