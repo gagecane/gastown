@@ -233,6 +233,66 @@ func TestRestartTracker_CrashLoop(t *testing.T) {
 	}
 }
 
+func TestRestartTracker_CrashLoopAutoExpiry(t *testing.T) {
+	cfg := RestartTrackerConfig{
+		InitialBackoff:    10 * time.Millisecond,
+		MaxBackoff:        100 * time.Millisecond,
+		BackoffMultiplier: 2.0,
+		CrashLoopWindow:   1 * time.Hour,
+		CrashLoopCount:    3,
+		StabilityPeriod:   50 * time.Millisecond, // Short for testing: expiry = 100ms
+	}
+	rt := NewRestartTracker(t.TempDir(), cfg)
+
+	// Trigger crash loop
+	for i := 0; i < 3; i++ {
+		rt.RecordRestart("test-agent")
+	}
+
+	if !rt.IsInCrashLoop("test-agent") {
+		t.Fatal("expected agent to be in crash loop")
+	}
+	if rt.CanRestart("test-agent") {
+		t.Fatal("should NOT be able to restart agent in crash loop")
+	}
+
+	// Wait for crash-loop expiry (2 × StabilityPeriod = 100ms)
+	time.Sleep(110 * time.Millisecond)
+
+	// Crash loop should now be considered expired
+	if rt.IsInCrashLoop("test-agent") {
+		t.Error("expected crash loop to be auto-expired after 2× StabilityPeriod")
+	}
+	if !rt.CanRestart("test-agent") {
+		t.Error("expected CanRestart to be true after crash-loop expiry")
+	}
+}
+
+func TestRestartTracker_CrashLoopNotExpiredWithinWindow(t *testing.T) {
+	cfg := RestartTrackerConfig{
+		InitialBackoff:    10 * time.Millisecond,
+		MaxBackoff:        100 * time.Millisecond,
+		BackoffMultiplier: 2.0,
+		CrashLoopWindow:   1 * time.Hour,
+		CrashLoopCount:    3,
+		StabilityPeriod:   1 * time.Hour, // Long: expiry = 2h — won't expire in test
+	}
+	rt := NewRestartTracker(t.TempDir(), cfg)
+
+	// Trigger crash loop
+	for i := 0; i < 3; i++ {
+		rt.RecordRestart("test-agent")
+	}
+
+	// Should still be in crash loop (nowhere near 2h expiry)
+	if !rt.IsInCrashLoop("test-agent") {
+		t.Error("expected agent to still be in crash loop within expiry window")
+	}
+	if rt.CanRestart("test-agent") {
+		t.Error("should NOT be able to restart during active crash loop")
+	}
+}
+
 func TestRestartTracker_SaveAndLoad(t *testing.T) {
 	townRoot := t.TempDir()
 	daemonDir := filepath.Join(townRoot, "daemon")

@@ -1759,16 +1759,27 @@ func (d *Daemon) deaconGracePeriod() time.Duration {
 // - Grace period only applies if heartbeat is from BEFORE we started Deacon
 // - If heartbeat is from AFTER start but stale, Deacon is stuck
 func (d *Daemon) checkDeaconHeartbeat() {
-	// Respect crash-loop guard: if the restart tracker says Deacon is in a
-	// crash loop, do not kill the session — the guard is deliberately holding
-	// off restarts to break the cycle. (Fixes #2086)
-	if d.restartTracker != nil && d.restartTracker.IsInCrashLoop("deacon") {
-		d.logger.Printf("Deacon is in crash-loop state, skipping heartbeat kill check")
-		return
-	}
-
-	// Always read heartbeat first (PATCH-005)
+	// Always read heartbeat first — even in crash-loop state we need to know
+	// whether the deacon recovered (PATCH-005, PATCH-006).
 	hb := deacon.ReadHeartbeat(d.config.TownRoot)
+
+	// PATCH-006: Auto-clear crash-loop when heartbeat proves deacon is alive.
+	// Without this, a crash-loop flag set days ago permanently blocks restarts
+	// even after the deacon has recovered (e.g., via manual restart).
+	// Root cause of the 1h36m respawn-stall on 2026-05-23 (gc-1obg9).
+	if d.restartTracker != nil && d.restartTracker.IsInCrashLoop("deacon") {
+		if hb != nil && hb.IsFresh() {
+			d.logger.Printf("Deacon heartbeat is fresh despite crash-loop flag — auto-clearing crash loop")
+			d.restartTracker.ClearCrashLoop("deacon")
+			if err := d.restartTracker.Save(); err != nil {
+				d.logger.Printf("Warning: failed to save restart state after crash-loop clear: %v", err)
+			}
+			// Fall through to normal heartbeat check (deacon is healthy)
+		} else {
+			d.logger.Printf("Deacon is in crash-loop state, skipping heartbeat kill check")
+			return
+		}
+	}
 
 	sessionName := d.getDeaconSessionName()
 

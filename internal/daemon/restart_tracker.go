@@ -146,7 +146,7 @@ func (rt *RestartTracker) Save() error {
 	return os.WriteFile(rt.restartStateFile(), data, 0600)
 }
 
-// CanRestart checks if an agent can be restarted (not in backoff).
+// CanRestart checks if an agent can be restarted (not in backoff or crash loop).
 func (rt *RestartTracker) CanRestart(agentID string) bool {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
@@ -156,9 +156,13 @@ func (rt *RestartTracker) CanRestart(agentID string) bool {
 		return true
 	}
 
-	// Check if in crash loop
+	// Check if in crash loop (respects auto-expiry)
 	if !info.CrashLoopSince.IsZero() {
-		return false
+		crashLoopExpiry := 2 * rt.config.StabilityPeriod
+		if time.Since(info.CrashLoopSince) <= crashLoopExpiry {
+			return false
+		}
+		// Crash loop expired — fall through to backoff check
 	}
 
 	// Check backoff period
@@ -249,6 +253,11 @@ func (rt *RestartTracker) RecordSuccess(agentID string) {
 }
 
 // IsInCrashLoop returns true if the agent is detected as crash-looping.
+//
+// A crash-loop flag automatically expires after 2× StabilityPeriod (default: 1h).
+// This prevents a stale flag from permanently blocking restarts when the agent
+// has recovered externally (e.g., manual restart) but nothing in the daemon
+// called RecordSuccess or ClearCrashLoop. See gc-1obg9.
 func (rt *RestartTracker) IsInCrashLoop(agentID string) bool {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
@@ -257,7 +266,16 @@ func (rt *RestartTracker) IsInCrashLoop(agentID string) bool {
 	if !exists {
 		return false
 	}
-	return !info.CrashLoopSince.IsZero()
+	if info.CrashLoopSince.IsZero() {
+		return false
+	}
+
+	// Auto-expire: crash-loop flag older than 2× StabilityPeriod is stale.
+	crashLoopExpiry := 2 * rt.config.StabilityPeriod
+	if time.Since(info.CrashLoopSince) > crashLoopExpiry {
+		return false
+	}
+	return true
 }
 
 // GetBackoffRemaining returns how long until the agent can be restarted.
