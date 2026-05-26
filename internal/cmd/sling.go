@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -138,6 +139,7 @@ var (
 	slingFormula       string // --formula: override formula for dispatch (default: mol-polecat-work)
 	slingCrew          string // --crew: target a crew member in the specified rig
 	slingReviewOnly    bool   // --review-only: mark work as review-only (no merge/commit/push)
+	slingPriorityFloor string // --priority-floor: dispatch priority floor (normal/low/lowest)
 )
 
 func init() {
@@ -168,6 +170,7 @@ func init() {
 	slingCmd.Flags().StringVar(&slingFormula, "formula", "", "Formula to apply (default: mol-polecat-work for polecat targets)")
 	slingCmd.Flags().StringVar(&slingCrew, "crew", "", "Target a crew member in the specified rig (e.g., --crew mel with target gastown → gastown/crew/mel)")
 	slingCmd.Flags().BoolVar(&slingReviewOnly, "review-only", false, "Mark work as review-only: assignee evaluates and reports back, must NOT merge/commit/push")
+	slingCmd.Flags().StringVar(&slingPriorityFloor, "priority-floor", "", "Dispatch priority floor: normal (default), low, or lowest. Lower-priority beads yield to higher-priority ones when capacity is constrained")
 
 	slingCmd.AddCommand(slingRespawnResetCmd)
 	rootCmd.AddCommand(slingCmd)
@@ -235,6 +238,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		default:
 			return fmt.Errorf("invalid --merge value %q: must be direct, mr, or local", slingMerge)
 		}
+	}
+
+	// Validate --priority-floor flag if provided
+	var parsedPriorityFloor int
+	if slingPriorityFloor != "" {
+		pf, ok := capacity.ParsePriorityFloor(slingPriorityFloor)
+		if !ok {
+			return fmt.Errorf("invalid --priority-floor value %q: must be normal, low, or lowest", slingPriorityFloor)
+		}
+		parsedPriorityFloor = pf
 	}
 
 	// Validate --branch / --pr resume flags (gh#3602).
@@ -381,22 +394,23 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			}
 			beadID := slingOnTarget
 			return scheduleBead(beadID, rigName, ScheduleOptions{
-				Formula:      formulaName,
-				Args:         slingArgs,
-				Vars:         slingVars,
-				Merge:        slingMerge,
-				BaseBranch:   slingBaseBranch,
-				ResumeBranch: slingResumeBranch,
-				NoConvoy:     slingNoConvoy,
-				Owned:        slingOwned,
-				DryRun:       slingDryRun,
-				Force:        slingForce,
-				NoMerge:      slingNoMerge,
-				ReviewOnly:   slingReviewOnly,
-				Account:      slingAccount,
-				Agent:        slingAgent,
-				HookRawBead:  slingHookRawBead,
-				Ralph:        slingRalph,
+				Formula:       formulaName,
+				Args:          slingArgs,
+				Vars:          slingVars,
+				Merge:         slingMerge,
+				BaseBranch:    slingBaseBranch,
+				ResumeBranch:  slingResumeBranch,
+				NoConvoy:      slingNoConvoy,
+				Owned:         slingOwned,
+				DryRun:        slingDryRun,
+				Force:         slingForce,
+				NoMerge:       slingNoMerge,
+				ReviewOnly:    slingReviewOnly,
+				Account:       slingAccount,
+				Agent:         slingAgent,
+				HookRawBead:   slingHookRawBead,
+				Ralph:         slingRalph,
+				PriorityFloor: parsedPriorityFloor,
 			})
 		}
 	}
@@ -422,22 +436,23 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			formulaName = ""
 		}
 		return scheduleBead(slingOnTarget, rigName, ScheduleOptions{
-			Formula:      formulaName,
-			Args:         slingArgs,
-			Vars:         slingVars,
-			Merge:        slingMerge,
-			BaseBranch:   slingBaseBranch,
-			ResumeBranch: slingResumeBranch,
-			NoConvoy:     slingNoConvoy,
-			Owned:        slingOwned,
-			DryRun:       slingDryRun,
-			Force:        slingForce,
-			NoMerge:      slingNoMerge,
-			ReviewOnly:   slingReviewOnly,
-			Account:      slingAccount,
-			Agent:        slingAgent,
-			HookRawBead:  slingHookRawBead,
-			Ralph:        slingRalph,
+			Formula:       formulaName,
+			Args:          slingArgs,
+			Vars:          slingVars,
+			Merge:         slingMerge,
+			BaseBranch:    slingBaseBranch,
+			ResumeBranch:  slingResumeBranch,
+			NoConvoy:      slingNoConvoy,
+			Owned:         slingOwned,
+			DryRun:        slingDryRun,
+			Force:         slingForce,
+			NoMerge:       slingNoMerge,
+			ReviewOnly:    slingReviewOnly,
+			Account:       slingAccount,
+			Agent:         slingAgent,
+			HookRawBead:   slingHookRawBead,
+			Ralph:         slingRalph,
+			PriorityFloor: parsedPriorityFloor,
 		})
 	}
 
@@ -463,22 +478,23 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID := args[0]
 			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, rigName)
 			return scheduleBead(beadID, rigName, ScheduleOptions{
-				Formula:      formula,
-				Args:         slingArgs,
-				Vars:         slingVars,
-				Merge:        slingMerge,
-				BaseBranch:   slingBaseBranch,
-				ResumeBranch: slingResumeBranch,
-				NoConvoy:     slingNoConvoy,
-				Owned:        slingOwned,
-				DryRun:       slingDryRun,
-				Force:        slingForce,
-				NoMerge:      slingNoMerge,
-				ReviewOnly:   slingReviewOnly,
-				Account:      slingAccount,
-				Agent:        slingAgent,
-				HookRawBead:  slingHookRawBead,
-				Ralph:        slingRalph,
+				Formula:       formula,
+				Args:          slingArgs,
+				Vars:          slingVars,
+				Merge:         slingMerge,
+				BaseBranch:    slingBaseBranch,
+				ResumeBranch:  slingResumeBranch,
+				NoConvoy:      slingNoConvoy,
+				Owned:         slingOwned,
+				DryRun:        slingDryRun,
+				Force:         slingForce,
+				NoMerge:       slingNoMerge,
+				ReviewOnly:    slingReviewOnly,
+				Account:       slingAccount,
+				Agent:         slingAgent,
+				HookRawBead:   slingHookRawBead,
+				Ralph:         slingRalph,
+				PriorityFloor: parsedPriorityFloor,
 			})
 		}
 		// Dog targets (deacon/dogs, deacon/dogs/<name>, dog:, dog:<name>) fall through

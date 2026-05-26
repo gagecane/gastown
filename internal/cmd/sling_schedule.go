@@ -46,22 +46,23 @@ func shouldDeferDispatch() (bool, error) {
 
 // ScheduleOptions holds options for scheduling a bead.
 type ScheduleOptions struct {
-	Formula      string   // Formula to apply at dispatch time (e.g., "mol-polecat-work")
-	Args         string   // Natural language args for executor
-	Vars         []string // Formula variables (key=value)
-	Merge        string   // Merge strategy: direct/mr/local
-	BaseBranch   string   // Override base branch for polecat worktree
-	ResumeBranch string   // Resume an existing branch (gh#3602); mutually exclusive with BaseBranch
-	NoConvoy     bool     // Skip auto-convoy creation
-	Owned        bool     // Mark auto-convoy as caller-managed lifecycle
-	DryRun       bool     // Show what would be done without acting
-	Force        bool     // Force schedule even if bead is hooked/in_progress
-	NoMerge      bool     // Skip merge queue on completion
-	ReviewOnly   bool     // Review-only mode: assignee evaluates and reports back, no merge/commit/push
-	Account      string   // Claude Code account handle
-	Agent        string   // Agent override (e.g., "gemini", "codex")
-	HookRawBead  bool     // Hook raw bead without default formula
-	Ralph        bool     // Ralph Wiggum loop mode
+	Formula       string   // Formula to apply at dispatch time (e.g., "mol-polecat-work")
+	Args          string   // Natural language args for executor
+	Vars          []string // Formula variables (key=value)
+	Merge         string   // Merge strategy: direct/mr/local
+	BaseBranch    string   // Override base branch for polecat worktree
+	ResumeBranch  string   // Resume an existing branch (gh#3602); mutually exclusive with BaseBranch
+	NoConvoy      bool     // Skip auto-convoy creation
+	Owned         bool     // Mark auto-convoy as caller-managed lifecycle
+	DryRun        bool     // Show what would be done without acting
+	Force         bool     // Force schedule even if bead is hooked/in_progress
+	NoMerge       bool     // Skip merge queue on completion
+	ReviewOnly    bool     // Review-only mode: assignee evaluates and reports back, no merge/commit/push
+	Account       string   // Claude Code account handle
+	Agent         string   // Agent override (e.g., "gemini", "codex")
+	HookRawBead   bool     // Hook raw bead without default formula
+	Ralph         bool     // Ralph Wiggum loop mode
+	PriorityFloor int      // Dispatch priority floor (0=normal, 2=low, 4=lowest)
 }
 
 // checkSchedulePrefixParity enforces, at enqueue time, the same cross-rig
@@ -297,6 +298,9 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		fields.Mode = "ralph"
 	}
 	fields.Owned = opts.Owned
+	if opts.PriorityFloor > 0 {
+		fields.PriorityFloor = opts.PriorityFloor
+	}
 
 	// Create sling context bead in the target rig's beads dir so the rig's
 	// witness discovers it during patrol. (GH#3468)
@@ -345,25 +349,29 @@ func runBatchSchedule(beadIDs []string, rigName, townRoot string) error {
 
 	fmt.Printf("%s Scheduling %d beads to rig '%s'...\n", style.Bold.Render("📋"), len(beadIDs), rigName)
 
+	// Parse priority floor from global flag (already validated in runSling)
+	batchPriorityFloor, _ := capacity.ParsePriorityFloor(slingPriorityFloor)
+
 	successCount := 0
 	for _, beadID := range beadIDs {
 		formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, rigName)
 		err := scheduleBead(beadID, rigName, ScheduleOptions{
-			Formula:      formula,
-			Args:         slingArgs,
-			Vars:         slingVars,
-			NoConvoy:     slingNoConvoy,
-			Owned:        slingOwned,
-			Merge:        slingMerge,
-			BaseBranch:   slingBaseBranch,
-			ResumeBranch: slingResumeBranch,
-			DryRun:       false,
-			Force:        slingForce,
-			NoMerge:      slingNoMerge,
-			Account:      slingAccount,
-			Agent:        slingAgent,
-			HookRawBead:  slingHookRawBead,
-			Ralph:        slingRalph,
+			Formula:       formula,
+			Args:          slingArgs,
+			Vars:          slingVars,
+			NoConvoy:      slingNoConvoy,
+			Owned:         slingOwned,
+			Merge:         slingMerge,
+			BaseBranch:    slingBaseBranch,
+			ResumeBranch:  slingResumeBranch,
+			DryRun:        false,
+			Force:         slingForce,
+			NoMerge:       slingNoMerge,
+			Account:       slingAccount,
+			Agent:         slingAgent,
+			HookRawBead:   slingHookRawBead,
+			Ralph:         slingRalph,
+			PriorityFloor: batchPriorityFloor,
 		})
 		if err != nil {
 			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)

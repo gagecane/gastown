@@ -1,6 +1,44 @@
 package capacity
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
+
+// PriorityFloor constants define named priority floor levels.
+// Lower numeric value = higher priority = dispatched first.
+// Normal (0) is the default; Lowest (4) is never starves but always yields.
+const (
+	PriorityFloorNormal = 0 // Default: no floor applied
+	PriorityFloorLow    = 2 // Low priority, yields to normal
+	PriorityFloorLowest = 4 // Lowest priority — never starves user work
+)
+
+// ParsePriorityFloor converts a named priority floor string to its numeric value.
+// Returns (value, true) on success, (0, false) on unrecognized input.
+func ParsePriorityFloor(s string) (int, bool) {
+	switch strings.ToLower(s) {
+	case "normal", "":
+		return PriorityFloorNormal, true
+	case "low":
+		return PriorityFloorLow, true
+	case "lowest":
+		return PriorityFloorLowest, true
+	}
+	return 0, false
+}
+
+// PriorityFloorName returns the human-readable name for a priority floor value.
+func PriorityFloorName(floor int) string {
+	switch {
+	case floor <= PriorityFloorNormal:
+		return "normal"
+	case floor <= PriorityFloorLow:
+		return "low"
+	default:
+		return "lowest"
+	}
+}
 
 // PendingBead represents a bead that is scheduled and ready for dispatch evaluation.
 type PendingBead struct {
@@ -34,6 +72,7 @@ type SlingContextFields struct {
 	HookRawBead      bool   `json:"hook_raw_bead,omitempty"`
 	Owned            bool   `json:"owned,omitempty"`
 	Mode             string `json:"mode,omitempty"`
+	PriorityFloor    int    `json:"priority_floor,omitempty"` // 0=normal (default), higher=lower priority
 	DispatchFailures int    `json:"dispatch_failures,omitempty"`
 	LastFailure      string `json:"last_failure,omitempty"`
 }
@@ -121,6 +160,27 @@ func BlockerAware(readyIDs map[string]bool) ReadinessFilter {
 	}
 }
 
+// SortByPriorityFloor sorts pending beads by priority floor (ascending: lower
+// floor = higher priority = dispatched first). Within the same floor, the
+// existing order (typically enqueue time) is preserved via stable sort.
+// This ensures that beads with --priority-floor=lowest never starve user work.
+func SortByPriorityFloor(beads []PendingBead) {
+	sort.SliceStable(beads, func(i, j int) bool {
+		fi := priorityFloorOf(beads[i])
+		fj := priorityFloorOf(beads[j])
+		return fi < fj
+	})
+}
+
+// priorityFloorOf extracts the priority floor from a PendingBead's context.
+// Returns 0 (normal) if context is nil or floor is unset.
+func priorityFloorOf(b PendingBead) int {
+	if b.Context == nil {
+		return PriorityFloorNormal
+	}
+	return b.Context.PriorityFloor
+}
+
 // PlanDispatch computes which beads to dispatch given capacity constraints.
 // availableCapacity: free slots (positive = that many slots, <= 0 = no capacity).
 // batchSize: max beads per cycle.
@@ -130,6 +190,11 @@ func BlockerAware(readyIDs map[string]bool) ReadinessFilter {
 // filtered out defensively before any capacity math runs. They are inter-agent
 // communication artifacts and never dispatchable work; if any survived earlier
 // filtering they must not reach a polecat (gt-el4).
+//
+// Beads are sorted by priority floor before capacity limits are applied:
+// lower floor values (higher priority) are dispatched first. This guarantees
+// that --priority-floor=lowest beads never starve user work when capacity is
+// constrained.
 func PlanDispatch(availableCapacity, batchSize int, ready []PendingBead) DispatchPlan {
 	ready, msgSkipped := FilterMessagingBeads(ready)
 
@@ -139,6 +204,10 @@ func PlanDispatch(availableCapacity, batchSize int, ready []PendingBead) Dispatc
 		}
 		return DispatchPlan{Reason: "none"}
 	}
+
+	// Sort by priority floor: normal (0) before low (2) before lowest (4).
+	// Stable sort preserves FIFO ordering within the same priority level.
+	SortByPriorityFloor(ready)
 
 	if availableCapacity <= 0 {
 		return DispatchPlan{

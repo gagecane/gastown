@@ -320,6 +320,185 @@ func TestPlanDispatch_OnlyMessagingBeads(t *testing.T) {
 	}
 }
 
+func TestParsePriorityFloor(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    int
+		wantOK  bool
+	}{
+		{"normal", PriorityFloorNormal, true},
+		{"Normal", PriorityFloorNormal, true},
+		{"NORMAL", PriorityFloorNormal, true},
+		{"", PriorityFloorNormal, true},
+		{"low", PriorityFloorLow, true},
+		{"Low", PriorityFloorLow, true},
+		{"lowest", PriorityFloorLowest, true},
+		{"Lowest", PriorityFloorLowest, true},
+		{"LOWEST", PriorityFloorLowest, true},
+		{"invalid", 0, false},
+		{"high", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, ok := ParsePriorityFloor(tt.input)
+			if ok != tt.wantOK {
+				t.Errorf("ParsePriorityFloor(%q) ok = %v, want %v", tt.input, ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("ParsePriorityFloor(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPriorityFloorName(t *testing.T) {
+	tests := []struct {
+		floor int
+		want  string
+	}{
+		{0, "normal"},
+		{-1, "normal"},
+		{1, "low"},
+		{2, "low"},
+		{3, "lowest"},
+		{4, "lowest"},
+		{99, "lowest"},
+	}
+	for _, tt := range tests {
+		got := PriorityFloorName(tt.floor)
+		if got != tt.want {
+			t.Errorf("PriorityFloorName(%d) = %q, want %q", tt.floor, got, tt.want)
+		}
+	}
+}
+
+func TestSortByPriorityFloor(t *testing.T) {
+	beads := []PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-low", Context: &SlingContextFields{PriorityFloor: PriorityFloorLowest}},
+		{ID: "ctx-2", WorkBeadID: "gt-normal", Context: &SlingContextFields{PriorityFloor: PriorityFloorNormal}},
+		{ID: "ctx-3", WorkBeadID: "gt-also-normal", Context: &SlingContextFields{PriorityFloor: PriorityFloorNormal}},
+		{ID: "ctx-4", WorkBeadID: "gt-medium", Context: &SlingContextFields{PriorityFloor: PriorityFloorLow}},
+	}
+	SortByPriorityFloor(beads)
+
+	// Expect: normal (0), normal (0), low (2), lowest (4)
+	// Within same priority, original order preserved (stable sort)
+	expected := []string{"gt-normal", "gt-also-normal", "gt-medium", "gt-low"}
+	for i, want := range expected {
+		if beads[i].WorkBeadID != want {
+			t.Errorf("position %d: got %s, want %s", i, beads[i].WorkBeadID, want)
+		}
+	}
+}
+
+func TestSortByPriorityFloor_NilContext(t *testing.T) {
+	beads := []PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-lowest", Context: &SlingContextFields{PriorityFloor: PriorityFloorLowest}},
+		{ID: "ctx-2", WorkBeadID: "gt-nil"},     // nil context → treated as normal (0)
+		{ID: "ctx-3", WorkBeadID: "gt-normal", Context: &SlingContextFields{PriorityFloor: PriorityFloorNormal}},
+	}
+	SortByPriorityFloor(beads)
+
+	// nil context and PriorityFloor=0 should both come before lowest
+	if beads[0].WorkBeadID != "gt-nil" {
+		t.Errorf("position 0: got %s, want gt-nil (nil context = normal priority)", beads[0].WorkBeadID)
+	}
+	if beads[1].WorkBeadID != "gt-normal" {
+		t.Errorf("position 1: got %s, want gt-normal", beads[1].WorkBeadID)
+	}
+	if beads[2].WorkBeadID != "gt-lowest" {
+		t.Errorf("position 2: got %s, want gt-lowest", beads[2].WorkBeadID)
+	}
+}
+
+// TestPlanDispatch_PriorityFloorDispatchesUserFirst is the integration test for
+// the priority-floor mechanism (gu-k1ub acceptance criteria #9):
+//
+//	Two beads are enqueued: an auto-test bead with --priority-floor=lowest and a
+//	fixture user bead with normal priority. The dispatcher must return the user
+//	bead first regardless of submission order.
+func TestPlanDispatch_PriorityFloorDispatchesUserFirst(t *testing.T) {
+	// Simulate: auto-test bead enqueued FIRST (earlier enqueue time),
+	// user bead enqueued SECOND. With priority floor, user bead dispatches first.
+	candidates := []PendingBead{
+		{
+			ID:         "ctx-autotest",
+			WorkBeadID: "gt-autotest",
+			Context:    &SlingContextFields{PriorityFloor: PriorityFloorLowest, EnqueuedAt: "2026-01-01T00:00:00Z"},
+		},
+		{
+			ID:         "ctx-user",
+			WorkBeadID: "gt-user",
+			Context:    &SlingContextFields{PriorityFloor: PriorityFloorNormal, EnqueuedAt: "2026-01-01T00:01:00Z"},
+		},
+	}
+
+	// Only 1 slot available — must pick the user bead (normal priority)
+	plan := PlanDispatch(1, 10, candidates)
+
+	if len(plan.ToDispatch) != 1 {
+		t.Fatalf("expected 1 dispatched, got %d", len(plan.ToDispatch))
+	}
+	if plan.ToDispatch[0].WorkBeadID != "gt-user" {
+		t.Errorf("expected user bead (gt-user) to be dispatched first, got %s", plan.ToDispatch[0].WorkBeadID)
+	}
+	if plan.Skipped != 1 {
+		t.Errorf("expected 1 skipped (auto-test bead), got %d", plan.Skipped)
+	}
+}
+
+// TestPlanDispatch_PriorityFloorDoesNotStarve verifies that lowest-priority
+// beads are eventually dispatched when capacity is available.
+func TestPlanDispatch_PriorityFloorDoesNotStarve(t *testing.T) {
+	candidates := []PendingBead{
+		{
+			ID:         "ctx-autotest",
+			WorkBeadID: "gt-autotest",
+			Context:    &SlingContextFields{PriorityFloor: PriorityFloorLowest},
+		},
+		{
+			ID:         "ctx-user",
+			WorkBeadID: "gt-user",
+			Context:    &SlingContextFields{PriorityFloor: PriorityFloorNormal},
+		},
+	}
+
+	// 2 slots available — both should dispatch, user first
+	plan := PlanDispatch(2, 10, candidates)
+
+	if len(plan.ToDispatch) != 2 {
+		t.Fatalf("expected 2 dispatched, got %d", len(plan.ToDispatch))
+	}
+	if plan.ToDispatch[0].WorkBeadID != "gt-user" {
+		t.Errorf("expected user bead first, got %s", plan.ToDispatch[0].WorkBeadID)
+	}
+	if plan.ToDispatch[1].WorkBeadID != "gt-autotest" {
+		t.Errorf("expected auto-test bead second, got %s", plan.ToDispatch[1].WorkBeadID)
+	}
+}
+
+// TestPlanDispatch_PriorityFloorFIFOWithinSameLevel verifies FIFO ordering
+// is preserved among beads with the same priority floor.
+func TestPlanDispatch_PriorityFloorFIFOWithinSameLevel(t *testing.T) {
+	candidates := []PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-first", Context: &SlingContextFields{PriorityFloor: PriorityFloorLowest}},
+		{ID: "ctx-2", WorkBeadID: "gt-second", Context: &SlingContextFields{PriorityFloor: PriorityFloorLowest}},
+		{ID: "ctx-3", WorkBeadID: "gt-third", Context: &SlingContextFields{PriorityFloor: PriorityFloorLowest}},
+	}
+
+	plan := PlanDispatch(2, 10, candidates)
+	if len(plan.ToDispatch) != 2 {
+		t.Fatalf("expected 2 dispatched, got %d", len(plan.ToDispatch))
+	}
+	// Within the same floor, FIFO order is preserved
+	if plan.ToDispatch[0].WorkBeadID != "gt-first" {
+		t.Errorf("expected gt-first at position 0, got %s", plan.ToDispatch[0].WorkBeadID)
+	}
+	if plan.ToDispatch[1].WorkBeadID != "gt-second" {
+		t.Errorf("expected gt-second at position 1, got %s", plan.ToDispatch[1].WorkBeadID)
+	}
+}
+
 func TestSplitVars(t *testing.T) {
 	tests := []struct {
 		name  string
