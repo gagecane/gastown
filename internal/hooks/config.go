@@ -272,11 +272,16 @@ func Merge(base, override *HooksConfig) *HooksConfig {
 // The successor picks up hooked work via SessionStart hook (gt prime --hook).
 func DefaultOverrides() map[string]*HooksConfig {
 	return map[string]*HooksConfig{
-		// Polecats: auto-run gt done on session Stop (gas-lob).
+		// Polecats: auto-run gt done on session Stop (gas-lob, gs-lrz).
 		// Catches the "idle polecat" problem: polecats that finish work but
 		// forget to call gt done before the session ends. The polecat-stop-check
 		// command is idempotent — it checks heartbeat state and branch commits
 		// before deciding whether to run gt done.
+		//
+		// gt costs record is preserved here because same-matcher entries in the
+		// override replace the base entirely (see mergeEntries in merge.go). Without
+		// it, the polecat override silently dropped autonomous cost accounting that
+		// the base Stop hook provides for every other role.
 		//
 		// The polecat-slack-notify hook posts a session-end Slack summary
 		// (commits, bead, duration) via an optional local script. It's gated
@@ -290,6 +295,10 @@ func DefaultOverrides() map[string]*HooksConfig {
 						{
 							Type:    "command",
 							Command: gtCommand("gt tap polecat-stop-check"),
+						},
+						{
+							Type:    "command",
+							Command: gtCommand("gt costs record &"),
 						},
 						{
 							Type:    "command",
