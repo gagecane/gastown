@@ -23,6 +23,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +74,17 @@ var (
 // shows `--duration=24h` as the example; we make that the actual
 // default so the common case doesn't require the flag at all.
 const pauseDurationDefault = 24 * time.Hour
+
+// statusTimeout is the hard deadline for `gt auto-test-pr status`.
+// Per acceptance criterion: "status timeout fast (<=2s) when Dolt is
+// degraded". The status command is a read-only operator query; if Dolt
+// is wedged or slow, it's better to fail fast with a clear message
+// than to block for the default 60s subprocess timeout.
+const statusTimeout = 2 * time.Second
+
+// statusTimeoutFn is the indirection point for tests. Production code
+// returns statusTimeout; tests can override to test timeout behavior.
+var statusTimeoutFn = func() time.Duration { return statusTimeout }
 
 // historyLastDefault is the default --last for `history`. Mirrors the
 // synthesis CLI surface (line 316): `history --rig=<rig> [--last=10]`.
@@ -258,6 +270,38 @@ func loadTownStateForCLI(b *beads.Beads) (autotestpr.TownState, error) {
 	return autotestpr.LoadTownState(b)
 }
 
+// loadTownStateWithTimeout wraps loadTownStateForCLI with a context
+// deadline so the `status` verb fails fast (≤2s) when Dolt is
+// degraded, rather than blocking for the full subprocess timeout.
+// Returns ErrStatusTimeout (a distinct sentinel) on deadline so the
+// caller can render a human-friendly degraded-Dolt message.
+func loadTownStateWithTimeout(b *beads.Beads, timeout time.Duration) (autotestpr.TownState, error) {
+	type result struct {
+		state autotestpr.TownState
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		s, err := loadTownStateForCLI(b)
+		ch <- result{s, err}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	select {
+	case r := <-ch:
+		return r.state, r.err
+	case <-ctx.Done():
+		return autotestpr.TownState{}, ErrStatusTimeout
+	}
+}
+
+// ErrStatusTimeout is returned when the status command's Dolt read
+// exceeds the ≤2s deadline. Callers render a degraded-Dolt notice
+// rather than propagating the raw context error.
+var ErrStatusTimeout = errors.New("status: Dolt read timed out (degraded)")
+
 // newAutoTestPRBeads returns a Beads wrapper rooted at the town root
 // with .beads/ resolved beneath it. The same pattern as the enable /
 // disable CLI verbs in auto_test_pr.go — kept as a small helper so
@@ -401,8 +445,13 @@ func runAutoTestPRStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	state, err := loadTownStateForCLI(bd)
+	state, err := loadTownStateWithTimeout(bd, statusTimeoutFn())
 	if err != nil {
+		if errors.Is(err, ErrStatusTimeout) {
+			fmt.Fprintln(stderr, "gt auto-test-pr status: Dolt read timed out (<=2s); Dolt may be degraded")
+			fmt.Fprintln(stderr, "  hint: check `gt dolt status` and retry")
+			return NewSilentExit(4)
+		}
 		return fmt.Errorf("reading town-state bead: %w", err)
 	}
 
