@@ -355,21 +355,31 @@ func ParseBugDiscoveredNotes(body string) []BugDiscovered {
 // fileBugBead creates a P2 bug bead in the rig's beads store, linked
 // to the cycle's MR bead via a label. Best-effort: errors are logged
 // but do not fail the handler.
+//
+// Idempotent: uses CreateIfNoDuplicate so re-processing the same event
+// (partial-failure retry) does not produce duplicate bug beads. The
+// title includes the truncated description, which serves as the dedup
+// key — if a bug bead with the same normalized title already exists,
+// the duplicate is suppressed.
 func (h *CycleCloseHandler) fileBugBead(rigName, mrID string, bug BugDiscovered) {
 	title := fmt.Sprintf("Bug from auto-test-pr: %s", truncate(bug.Description, 60))
 	desc := fmt.Sprintf("Discovered by auto-test-pr cycle.\nMR: %s\nRig: %s\n\n%s",
 		mrID, rigName, bug.Description)
 
-	_, err := h.Beads.Create(beads.CreateOptions{
+	_, created, err := h.Beads.CreateIfNoDuplicate(beads.CreateOptions{
 		Title:       title,
 		Description: desc,
-		Labels:      []string{"gt:auto-test-pr", "gt:bug-from-auto-test", fmt.Sprintf("mr:%s", mrID)},
+		Labels:      []string{"gt:bug", "gt:auto-test-pr", "gt:bug-from-auto-test", fmt.Sprintf("mr:%s", mrID)},
 		Priority:    2,
 		Actor:       "mayor/cycle-close-handler",
 		Rig:         rigName,
 	})
 	if err != nil {
 		h.logf("cycle-close-handler: failed to file bug bead for rig=%s mr=%s: %v", rigName, mrID, err)
+		return
+	}
+	if !created {
+		h.logf("cycle-close-handler: bug bead already exists for rig=%s mr=%s desc=%q (idempotent skip)", rigName, mrID, truncate(bug.Description, 40))
 		return
 	}
 	h.logf("cycle-close-handler: filed P2 bug bead for rig=%s mr=%s desc=%q", rigName, mrID, truncate(bug.Description, 40))

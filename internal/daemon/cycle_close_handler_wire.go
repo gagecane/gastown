@@ -37,7 +37,16 @@ func (d *Daemon) initMRCycleCloseHandler() {
 		return
 	}
 
-	b := beads.New(d.config.TownRoot)
+	// Use the in-process beadsdk.Storage (hq store) when available.
+	// This satisfies the acceptance criterion: "Attachment-bead writes go
+	// through in-process beadsdk.Storage (no bd subprocess fan-out)."
+	var b *beads.Beads
+	if hqStore := d.beadsStores["hq"]; hqStore != nil {
+		b = beads.NewWithStore(d.config.TownRoot, hqStore)
+	} else {
+		b = beads.New(d.config.TownRoot)
+		d.logger.Printf("cycle-close-handler: hq store not available, falling back to bd subprocess")
+	}
 
 	handler := &autotestpr.CycleCloseHandler{
 		Beads: b,
