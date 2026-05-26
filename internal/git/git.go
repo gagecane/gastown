@@ -1190,6 +1190,12 @@ func (g *Git) RecentCommits(n int) (string, error) {
 	return g.run("log", "--oneline", fmt.Sprintf("-%d", n))
 }
 
+// ForEachRef runs git for-each-ref with the given pattern and format string.
+// Returns the raw output as a string for caller-side parsing.
+func (g *Git) ForEachRef(pattern, format string) (string, error) {
+	return g.run("for-each-ref", "--format="+format, pattern)
+}
+
 // DeleteRemoteBranch deletes a branch on the remote.
 func (g *Git) DeleteRemoteBranch(remote, branch string) error {
 	_, err := g.runWithTimeout(pushTimeout, "push", remote, "--delete", branch)
