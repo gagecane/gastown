@@ -1,0 +1,504 @@
+description = """
+Auto-test-pr polecat formula for test improvement work.
+
+Extends mol-polecat-work with quality-gate steps (4a-g), the
+bug-discovery NOTES protocol, and the sandbox-wrapper integration.
+Supports two modes:
+
+- **mode=create** (default): Dispatched by the Mayor cycle to create a
+  new test-improvement MR from scratch. The polecat selects a
+  recently-churned source file, writes or improves unit tests, runs all
+  quality gates, and submits to the merge queue.
+
+- **mode=revise**: Dispatched by `gt auto-test-pr revise` (D17 manual
+  fallback) or by mol-pr-feedback-patrol (Phase 2). The polecat reads
+  args.revision from the dispatch envelope (prior comment thread + last
+  commit SHA + branch name), checks out the existing branch, addresses
+  reviewer feedback, runs the same quality gates, pushes a follow-up
+  commit, and emits the D19 reply step on each comment thread.
+
+## D19 Reply Step (mode=revise)
+
+After pushing the revision commit, the polecat replies on each
+originating comment thread with a templated banner:
+  (a) new commit SHA
+  (b) which gates passed
+  (c) one-line summary of what was changed
+
+Two paths:
+  1. args.revision.comment_id is set → reply on that specific thread.
+  2. args.revision.comment_id is empty → pick the most recent
+     non-resolved comment thread on the MR bead (D19 fallback).
+
+## Quality Gates (both modes)
+
+| Step | Gate | Failure |
+|------|------|---------|
+| 4a | coverage-delta (branch coverage, parsed via golang.org/x/tools/cover) | hard fail if delta ≤ 0 |
+| 4b | synthetic-mutant sanity (≤5 mutants, AST-aware, os.MkdirTemp sandbox) | hard fail if any new test passes when target line commented out |
+| 4c | flakiness rerun (go test -count=10 -run=<exact> ./<direct-package>) | hard fail if any flake |
+| 4d | tautology linter (4 sub-rules per synthesis §D19) | hard fail |
+| 4e | pre-push gitleaks scan (gitleaks detect --no-banner --redact) | hard fail; SEV-2 per Q6 |
+| 4f | output allow-list verifier (only same-package *_test.go, no integration/e2e/fuzz) | hard fail |
+| 4g | size-budget enforcer (max_files default 3, max_loc default 200) | hard fail |
+
+## Bug-Discovery NOTES Protocol
+
+If the polecat writes a candidate test that fails on main (i.e., it
+encodes correct behavior but the source is buggy), the polecat MUST exit
+with a BUG-DISCOVERED: NOTES section. It does NOT push a fix and does
+NOT open a test-only MR for the buggy area.
+
+## MR Labeling (Round 3 fix #6)
+
+At `gt done` time, the MR-bead MUST be labeled with both:
+  - `gt:auto-test-pr`
+  - `rig:<target_rig>` (read from dispatch envelope)
+
+The rig label is set once at create time and persists across the
+create-revise lifecycle. The cycle-close handler uses it for O(1)
+state-bead resolution.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | hook_bead | The issue ID being worked on |
+| base_branch | sling vars | Base branch to rebase on (default: main) |
+| mode | dispatch envelope | "create" or "revise" |
+| target_rig | dispatch envelope | Rig name for labeling |
+| mr_id | dispatch envelope | MR bead ID (revise mode only) |
+| commit_sha | dispatch envelope | Prior commit SHA (revise mode only) |
+| branch | dispatch envelope | Branch name (revise mode only) |
+| comment_id | dispatch envelope | Specific comment thread (revise mode, optional) |
+| size_budget_max_files | dispatch envelope | Max files allowed (default 3) |
+| size_budget_max_loc | dispatch envelope | Max added test LOC allowed (default 200) |
+| build_command | rig config | Build command (e.g., go build ./...) |
+| test_command | rig config | Test command (e.g., go test ./...) |
+| lint_command | rig config | Lint command. Empty = skip. |
+| typecheck_command | rig config | Type check command. Empty = skip. |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Gate hard-fail | Exit with NOTES explaining which gate failed and why |
+| Bug discovered | Exit with BUG-DISCOVERED: NOTES section; do NOT push |
+| Size budget exceeded | Exit with NOTES; no MR opened |
+| No unresolved thread (revise) | Reply on MR bead directly (not a thread) |
+| Branch conflict (revise) | Rebase, re-run gates; if unresolvable, escalate |"""
+formula = "mol-polecat-work-test-improver"
+version = 1
+
+[vars]
+[vars.issue]
+description = "The issue ID being worked on (set from hook_bead)"
+default = ""
+
+[vars.base_branch]
+description = "Base branch to rebase on (default: main)"
+default = "main"
+
+[vars.mode]
+description = "Execution mode: 'create' (new MR) or 'revise' (address feedback on existing MR)"
+default = "create"
+
+[vars.target_rig]
+description = "Target rig name for MR labeling (rig:<target_rig> label)"
+default = ""
+
+[vars.mr_id]
+description = "MR bead ID to revise (mode=revise only)"
+default = ""
+
+[vars.commit_sha]
+description = "Prior commit SHA to base revision on (mode=revise only)"
+default = ""
+
+[vars.branch]
+description = "Branch name to check out (mode=revise only)"
+default = ""
+
+[vars.comment_id]
+description = "Specific comment thread ID to address (mode=revise only; empty = most-recent fallback)"
+default = ""
+
+[vars.size_budget_max_files]
+description = "Maximum number of files allowed in the diff (size-budget gate 4g)"
+default = "3"
+
+[vars.size_budget_max_loc]
+description = "Maximum added test LOC allowed in the diff (size-budget gate 4g)"
+default = "200"
+
+[vars.build_command]
+description = "Build command (e.g., go build ./...). Empty = skip."
+default = ""
+
+[vars.test_command]
+description = "Test command (e.g., go test ./...). Empty = skip."
+default = ""
+
+[vars.lint_command]
+description = "Lint command. Empty = skip."
+default = ""
+
+[vars.typecheck_command]
+description = "Type check command. Empty = skip."
+default = ""
+
+[[steps]]
+id = "load-context"
+title = "Load context and verify assignment"
+description = """
+Initialize your session and understand your assignment.
+
+**1. Prime your environment:**
+```bash
+gt prime                    # Load role context
+bd prime                    # Load beads context
+```
+
+**2. Preflight check (validate connectivity):**
+```bash
+gt hook                     # Shows your hooked molecule
+bd show {{issue}}           # Reads your assignment
+```
+
+**3. Parse the dispatch envelope:**
+
+Read your sling-context args from the hook bead's description. Extract:
+- `mode`: "create" or "revise"
+- `target_rig`: the rig you're improving tests for
+- `mr_id`: (revise only) the MR bead to update
+- `commit_sha`: (revise only) the prior commit to base on
+- `branch`: (revise only) the branch to check out
+- `comment_id`: (revise only) specific thread to address
+
+**4. For mode=revise, validate the MR bead exists:**
+```bash
+bd show {{mr_id}}           # Must exist and carry gt:auto-test-pr label
+```
+
+**Exit criteria:** You understand the work, dispatch envelope is parsed,
+and (for revise) the MR bead is accessible."""
+
+[[steps]]
+id = "setup-branch"
+title = "Set up working branch"
+description = """
+Ensure you're on a clean branch ready for work.
+
+**mode=create path:**
+```bash
+git fetch origin
+git checkout -b auto-test/{{target_rig}}/{{issue}} origin/{{base_branch}}
+```
+
+**mode=revise path:**
+```bash
+git fetch origin
+git checkout -b {{branch}} origin/{{branch}}
+# Or if the branch doesn't exist remotely yet:
+git checkout {{branch}}
+git rebase origin/{{base_branch}}
+```
+
+**Verify clean state:**
+```bash
+git status                  # Working tree clean
+```
+
+**Exit criteria:** You're on the correct branch, rebased on latest base."""
+
+[[steps]]
+id = "implement"
+title = "Implement test improvements (create) or address feedback (revise)"
+description = """
+Do the actual work.
+
+**mode=create:**
+1. Identify recently-churned source files in {{target_rig}}
+2. Select a file with low coverage or no existing tests
+3. Write focused unit tests that improve branch coverage
+4. Follow the conventions sheet (.gt/auto-test-pr/conventions.md)
+5. Stay within size budget: ≤{{size_budget_max_files}} files, ≤{{size_budget_max_loc}} added LOC
+
+**mode=revise:**
+1. Read the reviewer's comment(s) from the MR bead thread
+2. If {{comment_id}} is set, focus on that specific thread
+3. If {{comment_id}} is empty, address the most recent non-resolved thread
+4. Make targeted changes to address the feedback
+5. Stay within the existing test file(s) — do NOT add new files in revise mode
+
+**Bug-Discovery Protocol:**
+If you write a test that FAILS on main (the test is correct but the
+source has a bug), STOP. Do NOT push. Exit with BUG-DISCOVERED: NOTES:
+```
+BUG-DISCOVERED:
+- File: <file:line>
+- Expected: <what the test asserts>
+- Actual: <what the source does>
+- Test source: <the candidate test code>
+```
+
+**Commit frequently:**
+```bash
+git add <files>
+git commit -m "test(auto-test-pr): <description> ({{issue}})"
+```
+
+**Exit criteria:** Implementation complete, changes committed."""
+
+[[steps]]
+id = "gate-coverage-delta"
+title = "Gate 4a: Coverage delta (branch mode)"
+description = """
+Verify the new/modified tests improve branch coverage.
+
+**Run coverage on the affected package(s):**
+```bash
+go test -coverprofile=/tmp/cover-new.out -covermode=set ./<package>/...
+```
+
+**Parse the coverage delta:**
+The delta must be > 0 (branch coverage improved). If delta ≤ 0, the
+tests do not contribute meaningful coverage — hard fail.
+
+**Hard fail behavior:**
+If coverage delta ≤ 0, exit with NOTES explaining which package(s)
+showed no improvement and what lines remain uncovered.
+
+**Exit criteria:** Branch coverage delta > 0 for at least one affected package."""
+
+[[steps]]
+id = "gate-mutant-sanity"
+title = "Gate 4b: Synthetic mutant sanity"
+description = """
+Verify tests actually detect regressions via mutation testing.
+
+**For each new test function:**
+1. Identify the target source line(s) being tested
+2. Generate ≤5 AST-aware mutants (comment out / negate / zero)
+3. Run each mutant in an os.MkdirTemp sandbox (outside worktree)
+4. The test MUST fail for each mutant
+
+**Hard fail behavior:**
+If any new test still passes when its target line is commented out,
+the test is vacuous — hard fail.
+
+**Exit criteria:** All new tests detect at least one mutation of their target."""
+
+[[steps]]
+id = "gate-flakiness"
+title = "Gate 4c: Flakiness rerun"
+description = """
+Verify tests are deterministic.
+
+```bash
+go test -count=10 -run="<exact-test-names>" ./<direct-package>
+```
+
+Run ONLY the exact test functions you added/modified, in the direct
+package (not recursive ./...).
+
+**Hard fail behavior:**
+If any test fails on any of the 10 runs, it is flaky — hard fail.
+
+**Exit criteria:** All new/modified tests pass 10/10 runs."""
+
+[[steps]]
+id = "gate-tautology"
+title = "Gate 4d: Tautology linter"
+description = """
+Verify tests are not trivially true (tautologies).
+
+Four sub-rules:
+(i) ≥1 assertion must depend on the function-under-test's return value
+    or observable side effect
+(ii) Reject tests where every assertion is literal-vs-literal
+     (e.g., assert.Equal("x", "x"))
+(iii) Reject tests whose only assertions against the SUT are
+      NotNil/NotEmpty/truthy checks
+(iv) Reject assert(true) / expect(x).toBe(x) / zero-assertion tests
+
+**Hard fail behavior:**
+If any new test function violates any sub-rule, hard fail with the
+specific rule and test function named.
+
+**Exit criteria:** All new test functions pass all 4 tautology sub-rules."""
+
+[[steps]]
+id = "gate-gitleaks"
+title = "Gate 4e: Pre-push gitleaks scan"
+description = """
+Ensure no secrets are leaked in the diff.
+
+```bash
+gitleaks detect --no-banner --redact --source=. --log-opts="origin/{{base_branch}}..HEAD"
+```
+
+**Hard fail behavior:**
+Any finding is a hard fail (SEV-2 per Q6). Do NOT push. Exit with
+NOTES naming the finding (redacted).
+
+**Exit criteria:** gitleaks reports zero findings."""
+
+[[steps]]
+id = "gate-allowlist"
+title = "Gate 4f: Output allow-list verifier"
+description = """
+Verify all changed files match the allowed output pattern.
+
+**Rules:**
+- Every changed file in the diff matches `**/*_test.go`
+- No file is under `integration/`, `e2e/`, or `test/` directories
+- No file has `//go:build integration` build tag
+- Every new top-level test function matches `func Test*(t *testing.T)`
+- Reject `Benchmark*`, `Example*`, `Fuzz*`, and non-`Test*` forms
+
+**Hard fail behavior:**
+If any file violates the allow-list, hard fail naming the offending
+file and rule.
+
+**Exit criteria:** All changed files pass the allow-list check."""
+
+[[steps]]
+id = "gate-size-budget"
+title = "Gate 4g: Size budget enforcer"
+description = """
+Verify the diff stays within the dispatched size budget.
+
+**Count:**
+- Files added/modified in the diff
+- Added test LOC (lines added that are not blank or comments)
+
+**Hard fail behavior:**
+- files > {{size_budget_max_files}} → hard fail
+- added_test_loc > {{size_budget_max_loc}} → hard fail
+
+Exit with NOTES if budget exceeded. No MR is opened.
+
+**Exit criteria:** files ≤ {{size_budget_max_files}} AND
+added_test_loc ≤ {{size_budget_max_loc}}."""
+
+[[steps]]
+id = "d19-reply"
+title = "D19: Reply to comment threads (mode=revise only)"
+description = """
+**This step runs ONLY in mode=revise. Skip if mode=create.**
+
+After the revision commit is pushed, reply on the originating comment
+thread(s) with the D19 templated banner.
+
+**1. Determine the target thread:**
+- If {{comment_id}} is set: reply on that thread directly.
+- If {{comment_id}} is empty: find the most recent non-resolved comment
+  thread on the MR bead and reply there.
+
+**2. Format the reply banner:**
+```
+🤖 **Auto-Test-PR Revision**
+- **Commit:** `<first-8-chars-of-SHA>`
+- **Gates passed:** <comma-separated list>
+- **Summary:** <one-line description of what changed>
+```
+
+For manual dispatches (no --comment-id), use:
+```
+🤖 **Auto-Test-PR Manual Revision**
+- **Dispatched by:** <actor>
+- **Commit:** `<first-8-chars-of-SHA>`
+- **Gates passed:** <comma-separated list>
+- **Summary:** <one-line description of what changed>
+```
+
+**3. Post the reply:**
+In v1 (Refinery mode), create a bead-comment on the MR bead threaded
+against the review-comment bead:
+```bash
+bd update {{mr_id}} --notes "D19 reply on thread {{comment_id}}:
+<reply banner text>"
+```
+
+**Exit criteria:** Reply posted on the target thread. If no unresolved
+thread exists and no comment_id was given, post on the MR bead directly
+as a fallback."""
+
+[[steps]]
+id = "label-mr"
+title = "Label MR bead (both modes)"
+description = """
+Ensure the MR bead carries the required labels for cycle-close handler
+resolution.
+
+**Required labels (Round 3 fix #6):**
+- `gt:auto-test-pr` — identifies this as an auto-test-pr MR
+- `rig:{{target_rig}}` — O(1) linkage for cycle-close handler
+
+**mode=create:** Labels are set when the MR bead is created at `gt done`
+time (the merge queue submit path).
+
+**mode=revise:** The MR bead already has these labels (set at create
+time). Verify they are present:
+```bash
+bd show {{mr_id}} | grep "gt:auto-test-pr"
+bd show {{mr_id}} | grep "rig:{{target_rig}}"
+```
+
+If labels are missing (edge case — bead corruption), add them:
+```bash
+bd update {{mr_id}} --add-label "gt:auto-test-pr" --add-label "rig:{{target_rig}}"
+```
+
+**Exit criteria:** MR bead carries both required labels."""
+
+[[steps]]
+id = "pre-merge-rebase"
+title = "Pre-merge rebase and gate verification"
+description = """
+Rebase onto the target branch and re-run gates to enable fast-path merge.
+
+```bash
+git fetch origin {{base_branch}}
+git rebase origin/{{base_branch}}
+```
+
+If rebase conflicts in mode=revise:
+- Resolve carefully (the revision addressed specific feedback)
+- Re-run all gates after resolution
+
+**Run the full gate suite:**
+```bash
+{{build_command}}
+{{test_command}}
+```
+
+**Exit criteria:** Branch rebased onto latest target, all gates pass."""
+
+[[steps]]
+id = "submit"
+title = "Submit work"
+description = """
+Submit your work to the merge queue.
+
+**Pre-flight:**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline   # Must show ≥1 commit
+git status                                        # Must be clean
+```
+
+**For mode=create:**
+```bash
+gt done --pre-verified --target {{base_branch}}
+```
+The merge queue submit path adds the `gt:auto-test-pr` and
+`rig:{{target_rig}}` labels to the MR bead automatically.
+
+**For mode=revise:**
+```bash
+gt done --pre-verified --target {{base_branch}}
+```
+The MR bead already exists and carries the correct labels.
+
+**Exit criteria:** Work submitted, sandbox nuked, session exited."""
