@@ -262,12 +262,12 @@ func loadTownStateForCLI(b *beads.Beads) (autotestpr.TownState, error) {
 // with .beads/ resolved beneath it. The same pattern as the enable /
 // disable CLI verbs in auto_test_pr.go — kept as a small helper so
 // the five verbs share identical resolution.
-func newAutoTestPRBeads() (*beads.Beads, string, error) {
+func newAutoTestPRBeads() (*beads.Beads, error) {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
-		return nil, "", fmt.Errorf("locating town root: %w", err)
+		return nil, fmt.Errorf("locating town root: %w", err)
 	}
-	return beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads")), townRoot, nil
+	return beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads")), nil
 }
 
 // validateRigOrAll enforces the mutually-exclusive --rig / --all
@@ -316,7 +316,7 @@ func runAutoTestPRPause(cmd *cobra.Command, args []string) error {
 		Now:    now,
 	}
 
-	bd, _, err := newAutoTestPRBeads()
+	bd, err := newAutoTestPRBeads()
 	if err != nil {
 		return err
 	}
@@ -355,7 +355,7 @@ func runAutoTestPRResume(cmd *cobra.Command, args []string) error {
 		OverrideCircuitBreaker: autoTestPRResumeOverride,
 	}
 
-	bd, _, err := newAutoTestPRBeads()
+	bd, err := newAutoTestPRBeads()
 	if err != nil {
 		return err
 	}
@@ -396,7 +396,7 @@ func runAutoTestPRStatus(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 
-	bd, _, err := newAutoTestPRBeads()
+	bd, err := newAutoTestPRBeads()
 	if err != nil {
 		return err
 	}
@@ -479,7 +479,7 @@ func runAutoTestPRShow(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 
-	bd, _, err := newAutoTestPRBeads()
+	bd, err := newAutoTestPRBeads()
 	if err != nil {
 		return err
 	}
@@ -561,7 +561,7 @@ func runAutoTestPRHistory(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 
-	bd, _, err := newAutoTestPRBeads()
+	bd, err := newAutoTestPRBeads()
 	if err != nil {
 		return err
 	}
