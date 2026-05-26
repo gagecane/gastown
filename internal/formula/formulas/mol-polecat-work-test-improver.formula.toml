@@ -1,0 +1,749 @@
+description = """
+Polecat work lifecycle for auto-test-pr (mode=create): extends mol-polecat-work
+with five quality-gate steps between implement and commit.
+
+This molecule guides a polecat through writing new unit tests for a target file,
+then validates the tests via five hard-fail quality gates before committing and
+submitting to the merge queue.
+
+## Extends mol-polecat-work
+
+Idiomatic extension per mol-polecat-work-monorepo-tdd (gu-deat). Steps 1-3 and
+5-8 match the parent formula identically; the implement step is specialized for
+test-writing, and five quality-gate steps (4a-4g) are inserted between implement
+and commit.
+
+## Quality Gates (all hard-fail)
+
+| Gate | Check |
+|------|-------|
+| 4a | coverage-delta — branch coverage delta must be > 0 |
+| 4b | synthetic-mutant sanity — ≤5 mutants per test, AST-aware |
+| 4c | flakiness rerun — `go test -count=10` must be green |
+| 4d | tautology linter — no trivial/tautological assertions |
+| 4e | gitleaks — no secrets in the diff |
+| 4f | output allow-list verifier — only same-package *_test.go files |
+| 4g | size-budget enforcer — max_files and max_loc from dispatch envelope |
+
+Each gate runs through the hardened sandbox wrapper (internal/autotest/sandbox)
+which strips credential env vars, drops network egress after module-cache
+warm-up, pins CWD to the worktree, and caps wall-clock per gate at 5 min
+(cycle-wide cap 30 min).
+
+## Bug-Discovery NOTES Protocol
+
+If the polecat writes a candidate test that fails on main as-written (i.e., the
+test encodes correct behavior but the source is buggy), the polecat MUST exit
+with a structured NOTES section under heading `BUG-DISCOVERED:` containing:
+(a) the file:line, (b) the failing assertion's expected vs. actual, (c) the
+candidate test source. The polecat does NOT push a fix and does NOT open a
+test-only MR for the buggy area. Mayor's cycle-close handler files a separate
+P2 bug bead.
+
+## MR-Bead Labeling (Round 3 fix #6)
+
+At gt done time, the polecat MUST label the resulting MR-bead with both:
+- `gt:auto-test-pr` (identifies the MR as auto-test-pr output)
+- `rig:<target_rig>` (O(1) linkage from MR-bead to per-rig state bead)
+
+The rig:<target_rig> label is read from the dispatch envelope's `target_rig`
+field. Without it, the 3c cycle-close handler must walk the bead graph back
+through the dispatch bead to resolve which rig the MR belongs to.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | hook_bead | The issue ID you're assigned to work on |
+| base_branch | sling vars | The base branch to rebase on (default: main) |
+| target_rig | dispatch envelope | The rig this test PR targets |
+| conventions_sheet_path | dispatch envelope | Path to conventions.md |
+| size_budget_max_files | dispatch envelope | Max files in diff (default 3) |
+| size_budget_max_loc | dispatch envelope | Max added test LOC (default 200) |
+| setup_command | rig config | Setup/install command. Empty = skip. |
+| typecheck_command | rig config | Type check command. Empty = skip. |
+| test_command | rig config | Test command. Empty = skip. |
+| lint_command | rig config | Lint command. Empty = skip. |
+| build_command | rig config | Build command. Empty = skip. |
+| gates_commands | rig config | Pre-merge gate commands. Empty = use legacy fields. |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Gate fails | Fix the test, re-run the gate. After 3 attempts, exit with NOTES. |
+| Bug discovered | Exit with BUG-DISCOVERED: NOTES (do NOT fix the source). |
+| Build fails | Fix it. Do not proceed if it won't compile. |
+| Blocked on external | Mail Witness for help. |
+| Context filling | Use gt handoff to cycle to fresh session. |"""
+formula = "mol-polecat-work-test-improver"
+version = 1
+
+[[steps]]
+id = "load-context"
+title = "Load context and verify assignment"
+description = """
+Initialize your session and understand your assignment.
+
+**1. Prime your environment:**
+```bash
+gt prime                    # Load role context
+bd prime                    # Load beads context
+```
+
+**2. Preflight check (validate connectivity):**
+```bash
+gt hook               # Shows your pinned molecule and hook_bead
+bd show {{issue}}           # Validates Dolt connectivity + reads your assignment
+```
+If `bd show` hangs or fails: run `gt dolt status` to check Dolt health.
+If Dolt is down: `gt escalate -s HIGH "Dolt: <symptom>"` — do NOT restart it yourself.
+
+The hook_bead is your assigned issue. Read the output of `bd show` carefully.
+The bead description contains the dispatch envelope JSON with:
+- `args.mode` — MUST be "create" for this formula path
+- `args.targets[]` — files to write tests for, with uncovered branches
+- `args.conventions_sheet_path` — path to conventions.md (MUST exist)
+- `args.size_budget` — max files and LOC for this cycle
+- `target_rig` — the rig this PR targets
+
+**3. Read the conventions sheet:**
+```bash
+cat {{conventions_sheet_path}}
+```
+This file constrains what you are allowed to write. If it does not exist,
+HARD FAIL: exit with `gt escalate` — the dispatch gate should have caught this.
+
+**4. Check inbox for additional context:**
+```bash
+gt mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**5. Understand the requirements:**
+- Which file(s) are targeted?
+- Which branches are uncovered?
+- What is the size budget?
+- What conventions must be followed?
+
+**6. Verify you can proceed:**
+- No unresolved blockers on the issue
+- Conventions sheet exists and is readable
+- Target files exist in the worktree
+- Required resources are available
+
+If blocked or unclear, mail Witness immediately:
+```bash
+gt mail send <rig>/witness -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the dispatch envelope, have read the conventions
+sheet, and can begin writing tests."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. Create a fresh branch (auto-test-pr uses a fixed naming convention):**
+```bash
+git fetch origin
+git checkout -b auto-test/{{target_rig}}/{{issue}} origin/{{base_branch}}
+```
+
+The branch name MUST match the `auto-test/<rig>/<bead-id>` convention per
+C-SEC-6 (branch-namespace contract). The branch-GC patrol
+(mol-auto-test-pr-branch-gc) is scoped to this prefix only.
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+```
+
+**4. Run project setup (if configured):**
+
+If setup_command is set, run it to install dependencies:
+```bash
+{{setup_command}}
+```
+
+Empty setup_command means "not configured" — skip this step.
+
+**Exit criteria:** You're on a clean feature branch named
+`auto-test/<target_rig>/<issue>`, rebased on latest {{base_branch}}."""
+
+[[steps]]
+id = "implement"
+title = "Write test code for target file(s)"
+needs = ["branch-setup"]
+description = """
+Write unit tests for the uncovered branches specified in the dispatch envelope.
+
+**Constraints (from conventions sheet + PRD):**
+- ONLY write `func Test*(t *testing.T)` functions
+- ONLY write in same-package `*_test.go` files
+- NO files under `integration/`, `e2e/`, or `test/` directories
+- NO `//go:build integration` build tag
+- NO `Benchmark*`, `Example*`, `Fuzz*` functions
+- Every new test MUST carry the D8 provenance marker:
+  `// gt:auto-test-pr origin=<bead-id> covers=<file:line>`
+- Respect size budget: max {{size_budget_max_files}} files,
+  max {{size_budget_max_loc}} added test LOC
+- Prefer uncovered branches close to recent churn (NG5)
+
+**Working principles:**
+- Follow existing codebase test conventions
+- Make atomic, focused commits
+- Keep changes scoped to the dispatch targets
+- Do NOT fix bugs in the source code (this is a test-only MR)
+
+**Bug-Discovery Protocol (CRITICAL):**
+If you write a test that fails on `main` as-written, and the test encodes
+correct behavior (i.e., the source has a bug, not your test), you MUST:
+1. Do NOT push the test
+2. Do NOT fix the source
+3. Persist the finding to the bead:
+```bash
+bd update {{issue}} --notes "BUG-DISCOVERED:
+file: <path>:<line>
+expected: <what the code should do per spec>
+actual: <what the code does>
+candidate_test: <paste the failing test source here>"
+```
+4. Exit the cycle: `gt done --status DEFERRED`
+
+**Commit the test code:**
+```bash
+git add <test-files>
+git commit -m "feat(auto-test-pr): add tests for <target> ({{issue}})"
+```
+
+**Exit criteria:** Test code committed to git. `git status` shows clean
+working tree. `git log origin/{{base_branch}}..HEAD` shows at least 1 commit."""
+
+[[steps]]
+id = "gate-4a-coverage-delta"
+title = "Gate 4a: Coverage delta verification"
+needs = ["implement"]
+description = """
+Verify that the new tests actually cover previously-uncovered branches.
+
+**Run through sandbox:**
+All gate commands run via the hardened sandbox wrapper which strips credential
+env vars, pins CWD, and caps wall-clock at 5 min.
+
+**1. Collect baseline coverage (before your tests):**
+```bash
+# Run tests WITHOUT your new test file(s) to get the before profile
+git stash push -m "gate-4a: stash new tests"
+go test -coverprofile=/tmp/before.cov -covermode=set ./path/to/target/package/...
+git stash pop
+```
+
+**2. Collect coverage WITH your new tests:**
+```bash
+go test -coverprofile=/tmp/after.cov -covermode=set ./path/to/target/package/...
+```
+
+**3. Compute branch delta:**
+The branch delta counts basic blocks that transitioned from Count==0 (before)
+to Count>0 (after). Uses `internal/autotest.BranchDelta()` logic.
+
+Parse both profiles and verify that:
+- Branch delta > 0 (at least one new branch covered)
+- The marker comment alone DOES NOT satisfy this (it lives in source, not profiles)
+
+**HARD FAIL if branch delta ≤ 0.** Fix your test to actually exercise uncovered
+branches, then re-run this gate.
+
+**Exit criteria:** Branch coverage delta is positive. New tests exercise at
+least one previously-uncovered basic block."""
+
+[[steps]]
+id = "gate-4b-mutant-sanity"
+title = "Gate 4b: Synthetic-mutant sanity"
+needs = ["gate-4a-coverage-delta"]
+description = """
+Verify that new tests actually detect behavioral changes via mutation testing.
+
+**Mutation selection (AST-aware):**
+- Mutate ONLY lines marked covered-by-the-test (from the after coverage profile)
+- Fixed mutation grammar:
+  (i) comment-out-line
+  (ii) negate-boolean (flip `!` / swap `==` ↔ `!=`)
+- ≤5 mutants per test function
+- Mutations run in `os.MkdirTemp` outside the worktree (D6 isolation)
+
+**Run through sandbox:**
+For each new test function:
+1. Copy the target package to a temp directory
+2. Apply ≤5 mutations to covered lines (one at a time)
+3. Run the specific test against the mutated code
+4. The test MUST fail on at least one mutation
+
+**HARD FAIL if any new test still passes when its target line is commented out
+or its boolean is negated.** This indicates the test does not actually depend
+on the exercised code path — it's a tautology or no-op test.
+
+Fix: strengthen the test assertions to depend on the function-under-test's
+actual return value or observable side effect.
+
+**Exit criteria:** All new test functions detect at least one synthetic mutant.
+No test passes against all mutations."""
+
+[[steps]]
+id = "gate-4c-flakiness"
+title = "Gate 4c: Flakiness rerun"
+needs = ["gate-4b-mutant-sanity"]
+description = """
+Verify that new tests are deterministic by running them multiple times.
+
+**Run through sandbox:**
+```bash
+go test -count=10 -run="<ExactTestNames>" ./<direct-package>
+```
+
+Where `<ExactTestNames>` is the `|`-separated regex of all newly-added
+test function names (e.g., `TestQueue_LeaseExpired|TestQueue_NilClaim`).
+
+Run ONLY in the direct package containing the test (not `./...`). This
+bounds the blast radius and keeps the gate fast.
+
+**HARD FAIL if any run produces a failure.** A flaky test would cause
+reviewer fatigue and erode trust in the auto-test-pr system.
+
+Fix: identify the source of non-determinism (time, randomness, global state,
+goroutine races) and make the test hermetic. If the test genuinely depends on
+timing, add appropriate synchronization or use `testing.Short()` guards.
+
+**Exit criteria:** All 10 runs green. No flakiness detected."""
+
+[[steps]]
+id = "gate-4d-tautology"
+title = "Gate 4d: Tautology linter"
+needs = ["gate-4c-flakiness"]
+description = """
+Verify that new tests contain meaningful assertions, not tautologies.
+
+**Tautology heuristic (4 sub-rules, all must pass):**
+
+(i) **SUT dependency:** ≥1 assertion must depend on the function-under-test's
+    return value or observable side effect. A test that never calls the
+    function it claims to test is rejected.
+
+(ii) **No literal-vs-literal:** reject tests where every assertion is
+     literal-vs-literal (e.g., `assert.Equal("x", "x")` or
+     constant-vs-constant).
+
+(iii) **No trivial-only assertions:** reject tests whose only assertions
+      against the SUT are `NotNil`/`NotEmpty`/truthy checks. At least one
+      assertion must verify a specific value or behavior.
+
+(iv) **No vacuous assertions:** reject `assert(true)` / `expect(x).toBe(x)` /
+     zero-assertion tests. Every test must have at least one assertion that
+     could plausibly fail.
+
+**Run through sandbox:**
+Uses the AST-aware tautology linter at `internal/autotestpr/tautology/`.
+The linter parses the test file, identifies assertions via `go/ast`, and
+checks each sub-rule.
+
+**HARD FAIL if any sub-rule triggers.** Fix the test to include meaningful
+assertions that verify actual behavior.
+
+**Exit criteria:** All new tests pass the tautology linter (all 4 sub-rules)."""
+
+[[steps]]
+id = "gate-4e-gitleaks"
+title = "Gate 4e: Pre-push gitleaks scan"
+needs = ["gate-4d-tautology"]
+description = """
+Scan for secrets in the diff before pushing.
+
+**Run through sandbox:**
+```bash
+gitleaks detect --no-banner --redact
+```
+
+This scans the current working tree for secrets (API keys, tokens,
+credentials, connection strings).
+
+**HARD FAIL if any secret is detected.** This is SEV-2 per Q6 — secrets
+in test code are particularly dangerous because they often end up in
+CI logs and public code search indices.
+
+Fix: remove the secret and use a test fixture or mock instead. NEVER
+commit real credentials in test files.
+
+**Exit criteria:** gitleaks reports zero findings."""
+
+[[steps]]
+id = "gate-4f-output-allowlist"
+title = "Gate 4f: Output allow-list verifier"
+needs = ["gate-4e-gitleaks"]
+description = """
+Verify that the diff contains ONLY permitted file types and test forms.
+
+**Allow-list rules (all must pass):**
+
+1. **File pattern:** Every changed file in the diff matches `**/*_test.go`
+   (no production code changes allowed in an auto-test-pr MR).
+
+2. **Directory restriction:** Changed files are NOT under `integration/`,
+   `e2e/`, or `test/` directories (only same-package `_test.go` files).
+
+3. **Build tag restriction:** No changed file has a `//go:build integration`
+   build tag in its first comment block.
+
+4. **Test form restriction:** Every newly-added top-level test function in
+   the diff matches `func Test*(t *testing.T)`. Reject `Benchmark*`,
+   `Example*`, `Fuzz*`, and any non-`Test*` form — these are not unit tests
+   per PRD Non-Goal NG2.
+
+**Verification:**
+```bash
+# List changed files in this branch
+git diff --name-only origin/{{base_branch}}...HEAD
+
+# For each file:
+# - Must end in _test.go
+# - Must NOT be under integration/, e2e/, or test/ directories
+# - Must NOT contain //go:build integration in first comment block
+# - All new top-level funcs must match: func Test[A-Z]*(t *testing.T)
+```
+
+**HARD FAIL if any rule is violated.** Fix: remove the offending file or
+function, or move it to a permitted location/form.
+
+**Exit criteria:** All changed files pass the output allow-list."""
+
+[[steps]]
+id = "gate-4g-size-budget"
+title = "Gate 4g: Size-budget enforcer"
+needs = ["gate-4f-output-allowlist"]
+description = """
+Verify that the diff stays within the dispatched size budget.
+
+**Budget limits (from dispatch envelope):**
+- `max_files`: {{size_budget_max_files}} (default 3)
+- `max_loc`: {{size_budget_max_loc}} (default 200)
+
+**Measurement:**
+```bash
+# Count files added/modified in diff
+FILES_CHANGED=$(git diff --name-only origin/{{base_branch}}...HEAD | wc -l)
+
+# Count added test LOC (only + lines, excluding blank lines and comments)
+ADDED_LOC=$(git diff origin/{{base_branch}}...HEAD --unified=0 | \
+  grep '^+' | grep -v '^+++' | grep -v '^+$' | grep -v '^+[[:space:]]*//' | wc -l)
+```
+
+**HARD FAIL if:**
+- `FILES_CHANGED > {{size_budget_max_files}}`
+- `ADDED_LOC > {{size_budget_max_loc}}`
+
+This is structural enforcement, not polecat self-judgment (D20). The gate
+is unforgeable — even if the polecat attempts to write more, this gate
+catches it.
+
+Fix: reduce the scope of your tests. Cover fewer branches per cycle.
+The cadence system will pick up remaining branches in future cycles.
+
+**Exit criteria:** Diff is within size budget (files ≤ {{size_budget_max_files}},
+LOC ≤ {{size_budget_max_loc}})."""
+
+[[steps]]
+id = "commit-changes"
+title = "Commit all implementation changes"
+needs = ["gate-4g-size-budget"]
+description = """
+Ensure ALL implementation work is committed IMMEDIATELY after gates pass.
+This step exists to prevent the #1 polecat failure mode: context exhaustion
+before code is committed. Commit NOW, review and build AFTER.
+
+**CRITICAL: You MUST commit all changes from implementation.**
+NEVER use `git checkout -- .` or `git restore .` to discard implementation work.
+ALWAYS commit ALL uncommitted changes from your implementation.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+
+**2. If there are ANY uncommitted changes, commit them now:**
+```bash
+git add -A && git commit -m "feat(auto-test-pr): add tests for target ({{issue}})"
+```
+
+**3. If working tree is already clean, that's fine — but you MUST still have commits (step 4).**
+
+**4. VERIFY commits exist (HARD GATE — do NOT close this step without passing):**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline
+```
+
+This MUST show at least 1 commit. If it shows NOTHING:
+- You have NOT completed your implementation. Do NOT close this step.
+- Go back to the implement step and do the work.
+- If the task genuinely requires no code changes (bug discovered, etc.),
+  you should have already exited via BUG-DISCOVERED protocol.
+- Do NOT proceed to review or build with zero commits.
+
+**5. VERIFY clean working tree:**
+```bash
+git status
+```
+Must show "nothing to commit, working tree clean".
+
+**Exit criteria:** Working tree clean AND at least 1 commit ahead of origin/{{base_branch}}."""
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["commit-changes"]
+description = """
+Review your own changes before the build check.
+
+**1. Review the diff:**
+```bash
+git diff origin/{{base_branch}}...HEAD     # All changes vs {{base_branch}}
+git log --oneline origin/{{base_branch}}..HEAD  # All commits
+```
+
+**2. Check for auto-test-pr-specific issues:**
+
+| Category | Look For |
+|----------|----------|
+| Conventions | D8 provenance marker on every test, NG2 forbidden forms |
+| Quality | Meaningful assertions, no tautologies, no trivial tests |
+| Scope | Only test files changed, within size budget |
+| Style | Matches existing test conventions in the rig |
+| Cruft | No debug prints, no commented code, no TODOs |
+
+**3. Verify MR labeling requirements:**
+Confirm that the branch name matches `auto-test/{{target_rig}}/{{issue}}`.
+At `gt done` time, the MR-bead will be labeled with:
+- `gt:auto-test-pr`
+- `rig:{{target_rig}}`
+
+**4. Fix issues found:**
+Don't just note them - fix them now. Amend or add commits as needed.
+
+**Exit criteria:** Changes are clean, conventions-compliant, and ready for build."""
+
+[[steps]]
+id = "build-check"
+title = "Build and sanity check"
+needs = ["self-review"]
+description = """
+Verify your changes compile and pass basic sanity checks.
+
+**1. Build (REQUIRED — must pass):**
+
+If build_command is set:
+```bash
+{{build_command}}
+```
+
+If setup_command is set (ensure new deps are installed):
+```bash
+{{setup_command}}
+```
+
+If typecheck_command is set:
+```bash
+{{typecheck_command}}
+```
+
+Empty commands mean "not configured" — skip silently.
+
+**2. If build fails:**
+- Fix it. Return to implement step if needed.
+- Do NOT submit broken code to the merge queue.
+
+**3. Run the new tests to confirm they pass:**
+```bash
+go test -run="<ExactTestNames>" ./<direct-package>
+```
+
+**4. Lint (OPTIONAL — run if configured and fast):**
+
+If lint_command is set:
+```bash
+{{lint_command}}
+```
+
+**Exit criteria:** Code compiles. New tests pass. Ready to submit."""
+
+[[steps]]
+id = "pre-verify"
+title = "Pre-merge rebase verification"
+needs = ["build-check"]
+description = """
+Rebase onto the target branch and run the full gate suite. This enables the
+refinery to fast-path merge your MR without re-running gates (~5s merge
+instead of minutes).
+
+**1. Fetch and rebase onto target:**
+```bash
+git fetch origin {{base_branch}}
+git rebase origin/{{base_branch}}
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Re-run the build to ensure the resolution is correct
+- If stuck, mail Witness
+
+**2. Run the full gate suite on the rebased result:**
+
+Run ALL configured gates (not just targeted tests — this is the full verification).
+
+If gates_commands is set, run each gate in order — stop on first failure:
+
+```bash
+{{gates_commands}}
+```
+
+If the block above is empty, fall back to legacy command fields:
+
+If build_command is set:
+```bash
+{{build_command}}
+```
+
+If typecheck_command is set:
+```bash
+{{typecheck_command}}
+```
+
+If lint_command is set:
+```bash
+{{lint_command}}
+```
+
+If test_command is set:
+```bash
+{{test_command}}
+```
+
+Empty commands mean "not configured" — skip silently.
+
+**3. If any gate fails after rebase:**
+- Fix the issue, commit, and re-run from step 1
+- Do NOT proceed with --pre-verified if gates failed
+
+**4. If all gates pass:**
+You will use `gt done --pre-verified` in the next step.
+
+**Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, all configured gates pass."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit work and self-clean"
+needs = ["pre-verify"]
+description = """
+Submit your work and clean up. You cease to exist after this step.
+
+**Pre-flight: Verify you have actual work to submit (HARD GATE):**
+```bash
+git log origin/{{base_branch}}..HEAD --oneline
+```
+This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
+
+**MR-Bead Labeling (MANDATORY — Round 3 fix #6):**
+
+At `gt done` time, the resulting MR-bead MUST be labeled with BOTH:
+1. `gt:auto-test-pr` — identifies this as an auto-test-pr output
+2. `rig:{{target_rig}}` — O(1) linkage to per-rig state bead
+
+The `gt done` command for auto-test-pr MUST include these labels:
+```bash
+gt done --pre-verified --target {{base_branch}} \
+  --label gt:auto-test-pr \
+  --label rig:{{target_rig}}
+```
+
+Without `rig:{{target_rig}}`, the 3c cycle-close handler must walk the bead
+graph back through the dispatch bead to resolve which rig the MR belongs to.
+
+You should see output like:
+```
+✓ Work submitted to merge queue
+  MR ID: gt-xxxxx
+  Source: auto-test/{{target_rig}}/{{issue}}
+  Target: {{base_branch}}
+  Issue: {{issue}}
+  Labels: gt:auto-test-pr, rig:{{target_rig}}
+✓ Sandbox nuked
+✓ Session exiting
+```
+
+**What happens next (not your concern):**
+- Refinery batches MRs and runs gates on the merged stack
+- If green: MR merges to {{base_branch}}
+- If red: Refinery bisects to isolate the culprit
+- Refinery's cycle-close handler transitions the rig state bead
+- Mayor files a bug bead if BUG-DISCOVERED: was in the NOTES
+
+You are NOT involved in any of that. You're gone. Done means gone.
+
+**Exit criteria:** Work submitted with both labels, sandbox nuked, session exited."""
+
+[vars]
+[vars.issue]
+description = "The issue ID assigned to this polecat"
+required = true
+
+[vars.base_branch]
+description = "The base branch to rebase on and compare against"
+default = "main"
+
+[vars.target_rig]
+description = "The rig this test PR targets (from dispatch envelope)"
+required = true
+
+[vars.conventions_sheet_path]
+description = "Path to the conventions.md file for this rig"
+default = ".gt/auto-test-pr/conventions.md"
+
+[vars.size_budget_max_files]
+description = "Maximum number of files allowed in the diff (from dispatch envelope)"
+default = "3"
+
+[vars.size_budget_max_loc]
+description = "Maximum added test LOC allowed (from dispatch envelope)"
+default = "200"
+
+[vars.setup_command]
+description = "Setup/install command (e.g., pnpm install). Empty = skip."
+default = ""
+
+[vars.typecheck_command]
+description = "Type check command (e.g., tsc --noEmit). Empty = skip."
+default = ""
+
+[vars.test_command]
+description = "Command to run tests (auto-detected from rig settings)"
+default = ""
+
+[vars.lint_command]
+description = "Command to run linting. Empty = skip."
+default = ""
+
+[vars.build_command]
+description = "Command to run build. Empty = skip."
+default = ""
+
+[vars.gates_commands]
+description = "Pre-merge gate commands from merge_queue.gates. Empty = use legacy *_command fields."
+default = ""
