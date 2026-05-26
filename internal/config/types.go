@@ -756,6 +756,146 @@ type RigSettings struct {
 	// full design. The block is operator-authored in the rig's settings JSON
 	// (operator/Mayor authority), not in the in-repo rig manifest.
 	AutoTestPR *AutoTestPRConfig `json:"auto_test_pr,omitempty"`
+
+	// UpstreamSync configures per-rig upstream sync behavior. Default-absent
+	// (nil) means disabled. When enabled, the Deacon patrol periodically
+	// checks the upstream remote for new commits and triggers a sync cycle
+	// (merge + CI gate + push). See .designs/cv-2s6tq/ for the design.
+	UpstreamSync *UpstreamSyncConfig `json:"upstream_sync,omitempty"`
+}
+
+// DefaultUpstreamSyncCadenceMinutes is the default cadence between
+// upstream sync checks (6 hours). This controls how often the Deacon's
+// patrol evaluates whether upstream has new commits to merge.
+const DefaultUpstreamSyncCadenceMinutes = 360
+
+// DefaultUpstreamSyncMaxConsecutiveFailures is the number of consecutive
+// failures before the circuit breaker pauses the rig's sync.
+const DefaultUpstreamSyncMaxConsecutiveFailures = 3
+
+// DefaultUpstreamSyncMaxAttempts is the bounded history size for the
+// per-rig state bead's attempts[] array. FIFO eviction past this cap.
+const DefaultUpstreamSyncMaxAttempts = 30
+
+// UpstreamSyncConfig represents per-rig upstream sync configuration.
+// It is operator-authored in the rig's settings JSON (not in-repo).
+// Default-absent (nil pointer on RigSettings) means upstream sync is
+// disabled for that rig.
+//
+// Design context: .designs/cv-2s6tq/data.md §"Configuration"
+type UpstreamSyncConfig struct {
+	// Enabled controls whether upstream sync runs for this rig.
+	Enabled bool `json:"enabled"`
+
+	// UpstreamRemote is the git remote name for the upstream repo.
+	// Default: "upstream".
+	UpstreamRemote string `json:"upstream_remote,omitempty"`
+
+	// UpstreamBranch is the branch to sync from on the upstream remote.
+	// Default: "main".
+	UpstreamBranch string `json:"upstream_branch,omitempty"`
+
+	// TargetBranch is the local/origin branch to sync into.
+	// Default: "main".
+	TargetBranch string `json:"target_branch,omitempty"`
+
+	// Strategy is the merge strategy: "merge" or "rebase".
+	// Default: "merge".
+	Strategy string `json:"strategy,omitempty"`
+
+	// CadenceMinutes is how often to check for upstream changes.
+	// Default: 360 (6 hours).
+	CadenceMinutes int `json:"cadence_minutes,omitempty"`
+
+	// GateCommands are the CI commands to run before pushing the merged
+	// result. Default: ["go build ./...", "go test ./...", "go vet ./..."].
+	GateCommands []string `json:"gate_commands,omitempty"`
+
+	// MaxConsecutiveFailures triggers a circuit breaker that pauses the
+	// rig's sync until manual resume. Default: 3.
+	MaxConsecutiveFailures int `json:"max_consecutive_failures,omitempty"`
+
+	// ConflictResolution controls how merge conflicts are handled:
+	//   "agent" (default) — dispatch a polecat to resolve conflicts
+	//   "escalate" — escalate to human (v1 fallback)
+	ConflictResolution string `json:"conflict_resolution,omitempty"`
+}
+
+// IsEnabled reports whether upstream sync is enabled for this rig.
+// Nil-safe: a nil config means disabled.
+func (c *UpstreamSyncConfig) IsEnabled() bool {
+	return c != nil && c.Enabled
+}
+
+// GetUpstreamRemote returns the configured upstream remote name,
+// defaulting to "upstream".
+func (c *UpstreamSyncConfig) GetUpstreamRemote() string {
+	if c == nil || c.UpstreamRemote == "" {
+		return "upstream"
+	}
+	return c.UpstreamRemote
+}
+
+// GetUpstreamBranch returns the configured upstream branch name,
+// defaulting to "main".
+func (c *UpstreamSyncConfig) GetUpstreamBranch() string {
+	if c == nil || c.UpstreamBranch == "" {
+		return "main"
+	}
+	return c.UpstreamBranch
+}
+
+// GetTargetBranch returns the configured target branch name,
+// defaulting to "main".
+func (c *UpstreamSyncConfig) GetTargetBranch() string {
+	if c == nil || c.TargetBranch == "" {
+		return "main"
+	}
+	return c.TargetBranch
+}
+
+// GetStrategy returns the configured merge strategy, defaulting to "merge".
+func (c *UpstreamSyncConfig) GetStrategy() string {
+	if c == nil || c.Strategy == "" {
+		return "merge"
+	}
+	return c.Strategy
+}
+
+// GetCadenceMinutes returns the configured cadence in minutes,
+// defaulting to DefaultUpstreamSyncCadenceMinutes.
+func (c *UpstreamSyncConfig) GetCadenceMinutes() int {
+	if c == nil || c.CadenceMinutes <= 0 {
+		return DefaultUpstreamSyncCadenceMinutes
+	}
+	return c.CadenceMinutes
+}
+
+// GetGateCommands returns the configured gate commands, defaulting to
+// the standard Go CI gates.
+func (c *UpstreamSyncConfig) GetGateCommands() []string {
+	if c == nil || len(c.GateCommands) == 0 {
+		return []string{"go build ./...", "go test ./...", "go vet ./..."}
+	}
+	return c.GateCommands
+}
+
+// GetMaxConsecutiveFailures returns the configured max consecutive
+// failures threshold, defaulting to DefaultUpstreamSyncMaxConsecutiveFailures.
+func (c *UpstreamSyncConfig) GetMaxConsecutiveFailures() int {
+	if c == nil || c.MaxConsecutiveFailures <= 0 {
+		return DefaultUpstreamSyncMaxConsecutiveFailures
+	}
+	return c.MaxConsecutiveFailures
+}
+
+// GetConflictResolution returns the configured conflict resolution mode,
+// defaulting to "agent".
+func (c *UpstreamSyncConfig) GetConflictResolution() string {
+	if c == nil || c.ConflictResolution == "" {
+		return "agent"
+	}
+	return c.ConflictResolution
 }
 
 // PolecatPoolConfig represents per-rig polecat pool settings.
