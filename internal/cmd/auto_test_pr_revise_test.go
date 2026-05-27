@@ -119,6 +119,94 @@ func TestExtractRigFromMRLabels_FirstRigWins(t *testing.T) {
 	}
 }
 
+func TestExtractRigFromMRLabels_PathTraversal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{
+			name:   "dot-dot-slash",
+			labels: []string{"rig:../../etc"},
+			want:   "",
+		},
+		{
+			name:   "slash in name",
+			labels: []string{"rig:foo/bar"},
+			want:   "",
+		},
+		{
+			name:   "backslash in name",
+			labels: []string{"rig:foo\\bar"},
+			want:   "",
+		},
+		{
+			name:   "dot-dot only",
+			labels: []string{"rig:.."},
+			want:   "",
+		},
+		{
+			name:   "space in name",
+			labels: []string{"rig:foo bar"},
+			want:   "",
+		},
+		{
+			name:   "null byte",
+			labels: []string{"rig:foo\x00bar"},
+			want:   "",
+		},
+		{
+			name:   "traversal skipped to valid",
+			labels: []string{"rig:../evil", "rig:legit_rig"},
+			want:   "legit_rig",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractRigFromMRLabels(tt.labels)
+			if got != tt.want {
+				t.Errorf("extractRigFromMRLabels(%v) = %q; want %q", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsValidRigComponent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"gastown_upstream", true},
+		{"my-rig", true},
+		{"rig123", true},
+		{"A_B-C", true},
+		{"", false},
+		{"..", false},
+		{"../etc", false},
+		{"foo/bar", false},
+		{"foo\\bar", false},
+		{"foo bar", false},
+		{"foo.bar", false},
+		{"foo\x00bar", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			got := isValidRigComponent(tt.input)
+			if got != tt.want {
+				t.Errorf("isValidRigComponent(%q) = %v; want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ReviseArgs JSON shape tests
 // ---------------------------------------------------------------------------

@@ -227,15 +227,37 @@ func runAutoTestPRRevise(cmd *cobra.Command, args []string) error {
 }
 
 // extractRigFromMRLabels extracts the rig name from labels in the form
-// "rig:<name>". Returns "" if no such label is found.
+// "rig:<name>". Returns "" if no such label is found or if the extracted
+// name fails validation (contains path separators, "..", or characters
+// outside the safe set [a-zA-Z0-9_-]).
 func extractRigFromMRLabels(labels []string) string {
 	const prefix = "rig:"
 	for _, l := range labels {
 		if len(l) > len(prefix) && l[:len(prefix)] == prefix {
-			return l[len(prefix):]
+			name := l[len(prefix):]
+			if !isValidRigComponent(name) {
+				continue
+			}
+			return name
 		}
 	}
 	return ""
+}
+
+// isValidRigComponent validates that a rig name is safe to use in
+// filepath.Join without path traversal. Allows only alphanumeric
+// characters, underscores, and hyphens (matching rigNameRe in
+// internal/proxy/git.go).
+func isValidRigComponent(s string) bool {
+	if len(s) == 0 || len(s) > 200 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // RigCycleState is the per-rig auto-test-pr state stored in the town-state
