@@ -45,17 +45,30 @@ OVERALL_RESULT="success"
 SUMMARY_LINES=()
 
 for RIG in $RIGS; do
-  CREW_DIR="${TOWN_ROOT}/${RIG}/crew/gagecane"
   RIG_PREFIX=$(python3 -c "import json; print(json.load(open('$RIGS_JSON'))['rigs']['$RIG']['beads']['prefix'])" 2>/dev/null || echo "")
 
   log "=== ${RIG} ==="
 
-  # Guard 1: crew checkout exists
-  if [ ! -d "$CREW_DIR/.git" ]; then
-    log "  no crew/gagecane checkout, skipping"
+  # Guard 1: locate crew checkout (auto-discover first crew/<name>/.git
+  # under this rig). Historically this hardcoded crew/gagecane, but every
+  # rig in this town now uses crew/canewiw — see gu-9a1g. Auto-discovery
+  # makes the plugin resilient to future crew renames.
+  CREW_DIR=""
+  CREW_PARENT="${TOWN_ROOT}/${RIG}/crew"
+  if [ -d "$CREW_PARENT" ]; then
+    for candidate in "$CREW_PARENT"/*/; do
+      if [ -d "${candidate}.git" ]; then
+        CREW_DIR="${candidate%/}"
+        break
+      fi
+    done
+  fi
+  if [ -z "$CREW_DIR" ]; then
+    log "  no crew/<name>/.git checkout found under $CREW_PARENT, skipping"
     SUMMARY_LINES+=("$RIG: skipped (no crew checkout)")
     continue
   fi
+  log "  using crew checkout: $CREW_DIR"
 
   # Guard 2: not parked/docked or explicitly disabled
   if [ -n "$RIG_PREFIX" ]; then

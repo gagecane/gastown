@@ -51,8 +51,10 @@ syncs a rig if ALL of the following are true:
    pending MRs).
 6. No polecat has a `hook_bead` or `active_mr` set on the rig (no in-flight
    work that could conflict mid-merge).
-7. The local crew/gagecane checkout (used to perform the merge) has a
-   clean working tree and is currently on `gagecane/gt`.
+7. The local crew checkout (used to perform the merge) has a clean
+   working tree and is currently on `gagecane/gt`. The plugin
+   auto-discovers the first `crew/<name>/.git` directory under each rig,
+   so it works whether the crew is named `gagecane`, `canewiw`, etc.
 
 Any "no" → skip this rig, record a "skipped: <reason>" receipt, do not
 escalate.
@@ -77,9 +79,9 @@ label `sync-upstream:disabled` on its rig identity bead.
 
 ## Notes
 
-- The plugin operates on `crew/gagecane/<rig>` worktrees, NOT on
-  refinery/mayor clones — those are managed by other components and may
-  have stale tracking refs.
+- The plugin operates on `crew/<name>/` worktrees (auto-discovered;
+  currently `crew/canewiw` in this town), NOT on refinery/mayor clones —
+  those are managed by other components and may have stale tracking refs.
 - Merge commits are created with `--no-edit` so the receipt body stays
   predictable.
 - Unlike the v1 rebase strategy, polecat branches based on the previous
