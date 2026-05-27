@@ -139,10 +139,8 @@ func recordAttributionRun(townRoot, rigName, currentSHA string, passed bool, now
 	state.Rigs[rigName] = entry
 	if err := saveMainBranchTestState(townRoot, state); err != nil {
 		// Don't fail the patrol over a state-write hiccup — the next run
-		// re-establishes the baseline. Log via the package-default logger
-		// is not available here; callers that need observability should
-		// wrap this call.
-		_ = err
+		// re-establishes the baseline.
+		fmt.Fprintf(os.Stderr, "daemon: failed to save attribution state for rig %s: %v\n", rigName, err)
 	}
 }
 
