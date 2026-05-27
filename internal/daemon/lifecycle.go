@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,12 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
+
+// gitNetworkTimeout is the timeout for git commands that involve network I/O (fetch, pull).
+const gitNetworkTimeout = 60 * time.Second
+
+// gitLocalTimeout is the timeout for local git commands (status, stash push/pop).
+const gitLocalTimeout = 30 * time.Second
 
 // BeadsMessage represents a message from gt mail inbox --json.
 type BeadsMessage struct {
@@ -641,7 +648,9 @@ func (d *Daemon) syncWorkspace(workDir string) {
 	var stderr bytes.Buffer
 
 	// Fetch latest from origin
-	fetchCmd := exec.Command("git", "fetch", "origin")
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), gitNetworkTimeout)
+	defer fetchCancel()
+	fetchCmd := exec.CommandContext(fetchCtx, "git", "fetch", "origin")
 	fetchCmd.Dir = workDir
 	fetchCmd.Stderr = &stderr
 	fetchCmd.Env = os.Environ() // Inherit PATH to find git executable
@@ -664,7 +673,9 @@ func (d *Daemon) syncWorkspace(workDir string) {
 	stashed := false
 	if d.isWorkingTreeDirty(workDir) {
 		d.logger.Printf("Warning: dirty working tree in %s, auto-stashing before pull", workDir)
-		stashCmd := exec.Command("git", "stash", "push", "-u", "-m", "daemon-auto-stash: pre-sync")
+		stashCtx, stashCancel := context.WithTimeout(context.Background(), gitLocalTimeout)
+		defer stashCancel()
+		stashCmd := exec.CommandContext(stashCtx, "git", "stash", "push", "-u", "-m", "daemon-auto-stash: pre-sync")
 		stashCmd.Dir = workDir
 		stashCmd.Stderr = &stderr
 		stashCmd.Env = os.Environ()
@@ -683,7 +694,9 @@ func (d *Daemon) syncWorkspace(workDir string) {
 	}
 
 	// Pull with rebase to incorporate changes
-	pullCmd := exec.Command("git", "pull", "--rebase", "origin", defaultBranch)
+	pullCtx, pullCancel := context.WithTimeout(context.Background(), gitNetworkTimeout)
+	defer pullCancel()
+	pullCmd := exec.CommandContext(pullCtx, "git", "pull", "--rebase", "origin", defaultBranch)
 	pullCmd.Dir = workDir
 	pullCmd.Stderr = &stderr
 	pullCmd.Env = os.Environ() // Inherit PATH to find git executable
@@ -709,7 +722,9 @@ func (d *Daemon) syncWorkspace(workDir string) {
 	// Restore stashed changes if we stashed them
 	if stashed {
 		stderr.Reset()
-		popCmd := exec.Command("git", "stash", "pop")
+		popCtx, popCancel := context.WithTimeout(context.Background(), gitLocalTimeout)
+		defer popCancel()
+		popCmd := exec.CommandContext(popCtx, "git", "stash", "pop")
 		popCmd.Dir = workDir
 		popCmd.Stderr = &stderr
 		popCmd.Env = os.Environ()
@@ -729,7 +744,9 @@ func (d *Daemon) syncWorkspace(workDir string) {
 // isWorkingTreeDirty checks if a git working tree has uncommitted changes.
 func (d *Daemon) isWorkingTreeDirty(workDir string) bool {
 	// "git status --porcelain" outputs nothing if clean
-	cmd := exec.Command("git", "status", "--porcelain")
+	ctx, cancel := context.WithTimeout(context.Background(), gitLocalTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmd.Dir = workDir
 	cmd.Env = os.Environ()
 	util.SetDetachedProcessGroup(cmd)
