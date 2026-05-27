@@ -134,7 +134,7 @@ func init() {
 	doneCmd.Flags().StringVar(&doneReason, "reason", "", "Reason for DEFERRED/ESCALATED exit (recorded on bead notes)")
 	doneCmd.Flags().StringVar(&doneCleanupStatus, "cleanup-status", "", "Git cleanup status: clean, uncommitted, unpushed, stash, unknown (ZFC: agent-observed)")
 	doneCmd.Flags().BoolVar(&doneResume, "resume", false, "Resume from last checkpoint (auto-detected, for Witness recovery)")
-	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
+	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target). gt done re-runs the gates locally to verify the attestation; on red, the attestation is dropped and refinery runs gates normally (gu-xp5f).")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
 	doneCmd.Flags().StringVar(&doneDeferUntil, "defer-until", "", "For --status=DEFERRED: when the bead becomes dispatchable again (e.g., +6h, +1d, tomorrow). Default: "+defaultDeferredOffset)
@@ -862,6 +862,27 @@ afterSafetyNet:
 				}
 			} else if skipReason != "" {
 				style.PrintWarning("branch is %d commits behind %s but %s; skipping auto-rebase", contam.Behind, contaminationBase, skipReason)
+			}
+		}
+
+		// gu-xp5f: If the polecat declared --pre-verified, re-run the rig's
+		// pre-merge gates here to verify the attestation against reality.
+		// Before this guard, --pre-verified was a pure trust claim — a polecat
+		// that observed a red gate could rationalize "pre-existing on mainline,
+		// not my fault" and bypass both the pre-push hook (gu-d416) AND the
+		// refinery's gate run (engineer.go fast-path). On gate failure we DROP
+		// the attestation rather than fail submission: the polecat's commits
+		// still get pushed and an MR bead still gets created, but the refinery
+		// runs gates normally and decides what to do with the red signal. This
+		// matches the gs-4bn auto-rebase invalidation pattern.
+		//
+		// We skip the verification when preVerifiedAttestationValid is already
+		// false (auto-rebase invalidated above) — re-running gates against a
+		// just-rebased branch costs the same as letting refinery do it, and
+		// risks the witness idle timeout (gu-d416) if the gates are slow.
+		if donePreVerified && preVerifiedAttestationValid && cwdAvailable {
+			if !verifyPreVerifiedAttestation(context.Background(), townRoot, rigName, cwd) {
+				preVerifiedAttestationValid = false
 			}
 		}
 

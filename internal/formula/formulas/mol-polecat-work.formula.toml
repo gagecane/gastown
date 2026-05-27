@@ -518,11 +518,24 @@ Empty commands mean "not configured" — skip silently.
 
 **3. If any gate fails after rebase:**
 - Fix the issue, commit, and re-run from step 1
-- Do NOT proceed with --pre-verified if gates failed
+- Do NOT proceed with --pre-verified if ANY gate is red — even if you believe
+  the failure is "pre-existing on mainline" or "not my fault" (gu-xp5f). The
+  --pre-verified flag is a verified attestation, not a judgment call:
+    * `gt done --pre-verified` re-runs these same gates locally before push
+      and drops the attestation on red, so claiming pre-verified on a red
+      gate buys you nothing — it just wastes the local gate run.
+    * The refinery is the authority on what to do with a red mainline. File
+      a bead about the suspected mainline regression and use plain `gt done`
+      (no --pre-verified). Refinery will see the red gate too and decide
+      whether to merge, bisect, or escalate.
+    * If the failure looks like a real regression you introduced, fix it.
+      Don't ship.
 
 **4. If all gates pass:**
 You will use `gt done --pre-verified` in the next step. This tells the refinery
 that you ran the full gate suite on a rebased branch, enabling fast-path merge.
+`gt done` will re-run the gates locally as a guard (gu-xp5f); on the green
+path this is fast and the attestation is preserved.
 
 **Note:** If this step takes too long or the gates are not configured for this
 project, you may skip this step and use `gt done` without --pre-verified.
