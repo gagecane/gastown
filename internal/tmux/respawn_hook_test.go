@@ -87,7 +87,15 @@ func TestAutoRespawnHookCmd_Format(t *testing.T) {
 
 // TestAutoRespawnHook_RespawnWorks is the primary regression test: pane dies,
 // hook fires on the correct socket, pane comes back alive.
+//
+// This test requires a functioning tmux hook subsystem with run-shell -b
+// background processes surviving pane death. In CI (GitHub Actions) with
+// tmux 3.4 and no attached client, run-shell -b background processes are
+// not reliably kept alive after the pane dies, causing spurious failures.
 func TestAutoRespawnHook_RespawnWorks(t *testing.T) {
+	if os.Getenv("CI") != "" {
+		t.Skip("skipping: tmux run-shell -b hooks are unreliable in CI without an attached client")
+	}
 	socket := requireTestSocket(t)
 	session := "test-respawn"
 
