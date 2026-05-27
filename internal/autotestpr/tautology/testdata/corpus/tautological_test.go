@@ -11,6 +11,7 @@ import (
 )
 
 // T01: Expected derived from same call's return field
+//
 //tautology:yes
 func TestTaut01_FieldFromSameReturn(t *testing.T) {
 	result := ParseConfig("input.json")
@@ -18,6 +19,7 @@ func TestTaut01_FieldFromSameReturn(t *testing.T) {
 }
 
 // T02: Expected derived by accessing field of FUT return
+//
 //tautology:yes
 func TestTaut02_ExpectedFromFUTField(t *testing.T) {
 	cfg := LoadSettings("/path")
@@ -26,6 +28,7 @@ func TestTaut02_ExpectedFromFUTField(t *testing.T) {
 }
 
 // T03: Expected built from FUT return via string method
+//
 //tautology:yes
 func TestTaut03_StringMethodOnReturn(t *testing.T) {
 	result := BuildMessage("hello")
@@ -33,6 +36,7 @@ func TestTaut03_StringMethodOnReturn(t *testing.T) {
 }
 
 // T04: Both sides from same multi-return function
+//
 //tautology:yes
 func TestTaut04_MultiReturnSameSource(t *testing.T) {
 	name, _ := SplitPath("/usr/local/bin")
@@ -40,6 +44,7 @@ func TestTaut04_MultiReturnSameSource(t *testing.T) {
 }
 
 // T05: Expected from indexing into FUT return slice
+//
 //tautology:yes
 func TestTaut05_IndexIntoFUTSlice(t *testing.T) {
 	items := ListItems("query")
@@ -49,6 +54,7 @@ func TestTaut05_IndexIntoFUTSlice(t *testing.T) {
 
 // T06: Expected from FUT return passed through len()
 // Note: len() is stdlib-setup, so this tests propagation
+//
 //tautology:yes
 func TestTaut06_LenOfFUTReturn(t *testing.T) {
 	items := ListItems("query")
@@ -57,6 +63,7 @@ func TestTaut06_LenOfFUTReturn(t *testing.T) {
 }
 
 // T07: Type assertion on FUT return used as expected
+//
 //tautology:yes
 func TestTaut07_TypeAssertOnFUT(t *testing.T) {
 	result := GetValue("key")
@@ -65,6 +72,7 @@ func TestTaut07_TypeAssertOnFUT(t *testing.T) {
 }
 
 // T08: Expected from FUT via intermediate variable chain
+//
 //tautology:yes
 func TestTaut08_IntermediateVarChain(t *testing.T) {
 	resp := FetchData("url")
@@ -74,6 +82,7 @@ func TestTaut08_IntermediateVarChain(t *testing.T) {
 }
 
 // T09: Expected from another method on same FUT return object
+//
 //tautology:yes
 func TestTaut09_MethodOnFUTObject(t *testing.T) {
 	obj := CreateObject("test")
@@ -81,6 +90,7 @@ func TestTaut09_MethodOnFUTObject(t *testing.T) {
 }
 
 // T10: Assert.True with comparison of FUT returns
+//
 //tautology:yes
 func TestTaut10_TrueWithFUTComparison(t *testing.T) {
 	a := ComputeHash("data")
@@ -89,6 +99,7 @@ func TestTaut10_TrueWithFUTComparison(t *testing.T) {
 }
 
 // T11: Expected from FUT range variable
+//
 //tautology:yes
 func TestTaut11_RangeOverFUT(t *testing.T) {
 	items := GetAll()
@@ -98,6 +109,7 @@ func TestTaut11_RangeOverFUT(t *testing.T) {
 }
 
 // T12: Expected from FUT via selector chain
+//
 //tautology:yes
 func TestTaut12_SelectorChain(t *testing.T) {
 	resp := GetResponse()
@@ -105,6 +117,7 @@ func TestTaut12_SelectorChain(t *testing.T) {
 }
 
 // T13: Both args tainted — actual from direct call, expected from stored
+//
 //tautology:yes
 func TestTaut13_StoredVsDirectCall(t *testing.T) {
 	stored := Transform("input")
@@ -113,6 +126,7 @@ func TestTaut13_StoredVsDirectCall(t *testing.T) {
 }
 
 // T14: Expected is FUT return error message
+//
 //tautology:yes
 func TestTaut14_ErrorMessageFromFUT(t *testing.T) {
 	_, err := Validate("bad input")
@@ -122,6 +136,7 @@ func TestTaut14_ErrorMessageFromFUT(t *testing.T) {
 }
 
 // T15: Expected from FUT return's sub-struct
+//
 //tautology:yes
 func TestTaut15_SubStructFromFUT(t *testing.T) {
 	result := BuildPlan("spec")
@@ -130,6 +145,7 @@ func TestTaut15_SubStructFromFUT(t *testing.T) {
 }
 
 // T16: Expected from FUT called twice with same args (idempotency "test")
+//
 //tautology:yes
 func TestTaut16_IdempotencyViaSameCall(t *testing.T) {
 	first := Normalize("  hello  ")
@@ -138,6 +154,7 @@ func TestTaut16_IdempotencyViaSameCall(t *testing.T) {
 }
 
 // T17: Expected derived from FUT via map lookup
+//
 //tautology:yes
 func TestTaut17_MapLookupFromFUT(t *testing.T) {
 	m := BuildIndex([]string{"a", "b", "c"})
@@ -146,6 +163,7 @@ func TestTaut17_MapLookupFromFUT(t *testing.T) {
 }
 
 // T18: Expected from FUT through conditional assignment
+//
 //tautology:yes
 func TestTaut18_ConditionalFromFUT(t *testing.T) {
 	result := Process("data")
@@ -157,6 +175,7 @@ func TestTaut18_ConditionalFromFUT(t *testing.T) {
 }
 
 // T19: Assert on length where both sides tainted
+//
 //tautology:yes
 func TestTaut19_LenBothTainted(t *testing.T) {
 	a := Filter(GetItems(), "pred")
@@ -165,6 +184,7 @@ func TestTaut19_LenBothTainted(t *testing.T) {
 }
 
 // T20: Expected from FUT via append (taint propagates)
+//
 //tautology:yes
 func TestTaut20_AppendFromFUT(t *testing.T) {
 	base := GetDefaults()
@@ -173,6 +193,7 @@ func TestTaut20_AppendFromFUT(t *testing.T) {
 }
 
 // T21: Struct literal with FUT field as expected
+//
 //tautology:yes
 func TestTaut21_StructFieldAsBothSides(t *testing.T) {
 	out := Generate("seed")
@@ -180,6 +201,7 @@ func TestTaut21_StructFieldAsBothSides(t *testing.T) {
 }
 
 // T22: Expected from method call on FUT-returned interface
+//
 //tautology:yes
 func TestTaut22_InterfaceMethodOnFUT(t *testing.T) {
 	svc := NewService("config")
@@ -187,6 +209,7 @@ func TestTaut22_InterfaceMethodOnFUT(t *testing.T) {
 }
 
 // T23: Expected from FUT via slice operation
+//
 //tautology:yes
 func TestTaut23_SliceOpOnFUT(t *testing.T) {
 	data := ReadAll("file")
@@ -195,6 +218,7 @@ func TestTaut23_SliceOpOnFUT(t *testing.T) {
 }
 
 // T24: FUT return compared to itself via different access paths
+//
 //tautology:yes
 func TestTaut24_DifferentAccessPaths(t *testing.T) {
 	m := ParseManifest("manifest.yaml")
@@ -204,6 +228,7 @@ func TestTaut24_DifferentAccessPaths(t *testing.T) {
 }
 
 // T25: Expected from FUT with taint through helper that wraps FUT
+//
 //tautology:yes
 func TestTaut25_WrappedFUT(t *testing.T) {
 	raw := Encode("data")

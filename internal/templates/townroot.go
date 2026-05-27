@@ -14,10 +14,11 @@ var townRootCLAUDEmdRaw string
 // Increment this when updating the template content with new sections.
 //
 // History:
-//   v1: initial extraction
-//   v2: add memory system + war room sections
-//   v3: replace footgun "kill -QUIT" Dolt diagnostic with `{{cmd}} dolt dump`
-//       (incident gc-wisp-2yc7); add stale-content detection in doctor check.
+//
+//	v1: initial extraction
+//	v2: add memory system + war room sections
+//	v3: replace footgun "kill -QUIT" Dolt diagnostic with `{{cmd}} dolt dump`
+//	    (incident gc-wisp-2yc7); add stale-content detection in doctor check.
 const TownRootCLAUDEmdVersion = 3
 
 // TownRootCLAUDEmd returns the canonical town-root CLAUDE.md content

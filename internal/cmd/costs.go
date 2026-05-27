@@ -38,7 +38,6 @@ var (
 	digestYesterday bool
 	digestDate      string
 	digestDryRun    bool
-
 )
 
 var costsCmd = &cobra.Command{
@@ -169,8 +168,8 @@ type TranscriptMessage struct {
 
 // TranscriptMessageBody contains the message content and usage info.
 type TranscriptMessageBody struct {
-	Model string          `json:"model"`
-	Role  string          `json:"role"`
+	Model string           `json:"model"`
+	Role  string           `json:"role"`
 	Usage *TranscriptUsage `json:"usage,omitempty"`
 }
 
@@ -1379,4 +1378,3 @@ func deleteSessionCostEntries(targetDate time.Time) (int, error) {
 
 	return deletedCount, nil
 }
-

@@ -622,7 +622,6 @@ func TestParseDurationOrDefault_AllWebTimeoutDefaults(t *testing.T) {
 	}
 }
 
-
 // --- PolecatPoolConfig ---
 
 func TestPolecatPoolConfigGetMaxConcurrent(t *testing.T) {

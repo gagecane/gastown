@@ -488,10 +488,10 @@ func isTestifyAssertion(name string) bool {
 		"assert.GreaterOrEqual": true, "assert.LessOrEqual": true,
 		"assert.Same": true, "assert.NotSame": true,
 		"assert.ElementsMatch": true,
-		"assert.JSONEq": true,
-		"assert.Equalf": true, "assert.NotEqualf": true,
+		"assert.JSONEq":        true,
+		"assert.Equalf":        true, "assert.NotEqualf": true,
 		"assert.Containsf": true,
-		"require.Equal": true, "require.NotEqual": true,
+		"require.Equal":    true, "require.NotEqual": true,
 		"require.True": true, "require.False": true,
 		"require.Nil": true, "require.NotNil": true,
 		"require.Contains": true, "require.NotContains": true,
@@ -500,8 +500,8 @@ func isTestifyAssertion(name string) bool {
 		"require.GreaterOrEqual": true, "require.LessOrEqual": true,
 		"require.Same": true, "require.NotSame": true,
 		"require.ElementsMatch": true,
-		"require.JSONEq": true,
-		"require.Equalf": true, "require.NotEqualf": true,
+		"require.JSONEq":        true,
+		"require.Equalf":        true, "require.NotEqualf": true,
 	}
 	return assertFuncs[name]
 }
@@ -545,12 +545,12 @@ func isLenAssertion(name string) bool {
 
 func isContainsAssertion(name string) bool {
 	contains := map[string]bool{
-		"assert.Contains":    true,
-		"assert.NotContains": true,
-		"assert.Containsf":  true,
+		"assert.Contains":     true,
+		"assert.NotContains":  true,
+		"assert.Containsf":    true,
 		"require.Contains":    true,
 		"require.NotContains": true,
-		"require.Containsf":  true,
+		"require.Containsf":   true,
 	}
 	return contains[name]
 }

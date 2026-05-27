@@ -297,4 +297,3 @@ func TestReapDeadAgentWisps_SkipsNonAgentAssignees(t *testing.T) {
 		}
 	}
 }
-

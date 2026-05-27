@@ -70,7 +70,7 @@ func TestMergeRules_R2_MixedSameAndDifferentMatchers(t *testing.T) {
 	}
 	overrides := map[string]*HooksConfig{
 		"deacon": {PreToolUse: []HookEntry{
-			he("Bash", h("deacon-bash")),  // R1: replaces
+			he("Bash", h("deacon-bash")),   // R1: replaces
 			he("Write", h("deacon-write")), // R2: adds
 		}},
 	}
@@ -91,7 +91,7 @@ func TestMergeRules_R3_EmptyListRemovesTypeFromBase(t *testing.T) {
 		PreCompact: []HookEntry{he("", h("base-precompact"))},
 	}
 	overrides := map[string]*HooksConfig{
-		"mayor": {Stop: []HookEntry{he("", /* empty hooks */)}},
+		"mayor": {Stop: []HookEntry{he("" /* empty hooks */)}},
 	}
 	got := MergeHooks(base, overrides, "mayor")
 	if len(got.Stop) != 0 {

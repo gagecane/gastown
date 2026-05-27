@@ -763,7 +763,6 @@ func formatEscalationSlackText(beadID, severity, description string) string {
 		emoji, strings.ToUpper(severity), beadID, description, beadID)
 }
 
-
 // sendEscalationEmail sends an escalation notification via SMTP.
 func sendEscalationEmail(cfg *config.EscalationConfig, beadID, severity, description string) error {
 	host := cfg.Contacts.SMTPHost

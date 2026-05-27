@@ -194,11 +194,11 @@ func TestFormatProblemLine_Stable(t *testing.T) {
 	// Spot-check every field. Don't assert exact column widths — that's
 	// cosmetic and would make the test brittle.
 	for _, want := range []string{
-		"gupp",        // state label
-		"🔥",           // state symbol
-		"45m",         // duration
-		"gu-xyz",      // bead ID
-		"myrig",       // rig
+		"gupp",         // state label
+		"🔥",            // state symbol
+		"45m",          // duration
+		"gu-xyz",       // bead ID
+		"myrig",        // rig
 		"polecat/rust", // role/name
 		"GUPP violation",
 	} {

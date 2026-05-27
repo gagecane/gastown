@@ -191,7 +191,6 @@ func issueFilterFromListOpts(opts ListOptions) beadsdk.IssueFilter {
 	return f
 }
 
-
 // storeList implements List using the in-process store.
 func (b *Beads) storeList(opts ListOptions) ([]*Issue, error) {
 	ctx, cancel := storeCtx()

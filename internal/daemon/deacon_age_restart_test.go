@@ -63,12 +63,12 @@ func TestCheckDeaconAge(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		maxAge           string                       // operational config value
-		sessionAge       time.Duration                // age of deacon's session
-		stores           map[string]beadsdk.Storage   // active-work backing
-		wantKillSessions int                          // tmux kill-session calls
-		wantLogContains  string                       // substring expected in logs
-		wantLogAbsent    string                       // substring NOT expected
+		maxAge           string                     // operational config value
+		sessionAge       time.Duration              // age of deacon's session
+		stores           map[string]beadsdk.Storage // active-work backing
+		wantKillSessions int                        // tmux kill-session calls
+		wantLogContains  string                     // substring expected in logs
+		wantLogAbsent    string                     // substring NOT expected
 	}{
 		{
 			name:             "disabled: no max-age config — no-op",
@@ -218,12 +218,12 @@ func TestCheckDeaconAge_ManualRestartFallback(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
-		maxAge           string
+		name               string
+		maxAge             string
 		sessionAgeFromTmux time.Duration // how old the tmux session_created reports
-		stores           map[string]beadsdk.Storage
-		wantKillSessions int
-		wantLogContains  []string
+		stores             map[string]beadsdk.Storage
+		wantKillSessions   int
+		wantLogContains    []string
 	}{
 		{
 			name:               "fallback: old tmux session, idle — restart fires",

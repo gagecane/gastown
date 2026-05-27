@@ -153,12 +153,12 @@ func TestPrimeFlagCombinations(t *testing.T) {
 	}()
 
 	cases := []struct {
-		name     string
-		hook     bool
-		dryRun   bool
-		state    bool
-		explain  bool
-		wantErr  string // expected substring; empty means expect nil
+		name    string
+		hook    bool
+		dryRun  bool
+		state   bool
+		explain bool
+		wantErr string // expected substring; empty means expect nil
 	}{
 		{name: "state_alone_is_valid", state: true},
 		{name: "state_with_hook_errors", state: true, hook: true, wantErr: "--state cannot be combined with other flags"},

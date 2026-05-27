@@ -5,11 +5,12 @@
 // feedback-patrol routing is not yet live (Phase 1).
 //
 // The CLI:
-//   (a) reads the MR bead
-//   (b) extracts comment thread + last commit SHA
-//   (c) CAS-transitions rig state bead mr-pending → mr-revising
-//   (d) files a sling-context bead with args.mode=revise
-//   (e) dispatches mol-polecat-work-test-improver
+//
+//	(a) reads the MR bead
+//	(b) extracts comment thread + last commit SHA
+//	(c) CAS-transitions rig state bead mr-pending → mr-revising
+//	(d) files a sling-context bead with args.mode=revise
+//	(e) dispatches mol-polecat-work-test-improver
 //
 // Design context: .designs/auto-test-pr/synthesis.md §D17
 // and §"Implementation Plan, Phase 0 task 2c".
@@ -264,10 +265,10 @@ func isValidRigComponent(s string) bool {
 // bead's RigSummary field. This is the Phase 0 shape — Phase 1 task 15
 // migrates to a per-rig pinned bead.
 type RigCycleState struct {
-	State        string `json:"state"`
-	LastTransAt  string `json:"last_transition_at,omitempty"`
-	LastActor    string `json:"last_actor,omitempty"`
-	CurrentMRID  string `json:"current_mr_id,omitempty"`
+	State       string `json:"state"`
+	LastTransAt string `json:"last_transition_at,omitempty"`
+	LastActor   string `json:"last_actor,omitempty"`
+	CurrentMRID string `json:"current_mr_id,omitempty"`
 }
 
 // casTransitionRigState performs a CAS (compare-and-swap) transition on

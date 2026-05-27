@@ -256,8 +256,8 @@ type rigsConfigBeadsConfig struct {
 }
 
 type rigsConfigFile struct {
-	Version int                         `json:"version"`
-	Rigs    map[string]rigsConfigEntry  `json:"rigs"`
+	Version int                        `json:"version"`
+	Rigs    map[string]rigsConfigEntry `json:"rigs"`
 }
 
 func loadRigsConfig(path string) (*rigsConfigFile, error) {
@@ -317,8 +317,8 @@ func (r *realDBPrefixGetter) GetDBPrefix(rigPath string) (string, error) {
 // would overwrite the shared database's prefix with the rig's prefix.
 type DatabasePrefixCheck struct {
 	FixableCheck
-	mismatches     []databasePrefixMismatch
-	prefixGetter   dbPrefixGetter
+	mismatches   []databasePrefixMismatch
+	prefixGetter dbPrefixGetter
 }
 
 type databasePrefixMismatch struct {

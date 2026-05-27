@@ -15,12 +15,12 @@ func withTightPolecatBackoff(t *testing.T) func() {
 	t.Helper()
 
 	prev := struct {
-		initial    time.Duration
-		max        time.Duration
-		mult       float64
-		window     time.Duration
-		count      int
-		stability  time.Duration
+		initial   time.Duration
+		max       time.Duration
+		mult      float64
+		window    time.Duration
+		count     int
+		stability time.Duration
 	}{
 		initial:   polecatBackoffInitial,
 		max:       polecatBackoffMax,

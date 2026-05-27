@@ -16,9 +16,9 @@ var (
 	mailType          string
 	mailReplyTo       string
 	mailNotify        bool
-	mailNoNotify      bool // Suppress auto-nudge notification to recipient
-	mailTo            string   // --to flag (alternative to positional arg)
-	mailFrom          string   // --from flag (override sender, for relay/bridge use)
+	mailNoNotify      bool   // Suppress auto-nudge notification to recipient
+	mailTo            string // --to flag (alternative to positional arg)
+	mailFrom          string // --from flag (override sender, for relay/bridge use)
 	mailSendSelf      bool
 	mailCC            []string // CC recipients
 	mailInboxJSON     bool
@@ -32,7 +32,7 @@ var (
 	mailThreadJSON    bool
 	mailReplySubject  string
 	mailReplyMessage  string
-	mailStdin         bool // Read message body from stdin
+	mailStdin         bool   // Read message body from stdin
 	mailConsumerBead  string // consumer_bead_id metadata: ID of the bead expected to consume this hooked mail (gu-ub1l)
 
 	// Search flags

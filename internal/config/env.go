@@ -670,7 +670,7 @@ func ShellQuote(s string) string {
 }
 
 // psQuote quotes a value for use in PowerShell $env: assignments.
-// Uses single quotes with embedded single quotes doubled ('').
+// Uses single quotes with embedded single quotes doubled (”).
 func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }

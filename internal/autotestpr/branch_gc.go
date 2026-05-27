@@ -3,15 +3,17 @@
 // Phase 0 task 9 (gu-gw35) — Standing patrol with two responsibilities:
 //
 // (a) Branch GC: list refs/heads/auto-test/*/*  branches across opted-in
-//     rigs, cross-reference against each rig's state bead and open MRs,
-//     delete branches >7 days old with no associated open MR or in-flight
-//     bead.
+//
+//	rigs, cross-reference against each rig's state bead and open MRs,
+//	delete branches >7 days old with no associated open MR or in-flight
+//	bead.
 //
 // (b) Attachment-bead retention (OQ4 fallback): list attachment beads via
-//     the gt:auto-test-pr-attachment label query and CLOSE (not delete)
-//     attachments outside their retention window:
-//     - kind:transition at age > 60d
-//     - kind:rejection at cooldown_until + 30d < now
+//
+//	the gt:auto-test-pr-attachment label query and CLOSE (not delete)
+//	attachments outside their retention window:
+//	- kind:transition at age > 60d
+//	- kind:rejection at cooldown_until + 30d < now
 //
 // Design context:
 //   - .designs/auto-test-pr/synthesis.md §"Phase 0 task 9"

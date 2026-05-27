@@ -271,9 +271,9 @@ type kiroEntry struct {
 
 // kiroDataBody is the "data" object for Prompt / AssistantMessage / ToolResults.
 type kiroDataBody struct {
-	MessageID string            `json:"message_id"`
-	Content   []kiroContent     `json:"content"`
-	Meta      *kiroMeta         `json:"meta,omitempty"`
+	MessageID string        `json:"message_id"`
+	Content   []kiroContent `json:"content"`
+	Meta      *kiroMeta     `json:"meta,omitempty"`
 }
 
 // kiroMeta carries the unix-seconds timestamp attached to Prompt entries.
@@ -302,9 +302,9 @@ type kiroToolUseData struct {
 
 // kiroToolResultData is the "data" object for a content block of kind "toolResult".
 type kiroToolResultData struct {
-	ToolUseID string          `json:"toolUseId"`
-	Content   []kiroContent   `json:"content"`
-	Status    string          `json:"status,omitempty"`
+	ToolUseID string        `json:"toolUseId"`
+	Content   []kiroContent `json:"content"`
+	Status    string        `json:"status,omitempty"`
 }
 
 // parseKiroLine parses one Kiro JSONL line and returns 0 or more AgentEvents

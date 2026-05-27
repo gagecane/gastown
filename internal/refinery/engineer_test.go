@@ -369,7 +369,7 @@ func TestEngineer_LoadConfig_SettingsConfigOnly(t *testing.T) {
 		"type":    "rig-settings",
 		"version": 1,
 		"merge_queue": map[string]interface{}{
-			"test_command":  "canonical",
+			"test_command":   "canonical",
 			"max_concurrent": 3,
 		},
 	}

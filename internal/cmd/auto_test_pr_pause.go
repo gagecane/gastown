@@ -50,14 +50,14 @@ var nowFn = func() time.Time { return time.Now() }
 // auto_test_pr.go convention. Tests set + restore them around each
 // run; we don't thread state through cobra args.
 var (
-	autoTestPRPauseRig         string
-	autoTestPRPauseAll         bool
-	autoTestPRPauseDuration    string
-	autoTestPRPauseReason      string
+	autoTestPRPauseRig      string
+	autoTestPRPauseAll      bool
+	autoTestPRPauseDuration string
+	autoTestPRPauseReason   string
 
-	autoTestPRResumeRig         string
-	autoTestPRResumeAll         bool
-	autoTestPRResumeOverride    bool
+	autoTestPRResumeRig      string
+	autoTestPRResumeAll      bool
+	autoTestPRResumeOverride bool
 
 	autoTestPRStatusFormat string
 
@@ -544,10 +544,10 @@ func runAutoTestPRShow(cmd *cobra.Command, args []string) error {
 		// `status --format=json` surface; show --raw is the per-rig
 		// debugging path.
 		rigSlice := struct {
-			Rig       string                  `json:"rig"`
-			Enabled   bool                    `json:"enabled"`
+			Rig       string                    `json:"rig"`
+			Enabled   bool                      `json:"enabled"`
 			Pause     *autotestpr.RigPauseEntry `json:"pause,omitempty"`
-			Incidents []autotestpr.Incident   `json:"incidents,omitempty"`
+			Incidents []autotestpr.Incident     `json:"incidents,omitempty"`
 		}{
 			Rig:       autoTestPRShowRig,
 			Enabled:   rigEnabled(state, autoTestPRShowRig),

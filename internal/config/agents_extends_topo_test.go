@@ -253,10 +253,10 @@ func TestTopoSortUserAgents_Deterministic(t *testing.T) {
 		{
 			description: "fan-out from shared root — alpha among siblings",
 			extends: map[string]string{
-				"root":   "kiro",
-				"beta":   "root",
-				"alpha":  "root",
-				"gamma":  "root",
+				"root":  "kiro",
+				"beta":  "root",
+				"alpha": "root",
+				"gamma": "root",
 			},
 			want: []string{"root", "alpha", "beta", "gamma"},
 		},
@@ -299,13 +299,13 @@ func TestTopoSortUserAgents_Deterministic(t *testing.T) {
 // sorting). Every run must produce byte-identical output. (gu-417s)
 func TestTopoSortUserAgents_RepeatedRuns(t *testing.T) {
 	input := map[string]string{
-		"delta":   "gamma",
-		"gamma":   "beta",
-		"beta":    "alpha",
-		"alpha":   "kiro",
-		"orphan":  "",
-		"optout":  "none",
-		"typoed":  "does-not-exist",
+		"delta":  "gamma",
+		"gamma":  "beta",
+		"beta":   "alpha",
+		"alpha":  "kiro",
+		"orphan": "",
+		"optout": "none",
+		"typoed": "does-not-exist",
 	}
 
 	first, err := topoSortUserAgents(input)

@@ -251,8 +251,8 @@ func TestPreserveForkSyncTopology_CustomTarget(t *testing.T) {
 			"upstream/release-1.0": {ok: true},
 		},
 		isAncestor: map[string]fakeIsAncestorResult{
-			"upstream/release-1.0->polecat/sync":        {ok: true},
-			"upstream/release-1.0->origin/release-1.0":  {ok: false},
+			"upstream/release-1.0->polecat/sync":       {ok: true},
+			"upstream/release-1.0->origin/release-1.0": {ok: false},
 		},
 	}
 	decision, err := preserveForkSyncTopology(g, "polecat/sync", "release-1.0")

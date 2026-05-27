@@ -20,7 +20,7 @@ func TestIsDogDoneMessage(t *testing.T) {
 		{"DOG_DONE\talpha", true},
 		{"DOG_DONE", true}, // bare subject is also accepted — from field identifies dog
 		{"  DOG_DONE alpha  ", true},
-		{"DOG_DONEISH", false}, // no delimiter — not a DOG_DONE message
+		{"DOG_DONEISH", false},    // no delimiter — not a DOG_DONE message
 		{"dog_done alpha", false}, // case-sensitive on purpose (keeps signal explicit)
 		{"Re: DOG_DONE alpha", false},
 		{"", false},
@@ -43,10 +43,10 @@ func TestExtractDogNameFromSender(t *testing.T) {
 	}{
 		{"deacon/dogs/alpha", "alpha"},
 		{"deacon/dogs/my-dog", "my-dog"},
-		{"deacon/dogs/alpha/", "alpha"},  // trailing slash ignored
+		{"deacon/dogs/alpha/", "alpha"},    // trailing slash ignored
 		{"deacon/dogs/alpha/sub", "alpha"}, // sub-path stripped defensively
 		{"deacon/dogs/", ""},               // no name — reject
-		{"deacon", ""},                      // not a dog sender
+		{"deacon", ""},                     // not a dog sender
 		{"mayor/", ""},
 		{"gastown_upstream/polecats/dust", ""},
 		{"", ""},

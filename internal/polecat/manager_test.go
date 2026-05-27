@@ -2490,10 +2490,10 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 // "cadk-casc_cdk-cat" instead of "cadk-cat".
 func TestValidatePolecatNameNotRedundantPrefix(t *testing.T) {
 	tests := []struct {
-		name     string
-		polecat  string
-		rigName  string
-		wantErr  bool
+		name    string
+		polecat string
+		rigName string
+		wantErr bool
 	}{
 		// Valid names — no redundant prefix
 		{"plain name", "cat", "casc_cdk", false},

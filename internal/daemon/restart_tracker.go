@@ -322,9 +322,9 @@ func ClearAgentBackoff(townRoot, agentID string) error {
 
 // PruneResult holds the result of a state pruning operation.
 type PruneResult struct {
-	Pruned  []string // Agent IDs removed from state
-	Kept    []string // Agent IDs retained (session still exists)
-	Total   int      // Total entries before pruning
+	Pruned []string // Agent IDs removed from state
+	Kept   []string // Agent IDs retained (session still exists)
+	Total  int      // Total entries before pruning
 }
 
 // PruneStaleAgents removes entries from restart_state.json for agents

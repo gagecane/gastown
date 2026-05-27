@@ -107,9 +107,9 @@ type PatrolScanStallItem struct {
 
 // PatrolScanCompleteOutput holds completion discovery results.
 type PatrolScanCompleteOutput struct {
-	Checked   int                       `json:"checked"`
-	Found     int                       `json:"found"`
-	Completed []PatrolScanCompleteItem  `json:"completed,omitempty"`
+	Checked   int                      `json:"checked"`
+	Found     int                      `json:"found"`
+	Completed []PatrolScanCompleteItem `json:"completed,omitempty"`
 }
 
 // PatrolScanCompleteItem is a single completion discovery in scan output.
@@ -126,19 +126,19 @@ type PatrolScanCompleteItem struct {
 
 // PatrolScanPostHocOutput holds post-hoc completion discovery results (gu-jr8).
 type PatrolScanPostHocOutput struct {
-	Checked int                       `json:"checked"`
-	Found   int                       `json:"found"`
-	Items   []PatrolScanPostHocItem   `json:"items,omitempty"`
-	Errors  []string                  `json:"errors,omitempty"`
+	Checked int                     `json:"checked"`
+	Found   int                     `json:"found"`
+	Items   []PatrolScanPostHocItem `json:"items,omitempty"`
+	Errors  []string                `json:"errors,omitempty"`
 }
 
 // PatrolScanPostHocItem is a single post-hoc completion in scan output.
 type PatrolScanPostHocItem struct {
-	Polecat     string `json:"polecat"`
-	AgentBead   string `json:"agent_bead"`
-	HookBead    string `json:"hook_bead"`
-	Action      string `json:"action"`
-	Error       string `json:"error,omitempty"`
+	Polecat   string `json:"polecat"`
+	AgentBead string `json:"agent_bead"`
+	HookBead  string `json:"hook_bead"`
+	Action    string `json:"action"`
+	Error     string `json:"error,omitempty"`
 }
 
 func runPatrolScan(cmd *cobra.Command, args []string) error {

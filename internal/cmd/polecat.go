@@ -1442,11 +1442,11 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 type pushDecision int
 
 const (
-	pushDecisionSkipEmpty         pushDecision = iota // branch unset → nothing to push
-	pushDecisionSkipForce                              // --force was set → discard, don't push
-	pushDecisionSkipDetachedHead                       // branch is literal "HEAD"
-	pushDecisionSkipNonPolecat                         // branch isn't under polecat/ prefix
-	pushDecisionAttempt                                // safe to attempt the push
+	pushDecisionSkipEmpty        pushDecision = iota // branch unset → nothing to push
+	pushDecisionSkipForce                            // --force was set → discard, don't push
+	pushDecisionSkipDetachedHead                     // branch is literal "HEAD"
+	pushDecisionSkipNonPolecat                       // branch isn't under polecat/ prefix
+	pushDecisionAttempt                              // safe to attempt the push
 )
 
 // bestEffortPushDecision returns the pushDecision for the given inputs.

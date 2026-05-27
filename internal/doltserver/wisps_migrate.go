@@ -3,11 +3,11 @@
 // The wisps table is a dolt_ignored copy of the issues table schema, used for
 // ephemeral operational data (agent beads, patrol wisps, etc.) that should not
 // be version-controlled. This migration:
-//   1. Creates the wisps table and auxiliary tables (wisp_labels, wisp_comments,
-//      wisp_events, wisp_dependencies) if they don't exist
-//   2. Copies existing agent beads (issue_type='agent') from issues to wisps
-//   3. Copies associated labels, comments, events, and dependencies
-//   4. Closes the originals in the issues table
+//  1. Creates the wisps table and auxiliary tables (wisp_labels, wisp_comments,
+//     wisp_events, wisp_dependencies) if they don't exist
+//  2. Copies existing agent beads (issue_type='agent') from issues to wisps
+//  3. Copies associated labels, comments, events, and dependencies
+//  4. Closes the originals in the issues table
 //
 // The migration uses `bd sql` for beads-side operations (copying agent beads between
 // the issues and wisps tables in bd's own database). Additionally, it ensures that

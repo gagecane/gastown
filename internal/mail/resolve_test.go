@@ -29,10 +29,10 @@ func TestMatchPattern(t *testing.T) {
 		{"gastown/crew/*", "gastown/polecats/Toast", false},
 
 		// Different path lengths
-		{"gastown/*", "gastown/crew/max", false},      // * matches single segment
-		{"gastown/*/*", "gastown/crew/max", true},     // Multiple wildcards
-		{"*/*", "gastown/witness", true},              // Both wildcards
-		{"*/*/*", "gastown/crew/max", true},           // Three-level wildcard
+		{"gastown/*", "gastown/crew/max", false},  // * matches single segment
+		{"gastown/*/*", "gastown/crew/max", true}, // Multiple wildcards
+		{"*/*", "gastown/witness", true},          // Both wildcards
+		{"*/*/*", "gastown/crew/max", true},       // Three-level wildcard
 	}
 
 	for _, tt := range tests {

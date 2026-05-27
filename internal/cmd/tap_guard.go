@@ -102,7 +102,7 @@ func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
 
 // prWorkflowPatterns defines commands that are forbidden in PR workflow.
 var prWorkflowPatterns = []struct {
-	match func(string) bool
+	match  func(string) bool
 	reason string
 }{
 	{matchesGhPrCreate, "gh pr create — Gas Town workers push directly to main"},
@@ -152,7 +152,7 @@ func printPRWorkflowBlock(reason string) {
 	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
 	fmt.Fprintln(os.Stderr, "║  ❌ PR WORKFLOW BLOCKED                                          ║")
 	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
-	fmt.Fprintf(os.Stderr,  "║  %-63s ║\n", truncateStr(reason, 63))
+	fmt.Fprintf(os.Stderr, "║  %-63s ║\n", truncateStr(reason, 63))
 	fmt.Fprintln(os.Stderr, "║                                                                  ║")
 	fmt.Fprintln(os.Stderr, "║  Instead:  git add . && git commit && git push origin main       ║")
 	fmt.Fprintln(os.Stderr, "║  See: ~/gt/docs/PRIMING.md (GUPP principle)                      ║")

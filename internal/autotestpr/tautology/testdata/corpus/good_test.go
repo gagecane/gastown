@@ -12,6 +12,7 @@ import (
 )
 
 // G01: Expected is a string literal
+//
 //tautology:no
 func TestGood01_LiteralExpected(t *testing.T) {
 	result := ParseConfig("test.json")
@@ -19,6 +20,7 @@ func TestGood01_LiteralExpected(t *testing.T) {
 }
 
 // G02: Expected from table-driven test struct
+//
 //tautology:no
 func TestGood02_TableDriven(t *testing.T) {
 	tests := []struct {
@@ -36,6 +38,7 @@ func TestGood02_TableDriven(t *testing.T) {
 }
 
 // G03: Expected is a numeric literal
+//
 //tautology:no
 func TestGood03_NumericLiteral(t *testing.T) {
 	count := CountItems("bucket")
@@ -43,6 +46,7 @@ func TestGood03_NumericLiteral(t *testing.T) {
 }
 
 // G04: Expected from independently constructed fixture
+//
 //tautology:no
 func TestGood04_IndependentFixture(t *testing.T) {
 	expected := &Config{Name: "test", Port: 8080}
@@ -52,6 +56,7 @@ func TestGood04_IndependentFixture(t *testing.T) {
 }
 
 // G05: Expected is a boolean literal
+//
 //tautology:no
 func TestGood05_BoolLiteral(t *testing.T) {
 	valid := IsValid("good-input")
@@ -59,6 +64,7 @@ func TestGood05_BoolLiteral(t *testing.T) {
 }
 
 // G06: Expected from test parameter (not FUT return)
+//
 //tautology:no
 func TestGood06_TestParameter(t *testing.T) {
 	input := "hello world"
@@ -67,6 +73,7 @@ func TestGood06_TestParameter(t *testing.T) {
 }
 
 // G07: Error assertion with nil expected
+//
 //tautology:no
 func TestGood07_NoError(t *testing.T) {
 	_, err := Process("valid-input")
@@ -74,6 +81,7 @@ func TestGood07_NoError(t *testing.T) {
 }
 
 // G08: Expected from constant
+//
 //tautology:no
 func TestGood08_Constant(t *testing.T) {
 	result := GetStatus()
@@ -81,6 +89,7 @@ func TestGood08_Constant(t *testing.T) {
 }
 
 // G09: Expected is empty slice
+//
 //tautology:no
 func TestGood09_EmptySlice(t *testing.T) {
 	items := Filter(GetItems(), "nonexistent")
@@ -88,6 +97,7 @@ func TestGood09_EmptySlice(t *testing.T) {
 }
 
 // G10: Assert.Len with literal count
+//
 //tautology:no
 func TestGood10_LenLiteral(t *testing.T) {
 	items := ListAll()
@@ -95,6 +105,7 @@ func TestGood10_LenLiteral(t *testing.T) {
 }
 
 // G11: Expected from os.Getenv (independent source)
+//
 //tautology:no
 func TestGood11_EnvVar(t *testing.T) {
 	t.Setenv("MY_VAR", "expected_value")
@@ -103,6 +114,7 @@ func TestGood11_EnvVar(t *testing.T) {
 }
 
 // G12: Expected from file content written by test setup
+//
 //tautology:no
 func TestGood12_FileFixture(t *testing.T) {
 	dir := t.TempDir()
@@ -112,6 +124,7 @@ func TestGood12_FileFixture(t *testing.T) {
 }
 
 // G13: Assert.Contains with literal substring
+//
 //tautology:no
 func TestGood13_ContainsLiteral(t *testing.T) {
 	msg := FormatError("missing field")
@@ -119,6 +132,7 @@ func TestGood13_ContainsLiteral(t *testing.T) {
 }
 
 // G14: Expected from different function (not FUT)
+//
 //tautology:no
 func TestGood14_DifferentFunction(t *testing.T) {
 	encoded := Encode("hello")
@@ -127,6 +141,7 @@ func TestGood14_DifferentFunction(t *testing.T) {
 }
 
 // G15: Assert.NotNil (no expected value comparison)
+//
 //tautology:no
 func TestGood15_NotNil(t *testing.T) {
 	obj := CreateObject("test")
@@ -134,6 +149,7 @@ func TestGood15_NotNil(t *testing.T) {
 }
 
 // G16: Expected from time.Now (independent source)
+//
 //tautology:no
 func TestGood16_TimeComparison(t *testing.T) {
 	result := GetTimestamp()
@@ -141,6 +157,7 @@ func TestGood16_TimeComparison(t *testing.T) {
 }
 
 // G17: Expected from struct field of test input (not FUT output)
+//
 //tautology:no
 func TestGood17_InputFieldAsExpected(t *testing.T) {
 	input := &Request{Method: "GET", Path: "/api"}
@@ -149,6 +166,7 @@ func TestGood17_InputFieldAsExpected(t *testing.T) {
 }
 
 // G18: Assert.Equal with computed expected from input
+//
 //tautology:no
 func TestGood18_ComputedFromInput(t *testing.T) {
 	input := []string{"a", "b", "c"}
@@ -157,6 +175,7 @@ func TestGood18_ComputedFromInput(t *testing.T) {
 }
 
 // G19: Assert on error message with literal
+//
 //tautology:no
 func TestGood19_ErrorMessage(t *testing.T) {
 	_, err := Validate("")
@@ -165,6 +184,7 @@ func TestGood19_ErrorMessage(t *testing.T) {
 }
 
 // G20: Expected from HTTP status code constant
+//
 //tautology:no
 func TestGood20_HTTPStatus(t *testing.T) {
 	resp := MakeRequest("GET", "/health")
@@ -172,6 +192,7 @@ func TestGood20_HTTPStatus(t *testing.T) {
 }
 
 // G21: Table-driven with struct comparison
+//
 //tautology:no
 func TestGood21_TableStructComparison(t *testing.T) {
 	tests := []struct {
@@ -197,6 +218,7 @@ func TestGood21_TableStructComparison(t *testing.T) {
 }
 
 // G22: Assert.False with function result
+//
 //tautology:no
 func TestGood22_FalseLiteral(t *testing.T) {
 	result := IsExpired("valid-token")
@@ -204,6 +226,7 @@ func TestGood22_FalseLiteral(t *testing.T) {
 }
 
 // G23: Expected from map literal
+//
 //tautology:no
 func TestGood23_MapLiteral(t *testing.T) {
 	expected := map[string]int{"a": 1, "b": 2}
@@ -213,6 +236,7 @@ func TestGood23_MapLiteral(t *testing.T) {
 }
 
 // G24: Expected from len of input (not output)
+//
 //tautology:no
 func TestGood24_LenOfInput(t *testing.T) {
 	input := []string{"x", "y", "z"}
@@ -221,6 +245,7 @@ func TestGood24_LenOfInput(t *testing.T) {
 }
 
 // G25: Assert.ElementsMatch with independently constructed slice
+//
 //tautology:no
 func TestGood25_ElementsMatch(t *testing.T) {
 	result := SortAndDedupe([]string{"b", "a", "b", "c"})

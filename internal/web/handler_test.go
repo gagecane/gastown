@@ -287,17 +287,17 @@ func TestConvoyHandler_MergeQueueRendering(t *testing.T) {
 		Convoys: []ConvoyRow{},
 		MergeQueue: []MergeQueueRow{
 			{
-				ID: "gt-abc12",
+				ID:         "gt-abc12",
 				Repo:       "roxas",
 				Title:      "Fix authentication bug",
-				Status: "open",
+				Status:     "open",
 				ColorClass: "mq-green",
 			},
 			{
-				ID: "gt-jkl78",
+				ID:         "gt-jkl78",
 				Repo:       "gastown",
 				Title:      "Add dashboard feature",
-				Status: "open",
+				Status:     "open",
 				ColorClass: "mq-yellow",
 			},
 		},
@@ -595,10 +595,10 @@ func TestConvoyHandler_FullDashboard(t *testing.T) {
 		},
 		MergeQueue: []MergeQueueRow{
 			{
-				ID: "gt-def34",
+				ID:         "gt-def34",
 				Repo:       "testrig",
 				Title:      "Test PR",
-				Status: "open",
+				Status:     "open",
 				ColorClass: "mq-green",
 			},
 		},
@@ -671,10 +671,10 @@ func TestE2E_Server_FullDashboard(t *testing.T) {
 		},
 		MergeQueue: []MergeQueueRow{
 			{
-				ID: "gt-ghi56",
+				ID:         "gt-ghi56",
 				Repo:       "roxas",
 				Title:      "E2E Test PR",
-				Status: "open",
+				Status:     "open",
 				ColorClass: "mq-green",
 			},
 		},

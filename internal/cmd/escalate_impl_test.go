@@ -477,4 +477,3 @@ func TestDeliveryStatusOmitsEmptyFields(t *testing.T) {
 // --- helpers ---
 
 // (captureStdout is defined in prime_test.go and reused here.)
-

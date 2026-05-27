@@ -810,7 +810,6 @@ exit 0
 	}
 }
 
-
 func TestInitAgentBeadsUsesRigBeadsDir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake bd stub is not compatible with multiline descriptions on Windows")

@@ -142,9 +142,9 @@ func analyzeTestFunc(fset *token.FileSet, fn *ast.FuncDecl) []Finding {
 
 // assertion represents a single assertion call found in a test function.
 type assertion struct {
-	call      *ast.CallExpr
-	name      string   // e.g. "assert.Equal"
-	args      []ast.Expr // meaningful args (skip t, skip trailing msg)
+	call *ast.CallExpr
+	name string     // e.g. "assert.Equal"
+	args []ast.Expr // meaningful args (skip t, skip trailing msg)
 }
 
 // collectAssertions walks the function body and returns all assertion calls.
@@ -237,9 +237,9 @@ func allTrivialChecks(assertions []assertion) bool {
 // existence/truthiness checks.
 func isTrivialCheck(name string) bool {
 	trivial := map[string]bool{
-		"assert.NotNil":   true,
-		"assert.NotEmpty": true,
-		"assert.True":     true,
+		"assert.NotNil":    true,
+		"assert.NotEmpty":  true,
+		"assert.True":      true,
 		"require.NotNil":   true,
 		"require.NotEmpty": true,
 		"require.True":     true,

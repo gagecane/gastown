@@ -127,8 +127,8 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	// to trigger the banner, but the box-drawing characters eat the agent's
 	// context window without adding value. See gu-pkf3 / gt-ube24 category B.
 	var (
-		width      int
-		widthErr   error
+		width    int
+		widthErr error
 	)
 	if util.IsAgentContext() {
 		// Force the short banner path.

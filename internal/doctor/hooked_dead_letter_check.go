@@ -98,9 +98,9 @@ func (c *HookedDeadLetterCheck) Run(ctx *CheckContext) *CheckResult {
 
 	if total <= c.threshold {
 		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Hooked dead-letter backlog OK (%d <= threshold %d)", total, c.threshold),
+			Name:     c.Name(),
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Hooked dead-letter backlog OK (%d <= threshold %d)", total, c.threshold),
 			Category: c.Category(),
 		}
 	}
@@ -117,8 +117,8 @@ func (c *HookedDeadLetterCheck) Run(ctx *CheckContext) *CheckResult {
 			"%d hooked mail bead(s) past dead-letter threshold (%d) — indicates consumer starvation or lifecycle leak",
 			total, c.threshold,
 		),
-		Details: details,
-		FixHint: "Run 'gt reaper reap-hooked-mail' or wait for next mol-dog-reaper cycle",
+		Details:  details,
+		FixHint:  "Run 'gt reaper reap-hooked-mail' or wait for next mol-dog-reaper cycle",
 		Category: c.Category(),
 	}
 }

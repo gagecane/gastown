@@ -652,7 +652,6 @@ func filterByPerRigCapacity(townRoot string, pending []capacity.PendingBead) []c
 	return result
 }
 
-
 // Context fields are already parsed (from PendingBead.Context).
 // Returns the SlingResult (including PolecatName) on success.
 func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {

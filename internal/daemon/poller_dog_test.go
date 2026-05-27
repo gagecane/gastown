@@ -276,10 +276,10 @@ func TestSupervisePollers_MixedFleet(t *testing.T) {
 	}
 	sess := &fakeSessionChecker{
 		alive: map[string]bool{
-			"hq-mayor":         true,
-			"gt-rig-crew-one":  true,
-			"gt-old-session":   false,
-			"gt-rig-crew-two":  true,
+			"hq-mayor":        true,
+			"gt-rig-crew-one": true,
+			"gt-old-session":  false,
+			"gt-rig-crew-two": true,
 		},
 	}
 	logf, _ := captureLogger()

@@ -77,9 +77,9 @@ func TestIsGoTestTempDir(t *testing.T) {
 		{"TestSomethingComplex_Subtest42", true},
 
 		// Not a Go test temp dir.
-		{"Test", false},            // just the prefix
-		{"TestNotes", false},       // no trailing digits
-		{"Test123", false},         // too generic (no alpha name)
+		{"Test", false},      // just the prefix
+		{"TestNotes", false}, // no trailing digits
+		{"Test123", false},   // too generic (no alpha name)
 		{"systemd-private-foo", false},
 		{"randomfile.txt", false},
 		{"", false},

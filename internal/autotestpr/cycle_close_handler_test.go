@@ -122,9 +122,9 @@ func TestExtractTargetPathFromBody(t *testing.T) {
 
 func TestTruncate(t *testing.T) {
 	tests := []struct {
-		s      string
-		max    int
-		want   string
+		s    string
+		max  int
+		want string
 	}{
 		{"short", 10, "short"},
 		{"exactly ten", 11, "exactly ten"},

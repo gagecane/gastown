@@ -92,13 +92,13 @@ func TestSubRuleIV_ZeroAssertion(t *testing.T) {
 
 	// Functions that should trigger zero-assertion rule.
 	shouldTrigger := map[string]bool{
-		"TestEmptyBody":           true,
-		"TestOnlySetup":           true,
-		"TestOnlyLogging":         true,
-		"TestAssertTrue":          true,
-		"TestAssertFalseFalse":    true,
-		"TestSelfEqual_Variable":  true,
-		"TestSelfEqual_Literal":   true,
+		"TestEmptyBody":          true,
+		"TestOnlySetup":          true,
+		"TestOnlyLogging":        true,
+		"TestAssertTrue":         true,
+		"TestAssertFalseFalse":   true,
+		"TestSelfEqual_Variable": true,
+		"TestSelfEqual_Literal":  true,
 	}
 	shouldNotTrigger := map[string]bool{
 		"TestValidAssertion": true,
@@ -131,9 +131,9 @@ func TestSubRuleI_NoInputDerived(t *testing.T) {
 	}
 
 	shouldTrigger := map[string]bool{
-		"TestNoFUTDependency_HardcodedExpected":   true,
-		"TestNoFUTDependency_SetupOnly":           true,
-		"TestNoFUTDependency_ConstantComparison":  true,
+		"TestNoFUTDependency_HardcodedExpected":  true,
+		"TestNoFUTDependency_SetupOnly":          true,
+		"TestNoFUTDependency_ConstantComparison": true,
 	}
 	shouldNotTrigger := map[string]bool{
 		"TestWithFUTOutput":        true,

@@ -83,9 +83,9 @@ func TestAccountHandles(t *testing.T) {
 	t.Run("returns sorted handles", func(t *testing.T) {
 		cfg := &config.AccountsConfig{
 			Accounts: map[string]config.Account{
-				"zeta":    {Email: "z@x"},
-				"alpha":   {Email: "a@x"},
-				"mike":    {Email: "m@x"},
+				"zeta":  {Email: "z@x"},
+				"alpha": {Email: "a@x"},
+				"mike":  {Email: "m@x"},
 			},
 		}
 		got := accountHandles(cfg)

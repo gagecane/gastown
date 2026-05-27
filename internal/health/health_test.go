@@ -322,8 +322,8 @@ func TestDirSize_SumsFileSizesRecursively(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	topBytes := []byte("hello")         // 5
-	nestedBytes := []byte("world!!")    // 7
+	topBytes := []byte("hello")        // 5
+	nestedBytes := []byte("world!!")   // 7
 	otherBytes := []byte("abcdefghij") // 10 — in nested dir
 
 	if err := os.WriteFile(filepath.Join(dir, "top.txt"), topBytes, 0o644); err != nil {

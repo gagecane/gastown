@@ -33,9 +33,9 @@ type daemonMetrics struct {
 
 	// hookedMu protects hooked-beads gauge snapshots written by the scanner
 	// goroutine and read by the OTel callback.
-	hookedMu         sync.RWMutex
-	hookedByDB       map[string]int64 // db → total hooked mail beads
-	hookedDeadByDB   map[string]int64 // db → hooked mail beads past dead-letter threshold
+	hookedMu       sync.RWMutex
+	hookedByDB     map[string]int64 // db → total hooked mail beads
+	hookedDeadByDB map[string]int64 // db → hooked mail beads past dead-letter threshold
 }
 
 // newDaemonMetrics registers all daemon OTel instruments against the global

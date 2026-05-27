@@ -2406,7 +2406,6 @@ func (m *Manager) FindIdlePolecats() ([]*Polecat, error) {
 	return idle, nil
 }
 
-
 // Get returns a specific polecat by name.
 // State is derived from beads assignee field + tmux session state:
 // - If an issue is assigned to this polecat: StateWorking

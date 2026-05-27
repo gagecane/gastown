@@ -1817,12 +1817,12 @@ func isPluginDispatchSubject(subject string) bool {
 // new auto-notification? Add its subject prefix here so the reply-reminder
 // nudge is suppressed.
 var systemNotificationSubjectPrefixes = []string{
-	"Convoy complete:",       // cmd/convoy.go
-	"Wisp Compaction:",       // cmd/compact_report.go (daily)
+	"Convoy complete:",        // cmd/convoy.go
+	"Wisp Compaction:",        // cmd/compact_report.go (daily)
 	"Weekly Wisp Compaction:", // cmd/compact_report.go (weekly rollup)
-	"Agent killed:",          // cmd/deacon.go
-	"PRD Review Complete:",   // workflow step durable artifact — no reply expected
-	"Plugin run:",            // plugin/recording.go
+	"Agent killed:",           // cmd/deacon.go
+	"PRD Review Complete:",    // workflow step durable artifact — no reply expected
+	"Plugin run:",             // plugin/recording.go
 }
 
 // isSystemNotificationSubject returns true when the message subject is a

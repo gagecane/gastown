@@ -612,7 +612,6 @@ func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {
 	})
 }
 
-
 func TestRoutesCheck_CorruptedRoutesJsonl(t *testing.T) {
 	t.Run("corrupted routes.jsonl results in empty routes", func(t *testing.T) {
 		tmpDir := t.TempDir()

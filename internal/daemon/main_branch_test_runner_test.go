@@ -1054,7 +1054,7 @@ func TestIsGoTestFailSignal(t *testing.T) {
 		// Non-matches (must NOT pull these into the rescue set)
 		{"    --- FAIL: TestFoo/sub (0.00s)", false}, // indented subtest marker
 		{"ok  \tgithub.com/x/y\t0.005s", false},
-		{"FAILED", false},       // FAILED != FAIL
+		{"FAILED", false}, // FAILED != FAIL
 		{"FAILURE: stuff", false},
 		{"FAIL:something", false}, // colon, no whitespace after FAIL
 		{"", false},
@@ -1113,9 +1113,9 @@ Cleaning up container
 			want: false,
 		},
 		{
-			name: "empty output — don't suppress",
+			name:   "empty output — don't suppress",
 			output: "",
-			want:  false,
+			want:   false,
 		},
 		{
 			name: "act failure after success — real failure, don't suppress",

@@ -3138,14 +3138,14 @@ func TestNonInteractiveGitEnv(t *testing.T) {
 	t.Parallel()
 	env := nonInteractiveGitEnv()
 	want := map[string]string{
-		"GIT_EDITOR":           "true",
-		"GIT_SEQUENCE_EDITOR":  "true",
-		"EDITOR":               "true",
-		"GIT_MERGE_AUTOEDIT":   "no",
-		"GIT_TERMINAL_PROMPT":  "0",
-		"GIT_ASKPASS":          "true",
-		"SSH_ASKPASS":          "true",
-		"SSH_ASKPASS_REQUIRE":  "never",
+		"GIT_EDITOR":          "true",
+		"GIT_SEQUENCE_EDITOR": "true",
+		"EDITOR":              "true",
+		"GIT_MERGE_AUTOEDIT":  "no",
+		"GIT_TERMINAL_PROMPT": "0",
+		"GIT_ASKPASS":         "true",
+		"SSH_ASKPASS":         "true",
+		"SSH_ASKPASS_REQUIRE": "never",
 	}
 	got := map[string]string{}
 	for _, kv := range env {
@@ -3304,7 +3304,6 @@ func TestMergeWithHostileEditor(t *testing.T) {
 		t.Fatalf("unexpected error stat-ing sentinel: %v", err)
 	}
 }
-
 
 // TestCloneAutoWiresHooksPath verifies that cloning a repo which ships a
 // .githooks directory auto-wires core.hooksPath=.githooks on the destination.

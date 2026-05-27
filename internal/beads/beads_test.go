@@ -588,7 +588,7 @@ func TestIsEpicLikeTitle(t *testing.T) {
 		{"EPICS are bad", false},
 		{"fix EPIC: handling in parser", false}, // not at start
 		{"Epic storm coming", false},            // no colon
-		{"epic: lowercase only", false},          // lowercase — intentionally strict
+		{"epic: lowercase only", false},         // lowercase — intentionally strict
 		{"Fix bug in parser", false},
 		{"", false},
 
@@ -2058,7 +2058,7 @@ func TestParseAgentBeadID(t *testing.T) {
 		{"hq-mayor", "", "mayor", "", true},                           // hq prefix town-level
 		// 4-character prefixes (e.g., cadk, cass, casw from routes.jsonl)
 		{"cadk-casc_cdk-polecat-furiosa", "casc_cdk", "polecat", "furiosa", true}, // 4-char prefix polecat
-		{"cass-casc_shared-witness", "casc_shared", "witness", "", true},           // 4-char prefix witness
+		{"cass-casc_shared-witness", "casc_shared", "witness", "", true},          // 4-char prefix witness
 		// Truly invalid patterns
 		{"x-mayor", "", "", "", false},        // Prefix too short (1 char)
 		{"abcd-mayor", "", "mayor", "", true}, // 4-char prefix is valid (e.g., cadk, cass)
@@ -3529,8 +3529,8 @@ func TestIsIdentityBeadTitle(t *testing.T) {
 		{`id = "gs-gastown-refinery"`, true},
 		{`id = "gu-gastown-polecat-nux"`, true},
 		{`id = "hq-mayor"`, true},
-		{`id="gs-gastown-witness"`, true},   // no spaces
-		{`id  =  "gt-deacon"`, true},        // extra whitespace
+		{`id="gs-gastown-witness"`, true},    // no spaces
+		{`id  =  "gt-deacon"`, true},         // extra whitespace
 		{`id = 'gs-gastown-refinery'`, true}, // single quotes
 
 		// No match — TOML-wrapper shape but inner value is a real task ID

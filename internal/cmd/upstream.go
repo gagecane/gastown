@@ -25,8 +25,8 @@ import (
 )
 
 var (
-	upstreamRig    string
-	upstreamJSON   bool
+	upstreamRig  string
+	upstreamJSON bool
 )
 
 var upstreamCmd = &cobra.Command{

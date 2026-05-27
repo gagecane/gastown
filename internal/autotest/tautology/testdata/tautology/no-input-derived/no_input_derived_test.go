@@ -63,11 +63,11 @@ func TestWithFUTError(t *testing.T) {
 }
 
 // Stubs for the FUT functions.
-func computeValue() int                    { return 42 }
-func fetchItems() []string                 { return []string{"a", "b", "c"} }
-func riskyOperation() (string, error)      { return "", nil }
+func computeValue() int               { return 42 }
+func fetchItems() []string            { return []string{"a", "b", "c"} }
+func riskyOperation() (string, error) { return "", nil }
 
 type Service struct{}
 
-func NewService() *Service              { return &Service{} }
+func NewService() *Service                  { return &Service{} }
 func (s *Service) Process(in string) string { return "processed: " + in }

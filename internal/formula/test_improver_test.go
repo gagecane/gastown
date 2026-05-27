@@ -245,9 +245,9 @@ func TestTestImproverFormulaVars(t *testing.T) {
 
 	// Vars with defaults.
 	wantDefaults := map[string]string{
-		"base_branch":          "main",
-		"size_budget_max_files": "3",
-		"size_budget_max_loc":  "200",
+		"base_branch":            "main",
+		"size_budget_max_files":  "3",
+		"size_budget_max_loc":    "200",
 		"conventions_sheet_path": ".gt/auto-test-pr/conventions.md",
 	}
 	for name, want := range wantDefaults {

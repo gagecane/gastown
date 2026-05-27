@@ -42,8 +42,8 @@ func PriorityFloorName(floor int) string {
 
 // PendingBead represents a bead that is scheduled and ready for dispatch evaluation.
 type PendingBead struct {
-	ID          string             // Context bead ID (sling context)
-	WorkBeadID  string             // The actual work bead ID
+	ID          string // Context bead ID (sling context)
+	WorkBeadID  string // The actual work bead ID
 	Title       string
 	TargetRig   string
 	Description string

@@ -256,7 +256,7 @@ func TestDiscoverRigBeadsDirs(t *testing.T) {
 	got := discoverRigBeadsDirs(townRoot)
 
 	want := map[string]bool{
-		filepath.Join(townRoot, ".beads"):         true,
+		filepath.Join(townRoot, ".beads"):          true,
 		filepath.Join(townRoot, "rig_a", ".beads"): true,
 		filepath.Join(townRoot, "rig_b", ".beads"): true,
 	}

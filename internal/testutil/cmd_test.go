@@ -185,11 +185,11 @@ func TestCleanGitEnv_PreservesIdentity(t *testing.T) {
 	env := CleanGitEnv()
 
 	want := map[string]bool{
-		"GIT_AUTHOR_NAME":      false,
-		"GIT_AUTHOR_EMAIL":     false,
-		"GIT_COMMITTER_NAME":   false,
-		"GIT_COMMITTER_EMAIL":  false,
-		"GIT_CONFIG_GLOBAL":    false,
+		"GIT_AUTHOR_NAME":     false,
+		"GIT_AUTHOR_EMAIL":    false,
+		"GIT_COMMITTER_NAME":  false,
+		"GIT_COMMITTER_EMAIL": false,
+		"GIT_CONFIG_GLOBAL":   false,
 	}
 	for _, e := range env {
 		for k := range want {

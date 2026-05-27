@@ -51,9 +51,9 @@ func TestEngineer_LoadConfig_MergeStrategyDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	config := map[string]interface{}{
-		"type":    "rig",
-		"version": 1,
-		"name":    "test-rig",
+		"type":        "rig",
+		"version":     1,
+		"name":        "test-rig",
 		"merge_queue": map[string]interface{}{},
 	}
 

@@ -964,8 +964,8 @@ func TestLoadRigCommandVars_GatesCommands(t *testing.T) {
 		MergeQueue: &config.MergeQueueConfig{
 			Gates: map[string]*config.GateConfig{
 				"lint":      {Cmd: "golangci-lint run", Phase: "pre-merge"},
-				"vet":       {Cmd: "go vet ./..."},                            // empty phase = pre-merge
-				"build":     {Cmd: "go build ./...", Phase: "post-squash"},    // must be excluded
+				"vet":       {Cmd: "go vet ./..."},                         // empty phase = pre-merge
+				"build":     {Cmd: "go build ./...", Phase: "post-squash"}, // must be excluded
 				"unit-test": {Cmd: "go test ./...", Phase: "pre-merge"},
 			},
 		},

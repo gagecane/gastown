@@ -92,7 +92,6 @@ func TestEffectivePolecatState(t *testing.T) {
 	}
 }
 
-
 // TestSessionLabel ensures the plain-text session label is emitted alongside
 // the ●/○ glyph so operators can tell live from dead sessions even when the
 // output is piped, logged, or rendered by a terminal that strips color/unicode.

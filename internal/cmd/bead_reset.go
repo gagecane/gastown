@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	beadResetReason  string
-	beadResetDryRun  bool
+	beadResetReason   string
+	beadResetDryRun   bool
 	beadResetKeepOpen bool // keep open sling-contexts (default: close them)
 )
 

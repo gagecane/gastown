@@ -138,13 +138,13 @@ func TestCategorizeSessions_PolecatsOnlyPreservesEverythingElse(t *testing.T) {
 	shutdownPolecatsOnly = true
 
 	sessions := []string{
-		"gt-thunder",      // polecat → stop
-		"bd-stormy",       // polecat in another rig → stop
-		"gt-crew-max",     // crew → preserve
-		"gt-witness",      // witness → preserve
-		"gt-refinery",     // refinery → preserve
-		"hq-mayor",        // mayor → preserve
-		"hq-deacon",       // deacon → preserve
+		"gt-thunder",  // polecat → stop
+		"bd-stormy",   // polecat in another rig → stop
+		"gt-crew-max", // crew → preserve
+		"gt-witness",  // witness → preserve
+		"gt-refinery", // refinery → preserve
+		"hq-mayor",    // mayor → preserve
+		"hq-deacon",   // deacon → preserve
 	}
 
 	toStop, preserved := categorizeSessions(sessions)

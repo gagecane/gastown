@@ -63,4 +63,3 @@ func execAgent(cfg *config.RuntimeConfig, prompt string) error {
 	}
 	return syscall.Exec(agentPath, args, os.Environ())
 }
-

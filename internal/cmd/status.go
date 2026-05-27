@@ -120,15 +120,15 @@ type DNDInfo struct {
 
 // AgentRuntime represents the runtime state of an agent.
 type AgentRuntime struct {
-	Name         string `json:"name"`                    // Display name (e.g., "mayor", "witness")
-	Address      string `json:"address"`                 // Full address (e.g., "greenplace/witness")
-	Session      string `json:"session"`                 // tmux session name
-	Role         string `json:"role"`                    // Role type
-	Running      bool   `json:"running"`                 // Is tmux session running?
-	ACP          bool   `json:"acp"`                     // Is ACP session active?
-	HasWork      bool   `json:"has_work"`                // Has pinned work?
-	WorkTitle    string `json:"work_title,omitempty"`    // Title of pinned work
-	HookBead     string `json:"hook_bead,omitempty"`     // Pinned bead ID from agent bead
+	Name              string `json:"name"`                         // Display name (e.g., "mayor", "witness")
+	Address           string `json:"address"`                      // Full address (e.g., "greenplace/witness")
+	Session           string `json:"session"`                      // tmux session name
+	Role              string `json:"role"`                         // Role type
+	Running           bool   `json:"running"`                      // Is tmux session running?
+	ACP               bool   `json:"acp"`                          // Is ACP session active?
+	HasWork           bool   `json:"has_work"`                     // Has pinned work?
+	WorkTitle         string `json:"work_title,omitempty"`         // Title of pinned work
+	HookBead          string `json:"hook_bead,omitempty"`          // Pinned bead ID from agent bead
 	State             string `json:"state,omitempty"`              // Agent state from agent bead
 	NotificationLevel string `json:"notification_level,omitempty"` // Notification level (verbose, normal, muted)
 	UnreadMail        int    `json:"unread_mail"`                  // Number of unread messages
@@ -1916,4 +1916,3 @@ func getMQSummary(r *rig.Rig) *MQSummary {
 		Health:   health,
 	}
 }
-

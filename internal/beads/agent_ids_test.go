@@ -270,4 +270,3 @@ func TestAgentBeadIDRoundTrip(t *testing.T) {
 		})
 	}
 }
-

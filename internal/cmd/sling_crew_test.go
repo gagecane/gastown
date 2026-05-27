@@ -25,12 +25,12 @@ func TestIsCrewTarget(t *testing.T) {
 
 		// Invalid patterns - not crew targets
 		{"", "", "", false},
-		{"gastown", "", "", false},           // rig name, not crew
-		{"gastown/crew", "", "", false},      // missing name segment
-		{"gastown/crew/", "", "", false},     // empty name segment
-		{"/crew/mel", "", "", false},         // empty rig segment
+		{"gastown", "", "", false},              // rig name, not crew
+		{"gastown/crew", "", "", false},         // missing name segment
+		{"gastown/crew/", "", "", false},        // empty name segment
+		{"/crew/mel", "", "", false},            // empty rig segment
 		{"gastown/polecats/mel", "", "", false}, // polecat, not crew
-		{"deacon/dogs/alpha", "", "", false}, // dog target
+		{"deacon/dogs/alpha", "", "", false},    // dog target
 		{"mayor", "", "", false},
 		{"dog:alpha", "", "", false},
 		{"gastown/crew/mel/extra", "", "", false}, // too many segments

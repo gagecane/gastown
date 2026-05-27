@@ -73,11 +73,11 @@ type RigCycleState struct {
 
 // RigTransition is a single transition log entry.
 type RigTransition struct {
-	At       string `json:"at"`
-	From     string `json:"from"`
-	To       string `json:"to"`
-	MRID     string `json:"mr_id"`
-	Reason   string `json:"reason"`
+	At     string `json:"at"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+	MRID   string `json:"mr_id"`
+	Reason string `json:"reason"`
 }
 
 // RigRejection is a single rejection log entry.

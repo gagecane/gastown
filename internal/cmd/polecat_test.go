@@ -510,8 +510,6 @@ func TestGetGitState_AllCommitsOnRemote(t *testing.T) {
 	}
 }
 
-
-
 // initTestRepo creates a temp dir, `git init`s it, configures local
 // author identity (required on hosts without a global git config), and
 // commits a README. Returns the absolute path. Test is skipped if git
@@ -1341,6 +1339,7 @@ func TestNamesAfterSmoke_NonPresentSmokedNameIsNoop(t *testing.T) {
 		t.Errorf("namesAfterSmoke with unknown smoked name = %v, want unchanged %v", got, in)
 	}
 }
+
 // TestBestEffortPushDecision codifies the gu-e7r3 invariant: --force MUST
 // take precedence over every other branch check, because --force is the
 // user's explicit "discard this work" signal. Pushing the branch in that

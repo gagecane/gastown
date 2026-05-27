@@ -378,7 +378,7 @@ func runNamepoolReset(cmd *cobra.Command, args []string) error {
 	}
 
 	pool.Reset()
-	
+
 	if err := pool.Save(); err != nil {
 		return fmt.Errorf("saving pool: %w", err)
 	}

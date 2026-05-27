@@ -64,10 +64,10 @@ var (
 	// stub-mode behavior without us threading state through cobra
 	// args. The flag bindings are reset between tests in the cobra
 	// SetArgs path; no global state survives between commands.
-	autoTestPREmitTemplate    bool
-	autoTestPREnableRig       string
-	autoTestPREnableLanguage  string
-	autoTestPRDisableRig      string
+	autoTestPREmitTemplate   bool
+	autoTestPREnableRig      string
+	autoTestPREnableLanguage string
+	autoTestPRDisableRig     string
 )
 
 var autoTestPRCmd = &cobra.Command{

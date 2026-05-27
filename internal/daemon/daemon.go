@@ -1954,10 +1954,10 @@ func (d *Daemon) restartStuckDeacon(sessionName, reason string) {
 // Trigger logic:
 //   - age <= max:                 no-op
 //   - max < age <= 2*max (soft):  restart only if no active work in flight,
-//                                 otherwise defer to a later tick
+//     otherwise defer to a later tick
 //   - age > 2*max (hard cap):     force restart regardless of active work,
-//                                 to escape the stuck-on-work pathology this
-//                                 knob is meant to prevent
+//     to escape the stuck-on-work pathology this
+//     knob is meant to prevent
 //
 // The actuation path is the same restartStuckDeacon used by the stuck-agent-
 // dog, so backoff, crash-loop guard, and usage-limit detection all apply.

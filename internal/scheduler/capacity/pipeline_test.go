@@ -322,9 +322,9 @@ func TestPlanDispatch_OnlyMessagingBeads(t *testing.T) {
 
 func TestParsePriorityFloor(t *testing.T) {
 	tests := []struct {
-		input   string
-		want    int
-		wantOK  bool
+		input  string
+		want   int
+		wantOK bool
 	}{
 		{"normal", PriorityFloorNormal, true},
 		{"Normal", PriorityFloorNormal, true},
@@ -394,7 +394,7 @@ func TestSortByPriorityFloor(t *testing.T) {
 func TestSortByPriorityFloor_NilContext(t *testing.T) {
 	beads := []PendingBead{
 		{ID: "ctx-1", WorkBeadID: "gt-lowest", Context: &SlingContextFields{PriorityFloor: PriorityFloorLowest}},
-		{ID: "ctx-2", WorkBeadID: "gt-nil"},     // nil context → treated as normal (0)
+		{ID: "ctx-2", WorkBeadID: "gt-nil"}, // nil context → treated as normal (0)
 		{ID: "ctx-3", WorkBeadID: "gt-normal", Context: &SlingContextFields{PriorityFloor: PriorityFloorNormal}},
 	}
 	SortByPriorityFloor(beads)

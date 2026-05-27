@@ -3186,7 +3186,6 @@ func DiscoverPostHocCompletions(bd *BdCli, workDir, rigName string) *DiscoverPos
 	return result
 }
 
-
 // agentBeadSnapshot holds all fields from a single bd show --json call for an agent bead.
 // Used to avoid redundant subprocess invocations during zombie detection, where the same
 // agent bead was previously queried 3-5 times per polecat per patrol cycle. (gt-2gra)

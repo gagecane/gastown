@@ -146,8 +146,8 @@ func TestCompiledSignature_MatchesAny(t *testing.T) {
 	}
 
 	cases := []struct {
-		text  string
-		want  bool
+		text string
+		want bool
 	}{
 		{"Type error: Module 'foo' has no exported member", true},
 		{"AttributeError: 'None' object has no attribute 'bar'", true},
@@ -534,4 +534,3 @@ func TestFailureClassifierConfigJSON(t *testing.T) {
 }
 
 // --- Helper functions ---
-

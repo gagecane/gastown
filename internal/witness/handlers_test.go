@@ -2276,7 +2276,6 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 }
 
-
 // --- DiscoverPostHocCompletions tests (gu-jr8) ---
 //
 // Post-hoc completion covers the narrow case where:
@@ -3729,6 +3728,7 @@ func TestHandleZombieRestart_AutoSaveEscalates(t *testing.T) {
 		t.Errorf("Action = %q, must NOT archive auto-save work", z.Action)
 	}
 }
+
 // when recoverUnfiledMR fails, the error flows onto zombie.Error so the patrol
 // operator sees what went wrong. The Action string still reflects the attempt.
 //

@@ -106,7 +106,7 @@ func TestConventionsTemplate_RequiredSections(t *testing.T) {
 			guidance: "the D8 section must show the literal provenance-marker comment so the polecat can copy it verbatim",
 		},
 		{
-			name:     "D15 approval-line instruction",
+			name: "D15 approval-line instruction",
 			needles: []string{
 				"D15:",
 				"approved-by",

@@ -594,7 +594,7 @@ func (d *Daemon) filterKnownRigs(databases []string) []string {
 		return databases
 	}
 	if rigsCfg == nil || len(rigsCfg.Rigs) == 0 {
-		d.logger.Printf("jsonl_git_backup: filterKnownRigs: rigs.json has no registered rigs; "+
+		d.logger.Printf("jsonl_git_backup: filterKnownRigs: rigs.json has no registered rigs; " +
 			"keeping full database list (fail-open)")
 		return databases
 	}

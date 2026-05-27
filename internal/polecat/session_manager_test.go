@@ -653,9 +653,9 @@ func TestPromptlessFallbackIncludesPrimeAndWorkInstructions(t *testing.T) {
 // not auto-submitted; the condition triggers verifyStartupNudgeDelivery as a safety net.
 func TestModeABeaconVerificationCondition(t *testing.T) {
 	tests := []struct {
-		name            string
-		rc              *config.RuntimeConfig
-		wantModeA       bool // !SendBeaconNudge && !SendStartupNudge
+		name      string
+		rc        *config.RuntimeConfig
+		wantModeA bool // !SendBeaconNudge && !SendStartupNudge
 	}{
 		{
 			name: "Claude hook+prompt agent triggers Mode A verification",
@@ -930,15 +930,15 @@ func TestParseFreshBranchName_Rejects(t *testing.T) {
 		"master",
 		"develop",
 		"feature/x",
-		"polecat/",              // empty tail
-		"polecat/alpha",         // no ts or issue
-		"polecat/alpha-",        // trailing dash, no ts
-		"polecat//gt-abc--1",    // empty polecat name (new form)
-		"polecat//gt-abc@1",     // empty polecat name (legacy form)
-		"polecat/alpha/--1",     // empty issue (new form)
-		"polecat/alpha/@1",      // empty issue (legacy form)
+		"polecat/",               // empty tail
+		"polecat/alpha",          // no ts or issue
+		"polecat/alpha-",         // trailing dash, no ts
+		"polecat//gt-abc--1",     // empty polecat name (new form)
+		"polecat//gt-abc@1",      // empty polecat name (legacy form)
+		"polecat/alpha/--1",      // empty issue (new form)
+		"polecat/alpha/@1",       // empty issue (legacy form)
 		"polecat/alpha/gt-abc--", // empty ts (new form)
-		"polecat/alpha/gt-abc@", // empty ts (legacy form)
+		"polecat/alpha/gt-abc@",  // empty ts (legacy form)
 		"",
 	}
 	for _, b := range rejects {

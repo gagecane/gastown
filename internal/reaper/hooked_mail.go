@@ -44,12 +44,12 @@ const DefaultOpenMailTTL = 24 * time.Hour
 
 // HookedMailResult holds the results of a hooked-mail reap operation.
 type HookedMailResult struct {
-	Database         string        `json:"database"`
-	Closed           int           `json:"closed"`
-	HookedRemain     int           `json:"hooked_remain"`
-	DryRun           bool          `json:"dry_run,omitempty"`
-	ClosedEntries    []ClosedEntry `json:"closed_entries,omitempty"`
-	Anomalies        []Anomaly     `json:"anomalies,omitempty"`
+	Database      string        `json:"database"`
+	Closed        int           `json:"closed"`
+	HookedRemain  int           `json:"hooked_remain"`
+	DryRun        bool          `json:"dry_run,omitempty"`
+	ClosedEntries []ClosedEntry `json:"closed_entries,omitempty"`
+	Anomalies     []Anomaly     `json:"anomalies,omitempty"`
 }
 
 // OpenMailResult holds the results of an open-mail reap operation.

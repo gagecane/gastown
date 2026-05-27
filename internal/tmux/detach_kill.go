@@ -108,7 +108,7 @@ func (t *Tmux) DetachedKillSessionWithProcesses(name string, delay time.Duration
 }
 
 // shellQuote wraps a string in single quotes for safe shell interpolation.
-// Internal single quotes are escaped as '\'' (end quote, escaped quote, new quote).
+// Internal single quotes are escaped as '\” (end quote, escaped quote, new quote).
 func shellQuote(s string) string {
 	if s == "" {
 		return "''"

@@ -434,4 +434,3 @@ exit 0
 		t.Errorf("Fix updated the wrong DB (expected legacy rig); updates.log:\n%s", data)
 	}
 }
-

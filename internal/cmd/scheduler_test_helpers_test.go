@@ -45,4 +45,3 @@ func configureScheduler(t *testing.T, hqPath string, maxPolecats, batchSize int)
 	}
 	writeJSONFile(t, config.TownSettingsPath(hqPath), settings)
 }
-

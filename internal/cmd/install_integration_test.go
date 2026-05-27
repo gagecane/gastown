@@ -534,13 +534,13 @@ func assertSlotValue(t *testing.T, townRoot, issueID, slot, want string) {
 
 // TestInstallDoctorClean validates that gt install creates a functional system.
 // This test verifies:
-// 1. gt install succeeds with proper structure
-// 2. gt rig add succeeds
-// 3. gt crew add succeeds
-// 4. Basic commands work
-// 5. gt doctor -v runs without crashing
-// 6. gt doctor --fix --no-start -v runs without crashing AND reduces the
-//    number of reported errors (does not regress)
+//  1. gt install succeeds with proper structure
+//  2. gt rig add succeeds
+//  3. gt crew add succeeds
+//  4. Basic commands work
+//  5. gt doctor -v runs without crashing
+//  6. gt doctor --fix --no-start -v runs without crashing AND reduces the
+//     number of reported errors (does not regress)
 //
 // The prior-known blockers for full doctor --fix verification are resolved:
 // - Dolt nil pointer dereference during agent bead creation: fixed (see 87a5847e)
