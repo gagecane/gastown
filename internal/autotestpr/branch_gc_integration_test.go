@@ -238,10 +238,6 @@ func assertBeadKept(t *testing.T, kept []string, idContains string) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0)
-}
-
 func initGit(t *testing.T, dir string) {
 	t.Helper()
 	cmds := [][]string{
