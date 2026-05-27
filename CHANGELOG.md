@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-27
+
 ### Fixed
 
 - **`gt done` gt-pvx refuses to auto-pop stale stashes** (gu-vtkn) — When a

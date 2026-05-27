@@ -48,7 +48,7 @@ func runTapList(cmd *cobra.Command, args []string) error {
 		{
 			name:        "pr-workflow",
 			kind:        "guard",
-			description: "Enforce configured PR/direct workflow",
+			description: "Block PR creation and feature branches",
 			event:       "PreToolUse",
 			matchers:    []string{"Bash(gh pr create*)", "Bash(git checkout -b*)", "Bash(git switch -c*)"},
 			implemented: true,

@@ -205,9 +205,9 @@ go here by default. But if you discover bugs/issues in OTHER projects:
 | Issue is about... | File in | Command |
 |-------------------|---------|---------|
 | This rig's code ({{ .RigName }}) | Here (default) | `bd create "..."` |
-| `bd` CLI (beads tool) | **beads** | `bd create --rig beads "..."` |
-| `gt` CLI (gas town tool) | **gastown** | `bd create --rig gastown "..."` |
-| Cross-rig coordination | **HQ** | `bd create --prefix hq- "..."` |
+| `bd` CLI (beads tool) | **beads** | `bd create --repo beads "..."` |
+| `gt` CLI (gas town tool) | **gastown** | `bd create --repo gastown "..."` |
+| Cross-rig coordination | **HQ** | `bd create --repo hq "..."` |
 
 **The test**: "Which repo would the fix be committed to?"
 
@@ -244,31 +244,30 @@ Mail beads can be hooked for ad-hoc instruction handoff:
 If you find mail on your hook (not a molecule), GUPP applies: read the mail
 content, interpret the prose instructions, and execute them.
 
-## Git Workflow: Match The Landing Mode
+## Git Workflow: Work Off Main
 
-Use the active landing mode for the repo or assignment. Do not push directly to
-main when fork-PR or review-only mode is in effect.
+**Crew workers push directly to main. No feature branches.**
 
-### PR and Direct-Main Policy
+### No PRs in Maintainer Repos
 
-- Direct mode: crew may push to the default branch when policy allows
-- Fork-PR mode: push only to a fork/non-maintainer remote and open a PR
-- MQ mode: polecats use `{{ cmd }} done` → Refinery merges to main
+If you have direct push access to the repo (you're a maintainer):
+- **NEVER create GitHub PRs** — push directly to main instead
+- Crew workers: push directly to main
+- Polecats: use `{{ cmd }} done` → Refinery merges to main
 
-Check `git remote -v` before PR work. If no fork/upstream push remote exists,
-do not create a GitHub PR.
+PRs are for external contributors submitting to repos they don't own.
+Check `git remote -v` to identify repo ownership.
 
 ### The Landing Rule
 
-> **Work is NOT landed until it is on the configured landing path.**
+> **Work is NOT landed until it's either on `main` or submitted to the Refinery MQ.**
 
 Feature branches are dangerous in multi-agent environments — the repo baseline
 diverges wildly, branches go stale, merge conflicts compound, and other agents
 can't see unmerged work.
 
-**Valid**: Pushed to main when direct mode allows it, submitted to Refinery via
-`{{ cmd }} done`, or opened as the required fork PR.
-**Invalid**: Sitting on a local or remote feature branch outside the configured workflow.
+**Valid**: Pushed to main, or submitted to Refinery via `{{ cmd }} done`.
+**Invalid**: Sitting on a local or remote feature branch not in MQ.
 
 ### Workflow
 
@@ -276,7 +275,7 @@ can't see unmerged work.
 git pull                    # Start fresh
 # ... do work ...
 git add -A && git commit -m "description"
-git push                    # Only when direct mode allows it
+git push                    # Direct to main
 ```
 
 If push fails (someone else pushed): `git pull --rebase && git push`
@@ -429,28 +428,27 @@ or the human asks.
 
 ## Landing the Plane (Session End Protocol)
 
-When ending a session, complete ALL steps. The plane is NOT landed until the
-configured landing path is reached. **Never say "ready to push when you are!"**
+When ending a session, complete ALL steps. The plane is NOT landed until `git push`
+succeeds. **YOU must push — NEVER say "ready to push when you are!"**
 
 **MANDATORY WORKFLOW:**
 
 1. **File beads** for remaining follow-up work
 2. **Run quality gates** (if code changed): `go test ./...` / `golangci-lint run ./...`
 3. **Update beads** — close finished work
-4. **Advance the configured landing path — NON-NEGOTIABLE:**
+4. **PUSH TO REMOTE — NON-NEGOTIABLE:**
    ```bash
    git pull --rebase
    git add <files> && git commit -m "description"
-   git push                    # direct mode only, when policy allows
-   # fork-PR mode: push to fork branch and open/update the PR instead
-   git status                  # MUST be clean
+   git push                    # DO NOT STOP BEFORE THIS COMPLETES
+   git status                  # MUST show "up to date with origin/main"
    ```
-   If the landing step fails, resolve and retry until it succeeds.
+   If `git push` fails, resolve and retry until it succeeds.
 5. **Clean up**: `git stash clear && git remote prune origin`
 6. **Handoff or close**: `{{ cmd }} handoff` or verify clean `git status`
 7. **Session summary**: What completed, beads filed, quality gate status, push confirmation
 
-**Landing means the configured direct, fork-PR, MQ, or review path is reached. No exceptions.**
+**Landing means EVERYTHING is pushed to remote. No exceptions.**
 
 ## Desire Paths: Improving the Tooling
 

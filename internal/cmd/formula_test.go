@@ -691,14 +691,18 @@ func TestRenderTemplate_MissingDesignIDLeavesSentinel(t *testing.T) {
 	}
 }
 
+// TestFormulaConvoyIDUsesTownConvoyPrefix used to exercise a top-level
+// formulaConvoyID helper with a hardcoded "hq-cv-" prefix. Upstream removed
+// that helper and instead constructs the convoy ID inline using the target
+// rig's beads prefix (e.g. fmt.Sprintf("%s-cv-%s", rigPrefix, shortID)) so
+// rigs other than HQ can run convoy formulas without colliding on bead IDs.
+// The remaining behavior is covered by
+// TestExecuteConvoyFormulaCreatesTownConvoyAndRigLegs below — it verifies the
+// convoy bead and leg beads end up on the target rig with the rig's prefix.
+// Keep this stub so the bead IDs of older test runs map to a recognisable
+// name when grepping history.
 func TestFormulaConvoyIDUsesTownConvoyPrefix(t *testing.T) {
-	t.Parallel()
-
-	got := formulaConvoyID("abc123")
-	want := "hq-cv-abc123"
-	if got != want {
-		t.Fatalf("formulaConvoyID() = %q, want %q", got, want)
-	}
+	t.Skip("formulaConvoyID helper removed; convoy ID is now constructed inline using the target rig's beads prefix (see executeConvoyFormula). Coverage retained by TestExecuteConvoyFormulaCreatesTownConvoyAndRigLegs.")
 }
 
 func TestExecuteConvoyFormulaCreatesTownConvoyAndRigLegs(t *testing.T) {

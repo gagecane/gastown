@@ -128,6 +128,44 @@ polecat_has_open_cleanup_wisp() {
   [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null
 }
 
+heartbeat_epoch() {
+  local file="$1"
+  local ts=""
+
+  ts=$(jq -r '(.timestamp // empty) | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // empty' "$file" 2>/dev/null || true)
+  if [ -n "$ts" ]; then
+    echo "$ts"
+    return 0
+  fi
+
+  # Fallback for malformed legacy files: use mtime rather than failing open.
+  stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null
+}
+
+has_in_progress_work() {
+  local locations=("$TOWN_ROOT")
+  local rig=""
+  local prefix=""
+  local loc=""
+  local output=""
+  local count=""
+
+  while IFS='|' read -r rig prefix; do
+    [ -z "$rig" ] && continue
+    [ -d "$TOWN_ROOT/$rig" ] && locations+=("$TOWN_ROOT/$rig")
+  done <<< "$RIG_PREFIX_MAP"
+
+  for loc in "${locations[@]}"; do
+    output=$(cd "$loc" && bd list --status=in_progress --json --limit=1 2>/dev/null) || return 0
+    count=$(printf '%s' "$output" | jq 'length' 2>/dev/null || echo 1)
+    if [ "${count:-1}" -gt 0 ]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 # --- Enumerate agents ---------------------------------------------------------
 
 log "=== Checking agent health ==="
@@ -273,6 +311,7 @@ log "=== Deacon Health ==="
 
 DEACON_SESSION="hq-deacon"
 DEACON_ISSUE=""
+DEACON_PROCESS_ALIVE=0
 
 if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
   log "  CRASHED: Deacon session is dead"
@@ -285,6 +324,7 @@ else
     DEACON_ISSUE="zombie"
   else
     log "  Process alive: pid=$DEACON_PID comm=$DEACON_COMM"
+    DEACON_PROCESS_ALIVE=1
   fi
 
   # Primary liveness check: session heartbeat (updated by any gt command, not

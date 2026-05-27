@@ -530,6 +530,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Re-check to get file details (cleanup detection already confirmed uncommitted changes)
 		workStatus, err := g.CheckUncommittedWork()
 		if err == nil && workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
+			if len(workStatus.UnmergedFiles) > 0 {
+				return fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", strings.Join(workStatus.UnmergedFiles, ", "))
+			}
+
 			fmt.Printf("\n%s Uncommitted changes detected — auto-saving to prevent work loss\n", style.Bold.Render("⚠"))
 			fmt.Printf("  Files: %s\n\n", workStatus.String())
 
@@ -547,9 +551,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						_ = g.ResetFiles("CLAUDE.md")
 					}
 				}
-				// Unstage runtime/ephemeral directories (mirrors checkpoint_dog exclusions).
-				for _, dir := range []string{".beads/", ".claude/", ".runtime/", "__pycache__/"} {
-					_ = g.ResetFiles(dir)
+				// Unstage runtime/ephemeral artifacts using the centralized git policy.
+				for _, path := range workStatus.RuntimeArtifactPaths() {
+					_ = g.ResetFiles(path)
 				}
 				// Unstage deletions of tracked files. A safety-net auto-commit should
 				// preserve work (additions + modifications), never destroy it (deletions).
@@ -676,7 +680,7 @@ afterSafetyNet:
 		}
 
 		// Block if there are uncommitted changes (would be lost on completion).
-		// Runtime artifacts (.claude/, .beads/, .runtime/, __pycache__/) are
+		// Runtime artifacts (.claude/, .opencode/, .beads/, .runtime/, __pycache__/) are
 		// excluded — these are toolchain-managed and normally gitignored.
 		// Without this filter, gt done fails on virtually every polecat because
 		// Cursor creates .claude/ at runtime in every workspace.
@@ -1596,7 +1600,7 @@ notifyWitness:
 	// was detected), but there is no durable MR wisp for the refinery to pick up.
 	// Nudging anyway causes refinery sessions to wake, scan an empty queue, and
 	// escalate phantom MQ_SUBMIT alerts across the town.
-	if mrID != "" && !mrFailed {
+	if mrID != "" && !mrFailed && shouldNudgeRefinery(exitType, mrID) {
 		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
 	}
 
@@ -1883,6 +1887,16 @@ func forceCloseWithRetry(bd *beads.Beads, issueID, closeReason string) error {
 		}
 	}
 	return closeErr
+}
+
+// shouldNudgeRefinery reports whether a gt done invocation may wake the
+// refinery. Only COMPLETED exits create an MR bead; DEFERRED and ESCALATED
+// exits (polecats finishing operational tasks with no code changes) must
+// never emit MQ_SUBMIT, or the refinery wakes from backoff to find an empty
+// merge queue (gh#3885). The exitType check is defensive: it holds the
+// invariant even if a future code path populates mrID outside COMPLETED.
+func shouldNudgeRefinery(exitType, mrID string) bool {
+	return exitType == ExitCompleted && mrID != ""
 }
 
 // setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead
@@ -2346,6 +2360,7 @@ func isDefaultBranchName(branch, defaultBranch string) bool {
 	}
 	return branch == "main" || branch == "master"
 }
+
 
 // stripOverlayCLAUDEmd detects and removes Gas Town overlay content from CLAUDE.md
 // and CLAUDE.local.md before the branch is pushed. Polecats were committing the

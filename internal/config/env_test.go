@@ -1391,12 +1391,17 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 	t.Run("ignores shell env var", func(t *testing.T) {
 		// The env var is deprecated — config takes over, falling back to "high"
 		t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
-		env := AgentEnv(AgentEnvConfig{
-			Role:     "crew",
-			TownRoot: "/tmp/nonexistent-town",
+		stderr := captureStderr(t, func() {
+			env := AgentEnv(AgentEnvConfig{
+				Role:     "crew",
+				TownRoot: "/tmp/nonexistent-town",
+			})
+			if got := env["CLAUDE_CODE_EFFORT_LEVEL"]; got != "high" {
+				t.Errorf("CLAUDE_CODE_EFFORT_LEVEL = %q, want %q (env var should be ignored)", got, "high")
+			}
 		})
-		if got := env["CLAUDE_CODE_EFFORT_LEVEL"]; got != "high" {
-			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL = %q, want %q (env var should be ignored)", got, "high")
+		if stderr != "" {
+			t.Fatalf("AgentEnv emitted stderr for ignored CLAUDE_CODE_EFFORT_LEVEL: %q", stderr)
 		}
 	})
 

@@ -189,13 +189,14 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Scheduled: %d total, %d ready\n", len(scheduled), readyCount)
 	fmt.Printf("  Active:    %d polecats\n", capacitySnapshot.ActiveSessions)
 	if capacitySnapshot.Max > 0 {
-		fmt.Printf("  Capacity:  %d free of %d (working: %d, recovery: %d, reservations: %d, reusable idle: %d)\n",
+		fmt.Printf("  Capacity:  %d free of %d (working: %d, recovery: %d, reservations: %d, reusable idle: %d, pending MR: %d)\n",
 			capacitySnapshot.Free,
 			capacitySnapshot.Max,
 			capacitySnapshot.Working,
 			capacitySnapshot.RecoveryBlocked,
 			capacitySnapshot.Reservations,
 			capacitySnapshot.ReusableIdle,
+			capacitySnapshot.PendingMR,
 		)
 	} else {
 		fmt.Printf("  Capacity:  direct dispatch (scheduler.max_polecats=%d)\n", capacitySnapshot.Max)
@@ -309,15 +310,14 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 		// Close ALL sling contexts for this specific work bead (there may be
 		// duplicates if concurrent scheduleBead calls raced past idempotency).
 		// Scan all rig dirs since contexts live in target rig beads. (GH#3468)
-		contexts := listAllSlingContexts(townRoot)
+		contexts := listAllSlingContextRecords(townRoot)
 
 		closed := 0
 		for _, ctx := range contexts {
-			fields := beads.ParseSlingContextFields(ctx.Description)
+			fields := beads.ParseSlingContextFields(ctx.issue.Description)
 			if fields != nil && fields.WorkBeadID == schedulerClearBead {
-				b := beadsForContext(townRoot, fields)
-				if err := b.CloseSlingContext(ctx.ID, "cleared"); err != nil {
-					fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.ID, err)
+				if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "cleared"); err != nil {
+					fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.issue.ID, err)
 					continue
 				}
 				closed++
@@ -334,7 +334,7 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 	}
 
 	// Close all open sling contexts across all dirs
-	allContexts := listAllSlingContexts(townRoot)
+	allContexts := listAllSlingContextRecords(townRoot)
 
 	if len(allContexts) == 0 {
 		fmt.Println("Scheduler is already empty.")
@@ -343,10 +343,8 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 
 	cleared := 0
 	for _, ctx := range allContexts {
-		fields := beads.ParseSlingContextFields(ctx.Description)
-		b := beadsForContext(townRoot, fields)
-		if err := b.CloseSlingContext(ctx.ID, "cleared"); err != nil {
-			fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.ID, err)
+		if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "cleared"); err != nil {
+			fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.issue.ID, err)
 			continue
 		}
 		cleared++
@@ -385,8 +383,10 @@ func listScheduledBeads(townRoot string) []scheduledBeadInfo {
 		}
 	}
 
-	// Build readyIDs set and batch-fetch work bead info for specific IDs
-	readyWorkIDs := listReadyWorkBeadIDs(townRoot)
+	// Build blockedIDs set and batch-fetch work bead info for specific IDs.
+	// bd blocked is fast because it reads the cached blocked set; bd ready walks
+	// the full ready graph and is too slow for scheduler display paths.
+	blockedWorkIDs, _ := listBlockedWorkBeadIDsWithError(townRoot, workBeadIDs)
 	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
 
 	seenWork := make(map[string]bool)
@@ -411,7 +411,8 @@ func listScheduledBeads(townRoot string) []scheduledBeadInfo {
 		// Get work bead info for title/status from batch-fetched map
 		title := ctx.Title
 		status := "open"
-		if info, found := workBeadInfo[fields.WorkBeadID]; found {
+		info, found := workBeadInfo[fields.WorkBeadID]
+		if found {
 			title = info.Title
 			status = info.Status
 			// Skip if work bead is hooked/closed
@@ -425,7 +426,7 @@ func listScheduledBeads(townRoot string) []scheduledBeadInfo {
 			Title:     title,
 			Status:    status,
 			TargetRig: fields.TargetRig,
-			Blocked:   !readyWorkIDs[fields.WorkBeadID],
+			Blocked:   !isScheduledWorkBeadReady(fields.WorkBeadID, info, found, blockedWorkIDs),
 		})
 	}
 

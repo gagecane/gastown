@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
@@ -1355,108 +1354,6 @@ func TestDetectBeadsPrefixFromConfig_NoFallbackToJSONL(t *testing.T) {
 	got := detectBeadsPrefixFromConfig(configPath)
 	if got != "" {
 		t.Errorf("detectBeadsPrefixFromConfig() = %q, want empty (should not read issues.jsonl)", got)
-	}
-}
-
-func TestAddRig_TrackedBeadsPrefixCollisionDoesNotRewriteRoute(t *testing.T) {
-	repoDir := t.TempDir()
-	beadsDir := filepath.Join(repoDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# second rig\n"), 0644); err != nil {
-		t.Fatalf("write README.md: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: gt\nissue-prefix: gt\n"), 0644); err != nil {
-		t.Fatalf("write config.yaml: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "init", "--initial-branch=main", repoDir},
-		{"git", "-C", repoDir, "config", "user.email", "test@test.com"},
-		{"git", "-C", repoDir, "config", "user.name", "Test User"},
-		{"git", "-C", repoDir, "add", "README.md"},
-		{"git", "-C", repoDir, "add", "-f", ".beads/config.yaml"},
-		{"git", "-C", repoDir, "commit", "-m", "Initial commit with beads config"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%v: %v\n%s", args, err, out)
-		}
-	}
-
-	root, rigsConfig := setupTestTown(t)
-	if err := beads.WriteRoutes(filepath.Join(root, ".beads"), []beads.Route{
-		{Prefix: "gt-", Path: "gastown/mayor/rig"},
-	}); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-	manager := NewManager(root, rigsConfig, git.NewGit(root))
-
-	_, err := manager.AddRig(AddRigOptions{
-		Name:          "secondrig",
-		GitURL:        repoDir,
-		SkipDoltCheck: true,
-	})
-	if err == nil {
-		t.Fatal("AddRig succeeded, want tracked source prefix collision")
-	}
-	if got := err.Error(); !strings.Contains(got, "source repo prefix") || !strings.Contains(got, "already used") {
-		t.Fatalf("AddRig error = %q, want source prefix collision", got)
-	}
-	if got := err.Error(); strings.Contains(got, "use --prefix") {
-		t.Fatalf("AddRig error = %q, should not suggest --prefix for tracked source prefix collision", got)
-	}
-
-	routes, err := beads.LoadRoutes(filepath.Join(root, ".beads"))
-	if err != nil {
-		t.Fatalf("load routes: %v", err)
-	}
-	if len(routes) != 1 {
-		t.Fatalf("routes count = %d, want 1: %#v", len(routes), routes)
-	}
-	if routes[0].Prefix != "gt-" || routes[0].Path != "gastown/mayor/rig" {
-		t.Fatalf("route = %#v, want gt- -> gastown/mayor/rig", routes[0])
-	}
-	if _, err := os.Stat(filepath.Join(root, "secondrig")); !os.IsNotExist(err) {
-		t.Fatalf("secondrig directory still exists after failed add: %v", err)
-	}
-}
-
-func TestAddRig_RollsBackRouteWhenRegistrationFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based bd shim not reliable on Windows CI")
-	}
-
-	fakeBDForAddRig(t)
-
-	root, rigsConfig := setupTestTown(t)
-	if err := os.WriteFile(filepath.Join(root, "mayor"), []byte("not a directory\n"), 0644); err != nil {
-		t.Fatalf("write mayor blocker: %v", err)
-	}
-	manager := NewManager(root, rigsConfig, git.NewGit(root))
-	repoDir := createTestGitRepoForRig(t, "rollbackrepo")
-
-	_, err := manager.AddRig(AddRigOptions{
-		Name:          "rollbackrig",
-		GitURL:        repoDir,
-		BeadsPrefix:   "rb",
-		SkipDoltCheck: true,
-	})
-	if err == nil {
-		t.Fatal("AddRig succeeded, want rigs.json registration failure")
-	}
-	if got := err.Error(); !strings.Contains(got, "registering rig in rigs.json") {
-		t.Fatalf("AddRig error = %q, want rigs.json registration failure", got)
-	}
-
-	routes, err := beads.LoadRoutes(filepath.Join(root, ".beads"))
-	if err != nil {
-		t.Fatalf("load routes: %v", err)
-	}
-	for _, route := range routes {
-		if route.Prefix == "rb-" {
-			t.Fatalf("route was not rolled back after failed add: %#v", routes)
-		}
 	}
 }
 

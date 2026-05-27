@@ -203,6 +203,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
 	d.Register(doctor.NewBootHealthCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())
+	d.Register(doctor.NewDoltConfigCheck())
 	d.Register(doctor.NewCustomTypesCheck())
 	d.Register(doctor.NewCustomStatusesCheck())
 	d.Register(doctor.NewFormulaCheck())

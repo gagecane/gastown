@@ -82,6 +82,23 @@ func normalizeDoltDatabasePrefix(dbName string) string {
 	return name
 }
 
+// ConfigYAMLDisablesAutoExport reports whether config.yaml content explicitly
+// disables bd's post-run auto-export. Comments do not count as configuration.
+func ConfigYAMLDisablesAutoExport(content string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "export.auto:") {
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "export.auto:"))
+			value = strings.Trim(value, `"'`)
+			return strings.EqualFold(value, "false")
+		}
+	}
+	return false
+}
+
 func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	wantPrefix := "prefix: " + prefix
@@ -94,11 +111,14 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	// auto-commit=off (bd's historical default), writes sit in the working
 	// set and are silently lost across sessions. See gt-2o9eg / gu-8nbc.
 	wantAutoCommit := "dolt.auto-commit: \"on\""
+	// Gas Town stores beads in Dolt/server-mode runtime directories that are often
+	// redirected or gitignored; bd's post-run auto-export git-add is noisy there.
+	wantExportAuto := "export.auto: \"false\""
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		// New config: include all Gas Town defaults
-		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantAutoCommit + "\n"
+		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantAutoCommit + "\n" + wantExportAuto + "\n"
 		return os.WriteFile(configPath, []byte(content), 0644)
 	}
 	if err != nil {
@@ -114,6 +134,7 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	foundIssuePrefix := false
 	foundIdleTimeout := false
 	foundAutoCommit := false
+	foundExportAuto := false
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -138,6 +159,11 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 			foundAutoCommit = true
 			continue
 		}
+		if strings.HasPrefix(trimmed, "export.auto:") {
+			lines[i] = wantExportAuto
+			foundExportAuto = true
+			continue
+		}
 	}
 
 	if !foundPrefix {
@@ -151,6 +177,9 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	}
 	if !foundAutoCommit {
 		lines = append(lines, wantAutoCommit)
+	}
+	if !foundExportAuto {
+		lines = append(lines, wantExportAuto)
 	}
 
 	newContent := strings.Join(lines, "\n")
