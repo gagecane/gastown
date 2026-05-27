@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -3342,6 +3343,280 @@ func TestRecoverUnfiledMR_NoGatesPreservesLegacyBehavior(t *testing.T) {
 	_, _ = _recoverUnfiledMR(bd, townRoot, "testrig", "nux", state)
 	// No assertion on action — the point is that the gate-runner mock is
 	// never invoked (enforced via t.Fatalf inside the mock).
+}
+
+// TestVerifyUnfiledMR_BareRepoFallback covers gu-uk8f: when origin/<branch>
+// has been reaped (fork sync, post-merge cleanup) but the rig's bare repo at
+// <rig>/.repo.git still has refs/heads/<branch> at the polecat HEAD, witness
+// recovery must treat the work as already-pushed instead of attempting a
+// fresh push to a missing remote. This mirrors the bare fallback that
+// internal/cmd/done.go:verifyPushedCommitWithBareFallback already provides
+// for the polecat-side push-verification path.
+//
+// Setup:
+//
+//	townRoot/
+//	  mayor/town.json                       (workspace marker)
+//	  testrig/
+//	    .repo.git/                          (bare clone with refs/heads/<branch>)
+//	    polecats/nux/testrig/               (polecat worktree, branch HEAD)
+//
+// The polecat worktree has a commit on a feature branch but NO origin remote
+// to query — so g.RemoteBranchTip returns an error and the new fallback path
+// must engage.
+func TestVerifyUnfiledMR_BareRepoFallback(t *testing.T) {
+	// Skip on platforms without a real git binary in PATH.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	rigName := "testrig"
+	polecatName := "nux"
+	branch := "polecat/nux/gu-uk8f"
+
+	// 1. Build a "seed" repo with one commit on main so the bare clone has a
+	// base history. Then add the polecat branch on top with a feature commit.
+	// We layer the polecat branch via a temporary worktree-like flow so the
+	// bare repo ends up holding refs/heads/<branch> at the SHA we observe in
+	// the polecat worktree.
+	seedDir := filepath.Join(townRoot, "seed")
+	if err := os.MkdirAll(seedDir, 0o755); err != nil {
+		t.Fatalf("mkdir seed: %v", err)
+	}
+	mustGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+		}
+	}
+	mustGit(seedDir, "init", "-b", "main")
+	mustGit(seedDir, "config", "user.email", "test@test")
+	mustGit(seedDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(seedDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed README: %v", err)
+	}
+	mustGit(seedDir, "add", "README.md")
+	mustGit(seedDir, "commit", "-m", "initial")
+
+	// Create the feature branch with one extra commit in the seed repo. We'll
+	// later push it into the bare repo and copy the worktree out to the
+	// polecat path.
+	mustGit(seedDir, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(seedDir, "feature.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	mustGit(seedDir, "add", "feature.txt")
+	mustGit(seedDir, "commit", "-m", "feature work")
+
+	// Capture the feature-branch HEAD SHA — this is what verifyUnfiledMR will
+	// observe as state.HeadSHA on the polecat worktree.
+	headOut, err := exec.Command("git", "-C", seedDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse seed HEAD: %v", err)
+	}
+	headSHA := strings.TrimSpace(string(headOut))
+
+	// 2. Create TWO bare repos: an "origin" (fork) bare that holds main but
+	// NOT the feature branch (simulating a reaped fork branch), and the
+	// rig-level .repo.git that DOES still have the feature branch ref. This
+	// mirrors the production gu-uk8f failure mode where the live remote was
+	// cleaned up but the rig's local mirror still has the work.
+	originDir := filepath.Join(townRoot, "origin.git")
+	mustGit(seedDir, "init", "--bare", originDir)
+	bareDir := filepath.Join(townRoot, rigName, ".repo.git")
+	if err := os.MkdirAll(filepath.Dir(bareDir), 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	mustGit(seedDir, "init", "--bare", bareDir)
+	mustGit(seedDir, "remote", "add", "origin", originDir)
+	mustGit(seedDir, "remote", "add", "bare", bareDir)
+	// Push main everywhere; push the feature branch only to the rig bare
+	// (origin has been "reaped" of the feature branch).
+	mustGit(seedDir, "push", "origin", "main")
+	mustGit(seedDir, "push", "bare", "main")
+	mustGit(seedDir, "push", "bare", branch)
+
+	// 3. Build the polecat worktree at the canonical nested path. Clone from
+	// origin so origin/main exists for the cherry-pick comparison, then
+	// fast-forward to the feature commit by fetching from the bare repo
+	// (which mirrors how the polecat got its commit pre-death). origin still
+	// does NOT have the feature branch, so g.RemoteBranchTip("origin", branch)
+	// will return empty and the new fallback path engages.
+	polecatPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	if err := os.MkdirAll(filepath.Dir(polecatPath), 0o755); err != nil {
+		t.Fatalf("mkdir polecat parent: %v", err)
+	}
+	mustGit(filepath.Dir(polecatPath), "clone", originDir, polecatPath)
+	mustGit(polecatPath, "remote", "add", "bare", bareDir)
+	mustGit(polecatPath, "fetch", "bare", branch)
+	mustGit(polecatPath, "checkout", "-b", branch, "FETCH_HEAD")
+	// Remove the bare remote — the polecat worktree in production wouldn't
+	// have it as a named remote. Only origin (with no feature branch) and
+	// the .repo.git lookup-path matter.
+	mustGit(polecatPath, "remote", "remove", "bare")
+
+	// Sanity: the polecat HEAD must equal headSHA (or the fixture is wrong).
+	pcHeadOut, err := exec.Command("git", "-C", polecatPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse polecat HEAD: %v", err)
+	}
+	if got := strings.TrimSpace(string(pcHeadOut)); got != headSHA {
+		t.Fatalf("polecat HEAD %q != bare branch SHA %q", got, headSHA)
+	}
+
+	// 4. Stub bd so verifyUnfiledMR's "look for an existing MR bead" lookup
+	// returns nothing. The function still proceeds and computes
+	// state.AlreadyPushed — which is what we're testing.
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			// `bd show <hookBead> --json` returns no description, so no
+			// gates parsing kicks in. `bd list ... --json` for the MR
+			// dedup lookup returns an empty array.
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	// 5. Invoke the function under test with no hookBead (skips the
+	// gates-parsing branch and keeps target=main).
+	state, err := _verifyUnfiledMR(bd, polecatPath, rigName, polecatName, "")
+	if err != nil {
+		t.Fatalf("_verifyUnfiledMR: %v", err)
+	}
+	if state == nil {
+		t.Fatal("state = nil, want non-nil with AlreadyPushed=true")
+	}
+	if !state.CommitsAhead {
+		t.Errorf("CommitsAhead = false, want true (1 commit ahead of bare/main)")
+	}
+	if state.HeadSHA != headSHA {
+		t.Errorf("HeadSHA = %q, want %q", state.HeadSHA, headSHA)
+	}
+	if !state.AlreadyPushed {
+		t.Errorf("AlreadyPushed = false, want true (bare repo has refs/heads/%s at HEAD)", branch)
+	}
+}
+
+// TestVerifyUnfiledMR_BareRepoFallback_StaleBare verifies the negative case:
+// if the bare repo's branch ref does NOT match the polecat HEAD (e.g., the
+// bare ref was never updated, or points at a stale SHA), the fallback must
+// NOT report AlreadyPushed. Otherwise witness would skip pushing legitimate
+// new work to origin.
+func TestVerifyUnfiledMR_BareRepoFallback_StaleBare(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	rigName := "testrig"
+	polecatName := "nux"
+	branch := "polecat/nux/gu-uk8f-stale"
+
+	mustGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+		}
+	}
+
+	seedDir := filepath.Join(townRoot, "seed")
+	if err := os.MkdirAll(seedDir, 0o755); err != nil {
+		t.Fatalf("mkdir seed: %v", err)
+	}
+	mustGit(seedDir, "init", "-b", "main")
+	mustGit(seedDir, "config", "user.email", "test@test")
+	mustGit(seedDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(seedDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed README: %v", err)
+	}
+	mustGit(seedDir, "add", "README.md")
+	mustGit(seedDir, "commit", "-m", "initial")
+	mustGit(seedDir, "checkout", "-b", branch)
+	// First feature commit — this is the SHA we'll plant in the bare repo.
+	if err := os.WriteFile(filepath.Join(seedDir, "feature.txt"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatalf("write feature v1: %v", err)
+	}
+	mustGit(seedDir, "add", "feature.txt")
+	mustGit(seedDir, "commit", "-m", "feature v1")
+
+	originDir := filepath.Join(townRoot, "origin.git")
+	mustGit(seedDir, "init", "--bare", originDir)
+	bareDir := filepath.Join(townRoot, rigName, ".repo.git")
+	if err := os.MkdirAll(filepath.Dir(bareDir), 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	mustGit(seedDir, "init", "--bare", bareDir)
+	mustGit(seedDir, "remote", "add", "origin", originDir)
+	mustGit(seedDir, "remote", "add", "bare", bareDir)
+	mustGit(seedDir, "push", "origin", "main")
+	mustGit(seedDir, "push", "bare", "main")
+	// Plant v1 in the rig bare repo (this is the "stale" state).
+	mustGit(seedDir, "push", "bare", branch)
+
+	// Now advance the polecat side past v1. The bare ref will point at v1;
+	// the polecat HEAD will be at v2.
+	if err := os.WriteFile(filepath.Join(seedDir, "feature.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatalf("write feature v2: %v", err)
+	}
+	mustGit(seedDir, "add", "feature.txt")
+	mustGit(seedDir, "commit", "-m", "feature v2")
+	v2Out, err := exec.Command("git", "-C", seedDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse seed HEAD v2: %v", err)
+	}
+	v2SHA := strings.TrimSpace(string(v2Out))
+
+	polecatPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	if err := os.MkdirAll(filepath.Dir(polecatPath), 0o755); err != nil {
+		t.Fatalf("mkdir polecat parent: %v", err)
+	}
+	// Clone from origin, fetch the v2 commit from the seed, check out as the
+	// feature branch. origin has no feature branch; bare has v1.
+	mustGit(filepath.Dir(polecatPath), "clone", originDir, polecatPath)
+	mustGit(polecatPath, "remote", "add", "seed", seedDir)
+	mustGit(polecatPath, "fetch", "seed", branch)
+	mustGit(polecatPath, "checkout", "-b", branch, "FETCH_HEAD")
+	mustGit(polecatPath, "remote", "remove", "seed")
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	state, err := _verifyUnfiledMR(bd, polecatPath, rigName, polecatName, "")
+	if err != nil {
+		t.Fatalf("_verifyUnfiledMR: %v", err)
+	}
+	if state == nil {
+		t.Fatal("state = nil, want non-nil")
+	}
+	if state.HeadSHA != v2SHA {
+		t.Errorf("HeadSHA = %q, want %q", state.HeadSHA, v2SHA)
+	}
+	if state.AlreadyPushed {
+		t.Error("AlreadyPushed = true, want false (bare ref is stale at v1, polecat HEAD is v2)")
+	}
 }
 
 // TestExtractMRIDFromSubmit covers parsing of `gt mq submit` output so we can
