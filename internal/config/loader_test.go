@@ -4001,7 +4001,16 @@ func TestMultipleAgentTypes(t *testing.T) {
 // to be explicitly defined as custom agents since they are NOT built-in presets.
 func TestCustomClaudeVariants(t *testing.T) {
 	skipIfAgentBinaryMissing(t, "claude")
-	t.Parallel()
+	// NOT parallel: asserts on the contents of the global agent registry
+	// (claude-opus/sonnet/haiku must NOT be built-in presets) AND mutates it
+	// later via ResolveRoleAgentConfig. Other parallel tests in this package
+	// (e.g. cost_tier_test.go, agents_prefix_inheritance_test.go) load
+	// settings that define claude-opus / claude-sonnet / claude-haiku into
+	// the package-global registry, polluting GetAgentPresetByName for this
+	// test. Reset the registry before asserting and on cleanup so this test
+	// is hermetic regardless of run order. See gu-wmdo.
+	ResetRegistryForTesting()
+	t.Cleanup(ResetRegistryForTesting)
 
 	// Verify that claude-opus/sonnet/haiku are NOT built-in presets
 	variants := []string{"claude-opus", "claude-sonnet", "claude-haiku"}
