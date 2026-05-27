@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1138,6 +1140,23 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 		}
 	}
 
+	// Squash-merge trap (gu-7nrd / gt-hc3e5): even when BranchPreservationStatus
+	// reports the branch as preserved (e.g. content-equivalent to main per
+	// `git cherry` patch-ID matching), the local commit OBJECTS may exist on no
+	// remote ref. Nuking the worktree would discard those objects. Detect this
+	// with `git rev-list --count HEAD --not --remotes`, guarded by a check that
+	// remote refs exist at all — otherwise a repo without remotes (test
+	// fixtures, freshly-initialized clones) would falsely count every commit
+	// as unpushed.
+	if state.UnpushedCommits == 0 {
+		if hasRemoteRefs(worktreePath) {
+			if n := unreachableFromRemotes(worktreePath); n > 0 {
+				state.UnpushedCommits = n
+				state.Clean = false
+			}
+		}
+	}
+
 	// Check for stashes using Git.StashCount() which filters by current branch.
 	// Without branch filtering, worktrees see repo-wide stashes and produce
 	// false "NEEDS_RECOVERY" verdicts for worktrees with zero stashes of their own.
@@ -1146,6 +1165,41 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 	}
 
 	return state, nil
+}
+
+// hasRemoteRefs reports whether any refs/remotes/* refs exist in the repo at
+// worktreePath. Used as a guard for unreachableFromRemotes to avoid counting
+// every commit as unpushed in remote-less repos (test fixtures, fresh inits).
+func hasRemoteRefs(worktreePath string) bool {
+	cmd := exec.Command("git", "for-each-ref", "--count=1", "refs/remotes/")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// unreachableFromRemotes returns the number of commits reachable from HEAD
+// that exist on no remote branch. Implements the squash-merge trap detection:
+// commits whose content is on main but whose SHA exists nowhere on any remote
+// would still be lost if the worktree is nuked.
+func unreachableFromRemotes(worktreePath string) int {
+	cmd := exec.Command("git", "rev-list", "--count", "HEAD", "--not", "--remotes")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	countStr := strings.TrimSpace(string(out))
+	if countStr == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(countStr)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // RecoveryStatus represents whether a polecat needs recovery or is safe to nuke.

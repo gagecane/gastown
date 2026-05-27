@@ -151,6 +151,17 @@ func withNonInteractiveEnv(extra ...string) []string {
 
 // run executes a git command and returns stdout.
 func (g *Git) run(args ...string) (string, error) {
+	out, err := g.runRaw(args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// runRaw is identical to run() except it does NOT TrimSpace stdout. Use this
+// for git commands whose output is column-sensitive (e.g. `status --porcelain`
+// where a leading space is part of the status code, not whitespace to trim).
+func (g *Git) runRaw(args ...string) (string, error) {
 	if err := g.guardUnsafeTownRootMutation(args); err != nil {
 		return "", err
 	}
@@ -176,7 +187,7 @@ func (g *Git) run(args ...string) (string, error) {
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return stdout.String(), nil
 }
 
 // pushTimeout is the maximum time a git push is allowed to run before being
@@ -1215,7 +1226,13 @@ type porcelainStatusEntry struct {
 
 // Status returns the current git status.
 func (g *Git) Status() (*GitStatus, error) {
-	out, err := g.run("status", "--porcelain", "-uall")
+	// Use runRaw to preserve leading whitespace in porcelain output:
+	// `git status --porcelain` emits "XY <path>" where X may be a literal
+	// space (e.g. " M README.md" for unstaged-only modifications). The
+	// shared run() helper TrimSpace's stdout and would silently shift the
+	// path slice by one character, producing "EADME.md" instead of
+	// "README.md". Status parsing relies on byte-exact column positions.
+	out, err := g.runRaw("status", "--porcelain", "-uall")
 	if err != nil {
 		return nil, err
 	}

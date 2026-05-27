@@ -483,8 +483,11 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		}
 	}
 
-	// Step 1: Create convoy bead
-	convoyID := fmt.Sprintf("%s-cv-%s", rigPrefix, generateFormulaShortID())
+	// Step 1: Create convoy bead. Convoys are town-level coordination beads;
+	// only the executable leg/synthesis beads are rig-scoped. The convoy ID
+	// must use the town hq- prefix so HQ-routed lookups (gt convoy list,
+	// dep list, status) hit the town database, not the rig database.
+	convoyID := fmt.Sprintf("hq-cv-%s", generateFormulaShortID())
 	convoyTitle := fmt.Sprintf("%s: %s", formulaName, f.Description)
 	if len(convoyTitle) > 80 {
 		convoyTitle = convoyTitle[:77] + "..."
@@ -514,10 +517,11 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		createArgs = append(createArgs, "--force")
 	}
 
-	createCmd := exec.Command("bd", createArgs...)
-	createCmd.Dir = townBeads
-	createCmd.Stderr = os.Stderr
-	if err := createCmd.Run(); err != nil {
+	// Use BdCmd so the convoy create runs with BEADS_DIR pinned to the town
+	// beads directory and inherited BEADS_DIR (e.g. from a polecat shell) is
+	// stripped. Without this, an inherited BEADS_DIR pointing at a rig db
+	// silently routes the convoy create to the wrong database.
+	if err := BdCmd(createArgs...).WithAutoCommit().Dir(townBeads).Stderr(os.Stderr).Run(); err != nil {
 		return fmt.Errorf("creating convoy bead: %w", err)
 	}
 
@@ -647,7 +651,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		}
 
 		// Track the leg with the convoy
-		if err := addTrackingRelationFn(townBeads, convoyID, legBeadID); err != nil {
+		if err := addTrackingRelationFn(townRoot, convoyID, legBeadID); err != nil {
 			fmt.Printf("%s Failed to track leg %s: %v\n",
 				style.Dim.Render("Warning:"), leg.ID, err)
 		}
@@ -709,7 +713,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 				style.Dim.Render("Warning:"), err)
 		} else {
 			// Track synthesis with convoy
-			_ = addTrackingRelationFn(townBeads, convoyID, synthesisBeadID)
+			_ = addTrackingRelationFn(townRoot, convoyID, synthesisBeadID)
 
 			// Add dependencies: synthesis depends on all legs
 			for _, legBeadID := range legBeads {

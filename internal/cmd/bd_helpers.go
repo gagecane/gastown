@@ -240,25 +240,40 @@ func (b *bdCmd) argsDesc() string {
 	return desc
 }
 
-// resolvedArgs returns the final args, normalizing requested stale-read support
-// to bd's global flag position when supported and stripping it when unsupported.
+// resolvedArgs returns the final args, honoring requested stale-read support.
+// When --allow-stale was requested via the AllowStale() builder, append it to
+// args (after the subcommand) so test bd stubs that switch on $1 still match
+// the subcommand. When the installed bd version does not support --allow-stale,
+// strip any occurrence so callers can share one compatibility path.
 func (b *bdCmd) resolvedArgs() []string {
-	filtered := make([]string, 0, len(b.args))
-	requestedAllowStale := b.allowStale
+	hasAllowStale := false
 	for _, a := range b.args {
 		if a == "--allow-stale" {
-			requestedAllowStale = true
-			continue
+			hasAllowStale = true
+			break
 		}
-		filtered = append(filtered, a)
 	}
+	requestedAllowStale := b.allowStale || hasAllowStale
+	supports := beads.BdSupportsAllowStaleWithEnv(b.buildEnv())
 	if !requestedAllowStale {
 		return b.args
 	}
-	if beads.BdSupportsAllowStaleWithEnv(b.buildEnv()) {
-		return append([]string{"--allow-stale"}, filtered...)
+	if !supports {
+		filtered := make([]string, 0, len(b.args))
+		for _, a := range b.args {
+			if a == "--allow-stale" {
+				continue
+			}
+			filtered = append(filtered, a)
+		}
+		return filtered
 	}
-	return filtered
+	if hasAllowStale {
+		// Already present; preserve original ordering.
+		return b.args
+	}
+	// Append (not prepend) so bd stubs that switch on $1 see the subcommand.
+	return append(append([]string{}, b.args...), "--allow-stale")
 }
 
 // Run builds and runs the command, returning any error.

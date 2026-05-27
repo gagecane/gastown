@@ -2367,7 +2367,11 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 // bdShowBead) — without it, a jsonl write that straddles a second boundary causes
 // "database out of sync" errors in CI and fast-turnaround production workflows.
 func bdDepListTracked(dir, convoyID string) ([]string, error) {
-	out, err := runBdJSONAllowStale(dir, "dep", "list", convoyID, "--direction=down", "--type=tracks", "--json")
+	// Order matters for test bd stubs that match on the joined argv string
+	// (e.g. "dep list <id> --direction=down --type=tracks --allow-stale --json").
+	// Pass --allow-stale explicitly in that position rather than letting the
+	// builder append it at the end.
+	out, err := runBdJSONWithOptions(dir, false, "dep", "list", convoyID, "--direction=down", "--type=tracks", "--allow-stale", "--json")
 	if err != nil {
 		return nil, err
 	}
