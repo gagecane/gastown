@@ -103,7 +103,7 @@ type RigState struct {
 	LastCycleAt string `json:"last_cycle_at,omitempty"`
 
 	// LastCycleOutcome is the outcome of the most-recent cycle.
-	// Values: "merged", "closed-unmerged", "expired", "cancelled".
+	// Values: "merged", "closed-unmerged", "expired", "canceled".
 	LastCycleOutcome string `json:"last_cycle_outcome,omitempty"`
 
 	// PausedUntil is the per-rig pause deadline (RFC3339). Empty means

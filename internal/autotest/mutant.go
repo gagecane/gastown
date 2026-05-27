@@ -368,7 +368,7 @@ func findMutantsInFile(fset *token.FileSet, f *ast.File, relFile string, lines [
 			// (iii) return-zero-value: replace return with zero values.
 			if len(node.Results) > 0 {
 				if line >= 1 && line <= len(lines) {
-					if zeroRet := zeroValueReturn(node, fset, lines[line-1]); zeroRet != "" {
+					if zeroRet := zeroValueReturn(node, lines[line-1]); zeroRet != "" {
 						mutants = append(mutants, Mutant{
 							Kind:        MutReturnZeroValue,
 							File:        relFile,
@@ -463,7 +463,7 @@ func flipNot(line string, col int) string {
 // zeroValueReturn attempts to build a zero-value return statement
 // from a return statement's results. It uses AST type inference
 // heuristics since we don't have full type information.
-func zeroValueReturn(ret *ast.ReturnStmt, fset *token.FileSet, originalLine string) string {
+func zeroValueReturn(ret *ast.ReturnStmt, originalLine string) string {
 	if len(ret.Results) == 0 {
 		return ""
 	}
@@ -553,7 +553,9 @@ func inferZeroValue(expr ast.Expr) string {
 // callExprName extracts a readable name from a call expression.
 func callExprName(call *ast.CallExpr) string {
 	var buf strings.Builder
-	printer.Fprint(&buf, token.NewFileSet(), call.Fun)
+	// printer.Fprint to a strings.Builder cannot fail; ignore the error
+	// to satisfy errcheck without losing readability.
+	_ = printer.Fprint(&buf, token.NewFileSet(), call.Fun)
 	return buf.String()
 }
 
