@@ -677,7 +677,9 @@ exit 1
 	if err != nil {
 		t.Fatalf("reading config.yaml: %v", err)
 	}
-	want := "prefix: gt\nissue-prefix: gt\ndolt.idle-timeout: \"0\"\ndolt.auto-commit: \"on\"\n"
+	// Upstream added export.auto: "false" to the default config so beads
+	// doesn't auto-export issue files on every write.
+	want := "prefix: gt\nissue-prefix: gt\ndolt.idle-timeout: \"0\"\ndolt.auto-commit: \"on\"\nexport.auto: \"false\"\n"
 	if string(config) != want {
 		t.Fatalf("config.yaml = %q, want %q", string(config), want)
 	}
