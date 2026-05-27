@@ -1573,6 +1573,22 @@ func _verifyUnfiledMR(bd *BdCli, workDir, rigName, polecatName, hookBead string)
 		if state.HeadSHA == "" || remoteSHA == state.HeadSHA {
 			state.AlreadyPushed = true
 		}
+	} else if state.HeadSHA != "" {
+		// gu-uk8f: origin may have reaped the branch (fork sync, post-merge
+		// cleanup) between push and witness recovery. Fall back to the rig's
+		// bare repo at <rig>/.repo.git, which mirrors the polecat-side fallback
+		// in internal/cmd/done.go:verifyPushedCommitWithBareFallback. If the
+		// bare repo still has refs/heads/<branch> at HEAD, the work was pushed
+		// — recovery should treat it as already-pushed instead of attempting
+		// a fresh push to a missing remote.
+		bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
+		if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+			bareGit := git.NewGitWithDir(bareRepoPath, "")
+			if bareSHA, bareErr := bareGit.Rev("refs/heads/" + branch); bareErr == nil &&
+				strings.TrimSpace(bareSHA) == state.HeadSHA {
+				state.AlreadyPushed = true
+			}
+		}
 	}
 
 	// Look for an existing open MR bead for this branch (+SHA when available).
