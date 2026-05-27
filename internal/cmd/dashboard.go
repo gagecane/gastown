@@ -211,5 +211,13 @@ func openBrowser(url string) {
 	default:
 		return
 	}
-	_ = cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	// Reap the child in a goroutine so it doesn't linger as a <defunct>
+	// zombie. The launcher (open / xdg-open / cmd) returns quickly after
+	// handing the URL off to the desktop environment, so Wait() returns
+	// promptly. Without this, dashboard processes accumulate one zombie
+	// per browser open until the parent exits.
+	go func() { _ = cmd.Wait() }()
 }
