@@ -20,7 +20,7 @@ is violated. They're called before the tool runs, preventing the
 forbidden operation entirely.
 
 Available guards:
-  pr-workflow        - Enforce configured PR/direct workflow
+  pr-workflow        - Block PR creation and feature branches
   bd-init            - Block bd init in wrong directories
   mol-patrol         - Block mol patrol from agent contexts
   dangerous-command  - Block rm -rf, force push, hard reset, git clean
@@ -39,13 +39,11 @@ Example hook configuration:
 
 var tapGuardPRWorkflowCmd = &cobra.Command{
 	Use:   "pr-workflow",
-	Short: "Enforce configured PR/direct workflow",
-	Long: `Enforce PR workflow operations in Gas Town.
+	Short: "Block PR creation and feature branches",
+	Long: `Block PR workflow operations in Gas Town.
 
-Gas Town supports both internal merge-queue work and fork-PR sweep work.
-This guard uses fork/upstream remote topology only as a narrow prerequisite
-for allowing PR/branch commands; formula, role, and pre-push policy still
-decide where work may land.
+Gas Town workers push directly to main. PRs add friction that breaks
+the autonomous execution model (GUPP principle).
 
 This guard blocks:
   - gh pr create
@@ -53,11 +51,14 @@ This guard blocks:
   - git switch -c (feature branches)
 
 Exit codes:
-  0 - Operation allowed (fork/upstream prerequisite present, or not an agent)
-  2 - Operation BLOCKED (agent context without fork/upstream prerequisite)
+  0 - Operation allowed (not in Gas Town agent context, not maintainer origin)
+  2 - Operation BLOCKED (in agent context OR maintainer origin)
 
-Humans and agents with a fork/upstream remote can run PR commands. Direct
-pushes to the default branch are controlled by the git pre-push hook.`,
+The guard blocks in two scenarios:
+  1. Running as a Gas Town agent (crew, polecat, witness, etc.)
+  2. Origin remote is steveyegge/gastown (maintainer should push directly)
+
+Humans running outside Gas Town with a fork origin can still use PRs.`,
 	RunE: runTapGuardPRWorkflow,
 }
 

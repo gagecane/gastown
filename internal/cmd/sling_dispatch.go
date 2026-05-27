@@ -128,7 +128,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 
 	// 1. Get bead info + status check
-	info, err := getBeadInfo(params.BeadID)
+	info, err := getBeadInfoFromTownRoot(townRoot, params.BeadID)
 	if err != nil {
 		result.ErrMsg = err.Error()
 		return result, fmt.Errorf("could not get bead info: %w", err)
@@ -419,7 +419,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 	defer assigneeUnlock()
 	hookDir := beads.ResolveHookDir(townRoot, beadToHook, hookWorkDir)
-	if err := hookBeadWithRetryFn(beadToHook, targetAgent, hookDir); err != nil {
+	if err := hookBeadWithRetryWithTownRootFn(beadToHook, targetAgent, hookDir, townRoot); err != nil {
 		// Clean up orphaned polecat to avoid leaving spawned-but-unhookable polecats
 		cleanupSpawnedPolecat(spawnInfo, params.RigName, convoyID)
 		result.ErrMsg = "hook failed"

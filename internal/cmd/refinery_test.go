@@ -144,3 +144,16 @@ func TestRefineryStatusOutput_OperatorStoppedField(t *testing.T) {
 		t.Errorf("operator_stopped must always be present in JSON output, got:\n%s", data)
 	}
 }
+
+func TestRefineryStartForegroundFlagHidden(t *testing.T) {
+	flag := refineryStartCmd.Flags().Lookup("foreground")
+	if flag == nil {
+		t.Fatal("expected hidden compatibility --foreground flag")
+	}
+	if !flag.Hidden {
+		t.Fatal("expected --foreground to be hidden")
+	}
+	if strings.Contains(refineryStartCmd.Long, "--foreground") {
+		t.Fatalf("refinery start help should not advertise --foreground:\n%s", refineryStartCmd.Long)
+	}
+}

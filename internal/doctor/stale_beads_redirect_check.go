@@ -287,13 +287,13 @@ func hasRedirectWithStaleFiles(beadsDir string) bool {
 		return false
 	}
 
-	// When metadata.json declares a dolt_database, cleanStaleBeadsFiles will
-	// preserve it (see metadataHasDoltDB guard below). If metadata.json is
+	// When metadata.json declares a dolt_database, cleanStaleBeadsFiles may
+	// preserve it (see shouldPreserveRedirectMetadata). If metadata.json is
 	// the ONLY match in this directory, flagging would produce a warning
 	// whose --fix is a no-op (we'd "clean" nothing). Skip metadata.json
 	// from the stale-trigger list in that case so the check and the fix
 	// stay symmetric.
-	skipMetadata := metadataHasDoltDB(beadsDir)
+	skipMetadata := metadataDoltDatabase(beadsDir) != ""
 
 	// Check for any stale files
 	for _, pattern := range staleFilePatterns {
@@ -321,10 +321,10 @@ func cleanStaleBeadsFiles(beadsDir string) error {
 		return fmt.Errorf("no redirect file found - refusing to clean")
 	}
 
-	// Check if metadata.json declares a dolt_database — if so, preserve it.
-	// Removing it would disconnect the rig from its database and make the
-	// prefix-named DB appear orphaned. (gt-85w7)
-	preserveMetadata := metadataHasDoltDB(beadsDir)
+	// Preserve redirect-local metadata only when it agrees with the redirect
+	// target. If it points at a different DB, it is stale drift and must be
+	// removed so bd follows the canonical target metadata.
+	preserveMetadata := shouldPreserveRedirectMetadata(beadsDir)
 
 	// Remove files matching stale patterns
 	for _, pattern := range staleFilePatterns {
@@ -353,21 +353,48 @@ func cleanStaleBeadsFiles(beadsDir string) error {
 	return nil
 }
 
-// metadataHasDoltDB checks if a .beads/metadata.json declares a dolt_database.
-// This is used to protect metadata.json from stale-file cleanup when the
-// directory has a redirect alongside valid DB configuration (tracked beads case).
-func metadataHasDoltDB(beadsDir string) bool {
+// metadataDoltDatabase returns the metadata.json dolt_database value, if any.
+func metadataDoltDatabase(beadsDir string) string {
 	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
 	if err != nil {
-		return false
+		return ""
 	}
 	var meta struct {
 		DoltDatabase string `json:"dolt_database"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(meta.DoltDatabase)
+}
+
+func shouldPreserveRedirectMetadata(beadsDir string) bool {
+	db := metadataDoltDatabase(beadsDir)
+	if db == "" {
 		return false
 	}
-	return meta.DoltDatabase != ""
+
+	targetDir := redirectTargetDir(beadsDir)
+	if targetDir == "" {
+		return true
+	}
+	targetDB := metadataDoltDatabase(targetDir)
+	return targetDB == "" || targetDB == db
+}
+
+func redirectTargetDir(beadsDir string) string {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "redirect"))
+	if err != nil {
+		return ""
+	}
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return ""
+	}
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target)
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(beadsDir), target))
 }
 
 // verifyRedirectTopology checks that all worktrees in a rig have correct redirects.

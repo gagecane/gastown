@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -283,6 +284,10 @@ func TestFilterAndSortSessions_BootSessionFiltered(t *testing.T) {
 
 func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 	setupCmdTestRegistry(t)
+	// Register the "mr"/myrig prefix so mr-witness is recognised; the
+	// shared setupCmdTestRegistry only seeds gt/do, and the rest of this
+	// suite expects mr to map to a real rig.
+	session.DefaultRegistry().Register("mr", "myrig")
 	input := []string{
 		"gt-crew-zed",   // crew (gastown)
 		"gt-witness",    // witness (gastown)
@@ -606,6 +611,9 @@ func TestFindTestSockets_SkipsNonTestSockets(t *testing.T) {
 
 func TestGuessSessionFromWorkerDir(t *testing.T) {
 	setupCmdTestRegistry(t)
+	// "different rig" subtest needs a registry entry for "myrig" so
+	// session.PrefixFor("myrig") returns "mr" instead of the default fallback.
+	session.DefaultRegistry().Register("mr", "myrig")
 	townRoot := "/town"
 
 	tests := []struct {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,6 +82,9 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		if escalateSignature != "" {
 			fmt.Printf("  Signature: %s\n", escalateSignature)
 		}
+		if escalateFingerprint != "" {
+			fmt.Printf("  Fingerprint: %s\n", escalationFingerprintLabel(escalateFingerprint))
+		}
 		fmt.Printf("  Actions: %s\n", strings.Join(actions, ", "))
 		fmt.Printf("  Mail targets: %s\n", strings.Join(targets, ", "))
 		return nil
@@ -113,6 +117,30 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		// Lookup failed or no match — fall through to create a new escalation.
 	}
 
+	fingerprintLabel := escalationFingerprintLabel(escalateFingerprint)
+	if fingerprintLabel != "" {
+		matches, err := bd.ListEscalationsByFingerprint(fingerprintLabel)
+		if err != nil {
+			return fmt.Errorf("checking escalation fingerprint: %w", err)
+		}
+		if len(matches) > 0 {
+			existing := matches[0]
+			if escalateJSON {
+				result := map[string]interface{}{
+					"id":          existing.ID,
+					"status":      "duplicate_suppressed",
+					"fingerprint": fingerprintLabel,
+				}
+				out, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Println(string(out))
+			} else {
+				fmt.Printf("%s Duplicate escalation suppressed: %s\n", style.Bold.Render("✓"), existing.ID)
+				fmt.Printf("  Fingerprint: %s\n", fingerprintLabel)
+			}
+			return nil
+		}
+	}
+
 	// Create escalation bead
 	fields := &beads.EscalationFields{
 		Severity:    severity,
@@ -122,6 +150,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		EscalatedBy: agentID,
 		EscalatedAt: time.Now().Format(time.RFC3339),
 		RelatedBead: escalateRelatedBead,
+		Fingerprint: fingerprintLabel,
 	}
 
 	issue, err := bd.CreateEscalationBead(description, fields)
@@ -223,6 +252,9 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		if escalateSource != "" {
 			result["source"] = escalateSource
 		}
+		if fingerprintLabel != "" {
+			result["fingerprint"] = fingerprintLabel
+		}
 		out, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(out))
 	} else {
@@ -231,6 +263,9 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Severity: %s\n", severity)
 		if escalateSource != "" {
 			fmt.Printf("  Source: %s\n", escalateSource)
+		}
+		if fingerprintLabel != "" {
+			fmt.Printf("  Fingerprint: %s\n", fingerprintLabel)
 		}
 		fmt.Printf("  Routed to: %s\n", strings.Join(targets, ", "))
 		for _, status := range statuses {
@@ -241,6 +276,15 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func escalationFingerprintLabel(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("escalation-fp:%x", sum[:6])
 }
 
 type deliveryStatus struct {

@@ -21,7 +21,7 @@ import (
 // DoltDockerImage is the Docker image used for Dolt test containers.
 // DOLT_ROOT_HOST=% tells the entrypoint to create root@'%' (available
 // since Dolt 1.46.0), which lets testcontainers connect via TCP.
-const DoltDockerImage = "dolthub/dolt-sql-server:1.86.5"
+const DoltDockerImage = "dolthub/dolt-sql-server:2.0.7"
 
 // doltContainerStartupTimeout overrides the testcontainers-go dolt module's
 // default 60s wait-for-log deadline. Under concurrent test load (multiple
@@ -92,31 +92,59 @@ func isTransientStartupErr(err error) bool {
 	return isReaperRemovingErr(err) || isLogWaitTimeoutErr(err)
 }
 
+// isDockerUnavailableErr returns true if the error indicates the Docker
+// daemon is not reachable from this host (rootless not installed, daemon
+// stopped, no host configured). Tests use this to skip rather than fail
+// when the environment lacks Docker.
+func isDockerUnavailableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "rootless docker not found") ||
+		strings.Contains(msg, "cannot connect to the docker daemon") ||
+		strings.Contains(msg, "no docker host")
+}
+
+// runDoltContainer starts a Dolt sql-server container with the local
+// gt_test database, recovering from testcontainers panics by converting
+// them into "docker unavailable" errors so isDockerUnavailableErr can
+// classify them.
+//
+// We override the dolt module's default 60s wait deadline with a longer
+// timeout via WithWaitStrategyAndDeadline so concurrent test runs don't
+// flake when the container is slow to come up under load.
+func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("testcontainers docker unavailable: %v", r)
+		}
+	}()
+
+	return dolt.Run(ctx, DoltDockerImage,
+		dolt.WithDatabase("gt_test"),
+		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
+		// Replace the dolt module's default 60s wait deadline.
+		// We use WithWaitStrategyAndDeadline (not Additional) so the
+		// dolt module's existing wait strategy is REPLACED, not
+		// stacked — stacking would force us to wait the maximum of
+		// both deadlines and would double-poll the same log line.
+		testcontainers.WithWaitStrategyAndDeadline(
+			doltContainerStartupTimeout,
+			wait.ForLog(doltContainerReadyLog),
+		),
+	)
+}
+
 // runDoltContainerWithRetry calls dolt.Run, retrying on transient errors
 // (reaper "removing" status and wait-for-log timeouts) up to 3 times with
 // exponential backoff.
-//
-// We override the dolt module's default 60s wait deadline with a longer
-// timeout via WithAdditionalWaitStrategyAndDeadline so concurrent test
-// runs don't flake when the container is slow to come up under load.
 func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error) {
 	const maxRetries = 3
 	delay := 2 * time.Second
 	var lastErr error
 	for attempt := range maxRetries {
-		ctr, err := dolt.Run(ctx, DoltDockerImage,
-			dolt.WithDatabase("gt_test"),
-			testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
-			// Replace the dolt module's default 60s wait deadline.
-			// We use WithWaitStrategyAndDeadline (not Additional) so the
-			// dolt module's existing wait strategy is REPLACED, not
-			// stacked — stacking would force us to wait the maximum of
-			// both deadlines and would double-poll the same log line.
-			testcontainers.WithWaitStrategyAndDeadline(
-				doltContainerStartupTimeout,
-				wait.ForLog(doltContainerReadyLog),
-			),
-		)
+		ctr, err := runDoltContainer(ctx)
 		if err == nil {
 			return ctr, nil
 		}
@@ -168,6 +196,9 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	ctx := context.Background()
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
+		if isDockerUnavailableErr(err) {
+			t.Skipf("Dolt container unavailable: %v", err)
+		}
 		t.Fatalf("starting Dolt container: %v", err)
 	}
 	t.Cleanup(func() {
@@ -208,6 +239,9 @@ func RequireDoltContainer(t *testing.T) {
 
 	doltCtrOnce.Do(startSharedDoltContainer)
 	if doltCtrErr != nil {
+		if isDockerUnavailableErr(doltCtrErr) {
+			t.Skipf("Dolt container unavailable: %v", doltCtrErr)
+		}
 		t.Fatalf("Dolt container setup failed: %v", doltCtrErr)
 	}
 }

@@ -279,6 +279,40 @@ func TestRemoveNotFound(t *testing.T) {
 	}
 }
 
+func TestActiveWorkBeadsForCleanupFiltersAssignedIssues(t *testing.T) {
+	issues := []*beads.Issue{
+		{ID: "open-work", Status: "open", Type: "task"},
+		{ID: "progress-work", Status: "in_progress", Type: "task"},
+		{ID: "hooked-work", Status: beads.StatusHooked, Type: "task"},
+		{ID: "closed-work", Status: "closed", Type: "task"},
+		{ID: "agent", Status: "open", Type: "agent"},
+		{ID: "protected", Status: "open", Type: "task", Labels: []string{"gt:keep"}},
+		{ID: "deferred", Status: "deferred", Type: "task"},
+		nil,
+	}
+
+	got := activeWorkBeadsForCleanup(issues)
+	want := []string{"open-work", "progress-work", "hooked-work"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d issue(s), want %d: %#v", len(got), len(want), got)
+	}
+	for i := range got {
+		if got[i].ID != want[i] {
+			t.Fatalf("got IDs %v, want %v", issueIDs(got), want)
+		}
+	}
+}
+
+func issueIDs(issues []*beads.Issue) []string {
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if issue != nil {
+			ids = append(ids, issue.ID)
+		}
+	}
+	return ids
+}
+
 func TestPolecatDir(t *testing.T) {
 	r := &rig.Rig{
 		Name: "test-rig",
@@ -855,6 +889,11 @@ func TestIsDoltConfigError(t *testing.T) {
 		{"no database", fmt.Errorf("no database found at path"), true},
 		{"database not found", fmt.Errorf("database not found"), true},
 		{"connection refused", fmt.Errorf("dial tcp: connection refused"), true},
+		{"circuit breaker", fmt.Errorf("Dolt circuit breaker is open: server appears down"), true},
+		{"server appears down", fmt.Errorf("server appears down"), true},
+		{"server down", fmt.Errorf("server down"), true},
+		{"server not running", fmt.Errorf("Dolt server is not running"), true},
+		{"server may not be running", fmt.Errorf("Dolt server may not be running"), true},
 		{"configure custom types", fmt.Errorf("configure custom types in /path: exit 1"), true},
 		{"identity mismatch", fmt.Errorf("identity mismatch: local project_id != database project_id"), true},
 		{"Unknown database", fmt.Errorf("Unknown database 'gastown'"), true},
@@ -2217,10 +2256,12 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 	}
 }
 
-// TestReuseIdlePolecat_PreservesLiveSessionWhenNeedsRecovery verifies that the
-// recovery safety gate runs before destructive session cleanup. A live session
-// means the slot is not proven idle yet, so reuse must fail closed.
-func TestReuseIdlePolecat_PreservesLiveSessionWhenNeedsRecovery(t *testing.T) {
+// TestReuseIdlePolecat_KillsLiveSession verifies that ReuseIdlePolecat kills
+// an existing live (non-stale) tmux session instead of returning ErrSessionRunning.
+// This is the regression test for the sling-reuse-stale-session bug: idle polecats
+// with a live Claude session at a dead ❯ prompt must have their session killed so
+// StartSession can create a fresh session with a proper gt prime --hook cycle.
+func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("tmux not supported on Windows")
 	}
@@ -2272,8 +2313,9 @@ func TestReuseIdlePolecat_PreservesLiveSessionWhenNeedsRecovery(t *testing.T) {
 		t.Fatal("precondition: heartbeat should exist")
 	}
 
-	// Call ReuseIdlePolecat. The recovery-safe reuse gate should fail before any
-	// session kill because a live session is not an idle slot.
+	// Call ReuseIdlePolecat — it will kill the session, then fail on worktree
+	// operations (no real git repo). The important thing is it does NOT return
+	// ErrSessionRunning.
 	_, reuseErr := mgr.ReuseIdlePolecat(polecatName, AddOptions{})
 
 	// Verify it did NOT return ErrSessionRunning (the old buggy behavior)
@@ -2283,11 +2325,23 @@ func TestReuseIdlePolecat_PreservesLiveSessionWhenNeedsRecovery(t *testing.T) {
 			"sessions must have their session killed, not rejected")
 	}
 
+	// We expect an error from later steps (worktree not found), but not from session handling
 	if reuseErr == nil {
-		t.Fatal("expected needs-recovery error")
+		t.Fatal("expected error from worktree operations (test has no real git repo)")
 	}
 	if !errors.Is(reuseErr, ErrPolecatNeedsRecovery) {
 		t.Fatalf("ReuseIdlePolecat error = %v, want ErrPolecatNeedsRecovery", reuseErr)
+	}
+
+	// Verify the session was killed
+	running, _ = tm.HasSession(sessionName)
+	if running {
+		t.Error("session should have been killed by ReuseIdlePolecat")
+	}
+
+	// Verify heartbeat was cleaned up
+	if hb := ReadSessionHeartbeat(townRoot, sessionName); hb != nil {
+		t.Error("heartbeat should have been removed after session kill")
 	}
 }
 
@@ -2377,9 +2431,10 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 	}
 }
 
-// TestReuseIdlePolecat_PreservesStaleSessionWhenNeedsRecovery verifies that even
-// stale sessions are not killed before the reuse decision proves the slot reusable.
-func TestReuseIdlePolecat_PreservesStaleSessionWhenNeedsRecovery(t *testing.T) {
+// TestReuseIdlePolecat_KillsStaleSession verifies that ReuseIdlePolecat also
+// handles the stale-session case correctly (regression: the original code path
+// that worked before the fix should still work after).
+func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("tmux not supported on Windows")
 	}
@@ -2436,6 +2491,17 @@ func TestReuseIdlePolecat_PreservesStaleSessionWhenNeedsRecovery(t *testing.T) {
 	}
 	if !errors.Is(reuseErr, ErrPolecatNeedsRecovery) {
 		t.Fatalf("ReuseIdlePolecat error = %v, want ErrPolecatNeedsRecovery", reuseErr)
+	}
+
+	// Session should be killed
+	running, _ := tm.HasSession(sessionName)
+	if running {
+		t.Error("stale session should have been killed")
+	}
+
+	// Heartbeat should be cleaned up
+	if hb := ReadSessionHeartbeat(townRoot, sessionName); hb != nil {
+		t.Error("heartbeat should have been removed after stale session kill")
 	}
 }
 

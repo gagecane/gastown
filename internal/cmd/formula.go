@@ -484,8 +484,10 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 	}
 
 	// Step 1: Create convoy bead. Convoys are town-level coordination beads;
-	// only the executable leg/synthesis beads are rig-scoped.
-	convoyID := formulaConvoyID(generateFormulaShortID())
+	// only the executable leg/synthesis beads are rig-scoped. The convoy ID
+	// must use the town hq- prefix so HQ-routed lookups (gt convoy list,
+	// dep list, status) hit the town database, not the rig database.
+	convoyID := fmt.Sprintf("hq-cv-%s", generateFormulaShortID())
 	convoyTitle := fmt.Sprintf("%s: %s", formulaName, f.Description)
 	if len(convoyTitle) > 80 {
 		convoyTitle = convoyTitle[:77] + "..."
@@ -515,6 +517,10 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		createArgs = append(createArgs, "--force")
 	}
 
+	// Use BdCmd so the convoy create runs with BEADS_DIR pinned to the town
+	// beads directory and inherited BEADS_DIR (e.g. from a polecat shell) is
+	// stripped. Without this, an inherited BEADS_DIR pointing at a rig db
+	// silently routes the convoy create to the wrong database.
 	if err := BdCmd(createArgs...).WithAutoCommit().Dir(townBeads).Stderr(os.Stderr).Run(); err != nil {
 		return fmt.Errorf("creating convoy bead: %w", err)
 	}
@@ -748,7 +754,9 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 				style.Dim.Render("Warning:"), leg.ID, err)
 			// Add comment to bead about failure
 			commentArgs := []string{"comments", "add", legBeadID, fmt.Sprintf("Failed to sling: %v", err)}
-			_ = BdCmd(commentArgs...).WithAutoCommit().Dir(rigBeadsDir).Run()
+			commentCmd := exec.Command("bd", commentArgs...)
+			commentCmd.Dir = townBeads
+			_ = commentCmd.Run()
 			continue
 		}
 
@@ -766,10 +774,6 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 	fmt.Printf("\n  Track progress: gt convoy status %s\n", convoyID)
 
 	return nil
-}
-
-func formulaConvoyID(shortID string) string {
-	return fmt.Sprintf("hq-cv-%s", shortID)
 }
 
 // executeWorkflowFormula creates step beads with dependency wiring and dispatches

@@ -285,6 +285,40 @@ func TestConcurrentPolecatAdmissionReservationsDoNotExceedCap(t *testing.T) {
 	}
 }
 
+func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields *beads.AgentFields
+		want   polecatCapacitySnapshot
+	}{
+		{
+			name:   "active mr is pending capacity",
+			fields: &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: "clean", ActiveMR: "gt-mr-open"},
+			want:   polecatCapacitySnapshot{PendingMR: 1},
+		},
+		{
+			name:   "push failed remains recovery blocked",
+			fields: &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: "clean", ActiveMR: "gt-mr-open", PushFailed: true},
+			want:   polecatCapacitySnapshot{RecoveryBlocked: 1},
+		},
+		{
+			name:   "clean idle is reusable",
+			fields: &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: "clean"},
+			want:   polecatCapacitySnapshot{ReusableIdle: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := polecatCapacitySnapshot{}
+			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, nil)
+			if snapshot.Working != tt.want.Working || snapshot.RecoveryBlocked != tt.want.RecoveryBlocked || snapshot.ReusableIdle != tt.want.ReusableIdle || snapshot.PendingMR != tt.want.PendingMR {
+				t.Fatalf("snapshot = %+v, want %+v", snapshot, tt.want)
+			}
+		})
+	}
+}
+
 func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDryRunPlan(capacity.DispatchPlan{
@@ -297,10 +331,11 @@ func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
 			RecoveryBlocked: 1,
 			Reservations:    0,
 			ReusableIdle:    3,
+			PendingMR:       2,
 			Free:            0,
 		}, 5)
 	})
-	for _, want := range []string{"0 free of 2", "working: 1", "recovery_blocked: 1", "reusable_idle: 3"} {
+	for _, want := range []string{"0 free of 2", "working: 1", "recovery_blocked: 1", "reusable_idle: 3", "pending_mr: 2"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run output %q missing %q", out, want)
 		}

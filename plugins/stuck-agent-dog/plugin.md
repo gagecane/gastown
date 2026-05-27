@@ -197,7 +197,11 @@ legitimate long-running operations (builds, tests, LLM calls).
 
 ## Step 3: Check deacon health
 
-The deacon session is `hq-deacon`. Check heartbeat staleness.
+The deacon session is `hq-deacon`. Check heartbeat staleness from the JSON
+`timestamp` field in `deacon/heartbeat.json` (fall back to file mtime only if
+the timestamp is missing or malformed). A live Deacon with no `in_progress` work
+is not an actionable stuck-heartbeat event; log and skip so idle patrol backoff
+does not produce escalation noise.
 
 ```bash
 echo ""
@@ -273,6 +277,8 @@ For DEACON stuck (stale heartbeat):
 - If output shows active work (recent timestamps, command output), the heartbeat
   file may just be stale — nudge instead of kill
 - If output shows no recent activity, restart is warranted
+- Use a stable escalation fingerprint (`stuck-agent-dog:deacon:stuck-heartbeat`)
+  for stale-heartbeat events; do not include the age seconds in the fingerprint.
 
 **Decision framework:**
 1. If agent is clearly dead (no process, no output) → restart
