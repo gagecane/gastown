@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/pushlog"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -56,6 +57,17 @@ type StaleHookResult struct {
 	WorktreeDirty bool   `json:"worktree_dirty,omitempty"`
 	UnpushedCount int    `json:"unpushed_count,omitempty"`
 	WorktreeError string `json:"worktree_error,omitempty"`
+
+	// PushReceiptSHA, when non-empty, is the SHA recorded in the rig's
+	// push receipt log for the worktree's current branch (gu-ftja). This
+	// lets forensics distinguish "branch was pushed then reaped" from
+	// "branch was never pushed" even when origin no longer has the ref.
+	PushReceiptSHA string `json:"push_receipt_sha,omitempty"`
+	// PushReceiptAt is the timestamp of the matching push receipt.
+	PushReceiptAt string `json:"push_receipt_at,omitempty"`
+	// PushReceiptSource indicates which code path recorded the receipt
+	// (e.g., "done", "witness-recovery").
+	PushReceiptSource string `json:"push_receipt_source,omitempty"`
 }
 
 // StaleHookScanResult contains the full results of a stale hook scan.
@@ -192,6 +204,13 @@ func assigneeToSessionName(assignee string) string {
 // checkWorktreeState checks an agent's worktree for uncommitted changes or
 // unpushed commits and populates the result fields. This is best-effort;
 // errors are recorded but do not prevent unhooking.
+//
+// gu-ftja: When a worktree's current branch has a matching push receipt in
+// the rig's runtime log, populate PushReceipt* on the result so witness/
+// deacon teardown forensics can prove "this branch was pushed at SHA X
+// at time T" — even after the fork branch is later reaped from origin.
+// Without this, a branch that was successfully pushed but later reaped
+// cannot be distinguished from a branch that never pushed.
 func checkWorktreeState(townRoot, assignee string, result *StaleHookResult) {
 	worktreePath := assigneeToWorktreePath(townRoot, assignee)
 	if worktreePath == "" {
@@ -210,6 +229,35 @@ func checkWorktreeState(townRoot, assignee string, result *StaleHookResult) {
 		result.WorktreeDirty = workStatus.HasUncommittedChanges
 		result.UnpushedCount = workStatus.UnpushedCommits
 	}
+
+	// Best-effort lookup of the push receipt for this worktree's branch.
+	// We don't error out — a missing receipt is the common pre-gu-ftja
+	// case and silence is correct.
+	rigName := assigneeRigName(assignee)
+	if rigName == "" {
+		return
+	}
+	branch, branchErr := g.CurrentBranch()
+	if branchErr != nil || branch == "" || branch == "HEAD" {
+		return
+	}
+	receipt, err := pushlog.FindByBranch(townRoot, rigName, branch)
+	if err != nil || receipt == nil {
+		return
+	}
+	result.PushReceiptSHA = receipt.CommitSHA
+	result.PushReceiptAt = receipt.Timestamp
+	result.PushReceiptSource = receipt.Source
+}
+
+// assigneeRigName returns the rig component of an assignee address
+// ("rig/polecats/name" → "rig"). Returns "" if the format is unrecognized.
+func assigneeRigName(assignee string) string {
+	parts := strings.Split(assignee, "/")
+	if len(parts) < 1 || parts[0] == "" {
+		return ""
+	}
+	return parts[0]
 }
 
 // assigneeToWorktreePath resolves an assignee address to its git worktree path.

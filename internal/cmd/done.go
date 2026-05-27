@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/pushlog"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -790,6 +791,8 @@ afterSafetyNet:
 						}
 						if noMRCommitSHA != "" {
 							closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, defaultBranch, noMRCommitSHA)
+							// gu-ftja: receipt for the no-MR direct-to-default push.
+							recordPushReceipt(g, townRoot, rigName, defaultBranch, noMRCommitSHA, pushlog.SourceDoneNoMR, worker, issueID)
 						}
 					}
 					// G15 fix: Force-close bypasses molecule dependency checks.
@@ -943,6 +946,8 @@ afterSafetyNet:
 				goto notifyWitness
 			}
 			fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
+			// gu-ftja: receipt for the direct-merge convoy push.
+			recordPushReceipt(g, townRoot, rigName, defaultBranch, directCommitSHA, pushlog.SourceDoneDirect, worker, issueID)
 
 			// Close the base issue — no MR/refinery will close it
 			if issueID != "" {
@@ -1125,6 +1130,11 @@ afterSafetyNet:
 			goto notifyWitness
 		}
 		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
+
+		// gu-ftja: Record a durable push receipt so witness/deacon teardown
+		// decisions can prove "this branch was pushed at SHA X at time T"
+		// even after a fork branch is later reaped from origin.
+		recordPushReceipt(g, townRoot, rigName, branch, pushedCommitSHA, pushlog.SourceDone, worker, issueID)
 
 		// Fix cleanup_status after successful push (gt-wcr).
 		// Status was detected before push, so "unpushed" is now stale.
@@ -1314,6 +1324,8 @@ afterSafetyNet:
 					goto notifyWitness
 				}
 				fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
+				// gu-ftja: receipt for the late-detected direct-merge push.
+				recordPushReceipt(g, townRoot, rigName, defaultBranch, lateDirectCommitSHA, pushlog.SourceDoneDirect, worker, issueID)
 
 				// Close the issue directly — refinery won't process it.
 				if issueID != "" {
@@ -1851,6 +1863,39 @@ func noteVerifiedPushSkipped(cwd, issueID, branch, commit, reason string) {
 	}
 	msg := fmt.Sprintf("verified_push_skipped: commit %s branch origin/%s reason=%s", commit, branch, reason)
 	_, _ = beads.New(cwd).Run("comments", "add", issueID, msg)
+}
+
+// recordPushReceipt persists a push receipt to the rig's runtime log
+// (see internal/pushlog). Called from every code path in `gt done` that
+// has just verified a push to origin succeeded.
+//
+// gu-ftja: Without a durable record, witness/deacon forensics rely on
+// live `git ls-remote`. After a fork branch is later reaped, that check
+// can't distinguish "push happened then was reaped" from "push never
+// happened". The receipt log makes the distinction unambiguous.
+//
+// Best-effort: any failure is logged to stderr inside pushlog.LogOrWarn
+// and otherwise swallowed. We never block a successful push on a
+// logging failure.
+func recordPushReceipt(g *git.Git, townRoot, rigName, branch, commit, source, worker, issueID string) {
+	if townRoot == "" || rigName == "" || branch == "" || commit == "" {
+		return
+	}
+	pushURL := ""
+	if g != nil {
+		if u, err := g.GetPushURL("origin"); err == nil {
+			pushURL = u
+		}
+	}
+	pushlog.LogOrWarn(townRoot, rigName, pushlog.Receipt{
+		Branch:    branch,
+		CommitSHA: commit,
+		Remote:    "origin",
+		PushURL:   pushURL,
+		Source:    source,
+		Worker:    worker,
+		IssueID:   issueID,
+	})
 }
 
 func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {
