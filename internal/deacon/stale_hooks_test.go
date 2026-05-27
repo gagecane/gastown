@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/pushlog"
 )
 
 func TestAssigneeToSessionName(t *testing.T) {
@@ -248,6 +250,119 @@ func TestDefaultStaleHookConfig(t *testing.T) {
 	}
 	if cfg.DryRun {
 		t.Error("DryRun should default to false")
+	}
+}
+
+// TestCheckWorktreeState_PushReceiptHydration verifies the gu-ftja
+// behavior: when the rig's push receipt log records a push for the
+// worktree's current branch, checkWorktreeState surfaces that receipt's
+// SHA / timestamp / source on the result so witness/deacon teardown
+// forensics can prove "branch was pushed at SHA X at time T" even after
+// origin no longer has the ref.
+func TestCheckWorktreeState_PushReceiptHydration(t *testing.T) {
+	tmpDir := t.TempDir()
+	townRoot := tmpDir
+	rigName := "testrig"
+
+	worktreePath := filepath.Join(townRoot, rigName, "polecats", "max", rigName)
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmds := [][]string{
+		{"git", "init", "-b", "polecat/max/work"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "initial"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = worktreePath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	// Drop a receipt for the worktree's current branch as if `gt done`
+	// had recorded a successful push.
+	if err := pushlog.Append(townRoot, rigName, pushlog.Receipt{
+		Branch:    "polecat/max/work",
+		CommitSHA: "deadbeef0123456789",
+		Remote:    "origin",
+		Source:    pushlog.SourceDone,
+	}); err != nil {
+		t.Fatalf("Append receipt: %v", err)
+	}
+
+	result := &StaleHookResult{}
+	checkWorktreeState(townRoot, "testrig/polecats/max", result)
+
+	if result.PushReceiptSHA != "deadbeef0123456789" {
+		t.Errorf("PushReceiptSHA = %q, want receipt SHA", result.PushReceiptSHA)
+	}
+	if result.PushReceiptAt == "" {
+		t.Errorf("expected PushReceiptAt to be populated from receipt timestamp")
+	}
+	if result.PushReceiptSource != pushlog.SourceDone {
+		t.Errorf("PushReceiptSource = %q, want %q", result.PushReceiptSource, pushlog.SourceDone)
+	}
+}
+
+// TestCheckWorktreeState_NoPushReceipt verifies the absence-case: with no
+// receipt log present, the PushReceipt* fields stay empty and no error
+// is recorded.
+func TestCheckWorktreeState_NoPushReceipt(t *testing.T) {
+	tmpDir := t.TempDir()
+	townRoot := tmpDir
+	rigName := "testrig"
+
+	worktreePath := filepath.Join(townRoot, rigName, "polecats", "max", rigName)
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmds := [][]string{
+		{"git", "init", "-b", "polecat/max/work"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "initial"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = worktreePath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	result := &StaleHookResult{}
+	checkWorktreeState(townRoot, "testrig/polecats/max", result)
+
+	if result.PushReceiptSHA != "" || result.PushReceiptAt != "" || result.PushReceiptSource != "" {
+		t.Errorf("expected empty PushReceipt fields when no log present, got %+v", result)
+	}
+	if result.WorktreeError != "" {
+		t.Errorf("WorktreeError = %q, want empty", result.WorktreeError)
+	}
+}
+
+func TestAssigneeRigName(t *testing.T) {
+	tests := []struct {
+		assignee, want string
+	}{
+		{"testrig/polecats/max", "testrig"},
+		{"testrig/crew/joe", "testrig"},
+		{"testrig", "testrig"},
+		{"", ""},
+		{"/no/leading", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.assignee, func(t *testing.T) {
+			got := assigneeRigName(tt.assignee)
+			if got != tt.want {
+				t.Errorf("assigneeRigName(%q) = %q, want %q", tt.assignee, got, tt.want)
+			}
+		})
 	}
 }
 

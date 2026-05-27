@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/pushlog"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1805,6 +1806,28 @@ func _recoverUnfiledMR(bd *BdCli, workDir, rigName, polecatName string, state *U
 		if pushErr := g.Push("origin", state.Branch, false); pushErr != nil {
 			return fmt.Sprintf("recover-failed-push (%s): %v", aaTag, pushErr),
 				fmt.Errorf("pushing branch: %w", pushErr)
+		}
+		// gu-ftja: Record a durable push receipt at the rig level so future
+		// witness/deacon teardown decisions can prove this branch was
+		// pushed at this SHA at this time, even after the fork branch is
+		// later reaped from origin. Best-effort: never blocks recovery.
+		commit := state.HeadSHA
+		if commit == "" {
+			if sha, shaErr := g.Rev("HEAD"); shaErr == nil {
+				commit = strings.TrimSpace(sha)
+			}
+		}
+		if commit != "" {
+			townRoot, _ := workspace.Find(workDir)
+			pushURL, _ := g.GetPushURL("origin")
+			pushlog.LogOrWarn(townRoot, rigName, pushlog.Receipt{
+				Branch:    state.Branch,
+				CommitSHA: commit,
+				Remote:    "origin",
+				PushURL:   pushURL,
+				Source:    pushlog.SourceWitnessRecovery,
+				Worker:    fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
+			})
 		}
 	}
 
