@@ -32,10 +32,14 @@ func newIsolatedTmuxForTest(t *testing.T) *tmux.Tmux {
 	// test that kills its last named session doesn't take the server with it
 	// and orphan a stale socket.
 	sentinel := "gt-test-cmd-sentinel"
+	// intentionally bare — per-test socket; must NOT honor the package
+	// default socket (tmux.SetDefaultSocket) since the whole point is to
+	// isolate this test from the user's tmux server. See gu-6mn1.
 	if err := exec.Command("tmux", "-u", "-L", socket, "new-session", "-d", "-s", sentinel).Run(); err != nil {
 		t.Skipf("cannot start isolated tmux server on socket %s: %v", socket, err)
 	}
 	t.Cleanup(func() {
+		// intentionally bare — per-test socket cleanup, see above.
 		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
 	})
 	return tmux.NewTmuxWithSocket(socket)
