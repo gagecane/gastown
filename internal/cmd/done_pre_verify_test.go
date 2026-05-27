@@ -41,9 +41,9 @@ func TestLoadPreVerifyGates_FiltersAndSorts(t *testing.T) {
 	rigName := "testrig"
 	writePreVerifyRigSettings(t, townRoot, rigName, &config.MergeQueueConfig{
 		Gates: map[string]*config.GateConfig{
-			"vet":       {Cmd: "go vet ./..."},                         // empty phase = pre-merge
+			"vet":       {Cmd: "go vet ./..."},                          // empty phase = pre-merge
 			"lint":      {Cmd: "golangci-lint run", Phase: "pre-merge"}, // explicit pre-merge
-			"build":     {Cmd: "go build ./...", Phase: "post-squash"}, // excluded
+			"build":     {Cmd: "go build ./...", Phase: "post-squash"},  // excluded
 			"empty-cmd": {Cmd: "  ", Phase: "pre-merge"},                // excluded (whitespace-only)
 			"unit-test": {Cmd: "go test ./...", Phase: "pre-merge", Timeout: "30s"},
 		},
@@ -192,4 +192,3 @@ func TestRunPreVerifyGates_TruncatesNoisyOutput(t *testing.T) {
 		t.Errorf("error should mention truncation marker, got: %s", err.Error())
 	}
 }
-

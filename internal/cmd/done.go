@@ -2382,7 +2382,6 @@ func isDefaultBranchName(branch, defaultBranch string) bool {
 	return branch == "main" || branch == "master"
 }
 
-
 // stripOverlayCLAUDEmd detects and removes Gas Town overlay content from CLAUDE.md
 // and CLAUDE.local.md before the branch is pushed. Polecats were committing the
 // overlay (which contains polecat lifecycle boilerplate like "Idle Polecat Heresy",

@@ -174,7 +174,6 @@ func printMaintainerBlock() {
 	fmt.Fprintln(os.Stderr, "")
 }
 
-
 // isGasTownAgentContext returns true if we're running as a Gas Town managed agent.
 func isGasTownAgentContext() bool {
 	// Check environment variables set by Gas Town session management

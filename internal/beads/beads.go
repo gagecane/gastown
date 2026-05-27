@@ -963,7 +963,6 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 	return stripStdoutWarnings(stdout.Bytes()), nil
 }
 
-
 // Run executes a bd command and returns stdout.
 // This is a public wrapper around the internal run method for cases where
 // callers need to run arbitrary bd commands.
@@ -1169,7 +1168,6 @@ func doltConnectionFromBeadsDir(beadsDir string) (port string, host string, data
 	database = strings.TrimSpace(meta.DoltDatabase)
 	return port, host, database
 }
-
 
 // stripEnvPrefixes removes entries matching any of the given prefixes from an
 // environment variable slice. Used by runWithRouting to strip BEADS_DIR.

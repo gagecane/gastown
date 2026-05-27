@@ -337,7 +337,6 @@ func runRefineryStart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-
 	fmt.Printf("%s Refinery started for %s\n", style.Bold.Render("✓"), rigName)
 	fmt.Printf("  %s\n", style.Dim.Render("Use 'gt refinery status' to check progress"))
 	return nil
