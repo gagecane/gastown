@@ -818,6 +818,11 @@ afterSafetyNet:
 		// the auto-rebase below) sees the current state of origin. Without this,
 		// the local view of origin/<base> may be stale and we'd skip a rebase that
 		// is actually needed.
+		//
+		// preVerifiedAttestationValid (gs-4bn): tracks whether the polecat's
+		// --pre-verified claim still reflects reality. An auto-rebase below
+		// invalidates it because the gates ran against the pre-rebase base.
+		preVerifiedAttestationValid := donePreVerified
 		contaminationBase := doneContaminationBaseRef(defaultBranch, doneTarget)
 		if fetchErr := g.Fetch("origin"); fetchErr != nil {
 			style.PrintWarning("could not fetch origin before contamination check: %v (proceeding with local refs)", fetchErr)
@@ -844,6 +849,17 @@ afterSafetyNet:
 			}
 			if rebased {
 				fmt.Printf("%s Branch rebased onto %s\n", style.Bold.Render("✓"), contaminationBase)
+				// gs-4bn: When auto-rebase fires on a --pre-verified branch, the
+				// polecat's gates ran against the pre-rebase base; the attestation
+				// is now stale. Suppress pre-verification metadata so refinery
+				// re-runs gates (correct) instead of fast-pathing on stale
+				// attestation. donePreVerified itself stays set so pushForDone
+				// still skips the pre-push hook — running gates here AND in
+				// refinery is wasteful and risks witness timeout (gu-d416).
+				if donePreVerified {
+					style.PrintWarning("auto-rebase invalidated --pre-verified attestation (gs-4bn); refinery will run gates")
+					preVerifiedAttestationValid = false
+				}
 			} else if skipReason != "" {
 				style.PrintWarning("branch is %d commits behind %s but %s; skipping auto-rebase", contam.Behind, contaminationBase, skipReason)
 			}
@@ -1433,7 +1449,12 @@ afterSafetyNet:
 
 			// Phase 3: Add pre-verification metadata if polecat ran gates after rebasing.
 			// The refinery uses these fields to fast-path merge without re-running gates.
-			if donePreVerified {
+			//
+			// gs-4bn: Only record the attestation when it is still valid. If an
+			// auto-rebase fired above, the polecat's gates ran against the
+			// pre-rebase base; advertising pre-verification would invite refinery
+			// to fast-path on a stale claim.
+			if donePreVerified && preVerifiedAttestationValid {
 				description += "\npre_verified: true"
 				description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
 				// Capture current origin/target HEAD as the verified base.

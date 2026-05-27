@@ -63,12 +63,16 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 			wantCalls:   1,
 		},
 		{
-			name:        "pre-verified: skip even when behind",
+			// gs-4bn: --pre-verified used to short-circuit the rebase. That left
+			// polecats pushing branches with stale workflow state and guaranteed
+			// CI failures. Caller now drops the pre-verification metadata when
+			// rebased && preVerified.
+			name:        "pre-verified does NOT skip rebase (gs-4bn)",
 			behind:      3,
 			preVerified: true,
-			wantRebased: false,
-			wantSkip:    "--pre-verified is set",
-			wantCalls:   0,
+			wantRebased: true,
+			wantSkip:    "",
+			wantCalls:   1,
 		},
 		{
 			name:          "already pushed: skip to avoid divergence",
@@ -79,12 +83,14 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 			wantCalls:     0,
 		},
 		{
-			name:          "pre-verified takes precedence over already-pushed",
+			// Already-pushed is the only remaining skip reason — it wins over
+			// preVerified because rebasing after push would require a force-push.
+			name:          "already-pushed wins even when pre-verified set",
 			behind:        3,
 			preVerified:   true,
 			alreadyPushed: true,
 			wantRebased:   false,
-			wantSkip:      "--pre-verified is set",
+			wantSkip:      "prior push checkpoint exists",
 			wantCalls:     0,
 		},
 	}
