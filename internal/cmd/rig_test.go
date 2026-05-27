@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -9,6 +11,35 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+// newIsolatedTmuxForTest returns a *tmux.Tmux bound to a unique gt-test-*
+// socket so the test does not race with other packages or parallel `go test`
+// processes against the user's default tmux server. A sentinel session keeps
+// the server alive across the test's own session create/kill churn, and the
+// whole server is torn down via t.Cleanup.
+//
+// Required for tests that enumerate sessions by prefix (e.g. findRigSessions):
+// sharing a tmux server with other test binaries means session names from
+// parallel runs leak into ListSessions, and other binaries' kill-server calls
+// can race the test's session creation. See gu-6mn1.
+func newIsolatedTmuxForTest(t *testing.T) *tmux.Tmux {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	socket := fmt.Sprintf("gt-test-cmd-%d-%d", os.Getpid(), time.Now().UnixNano())
+	// Sentinel keeps the server up across per-test session lifecycles so a
+	// test that kills its last named session doesn't take the server with it
+	// and orphan a stale socket.
+	sentinel := "gt-test-cmd-sentinel"
+	if err := exec.Command("tmux", "-u", "-L", socket, "new-session", "-d", "-s", sentinel).Run(); err != nil {
+		t.Skipf("cannot start isolated tmux server on socket %s: %v", socket, err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+	return tmux.NewTmuxWithSocket(socket)
+}
 
 func TestIsAgentSessionHealthy_DeadPane(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -125,12 +156,15 @@ func setupRigTestRegistry(t *testing.T) {
 }
 
 func TestFindRigSessions(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
 	setupRigTestRegistry(t)
 
-	tm := tmux.NewTmux()
+	// Isolate tmux to a per-test socket so this test does not race with
+	// parallel `go test` processes (e.g. polecats/shiny) or with other
+	// packages' TestMain teardown against the user's default tmux server.
+	// See gu-6mn1: full-suite -race runs intermittently saw "no tmux server
+	// running" mid-test because findRigSessions enumerates whatever server
+	// NewTmux() finds, which can be torn down by parallel test binaries.
+	tm := newIsolatedTmuxForTest(t)
 
 	// Create sessions that match our test rig prefix (zztr- for testrig1223)
 	matching := []string{
@@ -182,10 +216,6 @@ func TestFindRigSessions(t *testing.T) {
 }
 
 func TestFindRigSessions_NoSessions(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-
 	// Register a unique prefix for a rig that has no sessions
 	reg := session.NewPrefixRegistry()
 	reg.Register("zz", "nonexistentrig999")
@@ -193,7 +223,10 @@ func TestFindRigSessions_NoSessions(t *testing.T) {
 	session.SetDefaultRegistry(reg)
 	defer session.SetDefaultRegistry(old)
 
-	tm := tmux.NewTmux()
+	// Isolated tmux server (see gu-6mn1) — even the empty-result case must
+	// not depend on the user's tmux server being up during the full -race
+	// test suite.
+	tm := newIsolatedTmuxForTest(t)
 	got, err := findRigSessions(tm, "nonexistentrig999")
 	if err != nil {
 		t.Fatalf("findRigSessions: %v", err)
