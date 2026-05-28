@@ -150,13 +150,18 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	initBeadsDBForServer(t, hqPath, hqPrefix)
 
 	// --- testrig directory (loadRig checks os.Stat on townRoot/<rigName>) ---
+	// Init rig BEFORE town: bd v1.0.3+ walks parent dirs looking for an existing
+	// .beads/metadata.json and refuses to init when one is found. If we init the
+	// town first, the rig init aborts because it sees the town's metadata above
+	// it. Init the rig first while the parent is still routes-only (which bd
+	// does not treat as initialized), then init the town. See gu-r9q1.
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatalf("mkdir rigPath: %v", err)
 	}
 	initBeadsDBForServer(t, rigPath, rigPrefix)
+	initBeadsDBForServer(t, hqPath, hqPrefix)
 
 	// Drop test databases on cleanup to prevent orphaned databases on the Dolt server.
 	t.Cleanup(func() {
@@ -599,7 +604,12 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	initBeadsDBForServer(t, hqPath, hqPrefix)
+
+	// Init rigs BEFORE town: bd v1.0.3+ walks parent dirs looking for an
+	// existing .beads/metadata.json and refuses to init when one is found. If
+	// we init the town first, rig inits abort because they see the town's
+	// metadata above. Init rigs first while the parent is still routes-only
+	// (which bd does not treat as initialized), then init the town. See gu-r9q1.
 
 	// --- rig1 ---
 	if err := os.MkdirAll(rig1Path, 0755); err != nil {
@@ -634,6 +644,10 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	if err := os.WriteFile(filepath.Join(rig2Redirect, "redirect"), []byte("mayor/rig/.beads"), 0644); err != nil {
 		t.Fatalf("write rig2 redirect: %v", err)
 	}
+
+	// Now init the town root (parent). Rigs already exist below — bd does not
+	// walk DOWN looking for nested initialized dirs.
+	initBeadsDBForServer(t, hqPath, hqPrefix)
 
 	// Drop test databases on cleanup to prevent orphaned databases on the Dolt
 	// server. Without this, databases from multi-rig tests persist and can
