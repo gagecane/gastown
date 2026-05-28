@@ -1473,6 +1473,20 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		return nil, fmt.Errorf("listing convoys: %w", err)
 	}
 
+	// Hoist the town-wide scheduled-set computation out of the per-convoy
+	// loop. listAllSlingContexts() is invariant for the duration of one scan
+	// (a sling-context closing mid-scan can yield at-most one cycle of
+	// detection latency on the closing-context edge case — self-corrects on
+	// the next scan), and the previous per-convoy call to areScheduled() was
+	// re-running it for every convoy: O(convoys × rigs) bd subprocess
+	// fan-out, ~500 redundant `bd list --label=gt:sling-context` calls per
+	// scan in a 27-convoy / 19-rig town. Validated empirically (gu-6r5k):
+	// 8.6-10.6× speedup with byte-identical output. (gc-jmy04 root cause)
+	//
+	// scheduledSetAll is nil when townRoot cannot be resolved — see
+	// computeTownWideScheduledSet for the fail-closed fallback handling.
+	scheduledSetAll := computeTownWideScheduledSet(townBeads)
+
 	// Check each convoy for stranded state
 	for _, convoy := range convoys {
 		// Extract base_branch from convoy description fields
@@ -1508,12 +1522,25 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		// they can't be dispatched via gt sling -- they're handled by the deacon.
 		// Non-slingable types (epics, convoys, etc.) are also excluded.
 
-		// Batch-check scheduling status for all tracked issues (single DB query).
-		var trackedIDs []string
-		for _, t := range tracked {
-			trackedIDs = append(trackedIDs, t.ID)
+		// Look up scheduling status from the hoisted snapshot.
+		// Fall back to per-convoy areScheduled() when the snapshot was not
+		// computed (townRoot unresolvable) — preserves the existing
+		// fail-closed semantic that treats unknown scheduling as "scheduled."
+		var scheduledSet map[string]bool
+		if scheduledSetAll != nil {
+			scheduledSet = make(map[string]bool, len(tracked))
+			for _, t := range tracked {
+				if scheduledSetAll[t.ID] {
+					scheduledSet[t.ID] = true
+				}
+			}
+		} else {
+			trackedIDs := make([]string, 0, len(tracked))
+			for _, t := range tracked {
+				trackedIDs = append(trackedIDs, t.ID)
+			}
+			scheduledSet = areScheduled(trackedIDs)
 		}
-		scheduledSet := areScheduled(trackedIDs)
 
 		var readyIssues []string
 		for _, t := range tracked {
@@ -1560,6 +1587,56 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	}
 
 	return stranded, nil
+}
+
+// computeTownWideScheduledSet returns a town-wide map of work-bead IDs that
+// have OPEN, NON-STALE sling contexts. Mirrors areScheduled's logic from
+// internal/cmd/sling_schedule.go — including the slingContextTTL stale-orphan
+// filter — but does not filter to a specific set of bead IDs. Used by
+// findStrandedConvoys to amortize the O(rigs) bd subprocess fan-out across
+// all convoys in one scan instead of one per convoy. (gu-r9q1)
+//
+// Returns nil when town root cannot be resolved. Callers must treat a nil
+// return as "scheduling status is unknown" and fall back to whatever
+// fail-closed behavior they had previously (typically: per-convoy
+// areScheduled, which treats unknown as "scheduled").
+//
+// listAllSlingContexts is invariant for the duration of one scan in the way
+// that matters for stranded detection: a sling-context closing mid-scan can
+// yield at-most one cycle of detection latency (the closing bead is reported
+// as "scheduled" instead of "stranded ready"); the next scan reconciles. A
+// sling-context opening mid-scan is harmless — the snapshot still shows the
+// bead as "not scheduled," so it's reported as ready-stranded, which is
+// what the per-call version would have reported too.
+func computeTownWideScheduledSet(townRoot string) map[string]bool {
+	// Resolve the town root: callers pass the workspace root through
+	// findStrandedConvoys's townBeads parameter, but it can be empty in
+	// edge paths (callers that don't have a town context). Fall back to
+	// FindFromCwd to match the historical behavior of areScheduled().
+	if townRoot == "" {
+		var err error
+		townRoot, err = workspace.FindFromCwd()
+		if err != nil || townRoot == "" {
+			return nil
+		}
+	}
+	contexts := listAllSlingContexts(townRoot)
+	out := make(map[string]bool, len(contexts))
+	now := time.Now()
+	for _, ctx := range contexts {
+		if ctx.CreatedAt != "" {
+			if created, err := time.Parse(time.RFC3339, ctx.CreatedAt); err == nil {
+				if now.Sub(created) > slingContextTTL {
+					continue
+				}
+			}
+		}
+		fields := beads.ParseSlingContextFields(ctx.Description)
+		if fields != nil {
+			out[fields.WorkBeadID] = true
+		}
+	}
+	return out
 }
 
 // isReadyIssue checks if an issue is ready for dispatch (stranded).
