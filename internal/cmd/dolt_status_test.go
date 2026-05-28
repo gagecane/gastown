@@ -41,6 +41,13 @@ func TestReadBeadsRuntimeConfigServerMetadata(t *testing.T) {
 }
 
 func TestReadBeadsRuntimeConfigDefaultServerAddr(t *testing.T) {
+	// readBeadsRuntimeConfig falls back to doltserver.DefaultConfig(townRoot).Port
+	// when metadata omits dolt_server_port. DefaultConfig honors GT_DOLT_PORT
+	// from the environment (and the CI container exports a non-default port for
+	// the test Dolt instance), so isolate the test by clearing port-related env
+	// vars and any managed config that would override DefaultPort. See gu-r9q1.
+	t.Setenv("GT_DOLT_PORT", "")
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "1")
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
