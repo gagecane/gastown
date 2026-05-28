@@ -33,6 +33,29 @@ func debugSession(context string, err error) {
 	}
 }
 
+// envWithoutBeadsDir returns os.Environ() with any BEADS_DIR entries removed.
+//
+// bd treats BEADS_DIR as a hard override that wins over directory-based
+// discovery, so any inherited stale value (e.g., a daemon launched from a
+// shell that had it set, or test pollution) makes `bd show <id>` fail with
+// "not an issue ID or formula name" even when cmd.Dir points at the right
+// rig. Stripping BEADS_DIR forces bd to discover the database via cwd, which
+// is what the explicit cmd.Dir = bdWorkDir already specifies. (gu-olzp)
+//
+// Mirrors the filterEnvKey() pattern used throughout internal/cmd's bd
+// shellouts (e.g., close.go:92, cat.go:57, convoy_stage.go:1441).
+func envWithoutBeadsDir() []string {
+	in := os.Environ()
+	out := make([]string, 0, len(in))
+	for _, e := range in {
+		if strings.HasPrefix(e, "BEADS_DIR=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // Session errors
 var (
 	ErrSessionRunning  = errors.New("session already running")
@@ -951,6 +974,8 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 	cmd := exec.CommandContext(ctx, "bd", "show", issueID, "--json") //nolint:gosec // G204: bd is a trusted internal tool
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = bdWorkDir
+	// Strip inherited BEADS_DIR so cmd.Dir's discovery wins. (gu-olzp)
+	cmd.Env = envWithoutBeadsDir()
 	output, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrIssueInvalid, issueID)
@@ -1049,6 +1074,8 @@ func (m *SessionManager) hookIssue(issueID, agentID, workDir string) error {
 	cmd := exec.CommandContext(ctx, "bd", "update", issueID, "--status=hooked", "--assignee="+agentID) //nolint:gosec // G204: bd is a trusted internal tool
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = bdWorkDir
+	// Strip inherited BEADS_DIR so cmd.Dir's discovery wins. (gu-olzp)
+	cmd.Env = envWithoutBeadsDir()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("bd update failed: %w", err)
