@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -18,6 +19,45 @@ import (
 )
 
 const polecatAdmissionReservationTTL = 30 * time.Minute
+
+// polecatCapacitySnapshotCacheTTL is the maximum staleness allowed for a
+// cached town-wide polecat capacity snapshot. Computing a fresh snapshot
+// requires one `bd list --label=gt:agent` subprocess per rig, which serialize
+// through bd-list-read.flock (5s timeout). With 19 rigs in a busy town,
+// recomputing per call accounts for ~49% of all bd subprocess traffic during
+// a dispatch cycle and routinely starves the dispatcher's own bd calls
+// (live trace evidence: 494/1011 PIDs were this single call).
+//
+// 5s aligns with the bd-list-read flock timeout — even if every dispatch
+// path requested a snapshot back-to-back, no individual call would wait
+// longer for fresh data than the flock would have made it wait anyway.
+//
+// Capacity counts (Working, RecoveryBlocked, etc.) drift slowly: a polecat
+// state change takes at least a session-restart cycle (seconds), and the
+// admission gate has its own per-flock atomic check on the actual
+// reservation file — so a snapshot stale by up to 5s cannot cause
+// overcommit, only delay reporting of newly-freed slots. (gu-yfv7)
+const polecatCapacitySnapshotCacheTTL = 5 * time.Second
+
+var (
+	polecatCapacityCacheMu sync.Mutex
+	polecatCapacityCache   map[string]cachedCapacitySnapshot // keyed by townRoot
+)
+
+type cachedCapacitySnapshot struct {
+	snapshot polecatCapacitySnapshot
+	err      error
+	at       time.Time
+}
+
+// invalidatePolecatCapacityCache drops the cached snapshot for townRoot.
+// Used by tests and by code paths that explicitly need a fresh read after
+// a known state change (e.g., right after recording a dispatch).
+func invalidatePolecatCapacityCache(townRoot string) {
+	polecatCapacityCacheMu.Lock()
+	defer polecatCapacityCacheMu.Unlock()
+	delete(polecatCapacityCache, townRoot)
+}
 
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
 
@@ -141,6 +181,23 @@ func configuredSchedulerMaxPolecats(townRoot string) (int, error) {
 }
 
 func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, error) {
+	// Fast path: serve a recent cached snapshot if one exists. The dispatch
+	// loop's AvailableCapacity callback, the scheduler-status command, and
+	// the failed-attempt summary all call this within milliseconds of one
+	// another during a single dispatch cycle, and recomputing means
+	// `bd list --label=gt:agent` x N rigs through the bd-list-read flock —
+	// see polecatCapacitySnapshotCacheTTL doc for the full motivation.
+	//
+	// Cache miss falls through to the slow recompute path, which both:
+	//   - cleans stale admission reservations (rate-limited within the
+	//     reservation flock), and
+	//   - performs the per-rig `bd list` fan-out.
+	//
+	// Both happen at most once per polecatCapacitySnapshotCacheTTL window. (gu-yfv7)
+	if cached, ok := loadCachedPolecatCapacitySnapshot(townRoot); ok {
+		return cached.snapshot, cached.err
+	}
+
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
 		return polecatCapacitySnapshot{}, err
@@ -150,7 +207,42 @@ func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, e
 			return polecatCapacitySnapshot{}, err
 		}
 	}
-	return polecatCapacitySnapshotForTownNoCleanup(townRoot)
+	snapshot, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
+	storeCachedPolecatCapacitySnapshot(townRoot, snapshot, err)
+	return snapshot, err
+}
+
+// loadCachedPolecatCapacitySnapshot returns the cached snapshot if it is
+// fresher than polecatCapacitySnapshotCacheTTL. Returns ok=false otherwise.
+func loadCachedPolecatCapacitySnapshot(townRoot string) (cachedCapacitySnapshot, bool) {
+	polecatCapacityCacheMu.Lock()
+	defer polecatCapacityCacheMu.Unlock()
+	if polecatCapacityCache == nil {
+		return cachedCapacitySnapshot{}, false
+	}
+	entry, ok := polecatCapacityCache[townRoot]
+	if !ok {
+		return cachedCapacitySnapshot{}, false
+	}
+	if time.Since(entry.at) > polecatCapacitySnapshotCacheTTL {
+		return cachedCapacitySnapshot{}, false
+	}
+	return entry, true
+}
+
+// storeCachedPolecatCapacitySnapshot records the result of a fresh snapshot
+// computation for reuse by subsequent callers within the TTL window.
+func storeCachedPolecatCapacitySnapshot(townRoot string, snapshot polecatCapacitySnapshot, err error) {
+	polecatCapacityCacheMu.Lock()
+	defer polecatCapacityCacheMu.Unlock()
+	if polecatCapacityCache == nil {
+		polecatCapacityCache = make(map[string]cachedCapacitySnapshot)
+	}
+	polecatCapacityCache[townRoot] = cachedCapacitySnapshot{
+		snapshot: snapshot,
+		err:      err,
+		at:       time.Now(),
+	}
 }
 
 func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySnapshot, error) {
