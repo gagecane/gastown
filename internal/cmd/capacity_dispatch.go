@@ -834,9 +834,12 @@ func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispa
 // Used by scheduler list/status/clear, cleanupStaleContexts, and areScheduled.
 // Does NOT filter by readiness or circuit breaker.
 //
-// Deduplicates by context ID: different search dirs can resolve to the same
-// underlying beads DB (e.g., when a rig's top-level .beads is a redirect to
-// mayor/rig/.beads), and both paths would otherwise return the same contexts.
+// Deduplicates by context ID alone: different search dirs can resolve to the
+// same underlying beads DB (e.g., when a rig's top-level .beads is a redirect
+// to mayor/rig/.beads), AND `bd list --label` with prefix routing in
+// routes.jsonl returns the same bead from multiple BEADS_DIR pins (a bead
+// with prefix routed to a sibling DB shows up under both the host DB and the
+// routed-to DB). Keying dedup by ID alone collapses both cases. (gu-38ov)
 func listAllSlingContexts(townRoot string) []*beads.Issue {
 	records := listAllSlingContextRecords(townRoot)
 	all := make([]*beads.Issue, 0, len(records))
@@ -871,6 +874,11 @@ func listAllScheduledBeadIDs(townRoot string) []string {
 
 func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 	var records []slingContextRecord
+	// Dedup by ctx.ID alone: bd list with prefix routing returns the same
+	// bead from multiple BEADS_DIR pins when routes.jsonl maps the bead's
+	// prefix to a sibling DB. Keying on (beadsDir, ID) — the previous
+	// implementation — failed to collapse those duplicates, causing
+	// idempotency assertions to count one ctx as two. (gu-38ov)
 	seen := make(map[string]bool)
 	for _, dir := range beadsSearchDirs(townRoot) {
 		beadsDir := beads.ResolveBeadsDir(dir)
@@ -880,11 +888,10 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 			continue // Partial failure is acceptable — skip unavailable dirs
 		}
 		for _, ctx := range contexts {
-			key := beadsDir + "\x00" + ctx.ID
-			if seen[key] {
+			if seen[ctx.ID] {
 				continue
 			}
-			seen[key] = true
+			seen[ctx.ID] = true
 			records = append(records, slingContextRecord{issue: ctx, workDir: dir, beadsDir: beadsDir})
 		}
 	}
