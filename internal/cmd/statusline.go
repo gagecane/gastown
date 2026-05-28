@@ -107,11 +107,11 @@ func runStatusLine(cmd *cobra.Command, args []string) error {
 	}
 
 	// Crew/Polecat status line
-	return runWorkerStatusLine(statusLineSession, rigName, polecat, crew, issue)
+	return runWorkerStatusLine(polecat, crew, issue)
 }
 
 // runWorkerStatusLine outputs status for crew or polecat sessions.
-func runWorkerStatusLine(session, rigName, polecat, crew, issue string) error {
+func runWorkerStatusLine(polecat, crew, issue string) error {
 	// Determine agent type and identity
 	var icon string
 	if polecat != "" {
