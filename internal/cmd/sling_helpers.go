@@ -679,11 +679,25 @@ func routedBeadExistsForTargetRig(beadID, targetRig, townRoot string) bool {
 }
 
 func bdShowBeadOutput(beadID string) ([]byte, error) {
-	out, err := bdShowBeadDirectCmd(beadID).Stderr(io.Discard).Output()
+	return bdShowBeadOutputAllowStale(beadID, true)
+}
+
+// bdShowBeadOutputFresh is the post-mutation variant of bdShowBeadOutput that
+// omits --allow-stale. Use this for any bd show that runs in the same
+// dispatch (or other write-then-read) flow as a recent bd mutation, since
+// bd's stale-read path serves from an in-memory snapshot that may pre-date
+// the just-committed Dolt write — producing spurious "'<id>' not found"
+// errors. (gu-hxjx)
+func bdShowBeadOutputFresh(beadID string) ([]byte, error) {
+	return bdShowBeadOutputAllowStale(beadID, false)
+}
+
+func bdShowBeadOutputAllowStale(beadID string, allowStale bool) ([]byte, error) {
+	out, err := bdShowBeadDirectCmdAllowStale(beadID, allowStale).Stderr(io.Discard).Output()
 	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		return out, nil
 	}
-	routedOut, routedErr := bdShowBeadRoutedCmd(beadID).Stderr(io.Discard).Output()
+	routedOut, routedErr := bdShowBeadRoutedCmdAllowStale(beadID, allowStale).Stderr(io.Discard).Output()
 	if routedErr == nil && len(strings.TrimSpace(string(routedOut))) > 0 {
 		return routedOut, nil
 	}
@@ -691,14 +705,24 @@ func bdShowBeadOutput(beadID string) ([]byte, error) {
 }
 
 func bdShowBeadOutputFromTownRoot(townRoot, beadID string) ([]byte, error) {
+	return bdShowBeadOutputFromTownRootAllowStale(townRoot, beadID, true)
+}
+
+// bdShowBeadOutputFreshFromTownRoot is the post-mutation variant of
+// bdShowBeadOutputFromTownRoot. See bdShowBeadOutputFresh. (gu-hxjx)
+func bdShowBeadOutputFreshFromTownRoot(townRoot, beadID string) ([]byte, error) {
+	return bdShowBeadOutputFromTownRootAllowStale(townRoot, beadID, false)
+}
+
+func bdShowBeadOutputFromTownRootAllowStale(townRoot, beadID string, allowStale bool) ([]byte, error) {
 	if townRoot == "" {
-		return bdShowBeadOutput(beadID)
+		return bdShowBeadOutputAllowStale(beadID, allowStale)
 	}
-	out, err := bdShowBeadDirectCmdFromTownRoot(townRoot, beadID).Stderr(io.Discard).Output()
+	out, err := bdShowBeadDirectCmdFromTownRootAllowStale(townRoot, beadID, allowStale).Stderr(io.Discard).Output()
 	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		return out, nil
 	}
-	routedOut, routedErr := bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID).Stderr(io.Discard).Output()
+	routedOut, routedErr := bdShowBeadRoutedCmdFromTownRootAllowStale(townRoot, beadID, allowStale).Stderr(io.Discard).Output()
 	if routedErr == nil && len(strings.TrimSpace(string(routedOut))) > 0 {
 		return routedOut, nil
 	}
@@ -706,29 +730,58 @@ func bdShowBeadOutputFromTownRoot(townRoot, beadID string) ([]byte, error) {
 }
 
 func bdShowBeadDirectCmd(beadID string) *bdCmd {
-	return BdCmd("show", beadID, "--json").
-		AllowStale().
+	return bdShowBeadDirectCmdAllowStale(beadID, true)
+}
+
+func bdShowBeadDirectCmdAllowStale(beadID string, allowStale bool) *bdCmd {
+	bdc := BdCmd("show", beadID, "--json").
 		Dir(resolveBeadDir(beadID)).
 		StripBeadsDir()
+	if allowStale {
+		bdc = bdc.AllowStale()
+	}
+	return bdc
 }
 
 func bdShowBeadDirectCmdFromTownRoot(townRoot, beadID string) *bdCmd {
-	return BdCmd("show", beadID, "--json").
-		AllowStale().
+	return bdShowBeadDirectCmdFromTownRootAllowStale(townRoot, beadID, true)
+}
+
+func bdShowBeadDirectCmdFromTownRootAllowStale(townRoot, beadID string, allowStale bool) *bdCmd {
+	bdc := BdCmd("show", beadID, "--json").
 		Dir(resolveBeadDirFromTownRoot(townRoot, beadID)).
 		StripBeadsDir()
+	if allowStale {
+		bdc = bdc.AllowStale()
+	}
+	return bdc
 }
 
 func bdShowBeadRoutedCmd(beadID string) *bdCmd {
-	bdc := BdCmd("show", beadID, "--json").AllowStale()
+	return bdShowBeadRoutedCmdAllowStale(beadID, true)
+}
+
+func bdShowBeadRoutedCmdAllowStale(beadID string, allowStale bool) *bdCmd {
 	if townRoot, err := workspace.FindFromCwdOrError(); err == nil && townRoot != "" {
-		return bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID)
+		return bdShowBeadRoutedCmdFromTownRootAllowStale(townRoot, beadID, allowStale)
 	}
-	return bdc.Dir(resolveBeadDir(beadID)).StripBeadsDir()
+	bdc := BdCmd("show", beadID, "--json").Dir(resolveBeadDir(beadID)).StripBeadsDir()
+	if allowStale {
+		bdc = bdc.AllowStale()
+	}
+	return bdc
 }
 
 func bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID string) *bdCmd {
-	return BdCmd("show", beadID, "--json").AllowStale().Dir(townRoot).WithRouting()
+	return bdShowBeadRoutedCmdFromTownRootAllowStale(townRoot, beadID, true)
+}
+
+func bdShowBeadRoutedCmdFromTownRootAllowStale(townRoot, beadID string, allowStale bool) *bdCmd {
+	bdc := BdCmd("show", beadID, "--json").Dir(townRoot).WithRouting()
+	if allowStale {
+		bdc = bdc.AllowStale()
+	}
+	return bdc
 }
 
 // getBeadInfo returns status and assignee for a bead.
@@ -745,6 +798,19 @@ func getBeadInfo(beadID string) (*beadInfo, error) {
 
 func getBeadInfoFromTownRoot(townRoot, beadID string) (*beadInfo, error) {
 	out, err := bdShowBeadOutputFromTownRoot(townRoot, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("bead '%s' not found", beadID)
+	}
+	return parseBeadInfo(beadID, out)
+}
+
+// getBeadInfoFreshFromTownRoot is the post-mutation variant of
+// getBeadInfoFromTownRoot. It bypasses bd's stale-read snapshot, used by
+// the hook-verify path that runs immediately after bd update —— where a
+// stale snapshot can return a "not found" because it was taken before
+// the row was committed. (gu-hxjx)
+func getBeadInfoFreshFromTownRoot(townRoot, beadID string) (*beadInfo, error) {
+	out, err := bdShowBeadOutputFreshFromTownRoot(townRoot, beadID)
 	if err != nil {
 		return nil, fmt.Errorf("bead '%s' not found", beadID)
 	}
@@ -824,8 +890,11 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 
 	issue := &beads.Issue{}
 	if logPath == "" {
-		// Read the bead once
-		out, err := bdShowBeadOutput(beadID)
+		// Read the bead once. Use the fresh (non-stale) helper because this
+		// runs in the dispatch flow immediately after bd mol bond mutated the
+		// target row; bd's stale-read snapshot can pre-date that write and
+		// return "not found" for a row we just committed. (gu-hxjx)
+		out, err := bdShowBeadOutputFresh(beadID)
 		if err != nil {
 			return fmt.Errorf("fetching bead: %w", err)
 		}
@@ -1583,7 +1652,11 @@ func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string
 			break
 		}
 
-		verifyInfo, verifyErr := getBeadInfoFromTownRoot(townRoot, beadID)
+		// Hook verify must NOT use bd's stale-read path: we just wrote the
+		// hooked row in this exact loop iteration, and a stale-read snapshot
+		// taken before that write would falsely report "not found" or the
+		// pre-hook status, triggering a spurious retry. (gu-hxjx)
+		verifyInfo, verifyErr := getBeadInfoFreshFromTownRoot(townRoot, beadID)
 		if verifyErr != nil {
 			lastErr = fmt.Errorf("verifying hook: %w", verifyErr)
 			if attempt < maxRetries {
