@@ -229,8 +229,15 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(stdout, "Running %d gate(s)...\n", len(gates))
 	gateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+	// SandboxedEnv defaults to true here per Phase 5 (gu-1zfy / C-SEC-1):
+	// upstream code is semi-trusted, gates execute it (`go test`, `go
+	// build`, `go vet`), and any AWS/GitHub/Dolt/beads credential the
+	// parent inherits would otherwise be exfiltratable from a malicious
+	// init() or TestMain(). The Refinery's gate runner has its own
+	// sandboxing model and is unaffected.
 	gateResult := upstreamsync.RunGates(gateCtx, gates, upstreamsync.GateRunOptions{
-		Dir: gitDir,
+		Dir:          gitDir,
+		SandboxedEnv: true,
 	})
 	attempt.GateResults = gateResult.GateResultsMap()
 	for _, r := range gateResult.Results {

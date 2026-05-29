@@ -32,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -83,7 +84,7 @@ const DefaultGateTimeout = 10 * time.Minute
 
 // GateRunOptions tunes the runner's behavior. The zero value uses the
 // safe defaults: shell="/bin/sh", per-command timeout =
-// DefaultGateTimeout, no environment overlay.
+// DefaultGateTimeout, no environment overlay, no sandboxing.
 type GateRunOptions struct {
 	// Dir is the working directory passed to each gate command.
 	// Required: gate commands assume they run at the repo root.
@@ -99,10 +100,119 @@ type GateRunOptions struct {
 	PerCommandTimeout time.Duration
 
 	// Env adds entries to the child process environment. The runner
-	// does NOT scrub the inherited env; callers control how much of
-	// the parent shell leaks through (deacon patrol may want to
-	// strip BD_ACTOR; the CLI sync verb wants to keep it).
+	// does NOT scrub the inherited env unless SandboxedEnv is set;
+	// callers control how much of the parent shell leaks through
+	// (deacon patrol may want to strip BD_ACTOR; the CLI sync verb
+	// wants to keep it).
 	Env []string
+
+	// SandboxedEnv controls credential scrubbing for upstream-sync
+	// gates. The upstream-sync system executes gate commands (`go
+	// build`, `go test`, …) on freshly-merged upstream code — code
+	// that originated outside the fork's review boundary. A malicious
+	// `init()`, `TestMain()`, or build-time generator could exfiltrate
+	// any env-resident credential the child inherits.
+	//
+	// When SandboxedEnv is true, RunGates filters the parent env
+	// before exec, dropping known credential-bearing variables (see
+	// SandboxedEnvDenyPrefixes / SandboxedEnvDenyExact). Required
+	// system vars (PATH, HOME, GOPATH, GOCACHE, etc.) are preserved.
+	// Entries from Env are appended after filtering, so callers can
+	// re-inject specific variables a gate genuinely needs.
+	//
+	// Defaults to false to preserve legacy behavior — Phase 5 wires
+	// the upstream-sync CLI verb to default-enable it. Tests and the
+	// Refinery's gate runner (which has its own sandboxing model)
+	// continue to default off.
+	//
+	// Design context: .designs/cv-hpnja/security.md §C-SEC-1 and
+	// .designs/cv-2s6tq/security.md §"T2: Credential theft via
+	// malicious upstream code".
+	SandboxedEnv bool
+}
+
+// SandboxedEnvDenyPrefixes lists env variable name prefixes that are
+// stripped when GateRunOptions.SandboxedEnv is true. Prefix-match catches
+// the common credential families without enumerating every variant.
+//
+// Update ordering note: when adding new prefixes, keep them lowercase-
+// equivalent unique — the matcher is case-sensitive, matching unix
+// convention. Don't shorten existing entries (e.g. "GH_" subsumes
+// "GH_TOKEN"); we want explicit reviewable entries.
+var SandboxedEnvDenyPrefixes = []string{
+	"AWS_",         // AWS access keys, session tokens, profile
+	"BD_",          // beads actor / overrides
+	"DOLT_",        // dolt server credentials, mysql password, branch overrides
+	"GT_DOLT_",     // gas-town dolt overrides
+	"GITHUB_",      // GH App tokens, runner tokens, workflow context
+	"GH_",          // gh CLI tokens (GH_TOKEN, GH_ENTERPRISE_TOKEN)
+	"ANTHROPIC_",   // model provider keys
+	"OPENAI_",      // model provider keys
+	"GOOGLE_",      // GCP service account env / API keys
+	"AZURE_",       // Azure SP creds
+	"NPM_",         // npm registry tokens
+	"PYPI_",        // pypi upload tokens
+	"DOCKER_",      // docker registry creds (DOCKER_AUTH_CONFIG, DOCKER_PASSWORD)
+	"CARGO_",       // crates.io tokens
+	"HUGGINGFACE_", // HF tokens
+	"SLACK_",       // slack webhooks/tokens
+	"PAGERDUTY_",   // PD api keys
+}
+
+// SandboxedEnvDenyExact lists env variable names with no prefix match
+// that are stripped when GateRunOptions.SandboxedEnv is true. Used for
+// single-variable secrets that don't have a natural namespace prefix.
+var SandboxedEnvDenyExact = []string{
+	"NETRC",
+	"CURL_NETRC",
+	"SSH_AUTH_SOCK", // ssh-agent forwarding — denies access to keys
+	"SSH_AGENT_PID",
+	"SSL_CLIENT_CERT",
+	"GIT_ASKPASS",
+	"GCM_INTERACTIVE",
+	"VAULT_TOKEN",
+	"VAULT_ADDR",
+	"KUBECONFIG",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+}
+
+// SandboxFilterEnv returns a copy of `parent` with credential-bearing
+// variables removed per SandboxedEnvDenyPrefixes / SandboxedEnvDenyExact.
+// Pure function so callers can unit-test the filter without exec.
+//
+// Inputs are KEY=VALUE strings as returned by os.Environ. Entries
+// without an '=' are dropped (defensive — os.Environ never produces
+// these, but a hand-built input might).
+func SandboxFilterEnv(parent []string) []string {
+	out := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := kv[:eq]
+		if isSandboxDenied(key) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// isSandboxDenied reports whether `key` matches any deny prefix or
+// exact-name entry. Internal: callers go through SandboxFilterEnv.
+func isSandboxDenied(key string) bool {
+	for _, p := range SandboxedEnvDenyPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	for _, exact := range SandboxedEnvDenyExact {
+		if key == exact {
+			return true
+		}
+	}
+	return false
 }
 
 // GateRunSummary is the aggregate outcome of running a gate suite.
@@ -224,9 +334,19 @@ func runOneGate(parentCtx context.Context, shell, cmdStr string, opts GateRunOpt
 	if opts.Dir != "" {
 		c.Dir = opts.Dir
 	}
-	if len(opts.Env) > 0 {
-		// Append to inherited env, not replace — gate commands rely on
-		// PATH, HOME, GOPATH, etc.
+	// Build the child env. Default behavior (SandboxedEnv=false): inherit
+	// the parent env unchanged via cmd.Env zero-value, then optionally
+	// append opts.Env entries. Sandboxed: explicitly populate Env with a
+	// scrubbed parent so credentials never reach the child, then append
+	// opts.Env so callers can inject specific variables a gate genuinely
+	// needs (e.g., GOFLAGS, CGO_ENABLED). This is the C-SEC-1 enforcement
+	// point — see GateRunOptions.SandboxedEnv for design context.
+	if opts.SandboxedEnv {
+		c.Env = SandboxFilterEnv(os.Environ())
+		c.Env = append(c.Env, opts.Env...)
+	} else if len(opts.Env) > 0 {
+		// Legacy path: append to inherited env, not replace — gate
+		// commands rely on PATH, HOME, GOPATH, etc.
 		c.Env = append(c.Env, opts.Env...)
 	}
 	// Run the gate in its own process group and install a Cancel that

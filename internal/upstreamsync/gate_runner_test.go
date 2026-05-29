@@ -2,6 +2,7 @@ package upstreamsync
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -159,6 +160,146 @@ func TestTruncateGateOutput_OverLimit(t *testing.T) {
 	// Tail content should be preserved (last "xx\n").
 	if !strings.HasSuffix(got, "xx\n") {
 		t.Errorf("truncated output did not preserve tail; got suffix %q", got[max(0, len(got)-10):])
+	}
+}
+
+// TestSandboxFilterEnv_DropsCredentialFamilies verifies that the pure-
+// function env scrubber removes credential-bearing prefixes and exact
+// names while preserving system vars like PATH/HOME/GOPATH.
+//
+// Phase 5 (gu-1zfy / C-SEC-1): a malicious upstream commit running
+// during `go test` must not see push tokens, AWS creds, or beads/dolt
+// session secrets in the inherited env. SandboxFilterEnv is the
+// enforcement seam — RunGates calls it when SandboxedEnv=true.
+func TestSandboxFilterEnv_DropsCredentialFamilies(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/u",
+		"GOPATH=/home/u/go",
+		"GOCACHE=/home/u/.cache/go-build",
+		"AWS_ACCESS_KEY_ID=AKIA",       // dropped
+		"AWS_SECRET_ACCESS_KEY=secret", // dropped
+		"AWS_SESSION_TOKEN=tok",        // dropped
+		"GITHUB_TOKEN=ghp_xxx",         // dropped
+		"GH_TOKEN=ghp_yyy",             // dropped
+		"BD_ACTOR=brahmin",             // dropped
+		"DOLT_USER=root",               // dropped
+		"GT_DOLT_PORT=3307",            // dropped
+		"ANTHROPIC_API_KEY=sk-ant",     // dropped
+		"OPENAI_API_KEY=sk-oai",        // dropped
+		"NPM_TOKEN=xxx",                // dropped
+		"DOCKER_AUTH_CONFIG={}",        // dropped
+		"VAULT_TOKEN=hvs.xxx",          // dropped (exact)
+		"KUBECONFIG=/x",                // dropped (exact)
+		"SSH_AUTH_SOCK=/tmp/ssh.sock",  // dropped (exact)
+		"GOFLAGS=-mod=vendor",          // preserved
+		"USER=brahmin",                 // preserved (no prefix match)
+	}
+	got := SandboxFilterEnv(parent)
+
+	want := map[string]bool{
+		"PATH=/usr/bin":                   true,
+		"HOME=/home/u":                    true,
+		"GOPATH=/home/u/go":               true,
+		"GOCACHE=/home/u/.cache/go-build": true,
+		"GOFLAGS=-mod=vendor":             true,
+		"USER=brahmin":                    true,
+	}
+	mustNotAppear := []string{
+		"AWS_", "GITHUB_", "GH_", "BD_", "DOLT_", "GT_DOLT_",
+		"ANTHROPIC_", "OPENAI_", "NPM_", "DOCKER_",
+		"VAULT_TOKEN=", "KUBECONFIG=", "SSH_AUTH_SOCK=",
+	}
+
+	gotSet := make(map[string]bool, len(got))
+	for _, kv := range got {
+		gotSet[kv] = true
+	}
+
+	for w := range want {
+		if !gotSet[w] {
+			t.Errorf("missing required env entry: %q", w)
+		}
+	}
+	for _, kv := range got {
+		for _, deny := range mustNotAppear {
+			if strings.HasPrefix(kv, deny) {
+				t.Errorf("scrubbed env still contains denied entry: %q (matched prefix %q)", kv, deny)
+			}
+		}
+	}
+}
+
+// TestSandboxFilterEnv_DropsMalformedEntries ensures that defensive
+// handling of entries without '=' does not crash and silently drops
+// them (os.Environ never produces these but a hand-built input might).
+func TestSandboxFilterEnv_DropsMalformedEntries(t *testing.T) {
+	parent := []string{
+		"=value-only",    // empty key — drop
+		"key-without-eq", // no '=' — drop
+		"PATH=/bin",      // valid — keep
+	}
+	got := SandboxFilterEnv(parent)
+	if len(got) != 1 || got[0] != "PATH=/bin" {
+		t.Errorf("got %v, want [PATH=/bin]", got)
+	}
+}
+
+// TestRunGates_SandboxedEnv_ScrubsParentCredentials runs a real gate
+// command (`env`) with a credential-bearing variable seeded into the
+// process env, then verifies the captured output does NOT contain it
+// when SandboxedEnv=true. This is the end-to-end check that the
+// sandbox is wired into runOneGate, not just the pure filter.
+func TestRunGates_SandboxedEnv_ScrubsParentCredentials(t *testing.T) {
+	// Seed a credential into the parent env. t.Setenv handles the
+	// cleanup; safe to use even with t.Parallel sibling tests because
+	// it's per-test-process scoped via testing's helper.
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "S3CR3T-PHASE5-AUDIT")
+	t.Setenv("BD_ACTOR", "brahmin-test")
+	t.Setenv("PATH", os.Getenv("PATH")) // keep PATH so /usr/bin/env resolves
+
+	summary := RunGates(context.Background(), []string{
+		// `env` prints the inherited environment. If sandboxing is on,
+		// the seeded secrets must not appear.
+		"env",
+	}, GateRunOptions{
+		Dir:          ".",
+		SandboxedEnv: true,
+	})
+
+	if !summary.AllPassed {
+		t.Fatalf("gate failed unexpectedly: %+v", summary)
+	}
+	out := summary.Results[0].Output
+	if strings.Contains(out, "S3CR3T-PHASE5-AUDIT") {
+		t.Errorf("sandboxed gate leaked AWS_SECRET_ACCESS_KEY into child env:\n%s", out)
+	}
+	if strings.Contains(out, "brahmin-test") && strings.Contains(out, "BD_ACTOR") {
+		t.Errorf("sandboxed gate leaked BD_ACTOR into child env:\n%s", out)
+	}
+	// PATH must survive — without it, the shell can't find subsequent commands.
+	if !strings.Contains(out, "PATH=") {
+		t.Errorf("sandboxed gate dropped PATH; child env has no command resolution")
+	}
+}
+
+// TestRunGates_NotSandboxed_PreservesParentEnv verifies the legacy
+// path still inherits the full parent env. Important: existing callers
+// (Refinery's gate runner, manual operator-driven sync) rely on this.
+func TestRunGates_NotSandboxed_PreservesParentEnv(t *testing.T) {
+	t.Setenv("BRAHMIN_PHASE5_PROBE", "VISIBLE")
+
+	summary := RunGates(context.Background(), []string{
+		"env",
+	}, GateRunOptions{
+		Dir:          ".",
+		SandboxedEnv: false,
+	})
+	if !summary.AllPassed {
+		t.Fatalf("gate failed unexpectedly: %+v", summary)
+	}
+	if !strings.Contains(summary.Results[0].Output, "BRAHMIN_PHASE5_PROBE=VISIBLE") {
+		t.Errorf("non-sandboxed gate did not inherit parent env probe; output:\n%s", summary.Results[0].Output)
 	}
 }
 

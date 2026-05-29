@@ -2054,5 +2054,8 @@ func RigChecks() []Check {
 		NewBeadsConfigValidCheck(),
 		NewBeadsRedirectCheck(),
 		NewTestutilSymlinkCheck(),
+		// Phase 5 (gu-1zfy): per-rig upstream-sync state-bead and
+		// circuit-breaker health. Only fires when --rig is supplied.
+		NewUpstreamSyncCheck(),
 	}
 }

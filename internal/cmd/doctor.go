@@ -82,6 +82,7 @@ Rig checks (with --rig flag):
   - mayor-clone-exists       Verify mayor/rig/ clone exists (fixable)
   - polecat-clones-valid     Verify polecat directories are valid clones
   - beads-config-valid       Verify beads configuration (fixable)
+  - upstream-sync-health     Verify upstream-sync state bead + circuit-breaker health
 
 Routing checks (fixable):
   - routes-config            Check beads routing configuration
