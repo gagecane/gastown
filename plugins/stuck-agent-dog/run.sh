@@ -6,6 +6,12 @@
 
 set -euo pipefail
 
+# Diagnostic ERR trap (gu-6zhl): when a pipeline tripped set -e the script
+# exited rc=1 with no clue which line fired (intermittent early-exit after the
+# header log line). Print the failing line + command before set -e takes the
+# script down so the next regression is debuggable from logs alone.
+trap 'rc=$?; echo "[stuck-agent-dog] ERR trap: line $LINENO exited $rc: ${BASH_COMMAND}" >&2' ERR
+
 TOWN_ROOT="${GT_TOWN_ROOT:-$(gt town root 2>/dev/null)}"
 RIGS_JSON_PATH="${TOWN_ROOT}/mayor/rigs.json"
 
@@ -205,7 +211,11 @@ while IFS='|' read -r RIG PREFIX; do
       # Uses `gt hook show` (not `gt hook`) because bare `gt hook ` now
       # tries to *attach* the path as a bead after the subcommand refactor.
       # `|| true` so a missing entry doesn't abort under `set -euo pipefail`.
-      HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1)
+      # Trailing `|| true` also swallows SIGPIPE (rc=141) when `head -1`
+      # closes the pipe before `gt hook show` finishes writing — that
+      # caused intermittent rc=1 early-exits after only the header line
+      # printed (gu-6zhl).
+      HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1 || true)
       HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
 
       if [ -n "$HOOK_BEAD" ]; then
@@ -248,7 +258,8 @@ while IFS='|' read -r RIG PREFIX; do
         if [ -z "$PROC_COMM" ]; then
           # Zombie: process dead, session alive.
           # Uses `gt hook show` — see note above on subcommand refactor.
-          HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1)
+          # Trailing `|| true` also masks SIGPIPE from head -1 (gu-6zhl).
+          HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1 || true)
           HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
           if [ -n "$HOOK_BEAD" ]; then
             STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
@@ -258,7 +269,8 @@ while IFS='|' read -r RIG PREFIX; do
           # Process alive — check for stalled-alive case (gu-bfwa):
           # session + process alive, but agent is idle at prompt with hooked work
           # not progressing. Detected by a stale heartbeat on a hooked session.
-          HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1)
+          # Trailing `|| true` masks SIGPIPE from head -1 (gu-6zhl).
+          HOOK_OUTPUT=$(gt hook show "$RIG/polecats/$PCAT_NAME" 2>/dev/null | head -1 || true)
           HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
 
           if [ -n "$HOOK_BEAD" ]; then
