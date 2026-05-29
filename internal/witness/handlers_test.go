@@ -4342,3 +4342,338 @@ func TestHandleZombieRestart_FilesUnfiledMRPropagatesRecoverError(t *testing.T) 
 		t.Errorf("Action = %q, want recover-failed-push tag", z.Action)
 	}
 }
+
+// --- DetectStaleInProgressBeads tests (gu-wwyq) ---
+
+// strandedBeadsListJSON renders a fake bd list response with the fields
+// DetectStaleInProgressBeads consumes (id, assignee, updated_at, labels).
+// Other fields are omitted; the function must tolerate missing extras.
+func strandedBeadsListJSON(rows ...map[string]any) string {
+	b, err := json.Marshal(rows)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// TestDetectStaleInProgressBeads_HappyPath verifies the steady-state path:
+// a stale in_progress bead with a dead-polecat assignee gets escalated
+// (mail attempted + label applied) on first pass.
+func TestDetectStaleInProgressBeads_HappyPath(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	rigName := "testrig"
+	staleAge := 2 * time.Hour
+	now := time.Now().UTC()
+	old := now.Add(-staleAge).Format(time.RFC3339)
+
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-stale1", "assignee": rigName + "/polecats/alpha", "updated_at": old, "labels": []string{}},
+	)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), rigName, nil, time.Hour)
+
+	if result.Checked != 1 {
+		t.Fatalf("Checked = %d, want 1", result.Checked)
+	}
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	s := result.Stranded[0]
+	if s.BeadID != "gt-stale1" {
+		t.Errorf("BeadID = %q, want gt-stale1", s.BeadID)
+	}
+	if s.PolecatName != "alpha" {
+		t.Errorf("PolecatName = %q, want alpha", s.PolecatName)
+	}
+	if s.Action != "escalated" {
+		t.Errorf("Action = %q, want escalated", s.Action)
+	}
+
+	// Label must be applied even though router was nil (mail not attempted).
+	logStr := strings.Join(mock.calls, "\n")
+	if !strings.Contains(logStr, "update gt-stale1 --add-label="+StrandedAssigneeLabel) {
+		t.Errorf("expected --add-label=%s on gt-stale1, calls:\n%s", StrandedAssigneeLabel, logStr)
+	}
+}
+
+// TestDetectStaleInProgressBeads_LabelDedup verifies that beads already carrying
+// the stranded-assignee label are NOT re-escalated.
+func TestDetectStaleInProgressBeads_LabelDedup(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	rigName := "testrig"
+	old := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-stale1", "assignee": rigName + "/polecats/alpha", "updated_at": old, "labels": []string{StrandedAssigneeLabel}},
+	)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), rigName, nil, time.Hour)
+
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	if result.Stranded[0].Action != "skip-already-labeled" {
+		t.Errorf("Action = %q, want skip-already-labeled", result.Stranded[0].Action)
+	}
+
+	// Crucial: must NOT call update --add-label again on a labeled bead.
+	logStr := strings.Join(mock.calls, "\n")
+	if strings.Contains(logStr, "--add-label="+StrandedAssigneeLabel) {
+		t.Errorf("re-labeled an already-labeled bead; calls:\n%s", logStr)
+	}
+}
+
+// TestDetectStaleInProgressBeads_FreshUpdate verifies recently-updated beads
+// (younger than the threshold) are skipped, even with dead polecats.
+func TestDetectStaleInProgressBeads_FreshUpdate(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	rigName := "testrig"
+	// Updated 5 minutes ago vs threshold of 1 hour — fresh.
+	fresh := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
+
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-fresh", "assignee": rigName + "/polecats/alpha", "updated_at": fresh, "labels": []string{}},
+	)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), rigName, nil, time.Hour)
+
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	if result.Stranded[0].Action != "skip-fresh" {
+		t.Errorf("Action = %q, want skip-fresh", result.Stranded[0].Action)
+	}
+
+	// Must NOT label a fresh bead — we're not yet sure it's stranded.
+	logStr := strings.Join(mock.calls, "\n")
+	if strings.Contains(logStr, "--add-label="+StrandedAssigneeLabel) {
+		t.Errorf("fresh bead was labeled; calls:\n%s", logStr)
+	}
+}
+
+// TestDetectStaleInProgressBeads_WrongRig verifies cross-rig assignees are ignored.
+func TestDetectStaleInProgressBeads_WrongRig(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	rigName := "testrig"
+	old := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-other", "assignee": "otherrig/polecats/alpha", "updated_at": old, "labels": []string{}},
+		map[string]any{"id": "gt-noassign", "assignee": "", "updated_at": old, "labels": []string{}},
+		map[string]any{"id": "gt-crew", "assignee": rigName + "/crew/sean", "updated_at": old, "labels": []string{}},
+	)
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), rigName, nil, time.Hour)
+
+	if result.Checked != 0 {
+		t.Errorf("Checked = %d, want 0 (no in-rig polecat assignees)", result.Checked)
+	}
+	if len(result.Stranded) != 0 {
+		t.Errorf("Stranded = %d, want 0", len(result.Stranded))
+	}
+}
+
+// TestDetectStaleInProgressBeads_BadTimestamp verifies unparseable timestamps
+// are not escalated (fail-open: prefer leaving an undated bead alone).
+func TestDetectStaleInProgressBeads_BadTimestamp(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	rigName := "testrig"
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-bad", "assignee": rigName + "/polecats/alpha", "updated_at": "not-a-timestamp", "labels": []string{}},
+	)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), rigName, nil, time.Hour)
+
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	if result.Stranded[0].Action != "skip-bad-timestamp" {
+		t.Errorf("Action = %q, want skip-bad-timestamp", result.Stranded[0].Action)
+	}
+	logStr := strings.Join(mock.calls, "\n")
+	if strings.Contains(logStr, "--add-label="+StrandedAssigneeLabel) {
+		t.Errorf("bad-timestamp bead was labeled; calls:\n%s", logStr)
+	}
+}
+
+// TestDetectStaleInProgressBeads_DisabledThreshold verifies a zero or negative
+// threshold disables the scan entirely (no calls to bd).
+func TestDetectStaleInProgressBeads_DisabledThreshold(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			t.Fatalf("bd should not be called when threshold is 0; got %v", args)
+			return "", nil
+		},
+		func(args []string) error {
+			t.Fatalf("bd should not be called when threshold is 0; got %v", args)
+			return nil
+		},
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), "testrig", nil, 0)
+	if result.Checked != 0 || len(result.Stranded) != 0 {
+		t.Errorf("expected empty result with disabled threshold, got %+v", result)
+	}
+	if len(mock.calls) != 0 {
+		t.Errorf("expected 0 bd calls, got %d", len(mock.calls))
+	}
+}
+
+// TestDetectStaleInProgressBeads_ListError verifies bd list errors propagate.
+func TestDetectStaleInProgressBeads_ListError(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	wantErr := errors.New("bd: connection refused")
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "", wantErr },
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), "testrig", nil, time.Hour)
+
+	if len(result.Errors) == 0 {
+		t.Fatal("expected error when bd list fails")
+	}
+	if result.Checked != 0 || len(result.Stranded) != 0 {
+		t.Errorf("expected empty Stranded on list error, got %+v", result)
+	}
+}
+
+// TestParseBeadUpdatedAtAge verifies both supported timestamp formats parse.
+func TestParseBeadUpdatedAtAge(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 29, 20, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name      string
+		input     string
+		want      time.Duration
+		wantOK    bool
+		tolerance time.Duration
+	}{
+		{
+			name:      "RFC3339",
+			input:     "2026-05-29T19:00:00Z",
+			want:      1 * time.Hour,
+			wantOK:    true,
+			tolerance: time.Second,
+		},
+		{
+			name:      "space-separated",
+			input:     "2026-05-29 19:30:00",
+			want:      30 * time.Minute,
+			wantOK:    true,
+			tolerance: time.Second,
+		},
+		{
+			name:   "empty",
+			input:  "",
+			wantOK: false,
+		},
+		{
+			name:   "unparseable",
+			input:  "yesterday",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseBeadUpdatedAtAge(tc.input, now)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			diff := got - tc.want
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > tc.tolerance {
+				t.Errorf("got %v, want %v (±%v)", got, tc.want, tc.tolerance)
+			}
+		})
+	}
+}
+
+// TestStaleInProgressThresholdD_DefaultAndOverride verifies the config knob.
+func TestStaleInProgressThresholdD_DefaultAndOverride(t *testing.T) {
+	t.Parallel()
+
+	// nil config — default
+	var wt *config.WitnessThresholds
+	if got := wt.StaleInProgressThresholdD(); got != config.DefaultWitnessStaleInProgressThresh {
+		t.Errorf("default = %v, want %v", got, config.DefaultWitnessStaleInProgressThresh)
+	}
+
+	// override
+	wt = &config.WitnessThresholds{StaleInProgressThreshold: "30m"}
+	if got := wt.StaleInProgressThresholdD(); got != 30*time.Minute {
+		t.Errorf("override = %v, want 30m", got)
+	}
+
+	// invalid duration falls back to default
+	wt = &config.WitnessThresholds{StaleInProgressThreshold: "not-a-duration"}
+	if got := wt.StaleInProgressThresholdD(); got != config.DefaultWitnessStaleInProgressThresh {
+		t.Errorf("invalid override = %v, want default %v", got, config.DefaultWitnessStaleInProgressThresh)
+	}
+}

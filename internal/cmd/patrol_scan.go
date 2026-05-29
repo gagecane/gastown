@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -61,13 +62,14 @@ func init() {
 
 // PatrolScanOutput is the JSON output format for patrol scan results.
 type PatrolScanOutput struct {
-	Rig         string                    `json:"rig"`
-	Timestamp   string                    `json:"timestamp"`
-	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
-	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
-	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
-	PostHoc     *PatrolScanPostHocOutput  `json:"post_hoc_completions,omitempty"`
-	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
+	Rig         string                       `json:"rig"`
+	Timestamp   string                       `json:"timestamp"`
+	Zombies     *PatrolScanZombieOutput      `json:"zombies"`
+	Stalls      *PatrolScanStallOutput       `json:"stalls,omitempty"`
+	Completions *PatrolScanCompleteOutput    `json:"completions,omitempty"`
+	PostHoc     *PatrolScanPostHocOutput     `json:"post_hoc_completions,omitempty"`
+	Stranded    *PatrolScanStrandedOutput    `json:"stranded_assignees,omitempty"`
+	Receipts    []witness.PatrolReceipt      `json:"receipts,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -141,6 +143,25 @@ type PatrolScanPostHocItem struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// PatrolScanStrandedOutput holds stranded-assignee detection results (gu-wwyq).
+type PatrolScanStrandedOutput struct {
+	Checked  int                       `json:"checked"`
+	Found    int                       `json:"found"`
+	Stranded []PatrolScanStrandedItem  `json:"stranded,omitempty"`
+	Errors   []string                  `json:"errors,omitempty"`
+}
+
+// PatrolScanStrandedItem is a single stranded-assignee detection in scan output.
+type PatrolScanStrandedItem struct {
+	BeadID   string `json:"bead_id"`
+	Polecat  string `json:"polecat"`
+	Assignee string `json:"assignee"`
+	AgeSecs  int64  `json:"age_seconds"`
+	Action   string `json:"action"`
+	MailSent bool   `json:"mail_sent"`
+	Error    string `json:"error,omitempty"`
+}
+
 func runPatrolScan(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -182,6 +203,13 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	zombieResult := witness.DetectZombiePolecats(bd, workDir, rigName, router)
 	stallResult := witness.DetectStalledPolecats(workDir, rigName)
 
+	// Steady-state stranded-assignee detection (gu-wwyq). Runs after the
+	// transition-based zombie scan so that polecats observed alive→dead this
+	// cycle have a chance to take the existing path first; this scan catches
+	// the rest (already-dead-at-boot, dir-already-nuked, dead-between-cycles).
+	staleThreshold := config.LoadOperationalConfig(townRoot).GetWitnessConfig().StaleInProgressThresholdD()
+	strandedResult := witness.DetectStaleInProgressBeads(bd, workDir, rigName, router, staleThreshold)
+
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
 
@@ -197,10 +225,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, receipts)
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -255,7 +283,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -355,12 +383,38 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.PostHoc = po
 	}
 
+	// Stranded assignees (gu-wwyq)
+	if strandedResult != nil {
+		so := &PatrolScanStrandedOutput{
+			Checked: strandedResult.Checked,
+			Found:   len(strandedResult.Stranded),
+		}
+		for _, s := range strandedResult.Stranded {
+			item := PatrolScanStrandedItem{
+				BeadID:   s.BeadID,
+				Polecat:  s.PolecatName,
+				Assignee: s.Assignee,
+				AgeSecs:  int64(s.Age.Seconds()),
+				Action:   s.Action,
+				MailSent: s.MailSent,
+			}
+			if s.Error != nil {
+				item.Error = s.Error.Error()
+			}
+			so.Stranded = append(so.Stranded, item)
+		}
+		for _, e := range strandedResult.Errors {
+			so.Errors = append(so.Errors, e.Error())
+		}
+		output.Stranded = so
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -470,6 +524,39 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
+	// Stranded assignees (gu-wwyq)
+	if strandedResult != nil && (len(strandedResult.Stranded) > 0 || patrolScanVerbose) {
+		fmt.Printf("%s Stranded-Assignee Detection: checked %d in_progress bead(s)\n",
+			style.Bold.Render("🪨"), strandedResult.Checked)
+
+		escalated := 0
+		for _, s := range strandedResult.Stranded {
+			if s.Action == "escalated" {
+				escalated++
+			}
+		}
+		if escalated == 0 && len(strandedResult.Stranded) == 0 {
+			fmt.Printf("  %s\n", style.Dim.Render("No stranded in_progress beads"))
+		} else {
+			for _, s := range strandedResult.Stranded {
+				if s.Action != "escalated" && !patrolScanVerbose {
+					continue
+				}
+				fmt.Printf("  ● %s: polecat=%s age=%s action=%s\n",
+					s.BeadID, s.PolecatName, s.Age.Round(time.Second), s.Action)
+				if s.Error != nil {
+					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", s.Error)))
+				}
+			}
+		}
+		if len(strandedResult.Errors) > 0 && patrolScanVerbose {
+			for _, e := range strandedResult.Errors {
+				fmt.Printf("    - %v\n", e)
+			}
+		}
+		fmt.Println()
+	}
+
 	// Summary
 	zombieCount := 0
 	activeCount := 0
@@ -489,12 +576,20 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 	if postHocResult != nil {
 		postHocCount = len(postHocResult.Discovered)
 	}
+	strandedCount := 0
+	if strandedResult != nil {
+		for _, s := range strandedResult.Stranded {
+			if s.Action == "escalated" {
+				strandedCount++
+			}
+		}
+	}
 
-	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && postHocCount == 0 {
+	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && postHocCount == 0 && strandedCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d post-hoc\n",
-			zombieCount, activeCount, stallCount, completionCount, postHocCount)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d post-hoc, %d stranded\n",
+			zombieCount, activeCount, stallCount, completionCount, postHocCount, strandedCount)
 	}
 
 	return nil

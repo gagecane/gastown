@@ -536,6 +536,14 @@ type WitnessThresholds struct {
 	// possibly stuck at startup (e.g., auth 401 blocking initialization, default "5m").
 	// The witness exposes the signal; patrol formula decides whether to escalate.
 	HeartbeatStartupGrace string `json:"heartbeat_startup_grace,omitempty"`
+
+	// StaleInProgressThreshold is the minimum age of an in_progress bead with a
+	// dead-polecat assignee before the witness escalates it to mayor with a
+	// `stranded-assignee` label. Complements DetectZombiePolecats (which fires on
+	// alive→dead transitions); this threshold drives the steady-state scan that
+	// catches polecats already dead at patrol boot or that died between cycles.
+	// Default "1h". (gu-wwyq)
+	StaleInProgressThreshold string `json:"stale_in_progress_threshold,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.
