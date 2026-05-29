@@ -1055,6 +1055,18 @@ func (g *Git) Push(remote, branch string, force bool) error {
 	return err
 }
 
+// prePushSkipEnv is the env block that asks the pre-push hook to bypass its
+// slow gates (build/vet/test). The hook (scripts/pre-push-check.sh) requires
+// GT_SKIP_PREPUSH_REASON alongside GT_SKIP_PREPUSH=1 so every skip lands in
+// .runtime/prepush-skips.jsonl with a why — see gu-zy57. Callers that go
+// through Push*SkipPrePush are always the --pre-verified path, hence the
+// fixed reason; emergency / cherry-pick callers should use PushWithEnv and
+// supply their own GT_SKIP_PREPUSH_REASON.
+var prePushSkipEnv = []string{
+	"GT_SKIP_PREPUSH=1",
+	"GT_SKIP_PREPUSH_REASON=pre-verified",
+}
+
 // PushSkipPrePush is Push with GT_SKIP_PREPUSH=1 set so the repo's pre-push
 // hook (scripts/pre-push-check.sh) skips its build+vet+test gates. Used by
 // `gt done --pre-verified`, where the polecat already ran the full gate
@@ -1063,12 +1075,17 @@ func (g *Git) Push(remote, branch string, force bool) error {
 // failure mode (gu-d416). The hook's branch-name and integration-branch
 // guardrails still run (they're upstream of the gate-skip check); only the
 // slow gates are bypassed. Use Push (not this) when gates have NOT been run.
+//
+// The skip is audited: the hook also requires GT_SKIP_PREPUSH_REASON and
+// appends a structured event to .runtime/prepush-skips.jsonl (gu-zy57).
+// This function provides "pre-verified" as the reason; emergency / manual
+// skips should use PushWithEnv with a caller-supplied reason.
 func (g *Git) PushSkipPrePush(remote, branch string, force bool) error {
 	args := []string{"push", remote, branch}
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := g.runWithEnvAndTimeout(args, []string{"GT_SKIP_PREPUSH=1"}, pushTimeout)
+	_, err := g.runWithEnvAndTimeout(args, prePushSkipEnv, pushTimeout)
 	return err
 }
 
@@ -1119,7 +1136,7 @@ func (g *Git) pushSHAInternal(remote, sha, targetBranch string, force, skipPrePu
 		args = append(args, "--force")
 	}
 	if skipPrePush {
-		_, err := g.runWithEnvAndTimeout(args, []string{"GT_SKIP_PREPUSH=1"}, pushTimeout)
+		_, err := g.runWithEnvAndTimeout(args, prePushSkipEnv, pushTimeout)
 		return err
 	}
 	_, err := g.runWithTimeout(pushTimeout, args...)

@@ -112,6 +112,92 @@ if command -v go >/dev/null 2>&1; then
   functional_test
 fi
 
+# --- gu-zy57: GT_SKIP_PREPUSH must require a reason and emit an audit event ---
+#
+# Prior to gu-zy57 the script honoured GT_SKIP_PREPUSH=1 with no questions
+# asked, leaving zero audit trail when CI gates were bypassed. The fix:
+#
+#   1. GT_SKIP_PREPUSH=1 alone is rejected with a non-zero exit
+#   2. GT_SKIP_PREPUSH=1 + GT_SKIP_PREPUSH_REASON=<text> succeeds
+#   3. The honoured skip appends one JSON line to .runtime/prepush-skips.jsonl
+#
+# These tests run the script in a temp git repo so the audit file lands in
+# an isolated location instead of polluting the real repo's runtime dir.
+
+skip_audit_test() {
+  local repo
+  repo=$(mktemp -d)
+  trap "rm -rf $repo" RETURN
+
+  # Minimal git repo with one commit so `git rev-parse HEAD` succeeds inside
+  # the script's audit-event emitter.
+  (
+    cd "$repo"
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "test"
+    git commit --allow-empty -q -m "init"
+  )
+
+  # Case 1: skip without REASON must be rejected (exit non-zero, no audit line)
+  local rc out
+  out=$(GT_SKIP_PREPUSH=1 bash -c "cd $repo && bash $SCRIPT" 2>&1) && rc=0 || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 without REASON should be rejected, but script exited 0" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1))
+  else
+    PASS=$((PASS + 1))
+  fi
+  if [[ -f "$repo/.runtime/prepush-skips.jsonl" ]]; then
+    echo "FAIL: rejected skip should NOT write an audit event" >&2
+    FAIL=$((FAIL + 1))
+  else
+    PASS=$((PASS + 1))
+  fi
+
+  # Case 2: skip WITH REASON must succeed and append a JSON audit line
+  out=$(GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="pre-verified" \
+        bash -c "cd $repo && bash $SCRIPT" 2>&1) && rc=0 || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 + REASON should succeed, exit=$rc" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1))
+  else
+    PASS=$((PASS + 1))
+  fi
+  local audit="$repo/.runtime/prepush-skips.jsonl"
+  if [[ ! -s "$audit" ]]; then
+    echo "FAIL: audit file $audit was not written" >&2
+    FAIL=$((FAIL + 1))
+  else
+    if grep -q '"reason":"pre-verified"' "$audit" && \
+       grep -q '"ts":"' "$audit" && \
+       grep -q '"sha":"' "$audit"; then
+      PASS=$((PASS + 1))
+    else
+      echo "FAIL: audit line missing expected fields:" >&2
+      cat "$audit" >&2
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+
+  # Case 3: a second honoured skip APPENDS rather than overwrites
+  GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="emergency: gu-test" \
+    bash -c "cd $repo && bash $SCRIPT" >/dev/null 2>&1 || true
+  local lines
+  lines=$(wc -l < "$audit")
+  if [[ $lines -ne 2 ]]; then
+    echo "FAIL: audit file should have 2 lines after 2 skips, got $lines" >&2
+    cat "$audit" >&2
+    FAIL=$((FAIL + 1))
+  else
+    PASS=$((PASS + 1))
+  fi
+}
+
+skip_audit_test
+
 echo ""
 echo "pre-push-check_test.sh: $PASS passed, $FAIL failed"
 if [[ $FAIL -gt 0 ]]; then

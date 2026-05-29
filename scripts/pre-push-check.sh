@@ -27,8 +27,15 @@
 #   Tests job runs them. To run locally: `make verify-integration`.
 #
 # Escape hatches (use sparingly; if you're reaching regularly, file a bead):
-#   GT_SKIP_PREPUSH=1 git push       — skip this hook
-#   git push --no-verify             — skip all hooks (standard git)
+#   GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
+#                                    — skip this hook (REASON required, audited)
+#   git push --no-verify             — skip all hooks (standard git, NOT audited)
+#
+# Audit trail (gu-zy57):
+#   When GT_SKIP_PREPUSH=1 is honoured, this script appends one JSON line to
+#   <repo>/.runtime/prepush-skips.jsonl recording who skipped the gates, why,
+#   and what was pushed. Without an explicit GT_SKIP_PREPUSH_REASON the skip
+#   is rejected so a misconfigured hook chain can't silently bypass CI gates.
 #
 # Why pre-push, not pre-commit:
 #   The existing pre-commit hook already runs go vet and a fast lint scoped
@@ -41,9 +48,76 @@
 set -u
 
 # --- Escape hatch ----------------------------------------------------------
+#
+# GT_SKIP_PREPUSH=1 bypasses the slow gates (build/vet/test). To prevent a
+# misconfigured environment or rogue caller from silently disabling CI's last
+# line of defense (gu-zy57), we require GT_SKIP_PREPUSH_REASON=<text> alongside
+# it and append a structured audit event so witness tooling can flag
+# unexplained skips. The branch-name and integration-branch guardrails (further
+# down) still run — only the slow gates are skipped.
+
+# json_escape <var> — escape a string for embedding inside a JSON value.
+# Handles the cases we actually see in this script (backslashes, double
+# quotes, control chars common in branch names / actor strings). Anything
+# more exotic still produces parseable JSON because we never embed user
+# input in a key, only in a value.
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+# emit_skip_event — append one JSON line to .runtime/prepush-skips.jsonl
+# describing this skip. Best-effort: failures here MUST NOT block the push,
+# because the only thing worse than an unaudited skip is a script that
+# refuses to push because audit logging broke.
+emit_skip_event() {
+  local reason=$1
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  local events_dir="$repo_root/.runtime"
+  mkdir -p "$events_dir" 2>/dev/null || return 0
+  local events_file="$events_dir/prepush-skips.jsonl"
+
+  local ts actor branch sha
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  actor="${BD_ACTOR:-${GT_ROLE:-unknown}}"
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  sha=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+
+  local r a b
+  r=$(json_escape "$reason")
+  a=$(json_escape "$actor")
+  b=$(json_escape "$branch")
+
+  printf '{"ts":"%s","actor":"%s","reason":"%s","branch":"%s","sha":"%s"}\n' \
+    "$ts" "$a" "$r" "$b" "$sha" >> "$events_file" 2>/dev/null || true
+}
 
 if [[ "${GT_SKIP_PREPUSH:-0}" == "1" ]]; then
-  echo "pre-push: GT_SKIP_PREPUSH=1, skipping local CI gates." >&2
+  if [[ -z "${GT_SKIP_PREPUSH_REASON:-}" ]]; then
+    cat >&2 <<'EOF'
+✗ Push rejected: GT_SKIP_PREPUSH=1 requires GT_SKIP_PREPUSH_REASON=<text>.
+
+Skipping the pre-push gates without recording why is what let the gofmt-fail
+commits in gu-zy57 reach main unexamined. Set a reason explaining the skip:
+
+  GT_SKIP_PREPUSH=1 \
+  GT_SKIP_PREPUSH_REASON="pre-verified: gates ran in formula step 7" \
+  git push
+
+Legitimate reasons include "pre-verified" (polecat already ran gates),
+"emergency: <bead>", or "cherry-pick: <context>". The reason is appended to
+.runtime/prepush-skips.jsonl so witness tooling can audit it.
+EOF
+    exit 1
+  fi
+  emit_skip_event "${GT_SKIP_PREPUSH_REASON}"
+  echo "pre-push: GT_SKIP_PREPUSH=1, skipping local CI gates (reason: ${GT_SKIP_PREPUSH_REASON})." >&2
   exit 0
 fi
 
@@ -108,7 +182,7 @@ Fix compile errors before pushing. CI will reject the same build failures
 but with a ~5min round-trip cost.
 
 Emergency escape hatch:
-  GT_SKIP_PREPUSH=1 git push
+  GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
 EOF
   exit 1
 fi
@@ -125,7 +199,7 @@ Vet catches real bugs (shadow, printf, unreachable). Fix them or use
 //nolint:vet on the specific line if the warning is a false positive.
 
 Emergency escape hatch:
-  GT_SKIP_PREPUSH=1 git push
+  GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
 EOF
   exit 1
 fi
@@ -147,7 +221,7 @@ those vars to match CI — if a test unexpectedly fails here but passes
 with those set, the test is the bug, not your change.
 
 Emergency escape hatch:
-  GT_SKIP_PREPUSH=1 git push
+  GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
 EOF
   exit 1
 fi

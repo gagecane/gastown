@@ -3255,24 +3255,34 @@ func TestPushSHA_ValidatesInputs(t *testing.T) {
 }
 
 // TestPushSkipPrePush_BypassesHookGates installs a pre-push hook that fails
-// unless GT_SKIP_PREPUSH=1 is in the environment. This mirrors the real
-// scripts/pre-push-check.sh check (line 45 of that script). It verifies that:
+// unless GT_SKIP_PREPUSH=1 AND GT_SKIP_PREPUSH_REASON=<text> are in the
+// environment. This mirrors the real scripts/pre-push-check.sh check, which
+// since gu-zy57 requires a reason alongside the skip flag so every bypass is
+// auditable. It verifies that:
 //
 //  1. Push() does NOT bypass the hook (hook runs, push fails),
-//  2. PushSkipPrePush() DOES bypass it (hook short-circuits, push succeeds),
+//  2. PushSkipPrePush() DOES bypass it (hook sees both vars, push succeeds),
 //  3. PushSHASkipPrePush() also bypasses it.
 //
 // Regression guard for gu-d416: --pre-verified must skip the slow hook gates
 // the polecat already ran, otherwise git push hangs minutes and the witness
-// force-kills the polecat losing unpushed commits.
+// force-kills the polecat losing unpushed commits. Regression guard for
+// gu-zy57: the bypass MUST carry a non-empty REASON so misconfigured callers
+// can't silently skip CI's last line of defense.
 func TestPushSkipPrePush_BypassesHookGates(t *testing.T) {
 	localDir, _, _ := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
-	// Install a pre-push hook that fails unless GT_SKIP_PREPUSH=1.
+	// Install a pre-push hook that fails unless BOTH GT_SKIP_PREPUSH=1 and
+	// GT_SKIP_PREPUSH_REASON are set. This mirrors the production hook's
+	// gu-zy57 audit-trail requirement — a skip without a reason is rejected.
 	hookPath := filepath.Join(localDir, ".git", "hooks", "pre-push")
 	hookScript := `#!/bin/sh
 if [ "$GT_SKIP_PREPUSH" = "1" ]; then
+  if [ -z "$GT_SKIP_PREPUSH_REASON" ]; then
+    echo "pre-push: GT_SKIP_PREPUSH=1 requires GT_SKIP_PREPUSH_REASON" >&2
+    exit 1
+  fi
   exit 0
 fi
 echo "pre-push: gates would run here (slow)" >&2
@@ -3330,6 +3340,72 @@ exit 1
 	}
 	if err := g.VerifyPushedCommit("origin", "polecat/skip-prepush", sha); err != nil {
 		t.Fatalf("VerifyPushedCommit after PushSHASkipPrePush: %v", err)
+	}
+}
+
+// TestPushSkipPrePush_SetsReason asserts that PushSkipPrePush /
+// PushSHASkipPrePush always pass GT_SKIP_PREPUSH_REASON to git, not just
+// GT_SKIP_PREPUSH=1. The production hook (scripts/pre-push-check.sh) rejects
+// a skip without a reason after gu-zy57; a regression in the Go callers
+// would manifest as every --pre-verified push suddenly failing in CI. We
+// pin this with a hook that explicitly fails when REASON is empty even
+// though GT_SKIP_PREPUSH=1, so the test can't pass by accident.
+func TestPushSkipPrePush_SetsReason(t *testing.T) {
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	hookPath := filepath.Join(localDir, ".git", "hooks", "pre-push")
+	// Hook policy: if GT_SKIP_PREPUSH=1 is set but REASON is empty, this is
+	// the gu-zy57 misconfiguration we want to detect. Reject it. Otherwise
+	// allow the push. Plain (non-skip) pushes also pass — we're not testing
+	// the gate path here, only the reason-passing contract.
+	hookScript := `#!/bin/sh
+if [ "$GT_SKIP_PREPUSH" = "1" ] && [ -z "$GT_SKIP_PREPUSH_REASON" ]; then
+  echo "pre-push: skip without reason (gu-zy57)" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+
+	if err := g.CreateBranch("polecat/skip-prepush-reason"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout("polecat/skip-prepush-reason"); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "reason.txt"), []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("reason.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("v1"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := g.PushSkipPrePush("origin", "polecat/skip-prepush-reason:polecat/skip-prepush-reason", false); err != nil {
+		t.Fatalf("PushSkipPrePush must set GT_SKIP_PREPUSH_REASON to satisfy gu-zy57 hook: %v", err)
+	}
+
+	// And the SHA variant.
+	if err := os.WriteFile(filepath.Join(localDir, "reason.txt"), []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("write v2: %v", err)
+	}
+	if err := g.Add("reason.txt"); err != nil {
+		t.Fatalf("Add v2: %v", err)
+	}
+	if err := g.Commit("v2"); err != nil {
+		t.Fatalf("Commit v2: %v", err)
+	}
+	sha, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev: %v", err)
+	}
+	if err := g.PushSHASkipPrePush("origin", sha, "polecat/skip-prepush-reason", false); err != nil {
+		t.Fatalf("PushSHASkipPrePush must set GT_SKIP_PREPUSH_REASON to satisfy gu-zy57 hook: %v", err)
 	}
 }
 
