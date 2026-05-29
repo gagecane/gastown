@@ -1,0 +1,56 @@
+# gates.yaml — canonical declaration of CI gate commands.
+#
+# Single source of truth shared across:
+#   - scripts/pre-push-check.sh        (local fast/slow tier)
+#   - .github/workflows/ci.yml         (CI job matrix; planned, gu-followup-ci)
+#   - rig settings merge_queue.gates   (refinery; planned, gu-followup-refinery)
+#   - mol-polecat-work formula vars    (gates_commands; planned, gu-followup-formula)
+#
+# Today only pre-push reads this file directly. The other consumers still own
+# their copies; they will migrate one by one. Until the migrations land, this
+# file MUST be kept in sync with those copies (CI Lint job + pre-push tests
+# enforce this for the fast tier).
+#
+# Schema (see internal/gates for the canonical reader):
+#
+#   gates:
+#     <tier>:                       # "fast" or "slow"
+#       - name: <id>                # short identifier
+#         command: <shell command>  # exact command to execute
+#         tier: <required|required-if-installed|ci-only>
+#         skip_if_skip_prepush: <bool>  # honour GT_SKIP_PREPUSH=1 (slow only)
+#         note: <one-line>          # optional human comment
+#
+# Parent bead: gu-1wm3 — single-source-of-truth gate list.
+
+gates:
+  fast:
+    - name: build
+      command: go build ./...
+      tier: required
+      note: catches broken imports and type errors before push
+    - name: vet
+      command: go vet ./...
+      tier: required
+      note: shadow, printf, unreachable
+    - name: gofmt
+      # gofmt -l prints unformatted files; we fail when output is non-empty.
+      # The pre-push hook implements this as a custom check rather than a raw
+      # exit-code probe, because gofmt -l exits 0 even when files are dirty.
+      command: gofmt -l .
+      tier: required
+      note: parsed by pre-push (non-empty stdout = fail); see gu-7f0v
+    - name: lint
+      command: golangci-lint run --timeout=5m
+      tier: required-if-installed
+      note: misspell, errcheck, gosec, unconvert, unparam; see gu-mu11
+  slow:
+    - name: test
+      command: go test ./... -count=1 -timeout=5m
+      tier: required
+      skip_if_skip_prepush: true
+      note: full unit test suite; ~2 min; skippable under --pre-verified
+    - name: integration-tests
+      command: go test -tags=integration -timeout=15m ./internal/cmd/...
+      tier: ci-only
+      note: requires Docker + Dolt container; CI Integration Tests job only

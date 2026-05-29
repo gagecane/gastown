@@ -300,7 +300,7 @@ if [[ "$SKIP_SLOW" == "1" ]]; then
 fi
 
 echo "pre-push: [slow] go test ./... -count=1 (unit tests)" >&2
-if ! go test ./... -count=1 -timeout 5m 2>&1; then
+if ! go test ./... -count=1 -timeout=5m 2>&1; then
   cat >&2 <<'EOF'
 
 ✗ Push rejected: unit tests failed.
