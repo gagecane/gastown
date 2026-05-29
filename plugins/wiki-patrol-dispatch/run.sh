@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# wiki-patrol-dispatch/run.sh — Sling mol-casc-wiki-patrol to the dedicated
-# casc_cdk/polecats/wiki-patrol polecat, once per cooldown window.
+# wiki-patrol-dispatch/run.sh — Sling mol-casc-wiki-patrol into the casc_cdk
+# rig once per cooldown window, letting `gt sling` auto-resolve a polecat.
 #
 # This is the script implementation of plugins/wiki-patrol-dispatch/plugin.md.
 # It exists so the plugin does not depend on LLM cooperation — the daemon
@@ -9,13 +9,25 @@
 # Behavior:
 #   1. Resolve the casc_cdk project_path (the Brazil package working tree).
 #      This is what mol-casc-wiki-patrol's preflight step requires.
-#   2. Defense-in-depth single-instance check: if any open bead is already
-#      attached to mol-casc-wiki-patrol for casc_cdk/polecats/wiki-patrol,
-#      skip — the formula's wiki-patrol polecat holds at most one wisp at a
-#      time, but a stale dispatch should not double-queue.
-#   3. Sling the formula to casc_cdk/polecats/wiki-patrol with --create
-#      (auto-spawn the polecat on first run).
+#   2. Defense-in-depth single-instance check: if any open bead in casc_cdk
+#      is already attached to mol-casc-wiki-patrol, skip — the formula's
+#      single-molecule guarantee (cadk-xk4: concurrent writes multiply
+#      429s) means we never want a *new* wisp-pair while an earlier one is
+#      still in flight. We search across ALL casc_cdk polecats since the
+#      rig auto-resolves which polecat picks up the work.
+#   3. Sling the formula at the casc_cdk rig with --create (auto-spawn /
+#      reuse a polecat).
 #   4. Record a plugin-run receipt with result:success|skipped|failure.
+#
+# Why rig target (gu-fc8h): `gt sling <formula> <rig>` is the supported
+# syntax under deferred dispatch (scheduler.max_polecats > 0). Targeting
+# `<rig>/polecats/<name>` directly is rejected by the deferred sling path
+# with "'<target>' is not a known rig". The dedicated `wiki-patrol`
+# polecat identity (cadk-xvsz) is informational; per its findings the
+# Midway scope-narrowing the identity was meant to enforce isn't
+# implementable, so the polecat-name pin no longer adds isolation. The
+# formula scheduler still enforces single-instance via the in-flight
+# check below + the formula's own single-molecule semantics.
 #
 # Idempotency: the cooldown gate (23h) prevents same-day re-runs at the
 # daemon level. The single-instance check prevents same-day double-dispatch
@@ -29,7 +41,6 @@ set -uo pipefail
 PLUGIN_NAME="wiki-patrol-dispatch"
 FORMULA="mol-casc-wiki-patrol"
 TARGET_RIG="casc_cdk"
-TARGET_POLECAT="casc_cdk/polecats/wiki-patrol"
 
 log() { echo "[${PLUGIN_NAME}] $*" >&2; }
 
@@ -84,10 +95,12 @@ log "resolved project_path: $PROJECT_PATH"
 
 # --- Single-instance check ---------------------------------------------------
 #
-# Defense in depth. The wiki-patrol polecat is a single-slot resource so the
-# scheduler should already prevent overlap, but a slow Dolt round-trip or a
-# manual --force could double-dispatch. Look for any open bead attached to
-# this formula whose assignee is the wiki-patrol polecat. If one exists, skip.
+# Defense in depth. mol-casc-wiki-patrol must run as a single molecule (Phase
+# 1 cadk-xk4: concurrent writes multiply 429s). The formula scheduler should
+# already prevent overlap, but a slow Dolt round-trip or a manual --force
+# could double-dispatch. Look for any open bead attached to this formula in
+# the casc_cdk rig (across ALL polecats, since the rig target auto-resolves
+# which polecat picks up the work). If one exists, skip.
 #
 # We query the casc_cdk rig's bead store (formula-attached beads live in the
 # rig where the formula was slung, not in gastown_upstream).
@@ -105,20 +118,24 @@ else
   # formula's own scheduler will catch true overlap).
   open_json=$(cd "$CASC_DIR" && bd list --status open --status hooked --status in_progress --json 2>/dev/null || echo "[]")
   if [[ -n "$open_json" && "$open_json" != "[]" && "$open_json" != "null" ]]; then
-    in_flight=$(jq -r --arg pcat "$TARGET_POLECAT" --arg formula "$FORMULA" '
+    # Match any bead attached to this formula whose assignee is a polecat in
+    # the casc_cdk rig. Without polecat-name pinning we can't filter by a
+    # single assignee, so we use a prefix match on "<rig>/polecats/" and
+    # let the formula's attached_formula metadata carry the discriminator.
+    in_flight=$(jq -r --arg prefix "${TARGET_RIG}/polecats/" --arg formula "$FORMULA" '
       [
         .[]
-        | select(.assignee == $pcat)
+        | select((.assignee // "") | startswith($prefix))
         | select((.description // "") | contains("attached_formula: " + $formula))
         | .id
       ]
       | .[]
     ' <<<"$open_json" 2>/dev/null || true)
     if [[ -n "$in_flight" ]]; then
-      log "single-instance: ${FORMULA} already in flight for ${TARGET_POLECAT}, skipping"
+      log "single-instance: ${FORMULA} already in flight in ${TARGET_RIG}, skipping"
       log "  in-flight beads: $(tr '\n' ' ' <<<"$in_flight")"
       record_receipt "skipped" "in-flight run detected" \
-        "Single-instance guard: open beads already attached to ${FORMULA} for ${TARGET_POLECAT}.
+        "Single-instance guard: open beads already attached to ${FORMULA} in ${TARGET_RIG}.
 Skipping this dispatch to avoid concurrent wiki writes (Phase 1 cadk-xk4: concurrent writes multiply 429s).
 
 In-flight bead IDs:
@@ -130,9 +147,9 @@ fi
 
 # --- Sling the formula -------------------------------------------------------
 
-log "slinging ${FORMULA} to ${TARGET_POLECAT} (project_path=$PROJECT_PATH)"
+log "slinging ${FORMULA} to ${TARGET_RIG} (project_path=$PROJECT_PATH)"
 
-sling_out=$(gt sling "$FORMULA" "$TARGET_POLECAT" \
+sling_out=$(gt sling "$FORMULA" "$TARGET_RIG" \
   --create \
   --var "project_path=$PROJECT_PATH" \
   2>&1) || {
@@ -140,7 +157,7 @@ sling_out=$(gt sling "$FORMULA" "$TARGET_POLECAT" \
   log "ERROR: gt sling failed (exit $rc)"
   log "  output: $(head -n5 <<<"$sling_out" | tr '\n' ' ')"
   record_receipt "failure" "sling failed" \
-    "gt sling ${FORMULA} ${TARGET_POLECAT} --create --var project_path=${PROJECT_PATH}
+    "gt sling ${FORMULA} ${TARGET_RIG} --create --var project_path=${PROJECT_PATH}
 exit code: ${rc}
 
 Output (first 30 lines):
@@ -155,7 +172,7 @@ log "$sling_out"
 slung_id=$(grep -oE '\b[a-z0-9]+-(wisp-)?[a-z0-9]+\b' <<<"$sling_out" | head -n1 || true)
 
 record_receipt "success" "slung ${FORMULA}" \
-  "Dispatched ${FORMULA} to ${TARGET_POLECAT}.
+  "Dispatched ${FORMULA} to ${TARGET_RIG}.
 project_path: ${PROJECT_PATH}
 slung_id: ${slung_id:-(unknown)}
 
