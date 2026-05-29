@@ -774,7 +774,16 @@ func (b *Beads) Init(prefix string) error {
 // Investigation: dc-1pq8 (forensic report 2026-05-02).
 const bdSubprocessTimeout = 60 * time.Second
 
-const bdReadThrottleTimeout = 5 * time.Second
+// bdReadThrottleTimeout caps how long a caller will wait for the bd-list
+// read flock before failing. The flock serializes `bd list` invocations
+// across the whole town to prevent subprocess storms (see gt-rca-alias-
+// crash-load-audit-v4 / 6fe3fa12). Under `go test ./...`, multiple
+// packages spawn parallel test binaries that each issue real `bd list`
+// calls against the live town DB, and 5s of contention is not enough —
+// TestIntegration/List flaked for that exact reason (gu-zgdc).
+// Override via GT_BD_READ_THROTTLE_TIMEOUT_SEC for tests or unusual
+// workloads (must parse as a positive integer).
+const bdReadThrottleTimeout = 30 * time.Second
 
 // resolveBdSubprocessTimeout returns the configured timeout, honoring the
 // GT_BD_TIMEOUT_SEC env var override (must parse as a positive integer).
@@ -785,6 +794,18 @@ func resolveBdSubprocessTimeout() time.Duration {
 		}
 	}
 	return bdSubprocessTimeout
+}
+
+// resolveBdReadThrottleTimeout returns the read-throttle wait timeout,
+// honoring the GT_BD_READ_THROTTLE_TIMEOUT_SEC env override (positive
+// integer seconds). Falls back to bdReadThrottleTimeout otherwise.
+func resolveBdReadThrottleTimeout() time.Duration {
+	if v := os.Getenv("GT_BD_READ_THROTTLE_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return bdReadThrottleTimeout
 }
 
 // run executes a bd command and returns stdout.
@@ -815,7 +836,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
 	if shouldThrottleBDRead(fullArgs) {
-		unlock, err := b.acquireBDReadThrottle(bdReadThrottleTimeout)
+		unlock, err := b.acquireBDReadThrottle(resolveBdReadThrottleTimeout())
 		if err != nil {
 			return nil, fmt.Errorf("bd %s: %w", strings.Join(fullArgs, " "), err)
 		}
