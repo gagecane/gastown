@@ -183,12 +183,3 @@ func GetTownNameFromCwd() (string, error) {
 	return GetTownName(townRoot)
 }
 
-// MustGetTownName returns the town name or panics if it cannot be loaded.
-// Use sparingly - prefer GetTownName with proper error handling.
-func MustGetTownName(townRoot string) string {
-	name, err := GetTownName(townRoot)
-	if err != nil {
-		panic(fmt.Sprintf("failed to get town name: %v", err))
-	}
-	return name
-}

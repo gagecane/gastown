@@ -399,23 +399,6 @@ func TestParseAddress_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestMustParseAddress_Panics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("MustParseAddress with empty string should panic")
-		}
-	}()
-	MustParseAddress("")
-}
-
-func TestMustParseAddress_Valid(t *testing.T) {
-	// Should not panic
-	addr := MustParseAddress("rig/polecat")
-	if addr.Rig != "rig" || addr.Polecat != "polecat" {
-		t.Errorf("MustParseAddress returned wrong address: %+v", addr)
-	}
-}
-
 func TestAddressRigPath(t *testing.T) {
 	tests := []struct {
 		addr *Address

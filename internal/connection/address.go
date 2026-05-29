@@ -127,12 +127,3 @@ func (a *Address) Equal(other *Address) bool {
 	return m1 == m2 && a.Rig == other.Rig && a.Polecat == other.Polecat
 }
 
-// MustParseAddress parses an address and panics on error.
-// Only use for known-good addresses (e.g., constants).
-func MustParseAddress(s string) *Address {
-	addr, err := ParseAddress(s)
-	if err != nil {
-		panic(fmt.Sprintf("invalid address %q: %v", s, err))
-	}
-	return addr
-}
