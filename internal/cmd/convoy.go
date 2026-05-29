@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/tui/convoy"
+	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -1426,7 +1427,18 @@ func findConvoyWorktrees(tracked []trackedIssueInfo) []convoyWorktreeInfo {
 }
 
 // removePolecatWorktree removes a polecat worktree via gt polecat remove.
+//
+// Pre-teardown gate (gu-gn1a): before invoking the destructive `gt polecat
+// remove --force`, run VerifyTeardownSafe to confirm the polecat's work is
+// preserved (durable push receipt, live origin tip match, or commit already
+// on the rig's default branch). Refuse the removal and surface the error
+// otherwise — convoy land treats this as a non-fatal warning so a single
+// stranded polecat does not block landing the convoy, but the work is no
+// longer silently destroyed.
 func removePolecatWorktree(wt convoyWorktreeInfo) error {
+	if err := witness.VerifyTeardownSafe(wt.townRoot, wt.rigName, wt.polecatName); err != nil {
+		return fmt.Errorf("teardown gate refused %s/%s: %w", wt.rigName, wt.polecatName, err)
+	}
 	// gt polecat remove accepts rig/polecat format
 	target := fmt.Sprintf("%s/%s", wt.rigName, wt.polecatName)
 	cmd := exec.Command("gt", "polecat", "remove", target, "--force")

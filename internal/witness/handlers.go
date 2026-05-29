@@ -1395,6 +1395,15 @@ func NukePolecat(bd *BdCli, workDir, rigName, polecatName string) error {
 		return fmt.Errorf("refusing to nuke %s/%s: MR pending in refinery (gt-6a9d)", rigName, polecatName)
 	}
 
+	// Pre-teardown push verification gate (gu-gn1a): refuse to nuke unless we
+	// have proof the polecat's work is preserved (durable push receipt, live
+	// origin tip match, or commit on default branch). Trusting earlier
+	// cleanup_status strings can lose work when origin branches are reaped
+	// between the status snapshot and teardown (gu-ftlw).
+	if err := VerifyTeardownSafe(workDir, rigName, polecatName); err != nil {
+		return fmt.Errorf("refusing to nuke %s/%s: %w", rigName, polecatName, err)
+	}
+
 	// CRITICAL: Kill the tmux session FIRST and unconditionally.
 	// We do this explicitly here because gt polecat nuke may fail to kill the
 	// session due to rig loading issues or race conditions with IsRunning checks.
