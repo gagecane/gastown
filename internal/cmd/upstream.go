@@ -1,8 +1,9 @@
 // gt upstream — upstream sync management CLI surface.
 //
-// Phase 1 (gu-xdc6) implements `gt upstream status` as the initial
-// read-only command. The full verb set (sync, pause, resume, history,
-// config) ships in Phase 2.
+// Phase 1 (gu-xdc6) shipped `gt upstream status` as the read-only
+// inspection verb. Phase 2 (gu-4mj2) added the full mutating verb set:
+// sync, pause, resume, history, config — split across upstream_pause.go,
+// upstream_history.go, and upstream_sync.go to keep each file focused.
 //
 // Design context: .designs/cv-2s6tq/api.md §"Command Group: gt upstream"
 package cmd
@@ -44,10 +45,11 @@ triggers a sync cycle: fetch → merge → gate → push.
 Common flows:
 
   gt upstream status                 # Check sync health
-  gt upstream status --rig=myrig     # Check a specific rig
-  gt upstream status --json          # Machine-parseable output
-
-Phase 2 will add: sync, pause, resume, history, config.`,
+  gt upstream sync                   # Trigger an immediate cycle
+  gt upstream pause --reason "…"     # Halt automatic syncs
+  gt upstream resume                 # Re-enable automatic syncs
+  gt upstream history --limit=10     # Inspect attempt history
+  gt upstream config --set key=val   # Tune the rig's config`,
 	RunE: requireSubcommand,
 }
 
