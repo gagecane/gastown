@@ -781,6 +781,18 @@ afterSafetyNet:
 				}
 
 				if !skipClose {
+					// gu-irou: Close the attached molecule wisp BEFORE closing
+					// the hooked bead. The wisp is bonded to the bead via a
+					// `blocks` dep at sling time; if the bead is later reopened
+					// (e.g. by a Pattern A audit, refinery stranded-merge label,
+					// or manual `bd update --status=open`) the stale open wisp
+					// re-blocks the bead and the scheduler refuses to redispatch.
+					// The merged-close path at line ~2346 already closes the wisp
+					// for this same reason — this is the symmetric fix for the
+					// no-MR close path. See gu-551r/gu-rh0g for the close-paths
+					// that route here.
+					closeAttachedWispNoMR(bd, issueID)
+
 					closeReason := "Completed with no code changes (already fixed or pushed directly to main)"
 					noMRCommitSHA, _ := g.Rev("HEAD")
 					if doneSkipVerify {
@@ -1950,6 +1962,38 @@ func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, c
 // for speed. Keep as a package var so only the close retries are fast in tests —
 // other timing logic is unaffected.
 var closeHookedBeadBackoff = func(d time.Duration) { time.Sleep(d) }
+
+// closeAttachedWispNoMR closes any molecule wisp attached to the given hooked
+// bead BEFORE the no-MR close path closes the bead itself. Without this, a
+// later reopen of the bead (Pattern A audit, refinery stranded-merge label,
+// or manual `bd update --status=open`) leaves the wisp open as a `blocks` dep
+// — the scheduler refuses to redispatch the bead. (gu-irou)
+//
+// Mirrors the merged-close path in updateAgentStateOnDone (~line 2346) so both
+// close paths leave the wisp closed; only this no-MR close path was missing
+// the symmetric cleanup. The merged path lives in updateAgentStateOnDone where
+// it has bd already in scope; runDone constructs bd separately, so we expose
+// this as a small named helper to keep the no-MR path readable and testable.
+//
+// Errors are logged but never fatal: a stuck wisp will re-block only if the
+// bead is later reopened, and witness/reapers can sweep it. Closing the work
+// bead remains the primary goal of the no-MR close path.
+func closeAttachedWispNoMR(bd *beads.Beads, issueID string) {
+	issue, err := bd.Show(issueID)
+	if err != nil {
+		return
+	}
+	attachment := beads.ParseAttachmentFields(issue)
+	if attachment == nil || attachment.AttachedMolecule == "" {
+		return
+	}
+	if n := closeDescendants(bd, attachment.AttachedMolecule); n > 0 {
+		fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, attachment.AttachedMolecule)
+	}
+	if wispErr := bd.ForceCloseWithReason("done (no-MR close)", attachment.AttachedMolecule); wispErr != nil && !errors.Is(wispErr, beads.ErrNotFound) {
+		style.PrintWarning("could not close attached molecule %s: %v", attachment.AttachedMolecule, wispErr)
+	}
+}
 
 // forceCloseWithRetry closes an issue via bd.ForceCloseWithReason with up to
 // 3 attempts and exponential-ish backoff (2s, 4s) between attempts. Returns
