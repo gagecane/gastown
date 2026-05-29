@@ -912,6 +912,10 @@ func (d *Daemon) Run() (err error) {
 				// Lifecycle signal: immediate lifecycle processing (from gt handoff)
 				d.logger.Println("Received lifecycle signal, processing lifecycle requests immediately")
 				d.processLifecycleRequests()
+				// Drain RESTART_POLECAT requests on the same signal — a
+				// lifecycle-signal heartbeat should action both message
+				// families the daemon owns from the deacon inbox (gu-nep2).
+				d.processRestartPolecatRequests()
 			} else if isReloadRestartSignal(sig) {
 				// Reload restart tracker from disk (from 'gt daemon clear-backoff')
 				d.logger.Println("Received reload-restart signal, reloading restart tracker from disk")
@@ -1169,6 +1173,14 @@ func (d *Daemon) heartbeat(state *State) {
 
 	// 7. Process lifecycle requests
 	d.processLifecycleRequests()
+
+	// 7a. Process RESTART_POLECAT requests from the stuck-agent-dog plugin
+	// (gu-nep2). Dogs file these into the deacon inbox when they detect a
+	// dead, zombie, or stalled-alive polecat. Handling them in the daemon
+	// closes the self-healing loop deterministically; the deacon LLM agent
+	// historically dropped them, leaving polecats wedged until a human ran
+	// `gt session start` by hand.
+	d.processRestartPolecatRequests()
 
 	// 9. (Removed) Stale agent check - violated "discover, don't track"
 

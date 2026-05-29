@@ -82,6 +82,13 @@ const (
 	// Emitted additively alongside existing mail dispatch so future consumers can
 	// migrate off the mail transport one at a time. See docs/design/plugin-dispatch-transport.md.
 	TypeDaemonPluginDispatch = "daemon.plugin.dispatch" // Daemon dispatched a plugin to an agent
+
+	// RESTART_POLECAT processing (gu-nep2). Emitted by the daemon's
+	// processRestartPolecatRequests handler for each mail it actions so
+	// operators can tell what was picked up vs skipped without scraping
+	// logs. Audit-only by design — this is mechanical self-healing, not
+	// feed-visible activity.
+	TypeRestartPolecatHandled = "restart_polecat_handled"
 )
 
 // EventsFile is the name of the raw events log.

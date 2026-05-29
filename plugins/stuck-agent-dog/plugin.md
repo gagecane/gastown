@@ -302,22 +302,28 @@ issuing each RESTART_POLECAT.
 For each agent requiring restart:
 
 ```bash
-# For crashed polecats — notify witness to handle restart
+# For crashed polecats — file restart request into the deacon inbox.
+# The daemon's processRestartPolecatRequests handler claims and actions
+# RESTART_POLECAT mail every heartbeat (gu-nep2). Earlier versions of this
+# plugin addressed the mail to "$RIG/witness" but no Go handler ever
+# processed it, so requests piled up indefinitely.
 for ENTRY in "${CRASHED[@]}"; do
   IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
 
   echo "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK)"
 
-  gt mail send "$RIG/witness" \
+  gt mail send "deacon/" \
     -s "RESTART_POLECAT: $RIG/$PCAT" \
     --stdin <<BODY
 Polecat $PCAT crash confirmed by stuck-agent-dog plugin.
 Context-aware inspection completed — agent is genuinely dead.
 
+rig: $RIG
+polecat: $PCAT
 hook_bead: $HOOK
 action: restart requested
 
-Please restart this polecat session.
+The daemon will action this within one heartbeat.
 BODY
 
 done
@@ -329,12 +335,14 @@ for ENTRY in "${STUCK[@]}"; do
   echo "Killing zombie session $SESSION and requesting restart"
   tmux kill-session -t "$SESSION" 2>/dev/null || true
 
-  gt mail send "$RIG/witness" \
+  gt mail send "deacon/" \
     -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" \
     --stdin <<BODY
 Polecat $PCAT zombie session cleared by stuck-agent-dog plugin.
 Session was alive but agent process was dead.
 
+rig: $RIG
+polecat: $PCAT
 hook_bead: $HOOK
 reason: $REASON
 action: restart requested

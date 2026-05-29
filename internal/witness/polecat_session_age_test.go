@@ -77,7 +77,7 @@ func TestSessionTooYoung_LiveOldSession(t *testing.T) {
 }
 
 // TestRestartWithBackoff_SkipsYoungSession verifies the wrapper integration:
-// restartPolecatWithBackoff must surface ErrPolecatSessionTooYoung as a
+// RestartPolecatWithBackoff must surface ErrPolecatSessionTooYoung as a
 // recognizable skip rather than attempting RestartPolecatSession. The
 // test passes a workDir tmpdir to keep the backoff state isolated from
 // other tests.
@@ -87,9 +87,9 @@ func TestRestartWithBackoff_SkipsYoungSession(t *testing.T) {
 
 	tmp := newPolecatBackoffTempDir(t)
 
-	err := restartPolecatWithBackoff(tmp, "rig-a", "delta")
+	err := RestartPolecatWithBackoff(tmp, "rig-a", "delta")
 	if err == nil {
-		t.Fatal("expected restartPolecatWithBackoff to skip a too-young session, got nil error")
+		t.Fatal("expected RestartPolecatWithBackoff to skip a too-young session, got nil error")
 	}
 	if !errors.Is(err, ErrPolecatSessionTooYoung) {
 		t.Errorf("expected ErrPolecatSessionTooYoung in error chain, got %v", err)
@@ -114,9 +114,9 @@ func TestRestartWithBackoff_BackoffStillRecognizedAsSkip(t *testing.T) {
 	tmp := newPolecatBackoffTempDir(t)
 	RecordPolecatStartFailure(tmp, "rig-a", "echo")
 
-	err := restartPolecatWithBackoff(tmp, "rig-a", "echo")
+	err := RestartPolecatWithBackoff(tmp, "rig-a", "echo")
 	if err == nil {
-		t.Fatal("expected restartPolecatWithBackoff to skip during backoff, got nil error")
+		t.Fatal("expected RestartPolecatWithBackoff to skip during backoff, got nil error")
 	}
 	if !errors.Is(err, ErrPolecatInStartupBackoff) {
 		t.Errorf("expected ErrPolecatInStartupBackoff in error chain, got %v", err)

@@ -1309,7 +1309,7 @@ func extractPolecatFromJSON(output string) string {
 //
 // NOTE: This is the unconditional primitive. Patrol callsites (zombie
 // detectors) must gate themselves with IsPolecatInStartupBackoff and record
-// success/failure via RecordPolecatStartFailure — use restartPolecatWithBackoff
+// success/failure via RecordPolecatStartFailure — use RestartPolecatWithBackoff
 // for that path.
 func RestartPolecatSession(workDir, rigName, polecatName string) error {
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
@@ -1319,13 +1319,13 @@ func RestartPolecatSession(workDir, rigName, polecatName string) error {
 	return nil
 }
 
-// ErrPolecatInStartupBackoff is returned by restartPolecatWithBackoff when
+// ErrPolecatInStartupBackoff is returned by RestartPolecatWithBackoff when
 // the witness patrol should skip the restart because the polecat has failed
 // too recently. This is a sentinel — callers unwrap it to distinguish "we
 // chose not to restart" from "restart was attempted and failed."
 var ErrPolecatInStartupBackoff = fmt.Errorf("polecat in startup backoff")
 
-// restartPolecatWithBackoff is the patrol-safe wrapper around
+// RestartPolecatWithBackoff is the patrol-safe wrapper around
 // RestartPolecatSession. Before attempting the restart it consults the
 // polecat startup-backoff tracker (gu-mkz7 / gu-rq8i mitigation 3); if the
 // polecat is in backoff or crash-loop, it returns a wrapped
@@ -1341,12 +1341,16 @@ var ErrPolecatInStartupBackoff = fmt.Errorf("polecat in startup backoff")
 // tracker's stability-period reset-on-next-failure gate is the current
 // safety net, matching the dog tracker).
 //
+// Exported so the daemon's RESTART_POLECAT mail handler (gu-nep2) can
+// honour the same gs-549 backoff and session-too-young guards that the
+// witness patrol uses; both paths feed into the same restart primitive.
+//
 // Returns:
 //
 //	nil                         — restart succeeded
 //	ErrPolecatInStartupBackoff  — skipped due to backoff (wrapped with reason)
 //	other error                 — restart was attempted and failed; backoff bumped
-func restartPolecatWithBackoff(workDir, rigName, polecatName string) error {
+func RestartPolecatWithBackoff(workDir, rigName, polecatName string) error {
 	if skip, reason := IsPolecatInStartupBackoff(workDir, rigName, polecatName); skip {
 		return fmt.Errorf("%w: %s", ErrPolecatInStartupBackoff, reason)
 	}
@@ -2533,9 +2537,9 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
 		}
-		// gu-mkz7: restartPolecatWithBackoff gates this call so a persistently
+		// gu-mkz7: RestartPolecatWithBackoff gates this call so a persistently
 		// crashing polecat doesn't get re-spawned on every patrol cycle.
-		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
+		if err := RestartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
 			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart-stuck-session: %v", err)
 			} else {
@@ -2562,7 +2566,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
 		}
-		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
+		if err := RestartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
 			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart-agent-dead-session: %v", err)
 			} else {
@@ -2590,7 +2594,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		if alive, _ := t.HasSession(sessionName); !alive {
 			return ZombieResult{}, false
 		}
-		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
+		if err := RestartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
 			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart-bead-closed: %v", err)
 			} else {
@@ -2776,7 +2780,7 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			WasActive:      true,
 			Action:         fmt.Sprintf("restarted (done-intent age=%v, type=%s)", age.Round(time.Second), doneIntent.ExitType),
 		}
-		if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
+		if err := RestartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
 			if isPolecatRestartSkip(err) {
 				zombie.Action = fmt.Sprintf("skipped-restart (done-intent age=%v, type=%s): %v", age.Round(time.Second), doneIntent.ExitType, err)
 			} else {
@@ -3009,9 +3013,9 @@ func handleZombieRestart(bd *BdCli, workDir, rigName, polecatName, hookBead, cle
 	}
 
 	// Restart regardless of cleanup state — the worktree is preserved.
-	// gu-mkz7: Gated through restartPolecatWithBackoff so a polecat that keeps
+	// gu-mkz7: Gated through RestartPolecatWithBackoff so a polecat that keeps
 	// dying immediately doesn't get respawned on every patrol cycle.
-	if err := restartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
+	if err := RestartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
 		if isPolecatRestartSkip(err) {
 			// Backoff skip is not a failure to record on zombie.Error.
 			// The Action already reflects what the caller intended ("restarted",
