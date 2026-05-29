@@ -536,6 +536,77 @@ func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) 
 	return ids, nil
 }
 
+// getAllTrackedIssuesByConvoy issues a single bd sql query that returns
+// the tracked dependency edges for ALL passed convoy IDs at once. It
+// amortizes the per-convoy bd-subprocess fan-out used by getTrackedIssues
+// across one batched call. Returns a map from convoy ID to its tracked
+// bead IDs (deduplicated, unwrapped from external: prefixes).
+//
+// Mirrors bdDepListRawIDs's `WHERE issue_id = '<id>' AND type = 'tracks'`
+// query, generalized to `WHERE issue_id IN (...)`. Each convoy ID is
+// validated via isValidBeadID before SQL interpolation.
+//
+// Returns a non-nil map and err when the SQL query itself fails — the
+// callers (findStrandedConvoys) treat that as a signal to fall back to
+// per-convoy getTrackedIssues. Convoys that have zero rows in the result
+// are simply absent from the map; callers fall back to bdShowTrackedDeps
+// for those to preserve the cross-database dependency edge case fallback.
+//
+// Used by findStrandedConvoys (gu-6m38) — mirrors the
+// computeTownWideScheduledSet hoist (gu-c6ua) for the same reason: the
+// dependency graph is invariant for the duration of one scan.
+func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[string][]string, error) {
+	result := make(map[string][]string, len(convoyIDs))
+	if len(convoyIDs) == 0 {
+		return result, nil
+	}
+
+	// Validate every convoy ID — we're SQL-interpolating them into an
+	// IN clause and isValidBeadID is what the single-id path uses.
+	quoted := make([]string, 0, len(convoyIDs))
+	for _, id := range convoyIDs {
+		if !isValidBeadID(id) {
+			return nil, fmt.Errorf("invalid convoy ID for batched dep query: %q", id)
+		}
+		quoted = append(quoted, "'"+id+"'")
+	}
+
+	query := fmt.Sprintf(
+		"SELECT issue_id, depends_on_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
+		strings.Join(quoted, ","),
+	)
+
+	out, err := runBdJSON(townBeads, "sql", query, "--json")
+	if err != nil {
+		return nil, fmt.Errorf("bd sql for batched tracked deps: %w", err)
+	}
+
+	var rows []map[string]string
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("parsing batched dep sql: %w", err)
+	}
+
+	// Dedup per convoy.
+	seen := make(map[string]map[string]bool, len(convoyIDs))
+	for _, row := range rows {
+		convoyID := row["issue_id"]
+		rawID := row["depends_on_id"]
+		id := beads.ExtractIssueID(rawID)
+		if convoyID == "" || id == "" {
+			continue
+		}
+		if seen[convoyID] == nil {
+			seen[convoyID] = make(map[string]bool)
+		}
+		if seen[convoyID][id] {
+			continue
+		}
+		seen[convoyID][id] = true
+		result[convoyID] = append(result[convoyID], id)
+	}
+	return result, nil
+}
+
 // isValidBeadID checks that a string is safe for SQL interpolation in dep queries.
 // Bead IDs contain only alphanumeric chars, hyphens, dots, and underscores.
 func isValidBeadID(s string) bool {
@@ -1487,10 +1558,18 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	// computeTownWideScheduledSet for the fail-closed fallback handling.
 	scheduledSetAll := computeTownWideScheduledSet(townBeads)
 
-	// Phase 1: collect tracked-bead IDs for every convoy in one cheap pass.
-	// bdDepListRawIDs is a SQL query against the local town deps table; it
-	// does NOT spawn the per-convoy bd show subprocess that getTrackedIssues
-	// otherwise would.
+	// Phase 1: collect tracked-bead IDs for every convoy. Use one batched
+	// bd sql query for ALL open convoys at once — replaces N per-convoy
+	// SQL calls (one per convoy) with a single IN-clause query. Same
+	// invariance argument as the scheduled-set hoist above: the dependency
+	// graph doesn't change during a single scan (gu-6m38, parent gu-6r5k
+	// spike step 4). On the dominant live-town size (27 convoys) this
+	// closes the remaining ~27s of bd-subprocess fan-out left after the
+	// gu-c6ua sling-context hoist.
+	//
+	// trackedIDsByConvoy is nil when the batched query itself fails —
+	// callers fall back to per-convoy getTrackedIssueIDs (which exercises
+	// the bd dep list / bd show fallback chain for cross-database deps).
 	type convoyTracked struct {
 		convoy     convoyListIssue
 		baseBranch string
@@ -1499,13 +1578,44 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	convoyEntries := make([]convoyTracked, 0, len(convoys))
 	allTrackedIDs := make([]string, 0)
 	seenAll := make(map[string]bool)
+
+	convoyIDs := make([]string, 0, len(convoys))
+	for _, c := range convoys {
+		convoyIDs = append(convoyIDs, c.ID)
+	}
+	trackedIDsByConvoy, hoistErr := getAllTrackedIssuesByConvoy(townBeads, convoyIDs)
+	if hoistErr != nil {
+		// Best-effort: log and fall back to per-convoy lookups for this scan.
+		fmt.Fprintf(os.Stderr, "⚠ Warning: batched tracked-deps query failed; "+
+			"falling back to per-convoy lookups: %v\n", hoistErr)
+		trackedIDsByConvoy = nil
+	}
+
 	for _, convoy := range convoys {
 		var baseBranch string
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
 		}
 
-		ids, err := getTrackedIssueIDs(townBeads, convoy.ID)
+		// Use the hoisted batched result when available and non-empty.
+		// Fall back to per-convoy getTrackedIssueIDs when:
+		//   - the batched query degraded (trackedIDsByConvoy is nil), OR
+		//   - the convoy is absent from the batched result OR present with
+		//     zero rows (preserves the bd dep list / bdShowTrackedDeps
+		//     fallback chain that handles cross-database deps).
+		var (
+			ids []string
+			err error
+		)
+		if trackedIDsByConvoy != nil {
+			if hoisted, ok := trackedIDsByConvoy[convoy.ID]; ok && len(hoisted) > 0 {
+				ids = hoisted
+			} else {
+				ids, err = getTrackedIssueIDs(townBeads, convoy.ID)
+			}
+		} else {
+			ids, err = getTrackedIssueIDs(townBeads, convoy.ID)
+		}
 		if err != nil {
 			// Write to stderr explicitly — stdout may be consumed as JSON
 			// by the daemon's JSON parser (fixes #2142).

@@ -489,3 +489,191 @@ func TestComputeTownWideScheduledSet_FailClosedNilOnNoTownRoot(t *testing.T) {
 			"(fail-closed semantic preservation)", got, len(got))
 	}
 }
+
+// TestFindStrandedConvoys_SingleTrackedDepsSQLScan asserts that one full
+// findStrandedConvoys() invocation issues exactly one
+// `bd sql ... FROM dependencies ... type = 'tracks'` subprocess
+// regardless of how many convoys are open.
+//
+// This is the production correctness check for the gu-6m38 hoist: the
+// per-convoy bdDepListRawIDs call inside getTrackedIssues was the
+// dominant cost after gu-c6ua landed (~1s × convoys × scan). Hoisting
+// it into a single batched IN-clause query closes the remaining N+1.
+//
+// Pre-hoist this would have spawned 5 calls; with the hoist it must be 1.
+func TestFindStrandedConvoys_SingleTrackedDepsSQLScan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell-script mock test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"),
+		[]byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// Counter file: mock bd appends a marker line on every
+	// `bd sql ... FROM dependencies ... type = 'tracks'` invocation.
+	counterPath := filepath.Join(binDir, "tracked-deps-sql-call-count")
+
+	// Mock bd: 5 open convoys, each tracking one bead. If the hoist
+	// regresses, this would produce 5+ tracked-deps SQL calls.
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+COUNTER="` + counterPath + `"
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+
+case "$pos0" in
+  list)
+    case "$*" in
+      *--label=gt:sling-context*)
+        echo '[]'
+        exit 0
+        ;;
+    esac
+    echo '[{"id":"hq-c1","title":"Convoy 1"},{"id":"hq-c2","title":"Convoy 2"},{"id":"hq-c3","title":"Convoy 3"},{"id":"hq-c4","title":"Convoy 4"},{"id":"hq-c5","title":"Convoy 5"}]'
+    exit 0
+    ;;
+  sql)
+    # Match the tracked-deps query (single-id or batched IN clause).
+    case "$*" in
+      *"FROM dependencies"*"type = 'tracks'"*)
+        echo X >> "$COUNTER"
+        # Batched IN-clause path: return one edge per convoy.
+        case "$*" in
+          *"issue_id IN ("*)
+            echo '[{"issue_id":"hq-c1","depends_on_id":"gt-r1"},{"issue_id":"hq-c2","depends_on_id":"gt-r2"},{"issue_id":"hq-c3","depends_on_id":"gt-r3"},{"issue_id":"hq-c4","depends_on_id":"gt-r4"},{"issue_id":"hq-c5","depends_on_id":"gt-r5"}]'
+            ;;
+          *"issue_id = 'hq-c1'"*) echo '[{"depends_on_id":"gt-r1"}]';;
+          *"issue_id = 'hq-c2'"*) echo '[{"depends_on_id":"gt-r2"}]';;
+          *"issue_id = 'hq-c3'"*) echo '[{"depends_on_id":"gt-r3"}]';;
+          *"issue_id = 'hq-c4'"*) echo '[{"depends_on_id":"gt-r4"}]';;
+          *"issue_id = 'hq-c5'"*) echo '[{"depends_on_id":"gt-r5"}]';;
+          *) echo '[]';;
+        esac
+        exit 0
+        ;;
+    esac
+    echo '[]'
+    exit 0
+    ;;
+  show)
+    # Generic ready issue details for any of gt-r{1..5}.
+    echo '[{"id":"gt-r1","title":"R1","status":"open","issue_type":"task","assignee":"","blocked_by":[],"blocked_by_count":0,"dependencies":[]}]'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := findStrandedConvoys(townRoot); err != nil {
+		t.Fatalf("findStrandedConvoys() error: %v", err)
+	}
+
+	data, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatalf("expected exactly one batched tracked-deps SQL call; "+
+			"counter file %s: %v", counterPath, err)
+	}
+	count := strings.Count(string(data), "X")
+	if count != 1 {
+		t.Errorf("hoist regression: tracked-deps `bd sql ... type = 'tracks'` "+
+			"called %d times for 5 convoys; expected 1 batched call. "+
+			"This is the gu-6m38 regression check — see gu-6r5k spike "+
+			"step 4 for the per-convoy fan-out background.", count)
+	}
+}
+
+// TestGetAllTrackedIssuesByConvoy_Equivalence verifies that the batched
+// helper returns the same per-convoy ID lists that bdDepListRawIDs would
+// return for each convoy individually. Acceptance criterion for gu-6m38.
+func TestGetAllTrackedIssuesByConvoy_Equivalence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell-script mock test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	bdPath := filepath.Join(binDir, "bd")
+	// Mock bd that returns deterministic edges for both single-id and
+	// batched IN-clause queries. Three synthetic convoys with varying
+	// tracked counts (0, 1, 2 deps) — must match per-convoy results.
+	script := `#!/bin/sh
+case "$*" in
+  *"FROM dependencies"*"issue_id IN ("*"type = 'tracks'"*)
+    echo '[{"issue_id":"hq-c1","depends_on_id":"gt-a"},{"issue_id":"hq-c3","depends_on_id":"gt-b"},{"issue_id":"hq-c3","depends_on_id":"gt-c"}]'
+    exit 0
+    ;;
+  *"FROM dependencies"*"issue_id = 'hq-c1'"*"type = 'tracks'"*)
+    echo '[{"depends_on_id":"gt-a"}]'
+    exit 0
+    ;;
+  *"FROM dependencies"*"issue_id = 'hq-c2'"*"type = 'tracks'"*)
+    echo '[]'
+    exit 0
+    ;;
+  *"FROM dependencies"*"issue_id = 'hq-c3'"*"type = 'tracks'"*)
+    echo '[{"depends_on_id":"gt-b"},{"depends_on_id":"gt-c"}]'
+    exit 0
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	convoyIDs := []string{"hq-c1", "hq-c2", "hq-c3"}
+	batched, err := getAllTrackedIssuesByConvoy(townRoot, convoyIDs)
+	if err != nil {
+		t.Fatalf("getAllTrackedIssuesByConvoy: %v", err)
+	}
+
+	for _, id := range convoyIDs {
+		single, err := bdDepListRawIDs(townRoot, id, "down", "tracks")
+		if err != nil {
+			t.Fatalf("bdDepListRawIDs(%s): %v", id, err)
+		}
+		got := batched[id]
+		if len(got) != len(single) {
+			t.Errorf("convoy %s: batched=%v single=%v (length mismatch)", id, got, single)
+			continue
+		}
+		// Order may differ; compare as sets.
+		gotSet := map[string]bool{}
+		for _, x := range got {
+			gotSet[x] = true
+		}
+		for _, x := range single {
+			if !gotSet[x] {
+				t.Errorf("convoy %s: batched missing %q (got=%v single=%v)", id, x, got, single)
+			}
+		}
+	}
+}
