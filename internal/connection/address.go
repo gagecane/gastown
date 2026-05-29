@@ -126,4 +126,3 @@ func (a *Address) Equal(other *Address) bool {
 
 	return m1 == m2 && a.Rig == other.Rig && a.Polecat == other.Polecat
 }
-
