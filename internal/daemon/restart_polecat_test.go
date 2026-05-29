@@ -20,11 +20,11 @@ func TestIsRestartPolecatMessage(t *testing.T) {
 		{"RESTART_POLECAT: rig/cat (zombie cleared)", true},
 		{"RESTART_POLECAT: rig/cat (stalled-alive cleared)", true},
 		{"  RESTART_POLECAT: rig/cat  ", true},
-		{"RESTART_POLECAT:", false},                  // bare prefix — no payload
-		{"RESTART_POLECAT: ", false},                 // bare prefix with trailing space
-		{"NUKE_PENDING: rig/cat", false},             // different subject family
-		{"Re: RESTART_POLECAT: rig/cat", false},      // forwarded mail — not a fresh request
-		{"restart_polecat: rig/cat", false},          // case-sensitive
+		{"RESTART_POLECAT:", false},             // bare prefix — no payload
+		{"RESTART_POLECAT: ", false},            // bare prefix with trailing space
+		{"NUKE_PENDING: rig/cat", false},        // different subject family
+		{"Re: RESTART_POLECAT: rig/cat", false}, // forwarded mail — not a fresh request
+		{"restart_polecat: rig/cat", false},     // case-sensitive
 		{"", false},
 	}
 	for _, tc := range tests {
@@ -46,8 +46,8 @@ func TestParseRestartPolecatSubject(t *testing.T) {
 		{"RESTART_POLECAT: rig-a/dust (zombie cleared)", "rig-a", "dust", true},
 		{"RESTART_POLECAT: rig-a/dust (stalled-alive cleared)", "rig-a", "dust", true},
 		{"  RESTART_POLECAT:   rig/cat   ", "rig", "cat", true},
-		{"RESTART_POLECAT: rig/", "", "", false},     // empty polecat
-		{"RESTART_POLECAT: /cat", "", "", false},     // empty rig
+		{"RESTART_POLECAT: rig/", "", "", false},      // empty polecat
+		{"RESTART_POLECAT: /cat", "", "", false},      // empty rig
 		{"RESTART_POLECAT: badformat", "", "", false}, // no slash
 		{"RESTART_POLECAT:", "", "", false},
 		{"NUKE_PENDING: rig/cat", "", "", false},
