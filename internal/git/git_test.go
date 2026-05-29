@@ -2202,6 +2202,92 @@ func TestStashPop(t *testing.T) {
 	}
 }
 
+// TestStashShowFiles_ReturnsChangedPaths verifies that StashShowFiles
+// (gu-6ctd) returns the list of paths the stash touched, used by the
+// polecat reaper auto-drop heuristic.
+func TestStashShowFiles_ReturnsChangedPaths(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// Empty ref errors.
+	if _, err := g.StashShowFiles(""); err == nil {
+		t.Error("StashShowFiles(\"\") should error")
+	}
+
+	// Two-file stash: .gitignore + package-lock.json.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("build\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	cmd = exec.Command("git", "stash", "push", "-m", "env drift")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git stash push: %v", err)
+	}
+
+	paths, err := g.StashShowFiles("stash@{0}")
+	if err != nil {
+		t.Fatalf("StashShowFiles: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range paths {
+		got[p] = true
+	}
+	if !got[".gitignore"] || !got["package-lock.json"] {
+		t.Errorf("StashShowFiles = %v, want .gitignore and package-lock.json", paths)
+	}
+}
+
+// TestStashDrop_DiscardsWithoutApplying verifies StashDrop removes the stash
+// from the reflog without applying it to the working tree.
+func TestStashDrop_DiscardsWithoutApplying(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// Empty ref errors.
+	if err := g.StashDrop(""); err == nil {
+		t.Error("StashDrop(\"\") should error")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "drop-me.txt"), []byte("drift"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	cmd = exec.Command("git", "stash", "push", "-m", "drop-target")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git stash push: %v", err)
+	}
+
+	// Confirm exactly one stash exists.
+	if n, _ := g.StashCount(); n != 1 {
+		t.Fatalf("StashCount before drop = %d, want 1", n)
+	}
+	if err := g.StashDrop("stash@{0}"); err != nil {
+		t.Fatalf("StashDrop: %v", err)
+	}
+	if n, _ := g.StashCount(); n != 0 {
+		t.Errorf("StashCount after drop = %d, want 0", n)
+	}
+	// Working tree must remain clean — drop must not apply.
+	if _, err := os.Stat(filepath.Join(dir, "drop-me.txt")); !os.IsNotExist(err) {
+		t.Errorf("drop-me.txt should NOT exist after drop (was the stash applied?): err=%v", err)
+	}
+}
+
 // TestIsStashStale_FreshStashIsNotStale verifies that a stash created on
 // the current HEAD (no intervening commits) is reported as non-stale —
 // the recovery scenario the gt-pvx auto-pop was designed for.

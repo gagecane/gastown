@@ -1353,6 +1353,40 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
 	}
 
+	// gu-6ctd: when invoked with --reconcile-cleanup (witness reaper path),
+	// drop environmental-only stashes before deciding the workstate. A stash
+	// whose every changed path matches polecat.EnvironmentalStashAllowlist
+	// (.gitignore drift, lock files, build outputs) is zero real WIP — auto-
+	// dropping it lets the polecat be reused instead of escalating
+	// NEEDS_RECOVERY for routine build-tool drift.
+	//
+	// Run this before DecideWorkstate so the cleared stash count flows into
+	// the disposition naturally. The reconciliation rewrite of cleanup_status
+	// from has_stash → clean is then handled by the existing
+	// reconcileCleanupStatusIfSafe path below (gates on Verdict=SAFE_TO_NUKE).
+	if polecatCheckRecoveryReconcileCleanup && gitState != nil && gitState.StashCount > 0 {
+		dropped, dropDiagnostics := autoDropEnvironmentalStashes(p.ClonePath)
+		status.Diagnostics = append(status.Diagnostics, dropDiagnostics...)
+		if dropped > 0 {
+			// Reload git state to reflect the dropped stashes. The auto-drop
+			// only touches stash refs; uncommitted/unpushed/working tree state
+			// is untouched, so the reload is just to refresh StashCount.
+			gitStateLoaded = false
+			loadGitState()
+			// Mirror the freshly-cleared stash count back into the input that
+			// DecideWorkstate sees.
+			if gitErr == nil && gitState != nil {
+				input.StashCount = gitState.StashCount
+				if input.CleanupStatus == polecat.CleanupStash && gitState.Clean {
+					// All blocking state was the now-dropped stash; let the
+					// reconcile pass below upgrade cleanup_status to clean.
+					input.IgnoreCleanupStatus = true
+					status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("auto_drop_stash dropped=%d cleared_cleanup_status=has_stash", dropped))
+				}
+			}
+		}
+	}
+
 	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, gitState, gitErr)
 	disposition := polecat.DecideWorkstate(input)
@@ -1624,6 +1658,94 @@ func partialSpawnWithoutDurableHook(bd issueShower, fields *beads.AgentFields, a
 		return false, ""
 	}
 	return true, fmt.Sprintf("partial_spawn_without_durable_hook agent_state=%s hook_bead=%s hook_status=%s hook_assignee=%q", fields.AgentState, fields.HookBead, issue.Status, issue.Assignee)
+}
+
+// autoDropEnvironmentalStashes inspects each stash entry on the current branch
+// and drops every stash whose changed paths are entirely environmental
+// (.gitignore drift, lock files, build outputs, IDE state — see
+// polecat.EnvironmentalStashAllowlist).
+//
+// Behavior is conservative:
+//   - If listing entries or showing files fails for any stash, that stash is
+//     left in place and treated as non-environmental.
+//   - Stale stashes (HEAD has moved past the stash's parent) are NEVER
+//     auto-dropped: file lists from `git stash show` are still measured
+//     against the stash's base, and dropping a stale stash means losing the
+//     ability to reconstruct it. Real WIP that became stale is exactly the
+//     case the original recovery path exists for.
+//   - A stash with zero changed paths is treated as non-environmental
+//     (anomalous — bail out instead of dropping on no evidence).
+//
+// Returns a slice of human-readable diagnostic strings describing each
+// stash dropped (or skipped) and the count of stashes dropped. The caller
+// reloads gitState afterward to reflect the new stash count.
+//
+// gu-6ctd: implements the auto-drop heuristic the witness reaper uses to
+// reuse polecats whose only "WIP" was environmental drift the build tooling
+// produced.
+func autoDropEnvironmentalStashes(worktreePath string) (dropped int, diagnostics []string) {
+	g := git.NewGit(worktreePath)
+	entries, err := g.StashListForBranch()
+	if err != nil {
+		return 0, []string{fmt.Sprintf("auto_drop_stash skipped: list failed: %v", err)}
+	}
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
+	// Iterate newest-first as `git stash list` returns them. Drop newest first
+	// so successive `stash@{N}` refs stay valid for entries we keep — dropping
+	// stash@{2} renumbers stash@{3..N} but leaves stash@{0..1} stable.
+	// Whenever we drop, we re-list before processing the next entry to avoid
+	// referring to refs whose numbering shifted.
+	for {
+		entries, err = g.StashListForBranch()
+		if err != nil {
+			diagnostics = append(diagnostics, fmt.Sprintf("auto_drop_stash skipped: list failed: %v", err))
+			return dropped, diagnostics
+		}
+		if len(entries) == 0 {
+			return dropped, diagnostics
+		}
+
+		droppedThisPass := false
+		for _, e := range entries {
+			// Refuse to drop stale stashes: HEAD has moved past the stash's
+			// base since it was created, which means the stash's file list
+			// from `git stash show` is measured against an old tree and could
+			// hide changes intervening commits made. Surface for manual review.
+			stale, _, _, staleErr := g.IsStashStale(e.Ref)
+			if staleErr != nil {
+				diagnostics = append(diagnostics, fmt.Sprintf("auto_drop_stash %s skipped: staleness check failed: %v", e.Ref, staleErr))
+				continue
+			}
+			if stale {
+				diagnostics = append(diagnostics, fmt.Sprintf("auto_drop_stash %s skipped: stale (HEAD advanced past stash base)", e.Ref))
+				continue
+			}
+
+			paths, showErr := g.StashShowFiles(e.Ref)
+			if showErr != nil {
+				diagnostics = append(diagnostics, fmt.Sprintf("auto_drop_stash %s skipped: show failed: %v", e.Ref, showErr))
+				continue
+			}
+			if !polecat.IsEnvironmentalOnlyStash(paths) {
+				continue
+			}
+			if dropErr := g.StashDrop(e.Ref); dropErr != nil {
+				diagnostics = append(diagnostics, fmt.Sprintf("auto_drop_stash %s drop failed: %v", e.Ref, dropErr))
+				continue
+			}
+			diagnostics = append(diagnostics, fmt.Sprintf("auto_dropped_stash %s paths=[%s]", e.Ref, strings.Join(paths, ",")))
+			dropped++
+			droppedThisPass = true
+			// Refs renumber after drop; re-list before continuing.
+			break
+		}
+		if !droppedThisPass {
+			return dropped, diagnostics
+		}
+	}
 }
 
 func recoveryGitStateBlocker(worktreePath string, gitState *GitState, gitErr error) string {

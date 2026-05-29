@@ -2809,6 +2809,48 @@ func (g *Git) StashPop(ref string) error {
 	return nil
 }
 
+// StashDrop discards the given stash ref without applying it. Used by the polecat
+// reaper to discard environmental-only stashes (gu-6ctd) where every changed path
+// matches a build-output / IDE-state allowlist and the contents represent zero
+// real WIP.
+//
+// Callers MUST verify the stash is environmental-only before invoking this —
+// dropping a real WIP stash is unrecoverable.
+func (g *Git) StashDrop(ref string) error {
+	if ref == "" {
+		return fmt.Errorf("stash ref required")
+	}
+	if _, err := g.run("stash", "drop", ref); err != nil {
+		return fmt.Errorf("git stash drop %s: %w", ref, err)
+	}
+	return nil
+}
+
+// StashShowFiles returns the list of paths changed by the given stash, as
+// produced by `git stash show --name-only`. Used to decide whether a stash is
+// environmental-only (gu-6ctd) — i.e. every path matches a build-output /
+// IDE-state allowlist.
+//
+// Returns the paths in the stash's own ordering. Index changes, working-tree
+// changes, and untracked-file additions (when present in the stash) are all
+// included.
+func (g *Git) StashShowFiles(ref string) ([]string, error) {
+	if ref == "" {
+		return nil, fmt.Errorf("stash ref required")
+	}
+	out, err := g.run("stash", "show", "--name-only", ref)
+	if err != nil {
+		return nil, fmt.Errorf("git stash show --name-only %s: %w", ref, err)
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, nil
+}
+
 // StashParentSHA returns the SHA of the commit HEAD pointed at when the stash
 // was created — i.e. `git rev-parse <ref>^1`. A stash commit's first parent is
 // the "base" commit the diff is measured against; callers compare this against
