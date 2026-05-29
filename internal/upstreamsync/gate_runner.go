@@ -35,6 +35,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // GateRunResult captures the outcome of running one gate command.
@@ -227,6 +229,19 @@ func runOneGate(parentCtx context.Context, shell, cmdStr string, opts GateRunOpt
 		// PATH, HOME, GOPATH, etc.
 		c.Env = append(c.Env, opts.Env...)
 	}
+	// Run the gate in its own process group and install a Cancel that
+	// SIGKILLs the whole group on context expiry. Without this, gate
+	// commands like `sleep 5` survive PerCommandTimeout cancellation:
+	// CommandContext only signals the leader (sh), but sleep is reparented
+	// to PID 1 and keeps writing to the inherited stdout pipe — `c.Run()`
+	// then blocks in Wait() until the child closes the pipe naturally
+	// (i.e., after the full sleep). Process-group SIGKILL terminates the
+	// child too. WaitDelay belt-and-suspenders: bound the post-cancel
+	// pipe wait at 100ms so any leftover I/O can't keep Run() blocked.
+	// (gu-4mj2 follow-up: TestRunGates_PerCommandTimeout was failing on
+	// CI with Duration ≈ 5s for a 100ms timeout.)
+	util.SetProcessGroup(c)
+	c.WaitDelay = 100 * time.Millisecond
 
 	var buf bytes.Buffer
 	c.Stdout = &buf
