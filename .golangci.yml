@@ -106,6 +106,17 @@ linters:
         linters:
           - errcheck
         text: "Error return value of .*(Close|Rollback|RemoveAll|Setenv|Unsetenv|Chdir|MkdirAll|Remove|Write).* is not checked"
+      # misspell: GitHub Actions' workflow-run API uses British "cancelled" as
+      # the canonical conclusion value (see docs.github.com/en/rest/actions
+      # /workflow-runs). The string literal "cancelled" and the matching Go
+      # identifier ConclusionCancelled in internal/ciwatcher/ are bound to
+      # that external contract — renaming them to "canceled" would break
+      # JSON parsing of GitHub responses. Scoped to ciwatcher so the linter
+      # still catches genuine misspellings elsewhere in the codebase.
+      - path: 'internal/ciwatcher/'
+        linters:
+          - misspell
+        text: "`[Cc]ancelled` is a misspelling"
 
 issues:
   uniq-by-line: true

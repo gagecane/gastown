@@ -13,9 +13,14 @@
 #     1. go build ./...            — compiles (catches broken imports, type errs)
 #     2. go vet ./...              — static analysis (shadow, printf, unreachable)
 #     3. gofmt -l                  — formatting check (catches trailing newlines etc.)
+#     4. golangci-lint run         — misspell, errcheck, gosec, unconvert,
+#                                    unparam (catches lint failures that
+#                                    only CI's Lint job sees today). Skipped
+#                                    if golangci-lint not installed locally.
+#                                    See gu-lint-fastgate.
 #
 #   SLOW gates (skipped when GT_SKIP_PREPUSH=1):
-#     4. go test ./... -count=1    — full unit test suite with clean env (~2min)
+#     5. go test ./... -count=1    — full unit test suite with clean env (~2min)
 #
 # Why split? `gt done --pre-verified` sets GT_SKIP_PREPUSH=1 to avoid re-running
 # the slow test suite that the polecat already ran during pre-verification. But
@@ -243,6 +248,42 @@ Run \`gofmt -w <file>\` (or \`gofmt -w .\`) to fix formatting, then re-push.
 This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
 EOF
   exit 1
+fi
+
+# --- FAST GATE 4: golangci-lint -------------------------------------------
+#
+# CI's Lint job (golangci-lint with .golangci.yml) catches misspell, errcheck,
+# gosec, unconvert, unparam findings that go vet does NOT. Same broken-main
+# window as gofmt: polecats pass build/vet/gofmt locally, push, and only THEN
+# does golangci-lint catch issues — by which point main is briefly broken.
+#
+# Mirroring the gofmt gate: runs as a fast gate so it fires even under
+# --pre-verified. The check is fast (~10-30s on this codebase) and catches
+# the failure modes that pre-verification often misses.
+#
+# If golangci-lint isn't installed locally, we skip with a loud warning rather
+# than failing the push — installing it requires `go install` + the version
+# lock from .github/workflows/ci.yml. CI still runs the full lint as the
+# authoritative gate; this is the local fast-feedback layer. (gu-lint-fastgate)
+
+if command -v golangci-lint >/dev/null 2>&1; then
+  echo "pre-push: [fast] golangci-lint run (static analysis)" >&2
+  if ! golangci-lint run --timeout=5m 2>&1; then
+    cat >&2 <<EOF
+
+✗ Push rejected: golangci-lint found findings.
+
+Fix the issues above (or add a .golangci.yml exclusion if the linter is
+mechanically wrong about an external API string), then re-push.
+
+This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
+The full lint suite is configured in .golangci.yml; the same gate runs in CI.
+EOF
+    exit 1
+  fi
+else
+  echo "pre-push: [fast] golangci-lint not installed locally — skipping (CI will still run it)" >&2
+  echo "pre-push: install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4" >&2
 fi
 
 # --- SLOW GATE: go test ---------------------------------------------------

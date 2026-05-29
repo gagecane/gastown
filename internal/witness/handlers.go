@@ -1342,7 +1342,7 @@ var ErrPolecatInStartupBackoff = fmt.Errorf("polecat in startup backoff")
 // safety net, matching the dog tracker).
 //
 // Exported so the daemon's RESTART_POLECAT mail handler (gu-nep2) can
-// honour the same gs-549 backoff and session-too-young guards that the
+// honor the same gs-549 backoff and session-too-young guards that the
 // witness patrol uses; both paths feed into the same restart primitive.
 //
 // Returns:

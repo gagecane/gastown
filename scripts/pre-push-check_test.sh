@@ -450,6 +450,92 @@ EOF
   rm -rf "$stubdir" "$tmprepo"
 }
 
+# gu-lint-fastgate: when golangci-lint is NOT on PATH, the script must
+# print a "not installed locally — skipping" warning and continue (CI is
+# the authoritative gate). No push rejection.
+test_lint_gate_skipped_when_not_installed() {
+  # run_with_stubs uses an isolated PATH containing only `go` and `gofmt`
+  # stubs — golangci-lint is absent there, so the command -v check fires
+  # the skip path. We then assert the script ran to completion AND emitted
+  # the expected warning string.
+  run_with_stubs \
+    'echo "go-called: $*" >&2; exit 0' \
+    'exit 0' \
+    1
+  if [[ $RC -ne 0 ]]; then
+    echo "FAIL: missing golangci-lint should not reject push (got rc=$RC)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    cleanup_last_run
+    return
+  fi
+  if ! echo "$OUT" | grep -qi "golangci-lint not installed"; then
+    echo "FAIL: missing golangci-lint should print the install hint warning" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    cleanup_last_run
+    return
+  fi
+  PASS=$((PASS + 1))
+  cleanup_last_run
+}
+
+# gu-lint-fastgate: when golangci-lint IS on PATH and it returns non-zero
+# (lint findings), the push is rejected EVEN under GT_SKIP_PREPUSH=1. This
+# is the symmetry to test_gofmt_blocks_under_skip — fast gates can't be
+# bypassed by --pre-verified.
+test_lint_gate_blocks_under_skip() {
+  local stubdir tmprepo
+  stubdir=$(mktemp -d)
+  tmprepo=$(mktemp -d)
+  cat > "$stubdir/go" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$stubdir/go"
+  cat > "$stubdir/gofmt" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$stubdir/gofmt"
+  cat > "$stubdir/golangci-lint" <<'EOF'
+#!/bin/bash
+echo "internal/foo.go:1:1: simulated lint finding" >&2
+exit 1
+EOF
+  chmod +x "$stubdir/golangci-lint"
+
+  ( cd "$tmprepo" && git init -q && \
+      git config user.email "test@example.com" && \
+      git config user.name "test" && \
+      git commit -q --allow-empty -m init ) >/dev/null 2>&1
+
+  local rc=0
+  local out
+  out=$(
+    cd "$tmprepo" && \
+    PATH="$stubdir:$PATH" \
+    env GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON=pre-verified \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    echo "FAIL: lint findings should reject push under GT_SKIP_PREPUSH=1 (got rc=0)" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1))
+    rm -rf "$stubdir" "$tmprepo"
+    return
+  fi
+  if ! echo "$out" | grep -qi "golangci-lint"; then
+    echo "FAIL: rejection message did not mention golangci-lint" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1))
+    rm -rf "$stubdir" "$tmprepo"
+    return
+  fi
+  PASS=$((PASS + 1))
+  rm -rf "$stubdir" "$tmprepo"
+}
+
 # Only run the functional test if we have a real `go` on PATH — otherwise
 # pre-push-check.sh short-circuits before the unset matters.
 if command -v go >/dev/null 2>&1; then
@@ -468,6 +554,9 @@ if command -v git >/dev/null 2>&1; then
   test_skip_without_reason_rejected
   test_skip_with_reason_audited
   test_skip_audit_appends
+  # gu-lint-fastgate: golangci-lint as a fast gate
+  test_lint_gate_skipped_when_not_installed
+  test_lint_gate_blocks_under_skip
 fi
 
 echo ""

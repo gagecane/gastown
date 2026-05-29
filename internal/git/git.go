@@ -1059,7 +1059,7 @@ func (g *Git) Push(remote, branch string, force bool) error {
 // SLOW gates (tests). The hook (scripts/pre-push-check.sh) splits gates into
 // two tiers per gu-7f0v: fast gates (build/vet/gofmt) run unconditionally,
 // only the slow tier is skippable. Per gu-zy57 the hook also requires
-// GT_SKIP_PREPUSH_REASON alongside GT_SKIP_PREPUSH=1 so every honoured skip
+// GT_SKIP_PREPUSH_REASON alongside GT_SKIP_PREPUSH=1 so every honored skip
 // lands in .runtime/prepush-skips.jsonl with a why. Push*SkipPrePush callers
 // are always the --pre-verified path, hence the fixed reason; emergency /
 // cherry-pick callers should use PushWithEnv and supply their own
