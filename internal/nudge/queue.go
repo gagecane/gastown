@@ -367,6 +367,50 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	return removed, nil
 }
 
+// HasKindByThread returns true if at least one queued nudge for the given
+// session matches both the kind and thread ID. Used to enforce per-thread
+// reminder budgets (e.g., reply-reminder fires once per thread, not once
+// per turn). See gu-0wcm.
+func HasKindByThread(townRoot, session, kind, threadID string) (bool, error) {
+	if kind == "" || threadID == "" {
+		return false, nil
+	}
+
+	dir := queueDir(townRoot, session)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading nudge queue: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return false, fmt.Errorf("reading queued nudge %s: %w", entry.Name(), err)
+		}
+
+		var n QueuedNudge
+		if err := json.Unmarshal(data, &n); err != nil {
+			continue
+		}
+		if n.Kind == kind && n.ThreadID == threadID {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // NormalizeReplySubject strips any number of leading "Re:" prefixes (any
 // case, with optional whitespace) and trims the result. Used to match a
 // satisfied reply against a queued reply-reminder when no thread ID is

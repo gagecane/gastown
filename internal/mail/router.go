@@ -1934,6 +1934,15 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if delay <= 0 {
 		return // Disabled by config
 	}
+	// Per-thread budget cap: skip if a reply-reminder is already queued for
+	// this (session, threadID). Avoids re-nudging every turn when an agent
+	// has chosen not to reply (or has a pending reply not yet visible).
+	// See gu-0wcm.
+	if msg.ThreadID != "" {
+		if exists, err := nudge.HasKindByThread(r.townRoot, sessionID, "reply-reminder", msg.ThreadID); err == nil && exists {
+			return
+		}
+	}
 	reminder := nudge.QueuedNudge{
 		Sender:          "system",
 		Message:         fmt.Sprintf("Remember to reply to %s (subject: %q) via `gt mail send %s` — not in chat.", msg.From, msg.Subject, msg.From),
