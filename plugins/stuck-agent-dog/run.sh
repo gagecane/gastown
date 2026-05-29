@@ -467,8 +467,20 @@ BODY
     continue
   fi
   log "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK)"
-  gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY
+  # Routing note (gu-nep2): RESTART_POLECAT mail used to be addressed to
+  # "$RIG/witness", but nothing in Go code or the witness formula actually
+  # processed the subject — requests piled up and polecats stayed dead
+  # until a human ran `gt session start` by hand. The daemon now polls the
+  # deacon inbox every heartbeat (processRestartPolecatRequests) and
+  # restarts the referenced polecat via witness.RestartPolecatWithBackoff,
+  # so addressing the mail to "deacon/" lets the daemon claim the message
+  # before any LLM agent touches it. NUKE_PENDING and other informational
+  # mail is still addressed to the witness (the audience that needs to see
+  # it).
+  gt mail send "deacon/" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY
 Polecat $PCAT crash confirmed by stuck-agent-dog plugin.
+rig: $RIG
+polecat: $PCAT
 hook_bead: $HOOK
 action: restart requested
 BODY
@@ -493,8 +505,12 @@ BODY
   fi
   log "Killing zombie session $SESSION and requesting restart"
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY
+  # gu-nep2: route to deacon inbox so the daemon's
+  # processRestartPolecatRequests handler picks it up.
+  gt mail send "deacon/" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY
 Polecat $PCAT zombie session cleared by stuck-agent-dog plugin.
+rig: $RIG
+polecat: $PCAT
 hook_bead: $HOOK
 reason: $REASON
 action: restart requested
@@ -523,8 +539,12 @@ BODY
   fi
   log "Killing stalled session $SESSION and requesting restart"
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (stalled-alive cleared)" --stdin <<BODY
+  # gu-nep2: route to deacon inbox so the daemon's
+  # processRestartPolecatRequests handler picks it up.
+  gt mail send "deacon/" -s "RESTART_POLECAT: $RIG/$PCAT (stalled-alive cleared)" --stdin <<BODY
 Polecat $PCAT session was alive but heartbeat was stale — agent idle at prompt.
+rig: $RIG
+polecat: $PCAT
 hook_bead: $HOOK
 reason: $REASON
 action: restart requested (hook and worktree preserved)

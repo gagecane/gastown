@@ -49,7 +49,7 @@ import (
 var polecatMinSessionAge = 5 * time.Minute
 
 // ErrPolecatSessionTooYoung is the sentinel returned by
-// restartPolecatWithBackoff when the polecat's live tmux session is
+// RestartPolecatWithBackoff when the polecat's live tmux session is
 // younger than polecatMinSessionAge. Callers unwrap it via
 // isPolecatRestartSkip to distinguish "we chose not to restart yet"
 // from "restart was attempted and failed."
