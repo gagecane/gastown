@@ -62,14 +62,36 @@ func init() {
 
 // PatrolScanOutput is the JSON output format for patrol scan results.
 type PatrolScanOutput struct {
-	Rig         string                    `json:"rig"`
-	Timestamp   string                    `json:"timestamp"`
-	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
-	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
-	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
-	PostHoc     *PatrolScanPostHocOutput  `json:"post_hoc_completions,omitempty"`
-	Stranded    *PatrolScanStrandedOutput `json:"stranded_assignees,omitempty"`
-	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
+	Rig            string                      `json:"rig"`
+	Timestamp      string                      `json:"timestamp"`
+	Zombies        *PatrolScanZombieOutput     `json:"zombies"`
+	Stalls         *PatrolScanStallOutput      `json:"stalls,omitempty"`
+	Completions    *PatrolScanCompleteOutput   `json:"completions,omitempty"`
+	PostHoc        *PatrolScanPostHocOutput    `json:"post_hoc_completions,omitempty"`
+	Stranded       *PatrolScanStrandedOutput   `json:"stranded_assignees,omitempty"`
+	StaleRigAgents *PatrolScanStaleRigAgentOut `json:"stale_rig_agents,omitempty"`
+	Receipts       []witness.PatrolReceipt     `json:"receipts,omitempty"`
+}
+
+// PatrolScanStaleRigAgentOut holds rig-agent staleness detection results
+// (gu-0nmw).
+type PatrolScanStaleRigAgentOut struct {
+	Checked int                           `json:"checked"`
+	Found   int                           `json:"found"`
+	Items   []PatrolScanStaleRigAgentItem `json:"items,omitempty"`
+	Errors  []string                      `json:"errors,omitempty"`
+}
+
+// PatrolScanStaleRigAgentItem is a single stale rig-agent in scan output.
+type PatrolScanStaleRigAgentItem struct {
+	Role             string `json:"role"`
+	Session          string `json:"session"`
+	HeartbeatAgeSecs int64  `json:"heartbeat_age_seconds"`
+	HeartbeatMissing bool   `json:"heartbeat_missing"`
+	SessionAlive     bool   `json:"session_alive"`
+	Action           string `json:"action"`
+	MailSent         bool   `json:"mail_sent"`
+	Error            string `json:"error,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -207,8 +229,16 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// transition-based zombie scan so that polecats observed alive→dead this
 	// cycle have a chance to take the existing path first; this scan catches
 	// the rest (already-dead-at-boot, dir-already-nuked, dead-between-cycles).
-	staleThreshold := config.LoadOperationalConfig(townRoot).GetWitnessConfig().StaleInProgressThresholdD()
+	witnessCfg := config.LoadOperationalConfig(townRoot).GetWitnessConfig()
+	staleThreshold := witnessCfg.StaleInProgressThresholdD()
 	strandedResult := witness.DetectStaleInProgressBeads(bd, workDir, rigName, router, staleThreshold)
+
+	// Stale rig-agent heartbeat detection (gu-0nmw). Catches the case where
+	// the refinery (or witness) process is up but the agent loop is wedged,
+	// or where the daemon supervisor missed a restart and the heartbeat sat
+	// untouched for hours.
+	staleAgentThreshold := witnessCfg.StaleRigAgentHeartbeatD()
+	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold)
 
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
@@ -225,10 +255,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, receipts)
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -283,7 +313,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -409,12 +439,41 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.Stranded = so
 	}
 
+	// Stale rig-agent heartbeats (gu-0nmw)
+	if staleAgentResult != nil {
+		so := &PatrolScanStaleRigAgentOut{
+			Checked: staleAgentResult.Checked,
+		}
+		for _, s := range staleAgentResult.Stale {
+			if s.Action == "escalated" {
+				so.Found++
+			}
+			item := PatrolScanStaleRigAgentItem{
+				Role:             s.AgentRole,
+				Session:          s.SessionName,
+				HeartbeatAgeSecs: int64(s.HeartbeatAge.Seconds()),
+				HeartbeatMissing: s.HeartbeatMissing,
+				SessionAlive:     s.SessionAlive,
+				Action:           s.Action,
+				MailSent:         s.MailSent,
+			}
+			if s.Error != nil {
+				item.Error = s.Error.Error()
+			}
+			so.Items = append(so.Items, item)
+		}
+		for _, e := range staleAgentResult.Errors {
+			so.Errors = append(so.Errors, e.Error())
+		}
+		output.StaleRigAgents = so
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -557,6 +616,43 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
+	// Stale rig-agent heartbeats (gu-0nmw)
+	if staleAgentResult != nil && (len(staleAgentResult.Stale) > 0 || patrolScanVerbose) {
+		fmt.Printf("%s Stale Rig-Agent Heartbeats: checked %d agent(s)\n",
+			style.Bold.Render("💔"), staleAgentResult.Checked)
+
+		escalated := 0
+		for _, s := range staleAgentResult.Stale {
+			if s.Action == "escalated" {
+				escalated++
+			}
+		}
+		if escalated == 0 && !patrolScanVerbose {
+			fmt.Printf("  %s\n", style.Dim.Render("No stale rig-agent heartbeats"))
+		} else {
+			for _, s := range staleAgentResult.Stale {
+				if s.Action != "escalated" && !patrolScanVerbose {
+					continue
+				}
+				ageStr := s.HeartbeatAge.Round(time.Second).String()
+				if s.HeartbeatMissing {
+					ageStr = "missing"
+				}
+				fmt.Printf("  ● %s/%s: age=%s session_alive=%v action=%s\n",
+					rigName, s.AgentRole, ageStr, s.SessionAlive, s.Action)
+				if s.Error != nil {
+					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", s.Error)))
+				}
+			}
+		}
+		if len(staleAgentResult.Errors) > 0 && patrolScanVerbose {
+			for _, e := range staleAgentResult.Errors {
+				fmt.Printf("    - %v\n", e)
+			}
+		}
+		fmt.Println()
+	}
+
 	// Summary
 	zombieCount := 0
 	activeCount := 0
@@ -584,12 +680,20 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			}
 		}
 	}
+	staleAgentCount := 0
+	if staleAgentResult != nil {
+		for _, s := range staleAgentResult.Stale {
+			if s.Action == "escalated" {
+				staleAgentCount++
+			}
+		}
+	}
 
-	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && postHocCount == 0 && strandedCount == 0 {
+	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && postHocCount == 0 && strandedCount == 0 && staleAgentCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d post-hoc, %d stranded\n",
-			zombieCount, activeCount, stallCount, completionCount, postHocCount, strandedCount)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d post-hoc, %d stranded, %d stale-agent(s)\n",
+			zombieCount, activeCount, stallCount, completionCount, postHocCount, strandedCount, staleAgentCount)
 	}
 
 	return nil

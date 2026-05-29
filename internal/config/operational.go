@@ -131,6 +131,12 @@ const (
 	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
 	DefaultWitnessHeartbeatStartupGrace  = 5 * time.Minute
 	DefaultWitnessStaleInProgressThresh  = 1 * time.Hour
+	// DefaultWitnessStaleRigAgentHeartbeat is the threshold above which a
+	// rig-level agent (refinery, witness) heartbeat is considered stale and the
+	// witness escalates to mayor with a STALE_RIG_AGENT mail. (gu-0nmw)
+	// 1h is comfortably longer than even a deeply backed-off await-signal
+	// idle (~5 min cap) so a healthy idle agent will never trip this.
+	DefaultWitnessStaleRigAgentHeartbeat = 1 * time.Hour
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -833,4 +839,15 @@ func (wt *WitnessThresholds) StaleInProgressThresholdD() time.Duration {
 		return ParseDurationOrDefault(wt.StaleInProgressThreshold, DefaultWitnessStaleInProgressThresh)
 	}
 	return DefaultWitnessStaleInProgressThresh
+}
+
+// StaleRigAgentHeartbeatD returns the configured or default age threshold above
+// which a rig-level agent (refinery, witness) heartbeat is considered stale
+// and escalated to mayor. (gu-0nmw) Set to 0 to disable the stale-agent
+// detection scan entirely.
+func (wt *WitnessThresholds) StaleRigAgentHeartbeatD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.StaleRigAgentHeartbeat, DefaultWitnessStaleRigAgentHeartbeat)
+	}
+	return DefaultWitnessStaleRigAgentHeartbeat
 }

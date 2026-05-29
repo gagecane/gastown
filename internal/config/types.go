@@ -544,6 +544,12 @@ type WitnessThresholds struct {
 	// catches polecats already dead at patrol boot or that died between cycles.
 	// Default "1h". (gu-wwyq)
 	StaleInProgressThreshold string `json:"stale_in_progress_threshold,omitempty"`
+
+	// StaleRigAgentHeartbeat is the minimum age of a rig-level agent (refinery,
+	// witness) heartbeat file above which the witness patrol escalates to mayor
+	// with a STALE_RIG_AGENT mail. Default "1h". Set to "0" to disable.
+	// (gu-0nmw)
+	StaleRigAgentHeartbeat string `json:"stale_rig_agent_heartbeat,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

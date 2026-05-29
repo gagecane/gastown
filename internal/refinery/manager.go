@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -296,6 +297,12 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
 		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
 	}
+
+	// Touch initial heartbeat so liveness detection works from the start.
+	// Subsequent touches happen on every gt command via persistentPreRun
+	// in cmd/root.go (gu-0nmw). Without this, the witness's stale-refinery
+	// scan can't tell a freshly-spawned refinery from a wedged one.
+	polecat.TouchSessionHeartbeat(townRoot, sessionID)
 
 	// Stream refinery's Claude Code JSONL conversation log to VictoriaLogs (opt-in).
 	if os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {

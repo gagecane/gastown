@@ -211,11 +211,17 @@ func touchPolecatHeartbeat() {
 		return
 	}
 
-	// Polecats, crew, dogs, and deacon all need session heartbeats — they're the
-	// ones checked by stuck-agent-dog and the witness for liveness detection.
+	// Polecats, crew, dogs, deacon, refinery, and witness all need session
+	// heartbeats — they're the ones checked by stuck-agent-dog, the witness
+	// stale-agent escalation, and `gt done`'s refinery-liveness guard for
+	// liveness detection. Without refinery/witness in this list, their
+	// heartbeat files never refresh, so a long-lived but otherwise healthy
+	// refinery looks "dead" the moment its initial-write timestamp ages out
+	// — the exact false-positive failure mode that triggered gu-0nmw.
 	role := os.Getenv("GT_ROLE")
 	if !strings.Contains(role, "polecat") && !strings.Contains(role, "crew") &&
-		!strings.Contains(role, "dog") && !strings.Contains(role, "deacon") {
+		!strings.Contains(role, "dog") && !strings.Contains(role, "deacon") &&
+		!strings.Contains(role, "refinery") && !strings.Contains(role, "witness") {
 		return
 	}
 

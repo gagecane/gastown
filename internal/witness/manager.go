@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -264,6 +265,11 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
 		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
 	}
+
+	// Touch initial heartbeat so liveness detection works from the start.
+	// Subsequent touches happen on every gt command via persistentPreRun
+	// in cmd/root.go (gu-0nmw).
+	polecat.TouchSessionHeartbeat(townRoot, sessionID)
 
 	// Start nudge-queue poller (gt-dgf). Claude's UserPromptSubmit hook only
 	// drains when the agent submits a prompt. Idle agents never submit, so
