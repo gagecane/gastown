@@ -38,8 +38,16 @@
 #   Tests job runs them. To run locally: `make verify-integration`.
 #
 # Escape hatches (use sparingly; if you're reaching regularly, file a bead):
-#   GT_SKIP_PREPUSH=1 git push       — skip SLOW gates only (fast gates still run)
-#   git push --no-verify             — skip ALL hooks (standard git)
+#   GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
+#                                    — skip SLOW gates (fast gates still run);
+#                                      REASON is required and audited (gu-zy57)
+#   git push --no-verify             — skip ALL hooks (standard git, NOT audited)
+#
+# Audit trail (gu-zy57):
+#   When GT_SKIP_PREPUSH=1 is honoured the script appends one JSON line to
+#   <repo>/.runtime/prepush-skips.jsonl recording who skipped the slow tier,
+#   why, and what was pushed. The empty-REASON case is rejected outright so
+#   a misconfigured caller can't silently bypass the slow tier without record.
 #
 # Why pre-push, not pre-commit:
 #   The existing pre-commit hook already runs go vet and a fast lint scoped
@@ -58,11 +66,79 @@ set -u
 # Fast gates (build, vet, gofmt) ALWAYS run — they're cheap and catch the
 # most common landing failures (gu-7f0v: trailing-newline gofmt landings under
 # --pre-verified that briefly broke main between push and CI catch).
+#
+# Audit (gu-zy57): a slow-tier skip MUST carry GT_SKIP_PREPUSH_REASON=<text>
+# and is recorded as one JSON line in <repo>/.runtime/prepush-skips.jsonl.
+# Without the reason the skip is rejected outright — misconfigured callers
+# that set the flag but not the reason fail closed instead of silently
+# bypassing tests.
+
+# json_escape <var> — escape a string for embedding inside a JSON value.
+# Handles backslashes, double quotes, and the control characters we expect
+# to see in branch names / actor strings. Anything more exotic still produces
+# parseable JSON because we never embed user input in a key, only in a value.
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+# emit_skip_event — append one JSON line to .runtime/prepush-skips.jsonl
+# describing this slow-tier skip. Best-effort: failures here MUST NOT block
+# the push, because the only thing worse than an unaudited skip is a script
+# that refuses to push because audit logging broke.
+emit_skip_event() {
+  local reason=$1
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  local events_dir="$repo_root/.runtime"
+  mkdir -p "$events_dir" 2>/dev/null || return 0
+  local events_file="$events_dir/prepush-skips.jsonl"
+
+  local ts actor branch sha
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  actor="${BD_ACTOR:-${GT_ROLE:-unknown}}"
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  sha=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+
+  local r a b
+  r=$(json_escape "$reason")
+  a=$(json_escape "$actor")
+  b=$(json_escape "$branch")
+
+  printf '{"ts":"%s","actor":"%s","reason":"%s","branch":"%s","sha":"%s"}\n' \
+    "$ts" "$a" "$r" "$b" "$sha" >> "$events_file" 2>/dev/null || true
+}
 
 SKIP_SLOW=0
 if [[ "${GT_SKIP_PREPUSH:-0}" == "1" ]]; then
+  if [[ -z "${GT_SKIP_PREPUSH_REASON:-}" ]]; then
+    cat >&2 <<'EOF'
+✗ Push rejected: GT_SKIP_PREPUSH=1 requires GT_SKIP_PREPUSH_REASON=<text>.
+
+Skipping the slow tier without recording why is what let unexplained
+test-suite bypasses through unaudited. Set a reason explaining the skip:
+
+  GT_SKIP_PREPUSH=1 \
+  GT_SKIP_PREPUSH_REASON="pre-verified: gates ran in formula step 7" \
+  git push
+
+Legitimate reasons include "pre-verified" (polecat already ran gates),
+"emergency: <bead>", or "cherry-pick: <context>". The reason is appended
+to .runtime/prepush-skips.jsonl so witness tooling can audit it.
+
+Note: fast gates (build/vet/gofmt) still run unconditionally — this only
+gates the SLOW tier (test suite). See gu-7f0v + gu-zy57.
+EOF
+    exit 1
+  fi
   SKIP_SLOW=1
-  echo "pre-push: GT_SKIP_PREPUSH=1, skipping SLOW gates (tests). Fast gates still run." >&2
+  emit_skip_event "${GT_SKIP_PREPUSH_REASON}"
+  echo "pre-push: GT_SKIP_PREPUSH=1, skipping SLOW gates (tests; reason: ${GT_SKIP_PREPUSH_REASON}). Fast gates still run." >&2
 fi
 
 # --- Locate repo root -----------------------------------------------------
@@ -196,8 +272,9 @@ might pass locally without this gate but fail in CI. This script unsets
 those vars to match CI — if a test unexpectedly fails here but passes
 with those set, the test is the bug, not your change.
 
-Emergency escape hatch (skips SLOW gates only — fast gates still run):
-  GT_SKIP_PREPUSH=1 git push
+Emergency escape hatch (skips SLOW gates only — fast gates still run;
+REASON is required and recorded in .runtime/prepush-skips.jsonl):
+  GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
 EOF
   exit 1
 fi
