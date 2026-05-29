@@ -1203,6 +1203,16 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 	_, _ = fmt.Fprintf(e.output, "  Worker: %s\n", mr.Worker)
 	_, _ = fmt.Fprintf(e.output, "  Source: %s\n", mr.SourceIssue)
 
+	// Phase 2 (gu-xuzc): Refuse to process MRs while ciwatcher has the merge
+	// queue frozen. The freeze flag is written when post-merge CI fails on
+	// the target branch and is cleared automatically by the next passing run
+	// (or manually via `gt ci-watcher unfreeze`). Returning NoMerge here
+	// keeps the MR in the queue so the refinery picks it up again after the
+	// freeze clears.
+	if frozen, frozenResult := e.CheckMQFreeze(); frozen {
+		return frozenResult
+	}
+
 	// Phase 3: Check pre-verification fast-path.
 	// If the polecat already rebased onto the target and ran gates, and the target
 	// hasn't moved since, we can skip running gates entirely (~5s merge).
