@@ -130,6 +130,7 @@ const (
 	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
 	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
 	DefaultWitnessHeartbeatStartupGrace  = 5 * time.Minute
+	DefaultWitnessStaleInProgressThresh  = 1 * time.Hour
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -820,4 +821,16 @@ func (wt *WitnessThresholds) HeartbeatStartupGraceD() time.Duration {
 		return ParseDurationOrDefault(wt.HeartbeatStartupGrace, DefaultWitnessHeartbeatStartupGrace)
 	}
 	return DefaultWitnessHeartbeatStartupGrace
+}
+
+// StaleInProgressThresholdD returns the configured or default age threshold above
+// which an in_progress bead with a dead-polecat assignee is considered stranded
+// and escalated to mayor. (gu-wwyq) The complementary alive→dead transition
+// path is handled by DetectZombiePolecats; this threshold drives the
+// steady-state path that catches polecats already dead at patrol boot.
+func (wt *WitnessThresholds) StaleInProgressThresholdD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.StaleInProgressThreshold, DefaultWitnessStaleInProgressThresh)
+	}
+	return DefaultWitnessStaleInProgressThresh
 }

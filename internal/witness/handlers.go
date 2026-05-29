@@ -4189,6 +4189,248 @@ func DetectOrphanedMolecules(bd *BdCli, workDir, rigName string, router *mail.Ro
 	return result
 }
 
+// StrandedAssigneeLabel is added to in_progress beads after the witness has
+// mailed mayor about their stranded state. Used to dedupe: each bead generates
+// at most one mail until the label is removed (or the bead recovers and the
+// label is cleared by the operator / re-dispatch).
+const StrandedAssigneeLabel = "stranded-assignee"
+
+// StaleInProgressBeadResult records a single stranded-assignee detection.
+type StaleInProgressBeadResult struct {
+	BeadID      string        // bead stuck in in_progress
+	Assignee    string        // full assignee address (rig/polecats/name)
+	PolecatName string        // extracted polecat name
+	Age         time.Duration // time since updated_at
+	Action      string        // "escalated", "skip-already-labeled", "skip-fresh", "skip-alive"
+	MailSent    bool          // true if mayor was notified this cycle
+	Error       error
+}
+
+// DetectStaleInProgressBeadsResult holds aggregate results.
+type DetectStaleInProgressBeadsResult struct {
+	Checked  int
+	Stranded []StaleInProgressBeadResult
+	Errors   []error
+}
+
+// DetectStaleInProgressBeads scans for in_progress beads whose polecat assignee
+// is dead (no tmux session) and whose updated_at is older than the configured
+// stale threshold (default 1h). Each detection mails mayor a STRANDED_ASSIGNEE
+// notification and adds the `stranded-assignee` label to dedupe — the bead
+// produces at most one mail until the label is removed.
+//
+// This complements DetectZombiePolecats (which fires on alive→dead transitions
+// observed within a single patrol cycle) by catching the steady-state cases:
+//   - Polecat died between patrol cycles or before witness boot — no transition
+//     was ever observed.
+//   - Polecat dir was nuked already, so DetectZombiePolecats can't see it.
+//   - DetectOrphanedBeads only handles the dir-gone case AND auto-resets — this
+//     function intentionally does NOT reset the bead. Mayor decides whether to
+//     re-sling, close as obsolete, or hand off the work.
+//
+// Preconditions for escalation (ALL must hold):
+//   - Bead status is in_progress (we deliberately do NOT scan hooked — those are
+//     freshly slung and the deacon's responsibility, not stranded work).
+//   - Assignee parses as <rigName>/polecats/<name>.
+//   - Polecat tmux session is dead (HasSession == false).
+//   - Bead's updated_at is older than the configured stale threshold.
+//   - Bead does NOT already carry the `stranded-assignee` label.
+//
+// Behavior:
+//   - Mails mayor with bead_id, polecat, age, last assignee.
+//   - Adds `stranded-assignee` label. If mail send fails the label is still
+//     applied — the operator's signal is "this bead has been seen as stranded";
+//     dedup must hold even when mail flakes.
+//   - Does NOT reset the bead status or clear the assignee. That decision is
+//     mayor's (re-sling, close, or investigate).
+func DetectStaleInProgressBeads(bd *BdCli, workDir, rigName string, router *mail.Router, staleThreshold time.Duration) *DetectStaleInProgressBeadsResult {
+	result := &DetectStaleInProgressBeadsResult{}
+
+	if staleThreshold <= 0 {
+		// Defensive: a zero or negative threshold would label every in_progress
+		// bead the moment its polecat session was unreachable. Treat as disabled.
+		return result
+	}
+
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+	initRegistryFromTownRoot(townRoot)
+
+	// Read in_progress beads with the fields we need: id, assignee, updated_at,
+	// labels. Use bd list --json --limit=0 (consistent with DetectOrphanedBeads).
+	output, err := bd.Exec(workDir, "list", "--status=in_progress", "--json", "--limit=0")
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("listing in_progress beads: %w", err))
+		return result
+	}
+	if output == "" {
+		return result
+	}
+
+	type beadRow struct {
+		ID        string   `json:"id"`
+		Assignee  string   `json:"assignee"`
+		UpdatedAt string   `json:"updated_at"`
+		Labels    []string `json:"labels"`
+	}
+	var beadList []beadRow
+	if err := json.Unmarshal([]byte(output), &beadList); err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("parsing in_progress beads: %w", err))
+		return result
+	}
+
+	t := tmux.NewTmux()
+	now := time.Now().UTC()
+	polecatPrefix := rigName + "/polecats/"
+
+	for _, b := range beadList {
+		if b.Assignee == "" {
+			continue
+		}
+		if !strings.HasPrefix(b.Assignee, polecatPrefix) {
+			continue
+		}
+		polecatName := strings.TrimPrefix(b.Assignee, polecatPrefix)
+		if polecatName == "" {
+			continue
+		}
+		result.Checked++
+
+		// Skip if already labeled — we already mailed about this stranded bead.
+		// Operator removes the label (or re-dispatch clears it) to allow re-mail.
+		if hasLabel(b.Labels, StrandedAssigneeLabel) {
+			result.Stranded = append(result.Stranded, StaleInProgressBeadResult{
+				BeadID:      b.ID,
+				Assignee:    b.Assignee,
+				PolecatName: polecatName,
+				Action:      "skip-already-labeled",
+			})
+			continue
+		}
+
+		// Check polecat liveness via tmux.
+		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+		alive, sessErr := t.HasSession(sessionName)
+		if sessErr != nil {
+			result.Errors = append(result.Errors,
+				fmt.Errorf("checking session %s for bead %s: %w", sessionName, b.ID, sessErr))
+			continue
+		}
+		if alive {
+			// Polecat is alive; not stranded. Skip silently.
+			continue
+		}
+
+		// Compute age from updated_at; conservatively skip if we can't parse.
+		age, ok := parseBeadUpdatedAtAge(b.UpdatedAt, now)
+		if !ok {
+			// Treat unparseable timestamps as fresh (don't escalate prematurely).
+			result.Stranded = append(result.Stranded, StaleInProgressBeadResult{
+				BeadID:      b.ID,
+				Assignee:    b.Assignee,
+				PolecatName: polecatName,
+				Action:      "skip-bad-timestamp",
+			})
+			continue
+		}
+		if age < staleThreshold {
+			result.Stranded = append(result.Stranded, StaleInProgressBeadResult{
+				BeadID:      b.ID,
+				Assignee:    b.Assignee,
+				PolecatName: polecatName,
+				Age:         age,
+				Action:      "skip-fresh",
+			})
+			continue
+		}
+
+		// All preconditions met — this bead is stranded. Send mail to mayor and
+		// label the bead so we don't re-mail every patrol cycle. The label is
+		// applied even if mail send fails: the dedup invariant is "we observed
+		// this stranded bead," independent of mail-bus health.
+		stranded := StaleInProgressBeadResult{
+			BeadID:      b.ID,
+			Assignee:    b.Assignee,
+			PolecatName: polecatName,
+			Age:         age,
+			Action:      "escalated",
+		}
+
+		if router != nil {
+			subject := fmt.Sprintf("STRANDED_ASSIGNEE %s (dead polecat %s, age=%s)",
+				b.ID, polecatName, age.Round(time.Second))
+			body := fmt.Sprintf(`Bead %s has been in_progress for %s but its assignee
+%s has no live tmux session.
+
+Witness's alive→dead transition path (DetectZombiePolecats) does not fire on
+polecats that were already dead when patrol booted, or that died between cycles
+without leaving signal. This bead has been observed in steady-state as stranded.
+
+Action required: investigate. Possible responses:
+  - Re-sling the bead: `+"`gt sling %s %s --create --force`"+`
+  - Close as obsolete: `+"`bd close %s -r \"<reason>\"`"+`
+  - Hand off to a different agent.
+
+Dedup: this mail will not repeat for this bead — the witness has applied the
+%q label. Remove the label to re-arm the alarm.`,
+				b.ID, age.Round(time.Second), b.Assignee, b.ID, rigName, b.ID, StrandedAssigneeLabel)
+			msg := &mail.Message{
+				From:     fmt.Sprintf("%s/witness", rigName),
+				To:       "mayor/",
+				Subject:  subject,
+				Priority: mail.PriorityHigh,
+				Body:     body,
+			}
+			if err := router.Send(msg); err != nil {
+				stranded.Error = fmt.Errorf("mail mayor: %w", err)
+				// Nudge fallback — mail flakes shouldn't suppress the signal.
+				nudgeMsg := fmt.Sprintf("STRANDED_ASSIGNEE %s (dead polecat %s/%s, age=%s) — mail send failed",
+					b.ID, rigName, polecatName, age.Round(time.Second))
+				if nudgeErr := t.NudgeSession(session.MayorSessionName(), nudgeMsg); nudgeErr != nil {
+					fmt.Fprintf(os.Stderr, "witness: nudge fallback to mayor failed for %s: %v\n", b.ID, nudgeErr)
+				} else {
+					stranded.MailSent = true // delivered via nudge
+				}
+			} else {
+				stranded.MailSent = true
+			}
+		}
+
+		// Apply the dedup label even if mail failed (so we don't infinitely retry
+		// a flaky mail bus on every patrol cycle). The operator can manually
+		// remove the label to force a retry.
+		if labelErr := bd.Run(workDir, "update", b.ID, "--add-label="+StrandedAssigneeLabel); labelErr != nil {
+			if stranded.Error == nil {
+				stranded.Error = fmt.Errorf("add label: %w", labelErr)
+			} else {
+				stranded.Error = fmt.Errorf("%w; also add label: %v", stranded.Error, labelErr)
+			}
+		}
+
+		result.Stranded = append(result.Stranded, stranded)
+	}
+
+	return result
+}
+
+// parseBeadUpdatedAtAge parses a bead updated_at timestamp (RFC3339 or the
+// alternate space-separated form bd sometimes returns) and returns the age
+// relative to `now`. Returns (0, false) if the input can't be parsed.
+func parseBeadUpdatedAtAge(updatedAt string, now time.Time) (time.Duration, bool) {
+	if updatedAt == "" {
+		return 0, false
+	}
+	if ts, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+		return now.Sub(ts), true
+	}
+	if ts, err := time.Parse("2006-01-02 15:04:05", updatedAt); err == nil {
+		return now.Sub(ts), true
+	}
+	return 0, false
+}
+
 // getAttachedMoleculeID reads a bead and returns its attached_molecule ID, if any.
 func getAttachedMoleculeID(bd *BdCli, workDir, beadID string) string {
 	output, err := bd.Exec(workDir, "show", beadID, "--json")
