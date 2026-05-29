@@ -718,17 +718,37 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 
 	// Set issue_prefix on the correct server-side database.
 	// EnsureMetadata has corrected dolt_database to point at <rigName>.
-	// Use "bd init --server --prefix --force" which reliably sets issue_prefix,
-	// unlike "bd config set issue_prefix" which bd rejects. --force is safe here
-	// because this is a fresh rig with no existing agent config to lose.
+	//
+	// Three layered attempts (gu-1kaw):
+	//   1. `bd config set issue_prefix` — works on bd <1.0; rejected by bd 1.0+.
+	//   2. `bd rename-prefix <p>- --repair` — bd 1.0+'s supported path; also
+	//      consolidates any leftover rows that EnsureRigIssuePrefix seeded
+	//      with the rigName fallback (it runs BEFORE routes/rigs.json are
+	//      written, so it derives prefix from the rigName, then `bd config
+	//      set` and `bd init --prefix --force` both fail to correct it on
+	//      bd 1.0+: `--force` is deprecated AND refuses to destroy existing
+	//      data, and `bd config set issue_prefix` is explicitly rejected).
+	//   3. Surface a warning if both fail so the operator can run
+	//      `bd rename-prefix` manually.
 	{
 		resolvedBeadsDir := beads.ResolveBeadsDir(rigPath)
 		bdEnv := bdSubprocessEnv(resolvedBeadsDir, opts.Name)
 		prefixCmd := exec.Command("bd", "config", "set", "issue_prefix", opts.BeadsPrefix)
 		prefixCmd.Dir = rigPath
 		prefixCmd.Env = bdEnv
-		if out, err := prefixCmd.CombinedOutput(); err != nil {
-			fmt.Printf("  Warning: Could not set issue_prefix on rig database: %v (%s)\n", err, strings.TrimSpace(string(out)))
+		out, err := prefixCmd.CombinedOutput()
+		if err != nil {
+			// bd 1.0+ rejects this path. Fall back to rename-prefix --repair,
+			// which both sets issue_prefix and rewrites any existing rows that
+			// EnsureRigIssuePrefix seeded with the rigName fallback.
+			renameCmd := exec.Command("bd", "rename-prefix", opts.BeadsPrefix+"-", "--repair")
+			renameCmd.Dir = rigPath
+			renameCmd.Env = bdEnv
+			if rOut, rErr := renameCmd.CombinedOutput(); rErr != nil {
+				fmt.Printf("  Warning: Could not set issue_prefix on rig database: %v (%s)\n", err, strings.TrimSpace(string(out)))
+				fmt.Printf("  Warning: rename-prefix fallback also failed: %v (%s)\n", rErr, strings.TrimSpace(string(rOut)))
+				fmt.Printf("  Run 'bd rename-prefix %s- --repair' from %s to fix.\n", opts.BeadsPrefix, rigPath)
+			}
 		}
 		typesCmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
 		typesCmd.Dir = rigPath
@@ -1217,18 +1237,57 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	}
 
 	// Build environment with explicit BEADS_DIR to prevent bd from
-	// finding a parent directory's .beads/ database
+	// finding a parent directory's .beads/ database.
+	//
+	// BD_DOLT_AUTO_COMMIT must be forced to "on" (gu-1kaw): bd v1.0.3 changed
+	// the default from "on" to "off", which routes writes (bd init --prefix,
+	// bd config set issue_prefix, bd config set types.custom, bd migrate)
+	// into an uncommitted Dolt session that disappears when the subprocess
+	// exits. The result is a rig where issue_prefix is not persisted, so
+	// `bd create` on that rig auto-generates IDs from the rig name instead
+	// of the configured prefix. Strip any inherited "off" before appending.
+	//
+	// Also suppress bd's JSONL export / git-add / push side effects so bd
+	// init/config commands in the rig directory do not dirty user-tracked
+	// files (TestAgentWorktreesStayClean).
+	suppressKeys := []string{
+		"BEADS_DIR",
+		"BEADS_DB",
+		"BEADS_DOLT_SERVER_DATABASE",
+		"BD_DOLT_AUTO_COMMIT",
+		"BEADS_NO_AUTO_IMPORT",
+		"BD_EXPORT_AUTO",
+		"BD_BACKUP_ENABLED",
+		"BD_DOLT_AUTO_PUSH",
+		"BD_NO_PUSH",
+		"BD_EXPORT_GIT_ADD",
+		"BD_NO_GIT_OPS",
+	}
 	env := os.Environ()
-	filteredEnv := make([]string, 0, len(env)+2)
+	filteredEnv := make([]string, 0, len(env)+12)
+outer:
 	for _, e := range env {
-		if !strings.HasPrefix(e, "BEADS_DIR=") && !strings.HasPrefix(e, "BEADS_DB=") && !strings.HasPrefix(e, "BEADS_DOLT_SERVER_DATABASE=") {
-			filteredEnv = append(filteredEnv, e)
+		for _, key := range suppressKeys {
+			if strings.HasPrefix(e, key+"=") {
+				continue outer
+			}
 		}
+		filteredEnv = append(filteredEnv, e)
 	}
 	filteredEnv = append(filteredEnv, "BEADS_DIR="+beadsDir)
 	if rigName != "" {
 		filteredEnv = append(filteredEnv, "BEADS_DOLT_SERVER_DATABASE="+rigName)
 	}
+	filteredEnv = append(filteredEnv,
+		"BD_DOLT_AUTO_COMMIT=on",
+		"BEADS_NO_AUTO_IMPORT=1",
+		"BD_EXPORT_AUTO=false",
+		"BD_BACKUP_ENABLED=false",
+		"BD_DOLT_AUTO_PUSH=false",
+		"BD_NO_PUSH=true",
+		"BD_EXPORT_GIT_ADD=false",
+		"BD_NO_GIT_OPS=true",
+	)
 
 	// Ensure BEADS_DOLT_PORT and BEADS_DOLT_SERVER_HOST are set when their GT_
 	// counterparts are present, so that bd subprocesses connect to the correct
@@ -1555,10 +1614,36 @@ func isValidBeadsPrefix(prefix string) bool {
 }
 
 func bdSubprocessEnv(beadsDir, database string) []string {
-	env := make([]string, 0, len(os.Environ())+2)
+	// Force BD_DOLT_AUTO_COMMIT=on (gu-1kaw): bd v1.0.3 changed the default to
+	// "off", which silently strands writes from `bd init --prefix`, `bd config
+	// set issue_prefix`, etc. in an uncommitted Dolt session that vanishes when
+	// the subprocess exits. Callers of this helper rely on those writes
+	// persisting (rig setup, prefix config, custom types).
+	//
+	// Also suppress bd's JSONL export / git-add / push side effects: rig setup
+	// runs `bd init`/`bd config set` in the mayor clone working tree, where
+	// bd's auto-export of issues.jsonl + git-add would dirty the user repo
+	// (TestAgentWorktreesStayClean enforces clean worktree post-rig-add).
+	suppress := []string{
+		"BEADS_DIR",
+		"BEADS_DB",
+		"BEADS_DOLT_SERVER_DATABASE",
+		"BD_DOLT_AUTO_COMMIT",
+		"BEADS_NO_AUTO_IMPORT",
+		"BD_EXPORT_AUTO",
+		"BD_BACKUP_ENABLED",
+		"BD_DOLT_AUTO_PUSH",
+		"BD_NO_PUSH",
+		"BD_EXPORT_GIT_ADD",
+		"BD_NO_GIT_OPS",
+	}
+	env := make([]string, 0, len(os.Environ())+12)
+outer:
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "BEADS_DIR=") || strings.HasPrefix(e, "BEADS_DB=") || strings.HasPrefix(e, "BEADS_DOLT_SERVER_DATABASE=") {
-			continue
+		for _, key := range suppress {
+			if strings.HasPrefix(e, key+"=") {
+				continue outer
+			}
 		}
 		env = append(env, e)
 	}
@@ -1568,6 +1653,16 @@ func bdSubprocessEnv(beadsDir, database string) []string {
 	if database != "" {
 		env = append(env, "BEADS_DOLT_SERVER_DATABASE="+database)
 	}
+	env = append(env,
+		"BD_DOLT_AUTO_COMMIT=on",
+		"BEADS_NO_AUTO_IMPORT=1",
+		"BD_EXPORT_AUTO=false",
+		"BD_BACKUP_ENABLED=false",
+		"BD_DOLT_AUTO_PUSH=false",
+		"BD_NO_PUSH=true",
+		"BD_EXPORT_GIT_ADD=false",
+		"BD_NO_GIT_OPS=true",
+	)
 	return env
 }
 
