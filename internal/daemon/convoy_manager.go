@@ -375,6 +375,14 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 			// per-cycle and cross-cycle dedup so a later close is processed again.
 			delete(seen, issueID)
 			m.processedCloses.Delete(issueID)
+
+			// gu-kawd: if any convoy auto-closed on this issue's previous close,
+			// reopen it so the convoy's lifecycle stays in sync with the tracked
+			// bead. Without this, the convoy stays closed with completion_notified_at
+			// set; the next genuine close suppresses the notification (idempotent
+			// stamp), and operators see "Convoy complete" mails that look premature
+			// because the bead they reference is currently in_progress.
+			convoy.ReopenConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath)
 			continue
 		}
 

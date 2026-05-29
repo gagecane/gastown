@@ -108,6 +108,74 @@ func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, 
 	return convoyIDs
 }
 
+// ReopenConvoysForIssue finds any closed convoys that track the given issue
+// and reopens them, clearing the completion-notified stamp so a future genuine
+// completion can fire its notification again.
+//
+// This is the counterpart to CheckConvoysForIssue for the close→reopen pattern:
+// when a tracked bead is reopened (e.g., a polecat closed it via `gt done` but
+// then resumed work, or an operator reopened it for follow-up), the convoy that
+// auto-closed on the original close becomes stale. Without this reopen, the
+// convoy stays closed with a `completion_notified_at` stamp, so when the bead
+// later closes for real, no second notification fires (gu-kawd).
+//
+// The reopen path uses `gt convoy add <convoy> <issue>` because it already
+// implements the reopen-if-closed-and-clear-notification semantic (and is the
+// only existing reopen path in the convoy lifecycle). The bead is already
+// tracked, so the add is a no-op for the dependency edge — but the wrapper
+// performs exactly the convoy-side state surgery we need.
+//
+// The check is idempotent: open or staged convoys are skipped.
+//
+// Returns the convoy IDs that were reopened (may be empty).
+func ReopenConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, issueID, caller string, logger func(format string, args ...interface{}), gtPath string) []string {
+	if logger == nil {
+		logger = func(format string, args ...interface{}) {} // no-op
+	}
+	if store == nil {
+		return nil
+	}
+
+	convoyIDs := getTrackingConvoys(ctx, store, issueID, logger)
+	if len(convoyIDs) == 0 {
+		return nil
+	}
+
+	reopened := make([]string, 0, len(convoyIDs))
+	for _, convoyID := range convoyIDs {
+		if !isConvoyClosed(ctx, store, convoyID) {
+			continue
+		}
+
+		logger("%s: reopening convoy %s after %s reopened", caller, convoyID, issueID)
+		if err := runConvoyAdd(ctx, townRoot, convoyID, issueID, gtPath); err != nil {
+			logger("%s: convoy %s reopen failed: %s", caller, convoyID, util.FirstLine(err.Error()))
+			continue
+		}
+		reopened = append(reopened, convoyID)
+	}
+
+	return reopened
+}
+
+// runConvoyAdd runs `gt convoy add <convoy-id> <issue-id>` to reopen a closed
+// convoy and clear its completion-notified stamp. The bead is already tracked,
+// so the dependency edge is a no-op; we use this entry point because it is the
+// only existing path that performs the reopen + clear-notification surgery.
+func runConvoyAdd(ctx context.Context, townRoot, convoyID, issueID, gtPath string) error {
+	cmd := exec.CommandContext(ctx, gtPath, "convoy", "add", convoyID, issueID)
+	cmd.Dir = townRoot
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%v: %s", err, stderr.String())
+	}
+
+	return nil
+}
+
 // getTrackingConvoys returns convoy IDs that track the given issue.
 // Uses SDK GetDependentsWithMetadata filtered by type "tracks".
 func getTrackingConvoys(ctx context.Context, store beadsdk.Storage, issueID string, logger func(format string, args ...interface{})) []string {
