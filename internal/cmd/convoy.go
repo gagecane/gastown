@@ -1487,21 +1487,70 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	// computeTownWideScheduledSet for the fail-closed fallback handling.
 	scheduledSetAll := computeTownWideScheduledSet(townBeads)
 
-	// Check each convoy for stranded state
+	// Phase 1: collect tracked-bead IDs for every convoy in one cheap pass.
+	// bdDepListRawIDs is a SQL query against the local town deps table; it
+	// does NOT spawn the per-convoy bd show subprocess that getTrackedIssues
+	// otherwise would.
+	type convoyTracked struct {
+		convoy     convoyListIssue
+		baseBranch string
+		trackedIDs []string
+	}
+	convoyEntries := make([]convoyTracked, 0, len(convoys))
+	allTrackedIDs := make([]string, 0)
+	seenAll := make(map[string]bool)
 	for _, convoy := range convoys {
-		// Extract base_branch from convoy description fields
 		var baseBranch string
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
 		}
 
-		tracked, err := getTrackedIssues(townBeads, convoy.ID)
+		ids, err := getTrackedIssueIDs(townBeads, convoy.ID)
 		if err != nil {
 			// Write to stderr explicitly — stdout may be consumed as JSON
 			// by the daemon's JSON parser (fixes #2142).
 			fmt.Fprintf(os.Stderr, "⚠ Warning: skipping convoy %s: %v\n", convoy.ID, err)
 			continue
 		}
+
+		convoyEntries = append(convoyEntries, convoyTracked{
+			convoy:     convoy,
+			baseBranch: baseBranch,
+			trackedIDs: ids,
+		})
+		for _, id := range ids {
+			if !seenAll[id] {
+				seenAll[id] = true
+				allTrackedIDs = append(allTrackedIDs, id)
+			}
+		}
+	}
+
+	// Phase 2: ONE town-wide bd show for every tracked ID across every
+	// convoy — replaces the previous N_convoys per-convoy bd show fan-out
+	// (gu-mxra). getIssueDetailsBatch already does prefix routing from the
+	// town root, so cross-rig beads are still resolved correctly.
+	//
+	// getIssueDetailsBatch is invariant for the duration of one scan in the
+	// same sense as listAllSlingContexts (gu-c6ua): a status flip mid-scan
+	// can yield at most one cycle of detection latency, which the next scan
+	// reconciles.
+	var allDetails map[string]*issueDetails
+	var allWorkers map[string]*workerInfo
+	if len(allTrackedIDs) > 0 {
+		allDetails = getIssueDetailsBatch(allTrackedIDs)
+		allWorkers = getWorkersForIssues(openIssueIDsFromDetails(allTrackedIDs, allDetails))
+	} else {
+		allDetails = map[string]*issueDetails{}
+		allWorkers = map[string]*workerInfo{}
+	}
+
+	// Phase 3: per-convoy strandedness evaluation using the cached town-wide
+	// detail and worker maps. No more bd show subprocess fan-out here.
+	for _, entry := range convoyEntries {
+		convoy := entry.convoy
+		baseBranch := entry.baseBranch
+		tracked := buildTrackedIssueInfosFromCache(entry.trackedIDs, allDetails, allWorkers)
 		// Empty convoys (0 tracked issues) are stranded — they need
 		// attention (auto-close via convoy check or manual cleanup).
 		if len(tracked) == 0 {
@@ -2356,7 +2405,34 @@ func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
 // dependencies (see GH #2624, #2832). Falls back to bd dep list and bd show
 // for older bd versions that don't support bd sql.
 // Then fetches fresh issue details via bd show with prefix routing.
+//
+// For multi-convoy scans, prefer getTrackedIssueIDs +
+// buildTrackedIssueInfosFromCache so the per-convoy bd show fan-out can be
+// hoisted to a single town-wide batch (gu-mxra).
 func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
+	trackedIDs, err := getTrackedIssueIDs(townBeads, convoyID)
+	if err != nil {
+		return nil, err
+	}
+	if len(trackedIDs) == 0 {
+		return nil, nil
+	}
+
+	// Fetch fresh issue details via bd show (uses prefix routing for cross-rig).
+	freshDetails := getIssueDetailsBatch(trackedIDs)
+	workersMap := getWorkersForIssues(openIssueIDsFromDetails(trackedIDs, freshDetails))
+
+	return buildTrackedIssueInfosFromCache(trackedIDs, freshDetails, workersMap), nil
+}
+
+// getTrackedIssueIDs returns the bead IDs tracked by a convoy without
+// fetching fresh issue details. Splitting the cheap dep-edge lookup from the
+// expensive bd show batch lets findStrandedConvoys aggregate IDs across all
+// convoys before issuing a single town-wide bd show call (gu-mxra).
+//
+// Prefers raw SQL (works for cross-database deps), falls back to bd dep list,
+// then to bd show on the convoy itself.
+func getTrackedIssueIDs(townBeads, convoyID string) ([]string, error) {
 	// Prefer raw SQL — works for cross-database deps where tracked beads
 	// live in different Dolt databases. Falls back to bd dep list if bd sql
 	// is not available (older bd versions).
@@ -2378,18 +2454,44 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 		}
 	}
 
+	return trackedIDs, nil
+}
+
+// openIssueIDsFromDetails returns the subset of trackedIDs that should be
+// considered "open" for worker-lookup purposes — i.e., everything except
+// confirmed-closed beads. IDs missing from freshDetails are kept (treated as
+// unknown / non-closed) so worker info isn't silently dropped for cross-rig
+// beads whose details lookup failed.
+func openIssueIDsFromDetails(trackedIDs []string, freshDetails map[string]*issueDetails) []string {
+	open := make([]string, 0, len(trackedIDs))
+	for _, id := range trackedIDs {
+		if d, ok := freshDetails[id]; ok && d.Status == "closed" {
+			continue
+		}
+		open = append(open, id)
+	}
+	return open
+}
+
+// buildTrackedIssueInfosFromCache materializes []trackedIssueInfo for a
+// convoy's tracked IDs using pre-fetched detail and worker caches. This is
+// the per-convoy "build" half of getTrackedIssues, split out so callers that
+// scan many convoys can share a single town-wide bd show / worker batch
+// across all of them (gu-mxra).
+//
+// trackedIDs preserves call-site dependency ordering. Missing entries in
+// freshDetails are marked trackedStatusUnknown (gt-bs6). workersMap may be
+// nil; lookups against a nil map are safe and yield no worker info.
+func buildTrackedIssueInfosFromCache(
+	trackedIDs []string,
+	freshDetails map[string]*issueDetails,
+	workersMap map[string]*workerInfo,
+) []trackedIssueInfo {
 	if len(trackedIDs) == 0 {
-		return nil, nil
+		return nil
 	}
 
-	// Fetch fresh issue details via bd show (uses prefix routing for cross-rig).
-	freshDetails := getIssueDetailsBatch(trackedIDs)
-
-	// Build tracked dependency structs from fresh details. When fresh details
-	// are missing (cross-rig DB unreachable, missing, parked, or unroutable
-	// from town root), mark the dep with trackedStatusUnknown so callers can
-	// distinguish it from a legitimately open bead. (gt-bs6)
-	var deps []trackedDependency
+	tracked := make([]trackedIssueInfo, 0, len(trackedIDs))
 	for _, id := range trackedIDs {
 		dep := trackedDependency{
 			ID:             id,
@@ -2400,21 +2502,7 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 		} else {
 			dep.Status = trackedStatusUnknown
 		}
-		deps = append(deps, dep)
-	}
 
-	// Collect non-closed issue IDs for worker lookup
-	openIssueIDs := make([]string, 0, len(deps))
-	for _, dep := range deps {
-		if dep.Status != "closed" {
-			openIssueIDs = append(openIssueIDs, dep.ID)
-		}
-	}
-	workersMap := getWorkersForIssues(openIssueIDs)
-
-	// Build result
-	var tracked []trackedIssueInfo
-	for _, dep := range deps {
 		info := trackedIssueInfo{
 			ID:        dep.ID,
 			Title:     dep.Title,
@@ -2426,7 +2514,6 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 			Labels:    dep.Labels,
 		}
 
-		// Add worker info if available
 		if worker, ok := workersMap[dep.ID]; ok {
 			info.Worker = worker.Worker
 			info.WorkerAge = worker.Age
@@ -2435,7 +2522,7 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 		tracked = append(tracked, info)
 	}
 
-	return tracked, nil
+	return tracked
 }
 
 // bdDepListTracked runs `bd dep list <convoyID> --direction=down --type=tracks --json`

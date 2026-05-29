@@ -117,6 +117,166 @@ esac
 	}
 }
 
+// TestFindStrandedConvoys_SingleBdShowScan asserts that one full
+// findStrandedConvoys() invocation issues exactly one `bd show` subprocess
+// regardless of how many convoys are open.
+//
+// This is the production correctness check for the gu-mxra hoist: if future
+// refactoring re-introduces a per-convoy bd show fan-out, this test catches
+// it. Pre-hoist this scan would have spawned O(convoys) `bd show` calls;
+// post-hoist there's a single town-wide batch.
+//
+// Also verifies behavioral equivalence: every tracked bead across every
+// convoy must still appear in the resulting strandedConvoyInfo, with the
+// correct fresh-details fields populated. (gu-mxra acceptance criterion
+// "town-wide batch result matches per-convoy batches concatenated".)
+func TestFindStrandedConvoys_SingleBdShowScan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell-script mock test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"),
+		[]byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// Counter file: mock bd appends a marker line on every `bd show`
+	// invocation that targets work beads (i.e. has positional args).
+	// Convoy listing uses `bd list`, not `bd show`, so it doesn't trigger
+	// this counter.
+	counterPath := filepath.Join(binDir, "show-call-count")
+
+	// Mock bd: 3 convoys with distinct tracked beads (5 total). Pre-hoist
+	// would issue 3 `bd show` calls (one per convoy); post-hoist exactly 1.
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+COUNTER="` + counterPath + `"
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+
+case "$pos0" in
+  list)
+    case "$*" in
+      *--label=gt:sling-context*)
+        echo '[]'
+        exit 0
+        ;;
+      *--label=gt:agent*)
+        # Worker lookup — return no agents.
+        echo '[]'
+        exit 0
+        ;;
+    esac
+    # Convoy listing.
+    echo '[{"id":"hq-c1","title":"Convoy 1"},{"id":"hq-c2","title":"Convoy 2"},{"id":"hq-c3","title":"Convoy 3"}]'
+    exit 0
+    ;;
+  sql)
+    # bdDepListRawIDs: per-convoy tracked-IDs query.
+    case "$*" in
+      *"issue_id = 'hq-c1'"*) echo '[{"depends_on_id":"gt-r1"},{"depends_on_id":"gt-r2"}]';;
+      *"issue_id = 'hq-c2'"*) echo '[{"depends_on_id":"gt-r3"}]';;
+      *"issue_id = 'hq-c3'"*) echo '[{"depends_on_id":"gt-r4"},{"depends_on_id":"gt-r5"}]';;
+      *) echo '[]';;
+    esac
+    exit 0
+    ;;
+  show)
+    # Bump the counter for any positional show call.
+    echo X >> "$COUNTER"
+    # Echo back a minimal record for every requested ID so the batch result
+    # populates allDetails for all 5 tracked beads in one call.
+    out='['
+    sep=''
+    for arg in "$@"; do
+      case "$arg" in
+        gt-*)
+          out="${out}${sep}{\"id\":\"${arg}\",\"title\":\"T-${arg}\",\"status\":\"open\",\"issue_type\":\"task\",\"assignee\":\"\",\"labels\":[],\"blocked_by\":[],\"blocked_by_count\":0,\"dependencies\":[]}"
+          sep=','
+          ;;
+      esac
+    done
+    out="${out}]"
+    echo "$out"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stranded, err := findStrandedConvoys(townRoot)
+	if err != nil {
+		t.Fatalf("findStrandedConvoys() error: %v", err)
+	}
+
+	// Subprocess-fanout assertion.
+	data, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatalf("expected at least one bd show call; counter file %s: %v",
+			counterPath, err)
+	}
+	count := strings.Count(string(data), "X")
+	if count != 1 {
+		t.Errorf("hoist regression: bd show called %d times for 3 convoys "+
+			"(5 tracked beads); expected 1 hoisted town-wide batch. This is "+
+			"the gu-mxra regression check — pre-hoist scans issued one bd "+
+			"show per convoy, contributing the dominant remaining subprocess "+
+			"cost in stranded scans.", count)
+	}
+
+	// Behavioral-equivalence assertion: every tracked bead from every
+	// convoy is still discovered, with title materialized from the
+	// town-wide bd show result.
+	if len(stranded) != 3 {
+		t.Fatalf("expected 3 stranded convoys, got %d", len(stranded))
+	}
+	wantReady := map[string][]string{
+		"hq-c1": {"gt-r1", "gt-r2"},
+		"hq-c2": {"gt-r3"},
+		"hq-c3": {"gt-r4", "gt-r5"},
+	}
+	for _, s := range stranded {
+		want, ok := wantReady[s.ID]
+		if !ok {
+			t.Errorf("unexpected convoy id %s", s.ID)
+			continue
+		}
+		if s.TrackedCount != len(want) {
+			t.Errorf("convoy %s: TrackedCount = %d, want %d",
+				s.ID, s.TrackedCount, len(want))
+		}
+		if s.ReadyCount != len(want) {
+			t.Errorf("convoy %s: ReadyCount = %d, want %d", s.ID, s.ReadyCount, len(want))
+		}
+		gotSet := make(map[string]bool, len(s.ReadyIssues))
+		for _, id := range s.ReadyIssues {
+			gotSet[id] = true
+		}
+		for _, id := range want {
+			if !gotSet[id] {
+				t.Errorf("convoy %s: missing ready issue %s in %v", s.ID, id, s.ReadyIssues)
+			}
+		}
+	}
+}
+
 // TestFindStrandedConvoys_HoistedSetUsesHotSlingContexts verifies that
 // when a sling-context exists for a tracked bead, the bead is reported as
 // scheduled (not ready-stranded) — exercising the hoisted-set lookup path.
