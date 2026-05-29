@@ -84,6 +84,144 @@ func TestVerifyCommitReferencesBead_AcceptsBeadInBody(t *testing.T) {
 	}
 }
 
+// TestSkipVerifyRequiresReason_RejectsEmptyReason verifies the gu-kruw
+// rationale gate: --skip-verify with no --skip-verify-reason and no
+// GT_SKIP_VERIFY_REASON env var must be rejected by runDone before any
+// state mutation. Mirrors GT_SKIP_PREPUSH_REASON from gu-zy57.
+//
+// We exercise the validation block directly by emulating the variable
+// state runDone observes — full runDone needs a polecat workspace, but
+// this gate is the entire payload of the new check and is logically
+// independent. (gu-kruw)
+func TestSkipVerifyRequiresReason_RejectsEmptyReason(t *testing.T) {
+	// Save and restore globals + env so other tests see clean state.
+	prevSkip := doneSkipVerify
+	prevReason := doneSkipVerifyReason
+	prevEnv, hadEnv := os.LookupEnv("GT_SKIP_VERIFY_REASON")
+	t.Cleanup(func() {
+		doneSkipVerify = prevSkip
+		doneSkipVerifyReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_SKIP_VERIFY_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_SKIP_VERIFY_REASON")
+		}
+	})
+
+	doneSkipVerify = true
+	doneSkipVerifyReason = ""
+	os.Unsetenv("GT_SKIP_VERIFY_REASON")
+
+	err := validateSkipVerifyReason()
+	if err == nil {
+		t.Fatal("validateSkipVerifyReason accepted --skip-verify with empty reason — gu-kruw guard broken")
+	}
+	for _, want := range []string{"--skip-verify", "reason", "gu-kruw"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message missing %q: %q", want, err.Error())
+		}
+	}
+}
+
+// TestSkipVerifyRequiresReason_AcceptsFlagReason verifies that a
+// non-empty --skip-verify-reason satisfies the gate. (gu-kruw)
+func TestSkipVerifyRequiresReason_AcceptsFlagReason(t *testing.T) {
+	prevSkip := doneSkipVerify
+	prevReason := doneSkipVerifyReason
+	prevEnv, hadEnv := os.LookupEnv("GT_SKIP_VERIFY_REASON")
+	t.Cleanup(func() {
+		doneSkipVerify = prevSkip
+		doneSkipVerifyReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_SKIP_VERIFY_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_SKIP_VERIFY_REASON")
+		}
+	})
+
+	doneSkipVerify = true
+	doneSkipVerifyReason = "audit-only: report bead with no code changes"
+	os.Unsetenv("GT_SKIP_VERIFY_REASON")
+
+	if err := validateSkipVerifyReason(); err != nil {
+		t.Fatalf("validateSkipVerifyReason rejected a valid reason: %v", err)
+	}
+}
+
+// TestSkipVerifyRequiresReason_AcceptsEnvReason verifies that
+// GT_SKIP_VERIFY_REASON env var satisfies the gate when the flag is
+// empty. Provides a clean way for wrappers to inject context. (gu-kruw)
+func TestSkipVerifyRequiresReason_AcceptsEnvReason(t *testing.T) {
+	prevSkip := doneSkipVerify
+	prevReason := doneSkipVerifyReason
+	prevEnv, hadEnv := os.LookupEnv("GT_SKIP_VERIFY_REASON")
+	t.Cleanup(func() {
+		doneSkipVerify = prevSkip
+		doneSkipVerifyReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_SKIP_VERIFY_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_SKIP_VERIFY_REASON")
+		}
+	})
+
+	doneSkipVerify = true
+	doneSkipVerifyReason = ""
+	os.Setenv("GT_SKIP_VERIFY_REASON", "wrapper-injected: nightly audit run")
+
+	if err := validateSkipVerifyReason(); err != nil {
+		t.Fatalf("validateSkipVerifyReason rejected env-supplied reason: %v", err)
+	}
+	if doneSkipVerifyReason != "wrapper-injected: nightly audit run" {
+		t.Errorf("expected env reason to populate doneSkipVerifyReason, got %q", doneSkipVerifyReason)
+	}
+}
+
+// TestSkipVerifyRequiresReason_RejectsWhitespaceOnly verifies the gate
+// trims whitespace — a polecat passing --skip-verify-reason="   " should
+// be rejected the same as an empty reason. (gu-kruw)
+func TestSkipVerifyRequiresReason_RejectsWhitespaceOnly(t *testing.T) {
+	prevSkip := doneSkipVerify
+	prevReason := doneSkipVerifyReason
+	prevEnv, hadEnv := os.LookupEnv("GT_SKIP_VERIFY_REASON")
+	t.Cleanup(func() {
+		doneSkipVerify = prevSkip
+		doneSkipVerifyReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_SKIP_VERIFY_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_SKIP_VERIFY_REASON")
+		}
+	})
+
+	doneSkipVerify = true
+	doneSkipVerifyReason = "   \t  "
+	os.Unsetenv("GT_SKIP_VERIFY_REASON")
+
+	if err := validateSkipVerifyReason(); err == nil {
+		t.Fatal("validateSkipVerifyReason accepted whitespace-only reason — guard broken")
+	}
+}
+
+// TestSkipVerifyRequiresReason_NoOpWhenFlagUnset verifies the gate is
+// a no-op when --skip-verify is not set. The reason field can be
+// safely empty in that case. (gu-kruw)
+func TestSkipVerifyRequiresReason_NoOpWhenFlagUnset(t *testing.T) {
+	prevSkip := doneSkipVerify
+	prevReason := doneSkipVerifyReason
+	t.Cleanup(func() {
+		doneSkipVerify = prevSkip
+		doneSkipVerifyReason = prevReason
+	})
+
+	doneSkipVerify = false
+	doneSkipVerifyReason = ""
+
+	if err := validateSkipVerifyReason(); err != nil {
+		t.Fatalf("validateSkipVerifyReason errored without --skip-verify set: %v", err)
+	}
+}
+
 // --- Test helpers ---
 
 // newTestGitRepo creates a temp git repo with one initial commit and returns

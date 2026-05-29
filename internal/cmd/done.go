@@ -61,16 +61,17 @@ Examples:
 }
 
 var (
-	doneIssue         string
-	donePriority      int
-	doneStatus        string
-	doneCleanupStatus string
-	doneResume        bool
-	donePreVerified   bool
-	doneTarget        string
-	doneSkipVerify    bool
-	doneReason        string
-	doneDeferUntil    string
+	doneIssue            string
+	donePriority         int
+	doneStatus           string
+	doneCleanupStatus    string
+	doneResume           bool
+	donePreVerified      bool
+	doneTarget           string
+	doneSkipVerify       bool
+	doneSkipVerifyReason string
+	doneReason           string
+	doneDeferUntil       string
 )
 
 // defaultDeferredOffset is the cooldown applied to DEFERRED beads when the
@@ -117,6 +118,36 @@ func pushSHAForDone(g *git.Git, remote, sha, branch string, force bool) error {
 	return g.PushSHA(remote, sha, branch, force)
 }
 
+// validateSkipVerifyReason enforces the gu-kruw requirement that
+// --skip-verify carry a non-empty rationale (either via the
+// --skip-verify-reason flag or the GT_SKIP_VERIFY_REASON env var).
+// Mirrors the GT_SKIP_PREPUSH_REASON pattern from gu-zy57: skipping
+// verification without recording why is what let mis-cited close-reasons
+// proliferate (gu-rpeg). The reason is required so misconfigured callers
+// fail loudly instead of silently bypassing verification.
+//
+// On success the resolved reason is written back to doneSkipVerifyReason
+// so the rest of runDone (and the audit emitters in noteVerifiedPushSkipped
+// / MR description composition) can use it directly.
+//
+// No-op when --skip-verify is not set.
+func validateSkipVerifyReason() error {
+	if !doneSkipVerify {
+		return nil
+	}
+	if strings.TrimSpace(doneSkipVerifyReason) == "" {
+		doneSkipVerifyReason = strings.TrimSpace(os.Getenv("GT_SKIP_VERIFY_REASON"))
+	}
+	doneSkipVerifyReason = strings.TrimSpace(doneSkipVerifyReason)
+	if doneSkipVerifyReason == "" {
+		return fmt.Errorf("--skip-verify requires --skip-verify-reason=<text> (or GT_SKIP_VERIFY_REASON env var).\n" +
+			"Skipping verified-push checks without recording why is what let mis-cited\n" +
+			"close-reasons proliferate (gu-kruw, gu-rpeg). Provide a brief rationale, e.g.:\n" +
+			"  gt done --skip-verify --skip-verify-reason=\"audit-only: no code changes for this report bead\"")
+	}
+	return nil
+}
+
 // shortSHA abbreviates a git SHA for human-readable diagnostic output.
 // Returns the first 8 characters, or the full value if shorter. Used by
 // the gu-vtkn staleness guard to report stash-parent vs. HEAD divergence.
@@ -138,6 +169,7 @@ func init() {
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target). gt done re-runs the gates locally to verify the attestation; on red, the attestation is dropped and refinery runs gates normally (gu-xp5f).")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
+	doneCmd.Flags().StringVar(&doneSkipVerifyReason, "skip-verify-reason", "", "Required when --skip-verify is set: human-readable rationale recorded in audit comment (gu-kruw). Falls back to GT_SKIP_VERIFY_REASON env var.")
 	doneCmd.Flags().StringVar(&doneDeferUntil, "defer-until", "", "For --status=DEFERRED: when the bead becomes dispatchable again (e.g., +6h, +1d, tomorrow). Default: "+defaultDeferredOffset)
 
 	rootCmd.AddCommand(doneCmd)
@@ -158,6 +190,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	exitType := strings.ToUpper(doneStatus)
 	if exitType != ExitCompleted && exitType != ExitEscalated && exitType != ExitDeferred {
 		return fmt.Errorf("invalid exit status '%s': must be COMPLETED, ESCALATED, or DEFERRED", doneStatus)
+	}
+
+	if err := validateSkipVerifyReason(); err != nil {
+		return err
 	}
 
 	// Persistent polecat model (gt-hdf8): sessions stay alive after gt done.
@@ -795,28 +831,25 @@ afterSafetyNet:
 
 					closeReason := "Completed with no code changes (already fixed or pushed directly to main)"
 					noMRCommitSHA, _ := g.Rev("HEAD")
-					if doneSkipVerify {
-						noteVerifiedPushSkipped(cwd, issueID, defaultBranch, noMRCommitSHA, "--skip-verify on no-MR close")
-						if noMRCommitSHA != "" {
-							closeReason = fmt.Sprintf("%s\nskip_verify: true\ntarget_branch: %s\ncommit_sha: %s", closeReason, defaultBranch, noMRCommitSHA)
-						}
-					} else if !isNoMergeTask {
-						if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
-							noteVerifiedPushFailure(cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
-							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
-						}
-						// gu-551r: refuse the no-op close if the cited commit's
-						// message does not reference this bead's ID. This
-						// catches polecats that walked away from work without
-						// shipping anything, then closed citing whatever
-						// commit happened to be at HEAD (a sibling polecat's
-						// landing). Conventional commit format puts (<bead-id>)
-						// in the subject for legitimate work, so this check
-						// is mechanical and won't flag real fixes.
+
+					// gu-kruw: The bead-citation guard (gu-551r) is a logical
+					// postcondition independent of push verification. It runs
+					// REGARDLESS of --skip-verify so polecats can't bypass the
+					// false-close protection by adding the flag. The push-
+					// verification step is what --skip-verify legitimately
+					// disables; the citation check protects the close-reason
+					// metadata from referencing an unrelated sibling commit.
+					//
+					// no_merge / review_only tasks have no commits to cite by
+					// design, so the citation check is skipped for them — the
+					// task's nature is the audit trail.
+					if !isNoMergeTask {
 						if commitErr := verifyCommitReferencesBead(g, noMRCommitSHA, issueID); commitErr != nil {
 							return fmt.Errorf("cannot close no-MR code bead: %w\n\n"+
 								"This polecat is hooked to %s but the most recent commit on HEAD does not\n"+
 								"reference that bead ID. Closing here would falsely claim the work shipped.\n\n"+
+								"--skip-verify does NOT bypass this check (gu-kruw): the citation guard\n"+
+								"protects the close-reason metadata regardless of push verification.\n\n"+
 								"Choose one:\n"+
 								"  • If the work was done in a sibling commit you should be on:\n"+
 								"      git rebase / cherry-pick the right commit, then re-run gt done\n"+
@@ -824,6 +857,18 @@ afterSafetyNet:
 								"    landed on main): gt done --status DEFERRED with a reason note\n"+
 								"  • If you cannot make progress: gt done --status ESCALATED",
 								commitErr, issueID)
+						}
+					}
+
+					if doneSkipVerify {
+						noteVerifiedPushSkipped(cwd, issueID, defaultBranch, noMRCommitSHA, fmt.Sprintf("--skip-verify on no-MR close: %s", doneSkipVerifyReason))
+						if noMRCommitSHA != "" {
+							closeReason = fmt.Sprintf("%s\nskip_verify: true\nskip_verify_reason: %s\ntarget_branch: %s\ncommit_sha: %s", closeReason, doneSkipVerifyReason, defaultBranch, noMRCommitSHA)
+						}
+					} else if !isNoMergeTask {
+						if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
+							noteVerifiedPushFailure(cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
+							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
 						}
 						if noMRCommitSHA != "" {
 							closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, defaultBranch, noMRCommitSHA)
@@ -990,7 +1035,7 @@ afterSafetyNet:
 			}
 			directCommitSHA, _ := g.Rev("HEAD")
 			if doneSkipVerify {
-				noteVerifiedPushSkipped(cwd, issueID, defaultBranch, directCommitSHA, "--skip-verify on direct merge")
+				noteVerifiedPushSkipped(cwd, issueID, defaultBranch, directCommitSHA, fmt.Sprintf("--skip-verify on direct merge: %s", doneSkipVerifyReason))
 			} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
@@ -1174,7 +1219,7 @@ afterSafetyNet:
 			pushedCommitSHA, _ = g.Rev("HEAD")
 		}
 		if doneSkipVerify {
-			noteVerifiedPushSkipped(cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
+			noteVerifiedPushSkipped(cwd, issueID, branch, pushedCommitSHA, fmt.Sprintf("--skip-verify on branch push: %s", doneSkipVerifyReason))
 		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
 			pushFailed = true
 			errMsg := verifyErr.Error()
@@ -1386,7 +1431,7 @@ afterSafetyNet:
 				} else {
 					lateDirectCommitSHA, _ := g.Rev("HEAD")
 					if doneSkipVerify {
-						noteVerifiedPushSkipped(cwd, issueID, defaultBranch, lateDirectCommitSHA, "--skip-verify on late direct merge")
+						noteVerifiedPushSkipped(cwd, issueID, defaultBranch, lateDirectCommitSHA, fmt.Sprintf("--skip-verify on late direct merge: %s", doneSkipVerifyReason))
 					} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, lateDirectCommitSHA); verifyErr != nil {
 						pushFailed = true
 						errMsg := verifyErr.Error()
@@ -1539,6 +1584,7 @@ afterSafetyNet:
 			}
 			if doneSkipVerify {
 				description += "\nskip_verify: true"
+				description += fmt.Sprintf("\nskip_verify_reason: %s", doneSkipVerifyReason)
 			}
 			if worker != "" {
 				description += fmt.Sprintf("\nworker: %s", worker)
