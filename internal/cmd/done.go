@@ -793,6 +793,26 @@ afterSafetyNet:
 							noteVerifiedPushFailure(cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
 							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
 						}
+						// gu-551r: refuse the no-op close if the cited commit's
+						// message does not reference this bead's ID. This
+						// catches polecats that walked away from work without
+						// shipping anything, then closed citing whatever
+						// commit happened to be at HEAD (a sibling polecat's
+						// landing). Conventional commit format puts (<bead-id>)
+						// in the subject for legitimate work, so this check
+						// is mechanical and won't flag real fixes.
+						if commitErr := verifyCommitReferencesBead(g, noMRCommitSHA, issueID); commitErr != nil {
+							return fmt.Errorf("cannot close no-MR code bead: %w\n\n"+
+								"This polecat is hooked to %s but the most recent commit on HEAD does not\n"+
+								"reference that bead ID. Closing here would falsely claim the work shipped.\n\n"+
+								"Choose one:\n"+
+								"  • If the work was done in a sibling commit you should be on:\n"+
+								"      git rebase / cherry-pick the right commit, then re-run gt done\n"+
+								"  • If the bead is genuinely already complete (e.g. duplicate of work\n"+
+								"    landed on main): gt done --status DEFERRED with a reason note\n"+
+								"  • If you cannot make progress: gt done --status ESCALATED",
+								commitErr, issueID)
+						}
 						if noMRCommitSHA != "" {
 							closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, defaultBranch, noMRCommitSHA)
 							// gu-ftja: receipt for the no-MR direct-to-default push.
@@ -1953,6 +1973,50 @@ func forceCloseWithRetry(bd *beads.Beads, issueID, closeReason string) error {
 		}
 	}
 	return closeErr
+}
+
+// verifyCommitReferencesBead checks that the commit at the given SHA mentions
+// the given bead ID in its message. This guards against the false-close
+// pattern where a polecat with no commits of its own closes its hooked bead
+// citing whatever commit is currently at HEAD — which is a sibling polecat's
+// landing for an unrelated bead.
+//
+// The check is intentionally mechanical and lenient: a single substring match
+// on the bead ID anywhere in the commit message body or subject is enough.
+// Conventional commit format used by Gas Town puts (<bead-id>) in the subject
+// for any committed work, so legitimate no-MR closes (rare but real — e.g.
+// when a previous polecat's commit already shipped this bead's work) match
+// trivially. False-close scenarios — citing some other bead's commit — fail.
+//
+// Returns nil if the commit references beadID. Returns a descriptive error
+// otherwise. An empty SHA, an empty beadID, or an unreadable commit message
+// also returns a descriptive error so the close path fails closed (gu-551r).
+func verifyCommitReferencesBead(g *git.Git, commitSHA, beadID string) error {
+	if beadID == "" {
+		return fmt.Errorf("internal error: bead ID is empty (cannot verify commit reference)")
+	}
+	if commitSHA == "" {
+		return fmt.Errorf("no commit at HEAD to cite as evidence (cannot close with no-code-changes reason)")
+	}
+	msg, err := g.GetBranchCommitMessage(commitSHA)
+	if err != nil {
+		return fmt.Errorf("could not read commit %s message to verify bead reference: %w", shortSHA(commitSHA), err)
+	}
+	if !strings.Contains(msg, beadID) {
+		subject := firstLine(msg)
+		return fmt.Errorf("commit %s does not reference bead %s in its message — refusing to falsely cite it as 'completed' evidence (commit subject: %q)",
+			shortSHA(commitSHA), beadID, subject)
+	}
+	return nil
+}
+
+// firstLine returns the first newline-delimited line of s, trimmed. Used to
+// extract the subject line from a multi-line commit message for error display.
+func firstLine(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return strings.TrimSpace(s)
 }
 
 // shouldNudgeRefinery reports whether a gt done invocation may wake the
