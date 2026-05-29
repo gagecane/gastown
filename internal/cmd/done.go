@@ -1694,8 +1694,13 @@ notifyWitness:
 		style.PrintWarning("could not log feed event: %v", err)
 	}
 
-	// Update agent bead state (ZFC: self-report completion)
-	updateAgentStateOnDone(cwd, townRoot, exitType, issueID)
+	// Update agent bead state (ZFC: self-report completion).
+	// gu-rh0g: pass pushFailed/mrFailed through so the hooked-bead close
+	// path can refuse to false-close work that never reached origin/main.
+	// Without this guard the bead transitions to closed("Completed via gt
+	// done (exit=COMPLETED)") even when the polecat's commits were stranded
+	// on a polecat branch — destroying real work and trust signals.
+	updateAgentStateOnDone(cwd, townRoot, exitType, issueID, pushFailed || mrFailed)
 
 	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
 	// evaluate slot availability against stale hook_bead or cleanup_status and emit
@@ -2168,7 +2173,11 @@ func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 // BUG FIX (hq-3xaxy): This function must be resilient to working directory deletion.
 // If the polecat's worktree is deleted before gt done finishes, we use env vars as fallback.
 // All errors are warnings, not failures - gt done must complete even if bead ops fail.
-func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
+// stranded indicates the polecat's work failed to reach origin/main (push or
+// MR step failed). When true, updateAgentStateOnDone refuses to close the
+// hooked bead even on a COMPLETED exit, preventing the Pattern B false-close
+// where a stranded MR is incorrectly reported as shipped. (gu-rh0g)
+func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, stranded bool) {
 	// Get role context - try multiple sources for resilience
 	roleInfo, err := GetRoleWithContext(cwd, townRoot)
 	if err != nil {
@@ -2294,6 +2303,25 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 		} else {
 			fmt.Fprintf(os.Stderr, "Deferred %s until %s (suppresses re-dispatch loop)\n", hookedBeadID, deferUntil)
 		}
+	}
+
+	// Pattern B guard (gu-rh0g): refuse to close the hooked bead when the
+	// polecat's work never reached origin/main. A stranded push/MR means
+	// the bead is NOT done — closing here would falsely report shipped work
+	// and the only on-disk record of the fix (the polecat branch) is at
+	// risk of reaping. Tag the bead with `stranded-merge` so audits catch
+	// it, and let the bead stay open for cherry-pick / refinery recovery.
+	if stranded && hookedBeadID != "" {
+		strandedReason := fmt.Sprintf("Stranded merge (gu-rh0g): polecat exited %s but push/MR failed; commits not on origin/main. See polecat branch for unrecovered work.", exitType)
+		if err := bd.Update(hookedBeadID, beads.UpdateOptions{AddLabels: []string{"stranded-merge"}}); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't add stranded-merge label to %s: %v\n", hookedBeadID, err)
+		}
+		// Append a note to the bead so the audit trail is human-readable.
+		if _, err := bd.Run("note", "add", hookedBeadID, "--body="+strandedReason); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't add stranded-merge note to %s: %v\n", hookedBeadID, err)
+		}
+		fmt.Fprintf(os.Stderr, "WARN: hooked bead %s NOT closed — push/MR failed; bead labeled stranded-merge for recovery.\n", hookedBeadID)
+		goto doneStateUpdate
 	}
 
 	if hookedBeadID != "" && (exitType != ExitDeferred || isWorkflowStep || isReviewOrNoMergeBead) {

@@ -153,7 +153,7 @@ func TestUpdateAgentStateOnDone_ReviewOnlyDeferredClosesNotDefers(t *testing.T) 
 				t.Fatalf("chdir: %v", err)
 			}
 
-			updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitDeferred, "gt-leg-rev")
+			updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitDeferred, "gt-leg-rev", false)
 
 			data, err := os.ReadFile(callsLog)
 			if err != nil {
@@ -244,7 +244,7 @@ func TestUpdateAgentStateOnDone_NormalDeferredStillDefers(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitDeferred, "gt-base-456")
+	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitDeferred, "gt-base-456", false)
 
 	data, err := os.ReadFile(callsLog)
 	if err != nil {

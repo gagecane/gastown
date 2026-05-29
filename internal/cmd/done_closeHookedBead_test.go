@@ -169,7 +169,7 @@ func TestDoneCloseHookedBead_RetriesTransientFailure(t *testing.T) {
 	script := stubBdWithRetryableClose("gt-base-123", 2) // first attempt fails
 	townRoot, closesLog := setupCloseHookedBeadTestEnv(t, script)
 
-	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123")
+	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", false)
 
 	closesBytes, err := os.ReadFile(closesLog)
 	if err != nil {
@@ -224,7 +224,7 @@ func TestDoneCloseHookedBead_UsesForceAndReason(t *testing.T) {
 	script := stubBdWithRetryableClose("gt-never-fails", 0)
 	townRoot, closesLog := setupCloseHookedBeadTestEnv(t, script)
 
-	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123")
+	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", false)
 
 	closesBytes, err := os.ReadFile(closesLog)
 	if err != nil {
@@ -269,7 +269,7 @@ func TestDoneCloseHookedBead_GivesUpAfterMaxAttempts(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123")
+		updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", false)
 		close(done)
 	}()
 	select {
