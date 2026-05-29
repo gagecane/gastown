@@ -193,8 +193,21 @@ func doltTargetEnvFromBeadsDir(beadsDir string) []string {
 	}
 	meta := readDoltMetadata(beadsDir)
 	var env []string
-	if townRoot := FindTownRoot(filepath.Dir(beadsDir)); townRoot != "" {
-		env = append(env, "BEADS_DOLT_DATA_DIR="+filepath.Join(townRoot, ".dolt-data"))
+	// Only set BEADS_DOLT_DATA_DIR when:
+	//   - the rig is NOT configured for server mode (no Host/Port in metadata), AND
+	//   - the data dir actually exists on disk.
+	// bd v1.0.3+ honors BEADS_DOLT_DATA_DIR even when server mode is selected,
+	// and uses it as a database lookup root that overrides the server-side
+	// DB. With our shared-server topology, the town-level .dolt-data either
+	// doesn't exist or maps to a stale embedded DB — pointing bd at it makes
+	// rig-prefixed bead lookups fail with "not found" (gu-6a68).
+	if meta.Host == "" && meta.Port == "" {
+		if townRoot := FindTownRoot(filepath.Dir(beadsDir)); townRoot != "" {
+			dataDir := filepath.Join(townRoot, ".dolt-data")
+			if _, err := os.Stat(dataDir); err == nil {
+				env = append(env, "BEADS_DOLT_DATA_DIR="+dataDir)
+			}
+		}
 	}
 	if meta.Host != "" {
 		env = append(env, "BEADS_DOLT_SERVER_HOST="+meta.Host)

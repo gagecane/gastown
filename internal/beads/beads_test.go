@@ -189,6 +189,92 @@ func TestBuildPinnedBDEnvFallsBackToGTDoltPort(t *testing.T) {
 	}
 }
 
+// TestBuildPinnedBDEnv_OmitsDataDirForServerMode verifies that when
+// metadata.json indicates server mode (has dolt_server_host/port),
+// BEADS_DOLT_DATA_DIR is NOT injected into the env. bd v1.0.3+ honors
+// BEADS_DOLT_DATA_DIR even when server connection vars are set, and uses
+// it as a database lookup root that overrides the server-side DB. With
+// our shared-server topology, the town-level .dolt-data either doesn't
+// exist or maps to a stale embedded DB, and pointing bd at it makes
+// rig-prefixed bead lookups fail with "'<id>' not found" — which broke
+// the entire dispatch queue. (gu-6a68)
+func TestBuildPinnedBDEnv_OmitsDataDirForServerMode(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin"}, beadsDir)
+	got := envMap(env)
+	if value, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
+		t.Fatalf("BEADS_DOLT_DATA_DIR should be omitted in server mode (host+port present), got %q in %v", value, env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "3307" {
+		t.Fatalf("server port should still be set, got %q in %v", got["BEADS_DOLT_SERVER_PORT"], env)
+	}
+}
+
+// TestBuildPinnedBDEnv_SkipsMissingDataDirInLocalMode verifies that when
+// metadata.json has no server connection (local/embedded mode) AND the
+// computed .dolt-data dir does not exist on disk, BEADS_DOLT_DATA_DIR is
+// also omitted. This protects against pointing bd at a phantom path.
+// (gu-6a68)
+func TestBuildPinnedBDEnv_SkipsMissingDataDirInLocalMode(t *testing.T) {
+	tempTownRoot := t.TempDir()
+	beadsDir := filepath.Join(tempTownRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"rigdb"}`) // no server host/port → local mode
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Don't create .dolt-data — it should be skipped.
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin"}, beadsDir)
+	got := envMap(env)
+	if value, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
+		t.Fatalf("BEADS_DOLT_DATA_DIR should be omitted when path doesn't exist, got %q in %v", value, env)
+	}
+}
+
+// TestBuildPinnedBDEnv_SetsDataDirInLocalModeWhenPresent verifies the
+// happy path for embedded-mode: when no server vars are set in metadata
+// and the .dolt-data dir exists on disk, BEADS_DOLT_DATA_DIR is set so
+// bd can find the local Dolt data root. (gu-6a68)
+func TestBuildPinnedBDEnv_SetsDataDirInLocalModeWhenPresent(t *testing.T) {
+	tempTownRoot := t.TempDir()
+	// FindTownRoot needs mayor/town.json to recognize this as a town root.
+	if err := os.MkdirAll(filepath.Join(tempTownRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempTownRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(tempTownRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"rigdb"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(tempTownRoot, ".dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin"}, beadsDir)
+	got := envMap(env)
+	if got["BEADS_DOLT_DATA_DIR"] != dataDir {
+		t.Fatalf("BEADS_DOLT_DATA_DIR = %q, want %q in %v", got["BEADS_DOLT_DATA_DIR"], dataDir, env)
+	}
+}
+
 func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
 	env := SuppressBDSideEffects([]string{
 		"PATH=/usr/bin",
