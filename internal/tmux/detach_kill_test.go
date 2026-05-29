@@ -41,17 +41,33 @@ func TestDetachedKillSession(t *testing.T) {
 		t.Fatal("session should still exist immediately after spawning detached kill")
 	}
 
-	// Wait for the detached subprocess to kill it
-	time.Sleep(3 * time.Second)
+	// Poll for the detached subprocess to kill the session. The subprocess
+	// sleeps 1s then runs `tmux kill-session`; under CI load the spawn +
+	// scheduling slack can exceed a fixed-duration sleep, producing flakes.
+	// Use a generous polling deadline instead — we still verify the kill
+	// happens, just without racing on a tight timing assumption.
+	if waitForSessionGone(t, tm, sessionName, 15*time.Second) {
+		return
+	}
+	t.Error("session should have been killed by detached subprocess")
+}
 
-	// Session should be gone
-	has, err = tm.HasSession(sessionName)
-	if err != nil {
-		t.Fatalf("HasSession (after delay): %v", err)
+// waitForSessionGone polls HasSession until the session is absent or the
+// deadline elapses. Returns true if the session disappeared.
+func waitForSessionGone(t *testing.T, tm *Tmux, name string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		has, err := tm.HasSession(name)
+		if err != nil {
+			t.Fatalf("HasSession (poll): %v", err)
+		}
+		if !has {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	if has {
-		t.Error("session should have been killed by detached subprocess")
-	}
+	return false
 }
 
 func TestDetachedKillSessionWithProcesses(t *testing.T) {
@@ -81,17 +97,12 @@ func TestDetachedKillSessionWithProcesses(t *testing.T) {
 		t.Fatalf("DetachedKillSessionWithProcesses: %v", err)
 	}
 
-	// Wait for the detached subprocess to kill it
-	time.Sleep(3 * time.Second)
-
-	// Session should be gone
-	has, err = tm.HasSession(sessionName)
-	if err != nil {
-		t.Fatalf("HasSession (after delay): %v", err)
+	// Poll for the detached subprocess to kill the session (see comment in
+	// TestDetachedKillSession — fixed sleeps race under CI load).
+	if waitForSessionGone(t, tm, sessionName, 15*time.Second) {
+		return
 	}
-	if has {
-		t.Error("session should have been killed by detached subprocess")
-	}
+	t.Error("session should have been killed by detached subprocess")
 }
 
 func TestDetachedKillSession_InvalidName(t *testing.T) {
