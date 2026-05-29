@@ -182,4 +182,3 @@ func GetTownNameFromCwd() (string, error) {
 	}
 	return GetTownName(townRoot)
 }
-
