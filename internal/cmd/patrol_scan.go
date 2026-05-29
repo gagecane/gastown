@@ -62,14 +62,14 @@ func init() {
 
 // PatrolScanOutput is the JSON output format for patrol scan results.
 type PatrolScanOutput struct {
-	Rig         string                       `json:"rig"`
-	Timestamp   string                       `json:"timestamp"`
-	Zombies     *PatrolScanZombieOutput      `json:"zombies"`
-	Stalls      *PatrolScanStallOutput       `json:"stalls,omitempty"`
-	Completions *PatrolScanCompleteOutput    `json:"completions,omitempty"`
-	PostHoc     *PatrolScanPostHocOutput     `json:"post_hoc_completions,omitempty"`
-	Stranded    *PatrolScanStrandedOutput    `json:"stranded_assignees,omitempty"`
-	Receipts    []witness.PatrolReceipt      `json:"receipts,omitempty"`
+	Rig         string                    `json:"rig"`
+	Timestamp   string                    `json:"timestamp"`
+	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
+	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
+	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
+	PostHoc     *PatrolScanPostHocOutput  `json:"post_hoc_completions,omitempty"`
+	Stranded    *PatrolScanStrandedOutput `json:"stranded_assignees,omitempty"`
+	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -145,10 +145,10 @@ type PatrolScanPostHocItem struct {
 
 // PatrolScanStrandedOutput holds stranded-assignee detection results (gu-wwyq).
 type PatrolScanStrandedOutput struct {
-	Checked  int                       `json:"checked"`
-	Found    int                       `json:"found"`
-	Stranded []PatrolScanStrandedItem  `json:"stranded,omitempty"`
-	Errors   []string                  `json:"errors,omitempty"`
+	Checked  int                      `json:"checked"`
+	Found    int                      `json:"found"`
+	Stranded []PatrolScanStrandedItem `json:"stranded,omitempty"`
+	Errors   []string                 `json:"errors,omitempty"`
 }
 
 // PatrolScanStrandedItem is a single stranded-assignee detection in scan output.
