@@ -960,6 +960,23 @@ afterSafetyNet:
 
 		// Handle "direct" strategy: push to target branch, skip MR
 		if convoyInfo != nil && convoyInfo.MergeStrategy == "direct" {
+			// gu-8edz: refuse direct-push from polecats on merge-queue rigs.
+			// On merge_queue.enabled rigs the refinery owns the gate suite;
+			// silently letting a polecat push direct (whether by convoy
+			// strategy or by accident) bypasses gates and races refinery
+			// merges. Override is GT_ALLOW_DIRECT_PUSH=1 with an audit
+			// reason in GT_SKIP_PREPUSH_REASON (per gu-zy57).
+			if guardErr := guardDirectPushOnMergeQueue(townRoot, rigName, "convoy direct merge"); guardErr != nil {
+				pushFailed = true
+				style.PrintWarning("%v", guardErr)
+				if stale, reason := isRefineryHeartbeatStale(townRoot, rigName); stale {
+					fmt.Fprintf(os.Stderr, "  Refinery heartbeat is stale (%s) — leaving branch on origin for refinery to pick up.\n", reason)
+					if issueID != "" {
+						markAwaitingRefineryRecovery(beads.New(cwd), issueID, reason)
+					}
+				}
+				goto notifyWitness
+			}
 			fmt.Printf("%s Direct merge strategy: pushing to %s\n", style.Bold.Render("→"), defaultBranch)
 			// Push submodule changes before direct push (gt-dzs)
 			pushSubmoduleChanges(g, defaultBranch)
@@ -1339,51 +1356,70 @@ afterSafetyNet:
 			convoyInfo = getConvoyInfoForIssue(issueID)
 		}
 		if convoyInfo != nil && convoyInfo.MergeStrategy == "direct" {
-			fmt.Printf("%s Late-detected direct merge strategy: pushing to %s\n", style.Bold.Render("→"), defaultBranch)
-			fmt.Printf("  Convoy: %s\n", convoyInfo.ID)
+			// gu-8edz: refuse direct-push from polecats on merge-queue rigs.
+			// At this stage the feature branch was already pushed to
+			// origin/<branch>; refusing here just keeps the work parked
+			// there for refinery (or a follow-up MR) to consume. The flow
+			// falls through to normal MR creation below so refinery has a
+			// bead to act on once it recovers.
+			directBlocked := false
+			if guardErr := guardDirectPushOnMergeQueue(townRoot, rigName, "late-detected direct merge"); guardErr != nil {
+				directBlocked = true
+				style.PrintWarning("%v", guardErr)
+				if stale, reason := isRefineryHeartbeatStale(townRoot, rigName); stale {
+					fmt.Fprintf(os.Stderr, "  Refinery heartbeat is stale (%s) — falling through to MR creation so refinery can pick up on recovery.\n", reason)
+					if issueID != "" {
+						markAwaitingRefineryRecovery(bd, issueID, reason)
+					}
+				}
+			}
+			if !directBlocked {
+				fmt.Printf("%s Late-detected direct merge strategy: pushing to %s\n", style.Bold.Render("→"), defaultBranch)
+				fmt.Printf("  Convoy: %s\n", convoyInfo.ID)
 
-			// Push branch directly to main (the earlier push went to origin/<branch>)
-			directRefspec := branch + ":" + defaultBranch
-			directPushErr := pushForDone(g, directRefspec)
-			if directPushErr != nil {
-				// Direct push failed — fall through to normal MR creation
-				style.PrintWarning("late direct push to %s failed: %v — falling through to MR", defaultBranch, directPushErr)
-			} else {
-				lateDirectCommitSHA, _ := g.Rev("HEAD")
-				if doneSkipVerify {
-					noteVerifiedPushSkipped(cwd, issueID, defaultBranch, lateDirectCommitSHA, "--skip-verify on late direct merge")
-				} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, lateDirectCommitSHA); verifyErr != nil {
-					pushFailed = true
-					errMsg := verifyErr.Error()
-					noteVerifiedPushFailure(cwd, issueID, defaultBranch, lateDirectCommitSHA, verifyErr)
-					style.PrintWarning("%s\nLate direct merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
+				// Push branch directly to main (the earlier push went to origin/<branch>)
+				directRefspec := branch + ":" + defaultBranch
+				directPushErr := pushForDone(g, directRefspec)
+				if directPushErr != nil {
+					// Direct push failed — fall through to normal MR creation
+					style.PrintWarning("late direct push to %s failed: %v — falling through to MR", defaultBranch, directPushErr)
+				} else {
+					lateDirectCommitSHA, _ := g.Rev("HEAD")
+					if doneSkipVerify {
+						noteVerifiedPushSkipped(cwd, issueID, defaultBranch, lateDirectCommitSHA, "--skip-verify on late direct merge")
+					} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, lateDirectCommitSHA); verifyErr != nil {
+						pushFailed = true
+						errMsg := verifyErr.Error()
+						noteVerifiedPushFailure(cwd, issueID, defaultBranch, lateDirectCommitSHA, verifyErr)
+						style.PrintWarning("%s\nLate direct merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
+						goto notifyWitness
+					}
+					fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
+					// gu-ftja: receipt for the late-detected direct-merge push.
+					recordPushReceipt(g, townRoot, rigName, defaultBranch, lateDirectCommitSHA, pushlog.SourceDoneDirect, worker, issueID)
+
+					// Close the issue directly — refinery won't process it.
+					if issueID != "" {
+						var closeErr error
+						for attempt := 1; attempt <= 3; attempt++ {
+							closeErr = bd.ForceCloseWithReason(
+								fmt.Sprintf("Direct merge to %s (convoy strategy, late detection)", defaultBranch), issueID)
+							if closeErr == nil {
+								fmt.Printf("%s Issue %s closed (direct merge)\n", style.Bold.Render("✓"), issueID)
+								break
+							}
+							if attempt < 3 {
+								style.PrintWarning("close attempt %d/3 failed: %v (retrying in %ds)", attempt, closeErr, attempt*2)
+								time.Sleep(time.Duration(attempt*2) * time.Second)
+							}
+						}
+						if closeErr != nil {
+							style.PrintWarning("could not close issue %s after 3 attempts: %v", issueID, closeErr)
+						}
+					}
+
 					goto notifyWitness
 				}
-				fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
-				// gu-ftja: receipt for the late-detected direct-merge push.
-				recordPushReceipt(g, townRoot, rigName, defaultBranch, lateDirectCommitSHA, pushlog.SourceDoneDirect, worker, issueID)
-
-				// Close the issue directly — refinery won't process it.
-				if issueID != "" {
-					var closeErr error
-					for attempt := 1; attempt <= 3; attempt++ {
-						closeErr = bd.ForceCloseWithReason(
-							fmt.Sprintf("Direct merge to %s (convoy strategy, late detection)", defaultBranch), issueID)
-						if closeErr == nil {
-							fmt.Printf("%s Issue %s closed (direct merge)\n", style.Bold.Render("✓"), issueID)
-							break
-						}
-						if attempt < 3 {
-							style.PrintWarning("close attempt %d/3 failed: %v (retrying in %ds)", attempt, closeErr, attempt*2)
-							time.Sleep(time.Duration(attempt*2) * time.Second)
-						}
-					}
-					if closeErr != nil {
-						style.PrintWarning("could not close issue %s after 3 attempts: %v", issueID, closeErr)
-					}
-				}
-
-				goto notifyWitness
 			}
 		}
 
