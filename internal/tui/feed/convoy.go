@@ -195,7 +195,7 @@ var (
 				Foreground(colorPrimary)
 
 	ConvoySectionStyle = lipgloss.NewStyle().
-				Foreground(colorDim).
+				Foreground(colorPrimary).
 				Bold(true)
 
 	ConvoyIDStyle = lipgloss.NewStyle().
@@ -299,7 +299,12 @@ func renderConvoyLine(c Convoy, landed bool, width int) string {
 		titleWidth = 10
 	}
 
-	title := c.Title
+	// Sanitize multi-line titles: collapse whitespace runs (including \n)
+	// to single spaces so the title fits one logical row. Without this,
+	// titles containing "\n\n" (typical of design-exploration molecule
+	// convoys whose first paragraph wraps with a blank line) overflow the
+	// fixed-height row and push the trailing counter onto a later line.
+	title := strings.Join(strings.Fields(c.Title), " ")
 	if utf8.RuneCountInString(title) > titleWidth {
 		runes := []rune(title)
 		title = string(runes[:titleWidth-3]) + "..."

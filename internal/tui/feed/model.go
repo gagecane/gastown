@@ -742,7 +742,18 @@ func (m *Model) updateViewportSizes() {
 		m.treeViewport.Width = contentWidth
 		m.treeViewport.Height = treeHeight
 		m.convoyViewport.Width = contentWidth
-		m.convoyViewport.Height = convoyHeight
+		// renderConvoyPanel renders an inline "🚚 Convoys" title line ABOVE
+		// the viewport, inside the panel border. Reserve 1 row for it so
+		// the convoy panel fits its allocated `convoyHeight + 2 borders`
+		// budget instead of overflowing by 1 row (which pushes the feed
+		// panel off-screen at small terminal heights and can cause the
+		// viewport to truncate top-line content like the IN PROGRESS
+		// section header).
+		convoyViewportHeight := convoyHeight - 1
+		if convoyViewportHeight < 1 {
+			convoyViewportHeight = 1
+		}
+		m.convoyViewport.Height = convoyViewportHeight
 		m.feedViewport.Width = contentWidth
 		m.feedViewport.Height = feedHeight
 	}
