@@ -206,6 +206,137 @@ After all divergent packages are reconciled, rerun:
 fi
 ```
 
+## Step 1.5: Probe for Stale Untracked Test Files
+
+**Historical failure** (gu-ja4e / codegen_ws cws-25z, 2026-05-29): Step 1 only
+reconciles divergent *committed* state. It does not touch untracked files.
+Stale `*.test.ts` / `*.test.tsx` files left in `src/<pkg>/src/__tests__/` —
+typically strays from another rig that referenced now-deleted source modules
+— persisted across 28+ verify-build runs and produced repeated false build
+failures (TypeScript "Cannot find module" errors), masking real signal.
+
+This step scans each package for untracked test files and classifies them:
+
+- **Stray** — no corresponding source file under `src/` (excluding
+  `__tests__/`). The test references a module that does not exist;
+  almost certainly a leftover from another rig. Auto-removed (`rm` of the
+  specific file — never `git clean -fdx`, which would nuke `node_modules` /
+  `dist`).
+- **Keep** — matching source file exists. Could be legitimate WIP. Logged
+  and surfaced in a P2 triage bead so a human can decide.
+
+```bash
+STRAY_REMOVED=()
+LEFTOVER_TESTS=()
+
+for pkg in src/*/; do
+  pkg_name=$(basename "$pkg")
+  (
+    cd "$pkg" || exit 0
+
+    # Untracked test files under any __tests__/ directory in this package.
+    untracked=$(git ls-files --others --exclude-standard 2>/dev/null \
+      | grep -E '(^|/)__tests__/.*\.(test|spec)\.(ts|tsx|js|jsx)$' || true)
+    [ -z "$untracked" ] && exit 0
+
+    strays=""
+    keeps=""
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+
+      # Resolve probable matching source file: foo.test.ts → foo.ts (etc.)
+      # under the package's src/, excluding the __tests__ tree itself.
+      fname=$(basename "$f")
+      stem=$(echo "$fname" | sed -E 's/\.(test|spec)\.(ts|tsx|js|jsx)$//')
+      match=$(find src -type f \
+                \( -name "$stem.ts"  -o -name "$stem.tsx" \
+                -o -name "$stem.js"  -o -name "$stem.jsx" \) \
+                -not -path '*/__tests__/*' 2>/dev/null | head -1)
+
+      if [ -z "$match" ]; then
+        echo "[STRAY] $pkg_name: $f (no matching source $stem.{ts,tsx,js,jsx})"
+        # Targeted removal — single file, never recursive.
+        rm -f "$f"
+        strays+="${pkg_name}/${f}"$'\n'
+      else
+        echo "[KEEP]  $pkg_name: $f (matches $match — leaving for triage)"
+        keeps+="${pkg_name}/${f}"$'\n'
+      fi
+    done <<< "$untracked"
+
+    # Emit per-package summary on a single line each so the parent shell
+    # can collect them without subshell variable scope issues.
+    [ -n "$strays" ] && printf 'STRAY_BLOCK_BEGIN\n%sSTRAY_BLOCK_END\n' "$strays"
+    [ -n "$keeps" ]  && printf 'KEEP_BLOCK_BEGIN\n%sKEEP_BLOCK_END\n'  "$keeps"
+  )
+done > /tmp/verify-build-untracked.$$.log 2>&1
+cat /tmp/verify-build-untracked.$$.log
+
+# Collect leftovers (untracked tests with matching source) for the bead.
+LEFTOVERS=$(awk '/^KEEP_BLOCK_BEGIN$/{f=1;next} /^KEEP_BLOCK_END$/{f=0} f' \
+  /tmp/verify-build-untracked.$$.log)
+STRAYS=$(awk '/^STRAY_BLOCK_BEGIN$/{f=1;next} /^STRAY_BLOCK_END$/{f=0} f' \
+  /tmp/verify-build-untracked.$$.log)
+rm -f /tmp/verify-build-untracked.$$.log
+
+echo ""
+echo "=== Step 1.5 summary ==="
+if [ -n "$STRAYS" ]; then
+  echo "  strays auto-removed:"
+  printf '    %s\n' $STRAYS
+else
+  echo "  strays auto-removed: none"
+fi
+if [ -n "$LEFTOVERS" ]; then
+  echo "  untracked tests retained (need triage):"
+  printf '    %s\n' $LEFTOVERS
+else
+  echo "  untracked tests retained: none"
+fi
+
+# File a P2 triage bead only for the LEFTOVERS — strays are handled.
+# Do NOT abort on leftovers; the build will catch real problems and the
+# bead carries the breadcrumb for follow-up.
+if [ -n "$LEFTOVERS" ]; then
+  leftover_list=$(printf '%s\n' $LEFTOVERS)
+  existing=$(cd ~/gt/codegen_ws && bd list -l untracked-tests,plugin:verify-build --status open --json 2>/dev/null \
+    | jq -r '.[0].id // empty' 2>/dev/null)
+
+  if [ -n "$existing" ]; then
+    echo "[BEAD] appending to existing untracked-tests bead $existing"
+    cd ~/gt/codegen_ws && bd update "$existing" --comment "Untracked test files seen on verify-build $(date -u +%FT%TZ):
+$leftover_list" 2>/dev/null || true
+  else
+    echo "[BEAD] filing new untracked-tests triage bead"
+    cd ~/gt/codegen_ws && bd create "verify-build: untracked test files in src/__tests__/ need triage" \
+      -p P2 \
+      -t task \
+      -l untracked-tests,plugin:verify-build \
+      -d "Step 1.5 of verify-build found untracked *.test.* / *.spec.* files
+under src/<pkg>/src/__tests__/ that have a matching source file — i.e. they
+are NOT obvious strays from another rig and may be legitimate WIP. They were
+left in place; please decide whether to commit, stash, or delete them.
+
+Files (package/path):
+$leftover_list
+
+Inspect:
+  cd /workplace/canewiw/CodegenAgentScheduler/src/<pkg>
+  git status
+  git diff --no-index /dev/null <path>   # see what's in the file
+
+Then either:
+  git add <path> && git commit            # commit it
+  git stash push -- <path>                # stash for later
+  rm <path>                               # discard
+
+After triage, rerun:
+  gt plugin run verify-build --force
+" 2>/dev/null || true
+  fi
+fi
+```
+
 ## Step 2: Run Workspace Build
 
 ```bash
