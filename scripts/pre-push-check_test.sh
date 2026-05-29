@@ -106,10 +106,168 @@ EOF
   fi
 }
 
+# --- Fast/slow gate split (gu-7f0v) --------------------------------------
+#
+# `gt done --pre-verified` sets GT_SKIP_PREPUSH=1 to avoid re-running tests
+# the polecat already ran. The script must still enforce FAST gates
+# (build/vet/gofmt) under that env, because they're cheap and catch landing
+# failures that pre-verification commonly misses (e.g. trailing-newline gofmt
+# regressions on 2026-05-29 — bffac8f7, ced30a88).
+#
+# These tests stub `go` and `gofmt` so we can observe which gates ran
+# without depending on a real Go toolchain or a buildable workspace.
+
+# Set up an isolated stub dir and a temp git repo, run the script, and
+# return its exit code + stdout/stderr in globals OUT and RC.
+run_with_stubs() {
+  local stub_go=$1   # path to go stub script body
+  local stub_fmt=$2  # path to gofmt stub script body
+  local skip_slow=$3 # "1" to set GT_SKIP_PREPUSH=1, else "0"
+
+  local stubdir tmprepo
+  stubdir=$(mktemp -d)
+  tmprepo=$(mktemp -d)
+
+  cat > "$stubdir/go" <<EOF
+#!/bin/bash
+$stub_go
+EOF
+  chmod +x "$stubdir/go"
+
+  cat > "$stubdir/gofmt" <<EOF
+#!/bin/bash
+$stub_fmt
+EOF
+  chmod +x "$stubdir/gofmt"
+
+  ( cd "$tmprepo" && git init -q && git commit -q --allow-empty -m init ) >/dev/null 2>&1
+
+  local rc=0
+  OUT=$(
+    cd "$tmprepo" && \
+    PATH="$stubdir:$PATH" \
+    GT_SKIP_PREPUSH="$skip_slow" \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  RC=$rc
+
+  rm -rf "$stubdir" "$tmprepo"
+}
+
+# Test: under GT_SKIP_PREPUSH=1, fast gates still run (build/vet/gofmt invoked).
+test_fast_gates_run_under_skip() {
+  run_with_stubs \
+    'echo "go-called: $*" >&2; exit 0' \
+    'exit 0' \
+    1
+  if [[ $RC -ne 0 ]]; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 should pass when fast gates pass (got rc=$RC)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if ! echo "$OUT" | grep -q "go-called: build"; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 did not invoke 'go build'" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if ! echo "$OUT" | grep -q "go-called: vet"; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 did not invoke 'go vet'" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
+# Test: under GT_SKIP_PREPUSH=1, slow gate (go test) is skipped.
+test_slow_gate_skipped_under_skip() {
+  run_with_stubs \
+    'echo "go-called: $*" >&2; exit 0' \
+    'exit 0' \
+    1
+  if echo "$OUT" | grep -q "go-called: test"; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 should NOT invoke 'go test' but did" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
+# Test: gofmt failure rejects the push EVEN under GT_SKIP_PREPUSH=1.
+# This is the gu-7f0v acceptance criterion — pre-verified must not bypass gofmt.
+test_gofmt_blocks_under_skip() {
+  run_with_stubs \
+    'exit 0' \
+    'echo "bad.go"; exit 0' \
+    1
+  if [[ $RC -eq 0 ]]; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 with unformatted file should reject (got rc=0)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if ! echo "$OUT" | grep -qi "gofmt"; then
+    echo "FAIL: rejection message did not mention gofmt" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
+# Test: build failure rejects the push EVEN under GT_SKIP_PREPUSH=1.
+test_build_blocks_under_skip() {
+  run_with_stubs \
+    'if [[ "$1" == "build" ]]; then echo "build broken" >&2; exit 1; fi; exit 0' \
+    'exit 0' \
+    1
+  if [[ $RC -eq 0 ]]; then
+    echo "FAIL: GT_SKIP_PREPUSH=1 with broken build should reject (got rc=0)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
+# Test: without GT_SKIP_PREPUSH, slow gate runs.
+test_slow_gate_runs_by_default() {
+  run_with_stubs \
+    'echo "go-called: $*" >&2; exit 0' \
+    'exit 0' \
+    0
+  if [[ $RC -ne 0 ]]; then
+    echo "FAIL: default run should pass when all stubs pass (got rc=$RC)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if ! echo "$OUT" | grep -q "go-called: test"; then
+    echo "FAIL: default run did not invoke 'go test'" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  PASS=$((PASS + 1))
+}
+
 # Only run the functional test if we have a real `go` on PATH — otherwise
 # pre-push-check.sh short-circuits before the unset matters.
 if command -v go >/dev/null 2>&1; then
   functional_test
+fi
+
+# The fast/slow split tests use stubbed `go` and `gofmt`, so they don't
+# require a real toolchain — but they do require git.
+if command -v git >/dev/null 2>&1; then
+  test_fast_gates_run_under_skip
+  test_slow_gate_skipped_under_skip
+  test_gofmt_blocks_under_skip
+  test_build_blocks_under_skip
+  test_slow_gate_runs_by_default
 fi
 
 echo ""

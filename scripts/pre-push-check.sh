@@ -7,11 +7,22 @@
 # to main (no feature branches, no PR queue), so there is no merge-queue
 # backstop. This script closes that gap by running CI's gates locally.
 #
-# Gates (in order, fail-fast):
+# Gates are split into two tiers:
 #
-#   1. go build ./...            — compiles (catches broken imports, type errs)
-#   2. go vet ./...              — static analysis (shadow, printf, unreachable)
-#   3. go test ./... -count=1    — full unit test suite with clean env
+#   FAST gates (always run, even under GT_SKIP_PREPUSH=1):
+#     1. go build ./...            — compiles (catches broken imports, type errs)
+#     2. go vet ./...              — static analysis (shadow, printf, unreachable)
+#     3. gofmt -l                  — formatting check (catches trailing newlines etc.)
+#
+#   SLOW gates (skipped when GT_SKIP_PREPUSH=1):
+#     4. go test ./... -count=1    — full unit test suite with clean env (~2min)
+#
+# Why split? `gt done --pre-verified` sets GT_SKIP_PREPUSH=1 to avoid re-running
+# the slow test suite that the polecat already ran during pre-verification. But
+# tests are the only slow gate — build/vet/gofmt are seconds and there's no
+# legitimate reason to skip them. A polecat that lies about pre-verification,
+# runs gates against a stale base, or simply forgets to gofmt can still land
+# broken code on origin. The fast tier closes that gap. See gu-7f0v.
 #
 # Env hygiene:
 #   This script UNSETS GT_TOWN_ROOT and GT_ROOT before running tests. Some
@@ -27,8 +38,8 @@
 #   Tests job runs them. To run locally: `make verify-integration`.
 #
 # Escape hatches (use sparingly; if you're reaching regularly, file a bead):
-#   GT_SKIP_PREPUSH=1 git push       — skip this hook
-#   git push --no-verify             — skip all hooks (standard git)
+#   GT_SKIP_PREPUSH=1 git push       — skip SLOW gates only (fast gates still run)
+#   git push --no-verify             — skip ALL hooks (standard git)
 #
 # Why pre-push, not pre-commit:
 #   The existing pre-commit hook already runs go vet and a fast lint scoped
@@ -40,11 +51,18 @@
 
 set -u
 
-# --- Escape hatch ----------------------------------------------------------
+# --- Tier selection -------------------------------------------------------
+#
+# GT_SKIP_PREPUSH=1 (set by `gt done --pre-verified`) means the caller already
+# ran the full gate suite on a rebased branch, so skip the SLOW gates (tests).
+# Fast gates (build, vet, gofmt) ALWAYS run — they're cheap and catch the
+# most common landing failures (gu-7f0v: trailing-newline gofmt landings under
+# --pre-verified that briefly broke main between push and CI catch).
 
+SKIP_SLOW=0
 if [[ "${GT_SKIP_PREPUSH:-0}" == "1" ]]; then
-  echo "pre-push: GT_SKIP_PREPUSH=1, skipping local CI gates." >&2
-  exit 0
+  SKIP_SLOW=1
+  echo "pre-push: GT_SKIP_PREPUSH=1, skipping SLOW gates (tests). Fast gates still run." >&2
 fi
 
 # --- Locate repo root -----------------------------------------------------
@@ -96,9 +114,9 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
       GIT_PREFIX GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS \
       GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
-# --- Gate 1: go build -----------------------------------------------------
+# --- FAST GATE 1: go build ------------------------------------------------
 
-echo "pre-push: go build ./... (compile check)" >&2
+echo "pre-push: [fast] go build ./... (compile check)" >&2
 if ! go build ./... 2>&1; then
   cat >&2 <<'EOF'
 
@@ -107,15 +125,15 @@ if ! go build ./... 2>&1; then
 Fix compile errors before pushing. CI will reject the same build failures
 but with a ~5min round-trip cost.
 
-Emergency escape hatch:
-  GT_SKIP_PREPUSH=1 git push
+This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
+There is no escape hatch for build failures; fix the build.
 EOF
   exit 1
 fi
 
-# --- Gate 2: go vet -------------------------------------------------------
+# --- FAST GATE 2: go vet --------------------------------------------------
 
-echo "pre-push: go vet ./... (static analysis)" >&2
+echo "pre-push: [fast] go vet ./... (static analysis)" >&2
 if ! go vet ./... 2>&1; then
   cat >&2 <<'EOF'
 
@@ -124,15 +142,47 @@ if ! go vet ./... 2>&1; then
 Vet catches real bugs (shadow, printf, unreachable). Fix them or use
 //nolint:vet on the specific line if the warning is a false positive.
 
-Emergency escape hatch:
-  GT_SKIP_PREPUSH=1 git push
+This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
 EOF
   exit 1
 fi
 
-# --- Gate 3: go test (non-integration) ------------------------------------
+# --- FAST GATE 3: gofmt ---------------------------------------------------
+#
+# CI's gofmt gate caught two consecutive landings (bffac8f7, ced30a88, both
+# 2026-05-29) with trailing-newline failures, briefly breaking main between
+# each push and the CI catch. Running gofmt here moves detection in front of
+# the push, eliminating the broken-main window. See gu-7f0v.
 
-echo "pre-push: go test ./... -count=1 (unit tests)" >&2
+echo "pre-push: [fast] gofmt -l (formatting check)" >&2
+unformatted=$(gofmt -l . 2>/dev/null)
+if [[ -n "$unformatted" ]]; then
+  cat >&2 <<EOF
+
+✗ Push rejected: gofmt found unformatted files:
+$unformatted
+
+Run \`gofmt -w <file>\` (or \`gofmt -w .\`) to fix formatting, then re-push.
+
+This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
+EOF
+  exit 1
+fi
+
+# --- SLOW GATE: go test ---------------------------------------------------
+#
+# Skipped under GT_SKIP_PREPUSH=1. The contract: callers setting that env
+# (e.g. `gt done --pre-verified`) already ran tests on a rebased branch.
+# Build/vet/gofmt above are not skippable because they're cheap and catch
+# the failure modes that pre-verification often misses.
+
+if [[ "$SKIP_SLOW" == "1" ]]; then
+  echo "pre-push: [slow] tests skipped (GT_SKIP_PREPUSH=1)" >&2
+  echo "pre-push: fast gates passed ✓" >&2
+  exit 0
+fi
+
+echo "pre-push: [slow] go test ./... -count=1 (unit tests)" >&2
 if ! go test ./... -count=1 -timeout 5m 2>&1; then
   cat >&2 <<'EOF'
 
@@ -146,7 +196,7 @@ might pass locally without this gate but fail in CI. This script unsets
 those vars to match CI — if a test unexpectedly fails here but passes
 with those set, the test is the bug, not your change.
 
-Emergency escape hatch:
+Emergency escape hatch (skips SLOW gates only — fast gates still run):
   GT_SKIP_PREPUSH=1 git push
 EOF
   exit 1

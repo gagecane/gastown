@@ -4,9 +4,9 @@
 // Phase 2 (gu-4mj2). These verbs surface the per-rig state bead
 // for human and machine consumers:
 //
-//   * history — print the bounded attempt log (last N entries)
-//   * config  — print the rig's upstream-sync configuration, with
-//               --set <key=value> to mutate settings/config.json
+//   - history — print the bounded attempt log (last N entries)
+//   - config  — print the rig's upstream-sync configuration, with
+//     --set <key=value> to mutate settings/config.json
 //
 // Both default to the current rig (inferred from cwd) and accept
 // --rig=<name> for cross-rig operation.
