@@ -5,12 +5,14 @@
 // idle. Each transition is CAS-protected via TransitionTo and
 // recorded as a SyncAttempt entry on the per-rig state bead.
 //
-// In Phase 2 the implementation is conservative: it only handles the
-// fast-path (clean fast-forward merge with passing gates). Conflict
-// resolution dispatches a polecat in Phase 3 when the deacon patrol
-// integration lands. For now, conflicts cause a transition to
-// StateFailed with conflicts populated on the attempt record so an
-// operator can resolve manually.
+// Phase 4 (gu-g5gh) extends the conflict path: when a fast-forward
+// is not possible, we run the complexity gate (file/hunk thresholds
+// + restricted-path allowlist), and either dispatch a polecat for
+// autonomous resolution (StateChecking → StateResolving + work bead)
+// or escalate to a human (StateFailed with structured reason). After
+// any failure path, the circuit breaker is consulted: if N consecutive
+// failures have accumulated, the rig auto-pauses (StateFailed →
+// StatePaused) so polecat slots aren't burned retrying a wedged sync.
 //
 // The --dry-run flag short-circuits before any git ops: it prints
 // the current divergence and what would happen, leaving the state
@@ -182,17 +184,25 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(5)
 	}
 
-	// Determine merge strategy. Phase 2 only handles fast-forward.
+	// Determine merge strategy. Fast-forward is the happy path.
 	canFastForward := isAncestor(gitDir, targetRef, upstreamRef)
 	if !canFastForward {
-		// Conflict path — record and bail. Phase 3 dispatches polecat.
-		attempt.Outcome = "conflict"
-		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-		attempt.Conflicts = []string{"non-fast-forward (Phase 2: manual resolution required)"}
-		_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
-		fmt.Fprintln(stderr, "gt upstream sync: non-fast-forward merge required")
-		fmt.Fprintln(stderr, "  Phase 2 only supports clean fast-forwards. Phase 3 will dispatch a polecat for resolution.")
-		return NewSilentExit(6)
+		// Phase 4: detect conflicts, evaluate complexity, and either
+		// dispatch a polecat (resolvable) or escalate (restricted /
+		// too complex). All failure paths consult the circuit breaker
+		// before returning so a wedged rig auto-pauses.
+		exitCode := handleNonFastForward(
+			cmd, bd, rigPrefix, rigName, gitDir, syncCfg, &attempt,
+			upstreamRef, targetRef)
+		// Skip the breaker check when the dispatch path took us to
+		// StateResolving (exitCode==0) — only attempt-failure paths trip.
+		if exitCode != 0 {
+			maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
+		}
+		if exitCode == 0 {
+			return nil
+		}
+		return NewSilentExit(exitCode)
 	}
 
 	// Transition checking → syncing.
@@ -206,6 +216,7 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 		_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
 		fmt.Fprintf(stderr, "gt upstream sync: fast-forward failed: %v\n", err)
+		maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
 		return NewSilentExit(7)
 	}
 
@@ -231,6 +242,7 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 		_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
 		fmt.Fprintf(stderr, "gt upstream sync: gate failed: %s\n", gateResult.FailedCommand)
+		maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
 		return NewSilentExit(8)
 	}
 
@@ -248,6 +260,7 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 			attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 			_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
 			fmt.Fprintf(stderr, "gt upstream sync: push failed: %v\n", err)
+			maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
 			return NewSilentExit(9)
 		}
 	}
@@ -429,3 +442,185 @@ func iconForGate(r upstreamsync.GateResult) string {
 // Compile-time assertion that io.Writer is satisfied by the cobra
 // stdout/stderr we hand to printers (defense against API drift).
 var _ io.Writer = (*strings.Builder)(nil)
+
+// handleNonFastForward is the Phase 4 conflict-resolution decision
+// point. When the upstream merge cannot be fast-forwarded:
+//
+//  1. Detect conflicts non-destructively via DetectConflicts
+//     (`git merge-tree`).
+//  2. Evaluate the configured complexity policy + restricted-path
+//     allowlist via EvaluateComplexity.
+//  3. If the conflict is resolvable AND the rig's ConflictResolution
+//     mode is "agent": dispatch a polecat (StateChecking →
+//     StateResolving + sling-context). Returns 0 on success.
+//  4. Otherwise: record the failure with structured reason
+//     (StateChecking → StateFailed). Returns a non-zero exit code
+//     so callers can update the circuit breaker.
+//
+// The function takes ownership of mutating CurrentAttempt's
+// Conflicts/PolecatBead/ResolutionBranch fields when dispatching, so
+// the state bead reflects the in-flight resolution.
+func handleNonFastForward(
+	cmd *cobra.Command,
+	bd *beads.Beads,
+	rigPrefix, rigName, gitDir string,
+	cfg *config.UpstreamSyncConfig,
+	attempt *upstreamsync.SyncAttempt,
+	upstreamRef, targetRef string,
+) int {
+	stderr := cmd.ErrOrStderr()
+	stdout := cmd.OutOrStdout()
+
+	// 1. Detect conflicts non-destructively. A failure here means we
+	// can't reason about the merge — escalate without dispatching.
+	report, err := upstreamsync.DetectConflicts(gitDir, targetRef, upstreamRef)
+	if err != nil {
+		attempt.Outcome = "conflict-detect-error"
+		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		attempt.Conflicts = []string{fmt.Sprintf("conflict detection failed: %v", err)}
+		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
+		fmt.Fprintf(stderr, "gt upstream sync: cannot detect conflicts: %v\n", err)
+		return 6
+	}
+
+	// Defensive: if merge-tree reported clean but we couldn't FF, treat
+	// as an unknown-shape conflict and escalate.
+	if report.IsClean() {
+		attempt.Outcome = "conflict"
+		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		attempt.Conflicts = []string{"non-fast-forward but no files reported by merge-tree"}
+		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
+		fmt.Fprintln(stderr, "gt upstream sync: non-FF merge with no detectable conflict files — manual review required")
+		return 6
+	}
+
+	// 2. Evaluate complexity. The policy comes from rig config with
+	// security-design defaults filled in.
+	policy := upstreamsync.ComplexityPolicy{
+		MaxFiles:        cfg.GetMaxConflictFiles(),
+		MaxHunks:        cfg.GetMaxConflictHunks(),
+		RestrictedPaths: cfg.GetRestrictedPaths(),
+	}
+	verdict := upstreamsync.EvaluateComplexity(report.Files, report.HunkCount, policy)
+
+	fmt.Fprintf(stdout, "Conflict detected: %d file(s), %d hunk(s)\n",
+		verdict.FileCount, verdict.HunkCount)
+	for _, f := range report.Files {
+		fmt.Fprintf(stdout, "  - %s\n", f)
+	}
+
+	switch verdict.Class {
+	case upstreamsync.ComplexityRestrictedEscalate:
+		attempt.Outcome = "conflict-restricted"
+		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		attempt.Conflicts = report.Files
+		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
+		fmt.Fprintf(stderr, "gt upstream sync: %s — escalating to human review\n", verdict.Reason)
+		return 10
+
+	case upstreamsync.ComplexityTooComplexEscalate:
+		attempt.Outcome = "conflict-too-complex"
+		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		attempt.Conflicts = report.Files
+		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
+		fmt.Fprintf(stderr, "gt upstream sync: %s — escalating to human review\n", verdict.Reason)
+		return 11
+
+	case upstreamsync.ComplexityResolvable:
+		// Continue below.
+	}
+
+	// Honor the operator's "escalate" mode — even resolvable conflicts
+	// can be forced to escalation when the rig is configured for it.
+	if cfg.GetConflictResolution() == "escalate" {
+		attempt.Outcome = "conflict-escalated"
+		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		attempt.Conflicts = report.Files
+		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
+		fmt.Fprintf(stderr, "gt upstream sync: conflict escalated per rig config (conflict_resolution=escalate)\n")
+		return 12
+	}
+
+	// 3. Dispatch a polecat for autonomous resolution.
+	restricted := cfg.GetRestrictedPaths()
+	if len(restricted) == 0 {
+		restricted = upstreamsync.DefaultRestrictedPaths()
+	}
+	in := upstreamsync.DispatchInput{
+		Rig:             rigName,
+		AttemptID:       attempt.ID,
+		UpstreamRemote:  cfg.GetUpstreamRemote(),
+		UpstreamBranch:  cfg.GetUpstreamBranch(),
+		UpstreamSHA:     attempt.UpstreamSHA,
+		TargetBranch:    cfg.GetTargetBranch(),
+		TargetSHA:       attempt.PreSyncSHA,
+		ConflictedFiles: report.Files,
+		HunkCount:       report.HunkCount,
+		RestrictedPaths: restricted,
+		Strategy:        cfg.GetStrategy(),
+		Actor:           attempt.Actor,
+	}
+	// The rigBeads handle is the same as the town handle here because
+	// the per-rig beads dir resolves to the town path in the polecat
+	// worktree layout. A future refactor (deacon patrol integration)
+	// will pass distinct handles; for the manual `gt upstream sync`
+	// call site we use the same wrapper.
+	result, dispatchErr := upstreamsync.DispatchConflictResolution(bd, bd, in)
+	if dispatchErr != nil {
+		attempt.Outcome = "dispatch-error"
+		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		attempt.Conflicts = report.Files
+		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
+		fmt.Fprintf(stderr, "gt upstream sync: polecat dispatch failed: %v\n", dispatchErr)
+		return 13
+	}
+
+	// 4. Transition StateChecking → StateResolving and stamp the
+	// dispatched work bead onto CurrentAttempt for audit / recovery.
+	err = upstreamsync.TransitionTo(bd, rigPrefix, upstreamsync.StateResolving, func(s *upstreamsync.SyncStateMetadata) error {
+		s.State = upstreamsync.StateResolving
+		if s.CurrentAttempt == nil {
+			s.CurrentAttempt = &upstreamsync.CurrentAttempt{
+				ID:          attempt.ID,
+				StartedAt:   attempt.StartedAt,
+				UpstreamSHA: attempt.UpstreamSHA,
+				PreSyncSHA:  attempt.PreSyncSHA,
+				Strategy:    attempt.Strategy,
+				Actor:       attempt.Actor,
+			}
+		}
+		s.CurrentAttempt.Conflicts = report.Files
+		s.CurrentAttempt.PolecatBead = result.WorkBeadID
+		s.CurrentAttempt.ResolutionBranch = result.ResolutionBranch
+		return nil
+	})
+	if err != nil {
+		// The dispatch already created beads; recording the transition
+		// failure on the state bead is best-effort to avoid orphaning
+		// the sync flow. The polecat will still pick up the work and
+		// can advance state when it lands.
+		fmt.Fprintf(stderr, "gt upstream sync: dispatched but state transition failed: %v\n", err)
+	}
+	fmt.Fprintf(stdout, "✓ dispatched polecat for conflict resolution\n")
+	fmt.Fprintf(stdout, "  Work bead:     %s\n", result.WorkBeadID)
+	fmt.Fprintf(stdout, "  Sling context: %s\n", result.ContextBeadID)
+	fmt.Fprintf(stdout, "  Resolution branch: %s\n", result.ResolutionBranch)
+	return 0
+}
+
+// maybeReportCircuitBreaker checks the breaker and, if it tripped,
+// prints a hint to stderr so operators know the rig was auto-paused.
+// Idempotent — safe to call after every failure path. Logging-only on
+// breaker errors: we don't want a Dolt blip to mask the original failure.
+func maybeReportCircuitBreaker(stderr io.Writer, bd *beads.Beads, rigPrefix string, cfg *config.UpstreamSyncConfig) {
+	tripped, err := upstreamsync.TripIfNeeded(bd, rigPrefix, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "  warning: circuit-breaker check failed: %v\n", err)
+		return
+	}
+	if tripped {
+		fmt.Fprintf(stderr, "  ⚡ circuit breaker tripped — rig auto-paused after %d consecutive failures\n",
+			cfg.GetMaxConsecutiveFailures())
+		fmt.Fprintln(stderr, "    resume with: gt upstream resume")
+	}
+}

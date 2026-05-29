@@ -833,6 +833,29 @@ type UpstreamSyncConfig struct {
 	//   "agent" (default) — dispatch a polecat to resolve conflicts
 	//   "escalate" — escalate to human (v1 fallback)
 	ConflictResolution string `json:"conflict_resolution,omitempty"`
+
+	// RestrictedPaths is the list of glob patterns that, when matched
+	// by any conflicted file, force escalation to a human regardless of
+	// conflict size. Empty/nil means use the security-design defaults
+	// (upstreamsync.DefaultRestrictedPaths). Operators extend this list
+	// to mark additional sensitive paths (e.g., proprietary internals).
+	//
+	// Patterns support three forms:
+	//   - Directory prefix:   "internal/auth/" matches everything under it
+	//   - Glob:               "*.sh" matches via filepath.Match (full and basename)
+	//   - Exact:              "go.mod", "Makefile" matches name or basename
+	//
+	// Phase 4 (gu-g5gh): see .designs/cv-2s6tq/security.md §"Constraints".
+	RestrictedPaths []string `json:"restricted_paths,omitempty"`
+
+	// MaxConflictFiles is the file-count ceiling for autonomous conflict
+	// resolution. Above this, the conflict escalates to a human even if
+	// no restricted paths are touched. Default: 3.
+	MaxConflictFiles int `json:"max_conflict_files,omitempty"`
+
+	// MaxConflictHunks is the hunk-count ceiling for autonomous conflict
+	// resolution. Default: 10.
+	MaxConflictHunks int `json:"max_conflict_hunks,omitempty"`
 }
 
 // IsEnabled reports whether upstream sync is enabled for this rig.
@@ -910,6 +933,38 @@ func (c *UpstreamSyncConfig) GetConflictResolution() string {
 		return "agent"
 	}
 	return c.ConflictResolution
+}
+
+// GetRestrictedPaths returns the configured restricted-path patterns
+// for autonomous conflict resolution. Returns nil when not configured —
+// callers should fall back to upstreamsync.DefaultRestrictedPaths().
+//
+// We intentionally return nil rather than the default list here so the
+// upstreamsync package owns the security default and config.types.go
+// stays free of policy decisions about which paths are sensitive.
+func (c *UpstreamSyncConfig) GetRestrictedPaths() []string {
+	if c == nil {
+		return nil
+	}
+	return c.RestrictedPaths
+}
+
+// GetMaxConflictFiles returns the configured file-count ceiling for
+// autonomous conflict resolution, defaulting to 3 (security-design).
+func (c *UpstreamSyncConfig) GetMaxConflictFiles() int {
+	if c == nil || c.MaxConflictFiles <= 0 {
+		return 3
+	}
+	return c.MaxConflictFiles
+}
+
+// GetMaxConflictHunks returns the configured hunk-count ceiling for
+// autonomous conflict resolution, defaulting to 10 (security-design).
+func (c *UpstreamSyncConfig) GetMaxConflictHunks() int {
+	if c == nil || c.MaxConflictHunks <= 0 {
+		return 10
+	}
+	return c.MaxConflictHunks
 }
 
 // PolecatPoolConfig represents per-rig polecat pool settings.
