@@ -1,0 +1,522 @@
+# Code Quality Convoy Formula
+#
+# Periodic, whole-codebase quality analysis via parallel specialized
+# reviewers. Triggered automatically by the `code-quality` plugin on a
+# condition gate (≥ 6h elapsed AND new commits), or manually:
+#
+#   gt formula run code-quality --rig=<name> --preset=quick
+#   gt formula run code-quality --rig=<name> --preset=standard
+#   gt formula run code-quality --rig=<name> --preset=full
+#
+# Each leg is a focused dimensional analysis. Findings are written to
+# `.quality/<date>/<leg>.md`. The synthesis step combines them into
+# `quality-report.md` (human-readable) plus `summary.json` (machine-readable
+# for trending) and files beads ONLY for critical (P0) findings — sub-critical
+# findings stay in the report to keep `bd list` low-noise.
+#
+# This formula is `review_only = true`: individual leg work is analysis-only
+# and does not pass through the merge queue. The synthesis step commits
+# `.quality/<date>/*` as a normal change that flows through the MQ.
+
+# ----------------------------------------------------------------------------
+# Top-level metadata
+# ----------------------------------------------------------------------------
+
+review_only = true  # Legs produce findings, not code fixes (gt-kvf)
+
+description = """
+Periodic codebase quality analysis via parallel specialized reviewers.
+
+Each leg examines the codebase from a different quality dimension. The
+synthesis step combines findings into a unified, scored report and files
+beads only for critical findings.
+
+## Legs (parallel execution, max_parallelism=3)
+
+- **dead-code**: Unreferenced code, unreachable branches, abandoned features
+- **dependency-health**: Outdated/vulnerable deps, unused deps, version drift
+- **architecture-drift**: Layering violations, circular imports, growing coupling
+- **test-quality**: Test meaningfulness (not coverage), flaky patterns, gaps
+- **complexity**: Hotspots — long functions, deep nesting, churn-vs-coverage
+- **documentation**: Public-API doc gaps, stale READMEs, missing runbooks
+- **tech-debt-trend**: TODO/FIXME accumulation, deprecation aging, churn debt
+
+## Presets (scope control)
+
+- **quick** — dead-code, dependency-health, architecture-drift (~5 min)
+- **standard** — quick + test-quality, complexity (~10 min)
+- **full** — all 7 legs (~20 min)
+
+## Output
+
+`.quality/<date>/`:
+  <leg>.md           per-leg markdown findings
+  quality-report.md  synthesized human-readable report
+  summary.json       machine-readable summary for trending
+"""
+formula = "code-quality"
+type = "convoy"
+version = 1
+
+# Cap parallelism so quality analysis doesn't starve feature work.
+# At 8 polecats/rig this leaves 5 slots for normal dispatch during analysis.
+# (Read by convoy dispatch; if dispatch does not yet honor this hint, the
+# field is forward-compatible — see design-doc.md "Open Questions".)
+max_parallelism = 3
+
+# ----------------------------------------------------------------------------
+# Inputs
+# ----------------------------------------------------------------------------
+
+[inputs]
+
+[inputs.rig]
+description = "Rig name to analyze (default: rig that owns this run)"
+type = "string"
+required = false
+
+[inputs.preset]
+description = "Scope preset: quick | standard | full"
+type = "string"
+default = "standard"
+
+[inputs.output_dir]
+description = "Output directory (default: .quality/<today>)"
+type = "string"
+required = false
+
+# ----------------------------------------------------------------------------
+# Prompt template (injected into all leg prompts)
+# ----------------------------------------------------------------------------
+
+[prompts]
+base = """
+# Code Quality Analysis Assignment
+
+You are a specialized quality analyst participating in a periodic
+whole-codebase quality audit.
+
+## Context
+- **Formula**: {{.formula_name}}
+- **Rig**: {{.rig}}
+- **Preset**: {{.preset}}
+- **Your dimension**: {{.leg.focus}}
+- **Leg ID**: {{.leg.id}}
+
+## Your Task
+{{.leg.description}}
+
+## Output Requirements
+
+Write your findings to: **{{.output_path}}**
+
+This is an audit, NOT a code-change task. Do NOT modify source code. Your
+deliverable is the markdown findings file.
+
+Structure your output as follows:
+
+```markdown
+# {{.leg.title}}
+
+## Summary
+(1-2 paragraphs: state of this dimension overall, top theme)
+
+## Score
+A single number in [0.0, 1.0] reflecting your confidence that this
+dimension is in good shape (1.0 = excellent, 0.0 = critical debt).
+Use the line `score: 0.NN` on its own line so the synthesis step can parse it.
+
+## Critical Findings (P0 — file as beads, fix urgently)
+For each:
+- **Title**: short imperative summary
+- **Location**: file:line (or path) reference
+- **Impact**: why this matters
+- **Suggested fix**: actionable next step
+
+## Major Findings (P1 — track but do not auto-bead)
+- ...
+
+## Minor Findings (P2 — informational)
+- ...
+
+## Counts
+On a single line, in this exact form (synthesis parses it):
+
+  counts: critical=N major=N minor=N
+```
+
+Be specific (file:line references), be actionable, and prioritize impact.
+The synthesis step will deduplicate findings reported by multiple legs.
+"""
+
+# ----------------------------------------------------------------------------
+# Output configuration
+# ----------------------------------------------------------------------------
+
+[output]
+directory = ".quality/{{.run_date}}"
+leg_pattern = "{{.leg.id}}.md"
+synthesis = "quality-report.md"
+
+# ----------------------------------------------------------------------------
+# Legs (each spawns a parallel polecat)
+# ----------------------------------------------------------------------------
+
+[[legs]]
+id = "dead-code"
+title = "Dead Code Audit"
+focus = "Unreferenced code, unreachable branches, abandoned features"
+review_only = true
+description = """
+Identify code that is no longer used and could be safely removed.
+
+**Look for:**
+- Functions, types, constants with no callers
+- Exported symbols not imported by any in-tree consumer
+- Unreachable branches (e.g. `if false`, dead `default` cases)
+- Files referenced only by themselves (orphan modules)
+- Feature flags whose code paths are never enabled
+- Commented-out code blocks (>= 5 lines)
+- Test helpers used by no test
+- Build targets / make rules with no consumers
+
+**Prioritization:**
+- Critical: Large dead modules (>200 lines) or dead exported APIs that
+  consumers might think are still supported
+- Major: Mid-size internal dead code (functions, files)
+- Minor: Single-line cruft, commented blocks
+
+**Questions to answer:**
+- What can be deleted in one PR with no behavior change?
+- What appears live but is actually unreferenced?
+"""
+
+[[legs]]
+id = "dependency-health"
+title = "Dependency Health Audit"
+focus = "Outdated/vulnerable deps, unused deps, version drift"
+review_only = true
+description = """
+Examine the project's dependency manifest(s) for health issues.
+
+**Look for:**
+- Direct dependencies more than one major version behind upstream
+- Transitive dependencies pinned via security overrides (and whether the
+  override is still needed)
+- Dependencies declared in the manifest but never imported
+- Imports from packages NOT declared in the manifest (implicit deps)
+- Multiple versions of the same dependency in the resolved tree
+- Deps with known CVEs (if a vulnerability database is available;
+  otherwise note as "verify via `npm audit` / `govulncheck` / etc.")
+- Deps marked deprecated/abandoned upstream
+- Dev dependencies leaking into production
+
+**Prioritization:**
+- Critical: Known-vulnerable deps in production paths
+- Major: Major-version-behind direct deps in active use
+- Minor: Unused declarations, dev/prod hygiene issues
+
+**Questions to answer:**
+- What deps would break first if upstream rotates?
+- What deps could be removed with no behavior change?
+"""
+
+[[legs]]
+id = "architecture-drift"
+title = "Architecture Drift Audit"
+focus = "Layering violations, circular imports, growing coupling"
+review_only = true
+description = """
+Assess whether the codebase's structure matches its declared architecture
+and whether coupling is trending in the right direction.
+
+**Look for:**
+- Layering violations (e.g. domain code importing UI, infra leaking into core)
+- Circular imports between packages or modules
+- "God" packages — many files importing them, but they import many things too
+  (high fan-in AND high fan-out)
+- Packages that have grown >50% in file count vs. last quality run (use
+  prior `summary.json` if available; otherwise note absolute size)
+- Public APIs of internal packages that are reached around (callers
+  bypassing the documented entry point)
+- Abstractions with one implementation that complicate without enabling
+  testability or substitution
+
+**Prioritization:**
+- Critical: New circular imports; clear layering violations in core paths
+- Major: Growing coupling concentration; god packages
+- Minor: Single-implementation abstractions, naming drift
+
+**Questions to answer:**
+- If you joined the team today, would the package structure tell you
+  the right story about responsibilities?
+- What is becoming load-bearing in a way the architecture didn't intend?
+"""
+
+[[legs]]
+id = "test-quality"
+title = "Test Quality Audit"
+focus = "Test meaningfulness, not coverage; flaky patterns; gaps"
+review_only = true
+description = """
+Coverage is a lagging proxy. Audit whether tests actually verify behavior
+that callers care about.
+
+**Look for:**
+- Weak assertions (only `!= nil`, `is_ok()` without value check, `assertTrue(true)`)
+- Tests so heavily mocked that they cannot fail on a real regression
+- Tests of implementation details that resist refactoring
+- Missing negative / boundary / error-path coverage on critical modules
+- Flaky-test indicators (`sleep`, `time.Now`, retry-on-fail loops)
+- Skipped / `t.Skip` / `#[ignore]` tests with no follow-up bead
+- High-churn files (many recent commits) with low test density
+
+**Prioritization:**
+- Critical: Critical-path module with no negative-path tests
+- Major: Persistently skipped tests; weak assertions in core logic
+- Minor: Style-level test smell
+
+**Questions to answer:**
+- If a real regression shipped today, which tests would catch it?
+- Which tests are theatre — green, but verify nothing?
+"""
+
+[[legs]]
+id = "complexity"
+title = "Complexity Hotspot Audit"
+focus = "Long functions, deep nesting, churn-vs-coverage hotspots"
+review_only = true
+description = """
+Identify the parts of the codebase that resist understanding and change.
+
+**Look for:**
+- Functions / methods longer than 100 lines (note 50+ as borderline)
+- Nesting depth > 4 levels (control flow, callbacks, conditional expressions)
+- Cyclomatic complexity outliers (if a tool is available in this repo)
+- Files with high recent churn AND low test coverage (the most dangerous
+  combination — frequent change without a safety net)
+- Single classes / structs with > 20 methods
+- Functions with > 5 parameters (data-clump candidates)
+- Boolean-flag parameters that branch the function body internally
+
+**Prioritization:**
+- Critical: High-churn + low-coverage hotspot in core logic
+- Major: Long / deeply-nested functions in business logic
+- Minor: Style-level smells (parameter counts, etc.)
+
+**Questions to answer:**
+- Where will the next bug come from?
+- What will the next refactor have to break first?
+"""
+
+[[legs]]
+id = "documentation"
+title = "Documentation Coverage Audit"
+focus = "Public-API doc gaps, stale READMEs, missing runbooks"
+review_only = true
+description = """
+Audit the documentation surface. Documentation is part of the codebase.
+
+**Look for:**
+- Exported / public symbols with no doc comment in languages that expect
+  one (Go exported names, Python public functions, Rust pub items, etc.)
+- README / CONTRIBUTING / ARCHITECTURE files that reference paths,
+  commands, or modules that no longer exist
+- "Quickstart" sections whose copy-paste examples no longer work
+- Modules whose package-level doc disagrees with the actual API
+- Deployment / operational runbooks that reference deprecated systems
+- Comments that contradict the code (TODO/FIXME aged > 90 days,
+  "TEMPORARY" markers older than the file's most-recent commit)
+- Generated docs that are out of sync with their source
+
+**Prioritization:**
+- Critical: Onboarding docs that are wrong (the first impression breaks)
+- Major: Public-API doc gaps in widely-used modules
+- Minor: Style/wording, internal staleness
+
+**Questions to answer:**
+- If a new contributor read only the docs, would they end up in the
+  same mental model as the code?
+- What is documented that no longer exists, or exists but is undocumented?
+"""
+
+[[legs]]
+id = "tech-debt-trend"
+title = "Technical Debt Trend Audit"
+focus = "TODO/FIXME accumulation, deprecation aging, churn debt"
+review_only = true
+description = """
+Look at the *trajectory* of debt, not just the snapshot. Compares against
+the prior `summary.json` if one exists in `.quality/`.
+
+**Look for:**
+- TODO / FIXME / HACK / XXX comments — count per dimension; flag any
+  with associated bead IDs that are now closed (the comment outlived
+  the work)
+- `@deprecated` markers without a removal plan or removal date
+- TODOs older than 180 days
+- Tests marked skip/ignore/pending without an associated bead
+- Migration markers ("temporary", "v1 compat") older than 6 months
+- Trend deltas vs. last run: count up? down? per directory?
+
+**Prioritization:**
+- Critical: Deprecated APIs with no removal plan AND active callers
+- Major: Aged TODOs in critical paths
+- Minor: General TODO inventory
+
+**Questions to answer:**
+- Is this codebase paying down debt, holding steady, or accumulating?
+- What is the oldest active TODO, and why is it still here?
+"""
+
+# ----------------------------------------------------------------------------
+# Presets — scope control
+# ----------------------------------------------------------------------------
+
+[presets]
+
+[presets.quick]
+description = "Daily gate-triggered run (~5 min) — three core dimensions"
+legs = ["dead-code", "dependency-health", "architecture-drift"]
+
+[presets.standard]
+description = "Default run (~10 min) — adds test and complexity dimensions"
+legs = ["dead-code", "dependency-health", "architecture-drift", "test-quality", "complexity"]
+
+[presets.full]
+description = "Comprehensive run (~20 min) — all seven dimensions"
+legs = [
+    "dead-code",
+    "dependency-health",
+    "architecture-drift",
+    "test-quality",
+    "complexity",
+    "documentation",
+    "tech-debt-trend",
+]
+
+# ----------------------------------------------------------------------------
+# Synthesis — combine leg outputs into report + summary.json
+# ----------------------------------------------------------------------------
+
+[synthesis]
+title = "Quality Report Synthesis"
+description = """
+Combine all leg findings into a unified, prioritized quality report and
+emit a machine-readable summary for trending.
+
+## Inputs
+- All leg findings under: `{{.output.directory}}/`
+- Optional: prior run's `summary.json` for delta computation. The most
+  recent prior `.quality/<date>/summary.json` (lexicographically before
+  `{{.run_date}}`). If none exists, deltas are reported as null.
+
+## Outputs
+
+### 1. `{{.output.directory}}/{{.output.synthesis}}` (quality-report.md)
+
+Structure:
+
+```markdown
+# Quality Report — <rig> — <date>
+
+## Executive Summary
+- Overall score: 0.NN (delta vs last: ±0.NN)
+- Findings: C critical / M major / m minor (delta: ±)
+- Top theme: <one sentence>
+- Recommendation: <none | track | act now>
+
+## Per-Dimension Scores
+| Dimension | Score | Critical | Major | Minor | Delta |
+|---|---|---|---|---|---|
+| dead-code | 0.NN | 0 | 0 | 0 | ±0.NN |
+| ... | ... | ... | ... | ... | ... |
+
+## Critical Findings (P0)
+For each (DEDUPLICATED across legs):
+- **Title** — `<file>:<line>` _(found by: leg-a, leg-b)_
+  - Impact:
+  - Suggested fix:
+  - Bead filed: `<id>` (or "—" if filing failed)
+
+## Major Findings (P1)
+Grouped by dimension. One bullet each.
+
+## Minor Findings (P2)
+Brief list, grouped by dimension. No need to expand each.
+
+## Trend Notes
+- What got better since last run?
+- What got worse?
+- New themes appearing?
+
+## Recommendations
+Actionable next steps (max 5).
+```
+
+### 2. `{{.output.directory}}/summary.json`
+
+Schema (v1):
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "<the synthesis bead id, if available>",
+  "rig": "<rig>",
+  "preset": "<preset>",
+  "timestamp": "<ISO 8601 UTC>",
+  "commit": "<HEAD sha at run time>",
+  "overall_score": 0.78,
+  "legs": {
+    "dead-code": {
+      "score": 0.85,
+      "findings": { "critical": 0, "major": 1, "minor": 3 }
+    },
+    "...": { "...": "..." }
+  },
+  "totals": { "critical": 0, "major": 5, "minor": 12 },
+  "delta_since_last": {
+    "overall_score": 0.03,
+    "critical": 0,
+    "major": -1,
+    "minor": 2
+  }
+}
+```
+
+`overall_score` is the unweighted mean of leg scores actually run (legs not
+selected by the preset are absent from `legs` and excluded from the mean).
+
+`delta_since_last` is `null` if no prior `summary.json` exists.
+
+## Bead-filing rules
+
+- File a bead **only** for each Critical (P0) finding.
+- Bead labels MUST include: `quality-critical`, `plugin:code-quality`,
+  `rig:<rig>`, `dim:<leg-id>`.
+- Bead title: short imperative — "<dim>: <title>".
+- Bead body: location, impact, suggested fix, link to the leg's findings file.
+- Do NOT file beads for major or minor findings; the report is sufficient.
+
+## Constraints
+
+- Do NOT modify source code in this step.
+- The only writes you should perform are:
+  1. Create `{{.output.directory}}/{{.output.synthesis}}`.
+  2. Create `{{.output.directory}}/summary.json`.
+  3. Create critical-finding beads (only if any).
+  4. Stage and commit `.quality/{{.run_date}}/` as a single commit with
+     message `chore(quality): {{.run_date}} report ({{.rig}})`.
+
+The plugin's Step 3 records the run receipt with score labels — that is
+NOT your responsibility here.
+"""
+depends_on = [
+    "dead-code",
+    "dependency-health",
+    "architecture-drift",
+    "test-quality",
+    "complexity",
+    "documentation",
+    "tech-debt-trend",
+]
