@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -26,6 +27,15 @@ const refineryHeartbeatStaleThreshold = 5 * time.Minute
 // could not submit because refinery is dead and direct-push is blocked on
 // merge-queue rigs. Refinery recovery sweeps these on startup. (gu-8edz)
 const awaitingRefineryRecoveryLabel = "awaiting_refinery_recovery"
+
+// awaitingRefineryMergeLabel marks beads whose polecat finished and submitted
+// a merge request but the refinery has not yet merged it to origin/main.
+// Distinct from awaiting_refinery_recovery (which guards the dead-refinery /
+// no-MR case) and stranded-merge (push/MR failure). The bead stays open until
+// the refinery's PostMerge path closes it with the real on-main commit_sha,
+// preserving the audit trail and preventing Pattern B false-closes when the
+// refinery is wedged or slow. (gu-treq, supersedes gu-wvgt)
+const awaitingRefineryMergeLabel = "awaiting_refinery_merge"
 
 // allowDirectPushEnv is the explicit override that lets a polecat bypass the
 // merge-queue direct-push block. When set to "1", the polecat must ALSO set
@@ -111,6 +121,40 @@ func guardDirectPushOnMergeQueue(townRoot, rigName, contextLabel string) error {
 	return fmt.Errorf("direct push to default branch refused on merge-queue rig %q (%s); merge queue is the merge gatekeeper.\n"+
 		"To override (emergencies only): set GT_ALLOW_DIRECT_PUSH=1 and GT_SKIP_PREPUSH_REASON=<text>",
 		rigName, contextLabel)
+}
+
+// markAwaitingRefineryMerge labels the hooked bead and records an audit note
+// when the polecat has successfully pushed/created an MR on a merge-queue
+// rig. The bead stays open (in_progress) until the refinery's PostMerge path
+// closes it with the real on-main commit_sha — that's the only event that
+// proves the work actually shipped to origin/main. (gu-treq)
+//
+// Distinct from markAwaitingRefineryRecovery: the MR exists and the queue is
+// healthy from the polecat's vantage point. This guard catches the variant
+// where the refinery later wedges or is slow, so the bead is not falsely
+// marked shipped before the merge actually happens.
+//
+// Best-effort: failures to label/note are warned, not fatal — the polecat
+// must still exit cleanly. The refinery's PostMerge will close the bead even
+// if these audit calls failed.
+func markAwaitingRefineryMerge(bd *beads.Beads, beadID, mrID, branch string) {
+	if bd == nil || beadID == "" {
+		return
+	}
+	if err := bd.Update(beadID, beads.UpdateOptions{AddLabels: []string{awaitingRefineryMergeLabel}}); err != nil {
+		style.PrintWarning("could not add %s label to %s: %v", awaitingRefineryMergeLabel, beadID, err)
+	}
+	parts := []string{"awaiting_refinery_merge (gu-treq): polecat submitted MR; refinery has not yet merged to origin/main."}
+	if mrID != "" {
+		parts = append(parts, fmt.Sprintf("mr_id: %s", mrID))
+	}
+	if branch != "" {
+		parts = append(parts, fmt.Sprintf("source_branch: %s", branch))
+	}
+	noteBody := strings.Join(parts, "\n")
+	if _, err := bd.Run("note", "add", beadID, "--body="+noteBody); err != nil {
+		style.PrintWarning("could not add awaiting_refinery_merge note to %s: %v", beadID, err)
+	}
 }
 
 // markAwaitingRefineryRecovery labels the hooked bead and records an audit

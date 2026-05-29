@@ -107,7 +107,7 @@ func TestDoneStrandedMerge_RefusesToCloseHookedBead(t *testing.T) {
 	townRoot, closesLog := setupCloseHookedBeadTestEnv(t, stubBdRecordingCloseAndLabel())
 
 	// Stranded=true: simulates push/MR failure.
-	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", true)
+	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", true, false, "", "")
 
 	logBytes, err := os.ReadFile(closesLog)
 	log := ""
@@ -146,7 +146,7 @@ func TestDoneStrandedMerge_FalseDoesNotChangeBehavior(t *testing.T) {
 	townRoot, closesLog := setupCloseHookedBeadTestEnv(t, stubBdRecordingCloseAndLabel())
 
 	// stranded=false: normal happy-path completion.
-	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", false)
+	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", false, false, "", "")
 
 	logBytes, err := os.ReadFile(closesLog)
 	if err != nil {

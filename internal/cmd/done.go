@@ -1794,7 +1794,19 @@ notifyWitness:
 	// Without this guard the bead transitions to closed("Completed via gt
 	// done (exit=COMPLETED)") even when the polecat's commits were stranded
 	// on a polecat branch — destroying real work and trust signals.
-	updateAgentStateOnDone(cwd, townRoot, exitType, issueID, pushFailed || mrFailed)
+	//
+	// gu-treq: on merge-queue rigs, even when push+MR succeed the work has
+	// NOT yet shipped to origin/main — refinery merges the polecat branch
+	// asynchronously. Compute awaitingRefineryMerge so the hooked bead stays
+	// open until refinery's PostMerge path closes it with the real on-main
+	// commit_sha. Pattern A guards (gu-551r commit-references-bead) live
+	// inside refinery's close path; the refinery is merging the polecat's
+	// own commits so the citation is correct by construction.
+	awaitingRefineryMerge := exitType == ExitCompleted &&
+		!pushFailed && !mrFailed &&
+		mrID != "" &&
+		isMergeQueueRig(townRoot, rigName)
+	updateAgentStateOnDone(cwd, townRoot, exitType, issueID, pushFailed || mrFailed, awaitingRefineryMerge, mrID, branch)
 
 	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
 	// evaluate slot availability against stale hook_bead or cleanup_status and emit
@@ -2303,7 +2315,16 @@ func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 // MR step failed). When true, updateAgentStateOnDone refuses to close the
 // hooked bead even on a COMPLETED exit, preventing the Pattern B false-close
 // where a stranded MR is incorrectly reported as shipped. (gu-rh0g)
-func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, stranded bool) {
+//
+// awaitingRefineryMerge indicates the polecat successfully submitted to a
+// merge queue (push + MR creation succeeded) but the refinery has not yet
+// merged the work to origin/main. When true, updateAgentStateOnDone leaves
+// the hooked bead open with an awaiting_refinery_merge label + audit note;
+// the refinery's PostMerge path closes it with the real on-main commit_sha
+// once the merge actually happens. This catches the Pattern B variant where
+// gu-rh0g's push-failure guard does not apply (push succeeded) but the
+// refinery later wedges or is slow. (gu-treq)
+func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, stranded bool, awaitingRefineryMerge bool, awaitingMergeMRID, awaitingMergeBranch string) {
 	// Get role context - try multiple sources for resilience
 	roleInfo, err := GetRoleWithContext(cwd, townRoot)
 	if err != nil {
@@ -2447,6 +2468,33 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, stranded bo
 			fmt.Fprintf(os.Stderr, "Warning: couldn't add stranded-merge note to %s: %v\n", hookedBeadID, err)
 		}
 		fmt.Fprintf(os.Stderr, "WARN: hooked bead %s NOT closed — push/MR failed; bead labeled stranded-merge for recovery.\n", hookedBeadID)
+		goto doneStateUpdate
+	}
+
+	// Pattern B (refinery-stall variant) guard (gu-treq): on merge-queue rigs,
+	// when the polecat successfully submitted an MR but the refinery has not
+	// yet merged to origin/main, leave the hooked bead OPEN and tag it with
+	// awaiting_refinery_merge. The refinery's PostMerge path closes the bead
+	// with the real on-main commit_sha when the merge actually lands. This
+	// prevents the Pattern B false-close where `gt done` reports work shipped
+	// before refinery has merged it (incident gu-xn2z). The molecule wisp is
+	// still closed below — the polecat session is done; only the work bead's
+	// terminal close is deferred to refinery's authoritative merge event.
+	if awaitingRefineryMerge && hookedBeadID != "" {
+		// Best-effort: close the molecule wisp (polecat session lifecycle ended).
+		if hookedBead, err := bd.Show(hookedBeadID); err == nil {
+			attachment := beads.ParseAttachmentFields(hookedBead)
+			if attachment != nil && attachment.AttachedMolecule != "" {
+				if n := closeDescendants(bd, attachment.AttachedMolecule); n > 0 {
+					fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, attachment.AttachedMolecule)
+				}
+				if closeErr := bd.ForceCloseWithReason("done (awaiting refinery merge)", attachment.AttachedMolecule); closeErr != nil && !errors.Is(closeErr, beads.ErrNotFound) {
+					fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s: %v\n", attachment.AttachedMolecule, closeErr)
+				}
+			}
+		}
+		markAwaitingRefineryMerge(bd, hookedBeadID, awaitingMergeMRID, awaitingMergeBranch)
+		fmt.Fprintf(os.Stderr, "Note: hooked bead %s left open pending refinery merge (mr=%s); refinery PostMerge will close with on-main commit_sha.\n", hookedBeadID, awaitingMergeMRID)
 		goto doneStateUpdate
 	}
 
