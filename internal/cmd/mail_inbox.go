@@ -15,6 +15,51 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 )
 
+// collectThreadIDsForIDs looks up each message ID in the mailbox and returns
+// the unique non-empty thread IDs found. Best-effort: missing or unreadable
+// messages are silently skipped — this only feeds reply-reminder cleanup.
+func collectThreadIDsForIDs(mailbox *mail.Mailbox, ids []string) []string {
+	if mailbox == nil || len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, id := range ids {
+		msg, err := mailbox.Get(id)
+		if err != nil || msg == nil || msg.ThreadID == "" {
+			continue
+		}
+		if seen[msg.ThreadID] {
+			continue
+		}
+		seen[msg.ThreadID] = true
+		out = append(out, msg.ThreadID)
+	}
+	return out
+}
+
+// clearReplyRemindersForThreads is a best-effort cleanup that removes any
+// queued reply-reminder nudges for the given recipient address and thread
+// IDs. Errors are logged as warnings — this is not load-bearing. See gu-0wcm.
+func clearReplyRemindersForThreads(address string, threadIDs []string) {
+	if address == "" || len(threadIDs) == 0 {
+		return
+	}
+	workDir, err := findMailWorkDir()
+	if err != nil {
+		return
+	}
+	router := mail.NewRouter(workDir)
+	for _, threadID := range threadIDs {
+		if threadID == "" {
+			continue
+		}
+		if err := router.ClearReplyReminders(address, threadID); err != nil {
+			style.PrintWarning("could not clear reply reminders for thread %s: %v", threadID, err)
+		}
+	}
+}
+
 // getMailbox returns the mailbox for the given address.
 func getMailbox(address string) (*mail.Mailbox, error) {
 	// All mail uses town beads (two-level architecture)
@@ -367,9 +412,16 @@ func runMailArchive(cmd *cobra.Command, args []string) error {
 	// `bd compact`), the mail entry is effectively already gone — we
 	// treat ErrMessageNotFound as success so orphaned inbox references
 	// can be cleared without manual surgery. See aa-6hv.
+	//
+	// We also clear any queued reply-reminder for the archived message's
+	// thread: archiving signals "I'm done with this", so the reminder is
+	// no longer actionable. Without this, archived threads keep nudging
+	// "remember to reply" until TTL expiry. See gu-0wcm.
 	archived := 0
 	gcd := 0
 	var errMsgs []string
+	// Snapshot thread IDs before deletion so we can clear reminders after.
+	threadIDs := collectThreadIDsForIDs(mailbox, args)
 	for _, msgID := range args {
 		err := mailbox.Delete(msgID)
 		switch {
@@ -383,6 +435,7 @@ func runMailArchive(cmd *cobra.Command, args []string) error {
 			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", msgID, err))
 		}
 	}
+	clearReplyRemindersForThreads(address, threadIDs)
 
 	// Report results
 	if len(errMsgs) > 0 {
@@ -451,10 +504,17 @@ func runMailArchiveStale(mailbox *mail.Mailbox, address string) error {
 	// `bd mol wisp gc` or `bd compact`, the close call returns
 	// ErrMessageNotFound. That's a success for archive: the mail entry
 	// is already effectively gone.
+	//
+	// Also clear any queued reply-reminder for the archived thread, so
+	// satisfied threads don't keep re-nudging. See gu-0wcm.
 	archived := 0
 	gcd := 0
 	var errMsgs []string
+	var threadIDs []string
 	for _, stale := range staleMessages {
+		if stale.Message != nil && stale.Message.ThreadID != "" {
+			threadIDs = append(threadIDs, stale.Message.ThreadID)
+		}
 		err := mailbox.Delete(stale.Message.ID)
 		switch {
 		case err == nil:
@@ -467,6 +527,7 @@ func runMailArchiveStale(mailbox *mail.Mailbox, address string) error {
 			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", stale.Message.ID, err))
 		}
 	}
+	clearReplyRemindersForThreads(address, threadIDs)
 
 	if len(errMsgs) > 0 {
 		fmt.Printf("%s Archived %d/%d stale messages\n", style.Bold.Render("⚠"), archived+gcd, len(staleMessages))

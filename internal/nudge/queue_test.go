@@ -652,6 +652,70 @@ func TestRemoveKindByThread(t *testing.T) {
 	}
 }
 
+// TestHasKindByThread covers the per-thread reminder budget cap:
+// HasKindByThread returns true iff at least one queued nudge matches both
+// the kind and thread ID. See gu-0wcm.
+func TestHasKindByThread(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-has-kind"
+
+	// Empty queue → false, no error.
+	got, err := HasKindByThread(townRoot, session, "reply-reminder", "thread-1")
+	if err != nil {
+		t.Fatalf("HasKindByThread (empty): %v", err)
+	}
+	if got {
+		t.Fatalf("HasKindByThread (empty) = true, want false")
+	}
+
+	// Empty args → false (defensive guard).
+	got, err = HasKindByThread(townRoot, session, "", "thread-1")
+	if err != nil || got {
+		t.Fatalf("HasKindByThread (empty kind): got=%v err=%v, want false/nil", got, err)
+	}
+	got, err = HasKindByThread(townRoot, session, "reply-reminder", "")
+	if err != nil || got {
+		t.Fatalf("HasKindByThread (empty threadID): got=%v err=%v, want false/nil", got, err)
+	}
+
+	// Enqueue a non-matching nudge → still false.
+	if err := Enqueue(townRoot, session, QueuedNudge{
+		Sender: "system", Message: "wrong-kind", Kind: "mail", ThreadID: "thread-1",
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	got, err = HasKindByThread(townRoot, session, "reply-reminder", "thread-1")
+	if err != nil {
+		t.Fatalf("HasKindByThread: %v", err)
+	}
+	if got {
+		t.Fatalf("HasKindByThread (wrong kind) = true, want false")
+	}
+
+	// Enqueue matching reminder → true.
+	if err := Enqueue(townRoot, session, QueuedNudge{
+		Sender: "system", Message: "match", Kind: "reply-reminder", ThreadID: "thread-1",
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	got, err = HasKindByThread(townRoot, session, "reply-reminder", "thread-1")
+	if err != nil {
+		t.Fatalf("HasKindByThread: %v", err)
+	}
+	if !got {
+		t.Fatalf("HasKindByThread (match) = false, want true")
+	}
+
+	// Different thread → false.
+	got, err = HasKindByThread(townRoot, session, "reply-reminder", "thread-other")
+	if err != nil {
+		t.Fatalf("HasKindByThread: %v", err)
+	}
+	if got {
+		t.Fatalf("HasKindByThread (other thread) = true, want false")
+	}
+}
+
 func TestNormalizeReplySubject(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"task ready", "task ready"},

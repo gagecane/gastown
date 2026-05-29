@@ -2065,6 +2065,46 @@ func TestClearReplyRemindersBySubject(t *testing.T) {
 	}
 }
 
+// TestEnqueueReplyReminder_PerThreadBudgetCap verifies that calling
+// enqueueReplyReminder twice for the same (session, threadID) only produces
+// one queued reminder. This caps the per-thread reminder budget at 1 so an
+// agent that has already been nudged isn't re-nudged on every subsequent
+// notification in the same thread. See gu-0wcm.
+func TestEnqueueReplyReminder_PerThreadBudgetCap(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+
+	const sessionID = "gt-gastown-crew-alice"
+	msg := &Message{
+		From:     "gastown/witness",
+		To:       "gastown/crew/alice",
+		Subject:  "status check",
+		Type:     TypeNotification,
+		ThreadID: "thread-ABC",
+	}
+
+	r.enqueueReplyReminder(msg, sessionID)
+	r.enqueueReplyReminder(msg, sessionID) // same thread — should be skipped
+	r.enqueueReplyReminder(msg, sessionID) // ditto
+
+	pending, err := nudge.Pending(townRoot, sessionID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("expected 1 queued reminder after dedup, got %d", pending)
+	}
+
+	// Different thread → should enqueue separately.
+	otherMsg := *msg
+	otherMsg.ThreadID = "thread-OTHER"
+	r.enqueueReplyReminder(&otherMsg, sessionID)
+	pending, _ = nudge.Pending(townRoot, sessionID)
+	if pending != 2 {
+		t.Fatalf("expected 2 queued reminders (one per thread), got %d", pending)
+	}
+}
+
 // TestEnqueueReplyReminder_SkipsReply verifies that reply-type messages do not
 // trigger a reply reminder (would be redundant noise).
 func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {

@@ -4,7 +4,16 @@
   "theme": "dark",
   "editorMode": "normal",
   "permissions": {
-    "defaultMode": "bypassPermissions"
+    "defaultMode": "bypassPermissions",
+    "deny": [
+      "TodoWrite",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskList",
+      "TaskGet",
+      "TaskOutput",
+      "TaskStop"
+    ]
   },
   "enabledPlugins": {
     "beads@beads-marketplace": false

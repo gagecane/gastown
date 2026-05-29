@@ -6,7 +6,16 @@
   "feedbackSurveyRate": 0,
   "awaySummaryEnabled": false,
   "permissions": {
-    "defaultMode": "bypassPermissions"
+    "defaultMode": "bypassPermissions",
+    "deny": [
+      "TodoWrite",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskList",
+      "TaskGet",
+      "TaskOutput",
+      "TaskStop"
+    ]
   },
   "enabledPlugins": {
     "beads@beads-marketplace": false
