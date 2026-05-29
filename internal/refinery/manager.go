@@ -164,6 +164,18 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		}
 	}
 
+	// Clear any "reaped temp upstream" wedge before the agent starts.
+	// After a successful merge, refinery's post-merge cleanup deletes the
+	// polecat branch from origin — but the worktree's local `temp` branch
+	// (created during the rebase step of the patrol molecule) still has
+	// branch.temp.merge pointing at the now-reaped ref. The next cycle's
+	// rebase/pull/push fails or behaves unexpectedly, and the wedge survives
+	// session restart because it's persisted in .git/config. (gu-hlie /
+	// parent gu-xn2z, 2026-05-29)
+	if unwedgeErr := UnwedgeWorktree(refineryRigDir, m.rig.DefaultBranch(), m.output); unwedgeErr != nil {
+		_, _ = fmt.Fprintf(m.output, "⚠ Could not clear refinery worktree wedge: %v (continuing)\n", unwedgeErr)
+	}
+
 	// Ensure runtime settings exist in the shared refinery parent directory.
 	// Settings are passed to Claude Code via --settings flag.
 	townRoot := filepath.Dir(m.rig.Path)

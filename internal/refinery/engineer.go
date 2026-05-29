@@ -1334,6 +1334,18 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 		}
 	}
 
+	// 2.5. Clear any "reaped temp upstream" wedge in the refinery worktree.
+	// The role-agent template uses a `temp` branch as its working ref each
+	// cycle; after we delete the polecat branch from origin (step 2 above),
+	// the worktree's branch.temp.merge config still points at that now-reaped
+	// ref. Unless cleared, the next cycle's rebase/pull/push fires
+	// "upstream is gone" warnings and can wedge the queue (gu-hlie /
+	// parent gu-xn2z, 2026-05-29). The clear runs unconditionally — it's a
+	// no-op when no wedge is present.
+	if unwedgeErr := UnwedgeWorktree(e.git.WorkDir(), e.rig.DefaultBranch(), e.output); unwedgeErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: post-merge unwedge failed: %v\n", unwedgeErr)
+	}
+
 	// 3. Check and auto-close completed convoys
 	// After closing a source issue, its parent convoy may now be complete.
 	// Run convoy check to auto-close and notify subscribers.

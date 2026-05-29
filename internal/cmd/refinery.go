@@ -226,6 +226,35 @@ Examples:
 
 var refineryBlockedJSON bool
 
+var refineryDiagnoseCmd = &cobra.Command{
+	Use:   "diagnose [rig]",
+	Short: "Diagnose refinery worktree health (wedge detection, etc.)",
+	Long: `Diagnose health of a rig's Refinery worktree.
+
+Detects known wedge conditions that can stall the merge queue without
+killing the refinery agent — most notably the "reaped temp upstream"
+state where the worktree's local 'temp' branch tracks an origin/polecat
+branch that has since been reaped (gu-hlie / parent gu-xn2z).
+
+By default the command is read-only. Pass --fix to clear any wedge
+condition in place (unsets the upstream and resets to origin/<default>).
+
+If rig is not specified, infers it from the current directory.
+
+Examples:
+  gt refinery diagnose
+  gt refinery diagnose greenplace
+  gt refinery diagnose --fix
+  gt refinery diagnose --json`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runRefineryDiagnose,
+}
+
+var (
+	refineryDiagnoseJSON bool
+	refineryDiagnoseFix  bool
+)
+
 func init() {
 	// Start flags
 	refineryStartCmd.Flags().BoolVar(&refineryForeground, "foreground", false, "Run in foreground (default: background)")
@@ -254,6 +283,10 @@ func init() {
 	// Blocked flags
 	refineryBlockedCmd.Flags().BoolVar(&refineryBlockedJSON, "json", false, "Output as JSON")
 
+	// Diagnose flags
+	refineryDiagnoseCmd.Flags().BoolVar(&refineryDiagnoseJSON, "json", false, "Output as JSON")
+	refineryDiagnoseCmd.Flags().BoolVar(&refineryDiagnoseFix, "fix", false, "Clear any detected wedge condition in place")
+
 	// Add subcommands
 	refineryCmd.AddCommand(refineryStartCmd)
 	refineryCmd.AddCommand(refineryStopCmd)
@@ -266,6 +299,7 @@ func init() {
 	refineryCmd.AddCommand(refineryUnclaimedCmd)
 	refineryCmd.AddCommand(refineryReadyCmd)
 	refineryCmd.AddCommand(refineryBlockedCmd)
+	refineryCmd.AddCommand(refineryDiagnoseCmd)
 
 	rootCmd.AddCommand(refineryCmd)
 }
@@ -950,5 +984,103 @@ func runRefineryBlocked(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	return nil
+}
+
+// RefineryDiagnoseOutput is the JSON shape for `gt refinery diagnose --json`.
+type RefineryDiagnoseOutput struct {
+	Rig          string `json:"rig"`
+	Worktree     string `json:"worktree"`
+	Exists       bool   `json:"worktree_exists"`
+	Branch       string `json:"current_branch,omitempty"`
+	HasTemp      bool   `json:"has_temp_branch"`
+	TempUpstream string `json:"temp_upstream,omitempty"`
+	Wedged       bool   `json:"wedged"`
+	Reason       string `json:"reason,omitempty"`
+	Fixed        bool   `json:"fixed,omitempty"`
+}
+
+func runRefineryDiagnose(cmd *cobra.Command, args []string) error {
+	rigName := ""
+	if len(args) > 0 {
+		rigName = args[0]
+	}
+
+	_, r, rigName, err := getRefineryManager(rigName)
+	if err != nil {
+		return err
+	}
+
+	worktree := refinery.RefineryWorktreePath(r)
+	status, detectErr := refinery.DetectWedge(worktree)
+	if detectErr != nil {
+		return fmt.Errorf("detect wedge: %w", detectErr)
+	}
+
+	out := RefineryDiagnoseOutput{
+		Rig:          rigName,
+		Worktree:     worktree,
+		Exists:       status.Exists,
+		Branch:       status.CurrentBranch,
+		HasTemp:      status.HasTempBranch,
+		TempUpstream: status.TempUpstream,
+		Wedged:       status.Wedged(),
+		Reason:       status.Reason,
+	}
+
+	if refineryDiagnoseFix && status.Wedged() {
+		// Apply repair, then re-detect to verify and surface the new state.
+		if fixErr := refinery.UnwedgeWorktree(worktree, r.DefaultBranch(), os.Stdout); fixErr != nil {
+			return fmt.Errorf("unwedge: %w", fixErr)
+		}
+		out.Fixed = true
+		// Re-detect for accurate post-fix output.
+		if post, err := refinery.DetectWedge(worktree); err == nil {
+			out.Branch = post.CurrentBranch
+			out.HasTemp = post.HasTempBranch
+			out.TempUpstream = post.TempUpstream
+			out.Wedged = post.Wedged()
+			out.Reason = post.Reason
+		}
+	}
+
+	if refineryDiagnoseJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
+
+	fmt.Printf("%s Refinery diagnose: %s\n\n", style.Bold.Render("🩺"), rigName)
+	fmt.Printf("  Worktree: %s\n", out.Worktree)
+	if !out.Exists {
+		fmt.Printf("  %s worktree directory does not exist\n", style.Dim.Render("○"))
+		return nil
+	}
+	if out.Branch != "" {
+		fmt.Printf("  Branch:   %s\n", out.Branch)
+	}
+	fmt.Printf("  temp:     ")
+	if out.HasTemp {
+		if out.TempUpstream != "" {
+			fmt.Printf("present (tracks %s)\n", out.TempUpstream)
+		} else {
+			fmt.Printf("present (no upstream)\n")
+		}
+	} else {
+		fmt.Printf("absent\n")
+	}
+
+	if out.Wedged {
+		fmt.Printf("\n  %s %s\n", style.Bold.Render("⚠ WEDGED:"), out.Reason)
+		if !refineryDiagnoseFix {
+			fmt.Printf("  %s\n", style.Dim.Render("Run with --fix to clear in place."))
+		}
+	} else {
+		if out.Fixed {
+			fmt.Printf("\n  %s wedge cleared (%s)\n", style.Bold.Render("✓"), out.Reason)
+		} else {
+			fmt.Printf("\n  %s healthy: %s\n", style.Bold.Render("✓"), out.Reason)
+		}
+	}
 	return nil
 }
