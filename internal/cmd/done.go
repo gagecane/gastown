@@ -2142,10 +2142,10 @@ func recoverPushFromOriginTip(g *git.Git, branch, expectedSHA string) bool {
 // closing the source bead with a recovery note).
 //
 // Best-effort: any failure to create the wisp logs a warning and returns
-// nil — the calling path still notifies witness via the existing channel.
-func fileStrandedPushWisp(bd *beads.Beads, rigName, branch, commitSHA, target, issueID, agentBeadID, worker string, pushErr error) string {
+// silently — the calling path still notifies witness via the existing channel.
+func fileStrandedPushWisp(bd *beads.Beads, rigName, branch, commitSHA, target, issueID, agentBeadID, worker string, pushErr error) {
 	if bd == nil || issueID == "" {
-		return ""
+		return
 	}
 	title := fmt.Sprintf("Push stranded: %s", issueID)
 	description := fmt.Sprintf("branch: %s\nsource_issue: %s\nrig: %s\npush_status: stranded",
@@ -2181,13 +2181,12 @@ func fileStrandedPushWisp(bd *beads.Beads, rigName, branch, commitSHA, target, i
 	})
 	if err != nil {
 		style.PrintWarning("could not file push-stranded wisp for %s: %v", issueID, err)
-		return ""
+		return
 	}
 	if wisp == nil || wisp.ID == "" {
-		return ""
+		return
 	}
 	fmt.Printf("%s Filed push-stranded wisp: %s\n", style.Bold.Render("⚠"), wisp.ID)
-	return wisp.ID
 }
 
 func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {
