@@ -4677,3 +4677,262 @@ func TestStaleInProgressThresholdD_DefaultAndOverride(t *testing.T) {
 		t.Errorf("invalid override = %v, want default %v", got, config.DefaultWitnessStaleInProgressThresh)
 	}
 }
+
+// --- gu-ww9u: PUSH_FAILED nudge re-fire suppression ---
+//
+// When the agent bead's sticky push_failed flag is true but the branch IS
+// already on origin (manual recovery, bare-repo fallback, out-of-band MR),
+// the witness must NOT fire PUSH_FAILED nudges to the mayor — that is a
+// false alarm that re-fires every patrol cycle.
+
+// setupPushFailedTestRepo builds a town root with:
+//   - a bare "origin" repo
+//   - a polecat worktree cloned from origin
+//   - a feature branch present on origin (or absent, controlled by branchPushed)
+//
+// Returns townRoot, the feature branch name, and the polecat worktree path.
+func setupPushFailedTestRepo(t *testing.T, rigName, polecatName, branch string, branchPushed bool) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	if err := os.MkdirAll(clonePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+	remotePath := filepath.Join(townRoot, "origin.git")
+	runGit(townRoot, "init", "--bare", remotePath)
+	runGit(clonePath, "init", "-b", "main")
+	runGit(clonePath, "config", "user.email", "test@example.com")
+	runGit(clonePath, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(clonePath, "README.md"), []byte("test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(clonePath, "add", "README.md")
+	runGit(clonePath, "commit", "-m", "initial")
+	runGit(clonePath, "remote", "add", "origin", remotePath)
+	runGit(clonePath, "push", "-u", "origin", "main")
+	runGit(clonePath, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(clonePath, "feature.txt"), []byte("feature\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(clonePath, "add", "feature.txt")
+	runGit(clonePath, "commit", "-m", "feature work")
+	if branchPushed {
+		runGit(clonePath, "push", "-u", "origin", branch)
+	}
+	return townRoot
+}
+
+func TestBranchOnOrigin_PresentReturnsTrue(t *testing.T) {
+	t.Parallel()
+	rigName, polecatName := "testrig", "deathclaw"
+	branch := "polecat/deathclaw/feature"
+	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, true /* branchPushed */)
+
+	if !branchOnOrigin(townRoot, rigName, polecatName, branch) {
+		t.Error("expected branchOnOrigin=true when branch is on origin")
+	}
+}
+
+func TestBranchOnOrigin_AbsentReturnsFalse(t *testing.T) {
+	t.Parallel()
+	rigName, polecatName := "testrig", "deathclaw"
+	branch := "polecat/deathclaw/missing"
+	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, false /* branchPushed */)
+
+	if branchOnOrigin(townRoot, rigName, polecatName, branch) {
+		t.Error("expected branchOnOrigin=false when branch is not on origin")
+	}
+}
+
+func TestBranchOnOrigin_EmptyArgsReturnsFalse(t *testing.T) {
+	t.Parallel()
+	if branchOnOrigin("", "rig", "polecat", "branch") {
+		t.Error("empty townRoot should return false")
+	}
+	if branchOnOrigin("/tmp", "rig", "polecat", "") {
+		t.Error("empty branch should return false")
+	}
+}
+
+func TestBranchOnOrigin_BareRepoFallback(t *testing.T) {
+	t.Parallel()
+	rigName, polecatName := "testrig", "deathclaw"
+	branch := "polecat/deathclaw/bare-only"
+	// Build a town root WITHOUT a polecat worktree — only the bare repo
+	// at <rig>/.repo.git holds the branch. This exercises the fallback path.
+	townRoot := t.TempDir()
+	bareRepo := filepath.Join(townRoot, rigName, ".repo.git")
+	if err := os.MkdirAll(filepath.Join(townRoot, rigName), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+	runGit(filepath.Join(townRoot, rigName), "init", "--bare", bareRepo)
+	// Seed a commit into the bare repo on the branch.
+	seed := t.TempDir()
+	runGit(seed, "init", "-b", branch)
+	runGit(seed, "config", "user.email", "test@example.com")
+	runGit(seed, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(seed, "x"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(seed, "add", "x")
+	runGit(seed, "commit", "-m", "x")
+	runGit(seed, "remote", "add", "bare", bareRepo)
+	runGit(seed, "push", "bare", branch)
+
+	if !branchOnOrigin(townRoot, rigName, polecatName, branch) {
+		t.Error("expected bare-repo fallback to detect branch")
+	}
+}
+
+// TestHandlePolecatDoneFromBead_PushFailedSuppressedWhenOnOrigin verifies the
+// gu-ww9u fix: when push_failed=true on the agent bead but the branch is on
+// origin, the handler must clear the flag and route through normal completion
+// instead of emitting a PUSH_FAILED action.
+func TestHandlePolecatDoneFromBead_PushFailedSuppressedWhenOnOrigin(t *testing.T) {
+	t.Parallel()
+	rigName, polecatName := "testrig", "deathclaw"
+	branch := "polecat/deathclaw/landed"
+	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, true /* branchPushed */)
+
+	fields := &beads.AgentFields{
+		ExitType:   string(ExitTypeCompleted),
+		Branch:     branch,
+		HookBead:   "gt-test-issue",
+		PushFailed: true, // Sticky stale flag — work actually landed.
+		MRFailed:   true, // Block MR-discovery fallback so we hit the no-MR branch.
+	}
+
+	// Use a mock bd that returns an empty issue list so clearPushFailedOnAgent
+	// is a no-op (won't crash) but we still observe routing.
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	result := HandlePolecatDoneFromBead(bd, townRoot, rigName, polecatName, fields, nil)
+	if !result.Handled {
+		t.Fatalf("expected Handled=true, got result=%+v", result)
+	}
+	if strings.Contains(result.Action, "push-failed-recovery-needed") {
+		t.Errorf("Action should NOT contain push-failed-recovery-needed when branch is on origin, got %q", result.Action)
+	}
+}
+
+// TestHandlePolecatDoneFromBead_PushFailedFiresWhenBranchMissing verifies
+// the genuine push-failure path still fires.
+func TestHandlePolecatDoneFromBead_PushFailedFiresWhenBranchMissing(t *testing.T) {
+	t.Parallel()
+	rigName, polecatName := "testrig", "deathclaw"
+	branch := "polecat/deathclaw/lost"
+	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, false /* branchPushed */)
+
+	fields := &beads.AgentFields{
+		ExitType:   string(ExitTypeCompleted),
+		Branch:     branch,
+		HookBead:   "gt-test-issue",
+		PushFailed: true,
+	}
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+
+	result := HandlePolecatDoneFromBead(bd, townRoot, rigName, polecatName, fields, nil)
+	if !result.Handled {
+		t.Fatalf("expected Handled=true, got result=%+v", result)
+	}
+	if !strings.Contains(result.Action, "push-failed-recovery-needed") {
+		t.Errorf("Action SHOULD contain push-failed-recovery-needed when branch missing, got %q", result.Action)
+	}
+}
+
+// TestProcessDiscoveredCompletion_PushFailedSuppressedWhenOnOrigin is the
+// parallel test for the bead-discovery code path (handlers.go:3317).
+func TestProcessDiscoveredCompletion_PushFailedSuppressedWhenOnOrigin(t *testing.T) {
+	t.Parallel()
+	rigName, polecatName := "testrig", "deathclaw"
+	branch := "polecat/deathclaw/discovered-landed"
+	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, true /* branchPushed */)
+
+	payload := &PolecatDonePayload{
+		PolecatName: polecatName,
+		Exit:        string(ExitTypeCompleted),
+		Branch:      branch,
+		IssueID:     "gt-test-issue",
+		PushFailed:  true,
+		MRFailed:    true, // Skip MR fallback to land in acknowledged-idle.
+	}
+	discovery := &CompletionDiscovery{}
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	processDiscoveredCompletion(bd, townRoot, rigName, payload, discovery)
+
+	if strings.Contains(discovery.Action, "push-failed-recovery-needed") {
+		t.Errorf("Action should NOT contain push-failed-recovery-needed when branch is on origin, got %q", discovery.Action)
+	}
+}
+
+// TestProcessDiscoveredCompletion_PushFailedFiresWhenBranchMissing keeps the
+// genuine-failure path covered for the discovery handler.
+func TestProcessDiscoveredCompletion_PushFailedFiresWhenBranchMissing(t *testing.T) {
+	t.Parallel()
+	rigName, polecatName := "testrig", "deathclaw"
+	branch := "polecat/deathclaw/discovered-lost"
+	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, false /* branchPushed */)
+
+	payload := &PolecatDonePayload{
+		PolecatName: polecatName,
+		Exit:        string(ExitTypeCompleted),
+		Branch:      branch,
+		IssueID:     "gt-test-issue",
+		PushFailed:  true,
+	}
+	discovery := &CompletionDiscovery{}
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "[]", nil },
+		func(args []string) error { return nil },
+	)
+	processDiscoveredCompletion(bd, townRoot, rigName, payload, discovery)
+
+	if !strings.Contains(discovery.Action, "push-failed-recovery-needed") {
+		t.Errorf("Action SHOULD contain push-failed-recovery-needed when branch missing, got %q", discovery.Action)
+	}
+}
+
+func TestClearPushFailedOnAgent_HandlesMissingBead(t *testing.T) {
+	t.Parallel()
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "", fmt.Errorf("bd: not found") },
+		func(args []string) error { return nil },
+	)
+	// Should not panic or block; just logs to stderr.
+	clearPushFailedOnAgent(bd, "/tmp", "gt-fake-agent")
+	clearPushFailedOnAgent(bd, "/tmp", "") // empty agentBeadID
+}

@@ -248,21 +248,36 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 	}
 
 	// Push failed: branch never reached origin (gas-556). Report recovery needed.
+	//
+	// gu-ww9u: PushFailed on the agent bead is sticky. Before alarming the
+	// mayor, re-check whether the branch is actually missing from origin —
+	// if it landed via bare-repo fallback, manual recovery, or out-of-band
+	// MR, the work is NOT lost and the nudge would be a false alarm. When
+	// the branch IS on origin, clear the stuck flag and route through the
+	// normal completion path so MR-discovery can pick up any pending work.
 	if payload.PushFailed {
-		result.Handled = true
-		result.Action = fmt.Sprintf("push-failed-recovery-needed for %s (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
-			polecatName, payload.Branch, payload.IssueID)
 		townRoot, _ := workspace.Find(workDir)
-		if townRoot != "" {
-			mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s — branch not on origin, possible work loss",
+		if branchOnOrigin(townRoot, rigName, polecatName, payload.Branch) {
+			prefix := beads.GetPrefixForRig(townRoot, rigName)
+			agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+			clearPushFailedOnAgent(bd, workDir, agentBeadID)
+			payload.PushFailed = false
+			// Fall through to normal completion routing below.
+		} else {
+			result.Handled = true
+			result.Action = fmt.Sprintf("push-failed-recovery-needed for %s (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
 				polecatName, payload.Branch, payload.IssueID)
-			mayorSession := session.MayorSessionName()
-			t := tmux.NewTmux()
-			if running, err := t.HasSession(mayorSession); err == nil && running {
-				_ = t.NudgeSession(mayorSession, mayorMsg)
+			if townRoot != "" {
+				mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s — branch not on origin, possible work loss",
+					polecatName, payload.Branch, payload.IssueID)
+				mayorSession := session.MayorSessionName()
+				t := tmux.NewTmux()
+				if running, err := t.HasSession(mayorSession); err == nil && running {
+					_ = t.NudgeSession(mayorSession, mayorMsg)
+				}
 			}
+			return result
 		}
-		return result
 	}
 
 	hasPendingMR := completionPayloadHasPendingMR(bd, workDir, rigName, payload)
@@ -3314,21 +3329,34 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 	// Push failed: branch never reached origin. Work is committed locally only.
 	// The polecat's worktree may be in /tmp and lost on reboot. Escalate so the
 	// witness agent can investigate and trigger recovery (gas-556).
+	//
+	// gu-ww9u: PushFailed on the agent bead is sticky. Re-check origin first
+	// — if the branch IS upstream (via bare-repo fallback, manual recovery,
+	// or out-of-band MR), the work is not lost; clear the stuck flag and
+	// route through the normal completion path below.
 	if payload.PushFailed {
-		discovery.Action = fmt.Sprintf("push-failed-recovery-needed (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
-			payload.Branch, payload.IssueID)
-		// Notify mayor so a new polecat can be dispatched if work is lost.
 		townRoot, _ := workspace.Find(workDir)
-		if townRoot != "" {
-			mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s — branch not on origin, possible work loss",
-				payload.PolecatName, payload.Branch, payload.IssueID)
-			mayorSession := session.MayorSessionName()
-			t := tmux.NewTmux()
-			if running, err := t.HasSession(mayorSession); err == nil && running {
-				_ = t.NudgeSession(mayorSession, mayorMsg)
+		if branchOnOrigin(townRoot, rigName, payload.PolecatName, payload.Branch) {
+			prefix := beads.GetPrefixForRig(townRoot, rigName)
+			agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, payload.PolecatName)
+			clearPushFailedOnAgent(bd, workDir, agentBeadID)
+			payload.PushFailed = false
+			// Fall through to normal completion routing below.
+		} else {
+			discovery.Action = fmt.Sprintf("push-failed-recovery-needed (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
+				payload.Branch, payload.IssueID)
+			// Notify mayor so a new polecat can be dispatched if work is lost.
+			if townRoot != "" {
+				mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s — branch not on origin, possible work loss",
+					payload.PolecatName, payload.Branch, payload.IssueID)
+				mayorSession := session.MayorSessionName()
+				t := tmux.NewTmux()
+				if running, err := t.HasSession(mayorSession); err == nil && running {
+					_ = t.NudgeSession(mayorSession, mayorMsg)
+				}
 			}
+			return
 		}
-		return
 	}
 
 	hasMR := false
@@ -3615,6 +3643,81 @@ func getAgentBeadFields(bd *BdCli, workDir, agentBeadID string) *beads.AgentFiel
 	}
 
 	return beads.ParseAgentFields(issues[0].Description)
+}
+
+// branchOnOrigin re-checks whether a branch is currently present on origin
+// (or any configured remote, with a bare-repo fallback at <rig>/.repo.git).
+// gu-ww9u: the agent bead's PushFailed flag is sticky — once written by `gt
+// done`, it persists even if the branch later reaches origin via manual
+// recovery, bare-repo fallback, or refinery picking up an out-of-band MR.
+// Trusting that flag without re-verification causes the witness to re-fire
+// PUSH_FAILED nudges to the mayor on every scan. This helper is the
+// defensive re-check: if the branch IS on origin at nudge time, work is not
+// actually lost and the alarm should be suppressed.
+//
+// Returns true if the branch is found on any remote or in the bare repo,
+// false if it is genuinely missing or cannot be checked. Best-effort: any
+// transient git/ls-remote error is treated as "unknown, do not suppress" so
+// genuine push failures still surface.
+func branchOnOrigin(townRoot, rigName, polecatName, branch string) bool {
+	if townRoot == "" || branch == "" {
+		return false
+	}
+	polecatPath := polecatWorktreePath(townRoot, rigName, polecatName)
+	if _, err := os.Stat(polecatPath); err == nil {
+		g := git.NewGit(polecatPath)
+		remotes, _ := g.Remotes()
+		if len(remotes) == 0 {
+			remotes = []string{"origin"}
+		}
+		for _, remote := range remotes {
+			if exists, err := g.PushRemoteBranchExists(remote, branch); err == nil && exists {
+				return true
+			}
+		}
+	}
+	// Bare-repo fallback: rigs with a local mirror at <rig>/.repo.git can
+	// have the branch present there even if origin reaped it (gu-uk8f).
+	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
+	if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+		bareGit := git.NewGitWithDir(bareRepoPath, "")
+		if sha, err := bareGit.Rev("refs/heads/" + branch); err == nil && strings.TrimSpace(sha) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// clearPushFailedOnAgent clears the sticky push_failed flag on a polecat's
+// agent bead after branchOnOrigin confirms the branch is genuinely present
+// upstream. Without this, the next witness scan would re-read PushFailed=true
+// and re-fire the nudge. Best-effort — errors are logged to stderr but do
+// not block downstream completion routing.
+func clearPushFailedOnAgent(bd *BdCli, workDir, agentBeadID string) {
+	if agentBeadID == "" {
+		return
+	}
+	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
+	if err != nil || output == "" {
+		fmt.Fprintf(os.Stderr, "witness: clear push_failed: read %s: %v\n", agentBeadID, err)
+		return
+	}
+	var issues []struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
+		return
+	}
+	fields := beads.ParseAgentFields(issues[0].Description)
+	if fields == nil || !fields.PushFailed {
+		return
+	}
+	fields.PushFailed = false
+	newDesc := beads.FormatAgentDescription(issues[0].Title, fields)
+	if err := bd.Run(workDir, "update", agentBeadID, "--description", newDesc); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: clear push_failed: update %s: %v\n", agentBeadID, err)
+	}
 }
 
 // clearCompletionMetadata removes completion metadata fields from an agent bead
