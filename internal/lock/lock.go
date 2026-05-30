@@ -70,7 +70,12 @@ func (l *Lock) Acquire(sessionID string) error {
 
 	// Acquire advisory flock to serialize concurrent Acquire() calls.
 	// The flock file is separate from the lock file itself.
-	unlock, err := flockAcquire(l.lockPath + ".flock")
+	//
+	// Use a bounded wait rather than a blocking LOCK_EX: if a prior gt process
+	// is stuck holding the coordination flock, a blocking acquire would hang
+	// the caller (gt prime/hook/done) indefinitely. Bounding it makes gt fail
+	// fast with a clear error instead (gs-e6n).
+	unlock, err := flockAcquireBounded(l.lockPath + ".flock")
 	if err != nil {
 		return fmt.Errorf("acquiring coordination lock: %w", err)
 	}
@@ -86,8 +91,12 @@ func (l *Lock) Acquire(sessionID string) error {
 				return fmt.Errorf("removing stale lock: %w", err)
 			}
 		} else {
-			// Active lock - check if it's us
-			if info.PID == os.Getpid() {
+			// Active lock - check if it's us. Match on PID (same process
+			// re-acquiring) OR on session: two short-lived gt invocations in
+			// the same tmux pane have different PIDs but represent the same
+			// agent identity, so comparing raw PID alone falsely reports a
+			// collision against our own pane (gs-e6n).
+			if info.PID == os.Getpid() || (sessionID != "" && info.SessionID == sessionID) {
 				// We already hold it - refresh
 				return l.write(sessionID)
 			}
@@ -99,6 +108,35 @@ func (l *Lock) Acquire(sessionID string) error {
 
 	// No lock or stale lock removed - acquire it
 	return l.write(sessionID)
+}
+
+// flockAcquireBounded acquires the coordination flock with a bounded wait.
+// Unlike the blocking flockAcquire (LOCK_EX), it never blocks indefinitely: if
+// another process holds the flock past the timeout (e.g. a stuck gt invocation),
+// it returns an error so the caller fails fast instead of hanging forever
+// (gs-e6n). Mirrors tryAcquireSlingAssigneeLock's retry loop.
+//
+// The attempt count and interval are package vars so tests can shrink the wait.
+var (
+	flockBoundedMaxAttempts = 100
+	flockBoundedInterval    = 50 * time.Millisecond
+)
+
+func flockAcquireBounded(path string) (func(), error) {
+	for attempt := 1; attempt <= flockBoundedMaxAttempts; attempt++ {
+		release, locked, err := FlockTryAcquire(path)
+		if err != nil {
+			return nil, err
+		}
+		if locked {
+			return release, nil
+		}
+		if attempt < flockBoundedMaxAttempts {
+			time.Sleep(flockBoundedInterval)
+		}
+	}
+	return nil, fmt.Errorf("timed out acquiring coordination lock %s after %s (another gt process may be stuck holding it)",
+		path, time.Duration(flockBoundedMaxAttempts)*flockBoundedInterval)
 }
 
 // Release releases the lock if we hold it.

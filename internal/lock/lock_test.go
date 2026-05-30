@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +117,97 @@ func TestLock_AcquireAlreadyHeld(t *testing.T) {
 	}
 
 	l.Release()
+}
+
+// TestLock_AcquireSameSessionDifferentPID verifies that a lock held by a live
+// PID is reclaimed (refreshed) when its recorded session matches ours. This is
+// the same-pane overlapping-invocation case from gs-e6n: two short-lived gt
+// processes share a tmux pane but have different PIDs, so a raw PID comparison
+// would falsely report an identity collision against our own session.
+func TestLock_AcquireSameSessionDifferentPID(t *testing.T) {
+	tmpDir := t.TempDir()
+	workerDir := filepath.Join(tmpDir, "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lock held by a live but different PID (init, PID 1) recorded against our
+	// own session.
+	const ourSession = "%574"
+	existing := LockInfo{
+		PID:        1, // alive, not us
+		AcquiredAt: time.Now(),
+		SessionID:  ourSession,
+	}
+	data, _ := json.Marshal(existing)
+	lockPath := filepath.Join(runtimeDir, "agent.lock")
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := New(workerDir)
+
+	// Same session => treat as us and refresh, not a collision.
+	if err := l.Acquire(ourSession); err != nil {
+		t.Fatalf("Acquire() with same-session lock should refresh, got error = %v", err)
+	}
+
+	info, err := l.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if info.PID != os.Getpid() {
+		t.Errorf("PID = %d, want %d (lock should be refreshed to our PID)", info.PID, os.Getpid())
+	}
+
+	l.Release()
+}
+
+// TestLock_AcquireBoundedFlockTimesOut verifies that Acquire fails fast with a
+// timeout error instead of hanging indefinitely when the coordination flock is
+// held by another process (gs-e6n).
+func TestLock_AcquireBoundedFlockTimesOut(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("advisory flock is a no-op on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	workerDir := filepath.Join(tmpDir, "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shrink the bounded wait so the test is fast; restore afterward.
+	origAttempts, origInterval := flockBoundedMaxAttempts, flockBoundedInterval
+	flockBoundedMaxAttempts, flockBoundedInterval = 3, 10*time.Millisecond
+	defer func() { flockBoundedMaxAttempts, flockBoundedInterval = origAttempts, origInterval }()
+
+	// Hold the coordination flock from "another process".
+	flockPath := filepath.Join(runtimeDir, "agent.lock.flock")
+	release, locked, err := FlockTryAcquire(flockPath)
+	if err != nil || !locked {
+		t.Fatalf("test setup: could not hold flock (locked=%v, err=%v)", locked, err)
+	}
+	defer release()
+
+	l := New(workerDir)
+
+	done := make(chan error, 1)
+	go func() { done <- l.Acquire("%574") }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Acquire() should fail while coordination flock is held, got nil")
+		}
+		if !strings.Contains(err.Error(), "coordination lock") {
+			t.Errorf("expected coordination-lock timeout error, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Acquire() hung instead of timing out on held coordination flock")
+	}
 }
 
 func TestLock_AcquireStaleLock(t *testing.T) {
