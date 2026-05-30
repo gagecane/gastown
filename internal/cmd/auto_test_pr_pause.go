@@ -86,6 +86,21 @@ const statusTimeout = 2 * time.Second
 // returns statusTimeout; tests can override to test timeout behavior.
 var statusTimeoutFn = func() time.Duration { return statusTimeout }
 
+// newAutoTestPRBeadsFn and loadTownStateFn are indirection points for the
+// status verb so its timeout/error mapping can be exercised deterministically
+// without touching the live town, a running Dolt server, or bd on PATH.
+// Production wires them to the real implementations below. (The status
+// timeout test previously forced a 1ns timeout and raced a real read: locally
+// the live Dolt server made the read slow enough that the timeout won, but in
+// CI's bd-less, server-less unit job the read failed instantly and that error
+// won the race — green locally, red in CI. Injecting the load lets the test
+// return ErrStatusTimeout directly, removing the race and the environment
+// dependency.)
+var (
+	newAutoTestPRBeadsFn = newAutoTestPRBeads
+	loadTownStateFn      = loadTownStateWithTimeout
+)
+
 // historyLastDefault is the default --last for `history`. Mirrors the
 // synthesis CLI surface (line 316): `history --rig=<rig> [--last=10]`.
 // Ten entries is half the MaxIncidents cap — enough to cover a
@@ -440,12 +455,12 @@ func runAutoTestPRStatus(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 
-	bd, err := newAutoTestPRBeads()
+	bd, err := newAutoTestPRBeadsFn()
 	if err != nil {
 		return err
 	}
 
-	state, err := loadTownStateWithTimeout(bd, statusTimeoutFn())
+	state, err := loadTownStateFn(bd, statusTimeoutFn())
 	if err != nil {
 		if errors.Is(err, ErrStatusTimeout) {
 			fmt.Fprintln(stderr, "gt auto-test-pr status: Dolt read timed out (<=2s); Dolt may be degraded")

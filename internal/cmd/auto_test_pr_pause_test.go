@@ -14,7 +14,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/autotestpr"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // resetAutoTestPRPauseFlags zeroes the package-level flag bindings
@@ -527,18 +526,22 @@ func TestStatusTimeoutExitCode(t *testing.T) {
 	resetAutoTestPRPauseFlags(t)
 	autoTestPRStatusFormat = "table"
 
-	// Override statusTimeoutFn to return an impossibly short duration.
-	prev := statusTimeoutFn
-	statusTimeoutFn = func() time.Duration { return 1 * time.Nanosecond }
-	t.Cleanup(func() { statusTimeoutFn = prev })
-
-	// We need a workspace for newAutoTestPRBeads to succeed. Skip if not
-	// in a Gas Town workspace (the test is meaningful in CI where the
-	// repo is checked out as a Gas Town workspace).
-	_, findErr := workspace.FindFromCwdOrError()
-	if findErr != nil {
-		t.Skipf("not in a Gas Town workspace: %v", findErr)
+	// Hermetic: stub the beads constructor and the town-state load so this
+	// exercises ONLY the timeout->SilentExit(4) wiring, with no dependency on
+	// a live town, a running Dolt server, or bd on PATH. The previous version
+	// forced a 1ns timeout and raced a real read — green locally (live Dolt
+	// server slow enough that the timeout won) but red in CI's bd-less,
+	// server-less unit job (read failed instantly, that error won the race).
+	prevBeads := newAutoTestPRBeadsFn
+	prevLoad := loadTownStateFn
+	newAutoTestPRBeadsFn = func() (*beads.Beads, error) { return nil, nil }
+	loadTownStateFn = func(*beads.Beads, time.Duration) (autotestpr.TownState, error) {
+		return autotestpr.TownState{}, ErrStatusTimeout
 	}
+	t.Cleanup(func() {
+		newAutoTestPRBeadsFn = prevBeads
+		loadTownStateFn = prevLoad
+	})
 
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
@@ -549,13 +552,6 @@ func TestStatusTimeoutExitCode(t *testing.T) {
 	defer cmd.SetErr(nil)
 
 	err := runAutoTestPRStatus(cmd, nil)
-	if err == nil {
-		// If Dolt responded in <1ns (impossible in normal conditions),
-		// the test would pass through the happy path. That's acceptable
-		// — the primary purpose is catching regressions in the timeout
-		// wiring, not simulating a real degraded server.
-		t.Skip("status returned without error (Dolt responded before 1ns timeout)")
-	}
 	code, ok := IsSilentExit(err)
 	if !ok || code != 4 {
 		t.Errorf("err = %v; want SilentExit(4) for timeout", err)
