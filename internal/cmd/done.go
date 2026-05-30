@@ -1900,7 +1900,12 @@ notifyWitness:
 	// detached subprocess survives the parent's exit independently.
 	if isPolecat {
 		daemonCfg := config.LoadOperationalConfig(townRoot).GetDaemonConfig()
-		if daemonCfg.PolecatSelfTerminate != nil && *daemonCfg.PolecatSelfTerminate {
+		// gu-ci0l: default-true via PolecatSelfTerminateV(). The previous nil-check
+		// pattern silently fell through to false when the operator did not configure
+		// the field, which exposed polecats to a post-done wedge loop (witness
+		// dependence + restart re-dispatch). Operators can still opt out by setting
+		// operational.daemon.polecat_self_terminate=false explicitly.
+		if daemonCfg.PolecatSelfTerminateV() {
 			fmt.Printf("%s Self-terminating session (polecat_self_terminate=true)\n", style.Bold.Render("✓"))
 			sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 			t := tmux.NewTmux()

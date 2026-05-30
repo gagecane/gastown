@@ -15,7 +15,9 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -493,8 +495,26 @@ func validateMoleculePrereqs(children []*beads.Issue) error {
 	return fmt.Errorf("%s", sb.String())
 }
 
+// maxCleanupWait bounds the post-submit wait for witness-driven termination.
+//
+// Capped at 30s (gu-ci0l): the previous 5-minute wait was the load-bearing
+// piece of a wedge loop. When the witness was slow, restarting, or had a
+// stale lifecycle queue, the polecat sat in this loop for the full 5 minutes,
+// then returned — but the session stayed alive. A restarting witness could
+// then re-discover the now-idle polecat and re-dispatch it, re-entering the
+// same wedge. 30s is enough headroom for a healthy witness to issue the kill;
+// if the witness misses that window, the safety net below self-terminates
+// rather than waste 4.5 more minutes of slot time.
+const maxCleanupWait = 30 * time.Second
+
 // polecatCleanup sends a lifecycle shutdown request to the witness and waits for termination.
 // This is called after a polecat successfully submits an MR.
+//
+// gu-ci0l defense-in-depth: if the witness does not terminate the session
+// within maxCleanupWait, the polecat self-terminates via a detached tmux-kill
+// subprocess. This eliminates the post-done wedge loop where slow / restarting
+// witnesses left polecats stranded in the wait, only to be re-dispatched on
+// the next witness patrol and wedge again.
 func polecatCleanup(rigName, worker, townRoot string) error {
 	// Send lifecycle request to witness
 	manager := rigName + "/witness"
@@ -522,14 +542,12 @@ Please verify state and execute lifecycle action.
 
 	// Wait for retirement with periodic status
 	fmt.Println()
-	fmt.Printf("%s Waiting for retirement...\n", style.Dim.Render("◌"))
-	fmt.Println(style.Dim.Render("(Witness will terminate this session)"))
+	fmt.Printf("%s Waiting for retirement (cap %s)...\n", style.Dim.Render("◌"), maxCleanupWait)
+	fmt.Println(style.Dim.Render("(Witness will terminate this session; self-terminate fires on timeout)"))
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	// Timeout after 5 minutes to prevent indefinite blocking
-	const maxCleanupWait = 5 * time.Minute
 	timeout := time.After(maxCleanupWait)
 
 	waitStart := time.Now()
@@ -538,15 +556,23 @@ Please verify state and execute lifecycle action.
 		case <-ticker.C:
 			elapsed := time.Since(waitStart).Round(time.Second)
 			fmt.Printf("%s Still waiting (%v elapsed)...\n", style.Dim.Render("◌"), elapsed)
-			if elapsed >= 2*time.Minute {
-				fmt.Println(style.Dim.Render("  Hint: If witness isn't responding, you may need to:"))
-				fmt.Println(style.Dim.Render("  - Check if witness is running: gt rig status"))
-				fmt.Println(style.Dim.Render("  - Use Ctrl+C to abort and manually exit"))
-			}
 		case <-timeout:
-			fmt.Printf("%s Timeout waiting for polecat retirement\n", style.WarningPrefix)
-			fmt.Println(style.Dim.Render("  The polecat may have already terminated, or witness is unresponsive."))
-			fmt.Println(style.Dim.Render("  You can verify with: gt polecat status"))
+			fmt.Printf("%s Timeout waiting for polecat retirement after %s\n", style.WarningPrefix, maxCleanupWait)
+			// gu-ci0l safety net: spawn a detached tmux-kill so the session
+			// terminates regardless of witness state. Without this fallback,
+			// a slow/restarting witness left the session alive — exposing it
+			// to re-dispatch on the next witness patrol and another round of
+			// the same wedge. The detached subprocess survives our return.
+			if worker != "" && rigName != "" {
+				sessionName := session.PolecatSessionName(session.PrefixFor(rigName), worker)
+				t := tmux.NewTmux()
+				if err := t.DetachedKillSessionWithProcesses(sessionName, 3*time.Second); err != nil {
+					style.PrintWarning("self-terminate fallback failed: %v (witness must clean up manually)", err)
+					fmt.Println(style.Dim.Render("  You can verify with: gt polecat status"))
+				} else {
+					fmt.Printf("%s Self-terminate fallback dispatched (session: %s)\n", style.Bold.Render("✓"), sessionName)
+				}
+			}
 			return nil // Don't fail the MR submission just because cleanup timed out
 		}
 	}

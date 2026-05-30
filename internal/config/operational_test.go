@@ -139,6 +139,42 @@ func TestDaemonThresholds_Overrides(t *testing.T) {
 	}
 }
 
+// TestPolecatSelfTerminate_DefaultTrue documents the gu-ci0l default flip.
+// A nil PolecatSelfTerminate field — the most common case in real configs —
+// must return true, eliminating the witness-dependent post-done wedge loop.
+// An explicit `false` override must still be honored so operators can opt
+// into the legacy persistent-polecat model.
+func TestPolecatSelfTerminate_DefaultTrue(t *testing.T) {
+	t.Parallel()
+
+	// Case 1: nil DaemonThresholds — default true.
+	var dNil *DaemonThresholds
+	if !dNil.PolecatSelfTerminateV() {
+		t.Errorf("nil DaemonThresholds: got false, want true (default)")
+	}
+
+	// Case 2: empty DaemonThresholds (field nil) — default true.
+	op := &OperationalConfig{}
+	daemon := op.GetDaemonConfig()
+	if !daemon.PolecatSelfTerminateV() {
+		t.Errorf("empty DaemonThresholds: got false, want true (default)")
+	}
+
+	// Case 3: explicit true — true.
+	tval := true
+	dTrue := &DaemonThresholds{PolecatSelfTerminate: &tval}
+	if !dTrue.PolecatSelfTerminateV() {
+		t.Errorf("explicit true: got false, want true")
+	}
+
+	// Case 4: explicit false override — false (operator opt-out preserved).
+	fval := false
+	dFalse := &DaemonThresholds{PolecatSelfTerminate: &fval}
+	if dFalse.PolecatSelfTerminateV() {
+		t.Errorf("explicit false: got true, want false (override should be honored)")
+	}
+}
+
 func TestDaemonThresholds_NewFieldOverrides(t *testing.T) {
 	t.Parallel()
 

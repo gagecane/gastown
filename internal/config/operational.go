@@ -72,6 +72,15 @@ const (
 	DefaultPressureCPUThreshold   = 0.0
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
+
+	// DefaultPolecatSelfTerminate defaults polecats to self-terminating their
+	// session after `gt done` completes. See gu-ci0l: previously default false
+	// meant polecats waited on the witness for tmux-kill, exposing them to a
+	// post-done wedge loop where witness restarts re-dispatched the still-alive
+	// idle polecat into the same gt done path. Self-termination eliminates the
+	// dependency on witness liveness for the cleanup path.
+	// Operators can opt out by setting operational.daemon.polecat_self_terminate=false.
+	DefaultPolecatSelfTerminate = true
 )
 
 // Deacon defaults.
@@ -410,6 +419,18 @@ func (d *DaemonThresholds) SyncFailureEscalationThresholdV() int {
 		return *d.SyncFailureEscalationThreshold
 	}
 	return DefaultSyncFailureEscalationThreshold
+}
+
+// PolecatSelfTerminateV returns the configured polecat-self-terminate setting,
+// or DefaultPolecatSelfTerminate (true) when not explicitly configured. Honors
+// an explicit `false` override — only nil falls through to the default. See
+// gu-ci0l: default-true eliminates the witness-dependent wedge loop in the
+// post-done cleanup path.
+func (d *DaemonThresholds) PolecatSelfTerminateV() bool {
+	if d != nil && d.PolecatSelfTerminate != nil {
+		return *d.PolecatSelfTerminate
+	}
+	return DefaultPolecatSelfTerminate
 }
 
 // DoctorMolCooldownD returns the configured or default doctor mol cooldown.

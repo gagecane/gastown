@@ -371,13 +371,18 @@ func TestIssuePatternCompiledAtPackageLevel(t *testing.T) {
 	}
 }
 
-// TestPolecatCleanupTimeoutConstant verifies the timeout constant is set correctly.
+// TestPolecatCleanupTimeoutConstant verifies the post-submit retirement-wait
+// cap is short enough to avoid the gu-ci0l wedge loop. Pre-fix this constant
+// was 5 minutes — slow/restarting witnesses left polecats stranded in the
+// wait and re-dispatched them on the next patrol cycle, looping forever. The
+// 30s cap pairs with a self-terminate fallback (detached tmux-kill) inside
+// polecatCleanup so the session always exits within ~30s of done.
 func TestPolecatCleanupTimeoutConstant(t *testing.T) {
-	// This test documents the expected timeout value.
-	// The actual timeout behavior is tested manually or with integration tests.
-	const expectedMaxCleanupWait = 5 * time.Minute
-	if expectedMaxCleanupWait != 5*time.Minute {
-		t.Errorf("expectedMaxCleanupWait = %v, want 5m", expectedMaxCleanupWait)
+	if maxCleanupWait > 60*time.Second {
+		t.Errorf("maxCleanupWait = %v, want <=60s to avoid the gu-ci0l wedge loop", maxCleanupWait)
+	}
+	if maxCleanupWait < 5*time.Second {
+		t.Errorf("maxCleanupWait = %v, want >=5s to give a healthy witness time to ack", maxCleanupWait)
 	}
 }
 
