@@ -1031,21 +1031,44 @@ afterSafetyNet:
 				pushSubmoduleChanges(g, defaultBranch)
 				directRefspec := branch + ":" + defaultBranch
 				directPushErr := pushForDone(g, directRefspec)
+				directHeadSHA, _ := g.Rev("HEAD")
 				if directPushErr != nil {
-					pushFailed = true
-					errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
-					style.PrintWarning("%s", errMsg)
-					goto notifyWitness
+					// gu-epv5 Option C: re-check origin/<defaultBranch>. The
+					// direct push may have actually landed even though the
+					// local report indicated failure (transient net error).
+					if directHeadSHA != "" && recoverPushFromOriginTip(g, defaultBranch, directHeadSHA) {
+						fmt.Printf("%s Direct push reported failure but origin/%s already matches HEAD — treating as success (gu-epv5 recovery)\n", style.Bold.Render("✓"), defaultBranch)
+						directPushErr = nil
+					} else {
+						pushFailed = true
+						errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
+						style.PrintWarning("%s", errMsg)
+						strandedBd := beads.New(cwd)
+						fileStrandedPushWisp(strandedBd, rigName, branch, directHeadSHA, defaultBranch, issueID, agentBeadID, worker, directPushErr)
+						goto notifyWitness
+					}
 				}
-				directCommitSHA, _ := g.Rev("HEAD")
+				directCommitSHA := directHeadSHA
+				if directCommitSHA == "" {
+					directCommitSHA, _ = g.Rev("HEAD")
+				}
 				if doneSkipVerify {
 					noteVerifiedPushSkipped(cwd, issueID, defaultBranch, directCommitSHA, fmt.Sprintf("--skip-verify on direct merge: %s", doneSkipVerifyReason))
 				} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, directCommitSHA); verifyErr != nil {
-					pushFailed = true
-					errMsg := verifyErr.Error()
-					noteVerifiedPushFailure(cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
-					style.PrintWarning("%s\nDirect merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
-					goto notifyWitness
+					// gu-epv5: re-check origin tip — verify may have hit a
+					// transient remote read failure. If tip matches, treat
+					// as success.
+					if recoverPushFromOriginTip(g, defaultBranch, directCommitSHA) {
+						fmt.Printf("%s Verify reported failure but origin/%s tip matches — treating as success (gu-epv5 recovery)\n", style.Bold.Render("✓"), defaultBranch)
+					} else {
+						pushFailed = true
+						errMsg := verifyErr.Error()
+						noteVerifiedPushFailure(cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
+						style.PrintWarning("%s\nDirect merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
+						strandedBd := beads.New(cwd)
+						fileStrandedPushWisp(strandedBd, rigName, branch, directCommitSHA, defaultBranch, issueID, agentBeadID, worker, verifyErr)
+						goto notifyWitness
+					}
 				}
 				fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
 				// gu-ftja: receipt for the direct-merge convoy push.
@@ -1210,11 +1233,28 @@ afterSafetyNet:
 		}
 
 		if pushErr != nil {
-			// All push attempts failed
-			pushFailed = true
-			errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
-			style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
-			goto notifyWitness
+			// All push attempts failed.
+			//
+			// gu-epv5 Option C: before giving up, re-check origin/<branch>.
+			// A push may have actually delivered the SHA but the local git
+			// reported failure (transient net error, lost ack, verifier
+			// timeout). If the tip matches our expected SHA, treat as
+			// success so MR creation still happens.
+			if pushedCommitSHA != "" && recoverPushFromOriginTip(g, branch, pushedCommitSHA) {
+				fmt.Printf("%s Push reported failure but origin/%s already matches expected SHA — proceeding to MR creation (gu-epv5 recovery)\n", style.Bold.Render("✓"), branch)
+				pushErr = nil
+			} else {
+				// gu-epv5 Option B: file a discoverable push-stranded wisp
+				// so the work isn't invisible. The merge queue will not
+				// pick it up (different label), but `gt mq list` and
+				// witness/mayor sweeps surface it for recovery.
+				pushFailed = true
+				errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
+				style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
+				strandedBd := beads.New(cwd)
+				fileStrandedPushWisp(strandedBd, rigName, branch, pushedCommitSHA, defaultBranch, issueID, agentBeadID, worker, pushErr)
+				goto notifyWitness
+			}
 		}
 
 		// Verify the pushed branch tip is the exact local commit before creating
@@ -1226,11 +1266,24 @@ afterSafetyNet:
 		if doneSkipVerify {
 			noteVerifiedPushSkipped(cwd, issueID, branch, pushedCommitSHA, fmt.Sprintf("--skip-verify on branch push: %s", doneSkipVerifyReason))
 		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
-			pushFailed = true
-			errMsg := verifyErr.Error()
-			noteVerifiedPushFailure(cwd, issueID, branch, pushedCommitSHA, verifyErr)
-			style.PrintWarning("%s\nCommits exist locally but verified push failed. Witness will be notified.", errMsg)
-			goto notifyWitness
+			// gu-epv5: verification reported failure. Re-check origin tip
+			// directly — verifyPushedCommitWithBareFallback may have hit a
+			// transient remote read error. If origin/<branch> matches our
+			// SHA, push really did land; proceed to MR creation.
+			if recoverPushFromOriginTip(g, branch, pushedCommitSHA) {
+				fmt.Printf("%s Verify reported failure but origin/%s tip matches — proceeding to MR creation (gu-epv5 recovery)\n", style.Bold.Render("✓"), branch)
+			} else {
+				// Verification truly failed — push may have been partial or
+				// rejected. File a stranded-push wisp so the queue surface
+				// shows the attempt.
+				pushFailed = true
+				errMsg := verifyErr.Error()
+				noteVerifiedPushFailure(cwd, issueID, branch, pushedCommitSHA, verifyErr)
+				style.PrintWarning("%s\nCommits exist locally but verified push failed. Witness will be notified.", errMsg)
+				strandedBd := beads.New(cwd)
+				fileStrandedPushWisp(strandedBd, rigName, branch, pushedCommitSHA, defaultBranch, issueID, agentBeadID, worker, verifyErr)
+				goto notifyWitness
+			}
 		}
 		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
 
@@ -1438,11 +1491,19 @@ afterSafetyNet:
 					if doneSkipVerify {
 						noteVerifiedPushSkipped(cwd, issueID, defaultBranch, lateDirectCommitSHA, fmt.Sprintf("--skip-verify on late direct merge: %s", doneSkipVerifyReason))
 					} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, lateDirectCommitSHA); verifyErr != nil {
-						pushFailed = true
-						errMsg := verifyErr.Error()
-						noteVerifiedPushFailure(cwd, issueID, defaultBranch, lateDirectCommitSHA, verifyErr)
-						style.PrintWarning("%s\nLate direct merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
-						goto notifyWitness
+						// gu-epv5: verify may have hit a transient remote
+						// read failure. Re-check origin tip directly before
+						// declaring the work stranded.
+						if recoverPushFromOriginTip(g, defaultBranch, lateDirectCommitSHA) {
+							fmt.Printf("%s Verify reported failure but origin/%s tip matches — treating as success (gu-epv5 recovery)\n", style.Bold.Render("✓"), defaultBranch)
+						} else {
+							pushFailed = true
+							errMsg := verifyErr.Error()
+							noteVerifiedPushFailure(cwd, issueID, defaultBranch, lateDirectCommitSHA, verifyErr)
+							style.PrintWarning("%s\nLate direct merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
+							fileStrandedPushWisp(bd, rigName, branch, lateDirectCommitSHA, defaultBranch, issueID, agentBeadID, worker, verifyErr)
+							goto notifyWitness
+						}
 					}
 					fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
 					// gu-ftja: receipt for the late-detected direct-merge push.
@@ -2041,6 +2102,92 @@ func recordPushReceipt(g *git.Git, townRoot, rigName, branch, commit, source, wo
 		Worker:    worker,
 		IssueID:   issueID,
 	})
+}
+
+// recoverPushFromOriginTip implements Option C recovery for gu-epv5: when a
+// push step reports failure, the push may have actually succeeded — the error
+// could be a transient network glitch, verification timeout, or post-push
+// communication failure. Re-check the remote branch tip; if it matches the
+// expected commit SHA, the push really did land, and the caller can clear
+// pushFailed and proceed to MR creation.
+//
+// Returns true if origin/<branch> tip matches expectedSHA.
+//
+// Best-effort: any error from the remote read is treated as "could not
+// confirm" (returns false) so callers fall through to the stranded-wisp path.
+func recoverPushFromOriginTip(g *git.Git, branch, expectedSHA string) bool {
+	if g == nil || branch == "" || expectedSHA == "" {
+		return false
+	}
+	tip, err := g.RemoteBranchTip("origin", branch)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(tip) == strings.TrimSpace(expectedSHA)
+}
+
+// fileStrandedPushWisp implements Option B for gu-epv5: when a push step
+// fails irrecoverably, file a discoverable wisp so refinery, witness, and
+// human operators can see that work was attempted but stranded. Without
+// this record, `gt done` returns silently after `goto notifyWitness` and
+// the only trace is a log line in stderr — the merge queue (`gt mq list`)
+// has nothing, and the bead's `stranded-merge` label (set by
+// updateAgentStateOnDone via gu-rh0g) is the only signal.
+//
+// The wisp is labeled `gt:push-stranded` rather than `gt:merge-request`
+// so refinery's queue scan does NOT pick it up as a merge candidate —
+// stranded-push wisps describe work that did NOT land on origin, and the
+// refinery must not try to merge a branch that may not exist remotely.
+// Mayor/witness sweep these wisps for recovery (re-push, escalation, or
+// closing the source bead with a recovery note).
+//
+// Best-effort: any failure to create the wisp logs a warning and returns
+// nil — the calling path still notifies witness via the existing channel.
+func fileStrandedPushWisp(bd *beads.Beads, rigName, branch, commitSHA, target, issueID, agentBeadID, worker string, pushErr error) string {
+	if bd == nil || issueID == "" {
+		return ""
+	}
+	title := fmt.Sprintf("Push stranded: %s", issueID)
+	description := fmt.Sprintf("branch: %s\nsource_issue: %s\nrig: %s\npush_status: stranded",
+		branch, issueID, rigName)
+	if target != "" {
+		description += fmt.Sprintf("\ntarget: %s", target)
+	}
+	if commitSHA != "" {
+		description += fmt.Sprintf("\ncommit_sha: %s", commitSHA)
+	}
+	if pushErr != nil {
+		// Truncate very long error messages so the wisp description stays
+		// readable. Full diagnostics live in stderr / pushlog.
+		errMsg := pushErr.Error()
+		if len(errMsg) > 512 {
+			errMsg = errMsg[:512] + "...(truncated)"
+		}
+		description += fmt.Sprintf("\npush_error: %s", errMsg)
+	}
+	if worker != "" {
+		description += fmt.Sprintf("\nworker: %s", worker)
+	}
+	if agentBeadID != "" {
+		description += fmt.Sprintf("\nagent_bead: %s", agentBeadID)
+	}
+	wisp, err := bd.Create(beads.CreateOptions{
+		Title:       title,
+		Labels:      []string{"gt:push-stranded"},
+		Priority:    1, // P1 — operator visibility for stranded work
+		Description: description,
+		Ephemeral:   true,
+		Rig:         rigName,
+	})
+	if err != nil {
+		style.PrintWarning("could not file push-stranded wisp for %s: %v", issueID, err)
+		return ""
+	}
+	if wisp == nil || wisp.ID == "" {
+		return ""
+	}
+	fmt.Printf("%s Filed push-stranded wisp: %s\n", style.Bold.Render("⚠"), wisp.ID)
+	return wisp.ID
 }
 
 func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {
