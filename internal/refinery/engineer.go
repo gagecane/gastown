@@ -23,9 +23,28 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/util"
 )
+
+// refineryTownRoot returns the town root for an Engineer's rig, or "" if it
+// cannot be determined. Used for cv-p3fem Phase 2 keepalive ticker setup.
+// e.rig.Path is .../<town>/<rig>; town root is the parent.
+func refineryTownRoot(e *Engineer) string {
+	if e == nil || e.rig == nil || e.rig.Path == "" {
+		return ""
+	}
+	return filepath.Dir(e.rig.Path)
+}
+
+// refinerySession returns the GT_SESSION the refinery is running under, or
+// "" if it can't be read. WithKeepalive treats an empty session as a no-op,
+// so callers can pass this through unconditionally — tests, foreground
+// invocations, and detached subprocesses all behave correctly.
+func refinerySession() string {
+	return os.Getenv("GT_SESSION")
+}
 
 // shortSHA returns at most 8 characters of a SHA for display.
 func shortSHA(sha string) string {
@@ -1024,6 +1043,11 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 		// infrastructure config), not from PR branches or user input. Shell execution
 		// is intentional for flexibility (pipes, env vars, etc).
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Executing test command: %s\n", e.config.TestCommand)
+		// Background keepalive ticker: a refinery test run can be many
+		// minutes (full go test ./..., gates suite). Without this the
+		// witness/dog flag the refinery as stale during a legitimate
+		// long run (cv-p3fem Phase 2, root cause of gu-rh0g class).
+		stopKeepalive := polecat.WithKeepalive(refineryTownRoot(e), refinerySession(), "refinery-tests", polecat.DefaultKeepaliveInterval)
 		cmd := exec.CommandContext(ctx, "sh", "-c", e.config.TestCommand) //nolint:gosec // G204: TestCommand is from trusted rig config
 		util.SetDetachedProcessGroup(cmd)
 		cmd.Dir = e.workDir
@@ -1032,6 +1056,7 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 		cmd.Stderr = &stderr
 
 		err := cmd.Run()
+		stopKeepalive()
 		if err == nil {
 			return ProcessResult{Success: true}
 		}
@@ -1073,6 +1098,13 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 		gateCtx, cancel = context.WithTimeout(ctx, gate.Timeout)
 		defer cancel()
 	}
+
+	// Background keepalive ticker: gates can run many minutes (build,
+	// rebase-check, lint, test). Keeps the heartbeat fresh so the
+	// witness/dog don't flag a healthy long gate run as stale
+	// (cv-p3fem Phase 2).
+	stopKeepalive := polecat.WithKeepalive(refineryTownRoot(e), refinerySession(), "refinery-gate:"+name, polecat.DefaultKeepaliveInterval)
+	defer stopKeepalive()
 
 	cmd := exec.CommandContext(gateCtx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
 	util.SetDetachedProcessGroup(cmd)

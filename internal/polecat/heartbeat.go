@@ -1,11 +1,13 @@
 package polecat
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -157,6 +159,135 @@ func IsSessionHeartbeatStale(townRoot, sessionName string) (stale bool, exists b
 		return false, false
 	}
 	return time.Since(hb.Timestamp) >= SessionHeartbeatStaleThreshold, true
+}
+
+// DefaultKeepaliveInterval is the default cadence for background keepalive
+// tickers (cv-p3fem Phase 2). Well below the 3-minute stale threshold (~6
+// keepalives of grace), well above filesystem flush thresholds. Long-running
+// call sites that don't otherwise touch the heartbeat (LLM calls, gate
+// runners, merge-queue waits) bump the timestamp on this cadence so the
+// witness/dog do not flag them as stale.
+const DefaultKeepaliveInterval = 30 * time.Second
+
+// Keepalive bumps the session heartbeat timestamp without changing the
+// reported state. Best-effort: errors are silently ignored, same contract as
+// TouchSessionHeartbeat. The current state/context/bead is preserved when
+// possible by reading the existing heartbeat first; if no heartbeat exists,
+// a default state="working" heartbeat is written.
+//
+// Phase 2 (cv-p3fem): updates only the v2 timestamp field. Phase 3 will add
+// a separate last_keepalive field. Old readers continue to see a fresh
+// timestamp during long calls, eliminating the false-stale-during-LLM-call
+// failure class.
+func Keepalive(townRoot, sessionName string) {
+	KeepaliveWithOp(townRoot, sessionName, "")
+}
+
+// KeepaliveWithOp bumps the heartbeat timestamp and records what the agent
+// is doing (e.g. "llm-call", "brazil-build", "go-test"). The op label is
+// preserved in the Context field for operator diagnostics. Best-effort.
+//
+// If no heartbeat file exists for the session, this writes a fresh
+// state="working" heartbeat with the supplied op as context. If an existing
+// heartbeat is present, its state and bead fields are preserved so a
+// keepalive does not overwrite agent self-reported state.
+func KeepaliveWithOp(townRoot, sessionName, op string) {
+	if !isValidSessionName(sessionName) {
+		return
+	}
+	state := HeartbeatWorking
+	context := op
+	bead := ""
+	if existing := ReadSessionHeartbeat(townRoot, sessionName); existing != nil {
+		state = existing.EffectiveState()
+		bead = existing.Bead
+		// Preserve the existing context only when the caller didn't supply
+		// one, so a typed `KeepaliveWithOp(... "llm-call")` overrides the
+		// stale "gt some-command" context but a plain `Keepalive(...)`
+		// doesn't blow it away.
+		if context == "" {
+			context = existing.Context
+		}
+	}
+	TouchSessionHeartbeatWithState(townRoot, sessionName, state, context, bead)
+}
+
+// WithKeepalive starts a background keepalive ticker and returns a cancel
+// func. The ticker calls KeepaliveWithOp every interval until the cancel
+// func is invoked. Defer-friendly: the canonical usage is
+//
+//	defer polecat.WithKeepalive(townRoot, session, "llm-call", 30*time.Second)()
+//
+// The cancel func is idempotent — calling it twice is safe. Returns a no-op
+// cancel func when sessionName or townRoot is empty (no GT_SESSION) so build
+// wrappers can call this unconditionally.
+//
+// cv-p3fem Phase 2: eliminates the false-stale-during-LLM-call class by
+// keeping the heartbeat fresh while the agent is in a long-running call.
+func WithKeepalive(townRoot, sessionName, op string, interval time.Duration) (cancel func()) {
+	if townRoot == "" || sessionName == "" {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = DefaultKeepaliveInterval
+	}
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	var once sync.Once
+	done := make(chan struct{})
+
+	// Bump immediately so a long call that finishes before the first tick
+	// still gets credit for being alive, and so the op label lands in the
+	// heartbeat right away for operator visibility.
+	KeepaliveWithOp(townRoot, sessionName, op)
+
+	go func() {
+		defer close(done)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				KeepaliveWithOp(townRoot, sessionName, op)
+			}
+		}
+	}()
+
+	return func() {
+		once.Do(func() {
+			ctxCancel()
+			<-done
+		})
+	}
+}
+
+// KeepaliveLoop is the context-aware variant of WithKeepalive for callers
+// that already have their own context (cancellation, timeout, etc.). The
+// loop runs in the calling goroutine and returns when ctx is canceled or
+// its deadline expires. Use go-routine-style: `go polecat.KeepaliveLoop(...)`.
+//
+// Like WithKeepalive, the first bump is immediate (before the first tick),
+// so a quick-completing call still gets a fresh heartbeat. Returns
+// immediately on missing town root or session name.
+func KeepaliveLoop(ctx context.Context, townRoot, sessionName, op string, interval time.Duration) {
+	if townRoot == "" || sessionName == "" {
+		return
+	}
+	if interval <= 0 {
+		interval = DefaultKeepaliveInterval
+	}
+	KeepaliveWithOp(townRoot, sessionName, op)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			KeepaliveWithOp(townRoot, sessionName, op)
+		}
+	}
 }
 
 // RemoveSessionHeartbeat removes the heartbeat file for a session.

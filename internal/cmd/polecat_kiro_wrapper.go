@@ -335,6 +335,14 @@ func runPolecatKiroWrapper(_ *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), iterDeadline)
 			defer cancel()
 
+			// Background keepalive ticker: bump the session heartbeat
+			// every 30s while kiro-cli runs so the witness/dog don't
+			// flag a healthy long LLM call as stale (cv-p3fem Phase 2,
+			// closes the gu-9ed0 false-positive class). No-op when
+			// sessionName/townRoot are empty (the cancel func is a
+			// safe defer either way).
+			defer polecat.WithKeepalive(cfg.townRoot, cfg.sessionName, "kiro-cli", polecat.DefaultKeepaliveInterval)()
+
 			c := exec.CommandContext(ctx, iterArgs[0], iterArgs[1:]...) //nolint:gosec // G204: args come from the agent preset config, same trust boundary as a direct kiro-cli invocation.
 			c.Stdin = os.Stdin
 			c.Stdout = os.Stdout

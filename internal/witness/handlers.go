@@ -57,6 +57,23 @@ func workDirToTownRoot(workDir string) string {
 	return workDir
 }
 
+// witnessTownRoot resolves the town root for cv-p3fem Phase 2 keepalive
+// setup from a polecat path. Returns "" when the polecat path can't be
+// resolved to a town root, which makes WithKeepalive a no-op — preferable
+// to a panic or a misrouted heartbeat write.
+func witnessTownRoot(polecatPath string) string {
+	if polecatPath == "" {
+		return ""
+	}
+	if townRoot, err := workspace.Find(polecatPath); err == nil && townRoot != "" {
+		return townRoot
+	}
+	// Fall back to walking up from the polecat path: polecat worktrees
+	// live at <town>/<rig>/polecats/<name>/<polecatRig>. Prefer the
+	// workspace.Find path; this is a defensive fallback.
+	return ""
+}
+
 // registryMu serializes calls to initRegistryFromTownRoot so that concurrent
 // callers (including parallel tests) don't race on the global registries.
 var registryMu sync.Mutex
@@ -2218,6 +2235,12 @@ func _runRecoveryGates(polecatPath string, gates []PolecatGate) recoveryGateOutc
 		out, err, didTimeout := func() ([]byte, error, bool) {
 			ctx, cancel := context.WithTimeout(context.Background(), recoveryGateTimeout)
 			defer cancel()
+			// Background keepalive ticker: recovery gates run the
+			// polecat's full pre-merge gate suite (build, test, lint)
+			// and can take many minutes. Without this, a long recovery
+			// gate makes the witness itself look stale to the daemon
+			// reaper (cv-p3fem Phase 2).
+			defer polecat.WithKeepalive(witnessTownRoot(polecatPath), os.Getenv("GT_SESSION"), "witness-recovery-gate:"+g.Name, polecat.DefaultKeepaliveInterval)()
 			// sh -c matches both the polecat's execution path and the refinery's
 			// runGate. G204: gate commands come from trusted bead formulas, not
 			// end-user input.
