@@ -2294,6 +2294,11 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 	// Create a live tmux session (simulates Claude sitting at ❯ after gt done)
 	sessMgr := NewSessionManager(tm, r)
 	sessionName := sessMgr.SessionName(polecatName)
+	// Clean up any stale session leaked by a prior crashed test run on the same
+	// default tmux socket — without this guard, NewSessionWithCommand returns
+	// "session already exists" and the test fails flakily. (Fixes gu-h48r;
+	// mirrors the gt-eo8d guard in TestVerifyStartupNudgeDelivery_IdleAgent.)
+	_ = tm.KillSessionWithProcesses(sessionName)
 	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
@@ -2411,6 +2416,11 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 
 	tm := tmux.NewTmux()
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	// Clean up any stale session leaked by a prior crashed test run on the same
+	// default tmux socket — without this guard, NewSessionWithCommand returns
+	// "session already exists" and the test fails flakily. (Fixes gu-h48r;
+	// mirrors the gt-eo8d guard in TestVerifyStartupNudgeDelivery_IdleAgent.)
+	_ = tm.KillSessionWithProcesses(sessionName)
 	if err := tm.NewSessionWithCommand(sessionName, oldClonePath, "sleep 300"); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
@@ -2464,6 +2474,11 @@ func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
 
 	sessMgr := NewSessionManager(tm, r)
 	sessionName := sessMgr.SessionName(polecatName)
+	// Clean up any stale session leaked by a prior crashed test run on the same
+	// default tmux socket — without this guard, NewSessionWithCommand returns
+	// "session already exists" and the test fails flakily. (Fixes gu-h48r;
+	// mirrors the gt-eo8d guard in TestVerifyStartupNudgeDelivery_IdleAgent.)
+	_ = tm.KillSessionWithProcesses(sessionName)
 	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
