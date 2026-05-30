@@ -657,9 +657,19 @@ func TestKeepaliveLoop_RespectsContext(t *testing.T) {
 		close(done)
 	}()
 
-	// Let it fire at least once.
-	time.Sleep(30 * time.Millisecond)
-	hb := ReadSessionHeartbeat(townRoot, session)
+	// The first bump is immediate (KeepaliveLoop fires once before its first
+	// tick), so the heartbeat should appear almost instantly. Poll with a
+	// generous timeout instead of a fixed sleep: on a loaded CI runner the
+	// goroutine above may not be scheduled within a tight window, which flaked
+	// the previous 30ms sleep (gs-i2p).
+	var hb *SessionHeartbeat
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if hb = ReadSessionHeartbeat(townRoot, session); hb != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if hb == nil {
 		t.Fatal("expected heartbeat from KeepaliveLoop")
 	}
