@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
@@ -731,6 +733,68 @@ Use --dry-run to preview closures without applying them.`,
 	},
 }
 
+var reaperScrubActiveMRCmd = &cobra.Command{
+	Use:   "scrub-active-mr",
+	Short: "Clear stale active_mr refs on agent beads (gu-dhqm)",
+	Long: `Scan every agent bead and clear active_mr fields whose referenced
+merge-request and source issue are both terminal.
+
+Background: ` + "`active_mr`" + ` is set by ` + "`gt done`" + ` and cleared by exactly one
+path — the refinery engineer's post-merge happy path. Every other lifecycle
+end (rebase-after-push, force-close, sibling-MR landing first, wisp TTL-reap)
+leaves the field dangling, where it eventually combines with cleanup_status
+drift to produce permanent ` + "`idle-recovery-needed`" + ` verdicts that hold
+scheduler slots.
+
+This command runs the same ` + "`polecat.AssessActiveMR`" + ` classifier that the
+on-demand recovery path uses, and clears the field when the assessment proves
+both the MR and the source issue are terminal.
+
+Preserves polecats with cleanup_status in {has_uncommitted, has_stash,
+has_unpushed} — the dangling ref is intentional audit trail for the human
+triage path (gc-eysed).
+
+Operates on the town database where agent beads live; the --db / --host /
+--port flags are used only for context discovery and are otherwise ignored.
+
+Use --dry-run to preview clears without applying them.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		townRoot, err := workspace.FindFromCwd()
+		if err != nil {
+			return fmt.Errorf("finding town root: %w", err)
+		}
+		bd := beads.New(townRoot).ForAgentBead()
+
+		result, err := reaper.ScrubStaleActiveMR(bd, reaperDryRun)
+		if err != nil {
+			return fmt.Errorf("scrub active_mr: %w", err)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(result))
+			return nil
+		}
+
+		prefix := ""
+		verb := "cleared"
+		if result.DryRun {
+			prefix = "[DRY RUN] would "
+			verb = "clear"
+		}
+		for _, entry := range result.ClearedEntries {
+			fmt.Printf("  %s active_mr=%s mr_status=%s source=%s\n",
+				entry.AgentBeadID, entry.ActiveMR, entry.MRStatus, entry.SourceIssue)
+		}
+		fmt.Printf("scrub-active-mr: scanned=%d had_active_mr=%d %s%s=%d preserved_wip=%d still_pending=%d\n",
+			result.Scanned, result.HadActiveMR, prefix, verb, result.Cleared,
+			result.PreservedWIP, result.StillPending)
+		for _, a := range result.Anomalies {
+			fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+		}
+		return nil
+	},
+}
+
 var reaperRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run full reaper cycle across all databases",
@@ -869,6 +933,34 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			db.Close()
 		}
 
+		// Active-MR scrub (gu-dhqm): clear stale active_mr refs on agent beads
+		// after the wisp/mail sweeps so any references to wisps just reaped or
+		// purged this cycle are caught immediately. Operates on the town
+		// database only — agent beads do not live in rig DBs. Best-effort:
+		// failures are logged but do not abort the cycle.
+		var totalScrubScanned, totalScrubCleared, totalScrubPreservedWIP, totalScrubStillPending int
+		if townRoot, twErr := workspace.FindFromCwd(); twErr != nil {
+			fmt.Printf("scrub-active-mr: skipped (no town root): %v\n", twErr)
+		} else {
+			bd := beads.New(townRoot).ForAgentBead()
+			scrubResult, err := reaper.ScrubStaleActiveMR(bd, reaperDryRun)
+			if err != nil {
+				fmt.Printf("scrub-active-mr: error: %v\n", err)
+			} else {
+				totalScrubScanned = scrubResult.Scanned
+				totalScrubCleared = scrubResult.Cleared
+				totalScrubPreservedWIP = scrubResult.PreservedWIP
+				totalScrubStillPending = scrubResult.StillPending
+				for _, entry := range scrubResult.ClearedEntries {
+					fmt.Printf("  %s active_mr=%s mr_status=%s source=%s\n",
+						entry.AgentBeadID, entry.ActiveMR, entry.MRStatus, entry.SourceIssue)
+				}
+				for _, a := range scrubResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+		}
+
 		// Report
 		prefix := ""
 		if reaperDryRun {
@@ -881,6 +973,8 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		fmt.Printf("  Closed:           %d stale issues\n", totalClosed)
 		fmt.Printf("  Hooked-mail TTL:  %d ttl-expired\n", totalHookedMailClosed)
 		fmt.Printf("  Open-mail TTL:    %d ttl-expired\n", totalOpenMailClosed)
+		fmt.Printf("  active_mr scrub:  scanned=%d cleared=%d preserved_wip=%d still_pending=%d\n",
+			totalScrubScanned, totalScrubCleared, totalScrubPreservedWIP, totalScrubStillPending)
 		fmt.Printf("  Open:             %d wisps remain\n", totalOpen)
 
 		return nil
@@ -907,7 +1001,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -918,7 +1012,7 @@ func init() {
 	}
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -952,6 +1046,7 @@ func init() {
 	reaperCmd.AddCommand(reaperReapHookedMailCmd)
 	reaperCmd.AddCommand(reaperReapOpenMailCmd)
 	reaperCmd.AddCommand(reaperClosePluginReceiptsCmd)
+	reaperCmd.AddCommand(reaperScrubActiveMRCmd)
 	reaperCmd.AddCommand(reaperRunCmd)
 
 	rootCmd.AddCommand(reaperCmd)

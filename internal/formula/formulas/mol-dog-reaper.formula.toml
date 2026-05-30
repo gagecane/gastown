@@ -268,9 +268,54 @@ gt reaper reap-open-mail --db=<name> --port={{dolt_port}} \\
 **Exit criteria:** Stale open mail closed with reason ttl-expired."""
 
 [[steps]]
+id = "scrub-active-mr"
+title = "Scrub stale active_mr refs on agent beads (gu-dhqm)"
+needs = ["reap-open-mail"]
+description = """
+Re-evaluate every agent bead's `active_mr` field and clear it when the
+referenced MR and source issue are both terminal.
+
+Context: `active_mr` is set by `gt done` and cleared in exactly one place —
+the refinery engineer's post-merge happy path. Every other lifecycle end
+(rebase-after-push, force-close, sibling-MR landing first, wisp TTL-reap)
+leaves the field dangling, where it eventually combines with cleanup_status
+drift to produce permanent `idle-recovery-needed` verdicts that hold
+scheduler slots.
+
+This step uses the same `polecat.AssessActiveMR` classifier the on-demand
+recovery path uses. It clears `active_mr` only when both MR and source
+issue are terminal.
+
+**Preservation invariant (gc-eysed):** polecats with cleanup_status in
+{has_uncommitted, has_stash, has_unpushed} keep their `active_mr` reference
+even if the assessment would otherwise clear it. The dangling ref provides
+the audit trail ("this WIP was for <mr>") that the human triage path needs.
+
+**1. Run the scrub against the town database:**
+```bash
+gt reaper scrub-active-mr --port={{dolt_port}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**2. Inspect results:**
+- A non-zero `cleared` count is normal — it indicates the scrubber freed
+  scheduler slots that were stuck on stale references.
+- `preserved_wip` should remain > 0 only if there are genuine human-WIP
+  polecats; a sudden spike suggests cleanup_status drift across the fleet.
+- `still_pending` reflects polecats with legitimate in-flight MRs; this is
+  the steady-state population.
+
+**Anomaly handling:**
+- `active_mr_clear_failed` anomalies are non-fatal (per-bead update errors)
+  but warrant escalation if they recur across multiple cycles.
+
+**Exit criteria:** Stale `active_mr` refs cleared; preservation invariant
+honored."""
+
+[[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["reap-open-mail"]
+needs = ["scrub-active-mr"]
 description = """
 Generate summary and signal completion.
 
@@ -285,6 +330,7 @@ Generate summary and signal completion.
 **Issues auto-closed**: (stale > stale_issue_age, excl. epics/P0-P1/deps)
 **Hooked mail ttl-expired**: (dead-letter HANDOFF/mail closed; gu-hhqk)
 **Open mail ttl-expired**: (stale P1 coordination mail closed; gu-ckly)
+**active_mr cleared**: (stale active_mr refs scrubbed off agent beads; gu-dhqm)
 **Open wisps remaining**: (total)
 **Anomalies**: (list any anomalies found)
 ```

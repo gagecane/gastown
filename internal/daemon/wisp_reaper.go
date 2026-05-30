@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/util"
@@ -317,13 +318,43 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		mol.closeStep("auto-close")
 	}
 
+	// Step 4b: Scrub stale active_mr refs on agent beads (gu-dhqm).
+	// Re-evaluate every agent bead's active_mr through polecat.AssessActiveMR
+	// and clear refs whose MR + source issue are both terminal. Preserves
+	// polecats with cleanup_status indicating human WIP (gc-eysed). Operates
+	// on the town database only.
+	var scrubScanned, scrubCleared, scrubPreservedWIP, scrubStillPending int
+	if d.config.TownRoot == "" {
+		d.logger.Printf("wisp_reaper: active_mr scrub skipped (no town root)")
+	} else {
+		bd := beads.New(d.config.TownRoot).ForAgentBead()
+		scrubResult, err := reaper.ScrubStaleActiveMR(bd, dryRun)
+		if err != nil {
+			d.logger.Printf("wisp_reaper: active_mr scrub error: %v", err)
+		} else {
+			scrubScanned = scrubResult.Scanned
+			scrubCleared = scrubResult.Cleared
+			scrubPreservedWIP = scrubResult.PreservedWIP
+			scrubStillPending = scrubResult.StillPending
+			for _, entry := range scrubResult.ClearedEntries {
+				d.logger.Printf("wisp_reaper: cleared active_mr on %s: mr=%s status=%s source=%s",
+					entry.AgentBeadID, entry.ActiveMR, entry.MRStatus, entry.SourceIssue)
+			}
+			for _, a := range scrubResult.Anomalies {
+				d.logger.Printf("wisp_reaper: active_mr scrub ANOMALY: %s", a.Message)
+			}
+		}
+	}
+
 	// Step 5: Report
 	if totalOpen > wispAlertThreshold {
 		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
 			totalOpen, wispAlertThreshold)
 	}
-	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d open=%d databases=%d dryRun=%v",
-		totalReaped, totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
+	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d open=%d databases=%d dryRun=%v",
+		totalReaped, totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed,
+		scrubScanned, scrubCleared, scrubPreservedWIP, scrubStillPending,
+		totalOpen, len(databases), dryRun)
 	mol.closeStep("report")
 }
 
