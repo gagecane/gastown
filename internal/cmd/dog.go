@@ -727,10 +727,11 @@ func splitPathComponents(path string) []string {
 	})
 }
 
-// closePluginMails archives all open "Plugin: " dispatch mails from a dog's inbox.
-// Plugin dispatch mails sent by the daemon accumulate because gt dog done never
-// closed them. On every UserPromptSubmit hook, gt mail check --inject re-injects
-// ALL open mails, causing context to balloon. This function cleans up eagerly.
+// closePluginMails archives all "Plugin: " dispatch mails from a dog's inbox,
+// read or unread. Plugin dispatch mails accumulate because nothing closed them
+// on completion and dispatch-time purges only matched the current subject. On
+// every UserPromptSubmit hook, gt mail check --inject re-injects ALL open mails,
+// causing context to balloon (gs-7yk). This function cleans up eagerly.
 // It is best-effort: failures are logged but do not prevent dog from going idle.
 func closePluginMails(dogName string) {
 	townRoot, err := workspace.FindFromCwd()
@@ -745,22 +746,9 @@ func closePluginMails(dogName string) {
 		return
 	}
 
-	messages, err := mailbox.List()
+	closed, err := mailbox.ArchivePluginDispatchMail()
 	if err != nil {
 		return
-	}
-
-	closed := 0
-	for _, msg := range messages {
-		if msg.Read {
-			continue
-		}
-		if !strings.HasPrefix(msg.Subject, "Plugin: ") {
-			continue
-		}
-		if archErr := mailbox.Archive(msg.ID); archErr == nil {
-			closed++
-		}
 	}
 
 	if closed > 0 {

@@ -432,6 +432,15 @@ func (d *Daemon) dispatchAutoDispatchForRig(rig, trigger, triggerSession, trigge
 	}
 
 	router := mail.NewRouterWithTownRoot(d.config.TownRoot, d.config.TownRoot)
+
+	// Purge stale plugin mails before dispatch. This path previously sent the
+	// fresh assignment without any purge, so prior plugin mail accumulated in
+	// the dog's inbox and was re-injected by the mail hook every turn, drowning
+	// the new assignment (gs-7yk). Mirror the cooldown path's cleanup.
+	if mbox, mboxErr := router.GetMailbox(fmt.Sprintf("deacon/dogs/%s", idleDog.Name)); mboxErr == nil {
+		_, _ = mbox.ArchivePluginDispatchMail()
+	}
+
 	msg := mail.NewMessage(
 		"daemon",
 		fmt.Sprintf("deacon/dogs/%s", idleDog.Name),

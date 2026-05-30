@@ -704,6 +704,49 @@ func TestMailboxLegacyAtomicArchive(t *testing.T) {
 	}
 }
 
+// TestArchivePluginDispatchMail verifies that plugin-dispatch mail is archived
+// regardless of read state, while non-plugin mail is left untouched. The
+// read-state coverage is the regression: the prior cleanup skipped read mail,
+// so read-but-open plugin dispatches accumulated indefinitely and the mail hook
+// re-injected them every turn, drowning a freshly dispatched dog (gs-7yk).
+func TestArchivePluginDispatchMail(t *testing.T) {
+	tmpDir := t.TempDir()
+	m := NewMailbox(tmpDir)
+
+	msgs := []*Message{
+		{ID: "msg-001", Subject: "Plugin: auto-dispatch", Read: true, Timestamp: time.Now().Add(-3 * time.Hour)},
+		{ID: "msg-002", Subject: "Plugin: stuck-agent-dog", Read: false, Timestamp: time.Now().Add(-2 * time.Hour)},
+		{ID: "msg-003", Subject: "Hello there", Read: true, Timestamp: time.Now().Add(-1 * time.Hour)},
+		{ID: "msg-004", Subject: "Status update", Read: false, Timestamp: time.Now()},
+	}
+	for _, msg := range msgs {
+		if err := m.Append(msg); err != nil {
+			t.Fatalf("Append error: %v", err)
+		}
+	}
+
+	archived, err := m.ArchivePluginDispatchMail()
+	if err != nil {
+		t.Fatalf("ArchivePluginDispatchMail error: %v", err)
+	}
+	if archived != 2 {
+		t.Fatalf("archived = %d, want 2 (both plugin mails, read and unread)", archived)
+	}
+
+	inbox, err := m.List()
+	if err != nil {
+		t.Fatalf("List error: %v", err)
+	}
+	if len(inbox) != 2 {
+		t.Fatalf("inbox has %d messages, want 2 (non-plugin only)", len(inbox))
+	}
+	for _, msg := range inbox {
+		if msg.ID == "msg-001" || msg.ID == "msg-002" {
+			t.Errorf("plugin mail %s should have been archived", msg.ID)
+		}
+	}
+}
+
 func TestAppendBeadsMessagesIfDedupAndStatusFilter(t *testing.T) {
 	src := []BeadsMessage{
 		{ID: "a", Status: "open"},

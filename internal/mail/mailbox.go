@@ -902,6 +902,37 @@ func (m *Mailbox) Archive(id string) error {
 	return nil
 }
 
+// ArchivePluginDispatchMail archives every plugin-dispatch ("Plugin: ...")
+// message in the mailbox, read or unread, and returns the number archived.
+//
+// Plugin dispatch mails accumulate across dog sessions: each dispatch path
+// historically purged only its own exact subject and only unread copies, so
+// read mail and mail from other plugins piled up indefinitely. Because the
+// mail hook re-injects ALL open mail on every turn, a freshly-dispatched dog
+// could drown in stale plugin instructions and fail to act on its real
+// assignment (gs-7yk). A dog receiving a new assignment — or one that has just
+// completed work via `gt dog done` — has no reason to retain any prior plugin
+// mail, so all of it is cleared here regardless of read state.
+//
+// Best-effort per message: an Archive failure on one mail does not abort the
+// sweep. A List error is returned so callers can log it.
+func (m *Mailbox) ArchivePluginDispatchMail() (int, error) {
+	messages, err := m.List()
+	if err != nil {
+		return 0, err
+	}
+	archived := 0
+	for _, msg := range messages {
+		if !isPluginDispatchSubject(msg.Subject) {
+			continue
+		}
+		if archErr := m.Archive(msg.ID); archErr == nil {
+			archived++
+		}
+	}
+	return archived, nil
+}
+
 // archiveLegacy moves a message to the archive file atomically.
 // A single flock covers the entire read-archive-rewrite cycle so that
 // a crash between appendToArchive and the inbox rewrite cannot lose the
