@@ -3847,17 +3847,40 @@ func (d *Daemon) reclaimStalledCleanPolecat(rigName, polecatName string) {
 	d.nukeCleanStalledPolecat(rigName, polecatName)
 }
 
-// isStalledReclaimCandidate reports whether a dead-session polecat in this agent
-// state is eligible for clean-debris reclamation (gs-9wz). Only the active
-// states a polecat should have transitioned out of on a clean gt done qualify;
-// terminal/idle states are already counted correctly and the deliberate-hold and
-// in-flight states must never be auto-nuked.
+// isStalledReclaimCandidate reports whether a DEAD-session polecat in this agent
+// state should be considered for clean-debris reclamation (gs-9wz).
+//
+// This is a COARSE pre-filter, not the safety decision: the actual destroy goes
+// through `gt polecat nuke` (no --force), whose safety check refuses any polecat
+// with uncommitted/unpushed/stashed work, an open MR, or hooked work — and the
+// caller additionally skips polecats with an open hook. So the only job here is
+// to exclude states we must PRESERVE; everything else is attempted and nuke
+// arbitrates.
+//
+// Earlier this allow-listed only working/running, which silently missed debris
+// that had transitioned to other abnormal states — e.g. a crashed polecat the
+// witness flagged "stuck"/"escalated" whose work later landed, leaving a clean,
+// no-hook, dead-session husk that nuke would happily reclaim but the patrol
+// never offered (observed live: lia_bac/rictus, agent_state=stuck, cleanup=clean
+// → "Would nuke" yet never reclaimed). Because nuke is the real authority, an
+// exclusion list is both safer (no missed debris) and simpler:
+//
+//   - idle           reusable warm-pool slot — don't churn it;
+//   - done / nuked   terminal / already reclaimed;
+//   - spawning       an in-flight `gt sling` launch — racing it risks double-spawn;
+//   - paused         deliberate operator hold;
+//   - awaiting-gate  deliberate protocol wait (CI/merge gate).
+//
+// Everything else (working, running, stuck, escalated, the computed "stalled",
+// empty/unknown, …) is an abnormal/crashed state whose dead-session debris is
+// reclaimed IFF nuke proves it carries no work.
 func isStalledReclaimCandidate(s beads.AgentState) bool {
 	switch s {
-	case beads.AgentStateWorking, beads.AgentStateRunning:
-		return true
-	default:
+	case beads.AgentStateIdle, beads.AgentStateDone, beads.AgentStateNuked,
+		beads.AgentStateSpawning, beads.AgentStatePaused, beads.AgentStateAwaitingGate:
 		return false
+	default:
+		return true
 	}
 }
 
