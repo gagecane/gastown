@@ -1845,6 +1845,18 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		return nil, fmt.Errorf("start point %s not found — fall back to full repair", startPoint)
 	}
 
+	// gu-fo82: Second-chance autosave before destructive reset. If killExisting
+	// already saved, this is a no-op (worktree clean). Belt-and-suspenders for
+	// any path where the prior autosave silently failed.
+	{
+		branch, _ := polecatGit.CurrentBranch()
+		if saved, sha, saveErr := AutoSaveAbandonedWIP(clonePath, branch, "reuse-second-chance"); saveErr != nil {
+			style.PrintWarning("reuse second-chance autosave failed: %v", saveErr)
+		} else if saved {
+			fmt.Printf("Second-chance autosave for %s: commit %s\n", name, sha)
+		}
+	}
+
 	// GH#2536: Clean worktree state before branch switch — the worktree may have
 	// stale state from a previous dog/pool dispatch (uncommitted changes, untracked
 	// files, detached HEAD, or checked out on an old dog/alpha-* branch).
@@ -2081,6 +2093,23 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 	if err != nil || !running {
 		return nil
 	}
+
+	// gu-fo82: Auto-save any uncommitted WIP before killing the session.
+	// This prevents work loss when a polecat dies mid-implementation.
+	worktreePath := m.clonePath(name)
+	if worktreePath != "" {
+		g := git.NewGit(worktreePath)
+		branch, _ := g.CurrentBranch()
+		saved, sha, saveErr := AutoSaveAbandonedWIP(worktreePath, branch, action)
+		if saveErr != nil {
+			// Non-fatal: log warning and proceed with kill.
+			// Preserving the slot is more important than perfect saves.
+			style.PrintWarning("autosave failed for %s: %v (proceeding with %s)", name, saveErr, action)
+		} else if saved {
+			fmt.Printf("AutoSaved WIP for %s: commit %s\n", name, sha)
+		}
+	}
+
 	if err := m.tmux.KillSessionWithProcesses(sessionName); err != nil {
 		return fmt.Errorf("killing existing session %s for %s: %w", sessionName, action, err)
 	}

@@ -1186,6 +1186,17 @@ func (g *Git) StagedDeletions() ([]string, error) {
 	return strings.Split(trimmed, "\n"), nil
 }
 
+// HasStagedChanges returns true if there are any changes staged for commit.
+// Used by auto-save to check if there's anything to commit after unstaging
+// runtime artifacts and deletions.
+func (g *Git) HasStagedChanges() (bool, error) {
+	out, err := g.run("diff", "--cached", "--name-only")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // ShowFile returns the contents of a file at a given ref (e.g., "origin/main:CLAUDE.md").
 // Returns empty string and no error if the file does not exist at that ref.
 func (g *Git) ShowFile(ref, path string) (string, error) {

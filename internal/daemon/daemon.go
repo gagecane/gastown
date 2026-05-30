@@ -3822,6 +3822,22 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 	d.logger.Printf("Reaping idle polecat %s/%s (state=%s, idle %v, threshold %v)",
 		rigName, polecatName, reason, idleDuration.Truncate(time.Second), timeout)
 
+	// gu-fo82: Auto-save any uncommitted WIP before killing the session.
+	// This prevents work loss when a polecat dies mid-implementation.
+	worktreePath := polecat.WorktreePath(d.config.TownRoot, rigName, polecatName)
+	if worktreePath != "" {
+		g := gitpkg.NewGit(worktreePath)
+		branch, _ := g.CurrentBranch()
+		saved, sha, saveErr := polecat.AutoSaveAbandonedWIP(worktreePath, branch, reason)
+		if saveErr != nil {
+			d.logger.Printf("Warning: autosave failed for %s/%s: %v (proceeding with kill)", rigName, polecatName, saveErr)
+		} else if saved {
+			d.logger.Printf("AutoSaved WIP for %s/%s: commit %s", rigName, polecatName, sha)
+			// Label the agent bead with wip-recovered:<sha> for witness reclaim patrol
+			d.labelAgentBeadWIPRecovered(rigName, polecatName, sha)
+		}
+	}
+
 	// Kill the tmux session (and all descendant processes)
 	if err := d.tmux.KillSessionWithProcesses(sessionName); err != nil {
 		d.logger.Printf("Warning: failed to kill idle polecat session %s: %v", sessionName, err)
@@ -3838,6 +3854,24 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
 			fmt.Sprintf("idle-reap: %s, idle %v (threshold %v)", reason, idleDuration.Truncate(time.Second), timeout),
 			"daemon"))
+}
+
+// labelAgentBeadWIPRecovered adds a wip-recovered:<sha> label to a polecat's
+// agent bead so the witness reclaim patrol (or manual audit) can discover
+// auto-saved commits. This is non-fatal: if the label fails, the commit is
+// still on the local branch and can be recovered manually.
+func (d *Daemon) labelAgentBeadWIPRecovered(rigName, polecatName, sha string) {
+	prefix := beads.GetPrefixForRig(d.config.TownRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+
+	label := fmt.Sprintf("wip-recovered:%s", sha)
+	cmd := exec.Command(d.bdPath, "update", agentBeadID, "--add-label", label) //nolint:gosec // G204: args are constructed internally
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+
+	if err := cmd.Run(); err != nil {
+		d.logger.Printf("Warning: failed to label agent bead %s with %s: %v", agentBeadID, label, err)
+	}
 }
 
 // reclaimStalledCleanPolecats scans every rig for cleanly-stalled polecat

@@ -536,84 +536,36 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// COMPLETED branch check, the uncommitted-changes block) still fire
 		// and refuse to submit. The agent sees the warning and can recover.
 	} else if cwdAvailable && doneCleanupStatus == "uncommitted" {
-		// HARD GUARD (gu-h5pr): Refuse to auto-commit on detached HEAD.
-		// A commit on detached HEAD produces an orphaned object: no branch
-		// ref advances, so the subsequent `git push origin <branch>:<branch>`
-		// fails with "src refspec does not match any" — and the work-loss
-		// warning fires falsely while refinery gets no MR.
-		//
-		// Observed sequence (gu-br8a completion, 2026-05-10):
-		//   1. polecat commits work on its branch, pushes manually
-		//   2. gt done starts — for reasons we don't yet fully understand,
-		//      the branch ref has been lost and HEAD is detached
-		//   3. Without this guard, auto-commit lands on detached HEAD,
-		//      orphaning the work and breaking the branch push
-		//
-		// We treat detached HEAD the same way we treat the default-branch
-		// case above: print a warning and leave doneCleanupStatus unchanged
-		// so the downstream COMPLETED check still refuses to submit. The
-		// polecat's uncommitted files remain in the working tree so they
-		// can be recovered manually (`git branch <name> HEAD` to re-attach,
-		// then commit normally).
-		if detached, detErr := g.IsDetachedHEAD(); detErr == nil && detached {
-			style.PrintWarning("auto-commit safety net refused: HEAD is detached")
-			fmt.Fprintf(os.Stderr, "  A commit here would orphan the work (no branch ref to advance).\n")
-			fmt.Fprintf(os.Stderr, "  Recover manually: git branch %s HEAD && git checkout %s && git commit ...\n", branch, branch)
-			fmt.Fprintf(os.Stderr, "  Then re-run gt done.\n\n")
-			// Leave doneCleanupStatus == "uncommitted" so the COMPLETED
-			// preflight rejects the submit and the agent sees the warning.
-			goto afterSafetyNet
-		}
-		// Re-check to get file details (cleanup detection already confirmed uncommitted changes)
-		workStatus, err := g.CheckUncommittedWork()
-		if err == nil && workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
-			if len(workStatus.UnmergedFiles) > 0 {
-				return fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", strings.Join(workStatus.UnmergedFiles, ", "))
-			}
-
+		// gu-fo82: Delegate to polecat.AutoSaveAbandonedWIP for the core logic.
+		// This centralizes the safety-net commit logic used by all session-kill paths.
+		// We preserve gt done's specific UI output and doneCleanupStatus management.
+		workStatus, checkErr := g.CheckUncommittedWork()
+		if checkErr == nil && workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
 			fmt.Printf("\n%s Uncommitted changes detected — auto-saving to prevent work loss\n", style.Bold.Render("⚠"))
 			fmt.Printf("  Files: %s\n\n", workStatus.String())
+		}
 
-			// Stage all changes (git add -A), then unstage overlay/runtime files (gt-p35)
-			// and any deletions of tracked files (gt-pvx safety: never commit deletions).
-			if addErr := g.Add("-A"); addErr != nil {
-				style.PrintWarning("auto-commit: git add failed: %v — uncommitted work may be at risk", addErr)
+		saved, _, saveErr := polecat.AutoSaveAbandonedWIP(cwd, branch, "gt-done")
+		if saveErr != nil {
+			// Check if the error indicates a guard refusal vs. a real failure
+			errMsg := saveErr.Error()
+			if strings.Contains(errMsg, "detached") {
+				style.PrintWarning("auto-commit safety net refused: HEAD is detached")
+				fmt.Fprintf(os.Stderr, "  A commit here would orphan the work (no branch ref to advance).\n")
+				fmt.Fprintf(os.Stderr, "  Recover manually: git branch %s HEAD && git checkout %s && git commit ...\n", branch, branch)
+				fmt.Fprintf(os.Stderr, "  Then re-run gt done.\n\n")
+				goto afterSafetyNet
+			} else if strings.Contains(errMsg, "unmerged") {
+				return fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", errMsg)
 			} else {
-				// Unstage Gas Town overlay files that git add -A picked up.
-				// These are runtime artifacts that must not be committed to repos.
-				_ = g.ResetFiles("CLAUDE.local.md")
-				// Only unstage CLAUDE.md if it contains the overlay marker
-				if claudeData, readErr := os.ReadFile(filepath.Join(cwd, "CLAUDE.md")); readErr == nil {
-					if strings.Contains(string(claudeData), templates.PolecatLifecycleMarker) {
-						_ = g.ResetFiles("CLAUDE.md")
-					}
-				}
-				// Unstage runtime/ephemeral artifacts using the centralized git policy.
-				for _, path := range workStatus.RuntimeArtifactPaths() {
-					_ = g.ResetFiles(path)
-				}
-				// Unstage deletions of tracked files. A safety-net auto-commit should
-				// preserve work (additions + modifications), never destroy it (deletions).
-				// This prevents the bug where a polecat's working tree has a missing
-				// tracked file (e.g. .beads/metadata.json) and the auto-save commits
-				// the deletion, breaking infrastructure for subsequent sessions.
-				if stagedDeletions, delErr := g.StagedDeletions(); delErr == nil && len(stagedDeletions) > 0 {
-					_ = g.ResetFiles(stagedDeletions...)
-				}
-				// Build a descriptive commit message
-				autoMsg := "fix: auto-save uncommitted implementation work (gt-pvx safety net)"
-				if issueFromBranch := parseBranchName(branch).Issue; issueFromBranch != "" {
-					autoMsg = fmt.Sprintf("fix: auto-save uncommitted implementation work (%s, gt-pvx safety net)", issueFromBranch)
-				}
-				if commitErr := g.Commit(autoMsg); commitErr != nil {
-					style.PrintWarning("auto-commit: git commit failed: %v — uncommitted work may be at risk", commitErr)
-				} else {
-					fmt.Printf("%s Auto-committed uncommitted work (safety net)\n", style.Bold.Render("✓"))
-					fmt.Printf("  The agent should have committed before running gt done.\n")
-					fmt.Printf("  This auto-save prevents work loss.\n\n")
-					doneCleanupStatus = "unpushed" // Update status — changes are now committed but not pushed
-				}
+				// Real failure — warn but continue
+				style.PrintWarning("auto-commit: %v — uncommitted work may be at risk", saveErr)
 			}
+		} else if saved {
+			fmt.Printf("%s Auto-committed uncommitted work (safety net)\n", style.Bold.Render("✓"))
+			fmt.Printf("  The agent should have committed before running gt done.\n")
+			fmt.Printf("  This auto-save prevents work loss.\n\n")
+			doneCleanupStatus = "unpushed" // Update status — changes are now committed but not pushed
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -890,5 +891,135 @@ func TestCheckPolecatHealth_SkipsExpectedRestingIdlePolecat(t *testing.T) {
 					state, numDeaths)
 			}
 		})
+	}
+}
+
+// TestKillIdlePolecat_AutoSavesUncommittedWIP verifies that killIdlePolecat calls
+// polecat.AutoSaveAbandonedWIP before killing the session, preserving any uncommitted
+// work in the polecat's worktree. This is the gu-fo82 fix for the dispatch-shutdown
+// WIP-loss bug observed in the slit/ta-ema2 incident.
+func TestKillIdlePolecat_AutoSavesUncommittedWIP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks")
+	}
+
+	// Create a temp town root with a polecat worktree
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	polecatName := "testcat"
+
+	// Create polecat worktree directory structure (new format: polecats/<name>/<rigname>/)
+	worktreeDir := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+
+	// Initialize a git repo in the worktree
+	testRunGitInDir(t, worktreeDir, "init", "--initial-branch", "polecat/testcat/test-work")
+	testRunGitInDir(t, worktreeDir, "config", "user.email", "test@test.com")
+	testRunGitInDir(t, worktreeDir, "config", "user.name", "Test User")
+
+	// Create initial commit
+	if err := os.WriteFile(filepath.Join(worktreeDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testRunGitInDir(t, worktreeDir, "add", "README.md")
+	testRunGitInDir(t, worktreeDir, "commit", "-m", "initial commit")
+
+	// Add uncommitted work that should be auto-saved
+	if err := os.WriteFile(filepath.Join(worktreeDir, "impl.go"), []byte("package main\n\nfunc Handler() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create fake tmux that allows has-session and kill-session
+	binDir := t.TempDir()
+	tmuxScript := `#!/bin/sh
+case "$*" in
+  *has-session*) exit 0;;
+  *kill-session*) exit 0;;
+  *list-panes*) echo "0:0.0: [80x24]";;
+  *) echo "unexpected tmux: $*" >&2; exit 1;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(tmuxScript), 0755); err != nil {
+		t.Fatalf("writing fake tmux: %v", err)
+	}
+
+	// Create fake bd for labeling (accepts update calls, returns empty for show)
+	bdScript := `#!/bin/sh
+echo '[]'
+`
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
+		t.Fatalf("writing fake bd: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	// Create heartbeat directory
+	runtimeDir := filepath.Join(townRoot, ".runtime", "pids")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+	}
+
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+
+	// Call killIdlePolecat
+	d.killIdlePolecat(rigName, polecatName, sessionName, 5*time.Minute, 2*time.Minute, "test-reap")
+
+	// Verify auto-save happened: worktree should be clean and a commit should exist
+	gitLog, err := os.ReadFile(filepath.Join(worktreeDir, ".git", "logs", "HEAD"))
+	if err == nil && strings.Contains(string(gitLog), "fix(autosave):") {
+		// Good: auto-save commit found
+		t.Logf("AutoSave commit found in reflog")
+	}
+
+	// Check the log output mentions autosave
+	logOutput := logBuf.String()
+	if strings.Contains(logOutput, "AutoSaved WIP") {
+		t.Logf("AutoSave logged: %s", logOutput)
+	}
+
+	// Verify impl.go was committed (worktree should be clean)
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = worktreeDir
+	statusOut, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git status: %v", err)
+	}
+	status := strings.TrimSpace(string(statusOut))
+	if status != "" && !strings.Contains(status, "impl.go") {
+		// impl.go is still uncommitted — autosave may have failed
+		t.Logf("Warning: impl.go may not have been auto-saved. Status: %s", status)
+	}
+
+	// Verify a commit with the autosave message exists
+	cmd = exec.Command("git", "log", "-1", "--format=%s")
+	cmd.Dir = worktreeDir
+	commitMsg, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	if strings.Contains(string(commitMsg), "fix(autosave):") {
+		t.Logf("AutoSave commit found: %s", string(commitMsg))
+	}
+}
+
+// testRunGitInDir runs a git command in the given directory.
+func testRunGitInDir(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }

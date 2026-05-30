@@ -1344,6 +1344,20 @@ func extractPolecatFromJSON(output string) string {
 // success/failure via RecordPolecatStartFailure — use RestartPolecatWithBackoff
 // for that path.
 func RestartPolecatSession(workDir, rigName, polecatName string) error {
+	// gu-fo82: Auto-save any uncommitted WIP before restarting the session.
+	// workDir is the town root; derive the polecat worktree path.
+	worktreePath := polecat.WorktreePath(workDir, rigName, polecatName)
+	if worktreePath != "" {
+		g := git.NewGit(worktreePath)
+		branch, _ := g.CurrentBranch()
+		if saved, sha, saveErr := polecat.AutoSaveAbandonedWIP(worktreePath, branch, "witness-restart"); saveErr != nil {
+			// Non-fatal: log warning and proceed with restart.
+			fmt.Printf("Warning: autosave failed for %s/%s: %v (proceeding with restart)\n", rigName, polecatName, saveErr)
+		} else if saved {
+			fmt.Printf("AutoSaved WIP for %s/%s before restart: commit %s\n", rigName, polecatName, sha)
+		}
+	}
+
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
 	if err := util.ExecRun(workDir, "gt", "session", "restart", address, "--force"); err != nil {
 		return fmt.Errorf("session restart failed: %w", err)
