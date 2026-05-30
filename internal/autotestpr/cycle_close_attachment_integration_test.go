@@ -339,4 +339,3 @@ func rtInitBeadsDB(t *testing.T, dir, prefix string) {
 		t.Fatalf("bd init: %v\n%s", err, out)
 	}
 }
-
