@@ -2398,6 +2398,14 @@ const (
 	// session stayed alive with an open hook and no fresh heartbeat. This catches
 	// the post-submit/pre-exit ghost idle gap from GH#3055.
 	ZombieSubmittedStillRunning ZombieClassification = "submitted-still-running"
+	// ZombieBlankToolsRestarted: agent self-reported the Claude Code
+	// tool-output-capture failure ("session blind"); the witness auto-restarted
+	// the session to clear the harness glitch (gs-4lk).
+	ZombieBlankToolsRestarted ZombieClassification = "blank-tools-restarted"
+	// ZombieBlankToolsCapped: blank-tools failure recurred past the per-bead
+	// auto-restart cap (or with dirty work); escalated to mayor instead of
+	// restarting again (gs-4lk).
+	ZombieBlankToolsCapped ZombieClassification = "blank-tools-capped"
 )
 
 // ImpliesActiveWork returns true if this classification indicates the polecat
@@ -2408,7 +2416,7 @@ func (c ZombieClassification) ImpliesActiveWork() bool {
 	switch c {
 	case ZombieStuckInDone, ZombieAgentDeadInSession, ZombieBeadClosedStillRunning,
 		ZombieDoneIntentDead, ZombieSessionDeadActive, ZombieAgentSelfReportedStuck,
-		ZombieNeverHeartbeated:
+		ZombieNeverHeartbeated, ZombieBlankToolsRestarted, ZombieBlankToolsCapped:
 		return true
 	default:
 		return false
@@ -2590,6 +2598,15 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 				return ZombieResult{}, false
 
 			case polecat.HeartbeatStuck:
+				// gs-4lk: Blank-tools auto-recovery. When the stuck context
+				// matches the Claude Code tool-output-capture failure signature
+				// ("all tool output empty / session blind"), the agent is blind
+				// and makes zero progress — a fresh session clears the harness
+				// glitch. Auto-restart instead of escalating, bounded by a
+				// per-bead cap so a bead that keeps tripping it doesn't loop.
+				if IsBlankToolsSignature(hb.Context) {
+					return recoverBlankToolsPolecat(workDir, rigName, polecatName, sessionName, t, snapState, snapHook, snap.cleanupStatus(), hb.Context)
+				}
 				// Agent self-reports stuck — escalate (don't restart, agent is alive).
 				zombie := ZombieResult{
 					PolecatName:    polecatName,
@@ -2724,6 +2741,72 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	}
 
 	return ZombieResult{}, false
+}
+
+// recoverBlankToolsPolecat auto-recovers a polecat that self-reported the
+// Claude Code tool-output-capture failure ("blank-tools" / "session blind"):
+// all tool output returns empty, so the agent is blind and makes zero progress.
+// This is a harness bug, not a gt bug, but the recovery is mechanical — a fresh
+// session clears the glitch — so the witness restarts the session instead of
+// pulling the mayor into a manual nuke+requeue loop. (gs-4lk)
+//
+// Bounding: the per-bead auto-restart count is capped at
+// MaxBlankToolsAutoRestarts. Past the cap — or if the worktree is unexpectedly
+// dirty (a blind agent shouldn't have committable work) — the witness escalates
+// to the mayor instead of restarting again, so a bead that keeps tripping the
+// failure on every spawn doesn't loop forever.
+func recoverBlankToolsPolecat(workDir, rigName, polecatName, sessionName string, t *tmux.Tmux, agentState, hookBead, cleanupStatus, context string) (ZombieResult, bool) {
+	zombie := ZombieResult{
+		PolecatName:   polecatName,
+		AgentState:    agentState,
+		HookBead:      hookBead,
+		CleanupStatus: cleanupStatus,
+		WasActive:     true,
+	}
+
+	// Safety: a blind agent makes no committable progress, so a clean worktree
+	// is expected. Dirty state is unexpected here — escalate and preserve the
+	// work rather than risk masking it behind a restart.
+	if cleanupStatus != "" && cleanupStatus != "clean" {
+		zombie.Classification = ZombieBlankToolsCapped
+		zombie.Action = fmt.Sprintf("escalated-blank-tools-dirty (cleanup_status=%s, context=%q)", cleanupStatus, context)
+		return zombie, true
+	}
+
+	// Per-bead cap: after MaxBlankToolsAutoRestarts auto-restarts, stop looping
+	// and escalate to the mayor.
+	if hookBead != "" && ShouldEscalateBlankTools(workDir, hookBead) {
+		zombie.Classification = ZombieBlankToolsCapped
+		zombie.Action = fmt.Sprintf("escalated-blank-tools (auto-restart cap %d reached for %s)", MaxBlankToolsAutoRestarts, hookBead)
+		return zombie, true
+	}
+
+	zombie.Classification = ZombieBlankToolsRestarted
+
+	// TOCTOU guard (gt-0pst): re-check session liveness before restarting. The
+	// session could have exited normally between our initial check and here.
+	if alive, _ := t.HasSession(sessionName); !alive {
+		return ZombieResult{}, false
+	}
+
+	// gu-mkz7: RestartPolecatWithBackoff gates the restart so a persistently
+	// crashing polecat doesn't get re-spawned on every patrol cycle.
+	if err := RestartPolecatWithBackoff(workDir, rigName, polecatName); err != nil {
+		if isPolecatRestartSkip(err) {
+			zombie.Action = fmt.Sprintf("skipped-restart-blank-tools: %v", err)
+		} else {
+			zombie.Error = err
+			zombie.Action = fmt.Sprintf("restart-blank-tools-failed: %v", err)
+		}
+		return zombie, true
+	}
+
+	count := 0
+	if hookBead != "" {
+		count = RecordBlankToolsRestart(workDir, hookBead)
+	}
+	zombie.Action = fmt.Sprintf("restarted-blank-tools (auto-restart %d/%d, bead=%s)", count, MaxBlankToolsAutoRestarts, hookBead)
+	return zombie, true
 }
 
 func detectSubmittedStillRunning(bd *BdCli, workDir, polecatName, sessionName string, t *tmux.Tmux, hb *polecat.SessionHeartbeat, snap *agentBeadSnapshot, staleThreshold time.Duration) (ZombieResult, bool) {
