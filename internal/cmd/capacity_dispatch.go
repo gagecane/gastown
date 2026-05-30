@@ -141,12 +141,32 @@ func saveCapacityExhaustionState(path string, st capacityExhaustionState) {
 	}
 }
 
+// poolDegraded reports whether the pool effectively cannot keep up with ready
+// work. Two shapes count (hq-q943s):
+//   - hard zero: no working and no reusable_idle slots — nothing can take work;
+//   - chronic degradation: a strict MAJORITY of slots wedged in recovery_blocked.
+//     The original alarm only tripped on hard-zero, so a trickle dispatch (one
+//     bead placed per cycle keeping working at 0-2) intermittently broke the
+//     working+reusable_idle==0 condition and reset the counter — the alarm never
+//     fired through ~hours of recovery_blocked 5-8/8. Tripping on a sustained
+//     recovery_blocked majority catches that degraded-throughput starvation too.
+func poolDegraded(s polecatCapacitySnapshot) bool {
+	if s.Working+s.ReusableIdle == 0 {
+		return true
+	}
+	return s.Max > 0 && s.RecoveryBlocked > s.Max/2
+}
+
 // monitorCapacityExhaustion advances the consecutive-exhaustion counter for this
 // dispatch cycle and escalates HIGH when the pool has been unable to place ready
-// work for capacityExhaustionThreshold consecutive cycles. Best-effort: state
-// and escalation failures never block dispatch.
+// work for capacityExhaustionThreshold consecutive cycles. It is called EVERY
+// cycle (not only when everything is skipped) so a trickle dispatch — one bead
+// placed while dozens are skipped and the pool stays wedged — keeps the counter
+// climbing instead of resetting it. The counter only resets when ready work is
+// actually flowing (nothing skipped, or the pool is no longer degraded).
+// Best-effort: state and escalation failures never block dispatch.
 func monitorCapacityExhaustion(townRoot string, snapshot polecatCapacitySnapshot, skipped int) {
-	exhausted := skipped > 0 && snapshot.Working+snapshot.ReusableIdle == 0
+	exhausted := skipped > 0 && poolDegraded(snapshot)
 	path := capacityExhaustionStatePath(townRoot)
 	next, escalate := evaluateCapacityExhaustion(loadCapacityExhaustionState(path), exhausted, time.Now().UTC().Format(time.RFC3339))
 	if escalate {
@@ -165,9 +185,9 @@ func resetCapacityExhaustion(townRoot string) {
 // capacity snapshot. The fingerprint lets `gt escalate`'s close-aware dedup
 // (gu-ah40) suppress repeats within an open episode. Overridable in tests.
 var fireCapacityExhaustionEscalation = func(snapshot polecatCapacitySnapshot, skipped int, st capacityExhaustionState) {
-	msg := fmt.Sprintf("Pool capacity exhausted: %d ready bead(s) skipped, zero dispatchable slots for %d consecutive cycles (since %s)",
+	msg := fmt.Sprintf("Pool capacity exhausted: %d ready bead(s) skipped, pool unable to place work for %d consecutive cycles (since %s)",
 		skipped, st.Consecutive, st.FirstSeen)
-	reason := fmt.Sprintf("working=%d recovery_blocked=%d reusable_idle=%d pending_mr=%d reservations=%d max=%d — all slots wedged, zero polecat dispatch while ready work queues. Likely recovery_blocked debris (hq-uzubf). Inspect: gt scheduler status --json; gt polecat list --all --json.",
+	reason := fmt.Sprintf("working=%d recovery_blocked=%d reusable_idle=%d pending_mr=%d reservations=%d max=%d — pool degraded (hard-zero dispatchable slots, or a recovery_blocked majority) while ready work queues; includes trickle starvation where a bead dispatches occasionally but throughput can't keep up. Likely recovery_blocked debris (hq-uzubf). Inspect: gt scheduler status --json; gt polecat list --all --json.",
 		snapshot.Working, snapshot.RecoveryBlocked, snapshot.ReusableIdle, snapshot.PendingMR, snapshot.Reservations, snapshot.Max)
 	cmd := exec.Command("gt", "escalate", "--severity", "high",
 		"--source", "scheduler:capacity",
@@ -394,25 +414,29 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		}
 	}
 
+	// Snapshot the pool once so both the log line and the exhaustion monitor see
+	// the same picture (hq-q943s).
+	snapshot, snapErr := polecatCapacitySnapshotForTown(townRoot)
+	if snapErr != nil {
+		snapshot = lastCapacitySnapshot
+	}
+
 	if report.Dispatched > 0 || report.Failed > 0 {
 		fmt.Printf("\n%s Dispatched %d, failed %d (reason: %s)\n",
 			style.Bold.Render("✓"), report.Dispatched, report.Failed, report.Reason)
-		// A successful dispatch proves the pool can place work — clear any
-		// pending exhaustion episode so the next outage re-arms (hq-ly5yj).
-		if report.Dispatched > 0 {
-			resetCapacityExhaustion(townRoot)
-		}
-	} else if report.Skipped > 0 {
-		snapshot, err := polecatCapacitySnapshotForTown(townRoot)
-		if err != nil {
-			snapshot = lastCapacitySnapshot
-		}
+	}
+	if report.Skipped > 0 {
 		fmt.Printf("\n%s Skipped %d bead(s) — zero capacity (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
 			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
-		// Ready beads were skipped — if the pool also has no dispatchable slots,
-		// advance the exhaustion counter and escalate once it's sustained (hq-ly5yj).
-		monitorCapacityExhaustion(townRoot, snapshot, report.Skipped)
 	}
+
+	// hq-q943s: run the exhaustion monitor EVERY cycle with the full picture.
+	// A trickle dispatch (one bead placed while dozens are skipped and the pool
+	// stays wedged) must keep the counter climbing, not reset it — the previous
+	// reset-on-any-dispatch let chronic degraded-throughput starvation slip past
+	// the alarm for hours. The monitor resets the counter itself only when ready
+	// work is actually flowing (nothing skipped, or the pool no longer degraded).
+	monitorCapacityExhaustion(townRoot, snapshot, report.Skipped)
 
 	return report.Dispatched, nil
 }

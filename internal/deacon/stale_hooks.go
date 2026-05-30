@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/pushlog"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -224,6 +225,28 @@ func checkWorktreeState(townRoot, assignee string, result *StaleHookResult) {
 		return
 	}
 
+	// hq-q943s: CheckUncommittedWork.UnpushedCommits counts commits ahead of the
+	// branch's UPSTREAM (origin/main for polecat branches). Recompute it against
+	// the rig's configured base branch instead, so an integration-rig polecat
+	// (lia_bac/lia_iac/lia_web base off gagecane/gt) whose work is already on the
+	// integration branch isn't false-flagged "N unpushed commit(s) need recovery"
+	// and churning bogus recovery wisps. Same base-branch class as the polecat
+	// git-state fix 24051140, different code path. Overwriting the field before
+	// CleanExcludingBeads() reads it fixes both the partial-work decision and the
+	// reported count. Best-effort: leave the upstream value if the base or branch
+	// can't be resolved.
+	if baseRef := deaconRigBaseRef(townRoot, assignee); baseRef != "" {
+		if branch, berr := g.CurrentBranch(); berr == nil && branch != "" && branch != "HEAD" {
+			if pres, perr := g.BranchPreservationStatus(branch, "origin", []string{baseRef}); perr == nil {
+				if pres.Preserved {
+					workStatus.UnpushedCommits = 0
+				} else {
+					workStatus.UnpushedCommits = pres.UnpreservedPatchCount
+				}
+			}
+		}
+	}
+
 	if !workStatus.CleanExcludingBeads() {
 		result.PartialWork = true
 		result.WorktreeDirty = workStatus.HasUncommittedChanges
@@ -258,6 +281,26 @@ func assigneeRigName(assignee string) string {
 		return ""
 	}
 	return parts[0]
+}
+
+// deaconRigBaseRef returns the remote-tracking ref of the assignee rig's
+// configured base branch (e.g. "origin/gagecane/gt"), or "" when it cannot be
+// resolved or is unset (in which case the upstream-based unpushed count stands —
+// correct for main-based rigs whose polecat branches already track origin/main).
+func deaconRigBaseRef(townRoot, assignee string) string {
+	rigName := assigneeRigName(assignee)
+	if rigName == "" {
+		return ""
+	}
+	cfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName))
+	if err != nil || cfg.DefaultBranch == "" {
+		return ""
+	}
+	base := cfg.DefaultBranch
+	if strings.HasPrefix(base, "origin/") || strings.HasPrefix(base, "refs/") {
+		return base
+	}
+	return "origin/" + base
 }
 
 // assigneeToWorktreePath resolves an assignee address to its git worktree path.

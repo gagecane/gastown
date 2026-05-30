@@ -97,4 +97,39 @@ func TestMonitorCapacityExhaustion_EndToEnd(t *testing.T) {
 	if fired != 2 {
 		t.Errorf("usable capacity must not escalate: fired=%d, want 2", fired)
 	}
+
+	// hq-q943s: TRICKLE starvation — one bead dispatches each cycle so working
+	// stays 0-2, but a recovery_blocked MAJORITY persists and ready beads keep
+	// being skipped. The old alarm reset on the nonzero working and never fired;
+	// it must now escalate.
+	resetCapacityExhaustion(town)
+	trickle := polecatCapacitySnapshot{Max: 8, Working: 2, RecoveryBlocked: 6} // working>0 yet 6/8 wedged
+	for i := 0; i < capacityExhaustionThreshold; i++ {
+		monitorCapacityExhaustion(town, trickle, 30)
+	}
+	if fired != 3 {
+		t.Errorf("trickle starvation (working>0, recovery_blocked majority) must escalate: fired=%d, want 3", fired)
+	}
+}
+
+// TestPoolDegraded pins the hq-q943s degraded-pool detection: hard-zero OR a
+// strict recovery_blocked majority counts; a healthy or exactly-half pool does not.
+func TestPoolDegraded(t *testing.T) {
+	cases := []struct {
+		name string
+		s    polecatCapacitySnapshot
+		want bool
+	}{
+		{"hard zero (no working, no reusable)", polecatCapacitySnapshot{Max: 8, RecoveryBlocked: 8}, true},
+		{"recovery majority despite trickle working", polecatCapacitySnapshot{Max: 8, Working: 2, RecoveryBlocked: 6}, true},
+		{"recovery just over half", polecatCapacitySnapshot{Max: 8, Working: 3, RecoveryBlocked: 5}, true},
+		{"recovery exactly half is not a majority", polecatCapacitySnapshot{Max: 8, Working: 4, RecoveryBlocked: 4}, false},
+		{"healthy pool", polecatCapacitySnapshot{Max: 8, Working: 5, ReusableIdle: 2, RecoveryBlocked: 1}, false},
+		{"max unknown, some working → not degraded", polecatCapacitySnapshot{Working: 2, RecoveryBlocked: 9}, false},
+	}
+	for _, tc := range cases {
+		if got := poolDegraded(tc.s); got != tc.want {
+			t.Errorf("%s: poolDegraded(%+v) = %v, want %v", tc.name, tc.s, got, tc.want)
+		}
+	}
 }
