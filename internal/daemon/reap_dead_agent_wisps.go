@@ -197,16 +197,45 @@ func (d *Daemon) evaluateAgentStaleness(sessionName string, bead agentBeadInfo, 
 	// entirely — heartbeats are bumped by every gt command (witness patrols
 	// run several gt invocations per cycle), so a fresh heartbeat with stale
 	// updated_at means the role IS alive and we must not reap.
+	//
+	// cv-p3fem Phase 3: consult the typed Liveness() verdict instead of a
+	// raw timestamp comparison. This honors v3 LastKeepalive (a keepalive
+	// ticker bumping during a long gate run keeps the heartbeat fresh
+	// without a foreground gt command), the operator recovery marker
+	// short-circuit, and ExpectedIdleUntil declarations. Reap only on
+	// Verdict==DEAD; MAYBE_DEAD is informational, never destructive.
 	if hb := polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName); hb != nil {
 		threshold := cfg.timeoutFor(role)
 		if threshold <= 0 {
 			// Per-role timeout disabled and no fallback either.
 			return false, agentStaleness{}
 		}
-		staleFor := time.Since(hb.Timestamp)
-		if staleFor < threshold {
-			return false, agentStaleness{}
+		// Build per-role thresholds for the Liveness verdict. The reaper's
+		// "threshold" is the dead boundary (we already trust per-role
+		// values from operator config); stale/grace are derived from it
+		// so a v3 keepalive ticker doesn't trip MAYBE_DEAD on a
+		// well-configured rig.
+		lt := polecat.LivenessThresholds{
+			Stale: threshold / 6,
+			Grace: threshold / 2,
+			Dead:  threshold,
 		}
+		report := polecat.Liveness(d.config.TownRoot, sessionName, lt)
+		// The daemon reaper's caller already established that the tmux
+		// session is gone — that IS the corroborating signal. So a
+		// past-dead MAYBE_DEAD verdict (heartbeat-only past the dead
+		// threshold) plus tmux-gone is enough to reap. We refuse to act
+		// only when the verdict actively asserts liveness (ALIVE) or
+		// when the heartbeat is still fresh (UNKNOWN/short-of-stale).
+		switch report.Verdict {
+		case polecat.LivenessAlive, polecat.LivenessUnknown:
+			return false, agentStaleness{}
+		case polecat.LivenessMaybeDead:
+			if report.VerdictReason != polecat.ReasonPastDeadThreshold {
+				return false, agentStaleness{}
+			}
+		}
+		staleFor := time.Since(hb.EffectiveLastKeepalive())
 		return true, agentStaleness{source: "heartbeat", staleFor: staleFor, threshold: threshold}
 	}
 

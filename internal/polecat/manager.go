@@ -2227,27 +2227,51 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 
 // isSessionProcessDead checks if a polecat session's agent has exited.
 //
-// Uses heartbeat-based liveness detection (gt-qjtq): checks whether the session's
-// heartbeat file has been updated recently. Polecat sessions touch their heartbeat
-// via gt commands (gt prime, gt hook, bd show, etc.) which run frequently during
-// normal operation. A stale heartbeat indicates the agent is no longer active.
+// cv-p3fem Phase 3: consults the typed Liveness() verdict (heartbeat +
+// PID corroboration) rather than reading the staleness flag directly.
+// Returns true only when verdict==DEAD; MAYBE_DEAD/UNKNOWN are explicitly
+// not destructive (single bad signal can't fan out — the gs-549 lesson).
 //
-// Falls back to PID signal probing when no heartbeat file exists (backward
-// compatibility for sessions started before heartbeat support was added).
-//
-// Returns true only when we can confirm the process is dead, not on transient
-// failures (gt-kncti: permission denied false positives).
+// Heartbeat-based liveness was first introduced in gt-qjtq (the ZFC fix
+// that switched from PID-probing to heartbeat reads). Phase 3 keeps the
+// PID probe as a fast-path for the v3 verdict and continues to fall back
+// to PID-only when no heartbeat file exists.
 func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) bool {
-	// Primary: heartbeat-based liveness check (gt-qjtq ZFC fix).
+	// Build a PID-liveness probe from tmux. When tmux is nil (test path)
+	// or returns an error, the probe reports queried=false so the verdict
+	// falls through to heartbeat-only logic without producing a false
+	// negative on transient tmux failures (gt-kncti).
+	var pidProbe PIDLivenessFunc
+	if t != nil {
+		pidProbe = PIDProbe(func(name string) (string, bool) {
+			pidStr, err := t.GetPanePID(name)
+			if err != nil {
+				return "", false
+			}
+			return pidStr, true
+		})
+	}
+
 	if townRoot != "" {
-		stale, exists := IsSessionHeartbeatStale(townRoot, sessionName)
-		if exists {
-			return stale
+		report := LivenessWithPID(townRoot, sessionName, DefaultLivenessThresholds, pidProbe)
+		switch report.Verdict {
+		case LivenessDead:
+			return true
+		case LivenessAlive, LivenessMaybeDead, LivenessUnknown:
+			// LivenessMaybeDead and LivenessUnknown explicitly do NOT
+			// kill the session — the caller can retry on the next
+			// cycle. LivenessUnknown without a heartbeat falls through
+			// to the PID-only legacy path below.
+			if report.Verdict != LivenessUnknown {
+				return false
+			}
 		}
-		// No heartbeat file — fall through to PID-based check for backward compatibility.
 	}
 
 	// Fallback: PID signal probing (legacy, for sessions without heartbeat support).
+	if t == nil {
+		return false
+	}
 	pidStr, err := t.GetPanePID(sessionName)
 	if err != nil {
 		// Tmux query failed — could be permission denied, server busy, etc.

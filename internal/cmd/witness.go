@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -222,10 +224,26 @@ func runWitnessStop(cmd *cobra.Command, args []string) error {
 
 // WitnessStatusOutput is the JSON output format for witness status.
 type WitnessStatusOutput struct {
-	Running           bool     `json:"running"`
-	RigName           string   `json:"rig_name"`
-	Session           string   `json:"session,omitempty"`
-	MonitoredPolecats []string `json:"monitored_polecats,omitempty"`
+	Running           bool                  `json:"running"`
+	RigName           string                `json:"rig_name"`
+	Session           string                `json:"session,omitempty"`
+	MonitoredPolecats []string              `json:"monitored_polecats,omitempty"`
+	// cv-p3fem Phase 3: per-session liveness verdicts. Includes the witness's
+	// own verdict plus one entry per monitored polecat so operators can scan
+	// the supervisor question ("which agents are live?") in one pass.
+	Liveness []PolecatLivenessRow `json:"liveness,omitempty"`
+}
+
+// PolecatLivenessRow is a single liveness row for the witness status JSON
+// output. cv-p3fem Phase 3 plugin contract — additive only.
+type PolecatLivenessRow struct {
+	Session       string `json:"session"`
+	Role          string `json:"role"`
+	Verdict       string `json:"verdict"`
+	VerdictReason string `json:"verdict_reason"`
+	State         string `json:"state,omitempty"`
+	Bead          string `json:"bead,omitempty"`
+	AgeSeconds    int64  `json:"age_seconds"`
 }
 
 func runWitnessStatus(cmd *cobra.Command, args []string) error {
@@ -246,12 +264,19 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 	// Polecats come from rig config, not state file
 	polecats := r.Polecats
 
+	// cv-p3fem Phase 3: gather per-session liveness verdicts for the witness
+	// itself plus each monitored polecat. Best-effort: errors silently
+	// skipped (a missing town root or unreadable heartbeat shouldn't break
+	// the status command).
+	livenessRows := collectLivenessRows(rigName, polecats)
+
 	// JSON output
 	if witnessStatusJSON {
 		output := WitnessStatusOutput{
 			Running:           running,
 			RigName:           rigName,
 			MonitoredPolecats: polecats,
+			Liveness:          livenessRows,
 		}
 		if sessionInfo != nil {
 			output.Session = sessionInfo.Name
@@ -273,6 +298,22 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  State: %s\n", style.Dim.Render("○ stopped"))
 	}
 
+	// Liveness column (cv-p3fem Phase 3): supervisor question first.
+	if len(livenessRows) > 0 {
+		fmt.Printf("\n  %s\n", style.Bold.Render("Liveness:"))
+		for _, row := range livenessRows {
+			ageStr := (time.Duration(row.AgeSeconds) * time.Second).Truncate(time.Second).String()
+			extras := ""
+			if row.State != "" {
+				extras += fmt.Sprintf(" state=%s", row.State)
+			}
+			if row.Bead != "" {
+				extras += fmt.Sprintf(" bead=%s", row.Bead)
+			}
+			fmt.Printf("    %-30s %-12s age=%s%s\n", row.Session, row.Verdict, ageStr, extras)
+		}
+	}
+
 	// Show monitored polecats
 	fmt.Printf("\n  %s\n", style.Bold.Render("Monitored Polecats:"))
 	if len(polecats) == 0 {
@@ -284,6 +325,48 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// collectLivenessRows gathers liveness verdicts for the witness session and
+// each monitored polecat in the rig. Best-effort: an unfindable town root
+// or unreadable heartbeat is silently skipped so the status command never
+// fails just because liveness cannot be computed.
+func collectLivenessRows(rigName string, polecats []string) []PolecatLivenessRow {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return nil
+	}
+	prefix := session.PrefixFor(rigName)
+
+	var rows []PolecatLivenessRow
+	// Witness self
+	witnessSession := session.WitnessSessionName(prefix)
+	rows = append(rows, livenessRowFor(townRoot, witnessSession, "witness", polecat.DefaultWitnessLivenessThresholds))
+	// Refinery (if any)
+	refinerySession := session.RefinerySessionName(prefix)
+	if polecat.ReadSessionHeartbeat(townRoot, refinerySession) != nil {
+		rows = append(rows, livenessRowFor(townRoot, refinerySession, "refinery", polecat.DefaultRefineryLivenessThresholds))
+	}
+	// Monitored polecats
+	for _, p := range polecats {
+		sess := session.PolecatSessionName(prefix, p)
+		rows = append(rows, livenessRowFor(townRoot, sess, "polecat", polecat.DefaultLivenessThresholds))
+	}
+	return rows
+}
+
+// livenessRowFor materializes a single liveness row. Used by witness status.
+func livenessRowFor(townRoot, sessionName, role string, thresholds polecat.LivenessThresholds) PolecatLivenessRow {
+	rep := polecat.Liveness(townRoot, sessionName, thresholds)
+	return PolecatLivenessRow{
+		Session:       sessionName,
+		Role:          role,
+		Verdict:       string(rep.Verdict),
+		VerdictReason: rep.VerdictReason,
+		State:         string(rep.State),
+		Bead:          rep.Bead,
+		AgeSeconds:    rep.AgeSeconds,
+	}
 }
 
 // witnessSessionName returns the tmux session name for a rig's witness.
