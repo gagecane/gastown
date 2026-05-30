@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	convoyops "github.com/steveyegge/gastown/internal/convoy"
+	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1010,6 +1011,24 @@ func closeConvoyIfComplete(townBeads, convoyID, title string, tracked []trackedI
 		return false, nil
 	}
 
+	// Defense-in-depth gate (gu-j7u5): every tracked bead reports closed, but
+	// `status=closed` is not proof the work shipped. Pattern B/C false-closes
+	// (gu-rh0g, gu-treq) and stranded merges produce closed beads whose commits
+	// never reached origin/main. Verify ship evidence before declaring the
+	// convoy complete; if any bead is closed-but-unshipped, surface a
+	// "complete with caveats" warning and leave the convoy open so the bead
+	// keeper / refinery / mayor sees the discrepancy.
+	unshipped := findUnshippedTrackedBeads(townBeads, tracked)
+	if len(unshipped) > 0 {
+		fmt.Printf("%s Convoy %s has %d closed-but-unshipped issue(s) — refusing auto-close until work reaches origin/main:\n",
+			style.Warning.Render("⚠"), convoyID, len(unshipped))
+		for _, u := range unshipped {
+			fmt.Printf("    %s %s — %s\n", style.Dim.Render("○"), u.id, u.reason)
+		}
+		fmt.Printf("  %s\n", style.Dim.Render("(gu-j7u5: convoy stays open until either the bead is reopened, the citing commit lands, or the no-merge marker is set)"))
+		return false, nil
+	}
+
 	if dryRun {
 		fmt.Printf("%s Would auto-close convoy 🚚 %s: %s\n", style.Warning.Render("⚠"), convoyID, title)
 		return true, nil
@@ -1024,6 +1043,146 @@ func closeConvoyIfComplete(townBeads, convoyID, title string, tracked []trackedI
 	fmt.Printf("%s Auto-closed convoy 🚚 %s: %s\n", style.Bold.Render("✓"), convoyID, title)
 	notifyConvoyCompletion(townBeads, convoyID, title)
 	return true, nil
+}
+
+// unshippedTrackedBead describes a closed tracked bead whose work has not been
+// observed on origin/main. The reason explains the verification verdict so
+// operators can tell apart "still in the queue", "stranded", and "closed
+// without a citing commit on the default branch".
+type unshippedTrackedBead struct {
+	id     string
+	reason string
+}
+
+// findUnshippedTrackedBeads checks each tracked bead for ship evidence and
+// returns the subset that is closed-but-unshipped. The check is mechanical
+// and ordered cheapest-first:
+//
+//  1. `awaiting_refinery_merge` label → MR submitted but refinery has not
+//     yet merged to origin/main; work is in flight.
+//  2. `stranded-merge` label → polecat exit but push/MR failed; commits
+//     not on origin/main.
+//  3. `review_only: true` or `no_merge: true` in the bead description →
+//     analysis-only / non-code work where no citing commit is expected.
+//  4. git citation check on the rig's default branch — if no commit on
+//     origin/main mentions the bead ID, treat the bead as unshipped.
+//
+// The function fails-open in two cases that are handled per-bead:
+//
+//   - If the bead's home rig path can't be resolved (cross-rig dep with
+//     missing routes.jsonl) we cannot prove non-shipping, so the bead is
+//     accepted as shipped to avoid blocking convoys whose tracked beads
+//     legitimately live in unrouted external rigs.
+//   - If the git command itself errors (e.g., shallow clone with no
+//     origin/main ref) we accept the bead as shipped for the same reason.
+//
+// These two failure-open cases are expected to be rare and noisy: their
+// alternative (fail-closed) would deadlock convoys whose tracking beads
+// live in legitimately unreachable rigs.
+func findUnshippedTrackedBeads(townBeads string, tracked []trackedIssueInfo) []unshippedTrackedBead {
+	var unshipped []unshippedTrackedBead
+	for _, t := range tracked {
+		if t.Status != "closed" {
+			// Tombstones and any unexpected status that survived the loop
+			// above are treated as shipped — tombstones represent definitive
+			// removal, and any other status was already handled by the
+			// allClosed gate that calls this function.
+			continue
+		}
+		if reason := evaluateTrackedBeadShipped(townBeads, t); reason != "" {
+			unshipped = append(unshipped, unshippedTrackedBead{id: t.ID, reason: reason})
+		}
+	}
+	return unshipped
+}
+
+// evaluateTrackedBeadShipped returns an empty string if the bead has shipped
+// (or shipping is not expected), or a short human-readable reason describing
+// why the bead is closed-but-unshipped. See findUnshippedTrackedBeads for the
+// resolution order.
+func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
+	if hasLabel(t.Labels, "awaiting_refinery_merge") {
+		return "awaiting_refinery_merge: MR submitted, refinery has not yet merged to origin/main"
+	}
+	if hasLabel(t.Labels, "stranded-merge") {
+		return "stranded-merge: polecat push/MR failed; commits not on origin/main"
+	}
+
+	if t.Description != "" {
+		if af := beads.ParseAttachmentFields(&beads.Issue{Description: t.Description}); af != nil {
+			if af.NoMerge || af.ReviewOnly {
+				// Non-code work by design: no citing commit expected.
+				return ""
+			}
+		}
+	}
+
+	citation, ok := lookupCitingCommit(townBeads, t.ID)
+	if !ok {
+		// Unable to verify (no rig path / git failure). Fail open so legitimate
+		// cross-rig tracked beads in unrouted rigs don't deadlock convoys.
+		// The shipping check is a defense-in-depth signal, not a hard gate.
+		return ""
+	}
+	if !citation {
+		return "no commit on origin/main cites this bead ID — possible Pattern B/C false-close"
+	}
+	return ""
+}
+
+// lookupCitingCommit returns (true, true) if origin/<default-branch> in the
+// bead's home rig contains at least one commit that cites the bead ID,
+// (false, true) if the search ran but found nothing, and (_, false) if the
+// search could not be performed (rig path unresolvable, git error). Callers
+// fail-open on the second component (see evaluateTrackedBeadShipped).
+func lookupCitingCommit(townBeads, beadID string) (cited bool, verified bool) {
+	rigPath := resolveRigWorktreePath(townBeads, beadID)
+	if rigPath == "" {
+		return false, false
+	}
+	g := gitpkg.NewGit(rigPath)
+	if !g.IsRepo() {
+		return false, false
+	}
+	defaultBranch := g.RemoteDefaultBranch()
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	cited, err := g.HasCommitCitingRef("origin/"+defaultBranch, beadID)
+	if err != nil {
+		return false, false
+	}
+	return cited, true
+}
+
+// resolveRigWorktreePath maps a bead ID to a usable git worktree path for
+// citation lookups. For beads whose prefix maps to a rig (gt-, bd-, etc.),
+// we try the standard refinery worktree (<rig>/refinery/rig). For town-level
+// or unrouted beads we fall back to the town's mayor/rig worktree, which
+// also tracks origin/main. Returns "" if no usable path is available.
+func resolveRigWorktreePath(townBeads, beadID string) string {
+	// townBeads here is the town root (see getTownBeadsDir — convoy ops pass
+	// the town root, not the .beads directory).
+	prefix := beads.ExtractPrefix(beadID)
+	if prefix != "" {
+		if rigName := beads.GetRigNameForPrefix(townBeads, prefix); rigName != "" {
+			candidate := filepath.Join(townBeads, rigName, "refinery", "rig")
+			if isDir(candidate) {
+				return candidate
+			}
+		}
+	}
+	// Town-level or unrouted bead — fall back to mayor's worktree.
+	mayorWT := filepath.Join(townBeads, "mayor", "rig")
+	if isDir(mayorWT) {
+		return mayorWT
+	}
+	return ""
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // checkSingleConvoy checks a specific convoy and closes it if all tracked issues are complete.
@@ -2474,16 +2633,17 @@ func formatConvoyStatus(status string) string {
 
 // trackedIssueInfo holds info about an issue being tracked by a convoy.
 type trackedIssueInfo struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Type      string   `json:"dependency_type"`
-	IssueType string   `json:"issue_type"`
-	Blocked   bool     `json:"blocked,omitempty"`    // True if issue currently has blockers
-	Assignee  string   `json:"assignee,omitempty"`   // Assigned agent (e.g., gastown/polecats/goose)
-	Labels    []string `json:"labels,omitempty"`     // Bead labels (propagated from trackedDependency)
-	Worker    string   `json:"worker,omitempty"`     // Worker currently assigned (e.g., gastown/nux)
-	WorkerAge string   `json:"worker_age,omitempty"` // How long worker has been on this issue
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Status      string   `json:"status"`
+	Type        string   `json:"dependency_type"`
+	IssueType   string   `json:"issue_type"`
+	Blocked     bool     `json:"blocked,omitempty"`     // True if issue currently has blockers
+	Assignee    string   `json:"assignee,omitempty"`    // Assigned agent (e.g., gastown/polecats/goose)
+	Labels      []string `json:"labels,omitempty"`      // Bead labels (propagated from trackedDependency)
+	Description string   `json:"description,omitempty"` // Bead description (used by ship-verification gate, gu-j7u5)
+	Worker      string   `json:"worker,omitempty"`      // Worker currently assigned (e.g., gastown/nux)
+	WorkerAge   string   `json:"worker_age,omitempty"`  // How long worker has been on this issue
 }
 
 // trackedDependency is dep-list data enriched with fresh issue details.
@@ -2495,6 +2655,7 @@ type trackedDependency struct {
 	Assignee       string   `json:"assignee"`
 	DependencyType string   `json:"dependency_type"`
 	Labels         []string `json:"labels"`
+	Description    string   `json:"-"` // Description from fresh bd show (used by ship-verification, gu-j7u5)
 	Blocked        bool     `json:"-"`
 }
 
@@ -2517,6 +2678,7 @@ func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
 	// labels are empty clears stale queue labels that would otherwise
 	// suppress stranded issue detection.
 	dep.Labels = details.Labels
+	dep.Description = details.Description
 }
 
 // getTrackedIssues gets issues tracked by a convoy with fresh cross-rig details.
@@ -2626,14 +2788,15 @@ func buildTrackedIssueInfosFromCache(
 		}
 
 		info := trackedIssueInfo{
-			ID:        dep.ID,
-			Title:     dep.Title,
-			Status:    dep.Status,
-			Type:      dep.DependencyType,
-			IssueType: dep.IssueType,
-			Blocked:   dep.Blocked,
-			Assignee:  dep.Assignee,
-			Labels:    dep.Labels,
+			ID:          dep.ID,
+			Title:       dep.Title,
+			Status:      dep.Status,
+			Type:        dep.DependencyType,
+			IssueType:   dep.IssueType,
+			Blocked:     dep.Blocked,
+			Assignee:    dep.Assignee,
+			Labels:      dep.Labels,
+			Description: dep.Description,
 		}
 
 		if worker, ok := workersMap[dep.ID]; ok {
@@ -2727,6 +2890,7 @@ type issueDetailsJSON struct {
 	Status         string            `json:"status"`
 	IssueType      string            `json:"issue_type"`
 	Assignee       string            `json:"assignee"`
+	Description    string            `json:"description"`
 	Labels         []string          `json:"labels"`
 	BlockedBy      []string          `json:"blocked_by"`
 	BlockedByCount int               `json:"blocked_by_count"`
@@ -2740,6 +2904,7 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 		Status:         issue.Status,
 		IssueType:      issue.IssueType,
 		Assignee:       issue.Assignee,
+		Description:    issue.Description,
 		Labels:         issue.Labels,
 		BlockedBy:      issue.BlockedBy,
 		BlockedByCount: issue.BlockedByCount,
@@ -2754,6 +2919,7 @@ type issueDetails struct {
 	Status         string
 	IssueType      string
 	Assignee       string
+	Description    string
 	Labels         []string
 	BlockedBy      []string
 	BlockedByCount int

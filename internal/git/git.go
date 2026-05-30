@@ -1624,6 +1624,34 @@ func (g *Git) GetBranchCommitMessage(branch string) (string, error) {
 	return g.run("log", "-1", "--format=%B", branch)
 }
 
+// HasCommitCitingRef searches the commit history of `ref` for any commit
+// whose subject or body contains the literal substring `needle`. Returns
+// (true, nil) if at least one such commit exists, (false, nil) if none do,
+// and (false, err) on git failure.
+//
+// Used by the convoy false-complete gate (gu-j7u5): when a tracked bead is
+// closed, we want to verify origin/main carries an actual commit citing the
+// bead ID before declaring the convoy "complete". A status=closed bead alone
+// is not proof the work shipped — the bead may have been false-closed via the
+// no-MR path or by a polecat that didn't reach origin/main.
+//
+// The match is mechanical (--fixed-strings, no regex) so bead IDs like
+// "gu-j7u5" don't accidentally match similar-prefixed beads. -F and a length
+// limit on the path/range reduce the risk of git exec arg-mangling.
+func (g *Git) HasCommitCitingRef(ref, needle string) (bool, error) {
+	if needle == "" {
+		return false, fmt.Errorf("HasCommitCitingRef: needle is empty")
+	}
+	if ref == "" {
+		return false, fmt.Errorf("HasCommitCitingRef: ref is empty")
+	}
+	out, err := g.run("log", "--format=%H", "--fixed-strings", "--grep="+needle, ref, "--")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // RecentCommits returns the last n commits as one-line summaries (hash + subject).
 // Returns empty string if there are no commits or the repo is empty.
 func (g *Git) RecentCommits(n int) (string, error) {
