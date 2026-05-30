@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -262,6 +263,17 @@ func (d *Daemon) runMainBranchTests() {
 	for _, rigName := range rigNames {
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
 		currentSHA, runErr := d.testRigMainBranch(rigName, rigPath, timeout)
+
+		// hq-0qszq: a host-load SIGKILL is NOT a regression and NOT a pass.
+		// Skip it without escalating and without touching the attribution
+		// baseline, so a load spike can't masquerade as a main-branch failure
+		// (the overseer was paged on exactly this). A later clean cycle records
+		// the real pass/fail.
+		if runErr != nil && errors.Is(runErr, errGateHostKilled) {
+			d.logger.Printf("main_branch_test: %s: SKIPPED — transient host kill, not a regression: %v", rigName, runErr)
+			tested++
+			continue
+		}
 
 		// Persist outcome BEFORE escalation emission so a crash between the
 		// gate suite and the bd-call still advances the per-rig baseline.
@@ -618,26 +630,61 @@ func gateEnv(townRoot string) []string {
 // formatFailureOutput.
 const failureOutputTailSize = 50
 
-// runCommandOnWorktree runs a single shell command in the given worktree directory.
+// errGateHostKilled marks a gate that was SIGKILLed by the host (OOM killer /
+// jetsam under load/swap pressure) rather than failing on its own. It is a
+// TRANSIENT condition — the code under test is not a regression — so callers
+// must NOT escalate it as a main-branch failure. See hq-0qszq.
+var errGateHostKilled = errors.New("gate killed by host load (transient, not a regression)")
+
+// gateHostKillRetries is how many extra times a host-killed gate is re-run
+// before giving up and reporting it transient. A short backoff between attempts
+// lets a load/swap spike subside.
+const gateHostKillRetries = 2
+
+// gateHostKillBackoff is the pause between host-kill retries. A var so tests can
+// shrink it; production lets a load/swap spike subside before re-running.
+var gateHostKillBackoff = 20 * time.Second
+
+// isHostKill reports whether a gate error is an external SIGKILL (host OOM/jetsam
+// under load) rather than a genuine test FAIL or our own deadline cancellation.
+// A go test that genuinely fails exits non-zero with "FAIL" output; a host kill
+// terminates the process with SIGKILL — which exec surfaces as "signal: killed"
+// — while our context did NOT hit its deadline (we didn't cancel it).
+func isHostKill(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() == context.DeadlineExceeded {
+		return false
+	}
+	return strings.Contains(err.Error(), "signal: killed")
+}
+
+// runCommandOnWorktree runs a single shell command in the given worktree
+// directory, retrying transient host-load SIGKILLs (hq-0qszq) so they don't
+// masquerade as main-branch regressions.
 func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, label, command string) error {
 	d.logger.Printf("main_branch_test: %s: running %s: %s", rigName, label, command)
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
-	cmd.Dir = workDir
-	cmd.Env = gateEnv(d.config.TownRoot)
-	// gs-lfr: use the process-group variant that ALSO installs a cancel hook
-	// killing the whole group, not the detached variant (no cancel hook).
-	// CommandContext's default cancel SIGKILLs only the leader PID, but `sh -c`
-	// forks the gate command as a child that keeps the output pipe open, so
-	// CombinedOutput blocks until the child exits on its own — making per-gate
-	// timeouts (gateCtx) run the full command duration instead of canceling at
-	// the deadline (da058e57/gu-z76g added the timeout plumbing but kept the
-	// detached, no-cancel variant). Killing the group (-pgid) terminates the
-	// whole tree at the deadline.
-	util.SetProcessGroup(cmd)
+	var err error
+	var output []byte
+	for attempt := 0; ; attempt++ {
+		cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
+		cmd.Dir = workDir
+		cmd.Env = gateEnv(d.config.TownRoot)
+		// gs-lfr: use the process-group variant that ALSO installs a cancel hook
+		// killing the whole group, not the detached variant (no cancel hook).
+		// CommandContext's default cancel SIGKILLs only the leader PID, but `sh -c`
+		// forks the gate command as a child that keeps the output pipe open, so
+		// CombinedOutput blocks until the child exits on its own — making per-gate
+		// timeouts (gateCtx) run the full command duration instead of canceling at
+		// the deadline (da058e57/gu-z76g added the timeout plumbing but kept the
+		// detached, no-cancel variant). Killing the group (-pgid) terminates the
+		// whole tree at the deadline.
+		util.SetProcessGroup(cmd)
 
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+		output, err = cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+
 		// Detect false-positive: the gate command succeeded but post-step
 		// cleanup (container teardown, cache save) ran past the deadline.
 		// act and pre-commit both emit success markers before starting
@@ -648,9 +695,32 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 			return nil
 		}
 
-		return fmt.Errorf("%s failed: %v\n%s", label, err, formatFailureOutput(string(output), failureOutputTailSize))
+		// hq-0qszq: a SIGKILL with our context still alive is a HOST kill
+		// (OOM/jetsam under load), not a test result. Retry after a backoff so a
+		// load spike doesn't masquerade as a regression. A genuine FAIL (non-zero
+		// exit, FAIL output) is NOT retried — it fails deterministically.
+		if isHostKill(ctx, err) && attempt < gateHostKillRetries {
+			d.logger.Printf("main_branch_test: %s: %s: SIGKILLed (host load/OOM, not a regression) — retry %d/%d after %v",
+				rigName, label, attempt+1, gateHostKillRetries, gateHostKillBackoff)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%w: %s canceled during load-kill backoff", errGateHostKilled, label)
+			case <-time.After(gateHostKillBackoff):
+			}
+			continue
+		}
+		break
 	}
-	return nil
+
+	if isHostKill(ctx, err) {
+		// Still killed after retries — surface as transient so the patrol does
+		// NOT escalate it as a main-branch regression (hq-0qszq).
+		d.logger.Printf("main_branch_test: %s: %s: still SIGKILLed after %d attempts — host load, marking transient (NOT a regression)",
+			rigName, label, gateHostKillRetries+1)
+		return fmt.Errorf("%w: %s (%v)", errGateHostKilled, label, err)
+	}
+
+	return fmt.Errorf("%s failed: %v\n%s", label, err, formatFailureOutput(string(output), failureOutputTailSize))
 }
 
 // formatFailureOutput renders command output for inclusion in an error
