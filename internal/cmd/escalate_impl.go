@@ -95,9 +95,40 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	// Dedup: if --dedup and --signature are set, check for an existing open
 	// escalation with the same signature. Bump its occurrence count instead of
 	// creating a new bead, keeping the HQ wisp table from growing unbounded.
+	//
+	// gu-ah40: also suppress re-fires when a matching escalation was closed
+	// within --dedup-window. Without that, the moment a deduped escalation
+	// closes the next plugin cycle creates a fresh bead, defeating the dedup.
 	if escalateDedup && escalateSignature != "" {
-		existing, existingFields, err := bd.FindOpenEscalationBySignature(escalateSignature)
+		existing, existingFields, err := bd.FindRecentEscalationBySignature(escalateSignature, escalateDedupWindow)
 		if err == nil && existing != nil {
+			if existing.Status == "closed" {
+				// Closed-within-window: suppress entirely. Do NOT bump the
+				// occurrence count on a resolved bead — that would leak edits
+				// into closed escalations and re-surface them in some views.
+				if debugDedup() {
+					fmt.Fprintf(os.Stderr,
+						"gt escalate: suppressed by dedup signature %q (matched closed escalation %s, window=%s)\n",
+						escalateSignature, existing.ID, escalateDedupWindow)
+				}
+				if escalateJSON {
+					out, _ := json.MarshalIndent(map[string]interface{}{
+						"id":         existing.ID,
+						"deduped":    true,
+						"suppressed": true,
+						"reason":     "matching escalation closed within dedup-window",
+						"signature":  escalateSignature,
+						"window":     escalateDedupWindow.String(),
+					}, "", "  ")
+					fmt.Println(string(out))
+				} else {
+					emoji := severityEmoji(existingFields.Severity)
+					fmt.Printf("%s Escalation suppressed by dedup signature: %s closed within %s\n",
+						emoji, existing.ID, escalateDedupWindow)
+				}
+				return nil
+			}
+			// Open match: bump occurrence count on the existing bead.
 			newCount := existingFields.OccurrenceCount + 1
 			_ = bd.BumpOccurrenceCount(existing.ID, escalateReason)
 			if escalateJSON {
@@ -276,6 +307,18 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// debugDedup returns true when GT_ESCALATE_DEBUG_DEDUP is set to a truthy
+// value. Used to log "suppressed by dedup signature" lines so the dedup path
+// is observable without spamming normal stderr output (gu-ah40 acceptance).
+func debugDedup() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("GT_ESCALATE_DEBUG_DEDUP")))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func escalationFingerprintLabel(raw string) string {
