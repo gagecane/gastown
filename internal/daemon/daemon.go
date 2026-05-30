@@ -3868,7 +3868,7 @@ func (d *Daemon) reclaimStalledCleanPolecat(rigName, polecatName string) {
 		return // Can't classify — leave it for the crash detector / witness.
 	}
 
-	if !isStalledReclaimCandidate(beads.AgentState(info.State)) {
+	if !isReclaimCandidate(info) {
 		return
 	}
 
@@ -3878,6 +3878,41 @@ func (d *Daemon) reclaimStalledCleanPolecat(rigName, polecatName string) {
 	}
 
 	d.nukeCleanStalledPolecat(rigName, polecatName)
+}
+
+// isReclaimCandidate decides whether a DEAD-session polecat should be OFFERED to
+// `gt polecat nuke` (no --force) for clean-debris reclamation. nuke's safety
+// check is the real authority — it refuses any uncommitted/unpushed/stashed
+// work, open MR, or hooked work — so this is a coarse pre-filter whose only job
+// is to skip states/slots we must preserve.
+//
+// Two populations qualify:
+//   - the "stalled" debris: a non-idle abnormal state the polecat never
+//     transitioned out of (isStalledReclaimCandidate); and
+//   - idle-but-WEDGED slots (hq-uzubf): an idle polecat the capacity snapshot
+//     counts as recovery_blocked because of a RESIDUAL — a non-clean
+//     cleanup_status, or a push/MR-failure flag. These starve the pool (idle
+//     reusable warm slots do NOT — they're cleanup=clean with no flags, and are
+//     correctly excluded here so the patrol never churns a healthy pool).
+//     The reclaim patrol used to skip ALL idle, so these wedged idle slots had
+//     nothing to free them and accumulated to recovery_blocked:8 → zero dispatch.
+func isReclaimCandidate(info *AgentBeadInfo) bool {
+	state := beads.AgentState(info.State)
+	if isStalledReclaimCandidate(state) {
+		return true
+	}
+	if state == beads.AgentStateIdle {
+		if info.PushFailed || info.MRFailed {
+			return true
+		}
+		// A non-clean cleanup_status is the residual that makes an idle polecat
+		// count as recovery_blocked. Empty ("unknown") is left to nuke's own
+		// gitSafe check rather than guessed at here.
+		if info.CleanupStatus != "" && info.CleanupStatus != "clean" {
+			return true
+		}
+	}
+	return false
 }
 
 // isStalledReclaimCandidate reports whether a DEAD-session polecat in this agent

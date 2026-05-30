@@ -815,6 +815,14 @@ type AgentBeadInfo struct {
 	RoleType   string // Parsed from description: role_type
 	Rig        string // Parsed from description: rig
 	LastUpdate string `json:"updated_at"`
+	// Residual signals parsed from the description (hq-uzubf). These are the
+	// same fields the capacity snapshot uses to decide recovery_blocked, so the
+	// reclaim patrol can tell an idle-but-WEDGED polecat (has a residual) from a
+	// reusable-idle warm slot (clean, no failure flags).
+	CleanupStatus string // e.g. "clean", "has_uncommitted", "has_unpushed", ""
+	PushFailed    bool
+	MRFailed      bool
+	ActiveMR      string
 	// Note: RoleBead field removed - role definitions are now config-based
 }
 
@@ -886,6 +894,10 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	if fields != nil {
 		info.RoleType = fields.RoleType
 		info.Rig = fields.Rig
+		info.CleanupStatus = fields.CleanupStatus
+		info.PushFailed = fields.PushFailed
+		info.MRFailed = fields.MRFailed
+		info.ActiveMR = fields.ActiveMR
 	}
 
 	info.State = beads.ResolveAgentState(issue.Description, issue.AgentState)

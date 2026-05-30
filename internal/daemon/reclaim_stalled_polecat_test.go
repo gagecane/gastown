@@ -44,3 +44,40 @@ func TestIsStalledReclaimCandidate(t *testing.T) {
 		}
 	}
 }
+
+// TestIsReclaimCandidate covers the hq-uzubf addition: idle polecats that are
+// WEDGED (recovery_blocked via a residual) must be offered for reclaim, while
+// reusable-idle warm slots (clean, no failure flags) must be preserved. nuke's
+// own safety check is still the authority on whether the residual is benign.
+func TestIsReclaimCandidate(t *testing.T) {
+	cases := []struct {
+		name string
+		info *AgentBeadInfo
+		want bool
+	}{
+		// Reusable-idle warm slot — clean, no flags, no residual: PRESERVE.
+		{"idle clean reusable", &AgentBeadInfo{State: "idle", CleanupStatus: "clean"}, false},
+		{"idle empty cleanup (unknown — leave to nuke)", &AgentBeadInfo{State: "idle", CleanupStatus: ""}, false},
+
+		// Idle but WEDGED — a residual makes it recovery_blocked: RECLAIM.
+		{"idle has_uncommitted", &AgentBeadInfo{State: "idle", CleanupStatus: "has_uncommitted"}, true},
+		{"idle has_unpushed", &AgentBeadInfo{State: "idle", CleanupStatus: "has_unpushed"}, true},
+		{"idle push-failed flag", &AgentBeadInfo{State: "idle", CleanupStatus: "clean", PushFailed: true}, true},
+		{"idle mr-failed flag", &AgentBeadInfo{State: "idle", CleanupStatus: "clean", MRFailed: true}, true},
+
+		// Non-idle abnormal states still qualify via isStalledReclaimCandidate.
+		{"working", &AgentBeadInfo{State: "working"}, true},
+		{"stuck", &AgentBeadInfo{State: "stuck"}, true},
+
+		// Preserve states are never candidates even with a flag.
+		{"done", &AgentBeadInfo{State: "done", PushFailed: true}, false},
+		{"nuked", &AgentBeadInfo{State: "nuked"}, false},
+		{"spawning", &AgentBeadInfo{State: "spawning"}, false},
+		{"paused", &AgentBeadInfo{State: "paused"}, false},
+	}
+	for _, tc := range cases {
+		if got := isReclaimCandidate(tc.info); got != tc.want {
+			t.Errorf("%s: isReclaimCandidate(%+v) = %v, want %v", tc.name, tc.info, got, tc.want)
+		}
+	}
+}
