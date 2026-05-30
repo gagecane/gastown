@@ -887,9 +887,29 @@ func runDeaconHeartbeat(cmd *cobra.Command, args []string) error {
 
 	// Also update the polecat-style session heartbeat so stuck-agent-dog can
 	// confirm liveness via JSON timestamp (not just mtime of the patrol file).
-	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
-		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatWorking, action, "")
+	//
+	// Robustness (gu-em89): the deacon session is a singleton with a
+	// deterministic name (`hq-deacon`). If GT_SESSION is missing from the
+	// invoking process — observed empirically when the deacon's heartbeat
+	// command runs in a subprocess that lost the env var — fall back to the
+	// canonical session name so the runtime heartbeat keeps refreshing. The
+	// deacon-internal cycle counter (deacon/heartbeat.json) was advancing
+	// even while .runtime/heartbeats/hq-deacon.json silently went stale,
+	// because the GT_SESSION guard was the only thing distinguishing the
+	// two writes — see gu-em89 / gc-pew7y for the 7-recurrence timeline.
+	//
+	// We also emit a one-line stderr warning when the fallback fires so the
+	// next subprocess-env-loss is visible at the operator level instead of
+	// silently accumulating until stuck-agent-dog escalates.
+	sessionName := os.Getenv("GT_SESSION")
+	if sessionName == "" {
+		sessionName = getDeaconSessionName()
+		fmt.Fprintf(os.Stderr,
+			"warning: gt deacon heartbeat: GT_SESSION not set; falling back to %q "+
+				"(GT_ROLE=%q pid=%d ppid=%d). See gu-em89.\n",
+			sessionName, os.Getenv("GT_ROLE"), os.Getpid(), os.Getppid())
 	}
+	polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatWorking, action, "")
 
 	return nil
 }
