@@ -2647,6 +2647,12 @@ func TestDiscoverPostHocCompletions_ClosesBeadWhenBranchMerged(t *testing.T) {
 	}
 	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
 
+	oldRef := verifyPolecatHeadReferencesBead
+	verifyPolecatHeadReferencesBead = func(workDir, rigName, polecatName, beadID string) (bool, error) {
+		return true, nil // positive evidence: HEAD references the hook bead
+	}
+	t.Cleanup(func() { verifyPolecatHeadReferencesBead = oldRef })
+
 	const (
 		rigName     = "testrig"
 		polecatName = "nux"
@@ -2839,6 +2845,146 @@ func TestDiscoverPostHocCompletions_VerifyError(t *testing.T) {
 	}
 	if len(result.Errors) == 0 {
 		t.Error("expected an error to be recorded when verify fails")
+	}
+}
+
+// TestDiscoverPostHocCompletions_SkipsWhenHeadDoesNotReferenceBead is the core
+// gs-i2p guard: a STALLED, zero-commit polecat passes verifyCommitOnMain (its
+// HEAD is the base branch, an ancestor of origin/main), but its HEAD commit does
+// NOT reference the hook bead. Without positive evidence of real work, the bead
+// must be left untouched rather than false-closed.
+func TestDiscoverPostHocCompletions_SkipsWhenHeadDoesNotReferenceBead(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil // ancestor check passes (zero-commit HEAD == base)
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	oldRef := verifyPolecatHeadReferencesBead
+	verifyPolecatHeadReferencesBead = func(workDir, rigName, polecatName, beadID string) (bool, error) {
+		return false, nil // HEAD cites a sibling's landing, not this bead
+	}
+	t.Cleanup(func() { verifyPolecatHeadReferencesBead = oldRef })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: gt-work-001"
+	bd, mock := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 (HEAD does not reference bead)", len(result.Discovered))
+	}
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close") {
+			t.Errorf("bd close should not be called when HEAD does not reference the bead, got: %v", mock.calls)
+		}
+	}
+}
+
+// TestDiscoverPostHocCompletions_RefCheckError treats a read failure in the
+// HEAD-references-bead check as fail-closed: don't close, record an error. This
+// mirrors the verifyCommitOnMain error path — a transient git/Dolt blip must
+// never be read as completion.
+func TestDiscoverPostHocCompletions_RefCheckError(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	oldRef := verifyPolecatHeadReferencesBead
+	verifyPolecatHeadReferencesBead = func(workDir, rigName, polecatName, beadID string) (bool, error) {
+		return false, fmt.Errorf("git error reading HEAD")
+	}
+	t.Cleanup(func() { verifyPolecatHeadReferencesBead = oldRef })
+
+	tmpDir := setupPostHocTestDir(t, "testrig", "nux")
+	agentDesc := "Agent: testrig/polecats/nux\n\nrole_type: polecat\n" +
+		"rig: testrig\nagent_state: working\nhook_bead: gt-work-001"
+	bd, mock := postHocTestBd(agentDesc, "in_progress")
+
+	result := DiscoverPostHocCompletions(bd, tmpDir, "testrig")
+	if len(result.Discovered) != 0 {
+		t.Errorf("Discovered = %d, want 0 on ref-check error (fail-closed)", len(result.Discovered))
+	}
+	if len(result.Errors) == 0 {
+		t.Error("expected an error to be recorded when ref-check fails")
+	}
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close") {
+			t.Errorf("bd close should not be called on ref-check error, got: %v", mock.calls)
+		}
+	}
+}
+
+// TestVerifyPolecatHeadReferencesBead exercises the real (non-mocked) guard
+// against a live git repo: a HEAD commit that cites the bead returns true; a
+// HEAD that cites only an unrelated sibling's landing (the zero-commit stalled
+// polecat case) returns false. This is the positive-evidence check that stops
+// the post-hoc path from false-closing stalled hooked beads (gs-i2p).
+func TestVerifyPolecatHeadReferencesBead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rigName     = "testrig"
+		polecatName = "nux"
+		hookBead    = "gt-work-001"
+	)
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, ".gt-root"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	polecatPath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
+	if err := os.MkdirAll(polecatPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = polecatPath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	mustGit("init", "-b", "main")
+	mustGit("config", "user.email", "test@test")
+	mustGit("config", "user.name", "Test")
+
+	// Base commit citing a DIFFERENT bead — this is what a zero-commit stalled
+	// polecat's HEAD would point at (a sibling's landing).
+	if err := os.WriteFile(filepath.Join(polecatPath, "a.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit("add", "a.txt")
+	mustGit("commit", "-m", "feat: unrelated sibling work (gt-other-999)")
+
+	// Zero-commit case: HEAD does not reference the hook bead.
+	ok, err := _verifyPolecatHeadReferencesBead(townRoot, rigName, polecatName, hookBead)
+	if err != nil {
+		t.Fatalf("unexpected error on base HEAD: %v", err)
+	}
+	if ok {
+		t.Errorf("HEAD cites gt-other-999, not %s — want false, got true", hookBead)
+	}
+
+	// Real-work case: add a commit that references the hook bead.
+	if err := os.WriteFile(filepath.Join(polecatPath, "b.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit("add", "b.txt")
+	mustGit("commit", "-m", "fix: real work ("+hookBead+")")
+
+	ok, err = _verifyPolecatHeadReferencesBead(townRoot, rigName, polecatName, hookBead)
+	if err != nil {
+		t.Fatalf("unexpected error on work HEAD: %v", err)
+	}
+	if !ok {
+		t.Errorf("HEAD references %s — want true, got false", hookBead)
 	}
 }
 

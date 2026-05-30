@@ -1572,6 +1572,49 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 	return false, nil
 }
 
+// verifyPolecatHeadReferencesBead reports whether the polecat's HEAD commit
+// message references the given bead ID. This is the positive-evidence guard for
+// the post-hoc completion path (gs-i2p): verifyCommitOnMain alone returns true
+// for a STALLED polecat that produced ZERO commits, because its HEAD is the base
+// branch commit, which is trivially an ancestor of origin/<default-branch>. Such
+// a polecat has done no work, yet would pass the ancestor check and get its hook
+// bead falsely closed on a transient scan.
+//
+// Mirroring verifyCommitReferencesBead in done.go, we require the polecat's own
+// HEAD commit to mention the hook bead in its message — Gas Town's conventional
+// commit format puts (<bead-id>) in the subject of every committed task. A
+// zero-commit polecat's HEAD is a sibling's unrelated landing, which fails this
+// check and is left untouched (fail-closed).
+//
+// Returns:
+//   - true, nil: HEAD references the bead — positive evidence of real work.
+//   - false, nil: HEAD does NOT reference the bead — no evidence; do not close.
+//   - false, error: couldn't read HEAD/message — unverifiable; do not close.
+//
+// Package-level var so tests can override it.
+var verifyPolecatHeadReferencesBead = _verifyPolecatHeadReferencesBead
+
+func _verifyPolecatHeadReferencesBead(workDir, rigName, polecatName, beadID string) (bool, error) {
+	if beadID == "" {
+		return false, fmt.Errorf("internal error: bead ID is empty (cannot verify commit reference)")
+	}
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+	polecatPath := polecatWorktreePath(townRoot, rigName, polecatName)
+	g := git.NewGit(polecatPath)
+	headSHA, err := g.Rev("HEAD")
+	if err != nil {
+		return false, fmt.Errorf("getting polecat HEAD: %w", err)
+	}
+	msg, err := g.GetBranchCommitMessage(headSHA)
+	if err != nil {
+		return false, fmt.Errorf("reading HEAD commit message: %w", err)
+	}
+	return strings.Contains(msg, beadID), nil
+}
+
 // verifyBranchAlreadyMerged checks whether the polecat's current branch work has
 // already landed on the default branch — including via SQUASH merge, which
 // rewrites commit SHAs and therefore escapes a plain ancestor check.
@@ -3472,6 +3515,10 @@ type DiscoverPostHocCompletionsResult struct {
 //   - Hook bead is non-empty and still in_progress or hooked.
 //   - verifyCommitOnMain returns true — polecat's HEAD is an ancestor of
 //     origin/<default-branch>, meaning the work IS on mainline.
+//   - verifyPolecatHeadReferencesBead returns true — the HEAD commit message
+//     cites the hook bead. This is the positive-evidence guard (gs-i2p): the
+//     ancestor check alone is satisfied by a stalled, ZERO-commit polecat whose
+//     HEAD is the base branch, which would otherwise false-close the hook bead.
 //
 // When all preconditions hold: close the hook bead with a clear reason. The
 // polecat's subsequent fate (zombie restart, nuke, etc.) is handled by the
@@ -3559,6 +3606,23 @@ func DiscoverPostHocCompletions(bd *BdCli, workDir, rigName string) *DiscoverPos
 		}
 		if !onMain {
 			continue
+		}
+
+		// Precondition 7 (gs-i2p): require POSITIVE evidence that THIS polecat
+		// did the work — its HEAD commit must reference the hook bead.
+		// verifyCommitOnMain alone is satisfied by a stalled, zero-commit polecat
+		// whose HEAD is the base branch (trivially an ancestor of
+		// origin/<default-branch>); closing on that signal false-closes hooked
+		// beads whose work was never done. Fail-closed: any read error or missing
+		// reference skips the close, mirroring verifyCommitReferencesBead in done.go.
+		referencesBead, err := verifyPolecatHeadReferencesBead(workDir, rigName, polecatName, fields.HookBead)
+		if err != nil {
+			result.Errors = append(result.Errors,
+				fmt.Errorf("verifying HEAD references bead for %s: %w", polecatName, err))
+			continue
+		}
+		if !referencesBead {
+			continue // No commit citing this bead — no evidence of completion.
 		}
 
 		// All preconditions satisfied — auto-close the hook bead.
