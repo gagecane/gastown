@@ -119,6 +119,12 @@ type PollResult struct {
 	// completed before the cold-start lookback cutoff. Always 0 on warm
 	// polls.
 	ColdStartSuppressed int
+
+	// SupersededSuppressed counts failed runs that were recorded as seen but
+	// NOT escalated because a later passing run on the target branch already
+	// superseded the break (the regression was resolved and main advanced).
+	// Applies on both cold and warm polls; see gs-218.
+	SupersededSuppressed int
 }
 
 // Process inspects the most recent completed runs on the target branch and
@@ -150,6 +156,28 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 			w.cfg.Rig, coldCutoff.Format(time.RFC3339))
 	}
 
+	// Find the most recent passing run on the target branch. A failure that
+	// completed before this timestamp has been superseded: main went green
+	// again afterwards, so the break is resolved and re-escalating it would
+	// just flood the mayor with stale broke-main-ci (gs-218). In the merge-
+	// queue model main freezes on a break, so a later green run means the
+	// queue advanced past the failing commit. Unlike the cold-start cutoff,
+	// this guard applies on warm polls too — so a ledger rebuild or a wide
+	// fetch window that re-surfaces an old, already-resolved failure does not
+	// re-escalate it.
+	var latestSuccess time.Time
+	for _, run := range runs {
+		if run.Conclusion != ConclusionSuccess {
+			continue
+		}
+		if !strings.EqualFold(run.Branch, w.cfg.TargetBranch) {
+			continue
+		}
+		if !run.CompletedAt.IsZero() && run.CompletedAt.After(latestSuccess) {
+			latestSuccess = run.CompletedAt
+		}
+	}
+
 	// Process oldest-to-newest so a fail-then-pass sequence in a single
 	// poll resolves to "no freeze" (the pass clears the failure's freeze).
 	// The fetcher returns newest-first, so reverse here.
@@ -179,6 +207,22 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 			w.logf("ciwatcher: cold-start suppress run id=%s sha=%s completed=%s (older than cutoff)",
 				run.ID, shortSHA(run.HeadSHA), run.CompletedAt.Format(time.RFC3339))
 			res.ColdStartSuppressed++
+			seen.Mark(run.ID, w.clock.Now())
+			continue
+		}
+
+		// Suppress a failed run whose break was already superseded by a later
+		// passing run on the target branch (gs-218). Record as seen but take
+		// no action: no reopen, no mail, no freeze. The current break — the
+		// newest failure, which by definition has no later success — is never
+		// suppressed, so a live regression still escalates promptly. Runs with
+		// no completion timestamp are processed normally (we'd rather act than
+		// silently drop a genuine break).
+		if run.Conclusion.IsFailureLike() && !run.CompletedAt.IsZero() &&
+			!latestSuccess.IsZero() && run.CompletedAt.Before(latestSuccess) {
+			w.logf("ciwatcher: superseded suppress run id=%s sha=%s completed=%s (later passing run at %s)",
+				run.ID, shortSHA(run.HeadSHA), run.CompletedAt.Format(time.RFC3339), latestSuccess.Format(time.RFC3339))
+			res.SupersededSuppressed++
 			seen.Mark(run.ID, w.clock.Now())
 			continue
 		}

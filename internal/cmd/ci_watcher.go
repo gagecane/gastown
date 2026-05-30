@@ -199,23 +199,24 @@ func runCIWatcherPoll(cmd *cobra.Command, args []string) error {
 
 	if ciWatcherJSON {
 		out := struct {
-			Rig                 string `json:"rig"`
-			Branch              string `json:"branch"`
-			RunsConsidered      int    `json:"runs_considered"`
-			RunsProcessed       int    `json:"runs_processed"`
-			FailuresHandled     int    `json:"failures_handled"`
-			FreezeWritten       bool   `json:"freeze_written"`
-			FreezeCleared       bool   `json:"freeze_cleared"`
-			ColdStartSuppressed int    `json:"cold_start_suppressed"`
-		}{rigName, branch, res.RunsConsidered, res.RunsProcessed, res.FailuresHandled, res.FreezeWritten, res.FreezeCleared, res.ColdStartSuppressed}
+			Rig                  string `json:"rig"`
+			Branch               string `json:"branch"`
+			RunsConsidered       int    `json:"runs_considered"`
+			RunsProcessed        int    `json:"runs_processed"`
+			FailuresHandled      int    `json:"failures_handled"`
+			FreezeWritten        bool   `json:"freeze_written"`
+			FreezeCleared        bool   `json:"freeze_cleared"`
+			ColdStartSuppressed  int    `json:"cold_start_suppressed"`
+			SupersededSuppressed int    `json:"superseded_suppressed"`
+		}{rigName, branch, res.RunsConsidered, res.RunsProcessed, res.FailuresHandled, res.FreezeWritten, res.FreezeCleared, res.ColdStartSuppressed, res.SupersededSuppressed}
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
 		return enc.Encode(out)
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-		"ciwatcher: rig=%s branch=%s considered=%d processed=%d failures=%d freeze_written=%v freeze_cleared=%v cold_start_suppressed=%d\n",
-		rigName, branch, res.RunsConsidered, res.RunsProcessed, res.FailuresHandled, res.FreezeWritten, res.FreezeCleared, res.ColdStartSuppressed,
+		"ciwatcher: rig=%s branch=%s considered=%d processed=%d failures=%d freeze_written=%v freeze_cleared=%v cold_start_suppressed=%d superseded_suppressed=%d\n",
+		rigName, branch, res.RunsConsidered, res.RunsProcessed, res.FailuresHandled, res.FreezeWritten, res.FreezeCleared, res.ColdStartSuppressed, res.SupersededSuppressed,
 	)
 	return nil
 }

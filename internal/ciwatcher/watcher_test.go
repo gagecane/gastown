@@ -408,6 +408,90 @@ func TestWatcherWarmPollEscalatesOldFailure(t *testing.T) {
 	}
 }
 
+// TestWatcherSupersededFailureSuppressedOnWarmPoll is the gs-218 regression:
+// on a warm poll, a failed run that a LATER passing run on main already
+// superseded must be recorded as seen but NOT escalated — it is a resolved,
+// historical break. Without this guard a wide fetch window (or a rebuilt
+// ledger) re-floods the mayor with broke-main-ci for already-closed work.
+func TestWatcherSupersededFailureSuppressedOnWarmPoll(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-old")
+	fm := &fakeMailer{}
+	now := time.Date(2026, 5, 29, 6, 0, 0, 0, time.UTC)
+	// Warm start: seed a non-empty ledger so cold-start suppression is off.
+	seed, _ := LoadSeenRuns(town, "alpha")
+	seed.Mark("seed-run", now.Add(-24*time.Hour))
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		// Newest: main is green again — supersedes the earlier break.
+		{ID: "201", HeadSHA: "greensha", Conclusion: ConclusionSuccess, Branch: "main", URL: "u201", CompletedAt: now.Add(-5 * time.Minute)},
+		// Older failure that the green run above resolved — must be suppressed.
+		{ID: "200", HeadSHA: "redsha", HeadCommitSubject: "fix (gu-old)", Conclusion: ConclusionFailure, Branch: "main", URL: "u200", CompletedAt: now.Add(-30 * time.Minute)},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.SupersededSuppressed != 1 {
+		t.Errorf("SupersededSuppressed = %d, want 1", res.SupersededSuppressed)
+	}
+	if res.FailuresHandled != 0 {
+		t.Errorf("FailuresHandled = %d, want 0 (break was superseded)", res.FailuresHandled)
+	}
+	if len(fm.sent) != 0 {
+		t.Errorf("expected no mail for a superseded break, got %d: %v", len(fm.sent), fm.sent)
+	}
+	if len(fb.reopens) != 0 {
+		t.Errorf("expected no bead reopen for a superseded break, got %v", fb.reopens)
+	}
+	// Both runs must be marked seen so a re-poll stays a no-op.
+	seen, _ := LoadSeenRuns(town, "alpha")
+	for _, id := range []string{"200", "201"} {
+		if !seen.Has(id) {
+			t.Errorf("run %s should be marked seen", id)
+		}
+	}
+}
+
+// TestWatcherCurrentBreakEscalatesDespiteEarlierSuccess verifies the superseded
+// guard never silences a live regression: when the NEWEST run is a failure
+// (no later passing run), it must still escalate even though an older passing
+// run sits in the same fetch window.
+func TestWatcherCurrentBreakEscalatesDespiteEarlierSuccess(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-new")
+	fm := &fakeMailer{}
+	now := time.Date(2026, 5, 29, 6, 0, 0, 0, time.UTC)
+	seed, _ := LoadSeenRuns(town, "alpha")
+	seed.Mark("seed-run", now.Add(-24*time.Hour))
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		// Newest: a fresh break with no later passing run — must escalate.
+		{ID: "301", HeadSHA: "redsha", HeadCommitSubject: "feat (gu-new)", Conclusion: ConclusionFailure, Branch: "main", URL: "u301", CompletedAt: now.Add(-5 * time.Minute)},
+		// Older passing run — does NOT supersede the newer failure.
+		{ID: "300", HeadSHA: "greensha", Conclusion: ConclusionSuccess, Branch: "main", URL: "u300", CompletedAt: now.Add(-30 * time.Minute)},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.SupersededSuppressed != 0 {
+		t.Errorf("SupersededSuppressed = %d, want 0", res.SupersededSuppressed)
+	}
+	if res.FailuresHandled != 1 {
+		t.Errorf("FailuresHandled = %d, want 1 (live break must escalate)", res.FailuresHandled)
+	}
+	if len(fb.reopens) != 1 || fb.reopens[0] != "gu-new" {
+		t.Errorf("reopens = %v, want [gu-new]", fb.reopens)
+	}
+}
+
 func TestWatcherMailFailureKeepsRunUnseen(t *testing.T) {
 	town := t.TempDir()
 	fb := newFakeBeads("gu-aaa")

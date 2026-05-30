@@ -60,6 +60,14 @@ every past CI failure across all of history (gs-qth). Once the ledger exists,
 every unseen failure escalates as normal — so a break that landed during a
 daemon downtime gap is still caught.
 
+**Superseded breaks:** a failed run is suppressed (recorded as seen, not
+escalated) when a *later* passing run on the target branch already resolved
+the break — in the merge-queue model main freezes on a break, so a newer green
+run means the queue advanced past the failing commit. This applies on warm
+polls too, so a rebuilt ledger or a wide fetch window that re-surfaces an old,
+already-resolved failure does not re-escalate it (gs-218). The current break —
+the newest failure with no later passing run — is never suppressed.
+
 ## Implementation
 
 This plugin is `execution.type = "script"` — the daemon runs `run.sh`
