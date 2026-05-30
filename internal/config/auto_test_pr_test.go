@@ -219,6 +219,127 @@ func TestLoadRigSettings_AutoTestPRDisabledBlockShipsCleanly(t *testing.T) {
 	}
 }
 
+func TestAutoTestPRConfig_RequiresReviewApproval(t *testing.T) {
+	t.Parallel()
+
+	// D15 (Phase 0 task 10 / gu-mahth) acceptance: the merge gate is
+	// default-true on opted-in rigs. The accessor's only "false" path
+	// is an explicit, present *bool with value false — anything else
+	// (nil receiver, absent block, unset key) returns true so a rig
+	// that opts in without thinking about the gate gets the safe
+	// default.
+	tt := []byte("true")
+	ff := []byte("false")
+	parseBool := func(raw []byte) *bool {
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			t.Fatalf("decode %q: %v", raw, err)
+		}
+		return &b
+	}
+
+	cases := []struct {
+		name string
+		cfg  *AutoTestPRConfig
+		want bool
+	}{
+		{
+			name: "nil receiver -> default true",
+			cfg:  nil,
+			want: true,
+		},
+		{
+			name: "block present, key unset -> default true",
+			cfg:  &AutoTestPRConfig{Enabled: true, Language: "go"},
+			want: true,
+		},
+		{
+			name: "explicit true",
+			cfg:  &AutoTestPRConfig{RequireReviewApproval: parseBool(tt)},
+			want: true,
+		},
+		{
+			name: "explicit false (only path that returns false)",
+			cfg:  &AutoTestPRConfig{RequireReviewApproval: parseBool(ff)},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.cfg.RequiresReviewApproval(); got != tc.want {
+				t.Errorf("RequiresReviewApproval() = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRigSettings_RequireReviewApproval_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// Round-trip the require_review_approval JSON tag both ways so a
+	// future tag rename (e.g. requireReviewApproval) is caught here.
+	bodyTrue := `{
+	  "type": "rig-settings",
+	  "version": 1,
+	  "auto_test_pr": { "enabled": true, "language": "go", "require_review_approval": true }
+	}`
+	pathTrue := writeRigSettingsFile(t, bodyTrue)
+	settings, err := LoadRigSettings(pathTrue)
+	if err != nil {
+		t.Fatalf("LoadRigSettings (true): %v", err)
+	}
+	if settings.AutoTestPR == nil || settings.AutoTestPR.RequireReviewApproval == nil {
+		t.Fatalf("expected RequireReviewApproval to round-trip as non-nil *bool, got %+v", settings.AutoTestPR)
+	}
+	if !*settings.AutoTestPR.RequireReviewApproval {
+		t.Error("RequireReviewApproval = false after parsing true")
+	}
+
+	bodyFalse := `{
+	  "type": "rig-settings",
+	  "version": 1,
+	  "auto_test_pr": { "enabled": true, "language": "go", "require_review_approval": false }
+	}`
+	pathFalse := writeRigSettingsFile(t, bodyFalse)
+	settings2, err := LoadRigSettings(pathFalse)
+	if err != nil {
+		t.Fatalf("LoadRigSettings (false): %v", err)
+	}
+	if settings2.AutoTestPR == nil || settings2.AutoTestPR.RequireReviewApproval == nil {
+		t.Fatalf("expected RequireReviewApproval to round-trip as non-nil *bool")
+	}
+	if *settings2.AutoTestPR.RequireReviewApproval {
+		t.Error("RequireReviewApproval = true after parsing false")
+	}
+	if settings2.AutoTestPR.RequiresReviewApproval() {
+		t.Error("RequiresReviewApproval() = true after explicit false in JSON")
+	}
+
+	// Absent key with block present: omitempty omits it, accessor
+	// surfaces default-true.
+	bodyAbsent := `{
+	  "type": "rig-settings",
+	  "version": 1,
+	  "auto_test_pr": { "enabled": true, "language": "go" }
+	}`
+	pathAbsent := writeRigSettingsFile(t, bodyAbsent)
+	settings3, err := LoadRigSettings(pathAbsent)
+	if err != nil {
+		t.Fatalf("LoadRigSettings (absent): %v", err)
+	}
+	if settings3.AutoTestPR == nil {
+		t.Fatal("expected non-nil AutoTestPR")
+	}
+	if settings3.AutoTestPR.RequireReviewApproval != nil {
+		t.Errorf("RequireReviewApproval should be nil when key absent, got %v",
+			*settings3.AutoTestPR.RequireReviewApproval)
+	}
+	if !settings3.AutoTestPR.RequiresReviewApproval() {
+		t.Error("RequiresReviewApproval() = false on absent key; want default-true")
+	}
+}
+
 func TestAutoTestPRConfigAccessors_NilSafe(t *testing.T) {
 	t.Parallel()
 

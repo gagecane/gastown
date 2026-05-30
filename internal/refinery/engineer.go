@@ -19,6 +19,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -1682,6 +1683,83 @@ func (e *Engineer) firstOpenBlocker(issue *beads.Issue) string {
 	return ""
 }
 
+// AutoTestPRApprovalLabel is the bead label that marks an MR as
+// produced by the auto-test-pr cycle (D14). The Refinery merge handler
+// holds these MRs until a maintainer applies an approved-by:<user>
+// label, when the rig opts in (default-true).
+//
+// See .designs/auto-test-pr/synthesis.md §D15 and Phase 0 task 10.
+const AutoTestPRApprovalLabel = "gt:auto-test-pr"
+
+// ApprovedByLabelPrefix is the canonical maintainer-approval label
+// prefix. The full label is `approved-by:<user>` (e.g.
+// `approved-by:alice`); the prefix is what the merge gate scans for,
+// since any approver satisfies the gate. Applied via
+// `bd update <mr-bead> --add-label approved-by:$USER` (D15).
+const ApprovedByLabelPrefix = "approved-by:"
+
+// hasApprovedByLabel reports whether any of issue's labels begins with
+// ApprovedByLabelPrefix. Pure / nil-safe so the merge gate is testable
+// without bd-mock plumbing. Strict prefix match: a literal
+// "approved-by:" with no user is treated as approved (operator chose
+// to apply it); the maintainer-applied form is "approved-by:<user>"
+// per the D15 contract.
+func hasApprovedByLabel(issue *beads.Issue) bool {
+	if issue == nil {
+		return false
+	}
+	for _, l := range issue.Labels {
+		if strings.HasPrefix(l, ApprovedByLabelPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldHoldForAutoTestPRApproval reports whether ListReadyMRs should
+// skip an auto-test-pr MR pending a maintainer's approved-by:<user>
+// label. Pure helper, testable without a beads mock.
+//
+// The gate fires only when ALL of:
+//   - the rig has require_review_approval enabled (default-true; see
+//     AutoTestPRConfig.RequiresReviewApproval),
+//   - the MR bead carries the gt:auto-test-pr label (D14: bead-applied,
+//     not PR-applied),
+//   - no approved-by:<user> label is present on the MR bead.
+//
+// MR beads without the auto-test-pr label are unaffected (D15
+// backwards-compat).
+func shouldHoldForAutoTestPRApproval(issue *beads.Issue, requireApproval bool) bool {
+	if !requireApproval || issue == nil {
+		return false
+	}
+	if !beads.HasLabel(issue, AutoTestPRApprovalLabel) {
+		return false
+	}
+	return !hasApprovedByLabel(issue)
+}
+
+// autoTestPRApprovalRequired reports whether this rig opts in to the
+// D15 maintainer-approval gate. Default-true: a missing settings file,
+// an absent auto_test_pr block, or an unset key all return true so a
+// rig that opts in to auto-test-pr without setting the flag gets the
+// safe default. An explicit false (v2 / fixture path) disables the
+// gate.
+//
+// Errors loading settings are non-fatal — they fall back to the safe
+// default so a settings-file glitch can never cause Refinery to merge
+// an auto-test MR that the rig wanted held.
+func (e *Engineer) autoTestPRApprovalRequired() bool {
+	if e == nil || e.rig == nil || e.rig.Path == "" {
+		return true
+	}
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(e.rig.Path))
+	if err != nil || settings == nil {
+		return true
+	}
+	return settings.GetAutoTestPR().RequiresReviewApproval()
+}
+
 // ListReadyMRs returns MRs that are ready for processing:
 // - Not claimed by another worker (checked via assignee field)
 // - Not blocked by an open task (checked via firstOpenBlocker)
@@ -1703,6 +1781,12 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
 	}
 
+	// D15 maintainer-approval gate: read once per scan, not per MR. The
+	// rig's auto_test_pr.require_review_approval flag (default-true)
+	// decides whether MR beads labeled gt:auto-test-pr must carry an
+	// approved-by:<user> label before merge. See Phase 0 task 10 / gu-mahth.
+	requireAutoTestPRApproval := e.autoTestPRApprovalRequired()
+
 	// Convert beads issues to MRInfo
 	var mrs []*MRInfo
 	for _, issue := range issues {
@@ -1721,6 +1805,15 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 		// convoys), but if one slips through, the refinery should not process it.
 		if beads.HasLabel(issue, "gt:owned-direct") {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Skipping MR %s: owned+direct convoy (belt-and-suspenders)\n", issue.ID)
+			continue
+		}
+
+		// D15: hold auto-test-pr MRs until a maintainer applies an
+		// approved-by:<user> label. MRs without gt:auto-test-pr are
+		// unaffected (backwards-compat). Ordered AFTER the owned-direct
+		// skip so owned-direct semantics still win.
+		if shouldHoldForAutoTestPRApproval(issue, requireAutoTestPRApproval) {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Holding MR %s: gt:auto-test-pr requires approved-by:<user> (D15)\n", issue.ID)
 			continue
 		}
 

@@ -1064,6 +1064,14 @@ type AutoTestPRConfig struct {
 	// trees). Nil/empty means no skip list. Entries are stored as
 	// authored; normalization is the consumer's responsibility.
 	SkipDirs []string `json:"skip_dirs,omitempty"`
+
+	// RequireReviewApproval gates Refinery's merge handler on a
+	// maintainer-applied `approved-by:<user>` label for MR beads
+	// labeled `gt:auto-test-pr`. Pointer-typed so absent → default-true
+	// (D15: "default-true on opted-in rigs"). Setting false explicitly
+	// disables the gate (v2 confidence-merge or test fixtures only).
+	// See .designs/auto-test-pr/synthesis.md §D15 and Phase 0 task 10.
+	RequireReviewApproval *bool `json:"require_review_approval,omitempty"`
 }
 
 // IsEnabled reports whether auto-test-pr is enabled for this rig.
@@ -1101,6 +1109,20 @@ func (c *AutoTestPRConfig) GetSkipDirs() []string {
 		return []string{}
 	}
 	return c.SkipDirs
+}
+
+// RequiresReviewApproval reports whether the Refinery merge handler
+// must hold MR beads labeled `gt:auto-test-pr` until a maintainer
+// applies an `approved-by:<user>` label. Default-true (D15): a nil
+// receiver, an absent block, or an unset key all return true, so
+// opting in to auto-test-pr without setting the key gets the safe
+// default. An explicit `false` (rare; v2 / fixture path) disables the
+// gate.
+func (c *AutoTestPRConfig) RequiresReviewApproval() bool {
+	if c == nil || c.RequireReviewApproval == nil {
+		return true
+	}
+	return *c.RequireReviewApproval
 }
 
 // GetAutoTestPR returns the rig's AutoTestPRConfig. Nil-safe; returns
