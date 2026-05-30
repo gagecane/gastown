@@ -3,14 +3,71 @@ package tmux
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/telemetry"
 )
+
+// EnvTmuxRealNudge, when set to a non-empty value, allows the tmux package's
+// own integration tests (which exercise real send-keys against an isolated
+// tmux server) to opt OUT of the test-mode nudge guard installed by
+// NudgeSessionWithOpts. Outside the tmux package this is irrelevant —
+// `go test ./...` for any other package will short-circuit before touching
+// tmux at all. See gu-l8zp.
+const EnvTmuxRealNudge = "GT_TEST_TMUX_REAL_NUDGE"
+
+// EnvTestNudgeLog, when set to a writable file path, captures every nudge
+// message that would have been sent so tests can assert on delivery without
+// reaching live tmux sessions. Mirrors the existing convention used by
+// internal/cmd/nudge.go and sling_helpers.go (gu-l8zp).
+const EnvTestNudgeLog = "GT_TEST_NUDGE_LOG"
+
+// testNudgeShortCircuit returns (true, captureLog) when running under
+// `go test` and the caller has not opted into real tmux delivery via
+// GT_TEST_TMUX_REAL_NUDGE. Production binaries return (false, "") because
+// testing.Testing() is false outside the test runner.
+//
+// This is the structural fix for gu-l8zp: a witness handler test that
+// exercises HandlePolecatDoneFromAgent with PushFailed=true used to reach
+// straight into the live mayor tmux session and deliver a synthetic
+// PUSH_FAILED nudge. Guarding at the lowest tmux boundary covers every
+// caller (15+ in internal/witness alone) without requiring each one to be
+// re-plumbed with a Notifier interface.
+func testNudgeShortCircuit() (skip bool, captureLog string) {
+	if !testing.Testing() {
+		return false, ""
+	}
+	if os.Getenv(EnvTmuxRealNudge) != "" {
+		return false, ""
+	}
+	return true, os.Getenv(EnvTestNudgeLog)
+}
+
+// recordTestNudge appends a structured line to GT_TEST_NUDGE_LOG so tests can
+// assert on the exact (session, message) pair that would have been delivered.
+// Format mirrors internal/cmd/sling_helpers.go's nudgeWitness/nudgeRefinery
+// hooks (`nudge:<session>:<message>\n`) so existing test helpers can parse
+// either source uniformly. Errors are intentionally swallowed: a failed write
+// must never block test progress, and the production code path has already
+// been short-circuited.
+func recordTestNudge(logPath, session, message string) {
+	if logPath == "" {
+		return
+	}
+	entry := fmt.Sprintf("nudge:%s:%s\n", session, message)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(entry)
+}
 
 // sessionNudgeLocks serializes nudges to the same session.
 // This prevents interleaving when multiple nudges arrive concurrently,
@@ -803,6 +860,22 @@ func (t *Tmux) canonicalPaneTarget(session, pane string) string {
 // NudgeSessionWithOpts is like NudgeSession but accepts delivery options.
 // See NudgeOpts for available options.
 func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) error {
+	// Test-mode guard (gu-l8zp): when running under `go test` and the caller
+	// has not opted into real tmux delivery via GT_TEST_TMUX_REAL_NUDGE, do
+	// not actually nudge — just optionally record the call to GT_TEST_NUDGE_LOG.
+	//
+	// This prevents witness handler tests (and any other test that constructs
+	// a synthetic payload triggering a nudge code path) from leaking
+	// PUSH_FAILED / SLOT_OPEN / MERGE_READY messages into the developer's
+	// live mayor / refinery / witness tmux sessions. Before this guard, the
+	// only thing protecting the mayor's inbox was the absence of a tmux
+	// session named `gu-crew-canewiw` — which is always running while
+	// developers work, so every test run reached production.
+	if skip, logPath := testNudgeShortCircuit(); skip {
+		recordTestNudge(logPath, session, message)
+		return nil
+	}
+
 	// Cross-process lock: serialize nudges across OS processes via flock(2).
 	// Each `gt nudge` CLI invocation is a separate process, so the in-process
 	// channel semaphore below provides no cross-process protection. Without

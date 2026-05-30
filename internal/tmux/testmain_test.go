@@ -18,6 +18,14 @@ func TestMain(m *testing.M) {
 	// user's personal server or the sentinel that indicates "no town context".
 	SetDefaultSocket(socket)
 
+	// Opt this package's tests into real NudgeSession delivery against the
+	// isolated test socket above. The default test-mode guard installed in
+	// NudgeSessionWithOpts (gu-l8zp) is meant for downstream packages that
+	// indirectly call NudgeSession from synthetic payloads — it would defeat
+	// the whole point of TestNudgeSession_* if it short-circuited here. The
+	// test socket is private to this process, so opting in is safe.
+	_ = os.Setenv(EnvTmuxRealNudge, "1")
+
 	// Start a sentinel session to keep the server alive for the entire test run.
 	// Without this, tests that kill their last session inadvertently take down
 	// the server, leaving a stale socket that prevents subsequent new-session
