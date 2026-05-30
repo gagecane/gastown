@@ -625,7 +625,16 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
 	cmd.Dir = workDir
 	cmd.Env = gateEnv(d.config.TownRoot)
-	util.SetDetachedProcessGroup(cmd)
+	// gs-lfr: use the process-group variant that ALSO installs a cancel hook
+	// killing the whole group, not the detached variant (no cancel hook).
+	// CommandContext's default cancel SIGKILLs only the leader PID, but `sh -c`
+	// forks the gate command as a child that keeps the output pipe open, so
+	// CombinedOutput blocks until the child exits on its own — making per-gate
+	// timeouts (gateCtx) run the full command duration instead of canceling at
+	// the deadline (da058e57/gu-z76g added the timeout plumbing but kept the
+	// detached, no-cancel variant). Killing the group (-pgid) terminates the
+	// whole tree at the deadline.
+	util.SetProcessGroup(cmd)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
