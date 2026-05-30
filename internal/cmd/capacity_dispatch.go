@@ -144,6 +144,17 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		cleanupStaleContexts(townRoot)
 	}
 
+	// Auto-release expired-defer beads (gu-0i09): scan all rigs for
+	// status=deferred beads whose defer_until is in the past and flip them
+	// back to status=open so they re-enter the ready queue. Without this
+	// the deferred-then-rediscover loop the scheduler relies on never runs
+	// and beads accumulate in the deferred state forever.
+	if !dryRun {
+		if released := releaseExpiredDeferredBeads(townRoot); released > 0 {
+			fmt.Printf("%s Auto-released %d bead(s) from defer\n", style.Dim.Render("○"), released)
+		}
+	}
+
 	// Wire up the DispatchCycle
 	successfulRigs := make(map[string]bool)
 	// Track polecat names from dispatch results, keyed by context bead ID.
@@ -1007,4 +1018,94 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 		return false
 	}
 	return info.Status == "open"
+}
+
+// nowForDeferRelease is a clock seam that lets tests inject a deterministic
+// "current time" for the auto-release pass. Production callers leave it nil
+// so we use the wall clock.
+var nowForDeferRelease func() time.Time
+
+// isDeferUntilExpired reports whether a defer_until string is non-empty and
+// represents a moment at or before `now`. Returns (false, nil) when the field
+// is empty (not deferred). Returns (false, err) when the string can't be
+// parsed by either RFC3339 or RFC3339Nano — callers log and skip.
+func isDeferUntilExpired(deferUntil string, now time.Time) (bool, error) {
+	if deferUntil == "" {
+		return false, nil
+	}
+	t, err := time.Parse(time.RFC3339, deferUntil)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, deferUntil)
+		if err != nil {
+			return false, err
+		}
+	}
+	return !t.After(now), nil
+}
+
+// releaseExpiredDeferredBeads scans every rig's beads dir for status=deferred
+// beads whose defer_until is in the past and flips them back to status=open
+// (clearing defer_until). Returns the count of beads released across the town.
+//
+// This implements the scheduler half of the deferred-bead lifecycle (gu-0i09):
+// `bd ready` already hides deferred beads with future defer_until, but nothing
+// in the dispatch loop ever transitioned them back to open once the timer
+// expired. Without this pass, beads deferred via `gt done --status DEFERRED`
+// (or any --until=...) accumulated forever and the scheduler never noticed.
+//
+// Best-effort by design — per-bead errors are logged to stderr and skipped so
+// a single bad bead doesn't stall the whole dispatch tick. Errors are also
+// emitted at the dir level so an unreachable rig db doesn't silently swallow
+// every bead in that rig.
+func releaseExpiredDeferredBeads(townRoot string) int {
+	now := time.Now()
+	if nowForDeferRelease != nil {
+		now = nowForDeferRelease()
+	}
+
+	released := 0
+	for _, dir := range beadsSearchDirs(townRoot) {
+		beadsDir := filepath.Join(dir, ".beads")
+		b := beads.NewWithBeadsDir(dir, beadsDir)
+		out, err := b.Run("list", "--status=deferred", "--json", "--limit=0")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s Warning: bd list deferred failed for %s: %v\n",
+				style.Dim.Render("⚠"), dir, err)
+			continue
+		}
+		// `bd list` may return non-JSON sentinel text ("No issues found.") on empty results.
+		if len(out) == 0 || (len(out) > 0 && out[0] != '[' && out[0] != '{') {
+			continue
+		}
+		var deferred []*beads.Issue
+		if jerr := json.Unmarshal(out, &deferred); jerr != nil {
+			fmt.Fprintf(os.Stderr, "%s Warning: parsing bd list deferred output for %s: %v\n",
+				style.Dim.Render("⚠"), dir, jerr)
+			continue
+		}
+		for _, issue := range deferred {
+			if issue == nil {
+				continue
+			}
+			expired, perr := isDeferUntilExpired(issue.DeferUntil, now)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "%s Warning: unparseable defer_until %q on %s: %v\n",
+					style.Dim.Render("⚠"), issue.DeferUntil, issue.ID, perr)
+				continue
+			}
+			if !expired {
+				continue
+			}
+			// Flip the bead back to open and clear the defer marker.
+			if _, uerr := b.Run("update", issue.ID, "--status=open", "--defer="); uerr != nil {
+				fmt.Fprintf(os.Stderr, "%s Warning: could not auto-release deferred bead %s: %v\n",
+					style.Dim.Render("⚠"), issue.ID, uerr)
+				continue
+			}
+			released++
+			_ = events.LogFeed(events.TypeSchedulerDeferReleased, "scheduler",
+				events.SchedulerDeferReleasedPayload(issue.ID, issue.DeferUntil))
+		}
+	}
+	return released
 }

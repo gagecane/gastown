@@ -74,6 +74,7 @@ const (
 	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
 	TypeSchedulerDispatchFailed = "scheduler_dispatch_failed" // Bead dispatch failed (requeued)
 	TypeSchedulerCloseRetry     = "scheduler_close_retry"     // Context close needed last-resort attempt
+	TypeSchedulerDeferReleased  = "scheduler_defer_released"  // Bead auto-released from defer (defer_until <= now)
 
 	// Auto-dispatch events (event-driven refill observability)
 	TypeAutoDispatchEventTriggered = "auto_dispatch_event_triggered" // Event-driven auto-dispatch fired
@@ -381,6 +382,16 @@ func SchedulerDispatchFailedPayload(beadID, rig, errMsg string) map[string]inter
 		"bead":  beadID,
 		"rig":   rig,
 		"error": errMsg,
+	}
+}
+
+// SchedulerDeferReleasedPayload creates a payload for the auto-release pass
+// (gu-0i09): records the bead that was flipped back from deferred → open and
+// the defer_until timestamp it had at release time.
+func SchedulerDeferReleasedPayload(beadID, deferUntil string) map[string]interface{} {
+	return map[string]interface{}{
+		"bead":        beadID,
+		"defer_until": deferUntil,
 	}
 }
 

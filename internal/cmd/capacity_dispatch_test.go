@@ -114,6 +114,42 @@ func TestIsContextOlderThan(t *testing.T) {
 	}
 }
 
+// TestIsDeferUntilExpired exercises the parser used by the auto-release pass
+// (gu-0i09). The pass must (a) treat empty defer_until as "not deferred", (b)
+// recognize both RFC3339 and RFC3339Nano formats since beads emits either, and
+// (c) flip beads at-or-before now so a bead deferred to "now exactly" doesn't
+// linger one tick longer than necessary.
+func TestIsDeferUntilExpired(t *testing.T) {
+	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name        string
+		deferUntil  string
+		wantExpired bool
+		wantErr     bool
+	}{
+		{"empty", "", false, false},
+		{"future RFC3339", now.Add(time.Hour).Format(time.RFC3339), false, false},
+		{"past RFC3339", now.Add(-time.Hour).Format(time.RFC3339), true, false},
+		{"exact now", now.Format(time.RFC3339), true, false},
+		{"past RFC3339Nano", now.Add(-time.Minute).Format(time.RFC3339Nano), true, false},
+		{"future RFC3339Nano", now.Add(time.Minute).Format(time.RFC3339Nano), false, false},
+		{"unparseable", "not-a-timestamp", false, true},
+		{"date-only no zone", "2026-05-30", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := isDeferUntilExpired(tt.deferUntil, now)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if got != tt.wantExpired {
+				t.Errorf("expired = %v, want %v", got, tt.wantExpired)
+			}
+		})
+	}
+}
+
 func TestIsAlreadyDispatchedError(t *testing.T) {
 	tests := []struct {
 		name string

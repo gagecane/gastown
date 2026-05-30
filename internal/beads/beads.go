@@ -342,6 +342,12 @@ type Issue struct {
 	Labels      []string `json:"labels,omitempty"`
 	Ephemeral   bool     `json:"ephemeral,omitempty"` // Wisp/ephemeral issues, not synced to git
 
+	// DeferUntil is the RFC3339 timestamp at which a deferred bead should
+	// re-enter the dispatch queue. Empty for non-deferred beads.
+	// The scheduler's auto-release pass (gu-0i09) flips status=deferred →
+	// status=open and clears this field once defer_until <= now().
+	DeferUntil string `json:"defer_until,omitempty"`
+
 	// Content fields (parsed from bd show --json)
 	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
 

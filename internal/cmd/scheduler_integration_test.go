@@ -1490,3 +1490,104 @@ func TestScheduleBead_ClosedForceDoesNotBypass(t *testing.T) {
 		t.Errorf("--force should not bypass closed guard; got: %s", out)
 	}
 }
+
+// TestReleaseExpiredDeferredBeads verifies the auto-release pass (gu-0i09):
+// status=deferred beads whose defer_until is in the past must be flipped back
+// to status=open with defer_until cleared, while beads with future
+// defer_until are left alone. Without this pass, deferred beads accumulated
+// forever and the scheduler's deferred-then-rediscover loop never ran.
+func TestReleaseExpiredDeferredBeads(t *testing.T) {
+	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
+
+	// Two beads, both deferred — one expired, one still in the future.
+	expiredID := createTestBead(t, rigPath, "expired defer should auto-release")
+	futureID := createTestBead(t, rigPath, "future defer should remain deferred")
+
+	// Defer expiredID into the past via a long --until then rewrite via a
+	// second update. bd does not allow `--until=-1h` directly, so we first
+	// defer with a future timestamp, then explicitly overwrite defer_until
+	// in a follow-up update with a past RFC3339 stamp.
+	pastStamp := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	for _, args := range [][]string{
+		{"defer", expiredID, "--until=+1h"},
+		{"update", expiredID, "--defer=" + pastStamp},
+	} {
+		cmd := exec.Command("bd", args...)
+		cmd.Dir = rigPath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+	}
+	cmd := exec.Command("bd", "defer", futureID, "--until=+24h")
+	cmd.Dir = rigPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd defer %s failed: %v\n%s", futureID, err, out)
+	}
+
+	// Confirm both beads start out deferred, and the expired one really has a
+	// past defer_until.
+	if got := beadStatus(t, rigPath, expiredID); got != "deferred" {
+		t.Fatalf("setup: %s status = %q, want deferred", expiredID, got)
+	}
+	if got := beadStatus(t, rigPath, futureID); got != "deferred" {
+		t.Fatalf("setup: %s status = %q, want deferred", futureID, got)
+	}
+
+	// Run the auto-release pass.
+	released := releaseExpiredDeferredBeads(hqPath)
+	if released != 1 {
+		t.Errorf("releaseExpiredDeferredBeads released %d beads, want 1", released)
+	}
+
+	// The expired bead must now be open with cleared defer.
+	expired := beadShow(t, rigPath, expiredID)
+	if expired.Status != "open" {
+		t.Errorf("%s status = %q, want open after release", expiredID, expired.Status)
+	}
+	if expired.DeferUntil != "" {
+		t.Errorf("%s defer_until = %q, want cleared after release", expiredID, expired.DeferUntil)
+	}
+
+	// The future-deferred bead must be untouched.
+	future := beadShow(t, rigPath, futureID)
+	if future.Status != "deferred" {
+		t.Errorf("%s status = %q, want deferred (future timer still pending)", futureID, future.Status)
+	}
+	if future.DeferUntil == "" {
+		t.Errorf("%s defer_until cleared unexpectedly", futureID)
+	}
+}
+
+// beadStatus returns the status of a bead via `bd show --json`.
+func beadStatus(t *testing.T, dir, id string) string {
+	t.Helper()
+	return beadShow(t, dir, id).Status
+}
+
+// beadShow returns the parsed Issue for a bead via `bd show --json`.
+func beadShow(t *testing.T, dir, id string) *beads.Issue {
+	t.Helper()
+	cmd := exec.Command("bd", "show", id, "--json")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("bd show %s failed: %v", id, err)
+	}
+	// bd show --json returns either a single object or a single-element array.
+	trimmed := strings.TrimSpace(string(out))
+	if strings.HasPrefix(trimmed, "[") {
+		var issues []*beads.Issue
+		if err := json.Unmarshal(out, &issues); err != nil {
+			t.Fatalf("parse bd show --json output: %v\nraw: %s", err, out)
+		}
+		if len(issues) == 0 {
+			t.Fatalf("bd show %s returned empty array", id)
+		}
+		return issues[0]
+	}
+	var issue beads.Issue
+	if err := json.Unmarshal(out, &issue); err != nil {
+		t.Fatalf("parse bd show --json output: %v\nraw: %s", err, out)
+	}
+	return &issue
+}
