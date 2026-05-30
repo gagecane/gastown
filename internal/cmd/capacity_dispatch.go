@@ -155,6 +155,20 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		}
 	}
 
+	// Recover zombie molecules (gu-w49a): scan queued sling-contexts whose
+	// work bead is open but has an unclaimed molecule wisp blocking it via
+	// `bd blocked`, and burn the orphan molecules. Without this, work
+	// beads dispatched while the polecat pool is at capacity (or any other
+	// "molecule attached, polecat never claimed" path) become permanently
+	// un-dispatchable because the molecule edge keeps them in the blocked
+	// set. Skip during dry-run to avoid mutating state.
+	if !dryRun {
+		if recovered := recoverZombieMolecules(townRoot); recovered > 0 {
+			fmt.Printf("%s Recovered %d work bead(s) from zombie-molecule wedge\n",
+				style.Dim.Render("○"), recovered)
+		}
+	}
+
 	// Wire up the DispatchCycle
 	successfulRigs := make(map[string]bool)
 	// Track polecat names from dispatch results, keyed by context bead ID.
