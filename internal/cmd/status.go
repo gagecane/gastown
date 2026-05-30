@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,6 +37,7 @@ var statusFast bool
 var statusWatch bool
 var statusInterval int
 var statusVerbose bool
+var statusFilter string
 
 var statusCmd = &cobra.Command{
 	Use:         "status",
@@ -48,7 +50,16 @@ var statusCmd = &cobra.Command{
 Shows town name, registered rigs, polecats, and witness status.
 
 Use --fast to skip mail lookups for faster execution.
-Use --watch to continuously refresh status at regular intervals.`,
+Use --watch to continuously refresh status at regular intervals.
+
+Use --filter to scope the agent list to specific lifecycle states (gu-r9g1).
+Comma-separated names from: all, running, dead, free, idle, working.
+  running  - tmux session alive (●)
+  working  - tmux session alive AND has pinned work
+  dead     - tmux session gone but pinned work remains (❌ — emergency)
+  free     - tmux session gone, no pinned work (◌ — exited cleanly)
+  idle     - long-lived agent (crew/witness/refinery) with session gone and no work (○)
+Example: --filter=dead,working surfaces agents that need attention.`,
 	RunE: runStatus,
 }
 
@@ -58,6 +69,7 @@ func init() {
 	statusCmd.Flags().BoolVarP(&statusWatch, "watch", "w", false, "Watch mode: refresh status continuously")
 	statusCmd.Flags().IntVarP(&statusInterval, "interval", "n", 2, "Refresh interval in seconds")
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show detailed multi-line output per agent")
+	statusCmd.Flags().StringVar(&statusFilter, "filter", "", "Comma-separated agent lifecycle states to include: running,working,dead,free,idle (default: all)")
 	rootCmd.AddCommand(statusCmd)
 }
 
@@ -455,10 +467,71 @@ func buildInfoFromConfig(rc *config.RuntimeConfig) string {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	// Validate --filter early so a typo fails before we gather expensive
+	// state. parseLifecycleFilter returns nil for empty input (= "all").
+	if _, err := parseLifecycleFilter(statusFilter); err != nil {
+		return err
+	}
 	if statusWatch {
 		return runStatusWatch(cmd, args)
 	}
 	return runStatusOnce(cmd, args)
+}
+
+// parseLifecycleFilter parses a comma-separated lifecycle filter string into
+// a set of AgentLifecycle values. The empty string and "all" return nil
+// (no filtering). Unknown tokens produce a clear error listing valid names.
+func parseLifecycleFilter(spec string) (map[AgentLifecycle]struct{}, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || spec == "all" {
+		return nil, nil
+	}
+	out := make(map[AgentLifecycle]struct{})
+	for _, raw := range strings.Split(spec, ",") {
+		tok := strings.TrimSpace(strings.ToLower(raw))
+		if tok == "" {
+			continue
+		}
+		if tok == "all" {
+			return nil, nil // any "all" token disables filtering
+		}
+		switch tok {
+		case "running":
+			out[LifecycleRunning] = struct{}{}
+		case "working":
+			out[LifecycleWorking] = struct{}{}
+		case "dead":
+			out[LifecycleDead] = struct{}{}
+		case "free":
+			out[LifecycleFree] = struct{}{}
+		case "idle":
+			out[LifecycleIdle] = struct{}{}
+		default:
+			return nil, fmt.Errorf("unknown --filter value %q (valid: all, running, working, dead, free, idle)", tok)
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// sortStrings is a tiny wrapper to keep imports localized at one site.
+func sortStrings(s []string) { sort.Strings(s) }
+
+// filterAgents returns only the agents whose lifecycle is in the allow set.
+// A nil allow set returns the input unchanged.
+func filterAgents(agents []AgentRuntime, allow map[AgentLifecycle]struct{}) []AgentRuntime {
+	if allow == nil {
+		return agents
+	}
+	out := make([]AgentRuntime, 0, len(agents))
+	for _, a := range agents {
+		if _, ok := allow[classifyLifecycle(a)]; ok {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func runStatusWatch(_ *cobra.Command, _ []string) error {
@@ -989,9 +1062,33 @@ func outputStatusJSON(status TownStatus) error {
 }
 
 func outputStatusText(w io.Writer, status TownStatus) error {
+	// Apply --filter if requested. Validation already happened in runStatus,
+	// so any error here is a programming bug — degrade to no-filter.
+	if statusFilter != "" {
+		if allow, err := parseLifecycleFilter(statusFilter); err == nil && allow != nil {
+			status.Agents = filterAgents(status.Agents, allow)
+			for i := range status.Rigs {
+				status.Rigs[i].Agents = filterAgents(status.Rigs[i].Agents, allow)
+			}
+		}
+	}
+
 	// Header
 	fmt.Fprintf(w, "%s %s\n", style.Bold.Render("Town:"), status.Name)
 	fmt.Fprintf(w, "%s\n\n", style.Dim.Render(status.Location))
+
+	// Filter notice — make it explicit that the listing is scoped.
+	if statusFilter != "" {
+		if allow, err := parseLifecycleFilter(statusFilter); err == nil && allow != nil {
+			names := make([]string, 0, len(allow))
+			for lc := range allow {
+				names = append(names, string(lc))
+			}
+			// Stable order for deterministic output.
+			sortStrings(names)
+			fmt.Fprintf(w, "%s %s\n\n", style.Dim.Render("Filter:"), strings.Join(names, ","))
+		}
+	}
 
 	// E-stop banner (if active)
 	addEstopToStatus(status.Location)
@@ -1468,19 +1565,83 @@ func renderAgentCompact(w io.Writer, agent AgentRuntime, indent string, hooks []
 	fmt.Fprintf(w, "%s%-12s %s%s%s%s\n", indent, agent.Name, statusIndicator, agentSuffix, hookSuffix, mailSuffix)
 }
 
+// AgentLifecycle is the observable lifecycle state of an agent, derived from
+// (Running, HasWork, Role). Per gu-r9g1, the original ○ glyph collapsed three
+// distinct conditions into one indicator; AgentLifecycle splits them so the
+// emergency case (dead with active work) is visually distinct from the benign
+// cases (idle-by-design, free-after-exit).
+type AgentLifecycle string
+
+const (
+	// LifecycleRunning: tmux session is alive (no pinned work).
+	LifecycleRunning AgentLifecycle = "running"
+	// LifecycleWorking: tmux session alive AND has pinned work.
+	LifecycleWorking AgentLifecycle = "working"
+	// LifecycleDead: tmux session gone but pinned work remains.
+	// This is an emergency — work is orphaned and needs recovery.
+	LifecycleDead AgentLifecycle = "dead"
+	// LifecycleFree: tmux session gone, no pinned work, transient role
+	// (polecat). The agent finished and exited cleanly.
+	LifecycleFree AgentLifecycle = "free"
+	// LifecycleIdle: tmux session gone, no pinned work, long-lived role
+	// (crew, witness, refinery). The agent is idle-by-design and will be
+	// respawned on demand.
+	LifecycleIdle AgentLifecycle = "idle"
+)
+
+// classifyLifecycle returns the lifecycle state for an agent based on the
+// observable (Running, HasWork, Role) tuple. It is the single source of truth
+// for the glyph used in buildStatusIndicator and the --filter logic.
+func classifyLifecycle(agent AgentRuntime) AgentLifecycle {
+	if agent.Running {
+		if agent.HasWork {
+			return LifecycleWorking
+		}
+		return LifecycleRunning
+	}
+	// Session is gone.
+	if agent.HasWork {
+		return LifecycleDead
+	}
+	// No work pinned. Distinguish transient (polecat) from long-lived
+	// (crew, witness, refinery). Polecats not running with no work means
+	// they've exited cleanly; crew/witness/refinery not running means
+	// they're idle-by-design awaiting respawn.
+	if agent.Role == constants.RolePolecat {
+		return LifecycleFree
+	}
+	return LifecycleIdle
+}
+
+// glyphForLifecycle returns the styled, single-character indicator for a
+// lifecycle state. Glyph choices per gu-r9g1:
+//
+//	●  running/working — alive, success-styled
+//	❌ dead             — emergency: agent died with active work
+//	◌  free             — polecat exited cleanly, dim
+//	○  idle             — long-lived agent idle-by-design, dim
+func glyphForLifecycle(lc AgentLifecycle) string {
+	switch lc {
+	case LifecycleRunning, LifecycleWorking:
+		return style.Success.Render("●")
+	case LifecycleDead:
+		return style.Error.Render("❌")
+	case LifecycleFree:
+		return style.Dim.Render("◌")
+	case LifecycleIdle:
+		return style.Dim.Render("○")
+	default:
+		return style.Dim.Render("○")
+	}
+}
+
 // buildStatusIndicator creates the visual status indicator for an agent.
 // Per gt-zecmc: uses tmux state (observable reality), not bead state.
-// Non-observable states (stuck, awaiting-gate, muted, etc.) are shown as suffixes.
+// Per gu-r9g1: differentiates dead-with-work (❌) from free-after-exit (◌)
+// and idle-by-design (○). Non-observable states (stuck, awaiting-gate,
+// muted, etc.) are shown as suffixes.
 func buildStatusIndicator(agent AgentRuntime) string {
-	sessionExists := agent.Running
-
-	// Base indicator from tmux state or ACP state
-	var indicator string
-	if sessionExists {
-		indicator = style.Success.Render("●")
-	} else {
-		indicator = style.Error.Render("○")
-	}
+	indicator := glyphForLifecycle(classifyLifecycle(agent))
 
 	// Add mode info if ACP
 	if agent.ACP {

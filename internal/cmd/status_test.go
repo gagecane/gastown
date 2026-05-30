@@ -175,6 +175,234 @@ func TestBuildStatusIndicator_AliveShowsRunning(t *testing.T) {
 	}
 }
 
+// TestClassifyLifecycle_AllStates verifies the (Running, HasWork, Role)
+// truth table for the gu-r9g1 lifecycle taxonomy.
+func TestClassifyLifecycle_AllStates(t *testing.T) {
+	cases := []struct {
+		name     string
+		agent    AgentRuntime
+		expected AgentLifecycle
+	}{
+		{
+			name:     "running polecat without work → running",
+			agent:    AgentRuntime{Running: true, Role: "polecat"},
+			expected: LifecycleRunning,
+		},
+		{
+			name:     "running polecat with work → working",
+			agent:    AgentRuntime{Running: true, HasWork: true, Role: "polecat"},
+			expected: LifecycleWorking,
+		},
+		{
+			name:     "dead polecat with work → dead (emergency)",
+			agent:    AgentRuntime{Running: false, HasWork: true, Role: "polecat"},
+			expected: LifecycleDead,
+		},
+		{
+			name:     "dead crew with work → dead (emergency)",
+			agent:    AgentRuntime{Running: false, HasWork: true, Role: "crew"},
+			expected: LifecycleDead,
+		},
+		{
+			name:     "exited polecat without work → free",
+			agent:    AgentRuntime{Running: false, HasWork: false, Role: "polecat"},
+			expected: LifecycleFree,
+		},
+		{
+			name:     "idle crew without work → idle",
+			agent:    AgentRuntime{Running: false, HasWork: false, Role: "crew"},
+			expected: LifecycleIdle,
+		},
+		{
+			name:     "idle witness without work → idle",
+			agent:    AgentRuntime{Running: false, HasWork: false, Role: "witness"},
+			expected: LifecycleIdle,
+		},
+		{
+			name:     "idle refinery without work → idle",
+			agent:    AgentRuntime{Running: false, HasWork: false, Role: "refinery"},
+			expected: LifecycleIdle,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyLifecycle(tc.agent); got != tc.expected {
+				t.Fatalf("classifyLifecycle = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+// TestBuildStatusIndicator_DistinguishesStoppedStates is the core gu-r9g1
+// regression: a stopped polecat with no work (free) MUST render a different
+// glyph than a stopped polecat with pinned work (dead). Before the fix both
+// rendered as ○ and the dead-with-active-work case was invisible.
+func TestBuildStatusIndicator_DistinguishesStoppedStates(t *testing.T) {
+	dead := buildStatusIndicator(AgentRuntime{Running: false, HasWork: true, Role: "polecat"})
+	free := buildStatusIndicator(AgentRuntime{Running: false, HasWork: false, Role: "polecat"})
+	idle := buildStatusIndicator(AgentRuntime{Running: false, HasWork: false, Role: "crew"})
+
+	if !strings.Contains(dead, "❌") {
+		t.Fatalf("dead-with-work should include ❌, got %q", dead)
+	}
+	if strings.Contains(free, "❌") || strings.Contains(idle, "❌") {
+		t.Fatalf("only the dead state should include ❌; free=%q idle=%q", free, idle)
+	}
+	if !strings.Contains(free, "◌") {
+		t.Fatalf("free polecat should include ◌, got %q", free)
+	}
+	if !strings.Contains(idle, "○") {
+		t.Fatalf("idle crew should include ○, got %q", idle)
+	}
+	// Make sure the three glyphs don't collide pairwise.
+	if dead == free || free == idle || dead == idle {
+		t.Fatalf("three stopped states must render distinctly: dead=%q free=%q idle=%q", dead, free, idle)
+	}
+}
+
+// TestBuildStatusIndicator_LegacyZombieGlyph guards backward compatibility
+// for callers asserting on ○ for crew/witness/refinery (the original glyph).
+// Polecats now render ◌ when free; long-lived agents still render ○ when idle.
+func TestBuildStatusIndicator_LegacyZombieGlyph(t *testing.T) {
+	for _, role := range []string{"crew", "witness", "refinery"} {
+		ind := buildStatusIndicator(AgentRuntime{Running: false, Role: role})
+		if !strings.Contains(ind, "○") {
+			t.Fatalf("idle %s should still render ○, got %q", role, ind)
+		}
+	}
+}
+
+func TestParseLifecycleFilter(t *testing.T) {
+	cases := []struct {
+		spec    string
+		want    map[AgentLifecycle]bool
+		wantErr bool
+	}{
+		{spec: "", want: nil},
+		{spec: "all", want: nil},
+		{spec: "  all  ", want: nil},
+		{spec: "running,dead", want: map[AgentLifecycle]bool{LifecycleRunning: true, LifecycleDead: true}},
+		{spec: "DEAD,Free", want: map[AgentLifecycle]bool{LifecycleDead: true, LifecycleFree: true}},
+		{spec: "idle", want: map[AgentLifecycle]bool{LifecycleIdle: true}},
+		{spec: "working,idle,all", want: nil}, // 'all' wins
+		{spec: "bogus", wantErr: true},
+		{spec: "running,nope", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.spec, func(t *testing.T) {
+			got, err := parseLifecycleFilter(tc.spec)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("expected nil set, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("len mismatch: got %d (%v), want %d (%v)", len(got), got, len(tc.want), tc.want)
+			}
+			for k := range tc.want {
+				if _, ok := got[k]; !ok {
+					t.Fatalf("missing %q in result", k)
+				}
+			}
+		})
+	}
+}
+
+func TestFilterAgents_ScopesToAllowSet(t *testing.T) {
+	agents := []AgentRuntime{
+		{Name: "alive", Running: true, Role: "polecat"},
+		{Name: "working", Running: true, HasWork: true, Role: "polecat"},
+		{Name: "dead-pol", Running: false, HasWork: true, Role: "polecat"},
+		{Name: "free-pol", Running: false, Role: "polecat"},
+		{Name: "idle-crew", Running: false, Role: "crew"},
+	}
+
+	// nil allow set → identity
+	if out := filterAgents(agents, nil); len(out) != len(agents) {
+		t.Fatalf("nil allow should pass through, got %d", len(out))
+	}
+
+	// dead only — surfaces the emergency case
+	deadOnly := filterAgents(agents, map[AgentLifecycle]struct{}{LifecycleDead: {}})
+	if len(deadOnly) != 1 || deadOnly[0].Name != "dead-pol" {
+		t.Fatalf("dead-only filter wrong, got %+v", deadOnly)
+	}
+
+	// dead + working — actionable view
+	combo := filterAgents(agents, map[AgentLifecycle]struct{}{
+		LifecycleDead:    {},
+		LifecycleWorking: {},
+	})
+	if len(combo) != 2 {
+		t.Fatalf("dead+working filter want 2, got %d (%+v)", len(combo), combo)
+	}
+
+	// idle + free — both stopped-no-work cases distinguishable
+	stopped := filterAgents(agents, map[AgentLifecycle]struct{}{
+		LifecycleFree: {},
+		LifecycleIdle: {},
+	})
+	if len(stopped) != 2 {
+		t.Fatalf("free+idle filter want 2, got %d (%+v)", len(stopped), stopped)
+	}
+}
+
+// TestOutputStatusText_FilterScopesAgents verifies that the --filter flag,
+// when set on the package-level statusFilter var, scopes the rendered list.
+func TestOutputStatusText_FilterScopesAgents(t *testing.T) {
+	old := statusFilter
+	t.Cleanup(func() { statusFilter = old })
+	statusFilter = "dead"
+
+	status := TownStatus{
+		Name:     "gt",
+		Location: "/tmp/gt",
+		Agents: []AgentRuntime{
+			{Name: "mayor", Address: "mayor", Role: "mayor", Running: true},
+		},
+		Rigs: []RigStatus{{
+			Name: "gastown",
+			Agents: []AgentRuntime{
+				{Name: "alive", Address: "gastown/alive", Role: "polecat", Running: true},
+				{Name: "dead-pol", Address: "gastown/dead-pol", Role: "polecat", Running: false, HasWork: true},
+				{Name: "free-pol", Address: "gastown/free-pol", Role: "polecat", Running: false},
+			},
+		}},
+	}
+
+	var buf bytes.Buffer
+	if err := outputStatusText(&buf, status); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "Filter:") {
+		t.Fatalf("expected Filter: notice, got: %q", out)
+	}
+	if !strings.Contains(out, "dead-pol") {
+		t.Fatalf("expected dead-pol in filtered output, got: %q", out)
+	}
+	if strings.Contains(out, "free-pol") {
+		t.Fatalf("filter=dead should hide free-pol, got: %q", out)
+	}
+	if strings.Contains(out, "  alive ") || strings.Contains(out, " alive\n") {
+		t.Fatalf("filter=dead should hide running 'alive' polecat, got: %q", out)
+	}
+	if strings.Contains(out, "mayor") {
+		t.Fatalf("filter=dead should hide running global mayor, got: %q", out)
+	}
+}
+
 func TestBuildStatusIndicator_DNDMutedShowsBadge(t *testing.T) {
 	agent := AgentRuntime{Running: true, NotificationLevel: beads.NotifyMuted}
 	indicator := buildStatusIndicator(agent)

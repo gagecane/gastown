@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`gt status`: differentiate stopped-state glyphs** (gu-r9g1) — The single
+  ○ glyph for "session not running" used to collapse three distinct
+  conditions: a dead agent with active pinned work (emergency — work is
+  orphaned), a polecat that had finished and exited cleanly (benign), and
+  a long-lived agent (crew/witness/refinery) sitting idle awaiting
+  respawn (also benign). Triage required cross-referencing the hook
+  column. Status now classifies each agent into one of five lifecycle
+  states from the observable `(Running, HasWork, Role)` tuple — `running`
+  (●), `working` (●), `dead` (❌, emergency), `free` (◌, polecat exited),
+  `idle` (○, long-lived agent idle-by-design) — and renders a distinct
+  glyph for each. Adds `gt status --filter=dead,working` (and any
+  comma-separated subset of the five names, plus `all`) to scope the
+  agent listing for triage.
+
 ## [1.2.0] - 2026-05-27
 
 ### Fixed
