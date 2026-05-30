@@ -332,6 +332,16 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 		// PR awaiting human approval — leave in queue for retry on next poll.
 		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: PR awaiting approval, will retry\n", mr.ID)
 		e.HandleMRInfoFailure(mr, processResult)
+	} else if processResult.PushFailed {
+		// gu-wj3f: push to origin/<target> failed (commonly non-ff rejection
+		// during convoy fan-out — sibling MR landed first). The local squash
+		// commit was already rolled back in doMerge. Route through
+		// HandleMRInfoFailure so the polecat is nudged with FIX_NEEDED, the
+		// branch + MR bead are preserved, and the queue moves on to the next
+		// MR. CRITICAL: do NOT call HandleMRInfoSuccess (closes beads, deletes
+		// branch) — the commit never reached origin.
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: push to origin/%s failed, MR preserved for rebase+retry\n", mr.ID, target)
+		e.HandleMRInfoFailure(mr, processResult)
 	} else {
 		result.Error = fmt.Errorf("merge failed: %s", processResult.Error)
 	}
@@ -406,11 +416,28 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 		}()
 	}
 
-	// Push to origin
+	// Push to origin.
+	//
+	// gu-wj3f: on failure (push reject OR post-push verify), every MR in this
+	// batch is preserved for rebase+retry — none of the merges actually
+	// landed on origin/<target>. The local squash commits are rolled back via
+	// ResetHard, and each MR is routed through HandleMRInfoFailure so the
+	// owning polecat gets a FIX_NEEDED nudge. CRITICAL: we MUST NOT fall
+	// through to the success path (which calls HandleMRInfoSuccess and would
+	// close the MR beads, close source issues, and delete the polecat
+	// branches — all assuming the commit reached the remote).
 	_, _ = fmt.Fprintf(e.output, "[Batch] Pushing %d merged MRs to origin/%s...\n", len(stacked), target)
 	if pushErr := e.git.Push("origin", target, false); pushErr != nil {
 		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after push failure: %v\n", target, resetErr)
+		}
+		errMsg := fmt.Sprintf("push to origin/%s failed: %v", target, pushErr)
+		for _, mr := range stacked {
+			e.HandleMRInfoFailure(mr, ProcessResult{
+				Success:    false,
+				PushFailed: true,
+				Error:      errMsg,
+			})
 		}
 		result.Error = fmt.Errorf("push to origin: %w", pushErr)
 		return result
@@ -418,6 +445,14 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 	if verifyErr := e.git.VerifyPushedCommit("origin", target, tipSHA); verifyErr != nil {
 		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after verified-push failure: %v\n", target, resetErr)
+		}
+		errMsg := verifyErr.Error()
+		for _, mr := range stacked {
+			e.HandleMRInfoFailure(mr, ProcessResult{
+				Success:    false,
+				PushFailed: true,
+				Error:      errMsg,
+			})
 		}
 		result.Error = verifyErr
 		return result
