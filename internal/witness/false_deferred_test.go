@@ -306,9 +306,9 @@ func TestShortShaTruncate(t *testing.T) {
 	}{
 		{"", ""},
 		{"abc", "abc"},
-		{"123456789012", "123456789012"},          // exactly 12
-		{"1234567890123", "123456789012"},         // > 12 truncates
-		{"  deadbeef  ", "deadbeef"},              // trim whitespace
+		{"123456789012", "123456789012"},           // exactly 12
+		{"1234567890123", "123456789012"},          // > 12 truncates
+		{"  deadbeef  ", "deadbeef"},               // trim whitespace
 		{"abcdef0123456789abcdef", "abcdef012345"}, // long → first 12
 	}
 	for _, tt := range tests {

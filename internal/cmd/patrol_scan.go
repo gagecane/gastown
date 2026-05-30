@@ -76,10 +76,10 @@ type PatrolScanOutput struct {
 
 // PatrolScanFalseDeferredOut holds false-deferred recovery results (gu-wykt).
 type PatrolScanFalseDeferredOut struct {
-	Checked   int                          `json:"checked"`
-	Found     int                          `json:"found"`
+	Checked   int                           `json:"checked"`
+	Found     int                           `json:"found"`
 	Recovered []PatrolScanFalseDeferredItem `json:"recovered,omitempty"`
-	Errors    []string                     `json:"errors,omitempty"`
+	Errors    []string                      `json:"errors,omitempty"`
 }
 
 // PatrolScanFalseDeferredItem is a single false-deferred recovery in scan output.

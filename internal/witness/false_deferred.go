@@ -316,4 +316,3 @@ func hasFalseDeferredRecoveredLabel(labels []string) bool {
 	}
 	return false
 }
-
