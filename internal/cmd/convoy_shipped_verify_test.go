@@ -11,11 +11,66 @@ package cmd
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+// setupMayorRigWithCitingCommit prepares a real git work tree at
+// <townBeads>/mayor/rig with a bare "origin" remote and pushes a single
+// commit on origin/main whose message contains the given bead ID. This is
+// the minimum viable rig for exercising lookupCitingCommit's grep against
+// origin/<default-branch>.
+//
+// Returns once `git log origin/main --grep=<beadID> --fixed-strings` would
+// match — i.e., the test can rely on the commit being visible via the
+// remote-tracking branch.
+func setupMayorRigWithCitingCommit(t *testing.T, townBeads, beadID string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("git plumbing layout differs on Windows")
+	}
+
+	mayorRig := filepath.Join(townBeads, "mayor", "rig")
+	originBare := filepath.Join(townBeads, "_origin.git")
+	if err := os.MkdirAll(mayorRig, 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+	if err := os.MkdirAll(originBare, 0755); err != nil {
+		t.Fatalf("mkdir origin bare: %v", err)
+	}
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+
+	// Bare repo as the "origin" remote.
+	runGit(originBare, "init", "--bare", "-b", "main")
+
+	// Working tree initialized with main as the active branch.
+	runGit(mayorRig, "init", "-b", "main")
+	runGit(mayorRig, "config", "user.email", "test@example.com")
+	runGit(mayorRig, "config", "user.name", "Test")
+	runGit(mayorRig, "config", "commit.gpgsign", "false")
+	runGit(mayorRig, "remote", "add", "origin", originBare)
+
+	// Initial commit citing the bead — substring match is mechanical and
+	// must hit on either the subject or the body.
+	readme := filepath.Join(mayorRig, "README.md")
+	if err := os.WriteFile(readme, []byte("# rig\n"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit(mayorRig, "add", "README.md")
+	runGit(mayorRig, "commit", "-m", "feat: initial rig setup ("+beadID+")")
+	runGit(mayorRig, "push", "-u", "origin", "main")
+}
 
 // TestCloseConvoyIfComplete_AwaitingRefineryMergeBlocksAutoClose verifies that
 // a tracked bead carrying the awaiting_refinery_merge label keeps the convoy
@@ -274,5 +329,103 @@ func TestResolveRigWorktreePath_ReturnsEmptyWhenNothingExists(t *testing.T) {
 	townBeads := t.TempDir()
 	if got := resolveRigWorktreePath(townBeads, "ws-orphan"); got != "" {
 		t.Fatalf("expected empty resolution, got %q", got)
+	}
+}
+
+// TestEvaluateTrackedBeadShipped_CitingCommitOverridesAwaitingLabel pins down
+// the gu-b5d4 fix: a citing commit on origin/<default-branch> is hard
+// evidence the work shipped and must trump a stale awaiting_refinery_merge
+// label. Refinery does not always clear that label post-merge — it's a
+// claim from the polecat at submission time, not a live state — so a bead
+// can be both "labeled in flight" AND "actually landed". Without this
+// override, ~40 fully-tracked convoys stay open indefinitely with their
+// landed beads still tagged awaiting_refinery_merge.
+func TestEvaluateTrackedBeadShipped_CitingCommitOverridesAwaitingLabel(t *testing.T) {
+	townBeads := t.TempDir()
+	const beadID = "hq-shipped-bead"
+	setupMayorRigWithCitingCommit(t, townBeads, beadID)
+
+	tracked := trackedIssueInfo{
+		ID:     beadID,
+		Status: "closed",
+		Labels: []string{"awaiting_refinery_merge"},
+	}
+
+	got := evaluateTrackedBeadShipped(townBeads, tracked)
+	if got != "" {
+		t.Fatalf("citing commit on origin/main must override stale awaiting_refinery_merge label; got reason: %q", got)
+	}
+}
+
+// TestEvaluateTrackedBeadShipped_CitingCommitOverridesStrandedLabel — same
+// override applies to stranded-merge. If a commit eventually shows up on
+// origin/main (e.g., the operator landed the work via a different path),
+// the bead is shipped; the stale label should not block convoy completion.
+func TestEvaluateTrackedBeadShipped_CitingCommitOverridesStrandedLabel(t *testing.T) {
+	townBeads := t.TempDir()
+	const beadID = "hq-recovered-bead"
+	setupMayorRigWithCitingCommit(t, townBeads, beadID)
+
+	tracked := trackedIssueInfo{
+		ID:     beadID,
+		Status: "closed",
+		Labels: []string{"stranded-merge"},
+	}
+
+	got := evaluateTrackedBeadShipped(townBeads, tracked)
+	if got != "" {
+		t.Fatalf("citing commit on origin/main must override stranded-merge label; got reason: %q", got)
+	}
+}
+
+// TestEvaluateTrackedBeadShipped_RefusesWhenLabeledAndNoCitation pins the
+// safety contract from gu-j7u5: when there is NO citing commit AND the
+// bead carries an in-flight label, the bead remains blocked. The fix is
+// purely additive (citing-commit-as-positive-override); it must not
+// weaken Pattern B/C protection. This test runs against a real rig with
+// a real origin/main but the commit cites a DIFFERENT bead ID, so the
+// substring search comes up empty.
+func TestEvaluateTrackedBeadShipped_RefusesWhenLabeledAndNoCitation(t *testing.T) {
+	townBeads := t.TempDir()
+	// Commit cites someone else's bead ID. Our tracked bead should not
+	// ship-verify off it.
+	setupMayorRigWithCitingCommit(t, townBeads, "hq-some-other-bead")
+
+	tracked := trackedIssueInfo{
+		ID:     "hq-not-in-history",
+		Status: "closed",
+		Labels: []string{"awaiting_refinery_merge"},
+	}
+
+	got := evaluateTrackedBeadShipped(townBeads, tracked)
+	if got == "" {
+		t.Fatalf("expected awaiting_refinery_merge diagnostic when no citing commit exists; got shipped")
+	}
+	if !strings.Contains(got, "awaiting_refinery_merge") {
+		t.Fatalf("expected diagnostic to mention awaiting_refinery_merge, got: %q", got)
+	}
+}
+
+// TestEvaluateTrackedBeadShipped_RefusesWhenNoEvidenceAtAll pins the
+// Pattern B/C protection from gu-j7u5: when the rig is verifiable, no
+// citing commit exists, and there are no in-flight labels and no
+// review_only/no_merge markers, the bead is treated as a possible
+// false-close and the convoy stays open. This is the safety guarantee
+// that gu-b5d4's softening must NOT weaken.
+func TestEvaluateTrackedBeadShipped_RefusesWhenNoEvidenceAtAll(t *testing.T) {
+	townBeads := t.TempDir()
+	setupMayorRigWithCitingCommit(t, townBeads, "hq-some-other-bead")
+
+	tracked := trackedIssueInfo{
+		ID:     "hq-orphan",
+		Status: "closed",
+	}
+
+	got := evaluateTrackedBeadShipped(townBeads, tracked)
+	if got == "" {
+		t.Fatalf("expected Pattern B/C false-close warning when no evidence anywhere; got shipped")
+	}
+	if !strings.Contains(got, "Pattern B/C") {
+		t.Fatalf("expected Pattern B/C warning, got: %q", got)
 	}
 }

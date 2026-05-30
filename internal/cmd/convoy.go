@@ -1100,7 +1100,40 @@ func findUnshippedTrackedBeads(townBeads string, tracked []trackedIssueInfo) []u
 // (or shipping is not expected), or a short human-readable reason describing
 // why the bead is closed-but-unshipped. See findUnshippedTrackedBeads for the
 // resolution order.
+//
+// Resolution policy (gu-b5d4 update):
+//
+//  1. Hard evidence wins. If a commit on origin/<default-branch> cites the
+//     bead ID, the bead is shipped — even if it still carries an
+//     "in flight" label like awaiting_refinery_merge or stranded-merge.
+//     Refinery does not always clear those labels post-merge, so a bead
+//     can be both labeled "in flight" AND provably landed; the citing
+//     commit is the strongest positive signal we have. The substring
+//     match catches direct cites in the body, branch-name cites in
+//     merge subjects (`Merge polecat/<worker>/<bead-id>--<sandbox>`),
+//     and any other free-text mention.
+//
+//  2. Without a citing commit, an "in flight" label still blocks the
+//     convoy — the polecat's last claim was "MR submitted, not yet
+//     merged" or "push/MR failed", and we have nothing to override that.
+//
+//  3. review_only / no_merge attachment fields skip the citation
+//     requirement entirely (analysis-only work has zero commits by
+//     design).
+//
+//  4. If the citation lookup itself could not run (no rig path, git
+//     error), fail open so legitimate cross-rig tracked beads in
+//     unrouted rigs do not deadlock convoys.
+//
+//  5. If the lookup ran successfully, found nothing, and no labels
+//     explain the absence, surface the Pattern B/C false-close
+//     warning (gu-j7u5 protection).
 func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
+	cited, verified := lookupCitingCommit(townBeads, t.ID)
+	if verified && cited {
+		return ""
+	}
+
 	if hasLabel(t.Labels, "awaiting_refinery_merge") {
 		return "awaiting_refinery_merge: MR submitted, refinery has not yet merged to origin/main"
 	}
@@ -1117,14 +1150,13 @@ func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
 		}
 	}
 
-	citation, ok := lookupCitingCommit(townBeads, t.ID)
-	if !ok {
+	if !verified {
 		// Unable to verify (no rig path / git failure). Fail open so legitimate
 		// cross-rig tracked beads in unrouted rigs don't deadlock convoys.
 		// The shipping check is a defense-in-depth signal, not a hard gate.
 		return ""
 	}
-	if !citation {
+	if !cited {
 		return "no commit on origin/main cites this bead ID — possible Pattern B/C false-close"
 	}
 	return ""
