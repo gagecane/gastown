@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/wisp"
@@ -280,7 +283,8 @@ func runCompact(cmd *cobra.Command, args []string) error {
 	// records in wisp_dependencies that reference the deleted wisp. Over many
 	// compaction cycles these accumulate as dangling refs. We sweep them here.
 	if !compactDryRun {
-		cleanOrphanedWispDeps(bd, result)
+		dbName := beads.DatabaseNameFromMetadata(beads.ResolveBeadsDir(workDir))
+		cleanOrphanedWispDeps(townRoot, dbName, result)
 	}
 
 	// Output results
@@ -298,21 +302,62 @@ func runCompact(cmd *cobra.Command, args []string) error {
 // longer exists in the wisps table. This happens when bd delete removes a wisp
 // but leaves behind its dependency records (bd delete has no cascade logic for
 // the wisp-level tables). Runs as a post-compact sweep.
-func cleanOrphanedWispDeps(bd *beads.Beads, result *compactResult) {
-	const q = `DELETE FROM wisp_dependencies WHERE ` +
-		`NOT EXISTS (SELECT 1 FROM wisps WHERE id = wisp_dependencies.issue_id) ` +
-		`OR NOT EXISTS (SELECT 1 FROM wisps WHERE id = wisp_dependencies.depends_on_id)`
-	out, err := bd.Run("sql", q)
+//
+// The DELETE runs against the running Dolt server (port 3307) via a direct SQL
+// connection rather than `bd sql`, which is unsupported in embedded mode and
+// caused this sweep to error out as a no-op (gs-1ki). Mirrors the reaper's
+// purge path: disable autocommit, delete, COMMIT to the working set, then
+// DOLT_COMMIT to persist to history.
+func cleanOrphanedWispDeps(townRoot, dbName string, result *compactResult) {
+	if dbName == "" {
+		result.Errors = append(result.Errors, "orphaned wisp_deps cleanup: no Dolt database resolved from .beads/metadata.json")
+		return
+	}
+
+	config := doltserver.DefaultConfig(townRoot)
+	db, err := reaper.OpenDB(config.EffectiveHost(), config.Port, dbName, 30*time.Second, 30*time.Second)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("orphaned wisp_deps cleanup: %v", err))
 		return
 	}
-	// bd sql reports "OK, N rows affected" for non-SELECT statements.
-	// Parse the count if present; a non-zero result means refs were cleaned.
-	var n int
-	if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "OK, %d rows affected", &n); scanErr == nil {
-		result.OrphanedWispDeps = n
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const q = `DELETE FROM wisp_dependencies WHERE ` +
+		`NOT EXISTS (SELECT 1 FROM wisps WHERE id = wisp_dependencies.issue_id) ` +
+		`OR NOT EXISTS (SELECT 1 FROM wisps WHERE id = wisp_dependencies.depends_on_id)`
+
+	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("orphaned wisp_deps cleanup: %v", err))
+		return
 	}
+	defer func() { _, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1") }()
+
+	sqlResult, err := db.ExecContext(ctx, q)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("orphaned wisp_deps cleanup: %v", err))
+		return
+	}
+	n, _ := sqlResult.RowsAffected()
+	if n == 0 {
+		return
+	}
+
+	// Flush the SQL transaction to the working set, then commit to Dolt history
+	// so the deletion is durable and replicates (matches the reaper purge path).
+	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("orphaned wisp_deps cleanup: sql commit: %v", err))
+		return
+	}
+	commitMsg := fmt.Sprintf("compactor: prune %d orphaned wisp dependency ref(s) from %s", n, dbName)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from internal counts only
+		result.Errors = append(result.Errors, fmt.Sprintf("orphaned wisp_deps cleanup: dolt commit: %v", err))
+		return
+	}
+
+	result.OrphanedWispDeps = int(n)
 }
 
 // listWisps queries all ephemeral issues from the database.

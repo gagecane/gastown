@@ -278,6 +278,24 @@ func TestExtractJSONArray(t *testing.T) {
 	}
 }
 
+func TestCleanOrphanedWispDepsEmptyDB(t *testing.T) {
+	// With no resolvable Dolt database, the sweep must record a clear error
+	// rather than panic or silently no-op. This guards the path where
+	// .beads/metadata.json has no dolt_database configured (gs-1ki).
+	result := &compactResult{}
+	cleanOrphanedWispDeps("", "", result)
+
+	if result.OrphanedWispDeps != 0 {
+		t.Errorf("OrphanedWispDeps = %d, want 0", result.OrphanedWispDeps)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %v, want exactly 1", result.Errors)
+	}
+	if !strings.Contains(result.Errors[0], "no Dolt database resolved") {
+		t.Errorf("error = %q, want it to mention the unresolved database", result.Errors[0])
+	}
+}
+
 func TestLoadTTLConfigDefaults(t *testing.T) {
 	// With empty town root, should return defaults
 	ttls := loadTTLConfig("", "")
