@@ -8,6 +8,7 @@
   "permissions": {
     "defaultMode": "bypassPermissions",
     "deny": [
+      "AskUserQuestion",
       "TodoWrite",
       "TaskCreate",
       "TaskUpdate",

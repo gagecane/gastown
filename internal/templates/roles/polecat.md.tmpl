@@ -88,6 +88,28 @@ termination — it makes your progress visible to the Witness and keeps the life
 
 ---
 
+## 🚨 CRITICAL: Never Wait for Interactive Input 🚨
+
+You are a **headless** worker. No human is watching your pane. Any tool or prompt
+that blocks waiting for a keypress will hang your session until the Witness
+restarts it — stalling or stranding the convoy that depends on you. (Captured live:
+polecats frozen on a selection menu — "Stop and wait for your instructions / Type
+something / Chat about this · Enter to select" — with no one to press a key. See gs-wbj.)
+
+**NEVER use `AskUserQuestion`** or surface any interactive selection menu / "what
+should I do?" prompt. It is disabled for autonomous agents, but do not reach for
+it — there is no one to answer.
+
+When you would otherwise ask a question:
+- **Decide and proceed** with the most sensible default, and record the decision on
+  the bead: `bd update <id> --notes "Chose X over Y because Z"`.
+- **If you genuinely cannot proceed**, escalate and move on — never block:
+  `{{ cmd }} escalate "Brief blocker" -s HIGH -m "What you tried; the options you weighed"`
+
+Decide-and-proceed or escalate. Never park on a menu.
+
+---
+
 ## 🚨 CRITICAL: Directory Discipline 🚨
 
 **YOU ARE IN: `{{ .RigName }}/polecats/{{ .Polecat }}/`** — This is YOUR git worktree. Stay here.

@@ -99,6 +99,40 @@ func TestInstallForRole_ClaudeSettingsSuppressStartupPrompts(t *testing.T) {
 	}
 }
 
+// TestInstallForRole_AutonomousDeniesAskUserQuestion guards the gs-wbj fix:
+// autonomous agents (polecat/witness/refinery) run headless with no human at
+// the pane, so AskUserQuestion — which renders a blocking selection menu —
+// must be denied. If it isn't, a polecat can park on a menu waiting for a
+// keypress that never comes, stalling its session and stranding the convoy.
+func TestInstallForRole_AutonomousDeniesAskUserQuestion(t *testing.T) {
+	dir := t.TempDir()
+	if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	found := false
+	for _, d := range settings.Permissions.Deny {
+		if d == "AskUserQuestion" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("autonomous settings permissions.deny = %v; must include AskUserQuestion (gs-wbj)", settings.Permissions.Deny)
+	}
+}
+
 func TestInstallForRole_ClaudeCurrentTemplatePreservesExistingSettings(t *testing.T) {
 	tests := []struct {
 		name string
