@@ -43,16 +43,16 @@ const (
 // VerdictReason is a stable enum string explaining why a verdict was reached.
 // Plugin authors lock in this set; new reasons are additive only.
 const (
-	ReasonNoHeartbeatFile     = "no_heartbeat_file"
-	ReasonKeepaliveFresh      = "keepalive_fresh"
-	ReasonHeartbeatFresh      = "heartbeat_fresh"
-	ReasonInsideGraceWindow   = "inside_grace_window"
-	ReasonPastDeadThreshold   = "past_dead_threshold"
-	ReasonPIDGone             = "pid_gone"
-	ReasonRecoveryMarker      = "recovery_marker_active"
-	ReasonExpectedIdle        = "expected_idle_until_future"
-	ReasonStateExiting        = "state_exiting"
-	ReasonInvalidSession      = "invalid_session_name"
+	ReasonNoHeartbeatFile   = "no_heartbeat_file"
+	ReasonKeepaliveFresh    = "keepalive_fresh"
+	ReasonHeartbeatFresh    = "heartbeat_fresh"
+	ReasonInsideGraceWindow = "inside_grace_window"
+	ReasonPastDeadThreshold = "past_dead_threshold"
+	ReasonPIDGone           = "pid_gone"
+	ReasonRecoveryMarker    = "recovery_marker_active"
+	ReasonExpectedIdle      = "expected_idle_until_future"
+	ReasonStateExiting      = "state_exiting"
+	ReasonInvalidSession    = "invalid_session_name"
 )
 
 // LivenessThresholds bundles the three durations that define the verdict
@@ -104,17 +104,17 @@ var DefaultRefineryLivenessThresholds = LivenessThresholds{
 // machine-readable (--json) surfaces to render without re-parsing the
 // underlying heartbeat. See cv-p3fem Phase 3 design §Plugin surface.
 type LivenessReport struct {
-	Session       string             `json:"session"`
-	Verdict       LivenessVerdict    `json:"verdict"`
-	VerdictReason string             `json:"verdict_reason"`
+	Session       string          `json:"session"`
+	Verdict       LivenessVerdict `json:"verdict"`
+	VerdictReason string          `json:"verdict_reason"`
 	// Age is time since EffectiveLastKeepalive (max of timestamp and
 	// last_keepalive). Zero when no heartbeat file exists.
-	Age                     time.Duration  `json:"-"`
-	AgeSeconds              int64          `json:"age_seconds"`
-	LastKeepaliveAgeSeconds int64          `json:"last_keepalive_age_seconds"`
-	State                   HeartbeatState `json:"state,omitempty"`
-	KeepaliveOp             string         `json:"keepalive_op,omitempty"`
-	Bead                    string         `json:"bead,omitempty"`
+	Age                     time.Duration      `json:"-"`
+	AgeSeconds              int64              `json:"age_seconds"`
+	LastKeepaliveAgeSeconds int64              `json:"last_keepalive_age_seconds"`
+	State                   HeartbeatState     `json:"state,omitempty"`
+	KeepaliveOp             string             `json:"keepalive_op,omitempty"`
+	Bead                    string             `json:"bead,omitempty"`
 	Thresholds              LivenessThresholds `json:"thresholds"`
 
 	// LastTimestamp / LastKeepalive carry the raw timestamps for callers

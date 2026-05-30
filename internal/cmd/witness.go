@@ -224,10 +224,10 @@ func runWitnessStop(cmd *cobra.Command, args []string) error {
 
 // WitnessStatusOutput is the JSON output format for witness status.
 type WitnessStatusOutput struct {
-	Running           bool                  `json:"running"`
-	RigName           string                `json:"rig_name"`
-	Session           string                `json:"session,omitempty"`
-	MonitoredPolecats []string              `json:"monitored_polecats,omitempty"`
+	Running           bool     `json:"running"`
+	RigName           string   `json:"rig_name"`
+	Session           string   `json:"session,omitempty"`
+	MonitoredPolecats []string `json:"monitored_polecats,omitempty"`
 	// cv-p3fem Phase 3: per-session liveness verdicts. Includes the witness's
 	// own verdict plus one entry per monitored polecat so operators can scan
 	// the supervisor question ("which agents are live?") in one pass.
