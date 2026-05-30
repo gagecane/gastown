@@ -131,7 +131,7 @@ func TestRecoverPushFromOriginTip_MissingBranchReturnsFalse(t *testing.T) {
 
 // TestRecoverPushFromOriginTip_RejectsEmptyInputs verifies the helper
 // fails closed on degenerate inputs: an empty SHA could come from a
-// reflog read failure, and we must not treat "tip == ''" as a match.
+// reflog read failure, and we must not treat "tip == ”" as a match.
 func TestRecoverPushFromOriginTip_RejectsEmptyInputs(t *testing.T) {
 	wt, _, branch := setupBareWithBranch(t, "feature/gu-epv5-empty")
 	g := git.NewGit(wt)
