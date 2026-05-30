@@ -8,9 +8,10 @@
 // and thread resolution logic.
 //
 // The reply is a templated banner that names:
-//   (a) the new commit SHA
-//   (b) which gates passed
-//   (c) a one-line summary of what the polecat changed
+//
+//	(a) the new commit SHA
+//	(b) which gates passed
+//	(c) a one-line summary of what the polecat changed
 //
 // Two paths:
 //  1. --comment-id provided: reply to that specific thread.
