@@ -58,29 +58,118 @@ IDENTITY_BEAD_PATTERN='-(refinery|witness|mayor|deacon)$'
 
 log() { echo "[stuck-agent-dog] $*"; }
 
-# heartbeat_age_seconds returns the age of a polecat session's heartbeat file
-# in seconds, or empty string if the heartbeat file does not exist or cannot
-# be parsed. A missing heartbeat is not treated as stale (backward compat with
-# IsSessionHeartbeatStale in internal/polecat/heartbeat.go).
+# heartbeat_status_json fetches the typed liveness report for a session
+# from `gt heartbeat status --json`. cv-p3fem Phase 3 plugin contract.
+# Echoes the JSON document on stdout, or empty string on error.
+heartbeat_status_json() {
+  local session_name="$1"
+  gt heartbeat status --session="$session_name" --json 2>/dev/null || true
+}
+
+# heartbeat_age_seconds returns the age of a polecat session's heartbeat
+# (preferring the v3 effective-keepalive age via `gt heartbeat status`).
+# Falls back to direct file read with v3-aware effective-freshness when
+# `gt heartbeat status` is unavailable (binary rollout window).
 heartbeat_age_seconds() {
   local session_name="$1"
+  local snap
+  snap=$(heartbeat_status_json "$session_name")
+  if [ -n "$snap" ] && [ "$snap" != "null" ]; then
+    local age
+    age=$(echo "$snap" | jq -r '.age_seconds // empty' 2>/dev/null)
+    if [ -n "$age" ]; then
+      echo "$age"
+      return 0
+    fi
+  fi
   local hb_file="${TOWN_ROOT}/.runtime/heartbeats/${session_name}.json"
   [ -f "$hb_file" ] || return 0
-  local hb_ts
+  local hb_ts last_keepalive
   hb_ts=$(jq -r '(.timestamp // empty) | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // empty' "$hb_file" 2>/dev/null)
+  last_keepalive=$(jq -r '(.last_keepalive // empty) | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // empty' "$hb_file" 2>/dev/null)
+  if [ -n "$last_keepalive" ] && { [ -z "$hb_ts" ] || [ "$last_keepalive" -gt "$hb_ts" ]; }; then
+    hb_ts="$last_keepalive"
+  fi
   [ -n "$hb_ts" ] || return 0
   echo $(( $(date +%s) - hb_ts ))
 }
 
-# heartbeat_state returns the agent-reported state from the heartbeat file
-# ("working", "idle", "exiting", "stuck"), or empty string if unknown. A v1
-# heartbeat without a state field returns "" — callers should treat that as
-# "working" for backward compatibility.
+# heartbeat_state returns the agent-reported state from the heartbeat
+# ("working", "idle", "exiting", "stuck"), or empty string if unknown.
+# Prefers `gt heartbeat status --json`; falls back to direct file read.
 heartbeat_state() {
   local session_name="$1"
+  local snap
+  snap=$(heartbeat_status_json "$session_name")
+  if [ -n "$snap" ] && [ "$snap" != "null" ]; then
+    local state
+    state=$(echo "$snap" | jq -r '.state // empty' 2>/dev/null)
+    if [ -n "$state" ]; then
+      echo "$state"
+      return 0
+    fi
+  fi
   local hb_file="${TOWN_ROOT}/.runtime/heartbeats/${session_name}.json"
   [ -f "$hb_file" ] || return 0
   jq -r '.state // empty' "$hb_file" 2>/dev/null
+}
+
+# heartbeat_verdict returns the typed liveness verdict ("ALIVE",
+# "MAYBE_DEAD", "DEAD", "UNKNOWN") for a session. cv-p3fem Phase 3.
+# Empty string means `gt heartbeat status` was unavailable.
+heartbeat_verdict() {
+  local session_name="$1"
+  local snap
+  snap=$(heartbeat_status_json "$session_name")
+  [ -n "$snap" ] && [ "$snap" != "null" ] || return 0
+  echo "$snap" | jq -r '.verdict // empty' 2>/dev/null
+}
+
+# session_pid_alive echoes "alive" / "dead" / "" (unknown) for a session.
+# The unknown state matters: when we can't determine PID liveness we MUST
+# NOT count this agent toward MASS_DEAD — single-class signals can't fan
+# out (gs-549).
+session_pid_alive() {
+  local session_name="$1"
+  tmux has-session -t "$session_name" 2>/dev/null || { echo "dead"; return 0; }
+  local pid
+  pid=$(tmux list-panes -t "$session_name" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+  if [ -z "$pid" ]; then
+    echo ""
+    return 0
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "alive"
+  else
+    echo "dead"
+  fi
+}
+
+# corroborated_dead returns 0 if a session has independently failed BOTH
+# the heartbeat liveness check (verdict==DEAD) AND the PID liveness check
+# (process gone). cv-p3fem security mitigation #1: each agent in a
+# CRITICAL/MASS-DEATH count must independently fail two signal classes
+# before counting toward escalation. The 2026-05-19 mass-kill (gs-549)
+# fed off three independently stale heartbeats with live PIDs — under
+# this rule that scenario yields TOTAL_DEAD=0 and never escalates.
+corroborated_dead() {
+  local session_name="$1"
+  local verdict pid_state
+  verdict=$(heartbeat_verdict "$session_name")
+  pid_state=$(session_pid_alive "$session_name")
+  # No verdict (binary rollout / missing gt) → single-class signal,
+  # cannot count.
+  if [ -z "$verdict" ] || [ "$verdict" = "UNKNOWN" ]; then
+    return 1
+  fi
+  # PID check must agree.
+  if [ "$pid_state" != "dead" ]; then
+    return 1
+  fi
+  if [ "$verdict" = "DEAD" ]; then
+    return 0
+  fi
+  return 1
 }
 
 # polecat_agent_bead_id returns the agent bead ID for a polecat using the
@@ -386,14 +475,34 @@ fi
 
 # --- Mass death check ---------------------------------------------------------
 
+# cv-p3fem Phase 3: per-agent independent corroboration before counting any
+# agent toward MASS_DEAD. Each candidate must have BOTH (a) verdict==DEAD
+# from the typed liveness API AND (b) PID-gone confirmation from tmux.
+# Single-class signals (transient FS issue, three corrupt JSONs) can no
+# longer fan out to a CRITICAL escalation.
 TOTAL_ISSUES=$(( ${#CRASHED[@]} + ${#STUCK[@]} + ${#STALLED[@]} ))
-if [ "$TOTAL_ISSUES" -ge 3 ]; then
+TOTAL_DEAD=0
+DEAD_NAMES=""
+for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"} ${STUCK[@]+"${STUCK[@]}"} ${STALLED[@]+"${STALLED[@]}"}; do
+  IFS='|' read -r SESSION REST <<< "$ENTRY"
+  if corroborated_dead "$SESSION"; then
+    TOTAL_DEAD=$((TOTAL_DEAD + 1))
+    DEAD_NAMES="$DEAD_NAMES $SESSION"
+  fi
+done
+
+if [ "$TOTAL_DEAD" -ge 3 ]; then
   log ""
-  log "MASS DEATH: $TOTAL_ISSUES agents down — escalating instead of restarting"
+  log "MASS DEATH: $TOTAL_DEAD agents corroborated dead — escalating (issues=$TOTAL_ISSUES)"
   gt escalate "Mass agent death detected by stuck-agent-dog" \
     -s CRITICAL \
     --source=stuck-agent-dog --dedup --signature=stuck-agent-dog:mass-death \
-    -r "$TOTAL_ISSUES agents down" 2>/dev/null || true
+    -r "$TOTAL_DEAD agents corroborated dead (verdict=DEAD AND PID gone):$DEAD_NAMES" 2>/dev/null || true
+elif [ "$TOTAL_ISSUES" -ge 3 ]; then
+  # Counted issues exist but corroboration didn't agree — log so operators
+  # can see the gate working without paging Mayor.
+  log ""
+  log "MASS DEATH GATED: $TOTAL_ISSUES issues, only $TOTAL_DEAD corroborated dead — not escalating (cv-p3fem)"
 fi
 
 # --- Take action --------------------------------------------------------------

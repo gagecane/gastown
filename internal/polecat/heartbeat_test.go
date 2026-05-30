@@ -286,24 +286,38 @@ func TestIsSessionProcessDead_HeartbeatFresh(t *testing.T) {
 	}
 }
 
-func TestIsSessionProcessDead_HeartbeatStale(t *testing.T) {
+// TestIsSessionProcessDead_HeartbeatStaleAlone pins the cv-p3fem Phase 3
+// behavior change: a stale heartbeat ALONE is no longer enough to mark a
+// session dead. Without a PID corroboration signal (tmux probe) the
+// Liveness() verdict tops out at MAYBE_DEAD, and isSessionProcessDead
+// returns false to prevent the gs-549 mass-kill class. The production
+// path threads a real *tmux.Tmux into isSessionProcessDead so the
+// verdict gets the corroboration; this test exercises the safety
+// property of the no-PID-source branch.
+func TestIsSessionProcessDead_HeartbeatStaleAlone(t *testing.T) {
 	townRoot := t.TempDir()
 	sessionName := "gt-test-hb-dead"
 
-	// Write a stale heartbeat
+	// Write a heartbeat that's stale even by polecat thresholds.Dead (20m).
 	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-10 * time.Minute).UTC()
+	oldTime := time.Now().Add(-30 * time.Minute).UTC()
 	data := []byte(`{"timestamp":"` + oldTime.Format(time.RFC3339Nano) + `"}`)
 	if err := os.WriteFile(filepath.Join(dir, sessionName+".json"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	dead := isSessionProcessDead(nil, sessionName, townRoot)
-	if !dead {
-		t.Error("expected dead=true for session with stale heartbeat")
+	if dead {
+		t.Error("expected dead=false: heartbeat-stale alone is not enough corroboration (cv-p3fem)")
+	}
+
+	// Sanity: the verdict-only API confirms MAYBE_DEAD, not DEAD.
+	rep := Liveness(townRoot, sessionName, DefaultLivenessThresholds)
+	if rep.Verdict == LivenessDead {
+		t.Errorf("Liveness verdict = %s, want != DEAD without PID corroboration", rep.Verdict)
 	}
 }
 

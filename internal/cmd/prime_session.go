@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -227,6 +228,11 @@ func emitSessionEvent(ctx RoleContext) {
 // outputSessionMetadata prints a structured metadata line for seance discovery.
 // Format: [GAS TOWN] role:<role> pid:<pid> session:<session_id>
 // This enables gt seance to discover sessions from gt prime output.
+//
+// cv-p3fem Phase 3: also emits a one-line self-liveness summary
+// ("liveness: ALIVE (heartbeat 1s ago, keepalive 1s ago)"). Self only —
+// neighbor liveness lines would blow the prime info budget. UX leg
+// constraint: exactly one extra line.
 func outputSessionMetadata(ctx RoleContext) {
 	if ctx.Role == RoleUnknown {
 		return
@@ -243,6 +249,68 @@ func outputSessionMetadata(ctx RoleContext) {
 
 	// Output structured metadata line
 	fmt.Println(formatSessionMetadataLine(actor, sessionID))
+
+	// cv-p3fem Phase 3: self-liveness line. Best-effort — any error path
+	// silently skips so prime never breaks because liveness can't be read.
+	if line := selfLivenessLine(ctx); line != "" {
+		fmt.Println(line)
+	}
+}
+
+// selfLivenessLine returns a one-line summary of this session's liveness,
+// or empty string when liveness can't be computed (no heartbeat, missing
+// town root, unknown session). Format:
+//
+//	liveness: ALIVE (heartbeat 1s ago, keepalive 1s ago)
+//
+// Self-only by design (cv-p3fem UX leg): neighbor lines blow the budget.
+func selfLivenessLine(ctx RoleContext) string {
+	sessionName := os.Getenv("GT_SESSION")
+	if sessionName == "" {
+		return ""
+	}
+	townRoot := ctx.WorkDir
+	if townRoot == "" {
+		var err error
+		townRoot, err = workspace.FindFromCwd()
+		if err != nil || townRoot == "" {
+			return ""
+		}
+	}
+	role := "polecat"
+	switch ctx.Role {
+	case RoleWitness:
+		role = "witness"
+	case RoleRefinery:
+		role = "refinery"
+	}
+	thresholds := polecat.DefaultLivenessThresholds
+	switch role {
+	case "witness":
+		thresholds = polecat.DefaultWitnessLivenessThresholds
+	case "refinery":
+		thresholds = polecat.DefaultRefineryLivenessThresholds
+	}
+	rep := polecat.Liveness(townRoot, sessionName, thresholds)
+	if rep.Verdict == polecat.LivenessUnknown && rep.VerdictReason == polecat.ReasonNoHeartbeatFile {
+		return ""
+	}
+
+	hbAge := time.Duration(0)
+	if !rep.LastTimestamp.IsZero() {
+		hbAge = time.Since(rep.LastTimestamp).Truncate(time.Second)
+	}
+	kaAge := time.Duration(0)
+	hasKa := !rep.LastKeepalive.IsZero()
+	if hasKa {
+		kaAge = time.Since(rep.LastKeepalive).Truncate(time.Second)
+	}
+
+	if hasKa {
+		return fmt.Sprintf("liveness: %s (heartbeat %s ago, keepalive %s ago)",
+			rep.Verdict, hbAge, kaAge)
+	}
+	return fmt.Sprintf("liveness: %s (heartbeat %s ago)", rep.Verdict, hbAge)
 }
 
 // formatSessionMetadataLine keeps the bracketed "[GAS TOWN]" banner for normal
