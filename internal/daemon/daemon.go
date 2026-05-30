@@ -1215,6 +1215,19 @@ func (d *Daemon) heartbeat(state *State) {
 	// Kill sessions that have been idle longer than the configured threshold.
 	d.reapIdlePolecats()
 
+	// 12b-ii. Reclaim cleanly-stalled polecat debris (gs-9wz).
+	// A polecat whose session dies WITHOUT completing gt done's idle transition
+	// (context exhaustion, killed mid-task, self-terminate racing teardown)
+	// keeps agent_state=working in beads. With a dead session that computes as
+	// the "stalled" state, which the capacity accounting counts as
+	// recovery_blocked forever — the scheduler dispatches but can't place work
+	// (the auto-dispatch starvation treadmill). When such a polecat is provably
+	// clean it is debris, not a recovery case, so reclaim it via the audited
+	// `gt polecat nuke` path (NO --force, so its safety checks refuse anything
+	// carrying real work). This keeps working capacity > 0 without the manual
+	// nukes operators were doing by hand.
+	d.reclaimStalledCleanPolecats()
+
 	// 13. Clean up orphaned claude subagent processes (memory leak prevention)
 	// These are Task tool subagents that didn't clean up after completion.
 	// This is a safety net - Deacon patrol also does this more frequently.
@@ -3767,6 +3780,110 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
 			fmt.Sprintf("idle-reap: %s, idle %v (threshold %v)", reason, idleDuration.Truncate(time.Second), timeout),
 			"daemon"))
+}
+
+// reclaimStalledCleanPolecats scans every rig for cleanly-stalled polecat
+// debris and reclaims it to free capacity (gs-9wz). See the per-polecat doc on
+// reclaimStalledCleanPolecat for the precise criteria and safety argument.
+func (d *Daemon) reclaimStalledCleanPolecats() {
+	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
+		d.reclaimRigStalledCleanPolecats(rigName)
+		return nil
+	})
+}
+
+// reclaimRigStalledCleanPolecats reclaims cleanly-stalled debris for one rig.
+func (d *Daemon) reclaimRigStalledCleanPolecats(rigName string) {
+	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
+	polecats, err := listPolecatWorktrees(polecatsDir)
+	if err != nil {
+		return // No polecats directory
+	}
+	for _, polecatName := range polecats {
+		d.reclaimStalledCleanPolecat(rigName, polecatName)
+	}
+}
+
+// reclaimStalledCleanPolecat reclaims a single cleanly-stalled polecat (gs-9wz).
+//
+// Target signature — ALL must hold:
+//   - tmux session is dead (live sessions belong to reapIdlePolecats /
+//     checkPolecatHealth, never to this reaper);
+//   - agent_state is an active state the polecat never transitioned out of
+//     (working/running) — the "stalled" signature that counts as
+//     recovery_blocked. idle warm-pool slots, intentional holds (stuck,
+//     escalated, awaiting-gate, paused) and in-flight spawns are excluded;
+//   - no OPEN hooked work (empty or already-closed hook_bead). An open hook is
+//     a genuine crash mid-task — left for the witness recovery path.
+//
+// The actual destroy goes through `gt polecat nuke` WITHOUT --force, whose own
+// safety checks refuse any polecat with uncommitted/unpushed/stashed work or an
+// open MR. So this is safe by construction: only provably-clean debris is
+// reclaimed; anything carrying real work survives for witness/mayor recovery.
+func (d *Daemon) reclaimStalledCleanPolecat(rigName, polecatName string) {
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+
+	// Live sessions are owned by other patrols.
+	if alive, err := d.tmux.HasSession(sessionName); err != nil || alive {
+		return
+	}
+
+	prefix := beads.GetPrefixForRig(d.config.TownRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	info, err := d.getAgentBeadInfo(agentBeadID)
+	if err != nil {
+		return // Can't classify — leave it for the crash detector / witness.
+	}
+
+	if !isStalledReclaimCandidate(beads.AgentState(info.State)) {
+		return
+	}
+
+	// Open hooked work → genuine mid-task crash, not clean debris.
+	if info.HookBead != "" && !d.isBeadClosed(info.HookBead) {
+		return
+	}
+
+	d.nukeCleanStalledPolecat(rigName, polecatName)
+}
+
+// isStalledReclaimCandidate reports whether a dead-session polecat in this agent
+// state is eligible for clean-debris reclamation (gs-9wz). Only the active
+// states a polecat should have transitioned out of on a clean gt done qualify;
+// terminal/idle states are already counted correctly and the deliberate-hold and
+// in-flight states must never be auto-nuked.
+func isStalledReclaimCandidate(s beads.AgentState) bool {
+	switch s {
+	case beads.AgentStateWorking, beads.AgentStateRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+// nukeCleanStalledPolecat reclaims one polecat via the audited `gt polecat nuke`
+// path. NO --force: nuke's safety checks refuse any polecat with
+// uncommitted/unpushed/stashed work, an open MR, or hooked work, so a refusal is
+// the safety net working as intended — that polecat stays for witness/mayor
+// recovery. Shelling out (rather than importing polecat.Manager) mirrors
+// dispatchQueuedWork and avoids a daemon↔cmd import cycle.
+func (d *Daemon) nukeCleanStalledPolecat(rigName, polecatName string) {
+	target := fmt.Sprintf("%s/%s", rigName, polecatName)
+	ctx, cancel := context.WithTimeout(d.ctx, 90*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gt", "polecat", "nuke", target)
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
+
+	if _, err := cmd.CombinedOutput(); err != nil {
+		// Expected when the polecat isn't clean (nuke refused to destroy work).
+		// Stay silent to avoid per-cycle log spam — the polecat remains visible
+		// via `gt scheduler status` and is handled by witness/mayor recovery.
+		return
+	}
+	d.logger.Printf("Reclaimed cleanly-stalled polecat %s — capacity freed (gs-9wz)", target)
 }
 
 // cleanupOrphanedProcesses kills orphaned claude subagent processes.
