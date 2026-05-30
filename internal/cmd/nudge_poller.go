@@ -70,6 +70,20 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("session %q not found", sessionName)
 	}
 
+	// Record our own PID so the supervisor and StopPoller always see the live
+	// process — even when this poller was started manually rather than via
+	// StartPoller. This refresh-on-startup is the core of gs-88o's pid-freshness
+	// fix; the matching release-on-exit keeps the file from lingering as stale.
+	myPID := os.Getpid()
+	if err := nudge.WritePIDFile(townRoot, sessionName, myPID); err != nil {
+		fmt.Fprintf(os.Stderr, "nudge-poller: failed to write PID file for %s: %v\n", sessionName, err)
+	}
+	defer func() {
+		if err := nudge.ReleaseOwnPIDFile(townRoot, sessionName, myPID); err != nil {
+			fmt.Fprintf(os.Stderr, "nudge-poller: failed to release PID file for %s: %v\n", sessionName, err)
+		}
+	}()
+
 	// Resolve nudge options once at startup: if the target agent uses Escape
 	// as cancel (e.g., Gemini CLI), skip the Escape keystroke during delivery
 	// to avoid canceling in-flight generation. (GH#gt-wasn)

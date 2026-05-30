@@ -3,6 +3,8 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -259,6 +261,72 @@ func TestSupervisePollers_ListPollersErrorLogs(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected list error log, got %v", getLogs())
+	}
+}
+
+// realIOSupervisor exercises the real nudge pid-file enumeration and cleanup
+// (so the test runs through genuine on-disk PID files and process-liveness
+// detection) while stubbing StartPoller — we must not exec a real poller
+// binary inside a unit test.
+type realIOSupervisor struct {
+	started []string
+}
+
+func (r *realIOSupervisor) ListPollers(townRoot string) ([]nudge.PollerEntry, error) {
+	return nudge.ListPollers(townRoot)
+}
+func (r *realIOSupervisor) StartPoller(_ string, session string) (int, error) {
+	r.started = append(r.started, session)
+	return 4242, nil
+}
+func (r *realIOSupervisor) RemoveStalePIDFile(townRoot, session string) error {
+	return nudge.RemoveStalePIDFile(townRoot, session)
+}
+
+// TestSupervisePollers_Integration_RespawnsKilledPoller is the acceptance test
+// for gs-88o: a poller registered via the real PID-file path is killed, and the
+// supervisor must auto-respawn it because its session is still alive. This
+// drives the full real path — pid-file write, ListPollers liveness probe, and
+// the respawn decision — rather than hand-setting Alive=false.
+func TestSupervisePollers_Integration_RespawnsKilledPoller(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX sleep + signal semantics")
+	}
+	townRoot := t.TempDir()
+	session := "gt-rig-crew-victim"
+
+	// Launch a real stand-in process to play the poller and register its PID
+	// through the same writer the poller itself uses on startup.
+	proc := exec.Command("sleep", "60")
+	if err := proc.Start(); err != nil {
+		t.Fatalf("starting stand-in poller: %v", err)
+	}
+	defer func() { _ = proc.Process.Kill() }()
+	if err := nudge.WritePIDFile(townRoot, session, proc.Process.Pid); err != nil {
+		t.Fatalf("WritePIDFile(): %v", err)
+	}
+
+	sup := &realIOSupervisor{}
+	sess := &fakeSessionChecker{alive: map[string]bool{session: true}}
+	logf, _ := captureLogger()
+
+	// While the poller is alive the supervisor must leave it alone.
+	supervisePollers(townRoot, sup, sess, logf)
+	if len(sup.started) != 0 {
+		t.Fatalf("alive poller should not be respawned, got %v", sup.started)
+	}
+
+	// Kill the poller and reap it so its PID is genuinely dead (not a zombie
+	// that still answers signal 0).
+	if err := proc.Process.Kill(); err != nil {
+		t.Fatalf("killing stand-in poller: %v", err)
+	}
+	_, _ = proc.Process.Wait()
+
+	// The supervisor must now respawn it, since the session is still alive.
+	supervisePollers(townRoot, sup, sess, logf)
+	if len(sup.started) != 1 || sup.started[0] != session {
+		t.Fatalf("killed poller should be respawned exactly once, got %v", sup.started)
 	}
 }
 

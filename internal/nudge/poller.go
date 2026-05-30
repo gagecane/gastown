@@ -77,8 +77,7 @@ func StartPoller(townRoot, session string) (int, error) {
 	pid := cmd.Process.Pid
 
 	// Write PID file for later cleanup.
-	pidPath := pollerPidFile(townRoot, session)
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
+	if err := WritePIDFile(townRoot, session, pid); err != nil {
 		// Non-fatal — the process is running, we just can't track it.
 		fmt.Fprintf(os.Stderr, "Warning: failed to write poller PID file: %v\n", err)
 	}
@@ -96,6 +95,50 @@ func buildPollerCommand(gtBin, townRoot, session string) *exec.Cmd {
 	cmd.Stderr = nil // discard
 	util.SetDetachedProcessGroup(cmd)
 	return cmd
+}
+
+// WritePIDFile records pid as the live nudge-poller for session, creating the
+// runtime directory if necessary. The poller process itself calls this on
+// startup (in addition to StartPoller writing it from the parent) so the PID
+// file always reflects the live process regardless of how the poller was
+// launched — StartPoller, a manual restart, or a supervisor respawn. Without
+// this, a manually (re)started poller leaves the old, dead PID in the file and
+// the supervisor cannot tell the live process from a corpse. See gs-88o.
+func WritePIDFile(townRoot, session string, pid int) error {
+	pidDir := pollerPidDir(townRoot)
+	if err := os.MkdirAll(pidDir, 0755); err != nil {
+		return fmt.Errorf("creating poller pid dir: %w", err)
+	}
+	pidPath := pollerPidFile(townRoot, session)
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644); err != nil {
+		return fmt.Errorf("writing poller pid file: %w", err)
+	}
+	return nil
+}
+
+// ReleaseOwnPIDFile removes the PID file for session, but only if it still
+// records pid. The conditional guards a restart race: when a new poller has
+// already overwritten the file with its own PID, the departing poller must not
+// delete its successor's live entry. A missing or differing PID is treated as
+// "not ours" and left untouched. See gs-88o.
+func ReleaseOwnPIDFile(townRoot, session string, pid int) error {
+	pidPath := pollerPidFile(townRoot, session)
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	current, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || current != pid {
+		// File holds a different (or corrupt) PID — not ours to remove.
+		return nil
+	}
+	if err := os.Remove(pidPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // StopPoller terminates the nudge-poller for a session, if running.

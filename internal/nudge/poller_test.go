@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/util"
@@ -140,6 +141,79 @@ func TestPollerAlive_LiveProcess(t *testing.T) {
 	}
 	if pid != myPid {
 		t.Errorf("pollerAlive() pid = %d, want %d", pid, myPid)
+	}
+}
+
+func TestWritePIDFile_RefreshesContent(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-gastown-crew-bear"
+
+	// First write — creates the runtime dir and the file.
+	if err := WritePIDFile(townRoot, session, 1234); err != nil {
+		t.Fatalf("WritePIDFile() first write: %v", err)
+	}
+	pidPath := pollerPidFile(townRoot, session)
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("reading pid file: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "1234" {
+		t.Errorf("pid file = %q, want %q", got, "1234")
+	}
+
+	// Second write with a new PID must overwrite (refresh on restart).
+	if err := WritePIDFile(townRoot, session, 5678); err != nil {
+		t.Fatalf("WritePIDFile() refresh: %v", err)
+	}
+	data, err = os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("reading pid file after refresh: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "5678" {
+		t.Errorf("refreshed pid file = %q, want %q", got, "5678")
+	}
+}
+
+func TestReleaseOwnPIDFile_RemovesOwnEntry(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-gastown-crew-bear"
+
+	if err := WritePIDFile(townRoot, session, 4242); err != nil {
+		t.Fatalf("WritePIDFile(): %v", err)
+	}
+	if err := ReleaseOwnPIDFile(townRoot, session, 4242); err != nil {
+		t.Fatalf("ReleaseOwnPIDFile(): %v", err)
+	}
+	if _, err := os.Stat(pollerPidFile(townRoot, session)); !os.IsNotExist(err) {
+		t.Error("ReleaseOwnPIDFile did not remove our own PID file")
+	}
+}
+
+func TestReleaseOwnPIDFile_LeavesSuccessorEntry(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-gastown-crew-bear"
+
+	// A successor poller has already claimed the file with its own PID.
+	if err := WritePIDFile(townRoot, session, 9999); err != nil {
+		t.Fatalf("WritePIDFile(): %v", err)
+	}
+	// The departing poller (pid 1111) must NOT delete the successor's entry.
+	if err := ReleaseOwnPIDFile(townRoot, session, 1111); err != nil {
+		t.Fatalf("ReleaseOwnPIDFile(): %v", err)
+	}
+	data, err := os.ReadFile(pollerPidFile(townRoot, session))
+	if err != nil {
+		t.Fatalf("successor pid file should survive: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "9999" {
+		t.Errorf("successor pid file = %q, want %q", got, "9999")
+	}
+}
+
+func TestReleaseOwnPIDFile_MissingFileIsNoError(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := ReleaseOwnPIDFile(townRoot, "no-such-session", 1); err != nil {
+		t.Errorf("ReleaseOwnPIDFile() on missing file: unexpected error %v", err)
 	}
 }
 
