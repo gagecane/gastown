@@ -1169,6 +1169,14 @@ func runDeaconHealthState(cmd *cobra.Command, args []string) error {
 // agentAddressToIDs converts an agent address to bead ID and session name.
 // Supports formats: "gastown/polecats/max", "gastown/witness", "deacon", "mayor"
 // Note: Town-level agents (Mayor, Deacon) use hq- prefix bead IDs stored in town beads.
+//
+// The bead ID is the canonical agent bead ID (e.g. "gt-gastown-polecat-max"),
+// NOT the session name (e.g. "gt-max"). These differ: a polecat's agent bead
+// carries the rig and role in its ID. Returning the session name as the bead ID
+// makes getAgentBeadUpdateTime and updateAgentBeadState silently fail against a
+// non-existent bead, defeating the deacon's primary liveness signal and leaving
+// only secondary tmux activity — which can misclassify actively-working
+// polecats. See gs-2r9.
 func agentAddressToIDs(address string) (beadID, sessionName string, err error) {
 	switch address {
 	case constants.RoleDeacon:
@@ -1182,22 +1190,24 @@ func agentAddressToIDs(address string) (beadID, sessionName string, err error) {
 	case 2:
 		// rig/role: "gastown/witness", "gastown/refinery"
 		rig, role := parts[0], parts[1]
+		prefix := session.PrefixFor(rig)
 		switch role {
 		case constants.RoleWitness:
-			return session.WitnessSessionName(session.PrefixFor(rig)), session.WitnessSessionName(session.PrefixFor(rig)), nil
+			return beads.WitnessBeadIDWithPrefix(prefix, rig), session.WitnessSessionName(prefix), nil
 		case constants.RoleRefinery:
-			return session.RefinerySessionName(session.PrefixFor(rig)), session.RefinerySessionName(session.PrefixFor(rig)), nil
+			return beads.RefineryBeadIDWithPrefix(prefix, rig), session.RefinerySessionName(prefix), nil
 		default:
 			return "", "", fmt.Errorf("unknown role: %s", role)
 		}
 	case 3:
 		// rig/type/name: "gastown/polecats/max", "gastown/crew/alpha"
 		rig, agentType, name := parts[0], parts[1], parts[2]
+		prefix := session.PrefixFor(rig)
 		switch agentType {
 		case "polecats":
-			return session.PolecatSessionName(session.PrefixFor(rig), name), session.PolecatSessionName(session.PrefixFor(rig), name), nil
+			return beads.PolecatBeadIDWithPrefix(prefix, rig, name), session.PolecatSessionName(prefix, name), nil
 		case constants.RoleCrew:
-			return session.CrewSessionName(session.PrefixFor(rig), name), session.CrewSessionName(session.PrefixFor(rig), name), nil
+			return beads.CrewBeadIDWithPrefix(prefix, rig, name), session.CrewSessionName(prefix, name), nil
 		default:
 			return "", "", fmt.Errorf("unknown agent type: %s", agentType)
 		}

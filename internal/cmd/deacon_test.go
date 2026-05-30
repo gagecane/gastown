@@ -79,31 +79,31 @@ func TestAgentAddressToIDs(t *testing.T) {
 		{
 			name:        "rig witness known prefix",
 			address:     "gastown/witness",
-			wantBeadID:  "gt-witness",
+			wantBeadID:  "gt-gastown-witness",
 			wantSession: "gt-witness",
 		},
 		{
 			name:        "rig refinery known prefix",
 			address:     "gastown/refinery",
-			wantBeadID:  "gt-refinery",
+			wantBeadID:  "gt-gastown-refinery",
 			wantSession: "gt-refinery",
 		},
 		{
 			name:        "rig witness other prefix",
 			address:     "beads/witness",
-			wantBeadID:  "bd-witness",
+			wantBeadID:  "bd-beads-witness",
 			wantSession: "bd-witness",
 		},
 		{
 			name:        "rig refinery other prefix",
 			address:     "longeye/refinery",
-			wantBeadID:  "le-refinery",
+			wantBeadID:  "le-longeye-refinery",
 			wantSession: "le-refinery",
 		},
 		{
 			name:        "rig witness unknown rig falls back to default prefix",
 			address:     "unknown-rig/witness",
-			wantBeadID:  session.DefaultPrefix + "-witness",
+			wantBeadID:  session.DefaultPrefix + "-unknown-rig-witness",
 			wantSession: session.DefaultPrefix + "-witness",
 		},
 		{
@@ -117,25 +117,25 @@ func TestAgentAddressToIDs(t *testing.T) {
 		{
 			name:        "polecat in gastown",
 			address:     "gastown/polecats/dust",
-			wantBeadID:  "gt-dust",
+			wantBeadID:  "gt-gastown-polecat-dust",
 			wantSession: "gt-dust",
 		},
 		{
 			name:        "polecat in beads",
 			address:     "beads/polecats/max",
-			wantBeadID:  "bd-max",
+			wantBeadID:  "bd-beads-polecat-max",
 			wantSession: "bd-max",
 		},
 		{
 			name:        "crew in gastown",
 			address:     "gastown/crew/alpha",
-			wantBeadID:  "gt-crew-alpha",
+			wantBeadID:  "gt-gastown-crew-alpha",
 			wantSession: "gt-crew-alpha",
 		},
 		{
 			name:        "crew in longeye",
 			address:     "longeye/crew/bravo",
-			wantBeadID:  "le-crew-bravo",
+			wantBeadID:  "le-longeye-crew-bravo",
 			wantSession: "le-crew-bravo",
 		},
 		{
@@ -147,7 +147,7 @@ func TestAgentAddressToIDs(t *testing.T) {
 		{
 			name:        "rig/type/name unknown rig uses default prefix",
 			address:     "unknown-rig/polecats/foo",
-			wantBeadID:  session.DefaultPrefix + "-foo",
+			wantBeadID:  session.DefaultPrefix + "-unknown-rig-polecat-foo",
 			wantSession: session.DefaultPrefix + "-foo",
 		},
 
