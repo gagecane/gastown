@@ -546,6 +546,41 @@ func TestActiveMRGitSafeForWorktree(t *testing.T) {
 			t.Fatalf("an unpushed commit must NOT be gitSafe — would risk work loss")
 		}
 	})
+
+	// gs-048: benign .beads/ churn is runtime artifact dirt (CleanExcludingRuntime),
+	// not work at risk — a worktree whose ONLY uncommitted change is a .beads/
+	// redirect file is gitSafe so the daemon reclaim patrol can free it.
+	t.Run("beads-only churn is safe (gs-048)", func(t *testing.T) {
+		repo := initTestRepoWithRemote(t)
+		if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir .beads: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".beads", "redirect"), []byte("../shared\n"), 0644); err != nil {
+			t.Fatalf("write .beads/redirect: %v", err)
+		}
+		if !activeMRGitSafeForWorktree(repo) {
+			t.Fatalf("a worktree dirty only with .beads/ churn must be gitSafe (reclaim allowed)")
+		}
+	})
+
+	// gs-048: a branch whose commits are already on origin/main (content-identical,
+	// branch behind main) carries 0 patch-unique unpushed commits — gitSafe so the
+	// reclaim patrol frees it instead of parking it as recovery_blocked.
+	t.Run("commits already on origin/main are safe (gs-048)", func(t *testing.T) {
+		repo := initTestRepoWithRemote(t)
+		runGit(t, repo, "checkout", "-b", "polecat/merged", "main")
+		if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("X\n"), 0644); err != nil {
+			t.Fatalf("write feature.txt: %v", err)
+		}
+		runGit(t, repo, "add", "feature.txt")
+		runGit(t, repo, "commit", "-m", "feature")
+		// The feature commit lands on origin/main verbatim; HEAD is now an ancestor
+		// of origin/main (the branch is "behind" once main moves ahead).
+		runGit(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+		if !activeMRGitSafeForWorktree(repo) {
+			t.Fatalf("a branch whose commits are already on origin/main must be gitSafe")
+		}
+	})
 }
 
 // initTestRepo creates a temp dir, `git init`s it, configures local

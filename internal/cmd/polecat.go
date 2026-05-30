@@ -1510,9 +1510,18 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 
 // staleCleanupStatusCanBeIgnoredForRecovery reports whether a non-clean
 // cleanup_status self-report can be safely ignored because the LIVE predicates
-// independently prove no work is at risk. It applies to two report classes:
+// independently prove no work is at risk. It applies to these report classes:
 //
-//   - has_unpushed: a stale self-report the worktree has since pushed past.
+//   - has_unpushed: a stale self-report the worktree has since pushed past, or
+//     whose commits are already on origin/main (gs-048: branch behind main but
+//     content-identical). gitSafe's patch-id-aware preservation check counts
+//     such commits as 0 unpushed, so the stale report is provably moot.
+//   - has_uncommitted (gs-048): a self-report of dirt whose only remaining churn
+//     is runtime/benign — e.g. .beads/ redirect files. gitSafe is computed via
+//     CleanExcludingRuntime, which already treats runtime artifacts (.beads,
+//     .claude, node_modules, …) as not-work-at-risk — the same policy gt done
+//     uses. So gitSafe==true means the worktree carries NO real source dirt; a
+//     stale has_uncommitted report over benign churn is then safe to ignore.
 //   - missing/unknown (gs-9wz): a polecat that DIED before gt done ever recorded
 //     a cleanup_status — the stalled-debris signature. Such polecats ALWAYS
 //     carry an empty cleanup_status (gt done writes cleanup and flips to idle
@@ -1521,15 +1530,17 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 //     forever and they accumulated as recovery_blocked under auto-dispatch
 //     load — the exact starvation gs-9wz tracks.
 //
-// gitSafe is the authoritative live git check (clean worktree, no stash, 0
-// unpushed, branch pushed to origin) — the same proof already trusted for the
-// has_unpushed case, so extending it to a missing/unknown report is no weaker.
-// workTerminal/hookSafe/activeMRSafe ensure the assigned work bead, hook, and MR
-// carry no unfinished work either. POSITIVE dirt reports (has_uncommitted,
-// has_stash) are NOT overridable — a self-report of real dirt is never ignored.
+// gitSafe is the authoritative live git check (worktree clean excluding runtime
+// artifacts, no stash, 0 patch-unique unpushed commits, branch pushed/preserved
+// to origin) — the same proof for every class above, so each is no weaker than
+// the next. workTerminal/hookSafe/activeMRSafe ensure the assigned work bead,
+// hook, and MR carry no unfinished work either. has_stash remains NON-overridable
+// — a stash is durable work that survives worktree deletion, and a stash
+// self-report is too strong a signal to discard on a live check that might miss
+// it.
 func staleCleanupStatusCanBeIgnoredForRecovery(status polecat.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
 	switch status {
-	case polecat.CleanupUnpushed, polecat.CleanupUnknown, "":
+	case polecat.CleanupUnpushed, polecat.CleanupUncommitted, polecat.CleanupUnknown, "":
 		return workTerminal && hookSafe && activeMRSafe && gitSafe
 	default:
 		return false

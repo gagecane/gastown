@@ -375,6 +375,37 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 			activeMRSafe: false,
 			gitSafe:      true,
 		},
+		// gs-048: a has_uncommitted self-report over benign runtime/.beads churn is
+		// ignorable when the live gitSafe check (CleanExcludingRuntime) proves no
+		// real source dirt, stash, or unpushed work remains. gitSafe==true is the
+		// authoritative proof; the stale positive report is then moot.
+		{
+			name:         "has_uncommitted with gitSafe (benign runtime churn) is ignorable (gs-048)",
+			status:       polecat.CleanupUncommitted,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "has_uncommitted still blocks when git not safe (real source dirt)",
+			status:       polecat.CleanupUncommitted,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      false,
+		},
+		// has_stash stays non-overridable even with every predicate safe — a stash
+		// is durable work and too strong a signal to discard on a live check.
+		{
+			name:         "has_stash stays blocked even when gitSafe (gs-048 scope guard)",
+			status:       polecat.CleanupStash,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+		},
 	}
 
 	for _, tt := range tests {
