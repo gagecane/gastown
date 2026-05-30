@@ -159,11 +159,17 @@ EOF
     reason_env='GT_SKIP_PREPUSH_REASON=pre-verified'
   fi
 
+  # Sterile PATH: only the stubs + coreutils/git, NOT the developer's full
+  # PATH. The full PATH leaks a real golangci-lint (e.g. ~/.local/bin) into a
+  # suite that documents itself as using "only go and gofmt stubs" — the real
+  # linter then runs against the stub `go` and chokes. GT_PREPUSH_PROBE_DIRS is
+  # pinned to the stubdir so the script's standard-dir probe (gs-812) doesn't
+  # re-introduce /usr/local/go/bin or ~/.local/bin.
   local rc=0
   OUT=$(
     cd "$tmprepo" && \
-    PATH="$stubdir:$PATH" \
-    env GT_SKIP_PREPUSH="$skip_slow" $reason_env \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    GT_SKIP_PREPUSH="$skip_slow" $reason_env \
     bash "$SCRIPT" 2>&1
   ) || rc=$?
   RC=$rc
@@ -536,6 +542,138 @@ EOF
   rm -rf "$stubdir" "$tmprepo"
 }
 
+# --- gs-812: fail closed in a Go repo + standard-dir probe ----------------
+#
+# A Go repo is identified by a go.mod at the repo root. When the toolchain is
+# missing there, the gate must BLOCK the push (not silently exit 0) and record
+# the block in .runtime/prepush-skips.jsonl. Non-Go checkouts still skip
+# gracefully. The standard-dir probe folds tool install dirs onto PATH before
+# declaring a tool absent; GT_PREPUSH_PROBE_DIRS overrides the probe list.
+#
+# These tests run with a STERILE PATH (no developer PATH) and pin
+# GT_PREPUSH_PROBE_DIRS so a real go/golangci-lint can't leak in.
+
+# Helper: make a temp git repo. Pass "go" to add a go.mod (Go repo), anything
+# else for a non-Go checkout. Echoes the repo path.
+make_test_repo() {
+  local kind=$1
+  local repo
+  repo=$(mktemp -d)
+  ( cd "$repo" && git init -q && \
+      git config user.email "test@example.com" && \
+      git config user.name "test"
+    if [[ "$kind" == "go" ]]; then
+      printf 'module testmod\n\ngo 1.21\n' > go.mod
+      git add go.mod && git commit -q -m init
+    else
+      git commit -q --allow-empty -m init
+    fi ) >/dev/null 2>&1
+  printf '%s' "$repo"
+}
+
+# Test: 'go' missing in a Go repo blocks the push and writes a BLOCKED audit.
+test_go_absent_blocks_in_go_repo() {
+  local repo emptydir
+  repo=$(make_test_repo go)
+  emptydir=$(mktemp -d)   # probe dir with no tools
+  local rc=0 out
+  out=$(
+    cd "$repo" && \
+    env PATH="/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$emptydir" \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+  if [[ $rc -eq 0 ]]; then
+    echo "FAIL: missing 'go' in a Go repo should reject the push (got rc=0)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$repo" "$emptydir"; return
+  fi
+  local audit="$repo/.runtime/prepush-skips.jsonl"
+  if [[ ! -s "$audit" ]] || ! grep -q 'BLOCKED' "$audit"; then
+    echo "FAIL: blocked push should write a BLOCKED audit line" >&2
+    [[ -f "$audit" ]] && cat "$audit" >&2
+    FAIL=$((FAIL + 1)); rm -rf "$repo" "$emptydir"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$repo" "$emptydir"
+}
+
+# Test: 'go' missing in a NON-Go checkout skips gracefully (rc=0, no audit).
+test_go_absent_skips_in_non_go_repo() {
+  local repo emptydir
+  repo=$(make_test_repo plain)
+  emptydir=$(mktemp -d)
+  local rc=0 out
+  out=$(
+    cd "$repo" && \
+    env PATH="/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$emptydir" \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL: missing 'go' in a non-Go checkout should skip gracefully (got rc=$rc)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$repo" "$emptydir"; return
+  fi
+  if [[ -f "$repo/.runtime/prepush-skips.jsonl" ]]; then
+    echo "FAIL: graceful non-Go skip should NOT write an audit line" >&2
+    FAIL=$((FAIL + 1)); rm -rf "$repo" "$emptydir"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$repo" "$emptydir"
+}
+
+# Test: golangci-lint missing in a Go repo (go present) blocks + audits.
+test_lint_absent_blocks_in_go_repo() {
+  local repo stubdir
+  repo=$(make_test_repo go)
+  stubdir=$(mktemp -d)   # go + gofmt present, golangci-lint absent
+  printf '#!/bin/bash\nexit 0\n' > "$stubdir/go";    chmod +x "$stubdir/go"
+  printf '#!/bin/bash\nexit 0\n' > "$stubdir/gofmt"; chmod +x "$stubdir/gofmt"
+  local rc=0 out
+  out=$(
+    cd "$repo" && \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+  if [[ $rc -eq 0 ]]; then
+    echo "FAIL: missing golangci-lint in a Go repo should reject the push (got rc=0)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$repo" "$stubdir"; return
+  fi
+  if ! echo "$out" | grep -qi "golangci-lint"; then
+    echo "FAIL: rejection message should mention golangci-lint" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$repo" "$stubdir"; return
+  fi
+  local audit="$repo/.runtime/prepush-skips.jsonl"
+  if [[ ! -s "$audit" ]] || ! grep -q 'BLOCKED' "$audit"; then
+    echo "FAIL: blocked lint gate should write a BLOCKED audit line" >&2
+    FAIL=$((FAIL + 1)); rm -rf "$repo" "$stubdir"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$repo" "$stubdir"
+}
+
+# Test: the standard-dir probe finds a toolchain that's off the base PATH but
+# present in a probed dir — the gate then runs to completion instead of
+# blocking. This is the core gs-812 mechanism: "absent" must mean genuinely
+# not installed, not merely off this shell's PATH.
+test_probe_finds_tools_off_base_path() {
+  local repo probedir
+  repo=$(make_test_repo go)
+  probedir=$(mktemp -d)   # all tools live ONLY here, not on the base PATH
+  printf '#!/bin/bash\nexit 0\n' > "$probedir/go";            chmod +x "$probedir/go"
+  printf '#!/bin/bash\nexit 0\n' > "$probedir/gofmt";         chmod +x "$probedir/gofmt"
+  printf '#!/bin/bash\nexit 0\n' > "$probedir/golangci-lint"; chmod +x "$probedir/golangci-lint"
+  local rc=0 out
+  out=$(
+    cd "$repo" && \
+    env PATH="/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$probedir" \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL: probe should find tools in GT_PREPUSH_PROBE_DIRS and pass (got rc=$rc)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$repo" "$probedir"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$repo" "$probedir"
+}
+
 # Only run the functional test if we have a real `go` on PATH — otherwise
 # pre-push-check.sh short-circuits before the unset matters.
 if command -v go >/dev/null 2>&1; then
@@ -557,6 +695,11 @@ if command -v git >/dev/null 2>&1; then
   # gu-lint-fastgate: golangci-lint as a fast gate
   test_lint_gate_skipped_when_not_installed
   test_lint_gate_blocks_under_skip
+  # gs-812: fail closed in a Go repo + standard-dir probe
+  test_go_absent_blocks_in_go_repo
+  test_go_absent_skips_in_non_go_repo
+  test_lint_absent_blocks_in_go_repo
+  test_probe_finds_tools_off_base_path
 fi
 
 echo ""

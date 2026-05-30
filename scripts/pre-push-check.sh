@@ -15,9 +15,10 @@
 #     3. gofmt -l                  — formatting check (catches trailing newlines etc.)
 #     4. golangci-lint run         — misspell, errcheck, gosec, unconvert,
 #                                    unparam (catches lint failures that
-#                                    only CI's Lint job sees today). Skipped
-#                                    if golangci-lint not installed locally.
-#                                    See gu-lint-fastgate.
+#                                    only CI's Lint job sees today). In a Go
+#                                    repo a missing golangci-lint fails the
+#                                    push CLOSED (gs-812); non-Go checkouts
+#                                    skip it. See gu-lint-fastgate.
 #
 #   SLOW gates (skipped when GT_SKIP_PREPUSH=1):
 #     5. go test ./... -count=1    — full unit test suite with clean env (~2min)
@@ -155,11 +156,63 @@ if [[ -z "$REPO_ROOT" ]]; then
 fi
 cd "$REPO_ROOT" || exit 1
 
-# --- Require go ----------------------------------------------------------
+# --- Tool discovery: probe standard install dirs --------------------------
+#
+# gs-812: a daemon restarted from a sterile shell, a polecat worktree with a
+# thinner PATH, or a cron-launched hook can run with a PATH that omits the
+# dirs Go tools install to. Before declaring a tool "absent" (and skipping or
+# blocking on its gate), fold the standard install locations onto PATH so
+# "not found" means genuinely-not-installed, not just not-on-this-PATH. The
+# probe list is overridable via GT_PREPUSH_PROBE_DIRS (colon-separated) for
+# testing.
+
+PROBE_DIRS="${GT_PREPUSH_PROBE_DIRS:-/usr/local/go/bin:$HOME/go/bin:$HOME/.local/bin}"
+_old_ifs=$IFS
+IFS=':'
+for _d in $PROBE_DIRS; do
+  [[ -n "$_d" && -d "$_d" ]] || continue
+  case ":$PATH:" in
+    *":$_d:"*) ;;            # already on PATH
+    *) PATH="$PATH:$_d" ;;
+  esac
+done
+IFS=$_old_ifs
+export PATH
+
+# --- Is this a Go repo? ---------------------------------------------------
+#
+# The gates only mean something in a Go repo, identified by a go.mod at the
+# repo root. In a Go repo the gates ARE the contract, so a missing toolchain
+# must FAIL CLOSED (block + audit) rather than silently skip — the old
+# silent exit-0 skip is exactly what let ungated pushes reach main (gs-812).
+# Genuine non-Go checkouts still skip gracefully.
+
+IS_GO_REPO=0
+[[ -f "$REPO_ROOT/go.mod" ]] && IS_GO_REPO=1
+
+# --- Require go (fail closed in a Go repo) -------------------------------
 
 if ! command -v go >/dev/null 2>&1; then
-  echo "⚠ pre-push: 'go' not found on PATH — skipping local gates." >&2
-  echo "  CI will still run them; install Go for faster feedback." >&2
+  if [[ "$IS_GO_REPO" == "1" ]]; then
+    emit_skip_event "BLOCKED: 'go' not found on PATH in a Go repo (probed: ${PROBE_DIRS})"
+    cat >&2 <<EOF
+
+✗ Push rejected: 'go' not found on PATH, but this is a Go repo (go.mod present).
+
+The pre-push gates (build/vet/gofmt/lint/test) are the only backstop between a
+broken change and main — crew workers push directly, with no merge-queue. The
+old behavior skipped every gate when 'go' fell off PATH, landing ungated code
+silently. This gate now fails CLOSED, and the block is recorded in
+.runtime/prepush-skips.jsonl.
+
+Probed for 'go' in: ${PROBE_DIRS}
+
+Fix: install Go or add it to PATH, then re-push. To bypass ALL hooks anyway
+(not recommended on a Go repo): git push --no-verify.
+EOF
+    exit 1
+  fi
+  echo "⚠ pre-push: 'go' not found and no go.mod at repo root — non-Go checkout, skipping gates." >&2
   exit 0
 fi
 
@@ -261,10 +314,11 @@ fi
 # --pre-verified. The check is fast (~10-30s on this codebase) and catches
 # the failure modes that pre-verification often misses.
 #
-# If golangci-lint isn't installed locally, we skip with a loud warning rather
-# than failing the push — installing it requires `go install` + the version
-# lock from .github/workflows/ci.yml. CI still runs the full lint as the
-# authoritative gate; this is the local fast-feedback layer. (gu-lint-fastgate)
+# If golangci-lint isn't installed locally, behavior splits on repo type
+# (gs-812): in a Go repo this gate fails CLOSED (block + audit), because a
+# missing linter is exactly how lint failures slipped onto main in the window
+# between push and CI catch. Non-Go checkouts skip gracefully. Install requires
+# `go install` + the version lock from .github/workflows/ci.yml. (gu-lint-fastgate)
 
 if command -v golangci-lint >/dev/null 2>&1; then
   echo "pre-push: [fast] golangci-lint run (static analysis)" >&2
@@ -281,9 +335,26 @@ The full lint suite is configured in .golangci.yml; the same gate runs in CI.
 EOF
     exit 1
   fi
+elif [[ "$IS_GO_REPO" == "1" ]]; then
+  emit_skip_event "BLOCKED: golangci-lint not found on PATH in a Go repo (probed: ${PROBE_DIRS})"
+  cat >&2 <<EOF
+
+✗ Push rejected: golangci-lint not found on PATH, but this is a Go repo.
+
+CI's Lint job runs it regardless; skipping it locally let lint failures land on
+main in the window between push and CI catch — the exact churn gs-812 tracks.
+In a Go repo this gate now fails CLOSED. The block is recorded in
+.runtime/prepush-skips.jsonl.
+
+Probed for golangci-lint in: ${PROBE_DIRS}
+
+Fix: install it, then re-push:
+  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+To bypass ALL hooks anyway (not recommended): git push --no-verify.
+EOF
+  exit 1
 else
-  echo "pre-push: [fast] golangci-lint not installed locally — skipping (CI will still run it)" >&2
-  echo "pre-push: install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4" >&2
+  echo "pre-push: [fast] golangci-lint not installed and no go.mod — non-Go checkout, skipping lint gate" >&2
 fi
 
 # --- SLOW GATE: go test ---------------------------------------------------
