@@ -1461,6 +1461,94 @@ func TestDispatchIssue_Failure(t *testing.T) {
 	}
 }
 
+// TestDispatchIssue_StripsPolecatRoleEnv is a regression test for gu-dvs5.
+// The convoy-feed path can fire from a polecat closing a leg via gt done →
+// bd close → checkConvoyCompletion → dispatchIssue. If the gt sling subprocess
+// inherits GT_ROLE=polecat / GT_POLECAT=name, gt sling rejects the dispatch
+// with "polecats cannot sling (use gt done for handoff)" and the convoy
+// stalls. dispatchIssue must strip those vars so the subprocess looks like a
+// system caller (which it is — the convoy infrastructure is the caller).
+func TestDispatchIssue_StripsPolecatRoleEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	// Set polecat env in the parent so dispatchIssue inherits it via
+	// os.Environ(). The fix must filter it back out.
+	t.Setenv("GT_ROLE", "polecat")
+	t.Setenv("GT_POLECAT", "deathclaw")
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "gt-env.log")
+	gtPath := filepath.Join(dir, "gt")
+	// Stub writes its environment to a file, not its args, so the test can
+	// inspect what env was passed in.
+	script := fmt.Sprintf("#!/bin/sh\nenv >> %q\nexit 0\n", envPath)
+	if err := os.WriteFile(gtPath, []byte(script), 0755); err != nil {
+		t.Fatalf("WriteFile gt stub: %v", err)
+	}
+
+	if err := dispatchIssue(context.Background(), t.TempDir(), "test-abc", "myrig", gtPath, ""); err != nil {
+		t.Fatalf("dispatchIssue returned error: %v", err)
+	}
+
+	envData, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("gt stub did not write env file: %v", err)
+	}
+	envStr := string(envData)
+
+	for _, key := range []string{"GT_ROLE=", "GT_POLECAT="} {
+		for _, line := range strings.Split(envStr, "\n") {
+			if strings.HasPrefix(line, key) {
+				t.Errorf("gt sling subprocess inherited %s — convoy-feed dispatch should strip polecat role env (gu-dvs5). Got line: %q", key, line)
+			}
+		}
+	}
+}
+
+func TestStripPolecatRoleEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "removes both keys",
+			in:   []string{"PATH=/bin", "GT_ROLE=polecat", "HOME=/h", "GT_POLECAT=deathclaw", "USER=u"},
+			want: []string{"PATH=/bin", "HOME=/h", "USER=u"},
+		},
+		{
+			name: "no-op when keys absent",
+			in:   []string{"PATH=/bin", "HOME=/h"},
+			want: []string{"PATH=/bin", "HOME=/h"},
+		},
+		{
+			name: "preserves non-matching prefixes",
+			in:   []string{"GT_ROLE_OTHER=x", "GT_ROLES=y", "GT_ROLE=polecat"},
+			want: []string{"GT_ROLE_OTHER=x", "GT_ROLES=y"},
+		},
+		{
+			name: "empty input",
+			in:   []string{},
+			want: []string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripPolecatRoleEnv(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len mismatch: got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("index %d: got %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DS-07: CheckConvoysForIssue skips staged_ready convoys
 // ---------------------------------------------------------------------------
