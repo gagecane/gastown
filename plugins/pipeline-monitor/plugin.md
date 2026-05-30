@@ -61,6 +61,28 @@ Package-scoped build/test failures MUST be filed in the rig whose remote owns th
 | CodegenAgentSchedulerWebApp | casc_webapp | casw |
 | _(unknown / pipeline-level)_ | codegen_ws | cws |
 
+## Step 0: Require pipeline MCP tools (fail-soft)
+
+This plugin depends on Amazon pipeline MCP tools — `GetPipelineHealth`,
+`GetPipelineDetails`, and `BrazilPackageBuilderAnalyzerTool`. These exist only
+on hosts wired to the Brazil/pipeline MCP server. **Before doing anything else,
+confirm those tools are available to you.**
+
+If any required tool is **not available** (this host has no pipeline MCP
+server), this host does not monitor pipelines. **Skip gracefully:**
+
+- Print exactly one info line, e.g.
+  `pipeline-monitor: pipeline MCP tools unavailable on this host — skipping (no-op)`.
+- Then **exit successfully.**
+- Do **NOT** escalate (no `gt escalate`), do **NOT** file ANY bead (no P1
+  blocker, no plugin-run receipt, no sentinel), and do **NOT** dispatch any
+  further work.
+
+A missing MCP server is a host-capability fact, not an incident — escalating it
+just floods the mayor with HIGH alerts every cooldown cycle and re-drifts after
+each rebuild (gs-348). Only continue to Step 1 once the required tools are
+confirmed present.
+
 ## Step 1: Check Health
 
 Use the `GetPipelineHealth` MCP tool:

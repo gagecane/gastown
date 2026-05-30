@@ -29,14 +29,16 @@ record_run() {
 # --- Preflight: harmony CLI -------------------------------------------------
 
 if ! command -v harmony >/dev/null 2>&1; then
-  log "ERROR: 'harmony' not on PATH. Cannot refresh CodeArtifact token."
-  record_run failure "harmony CLI missing from PATH"
-  gt escalate "harmony-npm-refresh: 'harmony' CLI missing" \
-    --severity high \
-    --source "plugin:harmony-npm-refresh" \
-    --reason "The 'harmony' CLI is not on PATH; CodeArtifact token cannot be refreshed. Operator must install Harmony CLI (https://builderhub.corp.amazon.com/docs/codeartifact/user-guide/)." \
-    2>/dev/null || true
-  exit 1
+  # Fail-soft (gs-348): a missing 'harmony' CLI means this host does not use
+  # Amazon Harmony/CodeArtifact at all — there is nothing to refresh and no
+  # operator action is possible or warranted here. Skip quietly with a SUCCESS
+  # exit: do NOT escalate, do NOT file a plugin-run bead, do NOT dispatch a dog.
+  # A HIGH escalation here just floods the mayor on every non-Amazon host and
+  # re-fires each cooldown cycle. (Genuine failures below — where harmony IS
+  # installed but Midway auth / token refresh fails — still escalate, because
+  # those are actionable on a host that actually uses Harmony.)
+  log "INFO: 'harmony' CLI not on PATH — host does not use Amazon CodeArtifact; skipping (no-op)."
+  exit 0
 fi
 
 # --- Preflight: Midway auth -------------------------------------------------
