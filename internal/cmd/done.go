@@ -1690,6 +1690,13 @@ afterSafetyNet:
 				Description: description,
 				Ephemeral:   true,
 				Rig:         rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
+				// gs-onu: force this write to commit to shared main even if the
+				// rig config has drifted to auto-commit=off. Otherwise the MR bead
+				// sits in the polecat session's Dolt working set, the local bd.Show
+				// readback below still passes, then the polecat self-terminates
+				// before the write commits — the refinery never sees the MR and the
+				// branch is silently stranded.
+				DoltAutoCommit: "on",
 			})
 			if err != nil {
 				// Non-fatal: record the error and skip to notifyWitness.
@@ -1772,10 +1779,14 @@ afterSafetyNet:
 			fmt.Printf("%s Work submitted to merge queue (verified)\n", style.Bold.Render("✓"))
 			fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
 
-			// NOTE: Refinery nudge is deferred to AFTER the Dolt branch merge
-			// (see post-merge nudge below). Nudging here would race with the
-			// merge — refinery wakes up and queries main before the polecat's
-			// Dolt branch (containing the MR bead) is merged.
+			// NOTE: the refinery nudge is deferred to the notifyWitness/post-MR
+			// section below, not fired here. (Historical note: an earlier comment
+			// claimed this was to wait for a "polecat Dolt branch merge" — that is
+			// stale. Beads use the transaction-based shared-main model against the
+			// shared Dolt server; with DoltAutoCommit:"on" above the MR bead is
+			// committed to main as soon as Create returns, so there is no branch to
+			// merge. The deferral is just ordering: nudge after hook/cleanup state
+			// is settled. See gs-onu.)
 		}
 
 		// Write MR checkpoint for resume (gt-aufru)

@@ -586,6 +586,16 @@ type CreateOptions struct {
 	// create path so we can write the default state in a single
 	// command rather than create-then-update.
 	Metadata json.RawMessage
+
+	// DoltAutoCommit, when non-empty (e.g. "on"), forces the Dolt auto-commit
+	// policy for THIS create regardless of the resolved config default. Used for
+	// ephemeral MR beads (gs-onu): they MUST commit to shared main immediately so
+	// the refinery can see them. If the rig config has drifted to auto-commit=off,
+	// the INSERT otherwise sits in the polecat session's Dolt working set and is
+	// lost when the session self-terminates — gt done exits COMPLETED with the
+	// branch pushed but the MR silently stranded. Pinning "on" here makes MR
+	// durability independent of config drift.
+	DoltAutoCommit string
 }
 
 // UpdateOptions specifies options for updating an issue.
@@ -1796,6 +1806,9 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 	}
 	if len(opts.Metadata) > 0 {
 		args = append(args, "--metadata="+string(opts.Metadata))
+	}
+	if opts.DoltAutoCommit != "" {
+		args = append(args, "--dolt-auto-commit="+opts.DoltAutoCommit)
 	}
 	// Default Actor from BD_ACTOR env var if not specified
 	// Uses getActor() to respect isolated mode (tests)

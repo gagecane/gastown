@@ -307,12 +307,15 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	} else {
 		// Create MR bead (ephemeral wisp - will be cleaned up after merge)
 		mrIssue, err = bd.Create(beads.CreateOptions{
-			Title:       title,
-			Labels:      []string{"gt:merge-request"},
-			Priority:    priority,
-			Description: description,
-			Ephemeral:   true,
-			Rig:         rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
+			// gs-onu: commit the MR bead to shared main immediately, independent
+			// of any auto-commit config drift, so the refinery reliably sees it.
+			DoltAutoCommit: "on",
+			Title:          title,
+			Labels:         []string{"gt:merge-request"},
+			Priority:       priority,
+			Description:    description,
+			Ephemeral:      true,
+			Rig:            rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
 		})
 		if err != nil {
 			return fmt.Errorf("creating merge request bead: %w", err)
