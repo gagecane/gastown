@@ -143,6 +143,16 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("checking bead status: %w", err)
 	}
 
+	// Soft cross-rig title warning (gu-an4y). The hard prefix guards above
+	// catch beads whose PREFIX provably can't dispatch to the target rig.
+	// They miss the bootstrap-pattern failure mode where prefix and rig agree
+	// but the title clearly mentions a different rig (e.g., a cadk-* bead
+	// titled "CodegenAgentSchedulerConstructs..." being scheduled to
+	// casc_cdk because cadk-* routes there). Emit a stderr warning naming
+	// the foreign rig so operators can refile before a polecat slot is
+	// wasted on the wrong worktree.
+	titleMismatchWarner(townRoot, rigName, beadID, info.Title)
+
 	// Guard against scheduling closed/tombstone beads (defense-in-depth, hq-ki2).
 	// Mirrors the closed-bead guards in runSling (sling.go) and executeSling
 	// (sling_dispatch.go). The daemon's stranded scan can route closed cross-prefix
