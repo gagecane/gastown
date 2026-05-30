@@ -1184,9 +1184,9 @@ func agentAddressToIDs(address string) (beadID, sessionName string, err error) {
 		rig, role := parts[0], parts[1]
 		switch role {
 		case constants.RoleWitness:
-			return session.WitnessSessionName(session.PrefixFor(rig)), session.WitnessSessionName(session.PrefixFor(rig)), nil
+			return beads.WitnessBeadIDWithPrefix(session.PrefixFor(rig), rig), session.WitnessSessionName(session.PrefixFor(rig)), nil
 		case constants.RoleRefinery:
-			return session.RefinerySessionName(session.PrefixFor(rig)), session.RefinerySessionName(session.PrefixFor(rig)), nil
+			return beads.RefineryBeadIDWithPrefix(session.PrefixFor(rig), rig), session.RefinerySessionName(session.PrefixFor(rig)), nil
 		default:
 			return "", "", fmt.Errorf("unknown role: %s", role)
 		}
@@ -1195,9 +1195,9 @@ func agentAddressToIDs(address string) (beadID, sessionName string, err error) {
 		rig, agentType, name := parts[0], parts[1], parts[2]
 		switch agentType {
 		case "polecats":
-			return session.PolecatSessionName(session.PrefixFor(rig), name), session.PolecatSessionName(session.PrefixFor(rig), name), nil
+			return beads.PolecatBeadIDWithPrefix(session.PrefixFor(rig), rig, name), session.PolecatSessionName(session.PrefixFor(rig), name), nil
 		case constants.RoleCrew:
-			return session.CrewSessionName(session.PrefixFor(rig), name), session.CrewSessionName(session.PrefixFor(rig), name), nil
+			return beads.CrewBeadIDWithPrefix(session.PrefixFor(rig), rig, name), session.CrewSessionName(session.PrefixFor(rig), name), nil
 		default:
 			return "", "", fmt.Errorf("unknown agent type: %s", agentType)
 		}
