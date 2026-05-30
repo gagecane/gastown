@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -753,6 +754,15 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 // dispatchIssue dispatches an issue to a rig via gt sling.
 // The context parameter enables cancellation on daemon shutdown.
 // gtPath is the resolved path to the gt binary.
+//
+// The GT_ROLE / GT_POLECAT env vars are stripped from the subprocess: the
+// in-process convoy-feed path can fire from a polecat's `bd close` (the
+// close hook in internal/cmd/close.go calls CheckConvoysForIssue → this
+// dispatch). gt sling rejects polecat-initiated slings with "polecats
+// cannot sling (use gt done for handoff)" — but the convoy infrastructure
+// is the one slinging here, not the polecat. Stripping the role env makes
+// the subprocess look like a system caller, which is what it actually is.
+// See gu-dvs5.
 func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBranch string) error {
 	args := []string{"sling", issueID, rig, "--no-boot"}
 	if baseBranch != "" {
@@ -760,6 +770,7 @@ func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBran
 	}
 	cmd := exec.CommandContext(ctx, gtPath, args...)
 	cmd.Dir = townRoot
+	cmd.Env = stripPolecatRoleEnv(os.Environ())
 	util.SetProcessGroup(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -769,4 +780,19 @@ func dispatchIssue(ctx context.Context, townRoot, issueID, rig, gtPath, baseBran
 	}
 
 	return nil
+}
+
+// stripPolecatRoleEnv returns env with GT_ROLE and GT_POLECAT removed. The
+// convoy-feed dispatch path is system-initiated; passing through the caller's
+// polecat identity would make gt sling reject the dispatch as a polecat
+// handoff. See gu-dvs5.
+func stripPolecatRoleEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GT_ROLE=") || strings.HasPrefix(kv, "GT_POLECAT=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
