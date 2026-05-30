@@ -2386,6 +2386,22 @@ func (g *Git) LogOneline(revRange string) (string, error) {
 	return g.run("log", "--oneline", revRange)
 }
 
+// LogGrepFixedHead returns the SHA of the most recent commit on the given ref
+// whose message contains the given fixed-string substring, or "" if none.
+//
+// This is the bead-citation lookup used by the false-deferred recovery patrol
+// (gu-wykt) and any future "is this bead's ID cited on mainline?" caller.
+// --fixed-strings prevents bead IDs containing regex metacharacters (none
+// today, but cheap defense) from expanding into unintended regex matches.
+// -n 1 returns at most one SHA; --format=%H emits the full SHA without
+// surrounding decoration.
+//
+// Returns trimmed stdout. An error from git (e.g. unknown revision) is
+// propagated to the caller; "no matching commit" returns ("", nil).
+func (g *Git) LogGrepFixedHead(ref, needle string) (string, error) {
+	return g.run("log", ref, "--grep="+needle, "--fixed-strings", "--format=%H", "-n", "1")
+}
+
 // WorktreeAdd creates a new worktree at the given path with a new branch.
 // The new branch is created from the current HEAD.
 // Skips LFS smudge filter during checkout (see WorktreeAddFromRef).

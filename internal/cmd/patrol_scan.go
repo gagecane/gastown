@@ -70,7 +70,24 @@ type PatrolScanOutput struct {
 	PostHoc        *PatrolScanPostHocOutput    `json:"post_hoc_completions,omitempty"`
 	Stranded       *PatrolScanStrandedOutput   `json:"stranded_assignees,omitempty"`
 	StaleRigAgents *PatrolScanStaleRigAgentOut `json:"stale_rig_agents,omitempty"`
+	FalseDeferred  *PatrolScanFalseDeferredOut `json:"false_deferred,omitempty"`
 	Receipts       []witness.PatrolReceipt     `json:"receipts,omitempty"`
+}
+
+// PatrolScanFalseDeferredOut holds false-deferred recovery results (gu-wykt).
+type PatrolScanFalseDeferredOut struct {
+	Checked   int                          `json:"checked"`
+	Found     int                          `json:"found"`
+	Recovered []PatrolScanFalseDeferredItem `json:"recovered,omitempty"`
+	Errors    []string                     `json:"errors,omitempty"`
+}
+
+// PatrolScanFalseDeferredItem is a single false-deferred recovery in scan output.
+type PatrolScanFalseDeferredItem struct {
+	BeadID         string `json:"bead_id"`
+	CitedCommitSHA string `json:"cited_commit_sha,omitempty"`
+	Action         string `json:"action"`
+	Error          string `json:"error,omitempty"`
 }
 
 // PatrolScanStaleRigAgentOut holds rig-agent staleness detection results
@@ -240,6 +257,12 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	staleAgentThreshold := witnessCfg.StaleRigAgentHeartbeatD()
 	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold)
 
+	// False-deferred bead recovery (gu-wykt). Beads that are status=deferred
+	// but whose work has shipped on origin/<default> with a commit citing the
+	// bead ID — auto-close them with the cited SHA. Sibling to gu-551r
+	// (Pattern A close-validation) but for the deferred-state escape hatch.
+	falseDeferredResult := witness.DiscoverDeferredButShipped(bd, workDir, rigName)
+
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
 
@@ -255,10 +278,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, receipts)
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -313,7 +336,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -468,12 +491,37 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.StaleRigAgents = so
 	}
 
+	// False-deferred bead recovery (gu-wykt)
+	if falseDeferredResult != nil {
+		fd := &PatrolScanFalseDeferredOut{
+			Checked: falseDeferredResult.Checked,
+		}
+		for _, r := range falseDeferredResult.Recovered {
+			if r.Action == "closed" {
+				fd.Found++
+			}
+			item := PatrolScanFalseDeferredItem{
+				BeadID:         r.BeadID,
+				CitedCommitSHA: r.CitedCommitSHA,
+				Action:         r.Action,
+			}
+			if r.Error != nil {
+				item.Error = r.Error.Error()
+			}
+			fd.Recovered = append(fd.Recovered, item)
+		}
+		for _, e := range falseDeferredResult.Errors {
+			fd.Errors = append(fd.Errors, e.Error())
+		}
+		output.FalseDeferred = fd
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -653,6 +701,44 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
+	// False-deferred bead recovery (gu-wykt)
+	if falseDeferredResult != nil {
+		closed := 0
+		for _, r := range falseDeferredResult.Recovered {
+			if r.Action == "closed" {
+				closed++
+			}
+		}
+		if closed > 0 || patrolScanVerbose {
+			fmt.Printf("%s False-Deferred Recovery: checked %d deferred bead(s)\n",
+				style.Bold.Render("⏳"), falseDeferredResult.Checked)
+
+			if closed == 0 && !patrolScanVerbose {
+				fmt.Printf("  %s\n", style.Dim.Render("No false-deferred beads recovered"))
+			} else {
+				for _, r := range falseDeferredResult.Recovered {
+					if r.Action != "closed" && !patrolScanVerbose {
+						continue
+					}
+					fmt.Printf("  ● %s: action=%s", r.BeadID, r.Action)
+					if r.CitedCommitSHA != "" {
+						fmt.Printf("  cited=%s", r.CitedCommitSHA)
+					}
+					fmt.Println()
+					if r.Error != nil {
+						fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", r.Error)))
+					}
+				}
+			}
+			if len(falseDeferredResult.Errors) > 0 && patrolScanVerbose {
+				for _, e := range falseDeferredResult.Errors {
+					fmt.Printf("    - %v\n", e)
+				}
+			}
+			fmt.Println()
+		}
+	}
+
 	// Summary
 	zombieCount := 0
 	activeCount := 0
@@ -688,12 +774,20 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			}
 		}
 	}
+	falseDeferredCount := 0
+	if falseDeferredResult != nil {
+		for _, r := range falseDeferredResult.Recovered {
+			if r.Action == "closed" {
+				falseDeferredCount++
+			}
+		}
+	}
 
-	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && postHocCount == 0 && strandedCount == 0 && staleAgentCount == 0 {
+	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && postHocCount == 0 && strandedCount == 0 && staleAgentCount == 0 && falseDeferredCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d post-hoc, %d stranded, %d stale-agent(s)\n",
-			zombieCount, activeCount, stallCount, completionCount, postHocCount, strandedCount, staleAgentCount)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d post-hoc, %d stranded, %d stale-agent(s), %d false-deferred\n",
+			zombieCount, activeCount, stallCount, completionCount, postHocCount, strandedCount, staleAgentCount, falseDeferredCount)
 	}
 
 	return nil
