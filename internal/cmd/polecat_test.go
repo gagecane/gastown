@@ -510,6 +510,44 @@ func TestGetGitState_AllCommitsOnRemote(t *testing.T) {
 	}
 }
 
+// TestActiveMRGitSafeForWorktree guards the gitSafe predicate the gs-9wz fix
+// relies on to reclaim a missing-cleanup stalled polecat ONLY when the worktree
+// is provably clean. If this ever returned true for a dirty or unpushed
+// worktree, the relaxed nuke-safety override (staleCleanupStatusCanBeIgnored
+// ForRecovery now trusts gitSafe for empty/unknown cleanup) would let
+// `gt polecat nuke` destroy real work — so these are the work-loss safety
+// boundary the mayor asked us to prove (zero work-loss reclamations).
+func TestActiveMRGitSafeForWorktree(t *testing.T) {
+	t.Run("clean and pushed is safe", func(t *testing.T) {
+		repo := initTestRepoWithRemote(t)
+		if !activeMRGitSafeForWorktree(repo) {
+			t.Fatalf("clean worktree on a pushed main must be gitSafe (reclaim allowed)")
+		}
+	})
+
+	t.Run("uncommitted changes are NOT safe", func(t *testing.T) {
+		repo := initTestRepoWithRemote(t)
+		if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("x\n"), 0644); err != nil {
+			t.Fatalf("write dirty.txt: %v", err)
+		}
+		if activeMRGitSafeForWorktree(repo) {
+			t.Fatalf("uncommitted changes must NOT be gitSafe — would risk work loss")
+		}
+	})
+
+	t.Run("unpushed commit is NOT safe", func(t *testing.T) {
+		repo := initTestRepoWithRemote(t)
+		if err := os.WriteFile(filepath.Join(repo, "local.txt"), []byte("y\n"), 0644); err != nil {
+			t.Fatalf("write local.txt: %v", err)
+		}
+		runGit(t, repo, "add", "local.txt")
+		runGit(t, repo, "commit", "-m", "local-only commit not on origin")
+		if activeMRGitSafeForWorktree(repo) {
+			t.Fatalf("an unpushed commit must NOT be gitSafe — would risk work loss")
+		}
+	})
+}
+
 // initTestRepo creates a temp dir, `git init`s it, configures local
 // author identity (required on hosts without a global git config), and
 // commits a README. Returns the absolute path. Test is skipped if git
