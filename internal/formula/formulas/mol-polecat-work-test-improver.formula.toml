@@ -1,17 +1,32 @@
 description = """
-Polecat work lifecycle for auto-test-pr (mode=create): extends mol-polecat-work
-with five quality-gate steps between implement and commit.
+Polecat work lifecycle for auto-test-pr: extends mol-polecat-work with seven
+hard-fail quality-gate steps between implement and commit.
 
-This molecule guides a polecat through writing new unit tests for a target file,
-then validates the tests via five hard-fail quality gates before committing and
-submitting to the merge queue.
+This molecule guides a polecat through writing new unit tests for a target file
+(mode=create) or addressing reviewer feedback on an existing auto-test-pr MR
+(mode=revise), then validates the tests via seven quality gates before
+committing and submitting to the merge queue.
+
+## Two Modes
+
+- **mode=create** (default): Dispatched by the Mayor cycle. The polecat selects
+  uncovered branches in the target file(s), writes focused unit tests, runs all
+  quality gates, and submits a fresh MR.
+
+- **mode=revise**: Dispatched by `gt auto-test-pr revise` (D17 manual fallback)
+  or by mol-pr-feedback-patrol (Phase 2). The polecat reads `args.revision`
+  from the dispatch envelope (`mr_id`, `branch`, `commit_sha`, optional
+  `comment_id`), checks out the existing branch, addresses the reviewer's
+  feedback, runs the same gates, pushes a follow-up commit, and emits the
+  D19 reply step on each originating comment thread.
 
 ## Extends mol-polecat-work
 
 Idiomatic extension per mol-polecat-work-monorepo-tdd (gu-deat). Steps 1-3 and
 5-8 match the parent formula identically; the implement step is specialized for
-test-writing, and five quality-gate steps (4a-4g) are inserted between implement
-and commit.
+test-writing (or feedback-addressing in mode=revise), seven quality-gate steps
+(4a-4g) are inserted between implement and commit, and a D19 reply step runs
+between pre-merge rebase and submit when mode=revise.
 
 ## Quality Gates (all hard-fail)
 
@@ -30,6 +45,25 @@ which strips credential env vars, drops network egress after module-cache
 warm-up, pins CWD to the worktree, and caps wall-clock per gate at 5 min
 (cycle-wide cap 30 min).
 
+## D19 Reply Step (mode=revise)
+
+After pushing the revision commit, the polecat replies on each originating
+comment thread with a structured banner:
+  (a) new commit SHA (truncated to 8 chars)
+  (b) which gates passed
+  (c) one-line summary of what was changed
+
+Two paths:
+  1. `args.revision.comment_id` is set → reply on that specific thread.
+  2. `args.revision.comment_id` is empty → pick the most recent non-resolved
+     comment thread on the MR bead and reply there (D19 fallback).
+
+For manual dispatches (`gt auto-test-pr revise` without `--comment-id`), the
+banner uses the "Auto-Test-PR Manual Revision" header and names the dispatching
+actor. Template rendering and thread resolution live in
+`internal/autotestpr/revise_reply.go` (`FormatReviseReply`,
+`ResolveTargetThread`, `GenerateReviseReplies`).
+
 ## Bug-Discovery NOTES Protocol
 
 If the polecat writes a candidate test that fails on main as-written (i.e., the
@@ -42,12 +76,15 @@ P2 bug bead.
 
 ## MR-Bead Labeling (Round 3 fix #6)
 
-At gt done time, the polecat MUST label the resulting MR-bead with both:
+At gt done time (mode=create), the polecat MUST label the resulting MR-bead
+with both:
 - `gt:auto-test-pr` (identifies the MR as auto-test-pr output)
 - `rig:<target_rig>` (O(1) linkage from MR-bead to per-rig state bead)
 
 The rig:<target_rig> label is read from the dispatch envelope's `target_rig`
-field. Without it, the 3c cycle-close handler must walk the bead graph back
+field. The label is set ONCE at create time and persists across the
+create-revise lifecycle — mode=revise reuses the same MR-bead and does not
+re-label. Without it, the 3c cycle-close handler must walk the bead graph back
 through the dispatch bead to resolve which rig the MR belongs to.
 
 ## Variables
@@ -56,10 +93,15 @@ through the dispatch bead to resolve which rig the MR belongs to.
 |----------|--------|-------------|
 | issue | hook_bead | The issue ID you're assigned to work on |
 | base_branch | sling vars | The base branch to rebase on (default: main) |
+| mode | dispatch envelope | "create" (default) or "revise" |
 | target_rig | dispatch envelope | The rig this test PR targets |
 | conventions_sheet_path | dispatch envelope | Path to conventions.md |
 | size_budget_max_files | dispatch envelope | Max files in diff (default 3) |
 | size_budget_max_loc | dispatch envelope | Max added test LOC (default 200) |
+| mr_id | dispatch envelope | MR bead ID (mode=revise only) |
+| branch | dispatch envelope | Branch to check out (mode=revise only) |
+| commit_sha | dispatch envelope | Prior commit SHA (mode=revise only) |
+| comment_id | dispatch envelope | Specific comment thread (revise; optional) |
 | setup_command | rig config | Setup/install command. Empty = skip. |
 | typecheck_command | rig config | Type check command. Empty = skip. |
 | test_command | rig config | Test command. Empty = skip. |
@@ -74,6 +116,8 @@ through the dispatch bead to resolve which rig the MR belongs to.
 | Gate fails | Fix the test, re-run the gate. After 3 attempts, exit with NOTES. |
 | Bug discovered | Exit with BUG-DISCOVERED: NOTES (do NOT fix the source). |
 | Build fails | Fix it. Do not proceed if it won't compile. |
+| No unresolved thread (revise) | Reply on the MR bead directly as fallback. |
+| Branch conflict (revise) | Rebase on base, re-run gates. If unresolvable, escalate. |
 | Blocked on external | Mail Witness for help. |
 | Context filling | Use gt handoff to cycle to fresh session. |"""
 formula = "mol-polecat-work-test-improver"
@@ -101,11 +145,30 @@ If Dolt is down: `gt escalate -s HIGH "Dolt: <symptom>"` — do NOT restart it y
 
 The hook_bead is your assigned issue. Read the output of `bd show` carefully.
 The bead description contains the dispatch envelope JSON with:
-- `args.mode` — MUST be "create" for this formula path
-- `args.targets[]` — files to write tests for, with uncovered branches
+- `args.mode` — "create" (default) or "revise"
 - `args.conventions_sheet_path` — path to conventions.md (MUST exist)
 - `args.size_budget` — max files and LOC for this cycle
 - `target_rig` — the rig this PR targets
+
+**For mode=create:**
+- `args.targets[]` — files to write tests for, with uncovered branches
+
+**For mode=revise (Phase 0 task 3b):**
+- `args.revision.mr_id` — the existing MR bead to update
+- `args.revision.branch` — the branch to check out (already pushed to origin)
+- `args.revision.commit_sha` — the prior commit SHA on that branch
+- `args.revision.comment_id` — specific thread to address (OPTIONAL; when
+  empty, the D19 fallback picks the most recent non-resolved thread)
+- `args.revision.actor` — operator who dispatched the revision (used only
+  by the D19 reply banner when comment_id is empty)
+
+In mode=revise, validate the MR bead exists and carries the
+`gt:auto-test-pr` label before proceeding:
+```bash
+bd show {{mr_id}}
+bd show {{mr_id}} | grep "gt:auto-test-pr" || \
+  gt escalate -s HIGH "MR {{mr_id}} missing gt:auto-test-pr label"
+```
 
 **3. Read the conventions sheet:**
 ```bash
@@ -154,7 +217,9 @@ git status
 git branch --show-current
 ```
 
-**2. Create a fresh branch (auto-test-pr uses a fixed naming convention):**
+**2. Create or check out the working branch:**
+
+**mode=create (default):**
 ```bash
 git fetch origin
 git checkout -b auto-test/{{target_rig}}/{{issue}} origin/{{base_branch}}
@@ -163,6 +228,22 @@ git checkout -b auto-test/{{target_rig}}/{{issue}} origin/{{base_branch}}
 The branch name MUST match the `auto-test/<rig>/<bead-id>` convention per
 C-SEC-6 (branch-namespace contract). The branch-GC patrol
 (mol-auto-test-pr-branch-gc) is scoped to this prefix only.
+
+**mode=revise:**
+```bash
+git fetch origin
+git checkout {{branch}}                       # branch from args.revision.branch
+git reset --hard origin/{{branch}}            # ensure we are at the pushed tip
+
+# Sanity-check we are on the expected prior commit before applying changes:
+git log -1 --format=%H | grep -q "^{{commit_sha}}" || \
+  gt escalate -s HIGH "branch {{branch}} tip != args.revision.commit_sha"
+```
+
+DO NOT create a new branch in mode=revise. The MR-bead already references
+`{{branch}}`; the revision must extend that branch in place so the same
+MR-bead is updated (Round 3 fix #6: MR-bead is the same bead across the
+create-revise lifecycle).
 
 **3. Ensure clean working state:**
 ```bash
@@ -183,12 +264,14 @@ Empty setup_command means "not configured" — skip this step.
 
 [[steps]]
 id = "implement"
-title = "Write test code for target file(s)"
+title = "Write test code (mode=create) or address feedback (mode=revise)"
 needs = ["branch-setup"]
 description = """
-Write unit tests for the uncovered branches specified in the dispatch envelope.
+Write unit tests for the uncovered branches specified in the dispatch envelope
+(mode=create), or apply targeted fixes in response to reviewer feedback
+(mode=revise).
 
-**Constraints (from conventions sheet + PRD):**
+**Constraints (from conventions sheet + PRD; apply to BOTH modes):**
 - ONLY write `func Test*(t *testing.T)` functions
 - ONLY write in same-package `*_test.go` files
 - NO files under `integration/`, `e2e/`, or `test/` directories
@@ -200,10 +283,28 @@ Write unit tests for the uncovered branches specified in the dispatch envelope.
   max {{size_budget_max_loc}} added test LOC
 - Prefer uncovered branches close to recent churn (NG5)
 
-**Working principles:**
+**mode=create:**
+- Identify targets from `args.targets[]` (file + uncovered branches)
+- Write focused unit tests against same-package `_test.go` files
+
+**mode=revise:**
+- Read the reviewer's comment(s) from the MR bead:
+  ```bash
+  bd show {{mr_id}}
+  ```
+- If `args.revision.comment_id` is set, focus on THAT specific thread.
+- If `args.revision.comment_id` is empty, address the most recent
+  non-resolved thread (the D19 reply step uses the same fallback).
+- Apply MINIMAL changes — do NOT add new files in revise mode unless the
+  feedback explicitly calls for them, and stay within the same size budget
+  (the gates re-run on the full diff vs `origin/{{base_branch}}`).
+- Do NOT change the rig:<target_rig> or gt:auto-test-pr labels — they are
+  set once at create time and persist across the create-revise lifecycle.
+
+**Working principles (BOTH modes):**
 - Follow existing codebase test conventions
 - Make atomic, focused commits
-- Keep changes scoped to the dispatch targets
+- Keep changes scoped to the dispatch targets / addressed feedback
 - Do NOT fix bugs in the source code (this is a test-only MR)
 
 **Bug-Discovery Protocol (CRITICAL):**
@@ -648,9 +749,87 @@ You will use `gt done --pre-verified` in the next step.
 **Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, all configured gates pass."""
 
 [[steps]]
+id = "d19-reply"
+title = "D19: Reply to comment threads (mode=revise only)"
+needs = ["pre-verify"]
+description = """
+**This step runs ONLY when mode=revise. Skip when mode=create.**
+
+After the revision commit is staged for push, post a templated reply on the
+originating comment thread(s) so the reviewer can see (a) the new commit SHA,
+(b) which gates passed, and (c) what the polecat changed. Template rendering
+and thread resolution live in `internal/autotestpr/revise_reply.go` —
+the formula description here mirrors that logic so an operator reading the
+formula and an agent following it agree on the exact output.
+
+**1. Determine the target thread:**
+
+- If `{{comment_id}}` is set: reply on that thread directly.
+- If `{{comment_id}}` is empty: pick the most recent non-resolved comment
+  thread on the MR bead. This matches `ResolveTargetThread` —
+  resolved threads and threads with unparseable timestamps are skipped;
+  the resolver returns `ErrNoUnresolvedThread` when no eligible thread
+  exists.
+
+**2. Format the reply banner:**
+
+Standard (automated) revision:
+```
+🤖 **Auto-Test-PR Revision**
+- **Commit:** `<first-8-chars-of-SHA>`
+- **Gates passed:** <comma-separated list>
+- **Summary:** <one-line description of what changed>
+```
+
+Manual revision (`gt auto-test-pr revise` without --comment-id):
+```
+🤖 **Auto-Test-PR Manual Revision**
+- **Dispatched by:** <args.revision.actor>
+- **Commit:** `<first-8-chars-of-SHA>`
+- **Gates passed:** <comma-separated list>
+- **Summary:** <one-line description of what changed>
+```
+
+`<comma-separated list>` lists the gates that ran clean (e.g.
+`coverage-delta, mutant-sanity, flakiness-rerun, tautology-linter, gitleaks`).
+If no gates ran clean (early-failure edge case), render `(none)` instead — the
+banner is still posted so the reviewer sees the SHA and intent.
+
+If `Summary` is empty, the `**Summary:**` line is omitted entirely.
+
+**3. Post the reply:**
+
+In v1 (Refinery mode), replies are bead-comments on the MR bead threaded
+against the review-comment bead:
+```bash
+bd update {{mr_id}} --notes "D19 reply on thread <thread-id>:
+<rendered banner>"
+```
+
+If no unresolved thread exists AND no `{{comment_id}}` was supplied
+(`ErrNoUnresolvedThread` from the resolver), reply on the MR bead directly
+as a fallback rather than failing the cycle — the reviewer still gets the
+update and the MR-bead is still the same bead across the lifecycle.
+
+v2 (external mode, post-Phase-0) will swap this for a GitHub PR review reply
+without changing the rendered banner content.
+
+**4. Verify the reply landed:**
+```bash
+bd show {{mr_id}}    # Notes/comments should contain the rendered banner
+```
+
+**Exit criteria (mode=revise):** Reply posted on the resolved thread (or on
+the MR bead directly when no unresolved thread exists). Banner contains the
+truncated commit SHA and the gates list.
+
+**Exit criteria (mode=create):** Step skipped — no comment threads to reply
+to on a create cycle."""
+
+[[steps]]
 id = "submit-and-exit"
 title = "Submit work and self-clean"
-needs = ["pre-verify"]
+needs = ["d19-reply"]
 description = """
 Submit your work and clean up. You cease to exist after this step.
 
@@ -662,21 +841,33 @@ This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 
 **MR-Bead Labeling (MANDATORY — Round 3 fix #6):**
 
-At `gt done` time, the resulting MR-bead MUST be labeled with BOTH:
+The labels `gt:auto-test-pr` and `rig:{{target_rig}}` are set ONCE at create
+time and persist across the create-revise lifecycle. The MR-bead is the same
+bead across both modes — mode=revise reuses it rather than opening a new one.
+
+**mode=create:** at `gt done` time the MR-bead MUST be labeled with BOTH:
 1. `gt:auto-test-pr` — identifies this as an auto-test-pr output
 2. `rig:{{target_rig}}` — O(1) linkage to per-rig state bead
 
-The `gt done` command for auto-test-pr MUST include these labels:
 ```bash
 gt done --pre-verified --target {{base_branch}} \
   --label gt:auto-test-pr \
   --label rig:{{target_rig}}
 ```
 
+**mode=revise:** the MR-bead already carries both labels (verified in
+load-context). Submit without re-labelling — `gt done` will push the new
+commit on `{{branch}}` and the existing MR-bead's commit_sha is updated by
+the merge-queue submit path:
+
+```bash
+gt done --pre-verified --target {{base_branch}}
+```
+
 Without `rig:{{target_rig}}`, the 3c cycle-close handler must walk the bead
 graph back through the dispatch bead to resolve which rig the MR belongs to.
 
-You should see output like:
+You should see output like (mode=create):
 ```
 ✓ Work submitted to merge queue
   MR ID: gt-xxxxx
@@ -711,6 +902,26 @@ default = "main"
 [vars.target_rig]
 description = "The rig this test PR targets (from dispatch envelope)"
 required = true
+
+[vars.mode]
+description = "Execution mode: 'create' (new MR) or 'revise' (address feedback on existing MR)"
+default = "create"
+
+[vars.mr_id]
+description = "MR bead ID to revise (mode=revise only, from args.revision.mr_id)"
+default = ""
+
+[vars.branch]
+description = "Branch name to check out (mode=revise only, from args.revision.branch)"
+default = ""
+
+[vars.commit_sha]
+description = "Prior commit SHA to verify branch tip (mode=revise only, from args.revision.commit_sha)"
+default = ""
+
+[vars.comment_id]
+description = "Specific comment thread ID for D19 reply (mode=revise; empty = most-recent fallback)"
+default = ""
 
 [vars.conventions_sheet_path]
 description = "Path to the conventions.md file for this rig"

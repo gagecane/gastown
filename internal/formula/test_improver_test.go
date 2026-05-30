@@ -24,7 +24,9 @@ func TestTestImproverFormulaStructure(t *testing.T) {
 		t.Errorf("formula version = %d, want >= 1", f.Version)
 	}
 
-	// All expected steps in DAG order.
+	// All expected steps in DAG order. The d19-reply step (Phase 0
+	// task 3b, gu-epc6) sits between pre-verify and submit-and-exit
+	// and runs only when mode=revise.
 	wantSteps := []string{
 		"load-context",
 		"branch-setup",
@@ -40,6 +42,7 @@ func TestTestImproverFormulaStructure(t *testing.T) {
 		"self-review",
 		"build-check",
 		"pre-verify",
+		"d19-reply",
 		"submit-and-exit",
 	}
 	if len(f.Steps) != len(wantSteps) {
@@ -84,7 +87,8 @@ func TestTestImproverFormulaTopology(t *testing.T) {
 		{"commit-changes", "self-review"},
 		{"self-review", "build-check"},
 		{"build-check", "pre-verify"},
-		{"pre-verify", "submit-and-exit"},
+		{"pre-verify", "d19-reply"},
+		{"d19-reply", "submit-and-exit"},
 	}
 	for _, p := range pairs {
 		posA, okA := pos[p[0]]
@@ -249,6 +253,13 @@ func TestTestImproverFormulaVars(t *testing.T) {
 		"size_budget_max_files":  "3",
 		"size_budget_max_loc":    "200",
 		"conventions_sheet_path": ".gt/auto-test-pr/conventions.md",
+		// mode=revise vars (Phase 0 task 3b, gu-epc6). All optional —
+		// empty default means "create mode" by convention.
+		"mode":       "create",
+		"mr_id":      "",
+		"branch":     "",
+		"commit_sha": "",
+		"comment_id": "",
 	}
 	for name, want := range wantDefaults {
 		v, ok := f.Vars[name]
@@ -258,6 +269,114 @@ func TestTestImproverFormulaVars(t *testing.T) {
 		}
 		if v.Default != want {
 			t.Errorf("var %q default = %q, want %q", name, v.Default, want)
+		}
+	}
+}
+
+// TestTestImproverFormulaD19ReplyStep verifies the D19 reply step
+// (Phase 0 task 3b, gu-epc6) is present, runs after pre-verify, and
+// documents the mode=revise reply behavior — both the targeted
+// (--comment-id) and most-recent-thread fallback paths plus the
+// manual-dispatch banner template.
+func TestTestImproverFormulaD19ReplyStep(t *testing.T) {
+	f, err := ParseFile("formulas/mol-polecat-work-test-improver.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	step := f.GetStep("d19-reply")
+	if step == nil {
+		t.Fatal("d19-reply step missing; mode=revise polecats have no reply checklist")
+	}
+
+	// Step must depend on pre-verify so the rebased branch is gate-clean
+	// before we publish a banner pointing at its tip commit.
+	foundPreVerify := false
+	for _, dep := range step.Needs {
+		if dep == "pre-verify" {
+			foundPreVerify = true
+			break
+		}
+	}
+	if !foundPreVerify {
+		t.Errorf("d19-reply step does not depend on pre-verify (deps=%v); "+
+			"reply may publish a SHA that has not passed gates", step.Needs)
+	}
+
+	requiredPhrases := []string{
+		// Mode gating — the step must announce it is revise-only.
+		"mode=revise",
+		// Both resolution paths must be documented.
+		"comment_id",
+		"most recent non-resolved",
+		// Both banner templates must be documented.
+		"Auto-Test-PR Revision",
+		"Auto-Test-PR Manual Revision",
+		// Banner contents.
+		"Commit:",
+		"Gates passed:",
+	}
+	for _, phrase := range requiredPhrases {
+		if !strings.Contains(step.Description, phrase) {
+			t.Errorf("d19-reply step description does not contain %q; "+
+				"the polecat will not know how to render the banner correctly", phrase)
+		}
+	}
+}
+
+// TestTestImproverFormulaSubmitDependsOnD19 verifies the submit step
+// runs AFTER the D19 reply step, so a mode=revise polecat publishes
+// the reviewer banner before the merge-queue submit nukes the sandbox.
+func TestTestImproverFormulaSubmitDependsOnD19(t *testing.T) {
+	f, err := ParseFile("formulas/mol-polecat-work-test-improver.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	submit := f.GetStep("submit-and-exit")
+	if submit == nil {
+		t.Fatal("submit-and-exit step missing")
+	}
+
+	foundD19 := false
+	for _, dep := range submit.Needs {
+		if dep == "d19-reply" {
+			foundD19 = true
+			break
+		}
+	}
+	if !foundD19 {
+		t.Errorf("submit-and-exit does not depend on d19-reply (deps=%v); "+
+			"reviewer banner may not be posted before sandbox nuke", submit.Needs)
+	}
+}
+
+// TestTestImproverFormulaReviseModeDocumented verifies the formula
+// description and the implement/branch-setup/load-context steps name
+// mode=revise so a polecat reading the checklist can branch correctly.
+func TestTestImproverFormulaReviseModeDocumented(t *testing.T) {
+	f, err := ParseFile("formulas/mol-polecat-work-test-improver.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	// Top-level description must announce mode=revise as a supported path.
+	if !strings.Contains(f.Description, "mode=revise") {
+		t.Error("formula description does not mention mode=revise; " +
+			"polecats reading the formula will not know revise is supported")
+	}
+
+	// load-context, branch-setup, and implement must all branch on mode.
+	stepIDs := []string{"load-context", "branch-setup", "implement"}
+	for _, id := range stepIDs {
+		step := f.GetStep(id)
+		if step == nil {
+			t.Errorf("step %q missing", id)
+			continue
+		}
+		if !strings.Contains(step.Description, "mode=revise") {
+			t.Errorf("step %q does not document mode=revise behavior; "+
+				"polecat will fall through to mode=create logic on a revise dispatch", id)
 		}
 	}
 }
