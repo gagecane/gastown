@@ -1087,6 +1087,90 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 	}
 }
 
+// TestFeedNextReadyIssue_SkipsFutureDeferredIssue guards gs-o5f: a leg deferred
+// via `gt done --status DEFERRED` keeps status=open but carries a future
+// defer_until. The continuation feed must skip it (mirroring `bd ready`) and
+// dispatch the next ready leg instead of re-dispatching the deferred one.
+func TestFeedNextReadyIssue_SkipsFutureDeferredIssue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	store := useSharedStore(t)
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	future := now.Add(24 * time.Hour)
+
+	convoy := &beadsdk.Issue{
+		ID:        "test-convoy-defer",
+		Title:     "Convoy For Defer Test",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Higher-priority but future-deferred: would sort first, must be skipped.
+	deferred := &beadsdk.Issue{
+		ID:         "test-defer1",
+		Title:      "Deferred Task",
+		Status:     beadsdk.StatusOpen,
+		Priority:   1,
+		IssueType:  beadsdk.TypeTask,
+		DeferUntil: &future,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	// Lower-priority, not deferred: should be dispatched.
+	ready := &beadsdk.Issue{
+		ID:        "test-defer-ready1",
+		Title:     "Ready Task",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	for _, iss := range []*beadsdk.Issue{convoy, deferred, ready} {
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+		}
+	}
+
+	for _, trackedID := range []string{deferred.ID, ready.ID} {
+		dep := &beadsdk.Dependency{
+			IssueID:     convoy.ID,
+			DependsOnID: trackedID,
+			Type:        beadsdk.DependencyType("tracks"),
+			CreatedAt:   now,
+			CreatedBy:   "test",
+		}
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency %s: %v", trackedID, err)
+		}
+	}
+
+	townRoot := setupTownRoot(t)
+	gtPath, logPath := makeGTStub(t, 0)
+	logger, _ := makeLogger()
+
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("gt stub was not called (no log file): %v", err)
+	}
+	logStr := strings.TrimSpace(string(logData))
+	if strings.Contains(logStr, "test-defer1") {
+		t.Errorf("future-deferred task should not have been dispatched, log: %q", logStr)
+	}
+	if !strings.Contains(logStr, "sling test-defer-ready1 testrig --no-boot") {
+		t.Errorf("expected non-deferred task dispatch, got: %q", logStr)
+	}
+}
+
 func TestFeedNextReadyIssue_NoReadyIssues_LogsMessage(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")

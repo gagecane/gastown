@@ -451,9 +451,10 @@ func isContextOlderThan(ctx *beads.Issue, now time.Time, ttl time.Duration) bool
 
 // beadStatusInfo holds batch-fetched bead status, title, and labels.
 type beadStatusInfo struct {
-	Status string
-	Title  string
-	Labels []string
+	Status     string
+	Title      string
+	Labels     []string
+	DeferUntil string
 }
 
 // batchFetchBeadInfoByIDs returns a map of bead ID → status+title+labels for specific beads.
@@ -479,17 +480,19 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			continue
 		}
 		var items []struct {
-			ID     string   `json:"id"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Labels []string `json:"labels"`
+			ID         string   `json:"id"`
+			Status     string   `json:"status"`
+			Title      string   `json:"title"`
+			Labels     []string `json:"labels"`
+			DeferUntil string   `json:"defer_until"`
 		}
 		if err := json.Unmarshal(out, &items); err == nil {
 			for _, item := range items {
 				result[item.ID] = beadStatusInfo{
-					Status: item.Status,
-					Title:  item.Title,
-					Labels: item.Labels,
+					Status:     item.Status,
+					Title:      item.Title,
+					Labels:     item.Labels,
+					DeferUntil: item.DeferUntil,
 				}
 			}
 		}
@@ -1031,7 +1034,23 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if !found || blockedWorkIDs[workBeadID] {
 		return false
 	}
-	return info.Status == "open"
+	if info.Status != "open" {
+		return false
+	}
+	// Skip beads deferred to a future time (gs-o5f). `gt done --status DEFERRED`
+	// sets defer_until WITHOUT flipping status off "open", so the status check
+	// alone lets a future-deferred bead through and the scheduler re-dispatches
+	// it before its defer window elapses. Mirror the `bd ready` filter
+	// (defer_until > now → hidden). On an unparseable defer_until we fall back
+	// to dispatchable rather than stranding the bead.
+	now := time.Now()
+	if nowForDeferRelease != nil {
+		now = nowForDeferRelease()
+	}
+	if expired, err := isDeferUntilExpired(info.DeferUntil, now); err == nil && info.DeferUntil != "" && !expired {
+		return false
+	}
+	return true
 }
 
 // nowForDeferRelease is a clock seam that lets tests inject a deterministic

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -236,13 +237,14 @@ func runConvoyCheck(ctx context.Context, townRoot, convoyID, gtPath string) erro
 
 // trackedIssue holds basic info about an issue tracked by a convoy.
 type trackedIssue struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Assignee  string   `json:"assignee"`
-	Priority  int      `json:"priority"`
-	IssueType string   `json:"issue_type"`
-	Labels    []string `json:"labels,omitempty"`
+	ID         string     `json:"id"`
+	Title      string     `json:"title"`
+	Status     string     `json:"status"`
+	Assignee   string     `json:"assignee"`
+	Priority   int        `json:"priority"`
+	IssueType  string     `json:"issue_type"`
+	Labels     []string   `json:"labels,omitempty"`
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
 }
 
 // slingableTypes are bead types that can be dispatched via gt sling.
@@ -418,6 +420,18 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			continue
 		}
 
+		// Skip beads deferred to a future time (gs-o5f). A polecat that defers
+		// a leg (`gt done --status DEFERRED`) sets defer_until WITHOUT flipping
+		// status off "open", so the status check above does not catch it. Mirror
+		// the `bd ready` filter (defer_until > now → hidden) so we don't
+		// re-dispatch a bead before its defer window elapses — otherwise the
+		// continuation feed spins the defer/reclaim/re-dispatch loop this bug
+		// describes.
+		if issue.DeferUntil != nil && issue.DeferUntil.After(time.Now()) {
+			logger("%s: convoy %s: %s is deferred until %s, skipping", caller, convoyID, issue.ID, issue.DeferUntil.Format(time.RFC3339))
+			continue
+		}
+
 		// Filter identity/system beads (ghost dispatch loop guard — gu-ypjm).
 		// Matches by gt:agent label, status=closed, or identity-naming title regex.
 		// This is defense-in-depth: status!=open is already filtered above, but
@@ -558,6 +572,7 @@ func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID
 			t.Priority = fresh.Priority
 			t.IssueType = string(fresh.IssueType)
 			t.Labels = fresh.Labels
+			t.DeferUntil = fresh.DeferUntil
 		} else if meta, ok := metaByID[id]; ok {
 			t.Title = meta.title
 			t.Status = meta.status

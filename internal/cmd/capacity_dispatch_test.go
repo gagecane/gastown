@@ -150,6 +150,36 @@ func TestIsDeferUntilExpired(t *testing.T) {
 	}
 }
 
+// TestIsScheduledWorkBeadReady_Deferred guards gs-o5f: the scheduler must not
+// dispatch a scheduled bead whose defer_until is still in the future, even
+// though `gt done --status DEFERRED` leaves it status=open. An expired or empty
+// defer_until still dispatches; an unparseable one falls back to dispatchable.
+func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
+	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+	nowForDeferRelease = func() time.Time { return now }
+	t.Cleanup(func() { nowForDeferRelease = nil })
+
+	tests := []struct {
+		name      string
+		info      beadStatusInfo
+		wantReady bool
+	}{
+		{"open no defer", beadStatusInfo{Status: "open"}, true},
+		{"open future defer", beadStatusInfo{Status: "open", DeferUntil: now.Add(time.Hour).Format(time.RFC3339)}, false},
+		{"open expired defer", beadStatusInfo{Status: "open", DeferUntil: now.Add(-time.Hour).Format(time.RFC3339)}, true},
+		{"open unparseable defer", beadStatusInfo{Status: "open", DeferUntil: "not-a-timestamp"}, true},
+		{"deferred status", beadStatusInfo{Status: "deferred", DeferUntil: now.Add(time.Hour).Format(time.RFC3339)}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isScheduledWorkBeadReady("wb-1", tt.info, true, map[string]bool{})
+			if got != tt.wantReady {
+				t.Errorf("isScheduledWorkBeadReady(%+v) = %v, want %v", tt.info, got, tt.wantReady)
+			}
+		})
+	}
+}
+
 func TestIsAlreadyDispatchedError(t *testing.T) {
 	tests := []struct {
 		name string
