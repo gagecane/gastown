@@ -1134,20 +1134,25 @@ func TestStop_WaitsForInFlightAlerts(t *testing.T) {
 		m.alertWg.Done()
 	}()
 
-	start := time.Now()
 	if err := m.Stop(); err != nil {
 		t.Fatalf("Stop() returned error: %v", err)
 	}
-	elapsed := time.Since(start)
 
+	// Stop() calls alertWg.Wait(), which returns only after the goroutine's
+	// alertWg.Done() — and Done() happens after close(released). So if Stop()
+	// honored the WaitGroup, released is already closed by the time we reach
+	// here; if it returned early, the default branch fires. This is the real
+	// property under test.
+	//
+	// We deliberately do NOT also assert elapsed >= hold: the goroutine's
+	// Sleep begins when it is scheduled, not at a point we can pin to a
+	// `start` captured on this goroutine, so a wall-clock lower bound flakes
+	// (observed 49.38ms for a 50ms hold on a loaded CI runner). See gs-a6z.
 	select {
 	case <-released:
 		// good — goroutine ran to completion before Stop() returned
 	default:
 		t.Fatal("Stop() returned before alert goroutine completed")
-	}
-	if elapsed < hold {
-		t.Errorf("Stop() returned after %v, expected at least %v", elapsed, hold)
 	}
 }
 
