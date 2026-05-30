@@ -1729,6 +1729,26 @@ afterSafetyNet:
 				goto notifyWitness
 			}
 
+			// gs-9sr: MAIN-VIEW verify (gs-onu defense-in-depth). The read-back
+			// above only proves the MR is in THIS session's local Dolt view — it
+			// passes even when an auto-commit drift leaves the write uncommitted,
+			// so the refinery never sees the MR and the branch strands silently.
+			// Re-run the refinery's own discovery through a FRESH bd connection;
+			// if the MR isn't discoverable on shared main, fail LOUD via a
+			// stranded-push wisp instead of exiting COMPLETED.
+			if visible, qErr := verifyMRVisibleOnMain(beads.NewWithBeadsDir(cwd, resolvedBeads), branch, commitSHA); qErr != nil {
+				// Inconclusive (e.g. transient Dolt blip). The read-back passed and
+				// DoltAutoCommit:"on" committed the write, so don't false-strand —
+				// warn and proceed.
+				style.PrintWarning("main-view MR verify inconclusive for %s (query error): %v\nProceeding on read-back + auto-commit durability.", mrID, qErr)
+			} else if !visible {
+				mrFailed = true
+				strandErr := fmt.Errorf("MR %s not discoverable on shared main via fresh query (branch=%s sha=%s) — the refinery would not see it", mrID, branch, shortSHA(commitSHA))
+				style.PrintWarning("%v\nBranch is pushed but the MR is invisible to the refinery. Filing a stranded-push wisp for recovery instead of reporting COMPLETED.", strandErr)
+				fileStrandedPushWisp(beads.New(cwd), rigName, branch, commitSHA, target, issueID, agentBeadID, worker, strandErr)
+				goto notifyWitness
+			}
+
 			// gt-gpy: Validate that the MR bead landed in the rig's database.
 			// If the source bead has a cross-rig prefix (e.g., hq-), the routing
 			// could still resolve to the wrong database despite Rig: rigName.
@@ -2195,6 +2215,13 @@ func fileStrandedPushWisp(bd *beads.Beads, rigName, branch, commitSHA, target, i
 		Description: description,
 		Ephemeral:   true,
 		Rig:         rigName,
+		// gs-9sr: commit the wisp to shared main immediately. This wisp exists to
+		// make a strand LOUD; if the underlying cause is an auto-commit config
+		// drift (gs-onu), a default-config Create would itself land only in the
+		// dying session's local working set and never reach the witness/mayor
+		// sweeps — a silent record of a silent strand. Force the commit so the
+		// alarm actually rings.
+		DoltAutoCommit: "on",
 	})
 	if err != nil {
 		style.PrintWarning("could not file push-stranded wisp for %s: %v", issueID, err)
@@ -2204,6 +2231,41 @@ func fileStrandedPushWisp(bd *beads.Beads, rigName, branch, commitSHA, target, i
 		return
 	}
 	fmt.Printf("%s Filed push-stranded wisp: %s\n", style.Bold.Render("⚠"), wisp.ID)
+}
+
+// mrMainViewFinder is the minimal beads surface verifyMRVisibleOnMain needs: the
+// refinery's MR discovery query. *beads.Beads satisfies it; tests inject a fake.
+type mrMainViewFinder interface {
+	FindMRForBranchAndSHA(branch, commitSHA string) (*beads.Issue, error)
+}
+
+// verifyMRVisibleOnMain is the gs-9sr defense-in-depth check (gs-onu follow-up).
+//
+// After creating the MR bead, gt done already re-reads it via bd.Show(mrID).
+// That read-back confirms the bead exists in THIS polecat session's LOCAL Dolt
+// view — which passes even when an auto-commit config drift leaves the write
+// uncommitted: the session self-terminates, the INSERT never reaches shared
+// main, and the refinery (a separate connection) never sees the MR. The branch
+// is then silently stranded. DoltAutoCommit:"on" on the Create should prevent
+// that at the source; this is the belt that catches any residual/again-drifted
+// case and converts a silent strand into a loud, recoverable one.
+//
+// The caller passes a FRESH bd wrapper (a new Dolt session that reads committed
+// shared main, not the local working set) and we re-run the refinery's own
+// discovery — FindMRForBranchAndSHA, the same query Manager.Queue() uses. If the
+// fresh connection cannot find the MR, neither will the refinery.
+//
+// Returns (visible, err):
+//   - (true, nil)  — discoverable on main; safe to report COMPLETED.
+//   - (false, nil) — genuinely absent; caller must fail loud (stranded wisp).
+//   - (false, err) — query inconclusive (e.g. transient Dolt blip); caller
+//     should warn but NOT strand, since the read-back already passed.
+func verifyMRVisibleOnMain(f mrMainViewFinder, branch, commitSHA string) (bool, error) {
+	issue, err := f.FindMRForBranchAndSHA(branch, commitSHA)
+	if err != nil {
+		return false, err
+	}
+	return issue != nil, nil
 }
 
 func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {

@@ -338,6 +338,21 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("MR bead %s created but verification read-back failed: %w", mrIssue.ID, verifyErr)
 		}
 
+		// gs-9sr: MAIN-VIEW verify (gs-onu defense-in-depth), mirroring gt done.
+		// The read-back above only proves the MR is in this session's LOCAL Dolt
+		// view; under an auto-commit config drift the write may never reach shared
+		// main, leaving the refinery blind. Re-run the refinery's own discovery
+		// through a FRESH bd connection. If the MR isn't discoverable on main,
+		// fail loud (stranded-push wisp + error) instead of nudging the refinery
+		// for an MR it can't see.
+		if visible, qErr := verifyMRVisibleOnMain(beads.New(cwd), branch, commitSHA); qErr != nil {
+			style.PrintWarning("main-view MR verify inconclusive for %s (query error): %v\nProceeding on read-back + auto-commit durability.", mrIssue.ID, qErr)
+		} else if !visible {
+			strandErr := fmt.Errorf("MR %s not discoverable on shared main via fresh query (branch=%s sha=%s) — the refinery would not see it", mrIssue.ID, branch, shortSHA(commitSHA))
+			fileStrandedPushWisp(beads.New(cwd), rigName, branch, commitSHA, target, issueID, "", worker, strandErr)
+			return fmt.Errorf("MR bead %s created but not discoverable on shared main: %w", mrIssue.ID, strandErr)
+		}
+
 		// gt-gpy: Validate MR bead landed in the rig's database (warning only).
 		if prefixErr := beads.ValidateRigPrefix(townRoot, rigName, mrIssue.ID); prefixErr != nil {
 			style.PrintWarning("MR bead prefix mismatch: %v\nThe refinery may not find this MR — check 'gt mq list %s'", prefixErr, rigName)
