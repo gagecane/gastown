@@ -365,8 +365,8 @@ func TestTestImproverFormulaImplementCoversReviseMode(t *testing.T) {
 	for _, s := range []string{
 		"mode=revise",
 		"args.revision.comments",
-		"D19-summary",       // the persisted-on-bead key the d19-reply step reads back
-		"one-line summary",  // contract phrase
+		"D19-summary",      // the persisted-on-bead key the d19-reply step reads back
+		"one-line summary", // contract phrase
 	} {
 		if !strings.Contains(impl.Description, s) {
 			t.Errorf("implement step missing %q; mode=revise path is under-documented", s)
