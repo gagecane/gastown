@@ -15,23 +15,10 @@ var testClock = time.Date(2026, 5, 25, 14, 0, 0, 0, time.UTC)
 // capturing logger, and stub nudge function. Suitable for pure unit
 // tests that exercise the handler logic without Dolt.
 type testHandlerFixture struct {
-	handler      *CycleCloseHandler
-	logs         []string
-	nudges       []string
-	createdBeads []fakeCreateCall
-	state        *TownState
-}
-
-type fakeCreateCall struct {
-	opts beadsCreateOpts
-}
-
-type beadsCreateOpts struct {
-	Title       string
-	Description string
-	Labels      []string
-	Priority    int
-	Rig         string
+	handler *CycleCloseHandler
+	logs    []string
+	nudges  []string
+	state   *TownState
 }
 
 func newTestHandler() *testHandlerFixture {
@@ -226,10 +213,18 @@ func TestLoadSaveRigCycleState_Roundtrip(t *testing.T) {
 	}
 }
 
-// --- Acceptance tests (four paths from the bead description) ---
+// --- Acceptance tests (state-machine paths from the bead description) ---
+//
+// Per the OQ4 fallback: high-cardinality transition / rejection records
+// live on attachment beads created via CreateTransitionAttachment /
+// CreateRejectionAttachment, NOT inside the town-state bead's
+// RigSummary blob. These tests exercise only the in-state-bead writes
+// (state, last_outcome, circuit-breaker counter, incidents) — the
+// attachment-write side is covered in attachments_test.go and the
+// integration tests in cycle_close_attachment_integration_test.go.
 
 // TestCycleCloseHandler_Path1_Merged tests:
-// merged → cooled-down, transition record, CB counter reset.
+// merged → cooled-down, CB counter reset, no in-blob log keys.
 func TestCycleCloseHandler_Path1_Merged(t *testing.T) {
 	f := newTestHandler()
 
@@ -246,9 +241,7 @@ func TestCycleCloseHandler_Path1_Merged(t *testing.T) {
 		Body:        "close_reason: merged\nrig: gastown_upstream\n",
 	}
 
-	// Simulate the handler's state mutation logic directly (since we
-	// can't use a real beads.Beads in unit tests).
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 
 	// Verify rig state transitioned to cooled-down.
 	rs := f.handler.loadRigCycleState(f.state, "gastown_upstream")
@@ -258,12 +251,6 @@ func TestCycleCloseHandler_Path1_Merged(t *testing.T) {
 	if rs.LastOutcome != "merged" {
 		t.Errorf("last_outcome = %q, want merged", rs.LastOutcome)
 	}
-	if len(rs.TransitionLog) != 1 {
-		t.Fatalf("transition_log len = %d, want 1", len(rs.TransitionLog))
-	}
-	if rs.TransitionLog[0].From != "mr-pending" || rs.TransitionLog[0].To != "cooled-down" {
-		t.Errorf("transition: %+v", rs.TransitionLog[0])
-	}
 
 	// Verify CB counter was reset.
 	if f.state.CircuitBreaker.Count != 0 {
@@ -272,10 +259,14 @@ func TestCycleCloseHandler_Path1_Merged(t *testing.T) {
 	if f.state.CircuitBreaker.WindowStartedAt != "" {
 		t.Errorf("CB window should be cleared on merge")
 	}
+
+	// Acceptance criterion (d): RigSummary entry MUST NOT contain
+	// transition_log[] or rejection_log[] keys post-cycle.
+	assertNoLegacyLogKeys(t, f.state, "gastown_upstream")
 }
 
 // TestCycleCloseHandler_Path2_ClosedUnmerged tests:
-// closed-unmerged → cooled-down + rejection-log + CB counter inc.
+// closed-unmerged → cooled-down + CB counter inc, no in-blob log keys.
 func TestCycleCloseHandler_Path2_ClosedUnmerged(t *testing.T) {
 	f := newTestHandler()
 
@@ -289,7 +280,7 @@ func TestCycleCloseHandler_Path2_ClosedUnmerged(t *testing.T) {
 		Body:        "close_reason: rejected\nrig: gastown_upstream\ntarget_path: internal/foo.go\n",
 	}
 
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 
 	rs := f.handler.loadRigCycleState(f.state, "gastown_upstream")
 	if rs.State != "cooled-down" {
@@ -297,18 +288,6 @@ func TestCycleCloseHandler_Path2_ClosedUnmerged(t *testing.T) {
 	}
 	if rs.LastOutcome != "rejected" {
 		t.Errorf("last_outcome = %q, want rejected", rs.LastOutcome)
-	}
-	if len(rs.TransitionLog) != 1 {
-		t.Fatalf("transition_log len = %d, want 1", len(rs.TransitionLog))
-	}
-	if len(rs.RejectionLog) != 1 {
-		t.Fatalf("rejection_log len = %d, want 1", len(rs.RejectionLog))
-	}
-	if rs.RejectionLog[0].TargetPath != "internal/foo.go" {
-		t.Errorf("target_path = %q", rs.RejectionLog[0].TargetPath)
-	}
-	if rs.RejectionLog[0].MRID != "gt-mr2" {
-		t.Errorf("rejection mr_id = %q", rs.RejectionLog[0].MRID)
 	}
 
 	// CB counter should be incremented.
@@ -318,10 +297,14 @@ func TestCycleCloseHandler_Path2_ClosedUnmerged(t *testing.T) {
 	if f.state.CircuitBreaker.WindowStartedAt == "" {
 		t.Error("CB window should be set")
 	}
+
+	// Acceptance criterion (d): RigSummary entry MUST NOT contain
+	// transition_log[] or rejection_log[] keys post-cycle.
+	assertNoLegacyLogKeys(t, f.state, "gastown_upstream")
 }
 
 // TestCycleCloseHandler_Path3_CircuitBreakerTrip tests:
-// 3-closes-in-7d → paused-by-circuit-breaker + overseer nudge.
+// 3-closes-in-7d → paused-by-circuit-breaker + overseer-nudge incident.
 func TestCycleCloseHandler_Path3_CircuitBreakerTrip(t *testing.T) {
 	f := newTestHandler()
 
@@ -339,7 +322,7 @@ func TestCycleCloseHandler_Path3_CircuitBreakerTrip(t *testing.T) {
 		Body:        "close_reason: rejected\nrig: gastown_upstream\n",
 	}
 
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 
 	// CB should now be tripped.
 	if f.state.CircuitBreaker.Count != 3 {
@@ -369,6 +352,8 @@ func TestCycleCloseHandler_Path3_CircuitBreakerTrip(t *testing.T) {
 	if !found {
 		t.Error("expected IncidentCircuitBreakerTripped incident")
 	}
+
+	assertNoLegacyLogKeys(t, f.state, "gastown_upstream")
 }
 
 // TestCycleCloseHandler_Path4_BugDiscovered tests:
@@ -412,7 +397,7 @@ func TestCycleCloseHandler_Path5_RigLabelLookup(t *testing.T) {
 		Body:        "close_reason: merged\nrig: gastown_upstream\n",
 	}
 
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 
 	// Only gastown_upstream should have changed.
 	gsRig := f.handler.loadRigCycleState(f.state, "gastown_upstream")
@@ -428,35 +413,22 @@ func TestCycleCloseHandler_Path5_RigLabelLookup(t *testing.T) {
 
 // --- Test helpers ---
 
-// applyHandlerToState simulates the handler's mutateTownState callback
-// directly against the test fixture's state, bypassing the real beads
-// CAS loop. This lets us test the pure logic without Dolt.
-func applyHandlerToState(f *testHandlerFixture, ev MRCycleCloseEvent) {
+// applyHandlerStateMutation simulates the handler's mutateTownState
+// callback directly against the test fixture's state, bypassing the
+// real beads CAS loop AND the post-CAS attachment-bead writes (which
+// require a live beads wrapper to exercise — see the integration tests
+// for that). This lets us test the in-state-bead mutation logic
+// without Dolt.
+func applyHandlerStateMutation(f *testHandlerFixture, ev MRCycleCloseEvent) {
 	now := f.handler.now()
 	isMerged := strings.EqualFold(ev.CloseReason, "merged")
 
 	rigState := f.handler.loadRigCycleState(f.state, ev.TargetRig)
-	prevState := rigState.State
 	rigState.State = "cooled-down"
 	rigState.LastCycleAt = now.UTC().Format(time.RFC3339)
 	rigState.LastOutcome = ev.CloseReason
 
-	appendRigTransition(&rigState, RigTransition{
-		At:     now.UTC().Format(time.RFC3339),
-		From:   prevState,
-		To:     "cooled-down",
-		MRID:   ev.MRID,
-		Reason: ev.CloseReason,
-	})
-
 	if !isMerged {
-		targetPath := extractTargetPathFromBody(ev.Body)
-		appendRigRejection(&rigState, RigRejection{
-			At:         now.UTC().Format(time.RFC3339),
-			MRID:       ev.MRID,
-			TargetPath: targetPath,
-		})
-
 		f.state.CircuitBreaker.Count++
 		if f.state.CircuitBreaker.WindowStartedAt == "" {
 			f.state.CircuitBreaker.WindowStartedAt = now.UTC().Format(time.RFC3339)
@@ -482,18 +454,40 @@ func applyHandlerToState(f *testHandlerFixture, ev MRCycleCloseEvent) {
 	f.handler.saveRigCycleState(f.state, ev.TargetRig, rigState)
 }
 
+// assertNoLegacyLogKeys is the gu-l6xu acceptance assertion (criterion d):
+// after a cycle-close mutation, the parent state bead's RigSummary entry
+// MUST NOT contain `transition_log` or `rejection_log` keys. Those moved
+// to attachment beads under the OQ4 fallback.
+func assertNoLegacyLogKeys(t *testing.T, s *TownState, rig string) {
+	t.Helper()
+	if s.RigSummary == nil {
+		return
+	}
+	raw, ok := s.RigSummary[rig]
+	if !ok {
+		return
+	}
+	got := string(raw)
+	if strings.Contains(got, "transition_log") {
+		t.Errorf("RigSummary[%q] contains 'transition_log' key (must move to attachment beads): %s", rig, got)
+	}
+	if strings.Contains(got, "rejection_log") {
+		t.Errorf("RigSummary[%q] contains 'rejection_log' key (must move to attachment beads): %s", rig, got)
+	}
+}
+
 // --- Idempotency / partial-failure tests ---
 
 // TestCycleCloseHandler_IdempotentReprocess tests the partial-failure
 // acceptance criterion: if the handler has already processed an event
 // (rig in cooled-down state) and re-processes the same event due to an
 // ack-label write failure on the dog side, the state transition is
-// safe — the rig stays in cooled-down and an additional (harmless)
-// transition log entry is appended.
+// safe — the rig stays in cooled-down. (Each re-run files an additional
+// transition attachment; that's the dog's ack-label problem to dedup,
+// not the handler's, and it is documented in the handler docstring.)
 func TestCycleCloseHandler_IdempotentReprocess(t *testing.T) {
 	f := newTestHandler()
 
-	// Initial state: rig in mr-pending.
 	rigState := RigCycleState{State: "mr-pending"}
 	f.handler.saveRigCycleState(f.state, "gastown_upstream", rigState)
 
@@ -505,30 +499,17 @@ func TestCycleCloseHandler_IdempotentReprocess(t *testing.T) {
 	}
 
 	// First processing: mr-pending → cooled-down.
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 	rs := f.handler.loadRigCycleState(f.state, "gastown_upstream")
 	if rs.State != "cooled-down" {
 		t.Fatalf("first process: state = %q, want cooled-down", rs.State)
 	}
-	if len(rs.TransitionLog) != 1 {
-		t.Fatalf("first process: transition_log len = %d, want 1", len(rs.TransitionLog))
-	}
 
 	// Second processing (partial-failure re-dispatch): cooled-down → cooled-down.
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 	rs = f.handler.loadRigCycleState(f.state, "gastown_upstream")
 	if rs.State != "cooled-down" {
 		t.Errorf("second process: state = %q, want cooled-down (idempotent)", rs.State)
-	}
-	// Additional transition log entry is the expected behavior — bounded log
-	// accepts duplicates and trims oldest entries when full.
-	if len(rs.TransitionLog) != 2 {
-		t.Errorf("second process: transition_log len = %d, want 2 (harmless dup)", len(rs.TransitionLog))
-	}
-	// Both entries should record the same from→to (cooled-down→cooled-down on re-run).
-	if rs.TransitionLog[1].From != "cooled-down" || rs.TransitionLog[1].To != "cooled-down" {
-		t.Errorf("second process: transition[1] = %s→%s, want cooled-down→cooled-down",
-			rs.TransitionLog[1].From, rs.TransitionLog[1].To)
 	}
 }
 
@@ -536,7 +517,7 @@ func TestCycleCloseHandler_IdempotentReprocess(t *testing.T) {
 // re-processing a closed-unmerged event. The circuit-breaker counter
 // increments on each call (documented non-idempotent behavior per the
 // handler docstring), but the dog's ack-label mechanism prevents
-// re-dispatch in normal operation. This test documents the behavior.
+// re-dispatch in normal operation.
 func TestCycleCloseHandler_IdempotentReprocess_ClosedUnmerged(t *testing.T) {
 	f := newTestHandler()
 
@@ -551,16 +532,14 @@ func TestCycleCloseHandler_IdempotentReprocess_ClosedUnmerged(t *testing.T) {
 	}
 
 	// First processing.
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 	if f.state.CircuitBreaker.Count != 1 {
 		t.Fatalf("first: CB count = %d, want 1", f.state.CircuitBreaker.Count)
 	}
 
 	// Second processing (re-dispatch).
-	applyHandlerToState(f, ev)
+	applyHandlerStateMutation(f, ev)
 	// CB counter incremented again — documented non-idempotent behavior.
-	// The ack-label mechanism is the primary dedup; the handler accepts
-	// the slight over-count as the lesser evil vs. complex distributed dedup.
 	if f.state.CircuitBreaker.Count != 2 {
 		t.Errorf("second: CB count = %d, want 2 (non-idempotent, accepted)", f.state.CircuitBreaker.Count)
 	}
@@ -570,10 +549,6 @@ func TestCycleCloseHandler_IdempotentReprocess_ClosedUnmerged(t *testing.T) {
 	if rs.State != "cooled-down" {
 		t.Errorf("state = %q, want cooled-down", rs.State)
 	}
-	// Rejection log should have 2 entries (one per invocation).
-	if len(rs.RejectionLog) != 2 {
-		t.Errorf("rejection_log len = %d, want 2", len(rs.RejectionLog))
-	}
 }
 
 // TestCycleCloseHandler_PartialFailure_BugBeadsIdempotent tests the
@@ -582,16 +557,11 @@ func TestCycleCloseHandler_IdempotentReprocess_ClosedUnmerged(t *testing.T) {
 // re-dispatched. On the second run, already-filed bugs should not be
 // duplicated (tested via CreateIfNoDuplicate semantics on the title).
 func TestCycleCloseHandler_PartialFailure_BugBeadsIdempotent(t *testing.T) {
-	// This test validates ParseBugDiscoveredNotes + the fileBugBead contract.
-	// The actual CreateIfNoDuplicate dedup is exercised at the beads layer
-	// (it normalizes and compares titles). Here we verify the handler passes
-	// the correct title format that enables dedup.
 	bugs := []BugDiscovered{
 		{Description: "foo_test.go::TestFoo encodes buggy behavior"},
 		{Description: "bar_test.go::TestBar has race condition"},
 	}
 
-	// First invocation: both bugs should produce distinct titles.
 	titles := make(map[string]bool)
 	for _, bug := range bugs {
 		title := fmt.Sprintf("Bug from auto-test-pr: %s", truncate(bug.Description, 60))
@@ -601,7 +571,6 @@ func TestCycleCloseHandler_PartialFailure_BugBeadsIdempotent(t *testing.T) {
 		titles[title] = true
 	}
 
-	// Second invocation of the same bugs: titles should be identical.
 	for _, bug := range bugs {
 		title := fmt.Sprintf("Bug from auto-test-pr: %s", truncate(bug.Description, 60))
 		if !titles[title] {
@@ -609,8 +578,6 @@ func TestCycleCloseHandler_PartialFailure_BugBeadsIdempotent(t *testing.T) {
 		}
 	}
 
-	// Verify the title format is deterministic — same input → same title.
-	// This is the contract that CreateIfNoDuplicate relies on.
 	t1 := fmt.Sprintf("Bug from auto-test-pr: %s", truncate(bugs[0].Description, 60))
 	t2 := fmt.Sprintf("Bug from auto-test-pr: %s", truncate(bugs[0].Description, 60))
 	if t1 != t2 {
@@ -618,56 +585,30 @@ func TestCycleCloseHandler_PartialFailure_BugBeadsIdempotent(t *testing.T) {
 	}
 }
 
-// --- appendRigTransition / appendRigRejection boundary tests ---
+// --- RigCycleState JSON shape test ---
 
-func TestAppendRigTransition_Bounded(t *testing.T) {
-	var state RigCycleState
-	for i := 0; i < MaxRigTransitions+5; i++ {
-		appendRigTransition(&state, RigTransition{
-			At:   fmt.Sprintf("2026-01-%02dT00:00:00Z", (i%28)+1),
-			MRID: fmt.Sprintf("gt-mr%d", i),
-		})
-	}
-	if len(state.TransitionLog) != MaxRigTransitions {
-		t.Errorf("transition_log len = %d, want %d", len(state.TransitionLog), MaxRigTransitions)
-	}
-	// Oldest should be dropped (FIFO).
-	if state.TransitionLog[0].MRID != "gt-mr5" {
-		t.Errorf("oldest entry = %q, want gt-mr5", state.TransitionLog[0].MRID)
-	}
-}
-
-func TestAppendRigRejection_Bounded(t *testing.T) {
-	var state RigCycleState
-	for i := 0; i < MaxRigTransitions+3; i++ {
-		appendRigRejection(&state, RigRejection{
-			At:   fmt.Sprintf("2026-01-%02dT00:00:00Z", (i%28)+1),
-			MRID: fmt.Sprintf("gt-mr%d", i),
-		})
-	}
-	if len(state.RejectionLog) != MaxRigTransitions {
-		t.Errorf("rejection_log len = %d, want %d", len(state.RejectionLog), MaxRigTransitions)
-	}
-}
-
-// --- RigSummary JSON roundtrip test ---
-
+// TestRigCycleState_JSONRoundtrip verifies the post-OQ4-fallback JSON
+// shape: only single-writer fields (state, last_cycle_at, last_outcome).
+// transition_log and rejection_log MUST NOT be encoded into this blob —
+// those records live on attachment beads.
 func TestRigCycleState_JSONRoundtrip(t *testing.T) {
 	original := RigCycleState{
 		State:       "cooled-down",
 		LastCycleAt: testClock.Format(time.RFC3339),
 		LastOutcome: "merged",
-		TransitionLog: []RigTransition{
-			{At: testClock.Format(time.RFC3339), From: "mr-pending", To: "cooled-down", MRID: "gt-mr1", Reason: "merged"},
-		},
-		RejectionLog: []RigRejection{
-			{At: testClock.Format(time.RFC3339), MRID: "gt-mr2", TargetPath: "internal/foo.go"},
-		},
 	}
 
 	raw, err := json.Marshal(original)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
+	}
+
+	got := string(raw)
+	if strings.Contains(got, "transition_log") {
+		t.Errorf("RigCycleState JSON contains transition_log key: %s", got)
+	}
+	if strings.Contains(got, "rejection_log") {
+		t.Errorf("RigCycleState JSON contains rejection_log key: %s", got)
 	}
 
 	var decoded RigCycleState
@@ -680,17 +621,5 @@ func TestRigCycleState_JSONRoundtrip(t *testing.T) {
 	}
 	if decoded.LastOutcome != original.LastOutcome {
 		t.Errorf("outcome = %q, want %q", decoded.LastOutcome, original.LastOutcome)
-	}
-	if len(decoded.TransitionLog) != 1 {
-		t.Fatalf("transition_log len = %d", len(decoded.TransitionLog))
-	}
-	if decoded.TransitionLog[0].MRID != "gt-mr1" {
-		t.Errorf("transition[0].MRID = %q", decoded.TransitionLog[0].MRID)
-	}
-	if len(decoded.RejectionLog) != 1 {
-		t.Fatalf("rejection_log len = %d", len(decoded.RejectionLog))
-	}
-	if decoded.RejectionLog[0].TargetPath != "internal/foo.go" {
-		t.Errorf("rejection[0].target_path = %q", decoded.RejectionLog[0].TargetPath)
 	}
 }

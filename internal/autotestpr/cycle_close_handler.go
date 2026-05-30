@@ -43,10 +43,15 @@ const CircuitBreakerThreshold = 3
 // CircuitBreakerWindow is the rolling time window for the breaker.
 const CircuitBreakerWindow = 7 * 24 * time.Hour
 
-// RigCycleState is the state machine for a single rig's auto-test-pr
-// cycle. Stored in TownState.RigSummary[rig] as JSON. Phase 0 only
-// tracks state, last_cycle_at, and last_outcome here; Phase 1 task 15
-// will provision per-rig state beads with a richer schema.
+// RigCycleState is the denormalized read-cache for a single rig's
+// auto-test-pr cycle, stored in TownState.RigSummary[rig] as JSON.
+// Single-writer fields only — the high-cardinality transition and
+// rejection logs live on attachment beads per the OQ4 fallback
+// (.designs/auto-test-pr/synthesis.md §"OQ4 fallback"). Phase 1
+// task 15 will hoist this state into a dedicated per-rig pinned bead
+// (rig_state.go); for Phase 0, the same fields live here on the
+// town-state bead so `gt auto-test-pr status` can render per-rig rows
+// without touching attachment beads.
 type RigCycleState struct {
 	// State is the current state machine position.
 	// Values: "idle", "mr-pending", "cooled-down", "paused-by-circuit-breaker"
@@ -58,37 +63,7 @@ type RigCycleState struct {
 	// LastOutcome is the close_reason of the most recent MR close event.
 	// Values: "merged", "rejected", "conflict", "superseded", etc.
 	LastOutcome string `json:"last_outcome,omitempty"`
-
-	// TransitionLog is a bounded log (≤MaxRigTransitions) of state
-	// transitions for this rig. Phase 0 home; Phase 1 moves this to
-	// attachment beads per the OQ4 fallback.
-	TransitionLog []RigTransition `json:"transition_log,omitempty"`
-
-	// RejectionLog is a bounded log (≤MaxRigTransitions) of rejected
-	// (closed-unmerged) MR events. Contains the target_path for the
-	// per-file 21d cooldown. Phase 0 home; Phase 1 moves this to
-	// attachment beads.
-	RejectionLog []RigRejection `json:"rejection_log,omitempty"`
 }
-
-// RigTransition is a single transition log entry.
-type RigTransition struct {
-	At     string `json:"at"`
-	From   string `json:"from"`
-	To     string `json:"to"`
-	MRID   string `json:"mr_id"`
-	Reason string `json:"reason"`
-}
-
-// RigRejection is a single rejection log entry.
-type RigRejection struct {
-	At         string `json:"at"`
-	MRID       string `json:"mr_id"`
-	TargetPath string `json:"target_path,omitempty"`
-}
-
-// MaxRigTransitions bounds the per-rig transition and rejection logs.
-const MaxRigTransitions = 20
 
 // CycleCloseHandler holds the dependencies for processing cycle-close
 // events. The handler is initialized once at daemon startup and
@@ -121,41 +96,39 @@ type CycleCloseHandler struct {
 // repeat, but the dog's ack-label mechanism prevents re-dispatch in
 // the normal case; the rare transient-ack-failure path accepts a
 // slight over-count as the lesser evil vs. complex distributed dedup.
+//
+// Transition and rejection records are persisted as separate
+// attachment beads (OQ4 fallback) — the town-state bead's RigSummary
+// holds only the denormalized per-rig read-cache (state, LastCycleAt,
+// LastOutcome) and the circuit-breaker counter. Acceptance criterion
+// (d) for gu-l6xu: the parent state bead's Issue.Metadata MUST NOT
+// contain `transition_log[]` or `rejection_log[]` keys post-cycle.
 func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 	now := h.now()
 	h.logf("cycle-close-handler: processing mr=%s rig=%s reason=%s", ev.MRID, ev.TargetRig, ev.CloseReason)
 
 	// Classify the close reason into merged vs closed-unmerged.
 	isMerged := strings.EqualFold(ev.CloseReason, "merged")
+	targetPath := ""
+	if !isMerged {
+		targetPath = extractTargetPathFromBody(ev.Body)
+	}
 
-	// CAS-mutate the town-state bead: update RigSummary and circuit breaker.
+	// CAS-mutate the town-state bead: update the per-rig read-cache row
+	// in RigSummary and the circuit-breaker counter. The high-cardinality
+	// transition / rejection records are written as separate attachment
+	// beads after the CAS commits — they are append-only and need not
+	// share the town bead's optimistic-lock window.
+	var prevState string
 	err := mutateTownState(h.Beads, func(s *TownState) error {
-		// 1. Update per-rig state in RigSummary.
 		rigState := h.loadRigCycleState(s, ev.TargetRig)
 
-		prevState := rigState.State
+		prevState = rigState.State
 		rigState.State = "cooled-down"
 		rigState.LastCycleAt = now.UTC().Format(time.RFC3339)
 		rigState.LastOutcome = ev.CloseReason
 
-		// Append transition record.
-		appendRigTransition(&rigState, RigTransition{
-			At:     now.UTC().Format(time.RFC3339),
-			From:   prevState,
-			To:     "cooled-down",
-			MRID:   ev.MRID,
-			Reason: ev.CloseReason,
-		})
-
 		if !isMerged {
-			// Append rejection record.
-			targetPath := extractTargetPathFromBody(ev.Body)
-			appendRigRejection(&rigState, RigRejection{
-				At:         now.UTC().Format(time.RFC3339),
-				MRID:       ev.MRID,
-				TargetPath: targetPath,
-			})
-
 			// Increment circuit-breaker counter.
 			s.CircuitBreaker.Count++
 			if s.CircuitBreaker.WindowStartedAt == "" {
@@ -182,7 +155,7 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 			s.CircuitBreaker.WindowStartedAt = ""
 		}
 
-		// Write back the rig state.
+		// Write back the rig state read-cache.
 		h.saveRigCycleState(s, ev.TargetRig, rigState)
 		return nil
 	})
@@ -192,9 +165,19 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 		return
 	}
 
-	// Nudge overseer if circuit breaker tripped.
+	// Persist the transition record as an attachment bead (OQ4 fallback).
+	// This runs after the CAS commits so a downstream attachment-write
+	// failure cannot rollback the state-machine transition. Attachment
+	// failures are logged but do not fail the handler — the read path
+	// degrades to "missing one transition" rather than "rig stuck in
+	// mr-pending".
+	h.fileTransitionAttachment(ev, prevState, "cooled-down", now)
+
 	if !isMerged {
-		// Re-read to check if we just tripped it.
+		// File the rejection attachment with the per-file 21d cooldown.
+		h.fileRejectionAttachment(ev, targetPath, now)
+
+		// Nudge overseer if circuit breaker tripped.
 		state, loadErr := LoadTownState(h.Beads)
 		if loadErr == nil && state.CircuitBreaker.IsTripped() {
 			msg := fmt.Sprintf("Q6 SEV-2: auto-test-pr circuit breaker tripped (count=%d, threshold=%d, window=7d). Last MR: %s, rig: %s",
@@ -214,6 +197,55 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 
 	h.logf("cycle-close-handler: completed mr=%s rig=%s reason=%s bugs=%d",
 		ev.MRID, ev.TargetRig, ev.CloseReason, len(bugs))
+}
+
+// RejectionCooldown is the per-file cooldown window applied to a
+// rejection attachment (synthesis §D14: per-file 21d cooldown after a
+// closed-unmerged MR before the same target is eligible again).
+const RejectionCooldown = 21 * 24 * time.Hour
+
+// fileTransitionAttachment writes a transition record as an attachment
+// bead. Errors are logged and swallowed — see HandleEvent docstring.
+func (h *CycleCloseHandler) fileTransitionAttachment(ev MRCycleCloseEvent, from, to string, now time.Time) {
+	if h.Beads == nil {
+		return
+	}
+	ctx := map[string]string{
+		"mr_id":  ev.MRID,
+		"reason": ev.CloseReason,
+	}
+	rec := TransitionRecord{
+		Rig:     ev.TargetRig,
+		From:    from,
+		To:      to,
+		At:      now.UTC(),
+		Actor:   "mayor/cycle-close-handler",
+		Context: ctx,
+	}
+	if _, err := CreateTransitionAttachment(h.Beads, rec); err != nil {
+		h.logf("cycle-close-handler: failed to file transition attachment for mr=%s rig=%s: %v",
+			ev.MRID, ev.TargetRig, err)
+	}
+}
+
+// fileRejectionAttachment writes a rejection record as an attachment
+// bead. Errors are logged and swallowed.
+func (h *CycleCloseHandler) fileRejectionAttachment(ev MRCycleCloseEvent, targetPath string, now time.Time) {
+	if h.Beads == nil {
+		return
+	}
+	rec := RejectionRecord{
+		Rig:           ev.TargetRig,
+		File:          targetPath,
+		RejectedAt:    now.UTC(),
+		Reason:        ev.CloseReason,
+		CooldownUntil: now.Add(RejectionCooldown).UTC(),
+		MRID:          ev.MRID,
+	}
+	if _, err := CreateRejectionAttachment(h.Beads, rec); err != nil {
+		h.logf("cycle-close-handler: failed to file rejection attachment for mr=%s rig=%s: %v",
+			ev.MRID, ev.TargetRig, err)
+	}
 }
 
 // MRCycleCloseEvent is re-exported from daemon for convenience.
@@ -293,26 +325,6 @@ func (h *CycleCloseHandler) saveRigCycleState(s *TownState, rig string, state Ri
 		s.RigSummary = make(map[string]json.RawMessage)
 	}
 	s.RigSummary[rig] = raw
-}
-
-// appendRigTransition appends a transition to the rig's log, bounded
-// to MaxRigTransitions entries.
-func appendRigTransition(s *RigCycleState, t RigTransition) {
-	s.TransitionLog = append(s.TransitionLog, t)
-	if len(s.TransitionLog) > MaxRigTransitions {
-		drop := len(s.TransitionLog) - MaxRigTransitions
-		s.TransitionLog = s.TransitionLog[drop:]
-	}
-}
-
-// appendRigRejection appends a rejection to the rig's log, bounded
-// to MaxRigTransitions entries.
-func appendRigRejection(s *RigCycleState, r RigRejection) {
-	s.RejectionLog = append(s.RejectionLog, r)
-	if len(s.RejectionLog) > MaxRigTransitions {
-		drop := len(s.RejectionLog) - MaxRigTransitions
-		s.RejectionLog = s.RejectionLog[drop:]
-	}
 }
 
 // extractTargetPathFromBody pulls the target_path value from the MR
