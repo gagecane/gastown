@@ -24,7 +24,9 @@ func TestTestImproverFormulaStructure(t *testing.T) {
 		t.Errorf("formula version = %d, want >= 1", f.Version)
 	}
 
-	// All expected steps in DAG order.
+	// All expected steps in DAG order. The d19-reply step (Phase 0 task 3b,
+	// gu-75jja) sits between pre-verify and submit-and-exit; it is a no-op
+	// in mode=create and emits a reviewer-comment-thread reply in mode=revise.
 	wantSteps := []string{
 		"load-context",
 		"branch-setup",
@@ -40,6 +42,7 @@ func TestTestImproverFormulaStructure(t *testing.T) {
 		"self-review",
 		"build-check",
 		"pre-verify",
+		"d19-reply",
 		"submit-and-exit",
 	}
 	if len(f.Steps) != len(wantSteps) {
@@ -84,7 +87,8 @@ func TestTestImproverFormulaTopology(t *testing.T) {
 		{"commit-changes", "self-review"},
 		{"self-review", "build-check"},
 		{"build-check", "pre-verify"},
-		{"pre-verify", "submit-and-exit"},
+		{"pre-verify", "d19-reply"},
+		{"d19-reply", "submit-and-exit"},
 	}
 	for _, p := range pairs {
 		posA, okA := pos[p[0]]
@@ -219,6 +223,199 @@ func TestTestImproverFormulaSandboxIntegration(t *testing.T) {
 	// The formula description should mention sandbox integration.
 	if !strings.Contains(f.Description, "sandbox") {
 		t.Error("formula description does not mention sandbox integration")
+	}
+}
+
+// TestTestImproverFormulaModeReviseDocumented verifies that the formula's
+// description and load-context step both teach the polecat how to read
+// the mode=revise dispatch envelope (args.revision shape, the
+// comment_id targeted vs most-recent fallback paths). Without these,
+// the dispatched polecat has no contract telling it which fields are
+// available and which paths apply (Phase 0 task 3b: gu-75jja).
+func TestTestImproverFormulaModeReviseDocumented(t *testing.T) {
+	f, err := ParseFile("formulas/mol-polecat-work-test-improver.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	// Top-level description must teach both modes.
+	for _, s := range []string{"mode=create", "mode=revise", "args.revision", "D19"} {
+		if !strings.Contains(f.Description, s) {
+			t.Errorf("formula description missing %q; mode=revise contract is incomplete", s)
+		}
+	}
+
+	loadCtx := f.GetStep("load-context")
+	if loadCtx == nil {
+		t.Fatal("load-context step missing")
+	}
+	for _, s := range []string{
+		"args.revision",
+		"branch",
+		"last_commit_sha",
+		"comment_id",
+		"comments[]",
+	} {
+		if !strings.Contains(loadCtx.Description, s) {
+			t.Errorf("load-context step missing %q; revise envelope shape not documented", s)
+		}
+	}
+}
+
+// TestTestImproverFormulaD19ReplyStep verifies that the D19 reply step
+// is wired between pre-verify and submit-and-exit, declares its
+// transport options (Refinery bead-comment in v1, GH review-reply in
+// v2), and references the SelectReplyTargets / RenderD19Reply helpers
+// shared with the manual CLI (Phase 0 task 3b: gu-75jja).
+func TestTestImproverFormulaD19ReplyStep(t *testing.T) {
+	f, err := ParseFile("formulas/mol-polecat-work-test-improver.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	step := f.GetStep("d19-reply")
+	if step == nil {
+		t.Fatal("d19-reply step missing — Phase 0 task 3b not implemented")
+	}
+
+	// Step must depend on pre-verify so gates have run before reply.
+	if len(step.Needs) == 0 || step.Needs[0] != "pre-verify" {
+		t.Errorf("d19-reply needs = %v; want first dep to be pre-verify (gates run before reply)",
+			step.Needs)
+	}
+
+	// submit-and-exit must depend on d19-reply (not pre-verify directly).
+	submit := f.GetStep("submit-and-exit")
+	if submit == nil {
+		t.Fatal("submit-and-exit step missing")
+	}
+	foundD19Dep := false
+	for _, n := range submit.Needs {
+		if n == "d19-reply" {
+			foundD19Dep = true
+			break
+		}
+	}
+	if !foundD19Dep {
+		t.Errorf("submit-and-exit needs = %v; must include d19-reply so the reply happens before push",
+			submit.Needs)
+	}
+
+	// The reply step body must teach both targeted and fallback paths
+	// AND name the helper symbols so polecats know where the logic lives.
+	// (Acceptance criteria: tests cover both --comment-id-targeted and
+	// most-recent-thread fallback paths.)
+	for _, s := range []string{
+		"mode=revise",
+		"comment_id",
+		"most-recent",
+		"non-resolved",
+		"manual",
+		"SelectReplyTargets",
+		"RenderD19Reply",
+	} {
+		if !strings.Contains(step.Description, s) {
+			t.Errorf("d19-reply step missing %q; D19 contract is incomplete", s)
+		}
+	}
+
+	// Transport options for v1 (Refinery / bead-comment) AND v2 (GH PR).
+	for _, s := range []string{"bead-comment", "gh pr review"} {
+		if !strings.Contains(step.Description, s) {
+			t.Errorf("d19-reply step missing transport %q; both Refinery and GH paths must be documented", s)
+		}
+	}
+
+	// The step must explicitly mention skipping when mode=create so a
+	// future polecat reading the formula does not post a banner against
+	// a non-existent reviewer thread on the original create cycle.
+	if !strings.Contains(step.Description, "create") {
+		t.Errorf("d19-reply step does not document the mode=create skip semantics")
+	}
+
+	// Failure handling must NOT swallow transport errors silently — the
+	// whole reason D19 was added (R23 in the risk register) is to
+	// prevent silent reply-skips.
+	for _, s := range []string{"escalate", "DEFERRED"} {
+		// At least one of these must be referenced; check both.
+		_ = s // (informational — actual assertion below)
+	}
+	if !strings.Contains(step.Description, "escalate") {
+		t.Errorf("d19-reply step does not document escalation on failure; silent reply-skip is the failure mode D19 prevents")
+	}
+}
+
+// TestTestImproverFormulaImplementCoversReviseMode verifies that the
+// implement step teaches the polecat how to address reviewer feedback
+// (mode=revise) in addition to writing new tests (mode=create). The
+// summary-string contract is critical — the D19 reply banner uses it
+// verbatim, so the implement step must explicitly tell the polecat to
+// produce one and persist it on the bead.
+func TestTestImproverFormulaImplementCoversReviseMode(t *testing.T) {
+	f, err := ParseFile("formulas/mol-polecat-work-test-improver.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	impl := f.GetStep("implement")
+	if impl == nil {
+		t.Fatal("implement step missing")
+	}
+
+	for _, s := range []string{
+		"mode=revise",
+		"args.revision.comments",
+		"D19-summary",       // the persisted-on-bead key the d19-reply step reads back
+		"one-line summary",  // contract phrase
+	} {
+		if !strings.Contains(impl.Description, s) {
+			t.Errorf("implement step missing %q; mode=revise path is under-documented", s)
+		}
+	}
+
+	// Production-source-edit ban must be explicit — the output-allow-list
+	// gate (4f) catches it but the implement step needs to warn polecats
+	// up front so they don't write source-fix code that gate-4f rejects
+	// at the end of a long cycle.
+	if !strings.Contains(impl.Description, "production source") &&
+		!strings.Contains(impl.Description, "production code") {
+		t.Errorf("implement step does not warn against editing production source in revise mode")
+	}
+}
+
+// TestTestImproverFormulaBranchSetupCoversReviseCheckout verifies that
+// the branch-setup step teaches the polecat to check out the existing
+// MR branch (rather than create a new one) when args.mode == "revise",
+// and that it validates HEAD against args.revision.last_commit_sha so a
+// stale dispatch envelope does not silently land a revision against
+// obsolete feedback.
+func TestTestImproverFormulaBranchSetupCoversReviseCheckout(t *testing.T) {
+	f, err := ParseFile("formulas/mol-polecat-work-test-improver.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	bs := f.GetStep("branch-setup")
+	if bs == nil {
+		t.Fatal("branch-setup step missing")
+	}
+
+	for _, s := range []string{
+		"mode=revise",
+		"args.revision.branch",
+		"args.revision.last_commit_sha",
+		"git checkout",
+		"git rev-parse HEAD",
+	} {
+		if !strings.Contains(bs.Description, s) {
+			t.Errorf("branch-setup step missing %q; revise checkout flow is incomplete", s)
+		}
+	}
+
+	// Stale-SHA escalation must be explicit so a polecat reading the
+	// formula does not silently rebase past last_commit_sha.
+	if !strings.Contains(bs.Description, "stale") {
+		t.Errorf("branch-setup step does not document stale-SHA escalation; concurrent push race is unhandled")
 	}
 }
 

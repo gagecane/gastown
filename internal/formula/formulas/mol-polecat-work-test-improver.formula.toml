@@ -1,17 +1,37 @@
 description = """
-Polecat work lifecycle for auto-test-pr (mode=create): extends mol-polecat-work
-with five quality-gate steps between implement and commit.
+Polecat work lifecycle for auto-test-pr (modes: create + revise): extends
+mol-polecat-work with five quality-gate steps between implement and commit
+and, in `mode=revise`, a D19 reviewer-comment-thread reply step between
+pre-merge gating and submission.
 
-This molecule guides a polecat through writing new unit tests for a target file,
-then validates the tests via five hard-fail quality gates before committing and
-submitting to the merge queue.
+This molecule guides a polecat through:
+
+  - **mode=create:** writing new unit tests for a target file, then
+    validating them via five hard-fail quality gates before committing and
+    submitting to the merge queue.
+
+  - **mode=revise:** reading `args.revision` from the dispatch envelope
+    (prior comment thread + last commit SHA + branch name), checking out
+    the existing branch, addressing reviewer feedback, running the same
+    five gates, and emitting the D19 reply step on each comment thread
+    in `args.revision.comments[]` after the new commit is built (templated
+    banner: new commit SHA + gates passed + one-line summary).
+
+For `mode=revise` invocations triggered by `gt auto-test-pr revise --mr=<id>`
+**without** `--comment-id`, the polecat picks the most recent
+non-resolved comment thread and replies there with the
+"manual revision dispatched by <user>" template (D19 fallback). The
+selection and rendering logic lives in `internal/autotestpr/d19reply.go`
+(`SelectReplyTargets`, `RenderD19Reply`); the formula step is the
+transport.
 
 ## Extends mol-polecat-work
 
 Idiomatic extension per mol-polecat-work-monorepo-tdd (gu-deat). Steps 1-3 and
 5-8 match the parent formula identically; the implement step is specialized for
 test-writing, and five quality-gate steps (4a-4g) are inserted between implement
-and commit.
+and commit. In `mode=revise`, an additional `d19-reply` step is inserted
+between `pre-verify` and `submit-and-exit`.
 
 ## Quality Gates (all hard-fail)
 
@@ -49,6 +69,36 @@ At gt done time, the polecat MUST label the resulting MR-bead with both:
 The rig:<target_rig> label is read from the dispatch envelope's `target_rig`
 field. Without it, the 3c cycle-close handler must walk the bead graph back
 through the dispatch bead to resolve which rig the MR belongs to.
+
+In `mode=revise`, the MR-bead is the **same bead** across the create-revise
+lifecycle — the `gt:auto-test-pr` and `rig:<target_rig>` labels were
+already set when the create cycle filed the MR. The revise polecat does
+NOT re-set these labels; the labels persist (Round 3 fix #6).
+
+## D19 Reply Step (mode=revise only)
+
+After the pre-merge gate suite passes and before `gt done`, the revise
+polecat posts a templated reply on each comment thread in
+`args.revision.comments[]`. The reply names:
+
+- the new commit SHA
+- which gates the revision commit passed
+- a one-line summary of what changed in response to that comment
+
+For invocations without `--comment-id`, the polecat picks the most-recent
+non-resolved thread (D19 fallback). If every thread is resolved (or the
+dispatch envelope has zero comments), the polecat posts a single
+"manual revision dispatched by <actor>" banner as a free-standing comment
+on the MR.
+
+The reply transport depends on the rig configuration:
+- **v1 (Refinery merge-queue rigs):** a follow-up bead-comment threaded
+  against the review-comment bead.
+- **v2 (external GitHub PR rigs):** a GitHub PR review reply via
+  `gh pr review` / the github API.
+
+The selection and rendering logic is shared across both transports —
+see `internal/autotestpr.SelectReplyTargets` and `RenderD19Reply`.
 
 ## Variables
 
@@ -101,11 +151,29 @@ If Dolt is down: `gt escalate -s HIGH "Dolt: <symptom>"` — do NOT restart it y
 
 The hook_bead is your assigned issue. Read the output of `bd show` carefully.
 The bead description contains the dispatch envelope JSON with:
-- `args.mode` — MUST be "create" for this formula path
-- `args.targets[]` — files to write tests for, with uncovered branches
+- `args.mode` — either "create" (new test PR) or "revise" (follow-up commit on existing MR)
+- `args.targets[]` — files to write tests for, with uncovered branches (mode=create)
 - `args.conventions_sheet_path` — path to conventions.md (MUST exist)
 - `args.size_budget` — max files and LOC for this cycle
 - `target_rig` — the rig this PR targets
+- `args.revision` — present only in mode=revise; carries:
+  - `branch`: the existing MR's source branch (e.g. `auto-test/<rig>/<bead>`)
+  - `last_commit_sha`: the HEAD commit on the branch you're revising
+  - `comment_id` (optional): a specific reviewer comment to address
+  - `comments[]`: reviewer comment threads (id, resolved, created_at, path, line, user)
+
+If `args.mode == "revise"` you MUST also:
+- Validate `args.revision` is present and has both `branch` and `last_commit_sha`.
+  If either is missing, hard-fail via `gt escalate -s HIGH "dispatcher bug:
+  revise envelope incomplete"` — the dispatcher (`gt auto-test-pr revise` or
+  the future feedback-patrol) is responsible for filling these in. Validating
+  here surfaces dispatcher bugs early instead of letting them manifest as
+  silent reply-skips. The matching helper in code is
+  `internal/autotestpr.ValidateRevisionContext`.
+- Read the comment thread(s) you'll address. With `args.revision.comment_id`
+  set, that thread is your sole target. Without it, the polecat will pick
+  the most-recent non-resolved thread in step `d19-reply` — preview which
+  one with `internal/autotestpr.MostRecentNonResolved`.
 
 **3. Read the conventions sheet:**
 ```bash
@@ -146,7 +214,8 @@ id = "branch-setup"
 title = "Set up working branch"
 needs = ["load-context"]
 description = """
-Ensure you're on a clean feature branch ready for work.
+Ensure you're on the right branch ready for work. The branch flow differs
+between mode=create and mode=revise.
 
 **1. Check current branch state:**
 ```bash
@@ -154,7 +223,9 @@ git status
 git branch --show-current
 ```
 
-**2. Create a fresh branch (auto-test-pr uses a fixed naming convention):**
+**2a. mode=create — create a fresh branch:**
+
+Auto-test-pr uses a fixed naming convention:
 ```bash
 git fetch origin
 git checkout -b auto-test/{{target_rig}}/{{issue}} origin/{{base_branch}}
@@ -163,6 +234,31 @@ git checkout -b auto-test/{{target_rig}}/{{issue}} origin/{{base_branch}}
 The branch name MUST match the `auto-test/<rig>/<bead-id>` convention per
 C-SEC-6 (branch-namespace contract). The branch-GC patrol
 (mol-auto-test-pr-branch-gc) is scoped to this prefix only.
+
+**2b. mode=revise — check out the existing MR branch:**
+
+In revise mode the MR-bead and branch already exist; your follow-up commit
+goes on the **same branch** so the MR thread continues. Check out the branch
+named in `args.revision.branch` and verify HEAD matches
+`args.revision.last_commit_sha`:
+```bash
+git fetch origin
+git checkout -B <args.revision.branch> origin/<args.revision.branch>
+git rev-parse HEAD                         # MUST == args.revision.last_commit_sha
+```
+
+If HEAD does not match `last_commit_sha`, the dispatcher saw a stale view of
+the branch (someone pushed to it concurrently). HARD FAIL: do NOT silently
+rebase past the SHA the dispatcher told you about — that risks landing a
+revision against feedback that's already obsolete.
+```bash
+gt escalate -s HIGH "revise dispatch stale: HEAD != args.revision.last_commit_sha"
+gt done --status DEFERRED
+```
+
+Do NOT create a new branch in revise mode — the create-revise lifecycle
+keeps the same branch and same MR-bead so the maintainer's MR thread is
+preserved.
 
 **3. Ensure clean working state:**
 ```bash
@@ -178,14 +274,50 @@ If setup_command is set, run it to install dependencies:
 
 Empty setup_command means "not configured" — skip this step.
 
-**Exit criteria:** You're on a clean feature branch named
-`auto-test/<target_rig>/<issue>`, rebased on latest {{base_branch}}."""
+**Exit criteria:**
+- mode=create: on a clean feature branch named `auto-test/<target_rig>/<issue>`,
+  rebased on latest {{base_branch}}.
+- mode=revise: on the existing MR branch (`args.revision.branch`) at HEAD ==
+  `args.revision.last_commit_sha`, working tree clean."""
 
 [[steps]]
 id = "implement"
 title = "Write test code for target file(s)"
 needs = ["branch-setup"]
 description = """
+Write unit tests for the uncovered branches (mode=create), or address
+reviewer feedback (mode=revise).
+
+## mode=revise — address reviewer feedback
+
+In revise mode the test file already exists on the branch from the
+preceding create cycle. Your job is to push a follow-up commit that
+addresses the reviewer comment(s) named in `args.revision.comments[]`
+(or, without `--comment-id`, the most-recent non-resolved thread).
+
+- Read the comment body — it tells you what the reviewer wants changed.
+- Make the smallest change that addresses it:
+  - assertion-fix → tighten / loosen / replace the offending assertion
+  - naming → rename test functions or variables
+  - placement → move the test (still must satisfy `gate-4f-output-allowlist`)
+  - additional case → add a sub-test
+- Do **NOT** scope-creep. The revise commit addresses **only** what the
+  reviewer flagged. Other improvements file as separate beads.
+- Do **NOT** edit production source code. The output-allow-list gate
+  (4f) will reject a non-`_test.go` change.
+- Compose **a one-line summary string** describing the change you made
+  in response to that comment (e.g.
+  `"tighten LeaseExpired assertion to check release timestamp"`). The
+  D19 reply step uses this string in the banner; persist it on the bead
+  so it survives session death:
+  ```bash
+  bd update {{issue}} --notes "D19-summary: <one-line summary>"
+  ```
+
+The remainder of the workflow below applies to both modes.
+
+## mode=create — original-cycle path
+
 Write unit tests for the uncovered branches specified in the dispatch envelope.
 
 **Constraints (from conventions sheet + PRD):**
@@ -648,9 +780,96 @@ You will use `gt done --pre-verified` in the next step.
 **Exit criteria:** Branch rebased onto latest origin/{{base_branch}}, all configured gates pass."""
 
 [[steps]]
+id = "d19-reply"
+title = "D19: reply on reviewer comment thread (mode=revise only)"
+needs = ["pre-verify"]
+description = """
+**This step runs ONLY when `args.mode == "revise"`** (i.e. mode=revise
+dispatches). mode=create polecats skip this step (no comment threads
+exist yet — the create cycle's MR is the original artifact).
+
+Per design D19 (PRD scenario S3), after the revision commit's gates pass
+the polecat MUST emit a structured reply on each comment thread it
+addressed. Without this reply, a maintainer who left a comment has no
+signal that the polecat acted on it (R23 in the risk register).
+
+**1. Determine reply targets:**
+
+Use `internal/autotestpr.SelectReplyTargets(rev, args.revision.comment_id)`.
+The function returns one of three shapes:
+
+| Input                                      | Output                                  |
+|--------------------------------------------|-----------------------------------------|
+| `comment_id` set, matches a thread         | [that thread], fallback=false           |
+| `comment_id` set, no match                 | error: ErrCommentIDNotFound — HARD FAIL |
+| `comment_id` empty, ≥1 non-resolved thread | [most-recent non-resolved], fallback=true |
+| `comment_id` empty, all threads resolved   | [], fallback=true (manual banner only)  |
+| `comment_id` empty, zero comments          | [], fallback=true (manual banner only)  |
+
+**2. Render the banner:**
+
+Call `internal/autotestpr.RenderD19Reply` with:
+- `CommitSHA`: the new revision commit SHA (`git rev-parse HEAD`)
+- `Branch`: `args.revision.branch`
+- `GatesPassed`: the names of every gate that passed in step `pre-verify`
+  (e.g. `["coverage-delta", "mutant-sanity", "flakiness", "tautology",
+  "gitleaks", "output-allowlist", "size-budget"]`)
+- `Summary`: the one-line summary you persisted to the bead during
+  `implement` (read it back via `bd show {{issue}}`)
+- `Target`: the selected `CommentRef` (zero value when fallback returns [])
+- `Manual`: true when fallback path was taken
+- `Actor`: when Manual=true, the operator who dispatched the revise
+  (read from `args.revision` if the dispatcher wrote it; else fall back
+  to the rendered "operator" default)
+
+**3. Post the reply:**
+
+Transport depends on the rig:
+
+- **Refinery / merge-queue rigs (v1):** post a follow-up bead-comment
+  threaded against the review-comment bead. The MR-bead's
+  `gt:auto-test-pr` label remains set; the review-comment bead's ID is
+  the `Target.ID` returned by `SelectReplyTargets`.
+- **External GitHub PR rigs (v2):** post a review reply via
+  ```bash
+  gh pr review <pr-url> --comment --body "<rendered banner>"
+  ```
+  or (preferred for inline threads) the github API
+  `POST /repos/<o>/<r>/pulls/<n>/comments` with `in_reply_to: <id>`. The
+  Go helper `internal/github.Client.ReplyToPRComment` already wraps this.
+
+When `SelectReplyTargets` returned `[]` and `fallback=true`, post a single
+free-standing comment on the MR (not threaded against any specific
+review-comment) carrying the manual-fallback banner.
+
+**4. Surface failures, do not swallow them:**
+
+If posting the reply fails (transport error, network, permission), do
+NOT proceed to `submit-and-exit`. Either:
+- retry once (transient errors), or
+- escalate: `gt escalate -s HIGH "D19 reply post failed: <err>"`
+- and exit `gt done --status ESCALATED`.
+
+A silent reply-skip is the exact failure mode D19 was added to prevent.
+
+**5. Persist the rendered banner on the bead:**
+
+So that the cycle-close handler (3c) can include it in the MR-event
+record without re-deriving it:
+```bash
+bd update {{issue}} --notes "D19-reply-posted:
+<rendered banner>"
+```
+
+**Exit criteria:** All targets in `args.revision.comments[]` (or the
+most-recent-non-resolved fallback target, or the manual-fallback
+banner) have received the rendered reply, and the rendered text is
+persisted on the bead. Skip cleanly with no banner if mode=create."""
+
+[[steps]]
 id = "submit-and-exit"
 title = "Submit work and self-clean"
-needs = ["pre-verify"]
+needs = ["d19-reply"]
 description = """
 Submit your work and clean up. You cease to exist after this step.
 
@@ -675,6 +894,18 @@ gt done --pre-verified --target {{base_branch}} \
 
 Without `rig:{{target_rig}}`, the 3c cycle-close handler must walk the bead
 graph back through the dispatch bead to resolve which rig the MR belongs to.
+
+**mode=revise — same MR-bead, same labels:**
+
+In revise mode the MR-bead is the **same bead** the create cycle filed,
+so the `gt:auto-test-pr` and `rig:{{target_rig}}` labels were set once at
+create time and persist (Round 3 fix #6). `gt done` recognizes the
+push-to-existing-MR-branch shape and updates the existing MR-bead's
+`commit_sha` field rather than filing a new one — but you should still
+pass `--label gt:auto-test-pr --label rig:{{target_rig}}` so the command
+is idempotent: re-asserting an existing label is a no-op, while omitting
+it on a future variant where the same branch was reused for an unrelated
+MR would mis-label the artifact.
 
 You should see output like:
 ```
