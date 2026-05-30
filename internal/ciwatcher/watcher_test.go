@@ -328,6 +328,86 @@ func TestWatcherFetchError(t *testing.T) {
 	}
 }
 
+// TestWatcherColdStartSuppressesStaleFailures is the gs-qth regression: on the
+// first-ever poll (no seen-runs ledger), historical failures older than the
+// cold-start lookback must be recorded as seen but NOT escalated, while a
+// genuinely-recent break still escalates promptly.
+func TestWatcherColdStartSuppressesStaleFailures(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-old", "gu-new")
+	fm := &fakeMailer{}
+	now := time.Date(2026, 5, 29, 6, 0, 0, 0, time.UTC)
+	runs := []CIRun{
+		// Recent failure (10m ago) — must escalate.
+		{ID: "910", HeadSHA: "newsha", HeadCommitSubject: "fix (gu-new)", Conclusion: ConclusionFailure, Branch: "main", URL: "u910", CompletedAt: now.Add(-10 * time.Minute)},
+		// Stale failures (well beyond the 2h lookback) — must be suppressed.
+		{ID: "900", HeadSHA: "oldsha", HeadCommitSubject: "fix (gu-old)", Conclusion: ConclusionFailure, Branch: "main", URL: "u900", CompletedAt: now.Add(-72 * time.Hour)},
+		{ID: "899", HeadSHA: "oldsha2", HeadCommitSubject: "fix (gu-old)", Conclusion: ConclusionFailure, Branch: "main", URL: "u899", CompletedAt: now.Add(-100 * time.Hour)},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.ColdStartSuppressed != 2 {
+		t.Errorf("ColdStartSuppressed = %d, want 2", res.ColdStartSuppressed)
+	}
+	if res.FailuresHandled != 1 {
+		t.Errorf("FailuresHandled = %d, want 1 (only the recent break)", res.FailuresHandled)
+	}
+	// Only the recent break should mail the mayor — no flood.
+	if len(fm.sent) != 1 {
+		t.Fatalf("expected 1 mail (recent break only), got %d: %v", len(fm.sent), fm.sent)
+	}
+	if !strings.Contains(fm.sent[0].Subject, "gu-new") {
+		t.Errorf("mail should be for the recent break, got %q", fm.sent[0].Subject)
+	}
+	if len(fb.reopens) != 1 || fb.reopens[0] != "gu-new" {
+		t.Errorf("only the recent bead should reopen, got %v", fb.reopens)
+	}
+	// All three runs must be marked seen so a warm re-poll is a no-op.
+	seen, _ := LoadSeenRuns(town, "alpha")
+	for _, id := range []string{"910", "900", "899"} {
+		if !seen.Has(id) {
+			t.Errorf("run %s should be marked seen after cold start", id)
+		}
+	}
+	if seen.Fresh() {
+		t.Errorf("ledger should no longer be Fresh after a save")
+	}
+}
+
+// TestWatcherWarmPollEscalatesOldFailure verifies the cold-start cutoff only
+// applies on the first poll: once a ledger exists, an unseen failure older
+// than the lookback (e.g. one that completed during a daemon downtime gap)
+// still escalates.
+func TestWatcherWarmPollEscalatesOldFailure(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	now := time.Date(2026, 5, 29, 6, 0, 0, 0, time.UTC)
+	// Seed a non-empty ledger so this is a warm start (not Fresh).
+	seed, _ := LoadSeenRuns(town, "alpha")
+	seed.Mark("seed-run", now.Add(-24*time.Hour))
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		{ID: "950", HeadSHA: "ab", HeadCommitSubject: "fix (gu-aaa)", Conclusion: ConclusionFailure, Branch: "main", URL: "u", CompletedAt: now.Add(-72 * time.Hour)},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ColdStartSuppressed != 0 {
+		t.Errorf("warm poll must not suppress, got ColdStartSuppressed=%d", res.ColdStartSuppressed)
+	}
+	if res.FailuresHandled != 1 {
+		t.Errorf("warm poll should escalate the old unseen failure, got FailuresHandled=%d", res.FailuresHandled)
+	}
+}
+
 func TestWatcherMailFailureKeepsRunUnseen(t *testing.T) {
 	town := t.TempDir()
 	fb := newFakeBeads("gu-aaa")

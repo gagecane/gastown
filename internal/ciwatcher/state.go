@@ -34,6 +34,7 @@ type SeenRuns struct {
 	townRoot string
 	rig      string
 	cache    map[string]time.Time // runID -> recorded-at
+	fresh    bool                 // true when no ledger existed at load (cold start)
 }
 
 // LoadSeenRuns opens (or initializes) the ledger. A missing file is
@@ -50,6 +51,7 @@ func LoadSeenRuns(townRoot, rig string) (*SeenRuns, error) {
 	f, err := os.Open(SeenRunsPath(townRoot, rig)) //nolint:gosec // operator-controlled rig name
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			s.fresh = true
 			return s, nil
 		}
 		return nil, fmt.Errorf("ciwatcher: open seen-runs: %w", err)
@@ -74,6 +76,17 @@ func LoadSeenRuns(townRoot, rig string) (*SeenRuns, error) {
 		return nil, fmt.Errorf("ciwatcher: read seen-runs: %w", err)
 	}
 	return s, nil
+}
+
+// Fresh reports whether the ledger had no backing file at load time — i.e.
+// this is the watcher's first-ever poll for the rig (a cold start). Callers
+// use this to bound which historical runs are eligible for escalation, so a
+// fresh daemon doesn't re-escalate every past CI failure.
+func (s *SeenRuns) Fresh() bool {
+	if s == nil {
+		return false
+	}
+	return s.fresh
 }
 
 // Has reports whether `runID` has already been processed.

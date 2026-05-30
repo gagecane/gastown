@@ -103,11 +103,12 @@ for line in "${RIG_LINES[@]}"; do
   failures=$(jq -r '.failures_handled // 0' <<<"$poll_out" 2>/dev/null || echo "?")
   fwritten=$(jq -r '.freeze_written // false' <<<"$poll_out" 2>/dev/null || echo "?")
   fcleared=$(jq -r '.freeze_cleared // false' <<<"$poll_out" 2>/dev/null || echo "?")
+  coldsupp=$(jq -r '.cold_start_suppressed // 0' <<<"$poll_out" 2>/dev/null || echo "?")
 
   [[ "$fwritten" == "true" ]] && total_freeze_written=$((total_freeze_written + 1))
   [[ "$fcleared" == "true" ]] && total_freeze_cleared=$((total_freeze_cleared + 1))
 
-  RIG_REPORTS+=("$rig: considered=$considered processed=$processed failures=$failures freeze_written=$fwritten freeze_cleared=$fcleared")
+  RIG_REPORTS+=("$rig: considered=$considered processed=$processed failures=$failures freeze_written=$fwritten freeze_cleared=$fcleared cold_start_suppressed=$coldsupp")
 done
 
 # --- Report ------------------------------------------------------------------

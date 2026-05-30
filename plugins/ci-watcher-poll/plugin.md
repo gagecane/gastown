@@ -52,6 +52,14 @@ On a passing CI run after a failure: the freeze is cleared automatically.
 State files at `<townRoot>/.runtime/ci-watcher-seen-<rig>` dedupe runs across
 invocations so a transient flake doesn't fire twice.
 
+**Cold start:** on the first-ever poll for a rig (no seen-runs ledger), the
+watcher only escalates failures that completed within the last 2h
+(`DefaultColdStartLookback`); older historical failures are recorded as seen
+but not escalated. This stops a fresh or rebuilt daemon from re-escalating
+every past CI failure across all of history (gs-qth). Once the ledger exists,
+every unseen failure escalates as normal — so a break that landed during a
+daemon downtime gap is still caught.
+
 ## Implementation
 
 This plugin is `execution.type = "script"` — the daemon runs `run.sh`

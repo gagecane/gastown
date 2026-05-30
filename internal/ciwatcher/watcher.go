@@ -18,6 +18,15 @@ const LabelBrokeMainCI = "broke-main-ci"
 // at most a handful of runs; 50 is comfortable head-room.
 const DefaultRunLimit = 50
 
+// DefaultColdStartLookback bounds how far back the watcher will escalate on
+// its first-ever poll for a rig (when no seen-runs ledger exists). Without
+// this bound, a fresh daemon treats every historical CI failure as new and
+// floods the mayor with stale broke-main-ci escalations (gs-qth). Runs that
+// completed before now-lookback on a cold start are recorded as seen but not
+// escalated. Two hours comfortably covers a daemon restart gap while keeping
+// long-resolved history out of the inbox.
+const DefaultColdStartLookback = 2 * time.Hour
+
 // Config holds the static configuration for a Watcher. All fields are
 // required unless noted otherwise.
 type Config struct {
@@ -38,6 +47,14 @@ type Config struct {
 	// RunLimit caps how many recent runs the fetcher returns per poll.
 	// Defaults to DefaultRunLimit when zero.
 	RunLimit int
+
+	// ColdStartLookback bounds escalation on the first-ever poll for a rig
+	// (no seen-runs ledger). On a cold start, runs that completed before
+	// now-ColdStartLookback are recorded as seen but not escalated, so a
+	// fresh daemon does not flood the mayor with stale historical failures.
+	// Defaults to DefaultColdStartLookback when zero. Has no effect once a
+	// ledger exists (warm polls process every unseen run as before).
+	ColdStartLookback time.Duration
 }
 
 // Watcher orchestrates the post-merge CI watch loop. Construct with NewWatcher
@@ -59,6 +76,9 @@ func NewWatcher(cfg Config, fetcher RunFetcher, beads BeadStore, mailer Mailer, 
 	}
 	if cfg.RunLimit == 0 {
 		cfg.RunLimit = DefaultRunLimit
+	}
+	if cfg.ColdStartLookback == 0 {
+		cfg.ColdStartLookback = DefaultColdStartLookback
 	}
 	if cfg.TargetBranch == "" {
 		cfg.TargetBranch = "main"
@@ -93,6 +113,12 @@ type PollResult struct {
 	// FreezeWritten is true when the watcher wrote a new freeze (or
 	// overwrote an existing one with newer metadata).
 	FreezeWritten bool
+
+	// ColdStartSuppressed counts runs that were recorded as seen but NOT
+	// escalated because this was a cold start (no prior ledger) and the run
+	// completed before the cold-start lookback cutoff. Always 0 on warm
+	// polls.
+	ColdStartSuppressed int
 }
 
 // Process inspects the most recent completed runs on the target branch and
@@ -110,6 +136,18 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 	seen, err := LoadSeenRuns(w.cfg.TownRoot, w.cfg.Rig)
 	if err != nil {
 		return res, fmt.Errorf("ciwatcher: load seen-runs: %w", err)
+	}
+
+	// Cold start: on the first-ever poll for a rig there is no ledger, so
+	// every historical run looks new. Bound escalation to a recent window so
+	// a fresh (or rebuilt) daemon doesn't re-escalate long-resolved failures
+	// across all of CI history (gs-qth).
+	coldStart := seen.Fresh()
+	var coldCutoff time.Time
+	if coldStart {
+		coldCutoff = w.clock.Now().Add(-w.cfg.ColdStartLookback)
+		w.logf("ciwatcher: cold start (no seen-runs ledger for rig=%s) — suppressing escalation for runs completed before %s",
+			w.cfg.Rig, coldCutoff.Format(time.RFC3339))
 	}
 
 	// Process oldest-to-newest so a fail-then-pass sequence in a single
@@ -130,6 +168,21 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 		if seen.Has(run.ID) {
 			continue
 		}
+
+		// On a cold start, suppress escalation for runs that completed
+		// before the lookback cutoff: record them as seen so they never
+		// escalate, but take no action. Runs with no completion timestamp
+		// are processed normally — when in doubt we'd rather act than
+		// silently drop a genuine break. The cutoff only applies on the
+		// first poll; subsequent (warm) polls process every unseen run.
+		if coldStart && !run.CompletedAt.IsZero() && run.CompletedAt.Before(coldCutoff) {
+			w.logf("ciwatcher: cold-start suppress run id=%s sha=%s completed=%s (older than cutoff)",
+				run.ID, shortSHA(run.HeadSHA), run.CompletedAt.Format(time.RFC3339))
+			res.ColdStartSuppressed++
+			seen.Mark(run.ID, w.clock.Now())
+			continue
+		}
+
 		res.RunsProcessed++
 
 		w.logf("ciwatcher: processing run id=%s sha=%s conclusion=%s", run.ID, shortSHA(run.HeadSHA), run.Conclusion)
