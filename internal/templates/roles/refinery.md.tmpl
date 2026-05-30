@@ -272,7 +272,16 @@ nudges are the queue working correctly; they NEVER warrant entering hold.
 git fetch --prune origin
 gt mq list {{ .RigName }}
 ```
-⚠️ **CRITICAL**: `{{ cmd }} mq list` is the ONLY source of truth. NEVER use `git branch -r | grep polecat`.
+⚠️ **CRITICAL**: `{{ cmd }} mq list` is the ONLY source of truth.
+- NEVER use `git branch -r | grep polecat` — misses MR beads with no remote branch.
+- NEVER use `bd list --label=mr` or `bd list --label mr` — that label does not
+  exist. The actual MR-bead label is `gt:merge-request`, written by `gt done`
+  in `internal/cmd/done.go`. Querying `--label=mr` returns 0 results even when
+  the queue is full (gu-weki). If you ever need to bypass `gt mq list` for
+  diagnostics, use `bd list --label gt:merge-request --status open`. For
+  normal patrol, use `gt mq list {{ .RigName }}` — it is the contract and is
+  insulated from label-schema changes.
+
 If queue empty, skip to context-check.
 
 **process-branch**: Pick next branch, rebase on effective target

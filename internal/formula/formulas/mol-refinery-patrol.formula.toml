@@ -107,7 +107,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -261,6 +261,20 @@ gt mq list <rig>
 
 The beads MQ tracks all pending merge requests. Do NOT rely on `git branch -r | grep polecat`
 as branches may exist without MR beads, or MR beads may exist for already-merged work.
+
+⚠️ **DO NOT substitute `bd list --label=mr` (or `--label mr`) for `gt mq list`.**
+That label does not exist — the real label written by `gt done` is
+`gt:merge-request`. A `--label=mr` query returns 0 rows even when the queue
+holds dozens of MRs; a freshly-restarted refinery that runs it will report
+"queue-scan EMPTY" and sleep through a full backlog (gu-weki). If you ever
+need a raw bead query as a diagnostic, use:
+
+```bash
+bd list --label gt:merge-request --status open
+```
+
+But for normal patrol you MUST use `gt mq list <rig>` — that command is the
+contract and isolates you from label-schema changes.
 
 If queue empty, skip to "check-integration-branches" step.
 

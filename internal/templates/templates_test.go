@@ -305,6 +305,52 @@ func TestRenderRole_Refinery_DefaultBranch(t *testing.T) {
 	}
 }
 
+// TestRenderRole_Refinery_QueueScanLabelGuidance verifies that the refinery
+// prompt explicitly forbids `bd list --label=mr` / `--label mr` and points
+// agents at `gt mq list` (or the real `gt:merge-request` label) for queue
+// discovery. Regression for gu-weki: a freshly-restarted refinery used the
+// wrong label, got 0 results, and reported "queue-scan EMPTY" while 19 MRs
+// were pending. The bug only surfaces in a fresh-context agent, so we lock
+// the guidance into the rendered prompt rather than hoping the agent
+// remembers the convention.
+func TestRenderRole_Refinery_QueueScanLabelGuidance(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:          "refinery",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/refinery/rig",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	output, err := tmpl.RenderRole("refinery", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	// Must explicitly call out the wrong label so a fresh agent does not
+	// invent it as natural shorthand.
+	if !strings.Contains(output, "--label=mr") {
+		t.Error("refinery prompt must explicitly mention `--label=mr` as a forbidden anti-pattern (gu-weki) so fresh agents do not invent it")
+	}
+	// Must name the real label too, so anyone bypassing `gt mq list` for
+	// diagnostics uses the right query.
+	if !strings.Contains(output, "gt:merge-request") {
+		t.Error("refinery prompt must name the real MR-bead label `gt:merge-request` for diagnostic queries (gu-weki)")
+	}
+	// Must keep `gt mq list` as the canonical contract.
+	if !strings.Contains(output, "gt mq list") {
+		t.Error("refinery prompt must keep `gt mq list` as the canonical queue-scan command")
+	}
+}
+
 func TestRenderMessage_Spawn(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {
