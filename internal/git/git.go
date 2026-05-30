@@ -3341,7 +3341,7 @@ type PrunedBranch struct {
 }
 
 // PruneStaleBranches finds and deletes local branches matching a pattern that are
-// stale — either fully merged to the default branch or whose remote tracking branch
+// stale — either fully merged to baseBranch or whose remote tracking branch
 // no longer exists (indicating the remote branch was deleted after merge).
 //
 // This addresses cross-clone branch accumulation: when polecats push branches to
@@ -3349,16 +3349,25 @@ type PrunedBranch struct {
 // remote branch is deleted (post-merge), git fetch --prune removes the remote
 // tracking ref but the local branch persists indefinitely.
 //
+// baseBranch is the ref merge-detection compares against. When empty it falls
+// back to the remote's default branch (origin/HEAD). Pass the rig's configured
+// default_branch (e.g. "gagecane/gt") so merge-detection is correct on rigs
+// whose integration branch is not the upstream default — otherwise branches
+// merged to the integration branch are misclassified (hq-dlksi).
+//
 // Safety: never deletes the current branch or the default branch (main/master).
 // Uses git branch -d (not -D), so only fully-merged branches are deleted.
-func (g *Git) PruneStaleBranches(pattern string, dryRun bool) ([]PrunedBranch, error) {
+func (g *Git) PruneStaleBranches(pattern string, dryRun bool, baseBranch string) ([]PrunedBranch, error) {
 	if pattern == "" {
 		pattern = "polecat/*"
 	}
 
 	// Get current branch to avoid deleting it
 	currentBranch, _ := g.CurrentBranch()
-	defaultBranch := g.RemoteDefaultBranch()
+	if baseBranch == "" {
+		baseBranch = g.RemoteDefaultBranch()
+	}
+	defaultBranch := baseBranch
 
 	// List all local branches matching the pattern
 	branches, err := g.ListBranches(pattern)

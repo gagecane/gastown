@@ -1007,68 +1007,73 @@ afterSafetyNet:
 		if convoyInfo != nil && convoyInfo.MergeStrategy == "direct" {
 			// gu-8edz: refuse direct-push from polecats on merge-queue rigs.
 			// On merge_queue.enabled rigs the refinery owns the gate suite;
-			// silently letting a polecat push direct (whether by convoy
-			// strategy or by accident) bypasses gates and races refinery
-			// merges. Override is GT_ALLOW_DIRECT_PUSH=1 with an audit
+			// silently letting a polecat push direct bypasses gates and races
+			// refinery merges. Override is GT_ALLOW_DIRECT_PUSH=1 with an audit
 			// reason in GT_SKIP_PREPUSH_REASON (per gu-zy57).
+			//
+			// hq-dlksi: when the guard fires, do NOT set pushFailed — fall
+			// through to the normal push+MR path so the work is still submitted
+			// via the merge queue instead of being stranded. This mirrors the
+			// late-detected direct-merge guard (below) which also falls through
+			// after the guard fires.
 			if guardErr := guardDirectPushOnMergeQueue(townRoot, rigName, "convoy direct merge"); guardErr != nil {
-				pushFailed = true
-				style.PrintWarning("%v", guardErr)
+				style.PrintWarning("%v — falling through to normal push+MR path", guardErr)
 				if stale, reason := isRefineryHeartbeatStale(townRoot, rigName); stale {
-					fmt.Fprintf(os.Stderr, "  Refinery heartbeat is stale (%s) — leaving branch on origin for refinery to pick up.\n", reason)
+					fmt.Fprintf(os.Stderr, "  Refinery heartbeat is stale (%s) — falling through to MR creation so refinery can pick up on recovery.\n", reason)
 					if issueID != "" {
 						markAwaitingRefineryRecovery(beads.New(cwd), issueID, reason)
 					}
 				}
-				goto notifyWitness
-			}
-			fmt.Printf("%s Direct merge strategy: pushing to %s\n", style.Bold.Render("→"), defaultBranch)
-			// Push submodule changes before direct push (gt-dzs)
-			pushSubmoduleChanges(g, defaultBranch)
-			directRefspec := branch + ":" + defaultBranch
-			directPushErr := pushForDone(g, directRefspec)
-			if directPushErr != nil {
-				pushFailed = true
-				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
-				style.PrintWarning("%s", errMsg)
-				goto notifyWitness
-			}
-			directCommitSHA, _ := g.Rev("HEAD")
-			if doneSkipVerify {
-				noteVerifiedPushSkipped(cwd, issueID, defaultBranch, directCommitSHA, fmt.Sprintf("--skip-verify on direct merge: %s", doneSkipVerifyReason))
-			} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, directCommitSHA); verifyErr != nil {
-				pushFailed = true
-				errMsg := verifyErr.Error()
-				noteVerifiedPushFailure(cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
-				style.PrintWarning("%s\nDirect merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
-				goto notifyWitness
-			}
-			fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
-			// gu-ftja: receipt for the direct-merge convoy push.
-			recordPushReceipt(g, townRoot, rigName, defaultBranch, directCommitSHA, pushlog.SourceDoneDirect, worker, issueID)
+				// Fall through to normal push + MR path below.
+			} else {
+				fmt.Printf("%s Direct merge strategy: pushing to %s\n", style.Bold.Render("→"), defaultBranch)
+				// Push submodule changes before direct push (gt-dzs)
+				pushSubmoduleChanges(g, defaultBranch)
+				directRefspec := branch + ":" + defaultBranch
+				directPushErr := pushForDone(g, directRefspec)
+				if directPushErr != nil {
+					pushFailed = true
+					errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
+					style.PrintWarning("%s", errMsg)
+					goto notifyWitness
+				}
+				directCommitSHA, _ := g.Rev("HEAD")
+				if doneSkipVerify {
+					noteVerifiedPushSkipped(cwd, issueID, defaultBranch, directCommitSHA, fmt.Sprintf("--skip-verify on direct merge: %s", doneSkipVerifyReason))
+				} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+					pushFailed = true
+					errMsg := verifyErr.Error()
+					noteVerifiedPushFailure(cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
+					style.PrintWarning("%s\nDirect merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
+					goto notifyWitness
+				}
+				fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
+				// gu-ftja: receipt for the direct-merge convoy push.
+				recordPushReceipt(g, townRoot, rigName, defaultBranch, directCommitSHA, pushlog.SourceDoneDirect, worker, issueID)
 
-			// Close the base issue — no MR/refinery will close it
-			if issueID != "" {
-				directBd := beads.New(cwd)
-				closeReason := fmt.Sprintf("Direct merge to %s (convoy strategy)", defaultBranch)
-				var closeErr error
-				for attempt := 1; attempt <= 3; attempt++ {
-					closeErr = directBd.ForceCloseWithReason(closeReason, issueID)
-					if closeErr == nil {
-						fmt.Printf("%s Issue %s closed (direct merge)\n", style.Bold.Render("✓"), issueID)
-						break
+				// Close the base issue — no MR/refinery will close it
+				if issueID != "" {
+					directBd := beads.New(cwd)
+					closeReason := fmt.Sprintf("Direct merge to %s (convoy strategy)", defaultBranch)
+					var closeErr error
+					for attempt := 1; attempt <= 3; attempt++ {
+						closeErr = directBd.ForceCloseWithReason(closeReason, issueID)
+						if closeErr == nil {
+							fmt.Printf("%s Issue %s closed (direct merge)\n", style.Bold.Render("✓"), issueID)
+							break
+						}
+						if attempt < 3 {
+							style.PrintWarning("close attempt %d/3 failed: %v (retrying in %ds)", attempt, closeErr, attempt*2)
+							time.Sleep(time.Duration(attempt*2) * time.Second)
+						}
 					}
-					if attempt < 3 {
-						style.PrintWarning("close attempt %d/3 failed: %v (retrying in %ds)", attempt, closeErr, attempt*2)
-						time.Sleep(time.Duration(attempt*2) * time.Second)
+					if closeErr != nil {
+						style.PrintWarning("could not close issue %s after 3 attempts: %v", issueID, closeErr)
 					}
 				}
-				if closeErr != nil {
-					style.PrintWarning("could not close issue %s after 3 attempts: %v", issueID, closeErr)
-				}
-			}
 
-			goto notifyWitness
+				goto notifyWitness
+			}
 		}
 
 		// Default: "mr" strategy (or no convoy) — push branch, create MR bead
@@ -2464,7 +2469,7 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, stranded bo
 			fmt.Fprintf(os.Stderr, "Warning: couldn't add stranded-merge label to %s: %v\n", hookedBeadID, err)
 		}
 		// Append a note to the bead so the audit trail is human-readable.
-		if _, err := bd.Run("note", "add", hookedBeadID, "--body="+strandedReason); err != nil {
+		if _, err := bd.Run("note", hookedBeadID, strandedReason); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: couldn't add stranded-merge note to %s: %v\n", hookedBeadID, err)
 		}
 		fmt.Fprintf(os.Stderr, "WARN: hooked bead %s NOT closed — push/MR failed; bead labeled stranded-merge for recovery.\n", hookedBeadID)

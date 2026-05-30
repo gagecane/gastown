@@ -64,19 +64,9 @@ case "$cmd" in
     fi
     ;;
   note)
-    # bd note add <id> --body=...
-    sub="$1"
-    shift || true
-    target=""
-    body=""
-    for arg in "$@"; do
-      case "$arg" in
-        --body=*) body="${arg#--body=}";;
-        --*) continue;;
-        *) [ -z "$target" ] && target="$arg";;
-      esac
-    done
-    if [ "$sub" = "add" ] && [ -n "$target" ]; then
+    # bd note <id> <text...>
+    target="$1"
+    if [ -n "$target" ]; then
       echo "note $target" >> "__CLOSES_LOG__"
     fi
     ;;

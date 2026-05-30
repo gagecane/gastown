@@ -3805,7 +3805,13 @@ func (d *Daemon) pruneStaleBranches() {
 		// Fetch --prune first to clean up stale remote tracking refs
 		_ = g.FetchPrune("origin")
 
-		pruned, err := g.PruneStaleBranches("polecat/*", false)
+		// Use the rig's configured default_branch so merge-detection works
+		// correctly on non-main integration branches (e.g. gagecane/gt). (hq-dlksi)
+		var baseBranch string
+		if rigCfg, cfgErr := rig.LoadRigConfig(dir); cfgErr == nil {
+			baseBranch = rigCfg.DefaultBranch
+		}
+		pruned, err := g.PruneStaleBranches("polecat/*", false, baseBranch)
 		if err != nil {
 			d.logger.Printf("Warning: branch prune failed for %s: %v", label, err)
 			return

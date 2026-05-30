@@ -152,7 +152,7 @@ func markAwaitingRefineryMerge(bd *beads.Beads, beadID, mrID, branch string) {
 		parts = append(parts, fmt.Sprintf("source_branch: %s", branch))
 	}
 	noteBody := strings.Join(parts, "\n")
-	if _, err := bd.Run("note", "add", beadID, "--body="+noteBody); err != nil {
+	if _, err := bd.Run("note", beadID, noteBody); err != nil {
 		style.PrintWarning("could not add awaiting_refinery_merge note to %s: %v", beadID, err)
 	}
 }
@@ -171,7 +171,7 @@ func markAwaitingRefineryRecovery(bd *beads.Beads, beadID, reason string) {
 		style.PrintWarning("could not add %s label to %s: %v", awaitingRefineryRecoveryLabel, beadID, err)
 	}
 	noteBody := fmt.Sprintf("awaiting_refinery_recovery (gu-8edz): %s", reason)
-	if _, err := bd.Run("note", "add", beadID, "--body="+noteBody); err != nil {
+	if _, err := bd.Run("note", beadID, noteBody); err != nil {
 		style.PrintWarning("could not add awaiting_refinery_recovery note to %s: %v", beadID, err)
 	}
 }

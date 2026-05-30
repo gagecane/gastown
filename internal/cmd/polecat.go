@@ -2453,8 +2453,13 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s fetch --prune: %v (continuing anyway)\n", style.Warning.Render("⚠"), err)
 	}
 
+	// Use the rig's configured default_branch for merge detection so polecats
+	// based on a non-main integration branch (e.g. gagecane/gt) are correctly
+	// classified as merged vs active. (hq-dlksi)
+	rigBaseBranch := r.DefaultBranch()
+
 	// Prune local branches that are merged or have no remote
-	pruned, err := repoGit.PruneStaleBranches("polecat/*", polecatPruneDryRun)
+	pruned, err := repoGit.PruneStaleBranches("polecat/*", polecatPruneDryRun, rigBaseBranch)
 	if err != nil {
 		return fmt.Errorf("pruning local branches: %w", err)
 	}
@@ -2477,7 +2482,7 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Println("Pruning remote polecat branches...")
 
-		defaultBranch := repoGit.RemoteDefaultBranch()
+		defaultBranch := rigBaseBranch
 		remoteRefs, lsErr := repoGit.ListPushRemoteRefsWithHashes("origin", "refs/heads/polecat/")
 		if lsErr != nil {
 			return fmt.Errorf("listing remote refs: %w", lsErr)

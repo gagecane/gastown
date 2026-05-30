@@ -2,10 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
@@ -58,7 +62,24 @@ func runPruneBranches(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Warning: git fetch --prune failed: %v\n", style.Warning.Render("⚠"), err)
 	}
 
-	pruned, err := g.PruneStaleBranches(pruneBranchesPattern, pruneBranchesDryRun)
+	// Load the rig's configured default_branch so merge-detection is correct for
+	// non-main integration branches (e.g. gagecane/gt). Falls back to remote
+	// default branch when rig config is unavailable. (hq-dlksi)
+	var baseBranch string
+	if townRoot, wsErr := workspace.FindFromCwd(); wsErr == nil {
+		cwd, _ := filepath.Abs(".")
+		if relPath, relErr := filepath.Rel(townRoot, cwd); relErr == nil {
+			parts := strings.Split(relPath, string(filepath.Separator))
+			if len(parts) > 0 && parts[0] != "" && parts[0] != "." {
+				rigName := parts[0]
+				if rigCfg, cfgErr := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); cfgErr == nil {
+					baseBranch = rigCfg.DefaultBranch
+				}
+			}
+		}
+	}
+
+	pruned, err := g.PruneStaleBranches(pruneBranchesPattern, pruneBranchesDryRun, baseBranch)
 	if err != nil {
 		return fmt.Errorf("pruning branches: %w", err)
 	}

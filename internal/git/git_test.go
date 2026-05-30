@@ -1201,7 +1201,7 @@ func TestPruneStaleBranches_MergedBranch(t *testing.T) {
 	}
 
 	// Prune should remove it
-	pruned, err := g.PruneStaleBranches("polecat/*", false)
+	pruned, err := g.PruneStaleBranches("polecat/*", false, "")
 	if err != nil {
 		t.Fatalf("PruneStaleBranches: %v", err)
 	}
@@ -1222,6 +1222,123 @@ func TestPruneStaleBranches_MergedBranch(t *testing.T) {
 	}
 	if len(branches) != 0 {
 		t.Errorf("expected 0 branches after prune, got %d: %v", len(branches), branches)
+	}
+}
+
+// TestPruneStaleBranches_NonMainBaseBranch is the regression test for hq-dlksi.
+//
+// On rigs with a non-main integration branch (e.g. gagecane/gt), origin/HEAD —
+// and therefore RemoteDefaultBranch() — points at the upstream repo's `main`,
+// not the rig's actual merge target. A polecat branch merged INTO gagecane/gt
+// (but never to origin/main) was misclassified by the merge-detection:
+//   - merged-to-gagecane/gt branch whose remote is gone was reported as plain
+//     "no-remote" instead of "no-remote-merged", and
+//   - the `merged` flag was wrong town-wide, defeating the intended cleanup.
+//
+// The fix threads the rig's configured default_branch through PruneStaleBranches
+// so IsAncestor compares against origin/gagecane/gt. This test asserts the
+// classification flips from "no-remote" (wrong base) to "no-remote-merged"
+// (correct base) for the exact same repo state.
+func TestPruneStaleBranches_NonMainBaseBranch(t *testing.T) {
+	// Repo whose remote default (origin/HEAD) is `main`.
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	// Create the rig's integration branch `gagecane/gt` off main and push it.
+	const integration = "gagecane/gt"
+	if err := g.CreateBranch(integration); err != nil {
+		t.Fatalf("CreateBranch integration: %v", err)
+	}
+	cmd := exec.Command("git", "push", "origin", integration)
+	cmd.Dir = localDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("push integration: %v", err)
+	}
+
+	// Polecat branches off the integration branch, commits, merges back into
+	// gagecane/gt — but NOTHING lands on origin/main.
+	if err := g.Checkout(integration); err != nil {
+		t.Fatalf("Checkout integration: %v", err)
+	}
+	if err := g.CreateBranch("polecat/non-main-merged"); err != nil {
+		t.Fatalf("CreateBranch polecat: %v", err)
+	}
+	if err := g.Checkout("polecat/non-main-merged"); err != nil {
+		t.Fatalf("Checkout polecat: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feat.txt"), []byte("feat"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feat.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("add feat"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	cmd = exec.Command("git", "push", "origin", "polecat/non-main-merged")
+	cmd.Dir = localDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("push polecat: %v", err)
+	}
+
+	// Merge polecat into the integration branch and push it.
+	if err := g.Checkout(integration); err != nil {
+		t.Fatalf("Checkout integration for merge: %v", err)
+	}
+	if err := g.Merge("polecat/non-main-merged"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	cmd = exec.Command("git", "push", "origin", integration)
+	cmd.Dir = localDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("push integration after merge: %v", err)
+	}
+
+	// Refinery deletes the remote polecat branch post-merge.
+	cmd = exec.Command("git", "push", "origin", "--delete", "polecat/non-main-merged")
+	cmd.Dir = localDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("delete remote polecat: %v", err)
+	}
+	if err := g.FetchPrune("origin"); err != nil {
+		t.Fatalf("FetchPrune: %v", err)
+	}
+
+	// Move off the polecat branch so it can be deleted, but keep the worktree
+	// on the integration branch (its real-world position) — NOT on main, so
+	// `git branch -d`'s merged-to-HEAD check also reflects the integration base.
+	if err := g.Checkout(integration); err != nil {
+		t.Fatalf("Checkout integration final: %v", err)
+	}
+
+	// Sanity: the polecat branch is NOT an ancestor of origin/main (the wrong
+	// base). If it were, this test couldn't distinguish the two code paths.
+	if anc, _ := g.IsAncestor("polecat/non-main-merged", "origin/"+mainBranch); anc {
+		t.Fatal("precondition violated: polecat branch should not be merged to origin/main")
+	}
+
+	// Both calls use dry-run so neither deletes; the classification reason is
+	// what differs between the wrong and correct base branch.
+
+	// WRONG base (empty → falls back to RemoteDefaultBranch()==main): the branch
+	// is not an ancestor of origin/main, so it's classified merely by remote
+	// presence → "no-remote", not "no-remote-merged".
+	wrongPruned, err := g.PruneStaleBranches("polecat/*", true, "")
+	if err != nil {
+		t.Fatalf("PruneStaleBranches (wrong base): %v", err)
+	}
+	if len(wrongPruned) != 1 || wrongPruned[0].Reason != "no-remote" {
+		t.Fatalf("wrong-base classification = %+v, want one branch with reason no-remote", wrongPruned)
+	}
+
+	// CORRECT base (gagecane/gt): IsAncestor against origin/gagecane/gt is true,
+	// so the branch is correctly classified as no-remote-merged.
+	correctPruned, err := g.PruneStaleBranches("polecat/*", true, integration)
+	if err != nil {
+		t.Fatalf("PruneStaleBranches (correct base): %v", err)
+	}
+	if len(correctPruned) != 1 || correctPruned[0].Reason != "no-remote-merged" {
+		t.Fatalf("correct-base classification = %+v, want one branch with reason no-remote-merged", correctPruned)
 	}
 }
 
@@ -1260,7 +1377,7 @@ func TestPruneStaleBranches_DryRun(t *testing.T) {
 	}
 
 	// Dry run should report but not delete
-	pruned, err := g.PruneStaleBranches("polecat/*", true)
+	pruned, err := g.PruneStaleBranches("polecat/*", true, "")
 	if err != nil {
 		t.Fatalf("PruneStaleBranches dry-run: %v", err)
 	}
@@ -1291,7 +1408,7 @@ func TestPruneStaleBranches_SkipsCurrentBranch(t *testing.T) {
 	}
 
 	// Prune should not delete the current branch
-	pruned, err := g.PruneStaleBranches("polecat/*", false)
+	pruned, err := g.PruneStaleBranches("polecat/*", false, "")
 	if err != nil {
 		t.Fatalf("PruneStaleBranches: %v", err)
 	}
@@ -1333,7 +1450,7 @@ func TestPruneStaleBranches_SkipsUnmerged(t *testing.T) {
 	}
 
 	// Prune should NOT delete unmerged branch that still has remote
-	pruned, err := g.PruneStaleBranches("polecat/*", false)
+	pruned, err := g.PruneStaleBranches("polecat/*", false, "")
 	if err != nil {
 		t.Fatalf("PruneStaleBranches: %v", err)
 	}
