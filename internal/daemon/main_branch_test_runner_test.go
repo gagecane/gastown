@@ -727,7 +727,7 @@ func TestRunGatesOnWorktree_SkipsPostSquashPhase(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := d.runGatesOnWorktree(ctx, "testrig", workDir, gates); err != nil {
+	if err := d.runGatesOnWorktree(ctx, "testrig", workDir, gates, false); err != nil {
 		t.Fatalf("runGatesOnWorktree: unexpected error: %v", err)
 	}
 
@@ -774,7 +774,7 @@ func TestRunGatesOnWorktree_PropagatesPreMergeFailures(t *testing.T) {
 		"failing-gate": {Cmd: "exit 1", Phase: "pre-merge"},
 	}
 
-	err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates)
+	err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates, false)
 	if err == nil {
 		t.Fatal("expected error from failing pre-merge gate, got nil")
 	}
@@ -803,7 +803,7 @@ func TestRunGatesOnWorktree_AllPostSquashIsNoOp(t *testing.T) {
 		"integ": {Cmd: "exit 1", Phase: "post-squash"}, // would fail if run
 	}
 
-	if err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates); err != nil {
+	if err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates, false); err != nil {
 		t.Errorf("expected nil (all gates skipped), got: %v", err)
 	}
 	if !strings.Contains(logBuf.String(), "skipped non-pre-merge gates") {
@@ -859,7 +859,7 @@ func TestRunGatesOnWorktree_DeterministicOrder(t *testing.T) {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := d.runGatesOnWorktree(ctx, "testrig", workDir, gates); err != nil {
+		if err := d.runGatesOnWorktree(ctx, "testrig", workDir, gates, false); err != nil {
 			cancel()
 			t.Fatalf("iter %d: runGatesOnWorktree: %v (execution order was non-deterministic)", i, err)
 		}
@@ -901,7 +901,7 @@ func TestRunGatesOnWorktree_SkippedGatesLoggedInOrder(t *testing.T) {
 		"banana": {Cmd: "true", Phase: "post-squash"},
 	}
 
-	if err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates); err != nil {
+	if err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates, false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1202,5 +1202,351 @@ func TestRunCommandOnWorktree_RealFailureNotSuppressed(t *testing.T) {
 	err := d.runCommandOnWorktree(ctx, "testrig", workDir, "build", script)
 	if err == nil {
 		t.Error("expected error (no success marker + timeout = real failure), got nil")
+	}
+}
+
+// TestLoadRigGateConfig_PerGateTimeout regresses the silent-drop in gu-z76g:
+// per-gate `timeout` was parsed but discarded by an anonymous struct that
+// only kept {cmd, phase}. talontriage rigs declared `build=5m` + `test=10m`
+// expecting per-gate budgets and instead got a single 10m rig-level ceiling
+// shared across both, which SIGTERM'd pytest under host load.
+func TestLoadRigGateConfig_PerGateTimeout(t *testing.T) {
+	t.Run("valid timeout durations are parsed", func(t *testing.T) {
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"gates": map[string]interface{}{
+					"build": map[string]interface{}{"cmd": "go build ./...", "timeout": "5m"},
+					"test":  map[string]interface{}{"cmd": "go test ./...", "timeout": "10m"},
+					"vet":   map[string]interface{}{"cmd": "go vet ./..."}, // no timeout — inherits parent
+				},
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if got := cfg.Gates["build"].Timeout; got != 5*time.Minute {
+			t.Errorf("build timeout: got %v, want 5m", got)
+		}
+		if got := cfg.Gates["test"].Timeout; got != 10*time.Minute {
+			t.Errorf("test timeout: got %v, want 10m", got)
+		}
+		if got := cfg.Gates["vet"].Timeout; got != 0 {
+			t.Errorf("vet timeout: got %v, want 0 (unset → inherit parent)", got)
+		}
+	})
+
+	t.Run("malformed timeout falls back to inherit (Timeout=0)", func(t *testing.T) {
+		// Operators occasionally typo "5min" or "5 minutes". A bad value
+		// shouldn't fail config load — the gate just inherits the parent
+		// deadline. The runner still works; the operator sees a clean run.
+		dir := t.TempDir()
+		data := map[string]interface{}{
+			"merge_queue": map[string]interface{}{
+				"gates": map[string]interface{}{
+					"build": map[string]interface{}{"cmd": "go build", "timeout": "5min"}, // bad
+				},
+			},
+		}
+		raw, _ := json.Marshal(data)
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadRigGateConfig(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if got := cfg.Gates["build"].Timeout; got != 0 {
+			t.Errorf("build timeout: got %v, want 0 (malformed → fallback)", got)
+		}
+		if cfg.Gates["build"].Cmd == "" {
+			t.Errorf("expected gate to still be loaded with cmd preserved")
+		}
+	})
+}
+
+// TestLoadRigGateConfig_GatesParallel regresses the silent-drop in gu-z76g:
+// `merge_queue.gates_parallel=true` was accepted by `gt rig settings set`
+// but `runGatesOnWorktree` was a sequential for-loop, so the flag had no
+// effect on main_branch_test.
+func TestLoadRigGateConfig_GatesParallel(t *testing.T) {
+	cases := []struct {
+		name     string
+		mqExtras map[string]interface{}
+		want     bool
+	}{
+		{"true", map[string]interface{}{"gates_parallel": true}, true},
+		{"false", map[string]interface{}{"gates_parallel": false}, false},
+		{"absent_defaults_false", map[string]interface{}{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mq := map[string]interface{}{
+				"gates": map[string]interface{}{
+					"build": map[string]interface{}{"cmd": "true"},
+				},
+			}
+			for k, v := range tc.mqExtras {
+				mq[k] = v
+			}
+			data := map[string]interface{}{"merge_queue": mq}
+			raw, _ := json.Marshal(data)
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadRigGateConfig(dir)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg == nil {
+				t.Fatal("expected non-nil config")
+			}
+			if cfg.GatesParallel != tc.want {
+				t.Errorf("GatesParallel: got %v, want %v", cfg.GatesParallel, tc.want)
+			}
+		})
+	}
+}
+
+// TestComputeEffectiveTimeout verifies that the parent context budget grows
+// to fit declared per-gate budgets so a rig that asks for build=5m + test=10m
+// doesn't get clamped to a 10m rig-level ceiling.
+func TestComputeEffectiveTimeout(t *testing.T) {
+	base := 10 * time.Minute
+
+	t.Run("nil config returns base", func(t *testing.T) {
+		if got := computeEffectiveTimeout(base, nil); got != base {
+			t.Errorf("got %v, want %v", got, base)
+		}
+	})
+
+	t.Run("no gates returns base", func(t *testing.T) {
+		cfg := &rigGateConfig{}
+		if got := computeEffectiveTimeout(base, cfg); got != base {
+			t.Errorf("got %v, want %v", got, base)
+		}
+	})
+
+	t.Run("gates with no declared timeouts return base", func(t *testing.T) {
+		cfg := &rigGateConfig{Gates: map[string]rigGate{
+			"build": {Cmd: "true"},
+			"test":  {Cmd: "true"},
+		}}
+		if got := computeEffectiveTimeout(base, cfg); got != base {
+			t.Errorf("got %v, want %v", got, base)
+		}
+	})
+
+	t.Run("sequential: parent = sum of per-gate when sum > base", func(t *testing.T) {
+		cfg := &rigGateConfig{Gates: map[string]rigGate{
+			"build": {Cmd: "true", Timeout: 5 * time.Minute},
+			"test":  {Cmd: "true", Timeout: 10 * time.Minute},
+		}}
+		// 5m + 10m = 15m > base(10m) → 15m
+		want := 15 * time.Minute
+		if got := computeEffectiveTimeout(base, cfg); got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("sequential: parent stays at base when sum < base", func(t *testing.T) {
+		cfg := &rigGateConfig{Gates: map[string]rigGate{
+			"build": {Cmd: "true", Timeout: 30 * time.Second},
+		}}
+		if got := computeEffectiveTimeout(base, cfg); got != base {
+			t.Errorf("got %v, want %v (base safety net)", got, base)
+		}
+	})
+
+	t.Run("parallel: parent = max of per-gate when max > base", func(t *testing.T) {
+		cfg := &rigGateConfig{
+			Gates: map[string]rigGate{
+				"build": {Cmd: "true", Timeout: 5 * time.Minute},
+				"test":  {Cmd: "true", Timeout: 15 * time.Minute},
+			},
+			GatesParallel: true,
+		}
+		want := 15 * time.Minute
+		if got := computeEffectiveTimeout(base, cfg); got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("parallel: parent stays at base when max < base", func(t *testing.T) {
+		cfg := &rigGateConfig{
+			Gates: map[string]rigGate{
+				"build": {Cmd: "true", Timeout: 2 * time.Minute},
+				"test":  {Cmd: "true", Timeout: 3 * time.Minute},
+			},
+			GatesParallel: true,
+		}
+		if got := computeEffectiveTimeout(base, cfg); got != base {
+			t.Errorf("got %v, want %v (base safety net)", got, base)
+		}
+	})
+
+	t.Run("gates without timeouts are ignored in sum/max", func(t *testing.T) {
+		// "vet" has no timeout — it inherits the parent ctx and shouldn't
+		// inflate the parent budget. Sum is 5m+10m=15m, vet contributes 0.
+		cfg := &rigGateConfig{Gates: map[string]rigGate{
+			"build": {Cmd: "true", Timeout: 5 * time.Minute},
+			"test":  {Cmd: "true", Timeout: 10 * time.Minute},
+			"vet":   {Cmd: "true"},
+		}}
+		want := 15 * time.Minute
+		if got := computeEffectiveTimeout(base, cfg); got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+}
+
+// TestRunGatesOnWorktree_PerGateTimeout verifies that a gate with its own
+// declared timeout is killed at that boundary even when the parent context
+// is much wider. This is the core fix for gu-z76g: a rig that declared
+// per-gate budgets used to silently get a single 10m rig-level ceiling.
+func TestRunGatesOnWorktree_PerGateTimeout(t *testing.T) {
+	workDir := t.TempDir()
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	gates := map[string]rigGate{
+		// Gate timeout (100ms) is much shorter than the parent ctx (10s),
+		// and the command would happily run for 5s if uninterrupted. The
+		// per-gate timeout MUST kick in.
+		"slow": {Cmd: "sleep 5", Phase: "pre-merge", Timeout: 100 * time.Millisecond},
+	}
+
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := d.runGatesOnWorktree(parent, "testrig", workDir, gates, false)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected per-gate timeout to fail the run, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("per-gate timeout (100ms) ignored: ran %v before failing", elapsed)
+	}
+	if !strings.Contains(err.Error(), "slow") {
+		t.Errorf("expected error to name failing gate, got: %v", err)
+	}
+}
+
+// TestRunGatesOnWorktree_PerGateTimeoutDoesNotCancelParent verifies that one
+// gate's per-gate timeout does NOT cancel a sibling gate's context. This
+// matters for parallel mode: gateA's WithTimeout(parent, 100ms) firing must
+// only kill gateA, not gateB.
+func TestRunGatesOnWorktree_PerGateTimeoutDoesNotCancelParent(t *testing.T) {
+	workDir := t.TempDir()
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	marker := filepath.Join(workDir, "ok.ran")
+	gates := map[string]rigGate{
+		// "fast-fail" has a very short per-gate timeout and will fail.
+		"fast-fail": {Cmd: "sleep 5", Phase: "pre-merge", Timeout: 100 * time.Millisecond},
+		// "ok" runs after fast-fail (sequential, alphabetical order) and
+		// must complete normally — its parent context is still alive.
+		"ok": {Cmd: "touch " + marker, Phase: "pre-merge"},
+	}
+
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := d.runGatesOnWorktree(parent, "testrig", workDir, gates, false); err == nil {
+		t.Fatal("expected fast-fail to surface error")
+	}
+
+	// Even though fast-fail timed out, the ok gate should have run.
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("expected sibling gate to run after per-gate timeout: %v", err)
+	}
+}
+
+// TestRunGatesOnWorktree_Parallel verifies the gates_parallel=true path:
+// two gates that each sleep 300ms must complete in well under 600ms when
+// run concurrently. The sequential path takes ~600ms; this proves we
+// actually fanned out.
+func TestRunGatesOnWorktree_Parallel(t *testing.T) {
+	workDir := t.TempDir()
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	const sleep = 300 * time.Millisecond
+	gates := map[string]rigGate{
+		"a": {Cmd: fmt.Sprintf("sleep %f", sleep.Seconds()), Phase: "pre-merge"},
+		"b": {Cmd: fmt.Sprintf("sleep %f", sleep.Seconds()), Phase: "pre-merge"},
+		"c": {Cmd: fmt.Sprintf("sleep %f", sleep.Seconds()), Phase: "pre-merge"},
+	}
+
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	if err := d.runGatesOnWorktree(parent, "testrig", workDir, gates, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Sequential lower bound is 3*sleep = 900ms. Parallel should be ~sleep
+	// plus shell-fork overhead. Allow generous slack for CI host load.
+	limit := 2 * sleep
+	if elapsed >= limit {
+		t.Errorf("parallel gates took %v (>= %v) — likely sequential", elapsed, limit)
+	}
+}
+
+// TestRunGatesOnWorktree_ParallelPropagatesAllFailures verifies that with
+// gates_parallel=true, a failure in one gate doesn't suppress the report of
+// another. This matches refinery's contract: any single gate failure = run
+// failure, but all failures are reported so operators see the full picture.
+func TestRunGatesOnWorktree_ParallelPropagatesAllFailures(t *testing.T) {
+	workDir := t.TempDir()
+	d := &Daemon{
+		ctx:    context.Background(),
+		config: &Config{TownRoot: workDir},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	gates := map[string]rigGate{
+		"alpha": {Cmd: "exit 1", Phase: "pre-merge"},
+		"beta":  {Cmd: "exit 2", Phase: "pre-merge"},
+		"gamma": {Cmd: "true", Phase: "pre-merge"}, // passes
+	}
+
+	err := d.runGatesOnWorktree(context.Background(), "testrig", workDir, gates, true)
+	if err == nil {
+		t.Fatal("expected error from parallel failures, got nil")
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("expected error to mention failing gate %q, got: %v", name, err)
+		}
+	}
+	if strings.Contains(err.Error(), "gamma") {
+		t.Errorf("did not expect passing gate 'gamma' in error, got: %v", err)
 	}
 }

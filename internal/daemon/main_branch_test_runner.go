@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/rig"
@@ -71,19 +72,23 @@ func mainBranchTestRigs(config *DaemonPatrolConfig) []string {
 	return nil
 }
 
-// rigGate captures a single merge_queue gate's executable command and its
-// lifecycle phase. Phase mirrors refinery's GatePhase ("pre-merge" or
-// "post-squash"); empty string means "pre-merge" per refinery's default.
+// rigGate captures a single merge_queue gate's executable command, its
+// lifecycle phase, and its optional per-gate timeout. Phase mirrors
+// refinery's GatePhase ("pre-merge" or "post-squash"); empty string means
+// "pre-merge" per refinery's default. Timeout=0 means "no per-gate budget,
+// inherit the parent context deadline".
 type rigGate struct {
-	Cmd   string
-	Phase string // "" or "pre-merge" = pre-merge (default), "post-squash" = post-squash
+	Cmd     string
+	Phase   string        // "" or "pre-merge" = pre-merge (default), "post-squash" = post-squash
+	Timeout time.Duration // 0 = inherit parent ctx deadline
 }
 
 // rigGateConfig holds the gate/test configuration extracted from a rig's config.json.
 type rigGateConfig struct {
-	TestCommand  string
-	SetupCommand string             // Optional pre-build install command (e.g., "pnpm install")
-	Gates        map[string]rigGate // gate name → cmd + phase
+	TestCommand   string
+	SetupCommand  string             // Optional pre-build install command (e.g., "pnpm install")
+	Gates         map[string]rigGate // gate name → cmd + phase + timeout
+	GatesParallel bool               // run pre-merge gates concurrently
 }
 
 // mainBranchTestPhase is the gate phase that main_branch_test is allowed to
@@ -168,9 +173,10 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 	}
 
 	var mq struct {
-		TestCommand  *string                    `json:"test_command"`
-		SetupCommand *string                    `json:"setup_command"`
-		Gates        map[string]json.RawMessage `json:"gates"`
+		TestCommand   *string                    `json:"test_command"`
+		SetupCommand  *string                    `json:"setup_command"`
+		Gates         map[string]json.RawMessage `json:"gates"`
+		GatesParallel *bool                      `json:"gates_parallel"`
 	}
 	if err := json.Unmarshal(raw.MergeQueue, &mq); err != nil {
 		return nil, fmt.Errorf("parsing merge_queue: %w", err)
@@ -178,18 +184,33 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 
 	cfg := &rigGateConfig{}
 
-	// Extract gates (preferred over legacy test_command)
+	// Extract gates (preferred over legacy test_command). Per-gate timeout
+	// is parsed as a duration string ("5m", "30s"); a malformed value is
+	// logged-by-omission (Timeout stays 0, gate inherits parent deadline)
+	// rather than failing the whole config load — the runner still works,
+	// the operator just doesn't get the budget they asked for.
 	if len(mq.Gates) > 0 {
 		cfg.Gates = make(map[string]rigGate, len(mq.Gates))
 		for name, rawGate := range mq.Gates {
 			var gate struct {
-				Cmd   string `json:"cmd"`
-				Phase string `json:"phase"`
+				Cmd     string `json:"cmd"`
+				Phase   string `json:"phase"`
+				Timeout string `json:"timeout"`
 			}
 			if err := json.Unmarshal(rawGate, &gate); err == nil && gate.Cmd != "" {
-				cfg.Gates[name] = rigGate{Cmd: gate.Cmd, Phase: gate.Phase}
+				rg := rigGate{Cmd: gate.Cmd, Phase: gate.Phase}
+				if gate.Timeout != "" {
+					if d, err := time.ParseDuration(gate.Timeout); err == nil && d > 0 {
+						rg.Timeout = d
+					}
+				}
+				cfg.Gates[name] = rg
 			}
 		}
+	}
+
+	if mq.GatesParallel != nil {
+		cfg.GatesParallel = *mq.GatesParallel
 	}
 
 	// Fall back to legacy test_command
@@ -342,7 +363,13 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		_ = cleanupCmd.Run()
 	}
 
-	ctx, cancel := context.WithTimeout(d.ctx, timeout)
+	// Effective parent timeout grows to fit declared per-gate budgets so a
+	// rig that declares build=5m + test=10m doesn't get clamped to a 10m
+	// rig-level ceiling and SIGTERM'd mid-pytest. See gu-z76g for the
+	// real-world failure mode (talontriage gc-vqwud).
+	effectiveTimeout := computeEffectiveTimeout(timeout, gateCfg)
+
+	ctx, cancel := context.WithTimeout(d.ctx, effectiveTimeout)
 	defer cancel()
 
 	// Fetch latest main
@@ -396,9 +423,49 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 
 	// Run gates or legacy test command
 	if len(gateCfg.Gates) > 0 {
-		return currentSHA, d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates)
+		return currentSHA, d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates, gateCfg.GatesParallel)
 	}
 	return currentSHA, d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
+}
+
+// computeEffectiveTimeout returns the parent context budget for a rig's
+// gate run. The base is the rig-level timeout (`mainBranchTestTimeout`,
+// default 10m). When per-gate timeouts are declared, the parent is widened
+// so it cannot be the bottleneck:
+//
+//   - sequential mode: parent = max(base, sum of per-gate timeouts)
+//   - parallel mode:   parent = max(base, max per-gate timeout)
+//
+// Gates with an unset timeout (Timeout==0) contribute nothing — the loose
+// idea is "if the operator declared a budget, honor it; if they didn't,
+// the rig-level ceiling still applies". The base stays the lower bound so
+// a rig that declares only one cheap 30s gate doesn't accidentally lose
+// the safety net the rig-level timeout provides.
+func computeEffectiveTimeout(base time.Duration, cfg *rigGateConfig) time.Duration {
+	if cfg == nil || len(cfg.Gates) == 0 {
+		return base
+	}
+	var (
+		sum     time.Duration
+		maxGate time.Duration
+	)
+	for _, gate := range cfg.Gates {
+		if gate.Timeout <= 0 {
+			continue
+		}
+		sum += gate.Timeout
+		if gate.Timeout > maxGate {
+			maxGate = gate.Timeout
+		}
+	}
+	candidate := sum
+	if cfg.GatesParallel {
+		candidate = maxGate
+	}
+	if candidate > base {
+		return candidate
+	}
+	return base
 }
 
 // runPreBuildInstall runs the dependency install step for a rig's worktree
@@ -437,7 +504,10 @@ func (d *Daemon) runPreBuildInstall(ctx context.Context, rigName, workDir string
 	return d.runCommandOnWorktree(installCtx, rigName, workDir, "install (setup_command)", cfg.SetupCommand)
 }
 
-// runGatesOnWorktree runs all pre-merge gates sequentially on the given worktree.
+// runGatesOnWorktree runs all pre-merge gates on the given worktree, either
+// sequentially (the safe default — preserves implicit ordering deps like
+// install→test) or concurrently when the rig declares
+// merge_queue.gates_parallel=true.
 //
 // Post-squash gates are skipped: they are defined to run on the squash-merged
 // result in refinery's pipeline and frequently rely on ambient state
@@ -445,23 +515,28 @@ func (d *Daemon) runPreBuildInstall(ctx context.Context, rigName, workDir string
 // worktree lacks. Running them in main_branch_test produces spurious
 // escalations that obscure real regressions. See gu-j1f7.
 //
-// Gates are iterated in a deterministic order (alphabetical by name) so that
-// rigs whose gates have implicit ordering dependencies (e.g. "install" must
-// run before "test" populates node_modules) get stable behavior instead of
-// ~50% false-failures from random Go map iteration. See gu-i0mb. Rigs that
+// Gates are iterated/started in a deterministic order (alphabetical by name)
+// so that rigs whose gates have implicit ordering dependencies (e.g. "install"
+// must run before "test" populates node_modules) get stable behavior instead
+// of ~50% false-failures from random Go map iteration. See gu-i0mb. Rigs that
 // need a non-alphabetical order should split their work across explicit
 // lifecycle hooks (e.g. a "pretest" script) rather than rely on gate naming.
-func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string, gates map[string]rigGate) error {
-	var failures []string
+//
+// Per-gate timeouts (rigGate.Timeout) are honored independently of the parent
+// context: a gate with timeout=5m gets context.WithTimeout(parent, 5m); a gate
+// with no declared timeout inherits the parent deadline. See gu-z76g.
+func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string, gates map[string]rigGate, parallel bool) error {
 	var skipped []string
 	names := make([]string, 0, len(gates))
 	for name := range gates {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	// Filter to runnable (pre-merge) gates while logging skips deterministically.
+	runNames := make([]string, 0, len(names))
 	for _, name := range names {
-		gc := gates[name]
-		phase := gc.Phase
+		phase := gates[name].Phase
 		if phase == "" {
 			phase = "pre-merge"
 		}
@@ -469,18 +544,56 @@ func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, workDir string
 			skipped = append(skipped, fmt.Sprintf("%s(%s)", name, phase))
 			continue
 		}
-		if err := d.runCommandOnWorktree(ctx, rigName, workDir, name, gc.Cmd); err != nil {
-			failures = append(failures, fmt.Sprintf("gate %q: %v", name, err))
-		}
+		runNames = append(runNames, name)
 	}
 	if len(skipped) > 0 {
 		d.logger.Printf("main_branch_test: %s: skipped non-pre-merge gates: %s",
 			rigName, strings.Join(skipped, ", "))
 	}
-	if len(failures) > 0 {
-		return fmt.Errorf("%s", strings.Join(failures, "; "))
+
+	failures := make([]string, len(runNames))
+	if parallel && len(runNames) > 1 {
+		var wg sync.WaitGroup
+		for i, name := range runNames {
+			wg.Add(1)
+			go func(idx int, gateName string) {
+				defer wg.Done()
+				if err := d.runGateWithTimeout(ctx, rigName, workDir, gateName, gates[gateName]); err != nil {
+					failures[idx] = fmt.Sprintf("gate %q: %v", gateName, err)
+				}
+			}(i, name)
+		}
+		wg.Wait()
+	} else {
+		for i, name := range runNames {
+			if err := d.runGateWithTimeout(ctx, rigName, workDir, name, gates[name]); err != nil {
+				failures[i] = fmt.Sprintf("gate %q: %v", name, err)
+			}
+		}
+	}
+
+	var msgs []string
+	for _, f := range failures {
+		if f != "" {
+			msgs = append(msgs, f)
+		}
+	}
+	if len(msgs) > 0 {
+		return fmt.Errorf("%s", strings.Join(msgs, "; "))
 	}
 	return nil
+}
+
+// runGateWithTimeout runs a single gate command, applying the gate's optional
+// per-gate timeout on top of the parent context. When Timeout==0 the gate
+// inherits the parent deadline unchanged.
+func (d *Daemon) runGateWithTimeout(ctx context.Context, rigName, workDir, name string, gc rigGate) error {
+	if gc.Timeout > 0 {
+		gateCtx, cancel := context.WithTimeout(ctx, gc.Timeout)
+		defer cancel()
+		return d.runCommandOnWorktree(gateCtx, rigName, workDir, name, gc.Cmd)
+	}
+	return d.runCommandOnWorktree(ctx, rigName, workDir, name, gc.Cmd)
 }
 
 // gateEnv builds the subprocess environment for gate commands.
