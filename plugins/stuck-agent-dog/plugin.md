@@ -177,7 +177,7 @@ echo "Health summary: ${#CRASHED[@]} crashed, ${#STUCK[@]} stuck, ${#STALLED[@]}
 |------|---------|---------------|-----------|------|
 | CRASHED | dead | — | — | set |
 | ZOMBIE (STUCK[]) | alive | dead | — | set |
-| STALLED-ALIVE | alive | alive | stale (>10m, state≠exiting/idle/stuck) | set |
+| STALLED-ALIVE | alive | alive | stale (>30m, state≠exiting/idle/stuck) | set |
 | IDENTITY-HOOKED | alive | alive | — | identity bead (`*-refinery`, `*-witness`, `*-mayor`, `*-deacon`) |
 | HEALTHY | alive | alive | fresh | any |
 
@@ -189,11 +189,14 @@ polecat with a stale heartbeat and state="working" is sitting on work it
 isn't making progress on — kill the session and let the witness respawn it
 with a fresh context via `gt prime`.
 
-`STUCK_STALLED_THRESHOLD` (env var, default 600s/10m) tunes the staleness
+`STUCK_STALLED_THRESHOLD` (env var, default 1800s/30m) tunes the staleness
 threshold. It is deliberately more lenient than the 3-min threshold used
 inside the gt daemon (`internal/polecat/heartbeat.go`) because this plugin
-runs on a 5-min cooldown and we want at least two cycles of grace for
-legitimate long-running operations (builds, tests, LLM calls).
+runs on a 5-min cooldown and we want six cycles of grace for legitimate
+long-running operations (deep LLM calls, full `go test ./...`, Brazil
+installs). The original 10m default tripped MASS DEATH on routine convoy
+execution and was raised to 30m under gu-9ed0; see the comment block in
+`run.sh` for the incident history.
 
 ## Step 3: Check deacon health
 

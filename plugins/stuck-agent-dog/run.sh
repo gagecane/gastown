@@ -19,8 +19,20 @@ RIGS_JSON_PATH="${TOWN_ROOT}/mayor/rigs.json"
 # session is considered stalled. Set higher than the 3-min heartbeat stale
 # threshold used by the witness (internal/polecat/heartbeat.go) to avoid false
 # positives on legitimate long-running operations (builds, tests, LLM calls).
-# The dog runs every 5m, so 10m gives 2 cycles of grace before flagging.
-STUCK_STALLED_THRESHOLD="${STUCK_STALLED_THRESHOLD:-600}"
+#
+# History (gu-9ed0): the original default was 600s (10m). In practice polecat
+# work cycles routinely run 20-45 minutes — a single LLM call against a deep
+# context, a Brazil install, or a long `go test ./...` run blocks the agent
+# loop and prevents heartbeat updates for the duration of the foreground tool
+# call. With a 10m threshold the dog flagged these busy-but-alive sessions as
+# STALLED, and any 3 simultaneous flags tripped MASS DEATH → spurious
+# CRITICAL escalations. Tonight (2026-05-29 → 2026-05-30) alone produced 6
+# mass-death false-positives, all closed by mayor as known noise. The dog runs
+# on a 5m cycle, so 1800s (30m) gives 6 cycles of grace — comfortably above
+# the long tail of legitimate long-running tool calls while still catching
+# genuinely-stalled polecats (process pinned in D-state for half an hour+).
+# Operators who need the old aggressive behavior can override via env var.
+STUCK_STALLED_THRESHOLD="${STUCK_STALLED_THRESHOLD:-1800}"
 
 # STUCK_LOAD_DEFER_RATIO is the 1-minute-load-average-per-CPU threshold
 # above which the dog defers RESTART_POLECAT actions entirely (gs-549 fix #3).
