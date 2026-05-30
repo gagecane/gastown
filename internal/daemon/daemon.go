@@ -583,6 +583,16 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 
+	// Self-heal dolt.auto-commit=on across the town and every rig's resolved
+	// beads config (gs-onu). `gt rig add` only ensured this for HQ + newly added
+	// rigs (rig.go), so a pre-existing rig whose resolved config predates that
+	// logic silently drifts to auto-commit=off — and ephemeral MR beads created
+	// by `gt done` then sit in the polecat session's Dolt working set, never
+	// committed to shared main, so the refinery never sees them: gt done exits
+	// COMPLETED with the branch pushed but the MR silently stranded (the gastown
+	// 40% strand rate). Defaulting it here on every startup makes the fix stick.
+	d.ensureRigsDoltAutoCommit()
+
 	// Write PID file with nonce for ownership verification
 	if _, err := writePIDFile(d.config.PidFile, os.Getpid()); err != nil {
 		return fmt.Errorf("writing PID file: %w", err)
@@ -1363,6 +1373,29 @@ func (d *Daemon) checkAllRigsDolt() error {
 
 	return fmt.Errorf("daemon startup blocked: %d rig(s) not on Dolt backend\n\n  %s",
 		len(problems), strings.Join(problems, "\n\n  "))
+}
+
+// ensureRigsDoltAutoCommit defaults dolt.auto-commit=on for the town and every
+// rig's RESOLVED beads config at startup, self-healing the config drift behind
+// the gs-onu MR-strand. It mirrors checkAllRigsDolt's iteration (town +
+// <rig>/mayor/rig/.beads, the path polecat `gt done` writes resolve to).
+//
+// Idempotent and conservative: EnsureDoltAutoCommitDefault only ADDS the key
+// when absent, so an operator's explicit value (including "off") is preserved.
+// Best-effort — a config write failure is logged, never fatal to startup.
+func (d *Daemon) ensureRigsDoltAutoCommit() {
+	dirs := []string{filepath.Join(d.config.TownRoot, ".beads")}
+	for _, rigName := range d.getKnownRigs() {
+		dirs = append(dirs, filepath.Join(d.config.TownRoot, rigName, "mayor", "rig", ".beads"))
+	}
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); err != nil {
+			continue // no beads dir here — nothing to default
+		}
+		if err := beads.EnsureDoltAutoCommitDefault(dir); err != nil {
+			d.logger.Printf("Warning: could not ensure dolt.auto-commit=on for %s: %v", dir, err)
+		}
+	}
 }
 
 // readBeadsBackend reads the backend field from metadata.json in a beads directory.
