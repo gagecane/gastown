@@ -175,8 +175,12 @@ func TestEnsureConfigYAML_PreservesUserSetAutoCommitOff(t *testing.T) {
 func TestEnsureDoltAutoCommitDefault_CreatesWhenMissing(t *testing.T) {
 	beadsDir := t.TempDir()
 
-	if err := EnsureDoltAutoCommitDefault(beadsDir); err != nil {
+	changed, err := EnsureDoltAutoCommitDefault(beadsDir)
+	if err != nil {
 		t.Fatalf("EnsureDoltAutoCommitDefault: %v", err)
+	}
+	if !changed {
+		t.Fatalf("changed=false on first write; expected changed=true (gu-b7h5 contract: caller can drive a follow-up commit only when this signals)")
 	}
 
 	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
@@ -201,8 +205,12 @@ func TestEnsureDoltAutoCommitDefault_AddsKeyWhenMissing(t *testing.T) {
 		t.Fatalf("write config.yaml: %v", err)
 	}
 
-	if err := EnsureDoltAutoCommitDefault(beadsDir); err != nil {
+	changed, err := EnsureDoltAutoCommitDefault(beadsDir)
+	if err != nil {
 		t.Fatalf("EnsureDoltAutoCommitDefault: %v", err)
+	}
+	if !changed {
+		t.Fatalf("changed=false when key was appended; expected changed=true")
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -230,8 +238,12 @@ func TestEnsureDoltAutoCommitDefault_PreservesExistingValue(t *testing.T) {
 		t.Fatalf("write config.yaml: %v", err)
 	}
 
-	if err := EnsureDoltAutoCommitDefault(beadsDir); err != nil {
+	changed, err := EnsureDoltAutoCommitDefault(beadsDir)
+	if err != nil {
 		t.Fatalf("EnsureDoltAutoCommitDefault: %v", err)
+	}
+	if changed {
+		t.Fatalf("changed=true when auto-commit was already set; expected changed=false (gu-b7h5: no follow-up commit must fire when the file was not actually modified)")
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -247,11 +259,19 @@ func TestEnsureDoltAutoCommitDefault_PreservesExistingValue(t *testing.T) {
 func TestEnsureDoltAutoCommitDefault_DoesNotDuplicateOnRepeatedCalls(t *testing.T) {
 	beadsDir := t.TempDir()
 
-	if err := EnsureDoltAutoCommitDefault(beadsDir); err != nil {
+	changed, err := EnsureDoltAutoCommitDefault(beadsDir)
+	if err != nil {
 		t.Fatalf("first EnsureDoltAutoCommitDefault: %v", err)
 	}
-	if err := EnsureDoltAutoCommitDefault(beadsDir); err != nil {
+	if !changed {
+		t.Fatalf("first call: expected changed=true")
+	}
+	changed, err = EnsureDoltAutoCommitDefault(beadsDir)
+	if err != nil {
 		t.Fatalf("second EnsureDoltAutoCommitDefault: %v", err)
+	}
+	if changed {
+		t.Fatalf("second call: expected changed=false (idempotent — gu-b7h5 contract)")
 	}
 
 	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))

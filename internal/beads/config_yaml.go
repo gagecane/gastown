@@ -198,11 +198,16 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 // values (whether "on" or "off") are preserved. The file is created with
 // just the auto-commit key if it does not exist.
 //
+// Returns changed=true only when the file was actually written (created or
+// the auto-commit key was appended). Callers can use this to drive a
+// follow-up commit so the self-heal does not leave a tracked file
+// permanently dirty (gu-b7h5).
+//
 // Use this when you want to set the Gas Town auto-commit default without
 // touching unrelated config (notably: without normalizing prefix or
 // issue-prefix). This is what `gt rig add` calls on HQ's .beads/config.yaml
 // so it doesn't retroactively rewrite HQ's prefix.
-func EnsureDoltAutoCommitDefault(beadsDir string) error {
+func EnsureDoltAutoCommitDefault(beadsDir string) (changed bool, err error) {
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	wantAutoCommit := "dolt.auto-commit: \"on\""
 
@@ -211,10 +216,13 @@ func EnsureDoltAutoCommitDefault(beadsDir string) error {
 		// No config.yaml at all — create one with just the auto-commit key.
 		// We intentionally do not seed prefix/issue-prefix here; callers that
 		// want full defaults should use EnsureConfigYAML.
-		return os.WriteFile(configPath, []byte(wantAutoCommit+"\n"), 0644)
+		if err := os.WriteFile(configPath, []byte(wantAutoCommit+"\n"), 0644); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	content := strings.ReplaceAll(string(data), "\r\n", "\n")
@@ -222,7 +230,7 @@ func EnsureDoltAutoCommitDefault(beadsDir string) error {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "dolt.auto-commit:") {
 			// Already set (to any value) — do not touch.
-			return nil
+			return false, nil
 		}
 	}
 
@@ -231,5 +239,8 @@ func EnsureDoltAutoCommitDefault(beadsDir string) error {
 		content += "\n"
 	}
 	content += wantAutoCommit + "\n"
-	return os.WriteFile(configPath, []byte(content), 0644)
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		return false, err
+	}
+	return true, nil
 }

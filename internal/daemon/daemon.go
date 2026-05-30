@@ -1408,19 +1408,82 @@ func (d *Daemon) checkAllRigsDolt() error {
 // Idempotent and conservative: EnsureDoltAutoCommitDefault only ADDS the key
 // when absent, so an operator's explicit value (including "off") is preserved.
 // Best-effort — a config write failure is logged, never fatal to startup.
+//
+// When a write actually happens AND the rig dir is itself a git work tree on
+// a non-detached branch with no pre-existing changes to the target file, the
+// daemon commits the change so it does not leave a tracked file permanently
+// dirty. Without this, rebuild-gt's "skip if dirty" guard treats the rig as
+// uncommittable and skips every cooldown forever (gu-b7h5).
 func (d *Daemon) ensureRigsDoltAutoCommit() {
-	dirs := []string{filepath.Join(d.config.TownRoot, ".beads")}
-	for _, rigName := range d.getKnownRigs() {
-		dirs = append(dirs, filepath.Join(d.config.TownRoot, rigName, "mayor", "rig", ".beads"))
+	type rigBeadsDir struct {
+		beadsDir string
+		gitRoot  string // empty for the town-level beads dir (no auto-commit needed)
 	}
-	for _, dir := range dirs {
-		if _, err := os.Stat(dir); err != nil {
+	dirs := []rigBeadsDir{{beadsDir: filepath.Join(d.config.TownRoot, ".beads")}}
+	for _, rigName := range d.getKnownRigs() {
+		rigRoot := filepath.Join(d.config.TownRoot, rigName, "mayor", "rig")
+		dirs = append(dirs, rigBeadsDir{
+			beadsDir: filepath.Join(rigRoot, ".beads"),
+			gitRoot:  rigRoot,
+		})
+	}
+	for _, entry := range dirs {
+		if _, err := os.Stat(entry.beadsDir); err != nil {
 			continue // no beads dir here — nothing to default
 		}
-		if err := beads.EnsureDoltAutoCommitDefault(dir); err != nil {
-			d.logger.Printf("Warning: could not ensure dolt.auto-commit=on for %s: %v", dir, err)
+		changed, err := beads.EnsureDoltAutoCommitDefault(entry.beadsDir)
+		if err != nil {
+			d.logger.Printf("Warning: could not ensure dolt.auto-commit=on for %s: %v", entry.beadsDir, err)
+			continue
+		}
+		if !changed || entry.gitRoot == "" {
+			continue
+		}
+		// Self-heal write happened in a rig with a known git work tree; commit
+		// it so rebuild-gt's "skip if dirty" guard doesn't trip every cooldown.
+		// Best-effort — any failure logs and proceeds; the original write is
+		// preserved either way.
+		if err := commitDaemonAutoCommitSelfHeal(entry.gitRoot); err != nil {
+			d.logger.Printf("Warning: could not commit dolt.auto-commit self-heal in %s: %v", entry.gitRoot, err)
+		} else {
+			d.logger.Printf("Committed dolt.auto-commit=on self-heal in %s", entry.gitRoot)
 		}
 	}
+}
+
+// commitDaemonAutoCommitSelfHeal stages and commits .beads/config.yaml in the
+// given git work tree, scoping the commit to that one path so unrelated dirty
+// state in the worktree is left alone. Returns an error if the rig is not a
+// git repo or is on a detached HEAD (in either case the operator is in some
+// non-routine state and we must not steamroll).
+func commitDaemonAutoCommitSelfHeal(gitRoot string) error {
+	g := gitpkg.NewGit(gitRoot)
+	if !g.IsRepo() {
+		return fmt.Errorf("not a git work tree")
+	}
+	// Refuse to commit on detached HEAD: rebuild-gt only rebuilds from main
+	// anyway, and a detached HEAD almost certainly means a polecat or
+	// recovery operation is in progress on the same checkout.
+	if _, err := g.CurrentBranchStrict(); err != nil {
+		return fmt.Errorf("refusing to commit self-heal: %w", err)
+	}
+	const relPath = ".beads/config.yaml"
+	// Stage only the target file. CommitPaths below scopes the commit to
+	// this pathspec so any other staged changes stay staged.
+	if err := g.Add(relPath); err != nil {
+		return fmt.Errorf("git add %s: %w", relPath, err)
+	}
+	msg := "chore(daemon): self-heal dolt.auto-commit=on (gu-b7h5)\n\n" +
+		"Daemon's gs-onu self-heal appends dolt.auto-commit=on to the rig's\n" +
+		"resolved beads config when missing. Without this commit, the tracked\n" +
+		"config.yaml stayed dirty across daemon restarts, which made\n" +
+		"rebuild-gt's \"skip if dirty\" guard skip every cooldown — the binary\n" +
+		"on disk could drift behind origin/main indefinitely. Commit the\n" +
+		"self-heal so the working tree returns to clean."
+	if err := g.CommitPaths(msg, relPath); err != nil {
+		return fmt.Errorf("git commit %s: %w", relPath, err)
+	}
+	return nil
 }
 
 // readBeadsBackend reads the backend field from metadata.json in a beads directory.

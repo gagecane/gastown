@@ -655,7 +655,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	// default for the new rig and HQ.
 	hqBeadsDir := filepath.Join(townRoot, ".beads")
 	if _, err := os.Stat(hqBeadsDir); err == nil {
-		if err := beads.EnsureDoltAutoCommitDefault(hqBeadsDir); err != nil {
+		if _, err := beads.EnsureDoltAutoCommitDefault(hqBeadsDir); err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: could not set dolt.auto-commit default on HQ config.yaml: %v\n", err)
 		}
 	}

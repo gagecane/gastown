@@ -1164,6 +1164,20 @@ func (g *Git) CommitAll(message string) error {
 	return err
 }
 
+// CommitPaths commits only the named pathspecs, leaving other staged or
+// unstaged changes in the worktree untouched. Behaves like
+// `git commit -m <message> -- <paths...>`. Used by surgical self-heal
+// commits where the daemon must not sweep up unrelated dirty state
+// (gu-b7h5).
+func (g *Git) CommitPaths(message string, paths ...string) error {
+	if len(paths) == 0 {
+		return fmt.Errorf("CommitPaths requires at least one path")
+	}
+	args := append([]string{"commit", "-m", message, "--"}, paths...)
+	_, err := g.run(args...)
+	return err
+}
+
 // ResetFiles unstages files without modifying the working tree.
 // Equivalent to: git reset HEAD -- <paths>
 func (g *Git) ResetFiles(paths ...string) error {
