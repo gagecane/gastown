@@ -113,9 +113,12 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
 
 	if err != nil || fields == nil {
-		// No agent bead - fall back to git check
+		// No agent bead - fall back to git check. Compare against the rig's
+		// configured base branch (hq-uzubf), not a hardcoded origin/main, so an
+		// integration-rig polecat landed on gagecane/gt isn't falsely flagged as
+		// having the whole base as "unpushed".
 		if infoErr == nil && polecatInfo != nil {
-			gitState, gitErr := getGitState(polecatInfo.ClonePath)
+			gitState, gitErr := getGitStateWithTargets(polecatInfo.ClonePath, []string{remoteBaseRef("origin", target.r.DefaultBranch())})
 			result.GitState = gitState
 			if gitErr != nil {
 				result.Reasons = append(result.Reasons, "cannot check git state")
@@ -151,7 +154,7 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			loadGitState()
 			gitSafe := false
 			if polecatInfo != nil {
-				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
+				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath, target.r.DefaultBranch())
 			}
 			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		}
@@ -171,7 +174,7 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			}
 			gitSafe := false
 			if polecatInfo != nil {
-				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
+				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath, target.r.DefaultBranch())
 			}
 			hookSafe, _, _ := hookBeadSafeForCleanup(bd, hookBead)
 			activeMRSafe := !activeMRAssessment.Pending
@@ -347,7 +350,7 @@ func displayDryRunSafetyCheck(target polecatTarget) bool {
 			sourceHint := agentSourceIssueHint("", fields)
 			gitSafe := false
 			if infoErr == nil && polecatInfo != nil {
-				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath)
+				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath, target.r.DefaultBranch())
 			}
 			if blocker := activeMRBlocker(bd, fields.ActiveMR, sourceHint, true, gitSafe); blocker != "" {
 				fmt.Printf("    - Active MR: %s (%s)\n", style.Error.Render("blocked"), blocker)

@@ -520,7 +520,7 @@ func TestGetGitState_AllCommitsOnRemote(t *testing.T) {
 func TestActiveMRGitSafeForWorktree(t *testing.T) {
 	t.Run("clean and pushed is safe", func(t *testing.T) {
 		repo := initTestRepoWithRemote(t)
-		if !activeMRGitSafeForWorktree(repo) {
+		if !activeMRGitSafeForWorktree(repo, "main") {
 			t.Fatalf("clean worktree on a pushed main must be gitSafe (reclaim allowed)")
 		}
 	})
@@ -530,7 +530,7 @@ func TestActiveMRGitSafeForWorktree(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(repo, "dirty.txt"), []byte("x\n"), 0644); err != nil {
 			t.Fatalf("write dirty.txt: %v", err)
 		}
-		if activeMRGitSafeForWorktree(repo) {
+		if activeMRGitSafeForWorktree(repo, "main") {
 			t.Fatalf("uncommitted changes must NOT be gitSafe — would risk work loss")
 		}
 	})
@@ -542,7 +542,7 @@ func TestActiveMRGitSafeForWorktree(t *testing.T) {
 		}
 		runGit(t, repo, "add", "local.txt")
 		runGit(t, repo, "commit", "-m", "local-only commit not on origin")
-		if activeMRGitSafeForWorktree(repo) {
+		if activeMRGitSafeForWorktree(repo, "main") {
 			t.Fatalf("an unpushed commit must NOT be gitSafe — would risk work loss")
 		}
 	})
@@ -558,7 +558,7 @@ func TestActiveMRGitSafeForWorktree(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(repo, ".beads", "redirect"), []byte("../shared\n"), 0644); err != nil {
 			t.Fatalf("write .beads/redirect: %v", err)
 		}
-		if !activeMRGitSafeForWorktree(repo) {
+		if !activeMRGitSafeForWorktree(repo, "main") {
 			t.Fatalf("a worktree dirty only with .beads/ churn must be gitSafe (reclaim allowed)")
 		}
 	})
@@ -577,8 +577,32 @@ func TestActiveMRGitSafeForWorktree(t *testing.T) {
 		// The feature commit lands on origin/main verbatim; HEAD is now an ancestor
 		// of origin/main (the branch is "behind" once main moves ahead).
 		runGit(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-		if !activeMRGitSafeForWorktree(repo) {
+		if !activeMRGitSafeForWorktree(repo, "main") {
 			t.Fatalf("a branch whose commits are already on origin/main must be gitSafe")
+		}
+	})
+
+	// hq-uzubf: integration rigs (lia_bac/lia_iac/lia_web) base off gagecane/gt,
+	// not main. A polecat whose work is preserved on origin/gagecane/gt — but not
+	// yet promoted to origin/main — must be gitSafe against its REAL base. Against
+	// the wrong base (main) it would be flagged as carrying the whole integration
+	// base as "unpushed" and wedged as recovery_blocked. Proves base-awareness.
+	t.Run("integration base safe vs gagecane/gt, NOT vs main (hq-uzubf)", func(t *testing.T) {
+		repo := initTestRepoWithRemote(t) // origin/main = init commit
+		runGit(t, repo, "checkout", "-b", "polecat/work", "main")
+		if err := os.WriteFile(filepath.Join(repo, "ux.txt"), []byte("ux\n"), 0644); err != nil {
+			t.Fatalf("write ux.txt: %v", err)
+		}
+		runGit(t, repo, "add", "ux.txt")
+		runGit(t, repo, "commit", "-m", "ux work")
+		// Work landed on the integration branch, NOT on main.
+		runGit(t, repo, "update-ref", "refs/remotes/origin/gagecane/gt", "HEAD")
+
+		if !activeMRGitSafeForWorktree(repo, "gagecane/gt") {
+			t.Errorf("work preserved on origin/gagecane/gt must be gitSafe against its real base")
+		}
+		if activeMRGitSafeForWorktree(repo, "main") {
+			t.Errorf("same work is NOT on origin/main — must NOT be gitSafe vs the wrong base (the false-unpushed wedge)")
 		}
 	})
 }

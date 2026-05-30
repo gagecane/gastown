@@ -1257,6 +1257,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
 	workTerminal := beadTerminal
 	targetRefs := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
+	// hq-uzubf: always include the rig's configured base branch as a preservation
+	// target so getGitState compares against it (e.g. gagecane/gt) rather than
+	// falling back to origin/main for an integration-rig polecat.
+	if ref := remoteBaseRef("origin", r.DefaultBranch()); ref != "" {
+		targetRefs = append(targetRefs, ref)
+	}
 	input := polecat.WorkstateInput{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch}
 	var gitState *GitState
 	var gitErr error
@@ -1318,7 +1324,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		}
 		activeMRAssessment := polecat.ActiveMRAssessment{}
 		if fields.ActiveMR != "" {
-			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
+			gitSafe := activeMRGitSafeForWorktree(p.ClonePath, r.DefaultBranch())
 			activeMRAssessment = polecat.AssessActiveMR(bd, polecat.ActiveMRInput{
 				ActiveMR:        fields.ActiveMR,
 				SourceIssueHint: sourceHint,
@@ -1343,7 +1349,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			if input.CleanupStatus == polecat.CleanupUnpushed {
 				loadGitState()
 			}
-			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
+			gitSafe := activeMRGitSafeForWorktree(p.ClonePath, r.DefaultBranch())
 			if staleCleanupStatusCanBeIgnoredForRecovery(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafe) {
 				input.IgnoreCleanupStatus = true
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=safe work_ref=terminal", input.CleanupStatus))
@@ -1547,21 +1553,58 @@ func staleCleanupStatusCanBeIgnoredForRecovery(status polecat.CleanupStatus, wor
 	}
 }
 
-func activeMRGitSafeForWorktree(worktreePath string) bool {
+// activeMRGitSafeForWorktree reports whether the worktree carries no work at
+// risk: clean (excluding runtime artifacts), no stash, and all commits preserved
+// on the remote. baseBranch is the rig's configured integration/default branch
+// (Rig.DefaultBranch()) — the commits are compared against IT, not a hardcoded
+// origin/main.
+//
+// hq-uzubf: on integration rigs (lia_bac/lia_iac/lia_web base off gagecane/gt),
+// a polecat whose work is fully landed on the integration branch was otherwise
+// falsely flagged ~N commits "unpushed vs origin/main" — its branch tracks
+// origin/main, so both CheckUncommittedWork.UnpushedCommits and the bare
+// BranchPushedToRemote(branch,"origin") compared against main and reported the
+// whole gagecane/gt base (400+ commits) as unpushed. That wedged the polecat as
+// recovery_blocked and made nuke (no --force) refuse it forever. Passing
+// baseBranch as the preservation target fixes all three integration rigs.
+// remoteBaseRef qualifies a rig base branch (e.g. "gagecane/gt", "main") as its
+// remote-tracking ref ("origin/gagecane/gt") so comparison-ref resolution can't
+// accidentally match a stale LOCAL branch of the same name. Returns "" for an
+// empty base.
+func remoteBaseRef(remote, baseBranch string) string {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return ""
+	}
+	if strings.HasPrefix(baseBranch, remote+"/") || strings.HasPrefix(baseBranch, "refs/") {
+		return baseBranch
+	}
+	return remote + "/" + baseBranch
+}
+
+func activeMRGitSafeForWorktree(worktreePath, baseBranch string) bool {
 	g := git.NewGit(worktreePath)
 	branch, err := g.CurrentBranch()
 	if err != nil || branch == "" {
 		return false
 	}
 	status, err := g.CheckUncommittedWork()
-	if err != nil || !status.CleanExcludingRuntime() || status.StashCount > 0 || status.UnpushedCommits > 0 {
+	// Note: do NOT gate on status.UnpushedCommits here — it counts commits ahead
+	// of the branch's UPSTREAM (origin/main for polecat branches), which is the
+	// wrong base for integration rigs. Preservation against baseBranch below is
+	// the authoritative, base-aware unpushed check.
+	if err != nil || !status.CleanExcludingRuntime() || status.StashCount > 0 {
 		return false
 	}
-	pushed, unpushed, err := g.BranchPushedToRemote(branch, "origin")
+	var targets []string
+	if ref := remoteBaseRef("origin", baseBranch); ref != "" {
+		targets = []string{ref}
+	}
+	pres, err := g.BranchPreservationStatus(branch, "origin", targets)
 	if err != nil {
 		return false
 	}
-	return pushed && unpushed == 0
+	return pres.Preserved && pres.UnpreservedPatchCount == 0
 }
 
 func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, terminal bool, blocker string) {
