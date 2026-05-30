@@ -74,6 +74,110 @@ var fireCrossRigEscalation = func(rig, prefix, beadID string) {
 // before a sling context is closed as circuit-broken.
 const maxDispatchFailures = 3
 
+// --- Capacity-exhaustion monitor (hq-ly5yj) --------------------------------
+//
+// When the pool can't place ANY ready work — every slot recovery_blocked, with
+// working+reusable_idle==0 — it is only LOGGED ("zero capacity") every cycle and
+// nothing escalates it. stuck-agent-dog inspects live tmux sessions, so it is
+// structurally blind to sessionless recovery_blocked slots; a real outage sat
+// ~9.5h silently (hq-uzubf), masked only because persistent crews kept flowing.
+// This monitor counts CONSECUTIVE dispatch cycles where the pool is exhausted
+// while ready beads are being skipped, and escalates HIGH once sustained. A
+// single blip is normal (a slot frees next cycle); sustained-with-skips is the
+// outage signature.
+
+// capacityExhaustionThreshold is the number of consecutive exhausted dispatch
+// cycles before escalating. At the daemon's ~3-4min heartbeat this is ~10-15min
+// of fully-dead pool — long enough to ignore transient blips, short enough to
+// catch a real outage early instead of hours later.
+const capacityExhaustionThreshold = 3
+
+// capacityExhaustionState persists across `gt scheduler run` invocations (each
+// is a separate process) in <town>/.runtime/capacity-exhaustion.json.
+type capacityExhaustionState struct {
+	Consecutive int    `json:"consecutive"`
+	FirstSeen   string `json:"first_seen,omitempty"`
+	Escalated   bool   `json:"escalated"`
+}
+
+// evaluateCapacityExhaustion is the pure state machine: given the prior state,
+// whether this cycle is exhausted, and a timestamp for a fresh episode, it
+// returns the next state and whether THIS cycle should fire an escalation
+// (true only on the cycle that first crosses the threshold within an episode).
+func evaluateCapacityExhaustion(prev capacityExhaustionState, exhausted bool, now string) (capacityExhaustionState, bool) {
+	if !exhausted {
+		return capacityExhaustionState{}, false // recovered → re-arm
+	}
+	next := prev
+	next.Consecutive++
+	if next.FirstSeen == "" {
+		next.FirstSeen = now
+	}
+	escalate := next.Consecutive >= capacityExhaustionThreshold && !next.Escalated
+	if escalate {
+		next.Escalated = true
+	}
+	return next, escalate
+}
+
+func capacityExhaustionStatePath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "capacity-exhaustion.json")
+}
+
+func loadCapacityExhaustionState(path string) capacityExhaustionState {
+	var st capacityExhaustionState
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
+	if err != nil {
+		return st
+	}
+	_ = json.Unmarshal(data, &st)
+	return st
+}
+
+func saveCapacityExhaustionState(path string, st capacityExhaustionState) {
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
+	if data, err := json.Marshal(st); err == nil {
+		_ = os.WriteFile(path, data, 0644)
+	}
+}
+
+// monitorCapacityExhaustion advances the consecutive-exhaustion counter for this
+// dispatch cycle and escalates HIGH when the pool has been unable to place ready
+// work for capacityExhaustionThreshold consecutive cycles. Best-effort: state
+// and escalation failures never block dispatch.
+func monitorCapacityExhaustion(townRoot string, snapshot polecatCapacitySnapshot, skipped int) {
+	exhausted := skipped > 0 && snapshot.Working+snapshot.ReusableIdle == 0
+	path := capacityExhaustionStatePath(townRoot)
+	next, escalate := evaluateCapacityExhaustion(loadCapacityExhaustionState(path), exhausted, time.Now().UTC().Format(time.RFC3339))
+	if escalate {
+		fireCapacityExhaustionEscalation(snapshot, skipped, next)
+	}
+	saveCapacityExhaustionState(path, next)
+}
+
+// resetCapacityExhaustion clears the counter after a successful dispatch so a
+// later episode re-arms and re-escalates.
+func resetCapacityExhaustion(townRoot string) {
+	saveCapacityExhaustionState(capacityExhaustionStatePath(townRoot), capacityExhaustionState{})
+}
+
+// fireCapacityExhaustionEscalation raises a HIGH escalation to the Mayor with the
+// capacity snapshot. The fingerprint lets `gt escalate`'s close-aware dedup
+// (gu-ah40) suppress repeats within an open episode. Overridable in tests.
+var fireCapacityExhaustionEscalation = func(snapshot polecatCapacitySnapshot, skipped int, st capacityExhaustionState) {
+	msg := fmt.Sprintf("Pool capacity exhausted: %d ready bead(s) skipped, zero dispatchable slots for %d consecutive cycles (since %s)",
+		skipped, st.Consecutive, st.FirstSeen)
+	reason := fmt.Sprintf("working=%d recovery_blocked=%d reusable_idle=%d pending_mr=%d reservations=%d max=%d — all slots wedged, zero polecat dispatch while ready work queues. Likely recovery_blocked debris (hq-uzubf). Inspect: gt scheduler status --json; gt polecat list --all --json.",
+		snapshot.Working, snapshot.RecoveryBlocked, snapshot.ReusableIdle, snapshot.PendingMR, snapshot.Reservations, snapshot.Max)
+	cmd := exec.Command("gt", "escalate", "--severity", "high",
+		"--source", "scheduler:capacity",
+		"--fingerprint", "pool:capacity-exhaustion",
+		"--reason", reason, msg)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s capacity-exhaustion escalation failed: %v\n", style.Warning.Render("⚠"), err)
+	}
+}
+
 // dispatchScheduledWork is the main dispatch loop for the capacity scheduler.
 // Called by both `gt scheduler run` and the daemon heartbeat.
 func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun bool) (int, error) {
@@ -293,6 +397,11 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	if report.Dispatched > 0 || report.Failed > 0 {
 		fmt.Printf("\n%s Dispatched %d, failed %d (reason: %s)\n",
 			style.Bold.Render("✓"), report.Dispatched, report.Failed, report.Reason)
+		// A successful dispatch proves the pool can place work — clear any
+		// pending exhaustion episode so the next outage re-arms (hq-ly5yj).
+		if report.Dispatched > 0 {
+			resetCapacityExhaustion(townRoot)
+		}
 	} else if report.Skipped > 0 {
 		snapshot, err := polecatCapacitySnapshotForTown(townRoot)
 		if err != nil {
@@ -300,6 +409,9 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		}
 		fmt.Printf("\n%s Skipped %d bead(s) — zero capacity (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
 			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
+		// Ready beads were skipped — if the pool also has no dispatchable slots,
+		// advance the exhaustion counter and escalate once it's sustained (hq-ly5yj).
+		monitorCapacityExhaustion(townRoot, snapshot, report.Skipped)
 	}
 
 	return report.Dispatched, nil
