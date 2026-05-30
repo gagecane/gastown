@@ -1891,9 +1891,15 @@ notifyWitness:
 	nudgeWitness(rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", polecatName, exitType))
 	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), exitType)
 
-	// Persistent polecat model (gt-hdf8): polecats transition to IDLE after completion.
-	// Session stays alive, sandbox preserved, worktree synced to main for reuse.
-	// "done means idle" - not "done means dead".
+	// Persistent polecat model (gt-hdf8), reconciled with self-terminate (gs-4pg):
+	// the pool persists IDENTITY + SANDBOX (worktree); the SESSION is ephemeral.
+	// On completion the polecat transitions to IDLE (agent_state=idle, worktree
+	// synced to main, old branch deleted) so its warm worktree is reusable, and
+	// then — when polecat_self_terminate is on (gu-ci0l, now default) — kills its
+	// own session below. These are NOT competing models: reuse (ReuseIdlePolecat)
+	// always kills any existing session and respawns fresh for a clean context, so
+	// session liveness is irrelevant to reuse. "done means idle" describes the
+	// SANDBOX (warm, reusable), not the session (which dies and respawns on reuse).
 	isPolecat := false
 	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil && roleInfo.Role == RolePolecat {
 		isPolecat = true
@@ -1951,7 +1957,7 @@ notifyWitness:
 			}
 		}
 
-		fmt.Printf("%s Polecat transitioned to IDLE — ready for new work\n", style.Bold.Render("✓"))
+		fmt.Printf("%s Polecat IDLE — warm worktree preserved for reuse (next gt sling respawns a fresh session)\n", style.Bold.Render("✓"))
 	}
 
 	fmt.Println()

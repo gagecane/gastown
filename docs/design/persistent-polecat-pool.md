@@ -63,6 +63,31 @@ SESSION (ephemeral)
 
 No `nuke` in the happy path. Polecats cycle: IDLE → WORKING → DONE → IDLE.
 
+### Reconciliation: self-terminate vs. pool reuse (gs-4pg)
+
+`operational.daemon.polecat_self_terminate` defaults to `true` (gu-ci0l): a
+polecat kills its own tmux session at the end of `gt done`. This is **not** in
+conflict with the persistent-pool reuse model — it is the lifecycle-separation
+table above applied literally:
+
+- **Identity** and **Sandbox** persist. The IDLE transition in `gt done`
+  (`agent_state=idle`, worktree synced to main, old branch deleted) leaves a
+  *warm worktree* in the pool. `FindIdlePolecats` keys only on `State==Idle`;
+  session liveness is irrelevant to whether a polecat is reusable.
+- **Session** is ephemeral. Even when self-terminate is off, `ReuseIdlePolecat`
+  *always* kills any existing session before reuse and respawns a fresh one
+  (`StartSession` + `gt prime --hook`) so the next assignment gets a clean
+  context window and correct hook discovery. self-terminate merely ends that
+  ephemeral session at done-time instead of at next-reuse-time.
+
+So the reused unit is the **worktree** (skipping ~5s of worktree creation) plus
+the **identity/CV** — never a live session. "done means idle" describes the
+sandbox, not the session. The capacity-starvation symptom in gs-9wz was a
+crash-detector misclassifying a *clean* self-terminated session as a crash
+(parked `recovery_blocked`); that was fixed independently (idle-state detection
+on clean `gt done` + the stalled-clean reclaim patrol, commit 18ad8b12) and is
+not an argument against either model.
+
 ### Pool Management
 
 **Pool size:** Fixed per rig. Configured in `rig.config.json`:
