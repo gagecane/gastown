@@ -302,7 +302,7 @@ var polecatPruneCmd = &cobra.Command{
 	Long: `Prune stale polecat branches in a rig.
 
 Finds and deletes polecat branches that are no longer needed:
-  - Branches fully merged to main
+  - Branches fully merged to the repository's default branch
   - Branches whose remote tracking branch was deleted (post-merge cleanup)
   - Branches for polecats that no longer exist (orphaned)
 

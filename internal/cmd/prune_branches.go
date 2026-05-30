@@ -30,7 +30,7 @@ persists indefinitely.
 
 This command finds and removes local branches matching the pattern (default:
 polecat/*) that are either:
-  - Fully merged to the default branch (main)
+  - Fully merged to the repository's default branch
   - Have no corresponding remote tracking branch (remote was deleted)
 
 Safety: Uses git branch -d (not -D) so only fully-merged branches are deleted.
@@ -54,6 +54,13 @@ func runPruneBranches(cmd *cobra.Command, args []string) error {
 	g := gitpkg.NewGit(".")
 	if !g.IsRepo() {
 		return fmt.Errorf("not a git repository")
+	}
+
+	// Resolve the rig's default branch for accurate user-facing messages
+	// (gu-hg3t: don't hardcode "main" — rigs may default to "master" or other).
+	defaultBranch := g.RemoteDefaultBranch()
+	if defaultBranch == "" {
+		defaultBranch = "main"
 	}
 
 	// Run fetch --prune first to clean up stale remote tracking refs
@@ -99,11 +106,11 @@ func runPruneBranches(cmd *cobra.Command, args []string) error {
 		reasonStr := ""
 		switch b.Reason {
 		case "merged":
-			reasonStr = "merged to main"
+			reasonStr = fmt.Sprintf("merged to %s", defaultBranch)
 		case "no-remote":
 			reasonStr = "remote branch deleted"
 		case "no-remote-merged":
-			reasonStr = "remote deleted, merged to main"
+			reasonStr = fmt.Sprintf("remote deleted, merged to %s", defaultBranch)
 		}
 		fmt.Printf("  %s %s (%s)\n",
 			style.Dim.Render("•"),
