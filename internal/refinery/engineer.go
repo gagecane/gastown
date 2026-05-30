@@ -571,6 +571,13 @@ type ProcessResult struct {
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
 	NoMerge        bool // Source issue has no_merge flag — intentionally blocked, not a failure
 	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
+	// PushFailed indicates `git push` (or its post-push verification) failed,
+	// most often a non-ff rejection from a sibling MR that landed first during
+	// convoy fan-out (gu-wj3f). The local squash commit is rolled back and the
+	// MR + branch are preserved so the polecat can rebase and resubmit. Callers
+	// MUST NOT run any post-merge cleanup (close beads, delete branch, send
+	// MERGED) when this is set — the commit never reached origin/<target>.
+	PushFailed bool
 }
 
 // doMerge performs the actual git merge operation.
@@ -837,18 +844,28 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after push failure: %v\n", target, resetErr)
 			}
+			// gu-wj3f: classify push failures as PushFailed so callers gate
+			// post-merge cleanup on push success. A non-ff rejection (sibling
+			// landed first during convoy fan-out) leaves the commit on the
+			// polecat branch but NOT on origin/<target> — closing the MR and
+			// nuking the branch here orphans the work.
 			return ProcessResult{
-				Success: false,
-				Error:   fmt.Sprintf("failed to push to origin: %v", err),
+				Success:    false,
+				PushFailed: true,
+				Error:      fmt.Sprintf("failed to push to origin: %v", err),
 			}
 		}
 		if err := e.git.VerifyPushedCommit("origin", target, mergeCommit); err != nil {
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after verified-push failure: %v\n", target, resetErr)
 			}
+			// gu-wj3f: post-push verification failure means the push reported
+			// success but origin/<target> tip is not our commit — treat as
+			// PushFailed for the same teardown-blocking reasons.
 			return ProcessResult{
-				Success: false,
-				Error:   err.Error(),
+				Success:    false,
+				PushFailed: true,
+				Error:      err.Error(),
 			}
 		}
 	} else {
@@ -1457,6 +1474,11 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 		failureType = "conflict"
 	} else if result.TestsFailed {
 		failureType = "tests"
+	} else if result.PushFailed {
+		// gu-wj3f: surface push failures distinctly so the polecat knows to
+		// rebase onto the new origin/<target> tip rather than re-running
+		// gates locally as if a build/test broke.
+		failureType = "push"
 	}
 	polecatName := strings.TrimPrefix(mr.Worker, "polecats/")
 	nudgeTarget := fmt.Sprintf("%s/%s", e.rig.Name, polecatName)
