@@ -879,6 +879,12 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("MR cycle-close dog ticker started (interval %v)", interval)
 	}
 
+	// Wire the Mayor SEV-1 main-CI-break handler (Phase 0 task 11, gu-36voy).
+	// Must be registered BEFORE the main_ci_break ticker starts so the first
+	// dispatched event goes to the real D16 handler, not the noop. Mirrors
+	// the cycle-close handler wiring above.
+	d.initMainCIBreakHandler()
+
 	// Start main CI-break ticker if configured.
 	// Watches main_branch_test escalations, resolves commit → MR bead,
 	// checks gt:auto-test-pr opt-in, and dispatches to the D16 handler.

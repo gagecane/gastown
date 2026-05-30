@@ -330,6 +330,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.MRCycleClose.Enabled
 	}
+	if patrol == "main_ci_break" {
+		// Opt-in patrol: D16 SEV-1 auto-revert path. Disabled by default
+		// so installs that have not yet rolled out auto-test-pr don't
+		// silently start the dog. Phase 1 entry flips this on once the
+		// pilot rig opts in (gu-gmj0r).
+		if config == nil || config.Patrols == nil || config.Patrols.MainCIBreak == nil {
+			return false
+		}
+		return config.Patrols.MainCIBreak.Enabled
+	}
 
 	if config == nil || config.Patrols == nil {
 		return true // Default: enabled
