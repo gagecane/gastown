@@ -628,7 +628,26 @@ refinery worktree would fail (or silently detach) in that case.
 # `origin` and `upstream` remotes (fork-PR workflow). Refinery worktrees
 # always have both, so the hook would reject this push without the env var.
 # This is the documented escape hatch — see .githooks/pre-push line ~76.
-GT_ALLOW_DIRECT_MAIN=1 git push origin HEAD:<merge-target>
+#
+# We invoke the push through scripts/git-push-verified.sh (gu-vph7). The
+# helper runs the same `git push` command but emits ONE of two structured
+# markers on stdout:
+#
+#   PUSH_OK: <oldsha>..<newsha> <local> -> <remote>   (or "PUSH_OK: up-to-date")
+#   PUSH_FAILED: <reason>[: <details>]
+#
+# These are the ONLY signals you may use to decide whether the push
+# succeeded. Do NOT read the raw git output and decide for yourself —
+# pre-push hook output frequently contains the substring "reject" in
+# unrelated contexts (lint warnings, test names, allowlist tokens) and the
+# Refinery agent has been observed hallucinating rejections from those
+# tokens (gu-vph7 live incident, 2026-05-30: agent reported a successful
+# push as "rejected" and latched into manual hold; mayor verified via
+# `git ls-remote` that the push had landed cleanly).
+PUSH_RESULT=$(GT_ALLOW_DIRECT_MAIN=1 \
+  scripts/git-push-verified.sh origin HEAD:<merge-target>)
+PUSH_RC=$?
+echo "$PUSH_RESULT"
 ```
 
 **⚠️ DO NOT WORKAROUND HOOK REJECTIONS WITH `git update-ref` (gu-xml5)**
@@ -640,12 +659,38 @@ origin never receives the merge, polecats and crew see a stale base, and
 the work appears merged in beads while silently sitting in your worktree.
 
 This bug stranded 14 commits on 2026-05-26 and is the root cause of gu-w1w6.
-Always run `git push` and let it fail loudly if there's a real problem —
-do not silently substitute a local-only operation.
+Always run `git push` (via the verified wrapper above) and let it fail
+loudly if there's a real problem — do not silently substitute a local-only
+operation.
 
-**Step 1.5 (direct only): VERIFY PUSH SUCCEEDED (CRITICAL - PATCH-003)**
+**Step 1.5 (direct only): VERIFY PUSH SUCCEEDED (CRITICAL — gu-vph7)**
 
-Push can fail silently (network, auth, hooks). IMMEDIATELY verify:
+Classify the push outcome using ONLY the structured marker emitted by
+`scripts/git-push-verified.sh`. Free-form interpretation of git output is
+the documented failure mode (gu-vph7) and is not allowed here.
+
+The classification rules are:
+
+| First word of `PUSH_RESULT` | Action |
+|----------------------------|--------|
+| `PUSH_OK:` | Push succeeded. Continue to the SHA cross-check below. |
+| `PUSH_FAILED:` | Push failed. Skip directly to the failure block below. |
+| anything else | Helper is broken or output was lost. Treat as failure. |
+
+Do NOT re-read the raw git output to second-guess the marker. The marker
+is the contract.
+
+```bash
+# PUSH_RESULT was captured in Step 1 above.
+echo "Marker: $PUSH_RESULT"
+```
+
+After a `PUSH_OK:` marker, perform a defensive SHA cross-check against
+origin. This catches the residual case where a future bug in the helper
+(or a remote-rewrite via shared hosting) leaves the local view out of
+sync with origin. The helper is the primary signal; this is
+belt-and-suspenders.
+
 ```bash
 git fetch origin
 # HEAD is still on temp, which now equals the merged commit we just pushed.
@@ -655,7 +700,7 @@ echo "Local:  $LOCAL_SHA"
 echo "Remote: $REMOTE_SHA"
 ```
 
-**If SHAs match**: Push succeeded.
+**If marker is `PUSH_OK:` AND SHAs match**: Push verified and confirmed.
 
 **Step 1.6 (direct only): CHECK FOR OPEN PR ON BRANCH (gas-fk4)**
 
@@ -678,21 +723,43 @@ The PR should be merged or closed through the GitHub API, not by branch deletion
 
 Continue to Step 2.
 
-**If SHAs differ**: STOP. Push failed silently.
+**If marker is `PUSH_FAILED:` OR SHAs differ OR marker is unrecognized**:
+STOP. The push did not land on origin.
 - DO NOT send MERGED notification
 - DO NOT close MR bead
 - DO NOT delete branch
-- Debug the push failure (check `git push` output, network, auth)
-- Retry push and verify again before proceeding
+- DO NOT mark the merge as complete in any beads field
+- Read the raw git output (echoed on stderr by the verified-push helper)
+  AND `$PUSH_RESULT` for the structured reason
+- If marker is `PUSH_FAILED: rejected` → another writer beat you to
+  origin. Re-run process-branch (rebase on the new tip) and retry.
+- If marker is `PUSH_FAILED: exit-128` or network-class → check
+  connectivity / auth and retry once. Escalate if it recurs.
+- If marker is `PUSH_OK:` but SHAs differ → the helper or origin is
+  misbehaving. Escalate (`gt escalate -s HIGH`) — do NOT silently retry.
+- Retry push and re-verify the marker before proceeding
 
 **If merge_strategy = "pr":**
 
 Push the rebased branch and create a GitHub PR instead of direct merge.
 
 ```bash
-# Push the rebased polecat branch (force-push since we rebased)
+# Push the rebased polecat branch through the verified-push wrapper
+# (gu-vph7) so we classify success/failure off the structured marker, not
+# free-form git output. --force-with-lease passes through to git unchanged.
 git checkout temp
-git push origin temp:refs/heads/<polecat-branch> --force-with-lease
+PUSH_RESULT=$(scripts/git-push-verified.sh \
+  origin temp:refs/heads/<polecat-branch> --force-with-lease)
+echo "$PUSH_RESULT"
+case "$PUSH_RESULT" in
+  PUSH_OK:*)   ;;  # push succeeded — proceed to PR creation
+  *)
+    # PUSH_FAILED or unrecognized marker. Do NOT create a PR for an
+    # un-pushed branch. Skip to loop-check; the next patrol cycle will
+    # retry from process-branch.
+    echo "Aborting PR creation: $PUSH_RESULT"
+    ;;
+esac
 
 # Create the PR using bead metadata for title/description
 PR_URL=$(gh pr create \
