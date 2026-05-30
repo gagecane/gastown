@@ -53,13 +53,42 @@ const (
 	HeartbeatStuck HeartbeatState = "stuck"
 )
 
+// LivenessSignal is the v3 write-classification: whether the heartbeat write
+// reflected a normal state-bearing touch, a freshness-only keepalive ping, or
+// the final write before `gt done` exits. Read by the Liveness() verdict
+// reader and (eventually) by an orphan-prune janitor that uses
+// LivenessExiting as a tombstone marker. See cv-p3fem Phase 3.
+type LivenessSignal string
+
+const (
+	// LivenessSignalAlive marks a normal state-bearing heartbeat write
+	// (the default for gt commands that touch the heartbeat).
+	LivenessSignalAlive LivenessSignal = "alive"
+	// LivenessSignalKeepalive marks a write that bumped freshness only —
+	// no state/context/bead change. Emitted by the Keepalive helpers.
+	LivenessSignalKeepalive LivenessSignal = "keepalive"
+	// LivenessSignalExiting marks the final write before a session exits
+	// cleanly via gt done. Useful as an orphan-prune tombstone.
+	LivenessSignalExiting LivenessSignal = "exiting"
+)
+
 // SessionHeartbeat represents a polecat session's heartbeat file.
-// v1: timestamp only. v2 (gt-3vr5): adds agent-reported state, context, and bead.
+//
+// v1: timestamp only.
+// v2 (gt-3vr5): adds agent-reported state, context, and bead.
+// v3 (cv-p3fem Phase 3): adds last_keepalive, keepalive_op, liveness, and
+// expected_idle_until for diagnostic clarity and TTL-bounded self-reports.
 type SessionHeartbeat struct {
 	Timestamp time.Time      `json:"timestamp"`
 	State     HeartbeatState `json:"state,omitempty"`   // v2: agent-reported state
 	Context   string         `json:"context,omitempty"` // v2: what the agent is doing
 	Bead      string         `json:"bead,omitempty"`    // v2: current hook bead ID
+
+	// v3 fields (cv-p3fem Phase 3). All omitempty — v1/v2 readers ignore.
+	LastKeepalive      time.Time      `json:"last_keepalive,omitempty"`
+	KeepaliveOp        string         `json:"keepalive_op,omitempty"`
+	Liveness           LivenessSignal `json:"liveness,omitempty"`
+	ExpectedIdleUntil  time.Time      `json:"expected_idle_until,omitempty"`
 }
 
 // EffectiveState returns the agent-reported state, defaulting to HeartbeatWorking
@@ -76,6 +105,24 @@ func (h *SessionHeartbeat) EffectiveState() HeartbeatState {
 // through to legacy timer-based detection.
 func (h *SessionHeartbeat) IsV2() bool {
 	return h.State != ""
+}
+
+// IsV3 returns true if this heartbeat carries v3 diagnostic fields. Detected
+// by the presence of last_keepalive (the most reliable v3 indicator: every
+// v3 producer writes it on every Touch). v1/v2 producers don't write it.
+func (h *SessionHeartbeat) IsV3() bool {
+	return !h.LastKeepalive.IsZero()
+}
+
+// EffectiveLastKeepalive returns the freshness signal for liveness checks:
+// max(Timestamp, LastKeepalive). For v1/v2 heartbeats this is just Timestamp.
+// For v3 it preserves the "I'm alive" signal even if the agent's last
+// state-bearing touch was longer ago than its last keepalive ping.
+func (h *SessionHeartbeat) EffectiveLastKeepalive() time.Time {
+	if h.LastKeepalive.After(h.Timestamp) {
+		return h.LastKeepalive
+	}
+	return h.Timestamp
 }
 
 // heartbeatsDir returns the directory for polecat session heartbeat files.
@@ -102,6 +149,12 @@ func TouchSessionHeartbeat(townRoot, sessionName string) {
 // This is best-effort: errors are silently ignored. Rejects (no-op) session
 // names that fail isValidSessionName so a hostile session_name cannot escape
 // the heartbeats directory (cv-p3fem Phase 1).
+//
+// cv-p3fem Phase 3: every state-bearing touch also bumps last_keepalive and
+// stamps liveness=alive (or =exiting for state=exiting). This means v3
+// readers can use the unified EffectiveLastKeepalive() rule
+// (max(timestamp, last_keepalive)) on every heartbeat we write, without
+// losing the v2 "fresh state-bearing touch" signal.
 func TouchSessionHeartbeatWithState(townRoot, sessionName string, state HeartbeatState, context, bead string) {
 	if !isValidSessionName(sessionName) {
 		return
@@ -111,11 +164,31 @@ func TouchSessionHeartbeatWithState(townRoot, sessionName string, state Heartbea
 		return
 	}
 
+	now := time.Now().UTC()
+	signal := LivenessSignalAlive
+	if state == HeartbeatExiting {
+		signal = LivenessSignalExiting
+	}
+
+	// Preserve the prior expected_idle_until and keepalive_op when the caller
+	// hasn't supplied one (a state transition shouldn't blow away an in-flight
+	// idle declaration set via `gt heartbeat keepalive --until=...`).
+	var expectedIdleUntil time.Time
+	var keepaliveOp string
+	if existing := readSessionHeartbeatRaw(townRoot, sessionName); existing != nil {
+		expectedIdleUntil = existing.ExpectedIdleUntil
+		keepaliveOp = existing.KeepaliveOp
+	}
+
 	hb := SessionHeartbeat{
-		Timestamp: time.Now().UTC(),
-		State:     state,
-		Context:   context,
-		Bead:      bead,
+		Timestamp:         now,
+		State:             state,
+		Context:           context,
+		Bead:              bead,
+		LastKeepalive:     now,
+		KeepaliveOp:       keepaliveOp,
+		Liveness:          signal,
+		ExpectedIdleUntil: expectedIdleUntil,
 	}
 
 	data, err := json.Marshal(hb)
@@ -134,16 +207,21 @@ func ReadSessionHeartbeat(townRoot, sessionName string) *SessionHeartbeat {
 	if !isValidSessionName(sessionName) {
 		return nil
 	}
+	return readSessionHeartbeatRaw(townRoot, sessionName)
+}
+
+// readSessionHeartbeatRaw is the inner reader without session-name validation,
+// for callers that have already validated the name (e.g. inside this package
+// during a write that then needs to preserve prior fields).
+func readSessionHeartbeatRaw(townRoot, sessionName string) *SessionHeartbeat {
 	data, err := os.ReadFile(heartbeatFile(townRoot, sessionName))
 	if err != nil {
 		return nil
 	}
-
 	var hb SessionHeartbeat
 	if err := json.Unmarshal(data, &hb); err != nil {
 		return nil
 	}
-
 	return &hb
 }
 
@@ -185,20 +263,45 @@ func Keepalive(townRoot, sessionName string) {
 
 // KeepaliveWithOp bumps the heartbeat timestamp and records what the agent
 // is doing (e.g. "llm-call", "brazil-build", "go-test"). The op label is
-// preserved in the Context field for operator diagnostics. Best-effort.
+// preserved in both Context (v2 backward compat) and KeepaliveOp (v3
+// diagnostic field). Best-effort.
 //
 // If no heartbeat file exists for the session, this writes a fresh
 // state="working" heartbeat with the supplied op as context. If an existing
 // heartbeat is present, its state and bead fields are preserved so a
 // keepalive does not overwrite agent self-reported state.
+//
+// cv-p3fem Phase 3: writes liveness=keepalive (vs liveness=alive for normal
+// state-bearing touches), bumps last_keepalive separately from timestamp so
+// the read API can distinguish a freshness-only ping from a state change.
 func KeepaliveWithOp(townRoot, sessionName, op string) {
+	KeepaliveWithOpUntil(townRoot, sessionName, op, time.Time{})
+}
+
+// KeepaliveWithOpUntil is like KeepaliveWithOp but also stamps an
+// expected_idle_until value into the heartbeat. The agent declares "I do not
+// expect to do anything observable until <until>; do not flag me as stuck
+// before then". Operators / supervision use this as a TTL-bounded
+// suppression hint; mass-kill / dead-agent paths still trip past the hard
+// `dead_seconds` ceiling regardless of self-reported idle, so a wedged
+// agent that lies about idleness cannot indefinitely suppress detection.
+//
+// Pass time.Time{} as until to clear/skip the field.
+func KeepaliveWithOpUntil(townRoot, sessionName, op string, until time.Time) {
 	if !isValidSessionName(sessionName) {
 		return
 	}
+	dir := heartbeatsDir(townRoot)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+
 	state := HeartbeatWorking
 	context := op
 	bead := ""
-	if existing := ReadSessionHeartbeat(townRoot, sessionName); existing != nil {
+	keepaliveOp := op
+	expectedIdleUntil := until
+	if existing := readSessionHeartbeatRaw(townRoot, sessionName); existing != nil {
 		state = existing.EffectiveState()
 		bead = existing.Bead
 		// Preserve the existing context only when the caller didn't supply
@@ -208,8 +311,36 @@ func KeepaliveWithOp(townRoot, sessionName, op string) {
 		if context == "" {
 			context = existing.Context
 		}
+		if keepaliveOp == "" {
+			keepaliveOp = existing.KeepaliveOp
+		}
+		// Preserve a previously-declared expected_idle_until when the caller
+		// didn't supply one. Caller passing a non-zero until overrides.
+		if expectedIdleUntil.IsZero() {
+			expectedIdleUntil = existing.ExpectedIdleUntil
+		}
 	}
-	TouchSessionHeartbeatWithState(townRoot, sessionName, state, context, bead)
+	now := time.Now().UTC()
+	// Bump both Timestamp and LastKeepalive so v1/v2 readers see freshness
+	// (eliminates the false-stale-during-long-call class for legacy readers
+	// during the v3 rollout, per cv-p3fem mid-rollout false-reap mitigation).
+	// v3 readers prefer EffectiveLastKeepalive() == max(timestamp,
+	// last_keepalive) but using both is forward-compatible.
+	hb := SessionHeartbeat{
+		Timestamp:         now,
+		State:             state,
+		Context:           context,
+		Bead:              bead,
+		LastKeepalive:     now,
+		KeepaliveOp:       keepaliveOp,
+		Liveness:          LivenessSignalKeepalive,
+		ExpectedIdleUntil: expectedIdleUntil,
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(heartbeatFile(townRoot, sessionName), data, 0644)
 }
 
 // WithKeepalive starts a background keepalive ticker and returns a cancel

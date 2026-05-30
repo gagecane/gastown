@@ -3,6 +3,7 @@ package session
 
 import (
 	"fmt"
+	"strings"
 )
 
 // DefaultPrefix is the default beads prefix used when no rig-specific prefix is known.
@@ -65,4 +66,17 @@ func BootSessionName() string {
 // Pattern: hq-dog-<name> (e.g., hq-dog-alpha).
 func DogSessionName(name string) string {
 	return fmt.Sprintf("%sdog-%s", HQPrefix, name)
+}
+
+// IsWitnessSessionName reports whether name has the witness session shape:
+// "<prefix>-witness". Used by callers that need to apply per-role
+// thresholds (e.g. cv-p3fem Liveness reader) without knowing the rig.
+func IsWitnessSessionName(name string) bool {
+	return strings.HasSuffix(name, "-witness")
+}
+
+// IsRefinerySessionName reports whether name has the refinery session shape:
+// "<prefix>-refinery".
+func IsRefinerySessionName(name string) bool {
+	return strings.HasSuffix(name, "-refinery")
 }

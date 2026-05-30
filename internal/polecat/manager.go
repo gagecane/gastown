@@ -2198,27 +2198,42 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 
 // isSessionProcessDead checks if a polecat session's agent has exited.
 //
-// Uses heartbeat-based liveness detection (gt-qjtq): checks whether the session's
-// heartbeat file has been updated recently. Polecat sessions touch their heartbeat
-// via gt commands (gt prime, gt hook, bd show, etc.) which run frequently during
-// normal operation. A stale heartbeat indicates the agent is no longer active.
+// Uses the typed Liveness() verdict (cv-p3fem Phase 3, was gt-qjtq) — a
+// stale heartbeat indicates the agent is no longer active, but only the
+// hard DEAD verdict (past dead threshold OR PID-confirmed gone) reaps. The
+// MAYBE_DEAD region is left to the daemon-level dead-agent reaper which
+// has wider per-role thresholds.
 //
-// Falls back to PID signal probing when no heartbeat file exists (backward
-// compatibility for sessions started before heartbeat support was added).
+// PID-existence is consulted as a fast-path inside Liveness() so a tmux
+// pane whose process exited is unambiguously DEAD without waiting for the
+// heartbeat to age out.
 //
-// Returns true only when we can confirm the process is dead, not on transient
-// failures (gt-kncti: permission denied false positives).
+// When no heartbeat file exists (UNKNOWN verdict), we fall back to direct
+// PID signal probing for the rare pre-rollout case.
+//
+// Returns true only when we can confirm the process is dead, not on
+// transient failures (gt-kncti: permission denied false positives).
 func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) bool {
-	// Primary: heartbeat-based liveness check (gt-qjtq ZFC fix).
-	if townRoot != "" {
-		stale, exists := IsSessionHeartbeatStale(townRoot, sessionName)
-		if exists {
-			return stale
-		}
-		// No heartbeat file — fall through to PID-based check for backward compatibility.
+	if townRoot == "" {
+		return legacyPIDSessionDead(t, sessionName)
 	}
+	pidStr, _ := t.GetPanePID(sessionName)
+	pid := PIDFromString(pidStr)
+	verdict := Liveness(townRoot, sessionName, LivenessOptions{PID: pid})
+	switch verdict.Verdict {
+	case LivenessDead:
+		return true
+	case LivenessAlive, LivenessMaybeDead:
+		return false
+	}
+	// UNKNOWN (no heartbeat file) — fall back to PID signal probing.
+	return legacyPIDSessionDead(t, sessionName)
+}
 
-	// Fallback: PID signal probing (legacy, for sessions without heartbeat support).
+// legacyPIDSessionDead is the pre-cv-p3fem PID-only liveness check, retained
+// for the no-heartbeat-file path so we don't lose coverage of sessions that
+// haven't run a gt command since the v3 rollout.
+func legacyPIDSessionDead(t *tmux.Tmux, sessionName string) bool {
 	pidStr, err := t.GetPanePID(sessionName)
 	if err != nil {
 		// Tmux query failed — could be permission denied, server busy, etc.
@@ -2231,14 +2246,12 @@ func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) boo
 	}
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
-		// Got a non-numeric PID — shouldn't happen, but don't kill.
 		return false
 	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return true
 	}
-	// On Unix, Signal(0) checks if process exists without sending a signal
 	if err := p.Signal(syscall.Signal(0)); err != nil {
 		return true
 	}

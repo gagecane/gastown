@@ -182,32 +182,46 @@ type agentStaleness struct {
 }
 
 // evaluateAgentStaleness picks the reap source for a witness/refinery wisp.
-// Heartbeat-first: if a SessionHeartbeat exists, it is the canonical
-// liveness signal and we apply the per-role threshold from cfg. Without a
-// heartbeat we fall back to bead.UpdatedAt against the legacy threshold so
-// pre-rollout sessions remain covered (gu-s009).
+// Heartbeat-first via the typed Liveness() verdict (cv-p3fem Phase 3): if a
+// SessionHeartbeat exists, the verdict is the canonical liveness signal and
+// the daemon only reaps on Verdict==DEAD. Without a heartbeat we fall back
+// to bead.UpdatedAt against the legacy threshold so pre-rollout sessions
+// remain covered (gu-s009).
+//
+// MAYBE_DEAD is intentionally NOT reapable here — it surfaces in operator
+// tooling (`gt heartbeat status`, `gt witness status`) and the dog plugin
+// for visibility, but auto-action is gated on the harder DEAD verdict.
 //
 // Returns (eligible, agentStaleness). eligible=false means we have no
-// trustworthy staleness signal — either both signals are missing/zero, or
-// they exist but aren't yet over threshold. The caller MUST NOT reap on
-// eligible=false even if other guards pass.
+// trustworthy staleness signal — the heartbeat exists but isn't past the
+// dead threshold yet, or both signals are missing. The caller MUST NOT
+// reap on eligible=false even if other guards pass.
 func (d *Daemon) evaluateAgentStaleness(sessionName string, bead agentBeadInfo, role string, cfg agentReapConfig) (bool, agentStaleness) {
-	// Heartbeat-first path: a heartbeat exists, so its timestamp is the
-	// canonical signal. Use the per-role threshold and ignore bead.UpdatedAt
-	// entirely — heartbeats are bumped by every gt command (witness patrols
-	// run several gt invocations per cycle), so a fresh heartbeat with stale
-	// updated_at means the role IS alive and we must not reap.
+	// Heartbeat-first path via Liveness() verdict.
 	if hb := polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName); hb != nil {
 		threshold := cfg.timeoutFor(role)
 		if threshold <= 0 {
-			// Per-role timeout disabled and no fallback either.
 			return false, agentStaleness{}
 		}
-		staleFor := time.Since(hb.Timestamp)
-		if staleFor < threshold {
+		// Map the daemon's existing per-role timeout onto the verdict's
+		// hard ceiling so the dead threshold matches operator
+		// expectations even when the verdict's defaults differ. Stale =
+		// 1/3, Grace = full timeout — same shape as the polecat-class
+		// 3m/10m/20m defaults but scaled to per-role values.
+		opts := polecat.LivenessOptions{
+			Stale: threshold / 6,
+			Grace: threshold / 2,
+			Dead:  threshold,
+		}
+		verdict := polecat.Liveness(d.config.TownRoot, sessionName, opts)
+		if verdict.Verdict != polecat.LivenessDead {
 			return false, agentStaleness{}
 		}
-		return true, agentStaleness{source: "heartbeat", staleFor: staleFor, threshold: threshold}
+		staleFor := verdict.Age
+		if staleFor <= 0 {
+			staleFor = time.Since(hb.EffectiveLastKeepalive())
+		}
+		return true, agentStaleness{source: "heartbeat-verdict-DEAD", staleFor: staleFor, threshold: threshold}
 	}
 
 	// Pre-rollout fallback: no heartbeat means we must rely on bead.UpdatedAt
