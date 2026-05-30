@@ -166,6 +166,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Threshold: &threshold},
 			MainBranchTest:       &MainBranchTestConfig{Enabled: false},
 			Handler:              &PatrolConfig{Enabled: false},
+			NudgeQueueGC:         &NudgeQueueGCConfig{Enabled: false},
 		},
 	}
 

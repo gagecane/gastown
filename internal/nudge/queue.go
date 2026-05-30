@@ -494,6 +494,107 @@ func RemoveKindByOriginal(townRoot, session, kind, originalFrom, originalSubject
 	return removed, nil
 }
 
+// GCResult summarizes what GCExpired removed in a single sweep.
+type GCResult struct {
+	// Sessions is the number of session subdirectories scanned.
+	Sessions int
+	// Removed is the number of expired .json nudge files deleted.
+	Removed int
+	// Errors is the number of non-fatal errors encountered (e.g.,
+	// unreadable directories or files). Each is logged to stderr.
+	Errors int
+}
+
+// GCExpired walks every session directory under <townRoot>/.runtime/nudge_queue
+// and deletes .json nudge files whose ExpiresAt is in the past.
+//
+// Drain already discards expired entries lazily, but lazy expiry only fires
+// when an agent actively drains its queue. If a session is wedged, dead, or
+// idle, expired files accumulate until MaxQueueDepth is reached and new
+// nudges are rejected silently. This sweep runs on the daemon's clock so
+// eviction is independent of recipient liveness. See gu-gsry.
+//
+// Best-effort and non-fatal: a single failed read/remove is counted in
+// Errors and logged; the sweep continues. Returns a nil error only if the
+// top-level queue directory cannot be read at all (and that case is
+// treated as "no queues yet" — returning nil error and zero counts so the
+// daemon can call this on a fresh town without log noise).
+func GCExpired(townRoot string) (GCResult, error) {
+	root := filepath.Join(townRoot, constants.DirRuntime, "nudge_queue")
+
+	sessionDirs, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return GCResult{}, nil
+		}
+		return GCResult{}, fmt.Errorf("reading nudge queue root: %w", err)
+	}
+
+	now := time.Now()
+	var result GCResult
+
+	for _, sd := range sessionDirs {
+		if !sd.IsDir() {
+			continue
+		}
+		result.Sessions++
+
+		dir := filepath.Join(root, sd.Name())
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: nudge GC: cannot read %s: %v\n", dir, err)
+			result.Errors++
+			continue
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+
+			path := filepath.Join(dir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue // raced with Drain — fine
+				}
+				fmt.Fprintf(os.Stderr, "Warning: nudge GC: cannot read %s: %v\n", path, err)
+				result.Errors++
+				continue
+			}
+
+			var n QueuedNudge
+			if err := json.Unmarshal(data, &n); err != nil {
+				// Malformed file — leave it. Drain handles malformed entries
+				// when an agent next picks them up; we don't want GC to also
+				// race on the cleanup of broken JSON.
+				continue
+			}
+
+			// Honor ExpiresAt only. A zero ExpiresAt means "no expiry set",
+			// in which case Enqueue would have applied the default TTL — so
+			// in practice every file we see here has an ExpiresAt. The
+			// IsZero check is defensive: never delete a nudge that has no
+			// expiry set.
+			if n.ExpiresAt.IsZero() || !now.After(n.ExpiresAt) {
+				continue
+			}
+
+			if err := os.Remove(path); err != nil {
+				if os.IsNotExist(err) {
+					continue // raced with Drain or another GC pass
+				}
+				fmt.Fprintf(os.Stderr, "Warning: nudge GC: cannot remove %s: %v\n", path, err)
+				result.Errors++
+				continue
+			}
+			result.Removed++
+		}
+	}
+
+	return result, nil
+}
+
 // FormatForInjection formats queued nudges as a system-reminder block
 // suitable for Claude Code hook output.
 func FormatForInjection(nudges []QueuedNudge) string {

@@ -61,6 +61,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 			Handler: &PatrolConfig{
 				Enabled: true,
 			},
+			NudgeQueueGC: &NudgeQueueGCConfig{
+				Enabled:     true,
+				IntervalStr: "5m",
+			},
 		},
 	}
 }
@@ -120,6 +124,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.Handler == nil {
 		p.Handler = d.Handler
+		changed = true
+	}
+	if p.NudgeQueueGC == nil {
+		p.NudgeQueueGC = d.NudgeQueueGC
 		changed = true
 	}
 

@@ -903,6 +903,22 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Main CI-break dog ticker started (interval %v)", interval)
 	}
 
+	// Start nudge queue GC ticker if configured.
+	// Sweeps expired entries from .runtime/nudge_queue/<session>/ on a fixed
+	// cadence regardless of recipient liveness — fixes gu-gsry, where lazy
+	// expiry (only honored on Drain) caused queues to fill with expired
+	// entries when sessions went idle, silently rejecting new nudges at
+	// MaxQueueDepth.
+	var nudgeQueueGCTicker *time.Ticker
+	var nudgeQueueGCChan <-chan time.Time
+	if d.isPatrolActive("nudge_queue_gc") {
+		interval := nudgeQueueGCInterval(d.patrolConfig)
+		nudgeQueueGCTicker = time.NewTicker(interval)
+		nudgeQueueGCChan = nudgeQueueGCTicker.C
+		defer nudgeQueueGCTicker.Stop()
+		d.logger.Printf("Nudge queue GC ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1042,6 +1058,15 @@ func (d *Daemon) Run() (err error) {
 			// commit → MR bead, checks auto-test-pr opt-in, dispatches to D16 handler.
 			if !d.isShutdownInProgress() {
 				d.runMainCIBreakDog()
+			}
+
+		case <-nudgeQueueGCChan:
+			// Nudge queue GC — sweeps expired entries from
+			// .runtime/nudge_queue/<session>/ regardless of recipient
+			// liveness. Drain's lazy expiry only fires when an agent
+			// actively drains; this catches dead/idle/wedged sessions.
+			if !d.isShutdownInProgress() {
+				d.runNudgeQueueGC()
 			}
 
 		case <-timer.C:

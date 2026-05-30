@@ -893,6 +893,185 @@ func TestZeroDeliverAfterIsImmediate(t *testing.T) {
 	}
 }
 
+// TestGCExpiredRemovesExpiredAcrossSessions verifies GCExpired walks every
+// session under <townRoot>/.runtime/nudge_queue and removes only entries
+// whose ExpiresAt is in the past. See gu-gsry.
+func TestGCExpiredRemovesExpiredAcrossSessions(t *testing.T) {
+	townRoot := t.TempDir()
+
+	// Two sessions, each with one fresh and one expired nudge.
+	for _, session := range []string{"hq-deacon", "hq-overseer"} {
+		expired := QueuedNudge{
+			Sender:    "old",
+			Message:   "stale",
+			Timestamp: time.Now().Add(-2 * time.Hour),
+			ExpiresAt: time.Now().Add(-1 * time.Hour),
+		}
+		if err := Enqueue(townRoot, session, expired); err != nil {
+			t.Fatalf("Enqueue expired (%s): %v", session, err)
+		}
+		time.Sleep(time.Millisecond)
+		fresh := QueuedNudge{
+			Sender:  "new",
+			Message: "fresh",
+		}
+		if err := Enqueue(townRoot, session, fresh); err != nil {
+			t.Fatalf("Enqueue fresh (%s): %v", session, err)
+		}
+	}
+
+	result, err := GCExpired(townRoot)
+	if err != nil {
+		t.Fatalf("GCExpired: %v", err)
+	}
+	if result.Sessions != 2 {
+		t.Errorf("Sessions = %d, want 2", result.Sessions)
+	}
+	if result.Removed != 2 {
+		t.Errorf("Removed = %d, want 2", result.Removed)
+	}
+	if result.Errors != 0 {
+		t.Errorf("Errors = %d, want 0", result.Errors)
+	}
+
+	// Each session should still have its fresh nudge.
+	for _, session := range []string{"hq-deacon", "hq-overseer"} {
+		n, err := Pending(townRoot, session)
+		if err != nil {
+			t.Fatalf("Pending(%s): %v", session, err)
+		}
+		if n != 1 {
+			t.Errorf("Pending(%s) = %d, want 1 (fresh nudge survives)", session, n)
+		}
+	}
+}
+
+// TestGCExpiredFreesQueueForNewNudges proves the bug fix: a queue filled
+// to MaxQueueDepth with expired entries can be evicted by GCExpired so a
+// new Enqueue succeeds without any agent draining the queue.
+func TestGCExpiredFreesQueueForNewNudges(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "hq-wedged"
+
+	// Fill the queue with expired entries.
+	for i := 0; i < MaxQueueDepth; i++ {
+		n := QueuedNudge{
+			Sender:    "old",
+			Message:   "stale",
+			Timestamp: time.Now().Add(-2 * time.Hour),
+			ExpiresAt: time.Now().Add(-1 * time.Hour),
+		}
+		if err := Enqueue(townRoot, session, n); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	// Sanity: queue is full.
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "new", Message: "blocked"}); err == nil {
+		t.Fatal("expected enqueue to fail when queue is full")
+	}
+
+	result, err := GCExpired(townRoot)
+	if err != nil {
+		t.Fatalf("GCExpired: %v", err)
+	}
+	if result.Removed != MaxQueueDepth {
+		t.Errorf("Removed = %d, want %d", result.Removed, MaxQueueDepth)
+	}
+
+	// Now enqueue should succeed.
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "new", Message: "ok"}); err != nil {
+		t.Fatalf("Enqueue after GC should succeed: %v", err)
+	}
+}
+
+// TestGCExpiredPreservesUnexpiredAndZeroExpiry verifies GCExpired never
+// removes entries with ExpiresAt in the future, nor entries with a zero
+// ExpiresAt (defensive — Enqueue normally sets a default TTL, but we
+// must not silently drop a hand-crafted entry that lacks one).
+func TestGCExpiredPreservesUnexpiredAndZeroExpiry(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "hq-test"
+
+	// Future-expiry: should survive.
+	future := QueuedNudge{
+		Sender:    "future",
+		Message:   "alive",
+		Timestamp: time.Now(),
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := Enqueue(townRoot, session, future); err != nil {
+		t.Fatal(err)
+	}
+
+	// Zero-expiry crafted by hand — bypass Enqueue's default-TTL logic by
+	// writing the file directly.
+	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	zeroPath := filepath.Join(dir, "9999999999999999-zerozero.json")
+	if err := os.WriteFile(zeroPath, []byte(`{"sender":"hand","message":"no-expiry"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := GCExpired(townRoot)
+	if err != nil {
+		t.Fatalf("GCExpired: %v", err)
+	}
+	if result.Removed != 0 {
+		t.Errorf("Removed = %d, want 0 (no entry was expired)", result.Removed)
+	}
+
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != 2 {
+		t.Errorf("Pending = %d, want 2 (both files preserved)", pending)
+	}
+}
+
+// TestGCExpiredEmptyTownRoot confirms a town with no nudge_queue directory
+// is not treated as an error.
+func TestGCExpiredEmptyTownRoot(t *testing.T) {
+	townRoot := t.TempDir()
+	result, err := GCExpired(townRoot)
+	if err != nil {
+		t.Fatalf("GCExpired on empty town: %v", err)
+	}
+	if result.Sessions != 0 || result.Removed != 0 || result.Errors != 0 {
+		t.Errorf("expected zero counts, got %+v", result)
+	}
+}
+
+// TestGCExpiredSkipsMalformed verifies that malformed JSON files are left
+// alone (Drain handles them on next agent pickup).
+func TestGCExpiredSkipsMalformed(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "hq-malformed"
+	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "100.json"), []byte("not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := GCExpired(townRoot)
+	if err != nil {
+		t.Fatalf("GCExpired: %v", err)
+	}
+	if result.Removed != 0 {
+		t.Errorf("Removed = %d, want 0 (malformed file should not be removed by GC)", result.Removed)
+	}
+
+	// Malformed file should still exist.
+	if _, err := os.Stat(filepath.Join(dir, "100.json")); err != nil {
+		t.Errorf("malformed file should remain: %v", err)
+	}
+}
+
 func TestConcurrentDrainNoDoubleDeli(t *testing.T) {
 	townRoot := t.TempDir()
 	session := "gt-test-drain-race"
