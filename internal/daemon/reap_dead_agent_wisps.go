@@ -33,7 +33,7 @@ import (
 //
 // Pre-rollout fallback: when no heartbeat file exists for the session, we
 // fall back to bead.updated_at age against DeadAgentReapTimeoutD (legacy 2h
-// default). This preserves the gu-s009 behaviour for sessions on the old
+// default). This preserves the gu-s009 behavior for sessions on the old
 // path so we don't lose coverage during rollout.
 //
 // The reap is conservative by design:
@@ -211,7 +211,7 @@ func (d *Daemon) evaluateAgentStaleness(sessionName string, bead agentBeadInfo, 
 	}
 
 	// Pre-rollout fallback: no heartbeat means we must rely on bead.UpdatedAt
-	// at the legacy timeout. This preserves gu-s009 behaviour for sessions
+	// at the legacy timeout. This preserves gu-s009 behavior for sessions
 	// that haven't run a gt command since cv-p3fem rolled out.
 	if cfg.fallbackTimeout <= 0 {
 		return false, agentStaleness{}
@@ -270,4 +270,3 @@ func (d *Daemon) maybeReapDeadAgentBead(rigName, role, sessionName string, bead 
 				bead.ID, bead.Status, st.source, st.staleFor.Truncate(time.Second), st.threshold),
 			"daemon"))
 }
-
