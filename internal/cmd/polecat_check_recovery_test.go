@@ -321,6 +321,60 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 			gitSafe:      true,
 			wantCanSkip:  true,
 		},
+		// gs-9wz: a stalled-debris polecat that died before gt done recorded a
+		// cleanup_status carries an empty/unknown report. When the live predicates
+		// prove no work is at risk, that missing report must be ignorable so
+		// `gt polecat nuke` (no --force) can reclaim it.
+		{
+			name:         "empty cleanup with all predicates safe is ignorable (gs-9wz)",
+			status:       "",
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "unknown cleanup with all predicates safe is ignorable (gs-9wz)",
+			status:       polecat.CleanupUnknown,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "empty cleanup still blocks when git not safe",
+			status:       "",
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      false,
+		},
+		{
+			name:         "empty cleanup still blocks with open hook",
+			status:       "",
+			workTerminal: true,
+			hookSafe:     false,
+			activeMRSafe: true,
+			gitSafe:      true,
+		},
+		{
+			name:         "empty cleanup still blocks with non-terminal work",
+			status:       "",
+			workTerminal: false,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+		},
+		{
+			name:         "empty cleanup still blocks with pending MR",
+			status:       "",
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: false,
+			gitSafe:      true,
+		},
 	}
 
 	for _, tt := range tests {

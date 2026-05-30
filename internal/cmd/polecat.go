@@ -1508,12 +1508,32 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 	return ""
 }
 
+// staleCleanupStatusCanBeIgnoredForRecovery reports whether a non-clean
+// cleanup_status self-report can be safely ignored because the LIVE predicates
+// independently prove no work is at risk. It applies to two report classes:
+//
+//   - has_unpushed: a stale self-report the worktree has since pushed past.
+//   - missing/unknown (gs-9wz): a polecat that DIED before gt done ever recorded
+//     a cleanup_status — the stalled-debris signature. Such polecats ALWAYS
+//     carry an empty cleanup_status (gt done writes cleanup and flips to idle
+//     together, so a working-state polecat never has cleanup=clean). Without
+//     trusting gitSafe here, `gt polecat nuke` (no --force) refused them
+//     forever and they accumulated as recovery_blocked under auto-dispatch
+//     load — the exact starvation gs-9wz tracks.
+//
+// gitSafe is the authoritative live git check (clean worktree, no stash, 0
+// unpushed, branch pushed to origin) — the same proof already trusted for the
+// has_unpushed case, so extending it to a missing/unknown report is no weaker.
+// workTerminal/hookSafe/activeMRSafe ensure the assigned work bead, hook, and MR
+// carry no unfinished work either. POSITIVE dirt reports (has_uncommitted,
+// has_stash) are NOT overridable — a self-report of real dirt is never ignored.
 func staleCleanupStatusCanBeIgnoredForRecovery(status polecat.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
-	return status == polecat.CleanupUnpushed &&
-		workTerminal &&
-		hookSafe &&
-		activeMRSafe &&
-		gitSafe
+	switch status {
+	case polecat.CleanupUnpushed, polecat.CleanupUnknown, "":
+		return workTerminal && hookSafe && activeMRSafe && gitSafe
+	default:
+		return false
+	}
 }
 
 func activeMRGitSafeForWorktree(worktreePath string) bool {
