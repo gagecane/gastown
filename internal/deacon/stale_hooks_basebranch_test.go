@@ -76,6 +76,32 @@ func TestCheckWorktreeState_IntegrationBase(t *testing.T) {
 			t.Errorf("a commit not on the base must be flagged: PartialWork=%v UnpushedCount=%d", res.PartialWork, res.UnpushedCount)
 		}
 	})
+
+	// hq-q943s third class (the gs-4lk case): the polecat's patch was landed on
+	// the base via a REBASE/SQUASH, so it exists on the base under a DIFFERENT
+	// SHA. A SHA-ancestry check (merge-base --is-ancestor) would call this
+	// stranded; the deacon's git-cherry (patch-id) preservation check must not.
+	t.Run("rebased/squashed onto base under a different SHA is NOT partial work", func(t *testing.T) {
+		repo := makePolecatWorktree(t, town, "slit")
+		// The landed copy on the base: same patch, distinct commit.
+		runGitCmd(t, repo, "checkout", "-b", "based", "main")
+		write(t, repo, "fix.txt", "the fix\n")
+		runGitCmd(t, repo, "add", "fix.txt")
+		runGitCmd(t, repo, "commit", "-m", "landed via refinery rebase")
+		runGitCmd(t, repo, "update-ref", "refs/remotes/origin/gagecane/gt", "HEAD")
+		// The polecat's original commit: identical patch from the same base C0,
+		// different message → different SHA, same patch-id.
+		runGitCmd(t, repo, "checkout", "-b", "polecat/slit/gs-4lk", "main")
+		write(t, repo, "fix.txt", "the fix\n")
+		runGitCmd(t, repo, "add", "fix.txt")
+		runGitCmd(t, repo, "commit", "-m", "original polecat commit (pre-rebase)")
+
+		var res StaleHookResult
+		checkWorktreeState(town, "lia_bac/polecats/slit", &res)
+		if res.PartialWork {
+			t.Errorf("a patch already on the base under a different SHA must NOT be partial work; UnpushedCount=%d", res.UnpushedCount)
+		}
+	})
 }
 
 func writeRigConfig(t *testing.T, town, rig, json string) {
