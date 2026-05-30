@@ -90,20 +90,27 @@ type LivenessThresholds struct {
 // LivenessReport is the full reader output: verdict + the signals that
 // produced it + the thresholds applied. Returned by Liveness() and rendered
 // by `gt heartbeat status`.
+//
+// Time fields use *time.Time so a zero value omits cleanly under
+// `omitempty` (Go's json package serializes time.Time{} as the RFC3339 zero
+// timestamp — pointers omit instead).
 type LivenessReport struct {
 	Session            string             `json:"session"`
 	Verdict            LivenessVerdict    `json:"-"`
 	VerdictString      string             `json:"verdict"`
 	VerdictReason      string             `json:"verdict_reason"`
-	LastTimestamp      time.Time          `json:"last_timestamp,omitempty"`
-	LastKeepalive      time.Time          `json:"last_keepalive,omitempty"`
+	LastTimestamp      time.Time          `json:"-"`
+	LastKeepalive      time.Time          `json:"-"`
+	LastTimestampJSON  *time.Time         `json:"last_timestamp,omitempty"`
+	LastKeepaliveJSON  *time.Time         `json:"last_keepalive,omitempty"`
 	Age                time.Duration      `json:"-"`
 	AgeSeconds         int64              `json:"age_seconds"`
 	LastKeepaliveAgeS  int64              `json:"last_keepalive_age_seconds"`
 	State              HeartbeatState     `json:"state,omitempty"`
 	KeepaliveOp        string             `json:"keepalive_op,omitempty"`
 	Bead               string             `json:"bead,omitempty"`
-	ExpectedIdleUntil  time.Time          `json:"expected_idle_until,omitempty"`
+	ExpectedIdleUntil  time.Time          `json:"-"`
+	ExpectedIdleJSON   *time.Time         `json:"expected_idle_until,omitempty"`
 	Thresholds         LivenessThresholds `json:"thresholds"`
 }
 
@@ -248,8 +255,19 @@ func fillFromHeartbeat(r *LivenessReport, hb *SessionHeartbeat) {
 	r.KeepaliveOp = hb.KeepaliveOp
 	r.Bead = hb.Bead
 	r.ExpectedIdleUntil = hb.ExpectedIdleUntil
+	// Pointer-form fields for clean omitempty in JSON.
+	if !hb.Timestamp.IsZero() {
+		ts := hb.Timestamp
+		r.LastTimestampJSON = &ts
+	}
 	if !hb.LastKeepalive.IsZero() {
+		ka := hb.LastKeepalive
+		r.LastKeepaliveJSON = &ka
 		r.LastKeepaliveAgeS = int64(time.Since(hb.LastKeepalive).Seconds())
+	}
+	if !hb.ExpectedIdleUntil.IsZero() {
+		eu := hb.ExpectedIdleUntil
+		r.ExpectedIdleJSON = &eu
 	}
 	if r.AgeSeconds == 0 && !hb.Timestamp.IsZero() {
 		r.AgeSeconds = int64(time.Since(hb.EffectiveLastKeepalive()).Seconds())

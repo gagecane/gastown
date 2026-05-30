@@ -2217,8 +2217,14 @@ func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) boo
 	if townRoot == "" {
 		return legacyPIDSessionDead(t, sessionName)
 	}
-	pidStr, _ := t.GetPanePID(sessionName)
-	pid := PIDFromString(pidStr)
+	// Best-effort PID lookup. Tmux is nil in some unit-test paths and we
+	// don't want to NPE — pass PID=0 and let Liveness() fall back to
+	// heartbeat-only reasoning.
+	pid := 0
+	if t != nil {
+		pidStr, _ := t.GetPanePID(sessionName)
+		pid = PIDFromString(pidStr)
+	}
 	verdict := Liveness(townRoot, sessionName, LivenessOptions{PID: pid})
 	switch verdict.Verdict {
 	case LivenessDead:
@@ -2234,6 +2240,11 @@ func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) boo
 // for the no-heartbeat-file path so we don't lose coverage of sessions that
 // haven't run a gt command since the v3 rollout.
 func legacyPIDSessionDead(t *tmux.Tmux, sessionName string) bool {
+	if t == nil {
+		// No tmux client → can't probe; default to "not dead" so we
+		// don't reap based on a missing supervisor handle.
+		return false
+	}
 	pidStr, err := t.GetPanePID(sessionName)
 	if err != nil {
 		// Tmux query failed — could be permission denied, server busy, etc.

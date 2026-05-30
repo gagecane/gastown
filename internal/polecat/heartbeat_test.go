@@ -290,12 +290,15 @@ func TestIsSessionProcessDead_HeartbeatStale(t *testing.T) {
 	townRoot := t.TempDir()
 	sessionName := "gt-test-hb-dead"
 
-	// Write a stale heartbeat
+	// Write a heartbeat past the DEAD threshold (cv-p3fem Phase 3 raised
+	// the polecat-class default to 20m). Old code reaped at any staleness
+	// past 3m; new code holds out until DEAD verdict for safety. This
+	// test pins the new contract: 30m → DEAD → reap.
 	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-10 * time.Minute).UTC()
+	oldTime := time.Now().Add(-30 * time.Minute).UTC()
 	data := []byte(`{"timestamp":"` + oldTime.Format(time.RFC3339Nano) + `"}`)
 	if err := os.WriteFile(filepath.Join(dir, sessionName+".json"), data, 0644); err != nil {
 		t.Fatal(err)
@@ -303,7 +306,32 @@ func TestIsSessionProcessDead_HeartbeatStale(t *testing.T) {
 
 	dead := isSessionProcessDead(nil, sessionName, townRoot)
 	if !dead {
-		t.Error("expected dead=true for session with stale heartbeat")
+		t.Error("expected dead=true for session with heartbeat past DEAD threshold")
+	}
+}
+
+// TestIsSessionProcessDead_HeartbeatMaybeDead_NotReapable pins the new
+// behavior: a stale-but-inside-grace heartbeat is MAYBE_DEAD, not DEAD.
+// The polecat manager must NOT reap such sessions — that's the daemon
+// agent reaper's call (with its wider per-role thresholds and external
+// corroboration). cv-p3fem Phase 3.
+func TestIsSessionProcessDead_HeartbeatMaybeDead_NotReapable(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "gt-test-hb-maybe-dead"
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// 8m old: past stale (3m), inside dead (20m).
+	oldTime := time.Now().Add(-8 * time.Minute).UTC()
+	data := []byte(`{"timestamp":"` + oldTime.Format(time.RFC3339Nano) + `"}`)
+	if err := os.WriteFile(filepath.Join(dir, sessionName+".json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dead := isSessionProcessDead(nil, sessionName, townRoot)
+	if dead {
+		t.Error("expected dead=false for MAYBE_DEAD verdict (8m stale, inside grace)")
 	}
 }
 

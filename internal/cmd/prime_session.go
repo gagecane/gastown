@@ -13,7 +13,9 @@ import (
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -243,6 +245,51 @@ func outputSessionMetadata(ctx RoleContext) {
 
 	// Output structured metadata line
 	fmt.Println(formatSessionMetadataLine(actor, sessionID))
+
+	// One-line self liveness banner (cv-p3fem Phase 3, design-doc §"gt prime
+	// banner liveness line"). Hard ceiling: one line, self only — never
+	// neighbors. The 40KB prime info budget can't absorb per-neighbor
+	// rendering, and the operator question this answers ("is MY session
+	// reporting alive?") only ever needs self.
+	emitPrimeLivenessLine(ctx)
+}
+
+// emitPrimeLivenessLine prints the one-line liveness summary for the
+// session that's running `gt prime`. Best-effort: any error or missing
+// signal is silently skipped — this is a cosmetic banner, not part of the
+// supervision contract.
+func emitPrimeLivenessLine(ctx RoleContext) {
+	sessionName := os.Getenv("GT_SESSION")
+	if sessionName == "" || ctx.TownRoot == "" {
+		return
+	}
+	opts := polecat.LivenessOptions{}
+	if session.IsWitnessSessionName(sessionName) {
+		opts = polecat.LivenessOptions{Stale: 5 * time.Minute, Grace: 15 * time.Minute, Dead: 30 * time.Minute}
+	} else if session.IsRefinerySessionName(sessionName) {
+		opts = polecat.LivenessOptions{Stale: 10 * time.Minute, Grace: 30 * time.Minute, Dead: 60 * time.Minute}
+	}
+	r := polecat.Liveness(ctx.TownRoot, sessionName, opts)
+	if r.VerdictReason == polecat.ReasonNoHeartbeatFile {
+		// Don't pollute the banner during pre-rollout / first-prime;
+		// the next gt command will write a heartbeat and subsequent
+		// primes will render this line.
+		return
+	}
+	parts := []string{}
+	if !r.LastTimestamp.IsZero() {
+		parts = append(parts, fmt.Sprintf("heartbeat %s ago",
+			time.Since(r.LastTimestamp).Round(time.Second)))
+	}
+	if !r.LastKeepalive.IsZero() {
+		parts = append(parts, fmt.Sprintf("keepalive %s ago",
+			time.Since(r.LastKeepalive).Round(time.Second)))
+	}
+	freshness := ""
+	if len(parts) > 0 {
+		freshness = " (" + strings.Join(parts, ", ") + ")"
+	}
+	fmt.Printf("liveness: %s%s\n", r.VerdictString, freshness)
 }
 
 // formatSessionMetadataLine keeps the bracketed "[GAS TOWN]" banner for normal

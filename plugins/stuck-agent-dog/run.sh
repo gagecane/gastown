@@ -58,12 +58,37 @@ IDENTITY_BEAD_PATTERN='-(refinery|witness|mayor|deacon)$'
 
 log() { echo "[stuck-agent-dog] $*"; }
 
+# liveness_status_json fetches the typed `gt heartbeat status --json` payload
+# for a session. cv-p3fem Phase 3 single source of truth — no more inline
+# jq+date arithmetic on the heartbeat file. Empty string on any failure
+# (missing session, gt unavailable, etc.) so callers can treat it as
+# "no signal" and fall back to legacy v2 inline parsing.
+liveness_status_json() {
+  local session_name="$1"
+  gt heartbeat status --session="$session_name" --json 2>/dev/null || true
+}
+
+# liveness_verdict reads the verdict word from a status payload (ALIVE,
+# MAYBE_DEAD, DEAD, UNKNOWN). Empty string on parse failure.
+liveness_verdict() {
+  local payload="$1"
+  [ -n "$payload" ] || return 0
+  echo "$payload" | jq -r '.verdict // empty' 2>/dev/null
+}
+
 # heartbeat_age_seconds returns the age of a polecat session's heartbeat file
-# in seconds, or empty string if the heartbeat file does not exist or cannot
-# be parsed. A missing heartbeat is not treated as stale (backward compat with
-# IsSessionHeartbeatStale in internal/polecat/heartbeat.go).
+# in seconds. Reads from `gt heartbeat status --json` first (single source of
+# truth, cv-p3fem Phase 3); falls back to legacy inline parse for sessions
+# the gt binary can't see (missing session_name validation, etc.).
 heartbeat_age_seconds() {
   local session_name="$1"
+  local payload age
+  payload=$(liveness_status_json "$session_name")
+  if [ -n "$payload" ]; then
+    age=$(echo "$payload" | jq -r '.age_seconds // empty' 2>/dev/null)
+    [ -n "$age" ] && [ "$age" != "null" ] && { echo "$age"; return 0; }
+  fi
+  # Legacy fallback (v1/v2 inline parse).
   local hb_file="${TOWN_ROOT}/.runtime/heartbeats/${session_name}.json"
   [ -f "$hb_file" ] || return 0
   local hb_ts
@@ -78,9 +103,28 @@ heartbeat_age_seconds() {
 # "working" for backward compatibility.
 heartbeat_state() {
   local session_name="$1"
+  local payload state
+  payload=$(liveness_status_json "$session_name")
+  if [ -n "$payload" ]; then
+    state=$(echo "$payload" | jq -r '.state // empty' 2>/dev/null)
+    [ -n "$state" ] && [ "$state" != "null" ] && { echo "$state"; return 0; }
+  fi
   local hb_file="${TOWN_ROOT}/.runtime/heartbeats/${session_name}.json"
   [ -f "$hb_file" ] || return 0
   jq -r '.state // empty' "$hb_file" 2>/dev/null
+}
+
+# pid_alive returns 0 (true) if the given PID exists, 1 otherwise. Used by
+# the mass-kill corroboration gate (cv-p3fem Phase 3 security mitigation):
+# each agent counted toward MASS DEATH must independently fail BOTH the
+# heartbeat staleness check AND the PID-liveness check, so a single bad
+# signal class (transient FS, corrupt JSON) cannot fan out into a CRITICAL
+# escalation that kills 13 healthy polecats (gs-549 incident).
+pid_alive() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  [ "$pid" -gt 0 ] 2>/dev/null || return 1
+  kill -0 "$pid" 2>/dev/null
 }
 
 # polecat_agent_bead_id returns the agent bead ID for a polecat using the
@@ -386,14 +430,45 @@ fi
 
 # --- Mass death check ---------------------------------------------------------
 
+# Per-agent independent corroboration gate (cv-p3fem Phase 3, design-doc
+# §"Mass-kill cascade", security mitigation 1). Each agent counted toward
+# MASS DEATH must independently fail BOTH the heartbeat staleness check AND
+# the PID-liveness check. This makes the gs-549 (2026-05-19) mass-kill
+# cascade structurally non-recurrable: a single bad signal class (transient
+# FS hiccup, three corrupt JSONs, mid-rollout schema mismatch) cannot fan
+# out into a CRITICAL escalation. STUCK entries already encode "PID dead"
+# (zombie or session-gone), so they always corroborate. STALLED entries
+# need an active PID check before counting.
+TOTAL_CORROBORATED=${#CRASHED[@]}
+# CRASHED = session gone entirely. PID is unambiguously dead (no pane to
+# check). Every CRASHED entry corroborates by definition.
+TOTAL_CORROBORATED=$(( TOTAL_CORROBORATED + ${#STUCK[@]} ))
+# STUCK = session alive, agent process dead. Already a multi-signal
+# corroboration (tmux pane PID check vs heartbeat). Counts in full.
+for ENTRY in ${STALLED[@]+"${STALLED[@]}"}; do
+  IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
+  PANE_PID=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+  if pid_alive "$PANE_PID"; then
+    # PID is alive — heartbeat is stale BUT process exists. This is the
+    # "long LLM call / stuck-but-alive" class. Still report STALLED in
+    # the summary (operator visibility), but DO NOT count toward
+    # MASS_DEATH escalation — a single bad signal class cannot fan out.
+    continue
+  fi
+  TOTAL_CORROBORATED=$(( TOTAL_CORROBORATED + 1 ))
+done
+
 TOTAL_ISSUES=$(( ${#CRASHED[@]} + ${#STUCK[@]} + ${#STALLED[@]} ))
-if [ "$TOTAL_ISSUES" -ge 3 ]; then
+if [ "$TOTAL_CORROBORATED" -ge 3 ]; then
   log ""
-  log "MASS DEATH: $TOTAL_ISSUES agents down — escalating instead of restarting"
+  log "MASS DEATH: $TOTAL_CORROBORATED agents down (corroborated, of $TOTAL_ISSUES total) — escalating instead of restarting"
   gt escalate "Mass agent death detected by stuck-agent-dog" \
     -s CRITICAL \
     --source=stuck-agent-dog --dedup --signature=stuck-agent-dog:mass-death \
-    -r "$TOTAL_ISSUES agents down" 2>/dev/null || true
+    -r "$TOTAL_CORROBORATED agents down (PID+heartbeat corroborated)" 2>/dev/null || true
+elif [ "$TOTAL_ISSUES" -ge 3 ]; then
+  log ""
+  log "MASS-LIKE: $TOTAL_ISSUES agents flagged but only $TOTAL_CORROBORATED corroborated (PID+heartbeat) — not escalating CRITICAL"
 fi
 
 # --- Take action --------------------------------------------------------------

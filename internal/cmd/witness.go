@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -273,17 +275,100 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  State: %s\n", style.Dim.Render("○ stopped"))
 	}
 
-	// Show monitored polecats
+	// Show monitored polecats with liveness column (cv-p3fem Phase 3).
+	// The Liveness verdict is the leftmost data column — operators scan
+	// for the supervisor question ("is the agent alive?") first.
 	fmt.Printf("\n  %s\n", style.Bold.Render("Monitored Polecats:"))
 	if len(polecats) == 0 {
 		fmt.Printf("    %s\n", style.Dim.Render("(none)"))
 	} else {
-		for _, p := range polecats {
-			fmt.Printf("    • %s\n", p)
-		}
+		townRoot, _ := workspace.FindFromCwd()
+		printPolecatLivenessTable(townRoot, rigName, polecats)
+	}
+
+	// Witness/refinery liveness (one line each) so operators see all
+	// roles in one tool. Mirrors design-doc §"gt witness status
+	// integration" example output.
+	if townRoot, _ := workspace.FindFromCwd(); townRoot != "" {
+		printRoleLivenessLine(townRoot, "Refinery", session.RefinerySessionName(session.PrefixFor(rigName)))
+		// Witness's own liveness — useful when an operator runs
+		// `gt witness status` from another tab and the witness is
+		// degraded.
+		printRoleLivenessLine(townRoot, "Witness", session.WitnessSessionName(session.PrefixFor(rigName)))
 	}
 
 	return nil
+}
+
+// printPolecatLivenessTable renders one row per polecat with the v3 Liveness
+// verdict, agent state, current bead, and freshness age. Columns are
+// fixed-width to make scanning easy across many polecats.
+func printPolecatLivenessTable(townRoot, rigName string, polecats []string) {
+	if townRoot == "" {
+		// No town root → no heartbeat dir → can't compute. Fall back to
+		// the legacy bullet list so the command still works in
+		// detached test contexts.
+		for _, p := range polecats {
+			fmt.Printf("    • %s\n", p)
+		}
+		return
+	}
+	prefix := session.PrefixFor(rigName)
+	fmt.Printf("    %-26s  %-10s  %-10s  %-18s  %s\n", "SESSION", "LIVENESS", "STATE", "BEAD", "AGE")
+	for _, p := range polecats {
+		s := session.PolecatSessionName(prefix, p)
+		report := polecat.Liveness(townRoot, s, polecat.LivenessOptions{})
+		bead := report.Bead
+		if bead == "" {
+			bead = "(none)"
+		}
+		age := "-"
+		if !report.LastTimestamp.IsZero() || !report.LastKeepalive.IsZero() {
+			age = time.Since(report.LastTimestamp).Round(time.Second).String()
+			if !report.LastKeepalive.IsZero() && report.LastKeepalive.After(report.LastTimestamp) {
+				age = time.Since(report.LastKeepalive).Round(time.Second).String()
+			}
+		}
+		state := string(report.State)
+		if state == "" {
+			state = "-"
+		}
+		fmt.Printf("    %-26s  %-10s  %-10s  %-18s  %s\n",
+			truncateLabel(s, 26), report.VerdictString, state, truncateLabel(bead, 18), age)
+	}
+}
+
+// printRoleLivenessLine renders a single-line liveness summary for a
+// non-polecat role (Refinery / Witness) using the same Liveness() API so
+// per-role thresholds apply uniformly.
+func printRoleLivenessLine(townRoot, label, sessionName string) {
+	opts := polecat.LivenessOptions{}
+	if session.IsWitnessSessionName(sessionName) {
+		opts = polecat.LivenessOptions{Stale: 5 * time.Minute, Grace: 15 * time.Minute, Dead: 30 * time.Minute}
+	} else if session.IsRefinerySessionName(sessionName) {
+		opts = polecat.LivenessOptions{Stale: 10 * time.Minute, Grace: 30 * time.Minute, Dead: 60 * time.Minute}
+	}
+	report := polecat.Liveness(townRoot, sessionName, opts)
+	freshness := ""
+	if !report.LastTimestamp.IsZero() {
+		freshness = fmt.Sprintf(" (heartbeat %s ago)",
+			time.Since(report.LastTimestamp).Round(time.Second))
+	} else if report.VerdictReason == polecat.ReasonNoHeartbeatFile {
+		freshness = " (no heartbeat file)"
+	}
+	fmt.Printf("\n  %s: %s%s\n", label, report.VerdictString, freshness)
+}
+
+// truncateLabel clamps s to the given width with an ellipsis. Distinct
+// from formula.go's truncate to avoid a redeclaration in the cmd package.
+func truncateLabel(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
 }
 
 // witnessSessionName returns the tmux session name for a rig's witness.
