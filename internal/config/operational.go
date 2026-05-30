@@ -47,12 +47,27 @@ const (
 	// when a polecat hard-crashes (OOM, tmux kill) and can't run its Stop hook.
 	// See gu-1x0j.
 	DefaultDeadPolecatReapTimeout = 1 * time.Hour
-	// DefaultDeadAgentReapTimeout is how long a witness/refinery's tmux session must be
-	// dead AND its hooked patrol wisp's last update must be aged before the wisp is
-	// auto-reset to open. Witness/refinery roles do not write heartbeat files, so the
-	// staleness proxy is bead.updated_at age. Prevents stuck patrol wisps from freezing
-	// the role's patrol cadence when its tmux session dies between cycles. See gu-s009.
-	DefaultDeadAgentReapTimeout           = 2 * time.Hour
+	// DefaultDeadAgentReapTimeout is the legacy/fallback timeout used when a
+	// witness/refinery wisp has no fresh heartbeat file (sessions still on the
+	// pre-cv-p3fem path). Roles that do produce heartbeats now use the per-role
+	// timeouts below. See gu-s009 (legacy) and cv-p3fem Phase 1 (heartbeat-first).
+	DefaultDeadAgentReapTimeout = 2 * time.Hour
+	// DefaultWitnessReapTimeout governs the heartbeat-driven reap of a witness's
+	// hooked patrol wisp. With per-command heartbeats (cv-p3fem Phase 1) a
+	// healthy witness touches its heartbeat several times per patrol cycle, so
+	// 15 minutes of staleness reliably indicates a dead session — short enough
+	// to satisfy gu-0nmw's <10min detection target once Phase 2's keepalive
+	// ticker lands. A value <=0 disables the per-role override and falls back
+	// to DefaultDeadAgentReapTimeout.
+	DefaultWitnessReapTimeout = 15 * time.Minute
+	// DefaultRefineryReapTimeout governs the heartbeat-driven reap of a
+	// refinery's hooked patrol wisp. Refineries run longer merge-queue cycles
+	// (~5–15min per gate run) so we err on the side of the upper bound from
+	// the gu-rh0g exit criteria — a refinery that dies mid-cycle is detected
+	// within 30 minutes. Phase 2's keepalive ticker will allow tightening this
+	// further. A value <=0 disables the per-role override and falls back to
+	// DefaultDeadAgentReapTimeout.
+	DefaultRefineryReapTimeout            = 30 * time.Minute
 	DefaultMaxDogPoolSize                 = 4
 	DefaultMaxLifecycleMessageAge         = 6 * time.Hour
 	DefaultSyncFailureEscalationThreshold = 3
@@ -373,12 +388,49 @@ func (d *DaemonThresholds) DeadPolecatReapTimeoutD() time.Duration {
 // has been dead AND its hooked patrol wisp's last update is older than this
 // threshold, the wisp is auto-reset to open with cleared assignee so the role's
 // next session can pick up a fresh patrol. Default 2 hours. A value <=0 disables
-// the reaper. See gu-s009.
+// the reaper.
+//
+// In cv-p3fem Phase 1 this is the FALLBACK timeout — used only for sessions
+// whose heartbeat file is missing (pre-rollout). Sessions with a heartbeat are
+// reaped against WitnessReapTimeoutD/RefineryReapTimeoutD instead. See
+// gu-s009 (legacy) and gu-rh0g (heartbeat-first).
 func (d *DaemonThresholds) DeadAgentReapTimeoutD() time.Duration {
 	if d != nil {
 		return ParseDurationOrDefault(d.DeadAgentReapTimeout, DefaultDeadAgentReapTimeout)
 	}
 	return DefaultDeadAgentReapTimeout
+}
+
+// WitnessReapTimeoutD returns the configured or default heartbeat-driven reap
+// timeout for a witness's hooked patrol wisp. Used only when a current
+// heartbeat file exists for the witness session; otherwise the reaper falls
+// back to DeadAgentReapTimeoutD. A value <=0 disables the per-role override.
+// See cv-p3fem Phase 1.
+func (d *DaemonThresholds) WitnessReapTimeoutD() time.Duration {
+	if d != nil {
+		dur := ParseDurationOrDefault(d.WitnessReapTimeout, DefaultWitnessReapTimeout)
+		if dur <= 0 {
+			return d.DeadAgentReapTimeoutD()
+		}
+		return dur
+	}
+	return DefaultWitnessReapTimeout
+}
+
+// RefineryReapTimeoutD returns the configured or default heartbeat-driven reap
+// timeout for a refinery's hooked patrol wisp. Used only when a current
+// heartbeat file exists for the refinery session; otherwise the reaper falls
+// back to DeadAgentReapTimeoutD. A value <=0 disables the per-role override.
+// See cv-p3fem Phase 1.
+func (d *DaemonThresholds) RefineryReapTimeoutD() time.Duration {
+	if d != nil {
+		dur := ParseDurationOrDefault(d.RefineryReapTimeout, DefaultRefineryReapTimeout)
+		if dur <= 0 {
+			return d.DeadAgentReapTimeoutD()
+		}
+		return dur
+	}
+	return DefaultRefineryReapTimeout
 }
 
 // DogIdleRemoveTimeoutD returns the configured or default dog idle remove timeout.

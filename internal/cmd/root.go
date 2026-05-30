@@ -141,11 +141,12 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 		warnIfTownRootOffMain()
 	}
 
-	// Touch polecat session heartbeat on every gt command (gt-qjtq: ZFC liveness fix).
+	// Touch agent session heartbeat on every gt command (gt-qjtq: ZFC liveness fix).
 	// This is best-effort and non-blocking — the heartbeat file signals that the agent
 	// is alive and actively running gt commands. Used by isSessionProcessDead to
-	// determine liveness without PID signal probing.
-	touchPolecatHeartbeat()
+	// determine liveness without PID signal probing. Covers polecat/crew/dog/deacon
+	// plus witness/refinery (cv-p3fem Phase 1: closes gu-rh0g).
+	touchAgentHeartbeat()
 
 	// Skip beads check for exempt commands
 	if beadsExempt || isRoleCommand(cmd) {
@@ -198,14 +199,18 @@ func initCLITheme() {
 	ui.ApplyThemeMode()
 }
 
-// touchPolecatHeartbeat touches the session heartbeat file for polecat agents.
+// touchAgentHeartbeat touches the session heartbeat file for any agent role
+// (polecat, crew, dog, deacon, witness, refinery).
 // Called from persistentPreRun on every gt command. The heartbeat signals that
 // the agent process is alive and actively running gt commands. Used by
-// isSessionProcessDead to determine liveness without PID signal probing (gt-qjtq).
+// isSessionProcessDead and the daemon reaper to determine liveness without PID
+// signal probing (gt-qjtq, cv-p3fem).
 //
-// This is best-effort: errors are silently ignored. Non-polecat sessions and
-// sessions without GT_SESSION are skipped silently.
-func touchPolecatHeartbeat() {
+// This is best-effort: errors are silently ignored. Non-agent sessions and
+// sessions without GT_SESSION are skipped silently. Renamed from
+// touchPolecatHeartbeat in cv-p3fem Phase 1 to reflect that witness/refinery
+// also produce heartbeats now.
+func touchAgentHeartbeat() {
 	sessionName := os.Getenv("GT_SESSION")
 	if sessionName == "" {
 		return

@@ -171,6 +171,107 @@ func TestRemoveSessionHeartbeat_NoopOnMissing(t *testing.T) {
 	RemoveSessionHeartbeat(townRoot, "nonexistent")
 }
 
+// TestHeartbeatFile_RejectsHostileSessionNames pins the cv-p3fem Phase 1
+// security boundary: every public heartbeat-file mutator/reader silently
+// no-ops on a hostile session_name so the heartbeats directory cannot be
+// escaped via filepath.Join. The test enumerates the categories called out
+// in the security review (gu-leg-pflxi):
+//   - empty string
+//   - parent traversal (`..`, `../`, `..\\`)
+//   - absolute paths (`/etc/passwd`, `/tmp/x`)
+//   - path separators inside the name (`a/b`, `a\\b`)
+//   - shell/whitespace metacharacters
+//
+// Each case must:
+//  1. Produce no file inside .runtime/heartbeats/ (TouchSession*).
+//  2. Return nil from ReadSessionHeartbeat (no probe escape).
+//  3. Return (false, false) from IsSessionHeartbeatStale (no probe escape).
+//  4. Be a no-op for RemoveSessionHeartbeat (no escape, no panic).
+//
+// If you change this list, also update isValidSessionName to match — the two
+// must move together or sessions named with newly-allowed characters will
+// silently lose their heartbeats.
+func TestHeartbeatFile_RejectsHostileSessionNames(t *testing.T) {
+	hostile := []string{
+		"",
+		"..",
+		"../escape",
+		"a/../b",
+		"a/b",
+		"/etc/passwd",
+		`a\b`,
+		"foo bar", // space
+		"foo\tbar",
+		"foo;rm -rf /",
+		"foo$bar",
+		"foo\nbar",
+		"\x00null",
+	}
+
+	for _, name := range hostile {
+		t.Run("name="+name, func(t *testing.T) {
+			townRoot := t.TempDir()
+
+			// 1. TouchSessionHeartbeat must no-op.
+			TouchSessionHeartbeat(townRoot, name)
+			TouchSessionHeartbeatWithState(townRoot, name, HeartbeatWorking, "ctx", "bead")
+
+			// The heartbeats dir may exist (the function MkdirAll's it before
+			// validating in the no-arg variant during the rollout window) so
+			// we don't assert dir absence — we assert no FILE landed.
+			dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+			entries, _ := os.ReadDir(dir)
+			for _, e := range entries {
+				t.Errorf("hostile name %q produced heartbeat file %q", name, e.Name())
+			}
+
+			// 2. ReadSessionHeartbeat must return nil.
+			if hb := ReadSessionHeartbeat(townRoot, name); hb != nil {
+				t.Errorf("ReadSessionHeartbeat(%q) returned %+v; want nil", name, hb)
+			}
+
+			// 3. IsSessionHeartbeatStale must report exists=false.
+			stale, exists := IsSessionHeartbeatStale(townRoot, name)
+			if exists || stale {
+				t.Errorf("IsSessionHeartbeatStale(%q) = (stale=%v, exists=%v); want (false,false)", name, stale, exists)
+			}
+
+			// 4. RemoveSessionHeartbeat must not panic and must not escape.
+			RemoveSessionHeartbeat(townRoot, name)
+		})
+	}
+}
+
+// TestHeartbeatFile_AcceptsValidSessionNames pins the corollary: names that
+// match ^[A-Za-z0-9_.-]+$ and don't contain `..` MUST round-trip cleanly.
+// This guards against an over-aggressive validator regression breaking real
+// session names (gt-rig-prefix-deathclaw, deacon.gt-uw, etc.).
+func TestHeartbeatFile_AcceptsValidSessionNames(t *testing.T) {
+	valid := []string{
+		"deathclaw",
+		"gt-uw-deathclaw",
+		"deacon.gt-uw",
+		"witness_main",
+		"a.b-c_d",
+		"a", // single char
+	}
+
+	for _, name := range valid {
+		t.Run("name="+name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			TouchSessionHeartbeat(townRoot, name)
+			hb := ReadSessionHeartbeat(townRoot, name)
+			if hb == nil {
+				t.Fatalf("valid name %q failed to round-trip; got nil heartbeat", name)
+			}
+			RemoveSessionHeartbeat(townRoot, name)
+			if hb := ReadSessionHeartbeat(townRoot, name); hb != nil {
+				t.Errorf("RemoveSessionHeartbeat(%q) failed to remove the file", name)
+			}
+		})
+	}
+}
+
 func TestIsSessionProcessDead_HeartbeatFresh(t *testing.T) {
 	townRoot := t.TempDir()
 	sessionName := "gt-test-hb-alive"

@@ -11,21 +11,30 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
 // reapDeadAgentWisps resets in_progress/hooked beads assigned to non-polecat
 // rig agents (witness, refinery) whose tmux sessions are dead and whose hooked
-// wisp has not been updated for longer than the configured timeout.
+// wisp has gone stale for longer than the configured timeout.
 //
 // Why this exists (gu-s009): when a witness or refinery tmux session dies or
 // restarts unexpectedly mid-patrol, its hooked patrol wisp stays HOOKED to it
 // forever. The role's next patrol cycle never starts because the prior wisp is
-// still hooked, freezing the rig's patrol cadence. The polecat-equivalent
-// reaper (reapDeadPolecatWisps, see gu-1x0j) only handles polecats: it requires
-// a polecats/<name>/ directory and a heartbeat file, neither of which witness
-// or refinery roles produce. Stuck witness/refinery wisps therefore fall
-// through, accumulate, and require manual intervention.
+// still hooked, freezing the rig's patrol cadence.
+//
+// Heartbeat-first staleness check (cv-p3fem Phase 1, closes gu-rh0g): when a
+// session-heartbeat file exists for the role, we use heartbeat-timestamp age
+// against per-role thresholds (Witness/RefineryReapTimeoutD). This is the
+// happy path for any session that has run a `gt` command since the cv-p3fem
+// rollout — it cuts witness detection from 2h to 15m and refinery detection
+// to 30m, satisfying gu-0nmw / gu-rh0g exit criteria.
+//
+// Pre-rollout fallback: when no heartbeat file exists for the session, we
+// fall back to bead.updated_at age against DeadAgentReapTimeoutD (legacy 2h
+// default). This preserves the gu-s009 behaviour for sessions on the old
+// path so we don't lose coverage during rollout.
 //
 // The reap is conservative by design:
 //   - Only handles assignees of the form "<rig>/witness" or "<rig>/refinery".
@@ -34,23 +43,58 @@ import (
 //   - Requires the tmux session for the role to be GONE. A live session, even
 //     with a stale wisp, is not reaped — it might just be slow and the next
 //     patrol cycle will resolve naturally.
-//   - Requires bead.updated_at to be older than the timeout. Witness and
-//     refinery don't have heartbeat files, but they do touch bd at the start
-//     of each patrol cycle (claim, status updates), so updated_at is a
-//     reasonable staleness proxy.
 //   - TOCTOU guard: re-checks tmux session liveness immediately before reset.
 func (d *Daemon) reapDeadAgentWisps() {
 	opCfg := d.loadOperationalConfig().GetDaemonConfig()
-	timeout := opCfg.DeadAgentReapTimeoutD()
-	if timeout <= 0 {
-		// Explicitly disabled via config — preserves the operator escape hatch.
+	fallbackTimeout := opCfg.DeadAgentReapTimeoutD()
+	witnessTimeout := opCfg.WitnessReapTimeoutD()
+	refineryTimeout := opCfg.RefineryReapTimeoutD()
+	// If both the heartbeat-driven per-role timeouts AND the bead.updated_at
+	// fallback are explicitly disabled, the operator has fully opted out.
+	// Either path being live keeps the reaper running (the per-role override
+	// only fires when a heartbeat exists; the fallback only fires when one
+	// does not, so they don't conflict).
+	if fallbackTimeout <= 0 && witnessTimeout <= 0 && refineryTimeout <= 0 {
 		return
 	}
 
+	cfg := agentReapConfig{
+		fallbackTimeout: fallbackTimeout,
+		witnessTimeout:  witnessTimeout,
+		refineryTimeout: refineryTimeout,
+	}
+
 	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		d.reapRigDeadAgentWisps(rigName, timeout)
+		d.reapRigDeadAgentWisps(rigName, cfg)
 		return nil
 	})
+}
+
+// agentReapConfig bundles the staleness thresholds for the agent reaper so we
+// don't thread three durations through every helper. fallbackTimeout is the
+// legacy bead.updated_at threshold used when no heartbeat file exists;
+// witness/refineryTimeout are the heartbeat-driven per-role thresholds.
+type agentReapConfig struct {
+	fallbackTimeout time.Duration
+	witnessTimeout  time.Duration
+	refineryTimeout time.Duration
+}
+
+// timeoutFor returns the configured per-role heartbeat timeout for a role.
+// Returns the fallback timeout if no per-role override applies (covers a hole
+// in operator config without breaking the reaper).
+func (c agentReapConfig) timeoutFor(role string) time.Duration {
+	switch role {
+	case "witness":
+		if c.witnessTimeout > 0 {
+			return c.witnessTimeout
+		}
+	case "refinery":
+		if c.refineryTimeout > 0 {
+			return c.refineryTimeout
+		}
+	}
+	return c.fallbackTimeout
 }
 
 // agentBeadInfo is the JSON shape we need from `bd list`. Only updated_at age
@@ -65,7 +109,7 @@ type agentBeadInfo struct {
 // reapRigDeadAgentWisps scans a single rig for in_progress/hooked beads
 // assigned to <rig>/witness or <rig>/refinery and resets them if the role's
 // tmux session is dead and the bead is stale.
-func (d *Daemon) reapRigDeadAgentWisps(rigName string, timeout time.Duration) {
+func (d *Daemon) reapRigDeadAgentWisps(rigName string, cfg agentReapConfig) {
 	// Build expected agent assignees for this rig. Crew is intentionally
 	// out of scope — see function comment.
 	witnessAssignee := rigName + "/witness"
@@ -121,14 +165,72 @@ func (d *Daemon) reapRigDeadAgentWisps(rigName string, timeout time.Duration) {
 			continue // Not a witness/refinery wisp in this rig.
 		}
 
-		d.maybeReapDeadAgentBead(rigName, role, sessionName, bead, timeout)
+		d.maybeReapDeadAgentBead(rigName, role, sessionName, bead, cfg)
 	}
 }
 
+// agentStaleness describes how far the role-assigned wisp's owning session
+// looks dead. Source is "heartbeat" when we read a heartbeat file (cv-p3fem
+// Phase 1) or "updated_at" when we fall back to the legacy bead-age check.
+// threshold is the timeout that was applied; staleFor is how stale the chosen
+// signal actually is. Carrying both keeps log lines self-describing and
+// guarantees the operator can tell which path made the call.
+type agentStaleness struct {
+	source    string
+	staleFor  time.Duration
+	threshold time.Duration
+}
+
+// evaluateAgentStaleness picks the reap source for a witness/refinery wisp.
+// Heartbeat-first: if a SessionHeartbeat exists, it is the canonical
+// liveness signal and we apply the per-role threshold from cfg. Without a
+// heartbeat we fall back to bead.UpdatedAt against the legacy threshold so
+// pre-rollout sessions remain covered (gu-s009).
+//
+// Returns (eligible, agentStaleness). eligible=false means we have no
+// trustworthy staleness signal — either both signals are missing/zero, or
+// they exist but aren't yet over threshold. The caller MUST NOT reap on
+// eligible=false even if other guards pass.
+func (d *Daemon) evaluateAgentStaleness(sessionName string, bead agentBeadInfo, role string, cfg agentReapConfig) (bool, agentStaleness) {
+	// Heartbeat-first path: a heartbeat exists, so its timestamp is the
+	// canonical signal. Use the per-role threshold and ignore bead.UpdatedAt
+	// entirely — heartbeats are bumped by every gt command (witness patrols
+	// run several gt invocations per cycle), so a fresh heartbeat with stale
+	// updated_at means the role IS alive and we must not reap.
+	if hb := polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName); hb != nil {
+		threshold := cfg.timeoutFor(role)
+		if threshold <= 0 {
+			// Per-role timeout disabled and no fallback either.
+			return false, agentStaleness{}
+		}
+		staleFor := time.Since(hb.Timestamp)
+		if staleFor < threshold {
+			return false, agentStaleness{}
+		}
+		return true, agentStaleness{source: "heartbeat", staleFor: staleFor, threshold: threshold}
+	}
+
+	// Pre-rollout fallback: no heartbeat means we must rely on bead.UpdatedAt
+	// at the legacy timeout. This preserves gu-s009 behaviour for sessions
+	// that haven't run a gt command since cv-p3fem rolled out.
+	if cfg.fallbackTimeout <= 0 {
+		return false, agentStaleness{}
+	}
+	if bead.UpdatedAt.IsZero() {
+		// Without either signal we can't prove staleness defensibly.
+		return false, agentStaleness{}
+	}
+	staleFor := time.Since(bead.UpdatedAt)
+	if staleFor < cfg.fallbackTimeout {
+		return false, agentStaleness{}
+	}
+	return true, agentStaleness{source: "updated_at", staleFor: staleFor, threshold: cfg.fallbackTimeout}
+}
+
 // maybeReapDeadAgentBead resets a single witness/refinery wisp if the role's
-// tmux session is provably dead and the bead has been idle longer than the
-// timeout.
-func (d *Daemon) maybeReapDeadAgentBead(rigName, role, sessionName string, bead agentBeadInfo, timeout time.Duration) {
+// tmux session is provably dead and the wisp's staleness signal (heartbeat
+// preferred, bead.updated_at fallback) is past the configured threshold.
+func (d *Daemon) maybeReapDeadAgentBead(rigName, role, sessionName string, bead agentBeadInfo, cfg agentReapConfig) {
 	alive, err := d.tmux.HasSession(sessionName)
 	if err != nil {
 		// Transient tmux error — err on the side of not reaping.
@@ -138,13 +240,8 @@ func (d *Daemon) maybeReapDeadAgentBead(rigName, role, sessionName string, bead 
 		return
 	}
 
-	// updated_at must be at least `timeout` old. If it's missing or in the
-	// future (clock skew), refuse to reap defensively.
-	if bead.UpdatedAt.IsZero() {
-		return
-	}
-	staleFor := time.Since(bead.UpdatedAt)
-	if staleFor < timeout {
+	eligible, st := d.evaluateAgentStaleness(sessionName, bead, role, cfg)
+	if !eligible {
 		return
 	}
 
@@ -164,12 +261,13 @@ func (d *Daemon) maybeReapDeadAgentBead(rigName, role, sessionName string, bead 
 		return
 	}
 
-	d.logger.Printf("reap-dead-agent-wisps: reset %s (rig=%s role=%s prev_status=%s session=%s bead_stale=%v threshold=%v)",
-		bead.ID, rigName, role, bead.Status, sessionName, staleFor.Truncate(time.Second), timeout)
+	d.logger.Printf("reap-dead-agent-wisps: reset %s (rig=%s role=%s prev_status=%s session=%s source=%s stale=%v threshold=%v)",
+		bead.ID, rigName, role, bead.Status, sessionName, st.source, st.staleFor.Truncate(time.Second), st.threshold)
 
 	_ = events.LogFeed(events.TypeSessionDeath, fmt.Sprintf("%s/%s", rigName, role),
 		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/%s", rigName, role),
-			fmt.Sprintf("dead-agent-wisp-reap: bead=%s prev_status=%s bead_stale=%v (threshold=%v)",
-				bead.ID, bead.Status, staleFor.Truncate(time.Second), timeout),
+			fmt.Sprintf("dead-agent-wisp-reap: bead=%s prev_status=%s source=%s stale=%v (threshold=%v)",
+				bead.ID, bead.Status, st.source, st.staleFor.Truncate(time.Second), st.threshold),
 			"daemon"))
 }
+

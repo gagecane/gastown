@@ -328,13 +328,26 @@ type DaemonThresholds struct {
 	// its Stop hook to signal completion. See gu-1x0j.
 	DeadPolecatReapTimeout string `json:"dead_polecat_reap_timeout,omitempty"`
 
-	// DeadAgentReapTimeout is how long a witness/refinery's tmux session must be
-	// dead AND its hooked patrol wisp's last update must be aged before the wisp
-	// is auto-reset to open (default "2h"). Witness/refinery roles do not write
-	// heartbeat files, so the staleness proxy is bead.updated_at age. Prevents
-	// stuck patrol wisps from freezing the role's patrol cadence when its tmux
-	// session dies between cycles. A value <=0 disables. See gu-s009.
+	// DeadAgentReapTimeout is the FALLBACK timeout used by the witness/refinery
+	// wisp reaper when no heartbeat file exists for the role's session
+	// (default "2h"). With cv-p3fem Phase 1 these roles produce per-command
+	// heartbeats and are reaped via WitnessReapTimeout/RefineryReapTimeout
+	// instead; this field only governs sessions still on the pre-rollout path.
+	// A value <=0 disables the reaper entirely. See gu-s009 (legacy) and
+	// gu-rh0g (heartbeat-first).
 	DeadAgentReapTimeout string `json:"dead_agent_reap_timeout,omitempty"`
+
+	// WitnessReapTimeout is how long a witness's heartbeat may be stale before
+	// its hooked patrol wisp is auto-reset to open (default "15m"). Used only
+	// when a heartbeat file exists for the witness session. A value <=0 falls
+	// back to DeadAgentReapTimeout. See cv-p3fem Phase 1.
+	WitnessReapTimeout string `json:"witness_reap_timeout,omitempty"`
+
+	// RefineryReapTimeout is how long a refinery's heartbeat may be stale
+	// before its hooked patrol wisp is auto-reset to open (default "30m").
+	// Used only when a heartbeat file exists for the refinery session. A value
+	// <=0 falls back to DeadAgentReapTimeout. See cv-p3fem Phase 1.
+	RefineryReapTimeout string `json:"refinery_reap_timeout,omitempty"`
 
 	// PolecatSelfTerminate controls whether polecats kill their own session after
 	// gt done completes (default false). When true, polecats terminate 3 seconds

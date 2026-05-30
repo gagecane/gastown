@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 func TestCheckHelpFlag(t *testing.T) {
@@ -246,5 +247,113 @@ func TestPersistentPreRunMalformedAgentRegistry(t *testing.T) {
 	got := config.GetProcessNames("claude")
 	if len(got) < 2 || got[0] != "node" || got[1] != "claude" {
 		t.Fatalf("GetProcessNames(claude) after malformed registry = %v, want builtin [node claude ...]", got)
+	}
+}
+
+// TestTouchAgentHeartbeat_RoleAllowlist pins the role allowlist for the
+// per-command heartbeat producer (cv-p3fem Phase 1: closes gu-rh0g). Without
+// witness/refinery in this list, their heartbeats never refresh and the
+// daemon reaper falls back to the legacy 2h updated_at proxy — exactly the
+// failure mode that lost a refinery for 28h. The polecat/crew/dog/deacon
+// entries existed pre-cv-p3fem; the test pins them too so a future tidy-up
+// doesn't accidentally narrow coverage.
+//
+// We exercise touchAgentHeartbeat (not the persistentPreRun layer) because
+// the rest of persistentPreRun's surface is already covered above and the
+// allowlist behaviour we care about lives entirely in touchAgentHeartbeat.
+func TestTouchAgentHeartbeat_RoleAllowlist(t *testing.T) {
+	cases := []struct {
+		role      string
+		wantWrite bool
+	}{
+		// Roles that MUST produce heartbeats.
+		{"gastown_upstream/polecats/dust", true},
+		{"gastown_upstream/crew/canewiw", true},
+		{"gastown_upstream/dog", true}, // stuck-agent-dog and friends
+		{"gastown_upstream/deacon", true},
+		{"gastown_upstream/witness", true},
+		{"gastown_upstream/refinery", true},
+		// Roles that intentionally skip — overseer is human, mayor is town-level
+		// coordination not subject to per-rig liveness. Empty/unknown roles are
+		// also skipped to avoid stray writes from `gt` invoked outside an agent
+		// context.
+		{"gastown_upstream/overseer", false},
+		{"mayor", false},
+		{"", false},
+		{"random/unknown", false},
+	}
+
+	// Each subtest needs an isolated townRoot to avoid state leaking between
+	// runs. We use t.Setenv so cleanup is automatic.
+	for _, tc := range cases {
+		tc := tc
+		t.Run("role="+tc.role, func(t *testing.T) {
+			townRoot := t.TempDir()
+			// Plant a workspace marker so detectTownRootFromCwd succeeds.
+			if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			origDir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(townRoot); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+			t.Setenv("GT_SESSION", "gt-test-allowlist")
+			t.Setenv("GT_ROLE", tc.role)
+
+			touchAgentHeartbeat()
+
+			hb := polecat.ReadSessionHeartbeat(townRoot, "gt-test-allowlist")
+			if tc.wantWrite && hb == nil {
+				t.Errorf("role %q: expected heartbeat write, got none", tc.role)
+			}
+			if !tc.wantWrite && hb != nil {
+				t.Errorf("role %q: expected NO heartbeat write, got %+v", tc.role, hb)
+			}
+		})
+	}
+}
+
+// TestTouchAgentHeartbeat_NoSession verifies that without GT_SESSION the
+// function silently no-ops, regardless of GT_ROLE. This protects against
+// stray heartbeat files when developers run `gt` interactively outside any
+// agent session.
+func TestTouchAgentHeartbeat_NoSession(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	t.Setenv("GT_SESSION", "")
+	t.Setenv("GT_ROLE", "gastown_upstream/witness")
+
+	touchAgentHeartbeat()
+
+	// Heartbeats dir might exist (other tests in same package), but no file
+	// for an empty session name should be there.
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		t.Errorf("touchAgentHeartbeat with empty GT_SESSION wrote %q", e.Name())
 	}
 }

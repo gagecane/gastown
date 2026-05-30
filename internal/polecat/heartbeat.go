@@ -4,8 +4,31 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
+
+// sessionNamePattern matches valid heartbeat session_name characters: ASCII
+// alphanumerics plus `_`, `.`, `-`. Anything else (slashes, NUL, spaces,
+// shell metachars) is rejected at the heartbeat-file boundary so a hostile or
+// malformed session_name cannot escape the heartbeats directory via
+// filepath.Join (which does not strip `..` segments). See cv-p3fem Phase 1
+// security review (gu-leg-pflxi).
+var sessionNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// isValidSessionName returns true if name is safe to use as a heartbeat
+// filename component. Rejects empty strings, names containing `..` (parent
+// segment traversal), and any character outside [A-Za-z0-9_.-].
+func isValidSessionName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.Contains(name, "..") {
+		return false
+	}
+	return sessionNamePattern.MatchString(name)
+}
 
 // SessionHeartbeatStaleThreshold is the age at which a polecat session heartbeat
 // is considered stale, indicating the agent process is likely dead.
@@ -74,8 +97,13 @@ func TouchSessionHeartbeat(townRoot, sessionName string) {
 
 // TouchSessionHeartbeatWithState writes a heartbeat with explicit state information.
 // Used by gt done (state="exiting") and gt heartbeat (state="stuck"). See gt-3vr5.
-// This is best-effort: errors are silently ignored.
+// This is best-effort: errors are silently ignored. Rejects (no-op) session
+// names that fail isValidSessionName so a hostile session_name cannot escape
+// the heartbeats directory (cv-p3fem Phase 1).
 func TouchSessionHeartbeatWithState(townRoot, sessionName string, state HeartbeatState, context, bead string) {
+	if !isValidSessionName(sessionName) {
+		return
+	}
 	dir := heartbeatsDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
@@ -97,8 +125,13 @@ func TouchSessionHeartbeatWithState(townRoot, sessionName string, state Heartbea
 }
 
 // ReadSessionHeartbeat reads the heartbeat for a polecat session.
-// Returns nil if the file doesn't exist or can't be read.
+// Returns nil if the file doesn't exist or can't be read. Invalid session
+// names (see isValidSessionName) are rejected with a nil read so callers
+// can't probe arbitrary paths via the heartbeats directory.
 func ReadSessionHeartbeat(townRoot, sessionName string) *SessionHeartbeat {
+	if !isValidSessionName(sessionName) {
+		return nil
+	}
 	data, err := os.ReadFile(heartbeatFile(townRoot, sessionName))
 	if err != nil {
 		return nil
@@ -127,7 +160,11 @@ func IsSessionHeartbeatStale(townRoot, sessionName string) (stale bool, exists b
 }
 
 // RemoveSessionHeartbeat removes the heartbeat file for a session.
-// Called during session cleanup.
+// Called during session cleanup. Invalid session names are silently ignored
+// so a hostile name cannot escape the heartbeats directory.
 func RemoveSessionHeartbeat(townRoot, sessionName string) {
+	if !isValidSessionName(sessionName) {
+		return
+	}
 	_ = os.Remove(heartbeatFile(townRoot, sessionName))
 }
