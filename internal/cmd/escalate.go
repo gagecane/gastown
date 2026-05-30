@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"time"
+
 	"github.com/spf13/cobra"
 )
 
@@ -17,9 +19,10 @@ var (
 	escalateStaleJSON   bool
 	escalateDryRun      bool
 	escalateCloseReason string
-	escalateStdin       bool   // Read reason from stdin
-	escalateDedup       bool   // Bump existing open escalation instead of creating new one
-	escalateSignature   string // Stable dedup key (used with --dedup)
+	escalateStdin       bool          // Read reason from stdin
+	escalateDedup       bool          // Bump existing open escalation instead of creating new one
+	escalateSignature   string        // Stable dedup key (used with --dedup)
+	escalateDedupWindow time.Duration // Suppress re-fires within this window after close (gu-ah40)
 )
 
 var escalateCmd = &cobra.Command{
@@ -152,6 +155,7 @@ func init() {
 	escalateCmd.Flags().BoolVar(&escalateStdin, "stdin", false, "Read reason from stdin (avoids shell quoting issues)")
 	escalateCmd.Flags().BoolVar(&escalateDedup, "dedup", false, "Bump existing open escalation with matching --signature instead of creating a new one")
 	escalateCmd.Flags().StringVar(&escalateSignature, "signature", "", "Stable dedup key for recurring alerts (used with --dedup)")
+	escalateCmd.Flags().DurationVar(&escalateDedupWindow, "dedup-window", time.Hour, "Suppress re-fires for this duration after the matching signature was closed (used with --dedup, default 1h)")
 
 	// List subcommand flags
 	escalateListCmd.Flags().BoolVar(&escalateListJSON, "json", false, "Output as JSON")

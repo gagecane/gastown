@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFormatEscalationDescription(t *testing.T) {
@@ -521,5 +522,170 @@ exit 0
 	// Sanity: stdin must contain newlines (it's the multi-line description).
 	if !strings.Contains(stdin, "\n") {
 		t.Errorf("expected stdin to be multi-line, got %q", stdin)
+	}
+}
+
+// TestPickRecentEscalationBySignature exercises the dedup match logic that
+// powers gt escalate --dedup --dedup-window (gu-ah40). The pure picker is
+// extracted from FindRecentEscalationBySignature so we can simulate Dolt
+// state without a bd stub.
+func TestPickRecentEscalationBySignature(t *testing.T) {
+	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+	mkIssue := func(id, status, sig, closedAt string) *Issue {
+		desc := "Title\n\nseverity: high\nsignature: " + sig
+		return &Issue{
+			ID:          id,
+			Status:      status,
+			Description: desc,
+			ClosedAt:    closedAt,
+			UpdatedAt:   closedAt,
+		}
+	}
+
+	tests := []struct {
+		name      string
+		issues    []*Issue
+		signature string
+		window    time.Duration
+		wantID    string // empty means no match expected
+	}{
+		{
+			name:      "empty signature never matches",
+			issues:    []*Issue{mkIssue("hq-1", "open", "X", "")},
+			signature: "",
+			window:    time.Hour,
+			wantID:    "",
+		},
+		{
+			name:      "no-issues no-match",
+			issues:    nil,
+			signature: "X",
+			window:    time.Hour,
+			wantID:    "",
+		},
+		{
+			name: "open match wins over closed-in-window",
+			issues: []*Issue{
+				mkIssue("hq-closed", "closed", "X", now.Add(-10*time.Minute).Format(time.RFC3339)),
+				mkIssue("hq-open", "open", "X", ""),
+			},
+			signature: "X",
+			window:    time.Hour,
+			wantID:    "hq-open",
+		},
+		{
+			name: "closed-within-window matches when no open",
+			issues: []*Issue{
+				mkIssue("hq-closed", "closed", "X", now.Add(-30*time.Minute).Format(time.RFC3339)),
+			},
+			signature: "X",
+			window:    time.Hour,
+			wantID:    "hq-closed",
+		},
+		{
+			name: "closed-outside-window does not match",
+			issues: []*Issue{
+				mkIssue("hq-closed", "closed", "X", now.Add(-2*time.Hour).Format(time.RFC3339)),
+			},
+			signature: "X",
+			window:    time.Hour,
+			wantID:    "",
+		},
+		{
+			name: "most-recent-closed wins among multiple closed",
+			issues: []*Issue{
+				mkIssue("hq-old", "closed", "X", now.Add(-50*time.Minute).Format(time.RFC3339)),
+				mkIssue("hq-new", "closed", "X", now.Add(-5*time.Minute).Format(time.RFC3339)),
+			},
+			signature: "X",
+			window:    time.Hour,
+			wantID:    "hq-new",
+		},
+		{
+			name: "different signature ignored",
+			issues: []*Issue{
+				mkIssue("hq-other", "open", "Y", ""),
+			},
+			signature: "X",
+			window:    time.Hour,
+			wantID:    "",
+		},
+		{
+			name: "window=0 still matches open (open-only path)",
+			issues: []*Issue{
+				mkIssue("hq-open", "open", "X", ""),
+			},
+			signature: "X",
+			window:    0,
+			wantID:    "hq-open",
+		},
+		{
+			name: "window=0 ignores closed even seconds-old",
+			issues: []*Issue{
+				mkIssue("hq-closed", "closed", "X", now.Add(-1*time.Second).Format(time.RFC3339)),
+			},
+			signature: "X",
+			window:    0,
+			wantID:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIssue, gotFields := pickRecentEscalationBySignature(tt.issues, tt.signature, tt.window, now)
+			if tt.wantID == "" {
+				if gotIssue != nil {
+					t.Fatalf("expected no match, got issue %s", gotIssue.ID)
+				}
+				if gotFields != nil {
+					t.Fatalf("expected nil fields, got %+v", gotFields)
+				}
+				return
+			}
+			if gotIssue == nil {
+				t.Fatalf("expected match %s, got nil", tt.wantID)
+			}
+			if gotIssue.ID != tt.wantID {
+				t.Errorf("got issue %s, want %s", gotIssue.ID, tt.wantID)
+			}
+			if gotFields == nil {
+				t.Errorf("expected non-nil fields for matched issue %s", gotIssue.ID)
+			}
+		})
+	}
+}
+
+// TestParseEscalationClosedAt verifies the ClosedAt fallback to UpdatedAt for
+// older bd versions or beads that didn't populate ClosedAt.
+func TestParseEscalationClosedAt(t *testing.T) {
+	closedAt := "2026-05-30T11:30:00Z"
+	updatedAt := "2026-05-30T11:45:00Z"
+
+	tests := []struct {
+		name string
+		i    *Issue
+		want string // RFC3339 expected, or "" for zero time
+	}{
+		{name: "nil", i: nil, want: ""},
+		{name: "closed_at populated", i: &Issue{ClosedAt: closedAt, UpdatedAt: updatedAt}, want: closedAt},
+		{name: "fallback to updated_at", i: &Issue{UpdatedAt: updatedAt}, want: updatedAt},
+		{name: "neither populated", i: &Issue{}, want: ""},
+		{name: "unparseable closed_at falls back", i: &Issue{ClosedAt: "not-a-time", UpdatedAt: updatedAt}, want: updatedAt},
+		{name: "unparseable both", i: &Issue{ClosedAt: "x", UpdatedAt: "y"}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseEscalationClosedAt(tt.i)
+			if tt.want == "" {
+				if !got.IsZero() {
+					t.Errorf("expected zero time, got %s", got)
+				}
+				return
+			}
+			want, _ := time.Parse(time.RFC3339, tt.want)
+			if !got.Equal(want) {
+				t.Errorf("got %s, want %s", got, want)
+			}
+		})
 	}
 }

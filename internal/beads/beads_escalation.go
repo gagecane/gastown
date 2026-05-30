@@ -209,6 +209,128 @@ func (b *Beads) FindOpenEscalationBySignature(signature string) (*Issue, *Escala
 	return nil, nil, nil
 }
 
+// listAllEscalations returns escalation beads in any status (open or closed).
+// Used by FindRecentEscalationBySignature for window-based dedup that includes
+// recently-closed escalations as suppression anchors.
+func (b *Beads) listAllEscalations() ([]*Issue, error) {
+	out, err := b.run("list", "--label=gt:escalation", "--status=all", "--json", "--limit=0")
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 || !isJSONBytes(out) {
+		return nil, nil
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd list output: %w", err)
+	}
+	return filterEscalationRecords(issues), nil
+}
+
+// FindRecentEscalationBySignature finds the most recent escalation bead with a
+// matching signature, considering both open escalations and escalations that
+// were closed within the given window. Returns the matched issue and fields,
+// or nil, nil, nil when no match is found.
+//
+// This is the dedup primitive for `gt escalate --dedup --signature=X`: it
+// answers "should we suppress this re-fire?" by checking whether any open or
+// recently-closed escalation already covers this signature. Closed escalations
+// inside the window count as the suppression anchor (gu-ah40) — without that,
+// the moment a deduped escalation is closed the next plugin cycle re-fires it
+// and creates a fresh bead.
+//
+// When the matched escalation is closed, callers should treat the result as
+// "suppress, do not bump occurrence count" (the bead is already resolved).
+// When open, callers should bump the occurrence count on the existing bead.
+//
+// window <= 0 means "open-only" (closed escalations are never matched).
+func (b *Beads) FindRecentEscalationBySignature(signature string, window time.Duration) (*Issue, *EscalationFields, error) {
+	if signature == "" {
+		return nil, nil, nil
+	}
+
+	// Open-only path: cheaper query, matches legacy behavior.
+	if window <= 0 {
+		return b.FindOpenEscalationBySignature(signature)
+	}
+
+	issues, err := b.listAllEscalations()
+	if err != nil {
+		return nil, nil, err
+	}
+	issue, fields := pickRecentEscalationBySignature(issues, signature, window, time.Now())
+	return issue, fields, nil
+}
+
+// pickRecentEscalationBySignature implements the dedup match logic against a
+// pre-fetched issue list. Extracted from FindRecentEscalationBySignature so the
+// signature-matching rules (open beats closed; closed must be within window;
+// most-recent-closed wins among ties) are unit-testable without a bd stub.
+func pickRecentEscalationBySignature(issues []*Issue, signature string, window time.Duration, now time.Time) (*Issue, *EscalationFields) {
+	if signature == "" {
+		return nil, nil
+	}
+	cutoff := now.Add(-window)
+	var (
+		bestOpen     *Issue
+		bestOpenF    *EscalationFields
+		bestClosed   *Issue
+		bestClosedF  *EscalationFields
+		bestClosedAt time.Time
+	)
+	for _, issue := range issues {
+		fields := ParseEscalationFields(issue.Description)
+		if fields.Signature != signature {
+			continue
+		}
+		if issue.Status != "closed" {
+			// Open match wins outright — there can't be a more authoritative
+			// suppression anchor than a still-open escalation with the same sig.
+			bestOpen = issue
+			bestOpenF = fields
+			break
+		}
+		// Closed: keep only if inside the window AND newer than the running pick.
+		closedAt := parseEscalationClosedAt(issue)
+		if closedAt.IsZero() || closedAt.Before(cutoff) {
+			continue
+		}
+		if bestClosed == nil || closedAt.After(bestClosedAt) {
+			bestClosed = issue
+			bestClosedF = fields
+			bestClosedAt = closedAt
+		}
+	}
+	if bestOpen != nil {
+		return bestOpen, bestOpenF
+	}
+	if bestClosed != nil {
+		return bestClosed, bestClosedF
+	}
+	return nil, nil
+}
+
+// parseEscalationClosedAt returns the closed-at timestamp for an escalation
+// issue, falling back to UpdatedAt when ClosedAt is unset (older beads or bd
+// versions that don't populate ClosedAt). Returns zero time when neither is
+// parseable.
+func parseEscalationClosedAt(issue *Issue) time.Time {
+	if issue == nil {
+		return time.Time{}
+	}
+	if issue.ClosedAt != "" {
+		if t, err := time.Parse(time.RFC3339, issue.ClosedAt); err == nil {
+			return t
+		}
+	}
+	if issue.UpdatedAt != "" {
+		if t, err := time.Parse(time.RFC3339, issue.UpdatedAt); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // BumpOccurrenceCount increments the occurrence_count on an escalation bead
 // and records the current time in last_occurrence_at. If updatedReason is
 // non-empty, the reason field is replaced with the latest occurrence details.
