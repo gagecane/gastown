@@ -45,8 +45,11 @@ func TestDetachedKillSession(t *testing.T) {
 	// sleeps 1s then runs `tmux kill-session`; under CI load the spawn +
 	// scheduling slack can exceed a fixed-duration sleep, producing flakes.
 	// Use a generous polling deadline instead — we still verify the kill
-	// happens, just without racing on a tight timing assumption.
-	if waitForSessionGone(t, tm, sessionName, 15*time.Second) {
+	// happens, just without racing on a tight timing assumption. 60s is
+	// chosen to absorb pathological scheduler latency under full
+	// `go test ./...` pressure (gu-zyxl); a real regression where the
+	// subprocess never spawns or never issues the kill still fails fast.
+	if waitForSessionGone(t, tm, sessionName, 60*time.Second) {
 		return
 	}
 	t.Error("session should have been killed by detached subprocess")
@@ -99,7 +102,7 @@ func TestDetachedKillSessionWithProcesses(t *testing.T) {
 
 	// Poll for the detached subprocess to kill the session (see comment in
 	// TestDetachedKillSession — fixed sleeps race under CI load).
-	if waitForSessionGone(t, tm, sessionName, 15*time.Second) {
+	if waitForSessionGone(t, tm, sessionName, 60*time.Second) {
 		return
 	}
 	t.Error("session should have been killed by detached subprocess")
