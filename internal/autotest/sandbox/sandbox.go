@@ -15,19 +15,33 @@ import (
 // synthesis.md, Phase 0 task 5a) and is intentionally over-broad:
 // adding a new credential family is safer than allow-listing what
 // happens to be in the polecat's process environment today.
+//
+// XDG_ is included as defense-in-depth (gu-6dbes): the sandbox already
+// pins CWD and uses a netns, but a tool that reads XDG_CONFIG_HOME,
+// XDG_CACHE_HOME, XDG_DATA_HOME, XDG_RUNTIME_DIR, etc. could still
+// reach host config. Stripping the whole prefix also catches new XDG_*
+// variables (e.g. XDG_STATE_HOME) without an allow-list update.
 var stripPrefixes = []string{
 	"AWS_",
 	"BD_",
 	"DOLT_",
 	"GIT_AUTHOR_",
 	"GIT_COMMITTER_",
+	"XDG_",
 }
 
 // stripExact lists environment variable names removed by exact match.
 // GITHUB_TOKEN does not share a prefix with another variable Auto-Test-PR
 // cares about, so it is enumerated here rather than in stripPrefixes.
+//
+// HOME is stripped (gu-6dbes) so a tool inside the sandbox cannot
+// resolve "~" or read host dotfiles (~/.aws/credentials,
+// ~/.netrc, ~/.gitconfig, ...). Callers that need a per-sandbox HOME
+// must set cmd.Env explicitly with a sandbox-internal value before
+// calling Apply.
 var stripExact = []string{
 	"GITHUB_TOKEN",
+	"HOME",
 }
 
 // Sandbox configures a subprocess to run with credential environment
@@ -92,8 +106,32 @@ func (s *Sandbox) Apply(cmd *exec.Cmd) error {
 	if base == nil {
 		base = os.Environ()
 	}
-	cmd.Env = FilterEnv(base)
+	cmd.Env = appendSandboxHome(FilterEnv(base), s.worktree)
 	return nil
+}
+
+// appendSandboxHome injects HOME and XDG_* assignments pointing at
+// worktree-internal paths (gu-6dbes). FilterEnv strips the host's
+// HOME and XDG_* so the host's "~/.aws", "~/.netrc",
+// "~/.config", etc. are no longer reachable by name; this function
+// then re-introduces those names with sandbox-internal values so
+// tools that read HOME (e.g. `go build` for GOCACHE / GOMODCACHE)
+// keep working without leaking host paths.
+//
+// The worktree itself is used as HOME — caches and config files
+// land alongside the sandboxed code rather than under the host
+// user's directory. For ephemeral worktrees (mutant runs, integ
+// tests) this means the cache is throwaway, which is the correct
+// trade-off for an isolation primitive.
+func appendSandboxHome(env []string, worktree string) []string {
+	return append(env,
+		"HOME="+worktree,
+		"XDG_CONFIG_HOME="+filepath.Join(worktree, ".config"),
+		"XDG_CACHE_HOME="+filepath.Join(worktree, ".cache"),
+		"XDG_DATA_HOME="+filepath.Join(worktree, ".local", "share"),
+		"XDG_STATE_HOME="+filepath.Join(worktree, ".local", "state"),
+		"XDG_RUNTIME_DIR="+filepath.Join(worktree, ".runtime"),
+	)
 }
 
 // FilterEnv returns env with credential variables removed. The input
