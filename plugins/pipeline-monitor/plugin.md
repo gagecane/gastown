@@ -1,7 +1,7 @@
 +++
 name = "pipeline-monitor"
 description = "Check Amazon Pipeline health and file P1 beads for blockers, routed to the package-owning rig, with drift-resistant cross-rig dedupe"
-version = 5
+version = 6
 
 [gate]
 type = "cooldown"
@@ -20,6 +20,10 @@ severity = "high"
 # Pipeline Monitor
 
 Check pipeline health and file actionable beads in the rig that **owns the fix** (not necessarily the rig whose package appears on the failure line), so a polecat in that rig can push the change.
+
+**v6 — Escalate stale grace-window re-fires.** One addition on top of v5:
+
+- **Step 5c re-fire escalation:** When the same fingerprint hits the grace window 2+ times without the existing closed/deferred bead changing status, the plugin escalates via `gt escalate -s HIGH` (in addition to appending the note). The note path alone was insufficient — observed beads `cait-pyv` (3 cycles, 2 days no action) and `cait-13v` (11 days stale) sat untouched until the overseer manually asked. The re-fire count is derived from the existing bead's history (count of prior `pipeline-monitor cycle ...` notes appended by Step 5c) so no extra state is required. The plugin still does NOT auto-reopen — the escalation surfaces the stale bead for a human decision.
 
 **v5 — Build/Deploy ID dedupe + mainline-aware skip.** Two additions on top of v4:
 
@@ -479,15 +483,51 @@ If the close was correct and the failure should be suppressed, add a sentinel \
 label ('sentinel' + 'do-not-dispatch') so future cycles honor it explicitly."
    ```
 
-2. Do **NOT** auto-reopen. Reopening is invasive and undoes an intentional
+2. **Count prior re-fires and escalate on the 2nd+ occurrence (v6).**
+   Count how many `pipeline-monitor cycle ...` notes already exist on the
+   bead from prior grace-window hits — that count plus the current cycle is
+   the re-fire count. (The note appended in step 1 above counts as the
+   current cycle's record.)
+
+   ```bash
+   # Count grace-window-specific notes (the one appended in step 1 is included).
+   # Match on "same fingerprint still failing" — that substring is unique to
+   # Step 5c notes and excludes Step 5b's "suppressed by sentinel" notes.
+   PRIOR_REFIRE_COUNT="$(cd "$HOME/gt/$FOUND_RIG" && bd show "$FOUND_ID" --json \
+       | jq -r '[.notes[]?.body // empty | select(test("same fingerprint still failing"))] | length')"
+   # 1st re-fire → count=1 (note path only).
+   # 2nd+ re-fire → count>=2 (escalate).
+   if [ "${PRIOR_REFIRE_COUNT:-0}" -ge 2 ]; then
+     gt escalate -s HIGH \
+       "pipeline-monitor: stale grace-window re-fire (${PRIOR_REFIRE_COUNT}x) on $FOUND_RIG/$FOUND_ID" \
+       -m "Bead: $FOUND_RIG/$FOUND_ID
+Status: closed/deferred but fingerprint $FP_HASH still failing
+Re-fires: ${PRIOR_REFIRE_COUNT} (this cycle counted)
+Close reason: '$PRIOR_REASON'
+Action needed: human decision — reopen + dispatch (real regression),
+add sentinel labels (intentionally suppressed), or file a new bead in
+the correct rig if the original was misrouted. Notes-only signal has
+proven insufficient for stale beads; see cait-pyv (3 cycles, 2 days)
+and cait-13v (11 days)."
+   fi
+   ```
+
+   The escalation surfaces the bead for a human decision. The plugin still
+   does **not** auto-reopen — the escalation is the stronger-than-note
+   signal that v5's note-only path was missing.
+
+3. Do **NOT** auto-reopen. Reopening is invasive and undoes an intentional
    close decision — a human should make that call. The note makes the
-   re-fire visible in the bead's history and on the rig dashboard.
-3. Do **NOT** file a new bead in this cycle. The note is the signal.
-4. Log the grace-window hit as a warning in the audit bead (Step 8):
+   re-fire visible in the bead's history and on the rig dashboard; the
+   escalation (step 2 above, on 2nd+ re-fire) makes it actively visible to
+   the overseer.
+4. Do **NOT** file a new bead in this cycle. The note is the signal.
+5. Log the grace-window hit as a warning in the audit bead (Step 8):
 
    ```
    WARN: grace-window hit. fingerprint=<hash> existing_bead=<rig>/<id> \
-         status=<closed|deferred> last_updated=<ts> \
+         status=<closed|deferred> last_updated=<ts> refire_count=<N> \
+         escalated=<yes|no> \
          → appended note, did not refile. Consider sentinel if intentional.
    ```
 
@@ -833,6 +873,14 @@ documents the reference resolution.
 - Result: no new bead. Audit bead records `mainline-past-failure` with both SHAs and the rig that was checked.
 - This case is observable as the *first* cycle after a fix lands; without 5h, even a perfectly-routed P1 dispatch would noisy-fire once until 5.0 catches subsequent cycles.
 
+### S14: Stale grace-window re-fire escalates after 2nd hit (v6)
+
+- Prior cycle filed `cait-X` in `casc_integ` with fingerprint `FP-S`. A polecat closed it as `wrong rig / tracked elsewhere`.
+- Cycle N+1: same `FP-S` re-fires within the 7d grace window. Step 5c appends note #1. `PRIOR_REFIRE_COUNT = 1` → no escalation, only note.
+- Cycle N+2: same `FP-S` re-fires again, no status change on `cait-X`. Step 5c appends note #2. `PRIOR_REFIRE_COUNT = 2` → `gt escalate -s HIGH` fires with the bead ID, re-fire count, and the actionable choices (reopen / sentinel / refile elsewhere). Audit bead records `escalated=yes`.
+- Cycle N+3 (still no human action): same fingerprint, note #3 appended, escalation fires again (count=3). Repeated escalation is the intended behavior — the previous escalations were not actioned, so the signal needs to keep arriving until someone responds.
+- Pre-v6 behavior (observed on `cait-pyv` and `cait-13v`): only notes were appended; the bead sat 2–11 days without action because nothing actively notified the overseer. v6 turns the 2nd+ re-fire into a HIGH escalation so stale grace-window beads get triaged.
+
 ## Rationale
 
 Filing pipeline-blocker beads in the rig that owns the code lets polecats in
@@ -924,6 +972,24 @@ commit, the failure is by definition stale. The check is best-effort —
 missing remotes, private repos, or absent failure-commit metadata all
 silently skip 5h, so we never suppress a real P1 dispatch on the basis of a
 check that didn't actually run.
+
+**Why escalate stale grace-window re-fires (v6 change):** v4's 7-day grace
+window stops the close-and-refile loop from filing duplicates, and v5's note
+path makes each re-fire visible in the bead's history. But neither *actively
+notifies* a human. Observed in production: `cait-pyv` sat through 3 cycles
+across 2 days with the same fingerprint re-firing each cycle, and `cait-13v`
+sat 11 days, both untouched until the overseer manually scanned and asked.
+Notes are passive; nobody reads them unless someone is already looking at the
+bead. The stale grace-window state has three plausible causes — real
+regression that needs reopen, intentional suppression that needs a sentinel
+label, or misroute that needs a fresh bead in the correct rig — and the
+plugin can't pick between them. v6 keeps the (intentionally non-invasive)
+no-auto-reopen policy but escalates via `gt escalate -s HIGH` on the 2nd+
+re-fire so a human is actively prompted to make that call. The re-fire count
+is derived from the bead's existing notes (one `pipeline-monitor cycle ...`
+note per prior Step 5c hit), so no new state has to be tracked. Repeated
+escalations on subsequent cycles are intentional: an unactioned escalation
+is the symptom v6 exists to fix.
 
 **Why ordering matters (v5 change):** Step 5.0 first, fingerprint steps in
 the middle, mainline check last.
