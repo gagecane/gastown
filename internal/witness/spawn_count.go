@@ -19,9 +19,23 @@ import (
 var respawnMu sync.Mutex
 
 // beadRespawnRecord tracks how many times a single bead has been reset for re-dispatch.
+//
+// Two counters live here on purpose (gu-iqji):
+//   - Count is the live counter that participates in the soft block + decay
+//     window. It can clear when the bead recovers from a load storm so a
+//     transient host-pressure event doesn't permanently wedge the bead.
+//   - Total is the cumulative lifetime counter, monotonically incremented on
+//     every respawn and never decayed. Once Total crosses
+//     PermanentBlockMultiplier × MaxBeadRespawns, the bead is permanently
+//     blocked from any further dispatch — including paths that pass --force —
+//     until an operator runs `gt sling respawn-reset`. This is the chronic-fail
+//     circuit breaker for beads that bounce between attempt 1..N → block →
+//     decay → attempt 1..N → block → decay forever (gu-ttc2 / cait-oc7 /
+//     cadk-w8k pattern).
 type beadRespawnRecord struct {
 	BeadID      string    `json:"bead_id"`
 	Count       int       `json:"count"`
+	Total       int       `json:"total,omitempty"`
 	LastRespawn time.Time `json:"last_respawn"`
 }
 
@@ -75,12 +89,26 @@ func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 // storm must not permanently wedge work).
 const respawnBlockDecayWindow = 30 * time.Minute
 
+// PermanentBlockMultiplier is the multiplier applied to MaxBeadRespawns to
+// derive the permanent (non-decaying, non-bypassable) circuit-breaker
+// threshold. Once a bead's lifetime respawn total crosses this threshold, no
+// dispatch path — including --force — can re-arm it without an explicit
+// `gt sling respawn-reset`. (gu-iqji: chronic-fail beads like gu-ttc2 /
+// cait-oc7 / cadk-w8k were cycling forever because each 30m decay window
+// re-armed them for another N attempts.)
+const PermanentBlockMultiplier = 2
+
 // ShouldBlockRespawn returns true if the bead has already been respawned
 // MaxBeadRespawns times (from operational config) AND the block is still fresh.
 // When true, the caller should escalate to mayor instead of sending
 // RECOVERED_BEAD to deacon for re-dispatch. This is the primary circuit breaker
 // for spawn storms (clown show #22). A block older than respawnBlockDecayWindow
 // is cleared so a load-storm-induced wedge self-heals once conditions recover.
+//
+// A bead whose cumulative lifetime Total has crossed
+// PermanentBlockMultiplier × MaxBeadRespawns is treated as permanently broken
+// and is blocked unconditionally — see ShouldPermanentlyBlockRespawn — but
+// callers can short-circuit on this function alone for the common path.
 func ShouldBlockRespawn(workDir, beadID string) bool {
 	respawnMu.Lock()
 	defer respawnMu.Unlock()
@@ -99,19 +127,64 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 
 	state := loadBeadRespawnState(townRoot)
 	rec, ok := state.Beads[beadID]
-	if !ok || rec.Count < maxRespawns {
+	if !ok {
+		return false
+	}
+
+	// Permanent block (gu-iqji): cumulative Total never decays. Once a bead
+	// has churned through 2x MaxBeadRespawns lifetime attempts, it stays
+	// blocked until an operator runs `gt sling respawn-reset`. This catches
+	// chronic-fail beads that cycle through Count → block → 30m decay →
+	// Count → block → ... and never converge.
+	if rec.Total >= PermanentBlockMultiplier*maxRespawns {
+		return true
+	}
+
+	if rec.Count < maxRespawns {
 		return false
 	}
 
 	// hq-0qszq/hq-5em9k: a stale block (no new respawn within the decay window)
-	// is most likely host-load fallout, not a live loop — clear it so the bead
-	// auto-recovers instead of staying wedged until a manual respawn-reset.
+	// is most likely host-load fallout, not a live loop — clear the live Count
+	// so the bead auto-recovers instead of staying wedged until a manual
+	// respawn-reset. Total is preserved so chronic-failure detection still
+	// trips at the permanent threshold.
 	if !rec.LastRespawn.IsZero() && time.Since(rec.LastRespawn) > respawnBlockDecayWindow {
-		delete(state.Beads, beadID)
+		rec.Count = 0
 		_ = saveBeadRespawnState(townRoot, state)
 		return false
 	}
 	return true
+}
+
+// ShouldPermanentlyBlockRespawn reports whether the bead has crossed the
+// chronic-failure threshold (PermanentBlockMultiplier × MaxBeadRespawns
+// cumulative attempts). Permanent blocks must NOT be bypassed by --force —
+// the bead has demonstrably failed to converge across multiple decay windows,
+// and re-dispatching it is known to waste polecat slots and reset the
+// counter spiral. The only way out is `gt sling respawn-reset` after an
+// operator investigates.
+func ShouldPermanentlyBlockRespawn(workDir, beadID string) bool {
+	respawnMu.Lock()
+	defer respawnMu.Unlock()
+
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+	maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
+
+	unlock, flockErr := lock.FlockAcquire(beadRespawnStateFile(townRoot) + ".flock")
+	if flockErr == nil {
+		defer unlock()
+	}
+
+	state := loadBeadRespawnState(townRoot)
+	rec, ok := state.Beads[beadID]
+	if !ok {
+		return false
+	}
+	return rec.Total >= PermanentBlockMultiplier*maxRespawns
 }
 
 // RecordBeadRespawn increments the respawn count for beadID and returns the new count.
@@ -143,6 +216,7 @@ func RecordBeadRespawn(workDir, beadID string) int {
 		state.Beads[beadID] = rec
 	}
 	rec.Count++
+	rec.Total++ // gu-iqji: lifetime counter, never decays.
 	rec.LastRespawn = time.Now().UTC()
 	_ = saveBeadRespawnState(townRoot, state) // Non-fatal: tracking failure must not block respawn
 	return rec.Count

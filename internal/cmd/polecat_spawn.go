@@ -137,18 +137,50 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		}
 	}
 
-	// Per-bead respawn circuit breaker (clown show #22):
-	// Track how many times this bead has been slung. Block after N attempts
-	// to prevent witness→deacon→sling feedback loops.
-	if opts.HookBead != "" && !opts.Force {
-		if witness.ShouldBlockRespawn(townRoot, opts.HookBead) {
+	// Per-bead respawn circuit breaker (clown show #22 + gu-iqji):
+	// Track how many times this bead has been slung. There are TWO tiers:
+	//
+	//   1. Soft block — bead has hit MaxBeadRespawns within the live decay
+	//      window. Operators can override with --force when they have reason
+	//      to believe the prior failures were transient (e.g. host load
+	//      storm, infra outage).
+	//
+	//   2. Permanent block — bead's lifetime cumulative attempts have crossed
+	//      PermanentBlockMultiplier × MaxBeadRespawns. The bead has
+	//      demonstrated chronic failure across multiple decay windows; --force
+	//      MUST NOT bypass this. Only `gt sling respawn-reset` clears it.
+	//
+	// We always increment the lifetime counter (RecordBeadRespawn) on a real
+	// dispatch — including --force paths from the deacon's RECOVERED_BEAD
+	// loop — so the chronic-failure detector observes every attempt, not
+	// just the polite ones. (Before gu-iqji, --force skipped the increment
+	// entirely, so the deacon's auto-redispatch loop never tripped the
+	// circuit breaker no matter how many times it ran.)
+	if opts.HookBead != "" {
+		// Permanent block: hard fail regardless of --force.
+		if witness.ShouldPermanentlyBlockRespawn(townRoot, opts.HookBead) {
 			maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
-			return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
-				"This bead keeps failing — investigate before re-dispatching.\n"+
-				"Override: gt sling %s %s --force\n"+
-				"Reset:    gt sling respawn-reset %s",
-				opts.HookBead, maxRespawns,
-				opts.HookBead, rigName, opts.HookBead)
+			limit := witness.PermanentBlockMultiplier * maxRespawns
+			return nil, fmt.Errorf("PERMANENT respawn block for %s (cumulative attempts ≥ %d).\n"+
+				"This bead has failed across multiple decay windows and is no longer auto-dispatchable.\n"+
+				"--force does NOT override a permanent block — investigate the root cause first.\n"+
+				"Reset: gt sling respawn-reset %s",
+				opts.HookBead, limit, opts.HookBead)
+		}
+		// Soft block: --force lets operators retry after transient failures
+		// (load storms, infra blips). The witness/deacon redispatch path
+		// always carries --force, so they bypass this gate by design — the
+		// permanent block above is what stops their feedback loop.
+		if !opts.Force {
+			if witness.ShouldBlockRespawn(townRoot, opts.HookBead) {
+				maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
+				return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
+					"This bead keeps failing — investigate before re-dispatching.\n"+
+					"Override: gt sling %s %s --force\n"+
+					"Reset:    gt sling respawn-reset %s",
+					opts.HookBead, maxRespawns,
+					opts.HookBead, rigName, opts.HookBead)
+			}
 		}
 		witness.RecordBeadRespawn(townRoot, opts.HookBead)
 	}
