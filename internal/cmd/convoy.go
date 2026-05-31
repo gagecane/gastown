@@ -1150,6 +1150,17 @@ func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
 		}
 	}
 
+	// gu-yy39: a close_reason that explicitly indicates "no work was done" makes
+	// a missing citing commit expected, not suspicious. The reaper auto-closes
+	// stale deferred beads ("stale:auto-closed by reaper") and polecats self-
+	// close beads they couldn't action ("no-changes:" / "not-applicable:") — in
+	// all three cases the bead aged out or was abandoned, never shipped, and the
+	// Pattern B/C false-close warning would block the tracking convoy forever
+	// even though there is nothing to ship. Short-circuit before that warning.
+	if shippingNotExpected(t.CloseReason) {
+		return ""
+	}
+
 	if !verified {
 		// Unable to verify (no rig path / git failure). Fail open so legitimate
 		// cross-rig tracked beads in unrouted rigs don't deadlock convoys.
@@ -1160,6 +1171,28 @@ func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
 		return "no commit on origin/main cites this bead ID — possible Pattern B/C false-close"
 	}
 	return ""
+}
+
+// shippingNotExpected reports whether a bead's close_reason indicates the bead
+// was closed without ever doing the work — so a missing citing commit on
+// origin/main is expected. The recognized prefixes are:
+//
+//   - "stale:"          — reaper auto-closed an aged-out deferred bead
+//   - "no-changes:"     — polecat closed without code changes (formula exception)
+//   - "not-applicable:" — polecat closed because the bead doesn't apply
+//
+// Any other close_reason (including "merged", "done", and the empty default)
+// falls through to the standard ship-verification logic.
+func shippingNotExpected(closeReason string) bool {
+	if closeReason == "" {
+		return false
+	}
+	for _, prefix := range []string{"stale:", "no-changes:", "not-applicable:"} {
+		if strings.HasPrefix(closeReason, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupCitingCommit returns (true, true) if origin/<default-branch> in the
@@ -2670,12 +2703,13 @@ type trackedIssueInfo struct {
 	Status      string   `json:"status"`
 	Type        string   `json:"dependency_type"`
 	IssueType   string   `json:"issue_type"`
-	Blocked     bool     `json:"blocked,omitempty"`     // True if issue currently has blockers
-	Assignee    string   `json:"assignee,omitempty"`    // Assigned agent (e.g., gastown/polecats/goose)
-	Labels      []string `json:"labels,omitempty"`      // Bead labels (propagated from trackedDependency)
-	Description string   `json:"description,omitempty"` // Bead description (used by ship-verification gate, gu-j7u5)
-	Worker      string   `json:"worker,omitempty"`      // Worker currently assigned (e.g., gastown/nux)
-	WorkerAge   string   `json:"worker_age,omitempty"`  // How long worker has been on this issue
+	Blocked     bool     `json:"blocked,omitempty"`      // True if issue currently has blockers
+	Assignee    string   `json:"assignee,omitempty"`     // Assigned agent (e.g., gastown/polecats/goose)
+	Labels      []string `json:"labels,omitempty"`       // Bead labels (propagated from trackedDependency)
+	Description string   `json:"description,omitempty"`  // Bead description (used by ship-verification gate, gu-j7u5)
+	CloseReason string   `json:"close_reason,omitempty"` // Why the bead was closed (used by ship-verification gate, gu-yy39)
+	Worker      string   `json:"worker,omitempty"`       // Worker currently assigned (e.g., gastown/nux)
+	WorkerAge   string   `json:"worker_age,omitempty"`   // How long worker has been on this issue
 }
 
 // trackedDependency is dep-list data enriched with fresh issue details.
@@ -2688,6 +2722,7 @@ type trackedDependency struct {
 	DependencyType string   `json:"dependency_type"`
 	Labels         []string `json:"labels"`
 	Description    string   `json:"-"` // Description from fresh bd show (used by ship-verification, gu-j7u5)
+	CloseReason    string   `json:"-"` // close_reason from fresh bd show (used by ship-verification, gu-yy39)
 	Blocked        bool     `json:"-"`
 }
 
@@ -2711,6 +2746,7 @@ func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
 	// suppress stranded issue detection.
 	dep.Labels = details.Labels
 	dep.Description = details.Description
+	dep.CloseReason = details.CloseReason
 }
 
 // getTrackedIssues gets issues tracked by a convoy with fresh cross-rig details.
@@ -2829,6 +2865,7 @@ func buildTrackedIssueInfosFromCache(
 			Assignee:    dep.Assignee,
 			Labels:      dep.Labels,
 			Description: dep.Description,
+			CloseReason: dep.CloseReason,
 		}
 
 		if worker, ok := workersMap[dep.ID]; ok {
@@ -2926,6 +2963,7 @@ type issueDetailsJSON struct {
 	Labels         []string          `json:"labels"`
 	BlockedBy      []string          `json:"blocked_by"`
 	BlockedByCount int               `json:"blocked_by_count"`
+	CloseReason    string            `json:"close_reason"`
 	Dependencies   []issueDependency `json:"dependencies"`
 }
 
@@ -2940,6 +2978,7 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 		Labels:         issue.Labels,
 		BlockedBy:      issue.BlockedBy,
 		BlockedByCount: issue.BlockedByCount,
+		CloseReason:    issue.CloseReason,
 		Dependencies:   issue.Dependencies,
 	}
 }
@@ -2955,6 +2994,7 @@ type issueDetails struct {
 	Labels         []string
 	BlockedBy      []string
 	BlockedByCount int
+	CloseReason    string
 	Dependencies   []issueDependency
 }
 

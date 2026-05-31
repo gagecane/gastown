@@ -429,3 +429,77 @@ func TestEvaluateTrackedBeadShipped_RefusesWhenNoEvidenceAtAll(t *testing.T) {
 		t.Fatalf("expected Pattern B/C warning, got: %q", got)
 	}
 }
+
+// TestEvaluateTrackedBeadShipped_CloseReasonShortCircuit pins the gu-yy39 fix:
+// when a tracked bead's close_reason indicates the bead was closed without
+// shipping (reaper auto-close, polecat self-close as no-changes/not-applicable),
+// the bead must NOT trigger the Pattern B/C false-close warning. Otherwise the
+// auto-created tracking convoy stays open forever even though there is nothing
+// left to ship — exactly the ta-xm99 / hq-cv-ju3yo deadlock that motivated this
+// fix.
+func TestEvaluateTrackedBeadShipped_CloseReasonShortCircuit(t *testing.T) {
+	townBeads := t.TempDir()
+	// A real rig with a commit citing some OTHER bead — verifies the path
+	// reaches the close_reason check rather than passing on a citation.
+	setupMayorRigWithCitingCommit(t, townBeads, "hq-unrelated")
+
+	cases := []struct {
+		name        string
+		closeReason string
+	}{
+		{"reaper auto-close", "stale:auto-closed by reaper"},
+		{"polecat no-changes", "no-changes: bug already fixed upstream"},
+		{"polecat not-applicable", "not-applicable: spec item is now obsolete"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tracked := trackedIssueInfo{
+				ID:          "hq-aged-out",
+				Status:      "closed",
+				CloseReason: c.closeReason,
+			}
+			got := evaluateTrackedBeadShipped(townBeads, tracked)
+			if got != "" {
+				t.Fatalf("close_reason %q must short-circuit Pattern B/C warning; got reason: %q", c.closeReason, got)
+			}
+		})
+	}
+}
+
+// TestEvaluateTrackedBeadShipped_CloseReasonDoesNotMaskRealFalseClose pins the
+// safety contract for gu-yy39: only close_reasons that explicitly indicate "no
+// work was done" short-circuit the Pattern B/C check. Generic close_reasons
+// like "merged", "done", or empty must still fall through to the citation
+// lookup so genuine Pattern B/C false-closes are caught.
+func TestEvaluateTrackedBeadShipped_CloseReasonDoesNotMaskRealFalseClose(t *testing.T) {
+	townBeads := t.TempDir()
+	setupMayorRigWithCitingCommit(t, townBeads, "hq-unrelated")
+
+	cases := []struct {
+		name        string
+		closeReason string
+	}{
+		{"empty", ""},
+		{"merged", "merged"},
+		{"done", "done"},
+		{"unrecognized prefix", "completed: by hand"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tracked := trackedIssueInfo{
+				ID:          "hq-truly-orphan",
+				Status:      "closed",
+				CloseReason: c.closeReason,
+			}
+			got := evaluateTrackedBeadShipped(townBeads, tracked)
+			if got == "" {
+				t.Fatalf("close_reason %q must NOT short-circuit Pattern B/C warning; got shipped", c.closeReason)
+			}
+			if !strings.Contains(got, "Pattern B/C") {
+				t.Fatalf("expected Pattern B/C warning, got: %q", got)
+			}
+		})
+	}
+}
