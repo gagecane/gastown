@@ -20,6 +20,15 @@ import (
 const (
 	defaultMainBranchTestInterval = 30 * time.Minute
 	defaultMainBranchTestTimeout  = 10 * time.Minute
+
+	// defaultMainBranchTestFlakeThreshold is the number of consecutive failing
+	// patrol cycles required before main_branch_test pages HIGH (hq-6qnct). A
+	// gate that fails one cycle and passes the surrounding ones is flaky under
+	// host load (hq-0qszq/hq-5em9k), not a regression — only a sustained red
+	// warrants the overseer. The merge-queue gates and main_ci_break_dog catch
+	// genuine breaks at merge time; this patrol is a slower backstop, so trading
+	// one extra cycle of latency for silence on single flakes is the right call.
+	defaultMainBranchTestFlakeThreshold = 2
 )
 
 // MainBranchTestConfig holds configuration for the main_branch_test patrol.
@@ -39,6 +48,12 @@ type MainBranchTestConfig struct {
 
 	// Rigs limits testing to specific rigs. If empty, all rigs are tested.
 	Rigs []string `json:"rigs,omitempty"`
+
+	// FlakeThreshold is the number of consecutive failing cycles required
+	// before a HIGH escalation fires (hq-6qnct). 0 (or unset) uses the default
+	// (defaultMainBranchTestFlakeThreshold). Set to 1 to restore the legacy
+	// "page on every failure" behavior.
+	FlakeThreshold int `json:"flake_threshold,omitempty"`
 }
 
 // mainBranchTestInterval returns the configured interval, or the default (30m).
@@ -63,6 +78,18 @@ func mainBranchTestTimeout(config *DaemonPatrolConfig) time.Duration {
 		}
 	}
 	return defaultMainBranchTestTimeout
+}
+
+// mainBranchTestFlakeThreshold returns the configured consecutive-failure
+// watermark, or the default. A configured value < 1 is ignored (a threshold of
+// 0 would never escalate; negatives are nonsense) and falls back to the default.
+func mainBranchTestFlakeThreshold(config *DaemonPatrolConfig) int {
+	if config != nil && config.Patrols != nil && config.Patrols.MainBranchTest != nil {
+		if n := config.Patrols.MainBranchTest.FlakeThreshold; n >= 1 {
+			return n
+		}
+	}
+	return defaultMainBranchTestFlakeThreshold
 }
 
 // mainBranchTestRigs returns the configured rig filter, or nil (all rigs).
@@ -256,6 +283,7 @@ func (d *Daemon) runMainBranchTests() {
 	}
 
 	timeout := mainBranchTestTimeout(d.patrolConfig)
+	flakeThreshold := mainBranchTestFlakeThreshold(d.patrolConfig)
 
 	var tested, failed int
 	var failures []string
@@ -277,18 +305,34 @@ func (d *Daemon) runMainBranchTests() {
 
 		// Persist outcome BEFORE escalation emission so a crash between the
 		// gate suite and the bd-call still advances the per-rig baseline.
-		// recordAttributionRun is best-effort: a state-write failure does not
-		// stall the patrol — the next successful cycle re-establishes the
-		// baseline and any intermediate failure escalates with
-		// previous_commit: unknown until then.
-		recordAttributionRun(d.config.TownRoot, rigName, currentSHA, runErr == nil, time.Now())
+		// State updates are best-effort: a write failure does not stall the
+		// patrol — the next successful cycle re-establishes the baseline and
+		// any intermediate failure escalates with previous_commit: unknown
+		// until then.
+		now := time.Now()
 
-		if runErr != nil {
-			d.logger.Printf("main_branch_test: %s: FAILED: %v", rigName, runErr)
+		if runErr == nil {
+			recordAttributionRun(d.config.TownRoot, rigName, currentSHA, true, now)
+			d.logger.Printf("main_branch_test: %s: passed", rigName)
+			tested++
+			continue
+		}
+
+		// hq-6qnct: a single failing cycle that passes the surrounding cycles is
+		// a host-load flake, not a regression. Only escalate HIGH once the gate
+		// has failed `threshold` cycles in a row, and dedup repeat pages for the
+		// same failing-gate signature. The failure path never promotes the
+		// breaking SHA to the last-passing baseline; recordFailureAndShouldEscalate
+		// advances LastRunAt and the streak.
+		sig := failureSignature(runErr)
+		shouldEscalate, streak := recordFailureAndShouldEscalate(d.config.TownRoot, rigName, sig, flakeThreshold, now)
+		if shouldEscalate {
+			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d, signature=%s) — escalating: %v", rigName, streak, sig, runErr)
 			failures = append(failures, formatRigFailureSection(rigName, currentSHA, d.config.TownRoot, runErr))
 			failed++
 		} else {
-			d.logger.Printf("main_branch_test: %s: passed", rigName)
+			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d/%d, signature=%s) — below flake watermark or already paged, not escalating: %v",
+				rigName, streak, flakeThreshold, sig, runErr)
 		}
 		tested++
 	}

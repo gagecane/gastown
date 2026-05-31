@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +69,18 @@ type rigAttributionEntry struct {
 	// (pass or fail). Operators use this to spot stalled runners; the daemon
 	// itself does not key any logic off it.
 	LastRunAt string `json:"last_run_at,omitempty"`
+
+	// ConsecutiveFailures counts back-to-back failing patrol cycles for this
+	// rig (hq-6qnct). Reset to 0 on the first pass. A single intermittent flake
+	// (fail surrounded by passes) stays at 1 and never reaches the HIGH-
+	// escalation watermark; only a sustained red pages the overseer.
+	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+
+	// LastEscalatedSignature is the failing-gate signature we last paged HIGH
+	// on (hq-6qnct dedup). While the same signature stays red we don't re-page
+	// every cycle; a new/different signature — or a recovery followed by a
+	// re-break — pages again. Cleared on any pass.
+	LastEscalatedSignature string `json:"last_escalated_signature,omitempty"`
 }
 
 // stateFileMu serializes read/modify/write of the state file. Single-process
@@ -133,8 +147,14 @@ func recordAttributionRun(townRoot, rigName, currentSHA string, passed bool, now
 	state := loadMainBranchTestState(townRoot)
 	entry := state.Rigs[rigName]
 	entry.LastRunAt = now.UTC().Format(time.RFC3339)
-	if passed && currentSHA != "" {
-		entry.LastPassingSHA = currentSHA
+	if passed {
+		if currentSHA != "" {
+			entry.LastPassingSHA = currentSHA
+		}
+		// A pass clears the flake watermark so a future break re-pages from a
+		// clean slate (hq-6qnct).
+		entry.ConsecutiveFailures = 0
+		entry.LastEscalatedSignature = ""
 	}
 	state.Rigs[rigName] = entry
 	if err := saveMainBranchTestState(townRoot, state); err != nil {
@@ -142,6 +162,83 @@ func recordAttributionRun(townRoot, rigName, currentSHA string, passed bool, now
 		// re-establishes the baseline.
 		fmt.Fprintf(os.Stderr, "daemon: failed to save attribution state for rig %s: %v\n", rigName, err)
 	}
+}
+
+// gateSignatureRe extracts failing gate names from a main_branch_test failure
+// error, which renders as `gate "<name>": <err>; gate "<name2>": <err>`.
+var gateSignatureRe = regexp.MustCompile(`gate "([^"]+)"`)
+
+// failureSignature derives a stable identifier for a failing cycle so repeat
+// failures of the SAME gate(s) can be deduped (hq-6qnct). It prefers the set of
+// failing gate names (the meaningful "which test is red" identity, stable
+// across cycles and independent of volatile durations/output). When no gate
+// name is present (legacy test_command rigs, or fetch/worktree infra errors) it
+// falls back to the error's first line with digits zeroed out, so run-to-run
+// numeric noise (PIDs, timings, exit codes) doesn't defeat the dedup.
+func failureSignature(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if matches := gateSignatureRe.FindAllStringSubmatch(msg, -1); len(matches) > 0 {
+		names := make([]string, 0, len(matches))
+		seen := map[string]bool{}
+		for _, m := range matches {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				names = append(names, m[1])
+			}
+		}
+		sort.Strings(names)
+		return "gates:" + strings.Join(names, ",")
+	}
+	first := msg
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	first = strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return '0'
+		}
+		return r
+	}, first)
+	if len(first) > 200 {
+		first = first[:200]
+	}
+	return "msg:" + first
+}
+
+// recordFailureAndShouldEscalate updates the per-rig flake state for a FAILED
+// cycle and reports whether this failure warrants a HIGH escalation (hq-6qnct).
+// It escalates only when the gate has failed `threshold` cycles in a row (the
+// watermark — single flakes stay silent) AND we have not already paged for this
+// exact failure signature (dedup). The streak and the escalated signature are
+// persisted BEFORE the caller emits the escalation, mirroring the file's
+// crash-safety ordering: a single dropped page on emit failure is preferable to
+// re-paging the same known-red signature on every subsequent cycle.
+//
+// Best-effort persistence: a state-write error still returns a decision so the
+// patrol proceeds (the next cycle re-derives the streak).
+func recordFailureAndShouldEscalate(townRoot, rigName, signature string, threshold int, now time.Time) (escalate bool, streak int) {
+	stateFileMu.Lock()
+	defer stateFileMu.Unlock()
+
+	state := loadMainBranchTestState(townRoot)
+	entry := state.Rigs[rigName]
+	entry.LastRunAt = now.UTC().Format(time.RFC3339)
+	entry.ConsecutiveFailures++
+	streak = entry.ConsecutiveFailures
+
+	if streak >= threshold && signature != entry.LastEscalatedSignature {
+		escalate = true
+		entry.LastEscalatedSignature = signature
+	}
+
+	state.Rigs[rigName] = entry
+	if err := saveMainBranchTestState(townRoot, state); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: failed to save flake state for rig %s: %v\n", rigName, err)
+	}
+	return escalate, streak
 }
 
 // readPreviousPassingSHA returns the last-passing SHA for a rig from the
