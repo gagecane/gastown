@@ -329,10 +329,26 @@ func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigNa
 		running, _ = tmuxClient.HasSession(session.PolecatSessionName(session.PrefixFor(rigName), polecatName))
 	}
 	if fields == nil {
+		// No agent bead exists for this polecat directory. Two distinct cases:
+		//
+		//   running: a session is alive but its bead is missing — anomalous
+		//   working state, count as working so the slot reflects the live
+		//   process and operators can investigate the missing bead.
+		//
+		//   !running: the polecat directory exists with no bead and no session.
+		//   This is a fresh / orphan warm-pool slot — exactly what
+		//   isReclaimCandidate treats as a "reusable warm-pool slot — don't
+		//   churn it" (internal/daemon/daemon.go isStalledReclaimCandidate).
+		//   Counting it as RecoveryBlocked falsely inflates the recovery count
+		//   and starves dispatch — observed in production at 34/50 slots
+		//   reporting recovery while only 4 polecats were actually
+		//   recovery-needed (gu-o086). Align with reclaim's view: classify as
+		//   ReusableIdle so the warm-pool benefit is preserved AND the
+		//   capacity counter is honest.
 		if running {
 			snapshot.Working++
 		} else {
-			snapshot.RecoveryBlocked++
+			snapshot.ReusableIdle++
 		}
 		return
 	}

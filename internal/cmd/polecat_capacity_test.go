@@ -319,6 +319,34 @@ func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 	}
 }
 
+// TestApplyAgentFieldsToCapacitySnapshot_NilFieldsDeadSessionIsReusable pins
+// down the gu-o086 alignment: a polecat directory with NO agent bead and a
+// dead tmux session is a fresh/orphan warm-pool slot, not a recovery
+// candidate. Reclaim's isReclaimCandidate (internal/daemon/daemon.go) treats
+// this exact case as "idle reusable warm-pool slot — preserve". The capacity
+// classifier must agree, otherwise the recovery_blocked counter inflates and
+// dispatch starves while reclaim refuses to churn the slot.
+//
+// Production observation pre-fix: 34/50 polecat directories without agent
+// beads inflated recovery_blocked by 27 (the rest were correctly counted via
+// other branches), making `gt scheduler status` report capacity exhaustion
+// while `gt polecat list --all` correctly classified the same polecats as
+// SAFE_TO_NUKE / counts_toward_capacity=False.
+func TestApplyAgentFieldsToCapacitySnapshot_NilFieldsDeadSessionIsReusable(t *testing.T) {
+	snapshot := polecatCapacitySnapshot{}
+	// fields=nil, tmuxClient=nil => running=false => orphan warm-pool slot.
+	applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "orphan", nil, nil)
+	if snapshot.ReusableIdle != 1 {
+		t.Fatalf("expected ReusableIdle=1 for nil-fields dead-session warm-pool slot (gu-o086), snapshot=%+v", snapshot)
+	}
+	if snapshot.RecoveryBlocked != 0 {
+		t.Fatalf("nil-fields dead-session must not be counted as RecoveryBlocked (gu-o086), snapshot=%+v", snapshot)
+	}
+	if snapshot.Working != 0 {
+		t.Fatalf("nil-fields dead-session must not be counted as Working, snapshot=%+v", snapshot)
+	}
+}
+
 func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDryRunPlan(capacity.DispatchPlan{
