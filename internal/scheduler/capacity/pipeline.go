@@ -90,6 +90,38 @@ const (
 	LabelMergeRequest = "gt:merge-request"
 )
 
+// LabelNoAutoDispatch marks a bead that must never be picked up by the
+// automatic scheduler/dispatch path. A human may still dispatch it manually
+// via `gt sling`, but the scheduler must skip it (gs-b2a).
+const LabelNoAutoDispatch = "no-auto-dispatch"
+
+// IsNoAutoDispatch reports whether the bead carries the no-auto-dispatch label,
+// meaning the automatic dispatch pipeline must not hand it to a polecat.
+func IsNoAutoDispatch(labels []string) bool {
+	for _, l := range labels {
+		if l == LabelNoAutoDispatch {
+			return true
+		}
+	}
+	return false
+}
+
+// FilterNoAutoDispatch removes no-auto-dispatch-labeled beads from the candidate
+// slice. Returns the filtered slice plus the count of removed beads. Callers
+// should log the skipped beads so the gap is observable.
+func FilterNoAutoDispatch(beads []PendingBead) ([]PendingBead, int) {
+	var result []PendingBead
+	removed := 0
+	for _, b := range beads {
+		if IsNoAutoDispatch(b.Labels) {
+			removed++
+			continue
+		}
+		result = append(result, b)
+	}
+	return result, removed
+}
+
 // IsMessagingBead reports whether the bead is an inter-agent communication
 // artifact rather than dispatchable work. Used as a defensive filter in the
 // dispatch pipeline: a bead carrying any of these labels must never be handed
@@ -199,6 +231,14 @@ func priorityFloorOf(b PendingBead) int {
 // constrained.
 func PlanDispatch(availableCapacity, batchSize int, ready []PendingBead) DispatchPlan {
 	ready, msgSkipped := FilterMessagingBeads(ready)
+
+	// Defensive filter: beads flagged no-auto-dispatch must never be picked up
+	// by the scheduler (gs-b2a). The primary guard is in the dispatch readiness
+	// gate (cmd.isScheduledWorkBeadReady); this mirrors the messaging-bead
+	// belt-and-suspenders so a label that slipped past earlier filtering still
+	// cannot reach a polecat. Folded into msgSkipped for skip accounting.
+	ready, noAutoSkipped := FilterNoAutoDispatch(ready)
+	msgSkipped += noAutoSkipped
 
 	if len(ready) == 0 {
 		if msgSkipped > 0 {

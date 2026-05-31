@@ -1185,6 +1185,14 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if isNonDispatchableBead(info) {
 		return false
 	}
+	// Skip beads flagged no-auto-dispatch (gs-b2a). Unlike the permanent
+	// tripwire labels above, this only blocks the AUTOMATIC scheduler path: a
+	// human may still dispatch the bead via `gt sling`, and `gt done` may still
+	// close it. So this guard lives here in the dispatch readiness gate rather
+	// than in isNonDispatchableBead (which also governs the gt done close guard).
+	if hasLabel(info.Labels, labelNoAutoDispatch) {
+		return false
+	}
 	// Skip beads deferred to a future time (gs-o5f). `gt done --status DEFERRED`
 	// sets defer_until WITHOUT flipping status off "open", so the status check
 	// alone lets a future-deferred bead through and the scheduler re-dispatches
@@ -1208,6 +1216,10 @@ const (
 	labelDoNotDispatch = "do-not-dispatch"
 	labelPinned        = "pinned"
 	issueTypeReference = "reference"
+	// labelNoAutoDispatch blocks the automatic scheduler from picking up a bead
+	// while still allowing manual `gt sling` and `gt done` (gs-b2a). Unlike the
+	// tripwire labels above it is checked only in the dispatch readiness gate.
+	labelNoAutoDispatch = "no-auto-dispatch"
 )
 
 // isNonDispatchableBead reports whether a bead is a reference/tripwire that the

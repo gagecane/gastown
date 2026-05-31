@@ -172,6 +172,8 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 		// hq-9jeyo: reference/tripwire beads must never be dispatched.
 		{"do-not-dispatch label", beadStatusInfo{Status: "open", Labels: []string{"do-not-dispatch"}}, false},
 		{"pinned label", beadStatusInfo{Status: "open", Labels: []string{"pinned"}}, false},
+		{"no-auto-dispatch label", beadStatusInfo{Status: "open", Labels: []string{"no-auto-dispatch"}}, false},
+		{"no-auto-dispatch with human-investigation (gs-b2a)", beadStatusInfo{Status: "open", Labels: []string{"no-auto-dispatch", "human-investigation"}}, false},
 		{"reference type", beadStatusInfo{Status: "open", Type: "reference"}, false},
 		{"tripwire all three", beadStatusInfo{Status: "open", Type: "reference", Labels: []string{"do-not-dispatch", "pinned"}}, false},
 		{"normal work with unrelated label still ready", beadStatusInfo{Status: "open", Labels: []string{"gt:rig"}}, true},
