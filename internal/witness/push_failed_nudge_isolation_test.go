@@ -71,7 +71,12 @@ func TestHandlePolecatDoneFromBead_PushFailed_DoesNotLeakToLiveMayor(t *testing.
 	if !result.Handled {
 		t.Fatalf("expected PushFailed payload to be handled, got result=%+v", result)
 	}
-	if !strings.Contains(result.Action, "push-failed-recovery-needed") {
+	// gu-ebj0: action prefix migrated from "push-failed-recovery-needed" to
+	// "push-failed-recovery-<outcome>" so the witness can distinguish between
+	// "we tried to push and gave up" (diverged/backoff/unknown — escalate)
+	// and "we pushed successfully" (already-on-origin/pushed — fall through).
+	// The shared "push-failed-recovery-" prefix preserves log-scrape continuity.
+	if !strings.Contains(result.Action, "push-failed-recovery-") {
 		t.Errorf("action %q should describe push-failed recovery", result.Action)
 	}
 

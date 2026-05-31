@@ -272,6 +272,10 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 	// MR, the work is NOT lost and the nudge would be a false alarm. When
 	// the branch IS on origin, clear the stuck flag and route through the
 	// normal completion path so MR-discovery can pick up any pending work.
+	// recoveryActionPrefix records the gu-ebj0 recovery outcome so it survives
+	// the downstream routing overwrite of result.Action. Empty when no recovery
+	// was attempted (branch already on origin / push_failed=false).
+	var recoveryActionPrefix string
 	if payload.PushFailed {
 		townRoot, _ := workspace.Find(workDir)
 		if branchOnOrigin(townRoot, rigName, polecatName, payload.Branch) {
@@ -281,19 +285,33 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 			payload.PushFailed = false
 			// Fall through to normal completion routing below.
 		} else {
-			result.Handled = true
-			result.Action = fmt.Sprintf("push-failed-recovery-needed for %s (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
-				polecatName, payload.Branch, payload.IssueID)
-			if townRoot != "" {
-				mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s — branch not on origin, possible work loss",
-					polecatName, payload.Branch, payload.IssueID)
-				mayorSession := session.MayorSessionName()
-				t := tmux.NewTmux()
-				if running, err := t.HasSession(mayorSession); err == nil && running {
-					_ = t.NudgeSession(mayorSession, mayorMsg)
+			// gu-ebj0: branch is not on origin — try to push it ourselves
+			// before alarming mayor. Recovery handles the fast-forward and
+			// fresh-push cases; divergence / budget-exhaustion / unknown
+			// fall through to the existing escalate path.
+			outcome := recoverPushFailed(townRoot, rigName, polecatName, payload.Branch)
+			switch outcome {
+			case PushRecoveryAlreadyOnOrigin, PushRecoveryPushed:
+				prefix := beads.GetPrefixForRig(townRoot, rigName)
+				agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+				clearPushFailedOnAgent(bd, workDir, agentBeadID)
+				payload.PushFailed = false
+				recoveryActionPrefix = pushRecoveryActionString(outcome, polecatName, payload.Branch, payload.IssueID)
+				// Fall through to normal completion routing below.
+			default:
+				result.Handled = true
+				result.Action = pushRecoveryActionString(outcome, polecatName, payload.Branch, payload.IssueID)
+				if townRoot != "" {
+					mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s outcome=%s — branch not on origin, possible work loss",
+						polecatName, payload.Branch, payload.IssueID, outcome.String())
+					mayorSession := session.MayorSessionName()
+					t := tmux.NewTmux()
+					if running, err := t.HasSession(mayorSession); err == nil && running {
+						_ = t.NudgeSession(mayorSession, mayorMsg)
+					}
 				}
+				return result
 			}
-			return result
 		}
 	}
 
@@ -311,6 +329,14 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 		result = handlePolecatDonePendingMR(bd, workDir, rigName, payload, result)
 	} else {
 		result = handlePolecatDoneNoMR(workDir, rigName, payload, result)
+	}
+
+	// gu-ebj0: when recovery succeeded above, prefix the recovery label onto
+	// whatever action the downstream routing produced. Operators see what
+	// happened ("we recovered, then routed as no-MR") and log scrapers
+	// continue to match on the "push-failed-recovery-" prefix.
+	if recoveryActionPrefix != "" {
+		result.Action = recoveryActionPrefix + " | " + result.Action
 	}
 
 	// Notify Mayor that a slot is open regardless of MR status.
@@ -3497,6 +3523,11 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 	// — if the branch IS upstream (via bare-repo fallback, manual recovery,
 	// or out-of-band MR), the work is not lost; clear the stuck flag and
 	// route through the normal completion path below.
+	// gu-ebj0: recoveryActionPrefix mirrors HandlePolecatDoneFromBead. When
+	// recovery succeeds, the downstream completion routing overwrites
+	// discovery.Action — we re-apply the prefix afterward. See the comment
+	// at the bottom of this function for the apply step.
+	var recoveryActionPrefix string
 	if payload.PushFailed {
 		townRoot, _ := workspace.Find(workDir)
 		if branchOnOrigin(townRoot, rigName, payload.PolecatName, payload.Branch) {
@@ -3506,21 +3537,42 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 			payload.PushFailed = false
 			// Fall through to normal completion routing below.
 		} else {
-			discovery.Action = fmt.Sprintf("push-failed-recovery-needed (branch=%s issue=%s) — branch not on origin, worktree may be at risk",
-				payload.Branch, payload.IssueID)
-			// Notify mayor so a new polecat can be dispatched if work is lost.
-			if townRoot != "" {
-				mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s — branch not on origin, possible work loss",
-					payload.PolecatName, payload.Branch, payload.IssueID)
-				mayorSession := session.MayorSessionName()
-				t := tmux.NewTmux()
-				if running, err := t.HasSession(mayorSession); err == nil && running {
-					_ = t.NudgeSession(mayorSession, mayorMsg)
+			// gu-ebj0: branch is not on origin — try to push it ourselves
+			// before alarming mayor. See HandlePolecatDoneFromBead for the
+			// matching bead-fields path; both call into recoverPushFailed.
+			outcome := recoverPushFailed(townRoot, rigName, payload.PolecatName, payload.Branch)
+			switch outcome {
+			case PushRecoveryAlreadyOnOrigin, PushRecoveryPushed:
+				prefix := beads.GetPrefixForRig(townRoot, rigName)
+				agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, payload.PolecatName)
+				clearPushFailedOnAgent(bd, workDir, agentBeadID)
+				payload.PushFailed = false
+				recoveryActionPrefix = pushRecoveryActionString(outcome, payload.PolecatName, payload.Branch, payload.IssueID)
+				// Fall through to normal completion routing below.
+			default:
+				discovery.Action = pushRecoveryActionString(outcome, payload.PolecatName, payload.Branch, payload.IssueID)
+				// Notify mayor so a new polecat can be dispatched if work is lost.
+				if townRoot != "" {
+					mayorMsg := fmt.Sprintf("PUSH_FAILED: polecat=%s branch=%s issue=%s outcome=%s — branch not on origin, possible work loss",
+						payload.PolecatName, payload.Branch, payload.IssueID, outcome.String())
+					mayorSession := session.MayorSessionName()
+					t := tmux.NewTmux()
+					if running, err := t.HasSession(mayorSession); err == nil && running {
+						_ = t.NudgeSession(mayorSession, mayorMsg)
+					}
 				}
+				return
 			}
-			return
 		}
 	}
+	// gu-ebj0: stamp the recovery prefix onto whatever discovery.Action the
+	// downstream routing leaves behind. Deferred so a single defer-style
+	// closure handles both the pending-MR and acknowledged-idle exits below.
+	defer func() {
+		if recoveryActionPrefix != "" {
+			discovery.Action = recoveryActionPrefix + " | " + discovery.Action
+		}
+	}()
 
 	hasMR := false
 	if payload.MRID != "" {

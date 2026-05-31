@@ -5110,10 +5110,22 @@ func TestHandlePolecatDoneFromBead_PushFailedSuppressedWhenOnOrigin(t *testing.T
 	}
 }
 
-// TestHandlePolecatDoneFromBead_PushFailedFiresWhenBranchMissing verifies
-// the genuine push-failure path still fires.
-func TestHandlePolecatDoneFromBead_PushFailedFiresWhenBranchMissing(t *testing.T) {
+// TestHandlePolecatDoneFromBead_PushFailedAutoRecoversWhenMissingFromOrigin
+// covers the gu-ebj0 contract change: when the branch is genuinely missing
+// from origin AND the polecat worktree has commits ahead, the witness now
+// auto-pushes the branch instead of escalating immediately. The action label
+// records the recovery and routing falls through to normal completion.
+//
+// Pre-gu-ebj0 this case asserted "Action SHOULD contain
+// push-failed-recovery-needed". The test was right; the service was
+// incomplete — escalating on every transient push failure was the original
+// gu-01ef capacity-drain symptom. This bead implements the auto-recovery,
+// so the assertion flips to the success path. Divergence/backoff/unknown
+// cases continue to escalate; see push_failed_recovery_test.go for those.
+func TestHandlePolecatDoneFromBead_PushFailedAutoRecoversWhenMissingFromOrigin(t *testing.T) {
 	t.Parallel()
+	resetPushRecoveryBudget()
+	t.Cleanup(resetPushRecoveryBudget)
 	rigName, polecatName := "testrig", "deathclaw"
 	branch := "polecat/deathclaw/lost"
 	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, false /* branchPushed */)
@@ -5123,6 +5135,7 @@ func TestHandlePolecatDoneFromBead_PushFailedFiresWhenBranchMissing(t *testing.T
 		Branch:     branch,
 		HookBead:   "gt-test-issue",
 		PushFailed: true,
+		MRFailed:   true, // route into the no-MR completion path so we can see the action
 	}
 
 	bd, _ := mockBd(
@@ -5134,8 +5147,13 @@ func TestHandlePolecatDoneFromBead_PushFailedFiresWhenBranchMissing(t *testing.T
 	if !result.Handled {
 		t.Fatalf("expected Handled=true, got result=%+v", result)
 	}
-	if !strings.Contains(result.Action, "push-failed-recovery-needed") {
-		t.Errorf("Action SHOULD contain push-failed-recovery-needed when branch missing, got %q", result.Action)
+	if !strings.Contains(result.Action, "push-failed-recovery-pushed") {
+		t.Errorf("Action SHOULD record successful auto-push, got %q", result.Action)
+	}
+	// The recovery branch must NOT short-circuit with the divergence-style
+	// escalate label — that is the failure mode this bead removes.
+	if strings.Contains(result.Action, "push-failed-recovery-diverged") {
+		t.Errorf("Action should not be diverged on simple missing-branch path, got %q", result.Action)
 	}
 }
 
@@ -5168,10 +5186,14 @@ func TestProcessDiscoveredCompletion_PushFailedSuppressedWhenOnOrigin(t *testing
 	}
 }
 
-// TestProcessDiscoveredCompletion_PushFailedFiresWhenBranchMissing keeps the
-// genuine-failure path covered for the discovery handler.
-func TestProcessDiscoveredCompletion_PushFailedFiresWhenBranchMissing(t *testing.T) {
+// TestProcessDiscoveredCompletion_PushFailedAutoRecoversWhenMissingFromOrigin
+// is the bead-discovery counterpart to
+// TestHandlePolecatDoneFromBead_PushFailedAutoRecoversWhenMissingFromOrigin.
+// See that test for the rationale behind the gu-ebj0 contract change.
+func TestProcessDiscoveredCompletion_PushFailedAutoRecoversWhenMissingFromOrigin(t *testing.T) {
 	t.Parallel()
+	resetPushRecoveryBudget()
+	t.Cleanup(resetPushRecoveryBudget)
 	rigName, polecatName := "testrig", "deathclaw"
 	branch := "polecat/deathclaw/discovered-lost"
 	townRoot := setupPushFailedTestRepo(t, rigName, polecatName, branch, false /* branchPushed */)
@@ -5182,6 +5204,7 @@ func TestProcessDiscoveredCompletion_PushFailedFiresWhenBranchMissing(t *testing
 		Branch:      branch,
 		IssueID:     "gt-test-issue",
 		PushFailed:  true,
+		MRFailed:    true,
 	}
 	discovery := &CompletionDiscovery{}
 
@@ -5191,8 +5214,11 @@ func TestProcessDiscoveredCompletion_PushFailedFiresWhenBranchMissing(t *testing
 	)
 	processDiscoveredCompletion(bd, townRoot, rigName, payload, discovery)
 
-	if !strings.Contains(discovery.Action, "push-failed-recovery-needed") {
-		t.Errorf("Action SHOULD contain push-failed-recovery-needed when branch missing, got %q", discovery.Action)
+	if !strings.Contains(discovery.Action, "push-failed-recovery-pushed") {
+		t.Errorf("Action SHOULD record successful auto-push, got %q", discovery.Action)
+	}
+	if strings.Contains(discovery.Action, "push-failed-recovery-diverged") {
+		t.Errorf("Action should not be diverged on simple missing-branch path, got %q", discovery.Action)
 	}
 }
 
