@@ -1,12 +1,44 @@
 package tmux
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
+// enableDetachedKillTrace points the detached-kill subprocess at a per-test
+// log file. On poll failure the test dumps the log so the next flake yields
+// a `set -x` trace instead of a bare assertion. See gu-4l21 — repeated
+// flakes despite a 60s polling deadline left no diagnostic trail because
+// the subprocess discarded stderr.
+func enableDetachedKillTrace(t *testing.T) string {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "detached-kill.log")
+	t.Setenv(EnvTmuxDetachedKillLog, logPath)
+	return logPath
+}
+
+// dumpDetachedKillLog reads the captured subprocess trace and logs it via
+// t.Log so it appears in test output. Tolerant of a missing file — the
+// subprocess may not have started, which is itself the diagnostic.
+func dumpDetachedKillLog(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Logf("detached-kill log unreadable (%v); subprocess may not have started", err)
+		return
+	}
+	if len(data) == 0 {
+		t.Log("detached-kill log empty — subprocess started but produced no output before deadline")
+		return
+	}
+	t.Logf("detached-kill subprocess trace:\n%s", string(data))
+}
+
 func TestDetachedKillSession(t *testing.T) {
 	tm := newTestTmux(t)
+	logPath := enableDetachedKillTrace(t)
 	sessionName := "gt-test-detach-kill"
 
 	// Clean up any leftover
@@ -52,6 +84,7 @@ func TestDetachedKillSession(t *testing.T) {
 	if waitForSessionGone(t, tm, sessionName, 60*time.Second) {
 		return
 	}
+	dumpDetachedKillLog(t, logPath)
 	t.Error("session should have been killed by detached subprocess")
 }
 
@@ -75,6 +108,7 @@ func waitForSessionGone(t *testing.T, tm *Tmux, name string, timeout time.Durati
 
 func TestDetachedKillSessionWithProcesses(t *testing.T) {
 	tm := newTestTmux(t)
+	logPath := enableDetachedKillTrace(t)
 	sessionName := "gt-test-detach-killp"
 
 	// Clean up any leftover
@@ -105,6 +139,7 @@ func TestDetachedKillSessionWithProcesses(t *testing.T) {
 	if waitForSessionGone(t, tm, sessionName, 60*time.Second) {
 		return
 	}
+	dumpDetachedKillLog(t, logPath)
 	t.Error("session should have been killed by detached subprocess")
 }
 
