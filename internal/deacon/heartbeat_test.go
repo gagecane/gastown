@@ -112,18 +112,18 @@ func TestHeartbeat_IsFresh(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "3 minutes old",
+			name: "10 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-3 * time.Minute),
+				Timestamp: time.Now().Add(-10 * time.Minute),
 			},
-			expected: true, // Fresh is <5 minutes
+			expected: true, // Fresh is <16 minutes
 		},
 		{
-			name: "6 minutes old",
+			name: "17 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-6 * time.Minute),
+				Timestamp: time.Now().Add(-17 * time.Minute),
 			},
-			expected: false, // Not fresh (>=5 minutes)
+			expected: false, // Not fresh (>=16 minutes)
 		},
 	}
 
@@ -149,32 +149,32 @@ func TestHeartbeat_IsStale(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "3 minutes old",
+			name: "10 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-3 * time.Minute),
+				Timestamp: time.Now().Add(-10 * time.Minute),
 			},
-			expected: false, // Fresh (<5 minutes)
+			expected: false, // Fresh (<16 minutes)
 		},
 		{
-			name: "7 minutes old",
+			name: "17 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-7 * time.Minute),
+				Timestamp: time.Now().Add(-17 * time.Minute),
 			},
-			expected: true, // Stale (5-20 minutes)
+			expected: true, // Stale (16-30 minutes)
 		},
 		{
-			name: "16 minutes old",
+			name: "25 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-16 * time.Minute),
+				Timestamp: time.Now().Add(-25 * time.Minute),
 			},
-			expected: true, // Stale (5-20 minutes)
+			expected: true, // Stale (16-30 minutes)
 		},
 		{
-			name: "21 minutes old",
+			name: "31 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-21 * time.Minute),
+				Timestamp: time.Now().Add(-31 * time.Minute),
 			},
-			expected: false, // Very stale, not stale (>20 minutes)
+			expected: false, // Very stale, not stale (>30 minutes)
 		},
 	}
 
@@ -200,32 +200,32 @@ func TestHeartbeat_IsVeryStale(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "3 minutes old",
-			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-3 * time.Minute),
-			},
-			expected: false, // Fresh
-		},
-		{
 			name: "10 minutes old",
 			hb: &Heartbeat{
 				Timestamp: time.Now().Add(-10 * time.Minute),
 			},
+			expected: false, // Fresh
+		},
+		{
+			name: "20 minutes old",
+			hb: &Heartbeat{
+				Timestamp: time.Now().Add(-20 * time.Minute),
+			},
 			expected: false, // Stale but not very stale
 		},
 		{
-			name: "16 minutes old",
+			name: "29 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-16 * time.Minute),
+				Timestamp: time.Now().Add(-29 * time.Minute),
 			},
-			expected: false, // Stale but not very stale (threshold is 20m)
+			expected: false, // Stale but not very stale (threshold is 30m)
 		},
 		{
-			name: "21 minutes old",
+			name: "31 minutes old",
 			hb: &Heartbeat{
-				Timestamp: time.Now().Add(-21 * time.Minute),
+				Timestamp: time.Now().Add(-31 * time.Minute),
 			},
-			expected: true, // Very stale (>20 minutes)
+			expected: true, // Very stale (>30 minutes)
 		},
 	}
 

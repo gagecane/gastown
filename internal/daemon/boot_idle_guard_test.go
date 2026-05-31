@@ -167,7 +167,7 @@ func TestEnsureBootRunning_IdleGuard(t *testing.T) {
 		},
 		{
 			name:         "stale heartbeat, no work — spawn",
-			heartbeatAge: 10 * time.Minute,
+			heartbeatAge: 17 * time.Minute, // > deacon.HeartbeatStaleThreshold (16m)
 			stores: map[string]beadsdk.Storage{
 				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{}},
 			},

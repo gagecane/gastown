@@ -13,15 +13,26 @@ import (
 // Heartbeat age thresholds — these are compiled-in defaults.
 // Configurable via operational.deacon.heartbeat_stale_threshold and
 // operational.deacon.heartbeat_very_stale_threshold in settings/config.json.
+//
+// Both thresholds MUST be greater than the deacon patrol's await-signal
+// backoff-max (15m, see mol-deacon-patrol.formula.toml). Otherwise the daemon
+// will see legitimate idle backoff sleep as a stuck heartbeat and either nudge
+// (waking the deacon for nothing, interrupting exponential backoff) or kill
+// the session. The earlier 5m / 20m setting tripped the nudge tier on every
+// idle cycle once the deacon's backoff exceeded 5m — gu-70rg observed 327
+// false-positive 'Deacon stuck for X - nudging session' log lines in 24h.
 const (
 	// HeartbeatStaleThreshold is the age at which a heartbeat is considered stale.
-	HeartbeatStaleThreshold = 5 * time.Minute
+	// Set above patrol backoff-max (15m) so a single missed cycle is required
+	// before the daemon sends a wake-up nudge — eliminating false positives
+	// during normal idle backoff while still catching genuinely stuck deacons.
+	HeartbeatStaleThreshold = 16 * time.Minute
 
 	// HeartbeatVeryStaleThreshold is the age at which a heartbeat is considered
 	// very stale, meaning the Deacon should be poked or restarted.
-	// Must be greater than patrol backoff-max (15m) to avoid false positives
-	// during legitimate await-signal sleep.
-	HeartbeatVeryStaleThreshold = 20 * time.Minute
+	// Set to ~2x backoff-max so a stuck deacon is caught after ~2 missed cycles
+	// while preserving headroom for legitimate long operations.
+	HeartbeatVeryStaleThreshold = 30 * time.Minute
 )
 
 // Heartbeat represents the Deacon's heartbeat file contents.
