@@ -54,3 +54,4 @@ routing.mode: "explicit"
 export.auto: "false"
 
 sync.remote: "git+ssh://git@github.com/gagecane/gastown.git"
+dolt.auto-commit: "on"
