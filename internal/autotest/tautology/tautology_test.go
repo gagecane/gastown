@@ -134,6 +134,9 @@ func TestSubRuleI_NoInputDerived(t *testing.T) {
 		"TestNoFUTDependency_HardcodedExpected":  true,
 		"TestNoFUTDependency_SetupOnly":          true,
 		"TestNoFUTDependency_ConstantComparison": true,
+		// gu-lem36: helper-built taint is not FUT — these are tautological.
+		"TestNoFUTDependency_HelperProvidedTaint": true,
+		"TestNoFUTDependency_HelperFactoryStruct": true,
 	}
 	shouldNotTrigger := map[string]bool{
 		"TestWithFUTOutput":        true,
@@ -141,6 +144,8 @@ func TestSubRuleI_NoInputDerived(t *testing.T) {
 		"TestWithFUTMethod":        true,
 		"TestWithFUTSlice":         true,
 		"TestWithFUTError":         true,
+		// gu-lem36: real FUT taint propagates through a local helper.
+		"TestWithFUTWrappedByHelper": true,
 	}
 
 	noInputFindings := filterByRule(findings, RuleNoInputDerived)

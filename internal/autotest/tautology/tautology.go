@@ -65,6 +65,13 @@ func AnalyzeFile(filename string, src []byte) ([]Finding, error) {
 
 // AnalyzeAST runs all sub-rules on a parsed file.
 func AnalyzeAST(fset *token.FileSet, f *ast.File) []Finding {
+	// Collect bare names of all top-level functions declared in this file.
+	// Functions defined here cannot be the function-under-test — they're
+	// test fixtures, factories, or helpers. Excluding them from FUT
+	// classification eliminates false negatives where helper-built values
+	// flow into otherwise-tautological assertions.
+	localFuncs := collectLocalFuncs(f)
+
 	var findings []Finding
 
 	for _, decl := range f.Decls {
@@ -72,14 +79,30 @@ func AnalyzeAST(fset *token.FileSet, f *ast.File) []Finding {
 		if !ok || !isTestFunc(fn) {
 			continue
 		}
-		findings = append(findings, analyzeTestFunc(fset, fn)...)
+		findings = append(findings, analyzeTestFunc(fset, fn, localFuncs)...)
 	}
 
 	return findings
 }
 
+// collectLocalFuncs returns the set of bare function names declared at the
+// top level of this file. Methods are also recorded by their bare name —
+// since callName() returns "receiver.Method" (not "Type.Method"), bare-name
+// matching is the closest syntactic approximation we can do without type info.
+func collectLocalFuncs(f *ast.File) map[string]bool {
+	locals := make(map[string]bool)
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name == nil {
+			continue
+		}
+		locals[fn.Name.Name] = true
+	}
+	return locals
+}
+
 // analyzeTestFunc runs all sub-rules on a single test function.
-func analyzeTestFunc(fset *token.FileSet, fn *ast.FuncDecl) []Finding {
+func analyzeTestFunc(fset *token.FileSet, fn *ast.FuncDecl, localFuncs map[string]bool) []Finding {
 	if fn.Body == nil {
 		return nil
 	}
@@ -121,7 +144,7 @@ func analyzeTestFunc(fset *token.FileSet, fn *ast.FuncDecl) []Finding {
 	}
 
 	// Sub-rule (i): no assertion depends on FUT output (flow-sensitive).
-	if !anyInputDerived(fn.Body, assertions) {
+	if !anyInputDerived(fn.Body, assertions, localFuncs) {
 		findings = append(findings, Finding{
 			Pos:      fset.Position(fn.Pos()),
 			Rule:     RuleNoInputDerived,
@@ -331,14 +354,18 @@ func exprEqual(a, b ast.Expr) bool {
 
 // anyInputDerived returns true if at least one assertion depends on a value
 // returned from a function-under-test (not a test helper or stdlib setup).
-func anyInputDerived(body *ast.BlockStmt, assertions []assertion) bool {
+//
+// localFuncs lists names of functions declared in the same _test.go file —
+// those are fixtures/helpers, never FUT, so calls to them do not introduce
+// taint.
+func anyInputDerived(body *ast.BlockStmt, assertions []assertion, localFuncs map[string]bool) bool {
 	// Build taint map: variable -> source FUT name.
 	tainted := make(map[string]string)
-	propagateTaint(body.List, tainted)
+	propagateTaint(body.List, tainted, localFuncs)
 
 	for _, a := range assertions {
 		for _, arg := range a.args {
-			if exprIsTainted(arg, tainted) {
+			if exprIsTainted(arg, tainted, localFuncs) {
 				return true
 			}
 		}
@@ -348,14 +375,14 @@ func anyInputDerived(body *ast.BlockStmt, assertions []assertion) bool {
 
 // propagateTaint walks statements and builds a taint map of variables
 // that are derived from function-under-test calls.
-func propagateTaint(stmts []ast.Stmt, tainted map[string]string) {
+func propagateTaint(stmts []ast.Stmt, tainted map[string]string, localFuncs map[string]bool) {
 	for _, stmt := range stmts {
-		propagateStmt(stmt, tainted)
+		propagateStmt(stmt, tainted, localFuncs)
 	}
 }
 
 // propagateStmt processes a single statement for taint propagation.
-func propagateStmt(stmt ast.Stmt, tainted map[string]string) {
+func propagateStmt(stmt ast.Stmt, tainted map[string]string, localFuncs map[string]bool) {
 	switch s := stmt.(type) {
 	case *ast.AssignStmt:
 		for i, lhs := range s.Lhs {
@@ -371,7 +398,7 @@ func propagateStmt(stmt ast.Stmt, tainted map[string]string) {
 			} else {
 				continue
 			}
-			if src := classifyExpr(rhs, tainted); src != "" {
+			if src := classifyExpr(rhs, tainted, localFuncs); src != "" {
 				tainted[ident.Name] = src
 			}
 		}
@@ -381,7 +408,7 @@ func propagateStmt(stmt ast.Stmt, tainted map[string]string) {
 				if vs, ok := spec.(*ast.ValueSpec); ok {
 					for i, name := range vs.Names {
 						if i < len(vs.Values) {
-							if src := classifyExpr(vs.Values[i], tainted); src != "" {
+							if src := classifyExpr(vs.Values[i], tainted, localFuncs); src != "" {
 								tainted[name.Name] = src
 							}
 						}
@@ -391,27 +418,27 @@ func propagateStmt(stmt ast.Stmt, tainted map[string]string) {
 		}
 	case *ast.IfStmt:
 		if s.Init != nil {
-			propagateStmt(s.Init, tainted)
+			propagateStmt(s.Init, tainted, localFuncs)
 		}
 		if s.Body != nil {
-			propagateTaint(s.Body.List, tainted)
+			propagateTaint(s.Body.List, tainted, localFuncs)
 		}
 		if s.Else != nil {
-			propagateStmt(s.Else, tainted)
+			propagateStmt(s.Else, tainted, localFuncs)
 		}
 	case *ast.BlockStmt:
 		if s != nil {
-			propagateTaint(s.List, tainted)
+			propagateTaint(s.List, tainted, localFuncs)
 		}
 	case *ast.ForStmt:
 		if s.Init != nil {
-			propagateStmt(s.Init, tainted)
+			propagateStmt(s.Init, tainted, localFuncs)
 		}
 		if s.Body != nil {
-			propagateTaint(s.Body.List, tainted)
+			propagateTaint(s.Body.List, tainted, localFuncs)
 		}
 	case *ast.RangeStmt:
-		if src := exprTaintSource(s.X, tainted); src != "" {
+		if src := exprTaintSource(s.X, tainted, localFuncs); src != "" {
 			if key, ok := s.Key.(*ast.Ident); ok && key.Name != "_" {
 				tainted[key.Name] = src
 			}
@@ -422,13 +449,13 @@ func propagateStmt(stmt ast.Stmt, tainted map[string]string) {
 			}
 		}
 		if s.Body != nil {
-			propagateTaint(s.Body.List, tainted)
+			propagateTaint(s.Body.List, tainted, localFuncs)
 		}
 	}
 }
 
 // classifyExpr determines if an expression introduces or propagates taint.
-func classifyExpr(expr ast.Expr, tainted map[string]string) string {
+func classifyExpr(expr ast.Expr, tainted map[string]string, localFuncs map[string]bool) string {
 	switch e := expr.(type) {
 	case *ast.CallExpr:
 		name := callName(e)
@@ -438,10 +465,22 @@ func classifyExpr(expr ast.Expr, tainted map[string]string) string {
 		if isTestHelper(name) {
 			return ""
 		}
+		// Functions defined in the same _test.go file are fixtures or
+		// helpers, never the FUT. Treat them as transparent: propagate
+		// taint from their args (so a helper that wraps a real FUT call
+		// still propagates) but do not introduce taint themselves.
+		if isLocalFunc(name, localFuncs) {
+			for _, arg := range e.Args {
+				if src := exprTaintSource(arg, tainted, localFuncs); src != "" {
+					return src
+				}
+			}
+			return ""
+		}
 		if isStdlibCall(name) {
 			// Transparent: propagate taint from args.
 			for _, arg := range e.Args {
-				if src := exprTaintSource(arg, tainted); src != "" {
+				if src := exprTaintSource(arg, tainted, localFuncs); src != "" {
 					return src
 				}
 			}
@@ -450,7 +489,7 @@ func classifyExpr(expr ast.Expr, tainted map[string]string) string {
 		// Unknown function call — treat as potential FUT.
 		// Check if args propagate existing taint first.
 		for _, arg := range e.Args {
-			if src := exprTaintSource(arg, tainted); src != "" {
+			if src := exprTaintSource(arg, tainted, localFuncs); src != "" {
 				return name
 			}
 		}
@@ -460,38 +499,38 @@ func classifyExpr(expr ast.Expr, tainted map[string]string) string {
 			return t
 		}
 	case *ast.SelectorExpr:
-		if src := exprTaintSource(e.X, tainted); src != "" {
+		if src := exprTaintSource(e.X, tainted, localFuncs); src != "" {
 			return src
 		}
 	case *ast.IndexExpr:
-		if src := exprTaintSource(e.X, tainted); src != "" {
+		if src := exprTaintSource(e.X, tainted, localFuncs); src != "" {
 			return src
 		}
 	case *ast.SliceExpr:
-		if src := exprTaintSource(e.X, tainted); src != "" {
+		if src := exprTaintSource(e.X, tainted, localFuncs); src != "" {
 			return src
 		}
 	case *ast.TypeAssertExpr:
-		if src := exprTaintSource(e.X, tainted); src != "" {
+		if src := exprTaintSource(e.X, tainted, localFuncs); src != "" {
 			return src
 		}
 	case *ast.UnaryExpr:
-		if src := exprTaintSource(e.X, tainted); src != "" {
+		if src := exprTaintSource(e.X, tainted, localFuncs); src != "" {
 			return src
 		}
 	case *ast.CompositeLit:
 		for _, elt := range e.Elts {
-			if src := exprTaintSource(elt, tainted); src != "" {
+			if src := exprTaintSource(elt, tainted, localFuncs); src != "" {
 				return src
 			}
 		}
 	case *ast.ParenExpr:
-		return classifyExpr(e.X, tainted)
+		return classifyExpr(e.X, tainted, localFuncs)
 	case *ast.BinaryExpr:
-		if src := exprTaintSource(e.X, tainted); src != "" {
+		if src := exprTaintSource(e.X, tainted, localFuncs); src != "" {
 			return src
 		}
-		if src := exprTaintSource(e.Y, tainted); src != "" {
+		if src := exprTaintSource(e.Y, tainted, localFuncs); src != "" {
 			return src
 		}
 	}
@@ -499,7 +538,7 @@ func classifyExpr(expr ast.Expr, tainted map[string]string) string {
 }
 
 // exprTaintSource returns the taint source if the expression is tainted.
-func exprTaintSource(expr ast.Expr, tainted map[string]string) string {
+func exprTaintSource(expr ast.Expr, tainted map[string]string, localFuncs map[string]bool) string {
 	if expr == nil {
 		return ""
 	}
@@ -509,16 +548,25 @@ func exprTaintSource(expr ast.Expr, tainted map[string]string) string {
 			return t
 		}
 	case *ast.SelectorExpr:
-		return exprTaintSource(e.X, tainted)
+		return exprTaintSource(e.X, tainted, localFuncs)
 	case *ast.IndexExpr:
-		return exprTaintSource(e.X, tainted)
+		return exprTaintSource(e.X, tainted, localFuncs)
 	case *ast.SliceExpr:
-		return exprTaintSource(e.X, tainted)
+		return exprTaintSource(e.X, tainted, localFuncs)
 	case *ast.CallExpr:
 		name := callName(e)
-		if name != "" && isStdlibCall(name) {
+		// Functions defined in this file are fixtures/helpers, not FUT —
+		// fall through to argument inspection so wrapped real-FUT taint
+		// still propagates.
+		if name != "" && isLocalFunc(name, localFuncs) {
 			for _, arg := range e.Args {
-				if src := exprTaintSource(arg, tainted); src != "" {
+				if src := exprTaintSource(arg, tainted, localFuncs); src != "" {
+					return src
+				}
+			}
+		} else if name != "" && isStdlibCall(name) {
+			for _, arg := range e.Args {
+				if src := exprTaintSource(arg, tainted, localFuncs); src != "" {
 					return src
 				}
 			}
@@ -526,25 +574,39 @@ func exprTaintSource(expr ast.Expr, tainted map[string]string) string {
 			return name
 		}
 	case *ast.TypeAssertExpr:
-		return exprTaintSource(e.X, tainted)
+		return exprTaintSource(e.X, tainted, localFuncs)
 	case *ast.UnaryExpr:
-		return exprTaintSource(e.X, tainted)
+		return exprTaintSource(e.X, tainted, localFuncs)
 	case *ast.ParenExpr:
-		return exprTaintSource(e.X, tainted)
+		return exprTaintSource(e.X, tainted, localFuncs)
 	case *ast.KeyValueExpr:
-		return exprTaintSource(e.Value, tainted)
+		return exprTaintSource(e.Value, tainted, localFuncs)
 	case *ast.BinaryExpr:
-		if src := exprTaintSource(e.X, tainted); src != "" {
+		if src := exprTaintSource(e.X, tainted, localFuncs); src != "" {
 			return src
 		}
-		return exprTaintSource(e.Y, tainted)
+		return exprTaintSource(e.Y, tainted, localFuncs)
 	}
 	return ""
 }
 
 // exprIsTainted returns true if the expression depends on a tainted value.
-func exprIsTainted(expr ast.Expr, tainted map[string]string) bool {
-	return exprTaintSource(expr, tainted) != ""
+func exprIsTainted(expr ast.Expr, tainted map[string]string, localFuncs map[string]bool) bool {
+	return exprTaintSource(expr, tainted, localFuncs) != ""
+}
+
+// isLocalFunc returns true if name matches a top-level function declared
+// in the current _test.go file. Only bare-name matches count: a selector
+// call like "svc.Process" is intentionally NOT treated as local even if a
+// "Process" method is declared in the file, because the receiver "svc"
+// could be a real production type whose methods coincidentally share names
+// with local helpers. Without type information we err on the side of
+// keeping real-FUT detection intact.
+func isLocalFunc(name string, localFuncs map[string]bool) bool {
+	if localFuncs == nil {
+		return false
+	}
+	return localFuncs[name]
 }
 
 // --- Helpers ---
