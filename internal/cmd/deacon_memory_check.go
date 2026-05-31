@@ -82,8 +82,8 @@ func init() {
 // memoryCheckResult is the JSON payload for `gt deacon memory-check --json`.
 type memoryCheckResult struct {
 	MemAvailableGB float64 `json:"mem_available_gb"`
-	Severity       string  `json:"severity"`     // "ok" | "warn" | "high" | "critical" | "unknown"
-	Action         string  `json:"action"`       // "none" | "logged" | "escalated" | "would-escalate" | "skipped"
+	Severity       string  `json:"severity"` // "ok" | "warn" | "high" | "critical" | "unknown"
+	Action         string  `json:"action"`   // "none" | "logged" | "escalated" | "would-escalate" | "skipped"
 	WarnGB         float64 `json:"warn_gb"`
 	HighGB         float64 `json:"high_gb"`
 	CriticalGB     float64 `json:"critical_gb"`

@@ -18,13 +18,13 @@ func TestClassifyMemory(t *testing.T) {
 	)
 
 	cases := []struct {
-		name        string
-		avail       float64
-		doEscalate  bool
-		dryRun      bool
-		wantSev     string
-		wantAction  string
-		wantExit2   bool
+		name       string
+		avail      float64
+		doEscalate bool
+		dryRun     bool
+		wantSev    string
+		wantAction string
+		wantExit2  bool
 	}{
 		{"unknown when zero", 0, true, false, "unknown", "skipped", false},
 		{"unknown when negative", -1, true, false, "unknown", "skipped", false},
