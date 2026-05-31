@@ -225,6 +225,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewOrphanSessionCheck())
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewStalledPolecatCheck())
+	d.Register(doctor.NewSchedulerCapacityDrainCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewHookedDeadLetterCheck())

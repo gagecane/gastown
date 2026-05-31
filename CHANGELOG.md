@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gt doctor` scheduler-capacity-drain check** (gu-01ef) — A new patrol
+  check flags the failure mode where `recovery_blocked` polecats accumulate
+  until the scheduler runs out of dispatchable slots while ready work
+  queues. `gt scheduler status --json` already surfaced the number, but no
+  automation read it; `gt doctor` did not. The check shells to that JSON,
+  warns when `recovery_blocked > 50%` of `scheduler.max_polecats`, and
+  escalates to error once that condition has held past `drainErrorAge`
+  (5m). Healthy snapshots clear the persisted timestamp, so a transient
+  drain auto-recovers without manual intervention. Direct-dispatch mode
+  (`scheduler.max_polecats=-1`) is skipped — there is no pool to drain.
+  Filed proposals #1 (push-failed auto-recovery handler) and #2 (work-bead
+  circuit-breaker audit) as separate beads (gu-ebj0, gu-iqji) to keep the
+  MR scoped.
+
 ### Changed
 
 - **`gt status`: differentiate stopped-state glyphs** (gu-r9g1) — The single
