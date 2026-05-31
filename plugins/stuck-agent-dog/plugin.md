@@ -53,6 +53,34 @@ Reference: WAR-ROOM-SERIAL-KILLER.md, commit f3d47a96.
 scripts enumerate exactly the sessions you should check. If a session does not
 appear in `CRASHED[]` or `STUCK[]` arrays, it does not exist for your purposes.
 
+## Per-Rig Skip File (gu-31mpz)
+
+When a systemic bug requires preserving stranded polecat worktrees as forensic
+evidence (e.g. gc-hl4lx kept 4 talontriage polecats in forensic-hold for hours),
+the dog otherwise regenerates RESTART_POLECAT signals every 5m cycle and the
+deacon must manually suppress each one.
+
+`run.sh` reads `${TOWN_ROOT}/.runtime/dog-skip-rigs` at start. Listed rigs are
+skipped entirely in the polecat iteration — neither flagged (CRASHED / STUCK /
+STALLED / IDENTITY_HOOKED) nor restarted — until the rig is removed.
+
+**Format**: newline-separated rig names. Blank lines and `#` comments ignored.
+Whitespace inside lines is stripped.
+
+**Add a rig**:
+```bash
+echo "talontriage" >> /home/canewiw/gt/.runtime/dog-skip-rigs
+```
+
+**Remove a rig** (resume normal monitoring):
+```bash
+sed -i '/^talontriage$/d' /home/canewiw/gt/.runtime/dog-skip-rigs
+```
+
+**Note**: this disables ALL stuck-agent-dog actions on the named rig — including
+mass-death corroboration, identity-hook escalation, and stalled-alive restarts.
+Use only as a temporary forensic-hold tool, not as a permanent silencer.
+
 ## Step 1: Enumerate agents to check
 
 Gather all polecats and the deacon session. We check both crashed sessions

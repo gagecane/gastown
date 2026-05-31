@@ -297,8 +297,36 @@ STALLED=()
 IDENTITY_HOOKED=()
 HEALTHY=0
 
+# Per-rig skip list (gu-31mpz): when a systemic bug requires preserving stranded
+# polecat worktrees as forensic evidence (e.g. gc-hl4lx kept 4 talontriage
+# polecats in forensic-hold for hours), the dog otherwise regenerates
+# RESTART_POLECAT signals every 5m cycle, forcing the deacon to manually
+# suppress each one. Listing a rig name in this file skips all of its polecats
+# in the health iteration — neither flagged nor restarted — until the rig is
+# removed from the file. Format: newline-separated rig names; blank lines and
+# `#` comments are ignored.
+SKIP_RIGS_FILE="${TOWN_ROOT}/.runtime/dog-skip-rigs"
+SKIP_RIGS=""
+if [ -f "$SKIP_RIGS_FILE" ]; then
+  # Strip comments and blank lines; trim leading/trailing whitespace per line.
+  SKIP_RIGS=$(sed -E 's/[[:space:]]+//g; /^#/d; /^$/d' "$SKIP_RIGS_FILE" 2>/dev/null | sort -u || true)
+  if [ -n "$SKIP_RIGS" ]; then
+    log "SKIP_RIGS active: $(echo "$SKIP_RIGS" | tr '\n' ',' | sed 's/,$//')"
+  fi
+fi
+
+rig_is_skipped() {
+  local rig="$1"
+  [ -n "$SKIP_RIGS" ] || return 1
+  printf '%s\n' "$SKIP_RIGS" | grep -qxF "$rig"
+}
+
 while IFS='|' read -r RIG PREFIX; do
   [ -z "$RIG" ] && continue
+  if rig_is_skipped "$RIG"; then
+    log "  SKIP rig $RIG: listed in $SKIP_RIGS_FILE"
+    continue
+  fi
   POLECAT_DIR="$TOWN_ROOT/$RIG/polecats"
   [ -d "$POLECAT_DIR" ] || continue
 
