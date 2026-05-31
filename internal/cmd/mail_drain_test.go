@@ -19,6 +19,7 @@ func TestIsDrainableMessage(t *testing.T) {
 		{"MERGE_READY furiosa", true},
 		{"MERGE_FAILED furiosa", true},
 		{"SWARM_START", true},
+		{"Convoy complete: gs-abc123 (refinery)", true},
 
 		// Non-drainable messages (need attention)
 		{"HELP: stuck on implementation", false},

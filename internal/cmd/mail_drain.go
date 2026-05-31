@@ -34,6 +34,7 @@ DRAINABLE MESSAGE TYPES:
   MERGE_READY        Merge ready notifications
   MERGE_FAILED       Merge failure notifications
   SWARM_START        Swarm initiation messages
+  Convoy complete:*  Convoy completion notifications (informational)
 
 NON-DRAINABLE (preserved):
   HELP:*             Help requests (need human attention)
@@ -70,6 +71,10 @@ var drainableSubjects = []string{
 	"MERGE_READY",
 	"MERGE_FAILED",
 	"SWARM_START",
+	// Convoy completion notifications are informational ("the work landed,
+	// no action needed"). They accumulate in the mayor's inbox during
+	// backlog drains and need bulk-archive support. See gu-25xj.
+	"Convoy complete:",
 }
 
 // isDrainableMessage checks if a message subject matches a drainable protocol pattern.
