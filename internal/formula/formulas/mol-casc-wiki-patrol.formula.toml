@@ -1,0 +1,205 @@
+description = """
+CASC wiki refresh patrol — Phase 2 Step 5 (cadk-1o2t).
+
+Daily-cadence formula that pulls latest mainline, regenerates the CASC wiki
+content from RigFacts, runs the secrets scanner as a HARD gate, and publishes
+only the pages that changed (input-hash staleness detection) via `raw write`.
+
+The publisher enforces a minimum 3s inter-write gap and exponential-backoff
+retry on HTTP 429 (initial 5s, ×1.5, capped at 60s, max 5 attempts) — see
+`scripts/wiki-publisher.ts`. On any non-transient failure (extractor crash,
+secrets-scan exit non-zero, persistent 429, raw write 5xx), the patrol files
+a `wiki-correction` bead and `gt escalate -s HIGH` so a human sees it the
+same day.
+
+## Cadence
+
+This formula is intended to be dispatched once per day at ~06:00 PT — between
+off-hours and US-West start of day. The Phase 2 kickoff gate (cadk-wss3)
+resolved the cadence to daily based on Phase 1 evidence: mechanical facts
+change at most weekly across the 8 rigs, and 6-hourly cadence is 4× more
+expensive for < 24h freshness improvement.
+
+Single-molecule guarantee is required (overlapping runs MUST NOT execute
+concurrently — Phase 1 cadk-xk4 confirmed concurrent writes multiply 429s).
+The formula scheduler enforces this; the patrol script does NOT add its own
+lock.
+
+## Identity & Scope
+
+This patrol writes ONLY to `/WWGST/UTRT/GOx/PromptRangers/CodegenAgentScheduler/`.
+It MUST run under a Midway-authenticated identity scoped to that path, NOT a
+broader operator credential. Phase 1 used a human operator (canewiw); Phase 2
+should use a dedicated polecat identity (e.g., `casc_cdk/polecats/wiki-patrol`)
+— see follow-up bead for cadk-1o2t AC(g).
+
+## Failure Path (resolves DQ#3 observability + AC(e))
+
+A wiki-correction bead is filed (with `wiki-patrol-failure` label) for any of:
+- generate-wiki.ts non-zero exit (extractor crash)
+- scan-wiki-secrets.sh non-zero exit (secrets detected — publish blocked)
+- wiki-publisher.ts non-zero exit (any page failed after retry)
+
+Every failure triggers `gt escalate -s HIGH` in addition to the bead.
+`scan-wiki-secrets.sh` failures are NEVER bypassed — the secrets filter is
+a hard control (cadk-wss3 OQ#1 disposition).
+
+## Kill Switch (resolves DQ#11 + AC(f))
+
+A `.docs-suppress` file at any rig root suppresses publication of THAT rig's
+detail page on subsequent patrol runs. The publisher emits a per-rig
+`suppressed: <reason>` line in the run summary. Cross-rig pages (landing,
+components, architecture) are not per-rig suppressible.
+
+## Vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| wisp_type | patrol | Wisp type — patrol formula |
+| dry_run | false | If true, publisher skips real writes — use for canary checks |
+| skip_pull | false | If true, skip `git pull origin mainline` (caller pre-staged the tree) |
+| wiki_base_path | /WWGST/UTRT/GOx/PromptRangers/CodegenAgentScheduler/ | Wiki space root |
+| project_path | (required) | Absolute path to the casc_cdk package working tree |
+| rigs_root | (computed) | Parent dir of project_path; rig siblings live here |
+"""
+
+formula = "mol-casc-wiki-patrol"
+version = 1
+
+[vars]
+[vars.wisp_type]
+description = "Type of wisp created for this molecule"
+default = "patrol"
+
+[vars.dry_run]
+description = "If true, the publisher does not call raw write (canary mode)"
+default = "false"
+
+[vars.skip_pull]
+description = "If true, skip git pull; assumes caller pre-staged the tree at the right ref"
+default = "false"
+
+[vars.wiki_base_path]
+description = "Wiki space base path — patrol writes are scoped to this prefix only"
+default = "/WWGST/UTRT/GOx/PromptRangers/CodegenAgentScheduler/"
+
+[vars.project_path]
+description = "Absolute path to the casc_cdk package working tree"
+required = true
+
+[vars.rigs_root]
+description = "Parent directory of project_path; .docs-suppress lookups happen here"
+default = ""
+
+[[steps]]
+id = "preflight"
+title = "Verify environment and credentials"
+description = """
+Verify the patrol can run end-to-end before we touch any wiki state.
+
+**1. Verify required tools are on PATH:**
+```bash
+for cmd in git npx raw bd gt; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "missing: $cmd" >&2; exit 2; }
+done
+```
+
+**2. Verify the project tree exists:**
+```bash
+test -d "{{project_path}}" || { echo "project_path missing: {{project_path}}" >&2; exit 2; }
+test -f "{{project_path}}/scripts/wiki-publisher.ts" || {
+  echo "wiki-publisher.ts missing — formula version mismatch?" >&2
+  exit 2
+}
+test -f "{{project_path}}/scripts/wiki-patrol.sh" || {
+  echo "wiki-patrol.sh missing — formula version mismatch?" >&2
+  exit 2
+}
+```
+
+**3. Verify Midway scope:**
+
+The patrol identity MUST have raw 4.0 credentials scoped to
+`{{wiki_base_path}}` and NOT broader. A `raw read` against the base
+path is a cheap scope check that does not modify wiki state:
+```bash
+raw read "{{wiki_base_path}}" >/dev/null 2>&1 || {
+  echo "raw read scope check failed — Midway credential not scoped correctly?" >&2
+  gt escalate -s HIGH "wiki-patrol: scope check failed" \
+    -m "raw read against {{wiki_base_path}} returned non-zero. Patrol cannot proceed."
+  exit 1
+}
+```
+
+**Exit criteria:** All required tools available, project tree present,
+patrol credential confirmed in-scope.
+"""
+
+[[steps]]
+id = "run-patrol"
+title = "Pull, regenerate, scan, and publish"
+needs = ["preflight"]
+description = """
+Invoke `scripts/wiki-patrol.sh`. The script handles all of: pull → generate
+→ secrets scan → publish, AND files a wiki-correction bead + escalates on
+any failure stage.
+
+```bash
+cd "{{project_path}}"
+
+WIKI_PATROL_ARGS=()
+if [[ "{{dry_run}}" == "true" ]]; then
+  WIKI_PATROL_ARGS+=(--dry-run)
+fi
+if [[ "{{skip_pull}}" == "true" ]]; then
+  WIKI_PATROL_ARGS+=(--skip-pull)
+fi
+
+# Override defaults via env vars (the script reads these).
+export WIKI_BASE_PATH="{{wiki_base_path}}"
+if [[ -n "{{rigs_root}}" ]]; then
+  export RIGS_ROOT="{{rigs_root}}"
+fi
+
+scripts/wiki-patrol.sh "${WIKI_PATROL_ARGS[@]}"
+```
+
+The script's exit code is the formula step's exit code. A non-zero exit
+indicates the bead and escalation were already filed by the script — the
+formula step should NOT re-file. The Mayor / Witness will pick up the
+escalation through normal channels.
+
+**Exit criteria:** Patrol script exited 0 (publish complete) OR exited
+non-zero with a wiki-correction bead already filed and escalation sent.
+"""
+
+[[steps]]
+id = "summarize"
+title = "Persist patrol summary as a bead note"
+needs = ["run-patrol"]
+description = """
+The publisher writes a structured JSON summary to
+`{{project_path}}/.wiki-state/summaries/<timestamp>.json`.
+Capture key counts in the patrol bead's notes for fast triage.
+
+```bash
+cd "{{project_path}}"
+LATEST_SUMMARY="$(ls -1t .wiki-state/summaries/*.json 2>/dev/null | head -n 1)"
+if [[ -z "$LATEST_SUMMARY" ]]; then
+  echo "No summary file found — patrol may have failed at preflight"
+  exit 0  # Non-fatal: a failure already filed its own bead.
+fi
+
+if command -v jq >/dev/null 2>&1; then
+  TOTAL=$(jq -r '.total' "$LATEST_SUMMARY")
+  PUBLISHED=$(jq -r '.published' "$LATEST_SUMMARY")
+  SKIPPED=$(jq -r '.skipped' "$LATEST_SUMMARY")
+  SUPPRESSED=$(jq -r '.suppressed' "$LATEST_SUMMARY")
+  FAILED=$(jq -r '.failed' "$LATEST_SUMMARY")
+  echo "patrol summary: total=$TOTAL published=$PUBLISHED skipped=$SKIPPED suppressed=$SUPPRESSED failed=$FAILED"
+fi
+```
+
+**Exit criteria:** Summary surfaced in patrol logs (or graceful skip if
+the patrol failed before producing a summary).
+"""
