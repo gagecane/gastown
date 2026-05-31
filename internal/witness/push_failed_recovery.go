@@ -3,10 +3,130 @@ package witness
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 )
+
+// patchEquivalenceChecker is the subset of *git.Git that classifyCherryUnmerged
+// needs. Defined as an interface so tests can drive the patch-equivalence
+// decision without a real repo.
+type patchEquivalenceChecker interface {
+	Cherry(upstream, head string) (string, error)
+	IsAncestor(ancestor, descendant string) (bool, error)
+}
+
+// isPatchEquivalent reports whether the polecat's work on HEAD has already
+// shipped on origin/<branch> — even when SHAs differ from a post-push rebase.
+// This is the rebase-after-push detector for gu-l0u0.
+//
+// Algorithm:
+//
+//  1. Run `git cherry origin/<branch> HEAD`. Each commit on HEAD becomes a
+//     "+ <sha>" (patch missing on origin/<branch>) or "- <sha>" (patch
+//     already applied upstream, possibly under a different SHA — the
+//     rebase-replay case).
+//  2. If there are zero "+" lines, every local patch is patch-equivalent to
+//     origin/<branch>. The work shipped.
+//  3. If there are "+" lines, they could be EITHER:
+//     a. Genuine unique work not on origin/<branch> → diverged.
+//     b. Mainline commits that the rebase swept onto HEAD (e.g., the new
+//        commits on origin/<defaultBranch> that the rebase incorporated).
+//        Origin/<branch> wouldn't have these, but they aren't "unique work"
+//        either — they're already on the target. Treat as patch-equivalent.
+//
+// We discriminate (3a) vs (3b) by checking whether each "+" SHA is an ancestor
+// of origin/<defaultBranch>. If every "+" SHA is on mainline, the only
+// commits HEAD has that origin/<branch> doesn't are mainline commits the
+// rebase pulled in — work is shipped. If any "+" SHA is NOT on mainline AND
+// NOT patch-equivalent to origin/<branch>, that's genuine unique work →
+// diverged.
+//
+// Best-effort: any error returns false (caller falls through to the existing
+// diverged path). False positives would silently lose work, so we err on the
+// side of conservative classification.
+//
+// `git cherry` against a remote-tracking branch requires the remote ref to be
+// locally cached. We fetch the specific branch first; failure is non-fatal.
+func isPatchEquivalent(g *git.Git, townRoot, rigName, remote, branch string) bool {
+	if g == nil || remote == "" || branch == "" {
+		return false
+	}
+	// Refresh the remote-tracking refs so cherry/IsAncestor compare against
+	// the freshest origin state. Non-fatal: stale refs produce a conservative
+	// "diverged" answer rather than a wrong one.
+	_ = g.FetchBranch(remote, branch)
+
+	defaultBranch := resolveDefaultBranch(townRoot, rigName)
+	_ = g.FetchBranch(remote, defaultBranch)
+
+	mainlineRef := remote + "/" + defaultBranch
+	return cherryAllShippedOrOnMainline(g, remote+"/"+branch, "HEAD", mainlineRef)
+}
+
+// resolveDefaultBranch returns the rig's configured default branch, or "main"
+// when the rig config can't be read. Best-effort lookup.
+func resolveDefaultBranch(townRoot, rigName string) string {
+	defaultBranch := "main"
+	if townRoot != "" && rigName != "" {
+		if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+			defaultBranch = rigCfg.DefaultBranch
+		}
+	}
+	return defaultBranch
+}
+
+// cherryAllShippedOrOnMainline returns true when every commit on `head` is
+// either patch-equivalent to one already on `upstream` (a "-" line in
+// `git cherry`) OR an ancestor of `mainlineRef` (a mainline commit the
+// rebase incorporated). Factored out from isPatchEquivalent so tests can
+// drive the decision against a stub git.
+//
+// Returns false on any error or unexpected output — conservative classification
+// preserves the existing "diverged → escalate to mayor" behavior.
+func cherryAllShippedOrOnMainline(g patchEquivalenceChecker, upstream, head, mainlineRef string) bool {
+	if g == nil || upstream == "" || head == "" {
+		return false
+	}
+	out, err := g.Cherry(upstream, head)
+	if err != nil {
+		return false
+	}
+	for _, raw := range strings.Split(strings.TrimSpace(out), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		// "- <sha>": patch already on upstream by patch-id. Always shipped.
+		if strings.HasPrefix(line, "-") {
+			continue
+		}
+		if !strings.HasPrefix(line, "+") {
+			// Unexpected format — bail conservatively.
+			return false
+		}
+		// "+ <sha>": patch not on upstream. Acceptable only if the commit is
+		// already an ancestor of mainline (rebase swept it in). Otherwise
+		// it's unique unshipped work.
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return false
+		}
+		sha := fields[1]
+		if mainlineRef == "" {
+			// No mainline reference to test against — can't justify the "+".
+			return false
+		}
+		isOnMainline, ancErr := g.IsAncestor(sha, mainlineRef)
+		if ancErr != nil || !isOnMainline {
+			return false
+		}
+	}
+	return true
+}
 
 // PushRecoveryOutcome enumerates the possible results of attempting to recover
 // a stranded polecat branch when the agent bead has push_failed=true and
@@ -45,6 +165,19 @@ const (
 	// Caller leaves the bead in push_failed state for a future patrol cycle
 	// to retry (or for mayor to investigate).
 	PushRecoveryBackoff
+
+	// PushRecoveryPatchEquivalent means origin and local diverged textually
+	// (different SHAs, neither an ancestor of the other) BUT every local patch
+	// is already present on origin/<branch> — the rebase-after-push pattern
+	// (gu-l0u0). Caller treats this like AlreadyOnOrigin: clear push_failed
+	// and route through normal completion. The work shipped; the local SHAs
+	// are just the post-rebase replay of patches that already landed.
+	//
+	// Why a distinct outcome: operators benefit from knowing this happened
+	// (it explains why a "diverged" branch was treated as recovered), and
+	// log scrapers / metrics may want to track rebase-after-push frequency
+	// separately from clean re-checks.
+	PushRecoveryPatchEquivalent
 )
 
 // String returns a stable lowercase token suitable for embedding in
@@ -59,6 +192,8 @@ func (o PushRecoveryOutcome) String() string {
 		return "diverged"
 	case PushRecoveryBackoff:
 		return "backoff"
+	case PushRecoveryPatchEquivalent:
+		return "patch-equivalent"
 	case PushRecoveryUnknown:
 		fallthrough
 	default:
@@ -117,7 +252,7 @@ func resetPushRecoveryBudget() {
 // It is invoked when the agent bead's PushFailed flag is set AND
 // branchOnOrigin reports the branch is genuinely missing upstream.
 //
-// Flow (mirrors gu-ebj0 acceptance criteria):
+// Flow (mirrors gu-ebj0 acceptance criteria, extended for gu-l0u0):
 //
 //  1. Open the polecat's worktree. If it is missing or not a git repo,
 //     return PushRecoveryUnknown — caller escalates as before.
@@ -127,7 +262,10 @@ func resetPushRecoveryBudget() {
 //     Success → PushRecoveryPushed. Failure → PushRecoveryDiverged.
 //     c. If HEAD is an ancestor of origin/<branch>: PushRecoveryAlreadyOnOrigin
 //     (origin moved ahead — local has nothing to add).
-//     d. Otherwise: PushRecoveryDiverged (incompatible histories).
+//     d. Otherwise (textual divergence): run `git cherry origin/<branch> HEAD`.
+//     If every local patch is already present on origin/<branch> (count of
+//     "+ " lines == 0), return PushRecoveryPatchEquivalent — this is the
+//     rebase-after-push pattern (gu-l0u0). Otherwise: PushRecoveryDiverged.
 //  3. If origin does NOT have the branch: attempt a fresh push.
 //     Success → PushRecoveryPushed. Failure → PushRecoveryDiverged
 //     (branch absent + push rejected = something we can't auto-resolve).
@@ -192,6 +330,20 @@ func _recoverPushFailed(townRoot, rigName, polecatName, branch string) PushRecov
 		// Is origin ahead of HEAD? (HEAD is ancestor of origin → nothing to add.)
 		if isAnc, err := g.IsAncestor(headSHA, originTip); err == nil && isAnc {
 			return PushRecoveryAlreadyOnOrigin
+		}
+		// Textual divergence: SHAs differ and neither is an ancestor of the other.
+		// Before declaring this a hard divergence, check patch-equivalence (gu-l0u0).
+		// The rebase-after-push pattern produces exactly this shape: an earlier
+		// push delivered the patches under SHA X, then a subsequent rebase on
+		// the local branch picked up new mainline commits and replayed the same
+		// patches under SHA Y. The work IS shipped; only the SHAs differ.
+		//
+		// `git cherry <upstream> <head>` reports each commit on HEAD with "+ "
+		// (patch missing on upstream) or "- " (patch already applied upstream
+		// by patch-id). If zero "+" lines, every local patch is already on
+		// origin → patch-equivalent → treat like AlreadyOnOrigin.
+		if isPatchEquivalent(g, townRoot, rigName, remote, branch) {
+			return PushRecoveryPatchEquivalent
 		}
 		// Diverged.
 		return PushRecoveryDiverged

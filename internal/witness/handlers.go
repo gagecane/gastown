@@ -291,7 +291,11 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 			// fall through to the existing escalate path.
 			outcome := recoverPushFailed(townRoot, rigName, polecatName, payload.Branch)
 			switch outcome {
-			case PushRecoveryAlreadyOnOrigin, PushRecoveryPushed:
+			case PushRecoveryAlreadyOnOrigin, PushRecoveryPushed, PushRecoveryPatchEquivalent:
+				// gu-l0u0: PatchEquivalent joins the success set — the work
+				// shipped under earlier SHAs and a subsequent rebase rewrote
+				// HEAD. Clear the sticky push_failed flag and route through
+				// normal completion (downstream MR-discovery picks up the work).
 				prefix := beads.GetPrefixForRig(townRoot, rigName)
 				agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 				clearPushFailedOnAgent(bd, workDir, agentBeadID)
@@ -3559,7 +3563,11 @@ func processDiscoveredCompletion(bd *BdCli, workDir, rigName string, payload *Po
 			// matching bead-fields path; both call into recoverPushFailed.
 			outcome := recoverPushFailed(townRoot, rigName, payload.PolecatName, payload.Branch)
 			switch outcome {
-			case PushRecoveryAlreadyOnOrigin, PushRecoveryPushed:
+			case PushRecoveryAlreadyOnOrigin, PushRecoveryPushed, PushRecoveryPatchEquivalent:
+				// gu-l0u0: PatchEquivalent joins the success set — the work
+				// shipped under earlier SHAs and a subsequent rebase rewrote
+				// HEAD. Clear the sticky push_failed flag and route through
+				// normal completion (downstream MR-discovery picks up the work).
 				prefix := beads.GetPrefixForRig(townRoot, rigName)
 				agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, payload.PolecatName)
 				clearPushFailedOnAgent(bd, workDir, agentBeadID)
