@@ -12,7 +12,10 @@ labels = ["plugin:stuck-agent-dog", "category:health"]
 digest = true
 
 [execution]
-timeout = "5m"
+# 10m (was 5m): scanning ~14 polecats + deacon performs many serial bd/jq/tmux
+# queries per session and was hitting the 5m wall (gu-brrm). 10m gives headroom
+# for the long tail until parallelization lands.
+timeout = "10m"
 notify_on_failure = true
 severity = "high"
 +++

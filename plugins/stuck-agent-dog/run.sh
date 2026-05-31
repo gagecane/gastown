@@ -377,7 +377,10 @@ while IFS='|' read -r RIG PREFIX; do
           if [ -n "$HOOK_BEAD" ]; then
             # Flag identity-bead hooks as a separate anomaly class. Auto-dispatch
             # is supposed to filter these; if one leaks through we want to know.
-            if echo "$HOOK_BEAD" | grep -Eq "$IDENTITY_BEAD_PATTERN"; then
+            # Use bash's [[ =~ ]] rather than `grep -E "$pat"` because the pattern
+            # begins with `-` and grep treats leading-dash patterns as option flags
+            # (`grep: invalid option -- '('`), spamming stderr on every cycle (gu-brrm).
+            if [[ "$HOOK_BEAD" =~ $IDENTITY_BEAD_PATTERN ]]; then
               IDENTITY_HOOKED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
               log "  IDENTITY-HOOK: $SESSION_NAME hooked to identity bead $HOOK_BEAD"
             fi
