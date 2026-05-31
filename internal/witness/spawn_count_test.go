@@ -5,9 +5,47 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
+
+// TestShouldBlockRespawn_StaleBlockDecays verifies hq-0qszq/hq-5em9k: an
+// at-limit respawn block self-heals once no new respawn lands within the decay
+// window (host-load fallout shouldn't permanently wedge a bead), while a fresh
+// at-limit block still blocks.
+func TestShouldBlockRespawn_StaleBlockDecays(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	max := config.LoadOperationalConfig(tmpDir).GetWitnessConfig().MaxBeadRespawnsV()
+	if max < 1 {
+		t.Skipf("unexpected max respawns %d", max)
+	}
+
+	for i := 0; i < max; i++ {
+		RecordBeadRespawn(tmpDir, "bead-decay")
+	}
+	if !ShouldBlockRespawn(tmpDir, "bead-decay") {
+		t.Fatalf("a fresh at-limit block must block")
+	}
+
+	// Age LastRespawn beyond the decay window — simulates a storm-induced block
+	// long after load has recovered.
+	st := loadBeadRespawnState(tmpDir)
+	st.Beads["bead-decay"].LastRespawn = time.Now().UTC().Add(-respawnBlockDecayWindow - time.Minute)
+	if err := saveBeadRespawnState(tmpDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if ShouldBlockRespawn(tmpDir, "bead-decay") {
+		t.Errorf("a stale at-limit block (past decay window) must auto-clear")
+	}
+	if rec := loadBeadRespawnState(tmpDir).Beads["bead-decay"]; rec != nil {
+		t.Errorf("stale block must be deleted so the bead re-arms; still present count=%d", rec.Count)
+	}
+}
 
 func TestRecordBeadRespawn_Increments(t *testing.T) {
 	tmpDir := t.TempDir()

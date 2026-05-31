@@ -63,11 +63,24 @@ func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 	return os.WriteFile(stateFile, data, 0600)
 }
 
+// respawnBlockDecayWindow bounds how long a respawn block lasts. The respawn
+// limit guards against fast witness→deacon→sling feedback loops (seconds to a
+// few minutes between attempts). A genuinely-looping bead keeps re-triggering
+// well within this window, so it stays blocked. But a bead that hit the limit
+// because its spawns/gates were SIGKILLed under host OOM/swap pressure (hq-0qszq
+// load storm) would otherwise stay PERMANENTLY wedged long after load recovered,
+// requiring a manual `gt sling respawn-reset`. Once no new respawn has been
+// recorded for this window, the block is treated as stale and cleared so the
+// bead auto-recovers on the next dispatch (hq-5em9k / hq-q943s class: a load
+// storm must not permanently wedge work).
+const respawnBlockDecayWindow = 30 * time.Minute
+
 // ShouldBlockRespawn returns true if the bead has already been respawned
-// MaxBeadRespawns times (from operational config). When true, the caller
-// should escalate to mayor instead of sending RECOVERED_BEAD to deacon
-// for re-dispatch. This is the primary circuit breaker for spawn storms
-// (clown show #22).
+// MaxBeadRespawns times (from operational config) AND the block is still fresh.
+// When true, the caller should escalate to mayor instead of sending
+// RECOVERED_BEAD to deacon for re-dispatch. This is the primary circuit breaker
+// for spawn storms (clown show #22). A block older than respawnBlockDecayWindow
+// is cleared so a load-storm-induced wedge self-heals once conditions recover.
 func ShouldBlockRespawn(workDir, beadID string) bool {
 	respawnMu.Lock()
 	defer respawnMu.Unlock()
@@ -86,10 +99,19 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 
 	state := loadBeadRespawnState(townRoot)
 	rec, ok := state.Beads[beadID]
-	if !ok {
+	if !ok || rec.Count < maxRespawns {
 		return false
 	}
-	return rec.Count >= maxRespawns
+
+	// hq-0qszq/hq-5em9k: a stale block (no new respawn within the decay window)
+	// is most likely host-load fallout, not a live loop — clear it so the bead
+	// auto-recovers instead of staying wedged until a manual respawn-reset.
+	if !rec.LastRespawn.IsZero() && time.Since(rec.LastRespawn) > respawnBlockDecayWindow {
+		delete(state.Beads, beadID)
+		_ = saveBeadRespawnState(townRoot, state)
+		return false
+	}
+	return true
 }
 
 // RecordBeadRespawn increments the respawn count for beadID and returns the new count.
