@@ -872,7 +872,7 @@ listener:
   port: %d%s
   read_timeout_millis: 30000
   write_timeout_millis: 30000
-  max_connections: 1000
+  max_connections: 100
 
 data_dir: %q
 

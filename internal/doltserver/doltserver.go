@@ -139,7 +139,16 @@ func setDoltGlobalConfig(key, value string) error {
 const (
 	DefaultPort           = 3307
 	DefaultUser           = "root" // Default Dolt user (no password for local access)
-	DefaultMaxConnections = 1000   // Dolt default; no reason to limit below (Tim Sehn confirmed 1k is fine)
+	// DefaultMaxConnections caps Dolt's connection pool.
+	//
+	// Earlier comment justified 1000 ("Dolt default; Tim Sehn confirmed 1k is
+	// fine"), but Gas Town empirical usage observed across multiple outage
+	// events showed 1-19 concurrent connections in practice. The 1000-conn pool
+	// reserves memory and contributes to oom_score, making Dolt a frequent
+	// OOM-killer target during system memory pressure. 100 is comfortably above
+	// observed peak concurrency and meaningfully reduces resident memory.
+	// See gc-1ld5e / gu-qlcr.
+	DefaultMaxConnections = 100
 
 	// DefaultReadTimeoutMs is the server-side timeout for reading a complete request from a client.
 	// Controls how long Dolt waits for a client to send a query on an idle connection.
@@ -242,8 +251,9 @@ type Config struct {
 	PidFile string
 
 	// MaxConnections is the maximum number of simultaneous connections the server will accept.
-	// Set to 0 to use the Dolt default (1000). Gas Town defaults to 50 to prevent
-	// connection storms during mass polecat slings.
+	// Set to 0 to use the Dolt default (1000). Gas Town defaults to 100
+	// (DefaultMaxConnections) — observed peak concurrency is ~1-19, and the
+	// lower cap reduces Dolt's resident memory and OOM-target score. See gu-qlcr.
 	MaxConnections int
 
 	// ReadTimeoutMs is the server-side read timeout in milliseconds.

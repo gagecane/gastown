@@ -472,7 +472,7 @@ type DoltThresholds struct {
 	// CmdTimeout is timeout for individual dolt CLI commands (default "15s").
 	CmdTimeout string `json:"cmd_timeout,omitempty"`
 
-	// MaxConnections is max concurrent connections (default 1000).
+	// MaxConnections is max concurrent connections (default 100).
 	MaxConnections *int `json:"max_connections,omitempty"`
 
 	// SlowQueryThreshold is duration above which a query is flagged slow (default "1s").

@@ -2339,8 +2339,8 @@ func TestDefaultConfig_MaxConnections(t *testing.T) {
 	if config.MaxConnections != DefaultMaxConnections {
 		t.Errorf("MaxConnections = %d, want %d", config.MaxConnections, DefaultMaxConnections)
 	}
-	if config.MaxConnections != 1000 {
-		t.Errorf("DefaultMaxConnections = %d, want 1000", config.MaxConnections)
+	if config.MaxConnections != 100 {
+		t.Errorf("DefaultMaxConnections = %d, want 100", config.MaxConnections)
 	}
 }
 
@@ -4718,7 +4718,7 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 	config := &Config{
 		Port:           3307,
 		DataDir:        dir,
-		MaxConnections: 1000,
+		MaxConnections: DefaultMaxConnections,
 		ReadTimeoutMs:  DefaultReadTimeoutMs,
 		WriteTimeoutMs: DefaultWriteTimeoutMs,
 		LogLevel:       "warning",
@@ -4736,7 +4736,7 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 
 	checks := []string{
 		"port: 3307",
-		"max_connections: 1000",
+		fmt.Sprintf("max_connections: %d", DefaultMaxConnections),
 		fmt.Sprintf("read_timeout_millis: %d", DefaultReadTimeoutMs),
 		fmt.Sprintf("write_timeout_millis: %d", DefaultWriteTimeoutMs),
 		"data_dir: \"" + dir + "\"",
@@ -4782,8 +4782,8 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 	if parsed.Listener.Port != 3307 {
 		t.Errorf("listener.port = %d, want 3307", parsed.Listener.Port)
 	}
-	if parsed.Listener.MaxConnections != 1000 {
-		t.Errorf("listener.max_connections = %d, want 1000", parsed.Listener.MaxConnections)
+	if parsed.Listener.MaxConnections != DefaultMaxConnections {
+		t.Errorf("listener.max_connections = %d, want %d", parsed.Listener.MaxConnections, DefaultMaxConnections)
 	}
 	if parsed.Listener.ReadTimeoutMillis != DefaultReadTimeoutMs {
 		t.Errorf("listener.read_timeout_millis = %d, want %d", parsed.Listener.ReadTimeoutMillis, DefaultReadTimeoutMs)
