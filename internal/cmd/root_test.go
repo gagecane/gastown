@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -356,4 +357,88 @@ func TestTouchAgentHeartbeat_NoSession(t *testing.T) {
 	for _, e := range entries {
 		t.Errorf("touchAgentHeartbeat with empty GT_SESSION wrote %q", e.Name())
 	}
+}
+
+// TestCheckStaleBinaryWarning_SuppressedOnNonTTY pins the regression fix for
+// gu-hmsv: when stderr is captured (not a TTY), the stale-binary banner must
+// NOT be written. Otherwise it leaks into convoy failure logs, refinery gate
+// output, and other capture-stderr code paths where it masquerades as the
+// actual error message.
+//
+// Test plan: redirect os.Stderr to a pipe (which is non-TTY), call
+// checkStaleBinaryWarning, and assert nothing was written. We don't need to
+// stage a stale binary — the function must short-circuit on the TTY check
+// before it runs `version.CheckStaleBinary`.
+func TestCheckStaleBinaryWarning_SuppressedOnNonTTY(t *testing.T) {
+	// Reset the once-per-session sentinel so this test is hermetic regardless
+	// of test ordering. The function early-returns if either staleBinaryWarned
+	// is set or GT_STALE_WARNED=1; clear both.
+	prevWarned := staleBinaryWarned
+	staleBinaryWarned = false
+	t.Cleanup(func() { staleBinaryWarned = prevWarned })
+	t.Setenv("GT_STALE_WARNED", "")
+	t.Setenv("GT_STALE_WARN", "") // ensure debug override is off
+
+	// Swap os.Stderr for a pipe (pipes are NOT terminals).
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	// Drain the read end in a goroutine so writes never block (defensive: the
+	// function under test should write nothing, but if a regression
+	// reintroduces the leak we still want the test to fail cleanly rather
+	// than deadlock).
+	captured := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		captured <- data
+	}()
+
+	checkStaleBinaryWarning()
+
+	// Close the writer so the reader returns.
+	_ = w.Close()
+	got := <-captured
+
+	if len(got) != 0 {
+		t.Errorf("checkStaleBinaryWarning wrote %q to stderr when stderr is non-TTY; want no output (gu-hmsv)", string(got))
+	}
+}
+
+// TestCheckStaleBinaryWarning_DebugOverride verifies that GT_STALE_WARN=1 lets
+// the staleness check proceed even when stderr is non-TTY. We can't easily
+// stage a stale binary in a unit test, so we assert that the function reaches
+// the version.CheckStaleBinary path (not the TTY short-circuit) by observing
+// that it does NOT early-return — i.e. setting staleBinaryWarned=true would
+// make a second call a no-op even with the override. That's a weak signal,
+// so instead we just assert no panic and rely on the fact that
+// CheckStaleBinary returns Error!=nil from a non-git temp dir, taking the
+// silent-skip branch. The regression we care about — stderr leak on non-TTY
+// — is pinned by the test above.
+func TestCheckStaleBinaryWarning_DebugOverride(t *testing.T) {
+	prevWarned := staleBinaryWarned
+	staleBinaryWarned = false
+	t.Cleanup(func() { staleBinaryWarned = prevWarned })
+	t.Setenv("GT_STALE_WARNED", "")
+	t.Setenv("GT_STALE_WARN", "1")
+
+	// Redirect stderr so any output during the test doesn't pollute test logs.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+	go func() { _, _ = io.ReadAll(r) }()
+
+	// Just verify it doesn't panic. With GT_STALE_WARN=1 the function takes
+	// the version.CheckStaleBinary path; from a non-git cwd that returns
+	// Error!=nil and the function silently skips.
+	checkStaleBinaryWarning()
+	_ = w.Close()
 }

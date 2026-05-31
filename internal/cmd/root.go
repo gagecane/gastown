@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -279,9 +281,24 @@ var staleBinaryWarned = os.Getenv("GT_STALE_WARNED") == "1"
 
 // checkStaleBinaryWarning checks if the installed binary is stale and prints a warning.
 // This is a non-blocking check - errors are silently ignored.
+//
+// The warning only fires when stderr is an interactive terminal. When stderr is
+// captured by another process (e.g. convoy/sling subprocess invocations or CI
+// log scrapers), the banner is suppressed — leaking it into structured-output
+// paths makes the warning masquerade as the actual error in failure logs
+// (gu-hmsv). Set GT_STALE_WARN=1 to force the warning even when stderr is not
+// a TTY (useful for debugging the staleness check itself).
 func checkStaleBinaryWarning() {
 	// Only warn once per shell session
 	if staleBinaryWarned {
+		return
+	}
+
+	// Suppress the warning when stderr is captured (non-TTY). This prevents
+	// the banner from leaking into convoy failure logs, refinery gate output,
+	// and other capture-stderr code paths where it masquerades as the real
+	// error. Override with GT_STALE_WARN=1 for debugging.
+	if os.Getenv("GT_STALE_WARN") != "1" && !term.IsTerminal(int(os.Stderr.Fd())) {
 		return
 	}
 
