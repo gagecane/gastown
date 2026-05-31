@@ -193,8 +193,23 @@ func (m *SessionManager) Stop(dogName string, force bool) error {
 	return nil
 }
 
-// IsRunning checks if a dog session is active.
+// IsRunning checks if a dog session is active AND has a live agent process.
+// Checks both tmux session existence AND agent process liveness to avoid
+// reporting zombie sessions (tmux alive but Claude dead) as "running" — a
+// zombie that the dispatcher would otherwise treat as a healthy worker,
+// assigning it a hook/mail that no live agent ever consumes (gs-49s).
+// This mirrors the polecat/witness/refinery managers, which already use
+// CheckSessionHealth for their liveness check.
 func (m *SessionManager) IsRunning(dogName string) (bool, error) {
+	sessionID := m.SessionName(dogName)
+	return m.tmux.CheckSessionHealth(sessionID, 0) == tmux.SessionHealthy, nil
+}
+
+// SessionExists reports whether the dog's tmux session exists, regardless of
+// whether a live agent runs inside it. Reap/kill paths use this (rather than
+// IsRunning) so a zombie session — tmux alive, agent dead — is still torn
+// down instead of leaking until orphan cleanup. See gs-49s.
+func (m *SessionManager) SessionExists(dogName string) (bool, error) {
 	sessionID := m.SessionName(dogName)
 	return m.tmux.HasSession(sessionID)
 }

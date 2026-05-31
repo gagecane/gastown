@@ -149,8 +149,10 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm *dog.SessionManager
 			continue
 		}
 
-		// Kill the tmux session — it's not doing anything useful.
-		running, err := sm.IsRunning(dg.Name)
+		// Kill the tmux session — it's not doing anything useful. Use
+		// SessionExists (not IsRunning) so a zombie session whose agent
+		// already died is still torn down rather than leaked (gs-49s).
+		running, err := sm.SessionExists(dg.Name)
 		if err != nil {
 			d.logger.Printf("Handler: error checking session for stale dog %s: %v", dg.Name, err)
 			continue
@@ -186,9 +188,11 @@ func (d *Daemon) reapIdleDogs(mgr *dog.Manager, sm *dog.SessionManager, daemonCf
 
 		idleDuration := now.Sub(dg.LastActive)
 
-		// Phase 1: kill stale tmux sessions for idle dogs.
+		// Phase 1: kill stale tmux sessions for idle dogs. Use SessionExists
+		// (not IsRunning) so a zombie session — tmux alive, agent dead — is
+		// still reaped instead of leaking until orphan cleanup (gs-49s).
 		if idleDuration >= idleSessionTimeout {
-			running, err := sm.IsRunning(dg.Name)
+			running, err := sm.SessionExists(dg.Name)
 			if err != nil {
 				d.logger.Printf("Handler: error checking session for idle dog %s: %v", dg.Name, err)
 				continue
@@ -206,8 +210,10 @@ func (d *Daemon) reapIdleDogs(mgr *dog.Manager, sm *dog.SessionManager, daemonCf
 			d.logger.Printf("Handler: removing long-idle dog %s from kennel (idle %v, pool %d/%d)",
 				dg.Name, idleDuration.Truncate(time.Minute), poolSize, poolMax)
 
-			// Ensure session is dead before removing.
-			running, _ := sm.IsRunning(dg.Name)
+			// Ensure session is dead before removing. SessionExists (not
+			// IsRunning) so a lingering zombie session is also torn down
+			// before the dog is removed from the kennel (gs-49s).
+			running, _ := sm.SessionExists(dg.Name)
 			if running {
 				_ = sm.Stop(dg.Name, true)
 			}
