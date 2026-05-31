@@ -304,6 +304,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewUnregisteredBeadsDirsCheck())
 	d.Register(doctor.NewNullAssigneeCheck())
 
+	// Detect rig code-bug beads misfiled in the town (hq-) db (hq-o1afr class).
+	d.Register(doctor.NewMisfiledRigBugCheck())
+
 	// Worktree gitdir validity (runs across all rigs, or specific rig with --rig)
 	d.Register(doctor.NewWorktreeGitdirCheck())
 
