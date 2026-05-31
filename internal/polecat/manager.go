@@ -1336,6 +1336,15 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 		return os.RemoveAll(polecatDir)
 	}
 
+	// TEARDOWN INVARIANT (hq-kpodq): before destroying the worktree, anchor any
+	// HEAD commit that is not already durably stored to a protected ref in the
+	// bare repo. The best-effort push above skips detached-HEAD worktrees, non-
+	// polecat branches, and any push that fails, and merge=local prototypes are
+	// never pushed at all — in every one of those cases the worktree + branch are
+	// about to be deleted and the commits would survive only as dangling objects
+	// until the next git gc, then vanish silently. Anchoring keeps them reachable.
+	m.preserveUnpushedHead(name, clonePath, repoGit)
+
 	// Try to remove as a worktree first (use force flag for worktree removal too)
 	if err := repoGit.WorktreeRemove(clonePath, force); err != nil {
 		// Fall back to direct removal if worktree removal fails
@@ -1373,6 +1382,46 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	_ = m.namePool.Save()
 
 	return nil
+}
+
+// preserveUnpushedHead anchors the worktree's HEAD commit to a durable,
+// GC-safe ref in the bare repo before the worktree is destroyed — UNLESS the
+// commit is already reachable from the rig's base branch (already merged, so
+// durably stored). This is the teardown data-loss invariant (hq-kpodq).
+//
+// The bare repo (.repo.git) shares its object store with linked worktrees, so
+// the HEAD commit is already present there; a ref under refs/preserved/ simply
+// keeps it reachable through worktree removal, branch deletion, and git gc.
+// Recover later with: git -C <rig>/.repo.git log <ref>.
+//
+// Best-effort and non-fatal: a preservation failure must never block teardown,
+// but it is logged loudly so any at-risk work is visible.
+func (m *Manager) preserveUnpushedHead(name, clonePath string, repoGit *git.Git) {
+	wt := git.NewGit(clonePath)
+	head, err := wt.Rev("HEAD")
+	if err != nil || len(head) < 12 {
+		return // no resolvable worktree HEAD to preserve (already removed, or empty repo)
+	}
+
+	// Skip if the commit is already on the rig's base branch — it is durably
+	// stored and nothing is at risk. Checked in the bare repo, which holds the
+	// shared object store and the canonical base ref(s). If the base ref is
+	// missing or the check errors, we fall through and anchor (safe default).
+	if base := m.rig.DefaultBranch(); base != "" {
+		for _, baseRef := range []string{"refs/remotes/origin/" + base, "refs/heads/" + base} {
+			if anc, ancErr := repoGit.IsAncestor(head, baseRef); ancErr == nil && anc {
+				return
+			}
+		}
+	}
+
+	preservedRef := fmt.Sprintf("refs/preserved/%s/%s", name, head[:12])
+	if err := repoGit.UpdateRef(preservedRef, head); err != nil {
+		style.PrintWarning("WORK AT RISK: could not anchor unpushed HEAD %s for %s before removal: %v", head[:12], name, err)
+		return
+	}
+	style.PrintWarning("preserved unpushed work: anchored HEAD %s -> %s in bare repo before removing %s (recover: git -C %s/.repo.git log %s)",
+		head[:12], preservedRef, name, m.rig.Path, preservedRef)
 }
 
 // verifyRemovalComplete checks that polecat directories were actually removed.

@@ -2379,6 +2379,14 @@ func (g *Git) Rev(ref string) (string, error) {
 	return g.run("rev-parse", ref)
 }
 
+// UpdateRef points ref at newValue (a commit SHA), creating ref if absent.
+// Used to anchor a commit under a protected namespace so it survives worktree
+// and branch deletion plus git gc — any ref keeps its objects reachable.
+func (g *Git) UpdateRef(ref, newValue string) error {
+	_, err := g.run("update-ref", ref, newValue)
+	return err
+}
+
 // IsAncestor checks if ancestor is an ancestor of descendant.
 func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	_, err := g.run("merge-base", "--is-ancestor", ancestor, descendant)
