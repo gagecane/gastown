@@ -90,6 +90,23 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no active patrol found for %s", cfg.RoleName)
 	}
 
+	// Refinery-only: if the agent reported queue-scan:EMPTY, independently
+	// verify against the rig's merge queue. A wrong-label query (e.g.
+	// `bd list --label=mr`) returns 0 even when MRs are pending — without
+	// this gate the report would close the patrol cycle and the queue
+	// would stall (gu-6hzv, gu-weki).
+	if roleInfo.Role == RoleRefinery && roleInfo.Rig != "" {
+		// MRs live in the rig's beads database (typically a redirect to
+		// mayor/rig/.beads); query that, not the town root.
+		_, r, rigErr := getRig(roleInfo.Rig)
+		if rigErr == nil && r != nil {
+			rigBeads := beads.New(r.BeadsPath())
+			if err := verifyRefineryQueueScan(roleInfo.Rig, patrolReportSteps, rigBeads); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Close the current patrol root with the summary
 	b := beads.New(cfg.BeadsDir)
 

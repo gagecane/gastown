@@ -276,6 +276,13 @@ bd list --label gt:merge-request --status open
 But for normal patrol you MUST use `gt mq list <rig>` — that command is the
 contract and isolates you from label-schema changes.
 
+**Server-side enforcement (gu-6hzv):** `gt patrol report --steps
+queue-scan:EMPTY` independently verifies the rig's merge queue. If pending
+MRs exist for the rig, the report is rejected with the missed MR IDs and
+the patrol cycle stays open. You cannot close a refinery patrol on a false
+"queue empty" claim — the cycle will fail at report time and force you to
+re-run with the correct query.
+
 If queue empty, skip to "check-integration-branches" step.
 
 For each MR in the queue, verify the branch still exists:
