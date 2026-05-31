@@ -180,6 +180,20 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Title, params.BeadID)
 	}
 
+	// Reference/tripwire guard (gs-9ct, follow-up to hq-9jeyo). A bead labeled
+	// do-not-dispatch / pinned, or issue_type=reference, is a permanent live
+	// safety gate, never work. hq-9jeyo added this guard to scheduleBead (the
+	// scheduler-ingestion path) and isScheduledWorkBeadReady, but executeSling
+	// is the universal dispatch chokepoint reached by other paths — direct
+	// `gt sling`, deacon/relay-convoy redispatch, batch sling — that would
+	// otherwise hand a polecat the tripwire to hook and then CLOSE via gt done,
+	// taking the gate down (lb-rtjr.12, hq-xulzo). Not bypassed by --force.
+	if isReferenceTripwireBeadInfo(info) {
+		result.ErrMsg = "do-not-dispatch"
+		return result, fmt.Errorf("bead %s is a do-not-dispatch / pinned reference tripwire: %q — it must stay OPEN as a live safety gate, never hooked to a polecat.\nRemove the labels/type first if that assessment is wrong: bd update %s --remove-label=do-not-dispatch --remove-label=pinned",
+			params.BeadID, info.Title, params.BeadID)
+	}
+
 	// Open-children guard (gu-fs88). A bead that has any non-closed child
 	// is a container for work tracked by its children, not a work item
 	// itself. Hooking such a bead to a polecat is a known failure loop:
