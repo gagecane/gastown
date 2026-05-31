@@ -137,8 +137,8 @@ func setDoltGlobalConfig(key, value string) error {
 
 // Default configuration
 const (
-	DefaultPort           = 3307
-	DefaultUser           = "root" // Default Dolt user (no password for local access)
+	DefaultPort = 3307
+	DefaultUser = "root" // Default Dolt user (no password for local access)
 	// DefaultMaxConnections caps Dolt's connection pool.
 	//
 	// Earlier comment justified 1000 ("Dolt default; Tim Sehn confirmed 1k is
