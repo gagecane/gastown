@@ -335,6 +335,60 @@ func TestManager_PostMerge_StripsTimestampSuffix(t *testing.T) {
 	}
 }
 
+// TestManager_PostMerge_ClearsAwaitingRefineryMergeLabel is a regression test
+// for gu-mhwn. When the polecat's gt done submits an MR, it adds the
+// awaiting_refinery_merge label to the source bead. PostMerge force-closes
+// the source bead but historically did NOT clear that label, so a closed +
+// cited bead could still carry the in-flight label, confusing downstream
+// consumers (convoy ship-verify, etc.).
+func TestManager_PostMerge_ClearsAwaitingRefineryMergeLabel(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	// Create a source issue that already carries awaiting_refinery_merge,
+	// matching the state after the polecat's gt done submitted the MR.
+	srcIssue, err := b.Create(beads.CreateOptions{
+		Title:  "Implement feature X",
+		Labels: []string{"gt:task", "awaiting_refinery_merge"},
+	})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+
+	mrDesc := "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main"
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: mrDesc,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error: %v", err)
+	}
+	if !result.SourceIssueClosed {
+		t.Fatal("PostMerge() SourceIssueClosed = false, want true")
+	}
+
+	got, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("show source issue: %v", err)
+	}
+	for _, label := range got.Labels {
+		if label == "awaiting_refinery_merge" {
+			t.Errorf("source issue still carries awaiting_refinery_merge after PostMerge; labels=%v", got.Labels)
+		}
+	}
+}
+
 func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)

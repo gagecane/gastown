@@ -702,6 +702,20 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 		} else {
 			result.SourceIssueClosed = true
 		}
+
+		// Clear the awaiting_refinery_merge label as part of the force-close
+		// transaction (gu-mhwn). The polecat's gt done adds this label when
+		// it submits an MR; without explicit removal here, the label leaks
+		// onto a closed-and-cited bead, confusing downstream consumers
+		// (convoy ship-verify, etc.). Best-effort: failures are logged but
+		// non-fatal because the merge has already succeeded.
+		if result.SourceIssueClosed {
+			if err := b.Update(sourceID, beads.UpdateOptions{
+				RemoveLabels: []string{"awaiting_refinery_merge"},
+			}); err != nil {
+				_, _ = fmt.Fprintf(m.output, "  %s clear awaiting_refinery_merge label on %s: %v\n", style.Dim.Render("○"), sourceID, err)
+			}
+		}
 	}
 
 	return result, nil
