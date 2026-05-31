@@ -37,32 +37,39 @@ func TestPreserveUnpushedHead(t *testing.T) {
 	// setup builds a shared object store on `main` and a linked worktree, and
 	// returns (manager, storePath, worktreePath). The worktree shares the
 	// store's objects so an anchored ref keeps the worktree commit reachable.
-	setup := func(t *testing.T) (*Manager, string, string) {
+	setup := func(t *testing.T) (m *Manager, store, wt, origin string) {
 		t.Helper()
 		root := t.TempDir()
-		store := filepath.Join(root, "store")
+		// Bare origin remote — the durable backup target (gs-4hm).
+		origin = filepath.Join(root, "origin.git")
+		gitRun(t, root, "init", "-q", "--bare", origin)
+
+		store = filepath.Join(root, "store")
 		if err := os.MkdirAll(store, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		gitRun(t, store, "init", "-q", "-b", "main")
 		gitRun(t, store, "config", "commit.gpgsign", "false")
+		gitRun(t, store, "remote", "add", "origin", origin)
 		if err := os.WriteFile(filepath.Join(store, "README.md"), []byte("hi\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		gitRun(t, store, "add", "README.md")
 		gitRun(t, store, "commit", "-q", "-m", "init")
+		gitRun(t, store, "push", "-q", "origin", "main") // origin/main = base tip
 
-		wt := filepath.Join(root, "wt")
+		wt = filepath.Join(root, "wt")
 		gitRun(t, store, "worktree", "add", "-q", "--detach", wt, "main")
 
 		r := &rig.Rig{Name: "rig", Path: root}
-		return NewManager(r, git.NewGit(root), nil), store, wt
+		return NewManager(r, git.NewGit(root), nil), store, wt, origin
 	}
 
-	t.Run("unpushed detached-HEAD commit is anchored", func(t *testing.T) {
-		m, store, wt := setup(t)
+	t.Run("unpushed detached-HEAD commit is anchored AND pushed to origin", func(t *testing.T) {
+		m, store, wt, origin := setup(t)
 
-		// A commit that exists only in the worktree, on no branch and not on main.
+		// A commit that exists only in the worktree, on no branch and not on main —
+		// the merge=local / detached-HEAD prototype loss mode (toast lb-fri1.5.18).
 		if err := os.WriteFile(filepath.Join(wt, "proto.txt"), []byte("prototype\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -72,23 +79,28 @@ func TestPreserveUnpushedHead(t *testing.T) {
 
 		m.preserveUnpushedHead("furiosa", wt, git.NewGit(store))
 
-		ref := "refs/preserved/furiosa/" + want[:12]
-		got := gitRun(t, store, "rev-parse", ref)
-		if got != want {
-			t.Errorf("anchored ref %s = %s, want %s", ref, got, want)
+		// Local anchor (hq-kpodq).
+		if got := gitRun(t, store, "rev-parse", "refs/preserved/furiosa/"+want[:12]); got != want {
+			t.Errorf("local anchor = %s, want %s", got, want)
+		}
+		// Durable origin push (gs-4hm) — reachable from an ORIGIN ref, gc-safe.
+		originRef := "refs/heads/preserved/furiosa/" + want[:12]
+		if got := gitRun(t, origin, "rev-parse", originRef); got != want {
+			t.Errorf("origin preservation ref %s = %s, want %s", originRef, got, want)
 		}
 	})
 
 	t.Run("commit already on base is left alone", func(t *testing.T) {
-		m, store, wt := setup(t)
-		// HEAD == main tip, nothing unmerged.
-		head := gitRun(t, wt, "rev-parse", "HEAD")
+		m, store, wt, origin := setup(t)
+		head := gitRun(t, wt, "rev-parse", "HEAD") // HEAD == main tip, nothing unmerged.
 
 		m.preserveUnpushedHead("nux", wt, git.NewGit(store))
 
-		out := gitRun(t, store, "for-each-ref", "refs/preserved/")
-		if out != "" {
-			t.Errorf("no ref should be anchored for already-merged HEAD %s; got:\n%s", head[:12], out)
+		if out := gitRun(t, store, "for-each-ref", "refs/preserved/"); out != "" {
+			t.Errorf("no local anchor for already-merged HEAD %s; got:\n%s", head[:12], out)
+		}
+		if out := gitRun(t, origin, "for-each-ref", "refs/heads/preserved/"); out != "" {
+			t.Errorf("no origin push for already-merged HEAD %s; got:\n%s", head[:12], out)
 		}
 	})
 }

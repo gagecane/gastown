@@ -1403,10 +1403,12 @@ func (m *Manager) preserveUnpushedHead(name, clonePath string, repoGit *git.Git)
 		return // no resolvable worktree HEAD to preserve (already removed, or empty repo)
 	}
 
-	// Skip if the commit is already on the rig's base branch — it is durably
-	// stored and nothing is at risk. Checked in the bare repo, which holds the
-	// shared object store and the canonical base ref(s). If the base ref is
-	// missing or the check errors, we fall through and anchor (safe default).
+	// Skip if the commit is already durably stored — on the rig's base branch
+	// (merged) or already pushed to origin under the worktree's own branch
+	// (normal MR flow). Both checks are best-effort; on error we fall through
+	// and preserve (a redundant preservation ref is harmless; losing work is
+	// not). The base check uses the bare repo (canonical base ref); the
+	// pushed-branch check uses the worktree (it tracks origin).
 	if base := m.rig.DefaultBranch(); base != "" {
 		for _, baseRef := range []string{"refs/remotes/origin/" + base, "refs/heads/" + base} {
 			if anc, ancErr := repoGit.IsAncestor(head, baseRef); ancErr == nil && anc {
@@ -1414,14 +1416,40 @@ func (m *Manager) preserveUnpushedHead(name, clonePath string, repoGit *git.Git)
 			}
 		}
 	}
+	if branch, brErr := wt.CurrentBranch(); brErr == nil && branch != "" && branch != "HEAD" {
+		if anc, ancErr := wt.IsAncestor(head, "refs/remotes/origin/"+branch); ancErr == nil && anc {
+			return
+		}
+	}
 
-	preservedRef := fmt.Sprintf("refs/preserved/%s/%s", name, head[:12])
+	short := head[:12]
+
+	// 1. Local GC-safe anchor in the bare repo (hq-kpodq). Immediate net: any
+	// ref keeps the commit reachable through worktree removal, branch deletion,
+	// and git gc — as long as the bare repo itself survives.
+	preservedRef := fmt.Sprintf("refs/preserved/%s/%s", name, short)
 	if err := repoGit.UpdateRef(preservedRef, head); err != nil {
-		style.PrintWarning("WORK AT RISK: could not anchor unpushed HEAD %s for %s before removal: %v", head[:12], name, err)
+		style.PrintWarning("WORK AT RISK: could not anchor unpushed HEAD %s for %s before removal: %v", short, name, err)
+	} else {
+		style.PrintWarning("preserved unpushed work: anchored HEAD %s -> %s in bare repo before removing %s", short, preservedRef, name)
+	}
+
+	// 2. Durable ORIGIN push (gs-4hm). The bare-repo anchor is NOT backed up and
+	// is gc-reapable if the clone/box is lost; --merge=local prototypes live ONLY
+	// in the worktree and never reach origin via the merge queue, so a detached-
+	// HEAD commit (e.g. toast lb-fri1.5.18, a 298-line proto) is left dangling
+	// once the worktree is gone — recoverable only via `git fsck`, one gc from
+	// permanent loss. Push the commit to a preservation branch under
+	// refs/heads/preserved/*, which the refinery NEVER scans (only polecat/* is
+	// merged), so the work is durable on origin without leaking into the merge
+	// pipeline — even a --force discard just leaves a ref to prune by hand. The
+	// worktree still exists here (removal happens next), so it can reach origin.
+	originRef := fmt.Sprintf("refs/heads/preserved/%s/%s", name, short)
+	if err := wt.Push("origin", head+":"+originRef, false); err != nil {
+		style.PrintWarning("WORK AT RISK: could not push preservation ref %s to origin for %s: %v (local anchor %s retained)", originRef, name, err, preservedRef)
 		return
 	}
-	style.PrintWarning("preserved unpushed work: anchored HEAD %s -> %s in bare repo before removing %s (recover: git -C %s/.repo.git log %s)",
-		head[:12], preservedRef, name, m.rig.Path, preservedRef)
+	style.PrintWarning("preserved unpushed work to ORIGIN: %s = %s (durable; recover: git fetch origin refs/heads/preserved/%s/%s)", originRef, short, name, short)
 }
 
 // verifyRemovalComplete checks that polecat directories were actually removed.
