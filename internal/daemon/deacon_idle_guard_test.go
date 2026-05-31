@@ -88,7 +88,7 @@ func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
 	}{
 		{
 			name:         "idle: stale heartbeat, no work — nudge suppressed",
-			heartbeatAge: 10 * time.Minute,
+			heartbeatAge: 20 * time.Minute,
 			stores: map[string]beadsdk.Storage{
 				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{}},
 			},
@@ -98,7 +98,7 @@ func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
 		},
 		{
 			name:         "active work: stale heartbeat, in_progress bead — nudge sent",
-			heartbeatAge: 10 * time.Minute,
+			heartbeatAge: 20 * time.Minute,
 			stores: map[string]beadsdk.Storage{
 				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
 					"in_progress": {{ID: "sc-abc"}},
@@ -110,7 +110,7 @@ func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
 		},
 		{
 			name:         "hooked only: stale heartbeat, patrol wisp — nudge suppressed",
-			heartbeatAge: 10 * time.Minute,
+			heartbeatAge: 20 * time.Minute,
 			stores: map[string]beadsdk.Storage{
 				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
 					"hooked": {{ID: "hq-wisp-34zi"}},
@@ -122,7 +122,7 @@ func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
 		},
 		{
 			name:         "store error: stale heartbeat, store fails — nudge sent conservatively",
-			heartbeatAge: 10 * time.Minute,
+			heartbeatAge: 20 * time.Minute,
 			stores: map[string]beadsdk.Storage{
 				"hq": &searchStorage{err: fmt.Errorf("db offline")},
 			},
@@ -131,14 +131,26 @@ func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
 			desc:             "Nudge must fire conservatively when work state is unknown",
 		},
 		{
-			name:         "very stale: heartbeat >= 20 min — escalation path, no nudge",
-			heartbeatAge: 21 * time.Minute,
+			name:         "very stale: heartbeat >= 30 min — escalation path, no nudge",
+			heartbeatAge: 31 * time.Minute,
 			stores: map[string]beadsdk.Storage{
 				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{}},
 			},
 			wantNudgeLog:     false,
 			wantIdleGuardLog: false,
 			desc:             "Very stale heartbeat takes escalation path, not nudge path; idle guard not reached",
+		},
+		{
+			name:         "fresh idle: heartbeat 10m old (within backoff-max=15m) — no nudge, no log",
+			heartbeatAge: 10 * time.Minute,
+			stores: map[string]beadsdk.Storage{
+				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
+					"in_progress": {{ID: "sc-active"}},
+				}},
+			},
+			wantNudgeLog:     false,
+			wantIdleGuardLog: false,
+			desc:             "10m heartbeat is fresh (<16m); the early-return on IsFresh fires before any stuck/idle path. Regression guard for gu-70rg.",
 		},
 	}
 

@@ -103,8 +103,11 @@ const (
 	DefaultDeaconPingTimeout             = 30 * time.Second
 	DefaultDeaconConsecutiveFailures     = 3
 	DefaultDeaconCooldown                = 5 * time.Minute
-	DefaultDeaconHeartbeatStaleThreshold = 5 * time.Minute
-	DefaultDeaconHeartbeatVeryStale      = 20 * time.Minute
+	// Both thresholds MUST exceed the deacon patrol's await-signal backoff-max
+	// (15m). See deacon.HeartbeatStaleThreshold for the gu-70rg incident
+	// history that drove the bump from 5m/20m to 16m/30m.
+	DefaultDeaconHeartbeatStaleThreshold = 16 * time.Minute
+	DefaultDeaconHeartbeatVeryStale      = 30 * time.Minute
 	DefaultMaxRedispatches               = 3
 	DefaultRedispatchCooldown            = 5 * time.Minute
 	DefaultMaxFeedsPerCycle              = 3
