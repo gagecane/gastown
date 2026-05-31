@@ -614,6 +614,26 @@ afterSafetyNet:
 		}
 	}
 
+	// hq-9jeyo: refuse to complete/close a reference or gate tripwire. Beads
+	// labeled do-not-dispatch / pinned (or issue_type=reference) must stay OPEN
+	// forever — they are live safety gates, never work. The dispatch filter now
+	// excludes them, but if one was already mis-hooked, letting gt done proceed
+	// would CLOSE the tripwire (the ESCALATED exit did exactly this, taking the
+	// gate down). Release the hook back to open+unassigned and exit without
+	// closing, MR creation, or marking the bead stuck.
+	if issueID != "" {
+		guardBd := beads.New(cwd)
+		if refIssue, err := guardBd.Show(issueID); err == nil && isNonDispatchableIssue(refIssue) {
+			style.PrintWarning("refusing to complete %s: it is a do-not-dispatch / pinned reference bead (tripwire), not work — leaving it OPEN", issueID)
+			if relErr := guardBd.ReleaseWithReason(issueID, "hq-9jeyo: mis-dispatched reference/tripwire bead is not completable via gt done"); relErr != nil {
+				style.PrintWarning("could not release reference bead %s (it stays OPEN): %v", issueID, relErr)
+			} else {
+				fmt.Printf("%s Released %s back to open; hook cleared\n", style.Bold.Render("✓"), issueID)
+			}
+			return nil
+		}
+	}
+
 	// Write done-intent label EARLY, before push/MR operations.
 	// If gt done crashes after this point, the Witness can detect the intent
 	// and auto-nuke the zombie polecat.

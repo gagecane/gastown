@@ -235,6 +235,22 @@ func isMayorOnlyBeadInfo(info *beadInfo) bool {
 	return beads.HasMayorOnlyLabel(info.Labels)
 }
 
+// isReferenceTripwireBeadInfo reports whether a bead is a permanent reference
+// or gate tripwire — do-not-dispatch / pinned labels, or issue_type=reference
+// (hq-9jeyo). Such beads stay OPEN forever as live safety gates and must never
+// be slung: scheduling one creates a sling-context + auto-convoy and lets a
+// polecat hook then CLOSE the tripwire, taking the gate down. The label/type
+// strings are shared with the dispatch-time filter (isNonDispatchableBead).
+func isReferenceTripwireBeadInfo(info *beadInfo) bool {
+	if info == nil {
+		return false
+	}
+	if strings.EqualFold(info.IssueType, issueTypeReference) {
+		return true
+	}
+	return hasLabel(info.Labels, labelDoNotDispatch) || hasLabel(info.Labels, labelPinned)
+}
+
 // hasOpenChildrenFn queries whether a parent bead has any open (non-closed)
 // children. Injected via variable so unit tests can stub it without running
 // a real `bd` subprocess. Returns (hasOpen, err) — on error, callers should

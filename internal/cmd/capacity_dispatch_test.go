@@ -169,6 +169,12 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 		{"open expired defer", beadStatusInfo{Status: "open", DeferUntil: now.Add(-time.Hour).Format(time.RFC3339)}, true},
 		{"open unparseable defer", beadStatusInfo{Status: "open", DeferUntil: "not-a-timestamp"}, true},
 		{"deferred status", beadStatusInfo{Status: "deferred", DeferUntil: now.Add(time.Hour).Format(time.RFC3339)}, false},
+		// hq-9jeyo: reference/tripwire beads must never be dispatched.
+		{"do-not-dispatch label", beadStatusInfo{Status: "open", Labels: []string{"do-not-dispatch"}}, false},
+		{"pinned label", beadStatusInfo{Status: "open", Labels: []string{"pinned"}}, false},
+		{"reference type", beadStatusInfo{Status: "open", Type: "reference"}, false},
+		{"tripwire all three", beadStatusInfo{Status: "open", Type: "reference", Labels: []string{"do-not-dispatch", "pinned"}}, false},
+		{"normal work with unrelated label still ready", beadStatusInfo{Status: "open", Labels: []string{"gt:rig"}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

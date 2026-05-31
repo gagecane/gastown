@@ -203,6 +203,17 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Title)
 	}
 
+	// Reference/tripwire guard (hq-9jeyo). A bead labeled do-not-dispatch /
+	// pinned, or issue_type=reference, is a permanent live safety gate, never
+	// work. Refusing here prevents the sling-context AND the auto-convoy from
+	// ever being created (the spurious hq-cv-ajqmm convoy that fed a tripwire),
+	// reinforcing the dispatch-time filter. Not bypassable by --force: it is a
+	// dispatcher invariant, not a status/assignee sanity check.
+	if isReferenceTripwireBeadInfo(info) {
+		return fmt.Errorf("bead %s is a do-not-dispatch / pinned reference tripwire: %q — refusing to schedule. It must stay OPEN as a live safety gate; remove the labels/type first if that assessment is wrong",
+			beadID, info.Title)
+	}
+
 	// Nested-wrapper guard (gu-hfr3). Refuse to schedule a bead that is
 	// itself a sling-context wrapper. Otherwise the idempotency check
 	// below (keyed on WorkBeadID) misses, and a new wrapper is created

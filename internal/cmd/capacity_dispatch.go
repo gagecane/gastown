@@ -591,6 +591,7 @@ type beadStatusInfo struct {
 	Title      string
 	Labels     []string
 	DeferUntil string
+	Type       string
 }
 
 // batchFetchBeadInfoByIDs returns a map of bead ID → status+title+labels for specific beads.
@@ -621,6 +622,7 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			Title      string   `json:"title"`
 			Labels     []string `json:"labels"`
 			DeferUntil string   `json:"defer_until"`
+			Type       string   `json:"issue_type"`
 		}
 		if err := json.Unmarshal(out, &items); err == nil {
 			for _, item := range items {
@@ -629,6 +631,7 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 					Title:      item.Title,
 					Labels:     item.Labels,
 					DeferUntil: item.DeferUntil,
+					Type:       item.Type,
 				}
 			}
 		}
@@ -1173,6 +1176,15 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if info.Status != "open" {
 		return false
 	}
+	// Never dispatch a bead marked as not-work (hq-9jeyo). Reference/gate
+	// tripwires carry do-not-dispatch / pinned labels (and issue_type=reference)
+	// and are meant to stay OPEN forever as live tripwires. Without this guard
+	// the scheduler hooked an open tripwire to a polecat, which then ran
+	// `gt done` (ESCALATED) and CLOSED the tripwire — taking the safety gate
+	// down and re-triggering the exact spawn-storm the tripwire guards against.
+	if isNonDispatchableBead(info) {
+		return false
+	}
 	// Skip beads deferred to a future time (gs-o5f). `gt done --status DEFERRED`
 	// sets defer_until WITHOUT flipping status off "open", so the status check
 	// alone lets a future-deferred bead through and the scheduler re-dispatches
@@ -1187,6 +1199,38 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 		return false
 	}
 	return true
+}
+
+// Labels / issue type that mark a bead as a permanent reference or gate
+// tripwire (hq-9jeyo). These beads stay OPEN forever by design and must never
+// be dispatched, hooked, spawned, or closed via the dispatch path.
+const (
+	labelDoNotDispatch = "do-not-dispatch"
+	labelPinned        = "pinned"
+	issueTypeReference = "reference"
+)
+
+// isNonDispatchableBead reports whether a bead is a reference/tripwire that the
+// scheduler must never dispatch. Matched by either the do-not-dispatch / pinned
+// labels or issue_type=reference — a tripwire typically carries all three, but
+// any one is sufficient to exclude it.
+func isNonDispatchableBead(info beadStatusInfo) bool {
+	if strings.EqualFold(info.Type, issueTypeReference) {
+		return true
+	}
+	return hasLabel(info.Labels, labelDoNotDispatch) || hasLabel(info.Labels, labelPinned)
+}
+
+// isNonDispatchableIssue is the *beads.Issue form of isNonDispatchableBead,
+// used by the gt done guard (hq-9jeyo) to refuse closing a mis-hooked tripwire.
+func isNonDispatchableIssue(issue *beads.Issue) bool {
+	if issue == nil {
+		return false
+	}
+	if strings.EqualFold(issue.Type, issueTypeReference) {
+		return true
+	}
+	return beads.HasLabel(issue, labelDoNotDispatch) || beads.HasLabel(issue, labelPinned)
 }
 
 // nowForDeferRelease is a clock seam that lets tests inject a deterministic
