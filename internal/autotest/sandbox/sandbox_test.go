@@ -76,6 +76,14 @@ func TestFilterEnv_StripsCredentialFamilies(t *testing.T) {
 		// GIT_COMMITTER_*
 		{"GIT_COMMITTER_NAME", "GIT_COMMITTER_NAME"},
 		{"GIT_COMMITTER_EMAIL", "GIT_COMMITTER_EMAIL"},
+		// HOME exact match (gu-6dbes — leaks host config dir).
+		{"HOME", "HOME"},
+		// XDG_* (gu-6dbes — same family of host-path leaks).
+		{"XDG_CONFIG_HOME", "XDG_CONFIG_HOME"},
+		{"XDG_CACHE_HOME", "XDG_CACHE_HOME"},
+		{"XDG_DATA_HOME", "XDG_DATA_HOME"},
+		{"XDG_RUNTIME_DIR", "XDG_RUNTIME_DIR"},
+		{"XDG_STATE_HOME", "XDG_STATE_HOME"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,12 +104,13 @@ func TestFilterEnv_StripsCredentialFamilies(t *testing.T) {
 func TestFilterEnv_KeepsNonCredentials(t *testing.T) {
 	env := []string{
 		"PATH=/usr/bin",
-		"HOME=/home/u",
 		"GO111MODULE=on",
-		"AWS_REGION=us-west-2", // sentinel: AWS_ prefix → must drop
+		"AWS_REGION=us-west-2",  // sentinel: AWS_ prefix → must drop
+		"HOME=/home/u",          // sentinel: HOME → must drop (gu-6dbes)
+		"XDG_CONFIG_HOME=/home/u/.config", // sentinel: XDG_ prefix → must drop
 	}
 	out := FilterEnv(env)
-	want := []string{"GO111MODULE", "HOME", "PATH"}
+	want := []string{"GO111MODULE", "PATH"}
 	got := keys(out)
 	sort.Strings(got)
 	if !equalStringSlices(got, want) {
@@ -231,6 +240,49 @@ func TestApply_RejectsNilCmd(t *testing.T) {
 	}
 	if err := sb.Apply(nil); err == nil {
 		t.Fatalf("Apply(nil) = nil, want error")
+	}
+}
+
+// TestApply_RewritesHOMEAndXDGToWorktree asserts gu-6dbes: after
+// Apply, HOME and XDG_* in cmd.Env point at worktree-internal paths,
+// not the caller's home directory. This is the defense-in-depth
+// behavior on top of FilterEnv stripping the host values: tools that
+// read HOME (e.g. `go test` looking up GOCACHE) still find a working
+// directory, but it's inside the sandbox.
+func TestApply_RewritesHOMEAndXDGToWorktree(t *testing.T) {
+	root := t.TempDir()
+	sb, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", "/host/home/should-not-leak")
+	t.Setenv("XDG_CONFIG_HOME", "/host/config/should-not-leak")
+	t.Setenv("XDG_CACHE_HOME", "/host/cache/should-not-leak")
+	cmd := exec.Command("/bin/true")
+	if err := sb.Apply(cmd); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"HOME":            sb.Worktree(),
+		"XDG_CONFIG_HOME": filepath.Join(sb.Worktree(), ".config"),
+		"XDG_CACHE_HOME":  filepath.Join(sb.Worktree(), ".cache"),
+		"XDG_DATA_HOME":   filepath.Join(sb.Worktree(), ".local", "share"),
+		"XDG_STATE_HOME":  filepath.Join(sb.Worktree(), ".local", "state"),
+		"XDG_RUNTIME_DIR": filepath.Join(sb.Worktree(), ".runtime"),
+	}
+	for key, wantVal := range want {
+		got := lookupEnv(cmd.Env, key)
+		if got == "" {
+			t.Errorf("%s missing from cmd.Env", key)
+			continue
+		}
+		if got != wantVal {
+			t.Errorf("%s = %q, want %q", key, got, wantVal)
+		}
+		if strings.Contains(got, "should-not-leak") {
+			t.Errorf("%s leaked host value: %q", key, got)
+		}
 	}
 }
 
@@ -374,6 +426,18 @@ func containsKey(env []string, key string) bool {
 		}
 	}
 	return false
+}
+
+func lookupEnv(env []string, key string) string {
+	prefix := key + "="
+	// Last assignment wins, matching exec semantics.
+	val := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			val = kv[len(prefix):]
+		}
+	}
+	return val
 }
 
 func keys(env []string) []string {
