@@ -1,6 +1,8 @@
 package deacon
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -329,6 +331,126 @@ func TestScanStaleSpawning_StalenessRequiresAgeAndDeadSession(t *testing.T) {
 				t.Errorf("expected action on old + dead + resolvable bead")
 			}
 		})
+	}
+}
+
+// fakeLivenessChecker is a stub *tmux.Tmux replacement used to drive
+// sessionLiveness in unit tests without a real tmux server.
+type fakeLivenessChecker struct {
+	exists      bool
+	existsErr   error
+	pids        []int
+	pidsErr     error
+	pidsCalls   int
+	sessionName string
+}
+
+func (f *fakeLivenessChecker) HasSession(name string) (bool, error) {
+	f.sessionName = name
+	return f.exists, f.existsErr
+}
+
+func (f *fakeLivenessChecker) SessionPanePIDs(name string) ([]int, error) {
+	f.sessionName = name
+	f.pidsCalls++
+	return f.pids, f.pidsErr
+}
+
+// TestSessionLiveness covers the two-factor (session presence + pane PID)
+// liveness check that fixed gu-qlc8z. The named subtests
+// "session_exists_but_pane_pids_dead" and "session_exists_with_live_pane_pid"
+// are the AC fixtures; the others guard the conservative fallbacks.
+func TestSessionLiveness(t *testing.T) {
+	// Choose a PID that is essentially guaranteed to be free. Linux's
+	// pid_max default is well below 1<<30; on macOS PIDs are 32 bits.
+	const definitelyDeadPID = 1 << 29
+
+	// os.Getpid() is always alive while the test is running.
+	livePID := os.Getpid()
+
+	tests := []struct {
+		name      string
+		checker   *fakeLivenessChecker
+		pidAlive  func(int) bool
+		wantAlive bool
+		wantErr   bool
+	}{
+		{
+			name:      "session_missing",
+			checker:   &fakeLivenessChecker{exists: false},
+			wantAlive: false,
+		},
+		{
+			name:      "has_session_error_is_conservative",
+			checker:   &fakeLivenessChecker{exists: false, existsErr: errors.New("tmux blew up")},
+			wantAlive: true,
+			wantErr:   true,
+		},
+		{
+			name:      "session_exists_but_pane_pids_dead",
+			checker:   &fakeLivenessChecker{exists: true, pids: []int{definitelyDeadPID}},
+			pidAlive:  func(pid int) bool { return false },
+			wantAlive: false,
+		},
+		{
+			name:      "session_exists_with_live_pane_pid",
+			checker:   &fakeLivenessChecker{exists: true, pids: []int{definitelyDeadPID, livePID}},
+			pidAlive:  func(pid int) bool { return pid == livePID },
+			wantAlive: true,
+		},
+		{
+			name:      "session_exists_no_panes_listed",
+			checker:   &fakeLivenessChecker{exists: true, pids: []int{}},
+			pidAlive:  func(pid int) bool { return true },
+			wantAlive: false,
+		},
+		{
+			name:      "windows_fallback_nil_pids_means_alive",
+			checker:   &fakeLivenessChecker{exists: true, pids: nil},
+			wantAlive: true,
+		},
+		{
+			name:      "pane_enumeration_error_is_conservative",
+			checker:   &fakeLivenessChecker{exists: true, pidsErr: errors.New("list-panes failed")},
+			wantAlive: true,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.pidAlive != nil {
+				orig := pidAliveFn
+				pidAliveFn = tt.pidAlive
+				defer func() { pidAliveFn = orig }()
+			}
+
+			alive, err := sessionLiveness(tt.checker, "gt-test")
+			if alive != tt.wantAlive {
+				t.Errorf("alive = %v, want %v", alive, tt.wantAlive)
+			}
+			if (err != nil) != tt.wantErr {
+				t.Errorf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.checker.sessionName != "gt-test" {
+				t.Errorf("session name passed = %q, want gt-test",
+					tt.checker.sessionName)
+			}
+		})
+	}
+}
+
+// TestDefaultPidAlive_CurrentProcess sanity-checks the real signal-0 probe
+// against a PID we know to be alive (us) and one we expect to be dead.
+func TestDefaultPidAlive_CurrentProcess(t *testing.T) {
+	if !defaultPidAlive(os.Getpid()) {
+		t.Errorf("defaultPidAlive(os.Getpid()) = false, want true")
+	}
+	if defaultPidAlive(0) {
+		t.Errorf("defaultPidAlive(0) = true, want false")
+	}
+	if defaultPidAlive(-1) {
+		t.Errorf("defaultPidAlive(-1) = true, want false")
 	}
 }
 

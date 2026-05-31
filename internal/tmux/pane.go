@@ -1,8 +1,10 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -145,6 +147,57 @@ func (t *Tmux) GetPanePID(target string) (string, error) {
 		return "", fmt.Errorf("empty PID for target %s (session may not exist)", target)
 	}
 	return result, nil
+}
+
+// SessionPanePIDs returns the PIDs of every pane across every window in the
+// named session. Unlike GetPanePID, which targets a single pane (the first
+// window's first pane), this enumerates the whole session — useful for
+// liveness checks that need to know whether ANY pane has a still-running
+// shell.
+//
+// Returns (nil, nil) on Windows. psmux's pane enumeration is not reliable
+// enough for liveness purposes, so callers fall back to session-name-only
+// presence on Windows (see internal/deacon/stale_spawning.go).
+//
+// Returns (nil, nil) when the session is missing or the tmux server is
+// gone — callers should pair this with HasSession to disambiguate
+// "no panes" from "no session".
+func (t *Tmux) SessionPanePIDs(name string) ([]int, error) {
+	if runtime.GOOS == "windows" {
+		return nil, nil
+	}
+	// "=" prefix forces exact-match on the session name, matching HasSession.
+	out, err := t.run("list-panes", "-s", "-t", "="+name, "-F", "#{pane_pid}")
+	if err != nil {
+		// Treat a missing session / dead server as "no panes" so callers
+		// can decide based on HasSession's verdict instead of bubbling
+		// up an opaque error.
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	pids := make([]int, 0)
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(line)
+		if err != nil {
+			// Skip unparseable lines defensively — a single bad row
+			// shouldn't poison the whole liveness check.
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids, nil
 }
 
 // CapturePane captures the visible content of a pane.

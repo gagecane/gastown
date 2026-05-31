@@ -4,8 +4,11 @@ package deacon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -140,7 +143,7 @@ func ScanStaleSpawning(townRoot string, cfg *StaleSpawningConfig) (*StaleSpawnin
 			continue
 		}
 
-		alive, _ := t.HasSession(sessionName)
+		alive, _ := sessionAliveFn(t, sessionName)
 		r.SessionAlive = alive
 
 		if alive {
@@ -282,6 +285,93 @@ func workerNameFromBeadID(id, role string) string {
 		return ""
 	}
 	return id[idx+len(marker):]
+}
+
+// sessionLivenessChecker is the slice of *tmux.Tmux behavior the liveness
+// helper needs. Defined as an interface so tests can swap in a fake without
+// requiring a live tmux server.
+type sessionLivenessChecker interface {
+	HasSession(name string) (bool, error)
+	SessionPanePIDs(name string) ([]int, error)
+}
+
+// pidAliveFn probes whether a PID is alive. Overridable in tests.
+//
+// Uses signal 0 ("kill -0"): the kernel performs the permission/existence
+// check without delivering a signal, so a successful Signal() call means
+// the process exists and we have permission to signal it. ESRCH means the
+// PID is gone; any other error (EPERM, etc.) is treated as alive — we'd
+// rather leave a bead alone than close one we couldn't fully verify.
+var pidAliveFn = defaultPidAlive
+
+// sessionAliveFn is the package-level entry point used by ScanStaleSpawning.
+// Overridable in tests so they can drive scan() without a real tmux server.
+var sessionAliveFn = sessionLiveness
+
+func defaultPidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		// On Unix this never errors, but be defensive on Windows.
+		return false
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// ESRCH = no such process. Any other error (EPERM, etc.) means
+		// the process exists but we lack permission — treat as alive so
+		// we don't close a bead whose owner we just can't probe.
+		return !errors.Is(err, syscall.ESRCH)
+	}
+	return true
+}
+
+// sessionLiveness reports whether a tmux session is hosting a still-running
+// agent. Two-step check:
+//
+//  1. HasSession(name) — if the session itself is gone, the agent is dead.
+//  2. SessionPanePIDs(name) — enumerate every pane PID and probe with
+//     signal 0. If any pane PID is alive, the session is alive.
+//
+// The PID layer is what catches the failure mode the original
+// HasSession-only check missed: a tmux session that outlives its child
+// process (Claude crashed, tmux session left behind). See gu-qlc8z /
+// gc-eeh64.
+//
+// On Windows, SessionPanePIDs returns (nil, nil) because psmux pane
+// enumeration is not reliable for liveness purposes; we keep the
+// historical session-name-only behavior there to avoid breaking
+// Windows developers.
+//
+// On error during pane enumeration we conservatively report "alive" so
+// transient tmux hiccups don't trigger spurious closes.
+func sessionLiveness(t sessionLivenessChecker, name string) (bool, error) {
+	exists, err := t.HasSession(name)
+	if err != nil {
+		// Conservative: if we can't even ask tmux, assume alive.
+		return true, err
+	}
+	if !exists {
+		return false, nil
+	}
+
+	pids, err := t.SessionPanePIDs(name)
+	if err != nil {
+		// Conservative: leave the bead alone on enumeration error.
+		return true, err
+	}
+	if pids == nil {
+		// Windows / psmux fallback — we can't verify pane PIDs, so honor
+		// HasSession's verdict (session exists → alive).
+		return true, nil
+	}
+
+	for _, pid := range pids {
+		if pidAliveFn(pid) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // closeSpawningBead closes a stuck spawning agent bead with a descriptive
