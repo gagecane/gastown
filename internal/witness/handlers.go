@@ -4482,14 +4482,26 @@ func DetectOrphanedMolecules(bd *BdCli, workDir, rigName string, router *mail.Ro
 // label is cleared by the operator / re-dispatch).
 const StrandedAssigneeLabel = "stranded-assignee"
 
+// RecoveredDeadSessionLabel is added to beads whose in_progress claim was
+// auto-released by the witness because the assignee polecat's tmux session
+// was confirmed dead. Forms an audit trail for "this bead was reset because
+// the polecat session died, not because an operator intervened" — see gu-mb1h.
+//
+// The label is purely informational and does NOT participate in dedup. The
+// bead is reset to status=open with no assignee, so the next patrol cycle
+// won't re-encounter it as stranded; if a fresh polecat picks it up and dies
+// again, the label simply accumulates an additional history entry.
+const RecoveredDeadSessionLabel = "recovered:dead-session"
+
 // StaleInProgressBeadResult records a single stranded-assignee detection.
 type StaleInProgressBeadResult struct {
 	BeadID      string        // bead stuck in in_progress
 	Assignee    string        // full assignee address (rig/polecats/name)
 	PolecatName string        // extracted polecat name
 	Age         time.Duration // time since updated_at
-	Action      string        // "escalated", "skip-already-labeled", "skip-fresh", "skip-alive"
+	Action      string        // "escalated", "recovered", "skip-already-labeled", "skip-fresh", "skip-alive", "skip-session-recreated"
 	MailSent    bool          // true if mayor was notified this cycle
+	Recovered   bool          // true if the bead was auto-reset (status=open, assignee cleared)
 	Error       error
 }
 
@@ -4502,20 +4514,22 @@ type DetectStaleInProgressBeadsResult struct {
 
 // DetectStaleInProgressBeads scans for in_progress beads whose polecat assignee
 // is dead (no tmux session) and whose updated_at is older than the configured
-// stale threshold (default 1h). Each detection mails mayor a STRANDED_ASSIGNEE
-// notification and adds the `stranded-assignee` label to dedupe — the bead
-// produces at most one mail until the label is removed.
+// stale threshold (default 1h). Each detection first attempts auto-recovery
+// (status=open, clear assignee, RECOVERED_BEAD nudge to deacon); if auto-recovery
+// is blocked by a circuit breaker, falls back to mailing mayor a STRANDED_ASSIGNEE
+// notification and adds the `stranded-assignee` label to dedupe.
 //
 // This complements DetectZombiePolecats (which fires on alive→dead transitions
 // observed within a single patrol cycle) by catching the steady-state cases:
 //   - Polecat died between patrol cycles or before witness boot — no transition
 //     was ever observed.
 //   - Polecat dir was nuked already, so DetectZombiePolecats can't see it.
-//   - DetectOrphanedBeads only handles the dir-gone case AND auto-resets — this
-//     function intentionally does NOT reset the bead. Mayor decides whether to
-//     re-sling, close as obsolete, or hand off the work.
+//   - DetectOrphanedBeads only handles the dir-gone case — this function
+//     handles dead-session-but-dir-still-present, which previously waited
+//     indefinitely on operator action (gu-mb1h: ta-ema2 stuck 18h on a dead
+//     slit polecat).
 //
-// Preconditions for escalation (ALL must hold):
+// Preconditions for action (ALL must hold):
 //   - Bead status is in_progress (we deliberately do NOT scan hooked — those are
 //     freshly slung and the deacon's responsibility, not stranded work).
 //   - Assignee parses as <rigName>/polecats/<name>.
@@ -4523,13 +4537,18 @@ type DetectStaleInProgressBeadsResult struct {
 //   - Bead's updated_at is older than the configured stale threshold.
 //   - Bead does NOT already carry the `stranded-assignee` label.
 //
-// Behavior:
-//   - Mails mayor with bead_id, polecat, age, last assignee.
-//   - Adds `stranded-assignee` label. If mail send fails the label is still
-//     applied — the operator's signal is "this bead has been seen as stranded";
-//     dedup must hold even when mail flakes.
-//   - Does NOT reset the bead status or clear the assignee. That decision is
-//     mayor's (re-sling, close, or investigate).
+// Behavior (gu-mb1h):
+//   - Re-checks session liveness immediately before mutation (TOCTOU guard).
+//   - Calls resetAbandonedBead, which: closes the bead if work is already on
+//     main, otherwise resets status=open + clears assignee + records a respawn
+//   - sends RECOVERED_BEAD to deacon (rate-limited and circuit-broken).
+//   - On successful reset: applies `recovered:dead-session` audit label (best
+//     effort) and records Action="recovered". Does NOT mail mayor — the deacon
+//     handles re-dispatch.
+//   - On reset blocked / no-op (respawn cap reached, rate-limit hit, or
+//     work-already-on-main close): falls back to mailing mayor with
+//     STRANDED_ASSIGNEE and applies `stranded-assignee` dedup label so the
+//     bead produces at most one mail until the label is removed.
 func DetectStaleInProgressBeads(bd *BdCli, workDir, rigName string, router *mail.Router, staleThreshold time.Duration) *DetectStaleInProgressBeadsResult {
 	result := &DetectStaleInProgressBeadsResult{}
 
@@ -4633,17 +4652,49 @@ func DetectStaleInProgressBeads(bd *BdCli, workDir, rigName string, router *mail
 			continue
 		}
 
-		// All preconditions met — this bead is stranded. Send mail to mayor and
-		// label the bead so we don't re-mail every patrol cycle. The label is
-		// applied even if mail send fails: the dedup invariant is "we observed
-		// this stranded bead," independent of mail-bus health.
+		// All preconditions met — this bead is stranded. Before falling back to
+		// the mail-mayor escalation path, attempt to auto-recover the bead by
+		// resetting status=open and clearing the assignee (gu-mb1h). The
+		// existing resetAbandonedBead helper already enforces the safety gates
+		// we need: work-on-main close guard, respawn-count circuit breaker,
+		// per-rig rate limiter, and a RECOVERED_BEAD nudge to the deacon for
+		// re-dispatch. If reset succeeds we record an audit label and skip the
+		// stranded-assignee mail; if reset is blocked (rate limit, respawn cap,
+		// work-already-on-main) we fall through to the existing escalation so
+		// mayor still has visibility.
 		stranded := StaleInProgressBeadResult{
 			BeadID:      b.ID,
 			Assignee:    b.Assignee,
 			PolecatName: polecatName,
 			Age:         age,
-			Action:      "escalated",
 		}
+
+		// TOCTOU re-check: a polecat could have come back between the liveness
+		// scan above and now. Mirrors the guard in DetectOrphanedBeads.
+		if alive, _ := t.HasSession(sessionName); alive {
+			stranded.Action = "skip-session-recreated"
+			result.Stranded = append(result.Stranded, stranded)
+			continue
+		}
+
+		if resetAbandonedBead(bd, workDir, rigName, b.ID, polecatName, router) {
+			stranded.Action = "recovered"
+			stranded.Recovered = true
+			// Best-effort audit label so operators can grep "why did this bead
+			// re-open?" Failures are non-fatal — the bead is already reset, the
+			// label is informational only.
+			if labelErr := bd.Run(workDir, "update", b.ID, "--add-label="+RecoveredDeadSessionLabel); labelErr != nil {
+				stranded.Error = fmt.Errorf("add recovered label: %w", labelErr)
+			}
+			result.Stranded = append(result.Stranded, stranded)
+			continue
+		}
+
+		// Reset blocked or no-op (respawn cap, rate-limited, or work already on
+		// main and bead was closed). Fall back to the original escalation path:
+		// label the bead so we don't re-mail every patrol cycle, and notify
+		// mayor so a human can pick up the slack the circuit breakers refused.
+		stranded.Action = "escalated"
 
 		if router != nil {
 			subject := fmt.Sprintf("STRANDED_ASSIGNEE %s (dead polecat %s, age=%s)",

@@ -4697,6 +4697,130 @@ func TestDetectStaleInProgressBeads_BadTimestamp(t *testing.T) {
 	}
 }
 
+// TestDetectStaleInProgressBeads_AutoRecovers verifies the gu-mb1h fix:
+// when a stranded in_progress bead's polecat is confirmed dead, the witness
+// auto-recovers the bead (status=open, clear assignee, audit label) instead
+// of just labeling it stranded-assignee and waiting for mayor to act.
+func TestDetectStaleInProgressBeads_AutoRecovers(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	// resetAbandonedBead's work-on-main close guard would otherwise close the
+	// bead and skip the reset path. Force "not on main" so the reset fires.
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	resetRedispatchLimitersForTest()
+	t.Cleanup(resetRedispatchLimitersForTest)
+
+	rigName := "testrig"
+	old := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-stale1", "assignee": rigName + "/polecats/alpha", "updated_at": old, "labels": []string{}},
+	)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			// resetAbandonedBead calls `show` to check status; return in_progress
+			// so the reset path is taken.
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"status":"in_progress"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), rigName, nil, time.Hour)
+
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	s := result.Stranded[0]
+	if s.Action != "recovered" {
+		t.Errorf("Action = %q, want recovered", s.Action)
+	}
+	if !s.Recovered {
+		t.Errorf("Recovered = false, want true")
+	}
+
+	logStr := strings.Join(mock.calls, "\n")
+	// Reset path must run: status=open + clear assignee.
+	if !strings.Contains(logStr, "update gt-stale1 --status=open --assignee=") {
+		t.Errorf("expected status=open + clear assignee, calls:\n%s", logStr)
+	}
+	// Audit label must be applied.
+	if !strings.Contains(logStr, "update gt-stale1 --add-label="+RecoveredDeadSessionLabel) {
+		t.Errorf("expected --add-label=%s, calls:\n%s", RecoveredDeadSessionLabel, logStr)
+	}
+	// Crucially: must NOT also apply the stranded-assignee label — recovery
+	// supersedes escalation.
+	if strings.Contains(logStr, "--add-label="+StrandedAssigneeLabel) {
+		t.Errorf("should not apply stranded-assignee on recovery, calls:\n%s", logStr)
+	}
+}
+
+// TestDetectStaleInProgressBeads_RecoveryBlockedFallsBackToEscalation verifies
+// that when resetAbandonedBead is a no-op (bead status check returns something
+// other than hooked/in_progress, e.g. closed by a sibling cycle), the function
+// falls back to the original label-and-mail-mayor escalation so mayor still
+// has visibility. (gu-mb1h)
+func TestDetectStaleInProgressBeads_RecoveryBlockedFallsBackToEscalation(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	rigName := "testrig"
+	old := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-stale1", "assignee": rigName + "/polecats/alpha", "updated_at": old, "labels": []string{}},
+	)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			// Return status=closed so resetAbandonedBead bails out without
+			// resetting (the (status != "hooked" && status != "in_progress")
+			// guard fires).
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"status":"closed"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, t.TempDir(), rigName, nil, time.Hour)
+
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	s := result.Stranded[0]
+	if s.Action != "escalated" {
+		t.Errorf("Action = %q, want escalated (recovery was blocked)", s.Action)
+	}
+	if s.Recovered {
+		t.Errorf("Recovered = true, want false (recovery was blocked)")
+	}
+
+	// stranded-assignee dedup label must be applied so we don't re-mail.
+	logStr := strings.Join(mock.calls, "\n")
+	if !strings.Contains(logStr, "update gt-stale1 --add-label="+StrandedAssigneeLabel) {
+		t.Errorf("expected --add-label=%s on fallback escalation, calls:\n%s", StrandedAssigneeLabel, logStr)
+	}
+	// The recovery audit label must NOT be applied — nothing was actually recovered.
+	if strings.Contains(logStr, "--add-label="+RecoveredDeadSessionLabel) {
+		t.Errorf("recovered:dead-session label leaked on blocked recovery, calls:\n%s", logStr)
+	}
+}
+
 // TestDetectStaleInProgressBeads_DisabledThreshold verifies a zero or negative
 // threshold disables the scan entirely (no calls to bd).
 func TestDetectStaleInProgressBeads_DisabledThreshold(t *testing.T) {
