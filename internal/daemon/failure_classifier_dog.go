@@ -322,6 +322,13 @@ func (d *Daemon) runFailureClassifier() {
 		return
 	}
 
+	// gu-8f20q: gate on the shared Dolt circuit breaker. When tripped,
+	// emit a single 'dolt-degraded' line and resume on the next tick.
+	if !d.doltBreaker.Allow() {
+		d.logger.Printf("failure_classifier: dolt-degraded — skipping tick (circuit breaker open)")
+		return
+	}
+
 	d.logger.Printf("failure_classifier: starting patrol cycle")
 
 	sigs := d.loadFailureSignatures()
@@ -336,6 +343,7 @@ func (d *Daemon) runFailureClassifier() {
 	}
 
 	escalations, err := d.listUnackedMainBranchEscalations()
+	d.doltBreaker.Record(err)
 	if err != nil {
 		d.logger.Printf("failure_classifier: failed to list escalations: %v", err)
 		return

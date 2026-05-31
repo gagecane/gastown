@@ -198,9 +198,18 @@ func (d *Daemon) runMainCIBreakDog() {
 		return
 	}
 
+	// gu-8f20q: gate on the shared Dolt circuit breaker so this dog
+	// does not pile retries onto a wedged Dolt server. When tripped,
+	// emit a single 'dolt-degraded' line and resume on the next tick.
+	if !d.doltBreaker.Allow() {
+		d.logger.Printf("main_ci_break_dog: dolt-degraded — skipping tick (circuit breaker open)")
+		return
+	}
+
 	d.logger.Printf("main_ci_break_dog: starting patrol cycle")
 
 	escalations, err := d.listUnackedMainCIBreakEscalations()
+	d.doltBreaker.Record(err)
 	if err != nil {
 		d.logger.Printf("main_ci_break_dog: failed to list escalations: %v", err)
 		return

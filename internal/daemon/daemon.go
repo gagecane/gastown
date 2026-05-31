@@ -223,6 +223,17 @@ type Daemon struct {
 	// auto-revert handler in via SetMainCIBreakHandler. Nil means "use the
 	// noop handler." Only accessed from the heartbeat goroutine.
 	mainCIBreakHandler MainCIBreakHandler
+
+	// doltBreaker is a per-process circuit breaker shared across patrol
+	// dogs that issue bd subprocess calls (main_ci_break_dog,
+	// mr_cycle_close_dog, failure_classifier_dog). When Dolt is
+	// unhealthy, every dog would otherwise retry on its own cadence,
+	// amplifying load on a recovering server and producing N
+	// independent error streams in daemon.log. The shared breaker
+	// short-circuits each dog's tick with a single 'dolt-degraded' log
+	// line and resumes when the breaker half-closes. Source: gu-8f20q
+	// (P2-19 from the x2kby code-review synthesis).
+	doltBreaker *DoltCircuitBreaker
 }
 
 // alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It
@@ -521,6 +532,7 @@ func New(config *Config) (*Daemon, error) {
 		otelProvider:    otelProvider,
 		metrics:         dm,
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
+		doltBreaker:     NewDoltCircuitBreaker(),
 	}
 	return d, nil
 }

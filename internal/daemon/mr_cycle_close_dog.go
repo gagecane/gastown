@@ -309,9 +309,17 @@ func (d *Daemon) runMRCycleCloseDog() {
 		return
 	}
 
+	// gu-8f20q: gate on the shared Dolt circuit breaker. When tripped,
+	// emit a single 'dolt-degraded' line and resume on the next tick.
+	if !d.doltBreaker.Allow() {
+		d.logger.Printf("mr_cycle_close_dog: dolt-degraded — skipping tick (circuit breaker open)")
+		return
+	}
+
 	d.logger.Printf("mr_cycle_close_dog: starting patrol cycle")
 
 	rows, err := d.listClosedAutoTestPRMergeRequests()
+	d.doltBreaker.Record(err)
 	if err != nil {
 		d.logger.Printf("mr_cycle_close_dog: failed to list MRs: %v", err)
 		return
