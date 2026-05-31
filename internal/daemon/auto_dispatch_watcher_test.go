@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -586,6 +587,54 @@ func TestClassifyNoDispatchable_DogInBackoffReportsBackoff(t *testing.T) {
 	got := classifyNoDispatchable(d, mgr, sm)
 	if got != "dog_in_backoff" {
 		t.Errorf("classifyNoDispatchable = %q, want dog_in_backoff", got)
+	}
+}
+
+// TestFormatRigScopedAutoDispatchBody_SkipAndContinueGuidance pins down the
+// gu-060l fix: when `gt sling` rejects an individual bead (e.g. an epic
+// passed through the pre-filter), the dog must log and CONTINUE to the next
+// candidate rather than aborting the entire run. Without this guidance, an
+// LLM dog interprets the first rejection as terminal and records
+// `result:all-failed` even though the rest of the ready list might sling
+// successfully.
+func TestFormatRigScopedAutoDispatchBody_SkipAndContinueGuidance(t *testing.T) {
+	p := &plugin.Plugin{
+		Name:        "auto-dispatch",
+		Description: "Auto-sling ready tasks to idle polecats across all rigs",
+	}
+	body := formatRigScopedAutoDispatchBody(p, "gastown_upstream", "gt-done")
+
+	wantContains := []string{
+		// gu-060l: explicit skip-and-continue contract
+		"On `gt sling` rejection",
+		"CONTINUE to the next-highest-priority candidate",
+		"Do NOT abort the run on a single bead's rejection",
+		"gu-060l",
+		// Concrete rejection examples the dog might see
+		"epics cannot be scheduled with explicit rig",
+		"bead not found",
+		// On exhaustion, record a structured no_dispatchable outcome
+		"result:no_dispatchable",
+		// Pre-filter still mentioned (defense-in-depth, not removed by gu-060l)
+		"issue_type is `epic` or `convoy`",
+		"EPIC:",
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(body, want) {
+			t.Errorf("formatRigScopedAutoDispatchBody body missing %q\n--- body ---\n%s", want, body)
+		}
+	}
+
+	// Targeted single-rig scope is preserved (gu-060l should not regress
+	// the existing event-driven contract).
+	for _, want := range []string{
+		"event-driven",
+		"Target rig**: gastown_upstream",
+		"Do NOT iterate other rigs",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("formatRigScopedAutoDispatchBody body missing pre-existing %q\n--- body ---\n%s", want, body)
+		}
 	}
 }
 
