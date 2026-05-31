@@ -84,18 +84,37 @@ type CycleCloseHandler struct {
 	// Logf is a printf-style logger. In production this is the
 	// daemon's logger.Printf; in tests it captures log lines.
 	Logf func(format string, args ...interface{})
+
+	// AlreadyProcessedMR, when non-nil, is consulted before the
+	// circuit-breaker counter is incremented for a non-merged event.
+	// If it returns true, the handler treats the event as a duplicate
+	// (e.g., webhook retry after a missed dog-side ack-label) and
+	// SKIPS both the counter increment and the rejection-attachment
+	// write — the state-machine transition still runs (idempotent).
+	//
+	// In production this defaults to a lookup over rejection
+	// attachment beads (see hasRejectionAttachment); in tests it can
+	// be stubbed without a live beads wrapper.
+	AlreadyProcessedMR func(rig, mrID string) bool
 }
 
 // HandleEvent processes a single MRCycleCloseEvent. This is the
 // function registered with Daemon.SetMRCycleCloseHandler.
 //
 // It is idempotent: re-processing the same event (due to a missed ack
-// label on the dog side) produces the same state transitions because
-// transitions are guarded by the current state (CAS from mr-pending
-// only). The circuit-breaker counter increment is NOT idempotent on
-// repeat, but the dog's ack-label mechanism prevents re-dispatch in
-// the normal case; the rare transient-ack-failure path accepts a
-// slight over-count as the lesser evil vs. complex distributed dedup.
+// label on the dog side or a webhook retry) produces the same state
+// transitions because transitions are guarded by the current state
+// (CAS from mr-pending only).
+//
+// The circuit-breaker counter increment is also idempotent (gu-fomxj):
+// before the CAS-mutate, the handler consults AlreadyProcessedMR to
+// check whether this MR has already produced a rejection attachment
+// for this rig. If so, the counter increment AND the rejection
+// attachment write are skipped — preventing webhook retries from
+// tripping the breaker prematurely (a denial-of-service on operator
+// attention). The state read-cache (rig state, last_outcome,
+// last_cycle_at) is still refreshed, because last-write-wins on a
+// no-op replay produces the same shape.
 //
 // Transition and rejection records are persisted as separate
 // attachment beads (OQ4 fallback) — the town-state bead's RigSummary
@@ -114,6 +133,21 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 		targetPath = extractTargetPathFromBody(ev.Body)
 	}
 
+	// gu-fomxj: dedup webhook retries. If we've already filed a
+	// rejection attachment for this MR+rig, the breaker counter has
+	// already been incremented for it — re-incrementing here would
+	// trip the breaker prematurely on duplicate dispatch. The state-
+	// machine transition still runs below (it's a no-op last-write-wins
+	// when the rig is already cooled-down).
+	duplicate := false
+	if !isMerged && ev.MRID != "" {
+		duplicate = h.alreadyProcessed(ev.TargetRig, ev.MRID)
+		if duplicate {
+			h.logf("cycle-close-handler: dedup mr=%s rig=%s — skipping CB increment + rejection attachment (already processed)",
+				ev.MRID, ev.TargetRig)
+		}
+	}
+
 	// CAS-mutate the town-state bead: update the per-rig read-cache row
 	// in RigSummary and the circuit-breaker counter. The high-cardinality
 	// transition / rejection records are written as separate attachment
@@ -128,7 +162,17 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 		rigState.LastCycleAt = now.UTC().Format(time.RFC3339)
 		rigState.LastOutcome = ev.CloseReason
 
-		if !isMerged {
+		switch {
+		case isMerged:
+			// Merged: reset circuit-breaker counter (consecutive-close resets).
+			s.CircuitBreaker.Count = 0
+			s.CircuitBreaker.WindowStartedAt = ""
+		case duplicate:
+			// gu-fomxj: webhook retry — already counted on the first
+			// dispatch. Skip the increment and skip the reset (the
+			// breaker state for non-merged events is owned by the
+			// first-dispatch path).
+		default:
 			// Increment circuit-breaker counter.
 			s.CircuitBreaker.Count++
 			if s.CircuitBreaker.WindowStartedAt == "" {
@@ -149,10 +193,6 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 					Details: fmt.Sprintf("count=%d threshold=%d window=7d mr=%s", s.CircuitBreaker.Count, CircuitBreakerThreshold, ev.MRID),
 				})
 			}
-		} else {
-			// Merged: reset circuit-breaker counter (consecutive-close resets).
-			s.CircuitBreaker.Count = 0
-			s.CircuitBreaker.WindowStartedAt = ""
 		}
 
 		// Write back the rig state read-cache.
@@ -173,8 +213,12 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 	// mr-pending".
 	h.fileTransitionAttachment(ev, prevState, "cooled-down", now)
 
-	if !isMerged {
+	if !isMerged && !duplicate {
 		// File the rejection attachment with the per-file 21d cooldown.
+		// Skipped on duplicate (gu-fomxj): the attachment from the first
+		// dispatch already records this MR — adding a second one would
+		// double-count when MaterializeAutoTestState reads back per-MR
+		// rejections (and is the very signal the dedup check uses).
 		h.fileRejectionAttachment(ev, targetPath, now)
 
 		// Nudge overseer if circuit breaker tripped.
@@ -203,6 +247,64 @@ func (h *CycleCloseHandler) HandleEvent(ev MRCycleCloseEvent) {
 // rejection attachment (synthesis §D14: per-file 21d cooldown after a
 // closed-unmerged MR before the same target is eligible again).
 const RejectionCooldown = 21 * 24 * time.Hour
+
+// alreadyProcessed reports whether this MR+rig has already produced a
+// rejection attachment. Used to dedup webhook retries (gu-fomxj). Uses
+// the AlreadyProcessedMR injection hook if set; otherwise falls back to
+// hasRejectionAttachment over the live beads wrapper. Returns false on
+// any lookup error (fail-open: the worst case is the documented
+// over-count behavior we accept on transient ack failures, which is
+// strictly better than dropping a real close on a transient list error).
+func (h *CycleCloseHandler) alreadyProcessed(rig, mrID string) bool {
+	if h.AlreadyProcessedMR != nil {
+		return h.AlreadyProcessedMR(rig, mrID)
+	}
+	if h.Beads == nil {
+		return false
+	}
+	seen, err := hasRejectionAttachment(h.Beads, rig, mrID)
+	if err != nil {
+		h.logf("cycle-close-handler: dedup lookup failed for mr=%s rig=%s: %v (fail-open)",
+			mrID, rig, err)
+		return false
+	}
+	return seen
+}
+
+// hasRejectionAttachment scans existing rejection attachment beads for a
+// matching (rig, mrID) pair. Lives next to MaterializeAutoTestState in
+// attachments.go semantically but kept here so the handler owns its
+// dedup contract. Returns true on first match, false on no-match.
+func hasRejectionAttachment(b *beads.Beads, rig, mrID string) (bool, error) {
+	if b == nil || rig == "" || mrID == "" {
+		return false, nil
+	}
+	issues, err := b.List(beads.ListOptions{
+		Label:  AttachmentLabel,
+		Status: "all",
+		Limit:  0,
+	})
+	if err != nil {
+		return false, fmt.Errorf("listing attachment beads for dedup: %w", err)
+	}
+	rigLbl := RigLabel(rig)
+	for _, issue := range issues {
+		if !beads.HasLabel(issue, rigLbl) {
+			continue
+		}
+		if !beads.HasLabel(issue, KindRejection) {
+			continue
+		}
+		rec, parseErr := parseRejection(issue.Metadata)
+		if parseErr != nil {
+			continue
+		}
+		if rec.MRID == mrID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // fileTransitionAttachment writes a transition record as an attachment
 // bead. Errors are logged and swallowed — see HandleEvent docstring.

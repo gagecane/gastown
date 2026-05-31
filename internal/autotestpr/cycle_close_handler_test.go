@@ -19,10 +19,17 @@ type testHandlerFixture struct {
 	logs    []string
 	nudges  []string
 	state   *TownState
+
+	// seenMRs mirrors the rejection-attachment dedup index that the
+	// real handler consults via AlreadyProcessedMR (gu-fomxj). The
+	// applyHandlerStateMutation helper writes to and reads from it
+	// so test scenarios can exercise the duplicate-skip path without
+	// a live beads wrapper. Keyed by "<rig>|<mrID>".
+	seenMRs map[string]bool
 }
 
 func newTestHandler() *testHandlerFixture {
-	f := &testHandlerFixture{}
+	f := &testHandlerFixture{seenMRs: map[string]bool{}}
 	s := DefaultTownState()
 	f.state = &s
 
@@ -34,6 +41,9 @@ func newTestHandler() *testHandlerFixture {
 		Now: func() time.Time { return testClock },
 		Logf: func(format string, args ...interface{}) {
 			f.logs = append(f.logs, fmt.Sprintf(format, args...))
+		},
+		AlreadyProcessedMR: func(rig, mrID string) bool {
+			return f.seenMRs[rig+"|"+mrID]
 		},
 	}
 	return f
@@ -423,12 +433,27 @@ func applyHandlerStateMutation(f *testHandlerFixture, ev MRCycleCloseEvent) {
 	now := f.handler.now()
 	isMerged := strings.EqualFold(ev.CloseReason, "merged")
 
+	// Mirror HandleEvent's gu-fomxj dedup: consult the fixture's
+	// seenMRs index (driven by AlreadyProcessedMR) for non-merged
+	// events so duplicate dispatch leaves the breaker counter alone.
+	duplicate := false
+	if !isMerged && ev.MRID != "" && f.handler.AlreadyProcessedMR != nil {
+		duplicate = f.handler.AlreadyProcessedMR(ev.TargetRig, ev.MRID)
+	}
+
 	rigState := f.handler.loadRigCycleState(f.state, ev.TargetRig)
 	rigState.State = "cooled-down"
 	rigState.LastCycleAt = now.UTC().Format(time.RFC3339)
 	rigState.LastOutcome = ev.CloseReason
 
-	if !isMerged {
+	switch {
+	case isMerged:
+		f.state.CircuitBreaker.Count = 0
+		f.state.CircuitBreaker.WindowStartedAt = ""
+	case duplicate:
+		// Skip increment AND skip reset — duplicate non-merged events
+		// are no-ops on the breaker counter (gu-fomxj).
+	default:
 		f.state.CircuitBreaker.Count++
 		if f.state.CircuitBreaker.WindowStartedAt == "" {
 			f.state.CircuitBreaker.WindowStartedAt = now.UTC().Format(time.RFC3339)
@@ -446,12 +471,17 @@ func applyHandlerStateMutation(f *testHandlerFixture, ev MRCycleCloseEvent) {
 				Details: fmt.Sprintf("count=%d threshold=%d window=7d mr=%s", f.state.CircuitBreaker.Count, CircuitBreakerThreshold, ev.MRID),
 			})
 		}
-	} else {
-		f.state.CircuitBreaker.Count = 0
-		f.state.CircuitBreaker.WindowStartedAt = ""
 	}
 
 	f.handler.saveRigCycleState(f.state, ev.TargetRig, rigState)
+
+	// Mark MR as processed (mirror what fileRejectionAttachment would
+	// record on a real run) so a subsequent re-dispatch trips the
+	// dedup path. Only non-merged events file rejection attachments,
+	// and only first-dispatch (not duplicate) writes one — match that.
+	if !isMerged && !duplicate && ev.MRID != "" {
+		f.seenMRs[ev.TargetRig+"|"+ev.MRID] = true
+	}
 }
 
 // assertNoLegacyLogKeys is the gu-l6xu acceptance assertion (criterion d):
@@ -514,10 +544,15 @@ func TestCycleCloseHandler_IdempotentReprocess(t *testing.T) {
 }
 
 // TestCycleCloseHandler_IdempotentReprocess_ClosedUnmerged tests
-// re-processing a closed-unmerged event. The circuit-breaker counter
-// increments on each call (documented non-idempotent behavior per the
-// handler docstring), but the dog's ack-label mechanism prevents
-// re-dispatch in normal operation.
+// re-processing a closed-unmerged event. Per gu-fomxj, the
+// circuit-breaker counter MUST be idempotent on duplicate dispatch —
+// webhook retries (or transient ack-label failures on the dog side)
+// must not trip the breaker prematurely. The handler consults
+// AlreadyProcessedMR before incrementing; on a hit the increment is
+// skipped while the state-machine transition still runs.
+//
+// Acceptance: replaying the same MRCycleCloseEvent twice MUST leave
+// CircuitBreaker.Count unchanged after the first call.
 func TestCycleCloseHandler_IdempotentReprocess_ClosedUnmerged(t *testing.T) {
 	f := newTestHandler()
 
@@ -531,23 +566,91 @@ func TestCycleCloseHandler_IdempotentReprocess_ClosedUnmerged(t *testing.T) {
 		Body:        "close_reason: rejected\nrig: gastown_upstream\ntarget_path: internal/bar.go\n",
 	}
 
-	// First processing.
+	// First processing: increments to 1 and records the MR as seen.
 	applyHandlerStateMutation(f, ev)
 	if f.state.CircuitBreaker.Count != 1 {
 		t.Fatalf("first: CB count = %d, want 1", f.state.CircuitBreaker.Count)
 	}
 
-	// Second processing (re-dispatch).
+	// Second processing (re-dispatch): dedup hit, counter stays at 1.
 	applyHandlerStateMutation(f, ev)
-	// CB counter incremented again — documented non-idempotent behavior.
-	if f.state.CircuitBreaker.Count != 2 {
-		t.Errorf("second: CB count = %d, want 2 (non-idempotent, accepted)", f.state.CircuitBreaker.Count)
+	if f.state.CircuitBreaker.Count != 1 {
+		t.Errorf("second (duplicate): CB count = %d, want 1 (idempotent per gu-fomxj)",
+			f.state.CircuitBreaker.Count)
 	}
 
-	// State should still be cooled-down (not tripped — threshold is 3).
+	// State should still be cooled-down (not tripped — single increment,
+	// threshold is 3).
 	rs := f.handler.loadRigCycleState(f.state, "gastown_upstream")
 	if rs.State != "cooled-down" {
 		t.Errorf("state = %q, want cooled-down", rs.State)
+	}
+}
+
+// TestCycleCloseHandler_DedupDoesNotMaskFreshMRs verifies the dedup
+// only suppresses the exact (rig, mrID) pair that has already been
+// processed — a fresh MR on the same rig still increments the counter
+// even if a different MR previously did. (Bug regression guard:
+// dedup must not be over-broad.)
+func TestCycleCloseHandler_DedupDoesNotMaskFreshMRs(t *testing.T) {
+	f := newTestHandler()
+
+	rigState := RigCycleState{State: "mr-pending"}
+	f.handler.saveRigCycleState(f.state, "gastown_upstream", rigState)
+
+	first := MRCycleCloseEvent{
+		MRID:        "gt-mr-A",
+		TargetRig:   "gastown_upstream",
+		CloseReason: "rejected",
+		Body:        "close_reason: rejected\nrig: gastown_upstream\n",
+	}
+	second := MRCycleCloseEvent{
+		MRID:        "gt-mr-B",
+		TargetRig:   "gastown_upstream",
+		CloseReason: "rejected",
+		Body:        "close_reason: rejected\nrig: gastown_upstream\n",
+	}
+
+	applyHandlerStateMutation(f, first)
+	applyHandlerStateMutation(f, second)
+
+	if f.state.CircuitBreaker.Count != 2 {
+		t.Errorf("CB count = %d, want 2 (two distinct MRs)", f.state.CircuitBreaker.Count)
+	}
+}
+
+// TestCycleCloseHandler_DedupDoesNotResetOnDuplicate verifies that a
+// duplicate non-merged dispatch does NOT clobber a non-zero breaker
+// counter (the old code paths' if/else branched into reset on the
+// duplicate side). After this fix, a duplicate is a true no-op on
+// CircuitBreaker.{Count,WindowStartedAt}.
+func TestCycleCloseHandler_DedupDoesNotResetOnDuplicate(t *testing.T) {
+	f := newTestHandler()
+
+	rigState := RigCycleState{State: "mr-pending"}
+	f.handler.saveRigCycleState(f.state, "gastown_upstream", rigState)
+
+	ev := MRCycleCloseEvent{
+		MRID:        "gt-mr-dup",
+		TargetRig:   "gastown_upstream",
+		CloseReason: "rejected",
+		Body:        "close_reason: rejected\nrig: gastown_upstream\n",
+	}
+
+	applyHandlerStateMutation(f, ev)
+	wantWindow := f.state.CircuitBreaker.WindowStartedAt
+	if wantWindow == "" {
+		t.Fatal("first: window not set")
+	}
+
+	applyHandlerStateMutation(f, ev) // duplicate
+
+	if f.state.CircuitBreaker.Count != 1 {
+		t.Errorf("CB count = %d, want 1 (duplicate must not reset)", f.state.CircuitBreaker.Count)
+	}
+	if f.state.CircuitBreaker.WindowStartedAt != wantWindow {
+		t.Errorf("window changed on duplicate: got %q, want %q",
+			f.state.CircuitBreaker.WindowStartedAt, wantWindow)
 	}
 }
 
