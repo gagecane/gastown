@@ -53,6 +53,10 @@ Abbreviated patrol rules:
 - **heartbeat-mid**: SKIP (short cycle doesn't need mid-cycle refresh).
 - **health-scan**: Quick `gt witness status` / `gt refinery status` only. Skip nudges.
 - **dolt-health**: SKIP.
+- **memory-check**: ALWAYS run. The kernel OOM-killer doesn't care whether
+  patrol is in abbreviated mode; if memory is critical we still need to
+  escalate before Dolt dies (gu-ayam3 / gc-ppz9r). The check is one
+  /proc/meminfo read — cheap enough to run every cycle.
 - **zombie-scan**: SKIP.
 - **plugin-run**: SKIP. This applies ONLY to the in-patrol plugin-run batch
   step below — the abbreviated-mode SKIP rule MUST NOT be applied to
@@ -76,7 +80,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 15
+version = 16
 
 [vars]
 [vars.wisp_type]
@@ -761,9 +765,61 @@ Log `Dolt health: OK` and move on.
 **Exit criteria:** Health check run, alerts handled or escalated."""
 
 [[steps]]
+id = "memory-check"
+title = "Check system memory pressure"
+needs = ["dolt-health"]
+description = """
+Detect low-memory conditions BEFORE the kernel OOM-killer fires and takes Dolt
+down. (gu-ayam3 / gc-ppz9r — 2026-05-24 incident: 5 OOM kills in 90 minutes
+on a host with 3.7GB MemAvailable and no swap.)
+
+The deacon's existing dolt-health step is reactive — it reports problems
+*after* Dolt is degraded. By that time bd commands are flaky and escalation
+paths are themselves degraded. This step is the proactive companion: read
+MemAvailable directly and escalate before the kill.
+
+**Run the check:**
+```bash
+gt deacon memory-check --json
+```
+
+The command reads `/proc/meminfo` (Linux) or `vm_stat` (macOS) and classifies
+into tiers (defaults shown — tunable via flags):
+
+| Tier      | Threshold              | Action                                |
+|-----------|------------------------|---------------------------------------|
+| OK        | MemAvailable ≥ 10 GB   | nothing — no log spam                 |
+| WARN      | MemAvailable < 10 GB   | log to patrol digest, no escalation   |
+| HIGH      | MemAvailable < 5  GB   | escalate severity=high (mayor mail)   |
+| CRITICAL  | MemAvailable < 2  GB   | escalate severity=critical            |
+
+Escalations use `--dedup --signature deacon:memory-check:<severity>` so
+repeated patrol cycles in the same low-memory window do NOT spam the mayor —
+the dedup path bumps the existing escalation instead. This is the same
+pattern used by other recurring patrol alerts.
+
+**Why this is ALWAYS run** (even in abbreviated patrol mode):
+The OOM killer doesn't care about idle cycles. If memory is critical we
+need to escalate now, not after the next full patrol. The check is a single
+file read plus integer parse — cheap enough to run every cycle.
+
+**Exit codes:**
+- 0 — memory healthy or WARN (logged, not escalated)
+- 1 — error reading memory info
+- 2 — HIGH or CRITICAL threshold crossed (escalation emitted unless --no-escalate)
+
+**If this fires repeatedly:**
+1. Capture top RSS consumers: `ps -eo pid,rss,comm --sort=-rss | head -20`
+2. Consider pausing dispatch: `gt pause` (if available) or escalate to mayor
+3. Investigate whether a specific agent or dog is leaking
+4. Related: gc-1ld5e (lower Dolt max_connections)
+
+**Exit criteria:** Memory checked and any HIGH/CRITICAL findings escalated."""
+
+[[steps]]
 id = "zombie-scan"
 title = "Detect zombie polecats (NO KILL AUTHORITY)"
-needs = ["dolt-health"]
+needs = ["memory-check"]
 description = """
 Defense-in-depth DETECTION of zombie polecats that Witness should have cleaned.
 
@@ -1323,7 +1379,7 @@ After await-signal returns (either by signal or timeout):
 gt patrol report --summary "<brief summary>" \
   --steps "heartbeat:OK,inbox-check:OK,orphan-process-cleanup:SKIP,..."
 ```
-The --steps flag is REQUIRED. List ALL 26 steps with their actual status.
+The --steps flag is REQUIRED. List ALL 27 steps with their actual status.
 Steps you executed get OK, steps you skipped get SKIP.
 This closes the current patrol wisp and automatically creates a new one.
 4. Hand off immediately so a fresh Deacon session picks up the newly-created
