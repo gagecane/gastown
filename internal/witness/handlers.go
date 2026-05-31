@@ -385,6 +385,23 @@ func handlePolecatDonePendingMR(bd *BdCli, workDir, rigName string, payload *Pol
 		return result
 	}
 
+	// gs-cfp: Only signal the refinery when the MR bead is concretely open and
+	// discoverable. completionPayloadHasPendingMR is fail-closed — it reports a
+	// pending MR even when the MR bead is missing or terminal, as long as the
+	// source issue isn't terminal yet, so the cleanup/recovery path above stays
+	// open. But emitting MERGE_READY for an MR the refinery can't find just wakes
+	// it to an empty queue (the false-signal symptom in gs-cfp: two consecutive
+	// MERGE_READY signals with no mail/PR/merge-ready bead). Mirror the gu-v76i /
+	// gs-onu "verify before you nudge" discipline used by gt done and gt mq
+	// submit. Suppression is safe: the cleanup wisp is preserved and the
+	// refinery's periodic patrol still picks up any real MR on its next cycle.
+	if !mrExistsAndOpen(bd, workDir, payload.MRID) {
+		result.Handled = true
+		result.WispCreated = wispID
+		result.Action = fmt.Sprintf("deferred cleanup for %s (MR=%s not open/discoverable — suppressed phantom MERGE_READY)", payload.PolecatName, payload.MRID)
+		return result
+	}
+
 	notifyRefineryMergeReady(workDir, rigName, result)
 
 	result.Handled = true

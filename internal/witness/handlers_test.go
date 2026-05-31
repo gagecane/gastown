@@ -2589,6 +2589,119 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 }
 
+// refineryEventCount counts .event files in townRoot/events/refinery.
+func refineryEventCount(t *testing.T, townRoot string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(townRoot, "events", "refinery"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("reading refinery event dir: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".event") {
+			n++
+		}
+	}
+	return n
+}
+
+// pendingMRTestBd builds a mockBd for handlePolecatDonePendingMR: it satisfies
+// createCleanupWisp (create), UpdateCleanupWispState (show wisp + update), and
+// the mrExistsAndOpen probe (show MR). mrShow/mrErr control what the MR id
+// resolves to.
+func pendingMRTestBd(t *testing.T, mrID, mrShow string, mrErr error) *BdCli {
+	t.Helper()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			switch {
+			case len(args) >= 1 && args[0] == "create":
+				return `{"id":"gt-wisp-1"}`, nil
+			case len(args) >= 2 && args[0] == "show" && args[1] == "gt-wisp-1":
+				return `[{"labels":["polecat:nux"]}]`, nil
+			case len(args) >= 2 && args[0] == "show" && args[1] == mrID:
+				return mrShow, mrErr
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+	return bd
+}
+
+func newTownRoot(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+	return townRoot
+}
+
+// gs-cfp: a pending-MR completion whose MR bead is missing/terminal must NOT
+// emit a MERGE_READY signal — that wakes the refinery to an empty queue. The
+// cleanup wisp is still created so recovery is preserved.
+func TestHandlePolecatDonePendingMR_PhantomMRSuppressesMergeReady(t *testing.T) {
+	townRoot := newTownRoot(t)
+	bd := pendingMRTestBd(t, "gt-mr-phantom", `{"error":"no issues found"}`,
+		fmt.Errorf("bd: no issue found matching %q", "gt-mr-phantom"))
+
+	payload := &PolecatDonePayload{
+		PolecatName: "nux",
+		MRID:        "gt-mr-phantom",
+		Branch:      "polecat/nux/gs-cfp",
+		IssueID:     "gs-cfp",
+	}
+	result := handlePolecatDonePendingMR(bd, townRoot, "gastown", payload, &HandlerResult{})
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if !result.Handled {
+		t.Fatal("result.Handled = false, want true")
+	}
+	if result.WispCreated != "gt-wisp-1" {
+		t.Errorf("WispCreated = %q, want gt-wisp-1 (cleanup wisp must still be created)", result.WispCreated)
+	}
+	if !strings.Contains(result.Action, "suppressed phantom MERGE_READY") {
+		t.Errorf("Action = %q, want it to mention suppressed phantom MERGE_READY", result.Action)
+	}
+	if n := refineryEventCount(t, townRoot); n != 0 {
+		t.Errorf("emitted %d MERGE_READY event(s) for a phantom MR, want 0", n)
+	}
+}
+
+// gs-cfp: a pending-MR completion with a genuinely open MR bead must still emit
+// MERGE_READY (regression guard for the suppression path above).
+func TestHandlePolecatDonePendingMR_OpenMREmitsMergeReady(t *testing.T) {
+	townRoot := newTownRoot(t)
+	bd := pendingMRTestBd(t, "gt-mr-real", `[{"status":"open"}]`, nil)
+
+	payload := &PolecatDonePayload{
+		PolecatName: "nux",
+		MRID:        "gt-mr-real",
+		Branch:      "polecat/nux/gs-cfp",
+		IssueID:     "gs-cfp",
+	}
+	result := handlePolecatDonePendingMR(bd, townRoot, "gastown", payload, &HandlerResult{})
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if !strings.Contains(result.Action, "nudged refinery") {
+		t.Errorf("Action = %q, want it to mention nudged refinery", result.Action)
+	}
+	if n := refineryEventCount(t, townRoot); n != 1 {
+		t.Errorf("emitted %d MERGE_READY event(s) for an open MR, want 1", n)
+	}
+}
+
 // --- DiscoverPostHocCompletions tests (gu-jr8) ---
 //
 // Post-hoc completion covers the narrow case where:
