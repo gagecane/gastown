@@ -38,6 +38,15 @@ const (
 	// repeats indefinitely, creating spawn storms and pummeling Dolt with
 	// repeated assignment writes. See gu-iygf / hq/gt-sfo6q.
 	feedDispatchCooldown = 5 * time.Minute
+
+	// missingBeadStrikeThreshold is the number of consecutive "bead not found"
+	// sling failures tolerated for a single (convoy, bead) pair before the
+	// bead is auto-untracked from the convoy. N=3 absorbs transient Dolt
+	// hiccups (replication lag, brief outages) while still terminating the
+	// forever-loop produced by a tracked bead that has been deleted /
+	// squashed / never created. See gu-f0gq (hq-cv-p6ht2 looped 347x on
+	// non-existent ta-9emq for 19h45m).
+	missingBeadStrikeThreshold = 3
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -127,9 +136,28 @@ type ConvoyManager struct {
 	// of the same in_progress bead with a dead assignee. See gu-iygf.
 	lastFeedAttempt sync.Map // map[string]time.Time
 
+	// missingBeadStrikes counts consecutive "bead not found" sling failures
+	// per (convoyID, issueID) pair. When the count reaches
+	// missingBeadStrikeThreshold the bead is auto-untracked from the convoy
+	// so the convoy can make progress (and ultimately auto-close if it
+	// becomes empty). Cleared on successful sling. See gu-f0gq.
+	missingBeadStrikes sync.Map // map[missingBeadKey]int
+
+	// untrackMissingBeadFn untracks issueID from convoyID. Overridable for
+	// tests; defaults to a `bd dep remove` subprocess call. Returning a
+	// non-nil error leaves the strike counter in place so the next scan
+	// retries the untrack rather than re-attempting the doomed sling.
+	untrackMissingBeadFn func(convoyID, issueID string) error
+
 	// now returns the current time. Overridable for tests; defaults to
 	// time.Now. Only used by the feed-cooldown logic.
 	now func() time.Time
+}
+
+// missingBeadKey identifies a (convoy, bead) pair for the strike counter.
+type missingBeadKey struct {
+	convoyID string
+	issueID  string
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -148,7 +176,7 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		isRigParked = func(string) bool { return false }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ConvoyManager{
+	m := &ConvoyManager{
 		townRoot:     townRoot,
 		scanInterval: scanInterval,
 		ctx:          ctx,
@@ -160,6 +188,8 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		gtPath:       gtPath,
 		now:          time.Now,
 	}
+	m.untrackMissingBeadFn = m.untrackMissingBeadViaBd
+	return m
 }
 
 // Start begins the convoy manager goroutines (event poll + stranded scan).
@@ -615,13 +645,105 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
-			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, util.FirstLine(stderr.String()))
+			stderrLine := util.FirstLine(stderr.String())
+			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, stderrLine)
+			if isBeadNotFoundError(stderrLine) {
+				m.handleMissingBeadStrike(c.ID, issueID, stderrLine)
+			}
 			continue
 		}
+		// Successful dispatch — clear any accumulated missing-bead strikes
+		// for this (convoy, bead) pair. A bead that was transiently invisible
+		// (Dolt restart, replication lag) shouldn't carry strikes forward.
+		m.missingBeadStrikes.Delete(missingBeadKey{c.ID, issueID})
 		return // Successfully dispatched one issue
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// isBeadNotFoundError reports whether a sling stderr line indicates the target
+// bead does not exist. Matches the error shapes produced by verifyBeadExists
+// and bd show ("bead 'xxx' not found", "bead xxx not found", and the bd-direct
+// "no issue found matching 'xxx'" form). Match is case-insensitive and tolerant
+// of quoting variants. (gu-f0gq)
+func isBeadNotFoundError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	s := strings.ToLower(stderrLine)
+	// gt sling: "bead 'xxx' not found" / "bead xxx not found"
+	if strings.Contains(s, "not found") &&
+		(strings.Contains(s, "bead ") || strings.Contains(s, "issue ")) {
+		return true
+	}
+	// bd: "no issue found matching"
+	if strings.Contains(s, "no issue found matching") {
+		return true
+	}
+	return false
+}
+
+// handleMissingBeadStrike increments the strike counter for (convoyID, issueID)
+// and, when the threshold is reached, untracks the bead from the convoy so the
+// stranded scan stops re-attempting an impossible sling. The convoy itself is
+// not closed here — the next scan will see the convoy with one fewer (or zero)
+// tracked beads and the existing checkConvoyCompletion / closeEmptyConvoy paths
+// take over. (gu-f0gq)
+func (m *ConvoyManager) handleMissingBeadStrike(convoyID, issueID, stderrLine string) {
+	key := missingBeadKey{convoyID, issueID}
+	var count int
+	if v, ok := m.missingBeadStrikes.Load(key); ok {
+		if c, ok := v.(int); ok {
+			count = c
+		}
+	}
+	count++
+	m.missingBeadStrikes.Store(key, count)
+
+	if count < missingBeadStrikeThreshold {
+		m.logger("Convoy %s: %s missing-bead strike %d/%d (last error: %s)",
+			convoyID, issueID, count, missingBeadStrikeThreshold, stderrLine)
+		return
+	}
+
+	m.logger("Convoy %s: %s missing for %d consecutive scans — auto-untracking",
+		convoyID, issueID, count)
+	if m.untrackMissingBeadFn == nil {
+		return
+	}
+	if err := m.untrackMissingBeadFn(convoyID, issueID); err != nil {
+		// Leave the strike counter in place so the next scan retries the
+		// untrack instead of re-running the doomed sling.
+		m.logger("Convoy %s: untrack of missing %s failed: %s",
+			convoyID, issueID, util.FirstLine(err.Error()))
+		return
+	}
+	// Untrack succeeded — drop the strike entry; the bead is gone from the
+	// convoy and will not reappear in subsequent stranded scans.
+	m.missingBeadStrikes.Delete(key)
+	m.logger("Convoy %s: untracked missing bead %s — next scan will reassess convoy state",
+		convoyID, issueID)
+}
+
+// untrackMissingBeadViaBd runs `bd dep remove <convoyID> <issueID> --type=tracks`
+// to evict a tracked bead that no longer resolves. Uses the same mutation-routing
+// env as the feeder's sling subprocess so cross-rig convoy lookups land in the
+// hq store. Returns any error verbatim (caller logs the first line).
+func (m *ConvoyManager) untrackMissingBeadViaBd(convoyID, issueID string) error {
+	cmd := exec.CommandContext(m.ctx, "bd", "dep", "remove", convoyID, issueID, "--type=tracks")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdMutationRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		return err
+	}
+	return nil
 }
 
 // checkConvoyCompletion runs gt convoy check to auto-close a convoy whose

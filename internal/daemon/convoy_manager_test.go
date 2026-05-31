@@ -2693,3 +2693,259 @@ exit 0
 		t.Errorf("expected exactly 1 sling attempt under cooldown despite failure, got %d: %q", got, data)
 	}
 }
+
+// TestIsBeadNotFoundError covers the stderr shapes that should trigger the
+// missing-bead strike accounting in feedFirstReady. (gu-f0gq)
+func TestIsBeadNotFoundError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"unrelated error", "dispatch failed: rig parked", false},
+		{"sling quoted", "bead 'ta-9emq' not found", true},
+		{"sling unquoted", "bead ta-9emq not found", true},
+		{"sling bd show wrap", "bead 'ta-9emq' not found (bd show failed: exit 1)", true},
+		{"bd direct", "Error fetching ta-9emq: no issue found matching \"ta-9emq\"", true},
+		{"issue not found", "issue ta-9emq not found in store", true},
+		{"case insensitive", "BEAD 'TA-9EMQ' Not Found", true},
+		{"not found but no bead/issue", "config not found", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isBeadNotFoundError(tc.in); got != tc.want {
+				t.Errorf("isBeadNotFoundError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFeedFirstReady_MissingBeadStrikes_TriggersUntrack verifies that after
+// missingBeadStrikeThreshold consecutive "bead not found" sling failures, the
+// stale tracked bead is auto-untracked from the convoy. This terminates the
+// hq-cv-p6ht2 / ta-9emq forever-loop documented in gu-f0gq.
+func TestFeedFirstReady_MissingBeadStrikes_TriggersUntrack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// gt sling always fails with "bead not found" — simulating a tracked bead
+	// that has been deleted/squashed.
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "bead '$2' not found" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Capture untrack invocations instead of shelling out to bd.
+	var untrackCalls []missingBeadKey
+	m.untrackMissingBeadFn = func(convoyID, issueID string) error {
+		untrackCalls = append(untrackCalls, missingBeadKey{convoyID, issueID})
+		return nil
+	}
+
+	// Drive the clock so the per-issue feed cooldown doesn't suppress later
+	// scans from re-attempting the same bead.
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-p6ht2",
+		Title:       "Zombie Convoy",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-9emq"},
+	}
+
+	// Strike 1: first failure, no untrack yet.
+	m.feedFirstReady(c)
+	if len(untrackCalls) != 0 {
+		t.Fatalf("untrack fired prematurely on strike 1: %v", untrackCalls)
+	}
+
+	// Advance past the cooldown window between each scan to mirror the live
+	// stranded-scan loop (every scan is well outside feedDispatchCooldown
+	// once the bead has been declared missing for hours).
+	for i := 2; i <= missingBeadStrikeThreshold; i++ {
+		current = current.Add(feedDispatchCooldown + time.Second)
+		m.feedFirstReady(c)
+	}
+
+	if len(untrackCalls) != 1 {
+		t.Fatalf("expected exactly 1 untrack invocation after %d strikes, got %d: %v",
+			missingBeadStrikeThreshold, len(untrackCalls), untrackCalls)
+	}
+	if untrackCalls[0] != (missingBeadKey{"hq-cv-p6ht2", "gt-9emq"}) {
+		t.Errorf("untrack target = %v, want {hq-cv-p6ht2 gt-9emq}", untrackCalls[0])
+	}
+
+	// Strike entry should be cleared on successful untrack so the next scan
+	// (if the convoy still has the bead for any reason) starts fresh.
+	if _, ok := m.missingBeadStrikes.Load(missingBeadKey{"hq-cv-p6ht2", "gt-9emq"}); ok {
+		t.Errorf("expected strike entry cleared after successful untrack")
+	}
+
+	// Sanity: at least one log line should mention auto-untracking.
+	foundLog := false
+	for _, l := range logged {
+		if strings.Contains(l, "auto-untracking") && strings.Contains(l, "gt-9emq") {
+			foundLog = true
+			break
+		}
+	}
+	if !foundLog {
+		t.Errorf("expected auto-untracking log line, got: %v", logged)
+	}
+}
+
+// TestFeedFirstReady_MissingBeadStrikes_ResetsOnSuccess verifies that a
+// transient "not found" (e.g. brief Dolt visibility gap) followed by a
+// successful sling does not accumulate strikes that would later untrack a
+// healthy bead.
+func TestFeedFirstReady_MissingBeadStrikes_ResetsOnSuccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// First sling exits 1 with "not found"; subsequent slings succeed.
+	countFile := filepath.Join(binDir, "count")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  if [ ! -f "` + countFile + `" ]; then
+    echo "1" > "` + countFile + `"
+    echo "bead '$2' not found" >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error {
+		untrackCalls++
+		return nil
+	}
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-good",
+		Title:       "Healthy",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-good"},
+	}
+
+	m.feedFirstReady(c) // strike 1 (transient)
+	current = current.Add(feedDispatchCooldown + time.Second)
+	m.feedFirstReady(c) // success — strike counter reset
+
+	if _, ok := m.missingBeadStrikes.Load(missingBeadKey{"hq-cv-good", "gt-good"}); ok {
+		t.Errorf("expected strike counter cleared after successful sling")
+	}
+
+	// Keep slinging successfully — there should be no untrack ever.
+	for i := 0; i < missingBeadStrikeThreshold+2; i++ {
+		current = current.Add(feedDispatchCooldown + time.Second)
+		m.feedFirstReady(c)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("untrack fired %d times for a healthy bead; want 0", untrackCalls)
+	}
+}
+
+// TestFeedFirstReady_MissingBeadStrikes_NonNotFoundFailureDoesNotStrike
+// verifies that other sling failure modes (rig parked mid-call, dolt outage,
+// etc.) do not increment the missing-bead counter — only "not found"
+// terminations should lead to auto-untrack. (gu-f0gq)
+func TestFeedFirstReady_MissingBeadStrikes_NonNotFoundFailureDoesNotStrike(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "rig parked: gastown" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error {
+		untrackCalls++
+		return nil
+	}
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-park",
+		Title:       "Parked Rig",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-parked"},
+	}
+	for i := 0; i < missingBeadStrikeThreshold+2; i++ {
+		current = current.Add(feedDispatchCooldown + time.Second)
+		m.feedFirstReady(c)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("non-not-found failures triggered %d untracks; want 0", untrackCalls)
+	}
+	if _, ok := m.missingBeadStrikes.Load(missingBeadKey{"hq-cv-park", "gt-parked"}); ok {
+		t.Errorf("expected no strike entry for non-not-found failure")
+	}
+}
