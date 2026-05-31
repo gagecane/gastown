@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1548,5 +1549,111 @@ func TestRunGatesOnWorktree_ParallelPropagatesAllFailures(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "gamma") {
 		t.Errorf("did not expect passing gate 'gamma' in error, got: %v", err)
+	}
+}
+
+// TestCleanupStaleWorktree_NoOpWhenMissing verifies the helper is idempotent
+// when there's nothing to clean up — the common case on a fresh runner.
+func TestCleanupStaleWorktree_NoOpWhenMissing(t *testing.T) {
+	rigDir := t.TempDir()
+	worktreePath := filepath.Join(rigDir, ".main-test-worktree")
+	bareRepoPath := filepath.Join(rigDir, ".repo.git")
+
+	if err := cleanupStaleWorktree(bareRepoPath, worktreePath); err != nil {
+		t.Fatalf("expected nil error when path missing, got %v", err)
+	}
+}
+
+// TestCleanupStaleWorktree_RemovesOrphanDirectory is the regression test for
+// gu-dob2f. A previous run was killed mid-build, leaving build artifacts at
+// .main-test-worktree with no .git link and no registration in the bare repo.
+// `git worktree remove` is a no-op against such a directory, so without
+// unconditional RemoveAll the path persists and the next `git worktree add`
+// fails with "already exists".
+func TestCleanupStaleWorktree_RemovesOrphanDirectory(t *testing.T) {
+	rigDir := t.TempDir()
+	worktreePath := filepath.Join(rigDir, ".main-test-worktree")
+	bareRepoPath := filepath.Join(rigDir, ".repo.git")
+
+	// Simulate the orphan-build-artifacts case: directory with files but no
+	// .git link, and no registration in any bare repo. (We don't even need
+	// bareRepoPath to exist — `git worktree remove` will fail; the helper
+	// must still clean up.)
+	if err := os.MkdirAll(filepath.Join(worktreePath, "target", "debug"), 0o755); err != nil {
+		t.Fatalf("setup MkdirAll: %v", err)
+	}
+	leftover := filepath.Join(worktreePath, "target", "debug", "leftover.bin")
+	if err := os.WriteFile(leftover, []byte("orphan build artifact"), 0o644); err != nil {
+		t.Fatalf("setup WriteFile: %v", err)
+	}
+
+	if err := cleanupStaleWorktree(bareRepoPath, worktreePath); err != nil {
+		t.Fatalf("cleanupStaleWorktree returned error: %v", err)
+	}
+
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree path %s to be removed, stat err=%v", worktreePath, err)
+	}
+}
+
+// TestCleanupStaleWorktree_RemovesRegisteredWorktree exercises the
+// happy-path case: a properly registered git worktree from a clean prior
+// run is removed. This guards against regressing the pre-existing behavior
+// while adding the orphan-directory handling.
+func TestCleanupStaleWorktree_RemovesRegisteredWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in test environment")
+	}
+	rigDir := t.TempDir()
+	bareRepoPath := filepath.Join(rigDir, ".repo.git")
+	worktreePath := filepath.Join(rigDir, ".main-test-worktree")
+
+	seed := filepath.Join(rigDir, "seed")
+	if err := os.MkdirAll(seed, 0o755); err != nil {
+		t.Fatalf("MkdirAll seed: %v", err)
+	}
+	mustRun := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s %v: %v (%s)", name, args, err, string(out))
+		}
+	}
+	mustRun(seed, "git", "init", "-q", "-b", "main")
+	mustRun(seed, "git", "config", "user.email", "test@example.com")
+	mustRun(seed, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(seed, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write seed file: %v", err)
+	}
+	mustRun(seed, "git", "add", "f")
+	mustRun(seed, "git", "commit", "-q", "-m", "seed")
+	if out, err := exec.Command("git", "clone", "-q", "--bare", seed, bareRepoPath).CombinedOutput(); err != nil {
+		t.Fatalf("git clone --bare: %v (%s)", err, string(out))
+	}
+
+	addCmd := exec.Command("git", "worktree", "add", "--detach", worktreePath, "main")
+	addCmd.Dir = bareRepoPath
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v (%s)", err, string(out))
+	}
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("worktree did not get created: %v", err)
+	}
+
+	if err := cleanupStaleWorktree(bareRepoPath, worktreePath); err != nil {
+		t.Fatalf("cleanupStaleWorktree: %v", err)
+	}
+
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree path %s to be removed, stat err=%v", worktreePath, err)
+	}
+
+	listCmd := exec.Command("git", "worktree", "list", "--porcelain")
+	listCmd.Dir = bareRepoPath
+	if out, err := listCmd.CombinedOutput(); err == nil {
+		if strings.Contains(string(out), worktreePath) {
+			t.Errorf("worktree still registered after cleanup:\n%s", string(out))
+		}
 	}
 }

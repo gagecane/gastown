@@ -411,12 +411,8 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		return "", fmt.Errorf("bare repo not found at %s", bareRepoPath)
 	}
 
-	// Clean up stale worktree if it exists
-	if _, err := os.Stat(worktreePath); err == nil {
-		cleanupCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
-		cleanupCmd.Dir = bareRepoPath
-		util.SetDetachedProcessGroup(cleanupCmd)
-		_ = cleanupCmd.Run()
+	if err := cleanupStaleWorktree(bareRepoPath, worktreePath); err != nil {
+		return "", err
 	}
 
 	// Effective parent timeout grows to fit declared per-gate budgets so a
@@ -457,13 +453,20 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		return currentSHA, fmt.Errorf("git worktree add failed: %v (%s)", err, strings.TrimSpace(string(output)))
 	}
 
-	// Always clean up the worktree
+	// Always clean up the worktree. Belt-and-suspenders: `git worktree remove`
+	// handles the registered case; `os.RemoveAll` mops up if the gate run
+	// left files git refused to remove (e.g., crashed mid-run leaving a
+	// detached target/ tree). Without the unconditional RemoveAll, an
+	// orphaned directory blocks the next run — see gu-dob2f.
 	defer func() {
 		removeCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
 		removeCmd.Dir = bareRepoPath
 		util.SetDetachedProcessGroup(removeCmd)
 		if err := removeCmd.Run(); err != nil {
 			d.logger.Printf("main_branch_test: %s: warning: worktree cleanup failed: %v", rigName, err)
+		}
+		if err := os.RemoveAll(worktreePath); err != nil {
+			d.logger.Printf("main_branch_test: %s: warning: worktree dir removal failed: %v", rigName, err)
 		}
 	}()
 
@@ -482,6 +485,38 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		return currentSHA, d.runGatesOnWorktree(ctx, rigName, worktreePath, gateCfg.Gates, gateCfg.GatesParallel)
 	}
 	return currentSHA, d.runCommandOnWorktree(ctx, rigName, worktreePath, "test", gateCfg.TestCommand)
+}
+
+// cleanupStaleWorktree removes any pre-existing content at worktreePath so a
+// subsequent `git worktree add` succeeds. Two cases must be handled:
+//
+//  1. A registered worktree from a clean prior run — `git worktree remove
+//     --force` deregisters it and deletes the directory.
+//  2. An orphan directory from a killed prior run — no `.git` link, not
+//     registered with the bare repo, just leftover build artifacts (e.g.,
+//     multi-GB Cargo target/ trees). `git worktree remove` is a no-op here,
+//     so without an unconditional RemoveAll the path persists and the next
+//     `git worktree add` fails with "already exists". See gu-dob2f for the
+//     real-world failure where 3.7GB of orphaned Cargo artifacts blocked all
+//     subsequent main_branch_test runs for a rig.
+//
+// Returns nil when worktreePath did not exist. Returns an error only if the
+// path exists and final RemoveAll fails — that's the unrecoverable case
+// where the next `git worktree add` is guaranteed to fail.
+func cleanupStaleWorktree(bareRepoPath, worktreePath string) error {
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat stale worktree %s: %w", worktreePath, err)
+	}
+	cleanupCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
+	cleanupCmd.Dir = bareRepoPath
+	util.SetDetachedProcessGroup(cleanupCmd)
+	_ = cleanupCmd.Run()
+	if err := os.RemoveAll(worktreePath); err != nil {
+		return fmt.Errorf("removing stale worktree directory %s: %w", worktreePath, err)
+	}
+	return nil
 }
 
 // computeEffectiveTimeout returns the parent context budget for a rig's
