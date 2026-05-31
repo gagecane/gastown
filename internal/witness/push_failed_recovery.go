@@ -81,8 +81,8 @@ const pushRecoveryMaxAttempts = 3
 // short-circuits when the branch landed via any other path, and (c) the
 // per-branch escalation goes to mayor on budget exhaustion anyway.
 var (
-	pushRecoveryMu      sync.Mutex
-	pushRecoveryBudget  = make(map[string]int)
+	pushRecoveryMu     sync.Mutex
+	pushRecoveryBudget = make(map[string]int)
 )
 
 func pushRecoveryKey(rigName, polecatName, branch string) string {
@@ -124,9 +124,9 @@ func resetPushRecoveryBudget() {
 //  2. Re-read origin/<branch> tip. If origin already has the branch:
 //     a. If origin/<branch> == HEAD: PushRecoveryAlreadyOnOrigin (race-safe).
 //     b. If origin/<branch> is an ancestor of HEAD: attempt fast-forward push.
-//        Success → PushRecoveryPushed. Failure → PushRecoveryDiverged.
+//     Success → PushRecoveryPushed. Failure → PushRecoveryDiverged.
 //     c. If HEAD is an ancestor of origin/<branch>: PushRecoveryAlreadyOnOrigin
-//        (origin moved ahead — local has nothing to add).
+//     (origin moved ahead — local has nothing to add).
 //     d. Otherwise: PushRecoveryDiverged (incompatible histories).
 //  3. If origin does NOT have the branch: attempt a fresh push.
 //     Success → PushRecoveryPushed. Failure → PushRecoveryDiverged
