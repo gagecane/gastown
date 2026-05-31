@@ -424,7 +424,7 @@ for pending warrants.
 │   └── daemon.pid              # Daemon process ID
 ├── deacon/
 │   ├── heartbeat.json          # Deacon freshness (updated each patrol cycle)
-│   ├── health-check-state.json # Agent health tracking (gt deacon health-check)
+│   ├── health-check-state.json # Force-kill ledger + manual health-check state (only updated by ad-hoc gt deacon health-check / force-kill, NOT patrol — see gu-9b2z4)
 │   └── dogs/
 │       ├── boot/               # Boot's working directory
 │       │   ├── CLAUDE.md       # Boot context

@@ -641,7 +641,7 @@ gt stop --rig <name>         # Kill rig sessions
 
 ```bash
 gt deacon health-check <agent>   # Send health check ping, track response
-gt deacon health-state           # Show health check state for all agents
+gt deacon health-state           # Show force-kill ledger + manual health-check state
 ```
 
 ### Merge Queue (MQ)

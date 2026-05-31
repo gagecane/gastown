@@ -175,13 +175,18 @@ Examples:
 
 var deaconHealthStateCmd = &cobra.Command{
 	Use:   "health-state",
-	Short: "Show health check state for all monitored agents",
-	Long: `Display the current health check state including:
-- Consecutive failure counts
-- Last ping and response times
-- Force-kill history and cooldowns
+	Short: "Show force-kill ledger and any manual health-check state",
+	Long: `Display the persisted force-kill ledger and any state recorded by
+ad-hoc 'gt deacon health-check' / 'gt deacon force-kill' invocations.
 
-This helps the Deacon understand which agents may need attention.`,
+NOTE: the deacon's normal patrol cycle does not currently probe agents
+per-cycle, so 'last ping' / 'last response' fields are populated only for
+agents that an operator has manually health-checked. Most rows will show
+'never probed' until a probe is run. See gu-9b2z4 for the rationale.
+
+The ledger surfaces:
+- Force-kill history (last kill time, total kill count, cooldowns)
+- Manual health-check results (consecutive failures, last ping/response)`,
 	RunE: runDeaconHealthState,
 }
 
@@ -1152,21 +1157,34 @@ func runDeaconHealthState(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(state.Agents) == 0 {
-		fmt.Printf("%s No health check state recorded yet\n", style.Dim.Render("○"))
+		fmt.Printf("%s No force-kill ledger entries yet\n", style.Dim.Render("○"))
+		fmt.Printf("  %s\n", style.Dim.Render("(this file is updated only by 'gt deacon health-check' / 'force-kill')"))
 		return nil
 	}
 
-	fmt.Printf("%s Health Check State (updated %s)\n\n",
-		style.Bold.Render("●"),
-		state.LastUpdated.Format(time.RFC3339))
+	updatedLabel := "never"
+	if !state.LastUpdated.IsZero() {
+		updatedLabel = fmt.Sprintf("%s (%s ago)",
+			state.LastUpdated.Format(time.RFC3339),
+			time.Since(state.LastUpdated).Round(time.Second))
+	}
+
+	fmt.Printf("%s Force-Kill Ledger (file last updated: %s)\n",
+		style.Bold.Render("●"), updatedLabel)
+	fmt.Printf("  %s\n\n",
+		style.Dim.Render("Updated only by 'gt deacon health-check' / 'force-kill'; not by patrol."))
 
 	for agentID, agentState := range state.Agents {
 		fmt.Printf("Agent: %s\n", style.Bold.Render(agentID))
 
-		if !agentState.LastPingTime.IsZero() {
+		if agentState.LastPingTime.IsZero() {
+			fmt.Printf("  Last ping: %s\n", style.Dim.Render("never probed"))
+		} else {
 			fmt.Printf("  Last ping: %s ago\n", time.Since(agentState.LastPingTime).Round(time.Second))
 		}
-		if !agentState.LastResponseTime.IsZero() {
+		if agentState.LastResponseTime.IsZero() {
+			fmt.Printf("  Last response: %s\n", style.Dim.Render("never responded"))
+		} else {
 			fmt.Printf("  Last response: %s ago\n", time.Since(agentState.LastResponseTime).Round(time.Second))
 		}
 
