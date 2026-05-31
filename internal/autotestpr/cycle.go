@@ -39,6 +39,7 @@ package autotestpr
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -95,6 +96,22 @@ type CycleConfig struct {
 	// Now is the wall-clock at the start of the tick. Passed in so
 	// tests can pin time deterministically.
 	Now time.Time
+
+	// Logger sinks operational messages (per-rig errors, non-fatal CAS
+	// failures). Optional: if nil, the cycle defaults to a logger that
+	// writes to os.Stderr with stdlib timestamp prefix. Tests can pass
+	// a buffer-backed logger to assert on output.
+	Logger *log.Logger
+}
+
+// logger returns cfg.Logger when set, otherwise a default stderr logger.
+// Centralized so the two call sites stay symmetric and the fallback is
+// clear from one place.
+func (c *CycleConfig) logger() *log.Logger {
+	if c.Logger != nil {
+		return c.Logger
+	}
+	return log.New(os.Stderr, "", log.LstdFlags)
 }
 
 // validate returns nil if the config is well-formed. Exposed fields
@@ -196,7 +213,7 @@ func RunCycle(cfg *CycleConfig) (*CycleResult, error) {
 		if err != nil {
 			// Per-rig errors are non-fatal to the cycle — log and
 			// continue. The next tick retries.
-			fmt.Fprintf(os.Stderr, "auto-test-pr-cycle: rig %s: %v\n", rigName, err)
+			cfg.logger().Printf("auto-test-pr-cycle: rig %s: %v", rigName, err)
 			continue
 		}
 		if processed {
@@ -261,8 +278,8 @@ func reconcileEnabledRigs(cfg *CycleConfig) ([]string, error) {
 	if err != nil {
 		// Non-fatal: the main cycle can still proceed with the ground
 		// truth from settings JSON. The next tick retries the CAS.
-		fmt.Fprintf(os.Stderr,
-			"auto-test-pr-cycle: reconcile CAS failed (non-fatal): %v\n", err)
+		cfg.logger().Printf(
+			"auto-test-pr-cycle: reconcile CAS failed (non-fatal): %v", err)
 		return groundTruth, nil
 	}
 

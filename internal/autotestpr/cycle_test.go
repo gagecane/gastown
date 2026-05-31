@@ -1,8 +1,11 @@
 package autotestpr
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,6 +255,36 @@ func TestCycleResult_JSON(t *testing.T) {
 	if !contains(s, "reconciled") {
 		t.Errorf("JSON missing reconciled: %s", s)
 	}
+}
+
+// TestCycleConfig_Logger verifies that CycleConfig.logger() returns the
+// caller-supplied logger when set, and falls back to a non-nil default
+// when nil. Tests can pass a buffer-backed logger to assert on output.
+func TestCycleConfig_Logger(t *testing.T) {
+	t.Parallel()
+
+	t.Run("uses-supplied-logger", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		injected := log.New(&buf, "", 0)
+		cfg := &CycleConfig{Logger: injected}
+		got := cfg.logger()
+		if got != injected {
+			t.Fatal("logger() did not return the supplied logger")
+		}
+		got.Printf("hello %s", "world")
+		if !strings.Contains(buf.String(), "hello world") {
+			t.Errorf("buffer missing log line: %q", buf.String())
+		}
+	})
+
+	t.Run("default-when-nil", func(t *testing.T) {
+		t.Parallel()
+		cfg := &CycleConfig{}
+		if cfg.logger() == nil {
+			t.Error("logger() returned nil for default fallback")
+		}
+	})
 }
 
 func contains(s, substr string) bool {
