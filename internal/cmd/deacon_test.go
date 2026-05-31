@@ -266,6 +266,7 @@ func TestDeaconSubcommandsRegistered(t *testing.T) {
 		"redispatch-state",
 		"feed-stranded",
 		"feed-stranded-state",
+		"memory-check",
 	}
 
 	got := make(map[string]*cobra.Command)

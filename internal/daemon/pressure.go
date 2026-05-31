@@ -129,6 +129,19 @@ func isAgentSession(name string) bool {
 	return false
 }
 
+// AvailableMemoryGB returns approximate available memory in GB.
+//
+// On Linux it reads MemAvailable from /proc/meminfo. On macOS it sums free
+// and inactive pages from vm_stat. On unsupported platforms (Windows, etc.)
+// it returns 0.
+//
+// Exported so other packages (e.g. the deacon patrol memory-check command,
+// gu-ayam3) can reuse the platform-specific implementations without
+// duplicating /proc/meminfo and vm_stat parsing.
+func AvailableMemoryGB() float64 {
+	return availableMemoryGB()
+}
+
 // loadAverage1 returns the 1-minute load average.
 // Falls back to 0 if unavailable (effectively disabling the check).
 func loadAverage1() float64 {
