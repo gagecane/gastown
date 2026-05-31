@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateDBName(t *testing.T) {
@@ -131,10 +132,10 @@ func TestReapUpdateQueryNoDatabaseNameInjection(t *testing.T) {
 }
 
 // TestPurgeDigestQueryNoDatabaseNameInjection verifies that the purge digest
-// query is a plain string with no Sprintf interpolation at all.
+// query carries no database name and still selects ephemeral wisps on the
+// short horizon.
 func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
-	// The fixed digestQuery is a string literal — no Sprintf.
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? GROUP BY wtype"
+	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE " + closedWispPurgeWhere + " GROUP BY wtype"
 
 	if strings.Contains(digestQuery, "gt") {
 		t.Errorf("purge digestQuery should not contain database name, got: %s", digestQuery)
@@ -147,9 +148,8 @@ func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
 // TestPurgeBatchQueryNoDatabaseNameInjection verifies that the purge batch
 // SELECT query uses DefaultBatchSize as the LIMIT, not dbName.
 func TestPurgeBatchQueryNoDatabaseNameInjection(t *testing.T) {
-	// This is the fixed query — only DefaultBatchSize in the Sprintf args.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? LIMIT %d",
+		"SELECT w.id FROM wisps w WHERE "+closedWispPurgeWhere+" LIMIT %d",
 		DefaultBatchSize)
 
 	if strings.Contains(idQuery, "gt") {
@@ -158,6 +158,24 @@ func TestPurgeBatchQueryNoDatabaseNameInjection(t *testing.T) {
 	expected := fmt.Sprintf("LIMIT %d", DefaultBatchSize)
 	if !strings.Contains(idQuery, expected) {
 		t.Errorf("purge idQuery should contain %s, got: %s", expected, idQuery)
+	}
+}
+
+// TestClosedWispPurgeWhereEphemeralHorizon verifies the shared purge predicate
+// keeps the standard closed-wisp cutoff while also purging ephemeral wisps via a
+// second placeholder (gs-7pk). The two placeholders must be bound, in order, to
+// (purgeAge cutoff, EphemeralPurgeAge cutoff).
+func TestClosedWispPurgeWhereEphemeralHorizon(t *testing.T) {
+	if !strings.Contains(closedWispPurgeWhere, "w.ephemeral = 1") {
+		t.Errorf("purge predicate should special-case ephemeral wisps, got: %s", closedWispPurgeWhere)
+	}
+	if got := strings.Count(closedWispPurgeWhere, "?"); got != 2 {
+		t.Errorf("purge predicate should have 2 placeholders (standard + ephemeral cutoff), got %d: %s", got, closedWispPurgeWhere)
+	}
+	// The standard purge age default is 7 days (see cmd/daemon); the ephemeral
+	// horizon must be strictly shorter or it has no effect.
+	if EphemeralPurgeAge >= 7*24*time.Hour {
+		t.Errorf("EphemeralPurgeAge (%s) must be shorter than the standard purge age to take effect", EphemeralPurgeAge)
 	}
 }
 

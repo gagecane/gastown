@@ -159,7 +159,21 @@ const (
 	// surface a warning. Sized above the natural steady-state for the current
 	// dog/deacon emit rate (~23 wisps/h × 24h TTL ≈ 550). See hq-57jr8.
 	DefaultAlertThreshold = 800
+	// EphemeralPurgeAge is the retention for closed *ephemeral* wisps (patrol
+	// molecules, plugin-run receipts, sling-context). They carry no audit value
+	// once closed, so they are purged far sooner than the standard purge-age for
+	// regular wisps. Letting them linger inflates the unindexed bd-show resolver
+	// scan over the wisps table — a near-continuous query whose cost is O(rows) —
+	// driving residual Dolt CPU after wisp-heavy bursts (gs-7pk).
+	EphemeralPurgeAge = 1 * time.Hour
 )
+
+// closedWispPurgeWhere selects closed wisps eligible for purge. Its two
+// placeholders, in order, are: (1) the standard purge cutoff applied to every
+// closed wisp, and (2) the shorter EphemeralPurgeAge cutoff applied only to
+// ephemeral wisps. Shared by Scan (candidate count) and purgeClosedWisps
+// (digest + delete) so all three stay in lockstep.
+const closedWispPurgeWhere = "w.status = 'closed' AND (w.closed_at < ? OR (w.ephemeral = 1 AND w.closed_at < ?))"
 
 // ValidateDBName returns an error if the database name is unsafe.
 func ValidateDBName(dbName string) error {
@@ -248,12 +262,13 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		return nil, fmt.Errorf("count reap candidates: %w", err)
 	}
 
-	// Count purge candidates: closed wisps past purge_age.
+	// Count purge candidates: closed wisps past purge_age (or past the shorter
+	// EphemeralPurgeAge horizon if ephemeral).
 	// No parent check needed — closed wisps past the delete age are unconditionally purgeable.
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m) query
 	// cost with 1800+ closed wisps, leading to CPU spikes and connection timeouts (gt-wvd2).
-	purgeQuery := "SELECT COUNT(*) FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?"
-	if err := db.QueryRowContext(ctx, purgeQuery, now.Add(-purgeAge)).Scan(&result.PurgeCandidates); err != nil {
+	purgeQuery := "SELECT COUNT(*) FROM wisps w WHERE " + closedWispPurgeWhere
+	if err := db.QueryRowContext(ctx, purgeQuery, now.Add(-purgeAge), now.Add(-EphemeralPurgeAge)).Scan(&result.PurgeCandidates); err != nil {
 		return nil, fmt.Errorf("count purge candidates: %w", err)
 	}
 
@@ -459,14 +474,15 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 	defer cancel()
 
 	deleteCutoff := time.Now().UTC().Add(-purgeAge)
+	ephemeralCutoff := time.Now().UTC().Add(-EphemeralPurgeAge)
 	var anomalies []Anomaly
 
 	// Digest: count by wisp_type.
 	// No parent check — closed wisps past the delete age are unconditionally purgeable.
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m)
 	// query cost with 1800+ closed wisps, leading to CPU spikes and timeouts (gt-wvd2).
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? GROUP BY wtype"
-	rows, err := db.QueryContext(ctx, digestQuery, deleteCutoff)
+	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE " + closedWispPurgeWhere + " GROUP BY wtype"
+	rows, err := db.QueryContext(ctx, digestQuery, deleteCutoff, ephemeralCutoff)
 	if err != nil {
 		return 0, nil, fmt.Errorf("digest query: %w", err)
 	}
@@ -501,11 +517,11 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 
 	// Batch delete — simple status+age filter, no parent check needed for purge.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ? LIMIT %d",
+		"SELECT w.id FROM wisps w WHERE "+closedWispPurgeWhere+" LIMIT %d",
 		DefaultBatchSize)
 	auxTables := []string{"wisp_labels", "wisp_comments", "wisp_events", "wisp_dependencies"}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables)
+	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, "wisps", auxTables, deleteCutoff, ephemeralCutoff)
 	if err != nil {
 		return totalDeleted, anomalies, err
 	}
@@ -568,7 +584,7 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 		dbName, dbName, DefaultBatchSize)
 	auxTables := []string{"labels", "comments", "events", "dependencies"}
 
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, mailCutoff, "issues", auxTables)
+	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, "issues", auxTables, mailCutoff)
 	if err != nil {
 		return totalDeleted, err
 	}
@@ -713,10 +729,11 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 }
 
 // batchDeleteRows deletes rows from a primary table and its auxiliary tables in batches.
-func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string) (int, error) {
+// cutoffArgs are bound to idQuery's placeholders on every batch iteration.
+func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery, primaryTable string, auxTables []string, cutoffArgs ...interface{}) (int, error) {
 	totalDeleted := 0
 	for {
-		idRows, err := db.QueryContext(ctx, idQuery, cutoffArg)
+		idRows, err := db.QueryContext(ctx, idQuery, cutoffArgs...)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("select batch: %w", err)
 		}
