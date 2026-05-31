@@ -645,16 +645,34 @@ const gateHostKillRetries = 2
 // shrink it; production lets a load/swap spike subside before re-running.
 var gateHostKillBackoff = 20 * time.Second
 
-// isHostKill reports whether a gate error is an external SIGKILL (host OOM/jetsam
-// under load) rather than a genuine test FAIL or our own deadline cancellation.
-// A go test that genuinely fails exits non-zero with "FAIL" output; a host kill
-// terminates the process with SIGKILL — which exec surfaces as "signal: killed"
-// — while our context did NOT hit its deadline (we didn't cancel it).
+// isHostKill reports whether a gate error is an external host signal (SIGKILL
+// from OOM/jetsam under load, or SIGTERM from contention/parent-death cascades)
+// rather than a genuine test FAIL or our own deadline cancellation.
+//
+// Two signal classes count:
+//
+//   - SIGKILL surfaces as "signal: killed" — typically OOM killer / jetsam
+//     under load/swap pressure (hq-0qszq).
+//   - SIGTERM surfaces as "signal: terminated" — observed in production when
+//     brazil-build under shared-workspace contention (the casc_* rigs share
+//     /tmp/codegen-agent-scheduler-gate.lock) emits its own SIGTERM, or when a
+//     PR_SET_PDEATHSIG cascade from a sibling process delivers SIGTERM to the
+//     gate group. The gt cancel path itself sends SIGKILL via
+//     util.SetProcessGroup's cmd.Cancel hook, so a SIGTERM observed without an
+//     expired context is necessarily external. See gu-13y6 for the SIGTERM-class
+//     evidence (18s and 1m38s "signal: terminated" mid-build, well under the
+//     20m budget).
+//
+// A go test that genuinely fails exits non-zero with "FAIL" output; an
+// external host signal terminates with no FAIL marker, while our context did
+// NOT hit its deadline (we didn't cancel it).
 func isHostKill(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() == context.DeadlineExceeded {
 		return false
 	}
-	return strings.Contains(err.Error(), "signal: killed")
+	msg := err.Error()
+	return strings.Contains(msg, "signal: killed") ||
+		strings.Contains(msg, "signal: terminated")
 }
 
 // runCommandOnWorktree runs a single shell command in the given worktree

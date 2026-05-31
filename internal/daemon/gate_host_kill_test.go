@@ -10,9 +10,10 @@ import (
 	"time"
 )
 
-// TestIsHostKill pins down the SIGKILL-vs-real-FAIL distinction (hq-0qszq): a
-// host SIGKILL with our context still alive is transient; a normal non-zero exit
-// or our own deadline cancellation is not a host kill.
+// TestIsHostKill pins down the host-signal-vs-real-FAIL distinction
+// (hq-0qszq + gu-13y6): a host signal (SIGKILL OR SIGTERM) with our context
+// still alive is transient; a normal non-zero exit or our own deadline
+// cancellation is not a host signal.
 func TestIsHostKill(t *testing.T) {
 	live := context.Background()
 	deadlineCtx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
@@ -27,6 +28,13 @@ func TestIsHostKill(t *testing.T) {
 	}{
 		{"sigkill, ctx live → host kill", live, errors.New("signal: killed"), true},
 		{"sigkill, but our deadline fired → not host kill", deadlineCtx, errors.New("signal: killed"), false},
+		// gu-13y6: SIGTERM under live context is also a transient host signal.
+		// brazil-build under shared-flock contention emits SIGTERM, and a
+		// PR_SET_PDEATHSIG cascade from a sibling process can deliver SIGTERM
+		// to the gate group. Our cancel path sends SIGKILL, so SIGTERM with a
+		// live context is necessarily external.
+		{"sigterm, ctx live → host kill", live, errors.New("signal: terminated"), true},
+		{"sigterm, but our deadline fired → not host kill", deadlineCtx, errors.New("signal: terminated"), false},
 		{"normal non-zero exit → not host kill", live, errors.New("exit status 1"), false},
 		{"nil error → not host kill", live, nil, false},
 	}
@@ -52,6 +60,16 @@ func TestRunCommandOnWorktree_HostKill(t *testing.T) {
 		err := d.runCommandOnWorktree(context.Background(), "rig", d.config.TownRoot, "test", "kill -9 $$")
 		if !errors.Is(err, errGateHostKilled) {
 			t.Fatalf("a host SIGKILL must be reported transient (errGateHostKilled), got: %v", err)
+		}
+	})
+
+	t.Run("self-SIGTERM is transient, not a regression (gu-13y6)", func(t *testing.T) {
+		// brazil-build under contention emits SIGTERM, not SIGKILL. The runner
+		// must treat both signal classes the same: retry, then surface as
+		// transient (errGateHostKilled) so the patrol does NOT escalate.
+		err := d.runCommandOnWorktree(context.Background(), "rig", d.config.TownRoot, "test", "kill -TERM $$")
+		if !errors.Is(err, errGateHostKilled) {
+			t.Fatalf("a host SIGTERM must be reported transient (errGateHostKilled), got: %v", err)
 		}
 	})
 
