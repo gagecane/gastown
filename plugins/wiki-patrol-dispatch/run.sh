@@ -149,7 +149,7 @@ fi
 
 log "slinging ${FORMULA} to ${TARGET_RIG} (project_path=$PROJECT_PATH)"
 
-sling_out=$(gt sling "$FORMULA" "$TARGET_RIG" \
+sling_out=$(gt sling --formula "$FORMULA" "$TARGET_RIG" \
   --create \
   --var "project_path=$PROJECT_PATH" \
   2>&1) || {
@@ -157,7 +157,7 @@ sling_out=$(gt sling "$FORMULA" "$TARGET_RIG" \
   log "ERROR: gt sling failed (exit $rc)"
   log "  output: $(head -n5 <<<"$sling_out" | tr '\n' ' ')"
   record_receipt "failure" "sling failed" \
-    "gt sling ${FORMULA} ${TARGET_RIG} --create --var project_path=${PROJECT_PATH}
+    "gt sling --formula ${FORMULA} ${TARGET_RIG} --create --var project_path=${PROJECT_PATH}
 exit code: ${rc}
 
 Output (first 30 lines):
