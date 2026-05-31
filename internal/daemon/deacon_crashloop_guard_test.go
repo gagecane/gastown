@@ -70,9 +70,10 @@ func TestCheckDeaconHeartbeat_RespectsCrashLoopGuard(t *testing.T) {
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("TMUX_LOG", tmuxLog)
 
-	// Stale heartbeat triggers restart path.
+	// Very-stale heartbeat triggers restart path
+	// (must exceed deacon.HeartbeatVeryStaleThreshold = 30m).
 	if err := deacon.WriteHeartbeat(townRoot, &deacon.Heartbeat{
-		Timestamp: time.Now().Add(-20 * time.Minute),
+		Timestamp: time.Now().Add(-31 * time.Minute),
 		Cycle:     1,
 	}); err != nil {
 		t.Fatalf("write heartbeat: %v", err)

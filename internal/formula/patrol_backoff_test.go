@@ -233,8 +233,8 @@ func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 // includes heartbeat refresh steps to prevent the daemon from killing a
 // healthy Deacon mid-cycle.
 //
-// Without heartbeat refreshes, a patrol cycle that exceeds 20 minutes
-// (HeartbeatVeryStaleThreshold = 20m) causes the daemon to consider the Deacon
+// Without heartbeat refreshes, a patrol cycle that exceeds 30 minutes
+// (HeartbeatVeryStaleThreshold = 30m) causes the daemon to consider the Deacon
 // stuck and kill it, even though the Deacon is actively executing steps.
 func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
 	content, err := formulasFS.ReadFile("formulas/mol-deacon-patrol.formula.toml")
