@@ -1,0 +1,11 @@
+{
+  "name": "normal window near rate thresholds (held-out)",
+  "window_id": "2026-05-28/1d-normal-nearthresh",
+  "EventCounts": [
+    {"Series": "sling", "Observed": 300, "FiledBy": "scheduler"},
+    {"Series": "done", "Observed": 400, "FiledBy": "refinery"},
+    {"Series": "mail", "Observed": 300, "FiledBy": "various"},
+    {"Series": "bead.open", "Observed": 150, "FiledBy": "various"},
+    {"Series": "unknown.series", "Observed": 9999, "FiledBy": "various"}
+  ]
+}

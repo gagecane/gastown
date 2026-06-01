@@ -1,0 +1,18 @@
+{
+  "name": "normal window with curio self-events (loop-breaker)",
+  "window_id": "2026-05-22/1d-normal-loopbreak",
+  "EventCounts": [
+    {"Series": "bead.open", "Observed": 500, "FiledBy": "curio"},
+    {"Series": "mail", "Observed": 400, "FiledBy": "curio"},
+    {"Series": "sling", "Observed": 60, "FiledBy": "scheduler"}
+  ],
+  "Beads": [
+    {"ID": "gu-curio-cand", "Rig": "gastown", "CloseReason": "merged", "Commit": "", "CommitInMainAncestry": false, "FiledBy": "curio"}
+  ],
+  "Admissions": [
+    {"ID": "adm-curio", "PID": 7777, "Rig": "gastown", "OwnerAlive": false, "FiledBy": "curio"}
+  ],
+  "LogLines": [
+    {"Source": "curio", "Text": "self log mentioning kill near dolt pid 1", "NearDoltPID": true, "FiledBy": "curio"}
+  ]
+}
