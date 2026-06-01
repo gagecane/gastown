@@ -114,6 +114,7 @@ type ConvoyInfo struct {
 	ID            string // Convoy bead ID (e.g., "hq-cv-abc")
 	Owned         bool   // true if convoy has gt:owned label
 	MergeStrategy string // "direct", "mr", "local", or "" (default = mr)
+	BaseBranch    string // Named relay/base branch the convoy's polecats cut from (gs-9ct #1)
 }
 
 // IsOwnedDirect returns true if the convoy is owned with direct merge strategy.
@@ -177,10 +178,40 @@ func getConvoyInfoForIssue(issueID string) *ConvoyInfo {
 		}
 	}
 
-	// Parse merge strategy from description using typed accessor
+	// Parse merge strategy + relay base branch from description (typed accessor).
 	info.MergeStrategy = convoyMergeFromFields(convoys[0].Description)
+	info.BaseBranch = convoyBaseFromFields(convoys[0].Description)
 
 	return info
+}
+
+// convoyBaseFromFields extracts the relay/base branch from a convoy description
+// using the typed ConvoyFields accessor. Returns "" if unset. Mirrors
+// convoyMergeFromFields (gs-9ct #1).
+func convoyBaseFromFields(description string) string {
+	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
+	if fields == nil {
+		return ""
+	}
+	return fields.BaseBranch
+}
+
+// effectiveBaseBranch resolves the base branch a polecat should cut from when
+// dispatching beadID. An explicit --base-branch always wins; otherwise the
+// bead's tracking convoy's base branch is inherited so a relay leg's worktree
+// is cut from the named branch (proto/v3-build) rather than the rig default
+// (gs-9ct #1: "worktree had nothing to edit" when the named-branch work was
+// absent from the rig default). Returns explicit unchanged when there is no
+// convoy base to inherit, so non-relay slings are unaffected.
+func effectiveBaseBranch(beadID, explicit string) string {
+	if explicit != "" || beadID == "" {
+		return explicit
+	}
+	info := getConvoyInfoForIssue(beadID)
+	if info == nil || info.BaseBranch == "" {
+		return explicit
+	}
+	return info.BaseBranch
 }
 
 // getConvoyInfoFromIssue reads convoy info directly from the issue's attachment fields.

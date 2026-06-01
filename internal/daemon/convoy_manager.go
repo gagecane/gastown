@@ -58,6 +58,12 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string  `json:"ready_issues"`
 	CreatedAt    time.Time `json:"created_at"`
 	BaseBranch   string    `json:"base_branch,omitempty"`
+	// Merge is the convoy's merge strategy ("direct"/"mr"/"local"). Threaded
+	// into the re-dispatch sling so a merge=local relay leg is fed back as
+	// merge=local instead of silently reverting to the merge-queue default
+	// (gs-9ct #3) — otherwise a stranded do-not-merge prototype leg would
+	// auto-MR to main on its next feed.
+	Merge string `json:"merge,omitempty"`
 }
 
 // ConvoyManager monitors beads events for issue closes and periodically scans for stranded convoys.
@@ -636,6 +642,13 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		slingArgs := []string{"sling", issueID, rig, "--no-boot"}
 		if c.BaseBranch != "" {
 			slingArgs = append(slingArgs, "--base-branch="+c.BaseBranch)
+		}
+		// Preserve the convoy's merge strategy on re-dispatch. Without this a
+		// stranded merge=local relay leg is re-fed with the default (merge
+		// queue) strategy and would auto-MR a do-not-merge prototype to main
+		// (gs-9ct #3).
+		if c.Merge != "" {
+			slingArgs = append(slingArgs, "--merge="+c.Merge)
 		}
 		cmd := exec.CommandContext(m.ctx, m.gtPath, slingArgs...)
 		cmd.Dir = m.townRoot

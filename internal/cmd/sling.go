@@ -826,6 +826,13 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		releaseLockOnce()
 		return runSlingToRig(ctx, beadID, rigName, formulaName, info, townRoot, townBeadsDir, force)
 	}
+	// Inherit the tracking convoy's relay base when none was passed explicitly,
+	// so a relay leg's worktree is cut from the named branch, not the rig
+	// default (gs-9ct #1). No-op for non-convoy / non-relay beads.
+	effectiveBase := effectiveBaseBranch(beadID, slingBaseBranch)
+	if effectiveBase != slingBaseBranch {
+		fmt.Printf("%s Inherited relay base branch %s from convoy\n", style.Dim.Render("→"), effectiveBase)
+	}
 	resolved, err := resolveTarget(target, ResolveTargetOptions{
 		DryRun:       slingDryRun,
 		Force:        force,
@@ -836,7 +843,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		HookBead:     beadID,
 		BeadID:       beadID,
 		TownRoot:     townRoot,
-		BaseBranch:   slingBaseBranch,
+		BaseBranch:   effectiveBase,
 		ResumeBranch: slingResumeBranch,
 	})
 	if err != nil {

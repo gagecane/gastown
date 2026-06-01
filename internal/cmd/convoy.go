@@ -1688,6 +1688,10 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string `json:"ready_issues"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	BaseBranch   string   `json:"base_branch,omitempty"`
+	// Merge is the convoy's merge strategy ("direct"/"mr"/"local"). Carried so
+	// the daemon's stranded-feed re-dispatch preserves merge=local relay legs
+	// instead of dropping them to the default merge-queue path (gs-9ct #3).
+	Merge string `json:"merge,omitempty"`
 }
 
 func runConvoyStranded(cmd *cobra.Command, args []string) error {
@@ -1809,6 +1813,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	type convoyTracked struct {
 		convoy     convoyListIssue
 		baseBranch string
+		merge      string
 		trackedIDs []string
 	}
 	convoyEntries := make([]convoyTracked, 0, len(convoys))
@@ -1828,9 +1833,10 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	}
 
 	for _, convoy := range convoys {
-		var baseBranch string
+		var baseBranch, merge string
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
+			merge = cf.Merge
 		}
 
 		// Use the hoisted batched result when available and non-empty.
@@ -1862,6 +1868,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		convoyEntries = append(convoyEntries, convoyTracked{
 			convoy:     convoy,
 			baseBranch: baseBranch,
+			merge:      merge,
 			trackedIDs: ids,
 		})
 		for _, id := range ids {
@@ -1896,6 +1903,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	for _, entry := range convoyEntries {
 		convoy := entry.convoy
 		baseBranch := entry.baseBranch
+		merge := entry.merge
 		tracked := buildTrackedIssueInfosFromCache(entry.trackedIDs, allDetails, allWorkers)
 		// Empty convoys (0 tracked issues) are stranded — they need
 		// attention (auto-close via convoy check or manual cleanup).
@@ -1908,6 +1916,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Merge:        merge,
 			})
 			continue
 		}
@@ -1956,6 +1965,20 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 			}
 		}
 
+		// Single-writer enforcement for relay-write convoys (gs-9ct #2). A
+		// shared named branch (base_branch + merge local/direct) can be
+		// diverged by concurrent pushers — the proto/v3-build relay's leg-4
+		// could not ff-push because earlier legs had moved the branch. While
+		// one leg's polecat is live, withhold the rest so writers serialize;
+		// the next scan re-exposes the queue once that session ends (done,
+		// close, or death). Non-relay (merge=mr) convoys are untouched: each
+		// leg uses its own polecat/* branch, so there is no shared contention.
+		if relayWriteConvoy(baseBranch, merge) && len(readyIssues) > 0 && hasLiveRelayWriter(tracked) {
+			fmt.Fprintf(os.Stderr, "○ Convoy %s: relay branch %s has a live writer — serializing (withholding %d ready)\n",
+				convoy.ID, baseBranch, len(readyIssues))
+			readyIssues = nil
+		}
+
 		if len(readyIssues) > 0 {
 			stranded = append(stranded, strandedConvoyInfo{
 				ID:           convoy.ID,
@@ -1965,6 +1988,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  readyIssues,
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Merge:        merge,
 			})
 		} else {
 			// Has tracked issues but none are ready — include in stranded
@@ -1977,6 +2001,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				Merge:        merge,
 			})
 		}
 	}
@@ -2040,6 +2065,42 @@ func computeTownWideScheduledSet(townRoot string) map[string]bool {
 // - OR status = "in_progress"/"hooked" AND assignee session is dead (orphaned molecule)
 // - AND not blocked (cross-rig-aware from issue details)
 // scheduledSet is a pre-computed set of bead IDs with open sling contexts (from areScheduled).
+// relayWriteConvoy reports whether a convoy's polecats push a SHARED named
+// branch, so concurrent writers can diverge it (gs-9ct #2). A base branch with
+// merge "local" or "direct" means legs push the relay branch itself; merge
+// "mr" (the default) routes each leg through its own polecat/* branch, so there
+// is no shared-branch contention to serialize.
+func relayWriteConvoy(baseBranch, merge string) bool {
+	return baseBranch != "" && (merge == "local" || merge == "direct")
+}
+
+// hasLiveRelayWriter reports whether any tracked bead is currently held by a
+// live worker session (status in_progress/hooked with an existing tmux
+// session). Used to enforce single-writer on relay-write convoys: while one
+// polecat holds the shared branch, a second writer must not be dispatched or
+// the two diverge it. Fail-open — an undeterminable session (no name) is not
+// counted as a live writer, so we never deadlock the relay on a parse miss;
+// the cost of a false negative is the pre-existing two-writer behavior, which
+// is no worse than today.
+func hasLiveRelayWriter(tracked []trackedIssueInfo) bool {
+	for _, t := range tracked {
+		if t.Status != "in_progress" && t.Status != "hooked" {
+			continue
+		}
+		if t.Assignee == "" {
+			continue
+		}
+		sessionName, _ := assigneeToSessionName(t.Assignee)
+		if sessionName == "" {
+			continue
+		}
+		if err := tmux.BuildCommand("has-session", "-t", sessionName).Run(); err == nil {
+			return true // session exists ⇒ a live writer holds the branch
+		}
+	}
+	return false
+}
+
 func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	// Closed issues are never ready
 	if t.Status == "closed" || t.Status == "tombstone" {

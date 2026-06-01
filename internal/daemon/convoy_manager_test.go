@@ -690,6 +690,113 @@ exit 0
 	}
 }
 
+// TestFeedFirstReady_CarriesMergeAndBase proves gs-9ct #3: when a stranded
+// convoy carries a merge strategy (and base branch), the daemon's re-dispatch
+// sling preserves them. Without --merge a stranded merge=local relay leg would
+// be re-fed with the default merge-queue strategy and auto-MR a do-not-merge
+// prototype to main.
+func TestFeedFirstReady_CarriesMergeAndBase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Relay leg",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-relay1"},
+		BaseBranch:  "proto/v3-build",
+		Merge:       "local",
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+	if !strings.Contains(logContent, "--merge=local") {
+		t.Errorf("expected --merge=local in sling args, got: %q", logContent)
+	}
+	if !strings.Contains(logContent, "--base-branch=proto/v3-build") {
+		t.Errorf("expected --base-branch=proto/v3-build in sling args, got: %q", logContent)
+	}
+}
+
+// TestFeedFirstReady_OmitsMergeWhenUnset is the negative case: an ordinary
+// convoy with no merge strategy must not emit a --merge flag (which would
+// otherwise fail flag validation / override the bead's own strategy).
+func TestFeedFirstReady_OmitsMergeWhenUnset(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	slingLogPath := filepath.Join(binDir, "sling.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "$@" >> "` + slingLogPath + `"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	m.feedFirstReady(strandedConvoyInfo{
+		ID:          "hq-cv2",
+		Title:       "Ordinary",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-ord1"},
+	})
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if strings.Contains(string(data), "--merge") {
+		t.Errorf("did not expect --merge for a convoy with no strategy, got: %q", string(data))
+	}
+}
+
 func TestFeedFirstReady_IteratesPastDispatchFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")

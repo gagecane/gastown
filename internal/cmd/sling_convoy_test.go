@@ -155,3 +155,38 @@ func TestBdDepListRawIDsValidation(t *testing.T) {
 		t.Error("bdDepListRawIDs should reject SQL injection in depType")
 	}
 }
+
+// TestConvoyBaseFromFields verifies the relay base branch is parsed from a
+// convoy description (gs-9ct #1).
+func TestConvoyBaseFromFields(t *testing.T) {
+	cases := []struct {
+		name string
+		desc string
+		want string
+	}{
+		{"named relay base", "owner: mayor/\nbase_branch: proto/v3-build\nmerge: local\n", "proto/v3-build"},
+		{"no base", "owner: mayor/\nmerge: mr\n", ""},
+		{"empty desc", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := convoyBaseFromFields(tc.desc); got != tc.want {
+				t.Errorf("convoyBaseFromFields = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEffectiveBaseBranch_ExplicitWins verifies the short-circuit paths of
+// effectiveBaseBranch that do NOT require a convoy lookup: an explicit base
+// always wins, and an empty beadID returns the explicit value unchanged
+// (gs-9ct #1). The inheritance path (empty explicit + tracking convoy) is
+// covered by integration coverage since it hits bd/Dolt.
+func TestEffectiveBaseBranch_ExplicitWins(t *testing.T) {
+	if got := effectiveBaseBranch("gt-abc", "feat/explicit"); got != "feat/explicit" {
+		t.Errorf("explicit base must win: got %q", got)
+	}
+	if got := effectiveBaseBranch("", ""); got != "" {
+		t.Errorf("empty beadID must return explicit unchanged: got %q", got)
+	}
+}

@@ -340,13 +340,20 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 
 	// 3. Spawn polecat (via spawnPolecatForSling)
+	// Inherit the tracking convoy's relay base when none was passed explicitly,
+	// so a relay leg's worktree is cut from the named branch instead of the rig
+	// default (gs-9ct #1). No-op for non-convoy / non-relay beads.
+	baseBranch := effectiveBaseBranch(params.BeadID, params.BaseBranch)
+	if baseBranch != params.BaseBranch {
+		fmt.Printf("  %s Inherited relay base branch %s from convoy\n", style.Dim.Render("→"), baseBranch)
+	}
 	spawnOpts := SlingSpawnOptions{
 		TownRoot:     townRoot,
 		Force:        params.Force,
 		Account:      params.Account,
 		HookBead:     params.BeadID,
 		Agent:        params.Agent,
-		BaseBranch:   params.BaseBranch,
+		BaseBranch:   baseBranch,
 		ResumeBranch: params.ResumeBranch,
 		// Create is always true for rig targets: executeSling only handles
 		// rig-targeted dispatch (batch sling + queue dispatch), where a fresh

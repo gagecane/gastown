@@ -56,6 +56,58 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 	}
 }
 
+// TestRelayWriteConvoy verifies which convoys are treated as shared-branch
+// relays for single-writer serialization (gs-9ct #2). Only a named base branch
+// pushed by its legs (merge local/direct) contends; merge=mr legs each use
+// their own polecat/* branch.
+func TestRelayWriteConvoy(t *testing.T) {
+	cases := []struct {
+		name       string
+		baseBranch string
+		merge      string
+		want       bool
+	}{
+		{"local relay", "proto/v3-build", "local", true},
+		{"direct relay", "proto/v3-build", "direct", true},
+		{"mr is not a relay-write", "proto/v3-build", "mr", false},
+		{"no base is not a relay-write", "", "local", false},
+		{"default (no base, no merge)", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := relayWriteConvoy(tc.baseBranch, tc.merge); got != tc.want {
+				t.Errorf("relayWriteConvoy(%q,%q) = %v, want %v", tc.baseBranch, tc.merge, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHasLiveRelayWriter_NoLiveSessions verifies the negative cases of the
+// single-writer probe: an unassigned in-flight bead, an open/closed bead, and
+// an empty set all report "no live writer" (so dispatch proceeds). The
+// positive case requires a real tmux session and is exercised by integration
+// coverage; the probe fails open (see hasLiveRelayWriter doc).
+func TestHasLiveRelayWriter_NoLiveSessions(t *testing.T) {
+	cases := []struct {
+		name    string
+		tracked []trackedIssueInfo
+	}{
+		{"empty", nil},
+		{"in_progress but unassigned", []trackedIssueInfo{{Status: "in_progress", Assignee: ""}}},
+		{"open with assignee is not a writer", []trackedIssueInfo{{Status: "open", Assignee: "gastown/polecats/goose"}}},
+		{"closed with assignee is not a writer", []trackedIssueInfo{{Status: "closed", Assignee: "gastown/polecats/goose"}}},
+		// Assignee whose tmux session does not exist in the test env ⇒ not live.
+		{"in_progress with dead session", []trackedIssueInfo{{Status: "in_progress", Assignee: "gastown/polecats/ghost-xyz-nonexistent"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if hasLiveRelayWriter(tc.tracked) {
+				t.Errorf("hasLiveRelayWriter(%+v) = true, want false", tc.tracked)
+			}
+		})
+	}
+}
+
 func TestApplyFreshIssueDetails_SetsBlockedFlag(t *testing.T) {
 	dep := trackedDependency{
 		ID:     "gt-123",
