@@ -882,6 +882,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Failure classifier ticker started (interval %v)", interval)
 	}
 
+	// Start curio ticker if configured.
+	// Curio self-inspection dog — discovers Gastown failures via declarative
+	// content rules and emits candidates to HQ Dolt. Opt-in, candidates-only
+	// (Phase 1): never files beads, runs an LLM, or mutates anything.
+	var curioTicker *time.Ticker
+	var curioChan <-chan time.Time
+	if d.isPatrolActive("curio") {
+		interval := curioInterval(d.patrolConfig)
+		curioTicker = time.NewTicker(interval)
+		curioChan = curioTicker.C
+		defer curioTicker.Stop()
+		d.logger.Printf("Curio ticker started (interval %v)", interval)
+	}
+
 	// Wire the Mayor cycle-close handler (Phase 0 task 3c, gu-xrxm6).
 	// Must be registered BEFORE the ticker starts so events dispatched on
 	// the first tick go to the real handler, not the noop.
@@ -1112,6 +1126,13 @@ func (d *Daemon) Run() (err error) {
 			// dispatches cycle-close events to the registered handler.
 			if !d.isShutdownInProgress() {
 				d.runMRCycleCloseDog()
+			}
+
+		case <-curioChan:
+			// Curio dog — runs declarative content rules over live Gastown
+			// state and emits candidates to HQ Dolt (candidates only, Phase 1).
+			if !d.isShutdownInProgress() {
+				d.runCurio()
 			}
 
 		case <-mainCIBreakChan:
