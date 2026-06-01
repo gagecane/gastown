@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/fingerprint"
 )
 
 const (
@@ -284,10 +284,14 @@ func (d *Daemon) loadFailureSignatures() []FailureSignature {
 // classifierFingerprint computes a stable 12-char hex dedupe fingerprint.
 // Fingerprint dimensions: rig × signature_id.
 // Invariant under repeated escalations, rig-level drift, and patrol restarts.
+//
+// Delegates to fingerprint.Legacy2, which reproduces this patrol's historical
+// "rig::sigID" fnv-128a wire format BYTE-IDENTICALLY. The bytes are load-bearing:
+// open beads are deduped by a "fingerprint:<fp>" label, so any drift would
+// orphan existing labels and re-file duplicates. Do NOT switch this to
+// fingerprint.Of — that is a different (collision-free) family. See gu-6s8ao.
 func classifierFingerprint(rigName, signatureID string) string {
-	h := fnv.New128a()
-	fmt.Fprintf(h, "%s::%s", rigName, signatureID)
-	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+	return fingerprint.Legacy2(rigName, signatureID)
 }
 
 // mainBranchEscalation holds parsed data from a main_branch_test escalation.
