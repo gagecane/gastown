@@ -39,6 +39,23 @@ const (
 	// repeated assignment writes. See gu-iygf / hq/gt-sfo6q.
 	feedDispatchCooldown = 5 * time.Minute
 
+	// feedCooldownCap bounds the escalate-churn backoff (gs-skv). An unworkable
+	// bead — one a polecat keeps refusing/escalating without ever closing or
+	// making progress — reappears in the stranded scan every cycle. The flat
+	// 5-minute cooldown alone re-fed it ~12×/hour for hours (dementus burned
+	// dispatch cycles for 1hr+). The effective cooldown now grows with the
+	// per-bead churn count and is capped here, so a churning bead is re-fed at
+	// most hourly instead of every 5 minutes. The backoff self-heals: once the
+	// bead stops reappearing for feedChurnWindow, its churn count ages out and
+	// resets to the base cooldown.
+	feedCooldownCap = 1 * time.Hour
+
+	// feedChurnWindow is how long a prior feed keeps counting toward a bead's
+	// churn streak. A re-feed within this window increments the streak (and the
+	// backoff); a gap longer than this resets it — so a bead that genuinely
+	// progressed and only much later reappears starts fresh, not pre-penalized.
+	feedChurnWindow = 1 * time.Hour
+
 	// missingBeadStrikeThreshold is the number of consecutive "bead not found"
 	// sling failures tolerated for a single (convoy, bead) pair before the
 	// bead is auto-untracked from the convoy. N=3 absorbs transient Dolt
@@ -137,10 +154,18 @@ type ConvoyManager struct {
 	processedLifecycleEvents sync.Map // map[string]bool
 
 	// lastFeedAttempt tracks the most recent sling attempt time per ready
-	// issue ID. Entries older than feedDispatchCooldown are ignored (and
+	// issue ID. Entries older than the (escalating) cooldown are ignored (and
 	// overwritten on the next attempt). Used to suppress hot-loop re-slings
 	// of the same in_progress bead with a dead assignee. See gu-iygf.
 	lastFeedAttempt sync.Map // map[string]time.Time
+
+	// feedChurn tracks the escalate-churn streak per issue ID (gs-skv): how
+	// many times in a row a bead has been re-fed within feedChurnWindow without
+	// ever leaving the ready set (i.e. without closing or sticking to a live
+	// worker). The streak scales the effective cooldown (effectiveFeedCooldown)
+	// so an unworkable, perpetually-refused bead backs off toward feedCooldownCap
+	// instead of being re-fed every 5 minutes forever.
+	feedChurn sync.Map // map[string]feedChurnEntry
 
 	// missingBeadStrikes counts consecutive "bead not found" sling failures
 	// per (convoyID, issueID) pair. When the count reaches
@@ -669,6 +694,10 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		// for this (convoy, bead) pair. A bead that was transiently invisible
 		// (Dolt restart, replication lag) shouldn't carry strikes forward.
 		m.missingBeadStrikes.Delete(missingBeadKey{c.ID, issueID})
+		// Advance the escalate-churn streak: a bead re-dispatched again and
+		// again (refused/escalated, never closing) backs off toward
+		// feedCooldownCap instead of being re-fed every 5 min (gs-skv).
+		m.recordFeedChurn(issueID)
 		return // Successfully dispatched one issue
 	}
 
@@ -791,9 +820,45 @@ func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	}
 }
 
-// inFeedCooldown reports whether issueID was slung within feedDispatchCooldown.
-// Stale entries (older than the cooldown) are pruned in place to bound the
-// lastFeedAttempt map. See gu-iygf.
+// feedChurnEntry records a bead's escalate-churn streak: how many consecutive
+// re-feeds within feedChurnWindow, and when the streak was last touched (so it
+// can age out). See gs-skv.
+type feedChurnEntry struct {
+	count int
+	last  time.Time
+}
+
+// effectiveFeedCooldown returns the cooldown for issueID, scaled by its
+// escalate-churn streak (gs-skv). The first dispatch uses the base 5-minute
+// cooldown; each consecutive re-feed within feedChurnWindow doubles it
+// (5m → 10m → 20m → 40m → …), capped at feedCooldownCap. This converts a
+// flat-rate re-feed loop (an unworkable bead re-fed every 5 min for hours)
+// into a fast-decaying backoff that re-feeds at most hourly.
+func (m *ConvoyManager) effectiveFeedCooldown(issueID string) time.Duration {
+	churn := 0
+	if v, ok := m.feedChurn.Load(issueID); ok {
+		if e, ok := v.(feedChurnEntry); ok {
+			churn = e.count
+		}
+	}
+	if churn <= 1 {
+		return feedDispatchCooldown
+	}
+	// Double per streak step; guard against overflow from a large shift.
+	shift := churn - 1
+	if shift > 16 {
+		return feedCooldownCap
+	}
+	d := feedDispatchCooldown << uint(shift)
+	if d <= 0 || d > feedCooldownCap {
+		return feedCooldownCap
+	}
+	return d
+}
+
+// inFeedCooldown reports whether issueID was slung within its (escalating)
+// effective cooldown. Stale entries (older than the cooldown) are pruned in
+// place to bound the lastFeedAttempt map. See gu-iygf / gs-skv.
 func (m *ConvoyManager) inFeedCooldown(issueID string) bool {
 	v, ok := m.lastFeedAttempt.Load(issueID)
 	if !ok {
@@ -804,7 +869,7 @@ func (m *ConvoyManager) inFeedCooldown(issueID string) bool {
 		m.lastFeedAttempt.Delete(issueID)
 		return false
 	}
-	if m.now().Sub(last) < feedDispatchCooldown {
+	if m.now().Sub(last) < m.effectiveFeedCooldown(issueID) {
 		return true
 	}
 	// Cooldown expired — drop the entry so the map doesn't grow unbounded
@@ -815,9 +880,37 @@ func (m *ConvoyManager) inFeedCooldown(issueID string) bool {
 }
 
 // recordFeedAttempt stamps issueID with the current time so subsequent scans
-// within feedDispatchCooldown skip it. See gu-iygf.
+// within the effective cooldown skip it. See gu-iygf.
 func (m *ConvoyManager) recordFeedAttempt(issueID string) {
 	m.lastFeedAttempt.Store(issueID, m.now())
+}
+
+// recordFeedChurn advances issueID's escalate-churn streak after a SUCCESSFUL
+// re-dispatch (gs-skv). It is deliberately NOT called on sling failures: a
+// "bead not found" failure is a missing-bead case with its own strike→untrack
+// termination (missingBeadStrikeThreshold), and must not inherit the escalating
+// backoff or it would never accumulate its 3 strikes. A successful re-dispatch
+// of a bead that keeps coming back (refused/escalated, never closed) IS the
+// escalate-churn this backs off: a re-dispatch within feedChurnWindow raises
+// the streak (and the next cooldown); a longer gap resets it to 1, so a bead
+// that genuinely progressed and only later reappears is not pre-penalized.
+func (m *ConvoyManager) recordFeedChurn(issueID string) {
+	now := m.now()
+
+	churn := 1
+	if v, ok := m.feedChurn.Load(issueID); ok {
+		if e, ok := v.(feedChurnEntry); ok && now.Sub(e.last) < feedChurnWindow {
+			churn = e.count + 1
+		}
+	}
+	m.feedChurn.Store(issueID, feedChurnEntry{count: churn, last: now})
+
+	// Surface the moment a bead crosses into heavy backoff so an operator can
+	// see the churn instead of it silently slowing.
+	if churn >= 3 {
+		m.logger("Convoy feed: %s churn ×%d — backing off to %s (gs-skv escalate-churn guard)",
+			issueID, churn, m.effectiveFeedCooldown(issueID))
+	}
 }
 
 // runStartupSweep runs one convoy check pass after a brief delay to catch

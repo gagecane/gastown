@@ -8,6 +8,107 @@ import (
 	"time"
 )
 
+// TestIsTransientWriteContention verifies the escalation-create retry only
+// classifies known not-committed Dolt write-contention errors as retryable, so
+// a retry can never duplicate an escalation (gs-skv).
+func TestIsTransientWriteContention(t *testing.T) {
+	retryable := []string{
+		"Error 1290: the MySQL server is running with the --read-only option",
+		"database is read only",
+		"table is locked",
+		"Lock wait timeout exceeded; try restarting transaction",
+		"Deadlock found when trying to get lock",
+	}
+	for _, msg := range retryable {
+		if !isTransientWriteContention(errString(msg)) {
+			t.Errorf("expected retryable: %q", msg)
+		}
+	}
+	notRetryable := []string{
+		"refusing to create escalation bead: flag-like title",
+		"bead not found",
+		"invalid severity",
+		"",
+	}
+	for _, msg := range notRetryable {
+		if isTransientWriteContention(errString(msg)) {
+			t.Errorf("expected NOT retryable: %q", msg)
+		}
+	}
+	if isTransientWriteContention(nil) {
+		t.Error("nil error must not be retryable")
+	}
+}
+
+// TestCreateEscalationWithRetry verifies the bounded retry: it retries a
+// transient contention error and succeeds, does not retry a non-transient
+// error, and stops after the attempt cap (gs-skv).
+func TestCreateEscalationWithRetry(t *testing.T) {
+	// Swap out the backoff sleep so the test is instant.
+	origSleep := escalationRetrySleep
+	escalationRetrySleep = func(time.Duration) {}
+	defer func() { escalationRetrySleep = origSleep }()
+
+	t.Run("retries transient then succeeds", func(t *testing.T) {
+		calls := 0
+		out, err := createEscalationWithRetry(func() ([]byte, error) {
+			calls++
+			if calls < 3 {
+				return nil, errString("database is read only")
+			}
+			return []byte(`{"id":"hq-esc-1"}`), nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if calls != 3 {
+			t.Errorf("expected 3 attempts (2 transient + success), got %d", calls)
+		}
+		if !strings.Contains(string(out), "hq-esc-1") {
+			t.Errorf("unexpected output: %s", out)
+		}
+	})
+
+	t.Run("does not retry non-transient", func(t *testing.T) {
+		calls := 0
+		_, err := createEscalationWithRetry(func() ([]byte, error) {
+			calls++
+			return nil, errString("flag-like title")
+		})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if calls != 1 {
+			t.Errorf("non-transient error must not retry, got %d attempts", calls)
+		}
+	})
+
+	t.Run("stops at attempt cap", func(t *testing.T) {
+		calls := 0
+		_, err := createEscalationWithRetry(func() ([]byte, error) {
+			calls++
+			return nil, errString("lock wait timeout")
+		})
+		if err == nil {
+			t.Fatal("expected error after exhausting retries")
+		}
+		if calls != escalationCreateMaxAttempts {
+			t.Errorf("expected %d attempts, got %d", escalationCreateMaxAttempts, calls)
+		}
+	})
+}
+
+type stringError string
+
+func (e stringError) Error() string { return string(e) }
+
+func errString(s string) error {
+	if s == "" {
+		return nil
+	}
+	return stringError(s)
+}
+
 func TestFormatEscalationDescription(t *testing.T) {
 	tests := []struct {
 		name   string

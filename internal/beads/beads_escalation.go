@@ -390,7 +390,16 @@ func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*I
 		args = append(args, "--actor="+actor)
 	}
 
-	out, err := b.runWithStdin([]byte(description), args...)
+	// Retry on transient Dolt write-contention (gs-skv). Under concurrent load
+	// the Dolt server can transiently reject a write ("database is read only",
+	// Error 1290, lock/timeout) BEFORE committing — so a retry cannot duplicate
+	// the escalation. Without this, an escalation raised during contention is
+	// silently lost (empty `gt escalate list`), which is how a polecat's
+	// unworkability signal vanished while it churned. Only retried errors that
+	// are known-not-committed; any other failure returns immediately.
+	out, err := createEscalationWithRetry(func() ([]byte, error) {
+		return b.runWithStdin([]byte(description), args...)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -401,6 +410,66 @@ func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*I
 	}
 
 	return &issue, nil
+}
+
+// escalationCreateMaxAttempts bounds the contention retry. Four attempts with
+// the backoff below spans ~3.5s, long enough to ride out a brief Dolt
+// write-lock/replication stall without blocking the caller for long.
+const escalationCreateMaxAttempts = 4
+
+// createEscalationWithRetry runs the escalation create, retrying only on
+// transient write-contention errors (which reject before commit, so a retry
+// cannot create a duplicate bead). create is injected so the retry policy is
+// unit-testable; the sleep is overridable via escalationRetrySleep.
+func createEscalationWithRetry(create func() ([]byte, error)) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= escalationCreateMaxAttempts; attempt++ {
+		out, err := create()
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if attempt == escalationCreateMaxAttempts || !isTransientWriteContention(err) {
+			return nil, err
+		}
+		// Backoff: 250ms, 500ms, 1s, ... (capped). Short enough to stay
+		// responsive, long enough to clear a transient write lock.
+		escalationRetrySleep(time.Duration(250*(1<<(attempt-1))) * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
+// escalationRetrySleep is the backoff sleep, overridable in tests to keep them
+// fast.
+var escalationRetrySleep = time.Sleep
+
+// isTransientWriteContention reports whether err is a Dolt write-contention
+// failure that rejected the write BEFORE committing — safe to retry without
+// risking a duplicate. Matches the known not-committed signatures: read-only
+// rejection (MySQL Error 1290 under concurrent commit pressure), lock-wait
+// timeouts, and "database is locked". Deliberately conservative: an unknown
+// error is treated as possibly-committed and NOT retried.
+func isTransientWriteContention(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sig := range []string{
+		"read only",
+		"read-only",
+		"error 1290",
+		"--read-only",
+		"database is locked",
+		"table is locked",
+		"lock wait timeout",
+		"try restarting transaction",
+		"deadlock found",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // AckEscalation acknowledges an escalation bead.

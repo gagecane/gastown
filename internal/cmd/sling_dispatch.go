@@ -127,8 +127,17 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 
-	// 1. Get bead info + status check
-	info, err := getBeadInfoFromTownRoot(townRoot, params.BeadID)
+	// 1. Get bead info + status check.
+	//
+	// Use the FRESH (non-stale) read here, not the --allow-stale snapshot
+	// (gs-skv). executeSling is the universal dispatch chokepoint — a dispatch
+	// spawns a polecat + worktree, a costly and hard-to-undo action that must
+	// gate on authoritative status. The stale snapshot can return `open` for a
+	// bead that was just closed under Dolt write-contention/replication lag,
+	// which is exactly how a CLOSED bead (lb-4ol4) kept being re-fed to a
+	// polecat that then refused and escalate-churned for an hour. The extra
+	// non-stale `bd show` per dispatch is negligible beside the spawn it gates.
+	info, err := getBeadInfoFreshFromTownRoot(townRoot, params.BeadID)
 	if err != nil {
 		result.ErrMsg = err.Error()
 		return result, fmt.Errorf("could not get bead info: %w", err)

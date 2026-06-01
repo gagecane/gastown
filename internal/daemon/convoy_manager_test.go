@@ -797,6 +797,67 @@ exit 0
 	}
 }
 
+// TestEffectiveFeedCooldown_EscalatesWithChurn proves gs-skv: a bead
+// re-dispatched repeatedly within feedChurnWindow backs off exponentially
+// (5m → 10m → 20m …) up to feedCooldownCap, rather than staying at a flat 5m.
+func TestEffectiveFeedCooldown_EscalatesWithChurn(t *testing.T) {
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Minute, nil, nil, nil)
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	const issue = "gt-churny"
+
+	// No churn yet → base cooldown.
+	if got := m.effectiveFeedCooldown(issue); got != feedDispatchCooldown {
+		t.Fatalf("base cooldown = %s, want %s", got, feedDispatchCooldown)
+	}
+
+	want := []time.Duration{
+		feedDispatchCooldown,      // streak 1 → base
+		feedDispatchCooldown * 2,  // streak 2
+		feedDispatchCooldown * 4,  // streak 3
+		feedDispatchCooldown * 8,  // streak 4
+		feedDispatchCooldown * 12, // streak 5 would be *16=80m but capped at 60m
+	}
+	for i, w := range want {
+		m.recordFeedChurn(issue)
+		got := m.effectiveFeedCooldown(issue)
+		// Cap applies once the doubling exceeds feedCooldownCap.
+		if w > feedCooldownCap {
+			w = feedCooldownCap
+		}
+		if got != w {
+			t.Errorf("after %d churns: cooldown = %s, want %s", i+1, got, w)
+		}
+		// Advance a little (well within feedChurnWindow) so the next churn counts.
+		current = current.Add(time.Second)
+	}
+}
+
+// TestRecordFeedChurn_ResetsAfterWindow proves the backoff self-heals: a
+// re-dispatch after a gap longer than feedChurnWindow restarts the streak at 1
+// (base cooldown), so a bead that genuinely progressed and only much later
+// reappears is not pre-penalized (gs-skv).
+func TestRecordFeedChurn_ResetsAfterWindow(t *testing.T) {
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Minute, nil, nil, nil)
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	const issue = "gt-healed"
+	m.recordFeedChurn(issue)
+	m.recordFeedChurn(issue)
+	if got := m.effectiveFeedCooldown(issue); got != feedDispatchCooldown*2 {
+		t.Fatalf("pre-gap cooldown = %s, want %s", got, feedDispatchCooldown*2)
+	}
+
+	// Gap beyond the churn window → streak resets to base on the next feed.
+	current = current.Add(feedChurnWindow + time.Minute)
+	m.recordFeedChurn(issue)
+	if got := m.effectiveFeedCooldown(issue); got != feedDispatchCooldown {
+		t.Errorf("post-gap cooldown = %s, want reset to %s", got, feedDispatchCooldown)
+	}
+}
+
 func TestFeedFirstReady_IteratesPastDispatchFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
