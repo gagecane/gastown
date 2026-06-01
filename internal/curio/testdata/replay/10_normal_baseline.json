@@ -1,0 +1,21 @@
+{
+  "name": "normal baseline (May 18-24)",
+  "window_id": "2026-05-20/1d-normal",
+  "EventCounts": [
+    {"Series": "sling", "Observed": 119, "FiledBy": "scheduler"},
+    {"Series": "done", "Observed": 297, "FiledBy": "refinery"},
+    {"Series": "mail", "Observed": 235, "FiledBy": "various"},
+    {"Series": "bead.open", "Observed": 48, "FiledBy": "various"},
+    {"Series": "bead.close", "Observed": 48, "FiledBy": "various"},
+    {"Series": "dispatch.stuck_agent", "Observed": 0, "FiledBy": "deacon"},
+    {"Series": "escalation", "Observed": 0, "FiledBy": "various"},
+    {"Series": "sched_fail", "Observed": 0, "FiledBy": "scheduler"}
+  ],
+  "Beads": [
+    {"ID": "gu-normal1", "Rig": "gastown", "CloseReason": "merged", "Commit": "abc123", "CommitInMainAncestry": true, "FiledBy": "polecat"},
+    {"ID": "gu-normal2", "Rig": "gastown", "CloseReason": "completed", "Commit": "", "CommitInMainAncestry": false, "FiledBy": "polecat"}
+  ],
+  "Admissions": [
+    {"ID": "adm-ok", "PID": 5001, "Rig": "gastown", "OwnerAlive": true, "FiledBy": "scheduler"}
+  ]
+}

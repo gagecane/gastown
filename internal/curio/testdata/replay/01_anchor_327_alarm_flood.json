@@ -1,0 +1,11 @@
+{
+  "name": "327-alarm flood (gu-70rg)",
+  "anchor": "gu-70rg",
+  "expect_rules": ["alarm_rate_spike"],
+  "window_id": "2026-05-XX/1d-anchor-alarm",
+  "EventCounts": [
+    {"Series": "dispatch.stuck_agent", "Observed": 123, "FiledBy": "deacon"},
+    {"Series": "sling", "Observed": 84, "FiledBy": "scheduler"},
+    {"Series": "done", "Observed": 90, "FiledBy": "refinery"}
+  ]
+}
