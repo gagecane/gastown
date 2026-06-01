@@ -966,11 +966,6 @@ func TestGCExpiredFreesQueueForNewNudges(t *testing.T) {
 		}
 	}
 
-	// Sanity: queue is full.
-	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "new", Message: "blocked"}); err == nil {
-		t.Fatal("expected enqueue to fail when queue is full")
-	}
-
 	result, err := GCExpired(townRoot)
 	if err != nil {
 		t.Fatalf("GCExpired: %v", err)
@@ -982,6 +977,67 @@ func TestGCExpiredFreesQueueForNewNudges(t *testing.T) {
 	// Now enqueue should succeed.
 	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "new", Message: "ok"}); err != nil {
 		t.Fatalf("Enqueue after GC should succeed: %v", err)
+	}
+}
+
+// TestEnqueueEvictsExpiredWhenFull proves the gs-ow9 fix: when the queue is
+// full of already-expired entries, Enqueue evicts them inline and accepts the
+// new nudge — without waiting for the periodic GC dog or any agent drain. This
+// closes the window where a wedged recipient (dead poller) would reject live
+// nudges with "queue is full" despite every queued entry being stale.
+func TestEnqueueEvictsExpiredWhenFull(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "hq-wedged"
+
+	// Fill the queue with expired entries.
+	for i := 0; i < MaxQueueDepth; i++ {
+		n := QueuedNudge{
+			Sender:    "old",
+			Message:   "stale",
+			Timestamp: time.Now().Add(-2 * time.Hour),
+			ExpiresAt: time.Now().Add(-1 * time.Hour),
+		}
+		if err := Enqueue(townRoot, session, n); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	// A fresh nudge must succeed: Enqueue evicts the expired backlog inline.
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "new", Message: "live"}); err != nil {
+		t.Fatalf("Enqueue into full-of-expired queue should self-heal: %v", err)
+	}
+
+	// Only the live nudge remains; the 50 expired entries were evicted.
+	pending, err := Pending(townRoot, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Errorf("Pending = %d, want 1 (expired evicted, live kept)", pending)
+	}
+}
+
+// TestEnqueueStillRejectsWhenFullOfLiveNudges confirms the eviction path does
+// not weaken the runaway-sender guard: a queue full of unexpired nudges still
+// rejects new ones (inline eviction removes nothing, so the cap holds).
+func TestEnqueueStillRejectsWhenFullOfLiveNudges(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "hq-busy"
+
+	for i := 0; i < MaxQueueDepth; i++ {
+		n := QueuedNudge{
+			Sender:    "live",
+			Message:   "fresh",
+			Timestamp: time.Now(),
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+		if err := Enqueue(townRoot, session, n); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	if err := Enqueue(townRoot, session, QueuedNudge{Sender: "new", Message: "blocked"}); err == nil {
+		t.Fatal("expected enqueue to fail when queue is full of live nudges")
 	}
 }
 
