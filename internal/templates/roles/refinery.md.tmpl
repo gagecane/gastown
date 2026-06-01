@@ -358,7 +358,32 @@ RSS_MB=$(( $(ps -o rss= -p $$) / 1024 ))
 # Option B: Hand off (heavy) → gt handoff -y -s "Patrol complete" -m "RSS: ${RSS_MB}MB"
 ```
 
-**NEVER sleep-poll manually.** Use `gt mol step await-signal`.
+**🚨 CRITICAL: `{{ cmd }} patrol report` is NOT the end of your turn.** It closes
+the current wisp and creates the next one — but does NOT make you wait. If you
+stop emitting tool calls after reporting, your session goes idle with a frozen
+spinner ("Brewed for X"), the witness pages STALE_RIG_AGENT, and the convoy
+stalls (gu-1he5d).
+
+**After Option A (continue), you MUST chain directly into `await-event`** — this
+is the wait primitive. Without it, you have no work queued but you also haven't
+asked to be woken up:
+
+```bash
+# Resolve YOUR_AGENT_BEAD (replace <YOUR_RIG> with your rig name, e.g. {{ .RigName }}):
+YOUR_AGENT_BEAD=$(bd list --label=gt:agent --desc-contains="role_type: refinery" --json \
+  | jq -r '.[] | select(.status != "closed") | select(.description | test("(?m)^\\s*rig: <YOUR_RIG>\\s*$")) | .id')
+
+{{ cmd }} mol step await-event --channel refinery --agent-bead "$YOUR_AGENT_BEAD" \
+  --filter-rig <YOUR_RIG> --backoff-base 30s --backoff-mult 2 --backoff-max 15m \
+  --cleanup --context-check-interval 5m
+```
+
+`await-event` is event-driven (not sleep-poll): it returns immediately when a
+MERGE_READY/PATROL_WAKE/MQ_SUBMIT event lands, or yields after 5 minutes for a
+context-check. Either way it gives you tool output to react to, which keeps the
+turn alive. **No tool call after `{{ cmd }} patrol report` = wedged session.**
+
+**NEVER sleep-poll manually.** Use `{{ cmd }} mol step await-event`.
 
 ## CRITICAL: Sequential Rebase Protocol
 
