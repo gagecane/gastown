@@ -86,6 +86,33 @@ type SlingResult struct {
 //  10. Store fields in bead (dispatcher, args, attached_molecule, no_merge)
 //  11. Create Dolt branch
 //  12. Start polecat session
+
+// slingDispatchFieldUpdates builds the attachment fields persisted onto a bead
+// when executeSling dispatches it. MergeStrategy + ConvoyID + ConvoyOwned are
+// included so a bead dispatched via executeSling (batch sling, queue dispatch,
+// and the daemon convoy-feed) carries its merge strategy on the attachment
+// (gs-1a8). Without them `gt done`'s primary convoy lookup
+// (getConvoyInfoFromIssue) returned nil and a do-not-merge (merge=local) relay
+// leg fell through to the default merge-queue path, merging its commits onto
+// the rig base branch. The single-sling path (runSling) already persists these
+// via buildSlingFieldUpdates; this keeps executeSling at parity.
+func slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, formulaVars string, params SlingParams) beadFieldUpdates {
+	return beadFieldUpdates{
+		Dispatcher:       actor,
+		Args:             params.Args,
+		Vars:             append([]string(nil), params.Vars...),
+		AttachedMolecule: attachedMoleculeID,
+		AttachedFormula:  params.FormulaName,
+		NoMerge:          params.NoMerge,
+		ReviewOnly:       params.ReviewOnly,
+		Mode:             params.Mode,
+		ConvoyID:         trackingConvoyID,
+		MergeStrategy:    params.Merge,
+		ConvoyOwned:      params.Owned,
+		FormulaVars:      formulaVars,
+	}
+}
+
 func executeSling(params SlingParams) (*SlingResult, error) {
 	townRoot := params.TownRoot
 	if townRoot == "" {
@@ -383,6 +410,13 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 
 	// 4. Auto-convoy (if !NoConvoy)
 	convoyID := ""
+	// trackingConvoyID is the convoy that ultimately tracks this bead — the one
+	// we just created OR a pre-existing one. Unlike convoyID (which drives
+	// rollback cleanup and must stay empty for a pre-existing convoy we didn't
+	// create), this is persisted onto the bead's attachment so gt done's
+	// primary convoy lookup (getConvoyInfoFromIssue) resolves the merge
+	// strategy reliably (gs-1a8).
+	trackingConvoyID := ""
 	if !params.NoConvoy {
 		existingConvoy := isTrackedByConvoy(params.BeadID)
 		if existingConvoy == "" {
@@ -393,8 +427,10 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			} else {
 				fmt.Printf("  %s Created convoy %s\n", style.Bold.Render("→"), convoyID)
 			}
+			trackingConvoyID = convoyID
 		} else {
 			fmt.Printf("  %s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
+			trackingConvoyID = existingConvoy
 		}
 	}
 
@@ -482,17 +518,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	updateAgentHookBead(targetAgent, beadToHook, hookWorkDir, beadsDir)
 
 	// 10. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
-	fieldUpdates := beadFieldUpdates{
-		Dispatcher:       actor,
-		Args:             params.Args,
-		Vars:             append([]string(nil), params.Vars...),
-		AttachedMolecule: attachedMoleculeID,
-		AttachedFormula:  params.FormulaName,
-		NoMerge:          params.NoMerge,
-		ReviewOnly:       params.ReviewOnly,
-		Mode:             params.Mode,
-		FormulaVars:      strings.Join(allVars, "\n"),
-	}
+	fieldUpdates := slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, strings.Join(allVars, "\n"), params)
 	// Use beadToHook for the update target (may differ from beadID when formula-on-bead)
 	if err := storeFieldsInBead(beadToHook, fieldUpdates); err != nil {
 		fmt.Printf("  %s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)

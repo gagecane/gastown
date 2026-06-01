@@ -443,6 +443,36 @@ func TestBatchSling_ConvoyIDStoredInBeadFieldUpdates(t *testing.T) {
 	}
 }
 
+// TestSlingDispatchFieldUpdates_PersistsMergeStrategy proves gs-1a8: a bead
+// dispatched via executeSling persists its merge strategy (and tracking convoy)
+// on the attachment, so `gt done` can detect a do-not-merge (merge=local) leg
+// and keep its commits off the rig base branch. Before the fix executeSling's
+// fieldUpdates literal omitted MergeStrategy/ConvoyID, so merge=local was lost
+// and the leg fell through to the merge-queue path onto the base.
+func TestSlingDispatchFieldUpdates_PersistsMergeStrategy(t *testing.T) {
+	params := SlingParams{
+		BeadID:      "lb-relay14",
+		Merge:       "local",
+		FormulaName: "mol-polecat-work",
+		Owned:       true,
+		NoMerge:     false,
+	}
+	fu := slingDispatchFieldUpdates("mayor", "mol-wisp-1", "hq-cv-oxeuo", "base_branch=proto/v3-build", params)
+
+	if fu.MergeStrategy != "local" {
+		t.Errorf("MergeStrategy = %q, want local (merge=local must survive dispatch)", fu.MergeStrategy)
+	}
+	if fu.ConvoyID != "hq-cv-oxeuo" {
+		t.Errorf("ConvoyID = %q, want hq-cv-oxeuo (needed for gt done's primary convoy lookup)", fu.ConvoyID)
+	}
+	if !fu.ConvoyOwned {
+		t.Error("ConvoyOwned = false, want true")
+	}
+	if fu.AttachedFormula != "mol-polecat-work" {
+		t.Errorf("AttachedFormula = %q, want mol-polecat-work", fu.AttachedFormula)
+	}
+}
+
 // TestBatchSling_ErrorsOnAlreadyTrackedBead verifies that batch sling refuses
 // to proceed when any bead is already tracked by another convoy, and that
 // isTrackedByConvoy correctly identifies the conflict.
