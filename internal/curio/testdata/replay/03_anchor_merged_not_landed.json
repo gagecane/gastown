@@ -1,0 +1,10 @@
+{
+  "name": "merged but not landed (gu-kc3lo)",
+  "anchor": "gu-kc3lo",
+  "expect_rules": ["bead_merged_not_landed"],
+  "window_id": "2026-05-XX/1d-anchor-merge",
+  "Beads": [
+    {"ID": "gu-redacted1", "Rig": "gastown", "CloseReason": "merged", "Commit": "deadbeef", "CommitInMainAncestry": false, "FiledBy": "polecat"},
+    {"ID": "gu-redacted2", "Rig": "gastown", "CloseReason": "merged", "Commit": "cafef00d", "CommitInMainAncestry": true, "FiledBy": "polecat"}
+  ]
+}

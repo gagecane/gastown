@@ -1,0 +1,10 @@
+{
+  "name": "Dolt SIGQUIT kill (gc-wisp-2yc7)",
+  "anchor": "gc-wisp-2yc7",
+  "expect_rules": ["kill_signal_near_dolt"],
+  "window_id": "2026-05-21/1d-anchor-dolt",
+  "LogLines": [
+    {"Source": "reaper", "Text": "sending kill -QUIT to dolt sql-server pid 12345 per documented protocol", "NearDoltPID": true, "FiledBy": "reaper"},
+    {"Source": "deacon", "Text": "routine heartbeat ok", "NearDoltPID": false, "FiledBy": "deacon"}
+  ]
+}
