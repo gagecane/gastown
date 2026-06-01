@@ -376,6 +376,18 @@ func runHook(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Builder-independence guard (gs-aoz): refuse to hook a review gate to the
+	// agent that built the work under review. This covers the manual
+	// `gt hook <gate> <agent>` acquisition path; the molecule self-continuation
+	// path is guarded in handleStepContinue. Fails open on any uncertainty.
+	if targetAgent != "" {
+		if info, err := getBeadInfoFromTownRoot(townRoot, beadID); err == nil && info != nil {
+			if indErr := assertReviewerIndependence(townRoot, beadID, info.Labels, info.Description, agentID); indErr != nil {
+				return indErr
+			}
+		}
+	}
+
 	// Hook the bead using bd update with retry logic (discovery-based approach).
 	// Run from town root so bd can find routes.jsonl for prefix-based routing.
 	// This is essential for hooking convoys (hq-* prefix) stored in town beads.

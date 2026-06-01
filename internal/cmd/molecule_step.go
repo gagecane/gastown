@@ -292,6 +292,15 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 		return nil
 	}
 
+	// Builder-independence guard (gs-aoz): a polecat continuing a molecule must
+	// not pin a review-gate step to itself when it built the work under review.
+	// This is the acquisition path the observed violation took — 'capable'
+	// re-grabbing its own review gate after reopen — which a fresh-dispatch
+	// guard cannot see.
+	if err := assertReviewerIndependence(townRoot, nextStep.ID, nextStep.Labels, nextStep.Description, agentID); err != nil {
+		return err
+	}
+
 	// Pin the next step bead
 	pinCmd := exec.Command("bd", "update", nextStep.ID, "--status=pinned", "--assignee="+agentID)
 	pinCmd.Dir = gitRoot
