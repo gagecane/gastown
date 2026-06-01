@@ -96,6 +96,23 @@ func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	return "origin/" + targetBranch
 }
 
+// relayBaseForLocalMerge decides whether a merge=local convoy leg should
+// FF-push to a named relay base branch instead of parking the work on the local
+// feature branch (gs-d26). It returns the base branch and true only when the
+// convoy carries a base_branch that is set and differs from the rig default —
+// the relay case. A plain merge=local convoy (no base, or base == default) keeps
+// the existing keep-local behavior used for human-review / upstream-PR work.
+func relayBaseForLocalMerge(convoyInfo *ConvoyInfo, defaultBranch string) (string, bool) {
+	if convoyInfo == nil {
+		return "", false
+	}
+	base := convoyInfo.BaseBranch
+	if base == "" || base == defaultBranch {
+		return "", false
+	}
+	return base, true
+}
+
 // pushForDone wraps git.Push, opting into GT_SKIP_PREPUSH=1 when the polecat
 // declared --pre-verified. The repo's pre-push hook re-runs build+vet+test
 // (~2-5min), which during gt done routinely exceeds the witness's idle timeout
@@ -860,8 +877,96 @@ afterSafetyNet:
 			convoyInfo = getConvoyInfoForIssue(issueID)
 		}
 
-		// Handle "local" strategy: skip push and MR entirely
+		// Handle "local" strategy: skip push and MR entirely.
+		//
+		// EXCEPTION (gs-d26): a relay leg — a merge=local convoy that carries a
+		// named base_branch other than the rig default — must FF-push its commits
+		// to origin/<base_branch> so the next leg in the relay builds on top of
+		// them. Plain merge=local parks the work on the local feature branch and
+		// the relay stalls (post-mortem: leg3 only landed via a MANUAL FF-push to
+		// origin/proto/v3-build). The base_branch != defaultBranch gate keeps the
+		// normal human-review / upstream-PR keep-local behavior unchanged.
 		if convoyInfo != nil && convoyInfo.MergeStrategy == "local" {
+			relayBase, isRelay := relayBaseForLocalMerge(convoyInfo, defaultBranch)
+			if isRelay {
+				// FF-push the relay leg to its named base branch. Mirrors the
+				// "direct" strategy path below, but targets base_branch and is
+				// strictly fast-forward-only: pushForDone uses force=false, so git
+				// rejects any non-fast-forward. A non-ff means an unexpected
+				// concurrent writer (single-writer should prevent this) — we fail
+				// loud and file a stranded-push wisp rather than clobber the other
+				// writer's commits with a force-push.
+				fmt.Printf("%s Relay leg: FF-pushing to %s\n", style.Bold.Render("→"), relayBase)
+				if issueID != "" {
+					fmt.Printf("  Issue: %s\n", issueID)
+				}
+				pushSubmoduleChanges(g, relayBase)
+				relayRefspec := branch + ":" + relayBase
+				relayHeadSHA, _ := g.Rev("HEAD")
+				relayPushErr := pushForDone(g, relayRefspec)
+				if relayPushErr != nil {
+					// gu-epv5 recovery: the push may have actually landed even
+					// though the local report indicated failure (transient net
+					// error). Re-check origin/<base_branch> against our HEAD.
+					if relayHeadSHA != "" && recoverPushFromOriginTip(g, relayBase, relayHeadSHA) {
+						fmt.Printf("%s Relay push reported failure but origin/%s already matches HEAD — treating as success (gu-epv5 recovery)\n", style.Bold.Render("✓"), relayBase)
+						relayPushErr = nil
+					} else {
+						pushFailed = true
+						errMsg := fmt.Sprintf("relay FF-push to %s failed (non-fast-forward or remote error — possible concurrent writer): %v", relayBase, relayPushErr)
+						style.PrintWarning("%s", errMsg)
+						strandedBd := beads.New(cwd)
+						fileStrandedPushWisp(strandedBd, rigName, branch, relayHeadSHA, relayBase, issueID, agentBeadID, worker, relayPushErr)
+						goto notifyWitness
+					}
+				}
+				relayCommitSHA := relayHeadSHA
+				if relayCommitSHA == "" {
+					relayCommitSHA, _ = g.Rev("HEAD")
+				}
+				if doneSkipVerify {
+					noteVerifiedPushSkipped(cwd, issueID, relayBase, relayCommitSHA, fmt.Sprintf("--skip-verify on relay FF-push: %s", doneSkipVerifyReason))
+				} else if verifyErr := g.VerifyPushedCommit("origin", relayBase, relayCommitSHA); verifyErr != nil {
+					// gu-epv5: verify may have hit a transient remote read
+					// failure. Re-check origin tip before declaring the work
+					// stranded.
+					if recoverPushFromOriginTip(g, relayBase, relayCommitSHA) {
+						fmt.Printf("%s Verify reported failure but origin/%s tip matches — treating as success (gu-epv5 recovery)\n", style.Bold.Render("✓"), relayBase)
+					} else {
+						pushFailed = true
+						errMsg := verifyErr.Error()
+						noteVerifiedPushFailure(cwd, issueID, relayBase, relayCommitSHA, verifyErr)
+						style.PrintWarning("%s\nRelay FF-push reported success but remote verification failed. Source bead will remain in progress.", errMsg)
+						strandedBd := beads.New(cwd)
+						fileStrandedPushWisp(strandedBd, rigName, branch, relayCommitSHA, relayBase, issueID, agentBeadID, worker, verifyErr)
+						goto notifyWitness
+					}
+				}
+				fmt.Printf("%s Relay leg FF-pushed to %s\n", style.Bold.Render("✓"), relayBase)
+				recordPushReceipt(g, townRoot, rigName, relayBase, relayCommitSHA, pushlog.SourceDoneRelay, worker, issueID)
+
+				// Close the base issue — no MR/refinery will close it.
+				if issueID != "" {
+					relayBd := beads.New(cwd)
+					closeReason := fmt.Sprintf("Relay FF-push to %s (merge=local relay leg)", relayBase)
+					var closeErr error
+					for attempt := 1; attempt <= 3; attempt++ {
+						closeErr = relayBd.ForceCloseWithReason(closeReason, issueID)
+						if closeErr == nil {
+							fmt.Printf("%s Issue %s closed (relay FF-push)\n", style.Bold.Render("✓"), issueID)
+							break
+						}
+						if attempt < 3 {
+							style.PrintWarning("close attempt %d/3 failed: %v (retrying in %ds)", attempt, closeErr, attempt*2)
+							time.Sleep(time.Duration(attempt*2) * time.Second)
+						}
+					}
+					if closeErr != nil {
+						style.PrintWarning("could not close issue %s after 3 attempts: %v", issueID, closeErr)
+					}
+				}
+				goto notifyWitness
+			}
 			fmt.Printf("%s Local merge strategy: skipping push and merge queue\n", style.Bold.Render("→"))
 			fmt.Printf("  Branch: %s\n", branch)
 			if issueID != "" {

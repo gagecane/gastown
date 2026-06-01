@@ -238,6 +238,11 @@ func getConvoyInfoFromIssue(issueID, cwd string) *ConvoyInfo {
 		ID:            attachment.ConvoyID,
 		MergeStrategy: attachment.MergeStrategy,
 		Owned:         attachment.ConvoyOwned,
+		// gs-d26: surface the relay base branch from the bead's formula_vars so
+		// `gt done` can FF-push a merge=local relay leg to its named base branch.
+		// AttachmentFields has no dedicated BaseBranch field; sling stamps it as a
+		// base_branch=<value> entry inside FormulaVars.
+		BaseBranch: extractFormulaVar(attachment.FormulaVars, "base_branch"),
 	}
 }
 

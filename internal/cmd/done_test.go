@@ -1242,6 +1242,58 @@ func TestConvoyInfoFallbackChain(t *testing.T) {
 	}
 }
 
+// TestRelayBaseForLocalMerge verifies the gs-d26 gate: a merge=local convoy
+// FF-pushes to its named base branch only when that base is set AND differs from
+// the rig default. Every other case keeps the existing keep-local behavior.
+func TestRelayBaseForLocalMerge(t *testing.T) {
+	tests := []struct {
+		name       string
+		convoyInfo *ConvoyInfo
+		defaultBr  string
+		wantBase   string
+		wantRelay  bool
+	}{
+		{
+			name:       "relay base set and differs from default → FF-push",
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local", BaseBranch: "proto/v3-build"},
+			defaultBr:  "main",
+			wantBase:   "proto/v3-build",
+			wantRelay:  true,
+		},
+		{
+			name:       "base equals default → keep local",
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local", BaseBranch: "main"},
+			defaultBr:  "main",
+			wantBase:   "",
+			wantRelay:  false,
+		},
+		{
+			name:       "no base branch → keep local",
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local"},
+			defaultBr:  "main",
+			wantBase:   "",
+			wantRelay:  false,
+		},
+		{
+			name:       "nil convoy → keep local",
+			convoyInfo: nil,
+			defaultBr:  "main",
+			wantBase:   "",
+			wantRelay:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBase, gotRelay := relayBaseForLocalMerge(tt.convoyInfo, tt.defaultBr)
+			if gotBase != tt.wantBase || gotRelay != tt.wantRelay {
+				t.Errorf("relayBaseForLocalMerge() = (%q, %v), want (%q, %v)",
+					gotBase, gotRelay, tt.wantBase, tt.wantRelay)
+			}
+		})
+	}
+}
+
 // TestHookedBeadCloseNotRestrictedToHookedStatus verifies the gt-pftz fix:
 // gt done must close the hooked bead regardless of its current status (hooked,
 // in_progress, open), not only when status == "hooked". Polecats update their

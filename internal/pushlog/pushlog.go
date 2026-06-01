@@ -49,6 +49,11 @@ const (
 	// without an MR queue).
 	SourceDoneDirect = "done-direct"
 
+	// SourceDoneRelay is `gt done` recording a fast-forward push of a
+	// merge=local relay leg to its named base branch (gs-d26), so the next
+	// leg in the relay builds on top of it.
+	SourceDoneRelay = "done-relay"
+
 	// SourceWitnessRecovery is the witness recoverUnfiledMR path pushing
 	// a polecat's stranded branch on its behalf.
 	SourceWitnessRecovery = "witness-recovery"
