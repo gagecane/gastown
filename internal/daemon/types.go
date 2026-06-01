@@ -137,6 +137,7 @@ type PatrolsConfig struct {
 	MainCIBreak          *MainCIBreakConfig          `json:"main_ci_break,omitempty"`
 	NudgeQueueGC         *NudgeQueueGCConfig         `json:"nudge_queue_gc,omitempty"`
 	RestartPending       *RestartPendingConfig       `json:"restart_pending,omitempty"`
+	Curio                *CurioConfig                `json:"curio,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -331,6 +332,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.MRCycleClose.Enabled
+	}
+	if patrol == "curio" {
+		// Opt-in: Phase 1 is candidates-only and must not run until explicitly
+		// enabled. A missing config means disabled.
+		if config == nil || config.Patrols == nil || config.Patrols.Curio == nil {
+			return false
+		}
+		return config.Patrols.Curio.Enabled
 	}
 	if patrol == "nudge_queue_gc" {
 		// Default-enabled: a missing config still returns true so the
