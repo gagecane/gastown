@@ -6,8 +6,39 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
+
+// TestShouldReattachFormula verifies the gs-am8 GAP 2 re-attach decision: an
+// already-scheduled bead's formula is replaced only under --force with a
+// genuinely different formula; otherwise the idempotent no-op stands.
+func TestShouldReattachFormula(t *testing.T) {
+	ctx := func(f string) *capacity.SlingContextFields {
+		return &capacity.SlingContextFields{Formula: f}
+	}
+	cases := []struct {
+		name      string
+		force     bool
+		requested string
+		existing  *capacity.SlingContextFields
+		want      bool
+	}{
+		{"force + different formula re-attaches", true, "mol-pw-adversarial-review", ctx("mol-polecat-work"), true},
+		{"force + same formula is a no-op", true, "mol-polecat-work", ctx("mol-polecat-work"), false},
+		{"no force never re-attaches", false, "mol-pw-adversarial-review", ctx("mol-polecat-work"), false},
+		{"force + clearing formula (to default) re-attaches", true, "", ctx("mol-polecat-work"), true},
+		{"nil existing fields never re-attaches", true, "mol-pw-adversarial-review", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldReattachFormula(tc.force, tc.requested, tc.existing); got != tc.want {
+				t.Errorf("shouldReattachFormula(%v,%q,%+v) = %v, want %v",
+					tc.force, tc.requested, tc.existing, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestAreScheduledFailClosed verifies that areScheduled fails closed when
 // running outside a town root — all requested IDs should be treated as scheduled.

@@ -98,6 +98,17 @@ func checkSchedulePrefixParity(townRoot, rigName, beadID string) error {
 		beadID, gotPrefix, rigName, rigPrefix, rigName)
 }
 
+// shouldReattachFormula reports whether an already-scheduled bead's staged
+// formula should be replaced in place (gs-am8 GAP 2). Re-attach only when the
+// caller passed --force AND is requesting a formula that differs from the one
+// currently staged — so a bead stuck on the wrong formula (e.g. a review gate
+// staged with the default mol-polecat-work) can be corrected without an
+// unschedule/reschedule dance. Without --force, or with the same formula, the
+// existing no-op (idempotent) behavior stands.
+func shouldReattachFormula(force bool, requestedFormula string, existing *capacity.SlingContextFields) bool {
+	return force && existing != nil && requestedFormula != existing.Formula
+}
+
 // scheduleBead schedules a bead for deferred dispatch via the capacity scheduler.
 // Creates a sling context bead to hold scheduling state. The work bead is never modified.
 func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
@@ -244,13 +255,53 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	// beads dir, which meant non-HQ rig witnesses never saw the context. (GH#3468)
 	rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, rigName)
 	rigBeads := beads.NewWithBeadsDir(townRoot, rigBeadsDir)
-	existingCtx, _, findErr := rigBeads.FindOpenSlingContext(beadID)
+	existingCtx, existingFields, findErr := rigBeads.FindOpenSlingContext(beadID)
 	if findErr != nil {
 		return fmt.Errorf("checking for existing sling context: %w", findErr)
 	}
 	if existingCtx != nil {
+		// Re-attach a DIFFERENT formula to an already-scheduled bead (gs-am8
+		// GAP 2). The previous behavior unconditionally no-op'd, so a staged
+		// bead stuck on the wrong formula — e.g. a review gate scheduled with
+		// the default mol-polecat-work instead of mol-pw-adversarial-review —
+		// could never be corrected (`gt sling mol-X --on <bead> --force`
+		// no-op'd). With --force and a changed formula, rewrite the existing
+		// context's formula in place (same context ID) so the next dispatch
+		// runs the intended formula.
+		if shouldReattachFormula(opts.Force, opts.Formula, existingFields) {
+			if opts.Formula != "" {
+				if err := verifyFormulaExists(opts.Formula); err != nil {
+					return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
+				}
+			}
+			if opts.DryRun {
+				fmt.Printf("Would re-attach formula %q to %s (context %s, was %q)\n",
+					opts.Formula, beadID, existingCtx.ID, existingFields.Formula)
+				return nil
+			}
+			if opts.Formula != "" {
+				workDir := beads.ResolveHookDir(townRoot, beadID, "")
+				if err := CookFormula(opts.Formula, workDir, townRoot); err != nil {
+					return fmt.Errorf("formula %q failed to cook: %w", opts.Formula, err)
+				}
+			}
+			newFields := *existingFields
+			newFields.Formula = opts.Formula
+			if err := rigBeads.UpdateSlingContextFields(existingCtx.ID, &newFields); err != nil {
+				return fmt.Errorf("re-attaching formula to context %s: %w", existingCtx.ID, err)
+			}
+			fmt.Printf("%s Re-attached formula %q to %s (context %s, was %q)\n",
+				style.Bold.Render("→"), opts.Formula, beadID, existingCtx.ID, existingFields.Formula)
+			return nil
+		}
 		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
 			style.Dim.Render("○"), beadID, existingCtx.ID)
+		// Point the operator at --force when they're trying to change the
+		// formula but didn't pass it (gs-am8 GAP 2).
+		if existingFields != nil && opts.Formula != "" && opts.Formula != existingFields.Formula {
+			fmt.Printf("  %s staged formula is %q; pass --force to re-attach %q\n",
+				style.Dim.Render("Tip:"), existingFields.Formula, opts.Formula)
+		}
 		return nil
 	}
 
