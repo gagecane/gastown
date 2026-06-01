@@ -1,6 +1,9 @@
 package cmd
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestReviewGateReviewedBead verifies the structural review-gate detection
 // (gs-aoz): a bead is a review gate only with BOTH the gt:review-gate label AND
@@ -88,5 +91,47 @@ func TestAssertReviewerIndependence_FailsOpen(t *testing.T) {
 	// Review-gate label but no reviews target → nil (nothing to enforce).
 	if err := assertReviewerIndependence("", "lb-x", []string{labelReviewGate}, "owner: mayor/", "gastown/polecats/capable"); err != nil {
 		t.Errorf("gate without reviewed target must pass: %v", err)
+	}
+}
+
+// TestWithReviewsField verifies the producer writes a reviews: line that the
+// consumer (parseReviewsField) reads back — appending when absent, replacing
+// when present, and preserving surrounding content (gs-bo1).
+func TestWithReviewsField(t *testing.T) {
+	cases := []struct {
+		name  string
+		desc  string
+		build string
+	}{
+		{"empty description", "", "gs-yuhl"},
+		{"append to existing content", "owner: mayor/\nseverity: high", "gs-yuhl"},
+		{"replace existing reviews line", "owner: mayor/\nreviews: gs-old\nseverity: high", "gs-new"},
+		{"replace case-insensitive key", "Reviews:   gs-old  ", "gs-new"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := withReviewsField(tc.desc, tc.build)
+			// Round-trip: the consumer must read back exactly what we wrote.
+			if rt := parseReviewsField(got); rt != tc.build {
+				t.Errorf("round-trip parseReviewsField = %q, want %q\nresult:\n%s", rt, tc.build, got)
+			}
+			// Exactly one reviews: line — no duplicates left behind.
+			n := 0
+			for _, line := range strings.Split(got, "\n") {
+				key, _, ok := strings.Cut(strings.TrimSpace(line), ":")
+				if ok && strings.ToLower(strings.TrimSpace(key)) == reviewsFieldKey {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Errorf("expected exactly 1 reviews line, got %d:\n%s", n, got)
+			}
+		})
+	}
+
+	// Non-reviews content is preserved verbatim.
+	got := withReviewsField("owner: mayor/\nseverity: high", "gs-yuhl")
+	if !strings.Contains(got, "owner: mayor/") || !strings.Contains(got, "severity: high") {
+		t.Errorf("surrounding content not preserved:\n%s", got)
 	}
 }

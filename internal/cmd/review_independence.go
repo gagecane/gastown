@@ -41,6 +41,60 @@ func reviewGateReviewedBead(labels []string, description string) string {
 	return parseReviewsField(description)
 }
 
+// withReviewsField returns description with a single `reviews: <buildBead>`
+// field set — replacing an existing reviews: line if present, otherwise
+// appending one. Pure (testable) and the PRODUCER counterpart to
+// parseReviewsField: it writes the line that parseReviewsField reads.
+func withReviewsField(description, buildBead string) string {
+	var out []string
+	replaced := false
+	scanner := bufio.NewScanner(strings.NewReader(description))
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, _, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && strings.ToLower(strings.TrimSpace(key)) == reviewsFieldKey {
+			out = append(out, reviewsFieldKey+": "+buildBead)
+			replaced = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if !replaced {
+		out = append(out, reviewsFieldKey+": "+buildBead)
+	}
+	return strings.Join(out, "\n")
+}
+
+// markReviewGate stamps the structural review-gate markers the independence
+// guard (assertReviewerIndependence) reads onto gateBeadID: the gt:review-gate
+// label and — when buildBead is non-empty — a `reviews: <buildBead>` field.
+// This is the PRODUCER half of gs-aoz; without it the guard stays inert. It is
+// idempotent: a no-op when the bead already carries the requested markers.
+func markReviewGate(townRoot, gateBeadID, buildBead string) error {
+	info, err := getBeadInfoFromTownRoot(townRoot, gateBeadID)
+	if err != nil {
+		return fmt.Errorf("marking review gate %s: %w", gateBeadID, err)
+	}
+	args := []string{"update", gateBeadID}
+	if !hasLabel(info.Labels, labelReviewGate) {
+		args = append(args, "--add-label="+labelReviewGate)
+	}
+	if buildBead != "" && parseReviewsField(info.Description) != buildBead {
+		args = append(args, "--description="+withReviewsField(info.Description, buildBead))
+	}
+	if len(args) == 2 {
+		return nil // already marked — nothing to write
+	}
+	if err := BdCmd(args...).
+		Dir(resolveBeadDirFromTownRoot(townRoot, gateBeadID)).
+		StripBeadsDir().
+		WithAutoCommit().
+		Run(); err != nil {
+		return fmt.Errorf("marking review gate %s: %w", gateBeadID, err)
+	}
+	return nil
+}
+
 // parseReviewsField extracts the `reviews: <bead-id>` value from a bead
 // description (a "key: value" line, matching the convoy/attachment field
 // style). Returns "" if absent.

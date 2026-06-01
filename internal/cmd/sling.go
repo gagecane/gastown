@@ -140,6 +140,8 @@ var (
 	slingCrew          string // --crew: target a crew member in the specified rig
 	slingReviewOnly    bool   // --review-only: mark work as review-only (no merge/commit/push)
 	slingPriorityFloor string // --priority-floor: dispatch priority floor (normal/low/lowest)
+	slingReviews       string // --reviews: mark this bead a review gate that reviews <build-bead> (gs-bo1)
+	slingReviewGate    bool   // --review-gate: mark this bead a review gate (gt:review-gate label)
 )
 
 func init() {
@@ -171,6 +173,8 @@ func init() {
 	slingCmd.Flags().StringVar(&slingCrew, "crew", "", "Target a crew member in the specified rig (e.g., --crew mel with target gastown → gastown/crew/mel)")
 	slingCmd.Flags().BoolVar(&slingReviewOnly, "review-only", false, "Mark work as review-only: assignee evaluates and reports back, must NOT merge/commit/push")
 	slingCmd.Flags().StringVar(&slingPriorityFloor, "priority-floor", "", "Dispatch priority floor: normal (default), low, or lowest. Lower-priority beads yield to higher-priority ones when capacity is constrained")
+	slingCmd.Flags().StringVar(&slingReviews, "reviews", "", "Mark this bead as a review gate reviewing the named build bead (adds gt:review-gate label + reviews: field; activates the builder-independence guard)")
+	slingCmd.Flags().BoolVar(&slingReviewGate, "review-gate", false, "Mark this bead as a review gate (gt:review-gate label). Combine with --reviews to name the build bead under review")
 
 	slingCmd.AddCommand(slingRespawnResetCmd)
 	rootCmd.AddCommand(slingCmd)
@@ -339,6 +343,38 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			return err
 		} else {
 			args = redirected
+		}
+	}
+
+	// Review-gate marker production (gs-bo1). When dispatching a bead as an
+	// adversarial review gate, stamp the structural markers the gs-aoz
+	// independence guard reads — the gt:review-gate label and a
+	// `reviews: <build-bead>` field — onto the gate bead so the guard (otherwise
+	// inert) activates and refuses to assign the gate to the agent that built the
+	// work under review. --reviews implies --review-gate. Done up front so every
+	// downstream dispatch path (deferred schedule, epic/convoy, rig, inline)
+	// inherits a marked bead. The dispatch flow's later description rewrites
+	// preserve the reviews: line (it is not an attachment-field key).
+	if slingReviews != "" || slingReviewGate {
+		gateBead := slingOnTarget
+		if gateBead == "" {
+			gateBead = args[0]
+		}
+		if slingDryRun {
+			if slingReviews != "" {
+				fmt.Printf("Would mark %s as review gate (reviews %s)\n", gateBead, slingReviews)
+			} else {
+				fmt.Printf("Would mark %s as review gate\n", gateBead)
+			}
+		} else {
+			if err := markReviewGate(townRoot, gateBead, slingReviews); err != nil {
+				return err
+			}
+			if slingReviews != "" {
+				fmt.Printf("%s Marked %s as review gate (reviews %s)\n", style.Bold.Render("✓"), gateBead, slingReviews)
+			} else {
+				fmt.Printf("%s Marked %s as review gate\n", style.Bold.Render("✓"), gateBead)
+			}
 		}
 	}
 
