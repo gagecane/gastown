@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/style"
@@ -222,7 +223,7 @@ func runSynthesisStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create synthesis bead
-	synthesisID, err := createSynthesisBead(convoyID, meta, f, legOutputs, reviewID)
+	synthesisID, err := createSynthesisBead(convoyID, meta, f, legOutputs, reviewID, targetRig)
 	if err != nil {
 		return fmt.Errorf("creating synthesis bead: %w", err)
 	}
@@ -518,9 +519,10 @@ func expandOutputPath(directory, pattern, reviewID, legID string) string {
 	return filepath.Join(dir, file)
 }
 
-// createSynthesisBead creates a bead for the synthesis step.
+// createSynthesisBead creates a bead for the synthesis step in the target rig's
+// beads database so it can be slung to a rig polecat.
 func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
-	legOutputs []LegOutput, reviewID string) (string, error) {
+	legOutputs []LegOutput, reviewID, targetRig string) (string, error) {
 
 	// Build synthesis title
 	title := "Synthesis: " + meta.Title
@@ -576,13 +578,27 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 		"--json",
 	}
 
-	townBeads, err := getTownBeadsDir()
+	townRoot, err := getTownBeadsDir()
 	if err != nil {
 		return "", err
 	}
 
+	// Create the synthesis bead in the TARGET RIG's beads database, not the town
+	// (hq) database. slingSynthesis verifies the bead exists in the target rig DB
+	// (see verifyBeadExistsInTargetRigDatabase); an hq-* synthesis bead created in
+	// the town DB is refused, orphaning a fresh bead on every retry (gs-k9f).
+	// Mirror the rig-scoped resolution used by sling verification so create and
+	// verify hit the same database.
+	createDir := beads.GetRigDirForName(townRoot, targetRig)
+	if createDir == "" {
+		createDir = filepath.Dir(doltserver.FindRigBeadsDir(townRoot, targetRig))
+	}
+	if createDir == "" || createDir == "." {
+		return "", fmt.Errorf("cannot resolve target rig %q beads database for synthesis bead", targetRig)
+	}
+
 	createCmd := exec.Command("bd", createArgs...)
-	createCmd.Dir = townBeads
+	createCmd.Dir = createDir
 	var stdout bytes.Buffer
 	createCmd.Stdout = &stdout
 	createCmd.Stderr = os.Stderr
@@ -604,8 +620,9 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 		return "", fmt.Errorf("parsing created bead: %w", err)
 	}
 
-	// Add tracking relation: convoy tracks synthesis.
-	_ = addTrackingRelationFn(townBeads, convoyID, result.ID) // Non-fatal if this fails
+	// Add tracking relation: convoy (town DB) tracks the rig-scoped synthesis
+	// bead. addTrackingRelation handles the cross-DB relation via an external: ref.
+	_ = addTrackingRelationFn(townRoot, convoyID, result.ID) // Non-fatal if this fails
 
 	return result.ID, nil
 }
@@ -703,7 +720,7 @@ func TriggerSynthesisIfReady(convoyID, targetRig string) error {
 		reviewID = strings.TrimPrefix(convoyID, "hq-cv-")
 	}
 
-	synthesisID, err := createSynthesisBead(convoyID, meta, f, legOutputs, reviewID)
+	synthesisID, err := createSynthesisBead(convoyID, meta, f, legOutputs, reviewID, targetRig)
 	if err != nil {
 		return fmt.Errorf("creating synthesis bead: %w", err)
 	}

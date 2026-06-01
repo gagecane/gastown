@@ -1,9 +1,77 @@
 package cmd
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+// TestCreateSynthesisBead_CreatesInRigDatabase is a regression test for gs-k9f:
+// the synthesis bead must be created in the TARGET RIG's beads database (so it
+// gets a rig prefix and slingSynthesis can verify it), not the town/hq database.
+// Previously createSynthesisBead ran `bd create` from the town root, producing an
+// hq-* bead that the sling verification refused, orphaning a fresh bead per retry.
+func TestCreateSynthesisBead_CreatesInRigDatabase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows - shell stubs")
+	}
+
+	townRoot, expectedWD := makeRoutingTownWorkspace(t)
+
+	// Route gs- beads to the gastown rig directory and create that rig's .beads.
+	routes := `{"prefix":"gs-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir rig .beads: %v", err)
+	}
+	chdirConvoyTest(t, townRoot)
+
+	pwdFile := filepath.Join(t.TempDir(), "create-pwd")
+	scriptBody := `
+case "$1" in
+  create)
+    printf '%s' "$PWD" > "` + pwdFile + `"
+    echo '{"id":"gs-syn-test"}'
+    ;;
+  *)
+    echo '[]'
+    ;;
+esac
+`
+	writeRoutingBdStub(t, scriptBody)
+
+	// The cross-DB tracking relation is exercised elsewhere; stub it so this test
+	// does not depend on a live Dolt store.
+	oldTrack := addTrackingRelationFn
+	addTrackingRelationFn = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { addTrackingRelationFn = oldTrack })
+
+	meta := &ConvoyMeta{ID: "hq-cv-test", Title: "Code Review: PR #1"}
+	id, err := createSynthesisBead("hq-cv-test", meta, nil, nil, "pr1", "gastown")
+	if err != nil {
+		t.Fatalf("createSynthesisBead: %v", err)
+	}
+	if id != "gs-syn-test" {
+		t.Errorf("synthesis ID = %q, want %q", id, "gs-syn-test")
+	}
+
+	gotPWD, err := os.ReadFile(pwdFile)
+	if err != nil {
+		t.Fatalf("read create pwd: %v", err)
+	}
+	wantWD := filepath.Join(expectedWD, "gastown")
+	if resolved, err := filepath.EvalSymlinks(wantWD); err == nil && resolved != "" {
+		wantWD = resolved
+	}
+	if strings.TrimSpace(string(gotPWD)) != wantWD {
+		t.Errorf("bd create ran from %q, want rig dir %q (gs-k9f: must not run from town root)",
+			strings.TrimSpace(string(gotPWD)), wantWD)
+	}
+}
 
 func TestExpandOutputPath(t *testing.T) {
 	tests := []struct {
