@@ -1,0 +1,11 @@
+{
+  "name": "dead-owner admission leak (gu-t6jqq)",
+  "anchor": "gu-t6jqq",
+  "expect_rules": ["dead_owner_admission"],
+  "window_id": "2026-06-01/1d-anchor-admission",
+  "Admissions": [
+    {"ID": "adm-redacted-1", "PID": 999001, "Rig": "gastown_upstream", "OwnerAlive": false, "FiledBy": "scheduler"},
+    {"ID": "adm-redacted-2", "PID": 999002, "Rig": "gastown_upstream", "OwnerAlive": false, "FiledBy": "scheduler"},
+    {"ID": "adm-live", "PID": 999003, "Rig": "gastown_upstream", "OwnerAlive": true, "FiledBy": "scheduler"}
+  ]
+}
