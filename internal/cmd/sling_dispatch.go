@@ -351,6 +351,22 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 
+	// Honor a 'gt:formula:<name>' label declared on the bead (gs-zq0 / gs-am8
+	// GAP 1). executeSling is the universal dispatch chokepoint reached by
+	// direct convoy-sling and batch paths that may arrive with no formula; a
+	// pre-staged gated leg's intended formula must survive rather than the bead
+	// being hooked raw (no review). Only fills an EMPTY FormulaName — an
+	// explicit choice (including one already resolved into a sling-context by
+	// scheduleBead) is preserved — and never overrides an explicit raw-bead
+	// request (HookRawBead).
+	if params.FormulaName == "" && !params.HookRawBead {
+		if declared := beads.FormulaFromLabels(info.Labels); declared != "" {
+			fmt.Printf("  %s Honoring %s%s declared on %s\n",
+				style.Bold.Render("→"), beads.FormulaLabelPrefix, declared, params.BeadID)
+			params.FormulaName = declared
+		}
+	}
+
 	// 2. Burn stale molecules (if formula applies)
 	if params.FormulaName != "" {
 		existingMolecules := collectExistingMolecules(info)

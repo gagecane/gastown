@@ -309,6 +309,22 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		return fmt.Errorf("bead %s is already %s to %s\nUse --force to override", beadID, info.Status, info.Assignee)
 	}
 
+	// Honor a 'gt:formula:<name>' label declared on the bead (gs-zq0 / gs-am8
+	// GAP 1) so a pre-staged gated leg's intended formula survives the deferred
+	// auto-dispatch path. The label outranks only the rig/system DEFAULT: when
+	// the caller passed nothing or the resolved default, the declared formula
+	// wins; an explicit non-default choice (e.g. `gt sling mol-X --on`) is
+	// preserved. hook-raw-bead (an explicit no-formula request) is left alone.
+	if declared := beads.FormulaFromLabels(info.Labels); declared != "" && !opts.HookRawBead {
+		if opts.Formula == "" || opts.Formula == resolveFormula("", false, townRoot, rigName) {
+			if declared != opts.Formula {
+				fmt.Printf("  %s Honoring %s%s declared on %s (was %q)\n",
+					style.Bold.Render("→"), beads.FormulaLabelPrefix, declared, beadID, opts.Formula)
+			}
+			opts.Formula = declared
+		}
+	}
+
 	if opts.Formula != "" {
 		if err := verifyFormulaExists(opts.Formula); err != nil {
 			return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
@@ -504,6 +520,23 @@ func resolveFormula(explicit string, hookRawBead bool, townRoot, rigName string)
 		}
 	}
 	return "mol-polecat-work"
+}
+
+// resolveFormulaForBead resolves the formula for a specific work bead, honoring
+// a 'gt:formula:<name>' label declared on the bead (gs-zq0 / gs-am8 GAP 1).
+// Precedence: explicit --formula flag > bead's gt:formula: label > rig/system
+// default (resolveFormula). The label only outranks the DEFAULT, never an
+// explicit choice — so a relay can pre-stage a gated leg (e.g. an adversarial
+// review gate) with the intended formula and have it survive the bare
+// auto-dispatch path that would otherwise silently apply mol-polecat-work.
+// hookRawBead still forces "" (no formula).
+func resolveFormulaForBead(explicit string, hookRawBead bool, townRoot, rigName string, labels []string) string {
+	if explicit == "" && !hookRawBead {
+		if declared := beads.FormulaFromLabels(labels); declared != "" {
+			return declared
+		}
+	}
+	return resolveFormula(explicit, hookRawBead, townRoot, rigName)
 }
 
 // slingContextTTL is the maximum age of a sling context before it's considered

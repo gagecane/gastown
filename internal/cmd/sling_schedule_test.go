@@ -151,6 +151,53 @@ func TestResolveFormula(t *testing.T) {
 	})
 }
 
+// TestResolveFormulaForBead verifies the gs-zq0 / gs-am8 GAP 1 precedence:
+// explicit --formula > bead 'gt:formula:<name>' label > rig/system default.
+func TestResolveFormulaForBead(t *testing.T) {
+	t.Parallel()
+
+	const label = "gt:formula:mol-pw-adversarial-review"
+	const labelFormula = "mol-pw-adversarial-review"
+
+	t.Run("explicit flag wins over label", func(t *testing.T) {
+		t.Parallel()
+		got := resolveFormulaForBead("mol-evolve", false, "/tmp/nonexistent", "myrig", []string{label})
+		if got != "mol-evolve" {
+			t.Errorf("got %q, want %q", got, "mol-evolve")
+		}
+	})
+
+	t.Run("label wins over system default", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		rigName := "testrig"
+		_ = os.MkdirAll(filepath.Join(tmpDir, rigName), 0o755)
+		got := resolveFormulaForBead("", false, tmpDir, rigName, []string{"bug", label})
+		if got != labelFormula {
+			t.Errorf("got %q, want %q", got, labelFormula)
+		}
+	})
+
+	t.Run("no label falls back to system default", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		rigName := "testrig"
+		_ = os.MkdirAll(filepath.Join(tmpDir, rigName), 0o755)
+		got := resolveFormulaForBead("", false, tmpDir, rigName, []string{"bug"})
+		if got != "mol-polecat-work" {
+			t.Errorf("got %q, want %q", got, "mol-polecat-work")
+		}
+	})
+
+	t.Run("hookRawBead ignores label", func(t *testing.T) {
+		t.Parallel()
+		got := resolveFormulaForBead("", true, "/tmp/nonexistent", "myrig", []string{label})
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+}
+
 // TestCheckSchedulePrefixParity verifies the enqueue-time cross-rig-prefix
 // guard mirrors the dispatcher's unconditional AcceptsPrefix check. This
 // is the parity fix for gu-5ooj: without this, `gt sling <bead> <rig>

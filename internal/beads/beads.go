@@ -321,6 +321,37 @@ func WrongRigsFromLabels(labels []string) []string {
 	return out
 }
 
+// FormulaLabelPrefix declares the formula a bead MUST be dispatched with, as a
+// machine-readable label 'gt:formula:<formula-name>' (e.g.
+// 'gt:formula:mol-pw-adversarial-review'). It is the first-class carrier for
+// formula intent that survives auto-dispatch.
+//
+// gs-zq0 / gs-am8 GAP 1: a relay pre-staged an adversarial review gate whose
+// intended formula lived only as PROSE in the bead's notes. When the gate's
+// build-leg blocker closed, the gate went ready and an auto-dispatch path
+// (a dog running `gt sling <gate>`, or convoy schedule) slung it bare — so the
+// system default mol-polecat-work was applied and NO REVIEW RAN.
+//
+// This label fixes the staging side: a relay (or operator) stamps the gate with
+// 'gt:formula:<name>' at construction. Because labels have no TTL and are never
+// auto-written by the dispatch path, the intent survives an arbitrarily long
+// blocker and is honored when the bead is finally fed. An explicit `--formula`
+// flag still wins; the label only outranks the rig/system DEFAULT.
+const FormulaLabelPrefix = "gt:formula:"
+
+// FormulaFromLabels returns the formula declared by a 'gt:formula:<name>' label,
+// or "" if none is present. The first such label wins (a bead should carry at
+// most one). The returned value is the raw formula segment; callers verify it
+// exists before applying it.
+func FormulaFromLabels(labels []string) string {
+	for _, l := range labels {
+		if f, ok := strings.CutPrefix(l, FormulaLabelPrefix); ok && f != "" {
+			return f
+		}
+	}
+	return ""
+}
+
 // Issue represents a beads issue.
 type Issue struct {
 	ID          string   `json:"id"`

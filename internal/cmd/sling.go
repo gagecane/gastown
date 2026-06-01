@@ -1038,10 +1038,17 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		if parts := strings.SplitN(targetAgent, "/", 2); len(parts) >= 1 {
 			targetRig = parts[0]
 		}
-		formulaName = resolveFormula(slingFormula, false, townRoot, targetRig)
-		if slingFormula != "" {
+		// Honor a 'gt:formula:<name>' label declared on the bead so a
+		// pre-staged review gate's intended formula survives this bare
+		// auto-apply path instead of being clobbered by the system default
+		// (gs-zq0 / gs-am8 GAP 1). Explicit --formula still wins.
+		formulaName = resolveFormulaForBead(slingFormula, false, townRoot, targetRig, info.Labels)
+		switch {
+		case slingFormula != "":
 			fmt.Printf("  Applying %s for polecat work...\n", formulaName)
-		} else {
+		case beads.FormulaFromLabels(info.Labels) != "":
+			fmt.Printf("  Applying %s (declared by %s label)...\n", formulaName, beads.FormulaLabelPrefix)
+		default:
 			fmt.Printf("  Auto-applying %s for polecat work...\n", formulaName)
 		}
 	}
