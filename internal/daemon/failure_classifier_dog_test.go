@@ -240,6 +240,29 @@ func TestClassifierFingerprint_Unique(t *testing.T) {
 	}
 }
 
+// TestClassifierFingerprint_ByteVector is the CRITICAL regression test for the
+// gu-6s8ao fingerprint refactor: the classifier's existing (rig, sigID) outputs
+// MUST be byte-identical after delegating to fingerprint.Legacy2. These exact
+// hashes are what in-prod open beads are deduped against via the
+// "fingerprint:<fp>" label — drift would orphan every label and re-file
+// duplicates. Vectors captured from the pre-refactor implementation
+// (fnv-128a over "rig::sigID", first 12 hex chars).
+func TestClassifierFingerprint_ByteVector(t *testing.T) {
+	cases := []struct {
+		rig, sig string
+		want     string
+	}{
+		{"gastown", "ts-import-error", "694e97e41c2c"},
+		{"lia_web", "ts-import-error", "de2e3fee08a3"},
+	}
+	for _, c := range cases {
+		if got := classifierFingerprint(c.rig, c.sig); got != c.want {
+			t.Errorf("classifierFingerprint(%q,%q) = %q, want %q — wire format changed, this breaks in-prod dedup",
+				c.rig, c.sig, got, c.want)
+		}
+	}
+}
+
 // --- Gate extraction tests ---
 
 func TestExtractFailureGate_Found(t *testing.T) {
