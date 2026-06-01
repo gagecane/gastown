@@ -196,7 +196,24 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// polecat; if none work we fall through to allocating a fresh one.
 	idlePolecats, findErr := polecatMgr.FindIdlePolecats()
 	if findErr == nil {
+		// Builder-independence guard (gs-aoz): never REUSE a polecat that built
+		// the work this bead depends on (the work under review) or that built
+		// this bead on a prior attempt. Reusing such a polecat for a review gate
+		// lets a builder review its own work, defeating adversarial review. We
+		// only skip the specific builder(s); other idle polecats are still reused
+		// (pool optimization preserved), and if every idle candidate is excluded
+		// we fall through to a fresh allocation — which is independent by
+		// construction (a brand-new polecat name).
+		var exclude map[string]bool
+		if len(idlePolecats) > 0 && opts.HookBead != "" {
+			exclude = builderIndependenceExclusions(beads.New(r.Path), opts.HookBead)
+		}
 		for _, idlePolecat := range idlePolecats {
+			if exclude[strings.ToLower(idlePolecat.Name)] {
+				fmt.Printf("  Skipping idle polecat %s for %s: builder-independence — it built the work under review (gs-aoz)\n",
+					idlePolecat.Name, opts.HookBead)
+				continue
+			}
 			info, reused := tryReuseIdlePolecat(polecatMgr, r, t, idlePolecat.Name, rigName, opts)
 			if reused {
 				return info, nil
@@ -422,6 +439,63 @@ func tryReuseIdlePolecat(
 		account:     opts.Account,
 		agent:       opts.Agent,
 	}, true
+}
+
+// beadShower is the minimal beads accessor needed by the builder-independence
+// guard. *beads.Beads satisfies it; tests use a stub.
+type beadShower interface {
+	Show(id string) (*beads.Issue, error)
+}
+
+// builderIndependenceExclusions returns the set of polecat names (lowercased)
+// that must NOT be reused to work beadID, because they built the work it
+// depends on — or built beadID itself on a prior attempt. For a review gate
+// (which dep-blocks on the build leg it reviews), the build leg's assignee is
+// exactly the polecat that produced the work under review; reusing it would let
+// a builder review its own work, defeating adversarial review (gs-aoz).
+//
+// Builder identity is read from the durable `assignee` field, which a closed
+// bead retains. The guard is read-only and conservative: it only narrows the
+// reuse candidate set and never blocks dispatch (callers fall through to a
+// fresh, independent allocation).
+func builderIndependenceExclusions(shower beadShower, beadID string) map[string]bool {
+	excl := map[string]bool{}
+	if shower == nil || beadID == "" {
+		return excl
+	}
+	bead, err := shower.Show(beadID)
+	if err != nil || bead == nil {
+		return excl
+	}
+	add := func(assignee string) {
+		if name := polecatNameFromAgent(assignee); name != "" {
+			excl[strings.ToLower(name)] = true
+		}
+	}
+	// A prior builder of this same bead (e.g. a reopened review gate that the
+	// builder previously held): give it fresh eyes on re-dispatch.
+	add(bead.Assignee)
+	// Builders of the work under review = assignees of this bead's dependencies.
+	for _, depID := range bead.DependsOn {
+		dep, err := shower.Show(depID)
+		if err != nil || dep == nil {
+			continue
+		}
+		add(dep.Assignee)
+	}
+	return excl
+}
+
+// polecatNameFromAgent extracts the polecat name from an agent address of the
+// form "<rig>/polecats/<name>". It returns "" for non-polecat agents (crew,
+// witness, refinery, etc.), which are never idle-reuse candidates anyway.
+func polecatNameFromAgent(agent string) string {
+	const marker = "/polecats/"
+	i := strings.Index(agent, marker)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(agent[i+len(marker):])
 }
 
 // verifyHookedWorkForAgent queries the beads database for any work bead that is
