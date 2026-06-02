@@ -218,6 +218,18 @@ func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 					name)
 			}
 
+			// Must pass --status=all so PINNED agent beads are visible.
+			// On bd 1.0.3, default `bd list` excludes pinned-status beads;
+			// without --status=all the resolver returns [] for any rig whose
+			// agent bead is pinned (the convention), silently breaking
+			// await-event backoff persistence. See gu-7eppf.
+			if !strings.Contains(loopDesc, "bd list --label=gt:agent --status=all") {
+				t.Errorf("%s loop step missing --status=all on agent bead resolver.\n"+
+					"Default `bd list` excludes pinned beads on bd 1.0.3, so the resolver\n"+
+					"cannot see a pinned agent bead. See gu-7eppf.",
+					name)
+			}
+
 			// Must NOT hardcode gt-<rig> prefix pattern
 			if strings.Contains(loopDesc, "gt-<rig>") {
 				t.Errorf("%s loop step hardcodes gt-<rig> prefix.\n"+
