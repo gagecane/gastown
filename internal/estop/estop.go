@@ -12,6 +12,7 @@ package estop
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -28,9 +29,37 @@ const TriggerAuto = "auto"
 
 // Info represents the parsed contents of an ESTOP file.
 type Info struct {
-	Trigger   string    // "manual" or "auto"
-	Reason    string    // human-readable reason
-	Timestamp time.Time // when the E-stop was triggered
+	Trigger     string    // "manual" or "auto"
+	TriggeredBy string    // actor who triggered the E-stop (os user + GT_ROLE/session)
+	Reason      string    // human-readable reason
+	Timestamp   time.Time // when the E-stop was triggered
+}
+
+// CurrentActor returns a best-effort identity string for whoever is triggering
+// an E-stop: the OS user combined with the Gas Town role/session when present
+// (e.g. "canewiw (gastown_upstream/polecats/raider)"). It never fails — an
+// empty or partial result is acceptable, since attribution is best-effort.
+func CurrentActor() string {
+	osUser := os.Getenv("USER")
+	if osUser == "" {
+		if u, err := user.Current(); err == nil {
+			osUser = u.Username
+		}
+	}
+
+	role := os.Getenv("GT_ROLE")
+	if role == "" {
+		role = os.Getenv("GT_SESSION")
+	}
+
+	switch {
+	case osUser != "" && role != "":
+		return fmt.Sprintf("%s (%s)", osUser, role)
+	case role != "":
+		return role
+	default:
+		return osUser
+	}
 }
 
 // FilePath returns the full path to the ESTOP sentinel file.
@@ -54,10 +83,9 @@ func Read(townRoot string) *Info {
 }
 
 // Activate creates the ESTOP sentinel file with the given trigger and reason.
+// The triggering actor is captured automatically via CurrentActor.
 func Activate(townRoot, trigger, reason string) error {
-	ts := time.Now().Format(time.RFC3339)
-	content := fmt.Sprintf("%s\t%s\t%s\n", trigger, ts, reason)
-	return os.WriteFile(FilePath(townRoot), []byte(content), 0644)
+	return os.WriteFile(FilePath(townRoot), []byte(format(trigger, CurrentActor(), reason)), 0644)
 }
 
 // Deactivate removes the ESTOP sentinel file.
@@ -102,10 +130,9 @@ func ReadRig(townRoot, rigName string) *Info {
 }
 
 // ActivateRig creates a per-rig ESTOP sentinel file.
+// The triggering actor is captured automatically via CurrentActor.
 func ActivateRig(townRoot, rigName, trigger, reason string) error {
-	ts := time.Now().Format(time.RFC3339)
-	content := fmt.Sprintf("%s\t%s\t%s\n", trigger, ts, reason)
-	return os.WriteFile(RigFilePath(townRoot, rigName), []byte(content), 0644)
+	return os.WriteFile(RigFilePath(townRoot, rigName), []byte(format(trigger, CurrentActor(), reason)), 0644)
 }
 
 // DeactivateRig removes a per-rig ESTOP sentinel file.
@@ -122,14 +149,28 @@ func IsAnyActive(townRoot, rigName string) bool {
 	return IsActive(townRoot) || IsRigActive(townRoot, rigName)
 }
 
+// format renders the on-disk ESTOP file content.
+//
+// Current format (4 fields): trigger\ttimestamp\ttriggered_by\treason
+// Legacy format (3 fields):  trigger\ttimestamp\treason
+//
+// parse reads both. triggered_by may be empty (best-effort attribution).
+func format(trigger, triggeredBy, reason string) string {
+	ts := time.Now().Format(time.RFC3339)
+	return fmt.Sprintf("%s\t%s\t%s\t%s\n", trigger, ts, triggeredBy, reason)
+}
+
 func parse(content string) *Info {
-	content = strings.TrimSpace(content)
-	if content == "" {
+	// Trim only the trailing newline, not all trailing whitespace: an empty
+	// reason leaves a trailing tab ("trigger\tts\tactor\t") that TrimSpace
+	// would eat, collapsing the 4-field form back into the 3-field legacy
+	// form and dropping the actor.
+	content = strings.TrimRight(content, "\r\n")
+	if strings.TrimSpace(content) == "" {
 		return &Info{Trigger: TriggerManual, Timestamp: time.Now()}
 	}
 
-	// Format: trigger\ttimestamp\treason
-	parts := strings.SplitN(content, "\t", 3)
+	parts := strings.SplitN(content, "\t", 4)
 	info := &Info{Trigger: TriggerManual}
 
 	if len(parts) >= 1 {
@@ -140,7 +181,13 @@ func parse(content string) *Info {
 			info.Timestamp = t
 		}
 	}
-	if len(parts) >= 3 {
+	switch {
+	case len(parts) >= 4:
+		// Current format: trigger\ttimestamp\ttriggered_by\treason
+		info.TriggeredBy = parts[2]
+		info.Reason = parts[3]
+	case len(parts) == 3:
+		// Legacy format: trigger\ttimestamp\treason (no actor captured)
 		info.Reason = parts[2]
 	}
 

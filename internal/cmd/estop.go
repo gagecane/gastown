@@ -86,10 +86,15 @@ func runEstop(cmd *cobra.Command, args []string) error {
 	if estop.IsActive(townRoot) {
 		info := estop.Read(townRoot)
 		if info != nil {
-			fmt.Printf("%s E-stop already active (triggered %s: %s)\n",
-				style.Error.Render("⛔"), info.Trigger, info.Reason)
+			fmt.Printf("%s E-stop already active %s\n",
+				style.Error.Render("⛔"), formatTriggerDetail(info))
 		}
 		return nil
+	}
+
+	if estopReason == "" {
+		fmt.Printf("%s No reason given (-r) — a town-wide freeze should justify itself.\n",
+			style.Warning.Render("!"))
 	}
 
 	// Create the sentinel file first — this is the source of truth
@@ -98,6 +103,9 @@ func runEstop(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s EMERGENCY STOP\n", style.Error.Render("⛔"))
+	if actor := estop.CurrentActor(); actor != "" {
+		fmt.Printf("   Triggered by: %s\n", actor)
+	}
 	if estopReason != "" {
 		fmt.Printf("   Reason: %s\n", estopReason)
 	}
@@ -123,8 +131,8 @@ func runEstopRig(townRoot, rigName string) error {
 	if estop.IsRigActive(townRoot, rigName) {
 		info := estop.ReadRig(townRoot, rigName)
 		if info != nil {
-			fmt.Printf("%s E-stop already active for %s (triggered %s: %s)\n",
-				style.Error.Render("⛔"), rigName, info.Trigger, info.Reason)
+			fmt.Printf("%s E-stop already active for %s %s\n",
+				style.Error.Render("⛔"), rigName, formatTriggerDetail(info))
 		}
 		return nil
 	}
@@ -134,6 +142,9 @@ func runEstopRig(townRoot, rigName string) error {
 	}
 
 	fmt.Printf("%s EMERGENCY STOP: %s\n", style.Error.Render("⛔"), style.Bold.Render(rigName))
+	if actor := estop.CurrentActor(); actor != "" {
+		fmt.Printf("   Triggered by: %s\n", actor)
+	}
 	if estopReason != "" {
 		fmt.Printf("   Reason: %s\n", estopReason)
 	}
@@ -362,6 +373,38 @@ func isGTSession(name string, rigPrefixes map[string]bool) bool {
 	return false
 }
 
+// formatTriggerDetail renders a parenthesized "(triggered <type> by <actor> at
+// <ts>: <reason>)" detail for the "already active" messages. The actor and
+// reason segments are omitted when unknown.
+func formatTriggerDetail(info *estop.Info) string {
+	var b strings.Builder
+	b.WriteString("(triggered ")
+	b.WriteString(info.Trigger)
+	if info.TriggeredBy != "" {
+		b.WriteString(" by ")
+		b.WriteString(info.TriggeredBy)
+	}
+	if !info.Timestamp.IsZero() {
+		b.WriteString(" at ")
+		b.WriteString(info.Timestamp.Format(time.RFC3339))
+	}
+	if info.Reason != "" {
+		b.WriteString(": ")
+		b.WriteString(info.Reason)
+	}
+	b.WriteString(")")
+	return b.String()
+}
+
+// formatBy renders a " by <actor>" suffix, or empty when the actor is unknown
+// (e.g. a legacy ESTOP file written before attribution was captured).
+func formatBy(info *estop.Info) string {
+	if info.TriggeredBy == "" {
+		return ""
+	}
+	return " by " + info.TriggeredBy
+}
+
 // addEstopToStatus checks for E-stop and prints a banner if active.
 // Called from gt status to surface E-stop state.
 func addEstopToStatus(townRoot string) {
@@ -369,7 +412,7 @@ func addEstopToStatus(townRoot string) {
 		info := estop.Read(townRoot)
 		if info != nil {
 			age := time.Since(info.Timestamp).Round(time.Second)
-			fmt.Printf("%s  E-STOP ACTIVE (%s, %s ago", style.Error.Render("⛔"), info.Trigger, age)
+			fmt.Printf("%s  E-STOP ACTIVE (%s%s, %s ago", style.Error.Render("⛔"), info.Trigger, formatBy(info), age)
 			if info.Reason != "" {
 				fmt.Printf(": %s", info.Reason)
 			}
@@ -385,7 +428,7 @@ func addEstopToStatus(townRoot string) {
 		info := estop.ReadRig(townRoot, rigName)
 		if info != nil {
 			age := time.Since(info.Timestamp).Round(time.Second)
-			fmt.Printf("%s  E-STOP: %s (%s, %s ago", style.Error.Render("⏸"), rigName, info.Trigger, age)
+			fmt.Printf("%s  E-STOP: %s (%s%s, %s ago", style.Error.Render("⏸"), rigName, info.Trigger, formatBy(info), age)
 			if info.Reason != "" {
 				fmt.Printf(": %s", info.Reason)
 			}
