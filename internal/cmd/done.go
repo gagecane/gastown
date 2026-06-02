@@ -1589,12 +1589,32 @@ afterSafetyNet:
 			if cpMR, cpErr := bd.Show(cpMRID); cpErr == nil && cpMR != nil {
 				branchPrefix := "branch: " + branch + "\n"
 				if strings.HasPrefix(cpMR.Description, branchPrefix) {
-					mrID = cpMRID
-					fmt.Printf("%s MR already created (resumed from checkpoint: %s)\n", style.Bold.Render("✓"), mrID)
-					goto afterMR
+					// gs-onu: the checkpoint + local bd.Show only prove the MR
+					// exists in THIS session's LOCAL Dolt view. On the
+					// restart-resume path a prior run can have written the
+					// checkpoint while its MR write never reached shared main
+					// (auto-commit drift / teardown race) — trusting the
+					// checkpoint then short-circuits to COMPLETED with no MR the
+					// refinery can see (the silent strand the witness measured on
+					// the restart-resume path). Re-verify on a FRESH main view:
+					// only when the MR is DEFINITIVELY absent there (visible
+					// false, no query error) do we distrust the checkpoint and
+					// fall through to the idempotent find/create path below
+					// (FindMRForBranchAndSHA reuses a real MR; re-create only if
+					// truly gone). A transient query error keeps the original
+					// trust-the-checkpoint behavior so a Dolt blip can't spawn a
+					// duplicate MR.
+					visible, qErr := verifyMRVisibleOnMain(beads.NewWithBeadsDir(cwd, resolvedBeads), branch, commitSHA)
+					if shouldTrustMRCheckpoint(visible, qErr) {
+						mrID = cpMRID
+						fmt.Printf("%s MR already created (resumed from checkpoint: %s)\n", style.Bold.Render("✓"), mrID)
+						goto afterMR
+					}
+					fmt.Printf("→ Checkpoint MR %s not on shared main — re-enqueuing instead of stranding (gs-onu)\n", cpMRID)
+				} else {
+					// Checkpoint MR is for a different branch — discard and create fresh.
+					fmt.Printf("→ Discarding stale MR checkpoint %s (was for different branch)\n", cpMRID)
 				}
-				// Checkpoint MR is for a different branch — discard and create fresh.
-				fmt.Printf("→ Discarding stale MR checkpoint %s (was for different branch)\n", cpMRID)
 			}
 			// If MR lookup fails, fall through to create/find MR normally.
 		}
@@ -2241,6 +2261,20 @@ func verifyMRVisibleOnMain(f mrMainViewFinder, branch, commitSHA string) (bool, 
 		return false, err
 	}
 	return issue != nil, nil
+}
+
+// shouldTrustMRCheckpoint decides whether gt done's resume path may skip MR
+// creation and trust a prior run's mr-created checkpoint, given the result of a
+// fresh main-view visibility check (gs-onu). It trusts the checkpoint unless
+// the MR is DEFINITIVELY absent on shared main (visible==false with no query
+// error) — the silent-strand signature. A query error is inconclusive (e.g. a
+// transient Dolt blip): trust the checkpoint rather than risk re-creating a
+// duplicate MR, matching the create-path's "warn, don't false-strand" rule.
+func shouldTrustMRCheckpoint(visibleOnMain bool, queryErr error) bool {
+	if queryErr != nil {
+		return true // inconclusive — keep the prior-run checkpoint
+	}
+	return visibleOnMain
 }
 
 func verifyPushedCommitWithBareFallback(g *git.Git, townRoot, rigName, branch, commit string) error {

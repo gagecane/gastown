@@ -85,3 +85,29 @@ func TestVerifyMRVisibleOnMain_QueryError(t *testing.T) {
 		t.Fatalf("a query error must report visible=false (inconclusive, not confirmed)")
 	}
 }
+
+// TestShouldTrustMRCheckpoint verifies the gs-onu resume verdict: gt done's
+// restart-resume path may only skip MR creation when the checkpointed MR is
+// confirmed visible on shared main. A definitive absence (false,nil) — the
+// silent-strand signature — must distrust the checkpoint and re-enqueue; a
+// transient query error stays conservative and trusts the checkpoint.
+func TestShouldTrustMRCheckpoint(t *testing.T) {
+	cases := []struct {
+		name    string
+		visible bool
+		qErr    error
+		want    bool
+	}{
+		{"visible on main → trust (skip create)", true, nil, true},
+		{"definitively absent → distrust (re-enqueue, fixes the resume strand)", false, nil, false},
+		{"query error → trust (inconclusive, avoid duplicate MR)", false, errors.New("dolt blip"), true},
+		{"visible + spurious error → trust", true, errors.New("dolt blip"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldTrustMRCheckpoint(tc.visible, tc.qErr); got != tc.want {
+				t.Errorf("shouldTrustMRCheckpoint(%v,%v) = %v, want %v", tc.visible, tc.qErr, got, tc.want)
+			}
+		})
+	}
+}
