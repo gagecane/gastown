@@ -103,3 +103,12 @@ docs/fork-info/
 
 # Gas Town (added by gt)
 GEMINI.md
+
+# Gas Town agent worktrees — runtime dirs, never commit (gu-h3kcn).
+# These get created as nested git worktrees and a stray 'git add' from the
+# town root sweeps them in as phantom submodule gitlinks (mode 160000) with
+# no .gitmodules, which reds Windows CI (post-job 'git submodule foreach'
+# dies with exit 128). Nothing under these paths is ever tracked.
+/crew/
+/polecats/
+/refinery/rig/
