@@ -860,6 +860,70 @@ Use --dry-run to preview closes without applying them.`,
 	},
 }
 
+var reaperScrubDanglingFKCmd = &cobra.Command{
+	Use:   "scrub-dangling-fk",
+	Short: "Clear dangling mr_id/hook_bead refs on agent beads (gu-96uxo)",
+	Long: `Scan every agent bead and clear ` + "`mr_id`" + ` and ` + "`hook_bead`" + ` fields whose
+referenced bead no longer exists (the signature of a TTL-reaped or purged wisp).
+
+Background: when the wisp reaper compacts an ephemeral bead, agent beads that
+hold a foreign-key reference to it (` + "`mr_id`, `hook_bead`" + `) are left pointing at
+an ID that no longer resolves. Those dangling pointers block downstream
+automation — refinery dispatch reads them as "still working an MR" — and only
+surface when the consumer escalates after N empty cycles (gu-96uxo).
+
+This is the complement to ` + "`scrub-active-mr`" + ` (gu-dhqm), which already covers the
+` + "`active_mr`" + ` field via the AssessActiveMR classifier. This command deliberately
+does NOT touch active_mr.
+
+Existence-only semantics: a referent that still exists (at any status) is left
+untouched — only a MISSING referent is cleared. Fail-closed on lookup errors
+other than not-found, so a flaky Dolt connection never produces spurious clears.
+
+Preserves polecats with cleanup_status in {has_uncommitted, has_stash,
+has_unpushed} — the dangling refs are intentional audit trail (gc-eysed).
+
+Operates on the town database where agent beads live; the --db / --host /
+--port flags are used only for context discovery and are otherwise ignored.
+
+Use --dry-run to preview clears without applying them.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		townRoot, err := workspace.FindFromCwd()
+		if err != nil {
+			return fmt.Errorf("finding town root: %w", err)
+		}
+		bd := beads.New(townRoot).ForAgentBead()
+
+		result, err := reaper.ScrubDanglingFKRefs(bd, reaperDryRun)
+		if err != nil {
+			return fmt.Errorf("scrub dangling fk: %w", err)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(result))
+			return nil
+		}
+
+		prefix := ""
+		verb := "cleared"
+		if result.DryRun {
+			prefix = "[DRY RUN] would "
+			verb = "clear"
+		}
+		for _, entry := range result.ClearedEntries {
+			fmt.Printf("  %s %s=%s (referent missing)\n",
+				entry.AgentBeadID, entry.Field, entry.Referent)
+		}
+		fmt.Printf("scrub-dangling-fk: scanned=%d had_mr_id=%d had_hook_bead=%d %s%s mr_id=%d hook_bead=%d preserved_wip=%d\n",
+			result.Scanned, result.HadMRID, result.HadHookBead, prefix, verb,
+			result.ClearedMRID, result.ClearedHookBead, result.PreservedWIP)
+		for _, a := range result.Anomalies {
+			fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+		}
+		return nil
+	},
+}
+
 var reaperRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run full reaper cycle across all databases",
@@ -1054,6 +1118,33 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			}
 		}
 
+		// Dangling-FK scrub (gu-96uxo): clear mr_id/hook_bead refs on agent
+		// beads whose referent wisp was reaped or purged this cycle (now
+		// missing). Complements the active_mr scrub above. Operates on the
+		// town database only. Best-effort: failures are logged, not fatal.
+		var totalFKScanned, totalFKClearedMRID, totalFKClearedHook, totalFKPreservedWIP int
+		if townRoot, twErr := workspace.FindFromCwd(); twErr != nil {
+			fmt.Printf("scrub-dangling-fk: skipped (no town root): %v\n", twErr)
+		} else {
+			bd := beads.New(townRoot).ForAgentBead()
+			fkResult, err := reaper.ScrubDanglingFKRefs(bd, reaperDryRun)
+			if err != nil {
+				fmt.Printf("scrub-dangling-fk: error: %v\n", err)
+			} else {
+				totalFKScanned = fkResult.Scanned
+				totalFKClearedMRID = fkResult.ClearedMRID
+				totalFKClearedHook = fkResult.ClearedHookBead
+				totalFKPreservedWIP = fkResult.PreservedWIP
+				for _, entry := range fkResult.ClearedEntries {
+					fmt.Printf("  %s %s=%s (referent missing)\n",
+						entry.AgentBeadID, entry.Field, entry.Referent)
+				}
+				for _, a := range fkResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+		}
+
 		// Report
 		prefix := ""
 		if reaperDryRun {
@@ -1070,6 +1161,8 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			totalReconScanned, totalReconReconciled, totalReconPreservedWIP)
 		fmt.Printf("  active_mr scrub:  scanned=%d cleared=%d preserved_wip=%d still_pending=%d\n",
 			totalScrubScanned, totalScrubCleared, totalScrubPreservedWIP, totalScrubStillPending)
+		fmt.Printf("  dangling_fk scrub: scanned=%d cleared_mr_id=%d cleared_hook_bead=%d preserved_wip=%d\n",
+			totalFKScanned, totalFKClearedMRID, totalFKClearedHook, totalFKPreservedWIP)
 		fmt.Printf("  Open:             %d wisps remain\n", totalOpen)
 
 		return nil
@@ -1096,7 +1189,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -1107,7 +1200,7 @@ func init() {
 	}
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -1143,6 +1236,7 @@ func init() {
 	reaperCmd.AddCommand(reaperClosePluginReceiptsCmd)
 	reaperCmd.AddCommand(reaperScrubActiveMRCmd)
 	reaperCmd.AddCommand(reaperReconcileOrphansCmd)
+	reaperCmd.AddCommand(reaperScrubDanglingFKCmd)
 	reaperCmd.AddCommand(reaperRunCmd)
 
 	rootCmd.AddCommand(reaperCmd)

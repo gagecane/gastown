@@ -376,15 +376,44 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		}
 	}
 
+	// Step 4c: Scrub dangling mr_id/hook_bead refs on agent beads (gu-96uxo).
+	// Clear FK fields whose referent wisp was reaped/purged this cycle (now
+	// missing). Complements the active_mr scrub above (gu-dhqm), which the
+	// existence-only check here deliberately does not duplicate. Operates on
+	// the town database only.
+	var fkScanned, fkClearedMRID, fkClearedHook, fkPreservedWIP int
+	if d.config.TownRoot == "" {
+		d.logger.Printf("wisp_reaper: dangling_fk scrub skipped (no town root)")
+	} else {
+		bd := beads.New(d.config.TownRoot).ForAgentBead()
+		fkResult, err := reaper.ScrubDanglingFKRefs(bd, dryRun)
+		if err != nil {
+			d.logger.Printf("wisp_reaper: dangling_fk scrub error: %v", err)
+		} else {
+			fkScanned = fkResult.Scanned
+			fkClearedMRID = fkResult.ClearedMRID
+			fkClearedHook = fkResult.ClearedHookBead
+			fkPreservedWIP = fkResult.PreservedWIP
+			for _, entry := range fkResult.ClearedEntries {
+				d.logger.Printf("wisp_reaper: cleared %s on %s: referent=%s (missing)",
+					entry.Field, entry.AgentBeadID, entry.Referent)
+			}
+			for _, a := range fkResult.Anomalies {
+				d.logger.Printf("wisp_reaper: dangling_fk scrub ANOMALY: %s", a.Message)
+			}
+		}
+	}
+
 	// Step 5: Report
 	if totalOpen > wispAlertThreshold {
 		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
 			totalOpen, wispAlertThreshold)
 	}
-	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d orphan_recon_scanned=%d orphan_reconciled=%d orphan_recon_preserved=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d open=%d databases=%d dryRun=%v",
+	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d orphan_recon_scanned=%d orphan_reconciled=%d orphan_recon_preserved=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d dangling_fk_scanned=%d dangling_fk_cleared_mr_id=%d dangling_fk_cleared_hook=%d dangling_fk_preserved=%d open=%d databases=%d dryRun=%v",
 		totalReaped, totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed,
 		reconScanned, reconReconciled, reconPreservedWIP,
 		scrubScanned, scrubCleared, scrubPreservedWIP, scrubStillPending,
+		fkScanned, fkClearedMRID, fkClearedHook, fkPreservedWIP,
 		totalOpen, len(databases), dryRun)
 	mol.closeStep("report")
 }
