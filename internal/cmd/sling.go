@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -334,7 +335,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Validate target format early, before any dispatch path (bead, formula, batch)
 	// can trigger resolveTarget side-effects like polecat spawning.
 	if len(args) > 1 {
-		if err := ValidateTarget(args[len(args)-1]); err != nil {
+		if err := sling.ValidateTarget(args[len(args)-1]); err != nil {
 			return err
 		}
 	}
@@ -809,7 +810,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 					selfAgent = sa
 				}
 			}
-			if !skipIdempotency && matchesSlingTarget(target, info.Assignee, selfAgent) {
+			if !skipIdempotency && sling.MatchesTarget(target, info.Assignee, selfAgent) {
 				if formulaName == "" {
 					// Plain sling to same target: no-op.
 					fmt.Printf("%s Bead %s is already %s to %s, no-op\n",

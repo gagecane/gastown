@@ -1,4 +1,7 @@
-package cmd
+// Package sling holds the domain logic for sling-context lifecycle:
+// target validation, idempotency matching, batching, scheduling, and
+// related bookkeeping extracted from internal/cmd.
+package sling
 
 import (
 	"fmt"
@@ -13,20 +16,27 @@ var knownRoles = map[string]bool{
 	"refinery": true,
 }
 
+// IsKnownRole reports whether role is a recognized second-segment role in a
+// path-style sling target (polecats, crew, witness, refinery). The comparison
+// is case-insensitive.
+func IsKnownRole(role string) bool {
+	return knownRoles[strings.ToLower(role)]
+}
+
 // ValidateTarget performs lightweight pre-checks on a sling target string,
-// catching common mistakes before resolveTarget can trigger side-effects
+// catching common mistakes before target resolution can trigger side-effects
 // like polecat spawning. It returns a non-nil error with a helpful message
 // when the target is clearly malformed.
 //
 // It intentionally does NOT duplicate the full resolution logic — valid
-// targets that pass this check are still resolved by resolveTarget.
+// targets that pass this check are still resolved downstream.
 func ValidateTarget(target string) error {
 	// Self, empty, and role shortcuts are always fine.
 	if target == "" || target == "." {
 		return nil
 	}
 
-	// No slashes → could be rig name or role shortcut; let resolveTarget decide.
+	// No slashes → could be rig name or role shortcut; let resolution decide.
 	if !strings.Contains(target, "/") {
 		return nil
 	}
