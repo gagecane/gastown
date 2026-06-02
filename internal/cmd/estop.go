@@ -46,6 +46,10 @@ Examples:
   gt estop -r "closing laptop"          # Freeze with reason
   gt estop --rig gastown                # Freeze only gastown
   gt estop --rig beads -r "maintenance" # Freeze beads rig`,
+	// NoArgs prevents the footgun where `gt estop status` (no such subcommand)
+	// is parsed as an ignored positional arg and FIRES a town-wide e-stop.
+	// Reject unexpected args so typos/probes error instead of freezing the town.
+	Args: cobra.NoArgs,
 	RunE: runEstop,
 }
 
