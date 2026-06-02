@@ -98,7 +98,11 @@ func TestCollectAdmissions_SkipsCorruptAndNonJSON(t *testing.T) {
 	}
 }
 
-func TestCollectInput_OnlyAdmissionsLive(t *testing.T) {
+func TestCollectInput_EmptyTownRootYieldsNoCandidates(t *testing.T) {
+	// Phase 1.1 wires all four collectors, but an empty townRoot has no
+	// events.jsonl, no daemon log dir, and (via default opts) no injected
+	// merged-bead sources — so every collector degrades to empty on missing
+	// data rather than erroring. This guards the missing-data failure mode.
 	in, err := CollectInput(t.TempDir(), "win-1")
 	if err != nil {
 		t.Fatal(err)
@@ -106,8 +110,8 @@ func TestCollectInput_OnlyAdmissionsLive(t *testing.T) {
 	if in.Window.ID != "win-1" {
 		t.Errorf("window id not set: %q", in.Window.ID)
 	}
-	// Phase 1: other collectors are staged, so their slices stay empty.
-	if len(in.Beads) != 0 || len(in.LogLines) != 0 || len(in.EventCounts) != 0 {
-		t.Error("non-admission slices should be empty in Phase 1")
+	if len(in.Beads) != 0 || len(in.LogLines) != 0 || len(in.EventCounts) != 0 || len(in.Admissions) != 0 {
+		t.Errorf("empty townRoot should yield empty slices, got beads=%d logs=%d events=%d adm=%d",
+			len(in.Beads), len(in.LogLines), len(in.EventCounts), len(in.Admissions))
 	}
 }
