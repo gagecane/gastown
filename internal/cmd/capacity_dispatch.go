@@ -1107,7 +1107,11 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 	seen := make(map[string]bool)
 	for _, dir := range beadsSearchDirs(townRoot) {
 		beadsDir := beads.ResolveBeadsDir(dir)
-		b := beads.NewWithBeadsDir(dir, beadsDir)
+		// Bypass the bd-list-read flock: this per-rig sling-context scan runs in
+		// getReadySlingContexts inside dispatchScheduledWork while holding
+		// scheduler-dispatch.lock; throttle-blocking here starves dispatch
+		// (gu-pug66, third fan-out).
+		b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
 		contexts, err := b.ListOpenSlingContexts()
 		if err != nil {
 			continue // Partial failure is acceptable — skip unavailable dirs
@@ -1354,7 +1358,10 @@ func releaseExpiredDeferredBeads(townRoot string) int {
 	released := 0
 	for _, dir := range beadsSearchDirs(townRoot) {
 		beadsDir := filepath.Join(dir, ".beads")
-		b := beads.NewWithBeadsDir(dir, beadsDir)
+		// Bypass the bd-list-read flock: this per-rig deferred-scan runs inside
+		// dispatchScheduledWork while holding scheduler-dispatch.lock, so blocking
+		// on the throttle here starves ALL dispatch (gu-pug66, second fan-out).
+		b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
 		out, err := b.Run("list", "--status=deferred", "--json", "--limit=0")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s Warning: bd list deferred failed for %s: %v\n",
