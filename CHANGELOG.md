@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`event_channel_gc` daemon patrol** (gu-5bf4f) — File-based channel events
+  under `events/<channel>/*.event` are a fire-and-forget fan-out: `await-event`
+  reads all pending events on each wake and keeps no offset/cursor, so consumers
+  that don't pass `--cleanup` (notably the witness/ and mayor/ channels) leave
+  their event files behind forever. The directories grew unbounded — witness/
+  reached 3549 files dating back 24 days, mayor/ 829 files back 34 days. A new
+  daemon dog runs `channelevents.GCOlderThan` on a fixed cadence (default 1h,
+  retention 7d), deleting `.event` files older than the retention window.
+  Age-based pruning is safe because there is no replay-from-start consumer; any
+  file past the window has long since been delivered. Default-enabled, with
+  `interval` and `retention` configurable under `patrols.event_channel_gc`.
+
 - **`gt doctor` scheduler-capacity-drain check** (gu-01ef) — A new patrol
   check flags the failure mode where `recovery_blocked` polecats accumulate
   until the scheduler runs out of dispatchable slots while ready work

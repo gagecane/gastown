@@ -170,6 +170,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			RestartPending:       &RestartPendingConfig{Enabled: false},
 			CircuitBreak:         &CircuitBreakConfig{Enabled: false},
 			SchedulerStuck:       &SchedulerStuckConfig{Enabled: false},
+			EventChannelGC:       &EventChannelGCConfig{Enabled: false},
 		},
 	}
 

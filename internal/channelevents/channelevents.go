@@ -60,6 +60,101 @@ func EmitToTown(townRoot, channel, eventType string, payloadPairs []string) (str
 	return emitToDir(eventDir, channel, eventType, payloadPairs)
 }
 
+// GCResult summarizes what GCOlderThan removed in a single sweep.
+type GCResult struct {
+	// Channels is the number of channel subdirectories scanned.
+	Channels int
+	// Removed is the number of stale .event files deleted.
+	Removed int
+	// Errors is the number of non-fatal errors encountered (e.g.,
+	// unreadable directories or files).
+	Errors int
+}
+
+// GCOlderThan walks every channel directory under <townRoot>/events and deletes
+// .event files older than maxAge (based on file modification time).
+//
+// Channel events are a pure fire-and-forget fan-out: await-event reads ALL
+// pending .event files on each wake (sorted oldest-first) and has no
+// offset/cursor/watermark — there is no replay-from-start consumer. Consumers
+// that pass --cleanup delete files as they read them, but the witness/ and
+// mayor/ channels have consumers that don't, so their directories grow
+// unbounded (gu-5bf4f: witness/ at 3549 files back to May 8). Age-based
+// pruning is therefore safe: any file older than maxAge has long since been
+// delivered, and a fresh-enough window is retained so a slow consumer never
+// races the sweep.
+//
+// Best-effort and non-fatal: a single failed read/remove is counted in Errors;
+// the sweep continues. A missing events root is treated as "nothing to GC"
+// (nil error, zero counts) so the daemon can call this on a fresh town.
+func GCOlderThan(townRoot string, maxAge time.Duration) (GCResult, error) {
+	root := filepath.Join(townRoot, "events")
+
+	channelDirs, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return GCResult{}, nil
+		}
+		return GCResult{}, fmt.Errorf("reading events root: %w", err)
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	var result GCResult
+
+	for _, cd := range channelDirs {
+		if !cd.IsDir() {
+			continue
+		}
+		result.Channels++
+
+		dir := filepath.Join(root, cd.Name())
+		removed, errs := pruneOlderInDir(dir, cutoff)
+		result.Removed += removed
+		result.Errors += errs
+	}
+
+	return result, nil
+}
+
+// pruneOlderInDir removes every .event file in dir whose modification time is
+// before cutoff, returning the number removed and the number of non-fatal
+// errors. A missing directory counts as zero of both.
+func pruneOlderInDir(dir string, cutoff time.Time) (removed, errs int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			errs++
+		}
+		return removed, errs
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".event") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // raced with a consumer's --cleanup — fine
+			}
+			errs++
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if rmErr := os.Remove(filepath.Join(dir, entry.Name())); rmErr != nil {
+				if os.IsNotExist(rmErr) {
+					continue // raced with a consumer — fine
+				}
+				errs++
+				continue
+			}
+			removed++
+		}
+	}
+
+	return removed, errs
+}
+
 // emitToDir writes an event file to the given directory.
 func emitToDir(eventDir, channel, eventType string, payloadPairs []string) (string, error) {
 	if !ValidChannelName.MatchString(channel) {

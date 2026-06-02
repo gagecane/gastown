@@ -996,6 +996,22 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Scheduler-stuck dog ticker started (interval %v)", interval)
 	}
 
+	// Start event channel GC ticker if configured.
+	// Prunes stale .event files from events/<channel>/ on a fixed cadence
+	// (default 1h, retention 7d) — fixes gu-5bf4f, where fire-and-forget
+	// channel events accumulated unbounded (witness/ at 3549 files back 24
+	// days) because await-event has no offset/cursor and consumers without
+	// --cleanup never prune.
+	var eventChannelGCTicker *time.Ticker
+	var eventChannelGCChan <-chan time.Time
+	if d.isPatrolActive("event_channel_gc") {
+		interval := eventChannelGCInterval(d.patrolConfig)
+		eventChannelGCTicker = time.NewTicker(interval)
+		eventChannelGCChan = eventChannelGCTicker.C
+		defer eventChannelGCTicker.Stop()
+		d.logger.Printf("Event channel GC ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1186,6 +1202,15 @@ func (d *Daemon) Run() (err error) {
 			// queue with free capacity (gu-n0hvf). Does NOT auto-remediate.
 			if !d.isShutdownInProgress() {
 				d.runSchedulerStuckDog()
+			}
+
+		case <-eventChannelGCChan:
+			// Event channel GC — prunes stale .event files from
+			// events/<channel>/ that fire-and-forget fan-out never
+			// cleans up (await-event has no offset/cursor, and
+			// consumers without --cleanup leave files behind).
+			if !d.isShutdownInProgress() {
+				d.runEventChannelGC()
 			}
 
 		case <-timer.C:
