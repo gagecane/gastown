@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -323,7 +324,7 @@ func missingPolecatTargetRig(target string, allowShorthand bool, townRoot string
 		return "", false
 	}
 	parts := strings.Split(target, "/")
-	if len(parts) != 2 || knownRoles[strings.ToLower(parts[1])] {
+	if len(parts) != 2 || sling.IsKnownRole(parts[1]) {
 		return "", false
 	}
 	if townRoot == "" {

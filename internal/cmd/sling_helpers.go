@@ -25,6 +25,7 @@ import (
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -446,7 +447,7 @@ func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
 	if target == "" || target == args[1] {
 		return args, nil
 	}
-	if err := ValidateTarget(target); err != nil {
+	if err := sling.ValidateTarget(target); err != nil {
 		return args, fmt.Errorf("invalid %s for %s: %w", workflowTargetField, args[0], err)
 	}
 	redirected := append([]string(nil), args...)

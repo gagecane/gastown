@@ -1,8 +1,8 @@
-package cmd
+package sling
 
 import "testing"
 
-func TestMatchesSlingTarget(t *testing.T) {
+func TestMatchesTarget(t *testing.T) {
 	tests := []struct {
 		name      string
 		target    string
@@ -104,9 +104,9 @@ func TestMatchesSlingTarget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := matchesSlingTarget(tt.target, tt.assignee, tt.selfAgent)
+			got := MatchesTarget(tt.target, tt.assignee, tt.selfAgent)
 			if got != tt.want {
-				t.Fatalf("matchesSlingTarget(%q, %q, %q) = %v, want %v",
+				t.Fatalf("MatchesTarget(%q, %q, %q) = %v, want %v",
 					tt.target, tt.assignee, tt.selfAgent, got, tt.want)
 			}
 		})
