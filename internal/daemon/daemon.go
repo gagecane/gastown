@@ -949,6 +949,17 @@ func (d *Daemon) Run() (err error) {
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
 
+	// Fire an immediate dispatch pass concurrently with the first heartbeat.
+	// On a daemon restart, dispatchQueuedWork is step 14 of 16 in the heartbeat
+	// and runs only after patrol recovery (deacon/witness/refinery/dogs, steps
+	// 1-6.5) plus the scheduler's own pre-dispatch maintenance scans — ~6min of
+	// latency before the first spawn on a cold start, which (stacked on the prior
+	// daemon's last inter-heartbeat gap) produced the ~10min dispatch hole on
+	// every bounce. The scheduler-dispatch.lock (TryLock in dispatchScheduledWork)
+	// makes this pass and the heartbeat's step-14 pass mutually exclusive, so
+	// there is no double-dispatch. See gu-n3u77.
+	go d.dispatchOnStartup()
+
 	// Initial heartbeat
 	d.heartbeat(state)
 	startupComplete = true
@@ -4223,4 +4234,36 @@ func (d *Daemon) dispatchQueuedWork() {
 	} else if len(out) > 0 {
 		d.logger.Printf("Scheduler dispatch: %s", string(out))
 	}
+}
+
+// shouldDispatchOnStartup reports whether the daemon may fire an immediate
+// dispatch pass at startup. It mirrors the gates the heartbeat applies before
+// step 14 (dispatchQueuedWork): never dispatch during a shutdown, under E-stop,
+// or when polecat-pressure blocks new spawns. Kept separate from dispatchOnStartup
+// so the gating logic is unit-testable without launching a subprocess.
+func (d *Daemon) shouldDispatchOnStartup() bool {
+	if d.isShutdownInProgress() {
+		return false
+	}
+	if estop.IsActive(d.config.TownRoot) {
+		return false
+	}
+	if p := d.checkPressure("polecat"); !p.OK {
+		d.logger.Printf("Startup dispatch deferred to heartbeat: %s", p.Reason)
+		return false
+	}
+	return true
+}
+
+// dispatchOnStartup fires a single dispatch pass at daemon startup, concurrent
+// with the first heartbeat, so queued work flows immediately on a bounce instead
+// of waiting ~6min behind patrol recovery (step 14 of 16) in the first heartbeat.
+// The scheduler-dispatch.lock serializes this with the heartbeat's own pass, so
+// at most one runs at a time and there is no double-dispatch. See gu-n3u77.
+func (d *Daemon) dispatchOnStartup() {
+	if !d.shouldDispatchOnStartup() {
+		return
+	}
+	d.logger.Printf("Startup dispatch: firing immediate pass (concurrent with first heartbeat)")
+	d.dispatchQueuedWork()
 }
