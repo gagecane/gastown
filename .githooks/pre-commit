@@ -64,6 +64,40 @@ if [[ -d "$GIT_DIR/rebase-merge" ]] \
   exit 0
 fi
 
+# --- Gate 0: reject phantom submodule gitlinks (gu-h3kcn) ------------------
+#
+# Gas Town agent worktrees (crew/, polecats/, refinery/rig) are nested git
+# repos. A stray 'git add' from the town root sweeps them into the index as
+# submodule gitlinks (mode 160000) even though there is no .gitmodules. On
+# Windows CI, actions/checkout's post-job 'git submodule foreach --recursive'
+# tries to resolve them, finds no URL, and dies with exit 128 — reding CI on
+# every push to main. This repo has no real submodules, so ANY staged gitlink
+# is a mistake. Reject it before it lands.
+
+staged_gitlinks=$(git diff --cached --name-only --diff-filter=ACMR | while IFS= read -r p; do
+  mode=$(git ls-files --stage -- "$p" | awk '{print $1}')
+  [[ "$mode" == "160000" ]] && printf '%s\n' "$p"
+done)
+
+if [[ -n "$staged_gitlinks" ]]; then
+  cat >&2 <<EOF
+
+✗ Commit rejected: staged submodule gitlink(s) (mode 160000):
+$(printf '  %s\n' $staged_gitlinks)
+
+This repo has no submodules. These are almost certainly Gas Town agent
+worktrees (crew/, polecats/, refinery/rig) accidentally swept in by a
+'git add' from the town root. They red Windows CI (see gu-h3kcn).
+
+Unstage them:
+  git rm --cached $staged_gitlinks
+
+Emergency escape hatch (do NOT use to commit gitlinks):
+  GIT_SKIP_VET=1 git commit ...
+EOF
+  exit 1
+fi
+
 # --- Collect staged Go files ----------------------------------------------
 
 # --diff-filter=ACMR: added, copied, modified, renamed (skip deletions).
