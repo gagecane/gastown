@@ -1,4 +1,4 @@
-package cmd
+package completion
 
 import (
 	"fmt"
@@ -42,11 +42,11 @@ const awaitingRefineryMergeLabel = "awaiting_refinery_merge"
 // GT_SKIP_PREPUSH_REASON (per gu-zy57) so the audit trail is preserved.
 const allowDirectPushEnv = "GT_ALLOW_DIRECT_PUSH"
 
-// isMergeQueueRig reports whether the given rig has merge_queue.enabled=true
+// IsMergeQueueRig reports whether the given rig has merge_queue.enabled=true
 // in its settings/config.json. Returns false when settings can't be loaded;
 // callers treat that as "not merge-queue managed" so unknown rigs preserve
 // existing behavior.
-func isMergeQueueRig(townRoot, rigName string) bool {
+func IsMergeQueueRig(townRoot, rigName string) bool {
 	settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
 	settings, err := config.LoadRigSettings(settingsPath)
 	if err != nil || settings == nil || settings.MergeQueue == nil {
@@ -55,7 +55,7 @@ func isMergeQueueRig(townRoot, rigName string) bool {
 	return settings.MergeQueue.Enabled
 }
 
-// isRefineryHeartbeatStale reports whether the rig's refinery heartbeat is
+// IsRefineryHeartbeatStale reports whether the rig's refinery heartbeat is
 // older than refineryHeartbeatStaleThreshold (or missing). Returns
 // (stale, reason): reason describes the staleness for diagnostic output.
 //
@@ -63,7 +63,7 @@ func isMergeQueueRig(townRoot, rigName string) bool {
 // heartbeat has either never run, or its file was nuked along with a session
 // teardown. Either way, dispatching new MRs into a queue with no live
 // processor is the failure mode this guard exists to prevent.
-func isRefineryHeartbeatStale(townRoot, rigName string) (bool, string) {
+func IsRefineryHeartbeatStale(townRoot, rigName string) (bool, string) {
 	rigPrefix := session.PrefixFor(rigName)
 	refinerySession := session.RefinerySessionName(rigPrefix)
 
@@ -95,7 +95,7 @@ func directPushOverrideAllowed() (allowed bool, reason string) {
 	return true, r
 }
 
-// guardDirectPushOnMergeQueue checks whether a polecat is allowed to push
+// GuardDirectPushOnMergeQueue checks whether a polecat is allowed to push
 // directly to the rig's default branch. On merge-queue-enabled rigs, the
 // merge queue is the merge gatekeeper and direct-push from polecats bypasses
 // the gate suite — exactly the failure mode that left main green only by
@@ -104,14 +104,14 @@ func directPushOverrideAllowed() (allowed bool, reason string) {
 // Returns nil when direct push is allowed (non-merge-queue rig, override
 // engaged, or non-polecat caller). Returns an error explaining why direct
 // push is refused otherwise.
-func guardDirectPushOnMergeQueue(townRoot, rigName, contextLabel string) error {
+func GuardDirectPushOnMergeQueue(townRoot, rigName, contextLabel string) error {
 	// Non-polecats (crew, mayor, deacon manual interventions) are unaffected.
 	// They sometimes push direct to recover from refinery outages, and the
 	// rationale is human-judged, not automated dispatch.
 	if os.Getenv("GT_POLECAT") == "" {
 		return nil
 	}
-	if !isMergeQueueRig(townRoot, rigName) {
+	if !IsMergeQueueRig(townRoot, rigName) {
 		return nil
 	}
 	if allowed, reason := directPushOverrideAllowed(); allowed {
@@ -123,13 +123,13 @@ func guardDirectPushOnMergeQueue(townRoot, rigName, contextLabel string) error {
 		rigName, contextLabel)
 }
 
-// markAwaitingRefineryMerge labels the hooked bead and records an audit note
+// MarkAwaitingRefineryMerge labels the hooked bead and records an audit note
 // when the polecat has successfully pushed/created an MR on a merge-queue
 // rig. The bead stays open (in_progress) until the refinery's PostMerge path
 // closes it with the real on-main commit_sha — that's the only event that
 // proves the work actually shipped to origin/main. (gu-treq)
 //
-// Distinct from markAwaitingRefineryRecovery: the MR exists and the queue is
+// Distinct from MarkAwaitingRefineryRecovery: the MR exists and the queue is
 // healthy from the polecat's vantage point. This guard catches the variant
 // where the refinery later wedges or is slow, so the bead is not falsely
 // marked shipped before the merge actually happens.
@@ -137,7 +137,7 @@ func guardDirectPushOnMergeQueue(townRoot, rigName, contextLabel string) error {
 // Best-effort: failures to label/note are warned, not fatal — the polecat
 // must still exit cleanly. The refinery's PostMerge will close the bead even
 // if these audit calls failed.
-func markAwaitingRefineryMerge(bd *beads.Beads, beadID, mrID, branch string) {
+func MarkAwaitingRefineryMerge(bd *beads.Beads, beadID, mrID, branch string) {
 	if bd == nil || beadID == "" {
 		return
 	}
@@ -157,13 +157,13 @@ func markAwaitingRefineryMerge(bd *beads.Beads, beadID, mrID, branch string) {
 	}
 }
 
-// markAwaitingRefineryRecovery labels the hooked bead and records an audit
+// MarkAwaitingRefineryRecovery labels the hooked bead and records an audit
 // note when MR submission is suppressed because refinery is dead. The bead
 // stays open so refinery recovery can sweep it. (gu-8edz)
 //
 // This is a best-effort helper: failures to label/note are warned, not fatal,
 // because we still want the polecat to exit cleanly so it can be re-dispatched.
-func markAwaitingRefineryRecovery(bd *beads.Beads, beadID, reason string) {
+func MarkAwaitingRefineryRecovery(bd *beads.Beads, beadID, reason string) {
 	if bd == nil || beadID == "" {
 		return
 	}

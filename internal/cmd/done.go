@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/polecat/completion"
 	"github.com/steveyegge/gastown/internal/pushlog"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -386,7 +387,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// Logic extracted to detectCleanupStatus (gu-y7ouk) so the auto-detect path
 	// is testable in isolation and runDone reads as a workflow, not git plumbing.
 	if doneCleanupStatus == "" {
-		doneCleanupStatus = detectCleanupStatus(g, branch, cwdAvailable)
+		doneCleanupStatus = completion.DetectCleanupStatus(g, branch, cwdAvailable)
 	}
 
 	// Resolve the rig's default branch early so downstream guards (safety-net
@@ -417,7 +418,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// runStashAutoPop (gu-y7ouk extraction) handles the gt-pvx stash safety
 		// net + gu-vtkn staleness guard. When status != "stash" it returns the
 		// input unchanged, so calling unconditionally is safe.
-		doneCleanupStatus = runStashAutoPop(g, doneCleanupStatus)
+		doneCleanupStatus = completion.RunStashAutoPop(g, doneCleanupStatus)
 	}
 
 	// SAFETY NET: Auto-commit uncommitted work before ANY exit path (gt-pvx).
@@ -813,7 +814,7 @@ afterSafetyNet:
 			// gh#3400: Auto-rebase the polecat branch onto the latest target before
 			// push, so the resulting MR/PR has a current base.
 			alreadyPushed := checkpoints[CheckpointPushed] == branch
-			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, alreadyPushed)
+			rebased, skipReason, rebaseErr := completion.AutoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, alreadyPushed)
 			if rebaseErr != nil {
 				return rebaseErr
 			}
@@ -851,7 +852,7 @@ afterSafetyNet:
 		// just-rebased branch costs the same as letting refinery do it, and
 		// risks the witness idle timeout (gu-d416) if the gates are slow.
 		if donePreVerified && preVerifiedAttestationValid && cwdAvailable {
-			if !verifyPreVerifiedAttestation(context.Background(), townRoot, rigName, cwd) {
+			if !completion.VerifyPreVerifiedAttestation(context.Background(), townRoot, rigName, cwd) {
 				preVerifiedAttestationValid = false
 			}
 		}
@@ -990,12 +991,12 @@ afterSafetyNet:
 			// via the merge queue instead of being stranded. This mirrors the
 			// late-detected direct-merge guard (below) which also falls through
 			// after the guard fires.
-			if guardErr := guardDirectPushOnMergeQueue(townRoot, rigName, "convoy direct merge"); guardErr != nil {
+			if guardErr := completion.GuardDirectPushOnMergeQueue(townRoot, rigName, "convoy direct merge"); guardErr != nil {
 				style.PrintWarning("%v — falling through to normal push+MR path", guardErr)
-				if stale, reason := isRefineryHeartbeatStale(townRoot, rigName); stale {
+				if stale, reason := completion.IsRefineryHeartbeatStale(townRoot, rigName); stale {
 					fmt.Fprintf(os.Stderr, "  Refinery heartbeat is stale (%s) — falling through to MR creation so refinery can pick up on recovery.\n", reason)
 					if issueID != "" {
-						markAwaitingRefineryRecovery(beads.New(cwd), issueID, reason)
+						completion.MarkAwaitingRefineryRecovery(beads.New(cwd), issueID, reason)
 					}
 				}
 				// Fall through to normal push + MR path below.
@@ -1440,13 +1441,13 @@ afterSafetyNet:
 			// falls through to normal MR creation below so refinery has a
 			// bead to act on once it recovers.
 			directBlocked := false
-			if guardErr := guardDirectPushOnMergeQueue(townRoot, rigName, "late-detected direct merge"); guardErr != nil {
+			if guardErr := completion.GuardDirectPushOnMergeQueue(townRoot, rigName, "late-detected direct merge"); guardErr != nil {
 				directBlocked = true
 				style.PrintWarning("%v", guardErr)
-				if stale, reason := isRefineryHeartbeatStale(townRoot, rigName); stale {
+				if stale, reason := completion.IsRefineryHeartbeatStale(townRoot, rigName); stale {
 					fmt.Fprintf(os.Stderr, "  Refinery heartbeat is stale (%s) — falling through to MR creation so refinery can pick up on recovery.\n", reason)
 					if issueID != "" {
-						markAwaitingRefineryRecovery(bd, issueID, reason)
+						completion.MarkAwaitingRefineryRecovery(bd, issueID, reason)
 					}
 				}
 			}
@@ -1876,7 +1877,7 @@ notifyWitness:
 	awaitingRefineryMerge := exitType == ExitCompleted &&
 		!pushFailed && !mrFailed &&
 		mrID != "" &&
-		isMergeQueueRig(townRoot, rigName)
+		completion.IsMergeQueueRig(townRoot, rigName)
 	updateAgentStateOnDone(cwd, townRoot, exitType, issueID, pushFailed || mrFailed, awaitingRefineryMerge, mrID, branch)
 
 	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
@@ -2702,7 +2703,7 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, stranded bo
 				}
 			}
 		}
-		markAwaitingRefineryMerge(bd, hookedBeadID, awaitingMergeMRID, awaitingMergeBranch)
+		completion.MarkAwaitingRefineryMerge(bd, hookedBeadID, awaitingMergeMRID, awaitingMergeBranch)
 		fmt.Fprintf(os.Stderr, "Note: hooked bead %s left open pending refinery merge (mr=%s); refinery PostMerge will close with on-main commit_sha.\n", hookedBeadID, awaitingMergeMRID)
 		goto doneStateUpdate
 	}

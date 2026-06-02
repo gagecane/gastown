@@ -1,26 +1,34 @@
-package cmd
-
-// done_phases.go: extracted sub-workflows from runDone() in done.go.
+// Package completion holds the `gt done` completion state machine, extracted
+// from internal/cmd (gu-re9a3). These are the self-contained phases of the
+// polecat completion workflow — cleanup-status detection, stash auto-pop,
+// auto-rebase, pre-verified gate attestation, and the merge-queue / refinery
+// direct-push guards.
 //
-// runDone is a 1800+ LOC procedural function that resists isolated testing and
-// forces every new exit-path concern through a single edit point. gu-y7ouk
-// recommends starting with runDone and pulling out self-contained phases as
-// named functions — this file is that template.
-//
-// Each helper here was lifted as-is from runDone with no behavior change.
-// They intentionally take the same primitives runDone has on hand (a
-// *git.Git, a few strings) so the call sites in runDone stay one-liners.
-// Refactor in surgical steps; do not redesign signatures while extracting.
+// runDone in internal/cmd/done.go keeps the cmd-level orchestration (argv,
+// output formatting, exit codes) and calls into this package for the
+// decision logic. Each function here is testable in isolation without
+// spawning the full runDone harness.
+package completion
 
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
-// detectCleanupStatus auto-detects the polecat's git cleanup status (gu-y7ouk
+// shortSHA abbreviates a git SHA for human-readable diagnostic output.
+func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
+// DetectCleanupStatus auto-detects the polecat's git cleanup status (gu-y7ouk
 // extraction from runDone). Returns one of: "uncommitted", "stash", "unpushed",
 // "clean", or "unknown".
 //
@@ -32,7 +40,7 @@ import (
 // "unknown" with a warning.
 //
 // Mirrors the lines previously inlined at done.go:367–400.
-func detectCleanupStatus(g *git.Git, branch string, cwdAvailable bool) string {
+func DetectCleanupStatus(g *git.Git, branch string, cwdAvailable bool) string {
 	if !cwdAvailable {
 		// Can't detect git state without working directory, default to unknown.
 		style.PrintWarning("cannot detect cleanup status - working directory deleted")
@@ -64,7 +72,7 @@ func detectCleanupStatus(g *git.Git, branch string, cwdAvailable bool) string {
 	}
 }
 
-// runStashAutoPop is the gt-pvx stash safety net (gu-y7ouk extraction).
+// RunStashAutoPop is the gt-pvx stash safety net (gu-y7ouk extraction).
 //
 // Background: agents have been observed running `git stash` to clear the
 // working tree before rebase/checkout, then dying before `git stash pop`.
@@ -84,7 +92,7 @@ func detectCleanupStatus(g *git.Git, branch string, cwdAvailable bool) string {
 // in place for manual handling.
 //
 // Mirrors the lines previously inlined at done.go:426–506.
-func runStashAutoPop(g *git.Git, status string) string {
+func RunStashAutoPop(g *git.Git, status string) string {
 	if status != "stash" {
 		return status
 	}

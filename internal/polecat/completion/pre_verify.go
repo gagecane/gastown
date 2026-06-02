@@ -1,4 +1,4 @@
-package cmd
+package completion
 
 // Pre-verification gate enforcement (gu-xp5f).
 //
@@ -178,7 +178,7 @@ func runPreVerifyGates(ctx context.Context, workDir string, gates []preVerifyGat
 	return true, nil
 }
 
-// verifyPreVerifiedAttestation is the high-level entry point used by
+// VerifyPreVerifiedAttestation is the high-level entry point used by
 // runDone. It runs pre-merge gates locally to validate the polecat's
 // --pre-verified claim. Returns:
 //   - keep=true: attestation stays valid; refinery may fast-path.
@@ -190,7 +190,7 @@ func runPreVerifyGates(ctx context.Context, workDir string, gates []preVerifyGat
 //
 // When the rig has no pre-merge gates configured, keep=true (nothing to
 // verify, attestation stays — same behavior as before this guard).
-func verifyPreVerifiedAttestation(ctx context.Context, townRoot, rigName, workDir string) bool {
+func VerifyPreVerifiedAttestation(ctx context.Context, townRoot, rigName, workDir string) bool {
 	gates := loadPreVerifyGates(townRoot, rigName)
 	if len(gates) == 0 {
 		// No gates configured to verify against. Keep attestation — refinery's

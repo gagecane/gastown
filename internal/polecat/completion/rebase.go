@@ -1,18 +1,18 @@
-package cmd
+package completion
 
 import (
 	"fmt"
 )
 
-// rebaseGit is the subset of *git.Git that autoRebaseOnTarget needs. Defined as
+// RebaseGit is the subset of *git.Git that AutoRebaseOnTarget needs. Defined as
 // an interface so tests can drive the decision logic without standing up a full
 // git repo for every gating case.
-type rebaseGit interface {
+type RebaseGit interface {
 	Rebase(onto string) error
 	AbortRebase() error
 }
 
-// autoRebaseOnTarget rebases the current branch onto base when the branch is
+// AutoRebaseOnTarget rebases the current branch onto base when the branch is
 // behind the target. It is a no-op when there is nothing to rebase or when a
 // prior push checkpoint exists (rebasing after pushing would require a
 // force-push).
@@ -33,7 +33,7 @@ type rebaseGit interface {
 //   - err: rebase failure, after AbortRebase has been attempted to clean up.
 //
 // gh#3400, gs-4bn.
-func autoRebaseOnTarget(g rebaseGit, base string, behind int, preVerified, alreadyPushed bool) (rebased bool, skipReason string, err error) {
+func AutoRebaseOnTarget(g RebaseGit, base string, behind int, preVerified, alreadyPushed bool) (rebased bool, skipReason string, err error) {
 	if behind <= 0 {
 		return false, "", nil
 	}

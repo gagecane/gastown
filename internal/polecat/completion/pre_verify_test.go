@@ -1,4 +1,4 @@
-package cmd
+package completion
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,7 +148,7 @@ func TestRunPreVerifyGates_StopsOnFirstFailure(t *testing.T) {
 		t.Errorf("expected to stop after 2nd gate, ran %d: %v", len(ran), ran)
 	}
 	// Error must name the failing gate so operators know what to look at.
-	if msg := err.Error(); !containsSubstring(msg, "vet") {
+	if msg := err.Error(); !strings.Contains(msg, "vet") {
 		t.Errorf("error should name failing gate %q, got %q", "vet", msg)
 	}
 }
@@ -188,7 +189,7 @@ func TestRunPreVerifyGates_TruncatesNoisyOutput(t *testing.T) {
 	if len(err.Error()) > 1500 {
 		t.Errorf("error message too long (%d bytes): truncation guard not working", len(err.Error()))
 	}
-	if !containsSubstring(err.Error(), "truncated") {
+	if !strings.Contains(err.Error(), "truncated") {
 		t.Errorf("error should mention truncation marker, got: %s", err.Error())
 	}
 }

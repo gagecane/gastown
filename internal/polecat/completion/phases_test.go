@@ -1,6 +1,6 @@
-package cmd
+package completion
 
-// Tests for done_phases.go (gu-y7ouk). These exist primarily to demonstrate
+// Tests for phases.go (gu-y7ouk). These exist primarily to demonstrate
 // that the extraction made the helpers reachable from a unit test — runDone
 // itself is too entangled with workspace / beads / session globals to reach
 // without a heavy harness, but the extracted phases are pure functions over
@@ -63,9 +63,9 @@ func initRepoForPhases(t *testing.T) (string, string) {
 
 // TestDetectCleanupStatus_NoCwd verifies the worktree-deleted fallback path.
 func TestDetectCleanupStatus_NoCwd(t *testing.T) {
-	got := detectCleanupStatus(nil, "polecat/whatever", false)
+	got := DetectCleanupStatus(nil, "polecat/whatever", false)
 	if got != "unknown" {
-		t.Errorf("detectCleanupStatus(cwdAvailable=false) = %q, want %q", got, "unknown")
+		t.Errorf("DetectCleanupStatus(cwdAvailable=false) = %q, want %q", got, "unknown")
 	}
 }
 
@@ -83,9 +83,9 @@ func TestDetectCleanupStatus_Clean(t *testing.T) {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
 
-	got := detectCleanupStatus(g, branch, true)
+	got := DetectCleanupStatus(g, branch, true)
 	if got != "clean" {
-		t.Errorf("detectCleanupStatus(clean+pushed) = %q, want %q", got, "clean")
+		t.Errorf("DetectCleanupStatus(clean+pushed) = %q, want %q", got, "clean")
 	}
 }
 
@@ -100,9 +100,9 @@ func TestDetectCleanupStatus_Uncommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectCleanupStatus(g, branch, true)
+	got := DetectCleanupStatus(g, branch, true)
 	if got != "uncommitted" {
-		t.Errorf("detectCleanupStatus(dirty) = %q, want %q", got, "uncommitted")
+		t.Errorf("DetectCleanupStatus(dirty) = %q, want %q", got, "uncommitted")
 	}
 }
 
@@ -132,9 +132,9 @@ func TestDetectCleanupStatus_Unpushed(t *testing.T) {
 		}
 	}
 
-	got := detectCleanupStatus(g, branch, true)
+	got := DetectCleanupStatus(g, branch, true)
 	if got != "unpushed" {
-		t.Errorf("detectCleanupStatus(committed-not-pushed) = %q, want %q", got, "unpushed")
+		t.Errorf("DetectCleanupStatus(committed-not-pushed) = %q, want %q", got, "unpushed")
 	}
 }
 
@@ -146,9 +146,9 @@ func TestRunStashAutoPop_Passthrough(t *testing.T) {
 	g := git.NewGit(wt)
 
 	for _, in := range []string{"", "clean", "uncommitted", "unpushed", "unknown"} {
-		got := runStashAutoPop(g, in)
+		got := RunStashAutoPop(g, in)
 		if got != in {
-			t.Errorf("runStashAutoPop(%q) = %q, want %q (non-stash status must pass through unchanged)", in, got, in)
+			t.Errorf("RunStashAutoPop(%q) = %q, want %q (non-stash status must pass through unchanged)", in, got, in)
 		}
 	}
 }
@@ -162,8 +162,8 @@ func TestRunStashAutoPop_NoStashes(t *testing.T) {
 	wt, _ := initRepoForPhases(t)
 	g := git.NewGit(wt)
 
-	got := runStashAutoPop(g, "stash")
+	got := RunStashAutoPop(g, "stash")
 	if got != "stash" {
-		t.Errorf("runStashAutoPop(stash, no-entries) = %q, want %q", got, "stash")
+		t.Errorf("RunStashAutoPop(stash, no-entries) = %q, want %q", got, "stash")
 	}
 }

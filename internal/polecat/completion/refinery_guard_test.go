@@ -1,4 +1,4 @@
-package cmd
+package completion
 
 import (
 	"encoding/json"
@@ -62,16 +62,16 @@ func writeRefineryHeartbeat(t *testing.T, townRoot, rigPrefix string, age time.D
 
 func TestIsMergeQueueRig(t *testing.T) {
 	tr := writeMergeQueueRig(t, "myrig", true)
-	if !isMergeQueueRig(tr, "myrig") {
+	if !IsMergeQueueRig(tr, "myrig") {
 		t.Errorf("expected isMergeQueueRig=true when merge_queue.enabled=true")
 	}
 
 	tr2 := writeMergeQueueRig(t, "myrig", false)
-	if isMergeQueueRig(tr2, "myrig") {
+	if IsMergeQueueRig(tr2, "myrig") {
 		t.Errorf("expected isMergeQueueRig=false when merge_queue.enabled=false")
 	}
 
-	if isMergeQueueRig(t.TempDir(), "doesnotexist") {
+	if IsMergeQueueRig(t.TempDir(), "doesnotexist") {
 		t.Errorf("expected isMergeQueueRig=false for missing rig")
 	}
 }
@@ -80,7 +80,7 @@ func TestIsRefineryHeartbeatStale(t *testing.T) {
 	tr := writeMergeQueueRig(t, "myrig", true)
 
 	// No file → stale.
-	stale, reason := isRefineryHeartbeatStale(tr, "myrig")
+	stale, reason := IsRefineryHeartbeatStale(tr, "myrig")
 	if !stale {
 		t.Errorf("expected stale=true when heartbeat file is missing")
 	}
@@ -90,14 +90,14 @@ func TestIsRefineryHeartbeatStale(t *testing.T) {
 
 	// Fresh heartbeat → not stale.
 	writeRefineryHeartbeat(t, tr, "gt", 0)
-	stale, _ = isRefineryHeartbeatStale(tr, "myrig")
+	stale, _ = IsRefineryHeartbeatStale(tr, "myrig")
 	if stale {
 		t.Errorf("expected stale=false on fresh heartbeat")
 	}
 
 	// Old heartbeat → stale.
 	writeRefineryHeartbeat(t, tr, "gt", refineryHeartbeatStaleThreshold+time.Minute)
-	stale, _ = isRefineryHeartbeatStale(tr, "myrig")
+	stale, _ = IsRefineryHeartbeatStale(tr, "myrig")
 	if !stale {
 		t.Errorf("expected stale=true when heartbeat is older than threshold")
 	}
@@ -119,32 +119,32 @@ func TestGuardDirectPushOnMergeQueue(t *testing.T) {
 	_ = os.Unsetenv("GT_ALLOW_DIRECT_PUSH")
 	_ = os.Unsetenv("GT_SKIP_PREPUSH_REASON")
 	tr := writeMergeQueueRig(t, "myrig", true)
-	if err := guardDirectPushOnMergeQueue(tr, "myrig", "test"); err != nil {
+	if err := GuardDirectPushOnMergeQueue(tr, "myrig", "test"); err != nil {
 		t.Errorf("non-polecat should not be blocked: %v", err)
 	}
 
 	// Polecat on non-merge-queue rig: not blocked.
 	_ = os.Setenv("GT_POLECAT", "thunder")
 	tr2 := writeMergeQueueRig(t, "myrig", false)
-	if err := guardDirectPushOnMergeQueue(tr2, "myrig", "test"); err != nil {
+	if err := GuardDirectPushOnMergeQueue(tr2, "myrig", "test"); err != nil {
 		t.Errorf("polecat on non-mq rig should not be blocked: %v", err)
 	}
 
 	// Polecat on merge-queue rig: blocked.
-	if err := guardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err == nil {
+	if err := GuardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err == nil {
 		t.Errorf("polecat on mq rig should be blocked")
 	}
 
 	// Override without reason: still blocked (per gu-zy57 audit requirement).
 	_ = os.Setenv("GT_ALLOW_DIRECT_PUSH", "1")
 	_ = os.Unsetenv("GT_SKIP_PREPUSH_REASON")
-	if err := guardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err == nil {
+	if err := GuardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err == nil {
 		t.Errorf("override without reason should still be blocked")
 	}
 
 	// Override with reason: allowed.
 	_ = os.Setenv("GT_SKIP_PREPUSH_REASON", "emergency: refinery down")
-	if err := guardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err != nil {
+	if err := GuardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err != nil {
 		t.Errorf("override with reason should be allowed: %v", err)
 	}
 }
@@ -166,11 +166,11 @@ func TestGuardDirectPushOnMergeQueue_StaleRefinery(t *testing.T) {
 	// Stale heartbeat (>5min old).
 	writeRefineryHeartbeat(t, tr, "gt", refineryHeartbeatStaleThreshold+time.Minute)
 
-	stale, _ := isRefineryHeartbeatStale(tr, "myrig")
+	stale, _ := IsRefineryHeartbeatStale(tr, "myrig")
 	if !stale {
 		t.Fatalf("test setup wrong: heartbeat should be stale")
 	}
-	if err := guardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err == nil {
+	if err := GuardDirectPushOnMergeQueue(tr, "myrig", "convoy direct"); err == nil {
 		t.Errorf("expected direct-push refused when refinery is stale on mq rig")
 	}
 }
