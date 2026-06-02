@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/curio"
 )
 
@@ -59,9 +60,23 @@ func (d *Daemon) runCurio() {
 	d.logger.Printf("curio: starting patrol cycle")
 
 	// Window ID labels this cycle. Time-based, stamped at collection.
-	windowID := fmt.Sprintf("live/%s", time.Now().UTC().Format(time.RFC3339))
+	now := time.Now().UTC()
+	windowID := fmt.Sprintf("live/%s", now.Format(time.RFC3339))
 
-	in, err := curio.CollectInput(d.config.TownRoot, windowID)
+	// Gather the merged-not-landed rule's bead source (requires bead Dolt
+	// access, which curio deliberately does not import) and inject it along
+	// with the per-rig git ancestry resolver. The filesystem collectors (rate,
+	// logs, admissions) are wired inside CollectInputWith from townRoot.
+	opts := curio.CollectOptions{
+		Start:             now.Add(-24 * time.Hour),
+		End:               now,
+		MergedBeadSources: [][]curio.MergedBeadObservation{d.collectMergedBeadObservations()},
+		Ancestry: curio.GitAncestryResolver(func(rig string) string {
+			return beads.GetRigDirForName(d.config.TownRoot, rig)
+		}),
+	}
+
+	in, err := curio.CollectInputWith(d.config.TownRoot, windowID, opts)
 	if err != nil {
 		d.logger.Printf("curio: collect failed: %v", err)
 		return
