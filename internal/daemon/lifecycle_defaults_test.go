@@ -168,6 +168,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			Handler:              &PatrolConfig{Enabled: false},
 			NudgeQueueGC:         &NudgeQueueGCConfig{Enabled: false},
 			RestartPending:       &RestartPendingConfig{Enabled: false},
+			SchedulerStuck:       &SchedulerStuckConfig{Enabled: false},
 		},
 	}
 

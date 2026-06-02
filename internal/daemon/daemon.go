@@ -945,6 +945,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Restart-pending dog ticker started (interval %v)", interval)
 	}
 
+	// Start scheduler-stuck ticker if configured.
+	// Detects the non-draining-ready-queue / 0-in-progress-with-capacity stall
+	// signature and escalates it to an agent (gu-n0hvf) — replacing the prior
+	// reliance on a human noticing a one-line warning on a manual scheduler run.
+	var schedulerStuckTicker *time.Ticker
+	var schedulerStuckChan <-chan time.Time
+	if d.isPatrolActive("scheduler_stuck") {
+		interval := schedulerStuckInterval(d.patrolConfig)
+		schedulerStuckTicker = time.NewTicker(interval)
+		schedulerStuckChan = schedulerStuckTicker.C
+		defer schedulerStuckTicker.Stop()
+		d.logger.Printf("Scheduler-stuck dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1100,6 +1114,14 @@ func (d *Daemon) Run() (err error) {
 			// agent so a gated restart happens (gu-muj66). Does NOT self-restart.
 			if !d.isShutdownInProgress() {
 				d.runRestartPendingDog()
+			}
+
+		case <-schedulerStuckChan:
+			// Scheduler-stuck dog — detects the non-draining-ready-queue /
+			// 0-in-progress-with-capacity stall and escalates to an agent
+			// (gu-n0hvf). Does NOT auto-remediate.
+			if !d.isShutdownInProgress() {
+				d.runSchedulerStuckDog()
 			}
 
 		case <-timer.C:
