@@ -710,20 +710,16 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 		return nil, nil
 	}
 
-	// 2. Build agentWorkIDs set from bd ready across all dirs (work beads live
-	// in rig-local DBs, so we need to check all dirs). agentWorkIDs carry the
-	// gt:agent label and must never be dispatched — they are state beads, not
-	// work items (gu-7gm). The ready-IDs return value is unused here:
-	// isScheduledWorkBeadReady relies on the per-bead workBeadInfo + blocked
-	// cache below for the readiness gate, so we deliberately drop it.
-	_, agentWorkIDs, readyErr := listReadyWorkBeadsWithError(townRoot)
-	if readyErr != nil {
-		return nil, readyErr
-	}
-
-	// 2b. Batch-fetch work bead labels so we can defensively filter messaging
-	// beads (gt:message / gt:handoff / gt:merge-request) that should never be
-	// handed to a polecat. See gt-el4 / gastownhall/gastown#3800.
+	// 2. Batch-fetch work bead status/labels/type via targeted `bd show` for
+	// exactly the work beads referenced by the open contexts. This single batch
+	// supplies everything the readiness gate and the agent-bead filter need —
+	// status, blocked-ness (combined with bd blocked below), labels, and type.
+	//
+	// We deliberately do NOT call bd ready across every town dir here (gu-k5sul):
+	// bd ready walks the full ready graph and was the dominant cost of the ~79s
+	// fanout across ~29 dirs. Its only consumer was the agent-bead guard, and the
+	// gt:agent label / issue_type=agent it detected is already present in this
+	// targeted batch. isAgentBeadInfo reads it directly.
 	workBeadIDs := make([]string, 0, len(allContexts))
 	for _, ctx := range allContexts {
 		fields := beads.ParseSlingContextFields(ctx.issue.Description)
@@ -780,7 +776,7 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 		// contexts from older code paths or manual bd writes may still be in
 		// the queue — skip them here instead of handing a polecat a state
 		// bead whose "work" is to resubmit some prior auto-save branch.
-		if agentWorkIDs[fields.WorkBeadID] {
+		if isAgentBeadInfo(info) {
 			fmt.Fprintf(os.Stderr, "%s Skipping sling context %s: work bead %s is an agent state bead (gt:agent), not a work item\n",
 				style.Warning.Render("⚠"), ctx.issue.ID, fields.WorkBeadID)
 			continue
@@ -1127,66 +1123,6 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 	return records
 }
 
-// listReadyWorkBeadIDsWithError returns a set of ready work bead IDs.
-// Wrapper around listReadyWorkBeadsWithError that drops the agent ID set.
-func listReadyWorkBeadIDsWithError(townRoot string) (map[string]bool, error) {
-	readyIDs, _, err := listReadyWorkBeadsWithError(townRoot)
-	return readyIDs, err
-}
-
-// listReadyWorkBeadsWithError returns two sets:
-//   - readyIDs: work bead IDs that are unblocked
-//   - agentIDs: subset of readyIDs that carry the gt:agent label or
-//     legacy issue_type == "agent" (polecat/witness/refinery/mayor/dog state beads)
-//
-// The scheduler uses agentIDs to filter out state beads that must never be
-// dispatched as work (gu-7gm). Returns an error only when ALL dirs fail
-// (partial success is acceptable).
-func listReadyWorkBeadsWithError(townRoot string) (map[string]bool, map[string]bool, error) {
-	readyIDs := make(map[string]bool)
-	agentIDs := make(map[string]bool)
-	dirs := beadsSearchDirs(townRoot)
-	failCount := 0
-	var lastErr error
-	for _, beadsDir := range dirs {
-		// Use Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,
-		// and BEADS_DOLT_PORT translation.
-		b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-		readyOut, err := b.Run("ready", "--json")
-		if err != nil {
-			failCount++
-			lastErr = err
-			fmt.Fprintf(os.Stderr, "%s Warning: bd ready failed for %s: %v\n",
-				style.Dim.Render("⚠"), filepath.Dir(beadsDir), err)
-			continue
-		}
-		var readyBeads []struct {
-			ID        string   `json:"id"`
-			IssueType string   `json:"issue_type"`
-			Labels    []string `json:"labels"`
-		}
-		if err := json.Unmarshal(readyOut, &readyBeads); err == nil {
-			for _, rb := range readyBeads {
-				readyIDs[rb.ID] = true
-				if rb.IssueType == "agent" {
-					agentIDs[rb.ID] = true
-					continue
-				}
-				for _, l := range rb.Labels {
-					if l == "gt:agent" {
-						agentIDs[rb.ID] = true
-						break
-					}
-				}
-			}
-		}
-	}
-	if failCount == len(dirs) && failCount > 0 {
-		return nil, nil, fmt.Errorf("all %d bd ready queries failed (last: %w)", failCount, lastErr)
-	}
-	return readyIDs, agentIDs, nil
-}
-
 // listBlockedWorkBeadIDsWithError returns a set of work bead IDs that have active blockers.
 // Returns an error only when ALL dirs fail (partial success is acceptable).
 func listBlockedWorkBeadIDsWithError(townRoot string, workBeadIDs []string) (map[string]bool, error) {
@@ -1269,6 +1205,21 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 		return false
 	}
 	return true
+}
+
+// isAgentBeadInfo reports whether a batch-fetched bead is an agent state bead
+// (polecat/witness/refinery/mayor/dog) rather than a work item. Identification
+// mirrors isAgentBead / beads.IsAgentBead: the "gt:agent" label (current
+// standard) or the legacy issue_type == "agent" (pre-migration beads).
+//
+// This is the beadStatusInfo form, used by getReadySlingContexts to filter
+// agent beads from the targeted bd-show batch (workBeadInfo) instead of from a
+// separate bd-ready fanout across every town dir (gu-k5sul).
+func isAgentBeadInfo(info beadStatusInfo) bool {
+	if info.Type == "agent" {
+		return true
+	}
+	return hasLabel(info.Labels, "gt:agent")
 }
 
 // Labels / issue type that mark a bead as a permanent reference or gate
