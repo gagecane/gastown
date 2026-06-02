@@ -11,12 +11,17 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
 	defaultDoltBackupInterval = 15 * time.Minute
 	doltBackupTimeout         = 120 * time.Second
+	// doltBackupPluginTimeout bounds the full run.sh execution, which iterates
+	// over every production database (not a single sync). Matches the plugin's
+	// declared [execution] timeout of 5m in plugins/dolt-backup/plugin.md.
+	doltBackupPluginTimeout = 5 * time.Minute
 )
 
 // doltBackupInterval returns the configured backup interval, or the default (15m).
@@ -33,10 +38,17 @@ func doltBackupInterval(config *DaemonPatrolConfig) time.Duration {
 
 // syncDoltBackups syncs each production database to its configured backup location.
 // Non-fatal: errors are logged but don't stop the daemon.
+//
+// Platform split (gu-a727o):
+//   - Linux: the native sync below uses iCloud Drive for offsite sync and the
+//     <db>-backup remote convention, neither of which apply. Instead we execute
+//     the dolt-backup plugin's run.sh in-process — the canonical deterministic
+//     backup path — decoupled from deacon-dog availability so freshness no
+//     longer drifts during deacon session-handoff gaps. See runDoltBackupPlugin.
+//   - macOS: keep the native sync + iCloud offsite replication.
 func (d *Daemon) syncDoltBackups() {
-	// Dolt backup uses iCloud Drive for offsite sync — only available on macOS.
-	// On Linux this generates HIGH priority escalation spam every ~15 minutes.
 	if runtime.GOOS != "darwin" {
+		d.runDoltBackupPlugin()
 		return
 	}
 	if !d.isPatrolActive("dolt_backup") {
@@ -104,6 +116,99 @@ func (d *Daemon) syncDoltBackups() {
 	}
 
 	mol.closeStep("report")
+}
+
+// runDoltBackupPlugin executes the dolt-backup plugin's run.sh in-process on the
+// daemon's backup tick. This is the Linux backup path (gu-a727o).
+//
+// Why in-process instead of dispatching to a deacon dog: the dog-dispatch path
+// (handler.dispatchPlugins) can only fire when an idle deacon dog is available.
+// During deacon session-handoff gaps no dog is dispatchable, so the backup is
+// deferred and freshness drifts (~23m observed, 32.5m breach). Running run.sh
+// directly on the daemon's own 15m tick removes that deacon-liveness coupling —
+// the daemon heartbeat keeps ticking regardless of dog/deacon state.
+//
+// Idempotent with the dog path via the shared plugin cooldown ledger: we skip if
+// a dolt-backup run was recorded within the backup interval, and run.sh records
+// its own run bead on completion (same type:plugin-run / plugin:dolt-backup
+// labels the cooldown gate queries). Whichever path runs first wins the window;
+// the other no-ops. run.sh is itself hash-deduped per database and only escalates
+// on real backup failure, so periodic ticking does not spam escalations.
+func (d *Daemon) runDoltBackupPlugin() {
+	if !d.isPatrolActive("dolt_backup") {
+		return
+	}
+
+	interval := doltBackupInterval(d.patrolConfig)
+
+	// Cooldown gate: skip if a dolt-backup run was recorded within the interval.
+	// Shared ledger with handler.dispatchPlugins keeps the two paths idempotent.
+	recorder := plugin.NewRecorder(d.config.TownRoot)
+	if count, err := recorder.CountRunsSince("dolt-backup", interval.String()); err != nil {
+		d.logger.Printf("dolt_backup: cooldown check failed (proceeding): %v", err)
+	} else if count > 0 {
+		return // Still in cooldown — a recent run (dog or daemon) covered it.
+	}
+
+	// Locate the dolt-backup plugin's run.sh.
+	rigNames := d.rigNamesForPluginScan()
+	scanner := plugin.NewScanner(d.config.TownRoot, rigNames)
+	p, err := scanner.GetPlugin("dolt-backup")
+	if err != nil {
+		d.logger.Printf("dolt_backup: plugin not found, skipping: %v", err)
+		return
+	}
+	runScript := filepath.Join(p.Path, "run.sh")
+	if _, statErr := os.Stat(runScript); statErr != nil {
+		d.logger.Printf("dolt_backup: run.sh not found at %s, skipping: %v", runScript, statErr)
+		return
+	}
+
+	d.logger.Printf("dolt_backup: running plugin run.sh (in-process, decoupled from dogs)")
+
+	ctx, cancel := context.WithTimeout(context.Background(), doltBackupPluginTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", runScript)
+	cmd.Dir = p.Path
+	cmd.Env = append(os.Environ(), "GT_TOWN_ROOT="+d.config.TownRoot)
+	util.SetDetachedProcessGroup(cmd)
+
+	// run.sh records its own run bead and escalates on failure; the daemon only
+	// logs the outcome here (escalating again would double-report).
+	output, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		d.logger.Printf("dolt_backup: plugin run.sh failed: %v (%s)", runErr, strings.TrimSpace(string(output)))
+		return
+	}
+	d.logger.Printf("dolt_backup: plugin run.sh completed: %s", lastNonEmptyLine(string(output)))
+}
+
+// rigNamesForPluginScan returns the rig names for plugin discovery, mirroring
+// handler.dispatchPlugins. Returns nil (town-level only) if rigs config is
+// unavailable — dolt-backup is a town-level plugin, so this still resolves it.
+func (d *Daemon) rigNamesForPluginScan() []string {
+	rigsConfig, err := d.loadRigsConfig()
+	if err != nil || rigsConfig == nil {
+		return nil
+	}
+	rigNames := make([]string, 0, len(rigsConfig.Rigs))
+	for name := range rigsConfig.Rigs {
+		rigNames = append(rigNames, name)
+	}
+	return rigNames
+}
+
+// lastNonEmptyLine returns the last non-empty line of s, trimmed. Used to
+// surface run.sh's summary line in the daemon log without dumping all output.
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // syncBackup runs `dolt backup sync <backup-name>` for a single database.

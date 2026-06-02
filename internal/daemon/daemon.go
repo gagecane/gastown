@@ -1008,7 +1008,10 @@ func (d *Daemon) Run() (err error) {
 
 		case <-doltBackupChan:
 			// Periodic Dolt filesystem backup — syncs production databases to
-			// local backup directory on a 15-minute cadence.
+			// local backup directory on a 15-minute cadence. On Linux this execs
+			// the dolt-backup plugin in-process, decoupled from deacon-dog
+			// availability so freshness doesn't drift during handoff gaps
+			// (gu-a727o); on macOS it runs the native sync + iCloud offsite.
 			if !d.isShutdownInProgress() {
 				d.syncDoltBackups()
 			}
