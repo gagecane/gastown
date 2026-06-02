@@ -279,6 +279,23 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Owner, info.Title)
 	}
 
+	// Open-children guard (gu-r8b0q, extends gu-fs88). A bead that is the
+	// parent of any non-closed child is a container — the children track the
+	// real work — and must never get a sling context. executeSling already
+	// rejects these at dispatch time, but the rejection only closes the ONE
+	// sling context (circuit-broken after maxDispatchFailures); the epic stays
+	// in `bd ready`, so the next convoy/stranded scan re-runs scheduleBead and
+	// creates a FRESH context → dispatch fails 3× again → circuit-breaks again
+	// → forever. Refusing context creation here breaks that re-creation loop at
+	// the source, so containers stop generating repeated circuit-break churn.
+	// Runs after the cheap title/label guards so the common path short-circuits
+	// before paying the extra `bd children` subprocess. Not bypassable by
+	// --force — close or reparent the children first.
+	if isParentOfOpenChildren(beadID) {
+		return fmt.Errorf("bead %s has open children: %q — refusing to schedule. It is a container for work tracked by its children, not a work item itself; close or reparent the children first (see `bd show %s --children`)",
+			beadID, info.Title, beadID)
+	}
+
 	// Idempotency: check for existing open sling context for this work bead.
 	// Fail fast on errors to avoid creating duplicate contexts on transient DB failures.
 	//

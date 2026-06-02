@@ -1259,6 +1259,54 @@ func TestSchedulerBatchEpicRejection(t *testing.T) {
 	}
 }
 
+// TestScheduleBeadRejectsOpenChildrenContainer verifies the gu-r8b0q guard:
+// a task-typed bead that is the parent of an open child is a container, and
+// scheduleBead must refuse to create a sling context for it. Without this
+// guard the scheduler re-creates a context every cycle for an epic that stays
+// in `bd ready`, each one fails the dispatch-time open-children guard 3× and
+// circuit-breaks — an endless re-dispatch / circuit-break loop.
+//
+// The bead is type=task (not epic) so it bypasses the epic-routing path and
+// exercises scheduleBead's new container guard specifically, mirroring the
+// real gu-q30qg case where the container had open children but was offered as
+// dispatchable work.
+func TestScheduleBeadRejectsOpenChildrenContainer(t *testing.T) {
+	hqPath, rig1Path, _, gtBinary, env := setupMultiRigSchedulerTown(t)
+
+	// Parent task with an open child via parent-child dep. The dep points
+	// child → parent (the child "depends on" the parent with type=parent-child),
+	// which is what populates the child's `parent` field so `bd children
+	// <parent>` lists it. isParentOfOpenChildren is then true for the parent.
+	parentID := createTestBead(t, rig1Path, "Container with open child")
+	childID := createTestBead(t, rig1Path, "Child tracking the real work")
+	addBeadDependencyOfType(t, childID, parentID, "parent-child", rig1Path)
+
+	// gt sling <parent> rig1 in deferred mode must refuse to schedule the
+	// container.
+	out, err := runGTCmdMayFail(t, gtBinary, hqPath, env, "sling", parentID, "rig1", "--hook-raw-bead")
+	if err == nil {
+		t.Fatalf("gt sling %s rig1 should reject a container with open children, but succeeded:\n%s", parentID, out)
+	}
+	if !strings.Contains(out, "open children") {
+		t.Errorf("expected 'open children' rejection, got:\n%s", out)
+	}
+
+	// Acceptance (a)/(c): no sling context was created, so there is nothing to
+	// re-select and circuit-break next cycle.
+	if fields := findSlingContext(t, hqPath, parentID); fields != nil {
+		t.Errorf("container %s must not get a sling context, but found one: %+v", parentID, fields)
+	}
+
+	// Acceptance (b): the child is still dispatchable as ordinary work.
+	childOut := slingToScheduler(t, gtBinary, hqPath, env, childID, "rig1")
+	if strings.Contains(childOut, "open children") {
+		t.Errorf("child %s should schedule normally, but was rejected:\n%s", childID, childOut)
+	}
+	if fields := findSlingContext(t, hqPath, childID); fields == nil {
+		t.Errorf("child %s should have a sling context after scheduling", childID)
+	}
+}
+
 // TestSchedulerInvalidJSONContextCleanup verifies that sling context beads with
 // invalid JSON descriptions get closed as "invalid-context" during stale cleanup.
 func TestSchedulerInvalidJSONContextCleanup(t *testing.T) {

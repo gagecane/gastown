@@ -798,6 +798,22 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 			continue
 		}
 
+		// Container filter (gu-r8b0q): a work bead with open children is an
+		// epic/container, not dispatchable work — the children track the real
+		// work. executeSling rejects these at dispatch time, but the rejection
+		// circuit-breaks (closes) only the one context while the epic stays in
+		// `bd ready`, so it gets re-selected every cycle → re-fails → re-breaks
+		// forever. Excluding containers from the candidate set here means they
+		// never reach dispatch in the first place, so there is no repeated
+		// circuit-break churn. Runs after dedup so we pay at most one
+		// `bd children` subprocess per unique ready work bead. The children
+		// themselves dispatch normally — only the container parent is filtered.
+		if isParentOfOpenChildren(fields.WorkBeadID) {
+			fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=open_children bead=%s (container — children track the work)\n",
+				style.Dim.Render("○"), fields.WorkBeadID)
+			continue
+		}
+
 		result = append(result, capacity.PendingBead{
 			ID:              ctx.issue.ID,
 			WorkBeadID:      fields.WorkBeadID,
