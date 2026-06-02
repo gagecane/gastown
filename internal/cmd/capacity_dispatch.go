@@ -1280,15 +1280,23 @@ const (
 	labelNoAutoDispatch = "no-auto-dispatch"
 )
 
-// isNonDispatchableBead reports whether a bead is a reference/tripwire that the
-// scheduler must never dispatch. Matched by either the do-not-dispatch / pinned
-// labels or issue_type=reference — a tripwire typically carries all three, but
-// any one is sufficient to exclude it.
-func isNonDispatchableBead(info beadStatusInfo) bool {
-	if strings.EqualFold(info.Type, issueTypeReference) {
+// isNonDispatchableLabelSet is the canonical reference/tripwire test on a raw
+// (issue_type, labels) pair: a bead the dispatch machinery must never feed,
+// schedule, or hook. Matched by issue_type=reference OR the do-not-dispatch /
+// pinned labels — a tripwire typically carries all three, but any one suffices.
+// Every dispatch-path guard delegates here so the convoy-feed, scheduler,
+// executeSling, and gt-done guards share ONE definition (gs-0cj).
+func isNonDispatchableLabelSet(issueType string, labels []string) bool {
+	if strings.EqualFold(issueType, issueTypeReference) {
 		return true
 	}
-	return hasLabel(info.Labels, labelDoNotDispatch) || hasLabel(info.Labels, labelPinned)
+	return hasLabel(labels, labelDoNotDispatch) || hasLabel(labels, labelPinned)
+}
+
+// isNonDispatchableBead reports whether a bead is a reference/tripwire that the
+// scheduler must never dispatch.
+func isNonDispatchableBead(info beadStatusInfo) bool {
+	return isNonDispatchableLabelSet(info.Type, info.Labels)
 }
 
 // isNonDispatchableIssue is the *beads.Issue form of isNonDispatchableBead,
@@ -1297,10 +1305,7 @@ func isNonDispatchableIssue(issue *beads.Issue) bool {
 	if issue == nil {
 		return false
 	}
-	if strings.EqualFold(issue.Type, issueTypeReference) {
-		return true
-	}
-	return beads.HasLabel(issue, labelDoNotDispatch) || beads.HasLabel(issue, labelPinned)
+	return isNonDispatchableLabelSet(issue.Type, issue.Labels)
 }
 
 // nowForDeferRelease is a clock seam that lets tests inject a deterministic

@@ -1961,6 +1961,17 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				if convoyops.IsIdentityBead(t.Title, t.Status, t.Labels) {
 					continue
 				}
+				// Reference/tripwire guard (gs-0cj). A do-not-dispatch / pinned /
+				// reference bead is a permanent live safety gate, never work. The
+				// sling, scheduler, executeSling, and acquisition guards (gs-9ct
+				// #4 / gs-aoz) all honored these labels, but the convoy-feed
+				// candidate selection did NOT — so a labeled tripwire (lb-rtjr.13)
+				// reached a polecat via the stranded feed. The tracked-issue
+				// labels are already loaded here, so exclude them at the same
+				// chokepoint the feed uses to pick candidates.
+				if isNonDispatchableLabelSet(t.IssueType, t.Labels) {
+					continue
+				}
 				readyIssues = append(readyIssues, t.ID)
 			}
 		}
