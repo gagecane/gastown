@@ -109,6 +109,38 @@ func shouldReattachFormula(force bool, requestedFormula string, existing *capaci
 	return force && existing != nil && requestedFormula != existing.Formula
 }
 
+// isStaleOrFailedContext reports whether an existing open sling context should
+// be treated as expired rather than a healthy in-flight dispatch (gu-rm08l).
+// True when the context recorded any transient dispatch failure
+// (dispatch_failures>0 — a spawn hiccup, bd-list read throttle, etc.) or when
+// it has aged past slingContextTTL. Either condition means a re-sling must NOT
+// no-op: the parked context is closed and a fresh one created so the work bead
+// returns to the dispatchable pool.
+//
+// This mirrors areScheduled()'s TTL logic, which already ignores such contexts
+// when convoy/epic/stranded scans decide whether to re-sling. Without this, the
+// scans re-sling but scheduleBead no-ops on the lingering context, parking the
+// bead indefinitely (only a manual `bd close <stale-context>` + re-sling
+// unblocked it). recordDispatchFailure already excludes "already hooked/
+// in_progress" errors, so dispatch_failures>0 implies a genuine spawn failure,
+// not active work being performed.
+func isStaleOrFailedContext(ctx *beads.Issue, fields *capacity.SlingContextFields, now time.Time) bool {
+	if fields != nil && fields.DispatchFailures > 0 {
+		return true
+	}
+	return isContextOlderThan(ctx, now, slingContextTTL)
+}
+
+// staleContextReslingReason returns the close reason for a stale/failed context
+// being recycled by a re-sling, distinguishing transient-failure expiry from
+// plain TTL expiry for observability.
+func staleContextReslingReason(fields *capacity.SlingContextFields) string {
+	if fields != nil && fields.DispatchFailures > 0 {
+		return fmt.Sprintf("failed-context-resling (dispatch_failures=%d)", fields.DispatchFailures)
+	}
+	return "stale-context-resling (ttl-expired)"
+}
+
 // scheduleBead schedules a bead for deferred dispatch via the capacity scheduler.
 // Creates a sling context bead to hold scheduling state. The work bead is never modified.
 func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
@@ -294,6 +326,33 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 				style.Bold.Render("→"), opts.Formula, beadID, existingCtx.ID, existingFields.Formula)
 			return nil
 		}
+
+		// Stale/failed-context recovery (gu-rm08l). A context that recorded a
+		// transient dispatch failure (dispatch_failures>0) or has aged past the
+		// TTL is NOT a healthy in-flight dispatch — it is a parked context the
+		// daemon will never make progress on. Close it and fall through to
+		// create a fresh one so the bead returns to the dispatchable pool.
+		// Without this, re-slings (manual or from convoy/epic/stranded scans,
+		// which already treat such contexts as unscheduled via areScheduled's
+		// TTL logic) no-op on the lingering context and park the bead forever.
+		if isStaleOrFailedContext(existingCtx, existingFields, time.Now()) {
+			reason := staleContextReslingReason(existingFields)
+			if opts.DryRun {
+				fmt.Printf("Would recycle stale/failed context %s for %s (%s) and re-schedule\n",
+					existingCtx.ID, beadID, reason)
+			} else {
+				if err := rigBeads.CloseSlingContext(existingCtx.ID, reason); err != nil {
+					return fmt.Errorf("recycling stale sling context %s: %w", existingCtx.ID, err)
+				}
+				fmt.Printf("%s Recycled stale/failed context %s for %s (%s); re-scheduling\n",
+					style.Bold.Render("↻"), existingCtx.ID, beadID, reason)
+			}
+			// Fall through to fresh schedule (existingCtx is now closed).
+			existingCtx = nil
+			existingFields = nil
+		}
+	}
+	if existingCtx != nil {
 		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
 			style.Dim.Render("○"), beadID, existingCtx.ID)
 		// Point the operator at --force when they're trying to change the

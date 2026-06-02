@@ -26,6 +26,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -491,6 +492,81 @@ func TestSchedulerSlingContextIdempotency(t *testing.T) {
 	if count != 1 {
 		t.Errorf("expected 1 sling context for %s, got %d", beadID, count)
 	}
+}
+
+// TestSchedulerReSlingRecyclesFailedContext verifies the gu-rm08l fix: a
+// re-sling of a bead whose open sling context carries a transient dispatch
+// failure (dispatch_failures>0) recycles the parked context (closes it) and
+// creates a fresh one, instead of no-op'ing. Previously such a context parked
+// the bead indefinitely: re-sling returned "already scheduled, no-op" and there
+// was no auto-retry or auto-expiry.
+func TestSchedulerReSlingRecyclesFailedContext(t *testing.T) {
+	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Failed-context recycle test")
+
+	// First sling: creates the original context.
+	slingToScheduler(t, gtBinary, hqPath, env, beadID, "testrig")
+
+	origID := slingContextIDFor(t, hqPath, beadID)
+	if origID == "" {
+		t.Fatalf("expected an open sling context for %s after first sling", beadID)
+	}
+
+	// Simulate a transient dispatch failure on the original context.
+	rigBeadsDir := doltserver.FindRigBeadsDir(hqPath, "testrig")
+	rigBeads := beads.NewWithBeadsDir(hqPath, rigBeadsDir)
+	fields := findSlingContext(t, hqPath, beadID)
+	if fields == nil {
+		t.Fatalf("could not read context fields for %s", beadID)
+	}
+	fields.DispatchFailures = 1
+	fields.LastFailure = "simulated: bd list read throttle"
+	if err := rigBeads.UpdateSlingContextFields(origID, fields); err != nil {
+		t.Fatalf("seeding dispatch failure: %v", err)
+	}
+
+	// Re-sling: must recycle the failed context and create a fresh one.
+	slingToScheduler(t, gtBinary, hqPath, env, beadID, "testrig")
+
+	// Exactly one OPEN context should exist, and it must be a NEW one
+	// (the failed context was closed).
+	newID := slingContextIDFor(t, hqPath, beadID)
+	if newID == "" {
+		t.Fatalf("expected an open sling context for %s after re-sling (bead must not be parked)", beadID)
+	}
+	if newID == origID {
+		t.Fatalf("re-sling reused the failed context %s; expected a fresh context", origID)
+	}
+
+	// The fresh context must have a clean failure counter.
+	freshFields := findSlingContext(t, hqPath, beadID)
+	if freshFields == nil {
+		t.Fatalf("could not read fresh context fields for %s", beadID)
+	}
+	if freshFields.DispatchFailures != 0 {
+		t.Fatalf("fresh context dispatch_failures = %d, want 0", freshFields.DispatchFailures)
+	}
+}
+
+// slingContextIDFor returns the ID of the single open sling context for a work
+// bead, scanning all rig beads dirs. Returns "" if none. Fails if more than one
+// open context exists (a duplication bug the recycle path must not introduce).
+func slingContextIDFor(t *testing.T, hqPath, workBeadID string) string {
+	t.Helper()
+	var found string
+	count := 0
+	for _, ctx := range listAllSlingContexts(hqPath) {
+		f := beads.ParseSlingContextFields(ctx.Description)
+		if f != nil && f.WorkBeadID == workBeadID {
+			found = ctx.ID
+			count++
+		}
+	}
+	if count > 1 {
+		t.Fatalf("expected at most 1 open sling context for %s, got %d", workBeadID, count)
+	}
+	return found
 }
 
 // TestSchedulerSlingContextWorkBeadPristine verifies that scheduling a bead

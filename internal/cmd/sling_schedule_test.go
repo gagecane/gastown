@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -37,6 +39,82 @@ func TestShouldReattachFormula(t *testing.T) {
 					tc.force, tc.requested, tc.existing, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestIsStaleOrFailedContext verifies the gu-rm08l recovery predicate: an open
+// sling context is treated as stale/failed (and thus recyclable on re-sling)
+// when it recorded any transient dispatch failure OR has aged past the TTL.
+// A healthy, fresh, never-failed context must NOT be recycled.
+func TestIsStaleOrFailedContext(t *testing.T) {
+	now := time.Date(2026, 6, 2, 14, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	aged := now.Add(-slingContextTTL - time.Minute).Format(time.RFC3339)
+
+	cases := []struct {
+		name   string
+		ctx    *beads.Issue
+		fields *capacity.SlingContextFields
+		want   bool
+	}{
+		{
+			name:   "fresh, no failures — healthy in-flight, keep",
+			ctx:    &beads.Issue{CreatedAt: fresh},
+			fields: &capacity.SlingContextFields{DispatchFailures: 0},
+			want:   false,
+		},
+		{
+			name:   "fresh but one transient failure — recycle",
+			ctx:    &beads.Issue{CreatedAt: fresh},
+			fields: &capacity.SlingContextFields{DispatchFailures: 1},
+			want:   true,
+		},
+		{
+			name:   "aged past TTL, no failures — recycle",
+			ctx:    &beads.Issue{CreatedAt: aged},
+			fields: &capacity.SlingContextFields{DispatchFailures: 0},
+			want:   true,
+		},
+		{
+			name:   "nil fields, fresh — keep (fail-closed on age)",
+			ctx:    &beads.Issue{CreatedAt: fresh},
+			fields: nil,
+			want:   false,
+		},
+		{
+			name:   "nil fields, aged — recycle on age alone",
+			ctx:    &beads.Issue{CreatedAt: aged},
+			fields: nil,
+			want:   true,
+		},
+		{
+			name:   "empty created_at, no failures — keep (unknown age fails closed)",
+			ctx:    &beads.Issue{CreatedAt: ""},
+			fields: &capacity.SlingContextFields{DispatchFailures: 0},
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStaleOrFailedContext(tc.ctx, tc.fields, now); got != tc.want {
+				t.Errorf("isStaleOrFailedContext(%+v, %+v) = %v, want %v",
+					tc.ctx, tc.fields, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStaleContextReslingReason verifies the close reason distinguishes a
+// transient-failure expiry from a plain TTL expiry, for operator observability.
+func TestStaleContextReslingReason(t *testing.T) {
+	if got := staleContextReslingReason(&capacity.SlingContextFields{DispatchFailures: 2}); !strings.Contains(got, "failed-context-resling") || !strings.Contains(got, "dispatch_failures=2") {
+		t.Errorf("failure reason = %q, want failed-context-resling with dispatch_failures=2", got)
+	}
+	if got := staleContextReslingReason(&capacity.SlingContextFields{DispatchFailures: 0}); !strings.Contains(got, "stale-context-resling") || !strings.Contains(got, "ttl-expired") {
+		t.Errorf("ttl reason = %q, want stale-context-resling ttl-expired", got)
+	}
+	if got := staleContextReslingReason(nil); !strings.Contains(got, "stale-context-resling") {
+		t.Errorf("nil fields reason = %q, want stale-context-resling", got)
 	}
 }
 
