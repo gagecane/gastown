@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -313,6 +314,20 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 						style.Bold.Render("⚠"),
 						style.Dim.Render("gt daemon stop && gt daemon start"))
 				}
+			}
+
+			// Commit-based staleness (gu-qx6rn): a more authoritative signal
+			// than the mod-time heuristic above. The daemon records its build
+			// commit at startup; compare it to the on-disk binary's commit to
+			// detect an upgraded-but-not-restarted daemon running stale code.
+			di := compareDaemonCommit(state.Commit, version.ResolveBinaryCommit())
+			if di.needsRestart {
+				fmt.Printf("  %s DAEMON RESTART PENDING: running %s, on-disk %s\n",
+					style.Error.Render("✗"),
+					version.ShortCommit(di.daemonCommit),
+					version.ShortCommit(version.ResolveBinaryCommit()))
+				fmt.Printf("    %s\n",
+					style.Dim.Render("gt daemon stop && gt daemon start"))
 			}
 		}
 	} else {

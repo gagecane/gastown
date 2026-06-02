@@ -61,6 +61,12 @@ type State struct {
 
 	// HeartbeatCount is how many heartbeats have completed.
 	HeartbeatCount int64 `json:"heartbeat_count"`
+
+	// Commit is the git commit the running daemon process was built from,
+	// recorded at startup. `gt stale` compares this to the on-disk binary's
+	// commit to detect an upgraded-but-not-restarted daemon running stale
+	// in-memory code (gu-qx6rn). Empty for dev builds with no embedded commit.
+	Commit string `json:"commit,omitempty"`
 }
 
 // StateFile returns the path to the state file.

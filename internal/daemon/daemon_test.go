@@ -389,6 +389,39 @@ func TestSaveLoadState_Roundtrip(t *testing.T) {
 	}
 }
 
+// TestSaveLoadState_PreservesCommit verifies the daemon's recorded build commit
+// survives a state-file round-trip. `gt stale` compares this to the on-disk
+// binary's commit to detect an upgraded-but-not-restarted daemon (gu-qx6rn).
+func TestSaveLoadState_PreservesCommit(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	const wantCommit = "abc1234def56"
+	if err := SaveState(tmpDir, &State{Running: true, PID: 1, Commit: wantCommit}); err != nil {
+		t.Fatalf("SaveState error: %v", err)
+	}
+
+	loaded, err := LoadState(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadState error: %v", err)
+	}
+	if loaded.Commit != wantCommit {
+		t.Errorf("Commit mismatch: got %q, want %q", loaded.Commit, wantCommit)
+	}
+}
+
+// TestState_CommitOmittedWhenEmpty verifies the commit field is omitted from
+// JSON when empty (dev builds / pre-upgrade daemons), so older state files and
+// dev builds don't carry a misleading empty commit.
+func TestState_CommitOmittedWhenEmpty(t *testing.T) {
+	data, err := json.Marshal(&State{Running: true, PID: 1})
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	if strings.Contains(string(data), "commit") {
+		t.Errorf("empty commit should be omitted from JSON, got %s", data)
+	}
+}
+
 func TestListPolecatWorktrees_SkipsHiddenDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 	polecatsDir := filepath.Join(tmpDir, "some-rig", "polecats")

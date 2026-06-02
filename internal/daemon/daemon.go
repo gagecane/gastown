@@ -41,6 +41,7 @@ import (
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/wisp"
 	"github.com/steveyegge/gastown/internal/witness"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -611,11 +612,15 @@ func (d *Daemon) Run() (err error) {
 	}
 	defer func() { _ = os.Remove(d.config.PidFile) }() // best-effort cleanup
 
-	// Update state
+	// Update state. Record the commit this daemon process was built from so
+	// `gt stale` can detect an upgraded-but-not-restarted daemon running stale
+	// in-memory code (gu-qx6rn). The daemon runs as `gt daemon run` — the same
+	// binary — so the ldflag-embedded commit is the running daemon's commit.
 	state := &State{
 		Running:   true,
 		PID:       os.Getpid(),
 		StartedAt: time.Now(),
+		Commit:    version.ResolveBinaryCommit(),
 	}
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)

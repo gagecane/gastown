@@ -46,6 +46,21 @@ func resolveCommitHash() string {
 	return ""
 }
 
+// ResolveBinaryCommit returns the commit hash this binary was built from,
+// reading from the ldflag-set Commit variable or Go build info. Returns "" for
+// dev builds with no embedded commit. Exported so the daemon can record the
+// commit it is actually running into its state file (see gu-qx6rn).
+func ResolveBinaryCommit() string {
+	return resolveCommitHash()
+}
+
+// CommitsMatch reports whether two commit hashes refer to the same commit,
+// tolerating short-vs-full hash differences via prefix matching (minimum 7
+// chars). Exported for the running-daemon-vs-on-disk-binary staleness check.
+func CommitsMatch(a, b string) bool {
+	return commitsMatch(a, b)
+}
+
 // ShortCommit returns first 12 characters of a hash.
 func ShortCommit(hash string) string {
 	if len(hash) > 12 {
