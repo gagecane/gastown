@@ -980,6 +980,22 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Circuit-break dog ticker started (interval %v)", interval)
 	}
 
+	// Start scheduler-stuck ticker if configured.
+	// Detects the non-draining-ready-queue / 0-in-progress-with-capacity stall
+	// signature (ready>0, working==0, free>0, not paused) sustained past the
+	// escalate threshold and escalates it to an agent (gu-n0hvf). Does NOT
+	// auto-remediate. Complements circuit_break, which covers repeated
+	// same-bead circuit-breaks.
+	var schedulerStuckTicker *time.Ticker
+	var schedulerStuckChan <-chan time.Time
+	if d.isPatrolActive("scheduler_stuck") {
+		interval := schedulerStuckInterval(d.patrolConfig)
+		schedulerStuckTicker = time.NewTicker(interval)
+		schedulerStuckChan = schedulerStuckTicker.C
+		defer schedulerStuckTicker.Stop()
+		d.logger.Printf("Scheduler-stuck dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1163,6 +1179,13 @@ func (d *Daemon) Run() (err error) {
 			// within the window (gu-ixo67). Does NOT auto-remediate.
 			if !d.isShutdownInProgress() {
 				d.runCircuitBreakDog()
+			}
+
+		case <-schedulerStuckChan:
+			// Scheduler-stuck dog — escalates a sustained non-draining ready
+			// queue with free capacity (gu-n0hvf). Does NOT auto-remediate.
+			if !d.isShutdownInProgress() {
+				d.runSchedulerStuckDog()
 			}
 
 		case <-timer.C:
