@@ -32,6 +32,31 @@ log() { echo "[rebuild-gt] $*"; }
 # never emit a malformed label if rig discovery failed.
 RIG_LABEL="rig:${RIG_NAME:-unknown}"
 
+# Known-local operational paths that the daemon/rig setup writes into the
+# source checkout but that are NOT real source changes. Left in the dirty
+# check, these block the ff-merge and the rebuild forever (gu-nfvqz, a
+# recurrence of gu-b7h5): local Dolt storage settings get appended to
+# .beads/config.yaml, the externally-managed-Dolt install deletes config.json
+# and drops embeddeddolt/ + metadata.json + .local_version. None affect the
+# built binary. We exclude them from the dirtiness decision so operational
+# residue never stops a deploy.
+#
+# Pathspec form for `git status --porcelain -- <paths>`.
+LOCAL_OPERATIONAL_PATHS=(
+  ':(exclude).beads/config.yaml'
+  ':(exclude)config.json'
+  ':(exclude).local_version'
+  ':(exclude)embeddeddolt/'
+  ':(exclude)metadata.json'
+)
+
+# source_dirty PATH — true (non-empty output) only if the tree has changes
+# OUTSIDE the known-local operational paths. A tree dirty solely with
+# operational residue is treated as clean for rebuild purposes.
+source_dirty() {
+  git -C "$1" status --porcelain -- "${LOCAL_OPERATIONAL_PATHS[@]}" 2>/dev/null
+}
+
 # --- Sync local checkout with origin/main -----------------------------------
 #
 # `gt stale` compares the binary's embedded commit to the *local* HEAD of the
@@ -41,7 +66,7 @@ RIG_LABEL="rig:${RIG_NAME:-unknown}"
 # real picture. Refuses dirty trees and non-ff-merge to preserve existing
 # safety guarantees.
 if [ -n "$RIG_ROOT" ] && [ -d "$RIG_ROOT" ]; then
-  PREFLIGHT_DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null || echo "DIRTY_CHECK_FAILED")
+  PREFLIGHT_DIRTY=$(source_dirty "$RIG_ROOT" 2>/dev/null || echo "DIRTY_CHECK_FAILED")
   if [ -z "$PREFLIGHT_DIRTY" ]; then
     PREFLIGHT_BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null || echo "")
     if [ "$PREFLIGHT_BRANCH" = "main" ]; then
@@ -114,12 +139,12 @@ fi
 
 log "Using source rig: $RIG_ROOT (rig=$RIG_NAME)"
 
-DIRTY=$(git -C "$RIG_ROOT" status --porcelain 2>/dev/null)
+DIRTY=$(source_dirty "$RIG_ROOT")
 if [ -n "$DIRTY" ]; then
-  log "Repo is dirty, skipping rebuild."
+  log "Repo is dirty (outside known-local operational paths), skipping rebuild."
   bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
-    -d "Skipped: repo has uncommitted changes" --silent 2>/dev/null || true
+    -d "Skipped: repo has uncommitted changes outside known-local operational paths" --silent 2>/dev/null || true
   exit 0
 fi
 

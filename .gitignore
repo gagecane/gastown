@@ -103,3 +103,10 @@ docs/fork-info/
 
 # Gas Town (added by gt)
 GEMINI.md
+
+# Local operational residue written into the rig checkout at runtime —
+# never source, must not dirty the tree or rebuild-gt's ff-merge gets
+# skipped forever (gu-nfvqz, recurrence of gu-b7h5).
+.local_version
+embeddeddolt/
+/metadata.json
