@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -126,6 +127,42 @@ type scheduledBeadInfo struct {
 	Blocked   bool   `json:"blocked,omitempty"`
 }
 
+// schedulerStatusScanTimeout bounds the heavy per-rig sling-context fanout
+// (listScheduledBeads → bd list/blocked across every rig dir). Under a large
+// backlog this query has been observed to take ~79s across ~29 dirs (gu-t6jqq),
+// which exceeds the caller's command timeout and makes `gt scheduler status`
+// hang to exit 124 — exactly when the mayor/deacon need it for dispatch triage
+// (gu-nhgev). Bounding it lets the command return the lightweight critical
+// diagnostics (paused, last_dispatch, capacity/reservations) promptly with a
+// stale marker rather than hanging on the optional scheduled-bead list.
+const schedulerStatusScanTimeout = 10 * time.Second
+
+// listScheduledBeadsBounded runs listScheduledBeads under a timeout. It returns
+// the scheduled beads and whether the scan completed; on timeout it returns
+// (nil, false) so the caller can render partial status flagged stale.
+func listScheduledBeadsBounded(townRoot string, timeout time.Duration) ([]scheduledBeadInfo, bool) {
+	return runBoundedScan(timeout, func() []scheduledBeadInfo {
+		return listScheduledBeads(townRoot)
+	})
+}
+
+// runBoundedScan runs scan under a timeout. On completion it returns
+// (result, true); on timeout it returns (nil, false) so the caller can render
+// partial status flagged stale. The abandoned goroutine finishes harmlessly in
+// the background (the channel is buffered, so it never blocks on send).
+func runBoundedScan(timeout time.Duration, scan func() []scheduledBeadInfo) ([]scheduledBeadInfo, bool) {
+	done := make(chan []scheduledBeadInfo, 1)
+	go func() {
+		done <- scan()
+	}()
+	select {
+	case r := <-done:
+		return r, true
+	case <-time.After(timeout):
+		return nil, false
+	}
+}
+
 func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -137,7 +174,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading scheduler state: %w", err)
 	}
 
-	scheduled := listScheduledBeads(townRoot)
+	scheduled, scanComplete := listScheduledBeadsBounded(townRoot, schedulerStatusScanTimeout)
 
 	capacitySnapshot, err := polecatCapacitySnapshotForTown(townRoot)
 	if err != nil {
@@ -154,6 +191,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			Capacity       polecatCapacitySnapshot `json:"capacity"`
 			LastDispatchAt string                  `json:"last_dispatch_at,omitempty"`
 			Beads          []scheduledBeadInfo     `json:"beads"`
+			Stale          bool                    `json:"stale,omitempty"`
 		}{
 			Paused:         state.Paused,
 			PausedBy:       state.PausedBy,
@@ -162,6 +200,7 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			Capacity:       capacitySnapshot,
 			LastDispatchAt: state.LastDispatchAt,
 			Beads:          scheduled,
+			Stale:          !scanComplete,
 		}
 		for _, b := range scheduled {
 			if !b.Blocked {
@@ -186,7 +225,12 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("  State:    active\n")
 	}
-	fmt.Printf("  Scheduled: %d total, %d ready\n", len(scheduled), readyCount)
+	if scanComplete {
+		fmt.Printf("  Scheduled: %d total, %d ready\n", len(scheduled), readyCount)
+	} else {
+		fmt.Printf("  Scheduled: %s (scan exceeded %s — backlog too large)\n",
+			style.Warning.Render("unavailable"), schedulerStatusScanTimeout)
+	}
 	fmt.Printf("  Active:    %d polecats\n", capacitySnapshot.ActiveSessions)
 	if capacitySnapshot.Max > 0 {
 		fmt.Printf("  Capacity:  %d free of %d (working: %d, recovery: %d, reservations: %d, reusable idle: %d, pending MR: %d)\n",
