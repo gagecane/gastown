@@ -14,8 +14,8 @@ type fakeOrphanBeads struct {
 	agents    map[string]*beads.Issue
 	issues    map[string]*beads.Issue
 	listErr   error
-	closeErrs map[string]error // source-issue ID -> error
-	closed    map[string]string // source-issue ID -> close reason
+	closeErrs map[string]error    // source-issue ID -> error
+	closed    map[string]string   // source-issue ID -> close reason
 	removed   map[string][]string // source-issue ID -> removed labels
 }
 

@@ -187,7 +187,7 @@ func ReconcileMergedOrphans(bd OrphanReconcileBeads, dryRun bool) (*ReconcileOrp
 			RemoveLabels: []string{awaitingRefineryMergeLabel},
 		}); err != nil {
 			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type: "orphan_label_clear_failed",
+				Type:    "orphan_label_clear_failed",
 				Message: fmt.Sprintf("source_issue=%s: %v", assessment.SourceIssue, err),
 			})
 		}
