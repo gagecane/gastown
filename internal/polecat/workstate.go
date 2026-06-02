@@ -56,16 +56,30 @@ type WorkstateDisposition struct {
 // DecideWorkstate returns the canonical disposition for a polecat.
 func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	if in.State != StateIdle {
-		verdict := WorkstateVerdictNeedsRecovery
-		needsRecovery := true
 		if in.State == StateWorking {
-			verdict = WorkstateVerdictWorking
-			needsRecovery = false
+			return WorkstateDisposition{
+				Verdict:              WorkstateVerdictWorking,
+				Reason:               "not-idle",
+				CountsTowardCapacity: true,
+			}
+		}
+		// A non-working, non-idle polecat (e.g. stalled after a clean completion)
+		// whose work is safely captured by an open merge request, with no at-risk
+		// local delta, is awaiting merge — not in need of recovery. Normal
+		// post-merge cleanup handles it. Treat it like the idle PENDING_MR case so
+		// it is preserved until the MR lands instead of escalating to the Mayor as
+		// an "unknown recovery predicate" false alarm.
+		if in.ActiveMRBlocker != "" && !workstateHasAtRiskDelta(in) {
+			return WorkstateDisposition{
+				Verdict:     WorkstateVerdictPendingMR,
+				Reason:      "active-mr-open",
+				ReuseStatus: "idle-pr-open",
+			}
 		}
 		return WorkstateDisposition{
-			Verdict:              verdict,
+			Verdict:              WorkstateVerdictNeedsRecovery,
 			Reason:               "not-idle",
-			NeedsRecovery:        needsRecovery,
+			NeedsRecovery:        true,
 			CountsTowardCapacity: true,
 		}
 	}
@@ -167,6 +181,26 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 		d.ReuseStatus = "idle-clean"
 	}
 	return d
+}
+
+// workstateHasAtRiskDelta reports whether the gathered facts show local work
+// that could be lost if the polecat were nuked now: a failed push/MR, an
+// unsafe cleanup status, a dirty or unreadable git tree, stashes, or unpushed
+// commits. When none of these hold, an open MR fully captures the work.
+func workstateHasAtRiskDelta(in WorkstateInput) bool {
+	if in.PushFailed || in.MRFailed {
+		return true
+	}
+	if !in.IgnoreCleanupStatus && !in.CleanupStatus.IsSafe() {
+		return true
+	}
+	if in.GitCheckFailed || in.GitDirty {
+		return true
+	}
+	if in.StashCount > 0 || in.UnpushedCommits > 0 {
+		return true
+	}
+	return false
 }
 
 func itoa(n int) string {
