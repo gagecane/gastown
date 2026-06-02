@@ -137,6 +137,7 @@ type PatrolsConfig struct {
 	MainCIBreak          *MainCIBreakConfig          `json:"main_ci_break,omitempty"`
 	NudgeQueueGC         *NudgeQueueGCConfig         `json:"nudge_queue_gc,omitempty"`
 	RestartPending       *RestartPendingConfig       `json:"restart_pending,omitempty"`
+	CircuitBreak         *CircuitBreakConfig         `json:"circuit_break,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -361,6 +362,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.RestartPending.Enabled
+	}
+	if patrol == "circuit_break" {
+		// Default-enabled (gu-ixo67): scheduler-failure observability that must
+		// run out of the box, including on towns whose daemon.json predates this
+		// addition. The dog only escalates (never auto-remediates), so it is
+		// safe to default on.
+		if config == nil || config.Patrols == nil || config.Patrols.CircuitBreak == nil {
+			return true
+		}
+		return config.Patrols.CircuitBreak.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

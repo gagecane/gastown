@@ -389,7 +389,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 				_ = events.LogFeed(events.TypeSchedulerDispatchFailed, actor,
 					events.SchedulerDispatchFailedPayload(b.WorkBeadID, b.TargetRig, err.Error()))
 			}
-			recordDispatchFailure(beadsForPendingContext(townRoot, b), b, err)
+			recordDispatchFailure(townRoot, beadsForPendingContext(townRoot, b), b, err)
 		},
 		BatchSize:  batchSize,
 		SpawnDelay: spawnDelay,
@@ -552,6 +552,12 @@ func cleanupStaleContexts(townRoot string) {
 		}
 		if fields.DispatchFailures >= maxDispatchFailures {
 			_ = beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "circuit-broken")
+			// Backstop log: the primary recordDispatchFailure path normally
+			// logs the break, but if that process died after incrementing the
+			// counter but before closing, this is where the break is observed.
+			// The monitor dedups by distinct context_id, so a double-log of the
+			// same context is harmless (gu-ixo67).
+			logCircuitBreak(townRoot, fields.WorkBeadID, ctx.issue.ID, fields.TargetRig, fields.LastFailure)
 			continue
 		}
 		staleCheckContexts = append(staleCheckContexts, ctx)
@@ -997,7 +1003,7 @@ func isAlreadyDispatchedError(err error) bool {
 // recordDispatchFailure increments the dispatch failure counter on the sling context bead.
 // Skips increment for "already hooked/in_progress" errors which indicate the bead
 // is actively being worked — not a true dispatch failure (gu-cqmw).
-func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
+func recordDispatchFailure(townRoot string, townBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
 	if b.Context == nil {
 		return
 	}
@@ -1024,6 +1030,26 @@ func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispa
 		}
 		fmt.Printf("  %s Context %s (work: %s) failed %d times, circuit-broken\n",
 			style.Warning.Render("⚠"), b.ID, b.WorkBeadID, b.Context.DispatchFailures)
+		logCircuitBreak(townRoot, b.WorkBeadID, b.ID, b.TargetRig, dispatchErr.Error())
+	}
+}
+
+// logCircuitBreak appends a circuit-break record to the town-wide log so the
+// circuit_break_dog daemon patrol can detect repeated breaks on the same work
+// bead (gu-ixo67). Best-effort: a log failure only delays detection, so it is
+// logged at warning level and never blocks dispatch.
+func logCircuitBreak(townRoot, workBeadID, contextID, targetRig, lastFailure string) {
+	if townRoot == "" {
+		return
+	}
+	if err := events.LogCircuitBreak(townRoot, events.CircuitBreakRecord{
+		WorkBeadID:  workBeadID,
+		ContextID:   contextID,
+		TargetRig:   targetRig,
+		LastFailure: lastFailure,
+	}); err != nil {
+		fmt.Printf("  %s Failed to log circuit-break for %s: %v\n",
+			style.Warning.Render("⚠"), contextID, err)
 	}
 }
 

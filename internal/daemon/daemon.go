@@ -951,6 +951,21 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Restart-pending dog ticker started (interval %v)", interval)
 	}
 
+	// Start circuit-break ticker if configured.
+	// Detects work beads that are circuit-broken repeatedly within a window
+	// (re-dispatched into fresh sling-contexts that each fail deterministically)
+	// and escalates them to an agent (gu-ixo67) — the failure shape deferred
+	// from gu-n0hvf that single-context dispatch state cannot surface.
+	var circuitBreakTicker *time.Ticker
+	var circuitBreakChan <-chan time.Time
+	if d.isPatrolActive("circuit_break") {
+		interval := circuitBreakInterval(d.patrolConfig)
+		circuitBreakTicker = time.NewTicker(interval)
+		circuitBreakChan = circuitBreakTicker.C
+		defer circuitBreakTicker.Stop()
+		d.logger.Printf("Circuit-break dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1120,6 +1135,13 @@ func (d *Daemon) Run() (err error) {
 			// agent so a gated restart happens (gu-muj66). Does NOT self-restart.
 			if !d.isShutdownInProgress() {
 				d.runRestartPendingDog()
+			}
+
+		case <-circuitBreakChan:
+			// Circuit-break dog — escalates beads circuit-broken repeatedly
+			// within the window (gu-ixo67). Does NOT auto-remediate.
+			if !d.isShutdownInProgress() {
+				d.runCircuitBreakDog()
 			}
 
 		case <-timer.C:
