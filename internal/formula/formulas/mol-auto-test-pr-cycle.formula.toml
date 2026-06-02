@@ -1,0 +1,129 @@
+description = """
+Standing patrol that drives the auto-test-pr cycle (Phase 0 task 4).
+
+Once per tick (recommended cadence: hourly), the Mayor runs one cycle:
+
+  0. Reconcile `town-auto-test-pr-state.enabled_rigs[]` against the
+     settings-JSON ground truth (Round 3 fix #4 self-heal).
+  1. D18 cooldown-release: for each opted-in rig in `cooled-down`,
+     CAS-transition `cooled-down → idle` if `now - last_transition.at
+     >= cadence_days * 24h`. `paused-by-circuit-breaker` does NOT
+     auto-release.
+  2. Read `town-auto-test-pr-state` for global pause / circuit-breaker.
+  3. For each opted-in rig: read `<rig>-auto-test-state`; skip unless
+     `state == idle` and not per-rig-paused.
+  4. CAS-transition `idle → picking`; on commit failure, skip (another
+     tick owns this rig).
+  5. Target picking: candidates from `git log --since=30d` × coverage
+     profile, ranked by (churn × uncovered_branches), per-file 21-day
+     rejection cooldown applied, uncovered branches ordered by
+     line-distance to recent churn (NG5).
+  6. CAS-transition `picking → dispatched`; file the dispatch bead
+     (JSON envelope per synthesis §Interface); sling-attach to the
+     polecat pool at the lowest priority floor.
+
+## Inert until a rig opts in (Phase 0)
+
+This formula is registered in the Mayor's patrol set in Phase 0, but
+the cycle SHORT-CIRCUITS at step 2 whenever no rig has
+`auto_test_pr.enabled=true`: the reconcile step computes an empty
+`enabled_rigs[]`, and `RunCycle` returns early with
+`exit_reason="no-rigs-enabled"`. No per-rig bead is touched, no work is
+dispatched. Phase 1 activation (gu-gmj0r) is a single settings flag flip
+— `gt auto-test-pr enable --rig=<rig>` — after which the same cycle code
+begins picking targets and dispatching. The Go implementation lives in
+`internal/autotestpr/cycle.go` (RunCycle); this formula is the
+patrol-shell that invokes it each tick.
+
+## Missing town-bead is non-fatal (Round 2 fix #10)
+
+If `town-auto-test-pr-state` is not provisioned (partial Phase 0
+revert), the cycle emits a structured warning and exits 0 — it does NOT
+panic. Run `gt auto-test-pr status` to auto-provision the town bead.
+
+## Design context
+
+  - .designs/auto-test-pr/synthesis.md §"Proposed Design component 1"
+  - .designs/auto-test-pr/integration.md §"Phase 0 — task 4"
+  - .plan-reviews/auto-test-pr/review-round-3.md (fix #4: reconcile)
+"""
+
+formula = "mol-auto-test-pr-cycle"
+version = 1
+
+[vars]
+[vars.wisp_type]
+description = "Type of wisp created for this molecule. Patrols loop continuously."
+default = "patrol"
+
+[vars.scan_interval_seconds]
+description = "Seconds to sleep between cycle ticks (default 3600 = hourly)."
+default = "3600"
+
+[vars.auto_test_label]
+description = "Bead label identifying auto-test-pr cycle / dispatch beads."
+default = "gt:auto-test-pr"
+
+[[steps]]
+id = "run-cycle-tick"
+title = "Run one auto-test-pr cycle tick"
+description = """
+Execute one tick of the auto-test-pr cycle via the Mayor's in-process
+RunCycle entry point (internal/autotestpr/cycle.go). The tick performs
+the reconcile, cooldown-release, town-state read, and (when rigs are
+opted in) per-rig pick → dispatch steps described above.
+
+**1. Run the tick:**
+```bash
+gt auto-test-pr cycle-tick
+```
+
+`cycle-tick` reconciles `enabled_rigs[]`, runs the D18 cooldown-release
+for any cooled-down rigs whose cadence has elapsed, reads the town
+state, and processes each opted-in idle rig. It prints the structured
+CycleResult (reconciled, enabled_rigs, exit_reason, rigs_processed).
+
+**2. Interpret the result (do not error on inert exits):**
+- `exit_reason=no-rigs-enabled` — expected in Phase 0. Nothing to do.
+- `exit_reason=town-bead-missing` — degraded; the cycle warned and
+  exited 0. A separate provisioning step (task 8) owns the fix; do NOT
+  panic or escalate from the tick.
+- `exit_reason=global-pause` / `circuit-breaker` — town-wide hold in
+  effect; the cycle correctly did no per-rig work.
+- empty `exit_reason` with `rigs_processed>0` — the cycle dispatched
+  auto-test work for one or more rigs this tick.
+
+**Exit criteria:** One cycle tick ran to completion; the CycleResult was
+logged. No per-rig bead is mutated when no rig is opted in."""
+
+[[steps]]
+id = "loop-or-exit"
+title = "Sleep then respawn for the next cycle tick"
+needs = ["run-cycle-tick"]
+wisp_ttl = "30m"
+consumer_bead_id = "next auto-test-pr cycle tick (self-respawn)"
+description = """
+Sleep for the configured interval, then respawn the patrol for the next
+tick. The respawn reuses the patrol molecule (no new bead created); the
+daemon's zombie-scan handles a respawn that never happens.
+
+**1. Sleep before the next tick:**
+```bash
+echo "auto-test-pr cycle tick complete. Sleeping {{scan_interval_seconds}}s."
+sleep {{scan_interval_seconds}}
+```
+
+**2. Respawn by looping back to run-cycle-tick:**
+```bash
+bd mol step respawn --target run-cycle-tick
+```
+
+**Context filling:** If the session is near context capacity, hand off
+rather than respawning:
+```bash
+gt handoff -y \\
+  -s "auto-test-pr cycle ticking" \\
+  -m "Next tick: reconcile enabled_rigs, run cooldown-release, process opted-in rigs."
+```
+
+**Exit criteria:** Next cycle tick initiated (via respawn or handoff)."""
