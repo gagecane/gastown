@@ -172,6 +172,100 @@ func TestPerRigDeactivate(t *testing.T) {
 	}
 }
 
+func TestActivateCapturesTriggeredBy(t *testing.T) {
+	townRoot := t.TempDir()
+
+	t.Setenv("USER", "testuser")
+	t.Setenv("GT_ROLE", "gastown/polecats/raider")
+	t.Setenv("GT_SESSION", "")
+
+	if err := Activate(townRoot, TriggerManual, "freezing"); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	info := Read(townRoot)
+	if info == nil {
+		t.Fatal("Read returned nil")
+	}
+	want := "testuser (gastown/polecats/raider)"
+	if info.TriggeredBy != want {
+		t.Errorf("TriggeredBy = %q, want %q", info.TriggeredBy, want)
+	}
+	if info.Reason != "freezing" {
+		t.Errorf("Reason = %q, want %q", info.Reason, "freezing")
+	}
+}
+
+func TestActivateRigCapturesTriggeredBy(t *testing.T) {
+	townRoot := t.TempDir()
+
+	t.Setenv("USER", "rigops")
+	t.Setenv("GT_ROLE", "")
+	t.Setenv("GT_SESSION", "")
+
+	if err := ActivateRig(townRoot, "gastown", TriggerManual, ""); err != nil {
+		t.Fatalf("ActivateRig: %v", err)
+	}
+
+	info := ReadRig(townRoot, "gastown")
+	if info == nil {
+		t.Fatal("ReadRig returned nil")
+	}
+	if info.TriggeredBy != "rigops" {
+		t.Errorf("TriggeredBy = %q, want %q", info.TriggeredBy, "rigops")
+	}
+}
+
+func TestParseLegacyThreeFieldFile(t *testing.T) {
+	// A pre-attribution ESTOP file: trigger\ttimestamp\treason
+	townRoot := t.TempDir()
+	content := "manual\t2026-06-02T06:28:09Z\tstale freeze\n"
+	if err := os.WriteFile(FilePath(townRoot), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := Read(townRoot)
+	if info == nil {
+		t.Fatal("Read returned nil")
+	}
+	if info.Trigger != TriggerManual {
+		t.Errorf("Trigger = %q, want %q", info.Trigger, TriggerManual)
+	}
+	if info.Reason != "stale freeze" {
+		t.Errorf("Reason = %q, want %q", info.Reason, "stale freeze")
+	}
+	if info.TriggeredBy != "" {
+		t.Errorf("TriggeredBy = %q, want empty for legacy file", info.TriggeredBy)
+	}
+}
+
+func TestCurrentActor(t *testing.T) {
+	// Cases all set USER explicitly so the os/user fallback (which would
+	// resolve the real test runner's username) is never exercised here.
+	cases := []struct {
+		name    string
+		user    string
+		role    string
+		session string
+		want    string
+	}{
+		{"user and role", "alice", "gastown/mayor", "", "alice (gastown/mayor)"},
+		{"user only", "bob", "", "", "bob"},
+		{"session fallback when role unset", "carol", "", "sess-123", "carol (sess-123)"},
+		{"role wins over session", "dave", "gastown/refinery", "sess-9", "dave (gastown/refinery)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("USER", tc.user)
+			t.Setenv("GT_ROLE", tc.role)
+			t.Setenv("GT_SESSION", tc.session)
+			if got := CurrentActor(); got != tc.want {
+				t.Errorf("CurrentActor() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseBareFile(t *testing.T) {
 	townRoot := t.TempDir()
 	// Simulate a bare touch (no content)
