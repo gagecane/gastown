@@ -34,9 +34,9 @@ type patchEquivalenceChecker interface {
 //  3. If there are "+" lines, they could be EITHER:
 //     a. Genuine unique work not on origin/<branch> → diverged.
 //     b. Mainline commits that the rebase swept onto HEAD (e.g., the new
-//        commits on origin/<defaultBranch> that the rebase incorporated).
-//        Origin/<branch> wouldn't have these, but they aren't "unique work"
-//        either — they're already on the target. Treat as patch-equivalent.
+//     commits on origin/<defaultBranch> that the rebase incorporated).
+//     Origin/<branch> wouldn't have these, but they aren't "unique work"
+//     either — they're already on the target. Treat as patch-equivalent.
 //
 // We discriminate (3a) vs (3b) by checking whether each "+" SHA is an ancestor
 // of origin/<defaultBranch>. If every "+" SHA is on mainline, the only
