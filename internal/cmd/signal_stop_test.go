@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
 )
 
@@ -58,6 +59,69 @@ func TestIsSelfHandoff(t *testing.T) {
 			got := isSelfHandoff(tt.msg, tt.address)
 			if got != tt.want {
 				t.Errorf("isSelfHandoff() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsSelfHandoffBead(t *testing.T) {
+	tests := []struct {
+		name string
+		bead *beads.Issue
+		want bool
+	}{
+		{
+			name: "nil bead",
+			bead: nil,
+			want: false,
+		},
+		{
+			name: "self-handoff mail bead",
+			bead: &beads.Issue{
+				Title:  "🤝 HANDOFF: Session cycling",
+				Labels: []string{"gt:message", "from:gastown/polecats/shiny"},
+			},
+			want: true,
+		},
+		{
+			name: "handoff keyword without leading emoji",
+			bead: &beads.Issue{
+				Title:  "HANDOFF notes for next session",
+				Labels: []string{"gt:message"},
+			},
+			want: true,
+		},
+		{
+			name: "genuine slung work (no message label)",
+			bead: &beads.Issue{
+				Title:  "Fix the auth bug",
+				Labels: []string{"gt:bug"},
+			},
+			want: false,
+		},
+		{
+			name: "message bead that is not a handoff",
+			bead: &beads.Issue{
+				Title:  "Question about the merge queue",
+				Labels: []string{"gt:message"},
+			},
+			want: false,
+		},
+		{
+			name: "handoff title but missing message label",
+			bead: &beads.Issue{
+				Title:  "🤝 HANDOFF: Session cycling",
+				Labels: []string{"gt:task"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isSelfHandoffBead(tt.bead)
+			if got != tt.want {
+				t.Errorf("isSelfHandoffBead() = %v, want %v", got, tt.want)
 			}
 		})
 	}

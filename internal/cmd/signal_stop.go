@@ -177,7 +177,8 @@ func checkStopSlungWork(townRoot string) string {
 		hookBead, err := b.Show(agentBead.HookBead)
 		if err == nil && hookBead != nil {
 			// Only block if the hooked work is in "hooked" status (not yet claimed)
-			if hookBead.Status == beads.StatusHooked {
+			// and isn't a self-handoff continuity bead (gu-8g439).
+			if hookBead.Status == beads.StatusHooked && !isSelfHandoffBead(hookBead) {
 				return fmt.Sprintf("[gt signal stop] Work slung to you: %s — \"%s\"\n\n"+
 					"Run `gt hook` to see details, then execute the work.",
 					hookBead.ID, hookBead.Title)
@@ -189,20 +190,45 @@ func checkStopSlungWork(townRoot string) string {
 
 	// Fallback: query for any hooked beads assigned to this agent.
 	// This catches cases where the agent bead doesn't exist yet.
+	// Limit raised above 1 so a self-handoff bead on the hook doesn't crowd
+	// out genuine slung work — we filter handoffs out below (gu-8g439).
 	hookedBeads, err := b.List(beads.ListOptions{
 		Status:   beads.StatusHooked,
 		Assignee: identity,
 		Priority: -1,
-		Limit:    1,
+		Limit:    10,
 	})
-	if err == nil && len(hookedBeads) > 0 {
-		bead := hookedBeads[0]
-		return fmt.Sprintf("[gt signal stop] Work slung to you: %s — \"%s\"\n\n"+
-			"Run `gt hook` to see details, then execute the work.",
-			bead.ID, bead.Title)
+	if err == nil {
+		for _, bead := range hookedBeads {
+			// Skip self-handoff continuity beads. These are hooked
+			// indefinitely as a session-survival primitive (see
+			// sendHandoffMail) and are NOT bd-closeable, so without this
+			// filter they re-block at every turn boundary even after their
+			// content has been consumed (gu-8g439).
+			if isSelfHandoffBead(bead) {
+				continue
+			}
+			return fmt.Sprintf("[gt signal stop] Work slung to you: %s — \"%s\"\n\n"+
+				"Run `gt hook` to see details, then execute the work.",
+				bead.ID, bead.Title)
+		}
 	}
 
 	return ""
+}
+
+// isSelfHandoffBead reports whether a hooked bead is a self-handoff continuity
+// bead rather than genuine slung work. Handoff mail beads are created by
+// sendHandoffMail with the "gt:message" label and a "HANDOFF" subject/title, and
+// are hooked indefinitely so the successor session can read them. They are a
+// durability primitive (not bd-closeable), so the stop hook must not treat them
+// as fresh work — otherwise they re-block at every turn boundary even after
+// being consumed. Mirrors isSelfHandoff used by the unread-mail path (gu-8g439).
+func isSelfHandoffBead(bead *beads.Issue) bool {
+	if bead == nil {
+		return false
+	}
+	return beads.HasLabel(bead, "gt:message") && strings.Contains(bead.Title, "HANDOFF")
 }
 
 // stopState tracks the last block reason to prevent infinite notification loops.
