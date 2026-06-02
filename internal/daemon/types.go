@@ -136,6 +136,7 @@ type PatrolsConfig struct {
 	MRCycleClose         *MRCycleCloseConfig         `json:"mr_cycle_close,omitempty"`
 	MainCIBreak          *MainCIBreakConfig          `json:"main_ci_break,omitempty"`
 	NudgeQueueGC         *NudgeQueueGCConfig         `json:"nudge_queue_gc,omitempty"`
+	EventChannelGC       *EventChannelGCConfig       `json:"event_channel_gc,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -340,6 +341,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.NudgeQueueGC.Enabled
+	}
+	if patrol == "event_channel_gc" {
+		// Default-enabled: a missing config still returns true so the
+		// patrol runs out of the box on towns whose daemon.json predates
+		// this addition. EnsureLifecycleDefaults will populate the field
+		// on next save so it shows up explicitly.
+		if config == nil || config.Patrols == nil || config.Patrols.EventChannelGC == nil {
+			return true
+		}
+		return config.Patrols.EventChannelGC.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

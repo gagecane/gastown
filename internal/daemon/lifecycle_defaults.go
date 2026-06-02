@@ -65,6 +65,11 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "5m",
 			},
+			EventChannelGC: &EventChannelGCConfig{
+				Enabled:      true,
+				IntervalStr:  "1h",
+				RetentionStr: "168h",
+			},
 		},
 	}
 }
@@ -128,6 +133,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.NudgeQueueGC == nil {
 		p.NudgeQueueGC = d.NudgeQueueGC
+		changed = true
+	}
+	if p.EventChannelGC == nil {
+		p.EventChannelGC = d.EventChannelGC
 		changed = true
 	}
 
