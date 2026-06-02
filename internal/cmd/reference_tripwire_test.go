@@ -98,22 +98,6 @@ func TestIsNonDispatchableIssue(t *testing.T) {
 	}
 }
 
-// TestIsReferenceTripwireBeadInfo covers the sling-ingestion guard (hq-9jeyo,
-// ask 3): refusing to schedule prevents the sling-context + auto-convoy.
-func TestIsReferenceTripwireBeadInfo(t *testing.T) {
-	if isReferenceTripwireBeadInfo(nil) {
-		t.Error("nil must not be flagged")
-	}
-	if isReferenceTripwireBeadInfo(&beadInfo{Status: "open", Labels: []string{"bug"}}) {
-		t.Error("ordinary work must not be flagged")
-	}
-	if !isReferenceTripwireBeadInfo(&beadInfo{Labels: []string{"do-not-dispatch"}}) {
-		t.Error("do-not-dispatch must be flagged")
-	}
-	if !isReferenceTripwireBeadInfo(&beadInfo{Labels: []string{"pinned"}}) {
-		t.Error("pinned must be flagged")
-	}
-	if !isReferenceTripwireBeadInfo(&beadInfo{IssueType: "reference"}) {
-		t.Error("issue_type=reference must be flagged")
-	}
-}
+// Note: the pure isReferenceTripwireBeadInfo predicate now lives in
+// internal/dispatch (gu-y5z8d); its unit coverage is
+// dispatch.TestIsReferenceTripwireBeadInfo.
