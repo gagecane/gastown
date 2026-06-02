@@ -28,6 +28,8 @@ func TestAssessActiveMR(t *testing.T) {
 		"mr-open":        &beads.Issue{ID: "mr-open", Status: "open"},
 		"mr-closed":      &beads.Issue{ID: "mr-closed", Status: "closed"},
 		"mr-with-source": &beads.Issue{ID: "mr-with-source", Status: "closed", Description: "source_issue: gt-closed\n"},
+		"mr-merged":      &beads.Issue{ID: "mr-merged", Status: "closed", Description: "close_reason: merged\n"},
+		"mr-mergecommit": &beads.Issue{ID: "mr-mergecommit", Status: "closed", Description: "merge_commit: 2b97b2c\n"},
 		"gt-closed":      &beads.Issue{ID: "gt-closed", Status: "closed"},
 		"gt-open":        &beads.Issue{ID: "gt-open", Status: "open"},
 	}}
@@ -50,6 +52,14 @@ func TestAssessActiveMR(t *testing.T) {
 		{name: "nil reader fails closed", reader: nil, input: ActiveMRInput{ActiveMR: "mr-closed", SourceIssueHint: "gt-closed"}, wantPend: true},
 		{name: "git unsafe fails closed when required", reader: reader, input: ActiveMRInput{ActiveMR: "mr-closed", SourceIssueHint: "gt-closed", RequireGitSafe: true}, wantPend: true, wantSource: "gt-closed"},
 		{name: "git safe permits stale when required", reader: reader, input: ActiveMRInput{ActiveMR: "mr-closed", SourceIssueHint: "gt-closed", RequireGitSafe: true, GitSafe: true}, wantPend: false, wantSource: "gt-closed"},
+		// gu-a0uc: a MERGED MR is satisfied even when GitSafe is false (squash-merge
+		// deletes the origin branch and rewrites SHAs, so the patch-id preservation
+		// check fails — but the work demonstrably landed on target).
+		{name: "merged MR is stale despite git unsafe", reader: reader, input: ActiveMRInput{ActiveMR: "mr-merged", SourceIssueHint: "gt-closed", RequireGitSafe: true, GitSafe: false}, wantPend: false, wantSource: "gt-closed"},
+		{name: "MR with merge_commit is stale despite git unsafe", reader: reader, input: ActiveMRInput{ActiveMR: "mr-mergecommit", SourceIssueHint: "gt-closed", RequireGitSafe: true, GitSafe: false}, wantPend: false, wantSource: "gt-closed"},
+		// A merged MR whose source is NOT terminal still requires the source to be
+		// terminal first — the merge alone does not bypass an open source bead.
+		{name: "merged MR with open source is pending", reader: reader, input: ActiveMRInput{ActiveMR: "mr-merged", SourceIssueHint: "gt-open", RequireGitSafe: true, GitSafe: false}, wantPend: true, wantSource: "gt-open"},
 	}
 
 	for _, tt := range tests {

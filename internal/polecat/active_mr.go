@@ -79,6 +79,20 @@ func assessStaleActiveMR(reader IssueReader, in ActiveMRInput, result ActiveMRAs
 		result.Reason = fmt.Sprintf("active_mr=%s status=%s %s", result.ActiveMR, mrStatus, reason)
 		return result
 	}
+	// A MERGED MR is definitive proof the work landed on the target branch, so
+	// the local worktree carries nothing at risk regardless of git state. After
+	// a squash-merge the Refinery deletes the origin polecat branch and rewrites
+	// SHAs, which makes the caller's patch-id preservation check (GitSafe) report
+	// false — leaving a cleanly-merged MR flagged NEEDS_RECOVERY forever and
+	// holding a recovery slot (gu-a0uc repro 2026-06-01). Treat merged as
+	// satisfied without the git-safe gate. Non-merged terminal MRs
+	// (rejected/superseded/conflict) still require GitSafe because local commits
+	// may be unpreserved.
+	if mrMerged(mr) {
+		result.Pending = false
+		result.Reason = ""
+		return result
+	}
 	if in.RequireGitSafe && !in.GitSafe {
 		result.Reason = fmt.Sprintf("active_mr=%s status=%s source_issue=%s git_state=unsafe", result.ActiveMR, mrStatus, sourceIssue)
 		return result
@@ -86,6 +100,20 @@ func assessStaleActiveMR(reader IssueReader, in ActiveMRInput, result ActiveMRAs
 	result.Pending = false
 	result.Reason = ""
 	return result
+}
+
+// mrMerged reports whether a terminal MR bead represents a successful merge to
+// the target branch (as opposed to rejected/superseded/conflict). It is proven
+// by either close_reason=merged or the presence of a merge_commit SHA. A nil mr
+// (missing bead) is NOT treated as merged — absence of the bead is not proof the
+// work landed.
+func mrMerged(mr *beads.Issue) bool {
+	fields := beads.ParseMRFields(mr)
+	if fields == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(fields.CloseReason), "merged") ||
+		strings.TrimSpace(fields.MergeCommit) != ""
 }
 
 func sourceIssueForActiveMR(hint string, mr *beads.Issue) string {
