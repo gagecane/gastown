@@ -32,6 +32,14 @@ type ActiveMRAssessment struct {
 	SourceIssue    string
 	SourceTerminal bool
 	Stale          bool
+	// MRMerged reports whether the referenced MR bead is proven-merged
+	// (close_reason=merged or a merge_commit SHA). It is meaningful only when
+	// Stale is true. Distinct from SourceTerminal: a merged MR is definitive
+	// proof the work landed on the target branch, which the post-merge orphan
+	// reconcile (gu-7igu8) uses to safely force-close a source issue that the
+	// refinery left non-terminal after an interrupted reconcile. A missing MR
+	// bead is NOT merged — absence is not proof the work landed.
+	MRMerged bool
 }
 
 // AssessActiveMR returns whether active_mr still represents work pending in the
@@ -71,6 +79,7 @@ func AssessActiveMR(reader IssueReader, in ActiveMRInput) ActiveMRAssessment {
 func assessStaleActiveMR(reader IssueReader, in ActiveMRInput, result ActiveMRAssessment, mrStatus string, mr *beads.Issue) ActiveMRAssessment {
 	result.MRStatus = mrStatus
 	result.Stale = true
+	result.MRMerged = mrMerged(mr)
 	sourceIssue := sourceIssueForActiveMR(in.SourceIssueHint, mr)
 	result.SourceIssue = sourceIssue
 	terminal, reason := terminalSourceIssue(reader, sourceIssue)

@@ -318,6 +318,36 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		mol.closeStep("auto-close")
 	}
 
+	// Step 4a: Reconcile post-merge orphans (gu-7igu8).
+	// The refinery's post-merge sequence (close MR → close source → unhook →
+	// reap) is non-atomic; an interrupted reconcile can leave a source issue
+	// non-terminal (HOOKED on a dead polecat) even though the MR merged. Detect
+	// that signature — agent bead whose active_mr points at a proven-merged MR
+	// with a still-non-terminal source — and complete the reconcile by closing
+	// the source issue. Runs BEFORE the active_mr scrub (4b) so the source is
+	// terminal in time for the same-cycle scrub to clear the dangling active_mr.
+	var reconScanned, reconReconciled, reconPreservedWIP int
+	if d.config.TownRoot == "" {
+		d.logger.Printf("wisp_reaper: post-merge orphan reconcile skipped (no town root)")
+	} else {
+		bd := beads.New(d.config.TownRoot).ForAgentBead()
+		reconResult, err := reaper.ReconcileMergedOrphans(bd, dryRun)
+		if err != nil {
+			d.logger.Printf("wisp_reaper: post-merge orphan reconcile error: %v", err)
+		} else {
+			reconScanned = reconResult.Scanned
+			reconReconciled = reconResult.Reconciled
+			reconPreservedWIP = reconResult.PreservedWIP
+			for _, entry := range reconResult.ReconciledEntries {
+				d.logger.Printf("wisp_reaper: reconciled post-merge orphan: agent=%s active_mr=%s source=%s closed",
+					entry.AgentBeadID, entry.ActiveMR, entry.SourceIssue)
+			}
+			for _, a := range reconResult.Anomalies {
+				d.logger.Printf("wisp_reaper: post-merge orphan reconcile ANOMALY: %s", a.Message)
+			}
+		}
+	}
+
 	// Step 4b: Scrub stale active_mr refs on agent beads (gu-dhqm).
 	// Re-evaluate every agent bead's active_mr through polecat.AssessActiveMR
 	// and clear refs whose MR + source issue are both terminal. Preserves
@@ -351,8 +381,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
 			totalOpen, wispAlertThreshold)
 	}
-	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d open=%d databases=%d dryRun=%v",
+	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d orphan_recon_scanned=%d orphan_reconciled=%d orphan_recon_preserved=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d open=%d databases=%d dryRun=%v",
 		totalReaped, totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed,
+		reconScanned, reconReconciled, reconPreservedWIP,
 		scrubScanned, scrubCleared, scrubPreservedWIP, scrubStillPending,
 		totalOpen, len(databases), dryRun)
 	mol.closeStep("report")
