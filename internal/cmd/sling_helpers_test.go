@@ -511,6 +511,12 @@ func TestIsMayorOnlyBeadInfo(t *testing.T) {
 			Status:    "open",
 			Labels:    []string{"no-polecat"},
 		}, true},
+		{"bug with human-only alias (gu-utpl3 shape)", &beadInfo{
+			Title:     "Meta-investigation: re-dispatch pattern",
+			IssueType: "bug",
+			Status:    "open",
+			Labels:    []string{"human-only"},
+		}, true},
 		{"both labels at once", &beadInfo{
 			Title:     "Cross-rig coordination",
 			IssueType: "task",
@@ -559,6 +565,12 @@ func TestIsMayorOnlyBeadInfo(t *testing.T) {
 			IssueType: "task",
 			Status:    "open",
 			Labels:    []string{"no-polecat-prep"},
+		}, false},
+		{"human-only-followup not matched", &beadInfo{
+			Title:     "Work",
+			IssueType: "task",
+			Status:    "open",
+			Labels:    []string{"human-only-followup"},
 		}, false},
 		{"Mayor-Only (wrong case) not matched", &beadInfo{
 			Title:     "Work",

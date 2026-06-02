@@ -212,7 +212,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	// the label first if this bead really is polecat-eligible.
 	if isMayorOnlyBeadInfo(info) {
 		result.ErrMsg = "mayor-only"
-		return result, fmt.Errorf("bead %s is labeled mayor-only / no-polecat: %q — polecats cannot resolve this work (town-scope, cross-rig, or requires human intervention).\nRemove the label first: bd update %s --remove-label=mayor-only --remove-label=no-polecat",
+		return result, fmt.Errorf("bead %s is labeled mayor-only / no-polecat / human-only: %q — polecats cannot resolve this work (town-scope, cross-rig, or requires human intervention).\nRemove the label first: bd update %s --remove-label=mayor-only --remove-label=no-polecat --remove-label=human-only",
 			params.BeadID, info.Title, params.BeadID)
 	}
 

@@ -251,19 +251,32 @@ func HasEpicPhaseLabel(labels []string) bool {
 const (
 	MayorOnlyLabel = "mayor-only"
 	NoPolecatLabel = "no-polecat"
+	// HumanOnlyLabel marks a bead whose resolution structurally requires a
+	// human (judgment calls, meta-investigations, sign-offs) and that no
+	// polecat — and not even the mayor agent — can complete by changing code.
+	// It is a third accepted alias alongside mayor-only / no-polecat for the
+	// same dispatch gate: a labeled bead is never auto-slung to a polecat.
+	//
+	// gu-utpl3: operators kept hand-labeling human-only/no-changes beads to
+	// stop them re-dispatching, but the dispatcher had no first-class symbol
+	// for "human-only", so the marker was inert and the beads kept looping
+	// through polecats that could only close them no-changes.
+	HumanOnlyLabel = "human-only"
 )
 
-// HasMayorOnlyLabel reports whether the labels slice carries either the
-// mayor-only or no-polecat marker. Both are accepted; mayor-only is the
-// preferred spelling (positive: "this is for mayor"), no-polecat is the
-// negative alias for operators used to the opt-out framing. See gu-bk6e.
+// HasMayorOnlyLabel reports whether the labels slice carries the mayor-only,
+// no-polecat, or human-only marker — the three accepted aliases for "do not
+// auto-sling this to a polecat." mayor-only is the preferred spelling
+// (positive: "this is for mayor"), no-polecat is the negative alias for
+// operators used to the opt-out framing, and human-only declares the work
+// requires a human (not even the mayor agent). See gu-bk6e, gu-utpl3.
 //
 // The check is an exact label match — substrings like "mayor-only-followup"
 // or "no-polecat-v2" are different labels and must not trigger. This mirrors
 // the HasEpicPhaseLabel semantics.
 func HasMayorOnlyLabel(labels []string) bool {
 	for _, l := range labels {
-		if l == MayorOnlyLabel || l == NoPolecatLabel {
+		if l == MayorOnlyLabel || l == NoPolecatLabel || l == HumanOnlyLabel {
 			return true
 		}
 	}

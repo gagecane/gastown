@@ -734,13 +734,16 @@ func TestHasMayorOnlyLabel(t *testing.T) {
 		{"empty labels", []string{}, false},
 		{"only mayor-only", []string{"mayor-only"}, true},
 		{"only no-polecat", []string{"no-polecat"}, true},
+		{"only human-only", []string{"human-only"}, true},
 		{"both labels", []string{"mayor-only", "no-polecat"}, true},
 		{"mayor-only among others", []string{"escalation", "mayor-only", "bug"}, true},
 		{"no-polecat among others", []string{"escalation", "no-polecat", "bug"}, true},
+		{"human-only among others", []string{"escalation", "human-only", "bug"}, true},
 		// Substring / prefix collisions must not trigger.
 		{"mayor-only-v2 rejected", []string{"mayor-only-v2"}, false},
 		{"mayor-onlyz rejected", []string{"mayor-onlyz"}, false},
 		{"no-polecat-prep rejected", []string{"no-polecat-prep"}, false},
+		{"human-only-followup rejected", []string{"human-only-followup"}, false},
 		{"polecat rejected (unrelated namespace)", []string{"polecat"}, false},
 		{"mayor rejected", []string{"mayor"}, false},
 		// Case-sensitive — the label convention is lowercase.
