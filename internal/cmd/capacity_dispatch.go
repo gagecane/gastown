@@ -74,6 +74,15 @@ var fireCrossRigEscalation = func(rig, prefix, beadID string) {
 // before a sling context is closed as circuit-broken.
 const maxDispatchFailures = 3
 
+// daemonDispatchBudget bounds how long the daemon-invoked dispatch loop may keep
+// launching new spawns. The daemon runs `gt scheduler run` under a hard 5m
+// SIGKILL (daemon.dispatchQueuedWork); this budget leaves headroom so the loop
+// stops launching new spawns and returns cleanly — durably closing the contexts
+// it already dispatched — well before the SIGKILL would kill the process with
+// zero forward progress (gu-t6jqq). Only applied under GT_DAEMON=1; the
+// interactive `gt scheduler run` path stays unbounded.
+const daemonDispatchBudget = 4*time.Minute + 30*time.Second
+
 // --- Capacity-exhaustion monitor (hq-ly5yj) --------------------------------
 //
 // When the pool can't place ANY ready work — every slot recovery_blocked, with
@@ -201,6 +210,11 @@ var fireCapacityExhaustionEscalation = func(snapshot polecatCapacitySnapshot, sk
 // dispatchScheduledWork is the main dispatch loop for the capacity scheduler.
 // Called by both `gt scheduler run` and the daemon heartbeat.
 func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun bool) (int, error) {
+	// Stamp the dispatch start so the daemon deadline budget covers the whole
+	// invocation (maintenance scans + query + spawns), all of which run under
+	// the daemon's single 5m SIGKILL (gu-t6jqq).
+	dispatchStart := time.Now()
+
 	// Acquire exclusive lock to prevent concurrent dispatch
 	runtimeDir := filepath.Join(townRoot, ".runtime")
 	_ = os.MkdirAll(runtimeDir, 0755)
@@ -381,6 +395,15 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		SpawnDelay: spawnDelay,
 	}
 
+	// Under the daemon, bound the execute loop so it stops launching new spawns
+	// and returns cleanly before the daemon's hard 5m SIGKILL. Without this a
+	// slow cycle (large queue → slow query + many sequential worktree spawns) is
+	// killed mid-loop with zero durable progress, and the backlog never drains —
+	// the gu-t6jqq death spiral. Interactive `gt scheduler run` stays unbounded.
+	if isDaemonDispatch() {
+		cycle.Deadline = dispatchStart.Add(daemonDispatchBudget)
+	}
+
 	if dryRun {
 		plan, planErr := cycle.Plan()
 		if planErr != nil {
@@ -426,8 +449,17 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 			style.Bold.Render("✓"), report.Dispatched, report.Failed, report.Reason)
 	}
 	if report.Skipped > 0 {
-		fmt.Printf("\n%s Skipped %d bead(s) — zero capacity (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
-			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
+		if report.Reason == "deadline" {
+			// Deadline cutoff (gu-t6jqq): the dispatch budget elapsed before the
+			// full plan ran. The skipped beads stay queued and dispatch next
+			// cycle — this is the spiral-breaking clean exit, NOT a capacity
+			// shortage. Logged distinctly so it isn't mistaken for zero capacity.
+			fmt.Printf("\n%s Dispatch budget elapsed — deferred %d bead(s) to next cycle (dispatched %d this cycle)\n",
+				style.Dim.Render("○"), report.Skipped, report.Dispatched)
+		} else {
+			fmt.Printf("\n%s Skipped %d bead(s) — zero capacity (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
+				style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
+		}
 	}
 
 	// hq-q943s: run the exhaustion monitor EVERY cycle with the full picture.

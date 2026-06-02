@@ -393,3 +393,121 @@ func TestDispatchCycle_Run_SpawnDelay(t *testing.T) {
 		t.Errorf("elapsed = %v, expected at least ~20ms for 2 delays", elapsed)
 	}
 }
+
+// TestDispatchCycle_Run_DeadlineStopsNewSpawns verifies that once the deadline
+// has passed, Run stops launching new dispatches, defers the remaining beads to
+// Skipped, and reports reason="deadline" (gu-t6jqq). The clock seam advances
+// past the deadline after the first dispatch so the second is gated.
+func TestDispatchCycle_Run_DeadlineStopsNewSpawns(t *testing.T) {
+	base := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+	deadline := base.Add(time.Minute)
+
+	dispatched := []string{}
+	// Clock: first now() (before item a) returns base (before deadline);
+	// subsequent calls return base+2m (past deadline), gating item b and c.
+	calls := 0
+	cycle := &DispatchCycle{
+		AvailableCapacity: func() (int, error) { return 100, nil },
+		QueryPending: func() ([]PendingBead, error) {
+			return []PendingBead{{ID: "a"}, {ID: "b"}, {ID: "c"}}, nil
+		},
+		Execute: func(b PendingBead) error {
+			dispatched = append(dispatched, b.ID)
+			return nil
+		},
+		OnSuccess: func(b PendingBead) error { return nil },
+		OnFailure: func(b PendingBead, err error) {
+			t.Errorf("OnFailure should not be called, called for %s", b.ID)
+		},
+		BatchSize: 10,
+		Deadline:  deadline,
+		Now: func() time.Time {
+			calls++
+			if calls == 1 {
+				return base // before deadline → item a dispatches
+			}
+			return base.Add(2 * time.Minute) // past deadline → b, c gated
+		},
+	}
+
+	report, err := cycle.Run()
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if report.Dispatched != 1 {
+		t.Errorf("Dispatched = %d, want 1", report.Dispatched)
+	}
+	if report.Skipped != 2 {
+		t.Errorf("Skipped = %d, want 2 (deferred to next cycle)", report.Skipped)
+	}
+	if report.Reason != "deadline" {
+		t.Errorf("Reason = %q, want %q", report.Reason, "deadline")
+	}
+	if len(dispatched) != 1 || dispatched[0] != "a" {
+		t.Errorf("dispatched = %v, want [a]", dispatched)
+	}
+}
+
+// TestDispatchCycle_Run_ZeroDeadlineUnbounded verifies the zero-value Deadline
+// disables the cutoff entirely — the full plan dispatches as before. This is
+// the interactive `gt scheduler run` path (no daemon budget).
+func TestDispatchCycle_Run_ZeroDeadlineUnbounded(t *testing.T) {
+	dispatched := []string{}
+	cycle := &DispatchCycle{
+		AvailableCapacity: func() (int, error) { return 100, nil },
+		QueryPending: func() ([]PendingBead, error) {
+			return []PendingBead{{ID: "a"}, {ID: "b"}, {ID: "c"}}, nil
+		},
+		Execute: func(b PendingBead) error {
+			dispatched = append(dispatched, b.ID)
+			return nil
+		},
+		OnSuccess: func(b PendingBead) error { return nil },
+		BatchSize: 10,
+		// Deadline left zero; Now provided to prove it's never consulted as a gate.
+		Now: func() time.Time { return time.Unix(0, 0) },
+	}
+
+	report, err := cycle.Run()
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if report.Dispatched != 3 {
+		t.Errorf("Dispatched = %d, want 3 (zero deadline = unbounded)", report.Dispatched)
+	}
+	if report.Reason == "deadline" {
+		t.Errorf("Reason = %q, deadline cutoff should not fire with zero Deadline", report.Reason)
+	}
+}
+
+// TestDispatchCycle_Run_DeadlineNotReachedDispatchesAll verifies that when the
+// deadline is set but never reached, the full plan dispatches normally.
+func TestDispatchCycle_Run_DeadlineNotReachedDispatchesAll(t *testing.T) {
+	base := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+	dispatched := []string{}
+	cycle := &DispatchCycle{
+		AvailableCapacity: func() (int, error) { return 100, nil },
+		QueryPending: func() ([]PendingBead, error) {
+			return []PendingBead{{ID: "a"}, {ID: "b"}}, nil
+		},
+		Execute: func(b PendingBead) error {
+			dispatched = append(dispatched, b.ID)
+			return nil
+		},
+		OnSuccess: func(b PendingBead) error { return nil },
+		BatchSize: 10,
+		Deadline:  base.Add(time.Hour),              // far future
+		Now:       func() time.Time { return base }, // always before deadline
+	}
+
+	report, err := cycle.Run()
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if report.Dispatched != 2 {
+		t.Errorf("Dispatched = %d, want 2", report.Dispatched)
+	}
+	if report.Reason == "deadline" {
+		t.Errorf("Reason = %q, deadline should not fire when not reached", report.Reason)
+	}
+}

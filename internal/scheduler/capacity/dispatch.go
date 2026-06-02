@@ -77,6 +77,36 @@ type DispatchCycle struct {
 
 	// SpawnDelay between dispatches.
 	SpawnDelay time.Duration
+
+	// Deadline bounds how long the execute loop may keep launching new
+	// dispatches. When non-zero, Run stops starting NEW dispatches once Now()
+	// is at or past Deadline, returns the partial progress made so far, and
+	// sets the report reason to "deadline". The currently-running Execute is
+	// allowed to finish (we only gate BEFORE starting the next one), so a bead
+	// is never left half-dispatched by the deadline itself.
+	//
+	// This exists because the daemon runs `gt scheduler run` under a hard 5m
+	// SIGKILL (daemon.dispatchQueuedWork). Without a softer internal deadline,
+	// a slow cycle (large queue → slow query + many sequential spawns) is
+	// killed mid-loop and the whole process dies — the backlog never drains
+	// and every subsequent cycle is just as slow (gu-t6jqq death spiral).
+	// Exiting cleanly under the SIGKILL preserves the contexts already closed
+	// by OnSuccess, so each cycle makes durable forward progress.
+	//
+	// Zero value (the default) disables the deadline — Run behaves exactly as
+	// before, dispatching the full plan.
+	Deadline time.Time
+
+	// Now is a clock seam for tests. Nil means use time.Now.
+	Now func() time.Time
+}
+
+// now returns the current time via the injected clock seam, or time.Now.
+func (c *DispatchCycle) now() time.Time {
+	if c.Now != nil {
+		return c.Now()
+	}
+	return time.Now()
 }
 
 // DispatchReport summarizes the result of one dispatch cycle.
@@ -118,6 +148,18 @@ func (c *DispatchCycle) Run() (DispatchReport, error) {
 	}
 
 	for i, b := range plan.ToDispatch {
+		// Stop launching NEW dispatches once we're past the deadline. The
+		// remaining beads stay queued (their sling-contexts are untouched) and
+		// dispatch on a later cycle. Reporting them as Skipped keeps the
+		// accounting honest and lets the daemon exit cleanly before its 5m
+		// SIGKILL instead of being killed mid-spawn with zero durable progress
+		// (gu-t6jqq).
+		if !c.Deadline.IsZero() && !c.now().Before(c.Deadline) {
+			report.Skipped += len(plan.ToDispatch) - i
+			report.Reason = "deadline"
+			return report, nil
+		}
+
 		if c.Validate != nil {
 			if err := c.Validate(b); err != nil {
 				report.Failed++
