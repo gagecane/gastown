@@ -52,6 +52,7 @@ Infrastructure checks:
 
 Cleanup checks (fixable):
   - orphan-sessions          Detect orphaned tmux sessions
+  - orphaned-admission-records Detect polecat-admission records with dead PIDs (fixable)
   - stalled-polecats         Detect polecats with dead sessions and unpushed work (fixable)
   - orphan-processes         Detect orphaned Claude processes
   - session-name-format      Detect sessions with outdated naming format (fixable)
@@ -226,6 +227,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewZombieSessionCheck())
 	d.Register(doctor.NewStalledPolecatCheck())
 	d.Register(doctor.NewSchedulerCapacityDrainCheck())
+	d.Register(doctor.NewOrphanedAdmissionRecordsCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewHookedDeadLetterCheck())
