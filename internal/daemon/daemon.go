@@ -931,6 +931,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Nudge queue GC ticker started (interval %v)", interval)
 	}
 
+	// Start restart-pending ticker if configured.
+	// Consumes daemon-restart-pending beads (filed by rebuild-gt after a binary
+	// upgrade) by escalating them to an agent — closing the gu-muj66 gap where
+	// the producer had no consumer and pending restarts were silently dropped.
+	var restartPendingTicker *time.Ticker
+	var restartPendingChan <-chan time.Time
+	if d.isPatrolActive("restart_pending") {
+		interval := restartPendingInterval(d.patrolConfig)
+		restartPendingTicker = time.NewTicker(interval)
+		restartPendingChan = restartPendingTicker.C
+		defer restartPendingTicker.Stop()
+		d.logger.Printf("Restart-pending dog ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1079,6 +1093,13 @@ func (d *Daemon) Run() (err error) {
 			// actively drains; this catches dead/idle/wedged sessions.
 			if !d.isShutdownInProgress() {
 				d.runNudgeQueueGC()
+			}
+
+		case <-restartPendingChan:
+			// Restart-pending dog — escalates daemon-restart-pending beads to an
+			// agent so a gated restart happens (gu-muj66). Does NOT self-restart.
+			if !d.isShutdownInProgress() {
+				d.runRestartPendingDog()
 			}
 
 		case <-timer.C:

@@ -65,6 +65,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "5m",
 			},
+			RestartPending: &RestartPendingConfig{
+				Enabled:     true,
+				IntervalStr: "5m",
+			},
 		},
 	}
 }
@@ -128,6 +132,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.NudgeQueueGC == nil {
 		p.NudgeQueueGC = d.NudgeQueueGC
+		changed = true
+	}
+	if p.RestartPending == nil {
+		p.RestartPending = d.RestartPending
 		changed = true
 	}
 

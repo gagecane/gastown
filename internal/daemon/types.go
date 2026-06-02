@@ -136,6 +136,7 @@ type PatrolsConfig struct {
 	MRCycleClose         *MRCycleCloseConfig         `json:"mr_cycle_close,omitempty"`
 	MainCIBreak          *MainCIBreakConfig          `json:"main_ci_break,omitempty"`
 	NudgeQueueGC         *NudgeQueueGCConfig         `json:"nudge_queue_gc,omitempty"`
+	RestartPending       *RestartPendingConfig       `json:"restart_pending,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -340,6 +341,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.NudgeQueueGC.Enabled
+	}
+	if patrol == "restart_pending" {
+		// Default-enabled (gu-muj66): deploy-reliability infra that must run
+		// out of the box, including on towns whose daemon.json predates this
+		// addition. The patrol only escalates (never restarts the daemon
+		// itself), so it is safe to default on.
+		if config == nil || config.Patrols == nil || config.Patrols.RestartPending == nil {
+			return true
+		}
+		return config.Patrols.RestartPending.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

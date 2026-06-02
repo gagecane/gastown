@@ -167,6 +167,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			MainBranchTest:       &MainBranchTestConfig{Enabled: false},
 			Handler:              &PatrolConfig{Enabled: false},
 			NudgeQueueGC:         &NudgeQueueGCConfig{Enabled: false},
+			RestartPending:       &RestartPendingConfig{Enabled: false},
 		},
 	}
 
