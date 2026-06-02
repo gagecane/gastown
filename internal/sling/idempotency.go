@@ -1,32 +1,32 @@
-package cmd
+package sling
 
 import "strings"
 
-// normalizeAgentID trims surrounding whitespace and trailing slash for comparison.
-func normalizeAgentID(v string) string {
+// NormalizeAgentID trims surrounding whitespace and trailing slash for comparison.
+func NormalizeAgentID(v string) string {
 	return strings.TrimSuffix(strings.TrimSpace(v), "/")
 }
 
-// matchesSlingTarget returns true when target should be treated as equivalent
+// MatchesTarget returns true when target should be treated as equivalent
 // to the existing assignee for idempotent sling behavior.
 //
 // Only matches unambiguous equivalences. Ambiguous shorthand targets
 // (e.g., "rig/name" which could resolve to polecats or crew) and pool
 // targets (e.g., "deacon/dogs" which dispatches to an idle dog) are NOT
 // matched — these must go through normal resolution to pick the right agent.
-func matchesSlingTarget(target, assignee, selfAgent string) bool {
-	assigneeNorm := normalizeAgentID(assignee)
+func MatchesTarget(target, assignee, selfAgent string) bool {
+	assigneeNorm := NormalizeAgentID(assignee)
 	if assigneeNorm == "" {
 		return false
 	}
 
 	target = strings.TrimSpace(target)
 	if target == "" || target == "." {
-		selfNorm := normalizeAgentID(selfAgent)
+		selfNorm := NormalizeAgentID(selfAgent)
 		return selfNorm != "" && selfNorm == assigneeNorm
 	}
 
-	targetNorm := normalizeAgentID(target)
+	targetNorm := NormalizeAgentID(target)
 	if targetNorm == assigneeNorm {
 		return true
 	}
