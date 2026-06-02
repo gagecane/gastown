@@ -669,10 +669,20 @@ type UpdateOptions struct {
 // beadsdk.Storage directly instead of shelling out to the bd CLI. This
 // eliminates ~600ms of subprocess overhead per operation.
 type Beads struct {
-	workDir    string
-	beadsDir   string // Optional BEADS_DIR override for cross-database access
-	isolated   bool   // If true, suppress inherited beads env vars (for test isolation)
-	serverPort int    // If set, pass --server-port to bd init and GT_DOLT_PORT to env
+	workDir  string
+	beadsDir string // Optional BEADS_DIR override for cross-database access
+	isolated bool   // If true, suppress inherited beads env vars (for test isolation)
+
+	// skipReadThrottle exempts this Beads instance's `bd list` calls from the
+	// town-wide bd-list-read flock. Set ONLY for critical-path, read-only
+	// queries that must not be starved/wedged by bulk-read contention — notably
+	// the scheduler's per-rig polecat-capacity fan-out, which otherwise blocks
+	// on the flock while holding scheduler-dispatch.lock, stalling ALL dispatch
+	// (gu-pug66: dispatch wedged with the capacity `bd list` stuck on the read
+	// throttle). Dolt's own concurrency is unaffected; this only skips the
+	// in-process serialization flock for this caller.
+	skipReadThrottle bool
+	serverPort       int // If set, pass --server-port to bd init and GT_DOLT_PORT to env
 
 	// store is an optional in-process beadsdk.Storage. When set, methods
 	// bypass the bd subprocess and use the store directly. Follows the
@@ -746,6 +756,27 @@ func (b *Beads) TownRoot() string {
 //
 // If the town root cannot be determined, returns the original wrapper to
 // preserve current behavior.
+// WithoutReadThrottle returns a copy of b whose `bd list` calls bypass the
+// town-wide bd-list-read flock. Use ONLY for critical-path, read-only queries
+// that must not be starved by bulk-read contention (e.g. the scheduler
+// polecat-capacity fan-out — gu-pug66). The copy shares the same routing/store
+// config; it only flips skipReadThrottle.
+func (b *Beads) WithoutReadThrottle() *Beads {
+	// Construct explicitly (not *b) so the sync.Once is fresh rather than copied
+	// (copylock). townRoot is carried over, so the fresh Once just guards a
+	// redundant re-resolve at worst.
+	return &Beads{
+		workDir:          b.workDir,
+		beadsDir:         b.beadsDir,
+		isolated:         b.isolated,
+		skipReadThrottle: true,
+		serverPort:       b.serverPort,
+		store:            b.store,
+		townRoot:         b.townRoot,
+		noRoute:          b.noRoute,
+	}
+}
+
 func (b *Beads) ForAgentBead() *Beads {
 	townRoot := b.getTownRoot()
 	if townRoot == "" {
@@ -946,7 +977,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
-	if shouldThrottleBDRead(fullArgs) {
+	if !b.skipReadThrottle && shouldThrottleBDRead(fullArgs) {
 		unlock, err := b.acquireBDReadThrottle(resolveBdReadThrottleTimeout())
 		if err != nil {
 			return nil, fmt.Errorf("bd %s: %w", strings.Join(fullArgs, " "), err)

@@ -275,7 +275,11 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 			continue
 		}
 
-		agents, err := beads.New(rigPath).ListAgentBeads()
+		// Bypass the bd-list-read flock for this critical-path capacity query.
+		// The per-rig fan-out otherwise blocks on the throttle while the caller
+		// holds scheduler-dispatch.lock, stalling ALL dispatch under bulk-read
+		// contention (gu-pug66). Read-only; Dolt concurrency is unaffected.
+		agents, err := beads.New(rigPath).WithoutReadThrottle().ListAgentBeads()
 		if err != nil {
 			return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
 		}
