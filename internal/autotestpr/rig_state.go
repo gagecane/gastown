@@ -60,6 +60,12 @@ const (
 	PerRigCycleStateMRPending  PerRigCycleState = "mr-pending"
 	PerRigCycleStateMRRevising PerRigCycleState = "mr-revising"
 	PerRigCycleStateCooledDown PerRigCycleState = "cooled-down"
+
+	// PerRigCycleStatePausedByCircuitBreaker is the terminal pause state
+	// entered when the circuit breaker trips (D16). Unlike cooled-down,
+	// it does NOT auto-release on cadence — it requires an explicit
+	// `gt auto-test-pr resume --override-circuit-breaker` (see D18).
+	PerRigCycleStatePausedByCircuitBreaker PerRigCycleState = "paused-by-circuit-breaker"
 )
 
 // CurrentCycle holds the in-flight cycle data when the rig is not
