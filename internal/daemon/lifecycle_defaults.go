@@ -73,6 +73,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "5m",
 			},
+			SchedulerStuck: &SchedulerStuckConfig{
+				Enabled:     true,
+				IntervalStr: "5m",
+			},
 		},
 	}
 }
@@ -144,6 +148,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.CircuitBreak == nil {
 		p.CircuitBreak = d.CircuitBreak
+		changed = true
+	}
+	if p.SchedulerStuck == nil {
+		p.SchedulerStuck = d.SchedulerStuck
 		changed = true
 	}
 
