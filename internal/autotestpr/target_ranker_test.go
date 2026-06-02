@@ -13,9 +13,9 @@ func TestRankCandidates_HighestScoreWins(t *testing.T) {
 	t.Parallel()
 
 	cands := []TargetCandidate{
-		{Path: "a.go", Churn: 2, UncoveredBranches: []UncoveredBranch{{Line: 1}, {Line: 2}}}, // score 4
+		{Path: "a.go", Churn: 2, UncoveredBranches: []UncoveredBranch{{Line: 1}, {Line: 2}}},            // score 4
 		{Path: "b.go", Churn: 5, UncoveredBranches: []UncoveredBranch{{Line: 1}, {Line: 2}, {Line: 3}}}, // score 15
-		{Path: "c.go", Churn: 1, UncoveredBranches: []UncoveredBranch{{Line: 1}}}, // score 1
+		{Path: "c.go", Churn: 1, UncoveredBranches: []UncoveredBranch{{Line: 1}}},                       // score 1
 	}
 
 	got := RankCandidates(cands, nil, rankerNow)
