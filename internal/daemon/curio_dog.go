@@ -79,7 +79,7 @@ func (d *Daemon) runCurio() {
 		d.logger.Printf("curio: failed to open HQ store: %v", err)
 		return
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	inserted, err := store.InsertCandidates(cands)
 	d.doltBreaker.Record(err)
