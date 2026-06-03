@@ -601,9 +601,13 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				})
 			}
 		}
-		// task bead with deferred + no rig: error — must specify a rig
+		// task bead with deferred + no rig: error — must specify a rig (or a
+		// capacity-neutral target: dog, mayor, deacon, <rig>/witness|refinery|crew).
+		// Wording kept in sync with the 2-arg deferred-reject path above (gu-z6cbq
+		// / #4035 updated that site + the tests but missed this one-arg path,
+		// reddening TestSchedulerDeferredTaskWithoutRig — gu-ii3my).
 		if deferred {
-			return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>", args[0])
+			return fmt.Errorf("deferred dispatch requires a rig or capacity-neutral target: gt sling %s <rig>", args[0])
 		}
 	}
 
