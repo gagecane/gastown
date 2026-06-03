@@ -457,7 +457,7 @@ func TestSlingDispatchFieldUpdates_PersistsMergeStrategy(t *testing.T) {
 		Owned:       true,
 		NoMerge:     false,
 	}
-	fu := slingDispatchFieldUpdates("mayor", "mol-wisp-1", "hq-cv-oxeuo", "base_branch=proto/v3-build", params)
+	fu := slingDispatchFieldUpdates("mayor", "mol-wisp-1", "hq-cv-oxeuo", "base_branch=proto/v3-build", "lb-relay14", params)
 
 	if fu.MergeStrategy != "local" {
 		t.Errorf("MergeStrategy = %q, want local (merge=local must survive dispatch)", fu.MergeStrategy)
@@ -470,6 +470,14 @@ func TestSlingDispatchFieldUpdates_PersistsMergeStrategy(t *testing.T) {
 	}
 	if fu.AttachedFormula != "mol-polecat-work" {
 		t.Errorf("AttachedFormula = %q, want mol-polecat-work", fu.AttachedFormula)
+	}
+	// gt-codex-issue-var: issue=<beadToHook> must be injected so polecat
+	// formula step descriptions render {{issue}} correctly.
+	if len(fu.Vars) == 0 || fu.Vars[0] != "issue=lb-relay14" {
+		t.Errorf("Vars[0] = %v, want issue=lb-relay14 prepended", fu.Vars)
+	}
+	if !strings.Contains(fu.FormulaVars, "issue=lb-relay14") {
+		t.Errorf("FormulaVars = %q, want to contain issue=lb-relay14", fu.FormulaVars)
 	}
 }
 
