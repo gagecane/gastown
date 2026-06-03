@@ -208,6 +208,11 @@ const socketProbeTimeout = 2 * time.Second
 // These sockets are created by TestMain in packages that need tmux isolation.
 // Only sockets with a running tmux server (i.e., ListSessions succeeds) are returned.
 func findTestSockets() []string {
+	// Reap dead gt-test-* socket files (orphaned by SIGKILLed test processes
+	// whose t.Cleanup never ran) before probing. This self-heals the leak that
+	// otherwise makes this scan O(stale-sockets) slow (gu-wb67v).
+	tmux.PruneDeadTestSockets()
+
 	socketDir := tmux.SocketDir()
 	entries, err := os.ReadDir(socketDir)
 	if err != nil {
