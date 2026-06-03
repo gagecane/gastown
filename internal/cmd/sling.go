@@ -534,21 +534,24 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				PriorityFloor: parsedPriorityFloor,
 			})
 		}
-		// Dog targets (deacon/dogs, deacon/dogs/<name>, dog:, dog:<name>) fall through
-		// to direct dispatch: dogs are a self-managed pool owned by the Deacon, not rig
-		// polecat slots, and therefore don't participate in the capacity scheduler.
-		// Without this fallthrough, dispatchFeedDog can't feed stranded convoys when a
-		// scheduler is active (bead aa-4yf2).
-		if _, isDog := IsDogTarget(args[1]); isDog {
-			// fall through to direct dispatch path below (resolveTarget handles dogs).
-		} else if _, _, isCrew := IsCrewTarget(args[1]); isCrew {
-			// Crew targets (<rig>/crew/<name>, bare "crew") fall through to direct
-			// dispatch: crew workers are persistent agents owned outside the rig
-			// polecat pool and don't consume capacity slots (gu-odjz).
-		} else {
-			// Non-rig, non-dog, non-crew target in deferred mode — reject to prevent bypassing capacity control
-			return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>\n'%s' is not a known rig", args[0], args[1])
+		// Capacity-neutral targets fall through to direct dispatch even when the
+		// scheduler is active: the cap (scheduler.max_polecats) governs only rig
+		// polecat slots. Dogs (the Deacon's self-managed pool, bead aa-4yf2) and
+		// standing singleton agents (mayor, deacon, rig witness/refinery, named
+		// crew, gu-odjz) do not occupy a polecat slot, so the cap does not apply
+		// to them. Without this, the daemon's workflow-step rewrite (rig -> role
+		// target, e.g. workflow_target: mayor) is dead-on-arrival under the
+		// scheduler and silently strands the convoy (gt-3798 deferred-dispatch
+		// follow-up).
+		if !isCapacityNeutralTarget(args[1]) {
+			// Non-rig, capacity-consuming target in deferred mode — reject so it
+			// cannot bypass capacity control.
+			return fmt.Errorf("deferred dispatch requires a rig or capacity-neutral target: gt sling %s <rig>\n"+
+				"'%s' is not a rig, dog, or standing agent (mayor, deacon, <rig>/witness, <rig>/refinery, <rig>/crew/<name>)",
+				args[0], args[1])
 		}
+		// else: fall through to direct dispatch path below (resolveTarget handles
+		// dogs and standing-agent role targets).
 	}
 
 	// Epic/convoy auto-detection (1 arg, no rig): works for both deferred and direct

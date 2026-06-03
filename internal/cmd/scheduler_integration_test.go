@@ -1110,8 +1110,8 @@ func TestSchedulerDeferredTaskWithoutRig(t *testing.T) {
 	if err == nil {
 		t.Fatalf("gt sling %s without rig in deferred mode should fail, but succeeded:\n%s", beadID, out)
 	}
-	if !strings.Contains(out, "deferred dispatch requires a rig target") {
-		t.Errorf("expected 'deferred dispatch requires a rig target' error, got:\n%s", out)
+	if !strings.Contains(out, "deferred dispatch requires a rig or capacity-neutral target") {
+		t.Errorf("expected 'deferred dispatch requires a rig or capacity-neutral target' error, got:\n%s", out)
 	}
 }
 
@@ -1146,8 +1146,8 @@ func TestSchedulerDeferredNonRigRejection(t *testing.T) {
 	if err == nil {
 		t.Fatalf("gt sling %s %s (non-rig) in deferred mode should fail, but succeeded:\n%s", beadID, otherBead, out)
 	}
-	if !strings.Contains(out, "deferred dispatch requires a rig target") {
-		t.Errorf("expected 'deferred dispatch requires a rig target' error, got:\n%s", out)
+	if !strings.Contains(out, "deferred dispatch requires a rig or capacity-neutral target") {
+		t.Errorf("expected 'deferred dispatch requires a rig or capacity-neutral target' error, got:\n%s", out)
 	}
 
 	// gt sling <bead> . in deferred mode should also be rejected
@@ -1155,8 +1155,8 @@ func TestSchedulerDeferredNonRigRejection(t *testing.T) {
 	if err == nil {
 		t.Fatalf("gt sling %s . in deferred mode should fail, but succeeded:\n%s", beadID, out)
 	}
-	if !strings.Contains(out, "deferred dispatch requires a rig target") {
-		t.Errorf("expected 'deferred dispatch requires a rig target' error for '.', got:\n%s", out)
+	if !strings.Contains(out, "deferred dispatch requires a rig or capacity-neutral target") {
+		t.Errorf("expected 'deferred dispatch requires a rig or capacity-neutral target' error for '.', got:\n%s", out)
 	}
 }
 
@@ -1178,7 +1178,7 @@ func TestSchedulerDeferredAcceptsDogTarget(t *testing.T) {
 
 	beadID := createTestBead(t, rigPath, "Dog target accept test")
 
-	// Targets that must NOT be rejected with "deferred dispatch requires a rig target".
+	// Targets that must NOT be rejected with "deferred dispatch requires a rig...".
 	dogTargets := []string{
 		"deacon/dogs",
 		"deacon/dogs/alpha",
@@ -1195,7 +1195,7 @@ func TestSchedulerDeferredAcceptsDogTarget(t *testing.T) {
 
 			// The regression we're guarding against: this exact error would
 			// appear if dog targets were rejected by the deferred-rig gate.
-			if strings.Contains(out, "deferred dispatch requires a rig target") {
+			if strings.Contains(out, "deferred dispatch requires a rig") {
 				t.Fatalf("dog target %q incorrectly rejected by deferred-rig gate (aa-4yf2 regression):\n%s",
 					target, out)
 			}
