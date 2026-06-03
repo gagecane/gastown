@@ -2574,13 +2574,16 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			branch := strings.TrimPrefix(ref.Name, "refs/heads/")
-			// Use the listed remote tip, not the short branch name, so remote-only
-			// branches can be classified without a local branch.
-			merged, mergeErr := repoGit.IsAncestor(ref.Hash, "origin/"+defaultBranch)
-			if mergeErr != nil {
+			// Use git cherry (patch-id comparison) instead of IsAncestor so that
+			// squash/rebase merges—where the SHA is rewritten—are also detected.
+			// "+" lines are unique commits not yet on upstream; "-" lines are
+			// patch-equivalents already on upstream; empty output means all
+			// commits are reachable ancestors. Zero unique commits → merged.
+			cherryOut, cherryErr := repoGit.Cherry("origin/"+defaultBranch, ref.Hash)
+			if cherryErr != nil {
 				continue
 			}
-			if !merged {
+			if git.CountCherryUnmergedCommits(cherryOut) > 0 {
 				continue
 			}
 
