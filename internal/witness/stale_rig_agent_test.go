@@ -42,7 +42,7 @@ func writeRigAgentHeartbeat(t *testing.T, townRoot, sessionName string, age time
 func TestDetectStaleRigAgentHeartbeats_DisabledByZero(t *testing.T) {
 	installFakeTmuxNoServer(t)
 
-	res := DetectStaleRigAgentHeartbeats(t.TempDir(), "testrig", nil, 0)
+	res := DetectStaleRigAgentHeartbeats(t.TempDir(), "testrig", nil, 0, "")
 	if res == nil {
 		t.Fatalf("DetectStaleRigAgentHeartbeats returned nil")
 	}
@@ -62,7 +62,7 @@ func TestDetectStaleRigAgentHeartbeats_NoSessionNoEscalation(t *testing.T) {
 	installFakeTmuxNoServer(t)
 
 	townRoot := t.TempDir()
-	res := DetectStaleRigAgentHeartbeats(townRoot, "testrig", nil, time.Hour)
+	res := DetectStaleRigAgentHeartbeats(townRoot, "testrig", nil, time.Hour, "")
 	if res.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2 (refinery+witness)", res.Checked)
 	}
@@ -87,7 +87,7 @@ func TestDetectStaleRigAgentHeartbeats_FreshSkips(t *testing.T) {
 	writeRigAgentHeartbeat(t, townRoot, session.RefinerySessionName(prefix), 30*time.Second)
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefix), 30*time.Second)
 
-	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour)
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "")
 	if res.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2", res.Checked)
 	}
@@ -117,7 +117,7 @@ func TestDetectStaleRigAgentHeartbeats_StaleEscalates(t *testing.T) {
 	// branch logic so a regression that escalates everything (or nothing) shows.
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefix), 30*time.Second)
 
-	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour)
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "")
 	if res.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2", res.Checked)
 	}
@@ -143,5 +143,53 @@ func TestDetectStaleRigAgentHeartbeats_StaleEscalates(t *testing.T) {
 	}
 	if witness.Action != "skip-fresh" {
 		t.Errorf("witness Action = %q, want skip-fresh", witness.Action)
+	}
+}
+
+// TestDetectStaleRigAgentHeartbeats_SelfSkip verifies that the scanning
+// agent's own session is never escalated, even when its heartbeat is stale
+// past the threshold. This is the gu-vqmmp self-amplifying-flood guard: an
+// idle witness whose own session heartbeat aged out (it blocks in
+// await-signal between cycles) must NOT escalate itself. The other agent
+// (refinery here) still escalates normally.
+func TestDetectStaleRigAgentHeartbeats_SelfSkip(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	prefix := session.PrefixFor(rigName)
+	// Both stale past threshold; witness is the scanning agent ("self").
+	writeRigAgentHeartbeat(t, townRoot, session.RefinerySessionName(prefix), 2*time.Hour)
+	witnessSession := session.WitnessSessionName(prefix)
+	writeRigAgentHeartbeat(t, townRoot, witnessSession, 2*time.Hour)
+
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, witnessSession)
+	if res.Checked != 2 {
+		t.Fatalf("Checked = %d, want 2", res.Checked)
+	}
+
+	var refinery, witness *StaleRigAgentResult
+	for i := range res.Stale {
+		s := &res.Stale[i]
+		switch s.AgentRole {
+		case "refinery":
+			refinery = s
+		case "witness":
+			witness = s
+		}
+	}
+	if refinery == nil || witness == nil {
+		t.Fatalf("missing per-agent result: refinery=%v witness=%v", refinery, witness)
+	}
+	// The scanning agent (witness) must be skipped despite its stale heartbeat.
+	if witness.Action != "skip-self" {
+		t.Errorf("witness (self) Action = %q, want skip-self", witness.Action)
+	}
+	if witness.MailSent {
+		t.Errorf("witness (self) MailSent = true, want false (never escalate self)")
+	}
+	// The other agent (refinery) still escalates normally.
+	if refinery.Action != "escalated" {
+		t.Errorf("refinery Action = %q, want escalated", refinery.Action)
 	}
 }
