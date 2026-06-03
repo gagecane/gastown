@@ -1,0 +1,15 @@
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Debug artifacts
+full_debug.txt
+run_debug.sh
+stderr.txt
+test_run.sh
+stdout.txt
+
+# Compiled binary
+github_sheriff
