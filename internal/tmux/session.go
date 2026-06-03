@@ -613,7 +613,14 @@ func (t *Tmux) HasSession(name string) (bool, error) {
 
 // ListSessions returns all session names.
 func (t *Tmux) ListSessions() ([]string, error) {
-	out, err := t.run("list-sessions", "-F", "#{session_name}")
+	return t.ListSessionsContext(context.Background())
+}
+
+// ListSessionsContext is like ListSessions but honors a context. Use this when
+// probing potentially-stale sockets so a single hung tmux server cannot block
+// the caller indefinitely (see findTestSockets / gu-erfce).
+func (t *Tmux) ListSessionsContext(ctx context.Context) ([]string, error) {
+	out, err := t.runContext(ctx, "list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
 			return nil, nil // No server = no sessions

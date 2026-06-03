@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -197,6 +199,11 @@ type socketGroup struct {
 	Sessions []*AgentSession
 }
 
+// socketProbeTimeout bounds a single tmux list-sessions probe against a
+// gt-test-* socket. Stale sockets whose tmux server has wedged would otherwise
+// block the probe (and the whole scan) indefinitely (gu-erfce).
+const socketProbeTimeout = 2 * time.Second
+
 // findTestSockets scans the tmux socket directory for active gt-test-* sockets.
 // These sockets are created by TestMain in packages that need tmux isolation.
 // Only sockets with a running tmux server (i.e., ListSessions succeeds) are returned.
@@ -219,8 +226,13 @@ func findTestSockets() []string {
 			continue
 		}
 		// Probe the socket: only include it if tmux server is alive.
+		// Bound each probe with a short timeout so a single stale/hung
+		// gt-test-* socket cannot wedge the whole scan forever (gu-erfce).
 		t := tmux.NewTmuxWithSocket(name)
-		if sessions, err := t.ListSessions(); err == nil && len(sessions) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), socketProbeTimeout)
+		sessions, err := t.ListSessionsContext(ctx)
+		cancel()
+		if err == nil && len(sessions) > 0 {
 			sockets = append(sockets, name)
 		}
 	}
