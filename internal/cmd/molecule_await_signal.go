@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -220,6 +221,20 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	}
 
 	startTime := time.Now()
+
+	// Idle-heartbeat keepalive (gu-vqmmp). await-signal is the primary wake
+	// mechanism for patrol agents (witness, refinery); an agent spends most
+	// of its idle time blocked here, up to the backoff cap (5–15m). While
+	// blocked it runs no `gt` commands, so persistentPreRun never refreshes
+	// the session heartbeat file — and the witness's STALE_RIG_AGENT scan
+	// (1h threshold) eventually trips on a perfectly healthy idle agent,
+	// flooding mayor with false escalations. A background keepalive ticker
+	// bumps the session heartbeat on its cadence so idle != stale. Best-effort:
+	// a no-op when GT_SESSION is unset (cancel is then a no-op too).
+	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
+		stopKeepalive := polecat.WithKeepalive(townRoot, sessionName, "await-signal", polecat.DefaultKeepaliveInterval)
+		defer stopKeepalive()
+	}
 
 	// Tail events file for new activity
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

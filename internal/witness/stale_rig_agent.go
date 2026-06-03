@@ -80,7 +80,16 @@ type DetectStaleRigAgentHeartbeatsResult struct {
 // The detector intentionally does NOT restart the agent itself — that
 // responsibility belongs to the daemon supervisor (which already runs
 // `ensureRefineryRunning` every cycle) or to the operator.
-func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration) *DetectStaleRigAgentHeartbeatsResult {
+//
+// selfSession is the session name of the agent running this scan (typically
+// $GT_SESSION). The detector NEVER escalates its own session: the scanning
+// agent is provably alive (it is executing this code), so flagging its own
+// heartbeat as stale is always a false positive. This breaks the
+// self-amplifying flood documented on gu-vqmmp — a witness whose own idle
+// heartbeat aged out would otherwise escalate itself every patrol cycle,
+// and cross-nudged peers re-running `gt patrol scan` would escalate theirs
+// in turn. Pass "" to disable the self-skip (e.g. in tests).
+func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration, selfSession string) *DetectStaleRigAgentHeartbeatsResult {
 	result := &DetectStaleRigAgentHeartbeatsResult{}
 
 	if staleThreshold <= 0 {
@@ -113,6 +122,19 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 		item := StaleRigAgentResult{
 			AgentRole:   c.role,
 			SessionName: c.sessionName,
+		}
+
+		// Self-skip (gu-vqmmp): never escalate the scanning agent's own
+		// session. The scanner is executing right now, so it is alive by
+		// definition — an idle agent whose session heartbeat aged out (it
+		// blocks in `gt mol step await-signal` between cycles without
+		// touching the session heartbeat) would otherwise escalate itself
+		// every patrol cycle, and cross-nudged peers would amplify it. This
+		// guard stops the feedback loop regardless of the threshold.
+		if selfSession != "" && c.sessionName == selfSession {
+			item.Action = "skip-self"
+			result.Stale = append(result.Stale, item)
+			continue
 		}
 
 		alive, sessErr := t.HasSession(c.sessionName)
