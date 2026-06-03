@@ -124,6 +124,54 @@ func SocketDir() string {
 	return filepath.Join("/tmp", fmt.Sprintf("tmux-%d", os.Getuid()))
 }
 
+// pruneDialTimeout bounds the kernel-level Unix-socket dial used by
+// PruneDeadTestSockets. A dead socket's ECONNREFUSED is returned immediately,
+// and a live server answers the dial well within this window even under load.
+const pruneDialTimeout = 200 * time.Millisecond
+
+// PruneDeadTestSockets removes leftover gt-test-* socket files in SocketDir
+// whose tmux server is no longer running, returning the count removed.
+//
+// Integration tests create sockets named "gt-test-*"; their t.Cleanup normally
+// kills the server and removes the file. But a test process SIGKILLed mid-run
+// (context limit, crash, scheduler nuke) never runs cleanup, orphaning the
+// socket file. Tens of thousands accumulate in /tmp/tmux-UID and slow every
+// gt-test-* socket scan because findTestSockets probes each one (gu-wb67v,
+// follow-on to the gu-erfce per-probe timeout).
+//
+// A socket is reaped only when a kernel-level dial returns ECONNREFUSED — the
+// file exists but nothing is listening. A successful dial (live server, even
+// with zero sessions) or any ambiguous error (ENOTSOCK, timeout, permission)
+// leaves the file untouched, matching the conservative stance of
+// probeServerHealth.
+func PruneDeadTestSockets() int {
+	entries, err := os.ReadDir(SocketDir())
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "gt-test-") {
+			continue
+		}
+		socketPath := filepath.Join(SocketDir(), name)
+		conn, err := net.DialTimeout("unix", socketPath, pruneDialTimeout)
+		if err == nil {
+			// Live listener — leave it alone.
+			_ = conn.Close()
+			continue
+		}
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			// No live listener: benign leftover from a killed test process.
+			if rmErr := os.Remove(socketPath); rmErr == nil {
+				removed++
+			}
+		}
+	}
+	return removed
+}
+
 // IsInSameSocket checks if the current process is inside a tmux session on the
 // same socket as the default town socket. Used to decide between switch-client
 // (same socket) and attach-session (different socket or outside tmux).
