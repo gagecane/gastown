@@ -183,6 +183,12 @@ type ConvoyManager struct {
 	// now returns the current time. Overridable for tests; defaults to
 	// time.Now. Only used by the feed-cooldown logic.
 	now func() time.Time
+
+	// seenSlingErrors deduplicates persistent sling failures so the daemon
+	// escalates once per stranded issue instead of spamming an escalation
+	// every scan cycle. Cleared on successful dispatch so a future failure
+	// (if the issue is re-queued) is escalated again. Key: issueID. (gt-3798)
+	seenSlingErrors sync.Map // map[string]bool
 }
 
 // missingBeadKey identifies a (convoy, bead) pair for the strike counter.
@@ -723,7 +729,14 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			stderrLine := util.FirstLine(stderr.String())
 			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, stderrLine)
 			if isBeadNotFoundError(stderrLine) {
+				// Missing beads have their own resolution path (auto-untrack
+				// after threshold strikes) — don't also escalate them.
 				m.handleMissingBeadStrike(c.ID, issueID, stderrLine)
+			} else if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
+				// Persistent non-missing failure (e.g. an unroutable target
+				// under the capacity scheduler, gt-3798): escalate once per
+				// stranded issue instead of every scan cycle.
+				m.escalateSlingFailure(c.ID, issueID, stderrLine)
 			}
 			continue
 		}
@@ -731,6 +744,9 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		// for this (convoy, bead) pair. A bead that was transiently invisible
 		// (Dolt restart, replication lag) shouldn't carry strikes forward.
 		m.missingBeadStrikes.Delete(missingBeadKey{c.ID, issueID})
+		// Clear any prior sling-failure record so a future failure (if the
+		// issue is re-queued) is escalated again (gt-3798).
+		m.seenSlingErrors.Delete(issueID)
 		// Advance the escalate-churn streak: a bead re-dispatched again and
 		// again (refused/escalated, never closing) backs off toward
 		// feedCooldownCap instead of being re-fed every 5 min (gs-skv).
@@ -739,6 +755,23 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+}
+
+// escalateSlingFailure fires a one-shot gt escalate for a stranded convoy step.
+// It is called at most once per issueID (the caller deduplicates via
+// seenSlingErrors), turning silent every-30s daemon.log spam into a single
+// actionable HIGH escalation (gt-3798).
+func (m *ConvoyManager) escalateSlingFailure(convoyID, issueID, errMsg string) {
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+
+	msg := fmt.Sprintf("Convoy %s: step %s cannot be dispatched and will never progress — %s (gt-3798). Investigate with: gt convoy status %s", convoyID, issueID, errMsg, convoyID)
+	cmd := exec.CommandContext(ctx, m.gtPath, "escalate", "-s", "HIGH", msg)
+	cmd.Dir = m.townRoot
+	util.SetProcessGroup(cmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		m.logger("Convoy %s: escalation failed: %v (%s)", convoyID, err, strings.TrimSpace(string(out)))
+	}
 }
 
 // isBeadNotFoundError reports whether a sling stderr line indicates the target

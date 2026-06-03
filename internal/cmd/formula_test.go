@@ -820,3 +820,31 @@ exit 0
 		t.Fatalf("tracking relation = (%q, %q), want hq-cv to gt-leg", trackedConvoyID, trackedIssueID)
 	}
 }
+
+// TestWorkflowStepTargetInteractiveStaysOnRig locks gt-3798: an interactive
+// step is session-bound and must never be routed by `target`, even when the
+// formula declares one. workflowStepTarget must return the rig, not the role.
+func TestWorkflowStepTargetInteractiveStaysOnRig(t *testing.T) {
+	t.Parallel()
+
+	step := formula.Step{Target: "mayor", Interactive: true}
+	if got := workflowStepTarget(step, "gastown"); got != "gastown" {
+		t.Fatalf("workflowStepTarget(interactive, target=mayor) = %q, want %q", got, "gastown")
+	}
+}
+
+// TestWorkflowStepDescriptionInteractiveOmitsTarget locks gt-3798: an
+// interactive step must not carry a routable workflow_target line, otherwise
+// the auto-dispatch override would redirect it away from the human's session.
+func TestWorkflowStepDescriptionInteractiveOmitsTarget(t *testing.T) {
+	t.Parallel()
+
+	description := "Talk to the human\n\nClarify the requirements"
+	got := workflowStepDescription(formula.Step{Target: "mayor", Interactive: true}, description)
+	if got != description {
+		t.Fatalf("workflowStepDescription(interactive) = %q, want raw %q", got, description)
+	}
+	if strings.Contains(got, workflowTargetField) {
+		t.Fatalf("interactive step description must not contain %q: %q", workflowTargetField, got)
+	}
+}
