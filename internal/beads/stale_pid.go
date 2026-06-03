@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/steveyegge/gastown/internal/liveness"
 )
 
 // CleanStaleDoltServerPID removes the dolt-server.pid file inside a beads
@@ -31,14 +32,8 @@ func CleanStaleDoltServerPID(beadsDir string) {
 		return
 	}
 
-	// Check if the process is alive using signal 0 (no-op probe)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		_ = os.Remove(pidPath)
-		return
-	}
-
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
+	// Check if the process is alive using a shared signal-0 probe.
+	if !liveness.PIDAlive(pid) {
 		// Process is dead — remove stale PID file
 		_ = os.Remove(pidPath)
 		fmt.Fprintf(os.Stderr, "Cleaned stale dolt-server.pid (PID %d) from %s\n", pid, beadsDir)

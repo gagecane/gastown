@@ -22,16 +22,6 @@ func (p *Proxy) setupProcessGroup() {
 	util.SetProcessGroup(p.cmd)
 }
 
-// isProcessAlive checks if the agent process is still running.
-// On Unix, we use signal 0 to check process liveness.
-func (p *Proxy) isProcessAlive() bool {
-	if p.cmd == nil || p.cmd.Process == nil {
-		return false
-	}
-	err := p.cmd.Process.Signal(syscall.Signal(0))
-	return err == nil
-}
-
 // terminateProcess gracefully terminates the agent process.
 // On Unix, we send SIGTERM to the process group, then SIGKILL after 2 seconds
 // if the process hasn't exited.

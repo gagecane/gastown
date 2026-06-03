@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -318,7 +317,7 @@ func gracefullyShutdownACP(townRoot string) error {
 	for i := 0; i < 30; i++ {
 		fmt.Fprintf(os.Stderr, ".")
 		// Check if process is still alive
-		if err := process.Signal(syscall.Signal(0)); err != nil {
+		if !processAlive(pid) {
 			// Process has exited
 			fmt.Fprintf(os.Stderr, " done\n")
 			return nil

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/liveness"
 )
 
 // ActivateAgentLogging spawns a detached `gt agent-log` process to stream the
@@ -113,11 +115,11 @@ func killPreviousAgentLogger(pidFile string) {
 	}
 	_ = proc.Signal(syscall.SIGTERM)
 	// Wait briefly for the process to exit to avoid overlapping watchers
-	// emitting duplicate events. Signal(0) returns an error once the process
-	// has exited (ESRCH on Linux/macOS).
+	// emitting duplicate events. The shared liveness leaf reports false once
+	// the process has exited (ESRCH on Linux/macOS).
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
+		if !liveness.PIDAlive(pid) {
 			break // process has exited
 		}
 		time.Sleep(50 * time.Millisecond)

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -211,7 +212,7 @@ func loadSignalState(filename string) map[int]signalState {
 		}
 
 		// Only keep if process still exists
-		if err := syscall.Kill(pid, 0); err == nil || err == syscall.EPERM {
+		if liveness.PIDAlive(pid) {
 			state[pid] = signalState{Signal: sig, Timestamp: time.Unix(ts, 0)}
 		}
 	}
@@ -258,8 +259,7 @@ func saveOrphanState(state map[int]signalState) error {
 
 // processExists checks if a process is still running.
 func processExists(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
+	return liveness.PIDAlive(pid)
 }
 
 // getProcessCwd returns the current working directory of a process.

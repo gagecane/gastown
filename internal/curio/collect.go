@@ -5,7 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+
+	"github.com/steveyegge/gastown/internal/liveness"
 )
 
 // Collectors turn live Gastown state into normalized records, resolving all
@@ -22,19 +23,6 @@ type admissionReservationFile struct {
 	ID  string `json:"id"`
 	PID int    `json:"pid"`
 	Rig string `json:"rig,omitempty"`
-}
-
-// pidAlive reports whether a process is alive using signal 0 (no-op probe),
-// matching beads.CleanStaleDoltServerPID's liveness check.
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // CollectAdmissions reads the polecat-admission reservation dir under townRoot
@@ -71,7 +59,7 @@ func CollectAdmissions(townRoot string) ([]AdmissionRecord, error) {
 			ID:         r.ID,
 			PID:        r.PID,
 			Rig:        r.Rig,
-			OwnerAlive: pidAlive(r.PID),
+			OwnerAlive: liveness.PIDAlive(r.PID),
 			// Reservations are written by the scheduler, never by curio; the
 			// loop-breaker check is a no-op here but kept explicit for safety.
 			FiledBy: "scheduler",

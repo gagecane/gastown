@@ -19,19 +19,6 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	}
 }
 
-// isProcessAlive checks if a process is still running.
-// On Windows, Signal(0) is not supported, so we open the process handle
-// with minimal access to verify it exists.
-func isProcessAlive(p *os.Process) bool {
-	const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-	h, err := syscall.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(p.Pid))
-	if err != nil {
-		return false
-	}
-	syscall.CloseHandle(h)
-	return true
-}
-
 // sendTermSignal sends a termination signal.
 // On Windows, there's no SIGTERM - we use Kill() directly.
 func sendTermSignal(p *os.Process) error {
