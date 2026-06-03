@@ -103,7 +103,26 @@ func isDockerUnavailableErr(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "rootless docker not found") ||
 		strings.Contains(msg, "cannot connect to the docker daemon") ||
-		strings.Contains(msg, "no docker host")
+		strings.Contains(msg, "no docker host") ||
+		isRegistryUnreachableErr(msg)
+}
+
+// isRegistryUnreachableErr returns true when the Docker daemon is up but
+// cannot reach the image registry (e.g. Docker Hub) due to a network-layer
+// problem: connection timeouts, DNS failures, or canceled connections. These
+// are environment flakes — not test or image regressions — so callers skip
+// rather than fail, matching the intent of isDockerUnavailableErr.
+//
+// We deliberately match only network-reachability signatures, NOT the registry
+// host alone: a genuine bad image tag surfaces as "manifest ... not found" and
+// MUST keep failing the build. The arg is expected to already be lowercased.
+func isRegistryUnreachableErr(msg string) bool {
+	return strings.Contains(msg, "client.timeout exceeded while awaiting headers") ||
+		strings.Contains(msg, "request canceled while waiting for connection") ||
+		strings.Contains(msg, "tls handshake timeout") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "network is unreachable")
 }
 
 // runDoltContainer starts a Dolt sql-server container with the local

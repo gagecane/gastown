@@ -131,6 +131,18 @@ func TestIsDockerUnavailableErr(t *testing.T) {
 		{name: "rootless", err: errors.New("testcontainers docker unavailable: rootless Docker not found"), want: true},
 		{name: "daemon", err: errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock"), want: true},
 		{name: "ordinary", err: errors.New("pulling image failed"), want: false},
+		// Registry-unreachable network flakes — daemon is up but can't reach
+		// Docker Hub. The "client.Timeout" case is the exact error from CI run
+		// 26873990005 that reddened the refinery nightly.
+		{
+			name: "registry pull timeout",
+			err:  errors.New(`starting Dolt container: run dolt: generic container: create container: Error response from daemon: Get "https://registry-1.docker.io/v2/": net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers)`),
+			want: true,
+		},
+		{name: "tls handshake timeout", err: errors.New(`Get "https://registry-1.docker.io/v2/": net/http: TLS handshake timeout`), want: true},
+		{name: "dns failure", err: errors.New(`dial tcp: lookup registry-1.docker.io: no such host`), want: true},
+		// A genuine bad image tag must STILL fail the build, not skip.
+		{name: "manifest not found", err: errors.New(`Error response from daemon: manifest for dolthub/dolt-sql-server:9.9.9 not found`), want: false},
 	}
 
 	for _, tt := range tests {
