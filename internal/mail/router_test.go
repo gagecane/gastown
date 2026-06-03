@@ -183,6 +183,13 @@ func TestAddressToSessionIDs(t *testing.T) {
 		{"mayor", []string{"hq-mayor"}},
 		{"mayor/", []string{"hq-mayor"}},
 		{"deacon", []string{"hq-deacon"}},
+		{"deacon/", []string{"hq-deacon"}},
+
+		// Dog addresses: "deacon/dogs/<name>" → hq-dog-<name>
+		// Must NOT be misrouted to the Deacon pane via prefix collision.
+		{"deacon/dogs/alpha", []string{"hq-dog-alpha"}},
+		{"deacon/dogs/bravo", []string{"hq-dog-bravo"}},
+		{"deacon/dogs/", nil}, // Empty dog name - guard
 
 		// Rig singletons - single session (no crew/polecat ambiguity)
 		{"gastown/refinery", []string{"gt-refinery"}},

@@ -2085,8 +2085,18 @@ func AddressToSessionIDs(address string) []string {
 		return []string{session.MayorSessionName()}
 	}
 
-	// Deacon address: "deacon/" or "deacon"
-	if strings.HasPrefix(address, constants.RoleDeacon) {
+	// Dog address: "deacon/dogs/<name>" → hq-dog-<name>
+	// Must come before the Deacon prefix check below to avoid prefix collision.
+	if strings.HasPrefix(address, "deacon/dogs/") {
+		name := strings.TrimPrefix(address, "deacon/dogs/")
+		if name == "" {
+			return nil
+		}
+		return []string{session.DogSessionName(name)}
+	}
+
+	// Deacon top-level address: "deacon" or "deacon/" (NOT deacon/dogs/...)
+	if address == constants.RoleDeacon || address == constants.RoleDeacon+"/" {
 		return []string{session.DeaconSessionName()}
 	}
 
