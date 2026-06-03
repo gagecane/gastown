@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -146,6 +147,41 @@ func makePolecatDir(t *testing.T, townRoot, rig, name string) {
 	}
 }
 
+// makePolecatGitWorktree creates a git worktree at the nested polecat layout
+// (<townRoot>/<rig>/polecats/<name>/<rig>/) with an initial commit on a feature
+// branch and one uncommitted untracked file. Returns the worktree path. This
+// lets reaper tests assert that gu-4gt3s autosave captures abandoned WIP before
+// the bead is reset and re-dispatched.
+func makePolecatGitWorktree(t *testing.T, townRoot, rig, name, branch, untrackedFile string) string {
+	t.Helper()
+	wt := filepath.Join(townRoot, rig, "polecats", name, rig)
+	if err := os.MkdirAll(wt, 0755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	runGit := func(args ...string) {
+		full := append([]string{"-c", "protocol.file.allow=always"}, args...)
+		cmd := exec.Command("git", full...)
+		cmd.Dir = wt
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, wt, err, out)
+		}
+	}
+	runGit("init", "--initial-branch", "main")
+	runGit("config", "user.email", "test@test.com")
+	runGit("config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(wt, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README.md")
+	runGit("commit", "-m", "initial commit")
+	runGit("checkout", "-b", branch)
+	// Abandoned WIP: an untracked file the dying polecat never committed.
+	if err := os.WriteFile(filepath.Join(wt, untrackedFile), []byte("abandoned work\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return wt
+}
+
 // --- Tests ----------------------------------------------------------------
 
 // TestReapDeadPolecatWisps_SkipsMissingRig verifies the reaper is a no-op
@@ -237,6 +273,70 @@ func TestReapDeadPolecatWisps_ReapsDeadPolecatBead(t *testing.T) {
 	}
 	if !strings.Contains(got, "prev_status=hooked") {
 		t.Errorf("log should record previous status, got: %q", got)
+	}
+}
+
+// TestReapDeadPolecatWisps_AutosavesAbandonedWIP verifies the gu-4gt3s fix:
+// when a dead polecat's bead is reaped and re-dispatched, the reaper first
+// auto-saves any uncommitted work in the worktree (git add -A + commit) so it
+// is not destroyed by the next ReuseIdlePolecat ResetHard. Prior to the fix,
+// only killIdlePolecat (still-alive sessions) autosaved; this already-dead path
+// reset the bead without preserving the worktree, stranding completed work.
+func TestReapDeadPolecatWisps_AutosavesAbandonedWIP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks")
+	}
+	binDir := t.TempDir()
+	writeFakeTmuxDeadSession(t, binDir)
+	bdPath := writeFakeBDListOnly(t, binDir, map[string]string{
+		"hooked":      `[{"id":"gu-wip","assignee":"myrig/polecats/shiny","status":"hooked"}]`,
+		"in_progress": `[]`,
+	})
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d, townRoot := newReapTestDaemon(t, &logBuf, bdPath)
+
+	// Real git worktree at the nested layout with an uncommitted untracked file.
+	branch := "polecat/shiny/gu-wip"
+	wt := makePolecatGitWorktree(t, townRoot, "myrig", "shiny", branch, "abandoned.go")
+	writeHeartbeatAge(t, townRoot, "myr-shiny", 90*time.Minute)
+
+	d.reapRigDeadPolecatWisps("myrig", time.Hour)
+
+	// The bead must still be reset (autosave is non-blocking).
+	updateData, err := os.ReadFile(filepath.Join(binDir, "bd-update.log"))
+	if err != nil {
+		t.Fatalf("expected bead reset, got no update log: %v\nlogger:\n%s", err, logBuf.String())
+	}
+	if !strings.Contains(string(updateData), "update gu-wip --status=open --assignee=") {
+		t.Errorf("bead was not reset to open; bd-update.log:\n%s", updateData)
+	}
+
+	// The abandoned WIP must now be committed on the feature branch — the
+	// worktree must be clean (no untracked/uncommitted files left to lose).
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = wt
+	statusOut, statusErr := statusCmd.Output()
+	if statusErr != nil {
+		t.Fatalf("git status in worktree: %v", statusErr)
+	}
+	if strings.TrimSpace(string(statusOut)) != "" {
+		t.Errorf("expected clean worktree after autosave, got uncommitted state:\n%s\nlogger:\n%s",
+			statusOut, logBuf.String())
+	}
+
+	// The autosave commit must contain the abandoned file.
+	showCmd := exec.Command("git", "show", "--name-only", "--format=", "HEAD")
+	showCmd.Dir = wt
+	showOut, _ := showCmd.Output()
+	if !strings.Contains(string(showOut), "abandoned.go") {
+		t.Errorf("autosave commit does not contain abandoned.go; HEAD files:\n%s", showOut)
+	}
+
+	// The reaper must log the autosave for operator visibility.
+	if !strings.Contains(logBuf.String(), "AutoSaved WIP for myrig/shiny") {
+		t.Errorf("missing autosave log line, got: %q", logBuf.String())
 	}
 }
 

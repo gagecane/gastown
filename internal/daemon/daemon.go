@@ -3879,6 +3879,28 @@ func (d *Daemon) maybeReapDeadPolecatBead(rigName, polecatName, beadID, status, 
 		return
 	}
 
+	// gu-4gt3s: Auto-save any uncommitted WIP before re-dispatching the bead.
+	// This path handles polecats whose session is ALREADY DEAD (session gone +
+	// heartbeat stale) — the exact "session dies → heartbeat-stale → reaped"
+	// scenario from the incident reports. Unlike killIdlePolecat (which reaps a
+	// still-alive session), this reaper only reset the bead and re-dispatched,
+	// leaving the dead polecat's uncommitted work in the worktree to be destroyed
+	// by the next ReuseIdlePolecat ResetHard/CleanForce. Saving it here mirrors
+	// killIdlePolecat's safety net (git add -A, push is the caller's job).
+	worktreePath := polecat.WorktreePath(d.config.TownRoot, rigName, polecatName)
+	if worktreePath != "" {
+		g := gitpkg.NewGit(worktreePath)
+		branch, _ := g.CurrentBranch()
+		saved, sha, saveErr := polecat.AutoSaveAbandonedWIP(worktreePath, branch, "dead-polecat-wisp-reap")
+		if saveErr != nil {
+			d.logger.Printf("reap-dead-polecat-wisps: autosave failed for %s/%s: %v (proceeding with reset)", rigName, polecatName, saveErr)
+		} else if saved {
+			d.logger.Printf("reap-dead-polecat-wisps: AutoSaved WIP for %s/%s: commit %s", rigName, polecatName, sha)
+			// Label the agent bead with wip-recovered:<sha> for witness reclaim patrol.
+			d.labelAgentBeadWIPRecovered(rigName, polecatName, sha)
+		}
+	}
+
 	// Reset bead to open with cleared assignee so the scheduler/sling flow
 	// can re-dispatch it. We use bd update directly rather than routing
 	// through the witness RECOVERED_BEAD pathway because:
