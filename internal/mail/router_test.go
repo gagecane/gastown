@@ -2486,3 +2486,26 @@ func TestAppendMetadataArgs(t *testing.T) {
 		}
 	})
 }
+
+// TestIsRoutineOverseerNotification verifies that high-volume overseer
+// notification subjects (convoy complete, etc.) are matched case-insensitively
+// so they route to banner delivery instead of tmux send-keys (gt-ini3q).
+func TestIsRoutineOverseerNotification(t *testing.T) {
+	tests := []struct {
+		subject string
+		want    bool
+	}{
+		{"Convoy complete", true},
+		{"convoy completed for gu-wisp-st32", true},
+		{"CONVOY COMPLETE", true},
+		{"prefix convoy complete suffix", true},
+		{"Escalation: dolt server down", false},
+		{"you have new mail", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isRoutineOverseerNotification(tt.subject); got != tt.want {
+			t.Errorf("isRoutineOverseerNotification(%q) = %v, want %v", tt.subject, got, tt.want)
+		}
+	}
+}
