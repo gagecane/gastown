@@ -208,6 +208,34 @@ var fireCapacityExhaustionEscalation = func(snapshot polecatCapacitySnapshot, sk
 	}
 }
 
+// fireDispatchCloseEscalation raises a HIGH escalation to the Mayor when the
+// last-resort sling-context close fails after a successful dispatch (gu-i0oaq).
+// The polecat has already launched but the context could not be marked closed
+// — usually because the wisp bead was TTL-reaped out from under the close
+// ("issue not found"), indicating bead-DB degradation. Left unescalated, the
+// next dispatch cycle could re-dispatch the same work. Fingerprinted per
+// work-bead so gt escalate's close-aware dedup suppresses repeats for the same
+// stranded context. Overridable in tests.
+var fireDispatchCloseEscalation = func(workBeadID, contextID, rig string, closeErr error) {
+	args := dispatchCloseEscalationArgs(workBeadID, contextID, rig, closeErr)
+	if err := exec.Command(args[0], args[1:]...).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s dispatch-close escalation failed: %v\n", style.Warning.Render("⚠"), err)
+	}
+}
+
+// dispatchCloseEscalationArgs builds the `gt escalate` command line for a
+// stranded-context double-dispatch risk. Pure so the severity, source, and
+// per-work-bead fingerprint can be asserted without shelling out.
+func dispatchCloseEscalationArgs(workBeadID, contextID, rig string, closeErr error) []string {
+	msg := fmt.Sprintf("Dispatch of %s succeeded but context %s could not be closed: %v — risk of double-dispatch on next cycle", workBeadID, contextID, closeErr)
+	reason := fmt.Sprintf("rig=%s work_bead=%s context=%s: last-resort CloseSlingContext failed after OnSuccess retries. Commonly wisp TTL-reaping racing the dispatch close (bead-DB degradation). The polecat launched but the sling context is still open, so the next scheduler cycle may re-dispatch %s. Inspect: gt scheduler status --json; bd show %s.",
+		rig, workBeadID, contextID, workBeadID, contextID)
+	return []string{"gt", "escalate", "--severity", "high",
+		"--source", "scheduler:dispatch-close",
+		"--fingerprint", fmt.Sprintf("dispatch-close:%s", workBeadID),
+		"--reason", reason, msg}
+}
+
 // dispatchScheduledWork is the main dispatch loop for the capacity scheduler.
 // Called by both `gt scheduler run` and the daemon heartbeat.
 func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun bool) (int, error) {
@@ -374,6 +402,15 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 				if closeErr := ctxBeads.CloseSlingContext(b.ID, "dispatch-close-failed"); closeErr != nil {
 					fmt.Fprintf(os.Stderr, "%s CRITICAL: last-resort close of %s failed — risk of double-dispatch for %s: %v\n",
 						style.Warning.Render("⚠"), b.ID, b.WorkBeadID, closeErr)
+					// Feed event so dashboards detect the stranded-context / bead-DB degradation.
+					_ = events.LogFeed(events.TypeSchedulerCloseFailed, actor,
+						events.SchedulerDispatchFailedPayload(b.WorkBeadID, b.TargetRig, closeErr.Error()))
+					// Escalate HIGH to the Mayor: the context is open and the work may re-dispatch.
+					fireDispatchCloseEscalation(b.WorkBeadID, b.ID, b.TargetRig, closeErr)
+					// Skip recordDispatchFailure: the context is in an unknown state and
+					// the bead DB is degraded — writing to it is unreliable and the
+					// escalation already routes this to a human/Mayor.
+					return
 				} else {
 					// Last-resort close succeeded — context is now closed.
 					// Log feed event so dashboards can detect bead DB degradation.

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,5 +243,53 @@ func TestIsAlreadyDispatchedError(t *testing.T) {
 				t.Errorf("isAlreadyDispatchedError(%q) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDispatchCloseEscalationArgs pins the gu-i0oaq escalation contract: the
+// stranded-context double-dispatch risk escalates HIGH, is sourced to the
+// dispatch-close path, and is fingerprinted PER WORK-BEAD so gt escalate's
+// dedup collapses repeats for the same stranded context (not across beads).
+func TestDispatchCloseEscalationArgs(t *testing.T) {
+	closeErr := fmt.Errorf("issue not found")
+	args := dispatchCloseEscalationArgs("ta-o19o", "ta-wisp-cl0", "talontriage", closeErr)
+
+	joined := strings.Join(args, " ")
+	want := map[string]string{
+		"--severity":    "high",
+		"--source":      "scheduler:dispatch-close",
+		"--fingerprint": "dispatch-close:ta-o19o",
+	}
+	for flag, val := range want {
+		idx := -1
+		for i, a := range args {
+			if a == flag {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 || idx+1 >= len(args) {
+			t.Fatalf("flag %q missing from args: %q", flag, joined)
+		}
+		if args[idx+1] != val {
+			t.Errorf("%s = %q, want %q", flag, args[idx+1], val)
+		}
+	}
+
+	if args[0] != "gt" || args[1] != "escalate" {
+		t.Errorf("command = %q %q, want gt escalate", args[0], args[1])
+	}
+	// The work bead, context, and underlying error must all surface for triage.
+	for _, must := range []string{"ta-o19o", "ta-wisp-cl0", "issue not found", "double-dispatch"} {
+		if !strings.Contains(joined, must) {
+			t.Errorf("escalation args missing %q: %s", must, joined)
+		}
+	}
+
+	// Fingerprint is keyed by work-bead, not context: a different bead must dedup
+	// independently even if it strands the same kind of context.
+	other := dispatchCloseEscalationArgs("ta-53is", "ta-wisp-4qh", "talontriage", closeErr)
+	if strings.Join(other, " ") == joined {
+		t.Error("distinct work beads produced identical escalation args; fingerprint not bead-scoped")
 	}
 }

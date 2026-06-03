@@ -74,6 +74,7 @@ const (
 	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
 	TypeSchedulerDispatchFailed = "scheduler_dispatch_failed" // Bead dispatch failed (requeued)
 	TypeSchedulerCloseRetry     = "scheduler_close_retry"     // Context close needed last-resort attempt
+	TypeSchedulerCloseFailed    = "scheduler_close_failed"    // Last-resort context close failed — double-dispatch risk
 	TypeSchedulerDeferReleased  = "scheduler_defer_released"  // Bead auto-released from defer (defer_until <= now)
 
 	// Auto-dispatch events (event-driven refill observability)
