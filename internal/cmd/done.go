@@ -753,7 +753,7 @@ afterSafetyNet:
 							closeReason = fmt.Sprintf("%s\nskip_verify: true\nskip_verify_reason: %s\ntarget_branch: %s\ncommit_sha: %s", closeReason, doneSkipVerifyReason, defaultBranch, noMRCommitSHA)
 						}
 					} else if !isNoMergeTask {
-						if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
+						if verifyErr := g.VerifyCommitOnRemoteBranch("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
 							noteVerifiedPushFailure(cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
 							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
 						}
@@ -927,7 +927,7 @@ afterSafetyNet:
 				}
 				if doneSkipVerify {
 					noteVerifiedPushSkipped(cwd, issueID, relayBase, relayCommitSHA, fmt.Sprintf("--skip-verify on relay FF-push: %s", doneSkipVerifyReason))
-				} else if verifyErr := g.VerifyPushedCommit("origin", relayBase, relayCommitSHA); verifyErr != nil {
+				} else if verifyErr := g.VerifyCommitOnRemoteBranch("origin", relayBase, relayCommitSHA); verifyErr != nil {
 					// gu-epv5: verify may have hit a transient remote read
 					// failure. Re-check origin tip before declaring the work
 					// stranded.
@@ -1029,7 +1029,7 @@ afterSafetyNet:
 				}
 				if doneSkipVerify {
 					noteVerifiedPushSkipped(cwd, issueID, defaultBranch, directCommitSHA, fmt.Sprintf("--skip-verify on direct merge: %s", doneSkipVerifyReason))
-				} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+				} else if verifyErr := g.VerifyCommitOnRemoteBranch("origin", defaultBranch, directCommitSHA); verifyErr != nil {
 					// gu-epv5: re-check origin tip — verify may have hit a
 					// transient remote read failure. If tip matches, treat
 					// as success.
@@ -1475,7 +1475,7 @@ afterSafetyNet:
 					lateDirectCommitSHA, _ := g.Rev("HEAD")
 					if doneSkipVerify {
 						noteVerifiedPushSkipped(cwd, issueID, defaultBranch, lateDirectCommitSHA, fmt.Sprintf("--skip-verify on late direct merge: %s", doneSkipVerifyReason))
-					} else if verifyErr := g.VerifyPushedCommit("origin", defaultBranch, lateDirectCommitSHA); verifyErr != nil {
+					} else if verifyErr := g.VerifyCommitOnRemoteBranch("origin", defaultBranch, lateDirectCommitSHA); verifyErr != nil {
 						// gu-epv5: verify may have hit a transient remote
 						// read failure. Re-check origin tip directly before
 						// declaring the work stranded.
