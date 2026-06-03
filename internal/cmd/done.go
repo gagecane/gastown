@@ -1218,6 +1218,16 @@ afterSafetyNet:
 			if pushedCommitSHA != "" && recoverPushFromOriginTip(g, branch, pushedCommitSHA) {
 				fmt.Printf("%s Push reported failure but origin/%s already matches expected SHA — proceeding to MR creation (gu-epv5 recovery)\n", style.Bold.Render("✓"), branch)
 				pushErr = nil
+			} else if pushedCommitSHA != "" && recoverNonFFOwnBranch(g, branch, pushedCommitSHA, pushErr) {
+				// gu-hz3vx Mayor fix-direction (b): a non-fast-forward rejection
+				// on the polecat's OWN private feature branch where the local
+				// HEAD tree is identical to origin's tip (pure amend/rebase, no
+				// content divergence) is safe to force-update — the branch is
+				// session-private, not shared history, and an identical tree
+				// loses nothing and smuggles nothing. recoverNonFFOwnBranch
+				// force-updated origin and verified the tip; proceed to MR.
+				fmt.Printf("%s Non-fast-forward on own branch with identical tree — force-updated origin/%s (gu-hz3vx recovery)\n", style.Bold.Render("✓"), branch)
+				pushErr = nil
 			} else {
 				// gu-epv5 Option B: file a discoverable push-stranded wisp
 				// so the work isn't invisible. The merge queue will not
@@ -2156,6 +2166,103 @@ func recoverPushFromOriginTip(g *git.Git, branch, expectedSHA string) bool {
 		return false
 	}
 	return strings.TrimSpace(tip) == strings.TrimSpace(expectedSHA)
+}
+
+// isNonFastForwardPushError reports whether a failed push was rejected by the
+// remote for being a non-fast-forward update (the diverged-branch case). Git
+// phrases this several ways depending on version and whether the ref is a
+// branch tip or a tracking ref, so we match the stable substrings that all
+// of them share. Used by recoverNonFFOwnBranch to distinguish a divergence
+// rejection (safe to consider force-updating a private branch) from any other
+// push failure (network, auth, gate rejection — never force-update on those).
+func isNonFastForwardPushError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "non-fast-forward") ||
+		strings.Contains(msg, "fetch first") ||
+		strings.Contains(msg, "updates were rejected") ||
+		strings.Contains(msg, "tip of your current branch is behind") ||
+		strings.Contains(msg, "failed to push some refs")
+}
+
+// recoverNonFFOwnBranch implements the safe slice of Mayor fix-direction (b)
+// for gu-hz3vx: when `gt done`'s branch:branch push is rejected non-fast-forward
+// on the polecat's OWN private feature branch, the branch is uniquely named per
+// session and not shared history — so force-updating it is permissible IN
+// PRINCIPLE. But the shiny gu-qx6rn recovery surfaced a footgun: the local
+// amended commit (4778a4c1) had bundled UNRELATED files on top of the
+// already-pushed work (ae9aaf99). Blindly force-pushing it would have shipped
+// that contamination to the merge queue.
+//
+// The provably-safe condition we require before force-updating is that the
+// local HEAD produces the BYTE-IDENTICAL tree as origin's current branch tip.
+// That means the divergence is purely a history-shape difference (an amend or
+// a rebase onto a different base that picked up no new content) — exactly the
+// shiny case once the contaminating files are excluded. Force-updating to an
+// identical tree:
+//   - loses nothing on origin (the content already there is preserved), and
+//   - adds no new content (so it cannot smuggle unrelated changes into the MR).
+//
+// When the trees differ, we refuse and return false so the caller falls through
+// to the existing loud-strand path (fileStrandedPushWisp + gu-rh0g refuse-close):
+// a real content divergence still demands human/Mayor judgement, not an
+// automatic force-push.
+//
+// Preconditions enforced by the caller: branch is NOT the rig default (the
+// gu-cfb guard above already rejected that), and pushErr was a real push
+// failure. Returns true only if it force-updated origin to expectedSHA AND
+// verified the new tip.
+func recoverNonFFOwnBranch(g *git.Git, branch, expectedSHA string, pushErr error) bool {
+	if g == nil || branch == "" || expectedSHA == "" {
+		return false
+	}
+	if !isNonFastForwardPushError(pushErr) {
+		return false
+	}
+
+	// Resolve origin's current tip for this branch.
+	originTip, err := g.RemoteBranchTip("origin", branch)
+	if err != nil || strings.TrimSpace(originTip) == "" {
+		// Can't read the remote — don't risk a force-push blind.
+		return false
+	}
+	originTip = strings.TrimSpace(originTip)
+
+	// If origin already matches our SHA there was nothing to recover; the
+	// origin-tip recovery path handles that case. A non-FF here with a
+	// matching tip would be contradictory, so bail.
+	if originTip == expectedSHA {
+		return false
+	}
+
+	// Make origin's tip object available locally so we can compare trees.
+	// Best-effort: if the fetch fails we cannot prove tree-equality, so refuse.
+	if fetchErr := g.FetchBranch("origin", branch); fetchErr != nil {
+		return false
+	}
+
+	// Compare the resulting TREES, not the commits. Identical trees ⇒ no
+	// content is lost and none is added by the force-update.
+	localTree, lErr := g.Rev(expectedSHA + "^{tree}")
+	remoteTree, rErr := g.Rev(originTip + "^{tree}")
+	if lErr != nil || rErr != nil {
+		return false
+	}
+	if strings.TrimSpace(localTree) != strings.TrimSpace(remoteTree) {
+		// Real content divergence (e.g. shiny's contaminating bundle). Do
+		// NOT force-push — let the caller strand it loudly for review.
+		return false
+	}
+
+	// Trees are identical — safe to force-update the private branch.
+	if forceErr := pushSHAForDone(g, "origin", expectedSHA, branch, true); forceErr != nil {
+		return false
+	}
+
+	// Verify the force-update actually landed our SHA before claiming success.
+	return recoverPushFromOriginTip(g, branch, expectedSHA)
 }
 
 // fileStrandedPushWisp implements Option B for gu-epv5: when a push step
