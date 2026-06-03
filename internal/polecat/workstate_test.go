@@ -49,19 +49,40 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			want: WorkstateDisposition{Verdict: WorkstateVerdictPendingMR, Reason: "active-mr-open", ReuseStatus: "idle-pr-open"},
 		},
 		{
+			// gu-54r7b: at-risk delta on a stalled polecat now falls through to the
+			// shared predicate block, so blockers are NAMED instead of returning a
+			// blocker-less "not-idle" NEEDS_RECOVERY ("unknown recovery predicate").
 			name: "stalled with open mr but unpushed commits still needs recovery",
 			in:   WorkstateInput{State: StateStalled, CleanupStatus: CleanupClean, ActiveMR: "gt-mr-open", ActiveMRBlocker: "active_mr=gt-mr-open status=open", UnpushedCommits: 2},
-			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "not-idle", NeedsRecovery: true, CountsTowardCapacity: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-unpushed", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed"},
 		},
 		{
 			name: "stalled with open mr but dirty tree still needs recovery",
 			in:   WorkstateInput{State: StateStalled, CleanupStatus: CleanupClean, ActiveMR: "gt-mr-open", ActiveMRBlocker: "active_mr=gt-mr-open status=open", GitDirty: true},
-			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "not-idle", NeedsRecovery: true, CountsTowardCapacity: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-dirty", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed"},
 		},
 		{
-			name: "stalled without an open mr still needs recovery",
+			// gu-54r7b: the core regression. A stalled polecat with a verifiably
+			// clean tree and no MR used to return NEEDS_RECOVERY with empty blockers
+			// ("unknown recovery predicate") and escalate to the Mayor. It must now
+			// be SAFE_TO_NUKE — no work is at risk.
+			name: "stalled clean tree without an open mr is safe to nuke",
 			in:   WorkstateInput{State: StateStalled, CleanupStatus: CleanupClean},
-			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "not-idle", NeedsRecovery: true, CountsTowardCapacity: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, ReuseStatus: "idle-clean"},
+		},
+		{
+			// gu-54r7b: a stalled polecat with a dirty tree and no MR names its
+			// blocker (git-dirty) rather than the blocker-less "unknown predicate".
+			name: "stalled dirty tree without an open mr names blocker",
+			in:   WorkstateInput{State: StateStalled, CleanupStatus: CleanupClean, GitDirty: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-dirty", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed"},
+		},
+		{
+			// gu-54r7b: a stalled polecat still holding a hook bead names that
+			// blocker rather than escalating with an unknown predicate.
+			name: "stalled with hook still set names blocker",
+			in:   WorkstateInput{State: StateStalled, CleanupStatus: CleanupClean, HookBead: "gt-work"},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "hook-still-set", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed"},
 		},
 	}
 

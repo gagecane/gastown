@@ -55,14 +55,14 @@ type WorkstateDisposition struct {
 
 // DecideWorkstate returns the canonical disposition for a polecat.
 func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
-	if in.State != StateIdle {
-		if in.State == StateWorking {
-			return WorkstateDisposition{
-				Verdict:              WorkstateVerdictWorking,
-				Reason:               "not-idle",
-				CountsTowardCapacity: true,
-			}
+	if in.State == StateWorking {
+		return WorkstateDisposition{
+			Verdict:              WorkstateVerdictWorking,
+			Reason:               "not-idle",
+			CountsTowardCapacity: true,
 		}
+	}
+	if in.State != StateIdle {
 		// A non-working, non-idle polecat (e.g. stalled after a clean completion)
 		// whose work is safely captured by an open merge request, with no at-risk
 		// local delta, is awaiting merge — not in need of recovery. Normal
@@ -76,12 +76,15 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 				ReuseStatus: "idle-pr-open",
 			}
 		}
-		return WorkstateDisposition{
-			Verdict:              WorkstateVerdictNeedsRecovery,
-			Reason:               "not-idle",
-			NeedsRecovery:        true,
-			CountsTowardCapacity: true,
-		}
+		// gu-54r7b: a stalled polecat with no open MR used to return
+		// NEEDS_RECOVERY unconditionally — with EMPTY blockers — so
+		// check-recovery printed "unknown recovery predicate" and escalated even
+		// for verifiably-clean trees (gu-xpqvf only fixed the open-MR sub-case).
+		// Fall through to the same predicate evaluation idle polecats use: a
+		// genuinely at-risk tree (dirty/unpushed/stash/hook-still-set/push-or-mr
+		// failed/unsubmitted MQ) still returns NEEDS_RECOVERY/NEEDS_MQ_SUBMIT with
+		// NAMED blockers, while a clean stalled tree correctly returns
+		// SAFE_TO_NUKE instead of a false-positive escalation.
 	}
 
 	d := WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke}
