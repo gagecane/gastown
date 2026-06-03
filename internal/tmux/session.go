@@ -21,6 +21,9 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
+	if err := t.probeServerHealth(); err != nil {
+		return err
+	}
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
@@ -58,6 +61,9 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 		}
 	}
 	if err := validateCommandBinary(command); err != nil {
+		return err
+	}
+	if err := t.probeServerHealth(); err != nil {
 		return err
 	}
 
@@ -149,6 +155,9 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 		}
 	}
 	if err := validateCommandBinary(command); err != nil {
+		return err
+	}
+	if err := t.probeServerHealth(); err != nil {
 		return err
 	}
 
