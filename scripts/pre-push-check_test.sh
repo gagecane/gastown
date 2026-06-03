@@ -674,6 +674,119 @@ test_probe_finds_tools_off_base_path() {
   PASS=$((PASS + 1)); rm -rf "$repo" "$probedir"
 }
 
+# --- gu-zadrb: slow-gate hard wall-clock group timeout -------------------
+#
+# The slow gate ('go test ./...') has been observed to hang PAST go's own
+# -timeout because a test spawned network children (git-remote-https) that
+# go's deadline doesn't reap. The orphaned tree pins the polecat worktree dir,
+# blocking post-merge nuke (STUCK_NUKE). The fix runs the slow gate in its own
+# process group under a wall-clock timeout and kills the WHOLE group on expiry.
+#
+# These tests stub `go` so the "test" subcommand hangs (and forks a child that
+# outlives its parent), then assert: (1) the push is rejected with the timeout
+# message, and (2) no forked child survives the group-kill.
+
+# Test: a hanging slow gate is killed by the wall-clock group timeout and the
+# push is rejected (rc != 0, timeout message printed).
+test_slow_gate_wall_clock_timeout_rejects() {
+  local stubdir tmprepo marker
+  stubdir=$(mktemp -d)
+  tmprepo=$(mktemp -d)
+  marker=$(mktemp -u)   # a path the forked grandchild creates then would keep alive
+  # `go`: pass build/vet fast, but the "test" subcommand spawns a long-lived
+  # child (writing its PID to $marker) and then hangs — simulating the
+  # hang-past-go-timeout failure mode.
+  cat > "$stubdir/go" <<EOF
+#!/bin/bash
+if [[ "\$1" == "test" ]]; then
+  # Spawn a child that outlives this process (the orphan-that-pins-worktree).
+  ( sleep 300 & echo "\$!" > "$marker"; sleep 300 ) &
+  # Hang forever — go's -timeout would normally fire, but we model the case
+  # where it does NOT (children keep the tree alive).
+  sleep 300
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$stubdir/go"
+  printf '#!/bin/bash\nexit 0\n' > "$stubdir/gofmt"; chmod +x "$stubdir/gofmt"
+
+  ( cd "$tmprepo" && git init -q && \
+      git config user.email "test@example.com" && \
+      git config user.name "test" && \
+      git commit -q --allow-empty -m init ) >/dev/null 2>&1
+
+  local rc=0 out
+  out=$(
+    cd "$tmprepo" && \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    GT_PREPUSH_TEST_WALL_SECONDS=2 \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+
+  if [[ $rc -eq 0 ]]; then
+    echo "FAIL: a hanging slow gate should reject the push (got rc=0)" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"; return
+  fi
+  if ! echo "$out" | grep -qi "wall-clock timeout"; then
+    echo "FAIL: rejection should mention the wall-clock timeout" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"; return
+  fi
+
+  # The forked grandchild must NOT survive the group-kill. Give the kill a
+  # moment to land, then check the PID recorded in $marker is gone.
+  sleep 2
+  if [[ -f "$marker" ]]; then
+    local child_pid
+    child_pid=$(cat "$marker" 2>/dev/null)
+    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
+      echo "FAIL: forked test child $child_pid survived the group-kill (orphan would pin worktree)" >&2
+      kill -KILL -- "-$child_pid" 2>/dev/null
+      kill -KILL "$child_pid" 2>/dev/null
+      FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"; return
+    fi
+  fi
+  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"
+}
+
+# Test: a fast slow-gate (returns before the wall) is NOT killed and the push
+# passes — the wall-clock must not penalize healthy test runs.
+test_slow_gate_under_wall_passes() {
+  local stubdir tmprepo
+  stubdir=$(mktemp -d)
+  tmprepo=$(mktemp -d)
+  printf '#!/bin/bash\nexit 0\n' > "$stubdir/go";    chmod +x "$stubdir/go"
+  printf '#!/bin/bash\nexit 0\n' > "$stubdir/gofmt"; chmod +x "$stubdir/gofmt"
+
+  ( cd "$tmprepo" && git init -q && \
+      git config user.email "test@example.com" && \
+      git config user.name "test" && \
+      git commit -q --allow-empty -m init ) >/dev/null 2>&1
+
+  local rc=0 out
+  out=$(
+    cd "$tmprepo" && \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    GT_PREPUSH_TEST_WALL_SECONDS=30 \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL: a fast slow-gate under the wall should pass (got rc=$rc)" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo"; return
+  fi
+  if ! echo "$out" | grep -q "all gates passed"; then
+    echo "FAIL: healthy run should report all gates passed" >&2
+    echo "$out" >&2
+    FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo"
+}
+
 # Only run the functional test if we have a real `go` on PATH — otherwise
 # pre-push-check.sh short-circuits before the unset matters.
 if command -v go >/dev/null 2>&1; then
@@ -700,6 +813,9 @@ if command -v git >/dev/null 2>&1; then
   test_go_absent_skips_in_non_go_repo
   test_lint_absent_blocks_in_go_repo
   test_probe_finds_tools_off_base_path
+  # gu-zadrb: slow-gate hard wall-clock group timeout
+  test_slow_gate_wall_clock_timeout_rejects
+  test_slow_gate_under_wall_passes
 fi
 
 echo ""

@@ -1308,7 +1308,14 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 			// tracking-config-based pushes (which would target origin/main for
 			// polecat branches that track main — the G20 root cause).
 			refspec := branch + ":" + branch
-			if pushErr := polecatGit.Push("origin", refspec, false); pushErr != nil {
+			// gu-zadrb: PushSkipPrePush (GT_SKIP_PREPUSH=1), NOT Push. This is a
+			// teardown push for a worktree about to be discarded — running the
+			// SLOW 'go test ./...' pre-push gate here is meaningless and actively
+			// harmful: the gate hangs mid-suite, orphans a forking test process
+			// tree (git-remote-https children at PPID=1) that PINS the worktree
+			// dir, and the nuke that follows can never rmdir it → STUCK_NUKE
+			// loops + stranded work. Fast gates (build/vet/gofmt) still run.
+			if pushErr := polecatGit.PushSkipPrePush("origin", refspec, false); pushErr != nil {
 				style.PrintWarning("could not push branch %s before removal (%d unpushed commit(s)): %v",
 					branch, unpushedCount, pushErr)
 				style.PrintWarning("WORK AT RISK: branch %s has %d unpushed commit(s) in worktree %s",

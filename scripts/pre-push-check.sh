@@ -370,8 +370,58 @@ if [[ "$SKIP_SLOW" == "1" ]]; then
   exit 0
 fi
 
-echo "pre-push: [slow] go test ./... -count=1 (unit tests)" >&2
-if ! go test ./... -count=1 -timeout=5m 2>&1; then
+# run_with_group_timeout <wall_seconds> <cmd...> — run a command in its OWN
+# process group (via setsid) under a hard wall-clock timeout. On expiry, signal
+# the WHOLE group (kill -- -PGID), not just the leader, so forked children are
+# reaped too. Returns 124 on timeout, else the command's exit code.
+#
+# gu-zadrb: 'go test ./... -count=1 -timeout=5m' has been observed to hang PAST
+# go's own -timeout — the test binary's deadline fires but orphaned network
+# children (git-remote-https at 0% CPU) keep the process tree alive, pinning the
+# polecat worktree dir so post-merge nuke can't rmdir it (→ STUCK_NUKE). go's
+# -timeout only bounds the test binary; it does not reap children the test
+# spawned via os/exec. GNU `timeout` alone is insufficient here — it does not
+# signal the child's whole process group, so re-forking test workers survive it
+# (verified). A wall-clock that kills the GROUP is the only robust bound.
+#
+# Falls back to a plain run when `setsid` is unavailable (the group bound is
+# then absent, but go's own -timeout still applies — no worse than before).
+run_with_group_timeout() {
+  local wall=$1; shift
+  if ! command -v setsid >/dev/null 2>&1; then
+    "$@"
+    return $?
+  fi
+  setsid "$@" &
+  local leader=$!   # setsid makes the child a session+group leader: PGID == PID
+  local waited=0
+  while kill -0 "$leader" 2>/dev/null; do
+    if (( waited >= wall )); then
+      echo "" >&2
+      echo "✗ pre-push: [slow] test gate exceeded hard wall-clock timeout (${wall}s)." >&2
+      echo "  Killing the whole test process group (PGID $leader) to avoid orphaned" >&2
+      echo "  children pinning this worktree (gu-zadrb). A hung test is a failed gate." >&2
+      kill -TERM -- "-$leader" 2>/dev/null
+      sleep 2
+      kill -KILL -- "-$leader" 2>/dev/null
+      wait "$leader" 2>/dev/null
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$leader"
+  return $?
+}
+
+# Hard wall-clock for the slow gate's process GROUP. Set a margin above go's own
+# -timeout=5m (300s) so go can fire its own deadline + dump goroutines first;
+# the group-kill is the backstop for the hang-past-go-timeout case. Overridable
+# via GT_PREPUSH_TEST_WALL_SECONDS for testing.
+TEST_WALL_SECONDS="${GT_PREPUSH_TEST_WALL_SECONDS:-360}"
+
+echo "pre-push: [slow] go test ./... -count=1 (unit tests; hard wall ${TEST_WALL_SECONDS}s)" >&2
+if ! run_with_group_timeout "$TEST_WALL_SECONDS" go test ./... -count=1 -timeout=5m; then
   cat >&2 <<'EOF'
 
 ✗ Push rejected: unit tests failed.
