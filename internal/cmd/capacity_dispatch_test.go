@@ -188,6 +188,37 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 	}
 }
 
+// TestIsAgentBeadInfo is the regression gate for gc-wbk1b / gu-k5sul: the
+// dispatch readiness scan stopped fanning `bd ready` across every town dir and
+// now identifies agent state beads (which must NEVER be dispatched as work —
+// gu-7gm) directly from the targeted bd-show batch via isAgentBeadInfo. The old
+// path detected them via the gt:agent label / issue_type=agent in bd-ready's
+// output; this verifies the beadStatusInfo form recognizes the same signals so
+// the guard swap (agentWorkIDs[...] -> isAgentBeadInfo(info)) is behavior-preserving.
+func TestIsAgentBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info beadStatusInfo
+		want bool
+	}{
+		{"gt:agent label (current standard)", beadStatusInfo{Status: "open", Labels: []string{"gt:agent"}}, true},
+		{"legacy issue_type=agent", beadStatusInfo{Status: "open", Type: "agent"}, true},
+		{"both label and type", beadStatusInfo{Type: "agent", Labels: []string{"gt:agent"}}, true},
+		{"gt:agent among other labels", beadStatusInfo{Status: "open", Labels: []string{"gt:rig", "gt:agent", "foo"}}, true},
+		{"normal work bead — not an agent", beadStatusInfo{Status: "open", Type: "task", Labels: []string{"gt:rig"}}, false},
+		{"no labels, no type", beadStatusInfo{Status: "open"}, false},
+		{"unrelated label only", beadStatusInfo{Status: "open", Labels: []string{"do-not-dispatch"}}, false},
+		{"agent substring must not false-match", beadStatusInfo{Status: "open", Labels: []string{"my-agentish-label"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAgentBeadInfo(tt.info); got != tt.want {
+				t.Errorf("isAgentBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsAlreadyDispatchedError(t *testing.T) {
 	tests := []struct {
 		name string
