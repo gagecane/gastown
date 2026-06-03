@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -25,7 +28,45 @@ var (
 	compactVerbose bool
 	compactJSON    bool
 	compactRig     string
+	compactTimeout time.Duration
 )
+
+// Compact timeout/progress defaults. Both can be overridden by env or flag.
+// Pre-fix: gt compact could silently hang for 10+ minutes with zero stdout/stderr
+// during deacon patrol while bd subprocesses backed up against a slow Dolt
+// server (aa-c6a). Now we always print progress and impose a hard ceiling.
+const (
+	defaultCompactTimeout       = 5 * time.Minute
+	defaultCompactProgressEvery = 15 * time.Second
+	compactTimeoutEnv           = "GT_COMPACT_TIMEOUT_SEC"
+	compactProgressEnv          = "GT_COMPACT_PROGRESS_SEC"
+)
+
+// resolveCompactTimeout returns the hard timeout for gt compact. Precedence:
+// --timeout flag > GT_COMPACT_TIMEOUT_SEC env > defaultCompactTimeout.
+func resolveCompactTimeout() time.Duration {
+	if compactTimeout > 0 {
+		return compactTimeout
+	}
+	if v := os.Getenv(compactTimeoutEnv); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return defaultCompactTimeout
+}
+
+// resolveCompactProgressInterval returns how often the progress heartbeat fires.
+// Precedence: GT_COMPACT_PROGRESS_SEC env > defaultCompactProgressEvery.
+// A value of 0 disables progress output entirely (useful for tests).
+func resolveCompactProgressInterval() time.Duration {
+	if v := os.Getenv(compactProgressEnv); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return defaultCompactProgressEvery
+}
 
 // Default TTLs per wisp type (from design doc WISP-COMPACTION-POLICY.md).
 var defaultTTLs = map[string]time.Duration{
@@ -84,6 +125,8 @@ func init() {
 	compactCmd.Flags().BoolVarP(&compactVerbose, "verbose", "v", false, "Show each wisp decision")
 	compactCmd.Flags().BoolVar(&compactJSON, "json", false, "Output results as JSON")
 	compactCmd.Flags().StringVar(&compactRig, "rig", "", "Compact a specific rig (default: current rig)")
+	compactCmd.Flags().DurationVar(&compactTimeout, "timeout", 0,
+		"Hard timeout for the whole compaction run (default: 5m, env GT_COMPACT_TIMEOUT_SEC)")
 
 	rootCmd.AddCommand(compactCmd)
 }
@@ -192,6 +235,119 @@ type compactIssue struct {
 	WispType     string `json:"wisp_type,omitempty"`
 }
 
+// compactProgress is the shared state the progress heartbeat reads from.
+// runCompact mutates these atomics as it walks the wisp list so the
+// background goroutine can print "step X — i/N" lines without races.
+type compactProgress struct {
+	total       int32
+	processed   int32
+	step        atomic.Value // string: current high-level step
+	currentWisp atomic.Value // string: id of wisp under active processing (or "")
+	start       time.Time
+}
+
+func newCompactProgress() *compactProgress {
+	p := &compactProgress{start: time.Now()}
+	p.step.Store("starting")
+	p.currentWisp.Store("")
+	return p
+}
+
+func (p *compactProgress) setStep(s string) { p.step.Store(s) }
+func (p *compactProgress) setCurrentWisp(id string) {
+	p.currentWisp.Store(id)
+}
+func (p *compactProgress) stepString() string {
+	if v, ok := p.step.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+func (p *compactProgress) currentWispString() string {
+	if v, ok := p.currentWisp.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// formatProgressLine renders a single heartbeat line. Kept pure for testing.
+func (p *compactProgress) formatProgressLine(elapsed time.Duration) string {
+	processed := atomic.LoadInt32(&p.processed)
+	total := atomic.LoadInt32(&p.total)
+	cur := p.currentWispString()
+	curPart := ""
+	if cur != "" {
+		curPart = fmt.Sprintf(" (on %s)", cur)
+	}
+	if total > 0 {
+		return fmt.Sprintf("compact: %s %d/%d%s (elapsed %s)",
+			p.stepString(), processed, total, curPart, elapsed.Round(time.Second))
+	}
+	return fmt.Sprintf("compact: %s%s (elapsed %s)",
+		p.stepString(), curPart, elapsed.Round(time.Second))
+}
+
+// startProgressHeartbeat fires a goroutine that prints a progress line every
+// `interval` until the returned stop func is called. interval==0 disables it.
+// In JSON mode the heartbeat is also suppressed so machine output stays clean.
+// All progress lines go to stderr so they don't corrupt --json on stdout.
+func startProgressHeartbeat(p *compactProgress, interval time.Duration, jsonMode bool) func() {
+	if interval <= 0 || jsonMode {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-t.C:
+				fmt.Fprintln(os.Stderr, p.formatProgressLine(now.Sub(p.start)))
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		wg.Wait()
+	}
+}
+
+// dumpCompactDiagnostics writes a one-shot diagnostic block to stderr
+// when the hard timeout fires, so silent hangs leave a forensic trail.
+func dumpCompactDiagnostics(p *compactProgress, timeout time.Duration, result *compactResult) {
+	processed := atomic.LoadInt32(&p.processed)
+	total := atomic.LoadInt32(&p.total)
+	remaining := int32(0)
+	if total > processed {
+		remaining = total - processed
+	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "compact: TIMEOUT after %s (env: %s)\n", timeout, compactTimeoutEnv)
+	fmt.Fprintf(os.Stderr, "compact: last step=%q current_wisp=%q processed=%d/%d remaining=%d\n",
+		p.stepString(), p.currentWispString(), processed, total, remaining)
+	if result != nil {
+		fmt.Fprintf(os.Stderr, "compact: partial result promoted=%d deleted=%d skipped=%d errors=%d\n",
+			len(result.Promoted), len(result.Deleted), result.Skipped, len(result.Errors))
+	}
+	fmt.Fprintln(os.Stderr,
+		"compact: most likely cause is a slow/blocked bd subprocess against Dolt; "+
+			"check daemon health (gt doctor), then bump GT_COMPACT_TIMEOUT_SEC if work was legitimately large.")
+}
+
+// errCompactTimeout is returned when the hard ceiling fires.
+type errCompactTimeout struct {
+	timeout time.Duration
+}
+
+func (e *errCompactTimeout) Error() string {
+	return fmt.Sprintf("gt compact: timed out after %s", e.timeout)
+}
+
 func runCompact(cmd *cobra.Command, args []string) error {
 	now := time.Now().UTC()
 
@@ -207,26 +363,99 @@ func runCompact(cmd *cobra.Command, args []string) error {
 		rigName = os.Getenv("GT_RIG")
 	}
 
+	// Hard ceiling on the whole run. Defends against the silent 10+ minute hang
+	// observed during deacon patrol cycle 2026-05-09 16:17 (aa-c6a) where bd
+	// subprocesses stalled and the parent emitted zero stdout/stderr until SIGTERM.
+	timeout := resolveCompactTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Periodic progress heartbeat so a stuck run can never be silent again.
+	progress := newCompactProgress()
+	stopHeartbeat := startProgressHeartbeat(progress, resolveCompactProgressInterval(), compactJSON)
+	defer stopHeartbeat()
+
+	progress.setStep("loading TTL config")
+	if !compactJSON && !compactDryRun {
+		fmt.Printf("Compacting wisps (timeout %s)...\n", timeout)
+	}
+
 	// Load TTL config
 	ttls := loadTTLConfig(townRoot, rigName)
 
 	// Query all ephemeral (wisp) issues via bd list
+	progress.setStep("listing wisps")
 	bd := beads.New(workDir)
 	allWisps, err := listWisps(bd)
 	if err != nil {
 		return fmt.Errorf("listing wisps: %w", err)
 	}
 
+	atomic.StoreInt32(&progress.total, int32(len(allWisps)))
 	if !compactJSON && !compactDryRun {
 		fmt.Printf("Compacting %d wisps...\n", len(allWisps))
 	}
 
 	result := &compactResult{}
+	progress.setStep("processing wisps")
 
+	// runCompactLoop is split into a helper so the timeout/diagnostic block
+	// stays readable. ctx.Err() between iterations bounds the bd subprocess
+	// fan-out even when individual bd calls return slowly.
+	if err := runCompactLoop(ctx, bd, allWisps, ttls, now, progress, result); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			dumpCompactDiagnostics(progress, timeout, result)
+			return &errCompactTimeout{timeout: timeout}
+		}
+		return err
+	}
+
+	// Clean up orphaned wisp_dependencies left behind by deleted wisps.
+	// When bd delete removes a wisp, it doesn't cascade-delete dependency
+	// records in wisp_dependencies that reference the deleted wisp. Over many
+	// compaction cycles these accumulate as dangling refs. We sweep them here.
+	if !compactDryRun {
+		progress.setStep("cleaning orphaned wisp_deps")
+		dbName := beads.DatabaseNameFromMetadata(beads.ResolveBeadsDir(workDir))
+		cleanOrphanedWispDeps(townRoot, dbName, result)
+	}
+
+	progress.setStep("done")
+
+	// Output results
+	if compactJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	printCompactSummary(result)
+	return nil
+}
+
+// runCompactLoop walks the wisp list and applies the promote/delete/skip
+// policy to each one. It checks ctx between iterations so the hard timeout
+// can short-circuit a slow bd backend without waiting for the next bd call
+// to time out on its own.
+func runCompactLoop(
+	ctx context.Context,
+	bd *beads.Beads,
+	allWisps []*compactIssue,
+	ttls map[string]time.Duration,
+	now time.Time,
+	progress *compactProgress,
+	result *compactResult,
+) error {
 	for _, w := range allWisps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		progress.setCurrentWisp(w.ID)
+
 		age, err := wispAge(w, now)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", w.ID, err))
+			atomic.AddInt32(&progress.processed, 1)
 			continue
 		}
 
@@ -276,25 +505,10 @@ func runCompact(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
-	}
 
-	// Clean up orphaned wisp_dependencies left behind by deleted wisps.
-	// When bd delete removes a wisp, it doesn't cascade-delete dependency
-	// records in wisp_dependencies that reference the deleted wisp. Over many
-	// compaction cycles these accumulate as dangling refs. We sweep them here.
-	if !compactDryRun {
-		dbName := beads.DatabaseNameFromMetadata(beads.ResolveBeadsDir(workDir))
-		cleanOrphanedWispDeps(townRoot, dbName, result)
+		atomic.AddInt32(&progress.processed, 1)
 	}
-
-	// Output results
-	if compactJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(result)
-	}
-
-	printCompactSummary(result)
+	progress.setCurrentWisp("")
 	return nil
 }
 
