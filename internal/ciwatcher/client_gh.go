@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -70,6 +71,15 @@ func (g *GHRunFetcher) CompletedRuns(ctx context.Context, branch string, limit i
 		"--limit", strconv.Itoa(limit),
 		"--json", "databaseId,headBranch,headSha,name,status,conclusion,url,updatedAt,createdAt,startedAt",
 	}
+	// Pin gh to the origin remote's repo (the town's push target). The rig is a
+	// fork with two remotes (origin=town, upstream=parent); with no default repo
+	// set, gh resolves to the PARENT, so the watcher would monitor upstream CI
+	// and freeze the town merge queue on upstream-only failures the town never
+	// has (gu-yholx). Best-effort: if origin can't be resolved we omit --repo
+	// and fall back to gh's own inference.
+	if repo := g.originRepo(ctx); repo != "" {
+		args = append(args, "--repo", repo)
+	}
 	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // bin is operator-controlled
 	if g.WorkDir != "" {
 		cmd.Dir = g.WorkDir
@@ -124,6 +134,45 @@ func (g *GHRunFetcher) fetchSubject(ctx context.Context, sha string) string {
 		s = s[:n-1]
 	}
 	return s
+}
+
+// originRepo resolves the `origin` remote to an OWNER/REPO slug for gh's
+// --repo flag. Returns empty string when origin is absent or unparseable, in
+// which case the caller falls back to gh's default repo inference.
+func (g *GHRunFetcher) originRepo(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "origin")
+	if g.WorkDir != "" {
+		cmd.Dir = g.WorkDir
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	return parseGitHubRepo(strings.TrimSpace(out.String()))
+}
+
+// parseGitHubRepo extracts the "owner/repo" slug from a GitHub remote URL.
+// Supports HTTPS (https://github.com/owner/repo[.git]) and SSH
+// (git@github.com:owner/repo[.git]) forms. Returns empty string for any URL
+// that is not a recognizable GitHub remote.
+func parseGitHubRepo(remoteURL string) string {
+	var path string
+	switch {
+	case strings.HasPrefix(remoteURL, "https://github.com/"):
+		path = strings.TrimPrefix(remoteURL, "https://github.com/")
+	case strings.HasPrefix(remoteURL, "git@github.com:"):
+		path = strings.TrimPrefix(remoteURL, "git@github.com:")
+	default:
+		return ""
+	}
+	path = strings.TrimSuffix(path, ".git")
+	path = strings.TrimSuffix(path, "/")
+	parts := strings.SplitN(path, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
 }
 
 // mapGHConclusion translates GitHub Actions' conclusion strings to our enum.

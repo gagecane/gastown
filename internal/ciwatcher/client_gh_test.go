@@ -20,6 +20,26 @@ func TestMapGHConclusion(t *testing.T) {
 	}
 }
 
+func TestParseGitHubRepo(t *testing.T) {
+	cases := map[string]string{
+		"https://github.com/gagecane/gastown":      "gagecane/gastown",
+		"https://github.com/gagecane/gastown.git":  "gagecane/gastown",
+		"https://github.com/gagecane/gastown/":     "gagecane/gastown",
+		"git@github.com:gagecane/gastown.git":      "gagecane/gastown",
+		"git@github.com:gagecane/gastown":          "gagecane/gastown",
+		"https://github.com/owner/repo/extra/path": "owner/repo",
+		// Non-GitHub or malformed → empty (fall back to gh inference).
+		"https://bitbucket.org/ws/repo.git": "",
+		"https://github.com/onlyowner":      "",
+		"":                                  "",
+	}
+	for in, want := range cases {
+		if got := parseGitHubRepo(in); got != want {
+			t.Errorf("parseGitHubRepo(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestConclusionIsFailureLike(t *testing.T) {
 	failureLike := []Conclusion{ConclusionFailure, ConclusionTimedOut, ConclusionStartupFailure}
 	for _, c := range failureLike {
