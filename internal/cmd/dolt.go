@@ -618,6 +618,9 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
 			fmt.Printf("  Port: %d\n", state.Port)
 			fmt.Printf("  Data dir: %s\n", state.DataDir)
+			fmt.Printf("  PID file: %s\n", doltserver.PIDFile(townRoot))
+			fmt.Printf("  State file: %s\n", doltserver.StateFile(townRoot))
+			fmt.Printf("  SQL info: %s\n", doltserver.SQLServerInfoPath(townRoot))
 			if len(state.Databases) > 0 {
 				owners := doltserver.CollectDatabaseOwners(townRoot)
 				fmt.Printf("  Databases:\n")

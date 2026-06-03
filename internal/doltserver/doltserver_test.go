@@ -2868,6 +2868,62 @@ func TestRefreshPIDStateFromLiveInfoInvalidPIDNoop(t *testing.T) {
 	}
 }
 
+// TestReadPIDFromFileAcceptsLegacyAndNonceFormats verifies that both the legacy
+// PID-only format and the daemon's nonce format (PID on the first line, nonce on
+// the second) are parsed correctly. The daemon writes daemon/dolt.pid in nonce
+// format, so a naive strconv.Atoi on the full file content would misread it.
+func TestReadPIDFromFileAcceptsLegacyAndNonceFormats(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dolt.pid")
+
+	if err := os.WriteFile(path, []byte("12345"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := readPIDFromFile(path); err != nil || pid != 12345 {
+		t.Fatalf("legacy pid = %d, %v; want 12345, nil", pid, err)
+	}
+
+	if err := os.WriteFile(path, []byte("67890\nnonce-value"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := readPIDFromFile(path); err != nil || pid != 67890 {
+		t.Fatalf("nonce pid = %d, %v; want 67890, nil", pid, err)
+	}
+}
+
+// TestRefreshPIDStateFromLiveInfoPreservesNonceFile verifies that when the PID
+// file already holds the live PID in nonce format, refreshPIDStateFromLiveInfo
+// leaves the file untouched rather than clobbering the nonce.
+func TestRefreshPIDStateFromLiveInfoPreservesNonceFile(t *testing.T) {
+	townRoot := t.TempDir()
+	config := DefaultConfig(townRoot)
+	if err := os.MkdirAll(filepath.Dir(config.PidFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	nonceContent := "12345\ndeadbeef"
+	if err := os.WriteFile(config.PidFile, []byte(nonceContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(townRoot, &State{Running: true, PID: 12345, Port: config.Port, DataDir: config.DataDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := refreshPIDStateFromLiveInfo(townRoot, config, 12345)
+	if err != nil {
+		t.Fatalf("refreshPIDStateFromLiveInfo: %v", err)
+	}
+	if changed {
+		t.Fatal("expected no change when nonce PID file already matches live PID")
+	}
+	pidData, err := os.ReadFile(config.PidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pidData) != nonceContent {
+		t.Fatalf("pid file = %q, want preserved %q", string(pidData), nonceContent)
+	}
+}
+
 // =============================================================================
 // Rollback round-trip test
 // =============================================================================

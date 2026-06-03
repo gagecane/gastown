@@ -589,6 +589,13 @@ func SQLServerInfoPath(townRoot string) string {
 	return sqlServerInfoPath(DefaultConfig(townRoot))
 }
 
+// PIDFile returns Gas Town's canonical Dolt server PID file path for a town.
+// Note: the PID file lives under daemon/, not .dolt-data/. Dolt's own runtime
+// metadata lives at .dolt-data/.dolt/sql-server.info.
+func PIDFile(townRoot string) string {
+	return DefaultConfig(townRoot).PidFile
+}
+
 // ReadSQLServerInfo reads Dolt's own sql-server.info metadata for a town.
 func ReadSQLServerInfo(townRoot string) (*SQLServerInfo, error) {
 	return readSQLServerInfo(DefaultConfig(townRoot))
@@ -653,13 +660,33 @@ func SaveState(townRoot string, state *State) error {
 	return atomicfile.WriteJSON(stateFile, state)
 }
 
+// readPIDFromFile reads a PID from a Dolt PID file, tolerating both the legacy
+// format (PID only) and the nonce format written by the daemon (PID on the
+// first line, nonce on the second). Only the leading PID field is parsed, so a
+// nonce-formatted file is never misread as stale.
+func readPIDFromFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("empty PID file at %s", path)
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, fmt.Errorf("invalid PID in %s: %w", path, err)
+	}
+	return pid, nil
+}
+
 func refreshPIDStateFromLiveInfo(townRoot string, config *Config, pid int) (bool, error) {
 	if pid <= 0 || config == nil || config.IsRemote() {
 		return false, nil
 	}
 
 	changed := false
-	if data, err := os.ReadFile(config.PidFile); err != nil || strings.TrimSpace(string(data)) != strconv.Itoa(pid) {
+	if current, err := readPIDFromFile(config.PidFile); err != nil || current != pid {
 		if err := os.MkdirAll(filepath.Dir(config.PidFile), 0755); err != nil {
 			return changed, err
 		}
@@ -746,22 +773,17 @@ func IsRunning(townRoot string) (bool, int, error) {
 	}
 
 	// First check PID file
-	data, err := os.ReadFile(config.PidFile)
-	if err == nil {
-		pidStr := strings.TrimSpace(string(data))
-		pid, err := strconv.Atoi(pidStr)
-		if err == nil {
-			// Check if process is alive
-			if processIsAlive(pid) {
-				// Verify it's actually serving on the expected port.
-				// More reliable than ps string matching (ZFC fix: gt-utuk).
-				if isDoltServerOnPort(config.Port) {
-					if doltProcessMatchesTown(townRoot, pid, config) {
-						_, _ = refreshPIDStateFromLiveInfo(townRoot, config, pid)
-						return true, pid, nil
-					}
-					// Port served by a different town's Dolt — fall through to stale cleanup
+	if pid, err := readPIDFromFile(config.PidFile); err == nil {
+		// Check if process is alive
+		if processIsAlive(pid) {
+			// Verify it's actually serving on the expected port.
+			// More reliable than ps string matching (ZFC fix: gt-utuk).
+			if isDoltServerOnPort(config.Port) {
+				if doltProcessMatchesTown(townRoot, pid, config) {
+					_, _ = refreshPIDStateFromLiveInfo(townRoot, config, pid)
+					return true, pid, nil
 				}
+				// Port served by a different town's Dolt — fall through to stale cleanup
 			}
 		}
 		// PID file is stale, clean it up
@@ -1540,10 +1562,8 @@ func ownedDoltTestServerCandidates(townRoot string, config *Config) []int {
 		pids = append(pids, pid)
 	}
 
-	if data, err := os.ReadFile(config.PidFile); err == nil {
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-			add(pid)
-		}
+	if pid, err := readPIDFromFile(config.PidFile); err == nil {
+		add(pid)
 	}
 	if info, err := readSQLServerInfo(config); err == nil {
 		add(info.PID)
