@@ -21,6 +21,7 @@ import (
 	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/tui/convoy"
@@ -2802,12 +2803,9 @@ func hasAllLabels(labels, required []string) bool {
 // convoyMergeFromFields extracts the merge strategy from a convoy description
 // using the typed ConvoyFields accessor.
 // Returns the strategy string ("direct", "mr", "local") or empty string if not set.
+// Delegates to the sling domain API.
 func convoyMergeFromFields(description string) string {
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
-	if fields == nil {
-		return ""
-	}
-	return fields.Merge
+	return sling.MergeFromFields(description)
 }
 
 // formatYesNo returns "yes" or "no" for a boolean value.

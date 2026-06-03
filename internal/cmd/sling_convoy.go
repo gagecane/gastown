@@ -3,8 +3,6 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/base32"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,15 +11,14 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // slingGenerateShortID generates a short random ID (5 lowercase chars).
 func slingGenerateShortID() string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
-	return strings.ToLower(base32.StdEncoding.EncodeToString(b)[:5])
+	return sling.GenerateShortID()
 }
 
 // isTrackedByConvoy checks if an issue is already being tracked by a convoy.
@@ -110,19 +107,10 @@ func convoyTracksBead(beadsDir, convoyID, beadID string) bool {
 	return false
 }
 
-// ConvoyInfo holds convoy details for an issue's tracking convoy.
-type ConvoyInfo struct {
-	ID            string // Convoy bead ID (e.g., "hq-cv-abc")
-	Owned         bool   // true if convoy has gt:owned label
-	MergeStrategy string // "direct", "mr", "local", or "" (default = mr)
-	BaseBranch    string // Named relay/base branch the convoy's polecats cut from (gs-9ct #1)
-}
-
-// IsOwnedDirect returns true if the convoy is owned with direct merge strategy.
-// This is the key check for skipping witness/refinery merge pipeline.
-func (c *ConvoyInfo) IsOwnedDirect() bool {
-	return c != nil && c.Owned && c.MergeStrategy == "direct"
-}
+// ConvoyInfo holds convoy details for an issue's tracking convoy. The domain
+// type and its IsOwnedDirect predicate live in internal/sling; this alias keeps
+// the cmd-package call surface stable (gu-yju86 increment 2).
+type ConvoyInfo = sling.ConvoyInfo
 
 // getConvoyInfoForIssue checks if an issue is tracked by a convoy and returns its info.
 // Returns nil if not tracked by any convoy.
@@ -188,13 +176,9 @@ func getConvoyInfoForIssue(issueID string) *ConvoyInfo {
 
 // convoyBaseFromFields extracts the relay/base branch from a convoy description
 // using the typed ConvoyFields accessor. Returns "" if unset. Mirrors
-// convoyMergeFromFields (gs-9ct #1).
+// convoyMergeFromFields (gs-9ct #1). Delegates to the sling domain API.
 func convoyBaseFromFields(description string) string {
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
-	if fields == nil {
-		return ""
-	}
-	return fields.BaseBranch
+	return sling.BaseFromFields(description)
 }
 
 // effectiveBaseBranch resolves the base branch a polecat should cut from when
