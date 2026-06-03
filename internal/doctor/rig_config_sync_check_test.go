@@ -617,6 +617,87 @@ func TestRigConfigSyncCheck_PrefixNamedDoltDBNoMismatch(t *testing.T) {
 	}
 }
 
+func TestRigConfigSyncCheck_RigPointingToTownDBIsValid(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake dolt stub is shell-specific")
+	}
+
+	tmpDir := t.TempDir()
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigsJSON := `{
+		"version": 1,
+		"rigs": {
+			"deacon": {
+				"git_url": "https://github.com/test/test.git",
+				"beads": {"prefix": "dc"}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create town-level .beads/metadata.json pointing to "hq"
+	townBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	townMeta := `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`
+	if err := os.WriteFile(filepath.Join(townBeadsDir, "metadata.json"), []byte(townMeta), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create deacon rig pointing to "hq" (the town DB) — valid after HQ migration
+	deaconDir := filepath.Join(tmpDir, "deacon")
+	beadsDir := filepath.Join(deaconDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{"type":"rig","version":1,"name":"deacon","git_url":"https://github.com/test/test.git","beads":{"prefix":"dc"}}`
+	if err := os.WriteFile(filepath.Join(deaconDir, "config.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: dc\nissue-prefix: dc\nexport.auto: \"false\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// deacon points to "hq" (town DB), not "deacon" (its own name)
+	deaconMeta := `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(deaconMeta), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create fake "hq" Dolt database on the local filesystem so doltDatabaseExists("hq") returns true.
+	hqDoltDir := filepath.Join(tmpDir, ".dolt-data", "hq", ".dolt", "noms")
+	if err := os.MkdirAll(hqDoltDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hqDoltDir, "manifest"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake bd that returns the bead ID so rigBeadExists passes.
+	binDir := t.TempDir()
+	fakeBd := "#!/usr/bin/env bash\necho \"$2\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBd), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx := &CheckContext{TownRoot: tmpDir}
+	check := NewRigConfigSyncCheck()
+	result := check.Run(ctx)
+
+	if len(check.dbNameMismatches) != 0 {
+		t.Errorf("expected no dbNameMismatches when rig.db == town.db, got: %v", check.dbNameMismatches)
+	}
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK when rig.db == town.db, got: %v (details: %v)", result.Status, result.Details)
+	}
+}
+
 func TestStaleRuntimeFilesCheck_StalePIDFiles(t *testing.T) {
 	// Create temp town root
 	tmpDir := t.TempDir()
