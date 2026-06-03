@@ -276,6 +276,62 @@ func TestFilterMessagingBeads(t *testing.T) {
 	}
 }
 
+func TestIsHandoffTitle(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		want  bool
+	}{
+		{"refinery context handoff", "🤝 HANDOFF: Refinery context handoff", true},
+		{"no space after emoji", "🤝HANDOFF: foo", true},
+		{"leading whitespace", "  🤝 HANDOFF: bar", true},
+		{"plain handoff word is not enough", "HANDOFF: needs the emoji", false},
+		{"emoji elsewhere is not a prefix", "fix: 🤝 HANDOFF mentioned", false},
+		{"plain work title", "fix: dispatch bug", false},
+		{"empty title", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsHandoffTitle(tt.title); got != tt.want {
+				t.Errorf("IsHandoffTitle(%q) = %v, want %v", tt.title, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterMessagingBeads_UnlabeledHandoffTitle(t *testing.T) {
+	// gu-a76gk: an agent-authored handoff memo lands as a bare type=task with
+	// NO messaging label. It must still be filtered out by its title.
+	beads := []PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-1", Title: "fix: real work", Labels: []string{"kind/bug"}},
+		{ID: "ctx-2", WorkBeadID: "cae2-w22", Title: "🤝 HANDOFF: Refinery context handoff", Labels: nil},
+	}
+	kept, removed := FilterMessagingBeads(beads)
+	if len(kept) != 1 {
+		t.Fatalf("kept = %d, want 1", len(kept))
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if kept[0].ID != "ctx-1" {
+		t.Errorf("kept the wrong bead: %s", kept[0].ID)
+	}
+}
+
+func TestPlanDispatch_FiltersUnlabeledHandoffTitle(t *testing.T) {
+	candidates := []PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-1", Title: "fix: real work", Labels: []string{"kind/bug"}},
+		{ID: "ctx-2", WorkBeadID: "cae2-w22", Title: "🤝 HANDOFF: Refinery context handoff", Labels: nil},
+	}
+	plan := PlanDispatch(100, 10, candidates)
+	if len(plan.ToDispatch) != 1 {
+		t.Fatalf("ToDispatch = %d, want 1", len(plan.ToDispatch))
+	}
+	if plan.ToDispatch[0].ID != "ctx-1" {
+		t.Errorf("dispatched the wrong bead: %s", plan.ToDispatch[0].ID)
+	}
+}
+
 func TestPlanDispatch_FiltersMessagingBeads(t *testing.T) {
 	// Mix 3 messaging-labeled beads and 2 plain work beads. PlanDispatch must
 	// keep only the 2 plain beads; Skipped must reflect the 3 messaging skips.

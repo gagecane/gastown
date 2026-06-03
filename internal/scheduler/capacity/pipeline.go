@@ -1,6 +1,7 @@
 package capacity
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -136,14 +137,33 @@ func IsMessagingBead(labels []string) bool {
 	return false
 }
 
+// handoffTitlePattern matches the well-known "🤝 HANDOFF" session-continuity
+// subject prefix. Mirrors witness/protocol.go PatternHandoff. Agent-authored
+// handoff memos sometimes land as bare type=task beads with NO messaging label
+// (gu-a76gk): the operator who routes mail adds gt:message, but a handoff memo
+// created directly as a task escapes that path and is treated as dispatchable
+// work, getting re-dispatched to a fresh polecat every scheduler cycle forever.
+var handoffTitlePattern = regexp.MustCompile(`^🤝\s*HANDOFF`)
+
+// IsHandoffTitle reports whether a bead title is a "🤝 HANDOFF" session-handoff
+// memo. This is a belt-and-suspenders guard for handoff beads that are missing
+// the gt:handoff / gt:message label that IsMessagingBead relies on (gu-a76gk).
+func IsHandoffTitle(title string) bool {
+	return handoffTitlePattern.MatchString(strings.TrimSpace(title))
+}
+
 // FilterMessagingBeads removes messaging-labeled beads from the candidate slice.
 // Returns the filtered slice plus the count of removed beads. Callers should
 // log the skipped beads at debug level so the gap is observable.
+//
+// Beads are filtered out if they carry a messaging label OR have a "🤝 HANDOFF"
+// title — the latter catches unlabeled handoff memos that would otherwise be
+// dispatched as work and re-dispatched forever (gu-a76gk).
 func FilterMessagingBeads(beads []PendingBead) ([]PendingBead, int) {
 	var result []PendingBead
 	removed := 0
 	for _, b := range beads {
-		if IsMessagingBead(b.Labels) {
+		if IsMessagingBead(b.Labels) || IsHandoffTitle(b.Title) {
 			removed++
 			continue
 		}

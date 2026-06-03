@@ -831,6 +831,16 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 			continue
 		}
 
+		// Belt-and-suspenders: handoff memos titled "🤝 HANDOFF" that lack the
+		// gt:handoff/gt:message label (agent-authored as bare type=task) would
+		// otherwise be dispatched as work and re-dispatched every cycle forever
+		// (gu-a76gk). Catch them by title.
+		if capacity.IsHandoffTitle(info.Title) {
+			fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=handoff_title bead=%s title=%q\n",
+				style.Dim.Render("○"), fields.WorkBeadID, info.Title)
+			continue
+		}
+
 		// Container filter (gu-r8b0q): a work bead with open children is an
 		// epic/container, not dispatchable work — the children track the real
 		// work. executeSling rejects these at dispatch time, but the rejection
