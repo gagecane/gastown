@@ -566,6 +566,14 @@ func (m *ConvoyManager) scan() {
 	// Successful scan: clear recovery mode so the ticker returns to normal interval.
 	m.recoveryMode.Store(false)
 
+	// Count "tracked but 0 ready" convoys — the completion-check candidates.
+	// Previously each was handled by a separate `gt convoy check <id>`
+	// subprocess inside this loop; with N convoys that serial fan-out (full gt
+	// cold-start + per-call bd queries each) blew the 5m dispatch budget
+	// (gu-jqb47). We now collect them and run ONE batched `gt convoy check`
+	// (no id → checkAndCloseCompletedConvoys, already IN(...)-batched per
+	// gc-pai9b) after the loop, collapsing N subprocess spawns into one.
+	completionCandidates := 0
 	for _, c := range stranded {
 		select {
 		case <-m.ctx.Done():
@@ -582,15 +590,44 @@ func (m *ConvoyManager) scan() {
 				m.logger("Convoy %s: empty but within grace period (created %s ago) — skipping", c.ID, time.Since(c.CreatedAt).Round(time.Second))
 				continue
 			}
+			// Empty convoys are NOT closed by the batched completion check
+			// (it deliberately treats 0/0 as "unresolved" to avoid false
+			// "landed" notifications — GH#3xxx). Handle them per-convoy here;
+			// they are rare relative to completion candidates.
 			m.closeEmptyConvoy(c.ID)
 		} else {
-			// Tracked issues exist but none are ready. This could mean:
-			// (a) all tracked issues are closed → convoy should auto-close
-			// (b) issues are blocked/in-progress → needs agent review
-			// Run convoy check to handle case (a); it's a no-op for (b).
-			m.logger("Convoy %s: %d tracked issues, 0 ready — checking completion", c.ID, c.TrackedCount)
-			m.checkConvoyCompletion(c.ID)
+			// Tracked issues exist but none are ready: either all closed
+			// (auto-close) or blocked/in-progress (no-op). Defer to the single
+			// batched completion pass below instead of one subprocess per convoy.
+			m.logger("Convoy %s: %d tracked issues, 0 ready — completion candidate", c.ID, c.TrackedCount)
+			completionCandidates++
 		}
+	}
+
+	// ONE batched completion check for all candidates (gu-jqb47): `gt convoy
+	// check` with no ID runs checkAndCloseCompletedConvoys over all open
+	// convoys in a single subprocess with a single batched tracks query, vs
+	// the previous N serial `gt convoy check <id>` spawns.
+	if completionCandidates > 0 {
+		m.logger("Convoy completion: batched check across %d candidate(s)", completionCandidates)
+		m.checkAllConvoyCompletion()
+	}
+}
+
+// checkAllConvoyCompletion runs a single `gt convoy check` (no convoy ID) which
+// invokes the batched checkAndCloseCompletedConvoys over all open convoys. This
+// replaces the per-convoy `gt convoy check <id>` fan-out that serialized the
+// dispatch sweep (gu-jqb47). Empty (0-tracked) convoys are handled separately
+// via closeEmptyConvoy, since the batched path intentionally leaves 0/0 open.
+func (m *ConvoyManager) checkAllConvoyCompletion() {
+	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdMutationRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		m.logger("Convoy: batched completion check failed: %s", util.FirstLine(stderr.String()))
 	}
 }
 
@@ -786,22 +823,6 @@ func (m *ConvoyManager) untrackMissingBeadViaBd(convoyID, issueID string) error 
 		return err
 	}
 	return nil
-}
-
-// checkConvoyCompletion runs gt convoy check to auto-close a convoy whose
-// tracked issues may all be closed. This handles the case where the event poll
-// missed the close events (e.g., daemon restart, Dolt latency).
-func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
-	cmd.Dir = m.townRoot
-	cmd.Env = bdMutationRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(stderr.String()))
-	}
 }
 
 // closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.

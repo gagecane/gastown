@@ -279,6 +279,56 @@ func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
 	}
 }
 
+// TestScanStranded_BatchesCompletionChecks is the regression guard for gu-jqb47:
+// the scan loop previously spawned one `gt convoy check <id>` subprocess per
+// "tracked>0, ready==0" convoy. With N stranded convoys that serial fan-out (a
+// full gt cold-start + per-call bd queries each) blew the 5m dispatch budget.
+// The fix collects completion candidates and runs ONE batched `gt convoy check`
+// (no id → checkAndCloseCompletedConvoys) after the loop. This proves: with 3
+// completion-candidate convoys, exactly ONE no-id check fires, not 3 per-id
+// spawns.
+func TestScanStranded_BatchesCompletionChecks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// 3 convoys with tracked issues but none ready → all completion candidates.
+	strandedJSON := `[` +
+		`{"id":"hq-cvA","title":"A","tracked_count":2,"ready_count":0,"ready_issues":[]},` +
+		`{"id":"hq-cvB","title":"B","tracked_count":1,"ready_count":0,"ready_issues":[]},` +
+		`{"id":"hq-cvC","title":"C","tracked_count":3,"ready_count":0,"ready_issues":[]}` +
+		`]`
+
+	paths := mockGtForScanTest(t, scanTestOpts{strandedJSON: strandedJSON})
+
+	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	m.scan()
+
+	data, err := os.ReadFile(paths.checkLogPath)
+	if err != nil {
+		t.Fatalf("read check log: %v", err)
+	}
+	logStr := strings.TrimSpace(string(data))
+
+	// Exactly ONE `convoy check` invocation (the batched no-id pass).
+	lines := strings.Split(logStr, "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 batched convoy check, got %d:\n%s", len(lines), logStr)
+	}
+
+	// The regression: a per-convoy serial fan-out would log the convoy IDs.
+	for _, id := range []string{"hq-cvA", "hq-cvB", "hq-cvC"} {
+		if strings.Contains(logStr, id) {
+			t.Errorf("detected per-convoy serial check for %s — regression of gu-jqb47; log:\n%s", id, logStr)
+		}
+	}
+
+	// And it must be the no-id form: `convoy check` with no trailing convoy ID.
+	if strings.TrimSpace(lines[0]) != "convoy check" {
+		t.Errorf("expected no-id `convoy check`, got: %q", lines[0])
+	}
+}
+
 func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
