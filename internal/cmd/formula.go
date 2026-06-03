@@ -906,19 +906,37 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		fmt.Printf("  %s %s: %s%s\n", style.Dim.Render("○"), step.ID, stepBeadID, needsStr)
 	}
 
-	// Step 3: Identify and dispatch ready steps (those with no dependencies)
-	// Interactive steps are hooked to the current session; others are slung to polecats.
-	fmt.Printf("\n%s Dispatching ready steps...\n\n", style.Bold.Render("→"))
-
-	// Check if any step in the workflow is interactive — if so, we'll need
-	// to handle the molecule lifecycle in the current session.
-	hasInteractive := false
-	for _, step := range f.Steps {
-		if step.Interactive {
-			hasInteractive = true
-			break
+	// Step 3: Identify and dispatch ready steps (those with no dependencies).
+	// Each step is routed independently: interactive steps are hooked to the
+	// current session (they need the human's chat channel and must NOT be
+	// routed by `target`); non-interactive steps are slung to their resolved
+	// `target` (gt-3798). A workflow that mixes interactive and non-interactive
+	// steps must still route the non-interactive ones — a single interactive
+	// step does not pin the whole workflow to the orchestrator session.
+	// Pre-flight: warn at pour-time if any ready non-interactive step targets
+	// something the capacity-scheduler's deferred gate will reject — neither a
+	// rig nor a capacity-neutral agent (gt-3798 follow-up, Approach C Part 2).
+	if deferred, _ := shouldDeferDispatch(); deferred {
+		for _, step := range f.Steps {
+			if len(step.Needs) > 0 || step.Interactive {
+				continue
+			}
+			t := workflowStepTarget(step, targetRig)
+			if isUnroutableTarget(t, IsRigName) {
+				fmt.Fprintf(os.Stderr,
+					"\nWARNING: step %q resolves target %q — not a rig or capacity-neutral agent.\n"+
+						"Under the capacity scheduler this step will strand.\n"+
+						"Fix the formula's `target` field.\n\n",
+					step.ID, t)
+				_ = BdCmd("comments", "add", workflowID,
+					fmt.Sprintf("Pour-time WARNING: step %q target %q is not a rig or capacity-neutral agent — will strand under the capacity scheduler (gt-3798).", step.ID, t)).
+					Dir(townBeads).
+					Run()
+			}
 		}
 	}
+
+	fmt.Printf("\n%s Dispatching ready steps...\n\n", style.Bold.Render("→"))
 
 	slingCount := 0
 	interactiveCount := 0
@@ -932,7 +950,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 			continue
 		}
 
-		if step.Interactive || hasInteractive {
+		if step.Interactive {
 			// Interactive step: hook to current session instead of slinging to a polecat.
 			// The user will execute this step in their current crew session.
 			_ = BdCmd("update", stepBeadID, "--status=hooked").
@@ -999,6 +1017,13 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 const workflowTargetField = "workflow_target"
 
 func workflowStepDescription(step formula.Step, description string) string {
+	// Interactive steps run in the orchestrator's session (they need the human's
+	// chat channel) and must NOT carry a routable workflow_target — otherwise the
+	// auto-dispatch override (applyWorkflowStepTargetOverride) would redirect them
+	// to a role that has no channel to the human (gt-3798).
+	if step.Interactive {
+		return description
+	}
 	target := strings.TrimSpace(step.Target)
 	if target == "" {
 		return description
@@ -1007,6 +1032,10 @@ func workflowStepDescription(step formula.Step, description string) string {
 }
 
 func workflowStepTarget(step formula.Step, targetRig string) string {
+	// Interactive steps are session-bound and never routed by target (gt-3798).
+	if step.Interactive {
+		return targetRig
+	}
 	target := strings.TrimSpace(step.Target)
 	if target == "" || target == "rig" {
 		return targetRig
