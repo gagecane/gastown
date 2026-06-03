@@ -57,6 +57,29 @@ source_dirty() {
   git -C "$1" status --porcelain -- "${LOCAL_OPERATIONAL_PATHS[@]}" 2>/dev/null
 }
 
+# resync_main RIG — best-effort fast-forward of local main to origin/main.
+# safe-install runs check-up-to-date, which re-fetches and REFUSES to install
+# when local main is behind origin/main. A transient preflight fetch/ff failure
+# (or a race where origin/main advances mid-run) leaves local main behind, and
+# simply re-running build/safe-install won't recover because nothing re-advances
+# local main. This re-fast-forwards it so a retry can succeed. No-ops (returns 0)
+# unless on a clean main that is strictly behind a fast-forwardable origin/main.
+# (gs-p8u)
+resync_main() {
+  local rig="$1" branch local_sha remote_sha
+  branch=$(git -C "$rig" branch --show-current 2>/dev/null || echo "")
+  [ "$branch" = "main" ] || return 0
+  [ -z "$(source_dirty "$rig" 2>/dev/null)" ] || return 0
+  git -C "$rig" fetch origin main --quiet 2>/dev/null || return 0
+  local_sha=$(git -C "$rig" rev-parse main 2>/dev/null || echo "")
+  remote_sha=$(git -C "$rig" rev-parse origin/main 2>/dev/null || echo "")
+  [ -n "$local_sha" ] && [ -n "$remote_sha" ] && [ "$local_sha" != "$remote_sha" ] || return 0
+  if git -C "$rig" merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null \
+     && git -C "$rig" merge --ff-only origin/main --quiet 2>/dev/null; then
+    log "Resynced main: ${local_sha:0:8} -> ${remote_sha:0:8}"
+  fi
+}
+
 # --- Sync local checkout with origin/main -----------------------------------
 #
 # `gt stale` compares the binary's embedded commit to the *local* HEAD of the
@@ -162,7 +185,31 @@ fi
 OLD_VER=$(gt version 2>/dev/null | head -1 || echo "unknown")
 log "Rebuilding gt from $RIG_ROOT..."
 
-if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
+# The build/safe-install can fail transiently — most commonly because local main
+# slipped behind origin/main, which safe-install's check-up-to-date refuses. A
+# stale daemon is worse than a delayed rebuild, so retry a few times, re-syncing
+# main to origin before each retry, and only escalate if every attempt fails.
+# Output is captured (not just streamed) so the escalation carries the real
+# failure detail instead of an empty reason. (gs-p8u)
+MAX_ATTEMPTS=3
+BUILD_OUTPUT=""
+BUILD_OK=false
+for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+  if [ "$attempt" -gt 1 ]; then
+    log "Build attempt ${attempt}/${MAX_ATTEMPTS} — re-syncing main to origin/main first..."
+    resync_main "$RIG_ROOT"
+  fi
+  if BUILD_OUTPUT=$( (cd "$RIG_ROOT" && make build && make safe-install) 2>&1 ); then
+    BUILD_OK=true
+    break
+  fi
+  log "Build attempt ${attempt}/${MAX_ATTEMPTS} failed."
+done
+
+# Stream the captured output to the plugin log so it stays visible like before.
+printf '%s\n' "$BUILD_OUTPUT" | sed 's/^/[rebuild-gt]   /'
+
+if [ "$BUILD_OK" = true ]; then
   NEW_VER=$(gt version 2>/dev/null | head -1 || echo "unknown")
   log "Rebuilt: $OLD_VER -> $NEW_VER"
   bd create "rebuild-gt: $OLD_VER -> $NEW_VER" -t chore --ephemeral \
@@ -184,11 +231,15 @@ if (cd "$RIG_ROOT" && make build && make safe-install) 2>&1; then
     -d "rebuild-gt upgraded the on-disk binary from $OLD_VER to $NEW_VER. The running daemon process (pid $DAEMON_PID) is still on the old binary. Operator action: gt daemon stop && gt daemon start" \
     --silent 2>/dev/null || true
 else
-  ERROR="make build/safe-install failed"
-  log "FAILED: $ERROR"
+  # Capture the real failure output so the escalation is triageable instead of
+  # carrying an empty reason (gs-p8u). Tail it to keep the bead/escalation sane.
+  ERROR_TAIL=$(printf '%s\n' "$BUILD_OUTPUT" | tail -30)
+  ERROR_SUMMARY=$(printf '%s\n' "$BUILD_OUTPUT" | tail -5 | tr '\n' ' ' | sed 's/  */ /g')
+  log "FAILED after ${MAX_ATTEMPTS} attempts: ${ERROR_SUMMARY}"
   bd create "Plugin: rebuild-gt [failure]" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:failure" \
-    -d "Build failed: $ERROR" --silent 2>/dev/null || true
-  gt escalate "Plugin FAILED: rebuild-gt" -s medium 2>/dev/null || true
+    -d "Build failed after ${MAX_ATTEMPTS} attempts ($OLD_VER). Output (tail):
+${ERROR_TAIL}" --silent 2>/dev/null || true
+  gt escalate "Plugin FAILED: rebuild-gt after ${MAX_ATTEMPTS} attempts: ${ERROR_SUMMARY:-no output captured}" -s medium 2>/dev/null || true
   exit 1
 fi
