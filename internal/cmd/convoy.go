@@ -2182,17 +2182,72 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 		return nil, fmt.Errorf("listing convoys: %w", err)
 	}
 
+	// Batch the per-convoy 'tracks' dep-edge lookup into ONE bd sql query
+	// (gc-pai9b). The previous per-convoy getTrackedIssues fan-out spawned a
+	// fresh `bd sql ... WHERE issue_id='<cv>' AND type='tracks'` subprocess per
+	// open convoy; under N concurrent `gt done` completions that serial fan-out
+	// saturated the shared Dolt server and starved the dispatch loop's capacity
+	// query. Mirror findStrandedConvoys (gu-6m38): one batched IN(...) query for
+	// all convoys, one town-wide bd show batch for details, build enriched infos
+	// in-memory. Per-convoy getTrackedIssues remains the fallback for degraded /
+	// zero-row / cross-database cases (preserves GH#2624 cross-db dep handling).
+	convoyIDs := make([]string, 0, len(convoys))
+	for _, c := range convoys {
+		convoyIDs = append(convoyIDs, c.ID)
+	}
+	trackedIDsByConvoy, batchErr := getAllTrackedIssuesByConvoy(townBeads, convoyIDs)
+	if batchErr != nil {
+		// Best-effort: degrade to per-convoy lookups for this pass.
+		style.PrintWarning("batched tracked-deps query failed; falling back to per-convoy lookups: %v", batchErr)
+		trackedIDsByConvoy = nil
+	}
+
+	// Hoist the issue-details bd show fan-out to a single town-wide batch over
+	// all tracked IDs from the batched result (gu-mxra pattern). Convoys that
+	// fall back per-convoy do their own (small) detail fetch.
+	allTrackedIDs := make([]string, 0)
+	seenAll := make(map[string]bool)
+	if trackedIDsByConvoy != nil {
+		for _, ids := range trackedIDsByConvoy {
+			for _, id := range ids {
+				if !seenAll[id] {
+					seenAll[id] = true
+					allTrackedIDs = append(allTrackedIDs, id)
+				}
+			}
+		}
+	}
+	var (
+		freshDetails map[string]*issueDetails
+		workersMap   map[string]*workerInfo
+	)
+	if len(allTrackedIDs) > 0 {
+		freshDetails = getIssueDetailsBatch(allTrackedIDs)
+		workersMap = getWorkersForIssues(openIssueIDsFromDetails(allTrackedIDs, freshDetails))
+	}
+
 	// Check each convoy
 	for _, convoy := range convoys {
 		if err := ensureKnownConvoyStatus(convoy.Status); err != nil {
 			style.PrintWarning("skipping convoy %s: invalid lifecycle state: %v", convoy.ID, err)
 			continue
 		}
-		tracked, err := getTrackedIssues(townBeads, convoy.ID)
-		if err != nil {
-			style.PrintWarning("skipping convoy %s: %v", convoy.ID, err)
-			continue
+
+		// Use the batched result when available and non-empty; otherwise fall
+		// back to the per-convoy path (handles batch degradation, convoys absent
+		// from the batched result, and cross-database deps that return zero rows).
+		var tracked []trackedIssueInfo
+		if ids, ok := trackedIDsByConvoy[convoy.ID]; trackedIDsByConvoy != nil && ok && len(ids) > 0 {
+			tracked = buildTrackedIssueInfosFromCache(ids, freshDetails, workersMap)
+		} else {
+			t, err := getTrackedIssues(townBeads, convoy.ID)
+			if err != nil {
+				style.PrintWarning("skipping convoy %s: %v", convoy.ID, err)
+				continue
+			}
+			tracked = t
 		}
+
 		ready, err := closeConvoyIfComplete(townBeads, convoy.ID, convoy.Title, tracked, dryRun)
 		if err != nil {
 			style.PrintWarning("couldn't close convoy %s: %v", convoy.ID, err)
