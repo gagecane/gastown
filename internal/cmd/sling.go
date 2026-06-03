@@ -1198,15 +1198,22 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Store all attachment fields in a single read-modify-write cycle.
 	// This eliminates the race condition where sequential independent updates
 	// (dispatcher, args, no_merge, attached_molecule) could overwrite each other.
+	//
+	// Inject `issue=<beadID>` into the stored vars so polecat formula step
+	// descriptions render `{{issue}}` correctly. InstantiateFormulaOnBead sets
+	// this on the wisp itself, but the bead's attached_vars / formula_vars
+	// (read by `gt prime --hook` to populate the var map) do NOT include it
+	// unless we add it here. (gt-codex-issue-var)
+	storedVars := append([]string{fmt.Sprintf("issue=%s", beadID)}, slingVars...)
 	fieldUpdates := buildSlingFieldUpdates(
 		actor,
 		slingArgs,
-		append([]string(nil), slingVars...),
+		storedVars,
 		attachedMoleculeID,
 		formulaName,
 		slingNoMerge,
 		slingReviewOnly,
-		strings.Join(slingVars, "\n"),
+		strings.Join(storedVars, "\n"),
 		convoyID,
 		slingMerge,
 		slingOwned,

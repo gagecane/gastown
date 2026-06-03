@@ -96,11 +96,21 @@ type SlingResult struct {
 // leg fell through to the default merge-queue path, merging its commits onto
 // the rig base branch. The single-sling path (runSling) already persists these
 // via buildSlingFieldUpdates; this keeps executeSling at parity.
-func slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, formulaVars string, params SlingParams) beadFieldUpdates {
+func slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, formulaVars, issueID string, params SlingParams) beadFieldUpdates {
+	// Inject `issue=<issueID>` into the stored vars and formula vars so polecat
+	// formula step descriptions render `{{issue}}` correctly. The bead's
+	// attached_vars / formula_vars (read by `gt prime --hook`) do NOT include
+	// it unless we add it here. (gt-codex-issue-var)
+	storedVars := append([]string{fmt.Sprintf("issue=%s", issueID)}, params.Vars...)
+	if formulaVars != "" {
+		formulaVars = fmt.Sprintf("issue=%s\n%s", issueID, formulaVars)
+	} else {
+		formulaVars = fmt.Sprintf("issue=%s", issueID)
+	}
 	return beadFieldUpdates{
 		Dispatcher:       actor,
 		Args:             params.Args,
-		Vars:             append([]string(nil), params.Vars...),
+		Vars:             storedVars,
 		AttachedMolecule: attachedMoleculeID,
 		AttachedFormula:  params.FormulaName,
 		NoMerge:          params.NoMerge,
@@ -557,7 +567,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	updateAgentHookBead(targetAgent, beadToHook, hookWorkDir, beadsDir)
 
 	// 10. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
-	fieldUpdates := slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, strings.Join(allVars, "\n"), params)
+	fieldUpdates := slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, strings.Join(allVars, "\n"), beadToHook, params)
 	// Use beadToHook for the update target (may differ from beadID when formula-on-bead)
 	if err := storeFieldsInBead(beadToHook, fieldUpdates); err != nil {
 		fmt.Printf("  %s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
