@@ -578,7 +578,15 @@ func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[stri
 		strings.Join(quoted, ","),
 	)
 
-	out, err := runBdJSON(townBeads, "sql", query, "--json")
+	// Bound this query with the standard bd command timeout (gc-pai9b). This
+	// batched 'tracks' lookup runs on the gt-done / 'gt convoy check' path that
+	// fires concurrently with the daemon dispatch loop against the one shared
+	// Dolt server; an unbounded query under Dolt contention is exactly what
+	// starved dispatch. runBdJSON uses a plain cmd.Run() with no deadline, so
+	// route through the context-bounded bdCmd.Output() path instead. On timeout
+	// the caller (findStrandedConvoys / checkAndCloseCompletedConvoys) degrades
+	// to per-convoy lookups rather than hanging the whole sweep.
+	out, err := BdCmd("sql", query, "--json").Dir(townBeads).StripBeadsDir().Output()
 	if err != nil {
 		return nil, fmt.Errorf("bd sql for batched tracked deps: %w", err)
 	}
