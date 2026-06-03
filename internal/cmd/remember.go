@@ -223,9 +223,22 @@ func bdKvListJSON() (map[string]string, error) {
 		return nil, err
 	}
 
-	var kvs map[string]string
-	if err := json.Unmarshal(out, &kvs); err != nil {
+	// bd kv list may include non-string values (e.g. the numeric
+	// schema_version key), so decode into RawMessage first and keep only
+	// the string-valued entries. Memories are always stored as strings.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parsing kv list: %w", err)
+	}
+
+	kvs := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			// Skip non-string values (e.g. schema_version).
+			continue
+		}
+		kvs[k] = s
 	}
 	return kvs, nil
 }
