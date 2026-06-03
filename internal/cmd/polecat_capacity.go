@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -261,7 +263,23 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		return snapshot, fmt.Errorf("loading rigs config for polecat capacity: %w", err)
 	}
 
-	tmuxClient := tmux.NewTmux()
+	// Enumerate live tmux sessions ONCE for the whole snapshot instead of
+	// shelling `tmux has-session` per polecat. At high session count the
+	// per-session serial probe would dominate; a single `tmux list-sessions` is
+	// ~4ms and the per-polecat liveness check below is an in-memory set lookup.
+	liveSessions := liveSessionSet(tmux.NewTmux())
+
+	// Phase 1 (serial, filesystem-only): gather the per-rig work items. Cheap —
+	// os.Stat + readdir, no bd subprocess.
+	type rigCapacityWork struct {
+		rigName      string
+		rigPath      string
+		prefix       string
+		polecatNames []string
+		agents       map[string]*beads.Issue // filled by the parallel phase
+		readOK       bool                    // true once ListAgentBeads succeeded
+	}
+	var work []*rigCapacityWork
 	for rigName := range rigsConfig.Rigs {
 		rigPath := filepath.Join(townRoot, rigName)
 		if _, err := os.Stat(rigPath); err != nil {
@@ -274,25 +292,67 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		if len(polecatNames) == 0 {
 			continue
 		}
+		work = append(work, &rigCapacityWork{
+			rigName:      rigName,
+			rigPath:      rigPath,
+			prefix:       beads.GetPrefixForRig(townRoot, rigName),
+			polecatNames: polecatNames,
+		})
+	}
 
-		// Bypass the bd-list-read flock for this critical-path capacity query.
-		// The per-rig fan-out otherwise blocks on the throttle while the caller
-		// holds scheduler-dispatch.lock, stalling ALL dispatch under bulk-read
-		// contention (gu-pug66). Read-only; Dolt concurrency is unaffected.
-		agents, err := beads.New(rigPath).WithoutReadThrottle().ListAgentBeads()
-		if err != nil {
-			return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
+	// Phase 2 (bounded-parallel): fetch each rig's agent beads concurrently. The
+	// serial per-rig `bd list --label=gt:agent` fan-out (one ~0.85s cold-start
+	// per rig) was the dominant scan cost — 16 rigs ≈ 14s (gu-el5bx). Each rig is
+	// a separate Dolt DB so the reads cannot collapse into one query; we instead
+	// run them concurrently behind a SEMAPHORE so even under contention they
+	// cannot storm the single shared Dolt server. We keep WithoutReadThrottle
+	// (gu-pug66 deliberately made this critical path lock-free; restoring the
+	// throttle under scheduler-dispatch.lock re-opens that dispatch-starvation
+	// deadlock) — the semaphore, not the throttle, bounds Dolt load here.
+	//
+	// Per-rig read errors degrade gracefully: that rig contributes no capacity
+	// rather than failing the whole snapshot (a transient Dolt blip on one rig
+	// must not stall town-wide dispatch).
+	sem := make(chan struct{}, capacityFanoutConcurrency())
+	var wg sync.WaitGroup
+	for _, w := range work {
+		wg.Add(1)
+		go func(w *rigCapacityWork) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			agents, err := beads.New(w.rigPath).WithoutReadThrottle().ListAgentBeads()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s capacity_skip reason=agent_list_failed rig=%s: %v\n",
+					style.Dim.Render("○"), w.rigName, err)
+				return // graceful degrade: readOK stays false
+			}
+			w.agents = agents
+			w.readOK = true
+		}(w)
+	}
+	wg.Wait()
+
+	// Phase 3 (serial): fold each rig's results into the shared snapshot
+	// single-threaded, preserving deterministic counting without locking.
+	for _, w := range work {
+		// A rig whose agent-bead read failed contributes NO capacity rather than
+		// being miscounted: with a nil agents map every polecat would parse as a
+		// fields==nil slot and inflate ReusableIdle/Working from stale guesses.
+		// Skipping leaves that rig out of this snapshot entirely; the next scan
+		// (or warm-cache expiry) re-reads it.
+		if !w.readOK {
+			continue
 		}
-		prefix := beads.GetPrefixForRig(townRoot, rigName)
-		for _, name := range polecatNames {
-			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
-			issue := agents[agentID]
+		for _, name := range w.polecatNames {
+			agentID := beads.PolecatBeadIDWithPrefix(w.prefix, w.rigName, name)
+			issue := w.agents[agentID] // nil-safe: nil map lookup yields nil
 			fields := (*beads.AgentFields)(nil)
 			if issue != nil {
 				fields = beads.ParseAgentFields(issue.Description)
 				fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
 			}
-			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, tmuxClient)
+			applyAgentFieldsToCapacitySnapshot(&snapshot, w.rigName, name, fields, liveSessions)
 		}
 	}
 
@@ -327,11 +387,46 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 	return names, nil
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, tmuxClient *tmux.Tmux) {
-	running := false
-	if tmuxClient != nil {
-		running, _ = tmuxClient.HasSession(session.PolecatSessionName(session.PrefixFor(rigName), polecatName))
+// capacityFanoutConcurrency bounds how many per-rig agent-bead reads run
+// concurrently in the capacity snapshot (gu-el5bx). These reads bypass the
+// bd-list-read throttle (gu-pug66's lock-free critical path), so the semaphore
+// is what keeps them from storming the single shared Dolt server. Default 4 —
+// enough for the ~4× speedup over serial while adding at most 4 concurrent Dolt
+// connections (Dolt sits at ~19/100, ample headroom). Tunable via
+// GT_CAPACITY_FANOUT for operators who want more parallelism on big towns.
+func capacityFanoutConcurrency() int {
+	const def = 4
+	if v := os.Getenv("GT_CAPACITY_FANOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
 	}
+	return def
+}
+
+// liveSessionSet enumerates all live tmux sessions in a single `tmux
+// list-sessions` and returns them as a membership set. This replaces the
+// per-polecat `tmux has-session` fan-out in the capacity snapshot (gu-el5bx).
+// On enumeration error (e.g. no tmux server) it returns an empty set, which
+// makes every per-polecat lookup report "not running" — identical to the prior
+// behavior when HasSession errored.
+func liveSessionSet(tmuxClient *tmux.Tmux) map[string]bool {
+	set := make(map[string]bool)
+	if tmuxClient == nil {
+		return set
+	}
+	sessions, err := tmuxClient.ListSessions()
+	if err != nil {
+		return set
+	}
+	for _, name := range sessions {
+		set[name] = true
+	}
+	return set
+}
+
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, liveSessions map[string]bool) {
+	running := liveSessions[session.PolecatSessionName(session.PrefixFor(rigName), polecatName)]
 	if fields == nil {
 		// No agent bead exists for this polecat directory. Two distinct cases:
 		//

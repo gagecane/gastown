@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 func setupPolecatCapacityTestTown(t *testing.T, maxPolecats int) string {
@@ -344,6 +345,82 @@ func TestApplyAgentFieldsToCapacitySnapshot_NilFieldsDeadSessionIsReusable(t *te
 	}
 	if snapshot.Working != 0 {
 		t.Fatalf("nil-fields dead-session must not be counted as Working, snapshot=%+v", snapshot)
+	}
+}
+
+// TestApplyAgentFieldsToCapacitySnapshot_LiveSessionSetLookup is the regression
+// guard for gu-el5bx: the capacity snapshot used to shell `tmux has-session`
+// once per polecat (~51 serial tmux subprocesses ≈ 40s at high session count).
+// The fix enumerates sessions ONCE into a membership set and the per-polecat
+// liveness check is now an in-memory lookup. This pins the set-driven behavior:
+// a polecat whose session name is in the set counts as running (Working when it
+// has no bead), and one absent from the set is treated as dead (ReusableIdle).
+func TestApplyAgentFieldsToCapacitySnapshot_LiveSessionSetLookup(t *testing.T) {
+	rig := "gastown"
+	aliveName := "alive"
+	deadName := "dead"
+	live := map[string]bool{
+		session.PolecatSessionName(session.PrefixFor(rig), aliveName): true,
+	}
+
+	// In-set + nil fields => live session, missing bead => Working (gu-o086).
+	alive := polecatCapacitySnapshot{}
+	applyAgentFieldsToCapacitySnapshot(&alive, rig, aliveName, nil, live)
+	if alive.Working != 1 || alive.ReusableIdle != 0 {
+		t.Fatalf("in-set polecat must count as Working, got %+v", alive)
+	}
+
+	// Not-in-set + nil fields => dead session, missing bead => ReusableIdle.
+	dead := polecatCapacitySnapshot{}
+	applyAgentFieldsToCapacitySnapshot(&dead, rig, deadName, nil, live)
+	if dead.ReusableIdle != 1 || dead.Working != 0 {
+		t.Fatalf("not-in-set polecat must count as ReusableIdle, got %+v", dead)
+	}
+}
+
+// TestCapacityFanoutConcurrency covers the semaphore bound for the per-rig
+// agent-bead fan-out (gu-el5bx). Defaults to 4; GT_CAPACITY_FANOUT overrides
+// with a positive int; junk/zero/negative fall back to the default so a
+// fat-fingered env can never serialize (1 is allowed) or, worse, set an
+// unbounded/invalid width.
+func TestCapacityFanoutConcurrency(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want int
+	}{
+		{"default when unset", "", 4},
+		{"override 6", "6", 6},
+		{"override 1 (serial allowed)", "1", 1},
+		{"zero falls back", "0", 4},
+		{"negative falls back", "-3", 4},
+		{"junk falls back", "lots", 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env == "" {
+				os.Unsetenv("GT_CAPACITY_FANOUT")
+			} else {
+				t.Setenv("GT_CAPACITY_FANOUT", tt.env)
+			}
+			if got := capacityFanoutConcurrency(); got != tt.want {
+				t.Errorf("capacityFanoutConcurrency() with env=%q = %d, want %d", tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLiveSessionSet_NilClient guards the no-tmux-server / nil-client path:
+// liveSessionSet must return a usable empty set (not nil-panic), so every
+// per-polecat lookup reports "not running" — matching the prior behavior when
+// HasSession errored.
+func TestLiveSessionSet_NilClient(t *testing.T) {
+	set := liveSessionSet(nil)
+	if set == nil {
+		t.Fatal("liveSessionSet(nil) must return a non-nil empty set")
+	}
+	if set["anything"] {
+		t.Fatalf("empty set must report no membership, got true")
 	}
 }
 
