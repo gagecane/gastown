@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -98,47 +99,23 @@ func checkSchedulePrefixParity(townRoot, rigName, beadID string) error {
 		beadID, gotPrefix, rigName, rigPrefix, rigName)
 }
 
-// shouldReattachFormula reports whether an already-scheduled bead's staged
-// formula should be replaced in place (gs-am8 GAP 2). Re-attach only when the
-// caller passed --force AND is requesting a formula that differs from the one
-// currently staged — so a bead stuck on the wrong formula (e.g. a review gate
-// staged with the default mol-polecat-work) can be corrected without an
-// unschedule/reschedule dance. Without --force, or with the same formula, the
-// existing no-op (idempotent) behavior stands.
+// shouldReattachFormula delegates to sling.ShouldReattachFormula (the gs-am8
+// GAP 2 re-attach decision). Kept as a thin cmd wrapper so existing callsites
+// and tests stay unchanged.
 func shouldReattachFormula(force bool, requestedFormula string, existing *capacity.SlingContextFields) bool {
-	return force && existing != nil && requestedFormula != existing.Formula
+	return sling.ShouldReattachFormula(force, requestedFormula, existing)
 }
 
-// isStaleOrFailedContext reports whether an existing open sling context should
-// be treated as expired rather than a healthy in-flight dispatch (gu-rm08l).
-// True when the context recorded any transient dispatch failure
-// (dispatch_failures>0 — a spawn hiccup, bd-list read throttle, etc.) or when
-// it has aged past slingContextTTL. Either condition means a re-sling must NOT
-// no-op: the parked context is closed and a fresh one created so the work bead
-// returns to the dispatchable pool.
-//
-// This mirrors areScheduled()'s TTL logic, which already ignores such contexts
-// when convoy/epic/stranded scans decide whether to re-sling. Without this, the
-// scans re-sling but scheduleBead no-ops on the lingering context, parking the
-// bead indefinitely (only a manual `bd close <stale-context>` + re-sling
-// unblocked it). recordDispatchFailure already excludes "already hooked/
-// in_progress" errors, so dispatch_failures>0 implies a genuine spawn failure,
-// not active work being performed.
+// isStaleOrFailedContext delegates to sling.IsStaleOrFailedContext (the
+// gu-rm08l recovery predicate). Kept as a thin cmd wrapper.
 func isStaleOrFailedContext(ctx *beads.Issue, fields *capacity.SlingContextFields, now time.Time) bool {
-	if fields != nil && fields.DispatchFailures > 0 {
-		return true
-	}
-	return isContextOlderThan(ctx, now, slingContextTTL)
+	return sling.IsStaleOrFailedContext(ctx, fields, now)
 }
 
-// staleContextReslingReason returns the close reason for a stale/failed context
-// being recycled by a re-sling, distinguishing transient-failure expiry from
-// plain TTL expiry for observability.
+// staleContextReslingReason delegates to sling.StaleContextReslingReason,
+// distinguishing transient-failure expiry from plain TTL expiry.
 func staleContextReslingReason(fields *capacity.SlingContextFields) string {
-	if fields != nil && fields.DispatchFailures > 0 {
-		return fmt.Sprintf("failed-context-resling (dispatch_failures=%d)", fields.DispatchFailures)
-	}
-	return "stale-context-resling (ttl-expired)"
+	return sling.StaleContextReslingReason(fields)
 }
 
 // scheduleBead schedules a bead for deferred dispatch via the capacity scheduler.
@@ -618,8 +595,8 @@ func resolveFormulaForBead(explicit string, hookRawBead bool, townRoot, rigName 
 // slingContextTTL is the maximum age of a sling context before it's considered
 // stale and ignored by areScheduled(). This prevents orphaned sling contexts
 // (from failed spawns or throttled dispatches) from permanently blocking tasks.
-// See GH#2279.
-const slingContextTTL = 30 * time.Minute
+// See GH#2279. Aliases the domain constant sling.ContextTTL.
+const slingContextTTL = sling.ContextTTL
 
 // areScheduled returns a set of bead IDs that have open sling contexts.
 // Scans all rig beads dirs since sling contexts are created in the target

@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -609,18 +610,12 @@ func cleanupStaleContexts(townRoot string) {
 	}
 }
 
-// isContextOlderThan reports whether the context's CreatedAt timestamp is
-// older than the given TTL, relative to now. Unparseable or empty timestamps
-// return false (fail-closed — don't treat an unknown-age context as stale).
+// isContextOlderThan delegates to sling.ContextOlderThan: reports whether the
+// context's CreatedAt timestamp is older than the given TTL relative to now.
+// Unparseable or empty timestamps return false (fail-closed). Kept as a thin
+// cmd wrapper so existing callsites and tests stay unchanged.
 func isContextOlderThan(ctx *beads.Issue, now time.Time, ttl time.Duration) bool {
-	if ctx == nil || ctx.CreatedAt == "" {
-		return false
-	}
-	created, err := time.Parse(time.RFC3339, ctx.CreatedAt)
-	if err != nil {
-		return false
-	}
-	return now.Sub(created) > ttl
+	return sling.ContextOlderThan(ctx, now, ttl)
 }
 
 // beadStatusInfo holds batch-fetched bead status, title, and labels.
