@@ -200,6 +200,14 @@ func NewTmuxWithSocket(socket string) *Tmux {
 // All commands include -u flag for UTF-8 support regardless of locale settings.
 // See: https://github.com/steveyegge/gastown/issues/1219
 func (t *Tmux) run(args ...string) (string, error) {
+	return t.runContext(context.Background(), args...)
+}
+
+// runContext is like run but honors a context for cancellation/timeout. A
+// hung tmux server (e.g. behind a stale socket) cannot wedge the caller
+// forever — when the context expires the subprocess is killed and the
+// context error is returned.
+func (t *Tmux) runContext(ctx context.Context, args ...string) (string, error) {
 	// Prepend global flags: -u (UTF-8 mode, PATCH-004) and optionally -L (socket).
 	// The -L flag must come before the subcommand, so it goes in the prefix.
 	allArgs := []string{"-u"}
@@ -207,7 +215,7 @@ func (t *Tmux) run(args ...string) (string, error) {
 		allArgs = append(allArgs, "-L", t.socketName)
 	}
 	allArgs = append(allArgs, args...)
-	cmd := exec.Command("tmux", allArgs...)
+	cmd := exec.CommandContext(ctx, "tmux", allArgs...)
 	hideConsoleWindow(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -215,6 +223,11 @@ func (t *Tmux) run(args ...string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
+		// Surface a timeout/cancellation as the context error so callers can
+		// distinguish a wedged probe from a real tmux failure.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		return "", t.wrapError(err, stderr.String(), args)
 	}
 
