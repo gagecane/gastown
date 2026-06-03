@@ -695,15 +695,20 @@ From: {{problem}} implementation plan
 "
 ```
 
-**3. Set up dependencies:**
+**3. Set up sibling sequencing dependencies (BLOCKING):**
 
-After creating all beads, wire up the dependencies based on the plan's
-sequencing:
+After creating all beads, wire up execution ordering between SIBLING tasks
+based on the plan's sequencing. These are blocking edges — a task is not
+ready until the tasks it depends on are closed:
 
 ```bash
 # X needs Y means Y blocks X:
 bd dep add <task-x-id> <task-y-id>  # x depends on y (y blocks x)
 ```
+
+Only use blocking deps for true sibling ordering (task X must finish before
+task Y starts). Do NOT use a blocking dep to express epic membership — see
+step 5.
 
 **4. Create a tracking epic:**
 ```bash
@@ -718,13 +723,46 @@ Implementation of: {{problem}}
 "
 ```
 
-**5. Verify the dependency graph:**
+**5. Link children to the epic (NON-BLOCKING — read this carefully):**
+
+⚠️ **FOOTGUN — DO NOT create a blocking child→epic dependency.**
+`bd dep add <child> <epic>` means "child depends on epic" = the child is
+BLOCKED until the epic closes. But an epic stays open until all its children
+finish, so every child becomes permanently blocked → never ready → dispatch
+deadlocks silently. (This deadlocked CASC wiki Phase 3, 2026-06-02.)
+
+To associate each child impl-bead with its parent epic, use a NON-BLOCKING
+`parent-child` edge in the **EPIC → child** direction. The epic tracks the
+child for hierarchy; the child is NOT blocked:
+
+```bash
+# Correct: epic is the parent, child is the child. Non-blocking hierarchy edge.
+bd dep add <epic-id> <child-id> --type=parent-child
+```
+
+Note the argument order: the EPIC comes first (it is the parent). This is the
+opposite of the blocking `bd dep add <child> <dependency>` form in step 3.
+
+Sibling-to-sibling ordering deps from step 3 are correct and stay as blocking
+edges. Only the child↔epic association must be non-blocking.
+
+**6. Verify the dependency graph:**
 ```bash
 bd blocked  # should show clean topological order
 bv --robot-mode  # if available: graph visualization
 ```
 
-**6. Notify the human in conversation:**
+⚠️ **Verify no child is blocked by the epic.** If `bd blocked` lists an
+impl-bead as blocked by the epic, you wired the child↔epic edge backwards
+(blocking child→epic instead of non-blocking epic→child). Remove the bad
+edge and redo it per step 5:
+```bash
+bd dep remove <child-id> <epic-id>                      # drop the blocking edge
+bd dep add <epic-id> <child-id> --type=parent-child     # add non-blocking hierarchy edge
+```
+At least one task should be ready (`bd ready`) immediately after wiring.
+
+**7. Notify the human in conversation:**
 
 Output:
 
