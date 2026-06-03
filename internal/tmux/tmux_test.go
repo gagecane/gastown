@@ -1821,6 +1821,77 @@ func TestNudgeSession_WithStoredPaneID(t *testing.T) {
 	}
 }
 
+// TestNudgeSession_WakesAgentWindowNotActiveWindow is a regression test for a
+// missed-wake bug in multi-window sessions. NudgeSessionWithOpts used to pass
+// the bare session name to WakePaneIfDetached, which resizes the session's
+// *active* window. When an agent session also has another window open and
+// focused (e.g. a `gt feed -w` window), the agent's pane lives in a now-inactive
+// window, so the SIGWINCH went to the wrong window and the agent never woke.
+//
+// The wake's resize dance ends by setting the targeted window's window-size
+// option to "latest". By pre-setting both windows to "manual" and checking which
+// one flips to "latest" after the nudge, we can assert the agent's window — not
+// the active window — was the one woken. (gu-n146i / upstream PR #4164)
+func TestNudgeSession_WakesAgentWindowNotActiveWindow(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-nudge-multiwin-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+
+	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	time.Sleep(200 * time.Millisecond)
+
+	// The agent pane is window 0's pane. Record it as the declared identity so
+	// FindAgentPane resolves the nudge target to it.
+	agentPane, err := tm.GetPaneID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPaneID: %v", err)
+	}
+	if err := tm.SetEnvironment(sessionName, "GT_PANE_ID", agentPane); err != nil {
+		t.Fatalf("SetEnvironment GT_PANE_ID: %v", err)
+	}
+
+	// Open a second window, which tmux makes the active window. This puts the
+	// agent's pane in a non-active window — the scenario that exposed the bug.
+	if _, err := tm.run("new-window", "-t", sessionName, "-n", "feed"); err != nil {
+		t.Fatalf("new-window: %v", err)
+	}
+
+	// Pre-set both windows to window-size "manual". The wake resets only the
+	// window it targets back to "latest", giving us a deterministic signal.
+	for _, win := range []string{":0", ":1"} {
+		if _, err := tm.run("set-option", "-w", "-t", sessionName+win, "window-size", "manual"); err != nil {
+			t.Fatalf("set-option window-size manual on %s: %v", sessionName+win, err)
+		}
+	}
+
+	if err := tm.NudgeSession(sessionName, "test message"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+
+	windowSize := func(win string) string {
+		out, err := tm.run("show-options", "-w", "-t", sessionName+win, "window-size")
+		if err != nil {
+			t.Fatalf("show-options window-size on %s: %v", sessionName+win, err)
+		}
+		fields := strings.Fields(strings.TrimSpace(out))
+		if len(fields) < 2 {
+			return ""
+		}
+		return fields[1]
+	}
+
+	// Agent window (0) must have been woken; active window (1) must be untouched.
+	if got := windowSize(":0"); got != "latest" {
+		t.Errorf("agent window (0) window-size = %q, want %q (agent's window was not woken)", got, "latest")
+	}
+	if got := windowSize(":1"); got != "manual" {
+		t.Errorf("active window (1) window-size = %q, want %q (wrong window was woken)", got, "manual")
+	}
+}
+
 // TestAdaptiveTextDelay verifies the delay scaling logic for post-text delivery.
 func TestAdaptiveTextDelay(t *testing.T) {
 	t.Parallel()
