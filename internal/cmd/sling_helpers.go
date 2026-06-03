@@ -70,38 +70,10 @@ func resolveBeadDirFromTownRoot(townRoot, beadID string) string {
 // (gu-y5z8d).
 type beadInfo = dispatch.BeadInfo
 
-// verifyBeadIDMatch returns an error if the resolved bead ID does not match the
-// requested ID when the requested ID looks like a full prefixed ID. This is a
-// defensive guard against bd's partial-ID resolver falling through to substring
-// matching (gu-yphj): when e.g. "gt-74f" exists (OPEN) but "gt-74fjf" also
-// exists (CLOSED), bd show "gt-74f" can return "gt-74fjf" because the exact
-// filter matches neither locally and the substring fallback picks the longer
-// closed bead. That misrouting blocks dispatch of the legitimate bead.
-//
-// We consider the input a "full" ID if it has a valid prefix (as detected by
-// beads.ExtractPrefix). Partial IDs without a prefix (e.g. "74f") are allowed
-// to resolve loosely — that is the documented bd show contract. Full IDs must
-// match exactly or we surface a clear error pointing at the collision.
-func verifyBeadIDMatch(requestedID, resolvedID string) error {
-	// Partial IDs without a recognized prefix are allowed to resolve loosely.
-	if beads.ExtractPrefix(requestedID) == "" {
-		return nil
-	}
-	if resolvedID == "" {
-		// bd show returned no ID field (older bd or partial JSON) — can't verify,
-		// be permissive rather than break existing callers.
-		return nil
-	}
-	if resolvedID == requestedID {
-		return nil
-	}
-	return fmt.Errorf("bead '%s' not found: bd show resolved to a different bead '%s' (prefix collision — use the exact ID)", requestedID, resolvedID)
-}
-
-// The pure dispatch-eligibility predicates now live in internal/dispatch
-// (gu-y5z8d). These var-aliases preserve the in-package names so every call
-// site — and the existing unit tests that still live in this package — keep
-// working unchanged.
+// The pure dispatch-eligibility predicates, bead-resolution helpers, and
+// formula-var helpers now live in internal/dispatch (gu-y5z8d). These
+// var-aliases preserve the in-package names so every call site — and the
+// existing unit tests that still live in this package — keep working unchanged.
 var (
 	isDeferredBead              = dispatch.IsDeferredBead
 	isAgentBead                 = dispatch.IsAgentBead
@@ -114,6 +86,11 @@ var (
 	isPolecatOwnedBeadInfo      = dispatch.IsPolecatOwnedBeadInfo
 	isEmptyAssignee             = dispatch.IsEmptyAssignee
 	collectExistingMolecules    = dispatch.CollectExistingMolecules
+
+	verifyBeadIDMatch                 = dispatch.VerifyBeadIDMatch
+	parseBeadInfo                     = dispatch.ParseBeadInfo
+	ensureFormulaRequiredVars         = dispatch.EnsureFormulaRequiredVars
+	workflowStepTargetFromDescription = dispatch.WorkflowStepTargetFromDescription
 )
 
 // hasOpenChildrenFn queries whether a parent bead has any open (non-closed)
@@ -221,24 +198,6 @@ func applyWorkflowStepTargetOverride(args []string) ([]string, error) {
 	redirected[1] = target
 	fmt.Printf("%s Workflow step target: %s\n", style.Dim.Render("→"), target)
 	return redirected, nil
-}
-
-func workflowStepTargetFromDescription(description, targetRig string) string {
-	for _, line := range strings.Split(description, "\n") {
-		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if !ok {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(key), workflowTargetField) {
-			continue
-		}
-		target := strings.TrimSpace(value)
-		if target == "" || target == "rig" {
-			return targetRig
-		}
-		return target
-	}
-	return ""
 }
 
 // isOrphanMolecule reports whether a bead's existing attached molecule(s) can
@@ -553,24 +512,6 @@ func getBeadInfoFreshFromTownRoot(townRoot, beadID string) (*beadInfo, error) {
 		return nil, fmt.Errorf("bead '%s' not found", beadID)
 	}
 	return parseBeadInfo(beadID, out)
-}
-
-func parseBeadInfo(beadID string, out []byte) (*beadInfo, error) {
-	if len(out) == 0 {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
-	}
-	// bd show --json returns an array (issue + dependents), take first element.
-	var infos []beadInfo
-	if err := json.Unmarshal(out, &infos); err != nil {
-		return nil, fmt.Errorf("parsing bead info: %w", err)
-	}
-	if len(infos) == 0 {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
-	}
-	if err := verifyBeadIDMatch(beadID, infos[0].ID); err != nil {
-		return nil, err
-	}
-	return &infos[0], nil
 }
 
 // beadFieldUpdates holds all the fields that need to be stored in a bead's description.
@@ -1240,41 +1181,6 @@ func parseBondSpawnRootIDWithStatus(bondOut []byte, formulaName, beadID, fallbac
 		}
 	}
 	return fallbackID, true
-}
-
-// ensureFormulaRequiredVars appends missing required vars for formulas that enforce
-// strict var presence on direct bond paths.
-func ensureFormulaRequiredVars(formulaName string, vars []string) []string {
-	// Currently only mol-polecat-work has strict required vars on bond.
-	if formulaName != "mol-polecat-work" && formulaName != "polecat-work" {
-		return vars
-	}
-
-	seen := make(map[string]bool, len(vars))
-	for _, variable := range vars {
-		if eq := strings.Index(variable, "="); eq > 0 {
-			seen[variable[:eq]] = true
-		}
-	}
-
-	requiredDefaults := []struct {
-		Key   string
-		Value string
-	}{
-		{"base_branch", "main"},
-		{"setup_command", ""},
-		{"typecheck_command", ""},
-		{"lint_command", ""},
-		{"test_command", ""},
-		{"build_command", ""},
-		{"gates_commands", ""},
-	}
-	for _, item := range requiredDefaults {
-		if !seen[item.Key] {
-			vars = append(vars, item.Key+"="+item.Value)
-		}
-	}
-	return vars
 }
 
 // CookFormula cooks a formula to ensure its proto exists.
