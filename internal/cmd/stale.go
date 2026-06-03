@@ -50,7 +50,10 @@ type StaleOutput struct {
 	SafeToRebuild bool   `json:"safe_to_rebuild"`
 	BinaryCommit  string `json:"binary_commit"`
 	RepoCommit    string `json:"repo_commit"`
+	CompareRef    string `json:"compare_ref,omitempty"`
 	CommitsBehind int    `json:"commits_behind,omitempty"`
+	Skipped       bool   `json:"skipped,omitempty"`
+	SkipReason    string `json:"skip_reason,omitempty"`
 	Error         string `json:"error,omitempty"`
 
 	// Daemon-staleness fields (gu-qx6rn): a distinct signal comparing the
@@ -174,7 +177,10 @@ func runStale(cmd *cobra.Command, args []string) error {
 		SafeToRebuild:      safeToRebuild,
 		BinaryCommit:       info.BinaryCommit,
 		RepoCommit:         info.RepoCommit,
+		CompareRef:         info.CompareRef,
 		CommitsBehind:      info.CommitsBehind,
+		Skipped:            info.Skipped,
+		SkipReason:         info.SkipReason,
 		DaemonRunning:      daemonInfo.running,
 		DaemonStale:        daemonInfo.stale,
 		DaemonNeedsRestart: daemonInfo.needsRestart,
@@ -195,18 +201,24 @@ func outputStaleJSON(output StaleOutput) error {
 }
 
 func outputStaleText(output StaleOutput) error {
+	if output.Skipped {
+		fmt.Printf("%s Binary staleness check skipped\n", style.Dim.Render("•"))
+		fmt.Printf("  %s\n", output.SkipReason)
+		fmt.Printf("  Binary: %s\n", version.ShortCommit(output.BinaryCommit))
+		return nil
+	}
 	if output.Stale {
 		fmt.Printf("%s Binary is stale\n", style.Warning.Render("⚠"))
-		fmt.Printf("  Binary: %s\n", version.ShortCommit(output.BinaryCommit))
-		fmt.Printf("  Repo:   %s\n", version.ShortCommit(output.RepoCommit))
+		fmt.Printf("  Binary:   %s\n", version.ShortCommit(output.BinaryCommit))
+		fmt.Printf("  Build ref (%s): %s\n", output.CompareRef, version.ShortCommit(output.RepoCommit))
 		if output.CommitsBehind > 0 {
-			fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(%d commits behind)", output.CommitsBehind)))
+			fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(%d commits behind %s)", output.CommitsBehind, output.CompareRef)))
 		}
 		if !output.Forward {
-			fmt.Printf("  %s repo HEAD is NOT a descendant of binary commit (diverged or older)\n", style.Error.Render("✗"))
+			fmt.Printf("  %s %s is NOT a descendant of binary commit (diverged or older)\n", style.Error.Render("✗"), output.CompareRef)
 		}
 		if !output.OnMainBranch {
-			fmt.Printf("  %s repo is not on main branch\n", style.Warning.Render("⚠"))
+			fmt.Printf("  %s source worktree is not on a build branch (compared against %s)\n", style.Warning.Render("⚠"), output.CompareRef)
 		}
 		if output.SafeToRebuild {
 			fmt.Printf("\n  Safe to rebuild: run 'make build && make install'\n")
@@ -217,6 +229,9 @@ func outputStaleText(output StaleOutput) error {
 	} else {
 		fmt.Printf("%s Binary is fresh\n", style.Success.Render("✓"))
 		fmt.Printf("  Commit: %s\n", version.ShortCommit(output.BinaryCommit))
+		if output.CompareRef != "" {
+			fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(compared against %s)", output.CompareRef)))
+		}
 	}
 
 	// Daemon-staleness signal (gu-qx6rn): independent of the on-disk-vs-repo
