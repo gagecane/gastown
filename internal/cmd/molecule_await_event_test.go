@@ -324,7 +324,7 @@ func TestWaitForEventFilesPolling(t *testing.T) {
 	}()
 
 	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, 0)
+	result, err := waitForEventFiles(ctx, dir, 0, "")
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -354,7 +354,7 @@ func TestWaitForEventFilesWithPending(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err := waitForEventFiles(ctx, dir, 0)
+	result, err := waitForEventFiles(ctx, dir, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -366,6 +366,68 @@ func TestWaitForEventFilesWithPending(t *testing.T) {
 	}
 }
 
+// TestWaitForEventFilesFilterRigNoCannibalize is the gu-5qpfi regression test.
+// The refinery event channel is a single town-global directory shared by every
+// rig's refinery. An idle refinery watching with --filter-rig <self> must NOT
+// consume (return) OR delete another rig's event — deleting it would cannibalize
+// that rig's wake signal and leave it asleep until its backoff timeout. The
+// non-matching event must survive intact for its intended consumer.
+func TestWaitForEventFilesFilterRigNoCannibalize(t *testing.T) {
+	dir := t.TempDir()
+	// An MQ_SUBMIT destined for a DIFFERENT rig than the one we watch.
+	otherRigEvent := `{"type":"MQ_SUBMIT","channel":"refinery","payload":{"rig":"talontriage","source":"sling"}}`
+	otherPath := filepath.Join(dir, "other-rig.event")
+	if err := os.WriteFile(otherPath, []byte(otherRigEvent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Watch for OUR rig; the pending event belongs to another rig, so we must
+	// time out rather than return it. Use a short positive timeout so the read
+	// succeeds (the filter then drops the event) and the poll runs to timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+
+	result, err := waitForEventFiles(ctx, dir, 0, "gastown_upstream")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "timeout" {
+		t.Errorf("expected reason 'timeout' (other rig's event must be ignored), got %q", result.Reason)
+	}
+	if len(result.Events) != 0 {
+		t.Errorf("expected 0 events (must not consume another rig's event), got %d", len(result.Events))
+	}
+	// Critical: the other rig's event file must still exist on disk so its own
+	// refinery can pick it up.
+	if _, statErr := os.Stat(otherPath); statErr != nil {
+		t.Errorf("non-matching event was deleted (cannibalized) — gu-5qpfi regression: %v", statErr)
+	}
+}
+
+// TestWaitForEventFilesFilterRigMatches confirms a matching event still wakes
+// the watcher when --filter-rig is set.
+func TestWaitForEventFilesFilterRigMatches(t *testing.T) {
+	dir := t.TempDir()
+	ourEvent := `{"type":"MQ_SUBMIT","channel":"refinery","payload":{"rig":"gastown_upstream","source":"sling"}}`
+	if err := os.WriteFile(filepath.Join(dir, "our-rig.event"), []byte(ourEvent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := waitForEventFiles(ctx, dir, 0, "gastown_upstream")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "event" {
+		t.Errorf("expected reason 'event' for matching rig, got %q", result.Reason)
+	}
+	if len(result.Events) != 1 {
+		t.Errorf("expected 1 matching event, got %d", len(result.Events))
+	}
+}
+
 func TestWaitForEventFilesTimeout(t *testing.T) {
 	// With no events and an expired context, should return timeout.
 	dir := t.TempDir()
@@ -373,7 +435,7 @@ func TestWaitForEventFilesTimeout(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
 	defer cancel()
 
-	result, err := waitForEventFiles(ctx, dir, 0)
+	result, err := waitForEventFiles(ctx, dir, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -386,7 +448,7 @@ func TestWaitForEventFilesNoDeadline(t *testing.T) {
 	// With a context that has no deadline, should return timeout immediately.
 	dir := t.TempDir()
 
-	result, err := waitForEventFiles(context.Background(), dir, 0)
+	result, err := waitForEventFiles(context.Background(), dir, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -406,7 +468,7 @@ func TestWaitForEventFilesTimeoutWithPolling(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, 0)
+	result, err := waitForEventFiles(ctx, dir, 0, "")
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -458,7 +520,7 @@ func TestWaitForEventFilesContextYield(t *testing.T) {
 	yieldAfter := 600 * time.Millisecond
 
 	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, yieldAfter)
+	result, err := waitForEventFiles(ctx, dir, yieldAfter, "")
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -491,7 +553,7 @@ func TestWaitForEventFilesContextYieldEventWins(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, "early.event"), []byte(`{"type":"MERGE_READY"}`), 0644)
 	}()
 
-	result, err := waitForEventFiles(ctx, dir, yieldAfter)
+	result, err := waitForEventFiles(ctx, dir, yieldAfter, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -514,7 +576,7 @@ func TestWaitForEventFilesContextYieldTimeoutWins(t *testing.T) {
 
 	yieldAfter := 5 * time.Second
 
-	result, err := waitForEventFiles(ctx, dir, yieldAfter)
+	result, err := waitForEventFiles(ctx, dir, yieldAfter, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -533,7 +595,7 @@ func TestWaitForEventFilesNoContextYieldWhenZero(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	result, err := waitForEventFiles(ctx, dir, 0) // zero = no yield
+	result, err := waitForEventFiles(ctx, dir, 0, "") // zero = no yield
 	elapsed := time.Since(start)
 
 	if err != nil {
