@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -192,16 +193,15 @@ func KillTrackedPIDs(townRoot string) (killed int, errSessions []string) {
 		}
 		pid := record.PID
 
-		// Check if process is still alive
-		proc, err := os.FindProcess(pid)
-		if err != nil {
+		// Check if process is still alive via the shared liveness leaf.
+		if !liveness.PIDAlive(pid) {
+			// Process is already dead — clean up PID file
 			_ = os.Remove(path)
 			continue
 		}
 
-		// Signal 0 checks existence without killing
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			// Process is already dead — clean up PID file
+		proc, err := os.FindProcess(pid)
+		if err != nil {
 			_ = os.Remove(path)
 			continue
 		}

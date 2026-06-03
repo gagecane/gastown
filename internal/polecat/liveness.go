@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"syscall"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/liveness"
 )
 
 // LivenessVerdict is the typed three-state verdict that all consumers of the
@@ -348,15 +349,8 @@ func PIDProbe(pidLookup PIDFromTmuxFunc) PIDLivenessFunc {
 			// fall back to heartbeat-only logic.
 			return false, false
 		}
-		p, err := os.FindProcess(pid)
-		if err != nil {
-			return false, true
-		}
-		// Signal(0) is the standard "is this process alive" probe on Unix.
-		if err := p.Signal(syscall.Signal(0)); err != nil {
-			return false, true
-		}
-		return true, true
+		// Probe the PID via the shared liveness leaf (signal 0 on Unix).
+		return liveness.PIDAlive(pid), true
 	}
 }
 

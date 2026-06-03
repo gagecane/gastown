@@ -4,14 +4,12 @@ package deacon
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -309,21 +307,7 @@ var pidAliveFn = defaultPidAlive
 var sessionAliveFn = sessionLiveness
 
 func defaultPidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		// On Unix this never errors, but be defensive on Windows.
-		return false
-	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		// ESRCH = no such process. Any other error (EPERM, etc.) means
-		// the process exists but we lack permission — treat as alive so
-		// we don't close a bead whose owner we just can't probe.
-		return !errors.Is(err, syscall.ESRCH)
-	}
-	return true
+	return liveness.PIDAlive(pid)
 }
 
 // sessionLiveness reports whether a tmux session is hosting a still-running

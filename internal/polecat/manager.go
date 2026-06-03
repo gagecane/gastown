@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -23,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -2364,15 +2364,9 @@ func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) boo
 		// Got a non-numeric PID — shouldn't happen, but don't kill.
 		return false
 	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return true
-	}
-	// On Unix, Signal(0) checks if process exists without sending a signal
-	if err := p.Signal(syscall.Signal(0)); err != nil {
-		return true
-	}
-	return false
+	// A dead PID means the session is dead; the shared leaf treats an
+	// unsignalable-but-existing process as alive (not dead).
+	return !liveness.PIDAlive(pid)
 }
 
 // pendingMaxAge is how long a .pending reservation marker may exist before

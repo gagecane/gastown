@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -508,9 +507,7 @@ func ensureDaemon(townRoot string) error {
 	if data, err := os.ReadFile(sentinelPath); err == nil {
 		stale := false
 		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-			if process, err := os.FindProcess(pid); err != nil {
-				stale = true
-			} else if err := process.Signal(syscall.Signal(0)); err != nil {
+			if !processAlive(pid) {
 				stale = true
 			}
 		} else {

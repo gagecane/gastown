@@ -6,8 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/liveness"
 )
 
 // OrphanedAdmissionRecordsCheck detects polecat-admission reservation records
@@ -63,16 +64,7 @@ func NewOrphanedAdmissionRecordsCheck() *OrphanedAdmissionRecordsCheck {
 // admissionRecordPIDAlive reports whether the given PID is a live process.
 // Uses signal 0 as a no-op liveness probe, matching the pattern in
 // stale_sql_server_info_check.go. A non-positive PID is treated as dead.
-var admissionRecordPIDAlive = func(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
-}
+var admissionRecordPIDAlive = liveness.PIDAlive
 
 // Run scans the polecat-admission directory for dead-PID records.
 func (c *OrphanedAdmissionRecordsCheck) Run(ctx *CheckContext) *CheckResult {

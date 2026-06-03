@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/steveyegge/gastown/internal/liveness"
 )
 
 // StaleSQLServerInfoCheck detects stale sql-server.info files left by crashed
@@ -136,13 +137,8 @@ func (c *StaleSQLServerInfoCheck) isStale(path string) bool {
 		return true // Corrupt or invalid PID
 	}
 
-	// Check if the process is alive using signal 0 (no-op probe)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return true
-	}
-
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
+	// Check if the process is alive using a shared signal-0 probe.
+	if !liveness.PIDAlive(pid) {
 		return true // Process is dead
 	}
 
