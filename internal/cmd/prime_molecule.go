@@ -230,7 +230,7 @@ func applyFormulaVars(text string, varMap map[string]string) string {
 // extractFormulaVar extracts a specific key's value from a newline-separated
 // key=value string (as stored in AttachmentFields.FormulaVars).
 // Returns "" if the key is not found.
-func extractFormulaVar(formulaVars, key string) string {
+func extractFormulaVar(formulaVars, key string) string { //nolint:unparam // key is always "base_branch" today but the function is intentionally generic
 	for _, line := range strings.Split(formulaVars, "\n") {
 		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok && k == key {
 			return v

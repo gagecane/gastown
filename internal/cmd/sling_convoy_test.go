@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -177,6 +178,34 @@ func TestConvoyBaseFromFields(t *testing.T) {
 	}
 }
 
+// TestUpsertVar verifies that a relay leg's base_branch replaces the rig-default
+// seed in place rather than appending a duplicate the first-match
+// extractFormulaVar reader would shadow (gs-n6h).
+func TestUpsertVar(t *testing.T) {
+	// Relay override: rig default seeded first, then upsert with the relay base.
+	// The stored vars must hold exactly ONE base_branch, set to the relay base,
+	// so extractFormulaVar (first-match) reads the relay base, not the default.
+	vars := []string{"base_branch=main", "lint_command=golangci-lint run"}
+	vars = upsertVar(vars, "base_branch", "proto/v3-build")
+	joined := strings.Join(vars, "\n")
+	if got := extractFormulaVar(joined, "base_branch"); got != "proto/v3-build" {
+		t.Errorf("upsert must replace in place: extractFormulaVar = %q, want proto/v3-build\nvars: %q", got, joined)
+	}
+	if n := strings.Count(joined, "base_branch="); n != 1 {
+		t.Errorf("upsert must not duplicate the key: found %d base_branch= entries in %q", n, joined)
+	}
+	// Position preserved (replaced in place, not moved to the end).
+	if vars[0] != "base_branch=proto/v3-build" {
+		t.Errorf("upsert must preserve position: vars[0] = %q", vars[0])
+	}
+
+	// Absent key: appended.
+	vars = upsertVar([]string{"lint_command=x"}, "base_branch", "feat/foo")
+	if got := extractFormulaVar(strings.Join(vars, "\n"), "base_branch"); got != "feat/foo" {
+		t.Errorf("upsert must append a missing key: got %q", got)
+	}
+}
+
 // TestEffectiveBaseBranch_ExplicitWins verifies the short-circuit paths of
 // effectiveBaseBranch that do NOT require a convoy lookup: an explicit base
 // always wins, and an empty beadID returns the explicit value unchanged
@@ -188,5 +217,18 @@ func TestEffectiveBaseBranch_ExplicitWins(t *testing.T) {
 	}
 	if got := effectiveBaseBranch("", ""); got != "" {
 		t.Errorf("empty beadID must return explicit unchanged: got %q", got)
+	}
+}
+
+// TestRigDefaultBranchForBead_Fallbacks verifies the rig-default resolver used
+// to distinguish a genuine relay base from the formula's base_branch=<default>
+// var (gs-n6h). Unresolvable prefix/rig/config all fall back to "main".
+func TestRigDefaultBranchForBead_Fallbacks(t *testing.T) {
+	tmp := t.TempDir()
+	if got := rigDefaultBranchForBead(tmp, "noprefix"); got != "main" {
+		t.Errorf("missing prefix must fall back to main: got %q", got)
+	}
+	if got := rigDefaultBranchForBead(tmp, "unknownrig-abc"); got != "main" {
+		t.Errorf("unresolvable rig must fall back to main: got %q", got)
 	}
 }

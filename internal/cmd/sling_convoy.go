@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -207,11 +208,71 @@ func effectiveBaseBranch(beadID, explicit string) string {
 	if explicit != "" || beadID == "" {
 		return explicit
 	}
+	// Primary: the base branch the bead records in its OWN attachment fields,
+	// stamped at the first dispatch (sling_dispatch.go). This is the reliable
+	// source on RE-dispatch — the DEFERRED / convoy-feed re-sling path (gs-o5f
+	// family) — where the cross-rig dep resolution getConvoyInfoForIssue depends
+	// on can silently return "" and drop the bead onto the rig default base
+	// instead of its relay base (gs-n6h). Mirrors the primary/fallback convoy
+	// lookup order gt done already uses (done.go, gt-7b6wf).
+	if townRoot, err := workspace.FindFromCwd(); err == nil {
+		if bb := beadStampedBaseBranch(beadID, townRoot); bb != "" {
+			return bb
+		}
+	}
+	// Fallback: the tracking convoy's named base (first dispatch, before the bead
+	// carries its own base_branch).
 	info := getConvoyInfoForIssue(beadID)
 	if info == nil || info.BaseBranch == "" {
 		return explicit
 	}
 	return info.BaseBranch
+}
+
+// beadStampedBaseBranch returns the relay base branch a bead records in its own
+// attachment formula_vars (base_branch=...), or "" when absent or equal to the
+// rig default. Every bead carries base_branch=<rig default> from the formula's
+// default var, so only a value that DIFFERS is a genuine relay base worth
+// honoring — the same predicate gt done / gt mq submit use for target detection
+// (bb != defaultBranch). The base is stamped at dispatch time, so this recovers
+// the relay base directly from the bead on re-dispatch without a convoy lookup.
+func beadStampedBaseBranch(beadID, townRoot string) string {
+	// Resolve the bead's OWN rig database from its ID prefix so the read routes
+	// to where the bead lives (a rig DB), not the town-level DB. Mirrors the
+	// routed-read pattern used elsewhere for cross-rig bead lookups.
+	beadsDir := beads.ResolveBeadsDirForID(filepath.Join(townRoot, ".beads"), beadID)
+	bd := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	issue, err := bd.Show(beadID)
+	if err != nil || issue == nil {
+		return ""
+	}
+	af := beads.ParseAttachmentFields(issue)
+	if af == nil {
+		return ""
+	}
+	bb := extractFormulaVar(af.FormulaVars, "base_branch")
+	if bb == "" || bb == rigDefaultBranchForBead(townRoot, beadID) {
+		return ""
+	}
+	return bb
+}
+
+// rigDefaultBranchForBead resolves the default branch of the rig that owns
+// beadID (by ID prefix), falling back to "main" when the rig or its config
+// cannot be resolved. Mirrors the defaultBranch resolution in gt mq submit.
+func rigDefaultBranchForBead(townRoot, beadID string) string {
+	prefix := beads.ExtractPrefix(beadID)
+	if prefix == "" {
+		return "main"
+	}
+	rigName := beads.GetRigNameForPrefix(townRoot, prefix)
+	if rigName == "" {
+		return "main"
+	}
+	if cfg, err := rigpkg.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && cfg != nil && cfg.DefaultBranch != "" {
+		return cfg.DefaultBranch
+	}
+	return "main"
 }
 
 // getConvoyInfoFromIssue reads convoy info directly from the issue's attachment fields.

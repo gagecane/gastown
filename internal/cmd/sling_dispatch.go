@@ -113,6 +113,22 @@ func slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, form
 	}
 }
 
+// upsertVar sets key=val in a slice of "key=value" entries, replacing an
+// existing entry for key in place (preserving its position) or appending when
+// absent. Used so a relay leg's base_branch overrides the rig-default seed from
+// loadRigCommandVars rather than producing a duplicate the first-match
+// extractFormulaVar reader would shadow (gs-n6h).
+func upsertVar(vars []string, key, val string) []string {
+	entry := key + "=" + val
+	for i, v := range vars {
+		if k, _, ok := strings.Cut(v, "="); ok && k == key {
+			vars[i] = entry
+			return vars
+		}
+	}
+	return append(vars, entry)
+}
+
 func executeSling(params SlingParams) (*SlingResult, error) {
 	townRoot := params.TownRoot
 	if townRoot == "" {
@@ -476,8 +492,15 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		rigCmdVars := loadRigCommandVars(townRoot, params.RigName)
 		// Build per-bead vars: rig defaults first, then user vars (higher priority)
 		allVars = append(rigCmdVars, params.Vars...)
-		if spawnInfo.BaseBranch != "" && spawnInfo.BaseBranch != "main" {
-			allVars = append(allVars, fmt.Sprintf("base_branch=%s", spawnInfo.BaseBranch))
+		// Stamp the resolved base branch onto the bead. loadRigCommandVars already
+		// seeds base_branch=<rig default>; UPSERT (not append) so a relay leg's
+		// named base replaces it instead of leaving two base_branch= entries with
+		// the rig default FIRST — extractFormulaVar returns the first match, so an
+		// appended relay base was unreadable and every consumer (gt done / gt mq
+		// submit target detection, re-dispatch base recovery) silently saw the rig
+		// default, misrouting the bead off its relay base (gs-n6h).
+		if spawnInfo.BaseBranch != "" {
+			allVars = upsertVar(allVars, "base_branch", spawnInfo.BaseBranch)
 		}
 
 		// GH#gt-zqvj: Inject prior attempt context when re-dispatching an issue
