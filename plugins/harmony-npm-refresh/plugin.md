@@ -44,7 +44,7 @@ dogs pull dependencies.
 
 | Symptom                                | Action                                    |
 |----------------------------------------|-------------------------------------------|
-| `harmony` not on PATH                  | Escalate HIGH (operator must install)     |
+| `harmony` not on PATH                  | Skip silently (info log, no-op) — host doesn't use CodeArtifact |
 | Midway expired (`mwinit -l` empty)     | Escalate HIGH (operator must run mwinit)  |
 | `harmony npm` non-zero exit            | Escalate HIGH (unknown; needs human)      |
 | `npm ping` doesn't hit CodeArtifact    | Escalate MEDIUM (registry misconfig)      |

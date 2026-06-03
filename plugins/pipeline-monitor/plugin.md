@@ -70,7 +70,9 @@ Package-scoped build/test failures MUST be filed in the rig whose remote owns th
 This plugin depends on Amazon pipeline MCP tools — `GetPipelineHealth`,
 `GetPipelineDetails`, and `BrazilPackageBuilderAnalyzerTool`. These exist only
 on hosts wired to the Brazil/pipeline MCP server. **Before doing anything else,
-confirm those tools are available to you.**
+confirm those tools are available to you** by inspecting your available tool
+list — do NOT call the tools to test them (a call to an absent MCP tool can
+stall the session instead of returning a clean "missing").
 
 If any required tool is **not available** (this host has no pipeline MCP
 server), this host does not monitor pipelines. **Skip gracefully:**
