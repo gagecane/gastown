@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -160,7 +161,7 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 
 	// Use unified session lifecycle for config → settings → command → create → env → theme → wait.
 	theme := tmux.ResolveSessionTheme(m.townRoot, "", "mayor", "")
-	_, err = session.StartSession(t, session.SessionConfig{
+	result, err := session.StartSession(t, session.SessionConfig{
 		SessionID:        sessionID,
 		WorkDir:          mayorDir,
 		Role:             "mayor",
@@ -182,6 +183,17 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 	if err != nil {
 		return err
 	}
+
+	// Startup fallback for promptless runtimes (prompt_mode: none).
+	// BuildCommandWithPrompt drops the prompt text for these runtimes, so the
+	// mayor never receives its work instructions via the CLI argument.
+	_ = runtime.RunStartupFallback(t, sessionID, "mayor", result.RuntimeConfig)
+	initialPrompt := session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: "mayor",
+		Sender:    "human",
+		Topic:     "cold-start",
+	})
+	_ = runtime.DeliverStartupPromptFallback(t, sessionID, initialPrompt, result.RuntimeConfig, constants.ClaudeStartTimeout)
 
 	// Start background nudge-queue poller (gt-dgf). Claude's UserPromptSubmit
 	// hook only drains the queue when the agent submits a prompt. Idle agents
