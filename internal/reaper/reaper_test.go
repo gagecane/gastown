@@ -377,3 +377,36 @@ func TestReapAndScanShareTrackedGuard(t *testing.T) {
 		t.Error("Reap() must apply liveTrackedContextExcludeJoin")
 	}
 }
+
+// TestCloseStaleHookedMolsQueryShape verifies that CloseStaleHookedMols targets
+// the wisps table with the correct status/title/agent filters. GH#3767.
+func TestCloseStaleHookedMolsQueryShape(t *testing.T) {
+	sourcePath := "reaper.go"
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sourcePath, err)
+	}
+	source := string(data)
+
+	funcStart := strings.Index(source, "func CloseStaleHookedMols(")
+	if funcStart == -1 {
+		t.Fatal("CloseStaleHookedMols not found in reaper.go")
+	}
+	// Isolate the function body up to the next top-level func declaration.
+	funcBody := source[funcStart:]
+	nextFunc := strings.Index(funcBody[1:], "\nfunc ")
+	if nextFunc != -1 {
+		funcBody = funcBody[:nextFunc+1]
+	}
+
+	for _, want := range []string{
+		"wisps", // queries the wisps table, not issues
+		"status = 'hooked'",
+		"mol-dog-", // title filter scopes to daemon dispatch mols
+		"issue_type != 'agent'",
+	} {
+		if !strings.Contains(funcBody, want) {
+			t.Errorf("CloseStaleHookedMols body missing %q", want)
+		}
+	}
+}
