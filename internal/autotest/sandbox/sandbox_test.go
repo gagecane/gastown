@@ -105,8 +105,8 @@ func TestFilterEnv_KeepsNonCredentials(t *testing.T) {
 	env := []string{
 		"PATH=/usr/bin",
 		"GO111MODULE=on",
-		"AWS_REGION=us-west-2",  // sentinel: AWS_ prefix → must drop
-		"HOME=/home/u",          // sentinel: HOME → must drop (gu-6dbes)
+		"AWS_REGION=us-west-2",            // sentinel: AWS_ prefix → must drop
+		"HOME=/home/u",                    // sentinel: HOME → must drop (gu-6dbes)
 		"XDG_CONFIG_HOME=/home/u/.config", // sentinel: XDG_ prefix → must drop
 	}
 	out := FilterEnv(env)
