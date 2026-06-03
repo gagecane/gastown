@@ -70,14 +70,16 @@ it used outdated `gt sling` syntax (gu-fc8h, gu-xd7b). This plugin uses
 the canonical form from the start:
 
 ```bash
-gt sling --formula casc-patrol casc_cdk --create \
+gt sling casc-patrol casc_cdk --create \
   --var "stage=$STAGE" \
   --var "project_path=$PROJECT_PATH"
 ```
 
-The `--formula` flag is required; without it, `gt sling` treats `casc-patrol`
-as a bead-id and fails "bead not found". `run_test.sh` asserts the
-invocation shape and the `gt sling` API contract.
+The formula is the FIRST POSITIONAL arg: `gt sling <formula> <rig>`. The
+`--formula` FLAG is a separate apply-on-bead feature; passing it makes
+`gt sling` read `casc_cdk` as the bead-to-sling and fail "deferred dispatch
+requires a rig target" (gu-ono8h). `run_test.sh` asserts the positional
+invocation shape.
 
 ## Project path resolution
 

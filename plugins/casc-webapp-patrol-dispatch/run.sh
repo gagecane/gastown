@@ -16,9 +16,12 @@
 # Single target (not a per-stage loop like casc-patrol): this patrol observes
 # one web app URL, so one sling.
 #
-# Sling syntax: --formula is required; without it, gt sling treats the formula
-# name as a bead-id and fails "bead not found" (gu-xd7b). run_test.sh asserts
-# both the invocation shape and the API contract.
+# Sling syntax: the formula is the FIRST POSITIONAL arg, the target rig is the
+# second: `gt sling <formula> <rig>`. The --formula FLAG is a separate feature
+# (apply-on-bead, default mol-polecat-work); passing it here makes gt sling
+# consume $FORMULA as the flag value and read $TARGET_RIG as the bead to sling,
+# which fails "deferred dispatch requires a rig target" (gu-ono8h). run_test.sh
+# asserts the positional invocation shape.
 
 set -uo pipefail
 
@@ -77,7 +80,7 @@ log "resolved project_path: $PROJECT_PATH"
 log "slinging ${FORMULA} to ${TARGET_RIG} (target_url=${TARGET_URL})"
 
 # --- Sling -------------------------------------------------------------------
-sling_out=$(gt sling --formula "$FORMULA" "$TARGET_RIG" \
+sling_out=$(gt sling "$FORMULA" "$TARGET_RIG" \
   --create \
   --var "project_path=$PROJECT_PATH" \
   --var "target_url=$TARGET_URL" \
@@ -86,7 +89,7 @@ sling_out=$(gt sling --formula "$FORMULA" "$TARGET_RIG" \
   log "ERROR: gt sling failed (exit $rc)"
   log "  output: $(head -n5 <<<"$sling_out" | tr '\n' ' ')"
   record_receipt "failure" "sling failed" \
-    "gt sling --formula ${FORMULA} ${TARGET_RIG} --create --var project_path=${PROJECT_PATH} --var target_url=${TARGET_URL}
+    "gt sling ${FORMULA} ${TARGET_RIG} --create --var project_path=${PROJECT_PATH} --var target_url=${TARGET_URL}
 exit code: ${rc}
 
 Output (first 30 lines):
