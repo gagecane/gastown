@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1141,31 +1142,73 @@ func listAllScheduledBeadIDs(townRoot string) []string {
 	return ids
 }
 
+// dispatchScanConcurrency bounds how many per-rig sling-context reads run
+// concurrently in listAllSlingContextRecords (gu-1h3ur). These reads bypass the
+// bd-list-read throttle (gu-pug66's lock-free dispatch path), so the semaphore
+// is what keeps them from storming the single shared Dolt server. Default 6 —
+// the dispatch scan runs under scheduler-dispatch.lock on the heartbeat budget,
+// so it gets slightly more parallelism than the capacity snapshot's default of 4
+// to drain the ~19-dir fan-out well inside budget. Tunable via
+// GT_DISPATCH_SCAN_FANOUT.
+func dispatchScanConcurrency() int {
+	const def = 6
+	if v := os.Getenv("GT_DISPATCH_SCAN_FANOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return def
+}
+
 func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 	var records []slingContextRecord
-	// Dedup by ctx.ID alone: bd list with prefix routing returns the same
-	// bead from multiple BEADS_DIR pins when routes.jsonl maps the bead's
-	// prefix to a sibling DB. Keying on (beadsDir, ID) — the previous
-	// implementation — failed to collapse those duplicates, causing
-	// idempotency assertions to count one ctx as two. (gu-38ov)
+	// Scan each rig's sling-contexts concurrently behind a bounded semaphore.
+	// This per-rig `bd` fan-out (one ListOpenSlingContexts cold-start per dir,
+	// ~0.65s each × ~19 dirs ≈ 12s serial) runs on the dispatch hot path inside
+	// dispatchScheduledWork while holding scheduler-dispatch.lock — so under a
+	// large town it blows the heartbeat dispatch budget and starves auto-dispatch
+	// (gu-1h3ur). Same collapse-the-serial-fan-out fix as the capacity snapshot
+	// (gu-el5bx): the semaphore — not the read throttle — bounds Dolt load, so we
+	// keep WithoutReadThrottle (gu-pug66's deliberately lock-free dispatch path).
+	dirs := beadsSearchDirs(townRoot)
+	type dirResult struct {
+		dir      string
+		beadsDir string
+		contexts []*beads.Issue
+	}
+	results := make([]dirResult, len(dirs))
+	sem := make(chan struct{}, dispatchScanConcurrency())
+	var wg sync.WaitGroup
+	for i, dir := range dirs {
+		wg.Add(1)
+		go func(i int, dir string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			beadsDir := beads.ResolveBeadsDir(dir)
+			results[i] = dirResult{dir: dir, beadsDir: beadsDir}
+			b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
+			contexts, err := b.ListOpenSlingContexts()
+			if err != nil {
+				return // Partial failure is acceptable — skip unavailable dirs
+			}
+			results[i].contexts = contexts
+		}(i, dir)
+	}
+	wg.Wait()
+
+	// Fold results in dir order (deterministic): dedup by ctx.ID alone, since bd
+	// prefix routing can return the same bead from multiple BEADS_DIR pins when
+	// routes.jsonl maps the bead's prefix to a sibling DB (gu-38ov). Iterating
+	// results in stable order keeps the oldest-context-wins dedup deterministic.
 	seen := make(map[string]bool)
-	for _, dir := range beadsSearchDirs(townRoot) {
-		beadsDir := beads.ResolveBeadsDir(dir)
-		// Bypass the bd-list-read flock: this per-rig sling-context scan runs in
-		// getReadySlingContexts inside dispatchScheduledWork while holding
-		// scheduler-dispatch.lock; throttle-blocking here starves dispatch
-		// (gu-pug66, third fan-out).
-		b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
-		contexts, err := b.ListOpenSlingContexts()
-		if err != nil {
-			continue // Partial failure is acceptable — skip unavailable dirs
-		}
-		for _, ctx := range contexts {
+	for _, r := range results {
+		for _, ctx := range r.contexts {
 			if seen[ctx.ID] {
 				continue
 			}
 			seen[ctx.ID] = true
-			records = append(records, slingContextRecord{issue: ctx, workDir: dir, beadsDir: beadsDir})
+			records = append(records, slingContextRecord{issue: ctx, workDir: r.dir, beadsDir: r.beadsDir})
 		}
 	}
 	return records

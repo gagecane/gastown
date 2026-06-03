@@ -2,12 +2,48 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
+
+// TestDispatchScanConcurrency guards the semaphore bound for the per-rig
+// sling-context fan-out in listAllSlingContextRecords (gu-1h3ur). That scan runs
+// on the dispatch hot path under scheduler-dispatch.lock; serial it was ~21s
+// across 33 dirs and blew the heartbeat dispatch budget, stalling auto-dispatch.
+// Defaults to 6; GT_DISPATCH_SCAN_FANOUT overrides with a positive int; junk /
+// zero / negative fall back to the default so a fat-fingered env can never set
+// an invalid width. 1 is allowed for an explicit serial fallback.
+func TestDispatchScanConcurrency(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want int
+	}{
+		{"default when unset", "", 6},
+		{"override 4", "4", 4},
+		{"override 12", "12", 12},
+		{"override 1 (serial allowed)", "1", 1},
+		{"zero falls back", "0", 6},
+		{"negative falls back", "-2", 6},
+		{"junk falls back", "wide", 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env == "" {
+				os.Unsetenv("GT_DISPATCH_SCAN_FANOUT")
+			} else {
+				t.Setenv("GT_DISPATCH_SCAN_FANOUT", tt.env)
+			}
+			if got := dispatchScanConcurrency(); got != tt.want {
+				t.Errorf("dispatchScanConcurrency() with env=%q = %d, want %d", tt.env, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestShouldFireCrossRigEscalation_Debounces(t *testing.T) {
 	resetCrossRigEscalationStateForTest()
