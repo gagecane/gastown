@@ -677,3 +677,122 @@ esac
 		}
 	}
 }
+
+// TestFindStrandedConvoys_CrossRigReadinessFromHomeDB is the regression test
+// for gu-1l6u5. An hq-cv-* convoy tracks two beads whose prefix belongs to a
+// DIFFERENT rig (cadk-). The convoy-feed must evaluate each bead's readiness
+// using details resolved from that bead's HOME rig DB (via prefix-routed
+// `bd show`), NOT the hq federated scope.
+//
+// Background: the bug report described the daemon's convoy-feed scoring
+// genuinely-ready epic-child beads as "0 ready" and silently never
+// dispatching them. The deacon's diagnosis attributed this to the readiness
+// predicate evaluating cross-rig beads in hq FEDERATED scope, where they don't
+// surface. The current code (GH#2960, which landed before this bug was filed)
+// resolves each tracked bead via `bd show` with prefix routing to its home rig
+// DB — so the blocked/closed/assignee status that drives the readiness verdict
+// reflects the bead's true home-DB state.
+//
+// This test pins that the home-DB-resolved blocked status is honored across
+// the rig boundary: a cross-rig bead that is BLOCKED in its home DB is excluded
+// from ready_issues, while an unblocked sibling is fed. This is a stronger
+// guard than asserting an open bead is ready, because an *unresolved* tracked
+// bead falls through to trackedStatusUnknown → treated as ready (fail-open
+// toward dispatch); only the blocked-status path distinguishes real home-DB
+// resolution from the unknown fallback. The existing stranded tests all use a
+// single gt- prefix, so none exercise the cross-rig boundary.
+func TestFindStrandedConvoys_CrossRigReadinessFromHomeDB(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell-script mock test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	// Two routes: hq-cv- is town-level (the convoy lives here), and cadk- maps
+	// to a SEPARATE rig. The tracked beads carry the cadk- prefix, so their
+	// readiness must be resolved in the casc_cdk rig DB — exactly the cross-DB
+	// scope the original bug mishandled.
+	routes := `{"prefix":"hq-cv-","path":"."}` + "\n" +
+		`{"prefix":"cadk-","path":"casc_cdk/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// Mock bd: one hq-cv convoy tracking two cross-rig cadk- beads. The
+	// prefix-routed `bd show` returns their fresh home-DB details:
+	//   - cadk-ready: open, unassigned, unblocked → ready
+	//   - cadk-blockd: open but blocked_by_count=1 → NOT ready
+	// A regression that ignored the cross-rig blocked status (e.g. by failing
+	// to resolve in the home DB and falling back to unknown→ready) would
+	// report ReadyCount=2 and feed the blocked bead.
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+
+case "$pos0" in
+  list)
+    case "$*" in
+      *--label=gt:sling-context*)
+        echo '[]'
+        exit 0
+        ;;
+      *--label=gt:agent*)
+        echo '[]'
+        exit 0
+        ;;
+    esac
+    echo '[{"id":"hq-cv-xrig","title":"Cross-rig convoy"}]'
+    exit 0
+    ;;
+  sql)
+    echo '[{"depends_on_id":"cadk-ready"},{"depends_on_id":"cadk-blockd"}]'
+    exit 0
+    ;;
+  show)
+    echo '[{"id":"cadk-ready","title":"Epic child ready","status":"open","issue_type":"task","assignee":"","labels":[],"blocked_by":[],"blocked_by_count":0,"dependencies":[]},{"id":"cadk-blockd","title":"Epic child blocked","status":"open","issue_type":"task","assignee":"","labels":[],"blocked_by":["cadk-hc5"],"blocked_by_count":1,"dependencies":[]}]'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stranded, err := findStrandedConvoys(townRoot)
+	if err != nil {
+		t.Fatalf("findStrandedConvoys() error: %v", err)
+	}
+	if len(stranded) != 1 {
+		t.Fatalf("expected 1 stranded convoy, got %d", len(stranded))
+	}
+
+	s := stranded[0]
+	if s.TrackedCount != 2 {
+		t.Errorf("TrackedCount = %d, want 2", s.TrackedCount)
+	}
+	// The crux of gu-1l6u5: cross-rig readiness is resolved from each bead's
+	// HOME DB. The unblocked bead is fed; the home-DB-blocked bead is excluded.
+	if s.ReadyCount != 1 {
+		t.Errorf("ReadyCount = %d, want 1 — cross-rig beads must be evaluated "+
+			"in their home rig DB: cadk-ready (unblocked) ready, cadk-blockd "+
+			"(blocked in home DB) excluded (gu-1l6u5)", s.ReadyCount)
+	}
+	if len(s.ReadyIssues) != 1 || s.ReadyIssues[0] != "cadk-ready" {
+		t.Errorf("ReadyIssues = %v, want [cadk-ready] (blocked cross-rig bead "+
+			"cadk-blockd must not be fed)", s.ReadyIssues)
+	}
+}
