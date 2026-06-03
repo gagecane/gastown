@@ -42,9 +42,13 @@ Unlike await-signal (which subscribes to the generic beads activity feed),
 await-event watches a dedicated event channel directory for .event files.
 Events are emitted via "gt mol step emit-event" or programmatically.
 
-Channels are single-consumer: only one process should watch a given channel
-at a time. If multiple consumers watch the same channel with --cleanup,
-events may be deleted before all consumers read them.
+Channels may be multi-consumer when partitioned by --filter-rig: the refinery
+channel is a single town-global directory watched by every rig's refinery, each
+filtering for its own rig. With --cleanup, a watcher only deletes events that
+MATCH its --filter-rig; events for other rigs are left untouched for their own
+consumer (gu-5qpfi). Without --filter-rig, treat the channel as single-consumer:
+if multiple consumers watch it with --cleanup, events may be deleted before all
+consumers read them.
 
 EVENT FORMAT:
 Events are JSON files in ~/gt/events/<channel>/*.event:
@@ -232,30 +236,11 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	result, err := waitForEventFiles(ctx, eventDir, contextCheckInterval)
+	result, err := waitForEventFiles(ctx, eventDir, contextCheckInterval, awaitEventFilterRig)
 	if err != nil {
 		return fmt.Errorf("event watch failed: %w", err)
 	}
 	result.Elapsed = time.Since(startTime)
-
-	// Filter events by rig if --filter-rig is set.
-	if awaitEventFilterRig != "" && result.Reason == "event" {
-		var filtered []EventFile
-		for _, ef := range result.Events {
-			if eventMatchesRig(ef.Content, awaitEventFilterRig) {
-				filtered = append(filtered, ef)
-				continue
-			}
-			// Rig doesn't match — skip this event but still clean it up
-			if awaitEventCleanup {
-				_ = os.Remove(ef.Path)
-			}
-		}
-		result.Events = filtered
-		if len(filtered) == 0 {
-			result.Reason = "timeout"
-		}
-	}
 
 	// Update agent bead idle cycles and heartbeat
 	if awaitEventAgentBead != "" && beadsDir != "" {
@@ -389,12 +374,25 @@ func calculateEventTimeout(idleCycles int) (time.Duration, error) {
 // after the given wall-clock duration. This allows the caller (a patrol agent) to
 // assess context usage before re-entering the wait, preventing unbounded context
 // accumulation during long idle periods.
-func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter time.Duration) (*AwaitEventResult, error) {
+//
+// filterRig, when non-empty, is applied INSIDE the wait loop: events whose
+// payload.rig names a different rig are ignored (neither returned nor deleted)
+// and the loop keeps waiting. This is deliberate. The refinery event channel
+// (events/refinery/) is a single town-global directory shared by every rig's
+// refinery, each watching with --filter-rig <rig> --cleanup. If a non-matching
+// event were deleted here, an idle refinery for rig A would cannibalize rig B's
+// wake signal before B's own watcher captured it, leaving B asleep until its
+// backoff timeout (up to 15m) — the gu-5qpfi idle-stall. Ignoring (not
+// deleting) other rigs' events leaves them intact for their intended consumer;
+// the event_channel_gc daemon dog prunes any that go unconsumed (same model the
+// witness/ and mayor/ channels already rely on).
+func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter time.Duration, filterRig string) (*AwaitEventResult, error) {
 	// Check for already-pending events
 	events, err := readPendingEvents(ctx, eventDir)
 	if err != nil {
 		return nil, err
 	}
+	events = filterEventsByRig(events, filterRig)
 	if len(events) > 0 {
 		return &AwaitEventResult{
 			Reason: "event",
@@ -435,7 +433,7 @@ func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter t
 			// read so a stuck filesystem can't prevent us from returning —
 			// the wait has already timed out, and reporting timeout is
 			// more useful than hanging indefinitely on the last read.
-			events = readPendingEventsBounded(ctx, eventDir, 500*time.Millisecond)
+			events = filterEventsByRig(readPendingEventsBounded(ctx, eventDir, 500*time.Millisecond), filterRig)
 			if len(events) > 0 {
 				return &AwaitEventResult{
 					Reason: "event",
@@ -446,7 +444,7 @@ func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter t
 		case <-contextYieldC:
 			// Context-check interval elapsed. Do a final event check before
 			// yielding — if an event just arrived, return it instead.
-			events = readPendingEventsBounded(ctx, eventDir, 500*time.Millisecond)
+			events = filterEventsByRig(readPendingEventsBounded(ctx, eventDir, 500*time.Millisecond), filterRig)
 			if len(events) > 0 {
 				return &AwaitEventResult{
 					Reason: "event",
@@ -479,10 +477,11 @@ func waitForEventFiles(ctx context.Context, eventDir string, contextCheckAfter t
 				if res.err != nil {
 					return nil, res.err
 				}
-				if len(res.events) > 0 {
+				matched := filterEventsByRig(res.events, filterRig)
+				if len(matched) > 0 {
 					return &AwaitEventResult{
 						Reason: "event",
-						Events: res.events,
+						Events: matched,
 					}, nil
 				}
 			}
@@ -559,6 +558,27 @@ func readPendingEvents(ctx context.Context, dir string) ([]EventFile, error) {
 	}
 
 	return events, nil
+}
+
+// filterEventsByRig returns only the events that pass the --filter-rig check.
+// When expectedRig is empty, all events pass (filtering disabled).
+//
+// Unlike the previous post-wait filter, this NEVER deletes non-matching events:
+// the refinery channel is town-global and another rig's refinery is the
+// intended consumer of those events. Deleting them here would cannibalize that
+// rig's wake signal (gu-5qpfi). Non-matching events are simply left in place
+// for their owner; the event_channel_gc dog prunes any stragglers.
+func filterEventsByRig(events []EventFile, expectedRig string) []EventFile {
+	if expectedRig == "" {
+		return events
+	}
+	var matched []EventFile
+	for _, ef := range events {
+		if eventMatchesRig(ef.Content, expectedRig) {
+			matched = append(matched, ef)
+		}
+	}
+	return matched
 }
 
 // eventMatchesRig reports whether an event JSON blob should pass a --filter-rig
