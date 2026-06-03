@@ -991,8 +991,14 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 		return fmt.Errorf("nudge to session %q: %w", session, err)
 	}
 
-	// 8. Wake the pane to trigger SIGWINCH for detached sessions
-	t.WakePaneIfDetached(session)
+	// 8. Wake the pane to trigger SIGWINCH for detached sessions.
+	// Use the resolved target (session:window.pane) rather than the bare
+	// session name. resize-window on a bare session name resizes the
+	// session's *active* window — in a multi-window session (e.g. one with a
+	// `gt feed -w` window open and focused) that is not the agent's window,
+	// so the agent's pane never receives SIGWINCH and stays idle despite the
+	// delivered nudge. Targeting the resolved pane wakes the correct window.
+	t.WakePaneIfDetached(target)
 	return nil
 }
 
