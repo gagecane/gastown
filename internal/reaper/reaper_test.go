@@ -308,3 +308,72 @@ func TestScanExcludesAgentBeads(t *testing.T) {
 		t.Fatalf("expected Scan() eligibility to exclude agent beads, scan body was:\n%s", scanBody)
 	}
 }
+
+// TestLiveTrackedContextExcludeJoin pins the gu-ycihb sling-context guard: the
+// reaper must not age-reap a gt:sling-context wisp whose tracked work bead is
+// still open, which would otherwise produce the gu-i0oaq dispatch-close race.
+func TestLiveTrackedContextExcludeJoin(t *testing.T) {
+	joinClause, whereCondition := liveTrackedContextExcludeJoin("testdb")
+
+	if joinClause == "" || whereCondition == "" {
+		t.Fatal("liveTrackedContextExcludeJoin must return non-empty join and where")
+	}
+	// Mirrors parentExcludeJoin but for tracks edges, scoped to sling-contexts.
+	checks := []string{
+		"wisp_dependencies",               // edge table
+		"wisp_labels",                     // label-scoping join
+		LabelSlingContext,                 // only protect sling-contexts
+		"'tracks'",                        // the sling-context dep type
+		"'open', 'hooked', 'in_progress'", // live work-bead statuses
+	}
+	for _, c := range checks {
+		if !contains(joinClause, c) {
+			t.Errorf("join clause missing %q: %s", c, joinClause)
+		}
+	}
+	// The work bead may live in either wisps or issues; both sides must be checked.
+	if !contains(joinClause, "wisps tw") || !contains(joinClause, "issues ti") {
+		t.Errorf("join must LEFT JOIN both wisps and issues for the tracked referent: %s", joinClause)
+	}
+	if !contains(whereCondition, "IS NULL") {
+		t.Errorf("where condition must be an IS NULL anti-join: %s", whereCondition)
+	}
+	// Must NOT reuse the parent-child type — that's a different (already-covered) edge.
+	if contains(joinClause, "parent-child") {
+		t.Errorf("tracks guard must not filter on parent-child: %s", joinClause)
+	}
+}
+
+// TestLabelSlingContextMatchesScheduler guards the duplicated label constant.
+// reaper.LabelSlingContext must equal capacity.LabelSlingContext ("gt:sling-context").
+// If the scheduler renames the label, this hard-codes the contract so the guard
+// can't silently stop matching.
+func TestLabelSlingContextMatchesScheduler(t *testing.T) {
+	if LabelSlingContext != "gt:sling-context" {
+		t.Fatalf("LabelSlingContext = %q, want gt:sling-context (must match capacity.LabelSlingContext)", LabelSlingContext)
+	}
+}
+
+// TestReapAndScanShareTrackedGuard ensures Scan() and Reap() both wire the
+// sling-context exclusion, so the operator never sees scan>0 / reap=0 drift for
+// the same cutoff (the lockstep invariant the agent-bead guard also protects).
+func TestReapAndScanShareTrackedGuard(t *testing.T) {
+	data, err := os.ReadFile("reaper.go")
+	if err != nil {
+		t.Fatalf("read reaper.go: %v", err)
+	}
+	source := string(data)
+	scanStart := strings.Index(source, "func Scan(")
+	reapStart := strings.Index(source, "func Reap(")
+	if scanStart == -1 || reapStart == -1 || reapStart <= scanStart {
+		t.Fatalf("could not isolate Scan()/Reap() bodies")
+	}
+	scanBody := source[scanStart:reapStart]
+	reapBody := source[reapStart:]
+	if !strings.Contains(scanBody, "liveTrackedContextExcludeJoin") {
+		t.Error("Scan() must apply liveTrackedContextExcludeJoin (lockstep with Reap)")
+	}
+	if !strings.Contains(reapBody, "liveTrackedContextExcludeJoin") {
+		t.Error("Reap() must apply liveTrackedContextExcludeJoin")
+	}
+}

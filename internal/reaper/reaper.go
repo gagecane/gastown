@@ -225,6 +225,39 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 	return
 }
 
+// LabelSlingContext is the label the scheduler attaches to sling-context wisps.
+// Duplicated here (rather than imported from internal/scheduler/capacity) to
+// keep the reaper package free of a scheduler dependency. Must stay in sync
+// with capacity.LabelSlingContext.
+const LabelSlingContext = "gt:sling-context"
+
+// liveTrackedContextExcludeJoin returns a LEFT JOIN clause and WHERE condition
+// that excludes sling-context wisps whose tracked work bead is still open.
+//
+// A sling-context wisp is created with `dep add <context> <workbead>
+// --type=tracks`, i.e. the context's wisp_dependencies row has issue_id=context
+// and depends_on_id=workbead. The work bead lives in the issues table. If the
+// reaper closes/purges the context by age while its work bead is still open,
+// the scheduler can dispatch against a now-missing context and CloseSlingContext
+// fails with "issue not found" — a double-dispatch risk (gu-i0oaq / gu-ycihb).
+//
+// This mirrors parentExcludeJoin but for type='tracks' edges, and is scoped to
+// wisps carrying the gt:sling-context label so unrelated 'tracks' edges (e.g.
+// convoys) are not protected. Semantics: exclude a wisp from reaping when it is
+// a sling-context AND its tracked work bead is open/hooked/in_progress.
+func liveTrackedContextExcludeJoin(dbName string) (joinClause, whereCondition string) {
+	joinClause = `LEFT JOIN (
+		SELECT DISTINCT wd.issue_id
+		FROM wisp_dependencies wd
+		INNER JOIN wisp_labels wl ON wl.issue_id = wd.issue_id AND wl.label = '` + LabelSlingContext + `'
+		LEFT JOIN wisps tw ON tw.id = wd.depends_on_id LEFT JOIN issues ti ON ti.id = wd.depends_on_id
+		WHERE wd.type = 'tracks'
+		AND (tw.status IN ('open', 'hooked', 'in_progress') OR ti.status IN ('open', 'in_progress'))
+	) live_tracked ON live_tracked.issue_id = w.id`
+	whereCondition = "live_tracked.issue_id IS NULL"
+	return
+}
+
 // HasReaperSchema checks whether the database has the tables required for reaper
 // operations (wisps and issues). Returns false (no error) when tables are missing
 // — callers use this to skip databases that have incomplete beads schema (e.g.
@@ -250,14 +283,16 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	result := &ScanResult{Database: dbName}
 	now := time.Now().UTC()
 	parentJoin, parentWhere := parentExcludeJoin(dbName)
+	trackedJoin, trackedWhere := liveTrackedContextExcludeJoin(dbName)
 
 	// Count reap candidates: open wisps past max_age with eligible parent status.
 	// Must match Reap() eligibility semantics exactly, including the exclusion of
-	// agent beads, otherwise scan can report candidates that reap will never close.
+	// agent beads and live-tracked sling-contexts (gu-ycihb), otherwise scan can
+	// report candidates that reap will never close.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
 	reapQuery := fmt.Sprintf(
-		"SELECT COUNT(*) FROM wisps w %s WHERE w.status IN ('open', 'hooked', 'in_progress') AND w.created_at < ? AND w.issue_type != 'agent' AND %s",
-		parentJoin, parentWhere)
+		"SELECT COUNT(*) FROM wisps w %s %s WHERE w.status IN ('open', 'hooked', 'in_progress') AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND %s",
+		parentJoin, trackedJoin, parentWhere, trackedWhere)
 	if err := db.QueryRowContext(ctx, reapQuery, now.Add(-maxAge)).Scan(&result.ReapCandidates); err != nil {
 		return nil, fmt.Errorf("count reap candidates: %w", err)
 	}
@@ -340,15 +375,19 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 
 	cutoff := time.Now().UTC().Add(-maxAge)
 	parentJoin, parentWhere := parentExcludeJoin(dbName)
+	trackedJoin, trackedWhere := liveTrackedContextExcludeJoin(dbName)
 	// Exclude agent beads (issue_type='agent') from reaping — they have persistent
 	// identity and should not be closed by the wisp reaper regardless of age.
+	// The trackedWhere clause additionally spares sling-context wisps whose
+	// tracked work bead is still open (gu-ycihb) to avoid the dispatch-close
+	// double-dispatch race (gu-i0oaq).
 	whereClause := fmt.Sprintf(
-		"w.status IN ('open', 'hooked', 'in_progress') AND w.created_at < ? AND w.issue_type != 'agent' AND %s", parentWhere)
+		"w.status IN ('open', 'hooked', 'in_progress') AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND %s", parentWhere, trackedWhere)
 
 	result := &ReapResult{Database: dbName, DryRun: dryRun}
 
 	if dryRun {
-		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM wisps w %s WHERE %s", parentJoin, whereClause)
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM wisps w %s %s WHERE %s", parentJoin, trackedJoin, whereClause)
 		if err := db.QueryRowContext(ctx, countQuery, cutoff).Scan(&result.Reaped); err != nil {
 			return nil, fmt.Errorf("dry-run count: %w", err)
 		}
@@ -370,8 +409,8 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	// This avoids holding a write lock on the entire table for minutes.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s WHERE %s LIMIT %d",
-		parentJoin, whereClause, DefaultBatchSize)
+		"SELECT w.id FROM wisps w %s %s WHERE %s LIMIT %d",
+		parentJoin, trackedJoin, whereClause, DefaultBatchSize)
 
 	totalReaped := 0
 	for {
