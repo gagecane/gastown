@@ -19,9 +19,12 @@
 # different AWS accounts/profiles and cannot collide. Wiki-patrol's
 # 429-multiplication concern (cadk-xk4) does not apply here.
 #
-# Sling syntax: --formula is required; without it, gt sling treats the
-# formula name as a bead-id and fails "bead not found" (gu-xd7b).
-# run_test.sh asserts both the invocation shape and the API contract.
+# Sling syntax: the formula is the FIRST POSITIONAL arg, the target rig is the
+# second: `gt sling <formula> <rig>`. The --formula FLAG is a separate feature
+# (apply-on-bead, default mol-polecat-work); passing it here makes gt sling
+# consume $FORMULA as the flag value and read $TARGET_RIG as the bead to sling,
+# which fails "deferred dispatch requires a rig target" (gu-ono8h).
+# run_test.sh asserts the positional invocation shape.
 
 set -uo pipefail
 # NOTE: not `set -e` — failure paths should record receipts and continue.
@@ -91,7 +94,7 @@ EXIT_CODE=0
 for STAGE in "${STAGES[@]}"; do
   log "slinging ${FORMULA} to ${TARGET_RIG} (stage=${STAGE}, project_path=${PROJECT_PATH})"
 
-  sling_out=$(gt sling --formula "$FORMULA" "$TARGET_RIG" \
+  sling_out=$(gt sling "$FORMULA" "$TARGET_RIG" \
     --create \
     --var "stage=$STAGE" \
     --var "project_path=$PROJECT_PATH" \
@@ -100,7 +103,7 @@ for STAGE in "${STAGES[@]}"; do
     log "ERROR: gt sling failed for stage=${STAGE} (exit $rc)"
     log "  output: $(head -n5 <<<"$sling_out" | tr '\n' ' ')"
     record_receipt "failure" "$STAGE" "sling failed" \
-      "gt sling --formula ${FORMULA} ${TARGET_RIG} --create --var stage=${STAGE} --var project_path=${PROJECT_PATH}
+      "gt sling ${FORMULA} ${TARGET_RIG} --create --var stage=${STAGE} --var project_path=${PROJECT_PATH}
 exit code: ${rc}
 
 Output (first 30 lines):

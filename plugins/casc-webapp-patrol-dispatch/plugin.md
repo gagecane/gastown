@@ -52,14 +52,16 @@ cron-gate dispatch lands.
 ## Sling syntax — don't repeat gu-fc8h / gu-xd7b
 
 ```bash
-gt sling --formula casc-webapp-patrol casc_webapp --create \
+gt sling casc-webapp-patrol casc_webapp --create \
   --var "project_path=$PROJECT_PATH" \
   --var "target_url=$TARGET_URL"
 ```
 
-The `--formula` flag is required; without it, `gt sling` treats
-`casc-webapp-patrol` as a bead-id and fails "bead not found". `run_test.sh`
-asserts the invocation shape and the `gt sling` API contract.
+The formula is the FIRST POSITIONAL arg: `gt sling <formula> <rig>`. The
+`--formula` FLAG is a separate apply-on-bead feature; passing it makes
+`gt sling` read `casc_webapp` as the bead-to-sling and fail "deferred
+dispatch requires a rig target" (gu-ono8h). `run_test.sh` asserts the
+positional invocation shape.
 
 ## Project path resolution
 
