@@ -18,6 +18,22 @@ const (
 	ResultSuccess RunResult = "success"
 	ResultFailure RunResult = "failure"
 	ResultSkipped RunResult = "skipped"
+
+	// ResultInflight marks a record written when a plugin is dispatched to a
+	// dog but BEFORE it has actually executed. Unlike the terminal results
+	// above, an in-flight record satisfies the cooldown gate only within a
+	// short grace window (see CooldownSatisfied) — not for the full cooldown.
+	// This stops a dog that dies silently after dispatch from re-arming the
+	// full cooldown on false pretenses, which let backup freshness drift
+	// unbounded (gu-50nbo). It still suppresses immediate re-dispatch so the
+	// daemon heartbeat does not storm a freshly-dispatched plugin (the original
+	// reason dispatch was recorded at all — 055747cd).
+	//
+	// NOTE: the literal value is deliberately "inflight", NOT "dispatched" —
+	// the auto-dispatch plugin's dog records result:dispatched to mean a
+	// successful TERMINAL outcome ("I slung a bead"), so reusing that string
+	// here would make a real success look non-terminal.
+	ResultInflight RunResult = "inflight"
 )
 
 // PluginRunRecord represents data for creating a plugin run bead.
@@ -222,4 +238,53 @@ func (r *Recorder) CountRunsSince(pluginName string, since string) (int, error) 
 		return 0, err
 	}
 	return len(runs), nil
+}
+
+// CooldownSatisfied reports whether a plugin's cooldown gate should suppress a
+// new run. It distinguishes a real completion from a bare dispatch record:
+//
+//   - A TERMINAL run (any result other than "inflight" — success, failure,
+//     skipped) within the cooldown window satisfies the full cooldown. This
+//     matches the historical CountRunsSince semantics for completed runs.
+//   - An IN-FLIGHT record ("inflight", written when work is handed to a
+//     dog before it executes) suppresses re-dispatch only within the short
+//     `grace` window. After grace elapses with no terminal record, the gate
+//     re-opens so the next heartbeat can re-dispatch / run in-process.
+//
+// This closes gu-50nbo: a dog that dies after dispatch but before running
+// run.sh no longer re-arms the full cooldown, so backup freshness can no longer
+// drift unbounded. It preserves the anti-storm guarantee (055747cd) because a
+// freshly-dispatched plugin is still suppressed for the in-flight grace window.
+//
+// grace must be <= cooldown for dispatch records to fall within the query
+// window; callers derive grace from the plugin's execution timeout.
+func (r *Recorder) CooldownSatisfied(pluginName, cooldown, grace string) (bool, error) {
+	runs, err := r.GetRunsSince(pluginName, cooldown)
+	if err != nil {
+		return false, err
+	}
+	graceDur, err := time.ParseDuration(grace)
+	if err != nil {
+		return false, fmt.Errorf("parsing grace duration %q: %w", grace, err)
+	}
+	return cooldownSatisfied(runs, time.Now(), graceDur), nil
+}
+
+// cooldownSatisfied is the pure decision core of CooldownSatisfied, split out
+// for unit testing without a live beads store. `runs` are the plugin-run beads
+// within the cooldown window; `now` and `grace` define the dispatch-record
+// grace cutoff.
+func cooldownSatisfied(runs []*PluginRunBead, now time.Time, grace time.Duration) bool {
+	graceCutoff := now.Add(-grace)
+	for _, run := range runs {
+		if run.Result != ResultInflight {
+			// A terminal run within the cooldown window satisfies the gate.
+			return true
+		}
+		// In-flight record: satisfies only while still within the grace window.
+		if run.CreatedAt.After(graceCutoff) {
+			return true
+		}
+	}
+	return false
 }

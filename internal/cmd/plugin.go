@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -431,13 +432,19 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		if duration == "" {
 			duration = "1h" // default
 		}
-		count, err := recorder.CountRunsSince(p.Name, duration)
+		// Use CooldownSatisfied so a stale dispatch-only record (a dog handed
+		// the plugin but died before running) doesn't block a manual run past
+		// the in-flight grace window (gu-50nbo). A real prior completion still
+		// closes the gate.
+		cooldownDur, _ := time.ParseDuration(duration)
+		grace := p.DispatchGrace(cooldownDur)
+		satisfied, err := recorder.CooldownSatisfied(p.Name, duration, grace.String())
 		if err != nil {
 			// Log warning but continue
 			fmt.Fprintf(os.Stderr, "Warning: checking gate status: %v\n", err)
-		} else if count > 0 {
+		} else if satisfied {
 			gateOpen = false
-			gateReason = fmt.Sprintf("ran %d time(s) within %s cooldown", count, duration)
+			gateReason = fmt.Sprintf("ran within %s cooldown", duration)
 		}
 	}
 
@@ -618,6 +625,11 @@ func runPluginHistory(cmd *cobra.Command, args []string) error {
 		} else if run.Result == plugin.ResultSkipped {
 			resultStyle = style.Dim
 			resultIcon = "○"
+		} else if run.Result == plugin.ResultInflight {
+			// Dispatched but no terminal completion recorded yet (or the dog
+			// died before recording one). Not a confirmed success.
+			resultStyle = style.Dim
+			resultIcon = "⟳"
 		}
 
 		fmt.Printf("  %s %s  %s\n",

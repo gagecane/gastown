@@ -264,15 +264,21 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			continue
 		}
 
-		// Evaluate cooldown: skip if plugin ran recently.
+		// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
+		// record (dog handed work but not yet executed) only suppresses
+		// re-dispatch within an in-flight grace window — after that the gate
+		// re-opens so a silently-dead dog can't re-arm the full cooldown and
+		// drift backups unbounded (gu-50nbo).
 		if p.Gate.Duration != "" {
-			count, err := recorder.CountRunsSince(p.Name, p.Gate.Duration)
+			cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
+			grace := p.DispatchGrace(cooldownDur)
+			satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
 			if err != nil {
 				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
 				continue
 			}
-			if count > 0 {
-				continue // Still in cooldown
+			if satisfied {
+				continue // Still in cooldown (or a dispatch is in-flight)
 			}
 		}
 
@@ -364,13 +370,19 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 
 		d.logger.Printf("Handler: dispatched plugin %s to dog %s", p.Name, idleDog.Name)
 
-		// Record the dispatch immediately so the cooldown gate is satisfied
-		// for the next 1h regardless of what the dog does. Dogs create their
-		// own completion beads but don't reliably use the label convention the
-		// gate requires, causing infinite re-dispatch loops.
+		// Record the dispatch so the cooldown gate suppresses immediate
+		// re-dispatch (the daemon heartbeat would otherwise storm a
+		// freshly-dispatched plugin — dogs don't reliably write the
+		// gate's completion label; see 055747cd). This is a ResultInflight
+		// record, NOT ResultSuccess: it only satisfies the gate within the
+		// in-flight grace window. If the dog dies before running, the gate
+		// re-opens after grace instead of re-arming the full cooldown on false
+		// pretenses — which had let backups drift unbounded (gu-50nbo). The
+		// dog's own run.sh records the terminal ResultSuccess on real
+		// completion, which then satisfies the full cooldown.
 		if _, err := recorder.RecordRun(plugin.PluginRunRecord{
 			PluginName: p.Name,
-			Result:     plugin.ResultSuccess,
+			Result:     plugin.ResultInflight,
 			Body:       fmt.Sprintf("Dispatched to dog %s", idleDog.Name),
 		}); err != nil {
 			d.logger.Printf("Handler: failed to record dispatch for plugin %s: %v", p.Name, err)

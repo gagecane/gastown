@@ -141,22 +141,28 @@ func (d *Daemon) runDoltBackupPlugin() {
 
 	interval := doltBackupInterval(d.patrolConfig)
 
-	// Cooldown gate: skip if a dolt-backup run was recorded within the interval.
-	// Shared ledger with handler.dispatchPlugins keeps the two paths idempotent.
-	recorder := plugin.NewRecorder(d.config.TownRoot)
-	if count, err := recorder.CountRunsSince("dolt-backup", interval.String()); err != nil {
-		d.logger.Printf("dolt_backup: cooldown check failed (proceeding): %v", err)
-	} else if count > 0 {
-		return // Still in cooldown — a recent run (dog or daemon) covered it.
-	}
-
-	// Locate the dolt-backup plugin's run.sh.
+	// Locate the dolt-backup plugin's run.sh. Resolved before the gate check so
+	// the cooldown evaluation can use the plugin's in-flight dispatch grace.
 	rigNames := d.rigNamesForPluginScan()
 	scanner := plugin.NewScanner(d.config.TownRoot, rigNames)
 	p, err := scanner.GetPlugin("dolt-backup")
 	if err != nil {
 		d.logger.Printf("dolt_backup: plugin not found, skipping: %v", err)
 		return
+	}
+
+	// Cooldown gate: skip if a dolt-backup run was recorded within the interval.
+	// Shared ledger with handler.dispatchPlugins keeps the two paths idempotent.
+	// Uses CooldownSatisfied (not a raw count) so a stale dispatch-only record
+	// from a dog that died before executing does NOT suppress this reliable
+	// in-process run past the grace window — that false-suppression was the
+	// unbounded-drift bug (gu-50nbo). A real prior completion still gates us.
+	recorder := plugin.NewRecorder(d.config.TownRoot)
+	grace := p.DispatchGrace(interval)
+	if satisfied, err := recorder.CooldownSatisfied("dolt-backup", interval.String(), grace.String()); err != nil {
+		d.logger.Printf("dolt_backup: cooldown check failed (proceeding): %v", err)
+	} else if satisfied {
+		return // Still in cooldown — a recent run (dog or daemon) covered it.
 	}
 	runScript := filepath.Join(p.Path, "run.sh")
 	if _, statErr := os.Stat(runScript); statErr != nil {

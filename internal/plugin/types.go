@@ -11,6 +11,18 @@ package plugin
 import (
 	"fmt"
 	"strings"
+	"time"
+)
+
+const (
+	// defaultDispatchGrace is the in-flight grace window for a dispatch-only
+	// cooldown record when the plugin declares no execution timeout. See
+	// Plugin.DispatchGrace.
+	defaultDispatchGrace = 5 * time.Minute
+
+	// dispatchGraceBuffer is added to a plugin's execution timeout to account
+	// for dog startup and mail-pickup latency before the script begins.
+	dispatchGraceBuffer = 2 * time.Minute
 )
 
 // Plugin represents a discovered plugin definition.
@@ -155,6 +167,29 @@ type PluginFrontmatter struct {
 	Gate        *Gate      `toml:"gate,omitempty"`
 	Tracking    *Tracking  `toml:"tracking,omitempty"`
 	Execution   *Execution `toml:"execution,omitempty"`
+}
+
+// DispatchGrace returns the in-flight grace window for a dispatch-only
+// cooldown record (see Recorder.CooldownSatisfied). A plugin dispatched to a
+// dog is given this long to actually execute and write a terminal run record;
+// if it doesn't, the cooldown gate re-opens so the work can be retried instead
+// of drifting unbounded (gu-50nbo).
+//
+// The window is the plugin's declared execution timeout plus a 2m buffer for
+// dog startup/mail-pickup latency, capped so it never exceeds the cooldown
+// itself (a grace longer than the cooldown would defeat the gate). When no
+// execution timeout is configured it falls back to defaultDispatchGrace.
+func (p *Plugin) DispatchGrace(cooldown time.Duration) time.Duration {
+	grace := defaultDispatchGrace
+	if p.Execution != nil && p.Execution.Timeout != "" {
+		if d, err := time.ParseDuration(p.Execution.Timeout); err == nil && d > 0 {
+			grace = d + dispatchGraceBuffer
+		}
+	}
+	if cooldown > 0 && grace > cooldown {
+		grace = cooldown
+	}
+	return grace
 }
 
 // IsExecWrapper returns true if this plugin is an exec-wrapper type.

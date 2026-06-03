@@ -486,10 +486,15 @@ func (d *Daemon) dispatchAutoDispatchForRig(rig, trigger, triggerSession, trigge
 	// Record the dispatch so the cooldown gate in dispatchPlugins() sees it.
 	// This prevents the next heartbeat from double-dispatching the same
 	// auto-dispatch plugin globally after we already handled it event-driven.
+	// ResultInflight (not ResultSuccess): it only suppresses re-dispatch within
+	// the in-flight grace window. If the dispatched dog dies before running,
+	// the gate re-opens after grace rather than re-arming the full cooldown on
+	// false pretenses (gu-50nbo). The dog writes its own terminal result:<...>
+	// receipt on real completion, which then satisfies the full cooldown.
 	recorder := plugin.NewRecorder(d.config.TownRoot)
 	if _, err := recorder.RecordRun(plugin.PluginRunRecord{
 		PluginName: p.Name,
-		Result:     plugin.ResultSuccess,
+		Result:     plugin.ResultInflight,
 		Body:       fmt.Sprintf("Event-driven dispatch to dog %s (rig=%s, trigger=%s)", idleDog.Name, rig, trigger),
 	}); err != nil {
 		d.logger.Printf("AutoDispatchWatcher: failed to record dispatch for plugin %s: %v", p.Name, err)
