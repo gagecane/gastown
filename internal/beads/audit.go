@@ -52,8 +52,10 @@ func (b *Beads) detachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions,
 	defer unlock()
 
 	showFn := b.Show
+	updateFn := b.Update
 	if local {
 		showFn = b.ShowLocal
+		updateFn = b.UpdateLocal
 	}
 
 	// Fetch the pinned bead first to get previous state
@@ -91,7 +93,7 @@ func (b *Beads) detachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions,
 	newDesc := SetAttachmentFields(issue, nil)
 
 	// Update the issue
-	if err := b.Update(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
+	if err := updateFn(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
 		return nil, fmt.Errorf("updating pinned bead: %w", err)
 	}
 
