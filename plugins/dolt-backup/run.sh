@@ -222,19 +222,34 @@ for DB in "${PROD_DBS[@]}"; do
     continue
   fi
 
-  # No-remote guard (gu-8xvpw): a DB that the discovery scan enumerated but that
-  # has no "<db>-backup" remote configured CANNOT be synced — `dolt backup sync`
-  # returns "backup '<db>-backup' not found". That is a configuration gap, NOT a
-  # data-safety failure: it's the signature of orphan/stray DBs (e.g. an
-  # unreferenced 'beads' orphan, or a misnested 'embeddeddolt'), not a live rig
-  # DB whose backup broke. Counting it as FAILED would fire a false HIGH
-  # data-loss escalation every cycle. Treat it as a low-severity SKIP instead so
-  # genuine sync failures on real (remote-configured) DBs stay the only HIGH.
+  # Auto-provision the "<db>-backup" remote if it is missing (gc-wjy7m).
+  #
+  # Neither this plugin nor `gt maintain` ever ran `dolt backup add`, so the
+  # "<db>-backup" remote never actually existed on any DB — `dolt backup sync`
+  # returned "backup '<db>-backup' not found" on every cycle. The old plugin's
+  # `|| true` PIPESTATUS bug (gu-8xvpw #3) masked this as success, so the backup
+  # safety net had in fact NEVER worked. CR2's no-remote guard is what finally
+  # surfaced it. The fix is to provision the remote idempotently here, pointing
+  # at this plugin's own BACKUP_DIR/<db> — the same path its size reporting and
+  # retention already target (Step 3). `dolt backup add` is additive (it creates
+  # a backup remote; it deletes nothing), so this is safe to run every cycle.
+  #
+  # We still keep a genuine no-remote SKIP for DBs we cannot provision (the add
+  # itself fails) — e.g. a corrupt/misnested DB like 'embeddeddolt' — so a real
+  # configuration gap is reported as a low-severity warning, not a HIGH
+  # data-loss failure.
+  JUST_PROVISIONED=false
   if ! (cd "$DB_DIR" && dolt backup 2>/dev/null | grep -qx "$BACKUP_NAME"); then
-    log "  $DB: no '$BACKUP_NAME' remote configured — skipping (not a data-loss failure)"
-    NO_REMOTE=$((NO_REMOTE + 1))
-    NO_REMOTE_DBS="$NO_REMOTE_DBS $DB"
-    continue
+    mkdir -p "$BACKUP_DIR/$DB"
+    if (cd "$DB_DIR" && dolt backup add "$BACKUP_NAME" "file://$BACKUP_DIR/$DB" 2>/dev/null); then
+      log "  $DB: provisioned '$BACKUP_NAME' remote -> $BACKUP_DIR/$DB"
+      JUST_PROVISIONED=true
+    else
+      log "  $DB: no '$BACKUP_NAME' remote and could not provision one — skipping (not a data-loss failure)"
+      NO_REMOTE=$((NO_REMOTE + 1))
+      NO_REMOTE_DBS="$NO_REMOTE_DBS $DB"
+      continue
+    fi
   fi
 
   # Get current HEAD hash
@@ -250,7 +265,13 @@ for DB in "${PROD_DBS[@]}"; do
     LAST_HASH=$(cat "$HASH_FILE")
   fi
 
-  if [[ "$CURRENT_HASH" = "$LAST_HASH" ]] && [[ "$CURRENT_HASH" != "unknown" ]]; then
+  # Skip only when the hash matches AND we did not just provision the remote.
+  # A freshly-provisioned remote holds zero backups regardless of what the
+  # .last-backup-hash file says — and those hash files may be stale/bogus,
+  # written by the old false-positive path (gu-8xvpw #3) without any real sync
+  # ever landing. Forcing the first sync after provisioning guarantees the
+  # backup actually exists before we trust the hash-skip optimization again.
+  if [[ "$CURRENT_HASH" = "$LAST_HASH" ]] && [[ "$CURRENT_HASH" != "unknown" ]] && ! $JUST_PROVISIONED; then
     log "  $DB: unchanged ($CURRENT_HASH), skipping"
     SKIPPED=$((SKIPPED + 1))
     continue
