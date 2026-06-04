@@ -739,329 +739,11 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 
-	// Start dedicated Dolt health check ticker if Dolt server is configured.
-	// This runs at a much higher frequency (default 30s) than the general
-	// heartbeat (3 min) so Dolt crashes are detected quickly.
-	var doltHealthTicker *time.Ticker
-	var doltHealthChan <-chan time.Time
-	if d.doltServer != nil && d.doltServer.IsEnabled() {
-		interval := d.doltServer.HealthCheckInterval()
-		doltHealthTicker = time.NewTicker(interval)
-		doltHealthChan = doltHealthTicker.C
-		defer doltHealthTicker.Stop()
-		d.logger.Printf("Dolt health check ticker started (interval %v)", interval)
-	}
-
-	// Start dedicated Dolt remotes push ticker if configured.
-	// This runs at a lower frequency (default 15 min) than the heartbeat (3 min)
-	// to periodically push databases to their git remotes.
-	var doltRemotesTicker *time.Ticker
-	var doltRemotesChan <-chan time.Time
-	if d.isPatrolActive("dolt_remotes") {
-		interval := doltRemotesInterval(d.patrolConfig)
-		doltRemotesTicker = time.NewTicker(interval)
-		doltRemotesChan = doltRemotesTicker.C
-		defer doltRemotesTicker.Stop()
-		d.logger.Printf("Dolt remotes push ticker started (interval %v)", interval)
-	}
-
-	// Start dedicated Dolt backup ticker if configured.
-	// Runs filesystem backup sync (dolt backup sync) for production databases.
-	var doltBackupTicker *time.Ticker
-	var doltBackupChan <-chan time.Time
-	if d.isPatrolActive("dolt_backup") {
-		interval := doltBackupInterval(d.patrolConfig)
-		doltBackupTicker = time.NewTicker(interval)
-		doltBackupChan = doltBackupTicker.C
-		defer doltBackupTicker.Stop()
-		d.logger.Printf("Dolt backup ticker started (interval %v)", interval)
-	}
-
-	// Start dolt backup watcher ticker if configured.
-	// Positive-signal safety net (gu-8xvpw): checks the dolt-backup completion
-	// heartbeat and escalates when it is absent or stale, catching the silent
-	// failure modes (killed/hung/never-scheduled) the plugin's own failure path
-	// cannot. Runs independently of the backup ticker so it still fires when
-	// backups have stopped running entirely.
-	var doltBackupWatcherTicker *time.Ticker
-	var doltBackupWatcherChan <-chan time.Time
-	if d.isPatrolActive("dolt_backup_watcher") {
-		interval := doltBackupWatcherInterval(d.patrolConfig)
-		doltBackupWatcherTicker = time.NewTicker(interval)
-		doltBackupWatcherChan = doltBackupWatcherTicker.C
-		defer doltBackupWatcherTicker.Stop()
-		d.logger.Printf("Dolt backup watcher ticker started (interval %v)", interval)
-	}
-
-	// Start JSONL git backup ticker if configured.
-	// Exports issues to JSONL, scrubs ephemeral data, pushes to git repo.
-	var jsonlGitBackupTicker *time.Ticker
-	var jsonlGitBackupChan <-chan time.Time
-	if d.isPatrolActive("jsonl_git_backup") {
-		interval := jsonlGitBackupInterval(d.patrolConfig)
-		jsonlGitBackupTicker = time.NewTicker(interval)
-		jsonlGitBackupChan = jsonlGitBackupTicker.C
-		defer jsonlGitBackupTicker.Stop()
-		d.logger.Printf("JSONL git backup ticker started (interval %v)", interval)
-	}
-
-	// Start wisp reaper ticker if configured.
-	// Closes stale wisps (abandoned molecule steps, old patrol data) across all databases.
-	var wispReaperTicker *time.Ticker
-	var wispReaperChan <-chan time.Time
-	if d.isPatrolActive("wisp_reaper") {
-		interval := wispReaperInterval(d.patrolConfig)
-		wispReaperTicker = time.NewTicker(interval)
-		wispReaperChan = wispReaperTicker.C
-		defer wispReaperTicker.Stop()
-		d.logger.Printf("Wisp reaper ticker started (interval %v)", interval)
-	}
-
-	// Start doctor dog ticker if configured.
-	// Health monitor: TCP check, latency, DB count, gc, zombie detection, backup/disk checks.
-	var doctorDogTicker *time.Ticker
-	var doctorDogChan <-chan time.Time
-	if d.isPatrolActive("doctor_dog") {
-		interval := doctorDogInterval(d.patrolConfig)
-		doctorDogTicker = time.NewTicker(interval)
-		doctorDogChan = doctorDogTicker.C
-		defer doctorDogTicker.Stop()
-		d.logger.Printf("Doctor dog ticker started (interval %v)", interval)
-	}
-
-	// Start compactor dog ticker if configured.
-	// Flattens Dolt commit history to reclaim graph storage (daily).
-	var compactorDogTicker *time.Ticker
-	var compactorDogChan <-chan time.Time
-	if d.isPatrolActive("compactor_dog") {
-		interval := compactorDogInterval(d.patrolConfig)
-		compactorDogTicker = time.NewTicker(interval)
-		compactorDogChan = compactorDogTicker.C
-		defer compactorDogTicker.Stop()
-		d.logger.Printf("Compactor dog ticker started (interval %v)", interval)
-	}
-
-	// Start checkpoint dog ticker if configured.
-	// Auto-commits WIP changes in active polecat worktrees to prevent data loss.
-	var checkpointDogTicker *time.Ticker
-	var checkpointDogChan <-chan time.Time
-	if d.isPatrolActive("checkpoint_dog") {
-		interval := checkpointDogInterval(d.patrolConfig)
-		checkpointDogTicker = time.NewTicker(interval)
-		checkpointDogChan = checkpointDogTicker.C
-		defer checkpointDogTicker.Stop()
-		d.logger.Printf("Checkpoint dog ticker started (interval %v)", interval)
-	}
-
-	// Start scheduled maintenance ticker if configured.
-	// Checks periodically whether we're in the maintenance window and
-	// runs `gt maintain --force` when commit counts exceed threshold.
-	var scheduledMaintenanceTicker *time.Ticker
-	var scheduledMaintenanceChan <-chan time.Time
-	if d.isPatrolActive("scheduled_maintenance") {
-		interval := maintenanceCheckInterval(d.patrolConfig)
-		scheduledMaintenanceTicker = time.NewTicker(interval)
-		scheduledMaintenanceChan = scheduledMaintenanceTicker.C
-		defer scheduledMaintenanceTicker.Stop()
-		window := maintenanceWindow(d.patrolConfig)
-		d.logger.Printf("Scheduled maintenance ticker started (check interval %v, window %s)", interval, window)
-	}
-
-	// Start main-branch test runner ticker if configured.
-	// Periodically runs quality gates on each rig's main branch to catch regressions.
-	var mainBranchTestTicker *time.Ticker
-	var mainBranchTestChan <-chan time.Time
-	if d.isPatrolActive("main_branch_test") {
-		interval := mainBranchTestInterval(d.patrolConfig)
-		mainBranchTestTicker = time.NewTicker(interval)
-		mainBranchTestChan = mainBranchTestTicker.C
-		defer mainBranchTestTicker.Stop()
-		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
-	}
-
-	// Start quota dog ticker if configured.
-	// Scans for rate-limited sessions and automatically rotates credentials.
-	var quotaDogTicker *time.Ticker
-	var quotaDogChan <-chan time.Time
-	if d.isPatrolActive("quota_dog") {
-		interval := quotaDogInterval(d.patrolConfig)
-		quotaDogTicker = time.NewTicker(interval)
-		quotaDogChan = quotaDogTicker.C
-		defer quotaDogTicker.Stop()
-		d.logger.Printf("Quota dog ticker started (interval %v)", interval)
-	}
-
-	// Start poller dog ticker if configured.
-	// Supervises nudge-poller processes: respawns dead pollers whose tmux
-	// sessions are still alive, removes stale PID files for dead sessions.
-	// See gu-23z4.
-	var pollerDogTicker *time.Ticker
-	var pollerDogChan <-chan time.Time
-	if d.isPatrolActive("poller_dog") {
-		interval := pollerDogInterval(d.patrolConfig)
-		pollerDogTicker = time.NewTicker(interval)
-		pollerDogChan = pollerDogTicker.C
-		defer pollerDogTicker.Stop()
-		d.logger.Printf("Poller dog ticker started (interval %v)", interval)
-	}
-
-	// Start failure classifier ticker if configured.
-	// Watches main_branch_test escalations, pattern-matches against known code-issue
-	// signatures, and auto-files rig beads — reducing operator triage burden.
-	var failureClassifierTicker *time.Ticker
-	var failureClassifierChan <-chan time.Time
-	if d.isPatrolActive("failure_classifier") {
-		interval := failureClassifierInterval(d.patrolConfig)
-		failureClassifierTicker = time.NewTicker(interval)
-		failureClassifierChan = failureClassifierTicker.C
-		defer failureClassifierTicker.Stop()
-		d.logger.Printf("Failure classifier ticker started (interval %v)", interval)
-	}
-
-	// Start curio ticker if configured.
-	// Curio self-inspection dog — discovers Gastown failures via declarative
-	// content rules and emits candidates to HQ Dolt. Opt-in, candidates-only
-	// (Phase 1): never files beads, runs an LLM, or mutates anything.
-	var curioTicker *time.Ticker
-	var curioChan <-chan time.Time
-	if d.isPatrolActive("curio") {
-		interval := curioInterval(d.patrolConfig)
-		curioTicker = time.NewTicker(interval)
-		curioChan = curioTicker.C
-		defer curioTicker.Stop()
-		d.logger.Printf("Curio ticker started (interval %v)", interval)
-	}
-
-	// Wire the Mayor cycle-close handler (Phase 0 task 3c, gu-xrxm6).
-	// Must be registered BEFORE the ticker starts so events dispatched on
-	// the first tick go to the real handler, not the noop.
-	d.initMRCycleCloseHandler()
-
-	// Start MR cycle-close ticker if configured.
-	// Polls closed merge-request beads labeled gt:auto-test-pr and dispatches
-	// to the registered cycle-close handler — the substrate for Phase 0
-	// task 3c (Mayor cycle-close handler) per gu-h1fn.
-	var mrCycleCloseTicker *time.Ticker
-	var mrCycleCloseChan <-chan time.Time
-	if d.isPatrolActive("mr_cycle_close") {
-		interval := mrCycleCloseInterval(d.patrolConfig)
-		mrCycleCloseTicker = time.NewTicker(interval)
-		mrCycleCloseChan = mrCycleCloseTicker.C
-		defer mrCycleCloseTicker.Stop()
-		d.logger.Printf("MR cycle-close dog ticker started (interval %v)", interval)
-	}
-
-	// Wire the Mayor SEV-1 main-CI-break handler (Phase 0 task 11, gu-36voy).
-	// Must be registered BEFORE the main_ci_break ticker starts so the first
-	// dispatched event goes to the real D16 handler, not the noop. Mirrors
-	// the cycle-close handler wiring above.
-	d.initMainCIBreakHandler()
-
-	// Start main CI-break ticker if configured.
-	// Watches main_branch_test escalations, resolves commit → MR bead,
-	// checks gt:auto-test-pr opt-in, and dispatches to the D16 handler.
-	// This is the substrate for Phase 0 task 11 / D16 SEV-1 auto-revert.
-	var mainCIBreakTicker *time.Ticker
-	var mainCIBreakChan <-chan time.Time
-	if d.isPatrolActive("main_ci_break") {
-		interval := mainCIBreakInterval(d.patrolConfig)
-		mainCIBreakTicker = time.NewTicker(interval)
-		mainCIBreakChan = mainCIBreakTicker.C
-		defer mainCIBreakTicker.Stop()
-		d.logger.Printf("Main CI-break dog ticker started (interval %v)", interval)
-	}
-
-	// Start nudge queue GC ticker if configured.
-	// Sweeps expired entries from .runtime/nudge_queue/<session>/ on a fixed
-	// cadence regardless of recipient liveness — fixes gu-gsry, where lazy
-	// expiry (only honored on Drain) caused queues to fill with expired
-	// entries when sessions went idle, silently rejecting new nudges at
-	// MaxQueueDepth.
-	var nudgeQueueGCTicker *time.Ticker
-	var nudgeQueueGCChan <-chan time.Time
-	if d.isPatrolActive("nudge_queue_gc") {
-		interval := nudgeQueueGCInterval(d.patrolConfig)
-		nudgeQueueGCTicker = time.NewTicker(interval)
-		nudgeQueueGCChan = nudgeQueueGCTicker.C
-		defer nudgeQueueGCTicker.Stop()
-		d.logger.Printf("Nudge queue GC ticker started (interval %v)", interval)
-	}
-
-	// Start restart-pending ticker if configured.
-	// Consumes daemon-restart-pending beads (filed by rebuild-gt after a binary
-	// upgrade) by escalating them to an agent — closing the gu-muj66 gap where
-	// the producer had no consumer and pending restarts were silently dropped.
-	var restartPendingTicker *time.Ticker
-	var restartPendingChan <-chan time.Time
-	if d.isPatrolActive("restart_pending") {
-		interval := restartPendingInterval(d.patrolConfig)
-		restartPendingTicker = time.NewTicker(interval)
-		restartPendingChan = restartPendingTicker.C
-		defer restartPendingTicker.Stop()
-		d.logger.Printf("Restart-pending dog ticker started (interval %v)", interval)
-	}
-
-	// Start circuit-break ticker if configured.
-	// Detects work beads that are circuit-broken repeatedly within a window
-	// (re-dispatched into fresh sling-contexts that each fail deterministically)
-	// and escalates them to an agent (gu-ixo67) — the failure shape deferred
-	// from gu-n0hvf that single-context dispatch state cannot surface.
-	var circuitBreakTicker *time.Ticker
-	var circuitBreakChan <-chan time.Time
-	if d.isPatrolActive("circuit_break") {
-		interval := circuitBreakInterval(d.patrolConfig)
-		circuitBreakTicker = time.NewTicker(interval)
-		circuitBreakChan = circuitBreakTicker.C
-		defer circuitBreakTicker.Stop()
-		d.logger.Printf("Circuit-break dog ticker started (interval %v)", interval)
-	}
-
-	// Start scheduler-stuck ticker if configured.
-	// Detects the non-draining-ready-queue / 0-in-progress-with-capacity stall
-	// signature (ready>0, working==0, free>0, not paused) sustained past the
-	// escalate threshold and escalates it to an agent (gu-n0hvf). Does NOT
-	// auto-remediate. Complements circuit_break, which covers repeated
-	// same-bead circuit-breaks.
-	var schedulerStuckTicker *time.Ticker
-	var schedulerStuckChan <-chan time.Time
-	if d.isPatrolActive("scheduler_stuck") {
-		interval := schedulerStuckInterval(d.patrolConfig)
-		schedulerStuckTicker = time.NewTicker(interval)
-		schedulerStuckChan = schedulerStuckTicker.C
-		defer schedulerStuckTicker.Stop()
-		d.logger.Printf("Scheduler-stuck dog ticker started (interval %v)", interval)
-	}
-
-	// Start event channel GC ticker if configured.
-	// Prunes stale .event files from events/<channel>/ on a fixed cadence
-	// (default 1h, retention 7d) — fixes gu-5bf4f, where fire-and-forget
-	// channel events accumulated unbounded (witness/ at 3549 files back 24
-	// days) because await-event has no offset/cursor and consumers without
-	// --cleanup never prune.
-	var eventChannelGCTicker *time.Ticker
-	var eventChannelGCChan <-chan time.Time
-	if d.isPatrolActive("event_channel_gc") {
-		interval := eventChannelGCInterval(d.patrolConfig)
-		eventChannelGCTicker = time.NewTicker(interval)
-		eventChannelGCChan = eventChannelGCTicker.C
-		defer eventChannelGCTicker.Stop()
-		d.logger.Printf("Event channel GC ticker started (interval %v)", interval)
-	}
-
-	// Start circuit-breaker GC ticker if configured.
-	// Reaps stale CLOSED beads circuit-breaker files from /tmp/beads-circuit
-	// so the directory can't regrow to the size that taxed every bd call
-	// ~650ms (gu-9ynqw). Runs off its own ticker, independent of dispatch
-	// health, so the recurrence guard fires even when dispatch is wedged.
-	var circuitBreakerGCTicker *time.Ticker
-	var circuitBreakerGCChan <-chan time.Time
-	if d.isPatrolActive("circuit_breaker_gc") {
-		interval := circuitBreakerGCInterval(d.patrolConfig)
-		circuitBreakerGCTicker = time.NewTicker(interval)
-		circuitBreakerGCChan = circuitBreakerGCTicker.C
-		defer circuitBreakerGCTicker.Stop()
-		d.logger.Printf("Circuit-breaker GC ticker started (interval %v)", interval)
-	}
+	// Start a ticker for each active patrol. Inactive patrols leave a nil
+	// channel, which never fires in the select below. setupPatrolTickers
+	// returns a stop function that halts every ticker it created.
+	patrols, stopPatrols := d.setupPatrolTickers()
+	defer stopPatrols()
 
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
@@ -1110,21 +792,21 @@ func (d *Daemon) Run() (err error) {
 				return d.shutdown(state)
 			}
 
-		case <-doltHealthChan:
+		case <-patrols.doltHealth:
 			// Dedicated Dolt health check — fast crash detection independent
 			// of the 3-minute general heartbeat.
 			if !d.isShutdownInProgress() {
 				d.ensureDoltServerRunning()
 			}
 
-		case <-doltRemotesChan:
+		case <-patrols.doltRemotes:
 			// Periodic Dolt remote push — pushes databases to their configured
 			// git remotes on a 15-minute cadence (independent of heartbeat).
 			if !d.isShutdownInProgress() {
 				d.pushDoltRemotes()
 			}
 
-		case <-doltBackupChan:
+		case <-patrols.doltBackup:
 			// Periodic Dolt filesystem backup — syncs production databases to
 			// local backup directory on a 15-minute cadence. On Linux this execs
 			// the dolt-backup plugin in-process, decoupled from deacon-dog
@@ -1134,105 +816,105 @@ func (d *Daemon) Run() (err error) {
 				d.syncDoltBackups()
 			}
 
-		case <-doltBackupWatcherChan:
+		case <-patrols.doltBackupWatcher:
 			// Heartbeat staleness check (gu-8xvpw) — escalates if backups have
 			// silently stopped. Independent of the backup tick above.
 			if !d.isShutdownInProgress() {
 				d.runDoltBackupWatcher()
 			}
 
-		case <-jsonlGitBackupChan:
+		case <-patrols.jsonlGitBackup:
 			// Periodic JSONL git backup — exports issues, scrubs ephemeral data,
 			// commits and pushes to git repo.
 			if !d.isShutdownInProgress() {
 				d.syncJsonlGitBackup()
 			}
 
-		case <-wispReaperChan:
+		case <-patrols.wispReaper:
 			// Periodic wisp reaper — closes stale wisps (abandoned molecule steps,
 			// old patrol data) to prevent unbounded table growth (Clown Show audit).
 			if !d.isShutdownInProgress() {
 				d.reapWisps()
 			}
 
-		case <-doctorDogChan:
+		case <-patrols.doctorDog:
 			// Doctor dog — comprehensive Dolt health monitor: connectivity, latency,
 			// gc, zombie detection, backup staleness, and disk usage checks.
 			if !d.isShutdownInProgress() {
 				d.runDoctorDog()
 			}
 
-		case <-compactorDogChan:
+		case <-patrols.compactorDog:
 			// Compactor dog — flattens Dolt commit history on production databases.
 			// Reclaims commit graph storage, then runs gc to reclaim chunks.
 			if !d.isShutdownInProgress() {
 				d.runCompactorDog()
 			}
 
-		case <-checkpointDogChan:
+		case <-patrols.checkpointDog:
 			// Checkpoint dog — auto-commits WIP changes in active polecat
 			// worktrees to prevent data loss from session crashes.
 			if !d.isShutdownInProgress() {
 				d.runCheckpointDog()
 			}
 
-		case <-scheduledMaintenanceChan:
+		case <-patrols.scheduledMaintenance:
 			// Scheduled maintenance — checks if we're in the maintenance window
 			// and runs `gt maintain --force` when commit counts exceed threshold.
 			if !d.isShutdownInProgress() {
 				d.runScheduledMaintenance()
 			}
 
-		case <-mainBranchTestChan:
+		case <-patrols.mainBranchTest:
 			// Main branch test runner — periodically runs quality gates on each
 			// rig's main branch to catch regressions from merges or direct pushes.
 			if !d.isShutdownInProgress() {
 				d.runMainBranchTests()
 			}
 
-		case <-quotaDogChan:
+		case <-patrols.quotaDog:
 			// Quota dog — scans for rate-limited sessions and automatically
 			// rotates credentials to available accounts via keychain swap.
 			if !d.isShutdownInProgress() {
 				d.runQuotaDog()
 			}
 
-		case <-pollerDogChan:
+		case <-patrols.pollerDog:
 			// Poller dog — supervises nudge-poller processes. Respawns
 			// dead pollers for live sessions and removes stale PID files.
 			if !d.isShutdownInProgress() {
 				d.runPollerDog()
 			}
 
-		case <-failureClassifierChan:
+		case <-patrols.failureClassifier:
 			// Failure classifier — classifies main_branch_test escalations against
 			// known code-issue signatures and auto-files rig beads for matches.
 			if !d.isShutdownInProgress() {
 				d.runFailureClassifier()
 			}
 
-		case <-mrCycleCloseChan:
+		case <-patrols.mrCycleClose:
 			// MR cycle-close dog — polls closed gt:auto-test-pr MR beads and
 			// dispatches cycle-close events to the registered handler.
 			if !d.isShutdownInProgress() {
 				d.runMRCycleCloseDog()
 			}
 
-		case <-curioChan:
+		case <-patrols.curio:
 			// Curio dog — runs declarative content rules over live Gastown
 			// state and emits candidates to HQ Dolt (candidates only, Phase 1).
 			if !d.isShutdownInProgress() {
 				d.runCurio()
 			}
 
-		case <-mainCIBreakChan:
+		case <-patrols.mainCIBreak:
 			// Main CI-break dog — watches main_branch_test escalations, resolves
 			// commit → MR bead, checks auto-test-pr opt-in, dispatches to D16 handler.
 			if !d.isShutdownInProgress() {
 				d.runMainCIBreakDog()
 			}
 
-		case <-nudgeQueueGCChan:
+		case <-patrols.nudgeQueueGC:
 			// Nudge queue GC — sweeps expired entries from
 			// .runtime/nudge_queue/<session>/ regardless of recipient
 			// liveness. Drain's lazy expiry only fires when an agent
@@ -1241,28 +923,28 @@ func (d *Daemon) Run() (err error) {
 				d.runNudgeQueueGC()
 			}
 
-		case <-restartPendingChan:
+		case <-patrols.restartPending:
 			// Restart-pending dog — escalates daemon-restart-pending beads to an
 			// agent so a gated restart happens (gu-muj66). Does NOT self-restart.
 			if !d.isShutdownInProgress() {
 				d.runRestartPendingDog()
 			}
 
-		case <-circuitBreakChan:
+		case <-patrols.circuitBreak:
 			// Circuit-break dog — escalates beads circuit-broken repeatedly
 			// within the window (gu-ixo67). Does NOT auto-remediate.
 			if !d.isShutdownInProgress() {
 				d.runCircuitBreakDog()
 			}
 
-		case <-schedulerStuckChan:
+		case <-patrols.schedulerStuck:
 			// Scheduler-stuck dog — escalates a sustained non-draining ready
 			// queue with free capacity (gu-n0hvf). Does NOT auto-remediate.
 			if !d.isShutdownInProgress() {
 				d.runSchedulerStuckDog()
 			}
 
-		case <-eventChannelGCChan:
+		case <-patrols.eventChannelGC:
 			// Event channel GC — prunes stale .event files from
 			// events/<channel>/ that fire-and-forget fan-out never
 			// cleans up (await-event has no offset/cursor, and
@@ -1271,7 +953,7 @@ func (d *Daemon) Run() (err error) {
 				d.runEventChannelGC()
 			}
 
-		case <-circuitBreakerGCChan:
+		case <-patrols.circuitBreakerGC:
 			// Circuit-breaker GC — reaps stale CLOSED beads circuit-breaker
 			// files from /tmp/beads-circuit (gu-9ynqw). beads' own cleanup
 			// only expires open/half-open files, so closed-state pollution
