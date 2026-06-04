@@ -45,6 +45,24 @@ func resolveTargetAgent(target string) (agentID string, pane string, hookRoot st
 	return agentID, pane, hookRoot, nil
 }
 
+// resolveTargetAgentIDFn is a seam for tests. Production uses resolveTargetAgentID.
+var resolveTargetAgentIDFn = resolveTargetAgentID
+
+// resolveTargetAgentID resolves a target spec to its agent ID WITHOUT requiring a
+// live tmux pane. Unlike resolveTargetAgent, it does not call getSessionPane or
+// GetPaneWorkDir, so it works when the target agent's session is dead.
+//
+// Use this for bead-level operations (e.g. unsling) that only need the agent ID to
+// query/clear hook status. A dead polecat holding a valid bead's hook must still be
+// detachable — resolveTargetAgent fails on the pane lookup in that case (gu-wmqey).
+func resolveTargetAgentID(target string) (string, error) {
+	sessionName, err := resolveRoleToSession(target)
+	if err != nil {
+		return "", err
+	}
+	return sessionToAgentID(sessionName), nil
+}
+
 // sessionToAgentID converts a session name to agent ID format.
 // Uses session.ParseSessionName for consistent parsing across the codebase.
 func sessionToAgentID(sessionName string) string {
