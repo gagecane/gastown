@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -881,35 +880,11 @@ func runRefineryUnclaimed(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Query beads for merge-request issues without assignee
-	b := beads.New(r.Path)
-	issues, err := b.ListMergeRequests(beads.ListOptions{
-		Status:   "open",
-		Label:    "gt:merge-request",
-		Priority: -1,
-	})
+	// Query the domain layer for unclaimed (unassigned) MRs.
+	eng := refinery.NewEngineer(r)
+	unclaimed, err := eng.ListUnclaimedMRs()
 	if err != nil {
 		return fmt.Errorf("listing merge requests: %w", err)
-	}
-
-	// Filter for unclaimed (no assignee)
-	var unclaimed []*refinery.MRInfo
-	for _, issue := range issues {
-		if issue.Assignee != "" {
-			continue
-		}
-		fields := beads.ParseMRFields(issue)
-		if fields == nil {
-			continue
-		}
-		mr := &refinery.MRInfo{
-			ID:       issue.ID,
-			Branch:   fields.Branch,
-			Target:   fields.Target,
-			Worker:   fields.Worker,
-			Priority: issue.Priority,
-		}
-		unclaimed = append(unclaimed, mr)
 	}
 
 	// JSON output
