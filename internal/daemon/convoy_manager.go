@@ -741,6 +741,18 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 				// drops from the next scan's ready set on its own.
 				m.logger("Convoy %s: %s already closed (work completed) — running completion check instead of escalating", c.ID, issueID)
 				m.runConvoyCheck(c.ID) // idempotent completion+close; no escalation
+			case isDoNotDispatchSlingError(stderrLine):
+				// Category C variant (gu-q1wzq): the bead is a do-not-dispatch /
+				// pinned reference tripwire — a permanent live safety gate the
+				// scheduler refuses by design (it must stay OPEN, never hooked).
+				// Like other structural non-work items it can NEVER become a
+				// dispatchable convoy step, so auto-untrack it (same seam as
+				// handleNonWorkBead) instead of re-feeding it every scan. This was
+				// the dominant share (~3,000/day, ≈383 per bead) of the convoy
+				// re-dispatch storm — it previously fell through to the default
+				// branch, which escalated once but kept re-feeding on the flat 5m
+				// cooldown forever (no churn-backoff on the failure path).
+				m.handleNonWorkBead(c.ID, issueID, stderrLine)
 			case isStructuralNonWorkSlingError(stderrLine):
 				// Category C (gu-y6ild): the bead is a structural non-work item
 				// (epic/container with open children, identity bead, sling-context
@@ -759,7 +771,17 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 				// will close on its own and trip the completion check). Without this
 				// the feeder floods the Mayor with HIGH 'cannot dispatch / will never
 				// progress' false-positives indistinguishable from real wedges.
+				//
+				// Advance the feed-churn streak (gu-q1wzq): an actively-worked bead
+				// has neither a strike→untrack path (it's legitimate, not missing)
+				// nor — previously — any backoff, so it was re-fed on the flat 5m
+				// cooldown every scan for the entire duration of the work. A
+				// long-running task therefore generated a steady re-feed/sling-fail
+				// stream (1,883 such retries in the gu-q1wzq storm). Recording churn
+				// here decays the re-feed interval 5m→1h while the work proceeds,
+				// without untracking (the step is real and will close on its own).
 				m.logger("Convoy %s: %s already hooked/in_progress to a live agent — in progress, suppressing escalation (gs-2dr)", c.ID, issueID)
+				m.recordFeedChurn(issueID)
 			default:
 				if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
 					// Genuinely-ambiguous persistent failure (e.g. an unroutable
@@ -906,6 +928,25 @@ func isActivelyWorkedSlingError(stderrLine string) bool {
 	s := strings.ToLower(stderrLine)
 	return strings.Contains(s, "already hooked") ||
 		strings.Contains(s, "already in_progress")
+}
+
+// isDoNotDispatchSlingError reports whether a sling stderr line indicates the
+// target bead is a do-not-dispatch / pinned reference tripwire — a permanent
+// live safety gate that the scheduler refuses by design and that must stay OPEN
+// (sling_dispatch.go / sling_schedule.go: "is a do-not-dispatch / pinned
+// reference tripwire ... refusing to schedule"). Unlike an actively-worked bead
+// (which is progressing and will close on its own), a tripwire NEVER becomes
+// dispatchable — its labels/type are intentional. Re-feeding it every scan is
+// pure waste: gu-q1wzq observed ~3,000 such retries in a day (≈383 per tripwire
+// bead) as the dominant share of a 6,508-retry convoy storm that spiked host
+// load. These must be permanently untracked from the convoy, not backed off.
+func isDoNotDispatchSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	s := strings.ToLower(stderrLine)
+	return strings.Contains(s, "do-not-dispatch") ||
+		strings.Contains(s, "reference tripwire")
 }
 
 // handleNonWorkBead untracks a structural non-work bead (Category C) from the
@@ -1085,15 +1126,20 @@ func (m *ConvoyManager) recordFeedAttempt(issueID string) {
 	m.lastFeedAttempt.Store(issueID, m.now())
 }
 
-// recordFeedChurn advances issueID's escalate-churn streak after a SUCCESSFUL
-// re-dispatch (gs-skv). It is deliberately NOT called on sling failures: a
-// "bead not found" failure is a missing-bead case with its own strike→untrack
-// termination (missingBeadStrikeThreshold), and must not inherit the escalating
-// backoff or it would never accumulate its 3 strikes. A successful re-dispatch
-// of a bead that keeps coming back (refused/escalated, never closed) IS the
-// escalate-churn this backs off: a re-dispatch within feedChurnWindow raises
-// the streak (and the next cooldown); a longer gap resets it to 1, so a bead
-// that genuinely progressed and only later reappears is not pre-penalized.
+// recordFeedChurn advances issueID's escalate-churn streak (gs-skv). It is
+// called after a SUCCESSFUL re-dispatch, and also on the actively-worked
+// (already-hooked/in_progress) failure path (gu-q1wzq) — both represent a bead
+// that keeps reappearing in the stranded set without terminating, which is the
+// escalate-churn this backs off (5m→1h). A re-dispatch/re-feed within
+// feedChurnWindow raises the streak (and the next cooldown); a longer gap resets
+// it to 1, so a bead that genuinely progressed and only later reappears is not
+// pre-penalized.
+//
+// It is deliberately NOT called on the "bead not found" failure path: that is a
+// missing-bead case with its own strike→untrack termination
+// (missingBeadStrikeThreshold), and must not inherit the escalating backoff or
+// it would never accumulate its 3 strikes. The structural / do-not-dispatch
+// paths don't need it either — they untrack permanently on first failure.
 func (m *ConvoyManager) recordFeedChurn(issueID string) {
 	now := m.now()
 

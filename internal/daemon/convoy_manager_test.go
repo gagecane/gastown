@@ -3253,6 +3253,35 @@ func TestIsActivelyWorkedSlingError(t *testing.T) {
 	}
 }
 
+// TestIsDoNotDispatchSlingError covers the stderr shapes sling/schedule emit for
+// a do-not-dispatch / pinned reference tripwire (gu-q1wzq) — and the shapes that
+// must NOT match so they route to their own handlers.
+func TestIsDoNotDispatchSlingError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"schedule-guard shape", `bead gt-trip is a do-not-dispatch / pinned reference tripwire: "deploy blocked: CFN" — refusing to schedule. It must stay OPEN as a live safety gate`, true},
+		{"dispatch-guard shape", `bead gt-trip is a do-not-dispatch / pinned reference tripwire: "x" — it must stay OPEN as a live safety gate, never hooked to a polecat.`, true},
+		{"reference tripwire phrasing", "bead gt-trip is a reference tripwire", true},
+		{"case insensitive", "BEAD gt-trip is a DO-NOT-DISPATCH / pinned reference TRIPWIRE", true},
+		// Must NOT match — distinct handler paths.
+		{"actively worked", "bead gt-trip is already hooked to gastown/polecats/x", false},
+		{"structural epic", `"EPIC: x" is an epic container`, false},
+		{"not found", "bead 'gt-trip' not found", false},
+		{"mayor-only", `"x" is labeled mayor-only / no-polecat`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDoNotDispatchSlingError(tc.in); got != tc.want {
+				t.Errorf("isDoNotDispatchSlingError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // feedFirstReadyTestEnv builds a town root with a gt- route and a mock gt whose
 // `sling` subcommand prints slingStderr to stderr and exits 1, while every other
 // subcommand (e.g. `convoy check`, `escalate`) appends its argv to invokeLog and
@@ -3376,6 +3405,68 @@ func TestFeedFirstReady_ActivelyWorked_NoEscalate(t *testing.T) {
 	}
 	if _, ok := m.seenSlingErrors.Load("gt-live"); ok {
 		t.Errorf("actively-worked bead should not record a sling error")
+	}
+}
+
+// TestFeedFirstReady_DoNotDispatch_UntracksNoEscalate verifies the gu-q1wzq fix:
+// a do-not-dispatch / pinned reference tripwire is auto-untracked on first
+// failure (like a structural non-work bead) and does NOT escalate — it can never
+// become dispatchable, so re-feeding it every scan was the dominant share of the
+// convoy re-dispatch storm.
+func TestFeedFirstReady_DoNotDispatch_UntracksNoEscalate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	stderr := `bead gt-trip is a do-not-dispatch / pinned reference tripwire: "deploy blocked: CFN" — refusing to schedule. It must stay OPEN as a live safety gate`
+	m, invokeLog := feedFirstReadyTestEnv(t, stderr)
+	var untrackCalls []missingBeadKey
+	m.untrackMissingBeadFn = func(convoyID, issueID string) error {
+		untrackCalls = append(untrackCalls, missingBeadKey{convoyID, issueID})
+		return nil
+	}
+
+	c := strandedConvoyInfo{ID: "hq-cv-t", Title: "Tripwire Step", ReadyCount: 1, ReadyIssues: []string{"gt-trip"}}
+	m.feedFirstReady(c) // single failure suffices — tripwire rejection is permanent
+
+	if len(untrackCalls) != 1 || untrackCalls[0] != (missingBeadKey{"hq-cv-t", "gt-trip"}) {
+		t.Fatalf("expected exactly 1 untrack of {hq-cv-t gt-trip} on first failure, got %v", untrackCalls)
+	}
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("do-not-dispatch tripwire should NOT escalate, but escalate was invoked: %q", data)
+	}
+}
+
+// TestFeedFirstReady_ActivelyWorked_RecordsChurn verifies the gu-q1wzq backoff:
+// an actively-worked bead advances its feed-churn streak on each failed re-feed,
+// so the effective cooldown escalates (5m→…) instead of staying flat at 5m and
+// re-feeding every scan for the entire duration of the work.
+func TestFeedFirstReady_ActivelyWorked_RecordsChurn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, _ := feedFirstReadyTestEnv(t, "bead gt-live is already in_progress to gastown/polecats/cheedo")
+	m.untrackMissingBeadFn = func(string, string) error { return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-live", Title: "Live Work", ReadyCount: 1, ReadyIssues: []string{"gt-live"}}
+
+	// First failed feed: churn streak should be recorded at 1 (base cooldown).
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-live"); got != feedDispatchCooldown {
+		t.Fatalf("after 1 churn, cooldown = %v, want base %v", got, feedDispatchCooldown)
+	}
+
+	// Clear the per-attempt cooldown stamp so the next feed isn't skipped by
+	// inFeedCooldown, simulating a later scan within feedChurnWindow.
+	m.lastFeedAttempt.Delete("gt-live")
+	m.feedFirstReady(c)
+
+	// Second consecutive re-feed within the window must raise the streak, which
+	// escalates the cooldown beyond the flat base — the whole point of the fix.
+	if got := m.effectiveFeedCooldown("gt-live"); got <= feedDispatchCooldown {
+		t.Errorf("after 2 churns, cooldown = %v, want > base %v (escalating backoff)", got, feedDispatchCooldown)
 	}
 }
 
