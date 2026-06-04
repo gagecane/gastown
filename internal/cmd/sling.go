@@ -206,6 +206,77 @@ func runSlingRespawnReset(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// slingInvocation holds flag-derived state validated by parseSlingInvocation
+// before any dispatch path (batch, deferred, epic/convoy, inline) runs.
+type slingInvocation struct {
+	// priorityFloor is the parsed --priority-floor value (0 when unset).
+	priorityFloor int
+}
+
+// parseSlingInvocation validates the sling command's flags and resolves any
+// flag-derived state up front, before the dispatch mode is selected. It
+// enforces invariants that must hold regardless of which dispatch path runs,
+// returning an error for any invalid flag or flag combination.
+//
+// Side effects: resolves --pr into slingResumeBranch (and prints the
+// resolution) so all downstream dispatch paths see a concrete branch.
+func parseSlingInvocation() (slingInvocation, error) {
+	var inv slingInvocation
+
+	// Polecats cannot sling - check early before writing anything.
+	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
+	// GT_POLECAT in their environment from spawning polecats. Only block if the
+	// parsed role is actually polecat (handles compound forms like
+	// "gastown/polecats/Toast"). If GT_ROLE is unset, fall back to GT_POLECAT.
+	if role := os.Getenv("GT_ROLE"); role != "" {
+		parsedRole, _, _ := parseRoleString(role)
+		if parsedRole == RolePolecat {
+			return inv, fmt.Errorf("polecats cannot sling (use gt done for handoff)")
+		}
+	} else if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" {
+		return inv, fmt.Errorf("polecats cannot sling (use gt done for handoff)")
+	}
+
+	// Validate --merge flag if provided
+	if slingMerge != "" {
+		switch slingMerge {
+		case "direct", "mr", "local":
+			// Valid
+		default:
+			return inv, fmt.Errorf("invalid --merge value %q: must be direct, mr, or local", slingMerge)
+		}
+	}
+
+	// Validate --priority-floor flag if provided
+	if slingPriorityFloor != "" {
+		pf, ok := capacity.ParsePriorityFloor(slingPriorityFloor)
+		if !ok {
+			return inv, fmt.Errorf("invalid --priority-floor value %q: must be normal, low, or lowest", slingPriorityFloor)
+		}
+		inv.priorityFloor = pf
+	}
+
+	// Validate --branch / --pr resume flags (gh#3602).
+	// These flags reuse an existing branch/PR head instead of creating a fresh
+	// polecat branch, letting a polecat continue work on an existing PR.
+	if slingResumeBranch != "" && slingResumePR != 0 {
+		return inv, fmt.Errorf("--branch and --pr are mutually exclusive")
+	}
+	if (slingResumeBranch != "" || slingResumePR != 0) && slingBaseBranch != "" {
+		return inv, fmt.Errorf("--base-branch cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
+	}
+	if slingResumePR != 0 {
+		resolved, err := resolvePRBranch(slingResumePR)
+		if err != nil {
+			return inv, fmt.Errorf("resolving --pr %d: %w", slingResumePR, err)
+		}
+		slingResumeBranch = resolved
+		fmt.Printf("%s --pr %d resolved to branch %s\n", style.Dim.Render("→"), slingResumePR, resolved)
+	}
+
+	return inv, nil
+}
+
 func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	ctx := context.Background()
 	if cmd != nil {
@@ -221,57 +292,12 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		telemetry.RecordSling(ctx, bead, target, retErr)
 	}()
-	// Polecats cannot sling - check early before writing anything.
-	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
-	// GT_POLECAT in their environment from spawning polecats. Only block if the
-	// parsed role is actually polecat (handles compound forms like
-	// "gastown/polecats/Toast"). If GT_ROLE is unset, fall back to GT_POLECAT.
-	if role := os.Getenv("GT_ROLE"); role != "" {
-		parsedRole, _, _ := parseRoleString(role)
-		if parsedRole == RolePolecat {
-			return fmt.Errorf("polecats cannot sling (use gt done for handoff)")
-		}
-	} else if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" {
-		return fmt.Errorf("polecats cannot sling (use gt done for handoff)")
+	// Validate flags and resolve flag-derived state before any dispatch path.
+	inv, err := parseSlingInvocation()
+	if err != nil {
+		return err
 	}
-
-	// Validate --merge flag if provided
-	if slingMerge != "" {
-		switch slingMerge {
-		case "direct", "mr", "local":
-			// Valid
-		default:
-			return fmt.Errorf("invalid --merge value %q: must be direct, mr, or local", slingMerge)
-		}
-	}
-
-	// Validate --priority-floor flag if provided
-	var parsedPriorityFloor int
-	if slingPriorityFloor != "" {
-		pf, ok := capacity.ParsePriorityFloor(slingPriorityFloor)
-		if !ok {
-			return fmt.Errorf("invalid --priority-floor value %q: must be normal, low, or lowest", slingPriorityFloor)
-		}
-		parsedPriorityFloor = pf
-	}
-
-	// Validate --branch / --pr resume flags (gh#3602).
-	// These flags reuse an existing branch/PR head instead of creating a fresh
-	// polecat branch, letting a polecat continue work on an existing PR.
-	if slingResumeBranch != "" && slingResumePR != 0 {
-		return fmt.Errorf("--branch and --pr are mutually exclusive")
-	}
-	if (slingResumeBranch != "" || slingResumePR != 0) && slingBaseBranch != "" {
-		return fmt.Errorf("--base-branch cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
-	}
-	if slingResumePR != 0 {
-		resolved, err := resolvePRBranch(slingResumePR)
-		if err != nil {
-			return fmt.Errorf("resolving --pr %d: %w", slingResumePR, err)
-		}
-		slingResumeBranch = resolved
-		fmt.Printf("%s --pr %d resolved to branch %s\n", style.Dim.Render("→"), slingResumePR, resolved)
-	}
+	parsedPriorityFloor := inv.priorityFloor
 
 	// Disable Dolt auto-commit for all bd commands run during sling (gt-u6n6a).
 	// Under concurrent load (batch slinging), auto-commits from individual bd writes
