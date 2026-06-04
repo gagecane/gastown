@@ -1048,6 +1048,21 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Event channel GC ticker started (interval %v)", interval)
 	}
 
+	// Start circuit-breaker GC ticker if configured.
+	// Reaps stale CLOSED beads circuit-breaker files from /tmp/beads-circuit
+	// so the directory can't regrow to the size that taxed every bd call
+	// ~650ms (gu-9ynqw). Runs off its own ticker, independent of dispatch
+	// health, so the recurrence guard fires even when dispatch is wedged.
+	var circuitBreakerGCTicker *time.Ticker
+	var circuitBreakerGCChan <-chan time.Time
+	if d.isPatrolActive("circuit_breaker_gc") {
+		interval := circuitBreakerGCInterval(d.patrolConfig)
+		circuitBreakerGCTicker = time.NewTicker(interval)
+		circuitBreakerGCChan = circuitBreakerGCTicker.C
+		defer circuitBreakerGCTicker.Stop()
+		d.logger.Printf("Circuit-breaker GC ticker started (interval %v)", interval)
+	}
+
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
 	// Global pane-died hooks don't fire reliably in tmux 3.2a, so we rely on the
 	// per-session approach which has been tested to work for continuous recovery.
@@ -1254,6 +1269,16 @@ func (d *Daemon) Run() (err error) {
 			// consumers without --cleanup leave files behind).
 			if !d.isShutdownInProgress() {
 				d.runEventChannelGC()
+			}
+
+		case <-circuitBreakerGCChan:
+			// Circuit-breaker GC — reaps stale CLOSED beads circuit-breaker
+			// files from /tmp/beads-circuit (gu-9ynqw). beads' own cleanup
+			// only expires open/half-open files, so closed-state pollution
+			// accumulated unbounded and taxed every bd call ~650ms. Leaves
+			// open/half-open breakers intact.
+			if !d.isShutdownInProgress() {
+				d.runCircuitBreakerGC()
 			}
 
 		case <-timer.C:

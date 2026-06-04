@@ -69,6 +69,11 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "5m",
 			},
+			CircuitBreakerGC: &CircuitBreakerGCConfig{
+				Enabled:      true,
+				IntervalStr:  "5m",
+				RetentionStr: "15m",
+			},
 			RestartPending: &RestartPendingConfig{
 				Enabled:     true,
 				IntervalStr: "5m",
@@ -149,6 +154,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.NudgeQueueGC == nil {
 		p.NudgeQueueGC = d.NudgeQueueGC
+		changed = true
+	}
+	if p.CircuitBreakerGC == nil {
+		p.CircuitBreakerGC = d.CircuitBreakerGC
 		changed = true
 	}
 	if p.RestartPending == nil {

@@ -143,6 +143,7 @@ type PatrolsConfig struct {
 	MRCycleClose         *MRCycleCloseConfig         `json:"mr_cycle_close,omitempty"`
 	MainCIBreak          *MainCIBreakConfig          `json:"main_ci_break,omitempty"`
 	NudgeQueueGC         *NudgeQueueGCConfig         `json:"nudge_queue_gc,omitempty"`
+	CircuitBreakerGC     *CircuitBreakerGCConfig     `json:"circuit_breaker_gc,omitempty"`
 	RestartPending       *RestartPendingConfig       `json:"restart_pending,omitempty"`
 	CircuitBreak         *CircuitBreakConfig         `json:"circuit_break,omitempty"`
 	Curio                *CurioConfig                `json:"curio,omitempty"`
@@ -416,6 +417,17 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.EventChannelGC.Enabled
+	}
+	if patrol == "circuit_breaker_gc" {
+		// Default-enabled (gu-9ynqw): recurrence guard for the
+		// /tmp/beads-circuit unbounded-growth latency tax. Must run out of
+		// the box, including on towns whose daemon.json predates this
+		// addition. The dog only deletes stale CLOSED breaker files (never
+		// open/half-open), so it is safe to default on.
+		if config == nil || config.Patrols == nil || config.Patrols.CircuitBreakerGC == nil {
+			return true
+		}
+		return config.Patrols.CircuitBreakerGC.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {
