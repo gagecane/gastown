@@ -581,17 +581,6 @@ func CleanupWispLabels(polecatName, state string) []string {
 	}
 }
 
-// SwarmWispLabels generates labels for a swarm tracking wisp.
-func SwarmWispLabels(swarmID string, total, completed int, startTime time.Time) []string {
-	return []string{
-		"swarm",
-		fmt.Sprintf("swarm_id:%s", swarmID),
-		fmt.Sprintf("total:%d", total),
-		fmt.Sprintf("completed:%d", completed),
-		fmt.Sprintf("start:%s", startTime.Format(time.RFC3339)),
-	}
-}
-
 // FormatHelpSummary formats a parsed HelpPayload into a human-readable summary
 // for the witness agent to triage. Includes assessment if available.
 func FormatHelpSummary(payload *HelpPayload) string {

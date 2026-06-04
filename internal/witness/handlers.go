@@ -155,72 +155,6 @@ type HandlerResult struct {
 	Error         error
 }
 
-// HandlePolecatDone processes a POLECAT_DONE message from a polecat.
-// For PHASE_COMPLETE exits, recycles the polecat (session ends, worktree kept).
-// For exits with pending MR, creates cleanup wisp and sends MERGE_READY to Refinery.
-// For exits without MR, acknowledges completion (polecat goes idle).
-//
-// When a pending MR exists, sends MERGE_READY to the Refinery to trigger
-// immediate merge queue processing. This ensures work flows through the system
-// without waiting for the daemon's heartbeat cycle.
-//
-// Persistent Polecat Model (gt-4ac):
-// Polecats persist after work completion - sandbox is preserved for reuse.
-// When work is done, the polecat transitions to idle state (no nuke).
-// The MR lifecycle continues independently in the Refinery.
-// If conflicts arise, Refinery creates a conflict-resolution task for an available polecat.
-func HandlePolecatDone(bd *BdCli, workDir, rigName string, msg *mail.Message, router *mail.Router) *HandlerResult {
-	result := &HandlerResult{
-		MessageID:    msg.ID,
-		ProtocolType: ProtoPolecatDone,
-	}
-
-	payload, err := ParsePolecatDone(msg.Subject, msg.Body)
-	if err != nil {
-		result.Error = fmt.Errorf("parsing POLECAT_DONE: %w", err)
-		return result
-	}
-
-	if stale, reason := isStalePolecatDone(workDir, rigName, payload.PolecatName, msg); stale {
-		result.Handled = true
-		result.Action = fmt.Sprintf("ignored stale POLECAT_DONE for %s (%s)", payload.PolecatName, reason)
-		return result
-	}
-
-	if payload.Exit == "PHASE_COMPLETE" {
-		result.Handled = true
-		result.Action = fmt.Sprintf("phase-complete for %s (gate=%s) - session recycled, awaiting gate", payload.PolecatName, payload.Gate)
-		return result
-	}
-
-	hasPendingMR := completionPayloadHasPendingMR(bd, workDir, rigName, payload)
-
-	// When Exit==COMPLETED but MRID is empty and MR creation didn't explicitly
-	// fail, query beads to check if an MR bead exists for this branch.
-	// This handles the case where the MR was created but the ID wasn't included
-	// in the POLECAT_DONE message (e.g., message truncation, race condition).
-	if !hasPendingMR && payload.Exit == "COMPLETED" && !payload.MRFailed && payload.Branch != "" {
-		if mrID := findMRBeadForBranch(bd, workDir, payload.Branch); mrID != "" {
-			payload.MRID = mrID
-			hasPendingMR = completionPayloadHasPendingMR(bd, workDir, rigName, payload)
-		}
-	}
-
-	if hasPendingMR {
-		result = handlePolecatDonePendingMR(bd, workDir, rigName, payload, result)
-	} else {
-		result = handlePolecatDoneNoMR(workDir, rigName, payload, result)
-	}
-
-	// Notify Mayor that a slot is open regardless of MR status.
-	// The polecat is idle either way — Mayor should consider slinging next bead. (GH#2727)
-	if result.Handled {
-		notifyMayorSlotOpen(workDir, rigName, payload.PolecatName, payload.Exit)
-	}
-
-	return result
-}
-
 // HandlePolecatDoneFromBead processes polecat completion detected from agent bead
 // state (gt-a6gp: nudge-over-mail). Instead of parsing a POLECAT_DONE mail message,
 // this reads completion metadata directly from the agent bead's description fields
@@ -352,16 +286,6 @@ func HandlePolecatDoneFromBead(bd *BdCli, workDir, rigName, polecatName string, 
 	return result
 }
 
-// TransitionPolecatToIdle sets a polecat's agent_state to idle after the witness
-// has processed its completion (gt-a6gp). With self-managed completion (gt-1qlg),
-// polecats transition to idle directly — this function is now a safety net for
-// crash recovery where the polecat set completion metadata but didn't reach
-// the idle transition.
-func TransitionPolecatToIdle(workDir, agentBeadID string) error {
-	bd := beads.New(beads.ResolveBeadsDir(workDir))
-	return bd.UpdateAgentState(agentBeadID, string(AgentStateIdle))
-}
-
 func completionPayloadHasPendingMR(bd *BdCli, workDir, rigName string, payload *PolecatDonePayload) bool {
 	if payload == nil || payload.MRID == "" {
 		return false
@@ -446,190 +370,6 @@ func handlePolecatDoneNoMR(_, _ string, payload *PolecatDonePayload, result *Han
 	return result
 }
 
-func isStalePolecatDone(workDir, rigName, polecatName string, msg *mail.Message) (bool, string) {
-	if msg == nil {
-		return false, ""
-	}
-
-	initRegistryFromWorkDir(workDir)
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
-	createdAt, err := session.SessionCreatedAt(sessionName)
-	if err != nil {
-		// Session not found or tmux not running - can't determine staleness, allow message
-		return false, ""
-	}
-
-	return session.StaleReasonForTimes(msg.Timestamp, createdAt)
-}
-
-// HandleLifecycleShutdown processes a LIFECYCLE:Shutdown message.
-// Similar to POLECAT_DONE but triggered by daemon rather than polecat.
-// Persistent polecat model (gt-4ac): sandbox preserved, polecat goes idle.
-func HandleLifecycleShutdown(workDir, rigName string, msg *mail.Message) *HandlerResult {
-	result := &HandlerResult{
-		MessageID:    msg.ID,
-		ProtocolType: ProtoLifecycleShutdown,
-	}
-
-	// Extract polecat name from subject
-	matches := PatternLifecycleShutdown.FindStringSubmatch(msg.Subject)
-	if len(matches) < 2 {
-		result.Error = fmt.Errorf("invalid LIFECYCLE:Shutdown subject: %s", msg.Subject)
-		return result
-	}
-	polecatName := matches[1]
-
-	// Persistent model: polecat goes idle, sandbox preserved for reuse.
-	// If polecat has dirty state, that's fine — it stays idle until
-	// someone slings new work to it (which will repair the worktree).
-	result.Handled = true
-	result.Action = fmt.Sprintf("polecat %s shutdown — now idle, sandbox preserved", polecatName)
-
-	return result
-}
-
-// HandleHelp processes a HELP message from a polecat requesting intervention.
-// Parses the HELP payload, assesses category/severity, and presents a
-// classified summary to the witness agent for triage.
-func HandleHelp(workDir, rigName string, msg *mail.Message, router *mail.Router) *HandlerResult {
-	result := &HandlerResult{
-		MessageID:    msg.ID,
-		ProtocolType: ProtoHelp,
-	}
-
-	// Parse the message
-	payload, err := ParseHelp(msg.Subject, msg.Body)
-	if err != nil {
-		result.Error = fmt.Errorf("parsing HELP: %w", err)
-		return result
-	}
-
-	// Assess category and severity from content
-	payload.Assessment = AssessHelp(payload)
-
-	// Format the help request summary for the witness agent to triage
-	summary := FormatHelpSummary(payload)
-
-	result.Handled = true
-	result.Action = summary
-	return result
-}
-
-// HandleMerged processes a MERGED message from the Refinery.
-// Verifies cleanup_status before allowing nuke, escalates if work is at risk.
-func HandleMerged(bd *BdCli, workDir, rigName string, msg *mail.Message) *HandlerResult {
-	result := &HandlerResult{
-		MessageID:    msg.ID,
-		ProtocolType: ProtoMerged,
-	}
-
-	payload, err := ParseMerged(msg.Subject, msg.Body)
-	if err != nil {
-		result.Error = fmt.Errorf("parsing MERGED: %w", err)
-		return result
-	}
-
-	wispID, err := findCleanupWisp(bd, workDir, payload.PolecatName)
-	if err != nil {
-		result.Error = fmt.Errorf("finding cleanup wisp: %w", err)
-		return result
-	}
-
-	if wispID == "" {
-		result.Handled = true
-		result.Action = fmt.Sprintf("no cleanup wisp found for %s (may be already cleaned)", payload.PolecatName)
-		return result
-	}
-
-	// Verify the polecat's commit is actually on main before allowing nuke.
-	onMain, err := verifyCommitOnMain(workDir, rigName, payload.PolecatName)
-	if err != nil {
-		result.Action = fmt.Sprintf("warning: couldn't verify commit on main for %s: %v", payload.PolecatName, err)
-	} else if !onMain {
-		result.Handled = true
-		result.WispCreated = wispID
-		result.Error = fmt.Errorf("polecat %s commit is NOT on main - MERGED signal may be stale, DO NOT NUKE", payload.PolecatName)
-		result.Action = fmt.Sprintf("BLOCKED: %s commit not verified on main, merge may have failed", payload.PolecatName)
-		return result
-	}
-
-	cleanupStatus := getCleanupStatus(bd, workDir, rigName, payload.PolecatName)
-	handleMergedCleanupStatus(workDir, rigName, payload.PolecatName, cleanupStatus, wispID, result)
-	return result
-}
-
-// handleMergedCleanupStatus acknowledges merge completion for persistent polecats.
-// Persistent model (gt-4ac): polecats go idle after merge, sandbox preserved.
-// ZFC (gt-5rne): Reports cleanup_status as data. The witness agent decides
-// whether dirty state warrants escalation — Go code does not make that policy call.
-func handleMergedCleanupStatus(_, _, polecatName, cleanupStatus, wispID string, result *HandlerResult) {
-	result.Handled = true
-	result.WispCreated = wispID
-	result.CleanupStatus = cleanupStatus
-	result.Action = fmt.Sprintf("polecat %s merged — idle, sandbox preserved (cleanup_status=%s, wisp=%s)", polecatName, cleanupStatus, wispID)
-}
-
-// HandleMergeFailed processes a MERGE_FAILED message from the Refinery.
-// Notifies the polecat that their merge was rejected and rework is needed.
-func HandleMergeFailed(workDir, rigName string, msg *mail.Message, router *mail.Router) *HandlerResult {
-	result := &HandlerResult{
-		MessageID:    msg.ID,
-		ProtocolType: ProtoMergeFailed,
-	}
-
-	// Parse the message
-	payload, err := ParseMergeFailed(msg.Subject, msg.Body)
-	if err != nil {
-		result.Error = fmt.Errorf("parsing MERGE_FAILED: %w", err)
-		return result
-	}
-
-	// Nudge the polecat about the failure instead of sending permanent mail.
-	initRegistryFromWorkDir(workDir)
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), payload.PolecatName)
-	nudgeMsg := fmt.Sprintf("MERGE_FAILED: branch=%s issue=%s type=%s error=%s — fix and resubmit with 'gt done'",
-		payload.Branch, payload.IssueID, payload.FailureType, payload.Error)
-	t := tmux.NewTmux()
-	if err := t.NudgeSession(sessionName, nudgeMsg); err != nil {
-		result.Error = fmt.Errorf("nudging polecat about failure: %w", err)
-		return result
-	}
-
-	result.Handled = true
-	result.Action = fmt.Sprintf("nudged %s about merge failure: %s - %s", payload.PolecatName, payload.FailureType, payload.Error)
-
-	return result
-}
-
-// HandleSwarmStart processes a SWARM_START message from the Mayor.
-// Creates a swarm tracking wisp to monitor batch polecat work.
-func HandleSwarmStart(bd *BdCli, workDir string, msg *mail.Message) *HandlerResult {
-	result := &HandlerResult{
-		MessageID:    msg.ID,
-		ProtocolType: ProtoSwarmStart,
-	}
-
-	// Parse the message
-	payload, err := ParseSwarmStart(msg.Body)
-	if err != nil {
-		result.Error = fmt.Errorf("parsing SWARM_START: %w", err)
-		return result
-	}
-
-	// Create a swarm tracking wisp
-	wispID, err := createSwarmWisp(bd, workDir, payload)
-	if err != nil {
-		result.Error = fmt.Errorf("creating swarm wisp: %w", err)
-		return result
-	}
-
-	result.Handled = true
-	result.WispCreated = wispID
-	result.Action = fmt.Sprintf("created swarm tracking wisp %s for %s", wispID, payload.SwarmID)
-
-	return result
-}
-
 // createCleanupWisp creates a wisp to track polecat cleanup.
 func createCleanupWisp(bd *BdCli, workDir, polecatName, issueID, branch string) (string, error) {
 	title := fmt.Sprintf("cleanup:%s", polecatName)
@@ -642,37 +382,6 @@ func createCleanupWisp(bd *BdCli, workDir, polecatName, issueID, branch string) 
 	}
 
 	labels := strings.Join(CleanupWispLabels(polecatName, "pending"), ",")
-
-	output, err := bd.Exec(workDir, "create",
-		"--ephemeral",
-		"--json",
-		"--title", title,
-		"--description", description,
-		"--labels", labels,
-	)
-	if err != nil {
-		return "", err
-	}
-
-	// Parse JSON output from bd create --json
-	var created struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal([]byte(output), &created); err != nil {
-		return "", fmt.Errorf("could not parse bead ID from bd create output: %w", err)
-	}
-	if created.ID == "" {
-		return "", fmt.Errorf("bd create --json returned empty ID")
-	}
-	return created.ID, nil
-}
-
-// createSwarmWisp creates a wisp to track swarm (batch) work.
-func createSwarmWisp(bd *BdCli, workDir string, payload *SwarmStartPayload) (string, error) {
-	title := fmt.Sprintf("swarm:%s", payload.SwarmID)
-	description := fmt.Sprintf("Tracking batch: %s\nTotal: %d polecats", payload.SwarmID, payload.Total)
-
-	labels := strings.Join(SwarmWispLabels(payload.SwarmID, payload.Total, 0, payload.StartedAt), ",")
 
 	output, err := bd.Exec(workDir, "create",
 		"--ephemeral",
@@ -729,44 +438,6 @@ func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
 // agentBeadResponse is used to parse the bd show --json response for agent beads.
 type agentBeadResponse struct {
 	Description string `json:"description"`
-}
-
-// getCleanupStatus retrieves the cleanup_status from a polecat's agent bead.
-// Returns the status string: "clean", "has_uncommitted", "has_stash", "has_unpushed"
-// Returns empty string if agent bead doesn't exist or has no cleanup_status.
-//
-// ZFC #10: This enables the Witness to verify it's safe to nuke before proceeding.
-// The polecat self-reports its git state when running `gt done`, and we trust that report.
-func getCleanupStatus(bd *BdCli, workDir, rigName, polecatName string) string {
-	// Construct agent bead ID using the rig's configured prefix
-	// This supports non-gt prefixes like "bd-" for the beads rig
-	townRoot, err := workspace.Find(workDir)
-	if err != nil || townRoot == "" {
-		// Fall back to default prefix
-		townRoot = workDir
-	}
-	prefix := beads.GetPrefixForRig(townRoot, rigName)
-	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil {
-		// Agent bead doesn't exist or bd failed - return empty (unknown status)
-		return ""
-	}
-
-	if output == "" {
-		return ""
-	}
-
-	// Parse the JSON response — bd show --json returns an array
-	var issues []agentBeadResponse
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return ""
-	}
-
-	// Use structured field parser instead of ad-hoc string parsing
-	fields := beads.ParseAgentFields(issues[0].Description)
-	return fields.CleanupStatus
 }
 
 // findMRBeadForBranch queries beads for an open merge-request bead whose
@@ -1213,26 +884,6 @@ func witnessUniqueRefs(values []string) []string {
 	return out
 }
 
-func witnessActiveMRBlocker(bd *beads.Beads, mrID string) string {
-	if mrID == "" {
-		return ""
-	}
-	if bd == nil {
-		return fmt.Sprintf("active_mr=%s status=unverified", mrID)
-	}
-	mr, err := bd.Show(mrID)
-	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return ""
-		}
-		return fmt.Sprintf("active_mr=%s status=lookup_error: %v", mrID, err)
-	}
-	if mr == nil || beads.IssueStatus(mr.Status).IsTerminal() {
-		return ""
-	}
-	return fmt.Sprintf("active_mr=%s status=%s", mrID, mr.Status)
-}
-
 func witnessIssueTerminal(bd *beads.Beads, issueID string) bool {
 	if bd == nil || issueID == "" {
 		return false
@@ -1313,23 +964,6 @@ type RecoveryPayload struct {
 	Branch        string
 	IssueID       string
 	DetectedAt    time.Time
-}
-
-// EscalateRecoveryNeeded nudges the Deacon about a RECOVERY_NEEDED situation.
-// Previously sent permanent mail; now uses ephemeral nudge since the deacon
-// can discover recovery state from cleanup wisps and polecat status.
-// ZFC (gt-5rne): Not called directly from handlers — available for callers
-// who decide escalation is warranted based on reported CleanupStatus data.
-func EscalateRecoveryNeeded(workDir, rigName string, payload *RecoveryPayload) (string, error) {
-	initRegistryFromWorkDir(workDir)
-	sessionName := session.DeaconSessionName()
-	nudgeMsg := fmt.Sprintf("RECOVERY_NEEDED: %s/%s cleanup_status=%s branch=%s issue=%s detected=%s — coordinate recovery before authorizing cleanup",
-		rigName, payload.PolecatName, payload.CleanupStatus, payload.Branch, payload.IssueID, payload.DetectedAt.Format(time.RFC3339))
-	t := tmux.NewTmux()
-	if err := t.NudgeSession(sessionName, nudgeMsg); err != nil {
-		return "", fmt.Errorf("nudging deacon about recovery: %w", err)
-	}
-	return "nudge", nil
 }
 
 // UpdateCleanupWispState updates a cleanup wisp's state label.
