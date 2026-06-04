@@ -1,7 +1,7 @@
 +++
 name = "pipeline-monitor"
 description = "Check Amazon Pipeline health and file P1 beads for blockers, routed to the package-owning rig, with drift-resistant cross-rig dedupe"
-version = 6
+version = 7
 
 [gate]
 type = "cooldown"
@@ -20,6 +20,10 @@ severity = "high"
 # Pipeline Monitor
 
 Check pipeline health and file actionable beads in the rig that **owns the fix** (not necessarily the rig whose package appears on the failure line), so a polecat in that rig can push the change.
+
+**v7 — Fingerprint route override (Step 4.5).** One addition on top of v6:
+
+- **Fingerprint route override (Step 4.5, runs after fingerprint compute, before dedupe):** For specific known fingerprints whose owning rig is structurally different from what the package-based heuristic (Step 3a) or runtime-error heuristic (Step 3b) infer, override routing to the configured target rig. The Midway-authorizer 500-instead-of-401/403 failures (fingerprints `7a99510458b0` and `0e76eb664e63`) re-routed wrong four times in 10 days — the failing-endpoint URL always resolves to the CRUD/Lambda layer (`casc_lambda` / `casc_crud`), but the actual fix lives in the constructs layer that wires the authorizer (`casc_constructs`). Each misroute spent a polecat that closed `no-changes` and re-dispatched. Step 4.5 is the structural fix: a small, evidence-only table mapping fingerprint hash → target rig that runs after the fingerprint is computed and overrides any prior routing decision. The fingerprint itself is not changed — Step 5 dedupe still finds the same bead across cycles regardless of which rig it lives in.
 
 **v6 — Escalate stale grace-window re-fires.** One addition on top of v5:
 
@@ -290,6 +294,73 @@ When the failure source identifies the commit being built or deployed (for examp
 ```bash
 FAILURE_COMMIT="<full SHA from pipeline metadata, or empty if not exposed>"
 ```
+
+## Step 4.5: Fingerprint Route Override
+
+After the fingerprint is computed, consult the **Fingerprint Route Override** table below. If the current `FP_HASH` matches a row, **override** the routing decision from Step 3 (both 3a default and 3b runtime-error reroute) and use the row's target rig + prefix instead. Continue with that rig through the rest of the run (dedupe, file/reuse, audit trail).
+
+The fingerprint string itself is **not** changed — only the chosen rig. Step 5's cross-rig search will still find an existing bead for the same fingerprint regardless of which rig it lives in, so this override doesn't break dedupe.
+
+### Fingerprint Route Override table
+
+| Fingerprint hash | Target rig | Prefix | Why override is needed | Evidence |
+|---|---|---|---|---|
+| `7a99510458b0` | casc_constructs | caco | Midway authorizer returns 500 on auth-enforcement integ tests (expected 401/403). Failing endpoint resolves to a CRUD/Lambda package by URL, but the fix lives in the constructs package that wires the authorizer onto the API. | Misrouted 4× in 10 days: cala-7e9 → casc_lambda (no-changes), cala-tl5 → casc_lambda (no-changes ×2), cacr-s5ct → casc_crud (no-changes per quartz 2026-05-30 07:34Z); refiled to gc-4t8gl (casc_constructs). |
+| `0e76eb664e63` | casc_constructs | caco | Sibling fingerprint of the above, same auth-enforcement failure mode (500-instead-of-401/403); same root cause and owning rig. | Co-occurs with `7a99510458b0` on the same pipeline runs; tracked in gc-4t8gl. |
+
+### How to apply the override
+
+```bash
+# After Step 4 sets FP_HASH:
+case "$FP_HASH" in
+  7a99510458b0|0e76eb664e63)
+    OVERRIDE_RIG="casc_constructs"
+    OVERRIDE_PREFIX="caco"
+    OVERRIDE_REASON="Midway authorizer 500-instead-of-401/403; fix lives in constructs (authorizer wiring), not in failing-endpoint package."
+    ;;
+  *)
+    OVERRIDE_RIG=""
+    ;;
+esac
+
+if [ -n "$OVERRIDE_RIG" ]; then
+  PRIOR_RIG="$CHOSEN_RIG"
+  PRIOR_PREFIX="$CHOSEN_PREFIX"
+  CHOSEN_RIG="$OVERRIDE_RIG"
+  CHOSEN_PREFIX="$OVERRIDE_PREFIX"
+  ROUTING_OVERRIDE_NOTE="Step 4.5 fingerprint override: ${FP_HASH} routed to ${CHOSEN_RIG} (prior decision: ${PRIOR_RIG}). Reason: ${OVERRIDE_REASON}"
+fi
+```
+
+When an override fires, record the chain in any bead filed in Step 7:
+
+```
+Routing override:
+  fingerprint:    <FP_HASH>
+  prior_rig:      <rig that Step 3 chose>
+  override_rig:   <target rig from table>
+  reason:         <one-line from the table's "Why" column>
+```
+
+Also record the override in the Step 8 audit bead so a human reviewer can spot bad rows quickly:
+
+```
+Routing-override hits:
+  - fingerprint=<hash> prior=<rig> override=<rig>
+```
+
+### When to add a row
+
+Add a row only after **either** of these is true:
+
+- A specific fingerprint has misrouted ≥2 times to the wrong rig and a human or crew has confirmed the correct owning rig (the cala-tl5/cacr-s5ct case is the canonical example), OR
+- A maintainer has reviewed the failure and determined the heuristic-routing decision is structurally wrong for that fingerprint and the fix is recurring at a known rig.
+
+Do **not** add rows speculatively. A wrong row creates a silent misroute that's harder to debug than the original heuristic miss — Step 4.5 is intended for narrow, evidence-backed exceptions, not as a general-purpose escape hatch.
+
+### When to remove a row
+
+Remove a row when the underlying structural fix has shipped and the override is no longer needed. Two clean cycles with no override hit (audit bead shows zero `Routing-override hits` for the fingerprint) is the signal. If the override row is still held in place by a sentinel/grace-window match — i.e., the failure isn't actually firing anymore — the row is dead weight; remove it. Removal is reversible: the next misroute will reproduce the same audit-trail evidence that justified the row originally.
 
 ## Step 5: Dedupe — Cross-Rig Search
 
@@ -883,6 +954,17 @@ documents the reference resolution.
 - Cycle N+3 (still no human action): same fingerprint, note #3 appended, escalation fires again (count=3). Repeated escalation is the intended behavior — the previous escalations were not actioned, so the signal needs to keep arriving until someone responds.
 - Pre-v6 behavior (observed on `cait-pyv` and `cait-13v`): only notes were appended; the bead sat 2–11 days without action because nothing actively notified the overseer. v6 turns the 2nd+ re-fire into a HIGH escalation so stale grace-window beads get triaged.
 
+### S15: Fingerprint route override redirects a known misroute (v7)
+
+- Pipeline failure: `CodegenAgentSchedulerLambda` build/test surfaces a Midway-authorizer 500 (expected 401/403) on the auth-enforcement integ test.
+- Step 2 returns `failing_package = CodegenAgentSchedulerLambda` (or `CodegenAgentSchedulerCrudLambda`, depending on which endpoint is exercised).
+- Step 3a routes to `casc_lambda` (or `casc_crud`); Step 3b does not fire (the failure is a 5xx but the fix is structurally a constructs-layer concern, not a missing module in the Lambda bundle — Step 3b's owning-package resolution would still land at the Lambda package).
+- Step 4 computes fingerprint hash `7a99510458b0` (or `0e76eb664e63`).
+- Step 4.5 matches the row in the Fingerprint Route Override table. Override `CHOSEN_RIG` from `casc_lambda`/`casc_crud` to `casc_constructs`. Record `prior_rig` and `override_rig` for the bead description and audit bead.
+- Step 5 cross-rig dedupe still works: the fingerprint label is unchanged, so any prior bead in `casc_constructs` (e.g., gc-4t8gl after the 2026-05-31 refile) is found via Step 5a and reused; no new bead.
+- If no prior bead exists in any rig, Step 7 files in `casc_constructs` with the routing-override block in the description.
+- Pre-v7 behavior (observed 2026-05-21..30): cala-7e9, cala-tl5 ×2, cacr-s5ct — four sequential misroutes to `casc_lambda`/`casc_crud`, each closed `no-changes` because the polecat in those rigs has no code to change. Step 4.5 is the structural fix.
+
 ## Rationale
 
 Filing pipeline-blocker beads in the rig that owns the code lets polecats in
@@ -1005,6 +1087,38 @@ the middle, mainline check last.
   failure exposed a commit SHA. The check fails open: any error or missing
   data falls through to file-new.
 
+**Why fingerprint route override (v7 change):** Step 3a (package-based) and
+Step 3b (runtime-error-owning-package) both infer the owning rig from
+*signals embedded in the failure itself* — the failing-package name, the
+FunctionName, the CFN construct path. Some failures have no such signal
+that resolves to the actual fix-owning rig: the Midway-authorizer
+500-instead-of-401/403 case is the canonical example. The failing endpoint
+URL resolves to a CRUD/Lambda package by URL prefix, but the authorizer
+wiring (and therefore the fix) lives in `casc_constructs`. There is no
+in-failure signal that distinguishes "auth denied with wrong status code"
+(constructs problem) from "auth allowed but handler errored" (Lambda
+problem). The heuristic always picks the Lambda layer because that's where
+the URL terminates — and four polecats in 10 days closed `no-changes`
+because there was no Lambda code to change. Step 4.5 is the small
+exception-mechanism that lets specific known-bad fingerprints route to the
+correct rig without inventing a brittle heuristic that would inevitably
+mis-classify other failures. The override is gated on the **fingerprint
+hash**, not on package names or string patterns, so it cannot drift across
+cycles the way a string-match override would. The dedupe path is unchanged
+— the fingerprint label is the same, so any cycle (with or without the
+override) finds the same prior bead by Step 5a.
+
+**Why a small evidence-only table (v7 design choice):** The override is
+deliberately not a regex / glob / config-DSL. Every row is a specific
+fingerprint hash with a documented misroute history. The cost of a wrong
+row is silent misroutes that are harder to diagnose than the original
+heuristic miss (the bead lands in `casc_constructs` "for unclear reasons"
+rather than in `casc_lambda` "because the URL is a Lambda endpoint"). The
+"Add a row only after ≥2 confirmed misroutes" rule keeps the table small
+and self-justifying; the "Remove a row after two clean cycles" rule keeps
+it from accreting forever. Same discipline as the FunctionName → Package
+table in Step 3b: evidence over speculation.
+
 ## Migration Notes
 
 **Backfilling the Build/Deploy ID label on legacy beads:** Beads filed by v4 do
@@ -1056,3 +1170,30 @@ FunctionName and you confirmed the owning package via CFN construct path,
 or (b) a human reviewed and approved the mapping. Rows without evidence
 create false-positive reroutes that are harder to debug than the
 unknown-FunctionName fallback in S10.
+
+**Backfilling Step 4.5 routing on legacy beads (v7):** Beads filed by v6
+or earlier under fingerprints `7a99510458b0` or `0e76eb664e63` may live in
+the wrong rig (`casc_lambda` or `casc_crud`). The first v7 cycle that
+re-detects either fingerprint will compute Step 4.5's override target
+(`casc_constructs`), then Step 5a's cross-rig search will find the legacy
+bead in the wrong rig and emit a Step 5e rig-mismatch warning, reusing the
+existing bead in place. **A human (or follow-up cleanup task) should
+migrate the bead to `casc_constructs` once the Step 5e warning fires** —
+Step 4.5 deliberately does not auto-migrate, because moving an in-flight
+bead between rigs while a polecat may be working on it creates worse
+problems than the warning. After a clean migration (close the legacy bead
+with `refiled to <new-id>`, file fresh in `casc_constructs`), Step 4.5 +
+Step 5a will route subsequent cycles cleanly. The active gc-4t8gl bead in
+`casc_constructs` (refiled from town-level by gu-whb6 on 2026-05-31) is
+already where Step 4.5 expects it.
+
+**Removing the v7 override if it misroutes:** Step 4.5 has the smallest
+blast radius of any v3+ change: a bad row affects exactly the listed
+fingerprint hash(es), and the audit bead's `Routing-override hits:` block
+makes every override decision visible. To rollback a wrong row: delete it
+from the table and let the next cycle route via Step 3a/3b again. Any
+existing bead filed under the override stays put and continues to be
+reused via cross-rig dedupe; no migration is required. The v7 change is
+therefore safer to land than v4's Step 3b (which changed routing for an
+entire taxonomy of failures) or v5's Step 5h (which can suppress real
+P1s if mainline metadata is wrong).
