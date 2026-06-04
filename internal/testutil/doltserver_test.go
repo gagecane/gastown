@@ -7,7 +7,31 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestShouldReapOrphan(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		started time.Time
+		want    bool
+	}{
+		{"fresh container is protected", now.Add(-30 * time.Second), false},
+		{"long suite still under threshold is protected", now.Add(-30 * time.Minute), false},
+		{"exactly at threshold is protected", now.Add(-orphanReapAge), false},
+		{"just past threshold is reaped", now.Add(-orphanReapAge - time.Second), true},
+		{"days-old leak is reaped", now.Add(-5 * 24 * time.Hour), true},
+		{"zero start time (never started) is reaped", time.Time{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldReapOrphan(tt.started, now); got != tt.want {
+				t.Errorf("shouldReapOrphan(%v, %v) = %v, want %v", tt.started, now, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestIsReaperRemovingErr(t *testing.T) {
 	tests := []struct {
