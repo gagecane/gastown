@@ -59,3 +59,24 @@ func TestReplay_LoopBreakerWindow(t *testing.T) {
 	}
 	t.Fatal("loop-breaker fixture not found")
 }
+
+// TestReplay_BootDeaconFlapCollapses asserts the Call 1(B) state-hash damper:
+// three dead-owner reservations flapping across boot/deacon owners within ONE
+// rig collapse to a single candidate (not three).
+func TestReplay_BootDeaconFlapCollapses(t *testing.T) {
+	fixtures, err := LoadFixtures("testdata/replay")
+	if err != nil {
+		t.Fatalf("loading fixtures: %v", err)
+	}
+	for _, f := range fixtures {
+		if f.Input.Window.ID != "2026-06-01/1d-boot-deacon-flap" {
+			continue
+		}
+		cands := Evaluate(DefaultRules(), f.Input)
+		if len(cands) != 1 {
+			t.Errorf("boot<->deacon flap must collapse to 1 candidate, got %d: %+v", len(cands), cands)
+		}
+		return
+	}
+	t.Fatal("boot-deacon flap fixture not found")
+}

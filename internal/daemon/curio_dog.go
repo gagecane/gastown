@@ -82,7 +82,24 @@ func (d *Daemon) runCurio() {
 		return
 	}
 
+	// Call 1(A) air-gap: the set of beads Curio itself has filed. Empty today —
+	// Curio is candidates-only and files no beads (the air-gap stays dormant
+	// until filing turns on in a later build). Wired now so the loop-breaker's
+	// causal half is exercised end-to-end the moment filing is enabled.
+	in.CurioBeads = d.collectCurioFiledBeads()
+
 	cands := curio.Evaluate(curio.DefaultRules(), in)
+
+	// Call 1(C) reaction-count backstop: observe this cycle's candidates so a
+	// (rule,target) flapping across cycles gets frozen. The annotation
+	// (ReactionCount/Frozen) is consumed by Call 2 (gu-2coqj); build 2a only
+	// records it. Runs even on an empty cycle so the tracker ages out quiet
+	// findings.
+	if d.curioReactions == nil {
+		d.curioReactions = curio.NewReactionTracker()
+	}
+	cands = d.curioReactions.Observe(cands)
+
 	if len(cands) == 0 {
 		d.logger.Printf("curio: cycle complete — no candidates")
 		return

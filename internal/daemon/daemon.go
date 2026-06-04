@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/boot"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/curio"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -235,6 +236,13 @@ type Daemon struct {
 	// line and resumes when the breaker half-closes. Source: gu-8f20q
 	// (P2-19 from the x2kby code-review synthesis).
 	doltBreaker *DoltCircuitBreaker
+
+	// curioReactions is the Curio Call 1(C) reaction-count backstop tracker. It
+	// is cross-cycle state (it remembers how often each finding has flapped) and
+	// is only ever touched from the curio patrol, which runs serially on the
+	// heartbeat goroutine — so it needs no locking. Lazily initialized on the
+	// first curio cycle.
+	curioReactions *curio.ReactionTracker
 }
 
 // alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It

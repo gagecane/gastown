@@ -52,3 +52,18 @@ func (d *Daemon) collectMergedBeadObservations() []curio.MergedBeadObservation {
 	}
 	return out
 }
+
+// collectCurioFiledBeads returns the set of bead IDs Curio itself has filed,
+// for the Call 1(A) air-gap (curio.Input.CurioBeads). A record whose causal
+// chain ROOTS at one of these beads is a reaction to Curio's own activity and
+// is suppressed by the loop-breaker.
+//
+// Build 2a: Curio is candidates-only and files ZERO beads, so this is always
+// empty today — the air-gap's causal half is dormant. It is wired here (rather
+// than left nil at the call site) so that the day filing turns on, the only
+// change needed is to make this return the curio-actor-filed beads; the
+// loop-breaker plumbing is already in place and tested. Returning nil is the
+// correct, conservative answer while filing is off.
+func (d *Daemon) collectCurioFiledBeads() map[string]bool {
+	return nil
+}

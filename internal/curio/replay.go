@@ -35,6 +35,10 @@ type fixtureJSON struct {
 	LogLines    []LogLine
 	EventCounts []SeriesCount
 	Admissions  []AdmissionRecord
+	// CurioBeads lists bead IDs Curio itself filed (Call 1(A) air-gap). A
+	// fixture record whose CausalRoot is in this list is a self-reaction the
+	// loop-breaker must suppress. Optional; omitted in most fixtures.
+	CurioBeads []string
 }
 
 // LoadFixtures reads all *.json fixtures from dir, sorted by filename for
@@ -62,6 +66,13 @@ func LoadFixtures(dir string) ([]Fixture, error) {
 		if err := json.Unmarshal(data, &fj); err != nil {
 			return nil, fmt.Errorf("parsing fixture %s: %w", name, err)
 		}
+		var curioBeads map[string]bool
+		if len(fj.CurioBeads) > 0 {
+			curioBeads = make(map[string]bool, len(fj.CurioBeads))
+			for _, id := range fj.CurioBeads {
+				curioBeads[id] = true
+			}
+		}
 		fixtures = append(fixtures, Fixture{
 			Name:        fj.Name,
 			Anchor:      fj.Anchor,
@@ -72,6 +83,7 @@ func LoadFixtures(dir string) ([]Fixture, error) {
 				LogLines:    fj.LogLines,
 				EventCounts: fj.EventCounts,
 				Admissions:  fj.Admissions,
+				CurioBeads:  curioBeads,
 			},
 		})
 	}

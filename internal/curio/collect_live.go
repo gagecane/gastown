@@ -220,6 +220,13 @@ func scanLogForKillSignals(source, content string, knownDoltPIDs []int) []LogLin
 		if !lineHasKillSignal(line) {
 			continue
 		}
+		// Call 1(A) air-gap: a kill-signal line emitted by Curio's own log is
+		// suppressed at the collector so Curio cannot detect itself even if its
+		// log were scanned (the daemon scans sibling-dog logs, but defending
+		// here keeps the loop-breaker uniform across collectors).
+		if isCurio(source) {
+			continue
+		}
 		out = append(out, LogLine{
 			Source:      source,
 			Text:        line,

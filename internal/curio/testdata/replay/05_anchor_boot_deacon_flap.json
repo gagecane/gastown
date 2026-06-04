@@ -1,0 +1,11 @@
+{
+  "name": "boot<->deacon dead-owner flap collapses to one candidate (Call 1B)",
+  "anchor": "dead_owner_admission_flap",
+  "expect_rules": ["dead_owner_admission"],
+  "window_id": "2026-06-01/1d-boot-deacon-flap",
+  "Admissions": [
+    {"ID": "adm-boot", "PID": 4242, "Rig": "gastown", "OwnerAlive": false, "FiledBy": "scheduler"},
+    {"ID": "adm-deacon", "PID": 4343, "Rig": "gastown", "OwnerAlive": false, "FiledBy": "scheduler"},
+    {"ID": "adm-boot2", "PID": 4444, "Rig": "gastown", "OwnerAlive": false, "FiledBy": "scheduler"}
+  ]
+}

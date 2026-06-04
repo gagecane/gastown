@@ -31,6 +31,34 @@ type Window struct {
 // Curio cannot anomaly-detect its own activity (safety invariant 5).
 const CurioActor = "curio"
 
+// CurioSeriesPrefix marks event series Curio itself emits. The Call 1(A)
+// air-gap drops these at collection so Curio's own telemetry can never feed the
+// rate rule (a self-reaction the FiledBy loop-breaker alone would miss when an
+// event is attributed to the emitting subsystem rather than to "curio").
+const CurioSeriesPrefix = "curio."
+
+// Causal provenance (Call 1(A) air-gap). Records carry the chain that produced
+// them so the loop-breaker can drop not just Curio's OWN records (FiledBy ==
+// CurioActor) but also any record that is a REACTION to a Curio-filed bead
+// (CausalRoot ∈ Input.CurioBeads). Without this, Curio could detect the
+// downstream churn its own (future) filings provoke and feed a runaway loop.
+//
+// These fields are plumbing only in build 2a: no external emit site populates
+// them yet (adding CausalRoot columns at non-curio emit sites is the
+// broadest-blast-radius change and is deliberately deferred — see gu-5ynaa
+// scope note). An empty CausalRoot means "unknown provenance," which the
+// loop-breaker treats as not-Curio (conservative: stays visible to detection).
+//
+//   - CausalParent is the immediate antecedent (e.g. the bead/event that
+//     directly triggered this record). Carried for tracing only.
+//   - CausalRoot is the origin of the causal chain. The loop-breaker keys on
+//     this: if the chain originates at a Curio-filed bead, the record is a
+//     self-reaction and is suppressed.
+type causalProvenance struct {
+	CausalParent string
+	CausalRoot   string
+}
+
 // BeadRecord is a normalized closed-bead observation for the
 // merged-but-not-landed rule (a). The collector resolves the git ancestry probe
 // upstream; the rule never shells out.
@@ -48,6 +76,9 @@ type BeadRecord struct {
 	CommitInMainAncestry bool
 	// FiledBy is the bead's provenance actor (loop-breaker input).
 	FiledBy string
+	// causalProvenance carries the Call 1(A) air-gap chain (CausalParent /
+	// CausalRoot). Empty in build 2a — no emit site populates it yet.
+	causalProvenance
 }
 
 // LogLine is a normalized dog-log observation for the kill-signal-near-Dolt
@@ -62,6 +93,8 @@ type LogLine struct {
 	NearDoltPID bool
 	// FiledBy is the provenance actor of the emitting component (loop-breaker).
 	FiledBy string
+	// causalProvenance carries the Call 1(A) air-gap chain. Empty in build 2a.
+	causalProvenance
 }
 
 // SeriesCount is a per-series event count over the window, for the alarm-rate
@@ -77,6 +110,8 @@ type SeriesCount struct {
 	// When a window mixes actors, the collector should split counts; for the
 	// rate rule we treat a non-curio series as eligible.
 	FiledBy string
+	// causalProvenance carries the Call 1(A) air-gap chain. Empty in build 2a.
+	causalProvenance
 }
 
 // AdmissionRecord is a normalized polecat-admission observation for the
@@ -93,6 +128,8 @@ type AdmissionRecord struct {
 	OwnerAlive bool
 	// FiledBy is the provenance actor (loop-breaker input).
 	FiledBy string
+	// causalProvenance carries the Call 1(A) air-gap chain. Empty in build 2a.
+	causalProvenance
 }
 
 // Input is the full normalized observation bundle for one patrol cycle / replay
@@ -103,4 +140,23 @@ type Input struct {
 	LogLines    []LogLine
 	EventCounts []SeriesCount
 	Admissions  []AdmissionRecord
+
+	// CurioBeads is the set of bead IDs Curio itself has filed (by ID). It is
+	// the second half of the Call 1(A) air-gap: a record whose CausalRoot is in
+	// this set is a REACTION to a Curio filing and is suppressed by the
+	// loop-breaker, even when its FiledBy is some downstream subsystem rather
+	// than "curio". Empty in build 2a (Curio files no beads yet), so the air-gap
+	// is dormant until filing turns on — but the plumbing is in place and tested.
+	CurioBeads map[string]bool
+}
+
+// isCurioReaction reports whether a record with the given provenance is a
+// reaction to one of Curio's own filed beads. This is the CausalRoot half of
+// the Call 1(A) air-gap. An empty CausalRoot or nil/empty curioBeads set means
+// "not a known reaction" (conservative: stays visible to detection).
+func (in Input) isCurioReaction(p causalProvenance) bool {
+	if p.CausalRoot == "" || len(in.CurioBeads) == 0 {
+		return false
+	}
+	return in.CurioBeads[p.CausalRoot]
 }

@@ -3,6 +3,10 @@ package curio
 import (
 	"fmt"
 	"sort"
+	"strings"
+
+	"github.com/steveyegge/gastown/internal/fingerprint"
+	"github.com/steveyegge/gastown/internal/liveness"
 )
 
 // Rule is a pure content-detection predicate. It reads the normalized Input
@@ -23,6 +27,15 @@ func isCurio(filedBy string) bool {
 	return filedBy == CurioActor
 }
 
+// suppressed is the full Call 1(A) loop-breaker: a record is suppressed if it
+// is Curio's OWN (FiledBy == "curio") OR a REACTION to a Curio-filed bead
+// (CausalRoot ∈ Input.CurioBeads). Build 2a extends the original FiledBy-only
+// check with the second, causal half so that once filing turns on, the churn a
+// Curio bead provokes downstream cannot feed back as a fresh detection.
+func (in Input) suppressed(filedBy string, p causalProvenance) bool {
+	return isCurio(filedBy) || in.isCurioReaction(p)
+}
+
 // --- Rule (a): bead closed "merged" but commit not in main ancestry ---
 // gu-kc3lo class. No rate/latency signature; a pure correctness fact.
 
@@ -33,7 +46,7 @@ func (mergedNotLandedRule) ID() string { return "bead_merged_not_landed" }
 func (r mergedNotLandedRule) Eval(in Input) []Candidate {
 	var out []Candidate
 	for _, b := range in.Beads {
-		if isCurio(b.FiledBy) {
+		if in.suppressed(b.FiledBy, b.causalProvenance) {
 			continue
 		}
 		if b.CloseReason != "merged" {
@@ -61,7 +74,7 @@ func (killSignalNearDoltRule) ID() string { return "kill_signal_near_dolt" }
 func (r killSignalNearDoltRule) Eval(in Input) []Candidate {
 	var out []Candidate
 	for i, l := range in.LogLines {
-		if isCurio(l.FiledBy) {
+		if in.suppressed(l.FiledBy, l.causalProvenance) {
 			continue
 		}
 		if !l.NearDoltPID {
@@ -107,7 +120,12 @@ func (rateSpikeRule) ID() string { return "alarm_rate_spike" }
 func (r rateSpikeRule) Eval(in Input) []Candidate {
 	var out []Candidate
 	for _, c := range in.EventCounts {
-		if isCurio(c.FiledBy) {
+		if in.suppressed(c.FiledBy, c.causalProvenance) {
+			continue
+		}
+		// Call 1(A) air-gap: never rate-detect Curio's own telemetry series,
+		// regardless of which actor the events were attributed to.
+		if strings.HasPrefix(c.Series, CurioSeriesPrefix) {
 			continue
 		}
 		threshold, known := r.thresholds[c.Series]
@@ -136,7 +154,7 @@ func (deadOwnerAdmissionRule) ID() string { return "dead_owner_admission" }
 func (r deadOwnerAdmissionRule) Eval(in Input) []Candidate {
 	var out []Candidate
 	for _, a := range in.Admissions {
-		if isCurio(a.FiledBy) {
+		if in.suppressed(a.FiledBy, a.causalProvenance) {
 			continue
 		}
 		if a.OwnerAlive {
@@ -144,7 +162,30 @@ func (r deadOwnerAdmissionRule) Eval(in Input) []Candidate {
 		}
 		summary := fmt.Sprintf("admission reservation %s owned by dead PID %d leaking capacity (rig %s)",
 			a.ID, a.PID, a.Rig)
-		out = append(out, newCandidate(in.Window.ID, r.ID(), a.ID, a.Rig, "polecat.admission.dead_owner", 1, summary))
+		cand := newCandidate(in.Window.ID, r.ID(), a.ID, a.Rig, "polecat.admission.dead_owner", 1, summary)
+
+		// Call 1(B) state-hash damper: the actionable STATE is "this rig has
+		// leaked capacity", not "this PID-keyed reservation file exists". The
+		// scheduler rewrites reservation files across boot/deacon cycles, so the
+		// same leak flaps through a series of distinct reservation IDs/owners.
+		// Keying StateHash on the rig (the stable dimension) collapses that flap
+		// to ONE candidate. When the rig is unknown we fall back to the
+		// per-reservation fingerprint (default) — never over-collapse unkeyed
+		// reservations into a single bucket.
+		if a.Rig != "" {
+			cand.StateHash = fingerprint.Of(r.ID(), "rig", a.Rig)
+		}
+
+		// Call 3 freeze-class fast path: dead_owner is the rule firing in
+		// production, and its truth is a cheap, deterministic syscall — so it
+		// rides the LaneVerified path. Attach a Verify() thunk that re-probes
+		// PID liveness; the finding STILL HOLDS iff the owner is still dead. Eval
+		// only constructs the thunk (pure); the live emitter (Call 2, 2b) calls
+		// it. Capturing the PID by value keeps the thunk free of loop-var aliasing.
+		pid := a.PID
+		cand.verify = func() bool { return !liveness.PIDAlive(pid) }
+
+		out = append(out, cand)
 	}
 	return out
 }
@@ -159,17 +200,28 @@ func DefaultRules() []Rule {
 	}
 }
 
-// Evaluate runs all rules over the input and returns deduplicated candidates
-// (by fingerprint), sorted deterministically by fingerprint for stable output.
+// Evaluate runs all rules over the input and returns deduplicated candidates,
+// sorted deterministically by fingerprint for stable output.
+//
+// Dedup is by StateHash, not Fingerprint (Call 1(B) state-hash damper): two
+// candidates that describe the same DISTINCT STATE — even via different
+// fingerprints, like a leak flapping across reservation IDs within one rig —
+// collapse to one. For rules that don't set a coarser StateHash, StateHash ==
+// Fingerprint, so this is identical to the prior fingerprint-dedup behavior.
+// First-writer-wins within the rule order, so output stays deterministic.
 func Evaluate(rules []Rule, in Input) []Candidate {
 	seen := make(map[string]bool)
 	var out []Candidate
 	for _, rule := range rules {
 		for _, c := range rule.Eval(in) {
-			if seen[c.Fingerprint] {
+			key := c.StateHash
+			if key == "" {
+				key = c.Fingerprint
+			}
+			if seen[key] {
 				continue
 			}
-			seen[c.Fingerprint] = true
+			seen[key] = true
 			out = append(out, c)
 		}
 	}
