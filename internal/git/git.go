@@ -1735,6 +1735,37 @@ func (g *Git) FindPRNumber(branch string) (int, error) {
 	return prs[0].Number, nil
 }
 
+// FindMergedPRCommit returns the merge commit SHA of the most recent MERGED PR
+// whose head was the given branch, or "" if no merged PR exists. Used to make
+// the refinery's post-merge close idempotent when a PR was merged out-of-band
+// (e.g. a refinery cycle that merged on GitHub but crashed before post-merge
+// close, GitHub auto-merge, or a manual merge), leaving a stale 'ready' MR wisp
+// whose head branch is gone. See gs-4uz.
+func (g *Git) FindMergedPRCommit(branch string) (string, error) {
+	cmd := exec.Command("gh", "pr", "list", "--head", branch, "--state", "merged", "--json", "mergeCommit", "--limit", "1")
+	cmd.Dir = g.workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list (merged) failed: %w", err)
+	}
+	out = bytes.TrimSpace(out)
+	if len(out) <= 2 {
+		return "", nil // No merged PR
+	}
+	var prs []struct {
+		MergeCommit struct {
+			OID string `json:"oid"`
+		} `json:"mergeCommit"`
+	}
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return "", fmt.Errorf("failed to parse gh pr list (merged) output: %w", err)
+	}
+	if len(prs) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(prs[0].MergeCommit.OID), nil
+}
+
 // IsPRApproved checks whether a GitHub PR has at least one approving review.
 // Returns true if approved, false if not (or on error).
 func (g *Git) IsPRApproved(prNumber int) (bool, error) {

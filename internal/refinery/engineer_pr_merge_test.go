@@ -138,6 +138,63 @@ func TestDoMergePR_NoPR_ReturnsError(t *testing.T) {
 	}
 }
 
+// fakeMergedPRProvider reports no OPEN PR but (optionally) an already-MERGED PR
+// for a branch — the gs-4uz out-of-band-merge scenario.
+type fakeMergedPRProvider struct {
+	mergedCommit string // returned by FindMergedPRCommit; "" means none
+}
+
+func (f *fakeMergedPRProvider) FindPRNumber(string) (int, error)    { return 0, nil }
+func (f *fakeMergedPRProvider) IsPRApproved(int) (bool, error)      { return false, nil }
+func (f *fakeMergedPRProvider) MergePR(int, string) (string, error) { return "", nil }
+func (f *fakeMergedPRProvider) FindMergedPRCommit(string) (string, error) {
+	return f.mergedCommit, nil
+}
+
+func TestDoMergePR_AlreadyMerged_TreatedAsSuccess(t *testing.T) {
+	// gs-4uz: when no OPEN PR exists but the branch's PR was already merged
+	// out-of-band (commit on origin/main), doMergePR must treat it as a
+	// successful merge so the caller runs the atomic post-merge close, rather
+	// than leaving a 'ready + GIT MISSING' orphan and an un-closed source bead.
+	workDir, g, _ := testGitRepo(t)
+	e := newTestEngineer(t, workDir, g)
+
+	// Simulate the already-merged-and-deleted branch: merge a feature branch
+	// into main, push, then delete the branch — its work is now on origin/main.
+	createFeatureBranch(t, workDir, "feat/already-merged", "merged.txt", "landed")
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--no-ff", "feat/already-merged", "-m", "merge feat")
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "HEAD")
+	run(t, workDir, "git", "branch", "-D", "feat/already-merged")
+
+	e.prProvider = &fakeMergedPRProvider{mergedCommit: mergeCommit}
+
+	result := e.doMergePR(context.Background(), "feat/already-merged", "main")
+
+	if !result.Success {
+		t.Fatalf("expected Success when PR already merged out-of-band, got error: %s", result.Error)
+	}
+	if result.MergeCommit != mergeCommit {
+		t.Errorf("expected MergeCommit %s, got %s", mergeCommit, result.MergeCommit)
+	}
+}
+
+func TestDoMergePR_NoOpenPR_NoMergedPR_StillFails(t *testing.T) {
+	// gs-4uz fail-closed: no OPEN PR and no already-merged PR must remain an
+	// error — nothing landed, so the source bead must NOT be closed.
+	workDir, g, _ := testGitRepo(t)
+	e := newTestEngineer(t, workDir, g)
+	createFeatureBranch(t, workDir, "feat/no-pr-at-all", "x.txt", "hi")
+
+	e.prProvider = &fakeMergedPRProvider{mergedCommit: ""}
+
+	result := e.doMergePR(context.Background(), "feat/no-pr-at-all", "main")
+	if result.Success {
+		t.Error("expected failure when neither open nor merged PR exists")
+	}
+}
+
 func TestProcessResult_NeedsApproval(t *testing.T) {
 	// Verify NeedsApproval field works on ProcessResult.
 	r := ProcessResult{

@@ -909,6 +909,37 @@ func (e *Engineer) doMergePR(ctx context.Context, branch, target string) Process
 		}
 	}
 	if prNumber == 0 {
+		// gs-4uz: no OPEN PR may mean the PR was already MERGED out-of-band — a
+		// prior refinery cycle that merged on GitHub but crashed before
+		// post-merge close, GitHub auto-merge, or a manual merge. The work has
+		// LANDED on the target branch, but the MR wisp is still 'ready' with its
+		// head branch deleted ('ready + GIT MISSING'), and the source bead —
+		// frequently HELD on an idle pr-open polecat — is never closed, so it
+		// gets re-dispatched and the merged work is redone. Detect the
+		// already-merged PR and treat it as a successful merge so the caller runs
+		// the atomic post-merge close (close source bead + MR wisp, delete
+		// branch). The merge is authoritative.
+		if finder, ok := e.prProvider.(mergedPRFinder); ok {
+			if mergeCommit, mErr := finder.FindMergedPRCommit(branch); mErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not check for already-merged PR on branch %s: %v\n", branch, mErr)
+			} else if mergeCommit != "" {
+				// Sync local target, then verify the merge commit actually landed
+				// on origin/<target> before declaring success. Fail-closed against
+				// phantom merges (cf. gu-ilf86): an unverified close would falsely
+				// report shipped work and strand it off mainline.
+				if err := e.git.Checkout(target); err != nil {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: checkout %s for already-merged verify: %v\n", target, err)
+				} else if err := e.git.Pull("origin", target); err != nil {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull %s for already-merged verify: %v\n", target, err)
+				}
+				landed, ancErr := e.git.IsAncestor(mergeCommit, target)
+				if ancErr == nil && landed {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] No open PR for %s, but its PR already merged (commit %s on %s) — completing post-merge close (gs-4uz)\n", branch, shortSHA(mergeCommit), target)
+					return ProcessResult{Success: true, MergeCommit: mergeCommit}
+				}
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Merged PR for %s reports commit %s but it is not on %s (ancestor=%v err=%v) — not closing (fail-closed)\n", branch, shortSHA(mergeCommit), target, landed, ancErr)
+			}
+		}
 		return ProcessResult{
 			Success: false,
 			Error:   fmt.Sprintf("no open PR found for branch %s — merge_strategy=pr requires a PR", branch),
