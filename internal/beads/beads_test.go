@@ -1318,7 +1318,15 @@ func TestIntegration(t *testing.T) {
 		t.Skip("no dolt database found")
 	}
 
-	b := New(dir)
+	// Bypass the town-wide bd-list-read flock. This test only exercises
+	// read-only smoke queries against the live town DB; it has no reason to
+	// queue behind every other parallel test binary's `bd list` on the flock.
+	// Under `go test ./...` that contention made TestIntegration/List flake
+	// with "timed out waiting for bd list read throttle" even after the wait
+	// was widened to 30s (gu-zgdc). Skipping the flock here removes the
+	// contention entirely without touching production throttle behavior
+	// (gs-1oh).
+	b := New(dir).WithoutReadThrottle()
 
 	// Test List
 	t.Run("List", func(t *testing.T) {
