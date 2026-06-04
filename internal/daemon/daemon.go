@@ -1273,6 +1273,31 @@ func (d *Daemon) recoveryHeartbeatInterval() time.Duration {
 // - Dead sessions that need restart
 // - Agents with work-on-hook not progressing (GUPP violation)
 // - Orphaned work (assigned to dead agents)
+// heartbeatPhaseSlowThreshold is the duration above which a heartbeat phase is
+// logged as slow even without GT_HEARTBEAT_PROFILE. The whole recovery heartbeat
+// targets well under the 3-min interval; any single phase over 10s is worth
+// surfacing because it eats into the dispatch budget (gu-pjrz3: the dispatch
+// tick was timing out at 5m with no visibility into which phase consumed it).
+const heartbeatPhaseSlowThreshold = 10 * time.Second
+
+// phase times a single heartbeat phase and logs its duration. It ALWAYS logs
+// when the phase exceeds heartbeatPhaseSlowThreshold (so a slow phase is visible
+// in normal operation), and logs every phase when GT_HEARTBEAT_PROFILE is set
+// (full per-tick breakdown for diagnosis). This turns the previously-opaque
+// heartbeat — ~25 sequential phases with no timing — into a measurable sequence,
+// so "what is taking long in the heartbeat" is answered by the log instead of
+// inferred from gaps between unrelated lines. Cheap: one time.Now() per phase.
+func (d *Daemon) phase(name string, fn func()) {
+	start := time.Now()
+	fn()
+	elapsed := time.Since(start)
+	if elapsed >= heartbeatPhaseSlowThreshold {
+		d.logger.Printf("Heartbeat phase %q SLOW: %s", name, elapsed.Round(time.Millisecond))
+	} else if os.Getenv("GT_HEARTBEAT_PROFILE") != "" {
+		d.logger.Printf("Heartbeat phase %q: %s", name, elapsed.Round(time.Millisecond))
+	}
+}
+
 func (d *Daemon) heartbeat(state *State) {
 	// Skip heartbeat if shutdown is in progress.
 	// This prevents the daemon from fighting shutdown by auto-restarting killed agents.
@@ -1308,16 +1333,16 @@ func (d *Daemon) heartbeat(state *State) {
 	}
 
 	// 0b. Kill ghost sessions left over from stale registry (default "gt" prefix).
-	d.killDefaultPrefixGhosts()
+	d.phase("killDefaultPrefixGhosts", d.killDefaultPrefixGhosts)
 
 	// 0. Ensure Dolt server is running (if configured)
 	// This must happen before beads operations that depend on Dolt.
-	d.ensureDoltServerRunning()
+	d.phase("ensureDoltServerRunning", d.ensureDoltServerRunning)
 
 	// 1. Ensure Deacon is running (restart if dead)
 	// Check patrol config - can be disabled in mayor/daemon.json
 	if d.isPatrolActive("deacon") {
-		d.ensureDeaconRunning()
+		d.phase("ensureDeaconRunning", d.ensureDeaconRunning)
 	} else {
 		d.logger.Printf("Deacon patrol disabled in config, skipping")
 		// Kill leftover deacon/boot sessions from before patrol was disabled.
@@ -1330,24 +1355,24 @@ func (d *Daemon) heartbeat(state *State) {
 	// Boot handles nuanced "is Deacon responsive" decisions
 	// Only run if Deacon patrol is enabled
 	if d.isPatrolActive("deacon") {
-		d.ensureBootRunning()
+		d.phase("ensureBootRunning", d.ensureBootRunning)
 	}
 
 	// 3. Direct Deacon heartbeat check (belt-and-suspenders)
 	// Boot may not detect all stuck states; this provides a fallback
 	// Only run if Deacon patrol is enabled
 	if d.isPatrolActive("deacon") {
-		d.checkDeaconHeartbeat()
+		d.phase("checkDeaconHeartbeat", d.checkDeaconHeartbeat)
 		// Preventative scheduled restart for long-running deacon sessions
 		// (gs-a0x). Disabled by default; opt-in via
 		// operational.daemon.deacon_max_session_age.
-		d.checkDeaconAge()
+		d.phase("checkDeaconAge", d.checkDeaconAge)
 	}
 
 	// 4. Ensure Witnesses are running for all rigs (restart if dead)
 	// Check patrol config - can be disabled in mayor/daemon.json
 	if d.isPatrolActive("witness") {
-		d.ensureWitnessesRunning()
+		d.phase("ensureWitnessesRunning", d.ensureWitnessesRunning)
 	} else {
 		d.logger.Printf("Witness patrol disabled in config, skipping")
 		// Kill leftover witness sessions from before patrol was disabled. (hq-2mstj)
@@ -1361,7 +1386,7 @@ func (d *Daemon) heartbeat(state *State) {
 		if p := d.checkPressure("refinery"); !p.OK {
 			d.logger.Printf("Deferring refinery spawn: %s", p.Reason)
 		} else {
-			d.ensureRefineriesRunning()
+			d.phase("ensureRefineriesRunning", d.ensureRefineriesRunning)
 		}
 	} else {
 		d.logger.Printf("Refinery patrol disabled in config, skipping")
@@ -1370,7 +1395,7 @@ func (d *Daemon) heartbeat(state *State) {
 	}
 
 	// 6. Ensure Mayor is running (restart if dead)
-	d.ensureMayorRunning()
+	d.phase("ensureMayorRunning", d.ensureMayorRunning)
 
 	// 6.5. Handle Dog lifecycle: cleanup stuck dogs and dispatch plugins
 	// Pressure-gated: dog dispatch spawns new agent sessions.
@@ -1378,16 +1403,16 @@ func (d *Daemon) heartbeat(state *State) {
 		if p := d.checkPressure("dog"); !p.OK {
 			d.logger.Printf("Deferring dog dispatch: %s", p.Reason)
 			// Still run cleanup phases (stuck/stale/idle) — only skip dispatch
-			d.handleDogsCleanupOnly()
+			d.phase("handleDogsCleanupOnly", d.handleDogsCleanupOnly)
 		} else {
-			d.handleDogs()
+			d.phase("handleDogs", d.handleDogs)
 		}
 	} else {
 		d.logger.Printf("Handler patrol disabled in config, skipping")
 	}
 
 	// 7. Process lifecycle requests
-	d.processLifecycleRequests()
+	d.phase("processLifecycleRequests", d.processLifecycleRequests)
 
 	// 7a. Process RESTART_POLECAT requests from the stuck-agent-dog plugin
 	// (gu-nep2). Dogs file these into the deacon inbox when they detect a
@@ -1395,19 +1420,19 @@ func (d *Daemon) heartbeat(state *State) {
 	// closes the self-healing loop deterministically; the deacon LLM agent
 	// historically dropped them, leaving polecats wedged until a human ran
 	// `gt session start` by hand.
-	d.processRestartPolecatRequests()
+	d.phase("processRestartPolecatRequests", d.processRestartPolecatRequests)
 
 	// 9. (Removed) Stale agent check - violated "discover, don't track"
 
 	// 10. Check for GUPP violations (agents with work-on-hook not progressing)
-	d.checkGUPPViolations()
+	d.phase("checkGUPPViolations", d.checkGUPPViolations)
 
 	// 11. Check for orphaned work (assigned to dead agents)
-	d.checkOrphanedWork()
+	d.phase("checkOrphanedWork", d.checkOrphanedWork)
 
 	// 12. Check polecat session health (proactive crash detection)
 	// This validates tmux sessions are still alive for polecats with work-on-hook
-	d.checkPolecatSessionHealth()
+	d.phase("checkPolecatSessionHealth", d.checkPolecatSessionHealth)
 
 	// 12a. Reap stuck in_progress/hooked wisps belonging to dead polecats.
 	// When a polecat hard-crashes (OOM, tmux kill), its Stop hook never fires
@@ -1415,7 +1440,7 @@ func (d *Daemon) heartbeat(state *State) {
 	// doctor patrol-not-stuck warnings. checkPolecatSessionHealth detects the
 	// crash but only notifies the witness — it does not reset the beads.
 	// This reaper bridges that gap with a conservative timeout. See gu-1x0j.
-	d.reapDeadPolecatWisps()
+	d.phase("reapDeadPolecatWisps", d.reapDeadPolecatWisps)
 
 	// 12a-ii. Reap stuck in_progress/hooked wisps belonging to dead witness or
 	// refinery sessions. Same shape as the polecat reaper above but for the
@@ -1423,12 +1448,12 @@ func (d *Daemon) heartbeat(state *State) {
 	// refinery tmux session dies between patrol cycles, its hooked patrol
 	// wisp stays HOOKED forever and freezes the next patrol cycle. Uses
 	// bead.updated_at age as the staleness proxy. See gu-s009.
-	d.reapDeadAgentWisps()
+	d.phase("reapDeadAgentWisps", d.reapDeadAgentWisps)
 
 	// 12b. Reap idle polecat sessions to prevent API slot burn.
 	// Polecats transition to IDLE after gt done but sessions stay alive.
 	// Kill sessions that have been idle longer than the configured threshold.
-	d.reapIdlePolecats()
+	d.phase("reapIdlePolecats", d.reapIdlePolecats)
 
 	// 12b-ii. Reclaim cleanly-stalled polecat debris (gs-9wz).
 	// A polecat whose session dies WITHOUT completing gt done's idle transition
@@ -1441,18 +1466,18 @@ func (d *Daemon) heartbeat(state *State) {
 	// `gt polecat nuke` path (NO --force, so its safety checks refuse anything
 	// carrying real work). This keeps working capacity > 0 without the manual
 	// nukes operators were doing by hand.
-	d.reclaimStalledCleanPolecats()
+	d.phase("reclaimStalledCleanPolecats", d.reclaimStalledCleanPolecats)
 
 	// 13. Clean up orphaned claude subagent processes (memory leak prevention)
 	// These are Task tool subagents that didn't clean up after completion.
 	// This is a safety net - Deacon patrol also does this more frequently.
-	d.cleanupOrphanedProcesses()
+	d.phase("cleanupOrphanedProcesses", d.cleanupOrphanedProcesses)
 
 	// 13. Prune stale local polecat tracking branches across all rig clones.
 	// When polecats push branches to origin, other clones create local tracking
 	// branches via git fetch. After merge, remote branches are deleted but local
 	// branches persist indefinitely. This cleans them up periodically.
-	d.pruneStaleBranches()
+	d.phase("pruneStaleBranches", d.pruneStaleBranches)
 
 	// 14. Dispatch scheduled work (capacity-controlled polecat dispatch).
 	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
@@ -1460,17 +1485,17 @@ func (d *Daemon) heartbeat(state *State) {
 	if p := d.checkPressure("polecat"); !p.OK {
 		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
 	} else {
-		d.dispatchQueuedWork()
+		d.phase("dispatchQueuedWork", d.dispatchQueuedWork)
 	}
 
 	// 15. Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
-	d.rotateOversizedLogs()
+	d.phase("rotateOversizedLogs", d.rotateOversizedLogs)
 
 	// 16. Scan hooked-mail counts for OTel gauges (gu-hhqk AC#5).
 	// Heartbeat cadence (3 min) is appropriate: dead-letter threshold is
 	// 30 min, so 3-min resolution is plenty and the queries are cheap.
-	d.updateHookedBeadsMetrics()
+	d.phase("updateHookedBeadsMetrics", d.updateHookedBeadsMetrics)
 
 	// Update state
 	state.LastHeartbeat = time.Now()

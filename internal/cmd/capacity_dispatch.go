@@ -237,6 +237,33 @@ func dispatchCloseEscalationArgs(workBeadID, contextID, rig string, closeErr err
 		"--reason", reason, msg}
 }
 
+// dispatchPhaseSlowThreshold mirrors the daemon heartbeat threshold: a single
+// pre-dispatch maintenance pass over this duration is logged as slow even
+// without GT_HEARTBEAT_PROFILE. The whole `gt scheduler run` runs under a 5m
+// daemon budget (gu-t6jqq); a pass eating multiple seconds while placing zero
+// work is exactly what blew that budget invisibly (gu-pjrz3), so surface it.
+const dispatchPhaseSlowThreshold = 5 * time.Second
+
+// dispatchPhase times one of dispatchScheduledWork's pre-dispatch maintenance
+// passes (cleanupStaleContexts, releaseExpiredDeferredBeads, recoverZombie-
+// Molecules, reconcileOrphanMolecules) — each a per-rig bd fan-out that runs
+// before any bead is placed. These were opaque: the dispatch could burn its
+// whole 5m budget here with no per-pass visibility. Logs to stderr (so it lands
+// in daemon.log when the daemon shells `gt scheduler run`) when a pass exceeds
+// dispatchPhaseSlowThreshold, or for every pass under GT_HEARTBEAT_PROFILE.
+func dispatchPhase(name string, fn func()) {
+	start := time.Now()
+	fn()
+	elapsed := time.Since(start)
+	if elapsed >= dispatchPhaseSlowThreshold {
+		fmt.Fprintf(os.Stderr, "%s dispatch maintenance %q SLOW: %s\n",
+			style.Warning.Render("⚠"), name, elapsed.Round(time.Millisecond))
+	} else if os.Getenv("GT_HEARTBEAT_PROFILE") != "" {
+		fmt.Fprintf(os.Stderr, "%s dispatch maintenance %q: %s\n",
+			style.Dim.Render("○"), name, elapsed.Round(time.Millisecond))
+	}
+}
+
 // dispatchScheduledWork is the main dispatch loop for the capacity scheduler.
 // Called by both `gt scheduler run` and the daemon heartbeat.
 func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun bool) (int, error) {
@@ -309,7 +336,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	// Clean up invalid/stale contexts before querying for ready beads.
 	// Skip during dry-run to avoid mutating state.
 	if !dryRun {
-		cleanupStaleContexts(townRoot)
+		dispatchPhase("cleanupStaleContexts", func() { cleanupStaleContexts(townRoot) })
 	}
 
 	// Auto-release expired-defer beads (gu-0i09): scan all rigs for
@@ -318,9 +345,11 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	// the deferred-then-rediscover loop the scheduler relies on never runs
 	// and beads accumulate in the deferred state forever.
 	if !dryRun {
-		if released := releaseExpiredDeferredBeads(townRoot); released > 0 {
-			fmt.Printf("%s Auto-released %d bead(s) from defer\n", style.Dim.Render("○"), released)
-		}
+		dispatchPhase("releaseExpiredDeferredBeads", func() {
+			if released := releaseExpiredDeferredBeads(townRoot); released > 0 {
+				fmt.Printf("%s Auto-released %d bead(s) from defer\n", style.Dim.Render("○"), released)
+			}
+		})
 	}
 
 	// Recover zombie molecules (gu-w49a): scan queued sling-contexts whose
@@ -331,10 +360,12 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	// un-dispatchable because the molecule edge keeps them in the blocked
 	// set. Skip during dry-run to avoid mutating state.
 	if !dryRun {
-		if recovered := recoverZombieMolecules(townRoot); recovered > 0 {
-			fmt.Printf("%s Recovered %d work bead(s) from zombie-molecule wedge\n",
-				style.Dim.Render("○"), recovered)
-		}
+		dispatchPhase("recoverZombieMolecules", func() {
+			if recovered := recoverZombieMolecules(townRoot); recovered > 0 {
+				fmt.Printf("%s Recovered %d work bead(s) from zombie-molecule wedge\n",
+					style.Dim.Render("○"), recovered)
+			}
+		})
 	}
 
 	// Reconcile orphaned molecule wisps (gu-sz6va): the daemon's dead-session
@@ -347,10 +378,12 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	// unblock its open work bead for re-dispatch. Runs after recoverZombieMolecules
 	// so it only sees wisps that pass didn't already resolve. Skip during dry-run.
 	if !dryRun {
-		if reconciled := reconcileOrphanMolecules(townRoot); reconciled > 0 {
-			fmt.Printf("%s Reconciled %d orphaned molecule wisp(s)\n",
-				style.Dim.Render("○"), reconciled)
-		}
+		dispatchPhase("reconcileOrphanMolecules", func() {
+			if reconciled := reconcileOrphanMolecules(townRoot); reconciled > 0 {
+				fmt.Printf("%s Reconciled %d orphaned molecule wisp(s)\n",
+					style.Dim.Render("○"), reconciled)
+			}
+		})
 	}
 
 	// Wire up the DispatchCycle
