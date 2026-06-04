@@ -1808,6 +1808,38 @@ func readLockHolder(lockFile string) int {
 	return pid
 }
 
+// ServerEnv returns the environment for launching a Dolt sql-server process,
+// applying Gas Town's Go runtime memory tuning on top of the current process
+// environment.
+//
+// Cap Dolt's Go runtime memory to prevent unbounded RSS growth under
+// long-running workloads. Without these, dolt has been observed climbing
+// to 30-55 GiB RSS in WSL2 hosts, which (a) triggers global OOM kills of
+// dolt itself and (b) starves the WSL2 kernel of contiguous pages needed
+// by NVIDIA's cuda-EvtHandlr, producing order:4 page allocation failures
+// in unrelated GPU containers (vLLM, ComfyUI). See dmesg for entries like:
+//
+//	cuda-EvtHandlr: page allocation failure: order:4, mode:0x40c40...
+//	VLLM::EngineCor: page allocation failure: order:4, ...
+//
+// Both vars are only set if the caller hasn't already chosen a value, so
+// operators can tune via the environment (e.g. GOMEMLIMIT=24GiB) without
+// editing source.
+//
+// Both the CLI start path (Start) and the daemon-managed start path
+// (daemon.DoltServerManager.startLocked) use this helper so the tuning cannot
+// drift between them. (gu-iozi6)
+func ServerEnv() []string {
+	env := os.Environ()
+	if _, set := os.LookupEnv("GOMEMLIMIT"); !set {
+		env = append(env, "GOMEMLIMIT=16GiB")
+	}
+	if _, set := os.LookupEnv("GOGC"); !set {
+		env = append(env, "GOGC=50")
+	}
+	return env
+}
+
 // Start starts the Dolt SQL server.
 func Start(townRoot string) error {
 	config := DefaultConfig(townRoot)
@@ -2057,24 +2089,11 @@ func Start(townRoot string) error {
 	cmd.Stderr = logFile
 
 	// Cap Dolt's Go runtime memory to prevent unbounded RSS growth under
-	// long-running workloads. Without these, dolt has been observed climbing
-	// to 30-55 GiB RSS in WSL2 hosts, which (a) triggers global OOM kills of
-	// dolt itself and (b) starves the WSL2 kernel of contiguous pages needed
-	// by NVIDIA's cuda-EvtHandlr, producing order:4 page allocation failures
-	// in unrelated GPU containers (vLLM, ComfyUI). See dmesg for entries like:
-	//   cuda-EvtHandlr: page allocation failure: order:4, mode:0x40c40...
-	//   VLLM::EngineCor: page allocation failure: order:4, ...
-	// Both vars are only set if the caller hasn't already chosen a value, so
-	// operators can tune via the environment (e.g. GOMEMLIMIT=24GiB) without
-	// editing source.
-	env := os.Environ()
-	if _, set := os.LookupEnv("GOMEMLIMIT"); !set {
-		env = append(env, "GOMEMLIMIT=16GiB")
-	}
-	if _, set := os.LookupEnv("GOGC"); !set {
-		env = append(env, "GOGC=50")
-	}
-	cmd.Env = env
+	// long-running workloads. See ServerEnv for the full rationale. Both the
+	// CLI start path (here) and the daemon-managed start path
+	// (daemon.DoltServerManager.startLocked) must apply this tuning, so the
+	// logic lives in the shared ServerEnv helper to prevent drift. (gu-iozi6)
+	cmd.Env = ServerEnv()
 
 	// Detach from terminal and put dolt in its own process group so that
 	// signals sent to the parent process group (e.g. SIGHUP when the caller
