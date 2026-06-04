@@ -2419,6 +2419,67 @@ func TestStashPop(t *testing.T) {
 	}
 }
 
+// TestStashDrop verifies that StashDrop removes a stash entry from the reflog
+// WITHOUT applying it to the working tree (gu-1vtw0).
+func TestStashDrop(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// Create a stash from a dirty working tree.
+	if err := os.WriteFile(filepath.Join(dir, "dropme.txt"), []byte("wip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = dir
+	_ = cmd.Run()
+	cmd = exec.Command("git", "stash", "push", "-m", "dropme")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git stash: %v", err)
+	}
+
+	// Resolve the stash commit so we can prove it survives the drop (anchored elsewhere).
+	sha, err := g.Rev("stash@{0}")
+	if err != nil {
+		t.Fatalf("Rev(stash@{0}): %v", err)
+	}
+	if count, _ := g.StashCount(); count != 1 {
+		t.Fatalf("StashCount before drop = %d, want 1", count)
+	}
+
+	// Anchor the commit under a ref so the drop doesn't make it unreachable
+	// (mirrors how the preserve-then-clear path keeps the work recoverable).
+	if err := g.UpdateRef("refs/preserved/test/stash", strings.TrimSpace(sha)); err != nil {
+		t.Fatalf("UpdateRef: %v", err)
+	}
+
+	// Drop it.
+	if err := g.StashDrop("stash@{0}"); err != nil {
+		t.Fatalf("StashDrop: %v", err)
+	}
+
+	// Stash should be gone.
+	if count, _ := g.StashCount(); count != 0 {
+		t.Errorf("StashCount after drop = %d, want 0", count)
+	}
+
+	// Working tree must NOT have been modified by the drop.
+	if _, err := os.Stat(filepath.Join(dir, "dropme.txt")); !os.IsNotExist(err) {
+		t.Errorf("dropme.txt should NOT exist after drop (drop must not apply to working tree)")
+	}
+
+	// The commit must still be reachable via the anchor ref.
+	if _, err := g.Rev("refs/preserved/test/stash"); err != nil {
+		t.Errorf("anchored stash commit should survive drop: %v", err)
+	}
+
+	// Empty ref should error.
+	if err := g.StashDrop(""); err == nil {
+		t.Error("StashDrop(\"\") should error")
+	}
+}
+
 // TestIsStashStale_FreshStashIsNotStale verifies that a stash created on
 // the current HEAD (no intervening commits) is reported as non-stale —
 // the recovery scenario the gt-pvx auto-pop was designed for.
