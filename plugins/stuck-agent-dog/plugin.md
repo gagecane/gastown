@@ -237,6 +237,18 @@ the timestamp is missing or malformed). A live Deacon with no `in_progress` work
 is not an actionable stuck-heartbeat event; log and skip so idle patrol backoff
 does not produce escalation noise.
 
+**Heartbeat-age alone is NOT sufficient (gu-wuduc).** The deacon runs legitimate
+long SINGLE operations — `gt patrol report` takes 15-20min — during which it
+writes no heartbeat (heartbeat is emitted at op boundaries). A stale heartbeat
+on a busy deacon therefore does NOT mean stuck. Before firing `stuck_heartbeat`,
+`run.sh` corroborates with **live pane progress**: it captures the tmux pane
+twice (`STUCK_PROGRESS_SAMPLE_GAP`s apart, default 3s) and only escalates if the
+content is byte-for-byte FROZEN (or the session is gone / pane uncapturable). A
+changed pane — streaming tokens, an advancing spinner, the "esc to interrupt ·
+NmNNs" elapsed counter — proves liveness and suppresses the escalation. This
+killed a recurring false-positive flood (mayor closed ~7 in one session, each a
+verify+close cycle with cry-wolf risk burying a real deacon freeze).
+
 ```bash
 echo ""
 echo "=== Deacon Health ==="

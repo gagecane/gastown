@@ -49,6 +49,16 @@ STUCK_STALLED_THRESHOLD="${STUCK_STALLED_THRESHOLD:-1800}"
 # incident. Set to 0 to disable the defer entirely.
 STUCK_LOAD_DEFER_RATIO="${STUCK_LOAD_DEFER_RATIO:-2.0}"
 
+# STUCK_PROGRESS_SAMPLE_GAP is the gap (seconds) between the two pane captures
+# used to corroborate a stale-heartbeat signal with live token/spinner progress
+# (gu-wuduc). A working agent mutates its pane between samples (streaming LLM
+# tokens, an advancing spinner, an incrementing "esc to interrupt · 1m23s"
+# elapsed counter, scrolling tool output); a genuinely frozen agent does not.
+# 3s comfortably exceeds the ~1s spinner frame interval so a live op always
+# shows movement, while keeping the dog's added latency negligible (this check
+# runs only for the single deacon session, not per-polecat).
+STUCK_PROGRESS_SAMPLE_GAP="${STUCK_PROGRESS_SAMPLE_GAP:-3}"
+
 # Identity-bead hook anomaly: a polecat should NEVER be hooked to an identity
 # bead (refinery/witness/mayor/deacon). Auto-dispatch's filter excludes these,
 # but if one leaks through (e.g. manual `gt hook` error, sling-context bug),
@@ -143,6 +153,29 @@ session_pid_alive() {
   else
     echo "dead"
   fi
+}
+
+# pane_progressing returns 0 (true) if a session's tmux pane content changes
+# between two captures STUCK_PROGRESS_SAMPLE_GAP seconds apart, 1 (false) if it
+# is byte-for-byte frozen. Returns 2 (unknown) when the pane cannot be captured
+# (session gone mid-check, tmux error) so callers can fail safe.
+#
+# This is the dog-side liveness signal mandated by gu-wuduc: heartbeat-FILE-AGE
+# alone is insufficient because an agent in a single long operation (e.g. the
+# deacon's 15-20min `gt patrol report`) writes no heartbeat for the op's
+# duration yet is fully alive. A live agent animates its pane — streaming LLM
+# tokens, an advancing spinner, the "esc to interrupt · NmNNs" elapsed counter —
+# so a changed pane proves liveness even when the heartbeat is stale.
+pane_progressing() {
+  local session_name="$1"
+  local first second
+  first=$(tmux capture-pane -p -t "$session_name" -S -40 2>/dev/null) || return 2
+  sleep "$STUCK_PROGRESS_SAMPLE_GAP"
+  second=$(tmux capture-pane -p -t "$session_name" -S -40 2>/dev/null) || return 2
+  if [ "$first" != "$second" ]; then
+    return 0
+  fi
+  return 1
 }
 
 # corroborated_dead returns 0 if a session has independently failed BOTH
@@ -477,8 +510,23 @@ else
   DEACON_HB_AGE=$(heartbeat_age_seconds "$DEACON_SESSION")
   if [ -n "$DEACON_HB_AGE" ]; then
     if [ "$DEACON_HB_AGE" -gt 1200 ]; then
-      log "  STUCK: Deacon session heartbeat stale (${DEACON_HB_AGE}s old, >20m threshold)"
-      DEACON_ISSUE="stuck_heartbeat_${DEACON_HB_AGE}s"
+      # gu-wuduc: heartbeat-age alone is a false-positive flood. The deacon's
+      # `gt patrol report` is a single 15-20min op that writes no heartbeat for
+      # its duration but is fully alive. Corroborate with live pane progress
+      # before escalating: only declare stuck if the pane is FROZEN (or the
+      # session is gone). A changed pane (spinner/tokens/elapsed advancing)
+      # proves liveness despite the stale heartbeat.
+      if pane_progressing "$DEACON_SESSION"; then
+        log "  OK: Deacon session heartbeat stale (${DEACON_HB_AGE}s old) but pane progressing — alive (gu-wuduc)"
+      else
+        PROG_RC=$?
+        if [ "$PROG_RC" = "2" ]; then
+          log "  STUCK: Deacon session heartbeat stale (${DEACON_HB_AGE}s old, >20m threshold); pane uncapturable — treating as stuck"
+        else
+          log "  STUCK: Deacon session heartbeat stale (${DEACON_HB_AGE}s old, >20m threshold) AND pane frozen across samples (gu-wuduc)"
+        fi
+        DEACON_ISSUE="stuck_heartbeat_${DEACON_HB_AGE}s"
+      fi
     else
       log "  OK: Deacon session heartbeat ${DEACON_HB_AGE}s old"
     fi
@@ -495,8 +543,19 @@ else
       fi
       PATROL_AGE=$(( $(date +%s) - PATROL_TIME ))
       if [ "$PATROL_AGE" -gt 1200 ]; then
-        log "  STUCK: Deacon patrol heartbeat stale (${PATROL_AGE}s old, >20m threshold, no session heartbeat)"
-        DEACON_ISSUE="stuck_heartbeat_${PATROL_AGE}s"
+        # gu-wuduc: corroborate stale patrol heartbeat with live pane progress
+        # before escalating (same rationale as the session-heartbeat path).
+        if pane_progressing "$DEACON_SESSION"; then
+          log "  OK: Deacon patrol heartbeat stale (${PATROL_AGE}s old) but pane progressing — alive (gu-wuduc)"
+        else
+          PROG_RC=$?
+          if [ "$PROG_RC" = "2" ]; then
+            log "  STUCK: Deacon patrol heartbeat stale (${PATROL_AGE}s old, >20m threshold, no session heartbeat); pane uncapturable — treating as stuck"
+          else
+            log "  STUCK: Deacon patrol heartbeat stale (${PATROL_AGE}s old, >20m threshold, no session heartbeat) AND pane frozen across samples (gu-wuduc)"
+          fi
+          DEACON_ISSUE="stuck_heartbeat_${PATROL_AGE}s"
+        fi
       else
         log "  OK: Deacon patrol heartbeat ${PATROL_AGE}s old"
       fi
