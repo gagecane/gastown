@@ -83,9 +83,19 @@ retention_cleanup() {
     # Safety floor: never delete the BACKUP_SAFETY_FLOOR most-recent archives
     (( i < BACKUP_SAFETY_FLOOR )) && continue
 
-    # mtime: macOS uses stat -f "%m"; GNU stat uses stat -c "%Y"
+    # mtime: try GNU stat -c "%Y" first (Linux daemon), macOS stat -f "%m"
+    # as fallback. Order matters: `stat -f` is GNU's FILESYSTEM-info mode and on
+    # Linux prints a multiline `  File: ...` blob to stdout while returning
+    # non-zero, which previously leaked into $mtime and crashed the arithmetic
+    # below under `set -u` ("File: unbound variable"), aborting the whole run in
+    # Step 3 even though all backups had already synced (gu-t9xgf). The numeric
+    # guard makes a non-numeric result skip the file rather than crash or delete.
     local mtime
-    mtime=$(stat -f "%m" "$f" 2>/dev/null || stat -c "%Y" "$f" 2>/dev/null || echo 0)
+    mtime=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)
+    if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
+      log "    retention: could not read mtime of $(basename "$f") — skipping"
+      continue
+    fi
 
     if (( mtime < cutoff )); then
       local age_days=$(( ( $(date +%s) - mtime ) / 86400 ))
