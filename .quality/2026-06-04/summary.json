@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "run_id": "gs-syn-3bnhg",
+  "rig": "gastown",
+  "preset": "default",
+  "timestamp": "2026-06-04T22:30:00Z",
+  "commit": "b345831c59a6e50a3349d0566a282445ee3e865a",
+  "overall_score": 0.70,
+  "legs": {
+    "architecture-drift": {
+      "score": 0.72,
+      "findings": { "critical": 0, "major": 3, "minor": 4 }
+    },
+    "complexity": {
+      "score": 0.46,
+      "findings": { "critical": 3, "major": 2, "minor": 3 }
+    },
+    "dead-code": {
+      "score": 0.58,
+      "findings": { "critical": 1, "major": 14, "minor": 4 }
+    },
+    "dependency-health": {
+      "score": 0.85,
+      "findings": { "critical": 0, "major": 1, "minor": 5 }
+    },
+    "documentation": {
+      "score": 0.74,
+      "findings": { "critical": 0, "major": 4, "minor": 3 }
+    },
+    "tech-debt-trend": {
+      "score": 0.90,
+      "findings": { "critical": 0, "major": 2, "minor": 5 }
+    },
+    "test-quality": {
+      "score": 0.63,
+      "findings": { "critical": 2, "major": 3, "minor": 3 }
+    }
+  },
+  "totals": { "critical": 6, "major": 29, "minor": 27 },
+  "delta_since_last": null
+}
