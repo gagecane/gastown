@@ -770,6 +770,22 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Dolt backup ticker started (interval %v)", interval)
 	}
 
+	// Start dolt backup watcher ticker if configured.
+	// Positive-signal safety net (gu-8xvpw): checks the dolt-backup completion
+	// heartbeat and escalates when it is absent or stale, catching the silent
+	// failure modes (killed/hung/never-scheduled) the plugin's own failure path
+	// cannot. Runs independently of the backup ticker so it still fires when
+	// backups have stopped running entirely.
+	var doltBackupWatcherTicker *time.Ticker
+	var doltBackupWatcherChan <-chan time.Time
+	if d.isPatrolActive("dolt_backup_watcher") {
+		interval := doltBackupWatcherInterval(d.patrolConfig)
+		doltBackupWatcherTicker = time.NewTicker(interval)
+		doltBackupWatcherChan = doltBackupWatcherTicker.C
+		defer doltBackupWatcherTicker.Stop()
+		d.logger.Printf("Dolt backup watcher ticker started (interval %v)", interval)
+	}
+
 	// Start JSONL git backup ticker if configured.
 	// Exports issues to JSONL, scrubs ephemeral data, pushes to git repo.
 	var jsonlGitBackupTicker *time.Ticker
@@ -1094,6 +1110,13 @@ func (d *Daemon) Run() (err error) {
 			// (gu-a727o); on macOS it runs the native sync + iCloud offsite.
 			if !d.isShutdownInProgress() {
 				d.syncDoltBackups()
+			}
+
+		case <-doltBackupWatcherChan:
+			// Heartbeat staleness check (gu-8xvpw) — escalates if backups have
+			// silently stopped. Independent of the backup tick above.
+			if !d.isShutdownInProgress() {
+				d.runDoltBackupWatcher()
 			}
 
 		case <-jsonlGitBackupChan:

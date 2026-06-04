@@ -47,6 +47,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "15m",
 			},
+			DoltBackupWatcher: &DoltBackupWatcherConfig{
+				Enabled:     true,
+				IntervalStr: "15m",
+			},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{
 				Enabled:   true,
 				Window:    "03:00",

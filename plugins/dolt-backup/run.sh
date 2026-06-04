@@ -205,7 +205,9 @@ log "Databases to backup (${#PROD_DBS[@]}): ${PROD_DBS[*]}"
 SYNCED=0
 SKIPPED=0
 FAILED=0
+NO_REMOTE=0
 FAILED_DBS=""
+NO_REMOTE_DBS=""
 
 for DB in "${PROD_DBS[@]}"; do
   DB_DIR="$DOLT_DATA_DIR/$DB"
@@ -217,6 +219,21 @@ for DB in "${PROD_DBS[@]}"; do
     log "  $DB: no .dolt directory, skipping"
     FAILED=$((FAILED + 1))
     FAILED_DBS="$FAILED_DBS $DB(no-dir)"
+    continue
+  fi
+
+  # No-remote guard (gu-8xvpw): a DB that the discovery scan enumerated but that
+  # has no "<db>-backup" remote configured CANNOT be synced — `dolt backup sync`
+  # returns "backup '<db>-backup' not found". That is a configuration gap, NOT a
+  # data-safety failure: it's the signature of orphan/stray DBs (e.g. an
+  # unreferenced 'beads' orphan, or a misnested 'embeddeddolt'), not a live rig
+  # DB whose backup broke. Counting it as FAILED would fire a false HIGH
+  # data-loss escalation every cycle. Treat it as a low-severity SKIP instead so
+  # genuine sync failures on real (remote-configured) DBs stay the only HIGH.
+  if ! (cd "$DB_DIR" && dolt backup 2>/dev/null | grep -qx "$BACKUP_NAME"); then
+    log "  $DB: no '$BACKUP_NAME' remote configured — skipping (not a data-loss failure)"
+    NO_REMOTE=$((NO_REMOTE + 1))
+    NO_REMOTE_DBS="$NO_REMOTE_DBS $DB"
     continue
   fi
 
@@ -324,8 +341,11 @@ done
 
 # --- Step 4: Report results ---------------------------------------------------
 
-SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
+SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
 log "$SUMMARY"
+if [[ "$NO_REMOTE" -gt 0 ]]; then
+  log "  no-remote DBs (enumerated but unconfigured — likely orphan/stray):$NO_REMOTE_DBS"
+fi
 
 # --- Step 5: Heartbeat, record result, escalate if needed ---------------------
 #
@@ -339,10 +359,12 @@ log "$SUMMARY"
 # can distinguish "ran and succeeded" from "never ran / died silently".
 
 if [[ "$FAILED" -eq 0 ]]; then
-  if [[ "$RETENTION_FAILED" -eq 0 ]]; then
+  # All remote-configured DBs synced. Retention errors and no-remote skips are
+  # non-data-loss conditions → low-severity warning, not a HIGH page (gu-8xvpw).
+  if [[ "$RETENTION_FAILED" -eq 0 && "$NO_REMOTE" -eq 0 ]]; then
     HB_STATUS="success"
   else
-    HB_STATUS="success_retention_warning"
+    HB_STATUS="success_with_warning"
   fi
   write_heartbeat "$HB_STATUS" "$SYNCED" "$SKIPPED" "$FAILED" "${#PROD_DBS[@]}" \
     "$RETENTION_CLEANED" "$RETENTION_FAILED" "$SUMMARY"
@@ -352,12 +374,12 @@ if [[ "$FAILED" -eq 0 ]]; then
     -l type:plugin-run,plugin:dolt-backup,result:success \
     -d "$SUMMARY" --silent 2>/dev/null || true
 
-  if [[ "$RETENTION_FAILED" -gt 0 ]]; then
-    # Visible but low-severity: backups are safe, pruning needs a look.
-    log "WARNING: backups succeeded but ${RETENTION_FAILED} retention dir(s) hit errors — disk may grow until addressed"
-    gt escalate "dolt-backup retention warning: $SUMMARY" \
+  if [[ "$RETENTION_FAILED" -gt 0 || "$NO_REMOTE" -gt 0 ]]; then
+    # Visible but low-severity: live backups are safe; config/maintenance needs a look.
+    log "WARNING: backups succeeded but ${RETENTION_FAILED} retention error(s), ${NO_REMOTE} no-remote DB(s) — review (not data-loss)"
+    gt escalate "dolt-backup warning: $SUMMARY" \
       --severity low \
-      --reason "Backups succeeded ($SYNCED synced, $SKIPPED unchanged); ${RETENTION_FAILED} retention pruning error(s). Not a data-loss failure." 2>/dev/null || true
+      --reason "Backups succeeded ($SYNCED synced, $SKIPPED unchanged); ${RETENTION_FAILED} retention error(s), ${NO_REMOTE} DB(s) with no backup remote (${NO_REMOTE_DBS# }). Config/maintenance issue, not a data-loss failure." 2>/dev/null || true
   fi
 else
   # Backup-sync failure — real data-safety risk. Heartbeat records the failure
