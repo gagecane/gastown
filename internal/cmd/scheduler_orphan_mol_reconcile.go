@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -204,35 +205,58 @@ var timeNowForOrphanReconcile = func() time.Time { return time.Now() }
 // orchestration is testable without real bd. Returns wisps that still need an
 // assignee/dependents check via a full bd show.
 var listOrphanWispCandidates = func(townRoot string, now time.Time) []*beads.Issue {
-	var candidates []*beads.Issue
-	for _, dir := range beadsSearchDirs(townRoot) {
-		beadsDir := filepath.Join(dir, ".beads")
-		// Bypass the bd-list read flock: this runs inside dispatchScheduledWork
-		// while holding scheduler-dispatch.lock, so blocking on the throttle
-		// here starves all dispatch (gu-pug66).
-		b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
-		out, err := b.Run("mol", "wisp", "list", "--json")
-		if err != nil {
-			// Wisps table may not exist for this dir — not an error worth
-			// surfacing on the hot path.
-			continue
-		}
-		if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
-			continue
-		}
-		var wrapper struct {
-			Wisps []*beads.Issue `json:"wisps"`
-		}
-		if jerr := json.Unmarshal(out, &wrapper); jerr != nil {
-			fmt.Fprintf(os.Stderr, "%s orphan-mol reconcile: parse wisp list for %s failed: %v\n",
-				style.Dim.Render("⚠"), dir, jerr)
-			continue
-		}
-		for _, w := range wrapper.Wisps {
-			if isOrphanMoleculeWispListEntry(w, now, orphanMolReconcileMinAge) {
-				candidates = append(candidates, w)
+	// Scan each rig's wisps concurrently behind the same bounded semaphore as the
+	// sling-context scan (gu-1h3ur/gu-el5bx). This per-rig `bd mol wisp list`
+	// fan-out is a maintenance pass that, before gu-pjrz3 decoupled it from the
+	// per-tick path, serial-forked one cold-start per dir × ~19 dirs and
+	// contributed to the 5m dispatch budget blowout (gu-rz169). Collapsing it to a
+	// capped-parallel scan keeps the pass sub-second even though it now runs on a
+	// separate cadence. The semaphore — not the read throttle — bounds Dolt load,
+	// so we keep WithoutReadThrottle (gu-pug66's lock-free dispatch path).
+	dirs := beadsSearchDirs(townRoot)
+	perDir := make([][]*beads.Issue, len(dirs))
+	sem := make(chan struct{}, dispatchScanConcurrency())
+	var wg sync.WaitGroup
+	for i, dir := range dirs {
+		wg.Add(1)
+		go func(i int, dir string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			beadsDir := filepath.Join(dir, ".beads")
+			b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
+			out, err := b.Run("mol", "wisp", "list", "--json")
+			if err != nil {
+				// Wisps table may not exist for this dir — not an error worth
+				// surfacing on the hot path.
+				return
 			}
-		}
+			if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
+				return
+			}
+			var wrapper struct {
+				Wisps []*beads.Issue `json:"wisps"`
+			}
+			if jerr := json.Unmarshal(out, &wrapper); jerr != nil {
+				fmt.Fprintf(os.Stderr, "%s orphan-mol reconcile: parse wisp list for %s failed: %v\n",
+					style.Dim.Render("⚠"), dir, jerr)
+				return
+			}
+			var dirCandidates []*beads.Issue
+			for _, w := range wrapper.Wisps {
+				if isOrphanMoleculeWispListEntry(w, now, orphanMolReconcileMinAge) {
+					dirCandidates = append(dirCandidates, w)
+				}
+			}
+			perDir[i] = dirCandidates
+		}(i, dir)
+	}
+	wg.Wait()
+
+	// Fold results in dir order (deterministic).
+	var candidates []*beads.Issue
+	for _, dirCandidates := range perDir {
+		candidates = append(candidates, dirCandidates...)
 	}
 	return candidates
 }
