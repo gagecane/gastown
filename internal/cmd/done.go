@@ -896,7 +896,18 @@ afterSafetyNet:
 		// --pre-verified claim still reflects reality. An auto-rebase below
 		// invalidates it because the gates ran against the pre-rebase base.
 		preVerifiedAttestationValid := donePreVerified
-		contaminationBase := doneContaminationBaseRef(defaultBranch, doneTarget)
+		// gs-xbo: rebase onto the bead's RELAY base, not just --target / rig
+		// default. effectiveBaseBranch mirrors the gs-n6h dispatch fix: explicit
+		// --target wins, else the tracking convoy's named base_branch (e.g.
+		// proto/v3-build on a gagecane/gt-default rig), else "" → rig default.
+		// Before this, a relay leg run as plain `gt done` (no --target) was
+		// auto-rebased onto origin/<rig default> — the WRONG base. That rebase
+		// conflicts on the relay file or is inapplicable, so it aborts and gt
+		// done bails: the polecat already pushed + closed its bead, but the
+		// session never terminates — it lands in stuck-in-done limbo, idle,
+		// still holding a capacity slot. A full batch saturates the pool and
+		// starves the scheduler.
+		contaminationBase := doneContaminationBaseRef(defaultBranch, effectiveBaseBranch(issueID, doneTarget))
 		if fetchErr := g.Fetch("origin"); fetchErr != nil {
 			style.PrintWarning("could not fetch origin before contamination check: %v (proceeding with local refs)", fetchErr)
 		}

@@ -27,6 +27,17 @@ func TestDoneContaminationBaseRef(t *testing.T) {
 			explicitTarget: "origin/upstream-rebuild-main",
 			want:           "origin/upstream-rebuild-main",
 		},
+		{
+			// gs-xbo: a relay leg's base (resolved via effectiveBaseBranch) must
+			// drive the rebase/contamination base, NOT the rig default. Here the
+			// rig default is gagecane/gt but the relay base is proto/v3-build —
+			// the auto-rebase must target origin/proto/v3-build or it aborts and
+			// strands the polecat in stuck-in-done limbo.
+			name:           "relay base overrides non-main rig default",
+			defaultBranch:  "gagecane/gt",
+			explicitTarget: "proto/v3-build",
+			want:           "origin/proto/v3-build",
+		},
 	}
 
 	for _, tt := range tests {
