@@ -3,7 +3,10 @@ package daemon
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -227,6 +230,21 @@ func (d *Daemon) reapIdleDogs(mgr *dog.Manager, sm *dog.SessionManager, daemonCf
 	}
 }
 
+// pluginCooldownFanout bounds how many per-plugin cooldown reads run
+// concurrently in dispatchPlugins. Each read is a `bd list` subprocess against
+// the single shared Dolt server, so the semaphore — not the read itself —
+// caps the load. Default 6 (matches the dispatch-scan fan-out of gu-1h3ur);
+// tunable via GT_PLUGIN_COOLDOWN_FANOUT.
+func pluginCooldownFanout() int {
+	const def = 6
+	if v := os.Getenv("GT_PLUGIN_COOLDOWN_FANOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return def
+}
+
 // dispatchPlugins scans for plugins, evaluates cooldown gates, and dispatches
 // eligible plugins to idle dogs.
 func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsConfig *config.RigsConfig) {
@@ -252,7 +270,23 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 	recorder := plugin.NewRecorder(d.config.TownRoot)
 	router := mail.NewRouterWithTownRoot(d.config.TownRoot, d.config.TownRoot)
 
-	for _, p := range plugins {
+	// Pre-compute cooldown eligibility for all plugins CONCURRENTLY before the
+	// serial dispatch below. CooldownSatisfied spawns a `bd list` subprocess per
+	// plugin (~0.65s cold-start); with ~24 cooldown-gated plugins the serial
+	// fan-out dominated handleDogs (measured 39-61s, gu-10nch). The checks are
+	// independent per-plugin reads with no cross-plugin state, so evaluating them
+	// behind a bounded semaphore is behavior-equivalent — the actual dispatch
+	// (which mutates the shared kennel: picks an idle dog, assigns work, starts a
+	// session) stays SERIAL below. Same collapse-the-serial-bd-fork pattern as
+	// gu-1h3ur/gc-wbk1b; the semaphore bounds Dolt load.
+	type cooldownResult struct {
+		eligible bool  // passed all gates and is ready to dispatch
+		err      error // cooldown lookup failed — log and skip
+	}
+	results := make([]cooldownResult, len(plugins))
+	sem := make(chan struct{}, pluginCooldownFanout())
+	var wg sync.WaitGroup
+	for i, p := range plugins {
 		// Never auto-dispatch manual-gate plugins — they require an explicit trigger.
 		if p.Gate != nil && p.Gate.Type == plugin.GateManual {
 			d.logger.Printf("Handler: skipping plugin %s (gate=manual, requires explicit trigger)", p.Name)
@@ -264,22 +298,43 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			continue
 		}
 
-		// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
-		// record (dog handed work but not yet executed) only suppresses
+		// A cooldown gate with no duration has nothing to satisfy — eligible.
+		if p.Gate.Duration == "" {
+			results[i].eligible = true
+			continue
+		}
+
+		// Evaluate cooldown concurrently: skip if plugin ran recently. A bare
+		// dispatch record (dog handed work but not yet executed) only suppresses
 		// re-dispatch within an in-flight grace window — after that the gate
 		// re-opens so a silently-dead dog can't re-arm the full cooldown and
 		// drift backups unbounded (gu-50nbo).
-		if p.Gate.Duration != "" {
+		wg.Add(1)
+		go func(i int, p *plugin.Plugin) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
 			cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
 			grace := p.DispatchGrace(cooldownDur)
 			satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
 			if err != nil {
-				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
-				continue
+				results[i].err = err
+				return
 			}
-			if satisfied {
-				continue // Still in cooldown (or a dispatch is in-flight)
-			}
+			results[i].eligible = !satisfied // not in cooldown (and no in-flight dispatch)
+		}(i, p)
+	}
+	wg.Wait()
+
+	// Dispatch eligible plugins SERIALLY — this mutates the shared kennel.
+	for i, p := range plugins {
+		if results[i].err != nil {
+			d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, results[i].err)
+			continue
+		}
+		if !results[i].eligible {
+			continue
 		}
 
 		// Find an idle dog that doesn't already have a live tmux session.

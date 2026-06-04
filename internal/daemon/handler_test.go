@@ -520,3 +520,38 @@ func TestFindDispatchableDog_Method_ReturnsNilWhenAllBackedOff(t *testing.T) {
 		t.Errorf("findDispatchableDog = %q, want nil (all dogs in backoff)", got.Name)
 	}
 }
+
+// TestPluginCooldownFanout guards the semaphore bound for the per-plugin
+// cooldown fan-out in dispatchPlugins (gu-10nch). Each cooldown check spawns a
+// `bd list` subprocess; serial across ~24 cooldown-gated plugins it dominated
+// handleDogs (measured 39-61s). Defaults to 6; GT_PLUGIN_COOLDOWN_FANOUT
+// overrides with a positive int; junk / zero / negative fall back to the
+// default so a fat-fingered env can never set an invalid width. 1 is allowed
+// for an explicit serial fallback.
+func TestPluginCooldownFanout(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want int
+	}{
+		{"default when unset", "", 6},
+		{"override 4", "4", 4},
+		{"override 12", "12", 12},
+		{"override 1 (serial allowed)", "1", 1},
+		{"zero falls back", "0", 6},
+		{"negative falls back", "-2", 6},
+		{"junk falls back", "wide", 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env == "" {
+				os.Unsetenv("GT_PLUGIN_COOLDOWN_FANOUT")
+			} else {
+				t.Setenv("GT_PLUGIN_COOLDOWN_FANOUT", tt.env)
+			}
+			if got := pluginCooldownFanout(); got != tt.want {
+				t.Errorf("pluginCooldownFanout() with env=%q = %d, want %d", tt.env, got, tt.want)
+			}
+		})
+	}
+}
