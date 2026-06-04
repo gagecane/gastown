@@ -1428,3 +1428,73 @@ func TestIsClaimStale(t *testing.T) {
 		})
 	}
 }
+
+// TestFirstOpenBlocker_ReadsGenericBlocksDeps is the regression test for
+// gu-5gvmp: an MR blocked by a generic `bd blocks` dependency must be reported
+// as blocked even though the bd CLI never populates issue.BlockedBy. The
+// blocker surfaces only as a live 'blocks' dependency edge from bd show.
+func TestFirstOpenBlocker_ReadsGenericBlocksDeps(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows - shell stubs")
+	}
+
+	tests := []struct {
+		name      string
+		showJSON  string // bd show --json payload for the MR bead
+		wantBlock string // expected first open blocker ID ("" = ready)
+	}{
+		{
+			name:      "open blocks edge → blocked",
+			showJSON:  `[{"id":"mr-1","status":"open","dependencies":[{"id":"task-99","dependency_type":"blocks","status":"open"}]}]`,
+			wantBlock: "task-99",
+		},
+		{
+			name:      "closed blocks edge → ready",
+			showJSON:  `[{"id":"mr-1","status":"open","dependencies":[{"id":"task-99","dependency_type":"blocks","status":"closed"}]}]`,
+			wantBlock: "",
+		},
+		{
+			name:      "tombstone blocks edge → ready",
+			showJSON:  `[{"id":"mr-1","status":"open","dependencies":[{"id":"task-99","dependency_type":"blocks","status":"tombstone"}]}]`,
+			wantBlock: "",
+		},
+		{
+			name:      "non-blocks edge ignored → ready",
+			showJSON:  `[{"id":"mr-1","status":"open","dependencies":[{"id":"mol-1","dependency_type":"tracks","status":"open"}]}]`,
+			wantBlock: "",
+		},
+		{
+			name:      "no dependencies → ready",
+			showJSON:  `[{"id":"mr-1","status":"open","dependencies":[]}]`,
+			wantBlock: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			bdPath := filepath.Join(binDir, "bd")
+			bdScript := "#!/bin/sh\n" +
+				"if [ \"$1\" = \"--allow-stale\" ]; then shift; fi\n" +
+				"case \"$1\" in\n" +
+				"  version) exit 0 ;;\n" +
+				"  show) printf '%s\\n' '" + tt.showJSON + "'; exit 0 ;;\n" +
+				"esac\n" +
+				"echo \"unexpected bd args: $*\" >&2\n" +
+				"exit 1\n"
+			if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
+				t.Fatalf("write bd stub: %v", err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			e := NewEngineer(&rig.Rig{Name: "testrig", Path: t.TempDir()})
+
+			// Issue from the list/SQL path: BlockedBy empty, Dependencies empty.
+			issue := &beads.Issue{ID: "mr-1", Status: "open"}
+			got := e.firstOpenBlocker(issue)
+			if got != tt.wantBlock {
+				t.Errorf("firstOpenBlocker() = %q, want %q", got, tt.wantBlock)
+			}
+		})
+	}
+}

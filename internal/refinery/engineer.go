@@ -1727,11 +1727,50 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 
 // firstOpenBlocker returns the ID of the first open blocker for an issue,
 // or empty string if none are open.
+//
+// Blockers are read from two sources:
+//
+//  1. issue.BlockedBy — a precomputed slice that the bd CLI does NOT populate
+//     (no blocked_by field is emitted by bd list/show). Kept for callers/tests
+//     that set it directly.
+//
+//  2. Live 'blocks' dependency edges read via bd show. This is the canonical
+//     source: bd exposes blockers as generic dependency edges
+//     (dependency_type == "blocks"), not via a blocked_by field. The list and
+//     wisp-SQL query paths that feed this function do not populate dependency
+//     edges, so we re-fetch the issue to read its current dependencies. This
+//     makes the Refinery readiness view honor generic `bd blocks` deps, not
+//     just convoy/sling deps — see gu-5gvmp (a blocked MR was reported 'ready'
+//     because only the never-populated BlockedBy field was consulted).
 func (e *Engineer) firstOpenBlocker(issue *beads.Issue) string {
 	for _, blockerID := range issue.BlockedBy {
 		isOpen, err := e.IsBeadOpen(blockerID)
 		if err == nil && isOpen {
 			return blockerID
+		}
+	}
+
+	// Re-fetch to obtain live dependency edges; the issue passed in comes from
+	// a list/SQL path that leaves Dependencies empty.
+	full, err := e.beads.Show(issue.ID)
+	if err != nil || full == nil {
+		return ""
+	}
+	for _, dep := range full.Dependencies {
+		if dep.DependencyType != "blocks" {
+			continue
+		}
+		// bd show embeds the blocker's status on the edge. Treat anything
+		// other than closed/tombstone as an open blocker. Fall back to a
+		// direct status check when the edge omits status.
+		if dep.Status != "" {
+			if dep.Status != "closed" && dep.Status != "tombstone" {
+				return dep.ID
+			}
+			continue
+		}
+		if isOpen, beadErr := e.IsBeadOpen(dep.ID); beadErr == nil && isOpen {
+			return dep.ID
 		}
 	}
 	return ""
@@ -1918,18 +1957,16 @@ func (e *Engineer) ListBlockedMRs() ([]*MRInfo, error) {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
 	}
 
-	// Filter for blocked issues (those with open blockers)
+	// Filter for blocked issues (those with open blockers). Do not pre-filter
+	// on issue.BlockedBy: the bd CLI never populates that field, so blockers
+	// surface only as live 'blocks' dependency edges. firstOpenBlocker reads
+	// both sources (see gu-5gvmp).
 	var mrs []*MRInfo
 	for _, issue := range issues {
-		// Skip if not blocked
-		if len(issue.BlockedBy) == 0 {
-			continue
-		}
-
 		// Check if any blocker is still open
 		blockedBy := e.firstOpenBlocker(issue)
 		if blockedBy == "" {
-			continue // All blockers are closed, not blocked
+			continue // No open blockers
 		}
 
 		fields := beads.ParseMRFields(issue)
