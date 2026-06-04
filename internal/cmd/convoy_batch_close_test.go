@@ -136,3 +136,96 @@ esac
 		t.Errorf("expected at least the batched sql call to be logged, got none")
 	}
 }
+
+// TestCheckAndCloseCompletedConvoys_SkipsShipUnverified is the regression guard
+// for gu-4cxuv: a convoy already marked convoy:ship-unverified (all tracked
+// closed but ship-unverifiable per gu-j7u5) must be SKIPPED by the completion
+// scan — not re-evaluated every tick. Re-evaluating 197 such convoys every tick
+// clogged the dispatch budget and starved town-wide spawning. The skip must
+// happen BEFORE the tracks query, so the labeled convoy never appears in the
+// batched sql lookup.
+func TestCheckAndCloseCompletedConvoys_SkipsShipUnverified(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping convoy shell-mock test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"),
+		[]byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	sqlLog := filepath.Join(binDir, "sql_invocations.log")
+	// hq-cv-skip carries convoy:ship-unverified → must be skipped (never tracked-
+	// queried, never closed). hq-cv-go is a normal completable convoy → closes.
+	script := `#!/bin/sh
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+case "$pos0" in
+  list)
+    echo '[{"id":"hq-cv-skip","title":"Skip me","status":"open","labels":["gt:convoy","convoy:ship-unverified"]},{"id":"hq-cv-go","title":"Close me","status":"open","labels":["gt:convoy"]}]'
+    exit 0
+    ;;
+  sql)
+    echo "$*" >> "` + sqlLog + `"
+    case "$*" in
+      *"IN ("*) echo '[{"issue_id":"hq-cv-go","depends_on_id":"gt-done1"}]' ;;
+      *) echo '[]' ;;
+    esac
+    exit 0
+    ;;
+  show)
+    case "$*" in
+      *gt-done1*) echo '[{"id":"gt-done1","status":"closed","issue_type":"task","assignee":""}]' ;;
+      *) echo '[]' ;;
+    esac
+    exit 0
+    ;;
+  update|close) exit 0 ;;
+  *) echo '[]'; exit 0 ;;
+esac
+`
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	closed, err := checkAndCloseCompletedConvoys(beadsDir, false)
+	if err != nil {
+		t.Fatalf("checkAndCloseCompletedConvoys() error: %v", err)
+	}
+
+	// The labeled convoy must NOT be closed; the normal one must close.
+	for _, c := range closed {
+		if c.ID == "hq-cv-skip" {
+			t.Errorf("convoy hq-cv-skip carries %s but was processed/closed — gu-4cxuv skip failed", convoyShipUnverifiedLabel)
+		}
+	}
+	var closedGo bool
+	for _, c := range closed {
+		if c.ID == "hq-cv-go" {
+			closedGo = true
+		}
+	}
+	if !closedGo {
+		t.Errorf("hq-cv-go (completable, unlabeled) should have closed; closed=%v", closed)
+	}
+
+	// The skipped convoy must never appear in the tracks sql lookup — the skip
+	// happens before the batch query, so its ID must be absent from the sql log.
+	logBytes, _ := os.ReadFile(sqlLog)
+	if strings.Contains(string(logBytes), "hq-cv-skip") {
+		t.Errorf("skipped convoy hq-cv-skip appeared in a tracks sql query — skip must precede the batch lookup; sql log:\n%s", logBytes)
+	}
+}

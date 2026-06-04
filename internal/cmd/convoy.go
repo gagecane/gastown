@@ -977,6 +977,38 @@ func runConvoyCheck(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// convoyShipUnverifiedLabel marks an all-tracked-closed convoy whose tracked
+// beads could not be ship-verified by the gu-j7u5 gate. The completion scan
+// skips convoys carrying it so they stop consuming the dispatch budget every
+// tick (gu-4cxuv). It is a terminal-but-reversible state: visible via
+// `bd list --label=convoy:ship-unverified`, and cleared by
+// removeShipUnverifiedLabel once the convoy's beads become ship-verifiable.
+const convoyShipUnverifiedLabel = "convoy:ship-unverified"
+
+// markConvoyShipUnverified labels a convoy convoy:ship-unverified (idempotent;
+// bd --add-label is a no-op if already present). Best-effort: a label failure
+// only means the convoy gets re-scanned next tick (the pre-gu-4cxuv behavior),
+// so we log and continue rather than fail the whole completion pass.
+func markConvoyShipUnverified(townBeads, convoyID string) {
+	if err := BdCmd("update", convoyID, "--add-label="+convoyShipUnverifiedLabel).
+		Dir(townBeads).WithAutoCommit().Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s convoy %s: could not set %s label (will re-scan): %v\n",
+			style.Dim.Render("○"), convoyID, convoyShipUnverifiedLabel, err)
+	}
+}
+
+// removeShipUnverifiedLabel clears the convoy:ship-unverified marker so the
+// convoy re-enters the normal completion scan — used when a previously
+// unverified convoy should be re-evaluated (e.g. a citing commit has since
+// landed). Best-effort.
+func removeShipUnverifiedLabel(townBeads, convoyID string) {
+	if err := BdCmd("update", convoyID, "--remove-label="+convoyShipUnverifiedLabel).
+		Dir(townBeads).WithAutoCommit().Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s convoy %s: could not clear %s label: %v\n",
+			style.Dim.Render("○"), convoyID, convoyShipUnverifiedLabel, err)
+	}
+}
+
 // closeConvoyIfComplete checks whether all tracked issues in a convoy are resolved
 // and closes the convoy if so. Returns (true, nil) if the convoy was closed or
 // would be closed (dry-run), (false, nil) if not ready, or (false, err) on failure.
@@ -1035,6 +1067,19 @@ func closeConvoyIfComplete(townBeads, convoyID, title string, tracked []trackedI
 			fmt.Printf("    %s %s — %s\n", style.Dim.Render("○"), u.id, u.reason)
 		}
 		fmt.Printf("  %s\n", style.Dim.Render("(gu-j7u5: convoy stays open until either the bead is reopened, the citing commit lands, or the no-merge marker is set)"))
+		// Terminal state (gu-4cxuv): an all-tracked-closed convoy whose beads
+		// can't be ship-verified would otherwise be re-evaluated on EVERY
+		// scheduler completion-scan tick — 197 such convoys clogged the dispatch
+		// budget and starved town-wide spawning. Mark it convoy:ship-unverified
+		// so the completion scan SKIPS it next tick (see checkAndCloseCompleted-
+		// Convoys). This does NOT weaken the gu-j7u5 gate — we are not claiming
+		// the work shipped, only refusing to burn budget re-checking it forever.
+		// The label is bd-queryable (bd list --label=convoy:ship-unverified) and
+		// reversible: removeShipUnverifiedLabel clears it so a convoy is re-checked
+		// once its tracked beads gain a citing commit / get reopened.
+		if !dryRun {
+			markConvoyShipUnverified(townBeads, convoyID)
+		}
 		return false, nil
 	}
 
@@ -1296,6 +1341,16 @@ func checkSingleConvoy(townBeads, convoyID string, dryRun bool) error {
 	if normalizeConvoyStatus(convoy.Status) == convoyStatusClosed {
 		fmt.Printf("%s Convoy %s is already closed\n", style.Dim.Render("○"), convoyID)
 		return nil
+	}
+
+	// Reversibility for the gu-4cxuv skip: an EXPLICIT single-convoy check is a
+	// deliberate re-evaluation request, so clear any stale convoy:ship-unverified
+	// marker first and let the fresh check below decide anew. If the convoy now
+	// ship-verifies it closes; if it is still unverified, closeConvoyIfComplete
+	// re-applies the label. This is how a convoy re-enters the scan after its
+	// tracked beads gain a citing commit / get reopened. (Skipped in dry-run.)
+	if !dryRun && hasLabel(convoy.Labels, convoyShipUnverifiedLabel) {
+		removeShipUnverifiedLabel(townBeads, convoyID)
 	}
 
 	// Get tracked issues
@@ -2189,6 +2244,29 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 	convoys, err := listConvoyIssues(townBeads, "open", false)
 	if err != nil {
 		return nil, fmt.Errorf("listing convoys: %w", err)
+	}
+
+	// Skip convoys already marked convoy:ship-unverified (gu-4cxuv). These are
+	// all-tracked-closed but ship-unverifiable (gu-j7u5) — re-evaluating them
+	// every completion-scan tick is what clogged the scheduler (197 instances
+	// burned the dispatch budget so ready beads never spawned). The label is
+	// their terminal state; they re-enter the scan only when explicitly cleared
+	// (removeShipUnverifiedLabel) once a citing commit lands or a bead reopens.
+	// Skipping here avoids both the tracked-deps batch query AND the per-convoy
+	// ship re-check for them.
+	skippedUnverified := 0
+	filtered := convoys[:0]
+	for _, c := range convoys {
+		if hasLabel(c.Labels, convoyShipUnverifiedLabel) {
+			skippedUnverified++
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	convoys = filtered
+	if skippedUnverified > 0 {
+		fmt.Printf("%s Skipped %d convoy(s) marked %s (run `bd list --label=%s` to review)\n",
+			style.Dim.Render("○"), skippedUnverified, convoyShipUnverifiedLabel, convoyShipUnverifiedLabel)
 	}
 
 	// Batch the per-convoy 'tracks' dep-edge lookup into ONE bd sql query
