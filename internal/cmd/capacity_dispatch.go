@@ -337,6 +337,22 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		}
 	}
 
+	// Reconcile orphaned molecule wisps (gu-sz6va): the daemon's dead-session
+	// reapers reset hooked beads to open+unassigned with no type filter, which
+	// strands molecule wisps as open+unassigned forever — neither re-enqueued
+	// nor reaped. recoverZombieMolecules (above) only approaches from the
+	// open-sling-context side, so it misses wisps whose work bead is already
+	// closed (or whose context was closed "dispatched"). This pass enumerates
+	// wisps directly and either reaps the zombie or burns the stale wisp to
+	// unblock its open work bead for re-dispatch. Runs after recoverZombieMolecules
+	// so it only sees wisps that pass didn't already resolve. Skip during dry-run.
+	if !dryRun {
+		if reconciled := reconcileOrphanMolecules(townRoot); reconciled > 0 {
+			fmt.Printf("%s Reconciled %d orphaned molecule wisp(s)\n",
+				style.Dim.Render("○"), reconciled)
+		}
+	}
+
 	// Wire up the DispatchCycle
 	successfulRigs := make(map[string]bool)
 	// Track polecat names from dispatch results, keyed by context bead ID.
