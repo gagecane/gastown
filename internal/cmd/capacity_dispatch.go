@@ -1491,52 +1491,76 @@ func releaseExpiredDeferredBeads(townRoot string) int {
 		now = nowForDeferRelease()
 	}
 
+	// Scan + release each rig's deferred beads concurrently behind the same
+	// bounded semaphore as the sling-context scan (gu-1h3ur/gu-el5bx). This per-rig
+	// `bd list` (plus per-expired-bead `bd update`) fan-out is a maintenance pass
+	// that, before gu-pjrz3 decoupled it from the per-tick path, serial-forked one
+	// cold-start per dir × ~19 dirs and contributed to the 5m dispatch budget
+	// blowout (gu-rz169). Collapsing it to a capped-parallel scan keeps the pass
+	// sub-second. The semaphore — not the read throttle — bounds Dolt load, so we
+	// keep WithoutReadThrottle (gu-pug66's lock-free dispatch path). Each dir's
+	// reads and writes stay within its own goroutine; only the released count is
+	// aggregated after the barrier.
+	dirs := beadsSearchDirs(townRoot)
+	perDir := make([]int, len(dirs))
+	sem := make(chan struct{}, dispatchScanConcurrency())
+	var wg sync.WaitGroup
+	for i, dir := range dirs {
+		wg.Add(1)
+		go func(i int, dir string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			beadsDir := filepath.Join(dir, ".beads")
+			b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
+			out, err := b.Run("list", "--status=deferred", "--json", "--limit=0")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s Warning: bd list deferred failed for %s: %v\n",
+					style.Dim.Render("⚠"), dir, err)
+				return
+			}
+			// `bd list` may return non-JSON sentinel text ("No issues found.") on empty results.
+			if len(out) == 0 || (len(out) > 0 && out[0] != '[' && out[0] != '{') {
+				return
+			}
+			var deferred []*beads.Issue
+			if jerr := json.Unmarshal(out, &deferred); jerr != nil {
+				fmt.Fprintf(os.Stderr, "%s Warning: parsing bd list deferred output for %s: %v\n",
+					style.Dim.Render("⚠"), dir, jerr)
+				return
+			}
+			dirReleased := 0
+			for _, issue := range deferred {
+				if issue == nil {
+					continue
+				}
+				expired, perr := isDeferUntilExpired(issue.DeferUntil, now)
+				if perr != nil {
+					fmt.Fprintf(os.Stderr, "%s Warning: unparseable defer_until %q on %s: %v\n",
+						style.Dim.Render("⚠"), issue.DeferUntil, issue.ID, perr)
+					continue
+				}
+				if !expired {
+					continue
+				}
+				// Flip the bead back to open and clear the defer marker.
+				if _, uerr := b.Run("update", issue.ID, "--status=open", "--defer="); uerr != nil {
+					fmt.Fprintf(os.Stderr, "%s Warning: could not auto-release deferred bead %s: %v\n",
+						style.Dim.Render("⚠"), issue.ID, uerr)
+					continue
+				}
+				dirReleased++
+				_ = events.LogFeed(events.TypeSchedulerDeferReleased, "scheduler",
+					events.SchedulerDeferReleasedPayload(issue.ID, issue.DeferUntil))
+			}
+			perDir[i] = dirReleased
+		}(i, dir)
+	}
+	wg.Wait()
+
 	released := 0
-	for _, dir := range beadsSearchDirs(townRoot) {
-		beadsDir := filepath.Join(dir, ".beads")
-		// Bypass the bd-list-read flock: this per-rig deferred-scan runs inside
-		// dispatchScheduledWork while holding scheduler-dispatch.lock, so blocking
-		// on the throttle here starves ALL dispatch (gu-pug66, second fan-out).
-		b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
-		out, err := b.Run("list", "--status=deferred", "--json", "--limit=0")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s Warning: bd list deferred failed for %s: %v\n",
-				style.Dim.Render("⚠"), dir, err)
-			continue
-		}
-		// `bd list` may return non-JSON sentinel text ("No issues found.") on empty results.
-		if len(out) == 0 || (len(out) > 0 && out[0] != '[' && out[0] != '{') {
-			continue
-		}
-		var deferred []*beads.Issue
-		if jerr := json.Unmarshal(out, &deferred); jerr != nil {
-			fmt.Fprintf(os.Stderr, "%s Warning: parsing bd list deferred output for %s: %v\n",
-				style.Dim.Render("⚠"), dir, jerr)
-			continue
-		}
-		for _, issue := range deferred {
-			if issue == nil {
-				continue
-			}
-			expired, perr := isDeferUntilExpired(issue.DeferUntil, now)
-			if perr != nil {
-				fmt.Fprintf(os.Stderr, "%s Warning: unparseable defer_until %q on %s: %v\n",
-					style.Dim.Render("⚠"), issue.DeferUntil, issue.ID, perr)
-				continue
-			}
-			if !expired {
-				continue
-			}
-			// Flip the bead back to open and clear the defer marker.
-			if _, uerr := b.Run("update", issue.ID, "--status=open", "--defer="); uerr != nil {
-				fmt.Fprintf(os.Stderr, "%s Warning: could not auto-release deferred bead %s: %v\n",
-					style.Dim.Render("⚠"), issue.ID, uerr)
-				continue
-			}
-			released++
-			_ = events.LogFeed(events.TypeSchedulerDeferReleased, "scheduler",
-				events.SchedulerDeferReleasedPayload(issue.ID, issue.DeferUntil))
-		}
+	for _, n := range perDir {
+		released += n
 	}
 	return released
 }
