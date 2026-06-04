@@ -612,6 +612,72 @@ exit 0
 	}
 }
 
+// TestCreateUnresolvableRigFailsLoudly verifies that an explicit but
+// unresolvable Rig is a hard error rather than a silent fallback to the local
+// database (gu-8622x — cross-rig create misroute data-loss class). A bare rig
+// name that isn't registered in routes.jsonl MUST NOT orphan the bead in the
+// caller's local DB with a success-looking result.
+func TestCreateUnresolvableRigFailsLoudly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir town .beads: %v", err)
+	}
+	// Only "testrig" is registered — "ghostrig" is not.
+	if err := WriteRoutes(townBeadsDir, []Route{
+		{Prefix: "hq-", Path: "."},
+		{Prefix: "tr-", Path: "testrig"},
+	}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// Install a bd stub that records any create invocation. If the create
+	// silently falls back to the local DB, the stub would be called — we assert
+	// it is NOT.
+	stubDir := t.TempDir()
+	logPath := filepath.Join(stubDir, "bd.log")
+	stubScript := `#!/bin/sh
+printf 'called=%s\n' "$*" >> "$MOCK_BD_LOG"
+printf '{"id":"hq-orphan","title":"test","status":"open","priority":2,"labels":[]}\n'
+exit 0
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MOCK_BD_LOG", logPath)
+
+	workerDir := filepath.Join(townRoot, "testrig", "polecats", "quartz")
+	if err := os.MkdirAll(workerDir, 0755); err != nil {
+		t.Fatalf("mkdir worker: %v", err)
+	}
+
+	bd := New(workerDir)
+	_, err := bd.Create(CreateOptions{Title: "Merge: hq-abc", Rig: "ghostrig", Ephemeral: true})
+	if err == nil {
+		t.Fatal("Create with unresolvable Rig should return an error, got nil (bead would be silently orphaned)")
+	}
+	if !strings.Contains(err.Error(), "ghostrig") {
+		t.Errorf("error should name the unresolvable rig, got: %v", err)
+	}
+
+	// The bd binary must never have been invoked — no orphaned bead written.
+	if data, readErr := os.ReadFile(logPath); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+		t.Fatalf("bd should not have been called for unresolvable rig, but log has:\n%s", data)
+	}
+}
+
 // TestIsFlagLikeTitle verifies flag-like title detection (gt-e0kx5).
 func TestIsFlagLikeTitle(t *testing.T) {
 	tests := []struct {

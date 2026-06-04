@@ -834,23 +834,36 @@ func (b *Beads) getResolvedBeadsDir() string {
 // targetBeadsDirForCreate returns the database a create operation should use.
 // Rig is authoritative for MR/conflict-task creates; otherwise parent-prefixed
 // children should land beside their parent so bd can resolve the relationship.
-func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) string {
+//
+// When opts.Rig is set explicitly, an unresolvable target is a hard error: we
+// MUST NOT silently fall back to the local database, because that orphans the
+// bead in the wrong DB with a success-looking result (gu-8622x — the silent
+// cross-rig misroute data-loss class). Callers asking for a specific rig get
+// that rig's database or a loud failure, never a different DB.
+func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 	fallback := b.getResolvedBeadsDir()
 	townRoot := b.getTownRoot()
 
-	if opts.Rig != "" && townRoot != "" {
-		if rigDir := GetRigDirForName(townRoot, opts.Rig); rigDir != "" {
-			if targetDir := ResolveBeadsDir(rigDir); targetDir != "" {
-				return targetDir
-			}
+	if opts.Rig != "" {
+		if townRoot == "" {
+			return "", fmt.Errorf("cannot route bead to rig %q: town root unavailable (refusing to create in local database and orphan the bead)", opts.Rig)
 		}
+		rigDir := GetRigDirForName(townRoot, opts.Rig)
+		if rigDir == "" {
+			return "", fmt.Errorf("cannot route bead to rig %q: rig is not registered in routes.jsonl (refusing to create in local database and orphan the bead)", opts.Rig)
+		}
+		targetDir := ResolveBeadsDir(rigDir)
+		if targetDir == "" {
+			return "", fmt.Errorf("cannot route bead to rig %q: rig directory %q has no resolvable beads database (refusing to create in local database and orphan the bead)", opts.Rig, rigDir)
+		}
+		return targetDir, nil
 	}
 
 	if opts.Parent != "" {
-		return ResolveRoutingTarget(townRoot, opts.Parent, fallback)
+		return ResolveRoutingTarget(townRoot, opts.Parent, fallback), nil
 	}
 
-	return fallback
+	return fallback, nil
 }
 
 // forIssueID returns a Beads wrapper bound to the correct beads directory for
@@ -1839,7 +1852,10 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
 	}
 
-	targetDir := b.targetBeadsDirForCreate(opts)
+	targetDir, err := b.targetBeadsDirForCreate(opts)
+	if err != nil {
+		return nil, err
+	}
 	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
 		bdForCreate := &Beads{
 			workDir:    b.workDir,
