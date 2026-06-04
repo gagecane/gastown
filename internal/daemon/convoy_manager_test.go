@@ -3222,6 +3222,37 @@ func TestIsStructuralNonWorkSlingError(t *testing.T) {
 	}
 }
 
+// TestIsActivelyWorkedSlingError covers the stderr shapes sling emits when a
+// tracked bead is already hooked / in_progress to a LIVE agent (gs-2dr) — and
+// the shapes that must NOT match so they still escalate.
+func TestIsActivelyWorkedSlingError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"hooked (sling.go shape)", "bead gs-xbo is already hooked to gastown/polecats/furiosa", true},
+		{"in_progress (sling.go shape)", "bead gs-xbo is already in_progress to gastown/polecats/cheedo", true},
+		{"hooked (dispatch shape)", "already hooked (use --force to re-sling)", true},
+		{"in_progress (dispatch shape)", "already in_progress (use --force to re-sling)", true},
+		{"case insensitive", "BEAD gs-xbo Is Already Hooked To x", true},
+		// Must NOT match — pinned is a structural do-not-dispatch state, others
+		// are genuinely-ambiguous and should still escalate.
+		{"pinned", "bead gs-xbo is already pinned to x", false},
+		{"closed", "bead gs-xbo is closed (work already completed)", false},
+		{"not found", "bead 'gs-xbo' not found", false},
+		{"mayor-only", `refusing to sling bead gs-xbo: "x" is labeled mayor-only / no-polecat`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isActivelyWorkedSlingError(tc.in); got != tc.want {
+				t.Errorf("isActivelyWorkedSlingError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // feedFirstReadyTestEnv builds a town root with a gt- route and a mock gt whose
 // `sling` subcommand prints slingStderr to stderr and exits 1, while every other
 // subcommand (e.g. `convoy check`, `escalate`) appends its argv to invokeLog and
@@ -3317,6 +3348,34 @@ func TestFeedFirstReady_StructuralNonWork_UntracksNoEscalate(t *testing.T) {
 	data, _ := os.ReadFile(invokeLog)
 	if strings.Contains(string(data), "escalate") {
 		t.Errorf("Category C should NOT escalate, but escalate was invoked: %q", data)
+	}
+}
+
+// TestFeedFirstReady_ActivelyWorked_NoEscalate verifies the gs-2dr fix: when
+// sling reports the bead is already hooked / in_progress to a LIVE agent, the
+// daemon suppresses the escalation (the bead is progressing), does NOT untrack
+// it, and does NOT record a sling error.
+func TestFeedFirstReady_ActivelyWorked_NoEscalate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, invokeLog := feedFirstReadyTestEnv(t, "bead gt-live is already hooked to gastown/polecats/furiosa")
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error { untrackCalls++; return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-live", Title: "Live Work", ReadyCount: 1, ReadyIssues: []string{"gt-live"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("actively-worked bead should NOT escalate, but escalate was invoked: %q", data)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("actively-worked bead should not untrack, got %d", untrackCalls)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-live"); ok {
+		t.Errorf("actively-worked bead should not record a sling error")
 	}
 }
 

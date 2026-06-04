@@ -749,6 +749,17 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 				// the missing-bead untrack path) so the convoy can progress and
 				// auto-close, instead of escalating to the Mayor every scan.
 				m.handleNonWorkBead(c.ID, issueID, stderrLine)
+			case isActivelyWorkedSlingError(stderrLine):
+				// The bead is already hooked / in_progress to a LIVE agent (gs-2dr).
+				// sling's own dead-agent detection auto-forces dispatch when the
+				// hooked agent's session is gone, so an "already hooked" / "already
+				// in_progress" rejection means the agent is alive and the bead is
+				// being worked right now — it is progressing, not wedged. Suppress
+				// the escalation (no untrack: this is a legitimate convoy step that
+				// will close on its own and trip the completion check). Without this
+				// the feeder floods the Mayor with HIGH 'cannot dispatch / will never
+				// progress' false-positives indistinguishable from real wedges.
+				m.logger("Convoy %s: %s already hooked/in_progress to a live agent — in progress, suppressing escalation (gs-2dr)", c.ID, issueID)
 			default:
 				if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
 					// Genuinely-ambiguous persistent failure (e.g. an unroutable
@@ -870,6 +881,31 @@ func isStructuralNonWorkSlingError(stderrLine string) bool {
 		return true
 	}
 	return false
+}
+
+// isActivelyWorkedSlingError reports whether a sling stderr line indicates the
+// target bead is already hooked / in_progress to a LIVE agent — i.e. the work is
+// being performed right now, not wedged (gs-2dr). sling refuses with this error
+// ONLY after its own dead-agent detection declines to auto-force: a hooked bead
+// whose agent's session is gone is auto-re-slung, so reaching this error path
+// means the hooked agent is alive. The convoy step is therefore progressing and
+// must NOT be escalated as 'cannot dispatch / will never progress'.
+//
+// Matched sling-guard rejection shapes:
+//   - sling.go:       "bead <id> is already hooked to <agent>"
+//   - sling.go:       "bead <id> is already in_progress to <agent>"
+//   - sling_dispatch: "already hooked (use --force to re-sling)"
+//   - sling_dispatch: "already in_progress (use --force to re-sling)"
+//
+// Deliberately NOT matched: "already pinned" — a pinned bead is an explicit
+// do-not-dispatch reference, a structural state the Mayor should still see.
+func isActivelyWorkedSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	s := strings.ToLower(stderrLine)
+	return strings.Contains(s, "already hooked") ||
+		strings.Contains(s, "already in_progress")
 }
 
 // handleNonWorkBead untracks a structural non-work bead (Category C) from the
