@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +201,134 @@ func TestBurnBaseBeadForWisp(t *testing.T) {
 				t.Errorf("burnBaseBeadForWisp() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestMRBurnNotifyRecipient covers recipient selection for a burned MR: the
+// polecat worker when present, else the mayor (the silent no-worker drop case).
+func TestMRBurnNotifyRecipient(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields *beads.MRFields
+		want   string
+	}{
+		{
+			name:   "nil fields → mayor",
+			fields: nil,
+			want:   "mayor/",
+		},
+		{
+			name:   "worker + rig → polecat address",
+			fields: &beads.MRFields{Worker: "nitro", Rig: "gastown_upstream"},
+			want:   "gastown_upstream/polecats/nitro",
+		},
+		{
+			name:   "worker without rig → mayor (can't address polecat)",
+			fields: &beads.MRFields{Worker: "nitro"},
+			want:   "mayor/",
+		},
+		{
+			name:   "no worker (bare submit) → mayor",
+			fields: &beads.MRFields{Rig: "gastown_upstream", Branch: "feat/x"},
+			want:   "mayor/",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mrBurnNotifyRecipient(tt.fields); got != tt.want {
+				t.Errorf("mrBurnNotifyRecipient() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMRBurnNotice verifies the burned-MR message names the wisp and carries the
+// resubmit-relevant fields (branch, target, source issue, commit) when present.
+func TestMRBurnNotice(t *testing.T) {
+	info := &beads.Issue{ID: "gu-wisp-562"}
+	fields := &beads.MRFields{
+		Branch:      "feat/circuit-breaker-gc",
+		Target:      "main",
+		SourceIssue: "gu-4rl37",
+		CommitSHA:   "abc1234",
+	}
+	subject, body := mrBurnNotice(info, fields)
+
+	if !strings.Contains(subject, "gu-wisp-562") {
+		t.Errorf("subject %q missing MR ID", subject)
+	}
+	for _, want := range []string{"feat/circuit-breaker-gc", "main", "gu-4rl37", "abc1234", "gt mq submit"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q:\n%s", want, body)
+		}
+	}
+
+	// Missing fields → body still renders with an explicit unknown branch and no
+	// blank field lines for the absent values.
+	subj2, body2 := mrBurnNotice(&beads.Issue{ID: "gu-wisp-x"}, nil)
+	if !strings.Contains(subj2, "gu-wisp-x") {
+		t.Errorf("subject %q missing MR ID", subj2)
+	}
+	if !strings.Contains(body2, "(unknown)") {
+		t.Errorf("body should mark branch unknown when fields nil:\n%s", body2)
+	}
+}
+
+// TestReconcileOrphanMolecules_NotifiesBurnedMR verifies that burning a
+// merge-request wisp (gu-6mqv4) fires a submitter notification, while burning a
+// plain molecule zombie does not.
+func TestReconcileOrphanMolecules_NotifiesBurnedMR(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	prevNow := timeNowForOrphanReconcile
+	timeNowForOrphanReconcile = func() time.Time { return now }
+	t.Cleanup(func() { timeNowForOrphanReconcile = prevNow })
+
+	prevList := listOrphanWispCandidates
+	listOrphanWispCandidates = func(townRoot string, n time.Time) []*beads.Issue {
+		return []*beads.Issue{
+			{ID: "gu-wisp-mr", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-plain", Type: "molecule", Status: "open", CreatedAt: old},
+		}
+	}
+	t.Cleanup(func() { listOrphanWispCandidates = prevList })
+
+	prevFetch := fetchWispInfoForReconcile
+	fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
+		switch wispID {
+		case "gu-wisp-mr": // MR wisp, no live work bead → burned, must notify
+			return &beads.Issue{
+				ID:          wispID,
+				Assignee:    "",
+				Labels:      []string{mergeRequestWispLabel},
+				Description: "branch: feat/x\nworker: nitro\nrig: gastown_upstream",
+				Dependents:  nil,
+			}
+		case "gu-wisp-plain": // plain molecule zombie → burned, no notification
+			return &beads.Issue{ID: wispID, Assignee: "", Dependents: nil}
+		}
+		return nil
+	}
+	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	prevBurn := burnExistingMoleculesForRecovery
+	burnExistingMoleculesForRecovery = func(molecules []string, beadID, townRoot string) error { return nil }
+	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
+
+	var notified []string
+	prevNotify := notifyMRBurnedSubmitter
+	notifyMRBurnedSubmitter = func(townRoot string, info *beads.Issue) {
+		notified = append(notified, info.ID)
+	}
+	t.Cleanup(func() { notifyMRBurnedSubmitter = prevNotify })
+
+	got := reconcileOrphanMolecules("/fake/town")
+	if got != 2 {
+		t.Errorf("reconciled count = %d, want 2", got)
+	}
+	if len(notified) != 1 || notified[0] != "gu-wisp-mr" {
+		t.Errorf("notified = %v, want [gu-wisp-mr] (only the MR wisp)", notified)
 	}
 }
 
