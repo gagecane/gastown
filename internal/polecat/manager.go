@@ -1459,6 +1459,80 @@ func (m *Manager) preserveUnpushedHead(name, clonePath string, repoGit *git.Git)
 	style.PrintWarning("preserved unpushed work to ORIGIN: %s = %s (durable; recover: git fetch origin refs/heads/preserved/%s/%s)", originRef, short, name, short)
 }
 
+// preserveAndClearBranchStashes anchors every stash on the worktree's CURRENT
+// branch to a durable preserved ref, then drops it from the stash reflog —
+// returning the count cleared (gu-1vtw0).
+//
+// Why this exists: git stores stashes in the SHARED object store + reflog
+// (refs/stash), visible from every linked worktree. When a polecat worktree is
+// recycled from one worker to another (thunder → nitro/dust) while still on the
+// prior occupant's branch, the prior occupant's "WIP on polecat/<prior>/<bead>"
+// stash is still present. The branch-filtered StashCount matches it, so the
+// reuse recovery gate (DecideSlotReuse → has_stash) refuses to recycle the slot
+// and escalates. Worse, ResetHard + CleanForce never touch refs/stash, so the
+// new occupant silently INHERITS the prior occupant's stash — and a blind drop
+// would be data-loss (the prior WIP can diverge from its committed MR).
+//
+// Mirroring preserveUnpushedHead (hq-kpodq), we anchor each stash commit under
+// refs/preserved/<name>/stash-<short> in the bare repo AND push it to
+// refs/heads/preserved/<name>/stash-<short> on origin before dropping, so the
+// work is durably recoverable and the merge queue never sees it. A stash that
+// cannot be preserved is left in place (fail-closed: never drop unpreserved
+// work).
+//
+// Best-effort and non-fatal: callers proceed with reuse regardless. Returns the
+// number of stashes successfully preserved-and-dropped.
+func (m *Manager) preserveAndClearBranchStashes(name, clonePath string, repoGit *git.Git) int {
+	wt := git.NewGit(clonePath)
+	entries, err := wt.StashListForBranch()
+	if err != nil || len(entries) == 0 {
+		return 0
+	}
+
+	cleared := 0
+	// Drop oldest-first (highest index first) so lower stash@{N} refs stay valid
+	// as we mutate the reflog — dropping stash@{0} would renumber the rest.
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+
+		// Resolve the stash commit (the full WIP snapshot) so a preserved ref
+		// keeps it reachable through the drop and any later git gc.
+		sha, revErr := wt.Rev(e.Ref)
+		if revErr != nil || len(sha) < 12 {
+			style.PrintWarning("WORK AT RISK: could not resolve stash %s for %s; leaving it in place: %v", e.Ref, name, revErr)
+			continue
+		}
+		short := sha[:12]
+
+		// 1. Local GC-safe anchor in the bare repo.
+		preservedRef := fmt.Sprintf("refs/preserved/%s/stash-%s", name, short)
+		if err := repoGit.UpdateRef(preservedRef, sha); err != nil {
+			style.PrintWarning("WORK AT RISK: could not anchor inherited stash %s (%s) for %s; leaving it in place: %v", e.Ref, short, name, err)
+			continue
+		}
+
+		// 2. Durable ORIGIN push under refs/heads/preserved/* (never scanned by
+		// the refinery, so it stays out of the merge pipeline). If this fails the
+		// local anchor still holds the work — but we keep the stash too, since a
+		// box loss would otherwise drop it. Fail-closed: do NOT drop.
+		originRef := fmt.Sprintf("refs/heads/preserved/%s/stash-%s", name, short)
+		if err := wt.Push("origin", sha+":"+originRef, false); err != nil {
+			style.PrintWarning("WORK AT RISK: could not push inherited stash preservation ref %s to origin for %s: %v (local anchor %s retained, stash left in place)", originRef, name, err, preservedRef)
+			continue
+		}
+
+		// 3. Both anchors hold — safe to drop the inherited stash so it no longer
+		// trips has_stash or leaks into the new occupant.
+		if err := wt.StashDrop(e.Ref); err != nil {
+			style.PrintWarning("preserved inherited stash %s to %s but could not drop it: %v", short, originRef, err)
+			continue
+		}
+		cleared++
+		style.PrintWarning("preserved+cleared inherited stash for %s: %s = %s (recover: git fetch origin refs/heads/preserved/%s/stash-%s)", name, originRef, short, name, short)
+	}
+	return cleared
+}
+
 // verifyRemovalComplete checks that polecat directories were actually removed.
 // If they still exist, it attempts more aggressive cleanup and returns an error
 // describing what couldn't be removed.
@@ -1858,12 +1932,34 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		return nil, err
 	}
 
+	// Get worktree path (the fatal "must exist" check is deferred until AFTER the
+	// recovery gate below, so a missing worktree still surfaces as
+	// ErrPolecatNeedsRecovery — the contract callers/tests rely on — rather than a
+	// bare "worktree not found").
+	clonePath := m.clonePath(name)
+
+	// gu-1vtw0: Preserve-then-clear any stash on the worktree's current branch
+	// BEFORE the recovery gate. Stashes live in the SHARED refs/stash reflog, so a
+	// recycled worktree still sitting on the prior occupant's branch carries that
+	// occupant's "WIP on polecat/<prior>/<bead>" stash. Left in place it (1) trips
+	// the has_stash recovery predicate below and blocks legitimate reuse, and
+	// (2) is silently inherited by the new occupant because ResetHard/CleanForce
+	// never touch refs/stash. We anchor each stash durably (bare repo + origin
+	// preservation ref) then drop it — no data loss, gate sees a clean slot.
+	// Best-effort and non-fatal: a missing/clean worktree yields 0 and is harmless,
+	// so this is safe to run before the fatal worktree-exists check.
+	if repoGit, err := m.repoBase(); err == nil {
+		if n := m.preserveAndClearBranchStashes(name, clonePath, repoGit); n > 0 {
+			fmt.Printf("Preserved and cleared %d inherited stash(es) for %s before reuse\n", n, name)
+		}
+	} else {
+		style.PrintWarning("could not resolve bare repo to preserve inherited stashes for %s: %v", name, err)
+	}
+
 	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
 		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
 	}
 
-	// Get worktree path (must already exist for reuse)
-	clonePath := m.clonePath(name)
 	if _, err := os.Stat(clonePath); err != nil {
 		return nil, fmt.Errorf("idle polecat worktree not found at %s: %w", clonePath, err)
 	}

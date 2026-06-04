@@ -3003,6 +3003,20 @@ func (g *Git) StashPop(ref string) error {
 	return nil
 }
 
+// StashDrop removes the given stash entry from the stash reflog WITHOUT applying
+// it to the working tree. Unlike StashPop, this never touches the working tree
+// and never conflicts. Callers MUST anchor the stash commit elsewhere first if
+// the work matters — the dropped reflog entry is gc-reapable once unreferenced.
+func (g *Git) StashDrop(ref string) error {
+	if ref == "" {
+		return fmt.Errorf("stash ref required")
+	}
+	if _, err := g.run("stash", "drop", ref); err != nil {
+		return fmt.Errorf("git stash drop %s: %w", ref, err)
+	}
+	return nil
+}
+
 // StashParentSHA returns the SHA of the commit HEAD pointed at when the stash
 // was created — i.e. `git rev-parse <ref>^1`. A stash commit's first parent is
 // the "base" commit the diff is measured against; callers compare this against
