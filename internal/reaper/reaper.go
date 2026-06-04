@@ -36,6 +36,25 @@ func isNothingToCommit(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "nothing to commit")
 }
 
+// hasWorkingSetChanges returns true if the current database has any working-set
+// changes (staged or unstaged) reported by dolt_status. It guards DOLT_COMMIT('-Am')
+// calls so the no-op commit is skipped entirely when the only mutated tables are
+// dolt-ignored (wisps, wisp_%, local_metadata, repo_mtimes). Mutating only ignored
+// tables leaves dolt_status empty, so the subsequent '-Am' commit would otherwise
+// emit a server-side "nothing to commit" warning to dolt.log at high frequency
+// (gu-leuwr; mirrors the staged-changes guard added for daemon pushes in gt-zb8).
+//
+// Uses COUNT(*) (not WHERE staged=1) because '-Am' auto-stages: any working-set
+// row means there is something to commit. Fails open (returns true) on query error
+// so a commit is still attempted and the error surfaces through the normal path.
+func hasWorkingSetChanges(ctx context.Context, db *sql.DB) bool {
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&count); err != nil {
+		return true
+	}
+	return count > 0
+}
+
 // isTableNotFound returns true if the error indicates a missing table.
 // This happens when beads stores its data on a separate Dolt instance from
 // the gt Dolt server, so tables like issues/labels/dependencies don't exist
@@ -467,13 +486,18 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 			return result, fmt.Errorf("sql commit: %w", err)
 		}
 		commitMsg := fmt.Sprintf("reaper: close %d stale wisps in %s", totalReaped, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// "nothing to commit" is expected when the reaper reverts dirty working
-			// set changes back to match HEAD. The wisps were set to "open" in the
-			// server's in-memory working set without being committed; closing them
-			// makes the working set match HEAD again, so DOLT_COMMIT sees no diff.
-			if !isNothingToCommit(err) {
-				return result, fmt.Errorf("dolt commit: %w", err)
+		// Skip the commit when nothing landed in the working set (e.g. the only
+		// mutated tables are dolt-ignored), avoiding a server-side "nothing to
+		// commit" warning in dolt.log (gu-leuwr).
+		if hasWorkingSetChanges(ctx, db) {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+				// "nothing to commit" is expected when the reaper reverts dirty working
+				// set changes back to match HEAD. The wisps were set to "open" in the
+				// server's in-memory working set without being committed; closing them
+				// makes the working set match HEAD again, so DOLT_COMMIT sees no diff.
+				if !isNothingToCommit(err) {
+					return result, fmt.Errorf("dolt commit: %w", err)
+				}
 			}
 		}
 	}
@@ -753,13 +777,18 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 			return result, nil
 		}
 		commitMsg := fmt.Sprintf("reaper: auto-close %d stale issues in %s", len(ids), dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// "nothing to commit" is expected when the updated tables are dolt_ignored.
-			if !isNothingToCommit(err) {
-				result.Anomalies = append(result.Anomalies, Anomaly{
-					Type:    "dolt_commit_failed",
-					Message: fmt.Sprintf("dolt commit after auto-close failed: %v", err),
-				})
+		// Skip the commit when nothing landed in the working set (e.g. the only
+		// mutated tables are dolt-ignored), avoiding a server-side "nothing to
+		// commit" warning in dolt.log (gu-leuwr).
+		if hasWorkingSetChanges(ctx, db) {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+				// "nothing to commit" is expected when the updated tables are dolt_ignored.
+				if !isNothingToCommit(err) {
+					result.Anomalies = append(result.Anomalies, Anomaly{
+						Type:    "dolt_commit_failed",
+						Message: fmt.Sprintf("dolt commit after auto-close failed: %v", err),
+					})
+				}
 			}
 		}
 	}
@@ -915,12 +944,17 @@ func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun
 		return result, nil
 	}
 	commitMsg := fmt.Sprintf("reaper: close %d plugin receipts in %s", len(ids), dbName)
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-		if !isNothingToCommit(err) {
-			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after plugin receipt close failed: %v", err),
-			})
+	// Skip the commit when nothing landed in the working set (e.g. the only
+	// mutated tables are dolt-ignored), avoiding a server-side "nothing to
+	// commit" warning in dolt.log (gu-leuwr).
+	if hasWorkingSetChanges(ctx, db) {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+			if !isNothingToCommit(err) {
+				result.Anomalies = append(result.Anomalies, Anomaly{
+					Type:    "dolt_commit_failed",
+					Message: fmt.Sprintf("dolt commit after plugin receipt close failed: %v", err),
+				})
+			}
 		}
 	}
 
@@ -1005,12 +1039,17 @@ func ClosePluginDispatches(db *sql.DB, dbName string, maxAge time.Duration, dryR
 		return result, nil
 	}
 	commitMsg := fmt.Sprintf("reaper: close %d plugin dispatches in %s", len(ids), dbName)
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-		if !isNothingToCommit(err) {
-			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after plugin dispatch close failed: %v", err),
-			})
+	// Skip the commit when nothing landed in the working set (e.g. the only
+	// mutated tables are dolt-ignored), avoiding a server-side "nothing to
+	// commit" warning in dolt.log (gu-leuwr).
+	if hasWorkingSetChanges(ctx, db) {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+			if !isNothingToCommit(err) {
+				result.Anomalies = append(result.Anomalies, Anomaly{
+					Type:    "dolt_commit_failed",
+					Message: fmt.Sprintf("dolt commit after plugin dispatch close failed: %v", err),
+				})
+			}
 		}
 	}
 
@@ -1086,12 +1125,17 @@ func CloseStaleHookedMols(db *sql.DB, dbName string, maxAge time.Duration, dryRu
 		return result, nil
 	}
 	commitMsg := fmt.Sprintf("reaper: close %d stale hooked mols in %s", len(ids), dbName)
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-		if !isNothingToCommit(err) {
-			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after hooked mol close failed: %v", err),
-			})
+	// Skip the commit when nothing landed in the working set (e.g. the only
+	// mutated tables are dolt-ignored), avoiding a server-side "nothing to
+	// commit" warning in dolt.log (gu-leuwr).
+	if hasWorkingSetChanges(ctx, db) {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+			if !isNothingToCommit(err) {
+				result.Anomalies = append(result.Anomalies, Anomaly{
+					Type:    "dolt_commit_failed",
+					Message: fmt.Sprintf("dolt commit after hooked mol close failed: %v", err),
+				})
+			}
 		}
 	}
 
