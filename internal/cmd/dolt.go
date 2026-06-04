@@ -274,6 +274,10 @@ An orphaned database is one that exists in .dolt-data/ but is not referenced
 by any rig's metadata.json. These are typically left over from partial setups,
 renamed databases, or failed migrations.
 
+It also prunes test-pollution circuit-breaker state files from /tmp/beads-circuit
+(left by ephemeral testdb_*/beads_t*/doctest_* databases). Those files accumulate
+unbounded and add a per-call latency tax to every bd invocation (gu-9ynqw).
+
 Use --dry-run to preview what would be removed without making changes.
 
 Examples:
@@ -1066,6 +1070,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 
 	if len(orphans) == 0 {
 		fmt.Printf("%s No orphaned databases found in .dolt-data/\n", style.Bold.Render("✓"))
+		cleanCircuitBreakerFiles()
 		return nil
 	}
 
@@ -1150,7 +1155,27 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n%s Removed %d/%d orphaned database(s)\n",
 		style.Bold.Render("✓"), removed, len(orphans))
 
+	cleanCircuitBreakerFiles()
+
 	return nil
+}
+
+// cleanCircuitBreakerFiles prunes test-pollution circuit-breaker state files
+// from /tmp/beads-circuit so the directory cannot regrow unbounded and re-wedge
+// dispatch (gu-9ynqw). Best-effort: failures are reported but never fatal.
+func cleanCircuitBreakerFiles() {
+	result, err := doltserver.CleanStaleCircuitBreakerFiles()
+	if err != nil {
+		fmt.Printf("\n%s Could not sweep %s: %v\n",
+			style.Bold.Render("!"), doltserver.CircuitBreakerDir, err)
+		return
+	}
+	if result.Removed == 0 {
+		return
+	}
+	fmt.Printf("\n%s Removed %d stale circuit-breaker file(s) (%s) from %s; %d remaining\n",
+		style.Bold.Render("✓"), result.Removed, formatBytes(result.BytesFreed),
+		doltserver.CircuitBreakerDir, result.Remaining)
 }
 
 func runDoltList(cmd *cobra.Command, args []string) error {
