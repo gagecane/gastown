@@ -329,3 +329,38 @@ func TestDispatchCloseEscalationArgs(t *testing.T) {
 		t.Error("distinct work beads produced identical escalation args; fingerprint not bead-scoped")
 	}
 }
+
+// TestDispatchMaintenanceDue covers the gu-pjrz3 option-b gate: maintenance
+// passes run at most once per interval (so the common dispatch tick skips the
+// 4-pass per-rig fan-out that blew the 5m budget). Fail-open on first run / no
+// stamp; defers within the interval; runs again after it elapses.
+func TestDispatchMaintenanceDue(t *testing.T) {
+	town := t.TempDir()
+	base := time.Date(2026, 6, 4, 6, 0, 0, 0, time.UTC)
+	clock := base
+	timeNowForDispatchMaint = func() time.Time { return clock }
+	t.Cleanup(func() { timeNowForDispatchMaint = time.Now })
+
+	// First call: no stamp → fail-open → due (stamps `base`).
+	if !dispatchMaintenanceDue(town) {
+		t.Fatal("first call should be due (no stamp, fail-open)")
+	}
+	// Same instant: within interval → NOT due.
+	if dispatchMaintenanceDue(town) {
+		t.Fatal("call at same instant should NOT be due (stamped this tick)")
+	}
+	// Just under the interval → still NOT due.
+	clock = base.Add(dispatchMaintenanceInterval - time.Second)
+	if dispatchMaintenanceDue(town) {
+		t.Fatal("call just under the interval should NOT be due")
+	}
+	// Past the interval → due again (and re-stamps at the new clock).
+	clock = base.Add(dispatchMaintenanceInterval + time.Second)
+	if !dispatchMaintenanceDue(town) {
+		t.Fatal("call past the interval should be due")
+	}
+	// Immediately after that run → NOT due again (re-stamp took).
+	if dispatchMaintenanceDue(town) {
+		t.Fatal("call right after a due-run should NOT be due (re-stamped)")
+	}
+}

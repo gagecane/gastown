@@ -264,6 +264,49 @@ func dispatchPhase(name string, fn func()) {
 	}
 }
 
+// dispatchMaintenanceInterval bounds how often the pre-dispatch maintenance
+// passes (cleanupStaleContexts, releaseExpiredDeferredBeads, recoverZombie-
+// Molecules, reconcileOrphanMolecules) run — at most once per interval, rather
+// than every dispatch tick (gu-pjrz3 option-b). 5 min is well under the slowest
+// staleness window these passes service (stale-context TTL, defer-release, wisp
+// reap) so nothing it cleans up lingers materially longer, while the dispatch
+// tick itself — the latency-critical "place ready work" path — runs free of the
+// per-rig fan-out cost on every other tick. Tunable via GT_DISPATCH_MAINT_INTERVAL.
+const dispatchMaintenanceInterval = 5 * time.Minute
+
+// dispatchMaintenanceDue reports whether the pre-dispatch maintenance passes are
+// due (>= dispatchMaintenanceInterval since the last run) and, if so, stamps the
+// run time. The stamp lives in <town>/.runtime/dispatch-maintenance.stamp.
+// Fail-open: if the stamp can't be read (first run, unreadable), maintenance
+// runs — we never SKIP maintenance due to a stamp error, only defer it when we
+// can prove it ran recently. This makes the common dispatch tick skip the
+// 4-pass per-rig fan-out that was blowing the 5m budget (gu-pjrz3).
+func dispatchMaintenanceDue(townRoot string) bool {
+	interval := dispatchMaintenanceInterval
+	if v := os.Getenv("GT_DISPATCH_MAINT_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			interval = d
+		}
+	}
+	now := timeNowForDispatchMaint()
+	stamp := filepath.Join(townRoot, ".runtime", "dispatch-maintenance.stamp")
+	if data, err := os.ReadFile(stamp); err == nil {
+		if last, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); perr == nil {
+			if now.Sub(last) < interval {
+				return false // ran recently — skip the passes this tick
+			}
+		}
+	}
+	// Due (or stamp unreadable → fail-open). Stamp now so concurrent/next ticks
+	// defer. Best-effort: a write failure just means the next tick also runs them.
+	_ = os.MkdirAll(filepath.Dir(stamp), 0755)
+	_ = os.WriteFile(stamp, []byte(now.Format(time.RFC3339Nano)), 0644)
+	return true
+}
+
+// timeNowForDispatchMaint is a seam for tests to control the maintenance clock.
+var timeNowForDispatchMaint = time.Now
+
 // dispatchScheduledWork is the main dispatch loop for the capacity scheduler.
 // Called by both `gt scheduler run` and the daemon heartbeat.
 func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun bool) (int, error) {
@@ -333,51 +376,35 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	}
 	spawnDelay := schedulerCfg.GetSpawnDelay()
 
-	// Clean up invalid/stale contexts before querying for ready beads.
-	// Skip during dry-run to avoid mutating state.
-	if !dryRun {
+	// Pre-dispatch maintenance passes (gu-pjrz3 option-b): these four per-rig bd
+	// fan-outs (stale-context cleanup, deferred-release, zombie-molecule recovery,
+	// orphan-wisp reconcile) are CLEANUP/reconcile, not dispatch-critical — yet
+	// they ran on EVERY dispatch tick, BEFORE any bead was placed. Under bd-read
+	// throttle + Dolt load, four stacked serial 18-dir fan-outs blew the 5m daemon
+	// dispatch budget (gu-t6jqq) and SIGKILLed dispatch before it placed anything —
+	// a town-wide dispatch outage where ready work never spawned despite free
+	// capacity. Decouple them from the hot path: run them at most once per
+	// dispatchMaintenanceInterval (timestamped in .runtime), so the COMMON dispatch
+	// tick skips straight to find-ready-contexts + place and stays sub-second.
+	// Maintenance still runs (correctness preserved — a stale context lingers at
+	// most one interval longer), just not blocking every placement. Skipped in
+	// dry-run (never mutates).
+	if !dryRun && dispatchMaintenanceDue(townRoot) {
 		dispatchPhase("cleanupStaleContexts", func() { cleanupStaleContexts(townRoot) })
-	}
 
-	// Auto-release expired-defer beads (gu-0i09): scan all rigs for
-	// status=deferred beads whose defer_until is in the past and flip them
-	// back to status=open so they re-enter the ready queue. Without this
-	// the deferred-then-rediscover loop the scheduler relies on never runs
-	// and beads accumulate in the deferred state forever.
-	if !dryRun {
 		dispatchPhase("releaseExpiredDeferredBeads", func() {
 			if released := releaseExpiredDeferredBeads(townRoot); released > 0 {
 				fmt.Printf("%s Auto-released %d bead(s) from defer\n", style.Dim.Render("○"), released)
 			}
 		})
-	}
 
-	// Recover zombie molecules (gu-w49a): scan queued sling-contexts whose
-	// work bead is open but has an unclaimed molecule wisp blocking it via
-	// `bd blocked`, and burn the orphan molecules. Without this, work
-	// beads dispatched while the polecat pool is at capacity (or any other
-	// "molecule attached, polecat never claimed" path) become permanently
-	// un-dispatchable because the molecule edge keeps them in the blocked
-	// set. Skip during dry-run to avoid mutating state.
-	if !dryRun {
 		dispatchPhase("recoverZombieMolecules", func() {
 			if recovered := recoverZombieMolecules(townRoot); recovered > 0 {
 				fmt.Printf("%s Recovered %d work bead(s) from zombie-molecule wedge\n",
 					style.Dim.Render("○"), recovered)
 			}
 		})
-	}
 
-	// Reconcile orphaned molecule wisps (gu-sz6va): the daemon's dead-session
-	// reapers reset hooked beads to open+unassigned with no type filter, which
-	// strands molecule wisps as open+unassigned forever — neither re-enqueued
-	// nor reaped. recoverZombieMolecules (above) only approaches from the
-	// open-sling-context side, so it misses wisps whose work bead is already
-	// closed (or whose context was closed "dispatched"). This pass enumerates
-	// wisps directly and either reaps the zombie or burns the stale wisp to
-	// unblock its open work bead for re-dispatch. Runs after recoverZombieMolecules
-	// so it only sees wisps that pass didn't already resolve. Skip during dry-run.
-	if !dryRun {
 		dispatchPhase("reconcileOrphanMolecules", func() {
 			if reconciled := reconcileOrphanMolecules(townRoot); reconciled > 0 {
 				fmt.Printf("%s Reconciled %d orphaned molecule wisp(s)\n",
