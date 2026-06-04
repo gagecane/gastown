@@ -20,11 +20,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // MigrateWispsResult holds migration statistics.
@@ -115,10 +118,27 @@ func MigrateAgentBeadsToWisps(townRoot, workDir string, dryRun bool) (*MigrateWi
 	return result, nil
 }
 
+// bdSQLEnv builds the environment for a `bd sql` subprocess pinned to workDir's
+// rig. BuildPinnedBDEnv strips inherited server/database selectors, re-derives the
+// server connection from the rig metadata (or GT_DOLT_*), and applies the go-test
+// leak guard. `bd sql` connects straight to the server though, so it will not read
+// the rig metadata for database selection — pin it explicitly, otherwise bd lands
+// on the server's default "beads" database and pollutes the shared Dolt server
+// (gs-7v3 / gs-qbd). Mirrors internal/doctor.bdSQLEnv.
+func bdSQLEnv(workDir string) []string {
+	beadsDir := beads.ResolveBeadsDir(workDir)
+	env := beads.BuildPinnedBDEnv(os.Environ(), beadsDir)
+	if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
+		env = append(env, dbEnv)
+	}
+	return env
+}
+
 // bdSQL executes a SQL query via `bd sql`.
 func bdSQL(workDir, query string) error {
 	cmd := exec.Command("bd", "sql", query)
 	cmd.Dir = workDir
+	cmd.Env = bdSQLEnv(workDir)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -131,6 +151,7 @@ func bdSQL(workDir, query string) error {
 func bdSQLCSV(workDir, query string) (string, error) {
 	cmd := exec.Command("bd", "sql", "--csv", query)
 	cmd.Dir = workDir
+	cmd.Env = bdSQLEnv(workDir)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -139,10 +160,13 @@ func bdSQLCSV(workDir, query string) (string, error) {
 	return string(output), nil
 }
 
-// bdExec executes a bd command.
+// bdExec executes a bd command. Non-sql bd subcommands resolve the database from
+// .beads metadata via cmd.Dir, but pin the env anyway so a stray inherited
+// selector cannot redirect the migration onto the shared server's default DB.
 func bdExec(workDir string, args ...string) error {
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = workDir
+	cmd.Env = bdSQLEnv(workDir)
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
