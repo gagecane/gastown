@@ -3167,3 +3167,182 @@ exit 0
 		t.Errorf("expected no strike entry for non-not-found failure")
 	}
 }
+
+// TestIsClosedBeadSlingError covers the stderr shape sling emits when a tracked
+// bead closes between the stranded scan and the feed (Category A, gu-y6ild).
+func TestIsClosedBeadSlingError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"closed", "bead gt-abc is closed (work already completed)", true},
+		{"tombstone", "bead gt-abc is tombstone (work already completed)", true},
+		{"case insensitive", "BEAD gt-abc is CLOSED (Work Already Completed)", true},
+		{"unrelated", "rig parked: gastown", false},
+		{"not found is not closed", "bead 'gt-abc' not found", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isClosedBeadSlingError(tc.in); got != tc.want {
+				t.Errorf("isClosedBeadSlingError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsStructuralNonWorkSlingError covers the sling-guard rejection shapes that
+// mark a bead as a permanent non-work item (Category C, gu-y6ild) — and the
+// shapes that must NOT match (mayor-only, unroutable) so they still escalate.
+func TestIsStructuralNonWorkSlingError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"epic", `refusing to sling bead gt-abc: "EPIC: x" is an epic container (title "EPIC: x", issue_type="task", labels=[])`, true},
+		{"open children", `refusing to sling bead gt-abc: "x" has open children — it is a container`, true},
+		{"identity", `refusing to sling bead gt-abc: "polecat-x" is an identity/system bead (gt:agent label or polecat/refinery title)`, true},
+		{"sling-context wrapper", `refusing to sling bead gt-abc: "x" is a sling-context wrapper (label gt:sling-context)`, true},
+		{"flag-like", `refusing to sling bead gt-abc: title "--foo" looks like a CLI flag (garbage bead from flag-parsing bug)`, true},
+		{"polecat-owned", `refusing to sling bead gt-abc: "x" is owned by a polecat (rig/polecats/y)`, true},
+		// Must NOT match — these are genuinely-ambiguous and should still escalate.
+		{"mayor-only", `refusing to sling bead gt-abc: "x" is labeled mayor-only / no-polecat`, false},
+		{"unroutable", "no rig for gt-abc", false},
+		{"not found", "bead 'gt-abc' not found", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStructuralNonWorkSlingError(tc.in); got != tc.want {
+				t.Errorf("isStructuralNonWorkSlingError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// feedFirstReadyTestEnv builds a town root with a gt- route and a mock gt whose
+// `sling` subcommand prints slingStderr to stderr and exits 1, while every other
+// subcommand (e.g. `convoy check`, `escalate`) appends its argv to invokeLog and
+// exits 0. Returns the manager and the path to the invocation log.
+func feedFirstReadyTestEnv(t *testing.T, slingStderr string) (*ConvoyManager, string) {
+	t.Helper()
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+	invokeLog := filepath.Join(binDir, "invoke.log")
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo ` + shellQuote(slingStderr) + ` >&2
+  exit 1
+fi
+echo "$@" >> "` + invokeLog + `"
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	return m, invokeLog
+}
+
+// shellQuote wraps s in single quotes for safe embedding in a /bin/sh script.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// TestFeedFirstReady_ClosedBead_ChecksConvoyNoEscalate verifies Category A
+// (gu-y6ild): when sling reports the bead is already closed, the daemon runs a
+// per-convoy completion check and does NOT escalate to the Mayor.
+func TestFeedFirstReady_ClosedBead_ChecksConvoyNoEscalate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, invokeLog := feedFirstReadyTestEnv(t, "bead gt-done is closed (work already completed)")
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error { untrackCalls++; return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-a", Title: "Closed Race", ReadyCount: 1, ReadyIssues: []string{"gt-done"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	log := string(data)
+	if !strings.Contains(log, "convoy check hq-cv-a") {
+		t.Errorf("expected a `convoy check hq-cv-a` invocation, got: %q", log)
+	}
+	if strings.Contains(log, "escalate") {
+		t.Errorf("Category A should NOT escalate, but escalate was invoked: %q", log)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("Category A should not untrack, got %d untrack calls", untrackCalls)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-done"); ok {
+		t.Errorf("closed-bead race should not record a sling error")
+	}
+}
+
+// TestFeedFirstReady_StructuralNonWork_UntracksNoEscalate verifies Category C
+// (gu-y6ild): when sling rejects a structural non-work bead (epic, identity,
+// wrapper, etc.), the daemon untracks it from the convoy on the FIRST failure
+// (no strike threshold) and does NOT escalate.
+func TestFeedFirstReady_StructuralNonWork_UntracksNoEscalate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	stderr := `refusing to sling bead gt-epic: "EPIC: rework" is an epic container (title "EPIC: rework", issue_type="task", labels=[])`
+	m, invokeLog := feedFirstReadyTestEnv(t, stderr)
+	var untrackCalls []missingBeadKey
+	m.untrackMissingBeadFn = func(convoyID, issueID string) error {
+		untrackCalls = append(untrackCalls, missingBeadKey{convoyID, issueID})
+		return nil
+	}
+
+	c := strandedConvoyInfo{ID: "hq-cv-c", Title: "Epic Step", ReadyCount: 1, ReadyIssues: []string{"gt-epic"}}
+	m.feedFirstReady(c) // single failure should suffice — structural rejection is deterministic
+
+	if len(untrackCalls) != 1 || untrackCalls[0] != (missingBeadKey{"hq-cv-c", "gt-epic"}) {
+		t.Fatalf("expected exactly 1 untrack of {hq-cv-c gt-epic} on first failure, got %v", untrackCalls)
+	}
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("Category C should NOT escalate, but escalate was invoked: %q", data)
+	}
+}
+
+// TestFeedFirstReady_AmbiguousFailure_StillEscalates verifies the default path
+// (gu-y6ild): a genuinely-ambiguous failure (e.g. mayor-only) is NOT auto-
+// remediated — it escalates once to the Mayor, preserving the gt-3798 behavior.
+func TestFeedFirstReady_AmbiguousFailure_StillEscalates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, invokeLog := feedFirstReadyTestEnv(t, `refusing to sling bead gt-mo: "x" is labeled mayor-only / no-polecat`)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error { untrackCalls++; return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-amb", Title: "Mayor Only", ReadyCount: 1, ReadyIssues: []string{"gt-mo"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if !strings.Contains(string(data), "escalate") {
+		t.Errorf("ambiguous failure should escalate, but escalate was not invoked: %q", data)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("ambiguous failure should not untrack, got %d", untrackCalls)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-mo"); !ok {
+		t.Errorf("ambiguous failure should record a sling error for dedup")
+	}
+}

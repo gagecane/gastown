@@ -728,15 +728,35 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		if err := cmd.Run(); err != nil {
 			stderrLine := util.FirstLine(stderr.String())
 			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, stderrLine)
-			if isBeadNotFoundError(stderrLine) {
+			switch {
+			case isBeadNotFoundError(stderrLine):
 				// Missing beads have their own resolution path (auto-untrack
 				// after threshold strikes) — don't also escalate them.
 				m.handleMissingBeadStrike(c.ID, issueID, stderrLine)
-			} else if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
-				// Persistent non-missing failure (e.g. an unroutable target
-				// under the capacity scheduler, gt-3798): escalate once per
-				// stranded issue instead of every scan cycle.
-				m.escalateSlingFailure(c.ID, issueID, stderrLine)
+			case isClosedBeadSlingError(stderrLine):
+				// Category A (gu-y6ild): the bead closed between the stranded
+				// scan and this feed (TOCTOU race). The work is already done —
+				// escalating is pure toil. Run a completion check so the convoy
+				// auto-closes once all tracked beads are closed; the closed bead
+				// drops from the next scan's ready set on its own.
+				m.logger("Convoy %s: %s already closed (work completed) — running completion check instead of escalating", c.ID, issueID)
+				m.runConvoyCheck(c.ID) // idempotent completion+close; no escalation
+			case isStructuralNonWorkSlingError(stderrLine):
+				// Category C (gu-y6ild): the bead is a structural non-work item
+				// (epic/container with open children, identity bead, sling-context
+				// wrapper, flag-like garbage, or polecat-owned). It can never be a
+				// dispatchable convoy step. Auto-untrack it from the convoy (reusing
+				// the missing-bead untrack path) so the convoy can progress and
+				// auto-close, instead of escalating to the Mayor every scan.
+				m.handleNonWorkBead(c.ID, issueID, stderrLine)
+			default:
+				if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
+					// Genuinely-ambiguous persistent failure (e.g. an unroutable
+					// target under the capacity scheduler, mayor-only/no-polecat
+					// assertion, gt-3798): escalate once per stranded issue instead
+					// of every scan cycle. These legitimately need Mayor judgment.
+					m.escalateSlingFailure(c.ID, issueID, stderrLine)
+				}
 			}
 			continue
 		}
@@ -794,6 +814,89 @@ func isBeadNotFoundError(stderrLine string) bool {
 		return true
 	}
 	return false
+}
+
+// isClosedBeadSlingError reports whether a sling stderr line indicates the
+// target bead is already closed/tombstoned — i.e. the work completed between
+// the stranded scan and this feed (a TOCTOU race). Matches the error shape
+// produced by sling's closed-bead guard: "bead <id> is closed (work already
+// completed)" / "... is tombstone (work already completed)". This is Category A
+// from gu-y6ild: a closed tracked bead should trigger a convoy completion check,
+// not a Mayor escalation. (gu-y6ild)
+func isClosedBeadSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(stderrLine), "work already completed")
+}
+
+// isStructuralNonWorkSlingError reports whether a sling stderr line indicates
+// the target bead is a structural non-work item that can never be dispatched as
+// a convoy step (Category C from gu-y6ild). These are permanent data-shape
+// rejections from sling's guards — re-attempting the sling every scan is futile,
+// and escalating to the Mayor every time is pure toil. The bead should be
+// auto-untracked from the convoy so it can progress and auto-close.
+//
+// Matched rejections (sling.go guards):
+//   - epic container (epic title / phase:epic label / type=epic)
+//   - parent of open children (container, not a leaf work item)
+//   - identity/system bead (gt:agent label or polecat/refinery title)
+//   - sling-context wrapper (gt:sling-context label)
+//   - flag-like garbage title (flag-parsing bug)
+//   - polecat-owned bead (self-filed by a polecat)
+//
+// Deliberately NOT matched (left to escalate as genuinely-ambiguous, needing
+// Mayor judgment): mayor-only / no-polecat beads, unroutable targets, and
+// capacity-scheduler failures. A mayor-only bead is an explicit operator
+// assertion that a human must resolve it — exactly the case the Mayor should
+// still see. (gu-y6ild)
+func isStructuralNonWorkSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	s := strings.ToLower(stderrLine)
+	switch {
+	case strings.Contains(s, "is an epic container"):
+		return true
+	case strings.Contains(s, "has open children"):
+		return true
+	case strings.Contains(s, "is an identity/system bead"):
+		return true
+	case strings.Contains(s, "is a sling-context wrapper"):
+		return true
+	case strings.Contains(s, "looks like a cli flag"):
+		return true
+	case strings.Contains(s, "is owned by a polecat"):
+		return true
+	}
+	return false
+}
+
+// handleNonWorkBead untracks a structural non-work bead (Category C) from the
+// convoy so the stranded scan stops re-attempting an impossible sling and the
+// convoy can make progress / auto-close. It reuses the missing-bead untrack
+// seam (untrackMissingBeadFn → `bd dep remove`). Unlike the missing-bead path,
+// no strike threshold is applied: a structural rejection is deterministic and
+// permanent (the bead's data shape will not change between scans), so a single
+// failure is sufficient evidence to untrack. On untrack failure the next scan
+// retries. (gu-y6ild)
+func (m *ConvoyManager) handleNonWorkBead(convoyID, issueID, stderrLine string) {
+	m.logger("Convoy %s: %s is a structural non-work bead (%s) — auto-untracking (gu-y6ild)",
+		convoyID, issueID, stderrLine)
+	if m.untrackMissingBeadFn == nil {
+		return
+	}
+	if err := m.untrackMissingBeadFn(convoyID, issueID); err != nil {
+		m.logger("Convoy %s: untrack of non-work %s failed: %s — will retry next scan",
+			convoyID, issueID, util.FirstLine(err.Error()))
+		return
+	}
+	// Clear any strike/error state for this pair so a future (re-added) bead
+	// starts fresh.
+	m.missingBeadStrikes.Delete(missingBeadKey{convoyID, issueID})
+	m.seenSlingErrors.Delete(issueID)
+	m.logger("Convoy %s: untracked non-work bead %s — next scan will reassess convoy state",
+		convoyID, issueID)
 }
 
 // handleMissingBeadStrike increments the strike counter for (convoyID, issueID)
@@ -861,7 +964,14 @@ func (m *ConvoyManager) untrackMissingBeadViaBd(convoyID, issueID string) error 
 // closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.
 func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	m.logger("Convoy %s: auto-closing (empty)", convoyID)
+	m.runConvoyCheck(convoyID)
+}
 
+// runConvoyCheck runs `gt convoy check <convoyID>` for a single convoy. This is
+// the idempotent completion-and-close pass: it closes the convoy iff all tracked
+// beads are closed (and shipped). Used by closeEmptyConvoy and by the Category A
+// closed-bead race path in feedFirstReady (gu-y6ild).
+func (m *ConvoyManager) runConvoyCheck(convoyID string) {
 	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
 	cmd.Dir = m.townRoot
 	cmd.Env = bdMutationRoutingEnv(m.townRoot)
