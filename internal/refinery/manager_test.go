@@ -389,6 +389,11 @@ func TestManager_PostMerge_ClearsAwaitingRefineryMergeLabel(t *testing.T) {
 	}
 }
 
+// TestManager_PostMerge_AlreadyClosedMR is a regression test for gu-3f02d.
+// A previous post-merge run may close the MR bead but be interrupted before
+// finishing branch-delete / source-issue-close. A retry must NOT error with
+// "merge request not found" (which abandoned the leftover cleanup); it must
+// recover the closed MR bead by ID and complete idempotently.
 func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
@@ -398,7 +403,7 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 		t.Skipf("bd init unavailable: %v", err)
 	}
 
-	// Create and close an MR bead
+	// Create and close an MR bead (simulating a prior partial post-merge run)
 	mrIssue, err := b.Create(beads.CreateOptions{
 		Title:       "Already merged MR",
 		Labels:      []string{"gt:merge-request"},
@@ -411,10 +416,68 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 		t.Fatalf("close MR issue: %v", err)
 	}
 
-	// PostMerge should fail since MR is already closed and won't be in queue
-	_, err = mgr.PostMerge(mrIssue.ID)
-	if err == nil {
-		t.Error("PostMerge() expected error for already-closed MR")
+	// PostMerge must succeed idempotently even though the MR is already closed
+	// and absent from the open queue.
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() on already-closed MR error = %v, want nil (idempotent)", err)
+	}
+	if !result.MRClosed {
+		t.Error("PostMerge() MRClosed = false, want true")
+	}
+	if result.MR.Branch != "polecat/old/gt-old" {
+		t.Errorf("PostMerge() MR.Branch = %q, want polecat/old/gt-old", result.MR.Branch)
+	}
+}
+
+// TestManager_PostMerge_IdempotentClosesSourceIssue is a regression test for
+// gu-3f02d. When a prior run closed the MR bead but left the source issue
+// HOOKED/open, the retry must close the source issue rather than bail.
+func TestManager_PostMerge_IdempotentClosesSourceIssue(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	// Source issue that a prior partial run left open.
+	srcIssue, err := b.Create(beads.CreateOptions{
+		Title:  "Implement feature Y",
+		Labels: []string{"gt:task"},
+	})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+
+	// MR bead already closed, but source issue still open.
+	mrDesc := "branch: polecat/test/gt-yz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main"
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature Y",
+		Labels:      []string{"gt:merge-request"},
+		Description: mrDesc,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	if err := b.Close(mrIssue.ID); err != nil {
+		t.Fatalf("close MR issue: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error = %v, want nil", err)
+	}
+	if !result.SourceIssueClosed {
+		t.Error("PostMerge() SourceIssueClosed = false, want true (idempotent retry must close source)")
+	}
+	got, err := b.Show(srcIssue.ID)
+	if err != nil {
+		t.Fatalf("show source issue: %v", err)
+	}
+	if !beads.IssueStatus(got.Status).IsTerminal() {
+		t.Errorf("source issue status = %q, want terminal", got.Status)
 	}
 }
 

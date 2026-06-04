@@ -591,6 +591,31 @@ func (m *Manager) FindMR(idOrBranch string) (*MergeRequest, error) {
 	return nil, ErrMRNotFound
 }
 
+// findClosedMRByID loads a merge-request bead directly by its exact ID,
+// bypassing the open-only Queue() filter. It is used by PostMerge to recover
+// the MR metadata (branch, source_issue) when a prior, interrupted post-merge
+// run already closed the MR bead but left branch/issue cleanup incomplete
+// (gu-3f02d). The bead must carry the gt:merge-request label so unrelated
+// IDs cannot be mistaken for an MR.
+func (m *Manager) findClosedMRByID(id string) (*MergeRequest, error) {
+	b := beads.New(m.rig.BeadsPath())
+	issue, err := b.Show(id)
+	if err != nil {
+		return nil, err
+	}
+	if issue == nil || !beads.HasLabel(issue, "gt:merge-request") {
+		return nil, ErrMRNotFound
+	}
+	mr := m.issueToMR(issue)
+	if mr == nil {
+		return nil, ErrMRNotFound
+	}
+	if beads.IssueStatus(issue.Status).IsTerminal() {
+		mr.Status = MRClosed
+	}
+	return mr, nil
+}
+
 // Retry is deprecated - the Refinery agent handles retry logic autonomously.
 // ZFC-compliant: no state file, agent uses beads issue status.
 // The agent will automatically retry failed MRs in its patrol cycle.
@@ -656,7 +681,21 @@ type PostMergeResult struct {
 func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 	mr, err := m.FindMR(idOrBranch)
 	if err != nil {
-		return nil, err
+		// FindMR only searches the OPEN queue. A previous post-merge run may
+		// have closed the MR bead but been interrupted before completing the
+		// branch-delete and source-issue-close steps (gu-3f02d). Retrying must
+		// not error with "merge request not found" and abandon the leftover
+		// cleanup — fall back to loading the closed MR bead directly by ID so
+		// the (idempotent) remaining steps can finish.
+		if errors.Is(err, ErrMRNotFound) {
+			if closedMR, findErr := m.findClosedMRByID(idOrBranch); findErr == nil {
+				mr = closedMR
+			} else {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	result := &PostMergeResult{

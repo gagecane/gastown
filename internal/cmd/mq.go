@@ -561,6 +561,14 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("remote branch delete: %w", err)
 	}
 
+	// Already-deleted remote branch is a no-op success. This makes post-merge
+	// idempotent: a retry after a partially-completed run must not fail just
+	// because the branch was already cleaned up (gu-3f02d).
+	if exists, existsErr := rigGit.PushRemoteBranchExists("origin", mr.Branch); existsErr == nil && !exists {
+		fmt.Printf("  %s Remote branch already deleted: %s\n", style.Dim.Render("○"), mr.Branch)
+		return nil
+	}
+
 	// Delete remote branch — but skip if there's an open PR on it.
 	// Deleting a branch with an open PR causes GitHub to auto-close the PR
 	// as "closed" (not "merged"), destroying the PR audit trail. (gas-fk4)
