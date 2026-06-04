@@ -380,6 +380,35 @@ func TestReapAndScanShareTrackedGuard(t *testing.T) {
 
 // TestCloseStaleHookedMolsQueryShape verifies that CloseStaleHookedMols targets
 // the wisps table with the correct status/title/agent filters. GH#3767.
+// TestAutoAddCommitsAreGuarded ensures every DOLT_COMMIT('-Am', ...) site in the
+// reaper is preceded by a hasWorkingSetChanges guard, so a no-op auto-add commit
+// is skipped when the only mutated tables are dolt-ignored. This prevents the
+// server-side "nothing to commit" warnings that bloated dolt.log (gu-leuwr).
+// Commits using '--allow-empty' are intentionally empty and exempt.
+func TestAutoAddCommitsAreGuarded(t *testing.T) {
+	for _, sourcePath := range []string{"reaper.go", "hooked_mail.go"} {
+		data, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatalf("read %s: %v", sourcePath, err)
+		}
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if !strings.Contains(line, "CALL DOLT_COMMIT('-Am'") {
+				continue
+			}
+			// Look back a few lines for the guard; the commit must be wrapped in it.
+			windowStart := i - 6
+			if windowStart < 0 {
+				windowStart = 0
+			}
+			window := strings.Join(lines[windowStart:i], "\n")
+			if !strings.Contains(window, "hasWorkingSetChanges(ctx, db)") {
+				t.Errorf("%s:%d: DOLT_COMMIT('-Am') is not guarded by hasWorkingSetChanges", sourcePath, i+1)
+			}
+		}
+	}
+}
+
 func TestCloseStaleHookedMolsQueryShape(t *testing.T) {
 	sourcePath := "reaper.go"
 	data, err := os.ReadFile(sourcePath)
