@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/docsonly"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -1310,6 +1311,22 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Pre-verification stale — target moved (%s → %s), running gates normally\n",
 				mr.PreVerifiedBase[:min(8, len(mr.PreVerifiedBase))], targetHead[:min(8, len(targetHead))])
+		}
+	}
+
+	// gs-2c9: Docs-only fast-path. The code-quality audit formula commits only
+	// reports under .quality/**.md; running the full gate suite (go test ./...,
+	// 7m) on a docs-only MR is pure throughput drain on the single-threaded
+	// refinery for zero code risk. If every changed file is documentation
+	// (*.md or .quality/**), skip gates regardless of pre-verification state.
+	// Independent of the pre-verified fast-path above: that one goes stale when
+	// the target moves, but a docs-only diff never needs Go gates.
+	if !skipGates {
+		if files, err := e.git.DiffNameOnly("origin/"+mr.Target, mr.Branch); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not diff %s for docs-only check: %v (running gates normally)\n", mr.Branch, err)
+		} else if docsonly.IsDocsOnly(files) {
+			_, _ = fmt.Fprintln(e.output, "[Engineer] Docs-only change (*.md / .quality/**) — skipping gates (gs-2c9)")
+			skipGates = true
 		}
 	}
 

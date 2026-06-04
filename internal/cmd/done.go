@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/docsonly"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -966,7 +967,15 @@ afterSafetyNet:
 		// just-rebased branch costs the same as letting refinery do it, and
 		// risks the witness idle timeout (gu-d416) if the gates are slow.
 		if donePreVerified && preVerifiedAttestationValid && cwdAvailable {
-			if !completion.VerifyPreVerifiedAttestation(context.Background(), townRoot, rigName, cwd) {
+			// gs-2c9: Skip the gate re-run for docs-only changes. The code-quality
+			// formula commits only reports under .quality/**.md; re-running
+			// go test/vet here (and again in the refinery) is the 360s hard-wall
+			// cost the bead describes, for zero code risk. Go gates only inspect
+			// .go sources, so a docs-only diff makes every gate a no-op — keep the
+			// attestation without spending the gate run.
+			if files, derr := g.DiffNameOnly(contaminationBase, "HEAD"); derr == nil && docsonly.IsDocsOnly(files) {
+				fmt.Printf("%s docs-only change (*.md / .quality/**) — skipping pre-merge gate verification (gs-2c9)\n", style.Bold.Render("→"))
+			} else if !completion.VerifyPreVerifiedAttestation(context.Background(), townRoot, rigName, cwd) {
 				preVerifiedAttestationValid = false
 			}
 		}
