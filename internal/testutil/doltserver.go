@@ -97,7 +97,69 @@ var (
 	doltCtrPort string
 	dockerOnce  sync.Once
 	dockerAvail bool
+	reapOnce    sync.Once
 )
+
+// orphanReapAge is how long a gastown Dolt test container may run before a new
+// test run treats it as a leak and force-removes it. testcontainers' Ryuk
+// reaper normally removes these on process exit (graceful OR crash), but if the
+// reaper container itself is killed first — host `docker prune`, an `act` job
+// teardown tearing down its network, OOM — the Dolt container it was tracking
+// leaks forever (observed: containers Up 4-5 days, which corrupted Docker
+// overlay storage and caused RWLayer-nil flakes; see gs-vxt). The longest
+// gastown suite runs under `-timeout=15m`, so any gastown Dolt test container
+// older than this is provably from a dead session and safe to remove — even
+// while other test processes run concurrently on the shared host daemon,
+// because none of their live containers can be this old.
+const orphanReapAge = 2 * time.Hour
+
+// shouldReapOrphan reports whether a Dolt test container last started at
+// `started` is old enough to be treated as a leak at `now`. Split out so the
+// age decision is unit-testable without a Docker daemon.
+func shouldReapOrphan(started, now time.Time) bool {
+	return now.Sub(started) > orphanReapAge
+}
+
+// reapOrphanedDoltContainers force-removes gastown Dolt test containers left
+// behind by dead test sessions whose testcontainers reaper failed to clean
+// them up. It is the self-healing safety net that stops the host from
+// re-accumulating leaked Dolt containers across runs.
+//
+// Targets ONLY containers that BOTH (a) use our exact Dolt image and (b) carry
+// the testcontainers reap label — so it never touches the gt production Dolt (a
+// host process, not a container), gc's Dolt, or any non-test container. The age
+// gate (orphanReapAge) guarantees it never removes a concurrently-running test's
+// live container. Best-effort: all Docker errors are ignored (worst case is the
+// pre-existing leak). Runs at most once per test process.
+func reapOrphanedDoltContainers() {
+	reapOnce.Do(func() {
+		if !isDockerAvailable() {
+			return
+		}
+		out, err := exec.Command("docker", "ps", "-a",
+			"--filter", "label=org.testcontainers.reap=true",
+			"--filter", "ancestor="+DoltDockerImage,
+			"--format", "{{.ID}}",
+		).Output()
+		if err != nil {
+			return
+		}
+		now := time.Now()
+		for _, id := range strings.Fields(string(out)) {
+			ts, err := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", id).Output()
+			if err != nil {
+				continue
+			}
+			started, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(ts)))
+			if err != nil {
+				continue
+			}
+			if shouldReapOrphan(started, now) {
+				_ = exec.Command("docker", "rm", "-f", id).Run()
+			}
+		}
+	})
+}
 
 // isDockerAvailable returns true if the Docker daemon is reachable.
 // The result is cached after the first call.
@@ -230,6 +292,7 @@ func runDoltContainerWithRetry(ctx context.Context) (*dolt.DoltContainer, error)
 // startSharedDoltContainer starts the shared Dolt container and sets
 // GT_DOLT_PORT and BEADS_DOLT_PORT process-wide.
 func startSharedDoltContainer() {
+	reapOrphanedDoltContainers()
 	ctx := context.Background()
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
@@ -260,6 +323,7 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 		t.Skip("Docker not available, skipping test")
 	}
 
+	reapOrphanedDoltContainers()
 	ctx := context.Background()
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
