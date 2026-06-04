@@ -1528,7 +1528,6 @@ afterSafetyNet:
 		}
 
 		// Pre-declare for checkpoint goto (gt-aufru)
-		var existingMR *beads.Issue
 		var commitSHA string
 
 		// GH#3032: Resolve HEAD commit SHA for MR dedup.
@@ -1577,196 +1576,33 @@ afterSafetyNet:
 			// If MR lookup fails, fall through to create/find MR normally.
 		}
 
-		// Check if MR bead already exists for this branch+SHA (idempotency)
-		if commitSHA != "" {
-			existingMR, err = bd.FindMRForBranchAndSHA(branch, commitSHA)
-		} else {
-			existingMR, err = bd.FindMRForBranch(branch)
-		}
-		if err != nil {
-			style.PrintWarning("could not check for existing MR: %v", err)
-			// Continue with creation attempt - Create will fail if duplicate
-		}
-
-		if existingMR != nil {
-			// MR already exists with same branch AND commit — true idempotent retry
-			mrID = existingMR.ID
-			fmt.Printf("%s MR already exists (idempotent)\n", style.Bold.Render("✓"))
-			fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
-		} else {
-			// Build MR bead title and description
-			title := fmt.Sprintf("Merge: %s", issueID)
-			description := fmt.Sprintf("branch: %s\ntarget: %s\nsource_issue: %s\nrig: %s",
-				branch, target, issueID, rigName)
-			if commitSHA != "" {
-				description += fmt.Sprintf("\ncommit_sha: %s", commitSHA)
-			}
-			if doneSkipVerify {
-				description += "\nskip_verify: true"
-				description += fmt.Sprintf("\nskip_verify_reason: %s", doneSkipVerifyReason)
-			}
-			if worker != "" {
-				description += fmt.Sprintf("\nworker: %s", worker)
-			}
-			if agentBeadID != "" {
-				description += fmt.Sprintf("\nagent_bead: %s", agentBeadID)
-			}
-
-			// Add conflict resolution tracking fields (initialized, updated by Refinery)
-			description += "\nretry_count: 0"
-			description += "\nlast_conflict_sha: null"
-			description += "\nconflict_task_id: null"
-
-			// Phase 3: Add pre-verification metadata if polecat ran gates after rebasing.
-			// The refinery uses these fields to fast-path merge without re-running gates.
-			//
-			// gs-4bn: Only record the attestation when it is still valid. If an
-			// auto-rebase fired above, the polecat's gates ran against the
-			// pre-rebase base; advertising pre-verification would invite refinery
-			// to fast-path on a stale claim.
-			if donePreVerified && preVerifiedAttestationValid {
-				description += "\npre_verified: true"
-				description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
-				// Capture current origin/target HEAD as the verified base.
-				// The polecat rebased onto this SHA before running gates.
-				if verifiedBase, baseErr := g.Rev("origin/" + target); baseErr == nil {
-					description += fmt.Sprintf("\npre_verified_base: %s", verifiedBase)
-				} else {
-					style.PrintWarning("could not resolve origin/%s for pre-verified base: %v (pre-verification data incomplete)", target, baseErr)
-				}
-			}
-
-			mrIssue, err := bd.Create(beads.CreateOptions{
-				Title:       title,
-				Labels:      []string{"gt:merge-request"},
-				Priority:    priority,
-				Description: description,
-				Ephemeral:   true,
-				Rig:         rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
-				// gs-onu: force this write to commit to shared main even if the
-				// rig config has drifted to auto-commit=off. Otherwise the MR bead
-				// sits in the polecat session's Dolt working set, the local bd.Show
-				// readback below still passes, then the polecat self-terminates
-				// before the write commits — the refinery never sees the MR and the
-				// branch is silently stranded.
-				DoltAutoCommit: "on",
-			})
-			if err != nil {
-				// Non-fatal: record the error and skip to notifyWitness.
-				// Push succeeded so branch is on remote, but MR bead failed.
-				// Set mrFailed so the witness knows not to send MERGE_READY.
-				mrFailed = true
-				errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
-				style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
-				goto notifyWitness
-			}
-			mrID = mrIssue.ID
-
-			// Guard against empty ID from bd create (observed in ephemeral/wisp mode).
-			// Fail fast with a clear message rather than passing "" to bd.Show.
-			if mrID == "" {
-				mrFailed = true
-				errMsg := "MR bead creation returned empty ID"
-				style.PrintWarning("%s\nBranch is pushed but MR bead has no ID. Witness will be notified.", errMsg)
-				goto notifyWitness
-			}
-
-			// GH#1945: Verify MR bead is readable before considering it confirmed.
-			// bd.Create() succeeds when the bead is written locally, but if the write
-			// didn't persist (Dolt failure, corrupt state), we'd nuke the worktree
-			// with no MR in the queue — losing the polecat's work permanently.
-			if verifiedMR, verifyErr := bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
-				mrFailed = true
-				errMsg := fmt.Sprintf("MR bead created but verification read-back failed (id=%s): %v", mrID, verifyErr)
-				style.PrintWarning("%s\nBranch is pushed but MR bead not confirmed. Preserving worktree.", errMsg)
-				goto notifyWitness
-			}
-
-			// gs-9sr: MAIN-VIEW verify (gs-onu defense-in-depth). The read-back
-			// above only proves the MR is in THIS session's local Dolt view — it
-			// passes even when an auto-commit drift leaves the write uncommitted,
-			// so the refinery never sees the MR and the branch strands silently.
-			// Re-run the refinery's own discovery through a FRESH bd connection;
-			// if the MR isn't discoverable on shared main, fail LOUD via a
-			// stranded-push wisp instead of exiting COMPLETED.
-			if visible, qErr := verifyMRVisibleOnMain(beads.NewWithBeadsDir(cwd, resolvedBeads), branch, commitSHA); qErr != nil {
-				// Inconclusive (e.g. transient Dolt blip). The read-back passed and
-				// DoltAutoCommit:"on" committed the write, so don't false-strand —
-				// warn and proceed.
-				style.PrintWarning("main-view MR verify inconclusive for %s (query error): %v\nProceeding on read-back + auto-commit durability.", mrID, qErr)
-			} else if !visible {
-				mrFailed = true
-				strandErr := fmt.Errorf("MR %s not discoverable on shared main via fresh query (branch=%s sha=%s) — the refinery would not see it", mrID, branch, shortSHA(commitSHA))
-				style.PrintWarning("%v\nBranch is pushed but the MR is invisible to the refinery. Filing a stranded-push wisp for recovery instead of reporting COMPLETED.", strandErr)
-				fileStrandedPushWisp(beads.New(cwd), rigName, branch, commitSHA, target, issueID, agentBeadID, worker, strandErr)
-				goto notifyWitness
-			}
-
-			// gt-gpy: Validate that the MR bead landed in the rig's database.
-			// If the source bead has a cross-rig prefix (e.g., hq-), the routing
-			// could still resolve to the wrong database despite Rig: rigName.
-			// This is a warning-only guard — mrFailed is NOT set on mismatch.
-			if prefixErr := beads.ValidateRigPrefix(townRoot, rigName, mrID); prefixErr != nil {
-				style.PrintWarning("MR bead prefix mismatch: %v\nThe refinery may not find this MR — check 'gt mq list %s'", prefixErr, rigName)
-			}
-
-			// GH#3032: Supersede older open MRs for the same source issue.
-			// When a polecat re-submits after fixing a gate failure, the old MR
-			// (same branch, different SHA) is stale. Close it so the refinery
-			// doesn't process the old submission.
-			if issueID != "" {
-				if oldMRs, findErr := bd.FindOpenMRsForIssue(issueID); findErr == nil {
-					for _, old := range oldMRs {
-						if old.ID == mrID {
-							continue // skip the one we just created
-						}
-						reason := fmt.Sprintf("superseded by %s", mrID)
-						if closeErr := bd.CloseWithReason(reason, old.ID); closeErr != nil {
-							style.PrintWarning("could not supersede old MR %s: %v", old.ID, closeErr)
-							continue
-						}
-						fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
-					}
-				}
-			}
-
-			// Update agent bead with active_mr reference (for traceability).
-			// Agent beads live in HQ regardless of rig prefix — bypass routing
-			// via ForAgentBead() to avoid the "issue not found" warning that
-			// leaves active_mr null after every gt done (hq-e73z).
-			if agentBeadID != "" {
-				if err := bd.ForAgentBead().UpdateAgentActiveMR(agentBeadID, mrID); err != nil {
-					style.PrintWarning("could not update agent bead with active_mr: %v", err)
-				}
-			}
-
-			// GH#2599: Back-link source issue to MR bead for discoverability.
-			if issueID != "" {
-				comment := fmt.Sprintf("MR created: %s", mrID)
-				if _, err := bd.Run("comments", "add", issueID, comment); err != nil {
-					style.PrintWarning("could not back-link source issue %s to MR %s: %v", issueID, mrID, err)
-				}
-			}
-
-			// Success output
-			fmt.Printf("%s Work submitted to merge queue (verified)\n", style.Bold.Render("✓"))
-			fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
-
-			// NOTE: the refinery nudge is deferred to the notifyWitness/post-MR
-			// section below, not fired here. (Historical note: an earlier comment
-			// claimed this was to wait for a "polecat Dolt branch merge" — that is
-			// stale. Beads use the transaction-based shared-main model against the
-			// shared Dolt server; with DoltAutoCommit:"on" above the MR bead is
-			// committed to main as soon as Create returns, so there is no branch to
-			// merge. The deferral is just ordering: nudge after hook/cleanup state
-			// is settled. See gs-onu.)
-		}
-
-		// Write MR checkpoint for resume (gt-aufru)
-		if mrID != "" && agentBeadID != "" {
-			// Agent bead lives in town DB despite rig prefix — bypass routing.
-			cpBd := beads.New(cwd).ForAgentBead()
-			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointMRCreated, mrID)
+		// Submit the merge-request bead for the pushed branch (gs-t0k phase 2).
+		// submitToMergeQueue owns the find/dedup → create → read-back → main-view
+		// verify (gs-onu/gs-9sr) → supersede → back-link → checkpoint sequence,
+		// matching the pushBranchWithFallbacks (gs-pd6) and completion-package
+		// (gs-bn1) extractions. A true mrFailed means the MR could not be durably
+		// filed: the branch is on origin but there is no MR the refinery can see,
+		// so route to notifyWitness. mrID may still be set when mrFailed is true
+		// (it is populated before the late verifications) — the gu-v76i guard
+		// below accounts for that.
+		mrID, mrFailed = submitToMergeQueue(mrSubmitParams{
+			bd:                          bd,
+			g:                           g,
+			cwd:                         cwd,
+			resolvedBeads:               resolvedBeads,
+			townRoot:                    townRoot,
+			rigName:                     rigName,
+			branch:                      branch,
+			commitSHA:                   commitSHA,
+			target:                      target,
+			issueID:                     issueID,
+			worker:                      worker,
+			agentBeadID:                 agentBeadID,
+			priority:                    priority,
+			preVerifiedAttestationValid: preVerifiedAttestationValid,
+		})
+		if mrFailed {
+			goto notifyWitness
 		}
 
 	afterMR:
@@ -1967,6 +1803,244 @@ notifyWitness:
 	}
 
 	return nil
+}
+
+// mrSubmitParams carries the runDone completion state that submitToMergeQueue
+// needs to file the merge-request bead. The done* flag globals (doneSkipVerify,
+// doneSkipVerifyReason, donePreVerified) are read directly and not threaded here.
+type mrSubmitParams struct {
+	bd            *beads.Beads
+	g             *git.Git
+	cwd           string
+	resolvedBeads string
+	townRoot      string
+	rigName       string
+	branch        string
+	commitSHA     string
+	target        string
+	issueID       string
+	worker        string
+	agentBeadID   string
+	priority      int
+	// preVerifiedAttestationValid is false once an auto-rebase invalidated the
+	// polecat's pre-verification gates (gs-4bn); the pre_verified attestation is
+	// only written when this stays true.
+	preVerifiedAttestationValid bool
+}
+
+// submitToMergeQueue files (or reuses) the merge-request bead for a completed
+// polecat branch that is already pushed to origin. It is the MR-submit phase of
+// runDone extracted whole (gs-t0k phase 2, follow-up to the gs-pd6 push-ladder
+// and gs-bn1 completion-package extractions), bounded by the checkpoint-resume
+// `goto afterMR` site and the afterMR label.
+//
+// The sequence: idempotent find by branch+SHA (GH#3032) → create the MR bead
+// with DoltAutoCommit:"on" so the write reaches shared main (gs-onu) → read-back
+// verify (GH#1945) → main-view verify through a fresh connection (gs-9sr) →
+// rig-prefix guard (gt-gpy) → supersede stale MRs for the issue (GH#3032) →
+// back-link agent + source beads → write the MR checkpoint for resume (gt-aufru).
+//
+// It returns the MR id and mrFailed. mrFailed is true when the MR could not be
+// durably filed (create error, empty id, failed read-back, or invisible on
+// shared main); in every such case the side effects (warnings, stranded-push
+// wisp) are already emitted and the caller must route to notifyWitness rather
+// than report COMPLETED. mrID may be non-empty even when mrFailed is true — it
+// is set before the late verifications run, and the gu-v76i nudge guard accounts
+// for this. A false mrFailed means the MR is on shared main and the refinery can
+// see it.
+func submitToMergeQueue(p mrSubmitParams) (mrID string, mrFailed bool) {
+	var existingMR *beads.Issue
+	var err error
+
+	// Check if MR bead already exists for this branch+SHA (idempotency)
+	if p.commitSHA != "" {
+		existingMR, err = p.bd.FindMRForBranchAndSHA(p.branch, p.commitSHA)
+	} else {
+		existingMR, err = p.bd.FindMRForBranch(p.branch)
+	}
+	if err != nil {
+		style.PrintWarning("could not check for existing MR: %v", err)
+		// Continue with creation attempt - Create will fail if duplicate
+	}
+
+	if existingMR != nil {
+		// MR already exists with same branch AND commit — true idempotent retry
+		mrID = existingMR.ID
+		fmt.Printf("%s MR already exists (idempotent)\n", style.Bold.Render("✓"))
+		fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
+	} else {
+		// Build MR bead title and description
+		title := fmt.Sprintf("Merge: %s", p.issueID)
+		description := fmt.Sprintf("branch: %s\ntarget: %s\nsource_issue: %s\nrig: %s",
+			p.branch, p.target, p.issueID, p.rigName)
+		if p.commitSHA != "" {
+			description += fmt.Sprintf("\ncommit_sha: %s", p.commitSHA)
+		}
+		if doneSkipVerify {
+			description += "\nskip_verify: true"
+			description += fmt.Sprintf("\nskip_verify_reason: %s", doneSkipVerifyReason)
+		}
+		if p.worker != "" {
+			description += fmt.Sprintf("\nworker: %s", p.worker)
+		}
+		if p.agentBeadID != "" {
+			description += fmt.Sprintf("\nagent_bead: %s", p.agentBeadID)
+		}
+
+		// Add conflict resolution tracking fields (initialized, updated by Refinery)
+		description += "\nretry_count: 0"
+		description += "\nlast_conflict_sha: null"
+		description += "\nconflict_task_id: null"
+
+		// Phase 3: Add pre-verification metadata if polecat ran gates after rebasing.
+		// The refinery uses these fields to fast-path merge without re-running gates.
+		//
+		// gs-4bn: Only record the attestation when it is still valid. If an
+		// auto-rebase fired above, the polecat's gates ran against the
+		// pre-rebase base; advertising pre-verification would invite refinery
+		// to fast-path on a stale claim.
+		if donePreVerified && p.preVerifiedAttestationValid {
+			description += "\npre_verified: true"
+			description += fmt.Sprintf("\npre_verified_at: %s", time.Now().UTC().Format(time.RFC3339))
+			// Capture current origin/target HEAD as the verified base.
+			// The polecat rebased onto this SHA before running gates.
+			if verifiedBase, baseErr := p.g.Rev("origin/" + p.target); baseErr == nil {
+				description += fmt.Sprintf("\npre_verified_base: %s", verifiedBase)
+			} else {
+				style.PrintWarning("could not resolve origin/%s for pre-verified base: %v (pre-verification data incomplete)", p.target, baseErr)
+			}
+		}
+
+		mrIssue, err := p.bd.Create(beads.CreateOptions{
+			Title:       title,
+			Labels:      []string{"gt:merge-request"},
+			Priority:    p.priority,
+			Description: description,
+			Ephemeral:   true,
+			Rig:         p.rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
+			// gs-onu: force this write to commit to shared main even if the
+			// rig config has drifted to auto-commit=off. Otherwise the MR bead
+			// sits in the polecat session's Dolt working set, the local bd.Show
+			// readback below still passes, then the polecat self-terminates
+			// before the write commits — the refinery never sees the MR and the
+			// branch is silently stranded.
+			DoltAutoCommit: "on",
+		})
+		if err != nil {
+			// Non-fatal: record the error and skip to notifyWitness.
+			// Push succeeded so branch is on remote, but MR bead failed.
+			// Set mrFailed so the witness knows not to send MERGE_READY.
+			errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
+			style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
+			return mrID, true
+		}
+		mrID = mrIssue.ID
+
+		// Guard against empty ID from bd create (observed in ephemeral/wisp mode).
+		// Fail fast with a clear message rather than passing "" to bd.Show.
+		if mrID == "" {
+			errMsg := "MR bead creation returned empty ID"
+			style.PrintWarning("%s\nBranch is pushed but MR bead has no ID. Witness will be notified.", errMsg)
+			return mrID, true
+		}
+
+		// GH#1945: Verify MR bead is readable before considering it confirmed.
+		// bd.Create() succeeds when the bead is written locally, but if the write
+		// didn't persist (Dolt failure, corrupt state), we'd nuke the worktree
+		// with no MR in the queue — losing the polecat's work permanently.
+		if verifiedMR, verifyErr := p.bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
+			errMsg := fmt.Sprintf("MR bead created but verification read-back failed (id=%s): %v", mrID, verifyErr)
+			style.PrintWarning("%s\nBranch is pushed but MR bead not confirmed. Preserving worktree.", errMsg)
+			return mrID, true
+		}
+
+		// gs-9sr: MAIN-VIEW verify (gs-onu defense-in-depth). The read-back
+		// above only proves the MR is in THIS session's local Dolt view — it
+		// passes even when an auto-commit drift leaves the write uncommitted,
+		// so the refinery never sees the MR and the branch strands silently.
+		// Re-run the refinery's own discovery through a FRESH bd connection;
+		// if the MR isn't discoverable on shared main, fail LOUD via a
+		// stranded-push wisp instead of exiting COMPLETED.
+		if visible, qErr := verifyMRVisibleOnMain(beads.NewWithBeadsDir(p.cwd, p.resolvedBeads), p.branch, p.commitSHA); qErr != nil {
+			// Inconclusive (e.g. transient Dolt blip). The read-back passed and
+			// DoltAutoCommit:"on" committed the write, so don't false-strand —
+			// warn and proceed.
+			style.PrintWarning("main-view MR verify inconclusive for %s (query error): %v\nProceeding on read-back + auto-commit durability.", mrID, qErr)
+		} else if !visible {
+			strandErr := fmt.Errorf("MR %s not discoverable on shared main via fresh query (branch=%s sha=%s) — the refinery would not see it", mrID, p.branch, shortSHA(p.commitSHA))
+			style.PrintWarning("%v\nBranch is pushed but the MR is invisible to the refinery. Filing a stranded-push wisp for recovery instead of reporting COMPLETED.", strandErr)
+			fileStrandedPushWisp(beads.New(p.cwd), p.rigName, p.branch, p.commitSHA, p.target, p.issueID, p.agentBeadID, p.worker, strandErr)
+			return mrID, true
+		}
+
+		// gt-gpy: Validate that the MR bead landed in the rig's database.
+		// If the source bead has a cross-rig prefix (e.g., hq-), the routing
+		// could still resolve to the wrong database despite Rig: rigName.
+		// This is a warning-only guard — mrFailed is NOT set on mismatch.
+		if prefixErr := beads.ValidateRigPrefix(p.townRoot, p.rigName, mrID); prefixErr != nil {
+			style.PrintWarning("MR bead prefix mismatch: %v\nThe refinery may not find this MR — check 'gt mq list %s'", prefixErr, p.rigName)
+		}
+
+		// GH#3032: Supersede older open MRs for the same source issue.
+		// When a polecat re-submits after fixing a gate failure, the old MR
+		// (same branch, different SHA) is stale. Close it so the refinery
+		// doesn't process the old submission.
+		if p.issueID != "" {
+			if oldMRs, findErr := p.bd.FindOpenMRsForIssue(p.issueID); findErr == nil {
+				for _, old := range oldMRs {
+					if old.ID == mrID {
+						continue // skip the one we just created
+					}
+					reason := fmt.Sprintf("superseded by %s", mrID)
+					if closeErr := p.bd.CloseWithReason(reason, old.ID); closeErr != nil {
+						style.PrintWarning("could not supersede old MR %s: %v", old.ID, closeErr)
+						continue
+					}
+					fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
+				}
+			}
+		}
+
+		// Update agent bead with active_mr reference (for traceability).
+		// Agent beads live in HQ regardless of rig prefix — bypass routing
+		// via ForAgentBead() to avoid the "issue not found" warning that
+		// leaves active_mr null after every gt done (hq-e73z).
+		if p.agentBeadID != "" {
+			if err := p.bd.ForAgentBead().UpdateAgentActiveMR(p.agentBeadID, mrID); err != nil {
+				style.PrintWarning("could not update agent bead with active_mr: %v", err)
+			}
+		}
+
+		// GH#2599: Back-link source issue to MR bead for discoverability.
+		if p.issueID != "" {
+			comment := fmt.Sprintf("MR created: %s", mrID)
+			if _, err := p.bd.Run("comments", "add", p.issueID, comment); err != nil {
+				style.PrintWarning("could not back-link source issue %s to MR %s: %v", p.issueID, mrID, err)
+			}
+		}
+
+		// Success output
+		fmt.Printf("%s Work submitted to merge queue (verified)\n", style.Bold.Render("✓"))
+		fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
+
+		// NOTE: the refinery nudge is deferred to the notifyWitness/post-MR
+		// section below, not fired here. (Historical note: an earlier comment
+		// claimed this was to wait for a "polecat Dolt branch merge" — that is
+		// stale. Beads use the transaction-based shared-main model against the
+		// shared Dolt server; with DoltAutoCommit:"on" above the MR bead is
+		// committed to main as soon as Create returns, so there is no branch to
+		// merge. The deferral is just ordering: nudge after hook/cleanup state
+		// is settled. See gs-onu.)
+	}
+
+	// Write MR checkpoint for resume (gt-aufru)
+	if mrID != "" && p.agentBeadID != "" {
+		// Agent bead lives in town DB despite rig prefix — bypass routing.
+		cpBd := beads.New(p.cwd).ForAgentBead()
+		writeDoneCheckpoint(cpBd, p.agentBeadID, CheckpointMRCreated, mrID)
+	}
+
+	return mrID, false
 }
 
 // pushSubmoduleChanges detects submodules modified between origin/defaultBranch
