@@ -1132,8 +1132,9 @@ afterSafetyNet:
 
 		// Default: "mr" strategy (or no convoy) — push branch, create MR bead
 
-		// Pre-declare push variables for checkpoint goto (gt-aufru)
-		var refspec string
+		// Pre-declare push variables for checkpoint goto (gt-aufru). These must be
+		// declared before the `goto afterPush` below so the jump does not skip a
+		// variable declaration that is in scope at the label.
 		var pushErr error
 		var pushedCommitSHA string
 
@@ -1155,18 +1156,6 @@ afterSafetyNet:
 		// isn't pushed yet, Refinery finds nothing to merge. The worktree gets
 		// nuked at the end of gt done, so the commits are lost forever.
 		//
-		// Auto-push submodule changes BEFORE parent push (gt-dzs).
-		// If the parent repo's submodule pointer references commits that don't
-		// exist on the submodule's remote, the Refinery MR will be broken.
-		// Detect modified submodules and push each one first.
-		pushSubmoduleChanges(g, defaultBranch)
-
-		// Use explicit refspec (branch:branch) to create the remote branch.
-		// Without refspec, git push follows the tracking config — polecat branches
-		// track origin/main, so a bare push sends commits to main directly,
-		// bypassing the MR/refinery flow (G20 root cause).
-		fmt.Printf("Pushing branch to remote...\n")
-		refspec = branch + ":" + branch
 		// HARD GUARD (gu-cfb): Refuse to push a default-branch-to-default-branch
 		// refspec. The COMPLETED preflight above already rejects `branch == defaultBranch`,
 		// but this is a belt-and-suspenders check in case a future refactor lets
@@ -1176,139 +1165,27 @@ afterSafetyNet:
 		if isDefaultBranchName(branch, defaultBranch) {
 			pushErr = fmt.Errorf("refusing to push %q: branch is the rig's default branch; polecat work must go through the merge queue", branch)
 			pushFailed = true
-			errMsg := pushErr.Error()
-			style.PrintWarning("%s", errMsg)
+			style.PrintWarning("%s", pushErr.Error())
 			goto notifyWitness
 		}
-		pushedCommitSHA, _ = g.Rev("HEAD")
-		pushErr = pushForDone(g, refspec)
-		if pushErr != nil {
-			// Primary push failed — try fallback from the bare repo (GH #1348).
-			// When polecat sessions are reused or worktrees are stale, the worktree's
-			// git context may be broken. But the branch always exists in the bare repo
-			// (.repo.git) because worktree commits share the same object database.
-			style.PrintWarning("primary push failed: %v — trying bare repo fallback...", pushErr)
-			rigPath := filepath.Join(townRoot, rigName)
-			bareRepoPath := filepath.Join(rigPath, ".repo.git")
-			if _, statErr := os.Stat(bareRepoPath); statErr == nil {
-				bareGit := git.NewGitWithDir(bareRepoPath, "")
-				pushErr = pushForDone(bareGit, refspec)
-				if pushErr != nil {
-					style.PrintWarning("bare repo push also failed: %v", pushErr)
-				} else {
-					fmt.Printf("%s Branch pushed via bare repo fallback\n", style.Bold.Render("✓"))
-				}
-			} else {
-				// No bare repo — try mayor/rig as last resort
-				mayorPath := filepath.Join(rigPath, "mayor", "rig")
-				if _, statErr := os.Stat(mayorPath); statErr == nil {
-					mayorGit := git.NewGit(mayorPath)
-					pushErr = pushForDone(mayorGit, refspec)
-					if pushErr != nil {
-						style.PrintWarning("mayor/rig push also failed: %v", pushErr)
-					} else {
-						fmt.Printf("%s Branch pushed via mayor/rig fallback\n", style.Bold.Render("✓"))
-					}
-				}
-			}
-		}
 
+		// Push the branch with the full fallback + recovery ladder (gs-pd6 phase 1).
+		// pushBranchWithFallbacks owns the bare-repo / mayor-clone / SHA-refspec /
+		// origin-tip recovery paths (gu-0l56/gu-epv5/gu-hz3vx/gs-y7g); a non-nil
+		// error means every attempt was exhausted and the work must be stranded.
+		pushedCommitSHA, pushErr = pushBranchWithFallbacks(g, townRoot, rigName, branch, defaultBranch)
 		if pushErr != nil {
-			// Orphan-commit recovery (gu-0l56): all branch:branch pushes failed.
-			// A common cause is the detached-HEAD scenario from gu-h5pr: an
-			// auto-save commit landed on detached HEAD, the local branch ref
-			// was deleted, and branch:branch now fails with "src refspec does
-			// not match any" — even though the commit itself is fine.
-			//
-			// Two recovery paths, in order:
-			//   (a) Check origin/<branch>: if it already points at our HEAD
-			//       commit, a prior push delivered the commit. Treat as no-op
-			//       success so the MR bead still gets filed.
-			//   (b) Retry with an explicit SHA refspec (<sha>:refs/heads/<branch>).
-			//       This pushes the commit from the local object DB to the
-			//       named branch ref on origin, even when no local branch ref
-			//       exists. Works for detached HEAD.
-			//
-			// Without this, polecats that land in the detached-HEAD trap see
-			// "push failed", skip MR creation, and leave their work orphaned
-			// on origin with no merge request — exactly the gu-br8a failure.
-			if pushedCommitSHA != "" {
-				if tip, tipErr := g.RemoteBranchTip("origin", branch); tipErr == nil && tip != "" && tip == pushedCommitSHA {
-					fmt.Printf("%s Branch already at expected commit on origin (orphan-commit recovery: prior push delivered SHA)\n", style.Bold.Render("✓"))
-					pushErr = nil
-				}
-			}
-			if pushErr != nil && pushedCommitSHA != "" {
-				style.PrintWarning("attempting SHA-refspec recovery (branch ref may be missing locally)...")
-				shaErr := pushSHAForDone(g, "origin", pushedCommitSHA, branch, false)
-				if shaErr == nil {
-					fmt.Printf("%s Branch pushed via SHA-refspec recovery\n", style.Bold.Render("✓"))
-					pushErr = nil
-				} else {
-					style.PrintWarning("SHA-refspec recovery also failed: %v", shaErr)
-					// Try the bare repo with SHA refspec too — it shares the
-					// object DB with the worktree, so the commit SHA is valid
-					// there even when the worktree's git context is broken.
-					bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
-					if _, statErr := os.Stat(bareRepoPath); statErr == nil {
-						bareGit := git.NewGitWithDir(bareRepoPath, "")
-						if bareErr := pushSHAForDone(bareGit, "origin", pushedCommitSHA, branch, false); bareErr == nil {
-							fmt.Printf("%s Branch pushed via bare repo + SHA-refspec recovery\n", style.Bold.Render("✓"))
-							pushErr = nil
-						} else {
-							style.PrintWarning("bare repo SHA-refspec recovery also failed: %v", bareErr)
-						}
-					}
-				}
-			}
-		}
-
-		if pushErr != nil {
-			// All push attempts failed.
-			//
-			// gu-epv5 Option C: before giving up, re-check origin/<branch>.
-			// A push may have actually delivered the SHA but the local git
-			// reported failure (transient net error, lost ack, verifier
-			// timeout). If the tip matches our expected SHA, treat as
-			// success so MR creation still happens.
-			if pushedCommitSHA != "" && recoverPushFromOriginTip(g, branch, pushedCommitSHA) {
-				fmt.Printf("%s Push reported failure but origin/%s already matches expected SHA — proceeding to MR creation (gu-epv5 recovery)\n", style.Bold.Render("✓"), branch)
-				pushErr = nil
-			} else if pushedCommitSHA != "" && recoverNonFFOwnBranch(g, branch, pushedCommitSHA, pushErr) {
-				// gu-hz3vx Mayor fix-direction (b): a non-fast-forward rejection
-				// on the polecat's OWN private feature branch where the local
-				// HEAD tree is identical to origin's tip (pure amend/rebase, no
-				// content divergence) is safe to force-update — the branch is
-				// session-private, not shared history, and an identical tree
-				// loses nothing and smuggles nothing. recoverNonFFOwnBranch
-				// force-updated origin and verified the tip; proceed to MR.
-				fmt.Printf("%s Non-fast-forward on own branch with identical tree — force-updated origin/%s (gu-hz3vx recovery)\n", style.Bold.Render("✓"), branch)
-				pushErr = nil
-			} else if adoptedOriginSHA := recoverNonFFAdoptOriginPatchIdentical(g, branch, pushedCommitSHA, pushErr); adoptedOriginSHA != "" {
-				// gs-y7g: peer-merge-during-work strand. A peer MR merged to main
-				// mid-work, so `gt done` rebased onto the new main and re-pushed a
-				// divergent SHA — but origin already holds the earlier,
-				// patch-identical push of this work. The trees differ (the rebase
-				// pulled in the peer's content) so the gu-hz3vx tree check above
-				// cannot match, yet the work is provably the same patch. Adopt the
-				// commit already on origin as the pushed commit and enqueue it —
-				// no force-push, no contamination risk.
-				fmt.Printf("%s Non-fast-forward on own branch; origin/%s holds a patch-identical commit — adopting it for MR (gs-y7g recovery)\n", style.Bold.Render("✓"), branch)
-				pushedCommitSHA = adoptedOriginSHA
-				pushErr = nil
-			} else {
-				// gu-epv5 Option B: file a discoverable push-stranded wisp
-				// so the work isn't invisible. The merge queue will not
-				// pick it up (different label), but `gt mq list` and
-				// witness/mayor sweeps surface it for recovery.
-				pushFailed = true
-				errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
-				style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
-				recordPushFailure(townRoot, rigName, branch, pushedCommitSHA, pushlog.SourceDone, pushlog.StagePush, worker, issueID, pushErr)
-				strandedBd := beads.New(cwd)
-				fileStrandedPushWisp(strandedBd, rigName, branch, pushedCommitSHA, defaultBranch, issueID, agentBeadID, worker, pushErr)
-				goto notifyWitness
-			}
+			// gu-epv5 Option B: file a discoverable push-stranded wisp
+			// so the work isn't invisible. The merge queue will not
+			// pick it up (different label), but `gt mq list` and
+			// witness/mayor sweeps surface it for recovery.
+			pushFailed = true
+			errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
+			style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
+			recordPushFailure(townRoot, rigName, branch, pushedCommitSHA, pushlog.SourceDone, pushlog.StagePush, worker, issueID, pushErr)
+			strandedBd := beads.New(cwd)
+			fileStrandedPushWisp(strandedBd, rigName, branch, pushedCommitSHA, defaultBranch, issueID, agentBeadID, worker, pushErr)
+			goto notifyWitness
 		}
 
 		// Verify the pushed branch tip is the exact local commit before creating
@@ -2119,6 +1996,162 @@ func pushSubmoduleChanges(g *git.Git, defaultBranch string) {
 			fmt.Printf("%s Submodule %s pushed\n", style.Bold.Render("✓"), sc.Path)
 		}
 	}
+}
+
+// pushBranchWithFallbacks performs the polecat's branch:branch push for the
+// `gt done` "mr" strategy and, when the primary push fails, walks the full
+// recovery ladder (extracted from runDone, gs-pd6 phase 1 — the biggest CC
+// contributor in the completion path):
+//
+//  1. bare-repo fallback (.repo.git shares the worktree object DB) — GH#1348
+//  2. mayor/rig clone fallback
+//  3. orphan-commit recovery (gu-0l56): origin/<branch> already at our SHA
+//     (a prior push delivered the commit), or an explicit SHA-refspec push for
+//     the detached-HEAD trap where no local branch ref exists
+//  4. transient / lost-ack recovery: re-check origin tip (gu-epv5), force-update
+//     an identical-tree non-fast-forward own branch (gu-hz3vx), or adopt a
+//     patch-identical commit already on origin (gs-y7g)
+//
+// It returns the SHA that was pushed (possibly adopted from origin in the gs-y7g
+// case) and the final error after all recovery attempts. A nil error means the
+// commit is on origin/<branch>; the caller still verifies the remote tip before
+// creating an MR bead. This function performs only git operations — the
+// push-failure receipt + stranded-wisp side-effects stay with the caller so the
+// failure routing reads in one place.
+func pushBranchWithFallbacks(g *git.Git, townRoot, rigName, branch, defaultBranch string) (string, error) {
+	// Auto-push submodule changes BEFORE parent push (gt-dzs).
+	// If the parent repo's submodule pointer references commits that don't
+	// exist on the submodule's remote, the Refinery MR will be broken.
+	pushSubmoduleChanges(g, defaultBranch)
+
+	// Use explicit refspec (branch:branch) to create the remote branch.
+	// Without refspec, git push follows the tracking config — polecat branches
+	// track origin/main, so a bare push sends commits to main directly,
+	// bypassing the MR/refinery flow (G20 root cause).
+	fmt.Printf("Pushing branch to remote...\n")
+	refspec := branch + ":" + branch
+	pushedCommitSHA, _ := g.Rev("HEAD")
+	pushErr := pushForDone(g, refspec)
+	if pushErr != nil {
+		// Primary push failed — try fallback from the bare repo (GH #1348).
+		// When polecat sessions are reused or worktrees are stale, the worktree's
+		// git context may be broken. But the branch always exists in the bare repo
+		// (.repo.git) because worktree commits share the same object database.
+		style.PrintWarning("primary push failed: %v — trying bare repo fallback...", pushErr)
+		rigPath := filepath.Join(townRoot, rigName)
+		bareRepoPath := filepath.Join(rigPath, ".repo.git")
+		if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+			bareGit := git.NewGitWithDir(bareRepoPath, "")
+			pushErr = pushForDone(bareGit, refspec)
+			if pushErr != nil {
+				style.PrintWarning("bare repo push also failed: %v", pushErr)
+			} else {
+				fmt.Printf("%s Branch pushed via bare repo fallback\n", style.Bold.Render("✓"))
+			}
+		} else {
+			// No bare repo — try mayor/rig as last resort
+			mayorPath := filepath.Join(rigPath, "mayor", "rig")
+			if _, statErr := os.Stat(mayorPath); statErr == nil {
+				mayorGit := git.NewGit(mayorPath)
+				pushErr = pushForDone(mayorGit, refspec)
+				if pushErr != nil {
+					style.PrintWarning("mayor/rig push also failed: %v", pushErr)
+				} else {
+					fmt.Printf("%s Branch pushed via mayor/rig fallback\n", style.Bold.Render("✓"))
+				}
+			}
+		}
+	}
+
+	if pushErr != nil {
+		// Orphan-commit recovery (gu-0l56): all branch:branch pushes failed.
+		// A common cause is the detached-HEAD scenario from gu-h5pr: an
+		// auto-save commit landed on detached HEAD, the local branch ref
+		// was deleted, and branch:branch now fails with "src refspec does
+		// not match any" — even though the commit itself is fine.
+		//
+		// Two recovery paths, in order:
+		//   (a) Check origin/<branch>: if it already points at our HEAD
+		//       commit, a prior push delivered the commit. Treat as no-op
+		//       success so the MR bead still gets filed.
+		//   (b) Retry with an explicit SHA refspec (<sha>:refs/heads/<branch>).
+		//       This pushes the commit from the local object DB to the
+		//       named branch ref on origin, even when no local branch ref
+		//       exists. Works for detached HEAD.
+		//
+		// Without this, polecats that land in the detached-HEAD trap see
+		// "push failed", skip MR creation, and leave their work orphaned
+		// on origin with no merge request — exactly the gu-br8a failure.
+		if pushedCommitSHA != "" {
+			if tip, tipErr := g.RemoteBranchTip("origin", branch); tipErr == nil && tip != "" && tip == pushedCommitSHA {
+				fmt.Printf("%s Branch already at expected commit on origin (orphan-commit recovery: prior push delivered SHA)\n", style.Bold.Render("✓"))
+				pushErr = nil
+			}
+		}
+		if pushErr != nil && pushedCommitSHA != "" {
+			style.PrintWarning("attempting SHA-refspec recovery (branch ref may be missing locally)...")
+			shaErr := pushSHAForDone(g, "origin", pushedCommitSHA, branch, false)
+			if shaErr == nil {
+				fmt.Printf("%s Branch pushed via SHA-refspec recovery\n", style.Bold.Render("✓"))
+				pushErr = nil
+			} else {
+				style.PrintWarning("SHA-refspec recovery also failed: %v", shaErr)
+				// Try the bare repo with SHA refspec too — it shares the
+				// object DB with the worktree, so the commit SHA is valid
+				// there even when the worktree's git context is broken.
+				bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
+				if _, statErr := os.Stat(bareRepoPath); statErr == nil {
+					bareGit := git.NewGitWithDir(bareRepoPath, "")
+					if bareErr := pushSHAForDone(bareGit, "origin", pushedCommitSHA, branch, false); bareErr == nil {
+						fmt.Printf("%s Branch pushed via bare repo + SHA-refspec recovery\n", style.Bold.Render("✓"))
+						pushErr = nil
+					} else {
+						style.PrintWarning("bare repo SHA-refspec recovery also failed: %v", bareErr)
+					}
+				}
+			}
+		}
+	}
+
+	if pushErr != nil {
+		// All push attempts failed.
+		//
+		// gu-epv5 Option C: before giving up, re-check origin/<branch>.
+		// A push may have actually delivered the SHA but the local git
+		// reported failure (transient net error, lost ack, verifier
+		// timeout). If the tip matches our expected SHA, treat as
+		// success so MR creation still happens.
+		if pushedCommitSHA != "" && recoverPushFromOriginTip(g, branch, pushedCommitSHA) {
+			fmt.Printf("%s Push reported failure but origin/%s already matches expected SHA — proceeding to MR creation (gu-epv5 recovery)\n", style.Bold.Render("✓"), branch)
+			pushErr = nil
+		} else if pushedCommitSHA != "" && recoverNonFFOwnBranch(g, branch, pushedCommitSHA, pushErr) {
+			// gu-hz3vx Mayor fix-direction (b): a non-fast-forward rejection
+			// on the polecat's OWN private feature branch where the local
+			// HEAD tree is identical to origin's tip (pure amend/rebase, no
+			// content divergence) is safe to force-update — the branch is
+			// session-private, not shared history, and an identical tree
+			// loses nothing and smuggles nothing. recoverNonFFOwnBranch
+			// force-updated origin and verified the tip; proceed to MR.
+			fmt.Printf("%s Non-fast-forward on own branch with identical tree — force-updated origin/%s (gu-hz3vx recovery)\n", style.Bold.Render("✓"), branch)
+			pushErr = nil
+		} else if adoptedOriginSHA := recoverNonFFAdoptOriginPatchIdentical(g, branch, pushedCommitSHA, pushErr); adoptedOriginSHA != "" {
+			// gs-y7g: peer-merge-during-work strand. A peer MR merged to main
+			// mid-work, so `gt done` rebased onto the new main and re-pushed a
+			// divergent SHA — but origin already holds the earlier,
+			// patch-identical push of this work. The trees differ (the rebase
+			// pulled in the peer's content) so the gu-hz3vx tree check above
+			// cannot match, yet the work is provably the same patch. Adopt the
+			// commit already on origin as the pushed commit and enqueue it —
+			// no force-push, no contamination risk.
+			fmt.Printf("%s Non-fast-forward on own branch; origin/%s holds a patch-identical commit — adopting it for MR (gs-y7g recovery)\n", style.Bold.Render("✓"), branch)
+			pushedCommitSHA = adoptedOriginSHA
+			pushErr = nil
+		}
+		// else: all recovery exhausted — return pushErr; the caller records the
+		// failure and files a discoverable stranded-push wisp.
+	}
+
+	return pushedCommitSHA, pushErr
 }
 
 func forceCloseIssueWithRetry(closeFn func(string, ...string) error, issueID, reason, successFormat string) error {
