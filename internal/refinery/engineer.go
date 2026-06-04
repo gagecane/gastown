@@ -1994,6 +1994,41 @@ func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
 	return mrs, nil
 }
 
+// ListUnclaimedMRs returns open merge requests that have no assignee.
+// Unlike ListReadyMRs it performs no staleness, blocker, or rig filtering —
+// it reports every open MR whose assignee is empty. Used by
+// `gt refinery unclaimed` for parallel workers to discover free work.
+func (e *Engineer) ListUnclaimedMRs() ([]*MRInfo, error) {
+	issues, err := e.beads.ListMergeRequests(beads.ListOptions{
+		Status:   "open",
+		Label:    "gt:merge-request",
+		Priority: -1, // No priority filter
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
+	}
+
+	var mrs []*MRInfo
+	for _, issue := range issues {
+		if issue.Assignee != "" {
+			continue
+		}
+		fields := beads.ParseMRFields(issue)
+		if fields == nil {
+			continue
+		}
+		mrs = append(mrs, &MRInfo{
+			ID:       issue.ID,
+			Branch:   fields.Branch,
+			Target:   fields.Target,
+			Worker:   fields.Worker,
+			Priority: issue.Priority,
+		})
+	}
+
+	return mrs, nil
+}
+
 // ListQueueAnomalies finds stale claims and orphaned branches in open MRs.
 // This gives Witness/Refinery patrols deterministic signals for deadlock risk.
 func (e *Engineer) ListQueueAnomalies(now time.Time) ([]*MRAnomaly, error) {
