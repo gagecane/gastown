@@ -29,6 +29,15 @@ type CurioConfig struct {
 
 	// IntervalStr is how often to run, as a string (e.g., "15m").
 	IntervalStr string `json:"interval,omitempty"`
+
+	// PageForReal is the Call 2 (gu-2coqj) SHADOW→LIVE safety gate. When false
+	// (the MANDATORY default), the lane-ceiling paging engine runs and records
+	// what it WOULD page to the shadow ledger + daemon log, but sends NO Overseer
+	// page. Flipping this to true is the DELIBERATE second enablement that lets
+	// Curio actually wake a human — only after precision + cadence have been
+	// observed on the live curio_shadow_page ledger. Mirrors the candidates-only
+	// discipline that kept Phase 1 safe.
+	PageForReal bool `json:"page_for_real,omitempty"`
 }
 
 // curioInterval returns the configured interval, or the default (15m).
@@ -100,6 +109,16 @@ func (d *Daemon) runCurio() {
 	}
 	cands = d.curioReactions.Observe(cands)
 
+	// Call 2 (gu-2coqj) lane-ceiling paging — decided every cycle (even an empty
+	// one, so the heartbeat stays fresh and the judgment breaker ages its
+	// window). The engine only DECIDES; emitCurioPages records/pages per the
+	// SHADOW-mode safety gate.
+	if d.curioPaging == nil {
+		d.curioPaging = curio.NewPagingEngine()
+	}
+	actions := d.curioPaging.Decide(cands, now)
+	d.emitCurioPages(windowID, actions)
+
 	if len(cands) == 0 {
 		d.logger.Printf("curio: cycle complete — no candidates")
 		return
@@ -120,6 +139,6 @@ func (d *Daemon) runCurio() {
 		return
 	}
 
-	d.logger.Printf("curio: cycle complete — found=%d new=%d (candidates only, no beads filed)",
-		len(cands), inserted)
+	d.logger.Printf("curio: cycle complete — found=%d new=%d paged=%d (candidates only, no beads filed)",
+		len(cands), inserted, len(actions))
 }

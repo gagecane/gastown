@@ -243,6 +243,13 @@ type Daemon struct {
 	// heartbeat goroutine — so it needs no locking. Lazily initialized on the
 	// first curio cycle.
 	curioReactions *curio.ReactionTracker
+
+	// curioPaging is the Curio Call 2 (gu-2coqj) lane-ceiling paging engine. Like
+	// curioReactions it is cross-cycle state (the judgment breaker's rolling
+	// occurrence window + latched state, and the verified-lane page memory) and
+	// is only touched from the serial curio patrol, so it needs no locking.
+	// Lazily initialized on the first curio cycle.
+	curioPaging *curio.PagingEngine
 }
 
 // alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It
