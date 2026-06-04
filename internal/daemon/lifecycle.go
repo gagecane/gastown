@@ -973,6 +973,23 @@ const GUPPViolationTimeout = constants.GUPPViolationTimeout
 // listAgentBeadsJSON queries both the issues and wisps tables for agent beads
 // and unmarshals the combined results into the provided slice pointer.
 // The wisps query is best-effort (gracefully ignored if table doesn't exist).
+// agentBeadRecord is the decoded shape of an agent bead returned by
+// listAgentBeadsJSON. It is shared by the GUPP and orphaned-work scans so the
+// town-wide bd list (two ~0.85s cold-start subprocesses) runs ONCE per
+// heartbeat phase instead of once per rig. Previously each per-rig helper
+// re-ran listAgentBeadsJSON inside the rig loop, returning identical town-wide
+// data every iteration filtered only by rig prefix — ~16 rigs × 2 subprocesses
+// ≈ 26s per phase (gu-10nch).
+type agentBeadRecord struct {
+	ID          string   `json:"id"`
+	Description string   `json:"description"`
+	UpdatedAt   string   `json:"updated_at"`
+	HookBead    string   `json:"hook_bead"` // Read from database column, not description
+	AgentState  string   `json:"agent_state"`
+	Labels      []string `json:"labels"`
+	Type        string   `json:"issue_type"`
+}
+
 func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
 	// Query issues table (backward compat during migration)
 	cmd := exec.Command(d.bdPath, "list", "--label=gt:agent", "--include-infra", "--json", "--flat") //nolint:gosec // G204: bd is a trusted internal tool
@@ -1070,31 +1087,25 @@ func (d *Daemon) checkGUPPViolations() {
 		return
 	}
 
-	for _, rigName := range rigs {
-		d.checkRigGUPPViolations(rigName)
-	}
-}
-
-// checkRigGUPPViolations checks polecats in a specific rig for GUPP violations.
-func (d *Daemon) checkRigGUPPViolations(rigName string) {
-	// List polecat agent beads for this rig (issues + wisps tables)
-	// Pattern: <prefix>-<rig>-polecat-<name> (e.g., gt-gastown-polecat-Toast)
-	var agents []struct {
-		ID          string   `json:"id"`
-		Description string   `json:"description"`
-		UpdatedAt   string   `json:"updated_at"`
-		HookBead    string   `json:"hook_bead"` // Read from database column, not description
-		AgentState  string   `json:"agent_state"`
-		Labels      []string `json:"labels"`
-		Type        string   `json:"issue_type"`
-	}
-
+	// Fetch the town-wide agent beads ONCE, then filter per rig. The list is
+	// identical for every rig (only the in-loop prefix filter differs), so
+	// re-running it per rig was pure redundant cost — ~16 rigs × two bd
+	// cold-start subprocesses ≈ 26s (gu-10nch).
+	var agents []agentBeadRecord
 	if err := d.listAgentBeadsJSON(&agents); err != nil {
 		// Suppress warning when there are simply no agent beads (expected when all rigs are docked)
 		d.logger.Printf("Warning: listing agent beads failed for GUPP check: %v", err)
 		return
 	}
 
+	for _, rigName := range rigs {
+		d.checkRigGUPPViolations(rigName, agents)
+	}
+}
+
+// checkRigGUPPViolations checks polecats in a specific rig for GUPP violations.
+// agents is the town-wide agent-bead list fetched once by the caller.
+func (d *Daemon) checkRigGUPPViolations(rigName string, agents []agentBeadRecord) {
 	// Use the rig's configured prefix (e.g., "gt" for gastown, "bd" for beads)
 	rigPrefix := config.GetRigPrefix(d.config.TownRoot, rigName)
 	// Pattern: <prefix>-<rig>-polecat-<name>
@@ -1187,28 +1198,22 @@ func (d *Daemon) checkOrphanedWork() {
 		return
 	}
 
-	for _, rigName := range rigs {
-		d.checkRigOrphanedWork(rigName)
-	}
-}
-
-// checkRigOrphanedWork checks polecats in a specific rig for orphaned work.
-func (d *Daemon) checkRigOrphanedWork(rigName string) {
-	// List polecat agent beads (issues + wisps tables)
-	var agents []struct {
-		ID          string   `json:"id"`
-		HookBead    string   `json:"hook_bead"`
-		AgentState  string   `json:"agent_state"`
-		Description string   `json:"description"`
-		Labels      []string `json:"labels"`
-		Type        string   `json:"issue_type"`
-	}
-
+	// Fetch the town-wide agent beads ONCE, then filter per rig (see
+	// checkGUPPViolations) — avoids the per-rig redundant bd fan-out (gu-10nch).
+	var agents []agentBeadRecord
 	if err := d.listAgentBeadsJSON(&agents); err != nil {
 		d.logger.Printf("Warning: listing agent beads failed for orphaned work check: %v", err)
 		return
 	}
 
+	for _, rigName := range rigs {
+		d.checkRigOrphanedWork(rigName, agents)
+	}
+}
+
+// checkRigOrphanedWork checks polecats in a specific rig for orphaned work.
+// agents is the town-wide agent-bead list fetched once by the caller.
+func (d *Daemon) checkRigOrphanedWork(rigName string, agents []agentBeadRecord) {
 	// Use the rig's configured prefix (e.g., "gt" for gastown, "bd" for beads)
 	rigPrefix := config.GetRigPrefix(d.config.TownRoot, rigName)
 	// Pattern: <prefix>-<rig>-polecat-<name>

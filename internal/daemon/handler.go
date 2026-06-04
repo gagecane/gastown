@@ -3,8 +3,10 @@ package daemon
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
-	"strings"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -130,23 +132,11 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm *dog.SessionManager
 		return
 	}
 
-	blanket := daemonCfg.StaleWorkingTimeoutD()
-	// Per-plugin stuck thresholds: a dog holding a short-cadence critical plugin
-	// slot (e.g. dolt-backup, 15m) must be reclaimed within a couple of intervals,
-	// not after the multi-hour blanket timeout — otherwise one hung dog silently
-	// halts that plugin's entire dispatch cadence (gu-9jmd3).
-	pluginThresholds := d.pluginStuckThresholds(blanket)
+	threshold := daemonCfg.StaleWorkingTimeoutD()
 	now := time.Now()
 	for _, dg := range dogs {
 		if dg.State != dog.StateWorking {
 			continue
-		}
-
-		threshold := blanket
-		if pluginName, ok := pluginWorkName(dg.Work); ok {
-			if t, found := pluginThresholds[pluginName]; found {
-				threshold = t
-			}
 		}
 
 		staleDuration := now.Sub(dg.LastActive)
@@ -154,8 +144,8 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm *dog.SessionManager
 			continue
 		}
 
-		d.logger.Printf("Handler: dog %s stuck in working state (inactive %v >= threshold %v, work: %s), clearing",
-			dg.Name, staleDuration.Truncate(time.Minute), threshold, dg.Work)
+		d.logger.Printf("Handler: dog %s stuck in working state (inactive %v, work: %s), clearing",
+			dg.Name, staleDuration.Truncate(time.Minute), dg.Work)
 
 		if err := mgr.ClearWork(dg.Name); err != nil {
 			d.logger.Printf("Handler: failed to clear work for stale dog %s: %v", dg.Name, err)
@@ -176,46 +166,6 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm *dog.SessionManager
 			}
 		}
 	}
-}
-
-// pluginWorkName extracts the plugin name from a dog's work descriptor. Plugin
-// work is assigned as "plugin:<name>" (optionally with a trailing suffix, e.g.
-// the event-driven watcher's "plugin:<name> (event-driven, rig=<r>)"). Returns
-// the bare plugin name and true when the descriptor is plugin work.
-func pluginWorkName(work string) (string, bool) {
-	const prefix = "plugin:"
-	if !strings.HasPrefix(work, prefix) {
-		return "", false
-	}
-	name := strings.TrimPrefix(work, prefix)
-	if i := strings.IndexByte(name, ' '); i >= 0 {
-		name = name[:i]
-	}
-	if name == "" {
-		return "", false
-	}
-	return name, true
-}
-
-// pluginStuckThresholds maps each discovered plugin's name to the stuck-clear
-// threshold the daemon should apply to a dog holding that plugin's slot. The
-// blanket timeout is used as both the fallback and the upper clamp, so a missing
-// or non-cooldown plugin keeps today's behavior and no plugin is ever given a
-// LONGER leash than the daemon-wide default. See Plugin.StuckThreshold and
-// gu-9jmd3. Discovery failures degrade gracefully to an empty map (blanket only).
-func (d *Daemon) pluginStuckThresholds(blanket time.Duration) map[string]time.Duration {
-	rigNames := d.rigNamesForPluginScan()
-	scanner := plugin.NewScanner(d.config.TownRoot, rigNames)
-	plugins, err := scanner.DiscoverAll()
-	if err != nil {
-		d.logger.Printf("Handler: failed to discover plugins for stuck thresholds: %v", err)
-		return nil
-	}
-	thresholds := make(map[string]time.Duration, len(plugins))
-	for _, p := range plugins {
-		thresholds[p.Name] = p.StuckThreshold(blanket)
-	}
-	return thresholds
 }
 
 // reapIdleDogs kills tmux sessions for dogs that have been idle too long, and
@@ -305,36 +255,17 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 	recorder := plugin.NewRecorder(d.config.TownRoot)
 	router := mail.NewRouterWithTownRoot(d.config.TownRoot, d.config.TownRoot)
 
-	for _, p := range plugins {
-		// Never auto-dispatch manual-gate plugins — they require an explicit trigger.
-		if p.Gate != nil && p.Gate.Type == plugin.GateManual {
-			d.logger.Printf("Handler: skipping plugin %s (gate=manual, requires explicit trigger)", p.Name)
-			continue
-		}
+	// Pre-pass (bounded-parallel): evaluate each plugin's cooldown gate. The gate
+	// check is a read-only `bd list` per plugin (one ~0.85s cold-start each), and
+	// running it serially per plugin dominated handleDogs latency (~60s, gu-10nch).
+	// Because the checks are side-effect-free we fan them out behind a semaphore
+	// (same pattern as gu-el5bx/gu-1h3ur) so even under contention they cannot
+	// storm the single shared Dolt server. Dispatch itself — dog claim, mail,
+	// tmux start, record — stays strictly SERIAL below so two plugins can never
+	// double-claim the same idle dog.
+	eligible := d.filterDispatchablePlugins(plugins, recorder)
 
-		// Only dispatch plugins with cooldown gates.
-		if p.Gate == nil || p.Gate.Type != plugin.GateCooldown {
-			continue
-		}
-
-		// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
-		// record (dog handed work but not yet executed) only suppresses
-		// re-dispatch within an in-flight grace window — after that the gate
-		// re-opens so a silently-dead dog can't re-arm the full cooldown and
-		// drift backups unbounded (gu-50nbo).
-		if p.Gate.Duration != "" {
-			cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
-			grace := p.DispatchGrace(cooldownDur)
-			satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
-			if err != nil {
-				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
-				continue
-			}
-			if satisfied {
-				continue // Still in cooldown (or a dispatch is in-flight)
-			}
-		}
-
+	for _, p := range eligible {
 		// Find an idle dog that doesn't already have a live tmux session.
 		// A leaked session (dog marked idle before its tmux terminated) would
 		// cause sm.Start to fail with "session already running", and since
@@ -441,6 +372,91 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			d.logger.Printf("Handler: failed to record dispatch for plugin %s: %v", p.Name, err)
 		}
 	}
+}
+
+// filterDispatchablePlugins returns, in the input order, the plugins whose
+// cooldown gate is currently OPEN (eligible for dispatch). Manual-gate and
+// non-cooldown plugins are dropped. The per-plugin cooldown check is a
+// read-only `bd list` (one ~0.85s cold-start each); evaluating them serially
+// dominated handleDogs latency (~60s, gu-10nch), so the checks are fanned out
+// behind a semaphore (same pattern as gu-el5bx/gu-1h3ur). The checks have no
+// side effects, so concurrency is safe here; the caller dispatches serially.
+//
+// A plugin whose gate check errors is conservatively skipped (logged), matching
+// the prior serial behavior.
+func (d *Daemon) filterDispatchablePlugins(plugins []*plugin.Plugin, recorder *plugin.Recorder) []*plugin.Plugin {
+	// candidates keeps only auto-dispatchable cooldown plugins, preserving the
+	// discovery order so dispatch remains deterministic.
+	candidates := make([]*plugin.Plugin, 0, len(plugins))
+	for _, p := range plugins {
+		// Never auto-dispatch manual-gate plugins — they require an explicit trigger.
+		if p.Gate != nil && p.Gate.Type == plugin.GateManual {
+			d.logger.Printf("Handler: skipping plugin %s (gate=manual, requires explicit trigger)", p.Name)
+			continue
+		}
+		// Only dispatch plugins with cooldown gates.
+		if p.Gate == nil || p.Gate.Type != plugin.GateCooldown {
+			continue
+		}
+		candidates = append(candidates, p)
+	}
+
+	// open[i] reports whether candidates[i]'s cooldown gate is open. Indexed
+	// writes need no lock (disjoint slots), so the semaphore alone bounds Dolt load.
+	open := make([]bool, len(candidates))
+	sem := make(chan struct{}, dogDispatchGateConcurrency())
+	var wg sync.WaitGroup
+	for i, p := range candidates {
+		// A plugin with no cooldown duration is always eligible (no gate query).
+		if p.Gate.Duration == "" {
+			open[i] = true
+			continue
+		}
+		wg.Add(1)
+		go func(i int, p *plugin.Plugin) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
+			// record (dog handed work but not yet executed) only suppresses
+			// re-dispatch within an in-flight grace window — after that the gate
+			// re-opens so a silently-dead dog can't re-arm the full cooldown and
+			// drift backups unbounded (gu-50nbo).
+			cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
+			grace := p.DispatchGrace(cooldownDur)
+			satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
+			if err != nil {
+				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
+				return // conservatively skip (open[i] stays false)
+			}
+			open[i] = !satisfied // gate open only when NOT still in cooldown/in-flight
+		}(i, p)
+	}
+	wg.Wait()
+
+	eligible := make([]*plugin.Plugin, 0, len(candidates))
+	for i, p := range candidates {
+		if open[i] {
+			eligible = append(eligible, p)
+		}
+	}
+	return eligible
+}
+
+// dogDispatchGateConcurrency bounds how many plugin cooldown-gate `bd list`
+// checks run concurrently in the dog-dispatch pre-pass (gu-10nch). These reads
+// hit the single shared Dolt server, so the semaphore keeps a large plugin set
+// from storming it. Default 6 — matching the dispatch-scan fan-out, which runs
+// on the same heartbeat budget. Tunable via GT_DOG_DISPATCH_GATE_FANOUT.
+func dogDispatchGateConcurrency() int {
+	const def = 6
+	if v := os.Getenv("GT_DOG_DISPATCH_GATE_FANOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return def
 }
 
 // findDispatchableDog returns the first dog in the kennel whose registry
