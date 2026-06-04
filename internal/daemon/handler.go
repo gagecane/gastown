@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -129,11 +130,23 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm *dog.SessionManager
 		return
 	}
 
-	threshold := daemonCfg.StaleWorkingTimeoutD()
+	blanket := daemonCfg.StaleWorkingTimeoutD()
+	// Per-plugin stuck thresholds: a dog holding a short-cadence critical plugin
+	// slot (e.g. dolt-backup, 15m) must be reclaimed within a couple of intervals,
+	// not after the multi-hour blanket timeout — otherwise one hung dog silently
+	// halts that plugin's entire dispatch cadence (gu-9jmd3).
+	pluginThresholds := d.pluginStuckThresholds(blanket)
 	now := time.Now()
 	for _, dg := range dogs {
 		if dg.State != dog.StateWorking {
 			continue
+		}
+
+		threshold := blanket
+		if pluginName, ok := pluginWorkName(dg.Work); ok {
+			if t, found := pluginThresholds[pluginName]; found {
+				threshold = t
+			}
 		}
 
 		staleDuration := now.Sub(dg.LastActive)
@@ -141,8 +154,8 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm *dog.SessionManager
 			continue
 		}
 
-		d.logger.Printf("Handler: dog %s stuck in working state (inactive %v, work: %s), clearing",
-			dg.Name, staleDuration.Truncate(time.Minute), dg.Work)
+		d.logger.Printf("Handler: dog %s stuck in working state (inactive %v >= threshold %v, work: %s), clearing",
+			dg.Name, staleDuration.Truncate(time.Minute), threshold, dg.Work)
 
 		if err := mgr.ClearWork(dg.Name); err != nil {
 			d.logger.Printf("Handler: failed to clear work for stale dog %s: %v", dg.Name, err)
@@ -163,6 +176,46 @@ func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm *dog.SessionManager
 			}
 		}
 	}
+}
+
+// pluginWorkName extracts the plugin name from a dog's work descriptor. Plugin
+// work is assigned as "plugin:<name>" (optionally with a trailing suffix, e.g.
+// the event-driven watcher's "plugin:<name> (event-driven, rig=<r>)"). Returns
+// the bare plugin name and true when the descriptor is plugin work.
+func pluginWorkName(work string) (string, bool) {
+	const prefix = "plugin:"
+	if !strings.HasPrefix(work, prefix) {
+		return "", false
+	}
+	name := strings.TrimPrefix(work, prefix)
+	if i := strings.IndexByte(name, ' '); i >= 0 {
+		name = name[:i]
+	}
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// pluginStuckThresholds maps each discovered plugin's name to the stuck-clear
+// threshold the daemon should apply to a dog holding that plugin's slot. The
+// blanket timeout is used as both the fallback and the upper clamp, so a missing
+// or non-cooldown plugin keeps today's behavior and no plugin is ever given a
+// LONGER leash than the daemon-wide default. See Plugin.StuckThreshold and
+// gu-9jmd3. Discovery failures degrade gracefully to an empty map (blanket only).
+func (d *Daemon) pluginStuckThresholds(blanket time.Duration) map[string]time.Duration {
+	rigNames := d.rigNamesForPluginScan()
+	scanner := plugin.NewScanner(d.config.TownRoot, rigNames)
+	plugins, err := scanner.DiscoverAll()
+	if err != nil {
+		d.logger.Printf("Handler: failed to discover plugins for stuck thresholds: %v", err)
+		return nil
+	}
+	thresholds := make(map[string]time.Duration, len(plugins))
+	for _, p := range plugins {
+		thresholds[p.Name] = p.StuckThreshold(blanket)
+	}
+	return thresholds
 }
 
 // reapIdleDogs kills tmux sessions for dogs that have been idle too long, and
