@@ -114,6 +114,73 @@ func relayBaseForLocalMerge(convoyInfo *ConvoyInfo, defaultBranch string) (strin
 	return base, true
 }
 
+// pushForDoneMaxAttempts is the total number of push attempts (initial + retries)
+// pushForDone makes when a transient push-infra error is observed. git push is
+// idempotent — re-pushing an already-landed commit exits 0 ("up to date") — so
+// retrying a transient failure cannot corrupt or duplicate work.
+const pushForDoneMaxAttempts = 3
+
+// pushForDoneRetryBackoff is the base backoff between transient-error retries.
+// Attempt N waits pushForDoneRetryBackoff * N before retrying (2s, 4s).
+var pushForDoneRetryBackoff = 2 * time.Second
+
+// isTransientPushError reports whether a failed push looks like a transient
+// push-infra blip (network reset, server 5xx, TLS handshake, timeout, hung-up
+// connection) rather than a deterministic rejection. Deterministic rejections
+// — non-fast-forward divergence, auth failures, missing refspec, gate
+// rejections — are NOT transient: retrying them just repeats the same failure,
+// and each already has a dedicated recovery path (recoverNonFFOwnBranch,
+// SHA-refspec recovery, etc.). Only transient errors are worth retrying.
+//
+// Motivation (gu-1or22): two casc_cdk stranded-merges in one session pushed
+// the feature branch fine, passed gates, then failed the mainline push — and
+// the gastown_upstream witness saw two simultaneous push_failed in the same
+// window, across both repos. That cross-repo correlation points at a transient
+// git push-infra blip, not a per-repo defect. The existing recovery paths all
+// re-check origin AFTER a failure, which cannot help a genuine blip: the commit
+// never landed, so the re-check confirms "not there" and the work strands. A
+// bounded retry-with-backoff on the push itself closes that gap.
+func isTransientPushError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Non-fast-forward is deterministic, not transient — never retry it.
+	// (recoverNonFFOwnBranch handles the safe slice of that case.)
+	if isNonFastForwardPushError(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	transientMarkers := []string{
+		"connection reset",
+		"connection refused",
+		"connection timed out",
+		"operation timed out",
+		"timed out",
+		"could not resolve host",
+		"failed to connect",
+		"the remote end hung up unexpectedly",
+		"early eof",
+		"rpc failed",
+		"broken pipe",
+		"tls handshake",
+		"gnutls_handshake",
+		"ssl_read",
+		"recv failure",
+		"send failure",
+		"temporary failure",
+		"internal server error",
+		"503",
+		"502",
+		"504",
+	}
+	for _, marker := range transientMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // pushForDone wraps git.Push, opting into GT_SKIP_PREPUSH=1 when the polecat
 // declared --pre-verified. The repo's pre-push hook re-runs build+vet+test
 // (~2-5min), which during gt done routinely exceeds the witness's idle timeout
@@ -121,11 +188,26 @@ func relayBaseForLocalMerge(convoyInfo *ConvoyInfo, defaultBranch string) (strin
 // --pre-verified, the polecat already ran the same gates on the rebased
 // branch (formula step 7), so the hook's gates are pure waste. The hook's
 // branch-name and integration-branch guardrails still run.
+//
+// Transient push-infra blips are retried with backoff (gu-1or22): see
+// isTransientPushError. Deterministic rejections fail fast on the first
+// attempt and fall through to the caller's existing recovery paths.
 func pushForDone(g *git.Git, refspec string) error {
-	if donePreVerified {
-		return g.PushSkipPrePush("origin", refspec, false)
+	var err error
+	for attempt := 1; attempt <= pushForDoneMaxAttempts; attempt++ {
+		if donePreVerified {
+			err = g.PushSkipPrePush("origin", refspec, false)
+		} else {
+			err = g.Push("origin", refspec, false)
+		}
+		if err == nil || !isTransientPushError(err) || attempt == pushForDoneMaxAttempts {
+			return err
+		}
+		backoff := pushForDoneRetryBackoff * time.Duration(attempt)
+		style.PrintWarning("push attempt %d/%d failed (transient): %v — retrying in %s", attempt, pushForDoneMaxAttempts, err, backoff)
+		time.Sleep(backoff)
 	}
-	return g.Push("origin", refspec, false)
+	return err
 }
 
 // pushSHAForDone is the orphan-commit recovery counterpart of pushForDone.
