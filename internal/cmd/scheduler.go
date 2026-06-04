@@ -481,7 +481,12 @@ func listScheduledBeads(townRoot string) []scheduledBeadInfo {
 // the town root plus any rig directories that have a .beads/ subdirectory.
 func beadsSearchDirs(townRoot string) []string {
 	dirs := []string{townRoot}
-	seen := map[string]bool{townRoot: true}
+	// Dedup by the *resolved* beads directory (following redirects), not the
+	// workdir path. A rig's own `.beads/redirect` and its `mayor/rig/.beads`
+	// target are distinct workdirs that point at the same database; scanning
+	// both makes concurrent maintenance passes (e.g. releaseExpiredDeferredBeads)
+	// race on the same beads and double-count (gs-96d).
+	seen := map[string]bool{beads.ResolveBeadsDir(townRoot): true}
 	entries, err := os.ReadDir(townRoot)
 	if err != nil {
 		return dirs
@@ -492,15 +497,19 @@ func beadsSearchDirs(townRoot string) []string {
 		}
 		rigDir := filepath.Join(townRoot, e.Name())
 		beadsDir := filepath.Join(rigDir, ".beads")
-		if _, err := os.Stat(beadsDir); err == nil && !seen[rigDir] {
-			dirs = append(dirs, rigDir)
-			seen[rigDir] = true
+		if _, err := os.Stat(beadsDir); err == nil {
+			if resolved := beads.ResolveBeadsDir(rigDir); !seen[resolved] {
+				dirs = append(dirs, rigDir)
+				seen[resolved] = true
+			}
 		}
 		mayorRigDir := filepath.Join(rigDir, "mayor", "rig")
 		mayorBeadsDir := filepath.Join(mayorRigDir, ".beads")
-		if _, err := os.Stat(mayorBeadsDir); err == nil && !seen[mayorRigDir] {
-			dirs = append(dirs, mayorRigDir)
-			seen[mayorRigDir] = true
+		if _, err := os.Stat(mayorBeadsDir); err == nil {
+			if resolved := beads.ResolveBeadsDir(mayorRigDir); !seen[resolved] {
+				dirs = append(dirs, mayorRigDir)
+				seen[resolved] = true
+			}
 		}
 	}
 	return dirs
