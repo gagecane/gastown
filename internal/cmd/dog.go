@@ -683,38 +683,68 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 
 	if d.State == dog.StateIdle && d.Work == "" {
 		fmt.Printf("Dog %s is already idle with no work\n", name)
-		return nil
+	} else {
+		if err := mgr.ClearWork(name); err != nil {
+			return fmt.Errorf("clearing work for dog %s: %w", name, err)
+		}
+		fmt.Printf("✓ Dog %s returned to kennel (idle)\n", name)
 	}
 
-	if err := mgr.ClearWork(name); err != nil {
-		return fmt.Errorf("clearing work for dog %s: %w", name, err)
-	}
+	// Always tear down the tmux session — even when the dog was already idle.
+	// A dog can be cleared to idle by another path (the daemon's DOG_DONE
+	// mail handler, the stale-working detector, or a prior `gt dog done`)
+	// while its tmux session is still alive with remain-on-exit=on. Returning
+	// early on the already-idle check skipped teardown, leaving a zombie
+	// session that only the hourly idle reaper would eventually collect — the
+	// recurring orphan-session leak deacon kept clearing by hand (gs-129).
+	// High-frequency plugins like ci-watcher-poll (3m cooldown) hit this most.
+	// Teardown is guarded by HasSession so a genuinely-resting dog is a no-op.
+	tearDownDogSession(newDogTmux(), name)
 
-	fmt.Printf("✓ Dog %s returned to kennel (idle)\n", name)
+	return nil
+}
 
-	// Auto-terminate the tmux session after a short delay.
-	// Dogs run inside tmux sessions (hq-dog-<name>). Without this, the
-	// Claude agent idles at the prompt indefinitely after completing work,
-	// wasting resources until the stale-working detector kills it (2 hours).
-	// The delay lets the agent see the success output before termination.
-	//
-	// We disable remain-on-exit first — otherwise kill-session leaves a
-	// dead pane that the deacon's health-check reports as an orphan.
-	//
-	// Uses a detached subprocess instead of a goroutine (gu-fr85): the
-	// goroutine ran inside the process being killed by the tmux session
-	// destroy, creating a race where the kill might never execute. A
-	// detached subprocess survives the parent's exit independently.
+// dogTmux is the tmux surface gt dog done needs to tear down a dog's session.
+// Abstracted so tests can assert teardown happens — including on the
+// already-idle path — without spawning a real tmux server (gs-129).
+type dogTmux interface {
+	HasSession(name string) (bool, error)
+	SetRemainOnExit(pane string, on bool) error
+	DetachedKillSession(name string, delay time.Duration) error
+}
+
+// newDogTmux returns the tmux client used for dog-session teardown. A package
+// var so tests can substitute a fake.
+var newDogTmux = func() dogTmux { return tmux.NewTmux() }
+
+// tearDownDogSession schedules termination of a dog's tmux session
+// (hq-dog-<name>). Without this, the Claude agent idles at the prompt
+// indefinitely after completing work, wasting resources until the
+// stale-working detector kills it (2 hours).
+//
+// We disable remain-on-exit first — otherwise kill-session leaves a dead pane
+// that the deacon's health-check reports as an orphan. A short delay lets the
+// agent see the success output before termination.
+//
+// Uses a detached subprocess instead of a goroutine (gu-fr85): the goroutine
+// ran inside the process being killed by the tmux session destroy, creating a
+// race where the kill might never execute. A detached subprocess survives the
+// parent's exit independently.
+//
+// Skips when no session exists so calling `gt dog done` on a resting dog (or
+// after the session already died) is a clean no-op rather than a spurious
+// "will terminate" message + harmless kill of a phantom session.
+func tearDownDogSession(t dogTmux, name string) {
 	sessionID := fmt.Sprintf("hq-dog-%s", name)
-	t := tmux.NewTmux()
+	if has, err := t.HasSession(sessionID); err == nil && !has {
+		return
+	}
 	_ = t.SetRemainOnExit(sessionID, false)
 	fmt.Printf("  Session %s will terminate in 3s\n", sessionID)
 
 	if err := t.DetachedKillSession(sessionID, 3*time.Second); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to spawn detached session kill for %s: %v\n", sessionID, err)
 	}
-
-	return nil
 }
 
 func splitPathComponents(path string) []string {

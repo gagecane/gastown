@@ -283,6 +283,76 @@ func TestDogDone_NotFound(t *testing.T) {
 	}
 }
 
+// fakeDogTmux records teardown calls so tests can assert gt dog done's
+// session-teardown behavior without a real tmux server (gs-129).
+type fakeDogTmux struct {
+	exists          bool
+	hasErr          error
+	remainOnExitOff bool
+	killScheduled   bool
+	killSessionName string
+}
+
+func (f *fakeDogTmux) HasSession(name string) (bool, error) { return f.exists, f.hasErr }
+
+func (f *fakeDogTmux) SetRemainOnExit(pane string, on bool) error {
+	if !on {
+		f.remainOnExitOff = true
+	}
+	return nil
+}
+
+func (f *fakeDogTmux) DetachedKillSession(name string, delay time.Duration) error {
+	f.killScheduled = true
+	f.killSessionName = name
+	return nil
+}
+
+// TestTearDownDogSession_SessionExists verifies the session is torn down
+// (remain-on-exit disabled + detached kill scheduled) when it exists. This is
+// the path that fixes the orphan-session leak: teardown must run even when the
+// dog was already cleared to idle by another path (gs-129).
+func TestTearDownDogSession_SessionExists(t *testing.T) {
+	f := &fakeDogTmux{exists: true}
+	tearDownDogSession(f, "charlie")
+
+	if !f.remainOnExitOff {
+		t.Error("expected remain-on-exit to be disabled before kill")
+	}
+	if !f.killScheduled {
+		t.Error("expected detached kill to be scheduled for existing session")
+	}
+	if f.killSessionName != "hq-dog-charlie" {
+		t.Errorf("kill target = %q, want hq-dog-charlie", f.killSessionName)
+	}
+}
+
+// TestTearDownDogSession_NoSession verifies teardown is a no-op when no session
+// exists, so calling gt dog done on a resting dog does not schedule a phantom
+// kill.
+func TestTearDownDogSession_NoSession(t *testing.T) {
+	f := &fakeDogTmux{exists: false}
+	tearDownDogSession(f, "charlie")
+
+	if f.killScheduled {
+		t.Error("expected no kill to be scheduled when session is absent")
+	}
+	if f.remainOnExitOff {
+		t.Error("expected remain-on-exit not to be touched when session is absent")
+	}
+}
+
+// TestTearDownDogSession_HasSessionError verifies that when liveness can't be
+// determined, teardown is attempted anyway (best-effort) rather than leaking.
+func TestTearDownDogSession_HasSessionError(t *testing.T) {
+	f := &fakeDogTmux{exists: false, hasErr: os.ErrPermission}
+	tearDownDogSession(f, "charlie")
+
+	if !f.killScheduled {
+		t.Error("expected best-effort kill when HasSession errors")
+	}
+}
+
 // =============================================================================
 // Dog Clear Tests
 // =============================================================================
