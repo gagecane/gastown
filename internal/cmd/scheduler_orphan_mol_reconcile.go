@@ -79,6 +79,19 @@ func reconcileOrphanMolecules(townRoot string) int {
 			continue
 		}
 
+		// gs-bpq: an open merge-request wisp is a pending merge that
+		// intentionally outlives its submitting polecat — it sits in the merge
+		// queue until the refinery merges it. A polecat self-terminates right
+		// after `gt mq submit`, so its dead tmux session is EXPECTED, not
+		// orphaned. Reaping the MR here silently drops the queued merge: the
+		// branch stays pushed-but-unmerged on origin and the source bead is
+		// left HOOKED, with no merge/reject mail (observed gs-wisp-qen/1r9 on a
+		// refinery backlog). The refinery owns the MR-wisp lifecycle and closes
+		// the wisp on merge/reject; the orphan pass must never reap one.
+		if beads.HasLabel(info, mergeRequestWispLabel) {
+			continue
+		}
+
 		action := reconcileDecision(info.Dependents)
 		if action == orphanWispActionSkip {
 			continue
@@ -94,17 +107,6 @@ func reconcileOrphanMolecules(townRoot string) int {
 			fmt.Fprintf(os.Stderr, "%s orphan-mol reconcile: burn failed for %s (base=%s): %v\n",
 				style.Dim.Render("⚠"), wisp.ID, baseBead, err)
 			continue
-		}
-
-		// gu-6mqv4: a merge-request wisp reaped here is a SILENTLY DROPPED merge.
-		// MRs are ephemeral wisps (gt:merge-request); when the source branch
-		// doesn't anchor to a live work bead, this pass treats the MR like any
-		// orphan molecule and burns it — dropping the queued merge while the
-		// submitter still believes it's in flight (lost work-intent). Notify the
-		// submitter (or the mayor, when the branch carried no worker) before we
-		// move on, so the drop is surfaced instead of vanishing without a trace.
-		if beads.HasLabel(info, mergeRequestWispLabel) {
-			notifyMRBurnedSubmitter(townRoot, info)
 		}
 
 		switch action {
@@ -301,68 +303,6 @@ var fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
 // mergeRequestWispLabel is the label a `gt mq submit` MR wisp carries. Matches
 // internal/scheduler/capacity.LabelMergeRequest and the refinery's discovery
 // query; duplicated as a local const to avoid pulling the capacity package into
-// this reconcile path's import set.
+// this reconcile path's import set. The orphan pass uses it to recognize — and
+// never reap — pending merge-request wisps (gs-bpq).
 const mergeRequestWispLabel = "gt:merge-request"
-
-// mrBurnNotifyRecipient picks who to tell when a merge-request wisp is reaped.
-// Prefer the submitter: a polecat worker (mr.Worker → <rig>/polecats/<worker>)
-// is the agent that still believes its MR is queued. Fall back to the mayor/
-// when the MR carried no worker — the no-worker case is exactly the silent
-// "bare gt mq submit produced a dangling MR" path from gu-6mqv4, and the mayor
-// is the operator who otherwise only discovers the drop by luck.
-func mrBurnNotifyRecipient(fields *beads.MRFields) string {
-	if fields != nil && fields.Worker != "" && fields.Rig != "" {
-		return fmt.Sprintf("%s/polecats/%s", fields.Rig, fields.Worker)
-	}
-	return "mayor/"
-}
-
-// mrBurnNotice builds the (subject, body) for a burned-MR notification. The body
-// names the wisp, branch, target, source issue, and commit so the submitter can
-// re-submit (rebase + `gt mq submit`) without having to forensically reconstruct
-// what was lost.
-func mrBurnNotice(info *beads.Issue, fields *beads.MRFields) (subject, body string) {
-	branch := "(unknown)"
-	if fields != nil && fields.Branch != "" {
-		branch = fields.Branch
-	}
-	subject = fmt.Sprintf("⚠ MR %s dropped from merge queue", info.ID)
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Your merge request %s was dropped from the queue before it merged.\n\n", info.ID)
-	sb.WriteString("Cause: the MR wisp had no live source work bead, so the orphan-molecule\n")
-	sb.WriteString("reconciler reaped it. The source branch is still pushed — the change\n")
-	sb.WriteString("never reached the target branch.\n\n")
-	fmt.Fprintf(&sb, "Branch: %s\n", branch)
-	if fields != nil {
-		if fields.Target != "" {
-			fmt.Fprintf(&sb, "Target: %s\n", fields.Target)
-		}
-		if fields.SourceIssue != "" {
-			fmt.Fprintf(&sb, "Source issue: %s\n", fields.SourceIssue)
-		}
-		if fields.CommitSHA != "" {
-			fmt.Fprintf(&sb, "Commit: %s\n", fields.CommitSHA)
-		}
-	}
-	sb.WriteString("\nTo land it: rebase the branch onto the target and re-submit with an\n")
-	sb.WriteString("explicit source issue — `gt mq submit --issue <bead>` — so the new MR\n")
-	sb.WriteString("anchors to a real work bead and isn't reaped again.")
-	return subject, sb.String()
-}
-
-// notifyMRBurnedSubmitter surfaces a burned merge-request wisp to its submitter
-// (gu-6mqv4). Best-effort: a failed notification must never stall the dispatch
-// tick, so errors only warn. Extracted as a seam (var) so the reconcile
-// orchestration test can assert the notification fires without sending mail.
-var notifyMRBurnedSubmitter = func(townRoot string, info *beads.Issue) {
-	if info == nil {
-		return
-	}
-	fields := beads.ParseMRFields(info)
-	to := mrBurnNotifyRecipient(fields)
-	subject, body := mrBurnNotice(info, fields)
-	sendMail(townRoot, to, subject, body)
-	fmt.Printf("%s Notified %s: MR %s dropped from queue\n",
-		style.Dim.Render("✉"), to, info.ID)
-}
