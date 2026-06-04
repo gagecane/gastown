@@ -985,6 +985,25 @@ func runConvoyCheck(cmd *cobra.Command, args []string) error {
 // removeShipUnverifiedLabel once the convoy's beads become ship-verifiable.
 const convoyShipUnverifiedLabel = "convoy:ship-unverified"
 
+// completionSweepMaxConvoys caps how many unlabeled convoys a single
+// checkAndCloseCompletedConvoys invocation processes (gu-c76op). The sweep
+// re-scans every open convoy each tick; when a large backlog of all-tracked-
+// closed-but-ship-unverifiable convoys accumulates, one unbounded sweep can
+// consume the whole 5m dispatch budget and SIGKILL before it reaches the tail —
+// so the ship-unverified labels (which would let the next tick SKIP them) never
+// get applied, and the backlog never shrinks (the gu-4cxuv chicken-and-egg).
+// Capping each invocation guarantees forward progress: every tick labels up to
+// N convoys, which are then filtered out next tick, draining the backlog
+// incrementally without any single sweep blowing the budget.
+const completionSweepMaxConvoys = 50
+
+// completionSweepTimeBox hard-bounds the wall-clock a single sweep spends in the
+// per-convoy close loop (gu-c76op). Even under the cap, a degraded Dolt server
+// can make each per-convoy ship-verification slow; the time-box ensures the
+// sweep returns control well within the dispatch budget regardless of per-call
+// latency. Convoys not reached this tick are picked up next tick.
+const completionSweepTimeBox = 30 * time.Second
+
 // markConvoyShipUnverified labels a convoy convoy:ship-unverified (idempotent;
 // bd --add-label is a no-op if already present). Best-effort: a label failure
 // only means the convoy gets re-scanned next tick (the pre-gu-4cxuv behavior),
@@ -2269,6 +2288,19 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 			style.Dim.Render("○"), skippedUnverified, convoyShipUnverifiedLabel, convoyShipUnverifiedLabel)
 	}
 
+	// Cap the number of convoys processed this invocation (gu-c76op). The
+	// remaining convoys are deferred to the next tick — which makes forward
+	// progress because the ship-unverifiable ones processed this tick get the
+	// convoy:ship-unverified label and are filtered out above next time. Without
+	// this cap, a large backlog could make one sweep exceed the dispatch budget
+	// and die before labeling anything, so the backlog would never shrink. Cap
+	// BEFORE the batched tracks query so the heavy bd work also stays bounded.
+	deferredOverCap := 0
+	if len(convoys) > completionSweepMaxConvoys {
+		deferredOverCap = len(convoys) - completionSweepMaxConvoys
+		convoys = convoys[:completionSweepMaxConvoys]
+	}
+
 	// Batch the per-convoy 'tracks' dep-edge lookup into ONE bd sql query
 	// (gc-pai9b). The previous per-convoy getTrackedIssues fan-out spawned a
 	// fresh `bd sql ... WHERE issue_id='<cv>' AND type='tracks'` subprocess per
@@ -2313,8 +2345,17 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 		workersMap = getWorkersForIssues(openIssueIDsFromDetails(allTrackedIDs, freshDetails))
 	}
 
-	// Check each convoy
-	for _, convoy := range convoys {
+	// Check each convoy. A hard time-box (gu-c76op) stops the loop if per-convoy
+	// ship-verification turns slow (e.g. degraded Dolt), so the sweep can never
+	// consume the whole dispatch budget; unreached convoys are picked up next
+	// tick. timeNowForCompletionSweep is a test seam.
+	sweepDeadline := timeNowForCompletionSweep().Add(completionSweepTimeBox)
+	timeBoxedOut := 0
+	for i, convoy := range convoys {
+		if timeNowForCompletionSweep().After(sweepDeadline) {
+			timeBoxedOut = len(convoys) - i
+			break
+		}
 		if err := ensureKnownConvoyStatus(convoy.Status); err != nil {
 			style.PrintWarning("skipping convoy %s: invalid lifecycle state: %v", convoy.ID, err)
 			continue
@@ -2345,8 +2386,20 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 		}
 	}
 
+	// Surface what was deferred so a bounded sweep never reads as "covered
+	// everything" (gu-c76op — no silent caps). These convoys are not dropped;
+	// the next tick processes them.
+	if deferred := deferredOverCap + timeBoxedOut; deferred > 0 {
+		fmt.Printf("%s Completion sweep deferred %d convoy(s) to next tick (cap=%d over=%d time-boxed=%d) — bounded to protect the dispatch budget (gu-c76op)\n",
+			style.Dim.Render("○"), deferred, completionSweepMaxConvoys, deferredOverCap, timeBoxedOut)
+	}
+
 	return closed, nil
 }
+
+// timeNowForCompletionSweep is a seam so tests can drive the sweep time-box
+// clock deterministically without sleeping.
+var timeNowForCompletionSweep = time.Now
 
 // notifyConvoyCompletion sends notifications to owner, any notify addresses, and mayor/.
 func notifyConvoyCompletion(townBeads, convoyID, title string) {
