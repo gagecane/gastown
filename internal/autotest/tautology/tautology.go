@@ -166,27 +166,108 @@ func analyzeTestFunc(fset *token.FileSet, fn *ast.FuncDecl, localFuncs map[strin
 // assertion represents a single assertion call found in a test function.
 type assertion struct {
 	call *ast.CallExpr
-	name string     // e.g. "assert.Equal"
-	args []ast.Expr // meaningful args (skip t, skip trailing msg)
+	name string // e.g. "assert.Equal" or "t.Errorf"
+	// args holds the meaningful expressions the assertion checks: for testify,
+	// the comparison arguments (skip t, skip trailing msg); for stdlib, the
+	// single enclosing `if` condition.
+	args []ast.Expr
+	// cmp is the comparison from the enclosing `if <cmp> { t.Errorf(...) }`
+	// idiom, set only for standard-library assertions whose failure is guarded
+	// by a single comparison condition. nil for testify-style assertions and
+	// for stdlib failures not guarded by a plain comparison.
+	cmp *ast.BinaryExpr
 }
 
 // collectAssertions walks the function body and returns all assertion calls.
+//
+// Two assertion shapes are recognized:
+//
+//	testify: assert.Equal(t, want, got) — the comparison operands are the
+//	         call arguments, extracted by extractArgs.
+//	stdlib:  if got != want { t.Errorf(...) } — the comparison lives in the
+//	         enclosing `if` condition, not the failure call's arguments. The
+//	         whole condition is lifted onto the assertion so the taint and
+//	         tautology rules see it.
 func collectAssertions(body *ast.BlockStmt) []assertion {
 	var result []assertion
+
+	// Pass 1: stdlib `if <cond> { t.Fail... }` idioms. The whole condition is
+	// the assertion's subject — the taint analysis walks it to see whether a
+	// function-under-test value flows into the check, whether directly
+	// (if FUT(x) != want) or through a variable (got := FUT(); if got != want).
+	// Record the failure calls so pass 2 does not double-count them.
+	guarded := make(map[*ast.CallExpr]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		var cmp *ast.BinaryExpr
+		if b, ok := ifStmt.Cond.(*ast.BinaryExpr); ok && isComparison(b.Op) {
+			cmp = b // a single comparison carries tautology semantics
+		}
+		for _, call := range stdlibFailCalls(ifStmt.Body) {
+			guarded[call] = true
+			result = append(result, assertion{
+				call: call,
+				name: callName(call),
+				args: []ast.Expr{ifStmt.Cond},
+				cmp:  cmp,
+			})
+		}
+		return true
+	})
+
+	// Pass 2: testify assertions and any stdlib failure calls not already
+	// captured as a guarded idiom (e.g. inside a switch or unconditional).
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok {
+		if !ok || guarded[call] {
 			return true
 		}
 		name := callName(call)
 		if !isAssertionCall(name) {
 			return true
 		}
-		args := extractArgs(call, name)
-		result = append(result, assertion{call: call, name: name, args: args})
+		result = append(result, assertion{call: call, name: name, args: extractArgs(call, name)})
 		return true
 	})
+
 	return result
+}
+
+// stdlibFailCalls returns the standard-library failure calls (t.Error,
+// t.Fatalf, ...) that appear as direct statements in an `if` block body.
+// Only direct children are considered so that nested `if`s are attributed to
+// their own condition rather than an outer one.
+func stdlibFailCalls(block *ast.BlockStmt) []*ast.CallExpr {
+	if block == nil {
+		return nil
+	}
+	var calls []*ast.CallExpr
+	for _, stmt := range block.List {
+		exprStmt, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			continue
+		}
+		call, ok := exprStmt.X.(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		if isStdlibFailCall(callName(call)) {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+// isComparison reports whether op is an ordering/equality comparison operator.
+func isComparison(op token.Token) bool {
+	switch op {
+	case token.EQL, token.NEQ, token.LSS, token.GTR, token.LEQ, token.GEQ:
+		return true
+	}
+	return false
 }
 
 // --- Sub-rule (ii): literal-vs-literal ---
@@ -307,6 +388,22 @@ func checkAssertTrue(fset *token.FileSet, fn *ast.FuncDecl, a assertion) *Findin
 				Pos:      fset.Position(a.call.Pos()),
 				Rule:     RuleZeroAssertion,
 				Message:  "assertion compares identical expressions",
+				FuncName: fn.Name.Name,
+			}
+		}
+	}
+
+	// stdlib idiom: if x != x { t.Errorf(...) } — the failure condition
+	// compares identical expressions, so it is always false and the test can
+	// never fail. (== / <= / >= are excluded: those always-fail rather than
+	// always-pass, which is a different defect.)
+	if a.cmp != nil && exprEqual(a.cmp.X, a.cmp.Y) {
+		switch a.cmp.Op {
+		case token.NEQ, token.LSS, token.GTR:
+			return &Finding{
+				Pos:      fset.Position(a.call.Pos()),
+				Rule:     RuleZeroAssertion,
+				Message:  "failure condition compares identical expressions (test can never fail)",
 				FuncName: fn.Name.Name,
 			}
 		}
@@ -451,7 +548,26 @@ func propagateStmt(stmt ast.Stmt, tainted map[string]string, localFuncs map[stri
 		if s.Body != nil {
 			propagateTaint(s.Body.List, tainted, localFuncs)
 		}
+	case *ast.ExprStmt:
+		// Subtest closures — t.Run(name, func(t *testing.T){ ... }) — carry the
+		// FUT call and the assertions on its output. Assertions are collected
+		// from inside closures (ast.Inspect recurses), so taint must follow.
+		propagateFuncLits(s.X, tainted, localFuncs)
 	}
+}
+
+// propagateFuncLits descends into any function literals nested in an
+// expression (e.g. the closure passed to t.Run) and propagates taint through
+// their bodies into the shared taint map.
+func propagateFuncLits(expr ast.Expr, tainted map[string]string, localFuncs map[string]bool) {
+	ast.Inspect(expr, func(n ast.Node) bool {
+		fl, ok := n.(*ast.FuncLit)
+		if !ok || fl.Body == nil {
+			return true
+		}
+		propagateTaint(fl.Body.List, tainted, localFuncs)
+		return false // body (incl. nested literals) handled by the recursion
+	})
 }
 
 // classifyExpr determines if an expression introduces or propagates taint.
@@ -628,6 +744,28 @@ func callName(call *ast.CallExpr) string {
 		if x, ok := fn.X.(*ast.Ident); ok {
 			return x.Name + "." + fn.Sel.Name
 		}
+		// Method call on a non-trivial receiver, e.g. tt.state.IsStalled().
+		// Return a dotted name so the call is classified as a FUT call — the
+		// dot keeps it out of the bare-name local/stdlib/helper sets, matching
+		// how single-receiver method calls (svc.Process) are already handled.
+		return receiverName(fn.X) + "." + fn.Sel.Name
+	}
+	return ""
+}
+
+// receiverName renders a selector/ident receiver chain as a dotted string,
+// e.g. tt.state -> "tt.state". Non-nameable receivers (index, call, ...)
+// yield "", leaving a leading-dot name that is still treated as FUT.
+func receiverName(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.SelectorExpr:
+		if r := receiverName(x.X); r != "" {
+			return r + "." + x.Sel.Name
+		}
+	case *ast.ParenExpr:
+		return receiverName(x.X)
 	}
 	return ""
 }
@@ -665,13 +803,26 @@ func extractArgs(call *ast.CallExpr, name string) []ast.Expr {
 	return nil
 }
 
-// isAssertionCall returns true for known test assertion calls.
+// isAssertionCall returns true for known test assertion calls — both
+// testify-style helpers and standard-library failure calls.
 func isAssertionCall(name string) bool {
-	return isTestifyStyle(name)
+	return isTestifyStyle(name) || isStdlibFailCall(name)
 }
 
 func isTestifyStyle(name string) bool {
 	return strings.HasPrefix(name, "assert.") || strings.HasPrefix(name, "require.")
+}
+
+// isStdlibFailCall returns true for standard-library *testing.T failure calls.
+// These signal an assertion in stdlib-style tests (e.g. the `if got != want {
+// t.Errorf(...) }` idiom). Non-failing helpers like t.Log/t.Skip are excluded:
+// they do not assert anything.
+func isStdlibFailCall(name string) bool {
+	switch name {
+	case "t.Error", "t.Errorf", "t.Fatal", "t.Fatalf", "t.Fail", "t.FailNow":
+		return true
+	}
+	return false
 }
 
 func isEqualStyle(name string) bool {

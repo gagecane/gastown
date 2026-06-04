@@ -163,6 +163,51 @@ func TestSubRuleI_NoInputDerived(t *testing.T) {
 	}
 }
 
+// TestStdlibStyle verifies that the linter recognizes standard-library
+// assertions (the `if got != want { t.Errorf(...) }` idiom), so that correct
+// stdlib tests are not flagged as zero-assertion and genuinely tautological
+// stdlib tests are caught.
+func TestStdlibStyle(t *testing.T) {
+	src := readFixture(t, "stdlib/stdlib_test.go")
+	findings, err := AnalyzeFile("stdlib_test.go", src)
+	if err != nil {
+		t.Fatalf("AnalyzeFile: %v", err)
+	}
+
+	zeroFlagged := findingFuncSet(filterByRule(findings, RuleZeroAssertion))
+	noInputFlagged := findingFuncSet(filterByRule(findings, RuleNoInputDerived))
+	anyFlagged := findingFuncSet(findings)
+
+	// Valid stdlib tests must not be flagged by any rule.
+	for _, fn := range []string{
+		"TestStdlib_TableDriven",
+		"TestStdlib_FatalGuard",
+		"TestStdlib_DeepEqual",
+		"TestStdlib_MethodOnRow",
+		"TestStdlib_FUTInCondition",
+	} {
+		if anyFlagged[fn] {
+			t.Errorf("valid stdlib test %s was falsely flagged", fn)
+		}
+	}
+
+	// Zero-assertion / tautological stdlib tests must be flagged by sub-rule (iv).
+	for _, fn := range []string{
+		"TestStdlib_EmptyBody",
+		"TestStdlib_OnlyLogging",
+		"TestStdlib_SelfCompare",
+	} {
+		if !zeroFlagged[fn] {
+			t.Errorf("sub-rule (iv) missed stdlib %s (false negative)", fn)
+		}
+	}
+
+	// A stdlib comparison of two non-FUT values must trip sub-rule (i).
+	if !noInputFlagged["TestStdlib_HardcodedComparison"] {
+		t.Error("sub-rule (i) missed stdlib TestStdlib_HardcodedComparison (false negative)")
+	}
+}
+
 // TestAnalyzeFileParseError ensures parse errors are returned properly.
 func TestAnalyzeFileParseError(t *testing.T) {
 	_, err := AnalyzeFile("bad.go", []byte("not valid go"))
