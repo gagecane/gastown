@@ -498,3 +498,91 @@ func TestStaleBinaryInfo_Describe(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckStaleBinary_LocalMainBehindUpstream is the regression guard for
+// gu-7qgyq: when the local build branch (main) is BEHIND its upstream, a binary
+// built from the stale local tip must NOT be reported "fresh" — staleness has
+// to be measured against what is actually shipped (origin/main), not the stale
+// local ref. This reproduces the real incident where gt stale said "fresh"
+// while origin/main was 2 commits ahead and merged fixes sat undeployed.
+func TestCheckStaleBinary_LocalMainBehindUpstream(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// Bare "origin" repo + a working clone on main tracking origin/main.
+	origin := t.TempDir()
+	gitRun(t, origin, "init", "-q", "--bare", "-b", "main")
+
+	work := t.TempDir()
+	gitRun(t, work, "init", "-q", "-b", "main")
+	gitRun(t, work, "config", "commit.gpgsign", "false")
+	gitRun(t, work, "remote", "add", "origin", origin)
+
+	// First commit — this is the "stale local tip" the binary is built from.
+	localTip := gitCommit(t, work, "a.go", "package x")
+	gitRun(t, work, "push", "-q", "origin", "main")
+	gitRun(t, work, "branch", "--set-upstream-to=origin/main", "main")
+
+	// Advance origin/main beyond local main: commit in a second clone and push,
+	// then fetch into work so origin/main is ahead of local main WITHOUT
+	// fast-forwarding local main (mirrors a never-FF'd local build branch).
+	other := t.TempDir()
+	gitRun(t, other, "clone", "-q", origin, ".")
+	gitRun(t, other, "config", "commit.gpgsign", "false")
+	shippedTip := gitCommit(t, other, "b.go", "package x // shipped fix")
+	gitRun(t, other, "push", "-q", "origin", "main")
+
+	gitRun(t, work, "fetch", "-q", "origin")
+	// Sanity: local main still at localTip, origin/main now at shippedTip.
+	if got := gitRun(t, work, "rev-parse", "HEAD"); got != localTip {
+		t.Fatalf("local HEAD moved unexpectedly: %s != %s", got, localTip)
+	}
+	if got := gitRun(t, work, "rev-parse", "origin/main"); got != shippedTip {
+		t.Fatalf("origin/main not at shipped tip: %s != %s", got, shippedTip)
+	}
+
+	// Binary was built from the stale local tip.
+	setBinaryCommit(t, localTip)
+
+	info := CheckStaleBinary(work)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.IsStale {
+		t.Errorf("expected IsStale=true (binary at stale local tip, origin/main ahead) — gu-7qgyq regression; info=%+v", info)
+	}
+	if !strings.Contains(info.CompareRef, "origin/") {
+		t.Errorf("expected compare against upstream (origin/main), got CompareRef=%q — stale local main was used", info.CompareRef)
+	}
+}
+
+// TestCheckStaleBinary_LocalMainCurrent verifies the no-regression case: when
+// local main is at-or-ahead of upstream, the binary built from that tip is
+// fresh and we do NOT spuriously switch to the upstream ref (gu-7qgyq guard
+// must only trigger when local is genuinely behind).
+func TestCheckStaleBinary_LocalMainCurrent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	origin := t.TempDir()
+	gitRun(t, origin, "init", "-q", "--bare", "-b", "main")
+
+	work := t.TempDir()
+	gitRun(t, work, "init", "-q", "-b", "main")
+	gitRun(t, work, "config", "commit.gpgsign", "false")
+	gitRun(t, work, "remote", "add", "origin", origin)
+	tip := gitCommit(t, work, "a.go", "package x")
+	gitRun(t, work, "push", "-q", "origin", "main")
+	gitRun(t, work, "branch", "--set-upstream-to=origin/main", "main")
+
+	setBinaryCommit(t, tip)
+
+	info := CheckStaleBinary(work)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if info.IsStale {
+		t.Errorf("expected fresh (binary == local main == upstream), got IsStale; info=%+v", info)
+	}
+}

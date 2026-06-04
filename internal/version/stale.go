@@ -140,9 +140,22 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 	// relative to a *build branch*.
 	var compareRef string
 	if info.OnMainBranch {
-		// Already on a build branch — its HEAD is the build branch.
+		// Normally a build branch's own HEAD is the comparison point.
+		//
+		// BUT a local build branch can itself be BEHIND its upstream: if local
+		// main was never fast-forwarded after upstream merges, comparing the
+		// binary against local HEAD measures binary-vs-stale-local instead of
+		// binary-vs-actually-shipped. That masked a real 2-commit deploy gap —
+		// gt stale reported "fresh" while origin/main was ahead and merged
+		// fixes sat undeployed (gu-7qgyq). When the build branch has an upstream
+		// strictly ahead of local HEAD, compare against the upstream ref (what
+		// is actually shipped), not the stale local tip.
 		compareRef = "HEAD"
 		info.CompareRef = branch
+		if upstream, ahead := upstreamIfAhead(repoDir); ahead {
+			compareRef = upstream
+			info.CompareRef = upstream
+		}
 	} else {
 		// Resolve a real build-branch ref instead of the feature HEAD.
 		ref, ok := resolveBuildBranchRef(repoDir, info.BinaryCommit)
@@ -384,6 +397,51 @@ func isBuildBranch(branch string) bool {
 		return true
 	}
 	return strings.HasPrefix(branch, "carry/")
+}
+
+// upstreamIfAhead returns the current branch's upstream ref (e.g. "origin/main")
+// and true when that upstream is STRICTLY AHEAD of local HEAD — i.e. the local
+// build branch is behind what has actually been pushed/merged. Returns ("",
+// false) when there is no upstream, the upstream cannot be resolved, or local
+// HEAD is already at-or-ahead of the upstream (the normal case).
+//
+// This is the guard that stops a stale local build branch from masking a real
+// deploy gap (gu-7qgyq): if local main was never fast-forwarded, its HEAD is an
+// older commit and a binary built from that era looks "fresh" against it even
+// though origin/main is ahead. We only switch the compare ref when the upstream
+// is genuinely ahead, so a normal up-to-date local branch is unaffected and we
+// never spuriously diff against an upstream that matches HEAD.
+func upstreamIfAhead(repoDir string) (string, bool) {
+	// Resolve the symbolic upstream of the current branch (e.g. origin/main).
+	upCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	upCmd.Dir = repoDir
+	util.SetDetachedProcessGroup(upCmd)
+	upOut, err := upCmd.Output()
+	if err != nil {
+		return "", false // no upstream tracking ref
+	}
+	upstream := strings.TrimSpace(string(upOut))
+	if upstream == "" {
+		return "", false
+	}
+
+	// Ahead iff there is at least one commit in upstream that is not in HEAD,
+	// i.e. `git rev-list --count HEAD..@{u}` > 0.
+	countCmd := exec.Command("git", "rev-list", "--count", "HEAD..@{u}")
+	countCmd.Dir = repoDir
+	util.SetDetachedProcessGroup(countCmd)
+	countOut, err := countCmd.Output()
+	if err != nil {
+		return "", false
+	}
+	var ahead int
+	if n, perr := fmt.Sscanf(strings.TrimSpace(string(countOut)), "%d", &ahead); perr != nil || n != 1 {
+		return "", false
+	}
+	if ahead <= 0 {
+		return "", false
+	}
+	return upstream, true
 }
 
 // SetCommit allows the cmd package to pass in the build-time commit.
