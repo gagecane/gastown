@@ -58,6 +58,52 @@ log() {
   echo "[dolt-backup] $*"
 }
 
+# Heartbeat: resolve the town runtime dir for the durable completion signal.
+# Prefer GT_TOWN_ROOT (set by the daemon when invoking the plugin); fall back
+# to the parent of DOLT_DATA_DIR so a manual run still emits a heartbeat.
+heartbeat_path() {
+  local runtime_root
+  if [[ -n "${GT_TOWN_ROOT:-}" ]]; then
+    runtime_root="$GT_TOWN_ROOT"
+  else
+    runtime_root="$(dirname "$DOLT_DATA_DIR")"
+  fi
+  echo "$runtime_root/.runtime/dolt-backup-heartbeat.json"
+}
+
+# write_heartbeat <status> <synced> <skipped> <failed> <total> <retention_dirs> <retention_failed> <detail>
+# Emits a durable positive completion signal on EVERY run (gu-8xvpw). A watcher
+# (gu-8xvpw CR2) alarms when this heartbeat is absent for longer than the backup
+# interval — catching the silent failure modes a failure-only model misses
+# (process killed, hung, never scheduled, or crashed before signaling). Written
+# atomically (temp + mv) so a concurrent reader never sees a partial file.
+# Best-effort: a heartbeat write failure is logged and never aborts the run.
+write_heartbeat() {
+  local status="$1" synced="$2" skipped="$3" failed="$4" total="$5"
+  local retention_dirs="$6" retention_failed="$7" detail="$8"
+  local hb_file hb_tmp ts
+  hb_file="$(heartbeat_path)"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if ! mkdir -p "$(dirname "$hb_file")" 2>/dev/null; then
+    log "  heartbeat: could not create $(dirname "$hb_file") — skipping signal"
+    return 0
+  fi
+
+  hb_tmp="${hb_file}.tmp.$$"
+  # detail is plain ASCII summary text; escape backslash and double-quote for JSON.
+  local detail_json="${detail//\\/\\\\}"
+  detail_json="${detail_json//\"/\\\"}"
+  if printf '{"schema":1,"timestamp":"%s","status":"%s","synced":%d,"skipped":%d,"failed":%d,"total":%d,"retention_dirs":%d,"retention_failed":%d,"detail":"%s"}\n' \
+      "$ts" "$status" "$synced" "$skipped" "$failed" "$total" "$retention_dirs" "$retention_failed" "$detail_json" \
+      > "$hb_tmp" 2>/dev/null && mv -f "$hb_tmp" "$hb_file" 2>/dev/null; then
+    log "  heartbeat: wrote $status signal to $hb_file"
+  else
+    rm -f "$hb_tmp" 2>/dev/null || true
+    log "  heartbeat: write failed for $hb_file — skipping signal"
+  fi
+}
+
 # retention_cleanup <backup_path>
 # Deletes .darc files older than BACKUP_RETENTION_DAYS, always keeping the
 # BACKUP_SAFETY_FLOOR most-recent files. Non-fatal: errors are logged and skipped.
@@ -76,6 +122,7 @@ retention_cleanup() {
 
   local deleted=0
   local freed_kb=0
+  local errors=0
   local cutoff=$(( $(date +%s) - BACKUP_RETENTION_DAYS * 86400 ))
 
   for (( i=0; i<total; i++ )); do
@@ -94,6 +141,7 @@ retention_cleanup() {
     mtime=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)
     if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
       log "    retention: could not read mtime of $(basename "$f") — skipping"
+      errors=$(( errors + 1 ))
       continue
     fi
 
@@ -107,6 +155,7 @@ retention_cleanup() {
         log "    retention: removed $(basename "$f") (${age_days}d old, ${kb}KB)"
       else
         log "    retention: could not remove $(basename "$f") — skipping"
+        errors=$(( errors + 1 ))
       fi
     fi
   done
@@ -114,6 +163,14 @@ retention_cleanup() {
   if (( deleted > 0 )); then
     log "  retention: freed ${freed_kb}KB across ${deleted} file(s) (${BACKUP_RETENTION_DAYS}d policy, floor ${BACKUP_SAFETY_FLOOR})"
   fi
+
+  # Signal a non-fatal retention error to the caller so it can be counted and
+  # surfaced as a low-severity warning (gu-8xvpw) — distinct from a backup-sync
+  # failure. Returning explicitly also avoids inheriting the exit status of the
+  # `(( deleted > 0 ))` test above (non-zero whenever nothing was pruned), which
+  # the caller's `if retention_cleanup` would otherwise misread as a failure.
+  (( errors > 0 )) && return 1
+  return 0
 }
 
 # --- Step 1: Discover databases -----------------------------------------------
@@ -192,8 +249,15 @@ for DB in "${PROD_DBS[@]}"; do
   log "  $DB: syncing ($LAST_HASH -> $CURRENT_HASH)..."
   SYNC_START=$(date +%s)
 
-  SYNC_OUTPUT=$(cd "$DB_DIR" && timeout "$BACKUP_TIMEOUT" dolt backup sync "$BACKUP_NAME" 2>&1) || true
-  SYNC_RC=${PIPESTATUS[0]:-$?}
+  # Capture the real exit code. The previous `... ) || true` form forced the
+  # status to 0 before SYNC_RC could read it (PIPESTATUS reflected `true`, not
+  # dolt), so EVERY sync — including hard failures and timeouts — was counted
+  # as success and never escalated (gu-8xvpw). Disable errexit around the
+  # assignment instead, then read $? directly.
+  set +e
+  SYNC_OUTPUT=$(cd "$DB_DIR" && timeout "$BACKUP_TIMEOUT" dolt backup sync "$BACKUP_NAME" 2>&1)
+  SYNC_RC=$?
+  set -e
   SYNC_ELAPSED=$(( $(date +%s) - SYNC_START ))
 
   if [[ $SYNC_RC -eq 0 ]]; then
@@ -220,6 +284,7 @@ done
 # are pruned (remote/cloud remotes manage their own retention).
 
 RETENTION_CLEANED=0
+RETENTION_FAILED=0
 for DB in "${PROD_DBS[@]}"; do
   DB_DIR="$DOLT_DATA_DIR/$DB"
   REPO_STATE="$DB_DIR/.dolt/repo_state.json"
@@ -243,27 +308,64 @@ except Exception:
       DARC_COUNT=$(ls "$BACKUP_PATH"/*.darc 2>/dev/null | wc -l | tr -d ' ')
       log "  $DB: DRY RUN retention — $DARC_COUNT .darc in $BACKUP_PATH"
     else
-      retention_cleanup "$BACKUP_PATH"
-      RETENTION_CLEANED=$(( RETENTION_CLEANED + 1 ))
+      # Retention is best-effort maintenance, NOT a backup-sync operation: a
+      # failure here must never be reported as data-loss (gu-t9xgf/gu-8xvpw).
+      # retention_cleanup is internally non-fatal; guard the call anyway so a
+      # future change can't let it abort the run under set -e.
+      if retention_cleanup "$BACKUP_PATH"; then
+        RETENTION_CLEANED=$(( RETENTION_CLEANED + 1 ))
+      else
+        RETENTION_FAILED=$(( RETENTION_FAILED + 1 ))
+        log "  $DB: retention cleanup reported an error (non-fatal) — continuing"
+      fi
     fi
   fi
 done
 
 # --- Step 4: Report results ---------------------------------------------------
 
-SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed (of ${#PROD_DBS[@]} DBs); retention checked ${RETENTION_CLEANED} backup dir(s)"
+SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
 log "$SUMMARY"
 
-# --- Step 5: Record result and escalate if needed -----------------------------
+# --- Step 5: Heartbeat, record result, escalate if needed ---------------------
+#
+# Severity is decoupled by failure class (gu-8xvpw):
+#   - BACKUP-SYNC failure (FAILED>0): real data-safety risk → HIGH + exit 1.
+#   - RETENTION-only failure (FAILED==0, RETENTION_FAILED>0): backups all
+#     succeeded; only best-effort pruning hit an error → WARNING, exit 0. This
+#     is exactly the gu-t9xgf class: a downstream maintenance bug must NOT
+#     masquerade as a town-wide data-loss failure and page HIGH every cycle.
+# The heartbeat is written on ALL paths so the absence-watcher (gu-8xvpw CR2)
+# can distinguish "ran and succeeded" from "never ran / died silently".
 
 if [[ "$FAILED" -eq 0 ]]; then
-  # Success — record quietly
+  if [[ "$RETENTION_FAILED" -eq 0 ]]; then
+    HB_STATUS="success"
+  else
+    HB_STATUS="success_retention_warning"
+  fi
+  write_heartbeat "$HB_STATUS" "$SYNCED" "$SKIPPED" "$FAILED" "${#PROD_DBS[@]}" \
+    "$RETENTION_CLEANED" "$RETENTION_FAILED" "$SUMMARY"
+
+  # Backups succeeded — record quietly.
   bd create --title "dolt-backup: $SUMMARY" -t chore --ephemeral \
     -l type:plugin-run,plugin:dolt-backup,result:success \
     -d "$SUMMARY" --silent 2>/dev/null || true
+
+  if [[ "$RETENTION_FAILED" -gt 0 ]]; then
+    # Visible but low-severity: backups are safe, pruning needs a look.
+    log "WARNING: backups succeeded but ${RETENTION_FAILED} retention dir(s) hit errors — disk may grow until addressed"
+    gt escalate "dolt-backup retention warning: $SUMMARY" \
+      --severity low \
+      --reason "Backups succeeded ($SYNCED synced, $SKIPPED unchanged); ${RETENTION_FAILED} retention pruning error(s). Not a data-loss failure." 2>/dev/null || true
+  fi
 else
-  # Failure — record and escalate
+  # Backup-sync failure — real data-safety risk. Heartbeat records the failure
+  # so the watcher sees a recent (failed) run rather than silence.
   FAIL_MSG="$SUMMARY. Failed:$FAILED_DBS"
+  write_heartbeat "failed" "$SYNCED" "$SKIPPED" "$FAILED" "${#PROD_DBS[@]}" \
+    "$RETENTION_CLEANED" "$RETENTION_FAILED" "$FAIL_MSG"
+
   bd create --title "dolt-backup: FAILED - $FAIL_MSG" -t chore --ephemeral \
     -l type:plugin-run,plugin:dolt-backup,result:failure \
     -d "$FAIL_MSG" --silent 2>/dev/null || true
