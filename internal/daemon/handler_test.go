@@ -429,6 +429,48 @@ func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
 		t.Errorf("dog work = %q, want empty (manual-gate plugin must not auto-dispatch)", dg.Work)
 	}
 }
+
+// TestDispatchPlugins_SkipsCronGateEmptySchedule verifies the cron branch's
+// guard: a cron-gate plugin with no schedule is skipped (and never reaches the
+// recorder), so it can't dispatch. The full cron eligibility matrix — fires
+// when due, suppressed when not, in-flight grace — is covered by the bd-free
+// pure-function tests TestCronDue / TestCronDue_ImpossibleSchedule in the
+// plugin package; this test just pins the handler-level wiring that a cron gate
+// is no longer silently dropped by the gate-type guard.
+func TestDispatchPlugins_SkipsCronGateEmptySchedule(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	pluginDir := filepath.Join(townRoot, "plugins", "test-cron-noschedule")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	pluginMD := "+++\nname = \"test-cron-noschedule\"\ndescription = \"cron gate without schedule\"\n\n[gate]\ntype = \"cron\"\n+++\n\n# Instructions\n"
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.md"), []byte(pluginMD), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	testSetupDogState(t, townRoot, "idle-dog", dog.StateIdle, time.Now().Add(-10*time.Minute))
+
+	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
+	mgr := dog.NewManager(townRoot, rigsConfig)
+	tm := tmux.NewTmux()
+	sm := dog.NewSessionManager(tm, townRoot, mgr)
+
+	d.dispatchPlugins(mgr, sm, rigsConfig)
+
+	dg, err := mgr.Get("idle-dog")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if dg.State != dog.StateIdle {
+		t.Errorf("dog state = %q, want idle (cron gate with empty schedule must not dispatch)", dg.State)
+	}
+	if dg.Work != "" {
+		t.Errorf("dog work = %q, want empty (cron gate with empty schedule must not dispatch)", dg.Work)
+	}
+}
+
 func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
