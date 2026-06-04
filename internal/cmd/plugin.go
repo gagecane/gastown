@@ -113,6 +113,11 @@ looking for a gastown repo, or checks known locations within the town.
 
 Syncs to town-level plugins (~/gt/plugins/) so all rigs see the latest plugins.
 
+DISABLING A PLUGIN:
+  Move a plugin directory into ~/gt/plugins/.disabled/ to disable it. Sync
+  honors this: it will not re-copy the plugin from source and removes any
+  active copy, so the disable persists across daemon restarts.
+
 Examples:
   gt plugin sync                           # Auto-detect source, sync to town
   gt plugin sync --source ./plugins        # Explicit source directory
@@ -559,6 +564,10 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 	if len(result.Copied) == 0 && len(result.Removed) == 0 {
 		fmt.Printf("%s Plugins already up to date (%d checked)\n",
 			style.Success.Render("✓"), len(result.Skipped))
+		if len(result.Disabled) > 0 {
+			fmt.Printf("  %s %d plugin(s) skipped (disabled)\n",
+				style.Dim.Render("⊘"), len(result.Disabled))
+		}
 		return nil
 	}
 
@@ -568,6 +577,9 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 	}
 	for _, name := range result.Removed {
 		fmt.Printf("  %s %s\n", style.Error.Render("×"), name)
+	}
+	for _, name := range result.Disabled {
+		fmt.Printf("  %s %s %s\n", style.Dim.Render("⊘"), name, style.Dim.Render("(disabled)"))
 	}
 	if len(result.Skipped) > 0 {
 		fmt.Printf("  %s %d plugin(s) already current\n",
