@@ -33,6 +33,10 @@ Examples:
 
 The bead's status changes from 'hooked' back to 'open'.
 
+This works even when the target agent's tmux session is dead — unsling
+operates entirely at the bead level and does not require a live pane. This
+lets you detach a valid bead from a dead polecat (gu-wmqey).
+
 Related commands:
   gt sling <bead>    # Hook + start (inverse of unsling)
   gt hook <bead>     # Hook without starting
@@ -81,7 +85,12 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	var agentID string
 	var err error
 	if targetAgent != "" {
-		agentID, _, _, err = resolveTargetAgent(targetAgent)
+		// Unsling operates entirely at the bead level — it only needs the agent ID
+		// to query and clear hook status. Resolve without requiring a live tmux pane
+		// so a valid bead can be detached from a DEAD polecat (gu-wmqey). The old
+		// resolveTargetAgent path failed here on the pane lookup, leaving dead
+		// polecats holding valid beads permanently stuck.
+		agentID, err = resolveTargetAgentIDFn(targetAgent)
 		if err != nil {
 			return fmt.Errorf("resolving target agent: %w", err)
 		}
