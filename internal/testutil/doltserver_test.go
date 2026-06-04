@@ -4,6 +4,8 @@ package testutil
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -152,4 +154,40 @@ func TestIsDockerUnavailableErr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCleanTestCircuitBreakerFilesIn verifies the gu-9ynqw teardown: it removes
+// circuit-breaker files for ephemeral test DBs (testdb_/beads_t/beads_pt/
+// doctest_) but leaves production/rig files (hq, a real rig) and non-circuit
+// files untouched.
+func TestCleanTestCircuitBreakerFilesIn(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]bool{ // name -> shouldBeRemoved
+		"beads-dolt-circuit-127-0-0-1-3307-testdb_abc123.json":    true,
+		"beads-dolt-circuit-127-0-0-1-3307-beads_test99.json":     true,
+		"beads-dolt-circuit-127-0-0-1-3307-beads_pt_x.json":       true,
+		"beads-dolt-circuit-127-0-0-1-3307-doctest_foo.json":      true,
+		"beads-dolt-circuit-127-0-0-1-3307-hq.json":               false, // production HQ — keep
+		"beads-dolt-circuit-127-0-0-1-3307-gastown_upstream.json": false, // real rig — keep
+		"some-other-file.json":                                    false, // not a circuit file
+		"beads-dolt-circuit-127-0-0-1-3307-talontriage.txt":       false, // not .json
+	}
+	for name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cleanTestCircuitBreakerFilesIn(dir)
+
+	for name, shouldRemove := range files {
+		_, err := os.Stat(filepath.Join(dir, name))
+		removed := errors.Is(err, os.ErrNotExist)
+		if removed != shouldRemove {
+			t.Errorf("%s: removed=%v, want removed=%v", name, removed, shouldRemove)
+		}
+	}
+
+	// Missing dir must be a no-op, not a panic/error.
+	cleanTestCircuitBreakerFilesIn(filepath.Join(dir, "does-not-exist"))
 }

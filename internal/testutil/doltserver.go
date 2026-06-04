@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,53 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// testDBCircuitPrefixes are the database-name prefixes the beads SDK uses for
+// ephemeral test databases (BEADS_TEST_MODE). Mirrors the test-db regex in
+// internal/daemon/jsonl_git_backup.go. Circuit-breaker files for these DBs are
+// the ones safe for a test teardown to delete.
+var testDBCircuitPrefixes = []string{"testdb_", "beads_t", "beads_pt", "doctest_"}
+
+// cleanTestCircuitBreakerFiles removes the beads circuit-breaker state files
+// (/tmp/beads-circuit/beads-dolt-circuit-<host>-<port>-<db>.json) that this
+// package's tests caused the beads SDK to create for ephemeral test databases.
+//
+// The beads SDK writes one such file per (host, port, database) on every
+// connection and only ever deletes tripped (open/half-open) ones — closed-state
+// files leak forever. Tests spin up thousands of testdb_<hash> databases, so
+// without this teardown the directory grows unbounded (observed: 35k+ files,
+// 140MB) and every subsequent `bd` invocation pays a per-call scan tax over the
+// whole directory (~650ms at 35k files), which amplified a town-wide dispatch
+// outage (gu-9ynqw). Tests created the orphans, so tests clean them up.
+//
+// Best-effort: failures are ignored (the worst case is the pre-existing leak).
+// Only test-DB-prefixed files are touched — production/rig circuit files
+// (beads-dolt-circuit-...-hq.json etc.) are left alone.
+func cleanTestCircuitBreakerFiles() {
+	cleanTestCircuitBreakerFilesIn(filepath.Join(os.TempDir(), "beads-circuit"))
+}
+
+// cleanTestCircuitBreakerFilesIn is the dir-scoped worker for
+// cleanTestCircuitBreakerFiles, split out so it can be tested against a temp
+// directory without touching the real /tmp/beads-circuit.
+func cleanTestCircuitBreakerFilesIn(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "beads-dolt-circuit-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		for _, p := range testDBCircuitPrefixes {
+			if strings.Contains(name, p) {
+				_ = os.Remove(filepath.Join(dir, name))
+				break
+			}
+		}
+	}
+}
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
 // DOLT_ROOT_HOST=% tells the entrypoint to create root@'%' (available
@@ -282,4 +330,10 @@ func TerminateDoltContainer() {
 		_ = testcontainers.TerminateContainer(doltCtr)
 		doltCtr = nil
 	}
+	// Tests created ephemeral testdb_<hash> databases; the beads SDK left a
+	// circuit-breaker file per DB in /tmp/beads-circuit that nothing reaps.
+	// Clean them here so they don't accumulate and tax every later `bd` call
+	// (gu-9ynqw). Terminating the container destroys the DBs; this destroys the
+	// matching host-side circuit files.
+	cleanTestCircuitBreakerFiles()
 }
