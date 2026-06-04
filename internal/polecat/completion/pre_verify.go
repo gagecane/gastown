@@ -43,10 +43,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -201,6 +203,16 @@ func VerifyPreVerifiedAttestation(ctx context.Context, townRoot, rigName, workDi
 	fmt.Printf("%s Verifying --pre-verified attestation: running %d pre-merge gate(s)\n",
 		style.Bold.Render("→"), len(gates))
 
+	// Cap concurrent full-suite gate runs host-wide (gu-0iyrn). Each gate run
+	// (`go test ./...`) burns 110-198% CPU; under bulk completion several fire
+	// near-together and spike host load avg to 19-25, starving the dispatch
+	// heartbeat. A cross-process counting semaphore bounds how many run at once.
+	// Acquiring the slot is best-effort: on timeout or error we proceed
+	// unthrottled rather than strand the polecat's submission.
+	if release := acquireGateSlot(townRoot); release != nil {
+		defer release()
+	}
+
 	ok, err := runPreVerifyGates(ctx, workDir, gates, nil)
 	if ok {
 		fmt.Printf("%s All pre-merge gates passed — attestation valid\n", style.Bold.Render("✓"))
@@ -214,4 +226,45 @@ func VerifyPreVerifiedAttestation(ctx context.Context, townRoot, rigName, workDi
 	fmt.Fprintf(os.Stderr, "  The branch will still be submitted; the refinery will re-run gates normally.\n")
 	fmt.Fprintf(os.Stderr, "  If the failure is real, refinery will reject; fix the regression and resubmit.\n")
 	return false
+}
+
+const (
+	// defaultGateConcurrency caps host-wide concurrent full-suite gate runs.
+	// 2 keeps load avg sane while letting two batches drain in parallel.
+	defaultGateConcurrency = 2
+	// gateSlotWaitTimeout bounds how long we wait for a free slot before
+	// proceeding unthrottled. Generous: a full `go test ./...` can take
+	// minutes, and we'd rather queue than skip the cap under bulk load.
+	gateSlotWaitTimeout = 10 * time.Minute
+)
+
+// resolveGateConcurrency returns the host-wide cap on concurrent gate runs,
+// honoring GT_GATE_CONCURRENCY (positive integer) and falling back to the
+// default otherwise.
+func resolveGateConcurrency() int {
+	if v := os.Getenv("GT_GATE_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultGateConcurrency
+}
+
+// acquireGateSlot takes a slot from the host-wide gate-run semaphore (gu-0iyrn).
+// Returns a release func on success, or nil if no town root is known, the slot
+// could not be acquired within the timeout, or the semaphore dir is unusable.
+// Callers proceed unthrottled when nil is returned — the cap is an optimization,
+// not a correctness gate.
+func acquireGateSlot(townRoot string) func() {
+	if townRoot == "" {
+		return nil
+	}
+	slotDir := filepath.Join(townRoot, ".runtime", "locks", "gate-slots")
+	sem := lock.NewFlockSemaphore(slotDir, resolveGateConcurrency())
+	release, err := sem.Acquire(gateSlotWaitTimeout)
+	if err != nil {
+		// Timed out or dir error — don't strand the submission, just run.
+		return nil
+	}
+	return release
 }
