@@ -857,6 +857,7 @@ afterSafetyNet:
 					} else if !isNoMergeTask {
 						if verifyErr := g.VerifyCommitOnRemoteBranch("origin", defaultBranch, noMRCommitSHA); verifyErr != nil {
 							noteVerifiedPushFailure(cwd, issueID, defaultBranch, noMRCommitSHA, verifyErr)
+							recordPushFailure(townRoot, rigName, defaultBranch, noMRCommitSHA, pushlog.SourceDoneNoMR, pushlog.StageVerify, worker, issueID, verifyErr)
 							return fmt.Errorf("cannot close no-MR code bead: %w", verifyErr)
 						}
 						if noMRCommitSHA != "" {
@@ -1029,6 +1030,7 @@ afterSafetyNet:
 						pushFailed = true
 						errMsg := fmt.Sprintf("relay FF-push to %s failed (non-fast-forward or remote error — possible concurrent writer): %v", relayBase, relayPushErr)
 						style.PrintWarning("%s", errMsg)
+						recordPushFailure(townRoot, rigName, branch, relayHeadSHA, pushlog.SourceDoneRelay, pushlog.StagePush, worker, issueID, relayPushErr)
 						strandedBd := beads.New(cwd)
 						fileStrandedPushWisp(strandedBd, rigName, branch, relayHeadSHA, relayBase, issueID, agentBeadID, worker, relayPushErr)
 						goto notifyWitness
@@ -1051,6 +1053,7 @@ afterSafetyNet:
 						errMsg := verifyErr.Error()
 						noteVerifiedPushFailure(cwd, issueID, relayBase, relayCommitSHA, verifyErr)
 						style.PrintWarning("%s\nRelay FF-push reported success but remote verification failed. Source bead will remain in progress.", errMsg)
+						recordPushFailure(townRoot, rigName, branch, relayCommitSHA, pushlog.SourceDoneRelay, pushlog.StageVerify, worker, issueID, verifyErr)
 						strandedBd := beads.New(cwd)
 						fileStrandedPushWisp(strandedBd, rigName, branch, relayCommitSHA, relayBase, issueID, agentBeadID, worker, verifyErr)
 						goto notifyWitness
@@ -1131,6 +1134,7 @@ afterSafetyNet:
 						pushFailed = true
 						errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
 						style.PrintWarning("%s", errMsg)
+						recordPushFailure(townRoot, rigName, branch, directHeadSHA, pushlog.SourceDoneDirect, pushlog.StagePush, worker, issueID, directPushErr)
 						strandedBd := beads.New(cwd)
 						fileStrandedPushWisp(strandedBd, rigName, branch, directHeadSHA, defaultBranch, issueID, agentBeadID, worker, directPushErr)
 						goto notifyWitness
@@ -1153,6 +1157,7 @@ afterSafetyNet:
 						errMsg := verifyErr.Error()
 						noteVerifiedPushFailure(cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
 						style.PrintWarning("%s\nDirect merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
+						recordPushFailure(townRoot, rigName, branch, directCommitSHA, pushlog.SourceDoneDirect, pushlog.StageVerify, worker, issueID, verifyErr)
 						strandedBd := beads.New(cwd)
 						fileStrandedPushWisp(strandedBd, rigName, branch, directCommitSHA, defaultBranch, issueID, agentBeadID, worker, verifyErr)
 						goto notifyWitness
@@ -1361,6 +1366,7 @@ afterSafetyNet:
 				pushFailed = true
 				errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
 				style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
+				recordPushFailure(townRoot, rigName, branch, pushedCommitSHA, pushlog.SourceDone, pushlog.StagePush, worker, issueID, pushErr)
 				strandedBd := beads.New(cwd)
 				fileStrandedPushWisp(strandedBd, rigName, branch, pushedCommitSHA, defaultBranch, issueID, agentBeadID, worker, pushErr)
 				goto notifyWitness
@@ -1390,6 +1396,7 @@ afterSafetyNet:
 				errMsg := verifyErr.Error()
 				noteVerifiedPushFailure(cwd, issueID, branch, pushedCommitSHA, verifyErr)
 				style.PrintWarning("%s\nCommits exist locally but verified push failed. Witness will be notified.", errMsg)
+				recordPushFailure(townRoot, rigName, branch, pushedCommitSHA, pushlog.SourceDone, pushlog.StageVerify, worker, issueID, verifyErr)
 				strandedBd := beads.New(cwd)
 				fileStrandedPushWisp(strandedBd, rigName, branch, pushedCommitSHA, defaultBranch, issueID, agentBeadID, worker, verifyErr)
 				goto notifyWitness
@@ -1611,6 +1618,7 @@ afterSafetyNet:
 							errMsg := verifyErr.Error()
 							noteVerifiedPushFailure(cwd, issueID, defaultBranch, lateDirectCommitSHA, verifyErr)
 							style.PrintWarning("%s\nLate direct merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
+							recordPushFailure(townRoot, rigName, branch, lateDirectCommitSHA, pushlog.SourceDoneDirect, pushlog.StageVerify, worker, issueID, verifyErr)
 							fileStrandedPushWisp(bd, rigName, branch, lateDirectCommitSHA, defaultBranch, issueID, agentBeadID, worker, verifyErr)
 							goto notifyWitness
 						}
@@ -2266,6 +2274,39 @@ func recordPushReceipt(g *git.Git, townRoot, rigName, branch, commit, source, wo
 		Remote:    "origin",
 		PushURL:   pushURL,
 		Source:    source,
+		Worker:    worker,
+		IssueID:   issueID,
+	})
+}
+
+// recordPushFailure persists a push/verify failure to the rig's runtime
+// failure log (see internal/pushlog). Called from every `gt done` code path
+// that gives up on a push or fails post-push verification, adjacent to the
+// stranded-push wisp it files.
+//
+// gu-7m9h9: the actual push error otherwise lives only in (a) the dying
+// session's stderr and (b) a Dolt-backed stranded wisp whose Create can fail
+// silently in a terminating session. A durable, Dolt-independent local file
+// lets the next strand investigation read the real error instead of inferring
+// it from convoy re-sling noise in daemon.log.
+//
+// Best-effort: any failure is logged to stderr inside pushlog.LogFailureOrWarn
+// and otherwise swallowed. We never block teardown on a logging failure.
+func recordPushFailure(townRoot, rigName, branch, commit, source, stage, worker, issueID string, pushErr error) {
+	if townRoot == "" || rigName == "" || branch == "" {
+		return
+	}
+	errMsg := ""
+	if pushErr != nil {
+		errMsg = pushErr.Error()
+	}
+	pushlog.LogFailureOrWarn(townRoot, rigName, pushlog.Failure{
+		Branch:    branch,
+		CommitSHA: commit,
+		Remote:    "origin",
+		Source:    source,
+		Stage:     stage,
+		Error:     errMsg,
 		Worker:    worker,
 		IssueID:   issueID,
 	})
