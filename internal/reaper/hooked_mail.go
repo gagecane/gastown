@@ -244,12 +244,17 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 			return result, fmt.Errorf("sql commit: %w", err)
 		}
 		commitMsg := fmt.Sprintf("reaper: ttl-expired close %d hooked mail in %s", int(affected), dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
-			if !isNothingToCommit(err) {
-				result.Anomalies = append(result.Anomalies, Anomaly{
-					Type:    "dolt_commit_failed",
-					Message: fmt.Sprintf("dolt commit after hooked-mail reap failed: %v", err),
-				})
+		// Skip the commit when nothing landed in the working set (e.g. the only
+		// mutated tables are dolt-ignored), avoiding a server-side "nothing to
+		// commit" warning in dolt.log (gu-leuwr).
+		if hasWorkingSetChanges(ctx, db) {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
+				if !isNothingToCommit(err) {
+					result.Anomalies = append(result.Anomalies, Anomaly{
+						Type:    "dolt_commit_failed",
+						Message: fmt.Sprintf("dolt commit after hooked-mail reap failed: %v", err),
+					})
+				}
 			}
 		}
 		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
@@ -482,12 +487,17 @@ func ReapOpenMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (*O
 			return result, fmt.Errorf("sql commit: %w", err)
 		}
 		commitMsg := fmt.Sprintf("reaper: ttl-expired close %d open mail in %s", int(affected), dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
-			if !isNothingToCommit(err) {
-				result.Anomalies = append(result.Anomalies, Anomaly{
-					Type:    "dolt_commit_failed",
-					Message: fmt.Sprintf("dolt commit after open-mail reap failed: %v", err),
-				})
+		// Skip the commit when nothing landed in the working set (e.g. the only
+		// mutated tables are dolt-ignored), avoiding a server-side "nothing to
+		// commit" warning in dolt.log (gu-leuwr).
+		if hasWorkingSetChanges(ctx, db) {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
+				if !isNothingToCommit(err) {
+					result.Anomalies = append(result.Anomalies, Anomaly{
+						Type:    "dolt_commit_failed",
+						Message: fmt.Sprintf("dolt commit after open-mail reap failed: %v", err),
+					})
+				}
 			}
 		}
 		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
