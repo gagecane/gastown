@@ -17,8 +17,28 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/hookutil"
 )
+
+// askUserQuestionTool is the Claude tool that renders a blocking selection menu.
+// Denying it prevents an unattended agent from parking on a prompt no human
+// will answer (gs-wbj footgun).
+const askUserQuestionTool = "AskUserQuestion"
+
+// roleMustDenyAskUserQuestion reports whether a role's Claude settings must deny
+// AskUserQuestion. This is the autonomous roles (headless by definition) PLUS
+// the mayor: the mayor is classified interactive (it uses the interactive
+// template and gets mail-injection), but it runs UNATTENDED for long stretches
+// and has hung on stray AskUserQuestion prompts no operator was there to answer
+// (gu-2qvnx). Denying the tool for mayor closes that footgun while leaving its
+// interactive classification — and everything IsAutonomousRole drives — intact.
+//
+// Crew is deliberately excluded: it is human-attended and legitimately uses
+// AskUserQuestion.
+func roleMustDenyAskUserQuestion(role string) bool {
+	return hookutil.IsAutonomousRole(role) || role == constants.RoleMayor
+}
 
 //go:embed templates/*
 var templateFS embed.FS
@@ -77,18 +97,25 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 // autonomous and the file's permissions.deny is missing ANY entry the template
 // denies, return true so the caller overwrites with the current template. It is
 // scoped narrowly:
-//   - Only settings files (not hook files) and only autonomous roles — the
-//     interactive/crew template legitimately omits AskUserQuestion, so we never
-//     force it there.
+//   - Only settings files (not hook files) and only roles that must deny
+//     AskUserQuestion — autonomous roles, plus the unattended mayor (gu-2qvnx).
+//     The interactive/crew template legitimately omits AskUserQuestion, so we
+//     never force it there.
 //   - It only ADDS toward the template's deny set; it does not invent new
 //     denies (no scope creep beyond restoring the canonical set).
 func denyListDrifted(existing []byte, hooksFile, role string) bool {
-	if !isSettingsFile(hooksFile) || !hookutil.IsAutonomousRole(role) {
+	if !isSettingsFile(hooksFile) || !roleMustDenyAskUserQuestion(role) {
 		return false
 	}
 	want := autonomousDenySet()
 	if len(want) == 0 {
 		return false // can't read the template — don't trigger a rewrite
+	}
+	// The mayor uses the interactive template (which omits AskUserQuestion) but
+	// must still deny it; the only canonical entry it can drift on is
+	// AskUserQuestion itself. Autonomous roles drift against the full set.
+	if !hookutil.IsAutonomousRole(role) {
+		return !denyEntries(existing)[askUserQuestionTool]
 	}
 	have := denyEntries(existing)
 	for entry := range want {
@@ -97,6 +124,44 @@ func denyListDrifted(existing []byte, hooksFile, role string) bool {
 		}
 	}
 	return false
+}
+
+// ensureDeny returns content with entry present in permissions.deny, adding it
+// (and the permissions/deny structure if absent) when missing. If the entry is
+// already denied, content is returned unchanged so callers stay byte-identical.
+// Returns an error only if content is not valid JSON.
+func ensureDeny(content []byte, entry string) ([]byte, error) {
+	if denyEntries(content)[entry] {
+		return content, nil // already denied — no-op, preserves bytes
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(content, &root); err != nil {
+		return nil, err
+	}
+	perms := map[string]json.RawMessage{}
+	if raw, ok := root["permissions"]; ok {
+		if err := json.Unmarshal(raw, &perms); err != nil {
+			return nil, err
+		}
+	}
+	var deny []string
+	if raw, ok := perms["deny"]; ok {
+		if err := json.Unmarshal(raw, &deny); err != nil {
+			return nil, err
+		}
+	}
+	deny = append([]string{entry}, deny...)
+	denyRaw, err := json.Marshal(deny)
+	if err != nil {
+		return nil, err
+	}
+	perms["deny"] = denyRaw
+	permsRaw, err := json.Marshal(perms)
+	if err != nil {
+		return nil, err
+	}
+	root["permissions"] = permsRaw
+	return json.MarshalIndent(root, "", "  ")
 }
 
 // autonomousDenySet returns the deny entries the canonical claude autonomous
@@ -223,6 +288,18 @@ func resolveAndSubstitute(provider, hooksFile, role string) ([]byte, error) {
 	content, err := resolveTemplate(provider, hooksFile, role)
 	if err != nil {
 		return nil, fmt.Errorf("resolving template for %s: %w", provider, err)
+	}
+
+	// The mayor uses the interactive template (shared with crew) but must deny
+	// AskUserQuestion because it runs unattended (gu-2qvnx). Inject the deny for
+	// mayor specifically rather than editing the shared interactive template,
+	// which would wrongly strip the tool from human-attended crew. Scoped to
+	// Claude settings files; idempotent for roles whose template already denies
+	// it (autonomous), so their output stays byte-identical.
+	if provider == "claude" && isSettingsFile(hooksFile) && role == constants.RoleMayor {
+		if injected, derr := ensureDeny(content, askUserQuestionTool); derr == nil {
+			content = injected
+		}
 	}
 
 	if bytes.Contains(content, []byte("{{GT_BIN}}")) {
