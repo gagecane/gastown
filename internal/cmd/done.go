@@ -340,26 +340,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Find current rig - use cwd (which has fallback for deleted worktrees)
-	// instead of findCurrentRig which calls os.Getwd() and fails on deleted cwd
-	var rigName string
-	if cwd != "" {
-		relPath, err := filepath.Rel(townRoot, cwd)
-		if err == nil {
-			parts := strings.Split(relPath, string(filepath.Separator))
-			if len(parts) > 0 && parts[0] != "" && parts[0] != "." {
-				rigName = parts[0]
-			}
-		}
-	}
-	// Prefer GT_RIG over cwd-derived rig name when available.
-	// When Claude Code resets shell cwd (e.g., to mayor/rig), the cwd-derived
-	// rig name is wrong (e.g., "mayor" instead of "vets"). GT_RIG is set
-	// reliably for polecats via session env injection.
-	if envRig := os.Getenv("GT_RIG"); envRig != "" {
-		rigName = envRig
-	}
-	if rigName == "" {
-		return fmt.Errorf("cannot determine current rig (working directory may be deleted)")
+	// instead of findCurrentRig which calls os.Getwd() and fails on deleted cwd.
+	// Logic extracted to completion.ResolveRigName (gs-bn1) so the cwd-vs-GT_RIG
+	// resolution is testable in isolation.
+	rigName, err := completion.ResolveRigName(townRoot, cwd, os.Getenv("GT_RIG"))
+	if err != nil {
+		return err
 	}
 
 	// When gt is invoked via shell alias (cd ~/gt && gt), or when Claude Code
@@ -419,70 +405,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		g = git.NewGit(mayorClone)
 	}
 
-	// Get current branch - try env var first if cwd is gone
-	var branch string
-	if !cwdAvailable {
-		// Try to get branch from GT_BRANCH env var (set by session manager)
-		branch = os.Getenv("GT_BRANCH")
-	}
-	// CRITICAL FIX: Only call g.CurrentBranch() if we're using the cwd-based git.
-	// When cwdAvailable is false, we fall back to the mayor clone for git operations,
-	// but the mayor clone is on main/master - NOT the polecat branch. Calling
-	// g.CurrentBranch() in that case would incorrectly return main/master.
-	if branch == "" {
-		if !cwdAvailable {
-			// We don't have GT_BRANCH and we're using mayor clone - can't determine branch.
-			// Session stays alive (persistent polecat model) — Witness handles recovery.
-			return fmt.Errorf("cannot determine branch: GT_BRANCH not set and working directory unavailable")
-		}
-		var err error
-		branch, err = g.CurrentBranch()
-		if err != nil {
-			// Last resort: try to extract from polecat name (polecat/<name>-<suffix>)
-			if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" {
-				branch = fmt.Sprintf("polecat/%s", polecatName)
-				style.PrintWarning("could not get branch from git, using fallback: %s", branch)
-			} else {
-				return fmt.Errorf("getting current branch: %w", err)
-			}
-		}
-	}
-
-	// gu-ge1s: Detached-HEAD guard.
-	//
-	// CurrentBranch() returns the literal string "HEAD" when the worktree is
-	// in detached-HEAD state (no symbolic ref). Without this guard, "HEAD"
-	// flows downstream as a branch name and produces:
-	//   * refs/heads/HEAD pollution on origin (refspec "HEAD:HEAD" is pushed)
-	//   * MR beads with branch="HEAD" that refinery can't process
-	//   * retry loops in worktrees that are detached because the canonical
-	//     branch was deleted out from under them
-	//
-	// If there's a polecat branch we can salvage, prefer that; otherwise fail
-	// with an actionable message. GT_BRANCH (set by session manager) also wins
-	// here because it records the branch the polecat was provisioned on even
-	// if a later checkout detached HEAD.
-	if branch == "" || branch == "HEAD" {
-		if cwdAvailable {
-			if detached, detErr := g.IsDetachedHEAD(); detErr == nil && detached {
-				if envBranch := os.Getenv("GT_BRANCH"); envBranch != "" && envBranch != "HEAD" {
-					style.PrintWarning("HEAD is detached; using GT_BRANCH=%s from environment", envBranch)
-					branch = envBranch
-				} else if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" {
-					fallback := fmt.Sprintf("polecat/%s", polecatName)
-					style.PrintWarning("HEAD is detached and GT_BRANCH is unset; falling back to %s (no-op push if branch missing)", fallback)
-					branch = fallback
-				} else {
-					return fmt.Errorf("cannot submit from detached HEAD: no named branch to push\n" +
-						"Create a branch first (git checkout -b <name>) or run `gt polecat nuke` to terminate this worktree")
-				}
-			}
-		}
-	}
-	// Belt-and-suspenders: never propagate the literal "HEAD" past this point,
-	// even if some fallback above accidentally assigned it.
-	if branch == "HEAD" {
-		return fmt.Errorf("refusing to proceed with branch=%q (detached HEAD); create a named branch or run `gt polecat nuke`", branch)
+	// Resolve the working branch with env-var fallbacks and the gu-ge1s
+	// detached-HEAD guard. Extracted to completion.ResolveBranch (gs-bn1) so the
+	// fallback ladder is testable in isolation. GT_BRANCH/GT_POLECAT are read
+	// here and passed in so the resolver stays pure modulo git queries.
+	branch, err := completion.ResolveBranch(g, cwdAvailable, os.Getenv("GT_BRANCH"), os.Getenv("GT_POLECAT"))
+	if err != nil {
+		return err
 	}
 
 	// Auto-detect cleanup status if not explicitly provided.
