@@ -425,6 +425,14 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 					style.Dim.Render("○"), b.WorkBeadID, err)
 				return
 			} else {
+				// Surface the failure REASON to the operator, not just the
+				// events feed (gu-lokoi). Without this an interactive
+				// `gt scheduler run` prints "Dispatching X →" then a bare
+				// "failed N" with no why — the reason was only ever written
+				// to .events.jsonl. The other OnFailure branches above already
+				// print to stderr; this generic spawn-failure case must too.
+				fmt.Fprintf(os.Stderr, "%s Dispatch of %s → %s failed: %v\n",
+					style.Warning.Render("⚠"), b.WorkBeadID, b.TargetRig, err)
 				_ = events.LogFeed(events.TypeSchedulerDispatchFailed, actor,
 					events.SchedulerDispatchFailedPayload(b.WorkBeadID, b.TargetRig, err.Error()))
 			}
