@@ -2087,6 +2087,37 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 		return b.storeUpdate(id, opts)
 	}
 
+	// Route cross-rig updates via routes.jsonl so that rig-level bead IDs
+	// resolve to the correct rig database, and town-owned agent beads whose
+	// IDs carry a rig prefix (e.g., ho-homelab-polecat-furiosa) resolve to the
+	// town database. This mirrors Show's routing. noRoute (see ForAgentBead)
+	// bypasses this for callers that have already re-rooted at the town DB.
+	if !b.noRoute {
+		targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
+		if targetDir != b.getResolvedBeadsDir() {
+			target := NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
+			return target.updateLocal(id, opts)
+		}
+	}
+
+	return b.updateLocal(id, opts)
+}
+
+// UpdateLocal updates an issue using the beads directory this wrapper is bound
+// to, WITHOUT consulting routes.jsonl. This is the write-side counterpart to
+// ShowLocal: callers that have independently resolved a bead's home DB (e.g.,
+// the gu-vkg3 detach fallback scan) must write back to that same DB rather than
+// the prefix-routed one.
+func (b *Beads) UpdateLocal(id string, opts UpdateOptions) error {
+	if b.store != nil {
+		return b.storeUpdate(id, opts)
+	}
+	return b.updateLocal(id, opts)
+}
+
+// updateLocal is the internal non-routing Update implementation shared by
+// Update (post-routing) and UpdateLocal (explicit non-routing).
+func (b *Beads) updateLocal(id string, opts UpdateOptions) error {
 	args := []string{"update", id}
 
 	if opts.Title != nil {
