@@ -317,6 +317,7 @@ type stuckWispRow struct {
 func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string) ([]string, error) {
 	cmd := exec.Command("bd", "sql", "--json", stuckWispsQuery) //nolint:gosec // G204: query is a constant
 	cmd.Dir = rigPath
+	cmd.Env = bdSQLEnv(rigPath)
 	output, err := cmd.Output() // Output() discards stderr; bd warnings go to stderr.
 	if err != nil {
 		return nil, fmt.Errorf("bd sql: %w", err)

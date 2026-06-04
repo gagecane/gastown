@@ -275,6 +275,78 @@ func TestBuildPinnedBDEnv_SetsDataDirInLocalModeWhenPresent(t *testing.T) {
 	}
 }
 
+// TestBuildPinnedBDEnv_PreventsDefaultBeadsLeakUnderTest verifies that when a
+// bd subprocess would otherwise reach bd's built-in default (no server, no data
+// dir, no resolvable database → connect to 127.0.0.1:3307 and create the
+// non-namespaced "beads" database), the test runner instead pins an isolated
+// embedded data dir so the production Dolt server is never touched (gs-7v3).
+func TestBuildPinnedBDEnv_PreventsDefaultBeadsLeakUnderTest(t *testing.T) {
+	// Bare beads dir: no metadata.json (no server, no database name).
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin"}, beadsDir)
+	got := envMap(env)
+
+	wantDir := filepath.Join(beadsDir, ".dolt-data")
+	if got["BEADS_DOLT_DATA_DIR"] != wantDir {
+		t.Fatalf("BEADS_DOLT_DATA_DIR = %q, want isolated %q in %v", got["BEADS_DOLT_DATA_DIR"], wantDir, env)
+	}
+	// Must not have selected a server — that would let bd reach 3307.
+	for _, key := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		if value, ok := got[key]; ok {
+			t.Fatalf("%s should be unset for an unconfigured test target, got %q in %v", key, value, env)
+		}
+	}
+}
+
+// TestBuildPinnedBDEnv_LeakGuardSkipsForConfiguredDatabase verifies the guard
+// does not fire (and does not inject a data dir) when a real database resolves
+// from metadata, so configured rigs — and container-backed integration tests
+// that init a database — reach their selected server unchanged.
+func TestBuildPinnedBDEnv_LeakGuardSkipsForConfiguredDatabase(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":4407}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin"}, beadsDir)
+	got := envMap(env)
+	if value, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
+		t.Fatalf("BEADS_DOLT_DATA_DIR should be omitted when a database is configured, got %q in %v", value, env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "4407" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 4407 in %v", got["BEADS_DOLT_SERVER_PORT"], env)
+	}
+}
+
+// TestBuildPinnedBDEnv_LeakGuardSkipsWhenServerSelected verifies the guard does
+// not fire (and does not inject a data dir) when a server is already selected —
+// e.g. a container-backed integration test (GT_DOLT_PORT set). Its port is
+// indistinguishable from a live town's, so the guard must leave it alone rather
+// than strip it and strand the test on empty embedded storage (gs-7v3).
+func TestBuildPinnedBDEnv_LeakGuardSkipsWhenServerSelected(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin", "GT_DOLT_PORT=43701"}, beadsDir)
+	got := envMap(env)
+	if value, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
+		t.Fatalf("BEADS_DOLT_DATA_DIR should be omitted when a server is selected, got %q in %v", value, env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "43701" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 43701 (container port preserved) in %v", got["BEADS_DOLT_SERVER_PORT"], env)
+	}
+}
+
 func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
 	env := SuppressBDSideEffects([]string{
 		"PATH=/usr/bin",

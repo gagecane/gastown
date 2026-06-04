@@ -1029,6 +1029,12 @@ func TestCheckAndCloseCompletedConvoys_UsesHardenedBDEnvs(t *testing.T) {
 	if err := os.MkdirAll(townBeads, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// A configured database keeps the leak guard (PreventTestDoltLeak) from
+	// treating this fixture as a bare temp dir and injecting an isolated
+	// BEADS_DOLT_DATA_DIR — which the bd stub below rejects as stale env.
+	if err := os.WriteFile(filepath.Join(townBeads, "metadata.json"), []byte(`{"dolt_database":"hq"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	rigDir := filepath.Join(tmpDir, "l9")
 	if err := os.MkdirAll(rigDir, 0755); err != nil {

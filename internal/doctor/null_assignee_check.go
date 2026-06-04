@@ -147,6 +147,7 @@ func (c *NullAssigneeCheck) Fix(ctx *CheckContext) error {
 func queryNullAssigneeBeads(rigDir string) ([]nullAssigneeRow, error) {
 	cmd := exec.Command("bd", "sql", "--csv", nullAssigneeSelectQuery) //nolint:gosec // G204: args are constants
 	cmd.Dir = rigDir
+	cmd.Env = bdSQLEnv(rigDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("bd sql: %w", err)
@@ -176,6 +177,7 @@ func queryNullAssigneeBeads(rigDir string) ([]nullAssigneeRow, error) {
 func execBdSQLWrite(rigDir, query string) error {
 	cmd := exec.Command("bd", "sql", query) //nolint:gosec // G204: query is a constant
 	cmd.Dir = rigDir
+	cmd.Env = bdSQLEnv(rigDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)

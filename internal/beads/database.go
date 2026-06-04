@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"testing"
 )
 
 var bdTargetEnvKeys = []string{
@@ -69,11 +70,11 @@ func StripBDTargetEnv(env []string) []string {
 func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	if beadsDir == "" {
-		return addGTDerivedDoltTargetEnv(env)
+		return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), "")
 	}
 	env = append(env, "BEADS_DIR="+beadsDir)
 	env = append(env, doltTargetEnvFromBeadsDir(beadsDir)...)
-	return addGTDerivedDoltTargetEnv(env)
+	return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), beadsDir)
 }
 
 // BuildRoutingBDEnv returns env for a bd subprocess that intentionally relies on
@@ -82,7 +83,7 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 func BuildRoutingBDEnv(base []string, fallbackBeadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	env = append(env, doltTargetEnvFromBeadsDir(fallbackBeadsDir)...)
-	return addGTDerivedDoltTargetEnv(env)
+	return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), fallbackBeadsDir)
 }
 
 // BuildReadOnlyPinnedBDEnv returns env for a read-only bd subprocess pinned to
@@ -274,6 +275,63 @@ func addGTDerivedDoltTargetEnv(env []string) []string {
 		}
 	}
 	return env
+}
+
+// PreventTestDoltLeak stops a bd subprocess from polluting the shared
+// production Dolt server during `go test`. When bd has no Dolt target at all, it
+// falls back to its built-in default: connect to its default server and use a
+// non-namespaced database literally named "beads". A test fixture built against
+// a bare temp dir (no metadata, no server selector) therefore leaks an orphan
+// "beads" database onto whatever server bd reaches — the production 3307 server
+// when an agent runs the test suite as a gate — recurring every run and tripping
+// deacon's safety gate (gs-7v3). Dozens of unit tests across ~10 packages
+// construct beads wrappers against bare temp dirs, so guarding at this single env
+// boundary covers them all rather than re-plumbing each (mirrors the
+// testing.Testing() boundary fix in internal/tmux/sendkeys.go, gu-l8zp).
+//
+// This only fires under testing.Testing() (false in production binaries), and
+// only when bd has no database AND no server/data-dir target — i.e. a bare test
+// fixture. A configured database (real rigs always record dolt_database,
+// preserving gu-6a68), an explicitly selected server, or a container-backed
+// integration test (CI sets GT_DOLT_PORT to the container port) are all left
+// untouched. When it fires it points bd at an isolated embedded data dir under
+// beadsDir (within the test's temp tree, discarded with it) so bd uses local
+// storage instead of the default server.
+func PreventTestDoltLeak(env []string, beadsDir string) []string {
+	// Only a non-empty beadsDir is a candidate for the bare-fixture leak. An
+	// empty beadsDir means bd routing by bead-id prefix (e.g. mail delivery),
+	// which legitimately needs the configured server and routes by prefix rather
+	// than the default "beads" database — leave it alone.
+	if !testing.Testing() || beadsDir == "" {
+		return env
+	}
+	// A real database resolves from metadata — respect the selected server and
+	// database; bd will not fall back to the default "beads" database.
+	if DatabaseNameFromMetadata(beadsDir) != "" {
+		return env
+	}
+	// A Dolt target is already selected — an explicit metadata server, an
+	// isolated test server/container (CI sets GT_DOLT_PORT to the container
+	// port), or an embedded data dir. Respect it; the leak only occurs when bd
+	// has no target at all and falls back to its built-in default. Critically,
+	// this leaves container-backed integration tests untouched — their port is
+	// indistinguishable from a live town's, so we must not strip it.
+	for _, key := range []string{
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT",
+		"GT_DOLT_PORT",
+		"BEADS_DOLT_DATA_DIR",
+	} {
+		if envValue(env, key) != "" {
+			return env
+		}
+	}
+	// No target at all: bd would connect to its built-in default server with the
+	// default "beads" database, leaking an orphan onto whatever server it reaches
+	// (the production 3307 server when an agent runs `go test` as a gate). Pin an
+	// isolated embedded data dir under the fixture's temp tree instead.
+	return append(env, "BEADS_DOLT_DATA_DIR="+filepath.Join(beadsDir, ".dolt-data"))
 }
 
 func envValue(env []string, key string) string {

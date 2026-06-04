@@ -354,6 +354,27 @@ func beadsCommandEnv(beadsDir string) []string {
 	return env
 }
 
+// bdSQLEnv pins a `bd sql` subprocess to the rig database for the rig rooted at
+// rigDir. `bd sql` connects straight to the shared Dolt server and, without
+// BEADS_DOLT_SERVER_DATABASE, lands on the server's default database — the
+// non-namespaced "beads" DB — recreating an orphan there on every patrol
+// (gs-7v3). beads.PreventTestDoltLeak additionally keeps `go test` runs (where
+// no server/database is configured) off the shared server; it is a no-op in
+// production binaries.
+func bdSQLEnv(rigDir string) []string {
+	beadsDir := beads.ResolveBeadsDir(rigDir)
+	// BuildPinnedBDEnv strips inherited server/database selectors, re-derives the
+	// server connection from the rig metadata (or GT_DOLT_*), and applies the
+	// go-test leak guard. `bd sql` connects straight to the server though, so it
+	// will not read the rig metadata for database selection — pin it explicitly,
+	// otherwise bd lands on the server's default "beads" database (gs-7v3).
+	env := beads.BuildPinnedBDEnv(os.Environ(), beadsDir)
+	if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
+		env = append(env, dbEnv)
+	}
+	return env
+}
+
 // NewDatabasePrefixCheck creates a new database prefix check.
 func NewDatabasePrefixCheck() *DatabasePrefixCheck {
 	return &DatabasePrefixCheck{

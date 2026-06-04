@@ -1196,12 +1196,14 @@ func (b *Beads) buildRunEnv() []string {
 	if b.isolated {
 		env := filterBeadsEnv(os.Environ())
 		if b.serverPort > 0 {
+			// Explicit test server (e.g. a container) — pin it; do not isolate.
 			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
+			return SuppressBDSideEffects(env)
 		}
-		return SuppressBDSideEffects(env)
+		return PreventTestDoltLeak(SuppressBDSideEffects(env), b.getResolvedBeadsDir())
 	}
 	// runWithStdin appends BEADS_DIR after probing bd --allow-stale support, so
 	// keep buildRunEnv focused on Dolt target isolation and avoid duplicate
@@ -1218,12 +1220,14 @@ func (b *Beads) buildRoutingEnv() []string {
 	if b.isolated {
 		env := filterBeadsEnv(os.Environ())
 		if b.serverPort > 0 {
+			// Explicit test server (e.g. a container) — pin it; do not isolate.
 			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
+			return SuppressBDSideEffects(env)
 		}
-		return SuppressBDSideEffects(env)
+		return PreventTestDoltLeak(SuppressBDSideEffects(env), b.getResolvedBeadsDir())
 	}
 	env := BuildRoutingBDEnv(os.Environ(), b.getResolvedBeadsDir())
 	return stripEnvKey(env, "BEADS_DOLT_SERVER_PORT")

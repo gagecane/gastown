@@ -127,6 +127,7 @@ func countJSONLEntries(rigDir string) (total, ephemeral int, err error) {
 func queryLiveIssueCount(rigDir string) (int, error) {
 	cmd := exec.Command("bd", "sql", "--csv", "SELECT COUNT(*) as cnt FROM issues") //nolint:gosec // G204: query is a constant
 	cmd.Dir = rigDir
+	cmd.Env = bdSQLEnv(rigDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("bd sql: %w", err)

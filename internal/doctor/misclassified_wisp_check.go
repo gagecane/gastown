@@ -117,6 +117,7 @@ func (c *CheckMisclassifiedWisps) findMisplacedEphemeralsDolt(rigDir, rigName st
 	issueQuery := `SELECT id, title FROM issues WHERE ephemeral = 1`
 	cmd := exec.Command("bd", "sql", "--csv", issueQuery) //nolint:gosec // G204: query is a constant
 	cmd.Dir = rigDir
+	cmd.Env = bdSQLEnv(rigDir)
 	issueOutput, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, 1 // DB unavailable for this rig
@@ -280,6 +281,7 @@ func (c *CheckMisclassifiedWisps) purgeRigBatch(ctx *CheckContext, workDir, rigN
 func bdTableExistsDoctor(workDir, tableName string) bool {
 	cmd := exec.Command("bd", "sql", fmt.Sprintf("SELECT 1 FROM `%s` LIMIT 1", tableName)) //nolint:gosec // G204: tableName is hardcoded
 	cmd.Dir = workDir
+	cmd.Env = bdSQLEnv(workDir)
 	err := cmd.Run()
 	return err == nil
 }
