@@ -249,6 +249,92 @@ func TestCheckpointGate_ProceedsOnRealEdit(t *testing.T) {
 	}
 }
 
+// --- gu-lxrbv: node_modules must be unstaged by the runtime exclude list ----
+//
+// casc_webapp polecat worktrees do not gitignore node_modules, and it commonly
+// appears as a gitlink or symlink rather than a real directory. The auto-WIP
+// checkpoint was committing a node_modules-only entry — pure junk that tripped
+// the DIRTY recovery predicate. These tests assert the configured exclude list
+// unstages node_modules in all three on-disk forms.
+//
+// applyRuntimeExcludes replicates the reset loop checkpointWorktree runs after
+// `git add -A`, driving it off the production runtimeExcludeDirs list so the
+// test fails if node_modules is dropped or reverts to a trailing-slash form
+// (which does NOT unstage a symlink — the original bug).
+func applyRuntimeExcludes(t *testing.T, repo string) {
+	t.Helper()
+	for _, dir := range runtimeExcludeDirs {
+		gitRun(t, repo, "reset", "HEAD", "--", dir)
+	}
+}
+
+func TestRuntimeExcludes_UnstagesNodeModulesSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	gitRun(t, "", "init", "-b", "main", repo)
+	gitRun(t, repo, "commit", "--allow-empty", "-m", "init")
+
+	if err := os.Symlink("/tmp/elsewhere", filepath.Join(repo, "node_modules")); err != nil {
+		t.Fatalf("symlink node_modules: %v", err)
+	}
+	gitRun(t, repo, "add", "-A")
+	if staged := gitRun(t, repo, "diff", "--cached", "--name-only"); staged == "" {
+		t.Fatalf("expected node_modules symlink to be staged before exclusion")
+	}
+
+	applyRuntimeExcludes(t, repo)
+
+	if staged := gitRun(t, repo, "diff", "--cached", "--name-only"); staged != "" {
+		t.Errorf("expected node_modules symlink unstaged, still staged: %q", staged)
+	}
+}
+
+func TestRuntimeExcludes_UnstagesNodeModulesGitlink(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	gitRun(t, "", "init", "-b", "main", repo)
+	gitRun(t, repo, "commit", "--allow-empty", "-m", "init")
+
+	// Seed an inner repo and stage it as a gitlink (mode 160000), the form
+	// observed in the bead's recurring junk commits.
+	sub := filepath.Join(repo, "sub")
+	gitRun(t, "", "init", "-b", "main", sub)
+	gitRun(t, sub, "commit", "--allow-empty", "-m", "subinit")
+	sha := gitRun(t, sub, "rev-parse", "HEAD")
+	gitRun(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+sha+",node_modules")
+	if staged := gitRun(t, repo, "diff", "--cached", "--name-only"); staged == "" {
+		t.Fatalf("expected node_modules gitlink to be staged before exclusion")
+	}
+
+	applyRuntimeExcludes(t, repo)
+
+	if staged := gitRun(t, repo, "diff", "--cached", "--name-only"); staged != "" {
+		t.Errorf("expected node_modules gitlink unstaged, still staged: %q", staged)
+	}
+}
+
+func TestRuntimeExcludes_UnstagesNodeModulesRealDir(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	gitRun(t, "", "init", "-b", "main", repo)
+	gitRun(t, repo, "commit", "--allow-empty", "-m", "init")
+
+	nm := filepath.Join(repo, "node_modules")
+	if err := os.MkdirAll(nm, 0o755); err != nil {
+		t.Fatalf("mkdir node_modules: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nm, "pkg.js"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write pkg.js: %v", err)
+	}
+	gitRun(t, repo, "add", "-A")
+
+	applyRuntimeExcludes(t, repo)
+
+	if staged := gitRun(t, repo, "diff", "--cached", "--name-only"); staged != "" {
+		t.Errorf("expected node_modules dir contents unstaged, still staged: %q", staged)
+	}
+}
+
 func TestResolveCheckpointWorkDir_NestedLayout(t *testing.T) {
 	// New polecat layout: polecats/<name>/<rigName>/.git is the worktree.
 	tmp := t.TempDir()
