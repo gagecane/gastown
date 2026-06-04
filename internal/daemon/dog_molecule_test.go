@@ -2,6 +2,41 @@ package daemon
 
 import "testing"
 
+// TestLoadFormulaSteps verifies that dog formula step IDs are loaded from the
+// formula file (embedded tier), since `bd mol wisp` no longer materializes
+// child step-wisps (root-only wisp model). This is the regression guard for
+// the "0 steps" / "unknown step (known: [])" treadmill (gu-861mn).
+func TestLoadFormulaSteps(t *testing.T) {
+	tests := []struct {
+		formula string
+		want    []string
+	}{
+		{"mol-dog-checkpoint", []string{"scan", "checkpoint", "report"}},
+		{"mol-dog-reaper", []string{"scan", "reap", "purge", "auto-close", "report"}},
+		{"mol-dog-doctor", []string{"probe", "inspect", "report"}},
+		{"mol-dog-backup", []string{"sync", "offsite", "report"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.formula, func(t *testing.T) {
+			dm := &dogMol{
+				steps:  make(map[string]bool),
+				logger: &recordingLogger{},
+			}
+			dm.loadFormulaSteps(tt.formula)
+
+			if len(dm.steps) == 0 {
+				t.Fatalf("loadFormulaSteps(%q) found 0 steps — regression of the 0-step pour bug", tt.formula)
+			}
+			for _, id := range tt.want {
+				if !dm.steps[id] {
+					t.Errorf("step %q missing from loaded steps %v", id, dm.knownSteps())
+				}
+			}
+		})
+	}
+}
+
 func TestParseWispID(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -68,65 +103,11 @@ func TestStripANSI(t *testing.T) {
 	}
 }
 
-func TestParseChildrenJSON(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     string
-		wantCount int
-		wantErr   bool
-	}{
-		{
-			name:      "bare array",
-			input:     `[{"id":"a","title":"Probe","status":"open"}]`,
-			wantCount: 1,
-		},
-		{
-			name:      "map wrapper from bd show",
-			input:     `{"hq-wisp-root":[{"id":"hq-wisp-a","title":"Probe","status":"open"},{"id":"hq-wisp-b","title":"Report","status":"open"}]}`,
-			wantCount: 2,
-		},
-		{
-			name:      "empty map wrapper",
-			input:     `{"hq-wisp-root":[]}`,
-			wantCount: 0,
-		},
-		{
-			name:      "empty array",
-			input:     `[]`,
-			wantCount: 0,
-		},
-		{
-			name:    "invalid json",
-			input:   `not json`,
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseChildrenJSON(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
-				return
-			}
-			if len(got) != tt.wantCount {
-				t.Errorf("got %d children, want %d", len(got), tt.wantCount)
-			}
-		})
-	}
-}
-
 func TestDogMolGracefulDegradation(t *testing.T) {
 	// A dogMol with empty rootID should be a no-op for all operations.
 	dm := &dogMol{
-		rootID:  "",
-		stepIDs: make(map[string]string),
+		rootID: "",
+		steps:  make(map[string]bool),
 	}
 
 	// These should not panic or error — graceful degradation.
@@ -134,3 +115,46 @@ func TestDogMolGracefulDegradation(t *testing.T) {
 	dm.failStep("scan", "test failure")
 	dm.close()
 }
+
+func TestDogMolUnknownStepWarns(t *testing.T) {
+	// closeStep/failStep validate the step ID against the formula's declared
+	// steps and warn (but do not panic) on drift.
+	rec := &recordingLogger{}
+	dm := &dogMol{
+		rootID:  "gt-wisp-test",
+		formula: "mol-dog-test",
+		steps:   map[string]bool{"scan": true},
+		logger:  rec,
+	}
+
+	// Known step: no warning.
+	dm.closeStep("scan")
+	if rec.count() != 0 {
+		t.Errorf("known step should not warn, got %d log lines", rec.count())
+	}
+
+	// Unknown step: warns.
+	dm.closeStep("nonexistent")
+	if rec.count() != 1 {
+		t.Errorf("unknown step should warn once, got %d log lines", rec.count())
+	}
+
+	// failStep on a known step logs the failure reason.
+	rec.reset()
+	dm.failStep("scan", "boom")
+	if rec.count() != 1 {
+		t.Errorf("failStep on known step should log once, got %d log lines", rec.count())
+	}
+}
+
+// recordingLogger captures Printf calls for assertions.
+type recordingLogger struct {
+	lines []string
+}
+
+func (r *recordingLogger) Printf(format string, args ...interface{}) {
+	r.lines = append(r.lines, format)
+}
+
+func (r *recordingLogger) count() int { return len(r.lines) }
+func (r *recordingLogger) reset()     { r.lines = nil }
