@@ -580,27 +580,30 @@ func TestExplain(t *testing.T) {
 	})
 }
 
-// TestDryRunSkipsSideEffects tests that --dry-run skips various side effects via CLI.
+// TestDryRunSkipsSideEffects verifies that the --dry-run handoff-marker check
+// leaves the marker in place, while the normal (non-dry-run) check removes it.
+//
+// This previously shelled out to the real `gt prime --dry-run`, but that drove
+// the full prime path into setupPrimeSession, which connects to the production
+// Dolt server on port 3307. When the suite ran inside a live Gas Town agent
+// session (e.g. a polecat running gates), that connection initialized a
+// non-namespaced "beads" database on the production server every run — the leak
+// behind gs-2l1, invisible in clean CI but recurring "every patrol". The
+// dry-run behavior under test lives entirely in checkHandoffMarkerDryRun, so we
+// exercise it in-process: no subprocess, no Dolt, no production pollution.
 func TestDryRunSkipsSideEffects(t *testing.T) {
-	gtBin := buildGT(t)
+	// The handoff-marker helpers mutate package globals; save and restore them
+	// so this test doesn't leak state into others.
+	origReason := primeHandoffReason
+	origExplain := primeExplain
+	t.Cleanup(func() {
+		primeHandoffReason = origReason
+		primeExplain = origExplain
+	})
+	primeExplain = false
 
-	// Create a temp workspace
-	townRoot := t.TempDir()
-
-	// Set up minimal workspace structure
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("create beads dir: %v", err)
-	}
-
-	// Write routes
-	routes := []beads.Route{{Prefix: "bd-", Path: "."}}
-	if err := beads.WriteRoutes(beadsDir, routes); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	// Create handoff marker that should NOT be removed in dry-run
-	runtimeDir := filepath.Join(townRoot, constants.DirRuntime)
+	workDir := t.TempDir()
+	runtimeDir := filepath.Join(workDir, constants.DirRuntime)
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		t.Fatalf("create runtime dir: %v", err)
 	}
@@ -609,23 +612,17 @@ func TestDryRunSkipsSideEffects(t *testing.T) {
 		t.Fatalf("write marker: %v", err)
 	}
 
-	// Run gt prime --dry-run --explain
-	cmd := exec.Command(gtBin, "prime", "--dry-run", "--explain")
-	cmd.Dir = townRoot
-	output, _ := cmd.CombinedOutput()
-
-	// The command may fail for other reasons (not fully configured workspace)
-	// but we can check:
-	// 1. Marker still exists
-	if _, err := os.Stat(markerPath); os.IsNotExist(err) {
-		t.Fatalf("handoff marker was removed in dry-run mode")
+	// Dry-run must NOT remove the marker (the side effect being skipped).
+	checkHandoffMarkerDryRun(workDir)
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("dry-run removed the handoff marker (should be skipped): %v", err)
 	}
 
-	// 2. Output mentions skipped operations
-	outputStr := string(output)
-	// Check for explain output about dry-run (if workspace was valid enough to get there)
-	if strings.Contains(outputStr, "bd prime") && !strings.Contains(outputStr, "skipped") {
-		t.Logf("Note: output doesn't explicitly mention skipping bd prime: %s", outputStr)
+	// The non-dry-run path DOES remove it — confirming the skip is meaningful,
+	// not just a marker that nothing ever touches.
+	checkHandoffMarker(workDir)
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("non-dry-run did not remove the handoff marker (stat err=%v)", err)
 	}
 }
 

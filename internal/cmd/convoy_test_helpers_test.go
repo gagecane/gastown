@@ -431,6 +431,13 @@ func (d *testDAG) Setup(t *testing.T) (townRoot, logPath string) {
 	// its cwd, leaking the process indefinitely (gs-4yf). The store-open call
 	// fails fast and addTrackingRelation falls back to the bd stub, which is
 	// what every test using this helper already expects.
+	//
+	// Note: AUTO_START=0 only stops the SDK from SPAWNING an embedded server; it
+	// does not stop OpenStore from CONNECTING to an already-running production
+	// server on 3307. That second leak vector (gs-2l1) is closed package-wide by
+	// the non-integration TestMain, which pins BEADS_DOLT_PORT/GT_DOLT_PORT to a
+	// guaranteed-closed port so the store-open fails fast and falls back to the
+	// bd stub instead of mutating production.
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
 
 	// Change cwd to town root with cleanup.
