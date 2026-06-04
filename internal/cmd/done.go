@@ -1625,6 +1625,58 @@ afterSafetyNet:
 	}
 
 notifyWitness:
+	// gs-a5v (gs-pd6 phase 3): the completion tail — refinery nudge, completion
+	// metadata, done logging, agent-state update, witness notify, worktree sync,
+	// and opt-in self-terminate — lives in teardownAfterDone. Every `goto
+	// notifyWitness` site reaches this single tail with the live MR/push state.
+	teardownAfterDone(teardownParams{
+		g:             g,
+		cwd:           cwd,
+		townRoot:      townRoot,
+		rigName:       rigName,
+		sender:        sender,
+		polecatName:   polecatName,
+		branch:        branch,
+		defaultBranch: defaultBranch,
+		issueID:       issueID,
+		agentBeadID:   agentBeadID,
+		exitType:      exitType,
+		mrID:          mrID,
+		mrFailed:      mrFailed,
+		pushFailed:    pushFailed,
+		cwdAvailable:  cwdAvailable,
+	})
+	return nil
+}
+
+// teardownParams carries the runDone completion-path state into
+// teardownAfterDone. These are the values live at the notifyWitness label:
+// the MR/push outcome flags, the agent identity, and the worktree handle
+// needed to nudge refinery, record completion, notify the witness, and
+// sync/self-terminate the sandbox.
+type teardownParams struct {
+	g             *git.Git
+	cwd           string
+	townRoot      string
+	rigName       string
+	sender        string
+	polecatName   string
+	branch        string
+	defaultBranch string
+	issueID       string
+	agentBeadID   string
+	exitType      string
+	mrID          string
+	mrFailed      bool
+	pushFailed    bool
+	cwdAvailable  bool
+}
+
+// teardownAfterDone runs the shared completion tail of runDone (the
+// notifyWitness path). Extracted from runDone (gs-a5v, gs-pd6 phase 3);
+// behavior is preserved exactly. The previous inline block and every `goto
+// notifyWitness` site now funnel through a single teardownAfterDone call.
+func teardownAfterDone(p teardownParams) {
 	// Nudge refinery — MR bead is already on main (transaction-based shared main).
 	//
 	// gu-v76i: Guard against spurious MQ_SUBMIT events. If the MR bead could not
@@ -1633,8 +1685,8 @@ notifyWitness:
 	// was detected), but there is no durable MR wisp for the refinery to pick up.
 	// Nudging anyway causes refinery sessions to wake, scan an empty queue, and
 	// escalate phantom MQ_SUBMIT alerts across the town.
-	if mrID != "" && !mrFailed && shouldNudgeRefinery(exitType, mrID) {
-		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
+	if p.mrID != "" && !p.mrFailed && shouldNudgeRefinery(p.exitType, p.mrID) {
+		nudgeRefinery(p.rigName, "MERGE_READY received - check inbox for pending work")
 	}
 
 	// Write completion metadata to agent bead for audit trail.
@@ -1642,35 +1694,35 @@ notifyWitness:
 	// detection and crash recovery by witness patrol, but the witness no
 	// longer processes routine completions from these fields.
 	fmt.Printf("\nNotifying Witness...\n")
-	if agentBeadID != "" {
+	if p.agentBeadID != "" {
 		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		completionBd := beads.New(cwd).ForAgentBead()
+		completionBd := beads.New(p.cwd).ForAgentBead()
 		meta := &beads.CompletionMetadata{
-			ExitType:       exitType,
-			MRID:           mrID,
-			Branch:         branch,
-			HookBead:       issueID,
-			MRFailed:       mrFailed,
-			PushFailed:     pushFailed,
+			ExitType:       p.exitType,
+			MRID:           p.mrID,
+			Branch:         p.branch,
+			HookBead:       p.issueID,
+			MRFailed:       p.mrFailed,
+			PushFailed:     p.pushFailed,
 			CompletionTime: time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := completionBd.UpdateAgentCompletion(agentBeadID, meta); err != nil {
+		if err := completionBd.UpdateAgentCompletion(p.agentBeadID, meta); err != nil {
 			style.PrintWarning("could not write completion metadata to agent bead: %v", err)
 		}
 	}
 
 	// Write witness notification checkpoint for resume (gt-aufru)
-	if agentBeadID != "" {
+	if p.agentBeadID != "" {
 		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		cpBd := beads.New(cwd).ForAgentBead()
-		writeDoneCheckpoint(cpBd, agentBeadID, CheckpointWitnessNotified, "ok")
+		cpBd := beads.New(p.cwd).ForAgentBead()
+		writeDoneCheckpoint(cpBd, p.agentBeadID, CheckpointWitnessNotified, "ok")
 	}
 
 	// Log done event (townlog and activity feed)
-	if err := LogDone(townRoot, sender, issueID); err != nil {
+	if err := LogDone(p.townRoot, p.sender, p.issueID); err != nil {
 		style.PrintWarning("could not log done event: %v", err)
 	}
-	if err := events.LogFeed(events.TypeDone, sender, events.DonePayload(issueID, branch)); err != nil {
+	if err := events.LogFeed(events.TypeDone, p.sender, events.DonePayload(p.issueID, p.branch)); err != nil {
 		style.PrintWarning("could not log feed event: %v", err)
 	}
 
@@ -1688,17 +1740,17 @@ notifyWitness:
 	// commit_sha. Pattern A guards (gu-551r commit-references-bead) live
 	// inside refinery's close path; the refinery is merging the polecat's
 	// own commits so the citation is correct by construction.
-	awaitingRefineryMerge := exitType == ExitCompleted &&
-		!pushFailed && !mrFailed &&
-		mrID != "" &&
-		completion.IsMergeQueueRig(townRoot, rigName)
-	updateAgentStateOnDone(cwd, townRoot, exitType, issueID, pushFailed || mrFailed, awaitingRefineryMerge, mrID, branch)
+	awaitingRefineryMerge := p.exitType == ExitCompleted &&
+		!p.pushFailed && !p.mrFailed &&
+		p.mrID != "" &&
+		completion.IsMergeQueueRig(p.townRoot, p.rigName)
+	updateAgentStateOnDone(p.cwd, p.townRoot, p.exitType, p.issueID, p.pushFailed || p.mrFailed, awaitingRefineryMerge, p.mrID, p.branch)
 
 	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
 	// evaluate slot availability against stale hook_bead or cleanup_status and emit
 	// false SLOT_BLOCKED/SLOT_OPEN signals.
-	nudgeWitness(rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", polecatName, exitType))
-	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), exitType)
+	nudgeWitness(p.rigName, fmt.Sprintf("POLECAT_DONE %s exit=%s", p.polecatName, p.exitType))
+	fmt.Printf("%s Witness notified of %s (via nudge)\n", style.Bold.Render("✓"), p.exitType)
 
 	// Persistent polecat model (gt-hdf8), reconciled with self-terminate (gs-4pg):
 	// the pool persists IDENTITY + SANDBOX (worktree); the SESSION is ephemeral.
@@ -1710,12 +1762,12 @@ notifyWitness:
 	// session liveness is irrelevant to reuse. "done means idle" describes the
 	// SANDBOX (warm, reusable), not the session (which dies and respawns on reuse).
 	isPolecat := false
-	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil && roleInfo.Role == RolePolecat {
+	if roleInfo, err := GetRoleWithContext(p.cwd, p.townRoot); err == nil && roleInfo.Role == RolePolecat {
 		isPolecat = true
 
 		fmt.Printf("%s Sandbox preserved for reuse (persistent polecat)\n", style.Bold.Render("✓"))
 
-		if pushFailed || mrFailed {
+		if p.pushFailed || p.mrFailed {
 			fmt.Printf("%s Work needs recovery (push or MR failed) — session preserved\n", style.Bold.Render("⚠"))
 		}
 
@@ -1729,36 +1781,36 @@ notifyWitness:
 		// switching branches would discard the work. Better to leave the worktree
 		// dirty on the feature branch so work can be recovered.
 		syncSafe := true
-		if cwdAvailable {
-			if ws, wsErr := g.CheckUncommittedWork(); wsErr == nil && ws.HasUncommittedChanges && !ws.CleanExcludingRuntime() {
+		if p.cwdAvailable {
+			if ws, wsErr := p.g.CheckUncommittedWork(); wsErr == nil && ws.HasUncommittedChanges && !ws.CleanExcludingRuntime() {
 				syncSafe = false
 				style.PrintWarning("uncommitted changes still present — skipping worktree sync to preserve work")
 				fmt.Printf("  Files: %s\n", ws.String())
 			}
 		}
-		if cwdAvailable && !pushFailed && !mrFailed && syncSafe {
+		if p.cwdAvailable && !p.pushFailed && !p.mrFailed && syncSafe {
 			// Remember the old branch so we can delete it after switching
-			oldBranch := branch
+			oldBranch := p.branch
 
-			fmt.Printf("%s Syncing worktree to %s...\n", style.Bold.Render("→"), defaultBranch)
-			if err := g.Checkout(defaultBranch); err != nil {
+			fmt.Printf("%s Syncing worktree to %s...\n", style.Bold.Render("→"), p.defaultBranch)
+			if err := p.g.Checkout(p.defaultBranch); err != nil {
 				// Worktree can't checkout defaultBranch (likely held by rig-root).
 				// Detach HEAD so the old feature branch can be deleted cleanly.
-				if detachErr := g.Checkout("--detach"); detachErr != nil {
-					style.PrintWarning("could not checkout %s or detach: %v (worktree stays on feature branch)", defaultBranch, err)
+				if detachErr := p.g.Checkout("--detach"); detachErr != nil {
+					style.PrintWarning("could not checkout %s or detach: %v (worktree stays on feature branch)", p.defaultBranch, err)
 				} else {
-					fmt.Printf("%s Detached HEAD (worktree checkout of %s blocked by another worktree)\n", style.Bold.Render("✓"), defaultBranch)
+					fmt.Printf("%s Detached HEAD (worktree checkout of %s blocked by another worktree)\n", style.Bold.Render("✓"), p.defaultBranch)
 				}
-			} else if err := g.Pull("origin", defaultBranch); err != nil {
-				style.PrintWarning("could not pull %s: %v (worktree on %s but may be stale)", defaultBranch, defaultBranch, err)
+			} else if err := p.g.Pull("origin", p.defaultBranch); err != nil {
+				style.PrintWarning("could not pull %s: %v (worktree on %s but may be stale)", p.defaultBranch, p.defaultBranch, err)
 			} else {
-				fmt.Printf("%s Worktree synced to %s\n", style.Bold.Render("✓"), defaultBranch)
+				fmt.Printf("%s Worktree synced to %s\n", style.Bold.Render("✓"), p.defaultBranch)
 			}
 
 			// Delete the old polecat branch (non-fatal: cleanup only).
 			// This prevents stale branch accumulation from persistent polecats.
-			if oldBranch != "" && oldBranch != defaultBranch && oldBranch != "master" {
-				if err := g.DeleteBranch(oldBranch, true); err != nil {
+			if oldBranch != "" && oldBranch != p.defaultBranch && oldBranch != "master" {
+				if err := p.g.DeleteBranch(oldBranch, true); err != nil {
 					style.PrintWarning("could not delete old branch %s: %v", oldBranch, err)
 				} else {
 					fmt.Printf("%s Deleted old branch %s\n", style.Bold.Render("✓"), oldBranch)
@@ -1786,7 +1838,7 @@ notifyWitness:
 	// destroy, creating a race where the kill might never execute. A
 	// detached subprocess survives the parent's exit independently.
 	if isPolecat {
-		daemonCfg := config.LoadOperationalConfig(townRoot).GetDaemonConfig()
+		daemonCfg := config.LoadOperationalConfig(p.townRoot).GetDaemonConfig()
 		// gu-ci0l: default-true via PolecatSelfTerminateV(). The previous nil-check
 		// pattern silently fell through to false when the operator did not configure
 		// the field, which exposed polecats to a post-done wedge loop (witness
@@ -1794,15 +1846,13 @@ notifyWitness:
 		// operational.daemon.polecat_self_terminate=false explicitly.
 		if daemonCfg.PolecatSelfTerminateV() {
 			fmt.Printf("%s Self-terminating session (polecat_self_terminate=true)\n", style.Bold.Render("✓"))
-			sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+			sessionName := session.PolecatSessionName(session.PrefixFor(p.rigName), p.polecatName)
 			t := tmux.NewTmux()
 			if err := t.DetachedKillSessionWithProcesses(sessionName, 3*time.Second); err != nil {
 				style.PrintWarning("could not spawn detached session kill: %v", err)
 			}
 		}
 	}
-
-	return nil
 }
 
 // mrSubmitParams carries the runDone completion state that submitToMergeQueue
