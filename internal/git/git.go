@@ -2456,6 +2456,50 @@ func (g *Git) MergeBase(ref1, ref2 string) (string, error) {
 	return g.run("merge-base", ref1, ref2)
 }
 
+// PatchID returns the stable patch-id of the commit at ref: a hash of the diff
+// the commit introduces, independent of the commit's base, parent, message, or
+// SHA. Two commits with the same patch-id introduce byte-identical changes even
+// if they sit on different bases (e.g. the same work rebased onto a newer main).
+//
+// Used to recognize the peer-merge-during-work strand (gs-y7g): a rebased local
+// HEAD and the earlier commit already on origin share a patch-id but differ in
+// tree (the rebase carried in the peer's merged content), so a tree comparison
+// cannot match them but a patch-id comparison can.
+//
+// Implemented as `git diff-tree --root -p <ref> | git patch-id --stable`. The
+// --stable flag makes the id reproducible across git versions and hunk ordering.
+// Output of patch-id is "<patch-id> <commit-id>"; we return the first field.
+func (g *Git) PatchID(ref string) (string, error) {
+	patch, err := g.runRaw("diff-tree", "--root", "-p", ref)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(patch) == "" {
+		// An empty diff (e.g. an empty commit) has no meaningful patch-id.
+		return "", fmt.Errorf("git patch-id: empty diff for %s", ref)
+	}
+
+	cmd := exec.Command("git", "patch-id", "--stable")
+	if g.workDir != "" {
+		cmd.Dir = g.workDir
+	}
+	cmd.Env = withNonInteractiveEnv()
+	cmd.Stdin = strings.NewReader(patch)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git patch-id for %s: %w: %s", ref, err, strings.TrimSpace(stderr.String()))
+	}
+
+	fields := strings.Fields(stdout.String())
+	if len(fields) == 0 {
+		return "", fmt.Errorf("git patch-id produced no output for %s", ref)
+	}
+	return fields[0], nil
+}
+
 // LogOneline returns one-line log output for the given revision range (e.g., "upstream..HEAD").
 func (g *Git) LogOneline(revRange string) (string, error) {
 	return g.run("log", "--oneline", revRange)

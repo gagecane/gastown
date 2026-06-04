@@ -1341,6 +1341,18 @@ afterSafetyNet:
 				// force-updated origin and verified the tip; proceed to MR.
 				fmt.Printf("%s Non-fast-forward on own branch with identical tree — force-updated origin/%s (gu-hz3vx recovery)\n", style.Bold.Render("✓"), branch)
 				pushErr = nil
+			} else if adoptedOriginSHA := recoverNonFFAdoptOriginPatchIdentical(g, branch, pushedCommitSHA, pushErr); adoptedOriginSHA != "" {
+				// gs-y7g: peer-merge-during-work strand. A peer MR merged to main
+				// mid-work, so `gt done` rebased onto the new main and re-pushed a
+				// divergent SHA — but origin already holds the earlier,
+				// patch-identical push of this work. The trees differ (the rebase
+				// pulled in the peer's content) so the gu-hz3vx tree check above
+				// cannot match, yet the work is provably the same patch. Adopt the
+				// commit already on origin as the pushed commit and enqueue it —
+				// no force-push, no contamination risk.
+				fmt.Printf("%s Non-fast-forward on own branch; origin/%s holds a patch-identical commit — adopting it for MR (gs-y7g recovery)\n", style.Bold.Render("✓"), branch)
+				pushedCommitSHA = adoptedOriginSHA
+				pushErr = nil
 			} else {
 				// gu-epv5 Option B: file a discoverable push-stranded wisp
 				// so the work isn't invisible. The merge queue will not
@@ -2376,6 +2388,75 @@ func recoverNonFFOwnBranch(g *git.Git, branch, expectedSHA string, pushErr error
 
 	// Verify the force-update actually landed our SHA before claiming success.
 	return recoverPushFromOriginTip(g, branch, expectedSHA)
+}
+
+// recoverNonFFAdoptOriginPatchIdentical handles the peer-merge-during-work
+// strand (gs-y7g) that recoverNonFFOwnBranch cannot: a peer MR merged to main
+// DURING the polecat's work, so `gt done` rebased the branch onto the new main
+// and re-pushed a divergent SHA — but origin/<branch> already holds the EARLIER
+// push of the same work, made before the rebase on the old base. The re-push is
+// rejected non-fast-forward because the SHAs diverged.
+//
+// The two commits are PATCH-IDENTICAL (local HEAD and origin's tip introduce
+// byte-identical diffs) but NOT tree-identical: the rebased local tree carries
+// the peer's freshly-merged content, origin's pre-rebase tree does not. So
+// recoverNonFFOwnBranch's tree-equality check necessarily fails here and the
+// work strands, needing manual witness MR-enqueue recovery.
+//
+// The witness's manual fix is simply to enqueue the commit ALREADY on origin as
+// the MR: it is patch-identical, already pushed, and needs no force-push. This
+// function automates exactly that — it returns origin's tip SHA (for the caller
+// to adopt as the pushed commit) when that tip is patch-identical to local HEAD,
+// and "" otherwise.
+//
+// Why patch-identity is a sound safety bar (and the gu-qx6rn contamination
+// footgun cannot bite): NO force-push happens — we ship origin's existing,
+// already-clean commit, never the local HEAD. Had the local HEAD bundled
+// unrelated files, its diff — and therefore its patch-id — would differ from
+// origin's clean commit, the ids would not match, and we would fall through to
+// the loud strand. We adopt origin's commit only when it provably introduces the
+// same change as the work.
+//
+// Preconditions enforced by the caller mirror recoverNonFFOwnBranch: branch is
+// not the rig default, and pushErr was a real push failure.
+func recoverNonFFAdoptOriginPatchIdentical(g *git.Git, branch, localSHA string, pushErr error) string {
+	if g == nil || branch == "" || localSHA == "" {
+		return ""
+	}
+	if !isNonFastForwardPushError(pushErr) {
+		return ""
+	}
+
+	originTip, err := g.RemoteBranchTip("origin", branch)
+	if err != nil || strings.TrimSpace(originTip) == "" {
+		return ""
+	}
+	originTip = strings.TrimSpace(originTip)
+
+	// If origin already matches our SHA there is no divergence to adopt; the
+	// origin-tip recovery path handles that case.
+	if originTip == localSHA {
+		return ""
+	}
+
+	// Make origin's tip object available locally so we can diff it. Best-effort:
+	// if the fetch fails we cannot prove patch-equality, so refuse.
+	if fetchErr := g.FetchBranch("origin", branch); fetchErr != nil {
+		return ""
+	}
+
+	localPID, lErr := g.PatchID(localSHA)
+	originPID, oErr := g.PatchID(originTip)
+	if lErr != nil || oErr != nil || localPID == "" || originPID == "" {
+		return ""
+	}
+	if localPID != originPID {
+		// Real content divergence (e.g. a contaminating bundle changes the
+		// diff and thus the patch-id). Do NOT adopt — let the caller strand it.
+		return ""
+	}
+
+	return originTip
 }
 
 // fileStrandedPushWisp implements Option B for gu-epv5: when a push step
