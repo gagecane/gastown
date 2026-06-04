@@ -53,6 +53,7 @@ const (
 	ReasonRecoveryMarker    = "recovery_marker_active"
 	ReasonExpectedIdle      = "expected_idle_until_future"
 	ReasonStateExiting      = "state_exiting"
+	ReasonStateIdle         = "state_idle"
 	ReasonInvalidSession    = "invalid_session_name"
 )
 
@@ -274,6 +275,27 @@ func LivenessWithPID(townRoot, sessionName string, thresholds LivenessThresholds
 				return report
 			}
 		}
+	}
+
+	// State-bearing idle hint (gs-535): an agent that self-reported idle is
+	// waiting for input, not dead. Idle agents (a witness/refinery between
+	// patrol cycles, a polecat parked in a reusable slot) block in
+	// `gt mol step await-signal` without bumping their heartbeat, so a
+	// healthy idle agent's timestamp naturally ages past the stale threshold.
+	// Treat self-reported idle as alive within the grace window so it does
+	// not flip to MAYBE_DEAD and trip the idle->MAYBE_DEAD->working ping-pong
+	// false positive (matches the mayor's standing note that idle-quiet
+	// stale-heartbeat alarms are false). We do NOT extend past grace — a
+	// session that died while last reporting idle must still surface beyond
+	// the grace window. This mirrors the exiting tombstone above and is
+	// reaper-safe: within grace the verdict was already MAYBE_DEAD
+	// (non-destructive, never reaped), so promoting it to ALIVE changes only
+	// the surfaced label, not any reap decision. Placed after the PID
+	// fast-path so a provably-gone PID still yields DEAD.
+	if hb.State == HeartbeatIdle && age < thresholds.Grace {
+		report.Verdict = LivenessAlive
+		report.VerdictReason = ReasonStateIdle
+		return report
 	}
 
 	// Heartbeat-only path.

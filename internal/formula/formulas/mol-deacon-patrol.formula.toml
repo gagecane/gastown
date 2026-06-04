@@ -80,7 +80,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 16
+version = 17
 
 [vars]
 [vars.wisp_type]
@@ -581,6 +581,36 @@ If NO active work (empty result or only patrol molecules):
 
 If ACTIVE work exists:
 - Proceed with health check nudges below
+
+**Health-check false-positive suppression (gs-535)**
+
+Before nudging or alarming an agent as a zombie / dead / MAYBE_DEAD, trust the
+canonical classifiers — do NOT re-derive a verdict from raw session/timestamp
+signals. The following are HEALTHY resting states, not problems. SUPPRESS:
+
+- **Idle-clean dead session** — a polecat with state=idle, cleanup=clean, no
+  hooked bead, and no active_mr. A dead tmux session here is the NORMAL
+  reusable-slot resting state; the scheduler starts a fresh session on the next
+  dispatch. There is nothing to clean — do NOT flag it as a zombie or nudge a
+  witness to clean it up. (`gt polecat list` reports such a slot as `idle-clean`
+  / `idle-preserved`, verdict SAFE_TO_NUKE — reusable, not a zombie.)
+- **Post-done with an OPEN merge request** — a polecat that ran `gt done` and
+  self-terminated while its active_mr is OPEN/READY in the queue. This is
+  healthy post-submit behavior (`gt done` kills the session by design).
+  `gt polecat list` reports it as `idle-pr-open` (verdict PENDING_MR). Only a
+  CLOSED/REJECTED active_mr with at-risk local work is a real wedge.
+- **Idle-but-fresh heartbeat** — an agent whose `gt heartbeat status` verdict is
+  ALIVE (including reason=state_idle within the grace window). A self-reported
+  idle agent waiting in `await-signal` is alive, not dead. Setting a witness to
+  `--state=idle` is the CORRECT signal when the rig is idle-quiet; it must not be
+  treated as MAYBE_DEAD. Only act on a verdict of DEAD, or MAYBE_DEAD that is
+  past the dead threshold (`gt heartbeat status --json | jq .verdict_reason` ==
+  `past_dead_threshold`) with corroborating evidence.
+
+Only alarm on genuine wedges: cleanup=has_uncommitted on a dead session, an
+active_mr that is CLOSED/REJECTED, or a verdict of DEAD / past-dead MAYBE_DEAD.
+This is the same real-signal-fatigue class as gs-2dr — false health-check
+nudges are indistinguishable from real recovery requests and erode trust.
 
 **ZFC Principle**: You (Claude) make the judgment call about what is "stuck" or "unresponsive" - there are no hardcoded thresholds in Go. Read the signals, consider context, and decide.
 

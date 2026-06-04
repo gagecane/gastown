@@ -282,6 +282,99 @@ func TestLiveness_StateExiting_AliveWithinGrace(t *testing.T) {
 	}
 }
 
+// TestLiveness_StateIdle_AliveWithinGrace pins the gs-535 idle suppression:
+// an agent that self-reported idle is waiting for input, not dead. Within the
+// grace window a stale idle heartbeat must read ALIVE (reason=state_idle), not
+// MAYBE_DEAD, so the deacon's health-check does not raise the
+// idle->MAYBE_DEAD->working ping-pong false positive.
+func TestLiveness_StateIdle_AliveWithinGrace(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-idle-state"
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hb := SessionHeartbeat{
+		Timestamp: time.Now().Add(-7 * time.Minute).UTC(), // inside grace (>stale 3m, <grace 10m)
+		State:     HeartbeatIdle,
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, session+".json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := Liveness(townRoot, session, DefaultLivenessThresholds)
+	if rep.Verdict != LivenessAlive {
+		t.Errorf("verdict = %q, want ALIVE for state=idle within grace", rep.Verdict)
+	}
+	if rep.VerdictReason != ReasonStateIdle {
+		t.Errorf("reason = %q, want %q", rep.VerdictReason, ReasonStateIdle)
+	}
+}
+
+// TestLiveness_StateIdle_MaybeDeadPastGrace pins that the idle suppression does
+// NOT extend past the grace window — a session that died while last reporting
+// idle must still surface as MAYBE_DEAD beyond grace (idle != invisible).
+func TestLiveness_StateIdle_MaybeDeadPastGrace(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-idle-past-grace"
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hb := SessionHeartbeat{
+		Timestamp: time.Now().Add(-12 * time.Minute).UTC(), // past grace (10m), short of dead (20m)
+		State:     HeartbeatIdle,
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, session+".json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := Liveness(townRoot, session, DefaultLivenessThresholds)
+	if rep.Verdict != LivenessMaybeDead {
+		t.Errorf("verdict = %q, want MAYBE_DEAD for state=idle past grace", rep.Verdict)
+	}
+}
+
+// TestLivenessWithPID_StateIdle_PIDGoneStillDead pins that idle suppression is
+// placed after the PID fast-path: a provably-gone PID overrides a self-reported
+// idle state and still yields DEAD.
+func TestLivenessWithPID_StateIdle_PIDGoneStillDead(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-idle-pid-gone"
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hb := SessionHeartbeat{
+		Timestamp: time.Now().Add(-7 * time.Minute).UTC(), // inside grace
+		State:     HeartbeatIdle,
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, session+".json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := func(name string) (bool, bool) { return false, true }
+	rep := LivenessWithPID(townRoot, session, DefaultLivenessThresholds, probe)
+	if rep.Verdict != LivenessDead {
+		t.Errorf("verdict = %q, want DEAD (PID gone overrides idle state)", rep.Verdict)
+	}
+	if rep.VerdictReason != ReasonPIDGone {
+		t.Errorf("reason = %q, want %q", rep.VerdictReason, ReasonPIDGone)
+	}
+}
+
 // TestLiveness_ExpectedIdleUntil_FutureTimeAlive pins the cv-p3fem
 // open-question 1 (gu-x9qc-approved) self-report behavior: an in-flight
 // ExpectedIdleUntil keeps the verdict at ALIVE until the declared idle
