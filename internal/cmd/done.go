@@ -97,6 +97,25 @@ func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	return "origin/" + targetBranch
 }
 
+// resolveRigDefaultBranch resolves the rig's default branch for MR target
+// resolution. The rig config's default_branch is the source of truth; when it
+// is unreadable or empty, fall back to the repo's actual default branch
+// (origin/HEAD via g) rather than a hardcoded "main" (gu-wcb37). A hardcoded
+// "main" silently misroutes MRs in a "mainline"-default repo (casc_webapp),
+// which would fail or misroute a merge once a repo carries both "main" and
+// "mainline". "main" is kept only as the final fallback when git can't answer.
+func resolveRigDefaultBranch(townRoot, rigName string, g *git.Git) string {
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		return rigCfg.DefaultBranch
+	}
+	if g != nil {
+		if b := g.RemoteDefaultBranch(); b != "" {
+			return b
+		}
+	}
+	return "main"
+}
+
 // relayBaseForLocalMerge decides whether a merge=local convoy leg should
 // FF-push to a named relay base branch instead of parking the work on the local
 // feature branch (gs-d26). It returns the base branch and true only when the
@@ -476,10 +495,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// auto-commit, push refspec builder) can refuse operations that would
 	// contaminate mainline. Duplicated below where the MR path needs it —
 	// keep both in sync until we consolidate into a single resolution pass.
-	defaultBranchEarly := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranchEarly = rigCfg.DefaultBranch
-	}
+	// Source of truth: rig config default_branch. When unreadable/empty, fall
+	// back to the repo's actual default (origin/HEAD), not a hardcoded "main"
+	// — the latter misroutes MR targets in a "mainline"-default repo (gu-wcb37).
+	defaultBranchEarly := resolveRigDefaultBranch(townRoot, rigName, g)
 
 	// SAFETY NET (gt-pvx, stash recovery): If we detected stashes belonging to
 	// this branch, auto-pop them so the existing uncommitted-work auto-commit
