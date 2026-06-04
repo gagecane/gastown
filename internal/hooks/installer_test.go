@@ -858,7 +858,8 @@ func TestInstallForRole_KiroRoleAware(t *testing.T) {
 // autonomous bypassPermissions agent able to hang on an interactive prompt
 // (gs-wbj footgun). denyListDrifted detects that so InstallForRole rewrites it,
 // while leaving interactive/crew (which legitimately omits AskUserQuestion) and
-// non-settings files alone.
+// non-settings files alone. The mayor is interactive but unattended (gu-2qvnx),
+// so it too is treated as drifted when it lacks the AskUserQuestion deny.
 func TestDenyListDrifted(t *testing.T) {
 	autonomousComplete := []byte(`{"permissions":{"deny":["AskUserQuestion","TodoWrite","TaskCreate","TaskUpdate","TaskList","TaskGet","TaskOutput","TaskStop"]}}`)
 	autonomousDrifted := []byte(`{"permissions":{"deny":["TodoWrite","TaskCreate","TaskUpdate","TaskList","TaskGet","TaskOutput","TaskStop"]}}`)
@@ -875,7 +876,10 @@ func TestDenyListDrifted(t *testing.T) {
 		{"autonomous witness drifted", autonomousDrifted, "settings.json", "witness", true},
 		{"autonomous complete (no drift)", autonomousComplete, "settings.json", "polecat", false},
 		{"interactive crew missing AskUserQuestion (by design, not drift)", interactiveNoAsk, "settings.json", "crew", false},
-		{"interactive mayor missing AskUserQuestion (mayor=interactive by design)", interactiveNoAsk, "settings.json", "mayor", false},
+		// gu-2qvnx: mayor is interactive but unattended — it MUST deny
+		// AskUserQuestion, so a mayor file missing it counts as drifted.
+		{"mayor missing AskUserQuestion (unattended interactive — drift)", interactiveNoAsk, "settings.json", "mayor", true},
+		{"mayor with AskUserQuestion (no drift)", autonomousComplete, "settings.json", "mayor", false},
 		{"non-settings file (non-json) never drifts", autonomousDrifted, "GASTOWN.md", "polecat", false},
 		{"unparseable settings.json: missing all deny entries → treated as drifted (will rewrite to canonical)", []byte("not json"), "settings.json", "polecat", true},
 	}
@@ -940,6 +944,116 @@ func TestInstallForRole_ReconcilesDriftedAutonomousDenyList(t *testing.T) {
 		}
 		if !strings.Contains(string(got), "operator-customized") {
 			t.Errorf("interactive crew file was clobbered (lost operator marker):\n%s", got)
+		}
+	})
+}
+
+// TestInstallForRole_MayorDeniesAskUserQuestion is the gu-2qvnx guard: the
+// mayor uses the interactive template (shared with crew) but runs unattended,
+// so its installed settings must deny AskUserQuestion even though the
+// interactive template omits it. Crew — human-attended — must NOT get the deny.
+func TestInstallForRole_MayorDeniesAskUserQuestion(t *testing.T) {
+	t.Run("mayor gets AskUserQuestion deny injected", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := InstallForRole("claude", dir, dir, "mayor", ".claude", "settings.json", true); err != nil {
+			t.Fatalf("InstallForRole: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !denyEntries(got)["AskUserQuestion"] {
+			t.Errorf("mayor settings must deny AskUserQuestion (gu-2qvnx):\n%s", got)
+		}
+		// Mayor keeps the interactive template's hooks — confirm it did not
+		// silently get the autonomous template (interactive omits dangerous-command
+		// guards / the role-gated mail-inject the autonomous template adds).
+		if strings.Contains(string(got), "apt install") {
+			t.Errorf("mayor wrongly received the autonomous template (gu-2qvnx wants interactive + deny):\n%s", got)
+		}
+	})
+
+	t.Run("crew does NOT get AskUserQuestion deny", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", true); err != nil {
+			t.Fatalf("InstallForRole: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if denyEntries(got)["AskUserQuestion"] {
+			t.Errorf("crew (human-attended) must NOT deny AskUserQuestion:\n%s", got)
+		}
+	})
+
+	t.Run("drifted mayor file is reconciled on reinstall", func(t *testing.T) {
+		dir := t.TempDir()
+		settingsPath := filepath.Join(dir, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		// A mayor file written before the deny existed (interactive deny set).
+		drifted := `{"permissions":{"defaultMode":"bypassPermissions","deny":["TodoWrite","TaskCreate"]}}`
+		if err := os.WriteFile(settingsPath, []byte(drifted), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := InstallForRole("claude", dir, dir, "mayor", ".claude", "settings.json", true); err != nil {
+			t.Fatalf("InstallForRole: %v", err)
+		}
+		got, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !denyEntries(got)["AskUserQuestion"] {
+			t.Errorf("drifted mayor file was NOT reconciled — AskUserQuestion still missing:\n%s", got)
+		}
+	})
+}
+
+// TestEnsureDeny verifies the deny-injection helper is idempotent and preserves
+// existing structure.
+func TestEnsureDeny(t *testing.T) {
+	t.Run("already present is a byte-identical no-op", func(t *testing.T) {
+		in := []byte(`{"permissions":{"deny":["AskUserQuestion","TodoWrite"]}}`)
+		out, err := ensureDeny(in, "AskUserQuestion")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out) != string(in) {
+			t.Errorf("expected unchanged bytes, got:\n%s", out)
+		}
+	})
+
+	t.Run("adds to existing deny list", func(t *testing.T) {
+		in := []byte(`{"permissions":{"defaultMode":"bypassPermissions","deny":["TodoWrite"]}}`)
+		out, err := ensureDeny(in, "AskUserQuestion")
+		if err != nil {
+			t.Fatal(err)
+		}
+		have := denyEntries(out)
+		if !have["AskUserQuestion"] || !have["TodoWrite"] {
+			t.Errorf("expected both entries, got:\n%s", out)
+		}
+	})
+
+	t.Run("creates permissions/deny when absent", func(t *testing.T) {
+		in := []byte(`{"theme":"dark"}`)
+		out, err := ensureDeny(in, "AskUserQuestion")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !denyEntries(out)["AskUserQuestion"] {
+			t.Errorf("expected AskUserQuestion deny, got:\n%s", out)
+		}
+		if !strings.Contains(string(out), `"dark"`) {
+			t.Errorf("expected theme preserved, got:\n%s", out)
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		if _, err := ensureDeny([]byte("not json"), "AskUserQuestion"); err == nil {
+			t.Error("expected error for invalid JSON")
 		}
 	})
 }
