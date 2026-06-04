@@ -55,13 +55,76 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
 
 	if existing, err := os.ReadFile(targetPath); err == nil {
-		if !needsUpgrade(existing) {
+		if !needsUpgrade(existing) && !denyListDrifted(existing, hooksFile, role) {
 			return nil // File exists and is current — don't overwrite
 		}
-		// Stale file detected — fall through to overwrite with current template
+		// Stale file or drifted deny-list detected — fall through to overwrite
+		// with the current template.
 	}
 
 	return writeTemplate(provider, role, hooksFile, targetPath)
+}
+
+// denyListDrifted reports whether an existing settings.json for an AUTONOMOUS
+// role is missing a deny-list entry that the canonical autonomous template
+// requires. Historically InstallForRole only overwrote on the needsUpgrade
+// stale-pattern signatures, so a settings file written before a deny entry was
+// added to the template (e.g. "AskUserQuestion", gu-u4g21) never got the new
+// entry — it silently drifted, leaving an autonomous, bypassPermissions agent
+// able to hang on an interactive prompt no one is attending (gs-wbj footgun).
+//
+// This reconciles toward the canonical autonomous deny set: if the role is
+// autonomous and the file's permissions.deny is missing ANY entry the template
+// denies, return true so the caller overwrites with the current template. It is
+// scoped narrowly:
+//   - Only settings files (not hook files) and only autonomous roles — the
+//     interactive/crew template legitimately omits AskUserQuestion, so we never
+//     force it there.
+//   - It only ADDS toward the template's deny set; it does not invent new
+//     denies (no scope creep beyond restoring the canonical set).
+func denyListDrifted(existing []byte, hooksFile, role string) bool {
+	if !isSettingsFile(hooksFile) || !hookutil.IsAutonomousRole(role) {
+		return false
+	}
+	want := autonomousDenySet()
+	if len(want) == 0 {
+		return false // can't read the template — don't trigger a rewrite
+	}
+	have := denyEntries(existing)
+	for entry := range want {
+		if !have[entry] {
+			return true
+		}
+	}
+	return false
+}
+
+// autonomousDenySet returns the deny entries the canonical claude autonomous
+// settings template requires, as a set. Empty on parse failure.
+func autonomousDenySet() map[string]bool {
+	content, err := templateFS.ReadFile("templates/claude/settings-autonomous.json")
+	if err != nil {
+		return nil
+	}
+	return denyEntries(content)
+}
+
+// denyEntries parses a settings.json body and returns its permissions.deny
+// entries as a set. Empty on parse failure or absent deny list.
+func denyEntries(content []byte) map[string]bool {
+	var parsed struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if json.Unmarshal(content, &parsed) != nil {
+		return map[string]bool{}
+	}
+	set := make(map[string]bool, len(parsed.Permissions.Deny))
+	for _, d := range parsed.Permissions.Deny {
+		set[d] = true
+	}
+	return set
 }
 
 // needsUpgrade returns true if an existing hooks file contains stale patterns

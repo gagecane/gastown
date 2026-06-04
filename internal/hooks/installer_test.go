@@ -851,3 +851,95 @@ func TestInstallForRole_KiroRoleAware(t *testing.T) {
 		t.Error("kiro interactive: missing dangerous-command guard (gu-6f2j regression)")
 	}
 }
+
+// TestDenyListDrifted is the regression guard for gu-u4g21: an autonomous
+// settings file written before a deny entry (e.g. "AskUserQuestion") was added
+// to the canonical template silently kept the old deny set — leaving an
+// autonomous bypassPermissions agent able to hang on an interactive prompt
+// (gs-wbj footgun). denyListDrifted detects that so InstallForRole rewrites it,
+// while leaving interactive/crew (which legitimately omits AskUserQuestion) and
+// non-settings files alone.
+func TestDenyListDrifted(t *testing.T) {
+	autonomousComplete := []byte(`{"permissions":{"deny":["AskUserQuestion","TodoWrite","TaskCreate","TaskUpdate","TaskList","TaskGet","TaskOutput","TaskStop"]}}`)
+	autonomousDrifted := []byte(`{"permissions":{"deny":["TodoWrite","TaskCreate","TaskUpdate","TaskList","TaskGet","TaskOutput","TaskStop"]}}`)
+	interactiveNoAsk := []byte(`{"permissions":{"deny":["TodoWrite","TaskCreate","TaskUpdate","TaskList","TaskGet","TaskOutput","TaskStop"]}}`)
+
+	tests := []struct {
+		name      string
+		content   []byte
+		hooksFile string
+		role      string
+		want      bool
+	}{
+		{"autonomous drifted (missing AskUserQuestion)", autonomousDrifted, "settings.json", "polecat", true},
+		{"autonomous witness drifted", autonomousDrifted, "settings.json", "witness", true},
+		{"autonomous complete (no drift)", autonomousComplete, "settings.json", "polecat", false},
+		{"interactive crew missing AskUserQuestion (by design, not drift)", interactiveNoAsk, "settings.json", "crew", false},
+		{"interactive mayor missing AskUserQuestion (mayor=interactive by design)", interactiveNoAsk, "settings.json", "mayor", false},
+		{"non-settings file (non-json) never drifts", autonomousDrifted, "GASTOWN.md", "polecat", false},
+		{"unparseable settings.json: missing all deny entries → treated as drifted (will rewrite to canonical)", []byte("not json"), "settings.json", "polecat", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := denyListDrifted(tt.content, tt.hooksFile, tt.role); got != tt.want {
+				t.Errorf("denyListDrifted(role=%q, file=%q) = %v, want %v", tt.role, tt.hooksFile, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInstallForRole_ReconcilesDriftedAutonomousDenyList verifies the end-to-end
+// behavior (gu-u4g21): InstallForRole overwrites a drifted autonomous settings
+// file to restore the canonical deny set, but leaves an interactive file alone.
+func TestInstallForRole_ReconcilesDriftedAutonomousDenyList(t *testing.T) {
+	// Autonomous (polecat): a pre-existing file missing AskUserQuestion must be
+	// rewritten so the deny is restored.
+	t.Run("autonomous drifted file is reconciled", func(t *testing.T) {
+		dir := t.TempDir()
+		settingsPath := filepath.Join(dir, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		drifted := `{"permissions":{"defaultMode":"bypassPermissions","deny":["TodoWrite","TaskCreate"]}}`
+		if err := os.WriteFile(settingsPath, []byte(drifted), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true); err != nil {
+			t.Fatalf("InstallForRole: %v", err)
+		}
+		got, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !denyEntries(got)["AskUserQuestion"] {
+			t.Errorf("autonomous drifted file was NOT reconciled — AskUserQuestion still missing:\n%s", got)
+		}
+	})
+
+	// Interactive (crew): a file legitimately lacking AskUserQuestion must NOT be
+	// force-rewritten to add it.
+	t.Run("interactive file is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		settingsPath := filepath.Join(dir, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		interactive := `{"permissions":{"defaultMode":"bypassPermissions","deny":["TodoWrite","TaskCreate"]},"_marker":"operator-customized"}`
+		if err := os.WriteFile(settingsPath, []byte(interactive), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", true); err != nil {
+			t.Fatalf("InstallForRole: %v", err)
+		}
+		got, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if denyEntries(got)["AskUserQuestion"] {
+			t.Errorf("interactive crew file was wrongly rewritten to add AskUserQuestion:\n%s", got)
+		}
+		if !strings.Contains(string(got), "operator-customized") {
+			t.Errorf("interactive crew file was clobbered (lost operator marker):\n%s", got)
+		}
+	})
+}
