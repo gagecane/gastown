@@ -232,3 +232,83 @@ func TestRigDefaultBranchForBead_Fallbacks(t *testing.T) {
 		t.Errorf("unresolvable rig must fall back to main: got %q", got)
 	}
 }
+
+// TestResolveRelayBaseFromAncestors covers the parent-epic inheritance walk that
+// lets a fresh relay-epic SLICE recover its epic's relay base on the FIRST
+// dispatch — the gap gs-n6h left open (it only recovered the base on
+// re-dispatch). The lookup is injected so the walk is exercised without bd/Dolt.
+func TestResolveRelayBaseFromAncestors(t *testing.T) {
+	// Graph fixtures: id -> (parent, relayBase). relayBase "" means the bead
+	// carries only the rig default with no relay convoy.
+	type node struct{ parent, base string }
+	mk := func(g map[string]node) func(string) (string, string) {
+		return func(id string) (string, string) {
+			n := g[id]
+			return n.parent, n.base
+		}
+	}
+
+	t.Run("direct parent epic carries relay base", func(t *testing.T) {
+		g := map[string]node{
+			"lb-wcdw.2": {parent: "lb-wcdw"},
+			"lb-wcdw":   {base: "proto/v3-build"},
+		}
+		if got := resolveRelayBaseFromAncestors("lb-wcdw.2", maxRelayInheritHops, mk(g)); got != "proto/v3-build" {
+			t.Errorf("slice must inherit epic relay base: got %q", got)
+		}
+	})
+
+	t.Run("walks past intermediate ancestor with no base", func(t *testing.T) {
+		g := map[string]node{
+			"lb-x.1":  {parent: "lb-x"},
+			"lb-x":    {parent: "lb-root"}, // no base on the immediate parent
+			"lb-root": {base: "proto/v3-build"},
+		}
+		if got := resolveRelayBaseFromAncestors("lb-x.1", maxRelayInheritHops, mk(g)); got != "proto/v3-build" {
+			t.Errorf("must climb to first ancestor with a relay base: got %q", got)
+		}
+	})
+
+	t.Run("no parent yields empty", func(t *testing.T) {
+		g := map[string]node{"gt-orphan": {}}
+		if got := resolveRelayBaseFromAncestors("gt-orphan", maxRelayInheritHops, mk(g)); got != "" {
+			t.Errorf("parentless bead must not inherit: got %q", got)
+		}
+	})
+
+	t.Run("non-relay ancestors yield empty", func(t *testing.T) {
+		g := map[string]node{
+			"gt-a": {parent: "gt-b"},
+			"gt-b": {parent: "gt-c"},
+			"gt-c": {},
+		}
+		if got := resolveRelayBaseFromAncestors("gt-a", maxRelayInheritHops, mk(g)); got != "" {
+			t.Errorf("no ancestor relay base must yield empty: got %q", got)
+		}
+	})
+
+	t.Run("parent cycle terminates", func(t *testing.T) {
+		g := map[string]node{
+			"gt-a": {parent: "gt-b"},
+			"gt-b": {parent: "gt-a"}, // cycle, neither carries a base
+		}
+		if got := resolveRelayBaseFromAncestors("gt-a", maxRelayInheritHops, mk(g)); got != "" {
+			t.Errorf("cycle must terminate with empty: got %q", got)
+		}
+	})
+
+	t.Run("respects hop bound", func(t *testing.T) {
+		// Chain longer than maxHops with the relay base only at the far end.
+		g := map[string]node{}
+		for i := 0; i < 5; i++ {
+			g[string(rune('a'+i))] = node{parent: string(rune('a' + i + 1))}
+		}
+		g[string(rune('a'+5))] = node{base: "proto/v3-build"}
+		if got := resolveRelayBaseFromAncestors("a", 2, mk(g)); got != "" {
+			t.Errorf("base beyond hop bound must not be reached: got %q", got)
+		}
+		if got := resolveRelayBaseFromAncestors("a", maxRelayInheritHops, mk(g)); got != "proto/v3-build" {
+			t.Errorf("base within hop bound must be found: got %q", got)
+		}
+	})
+}
