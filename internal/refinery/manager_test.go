@@ -1,6 +1,7 @@
 package refinery
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,7 +44,12 @@ func setupTestManager(t *testing.T) (*Manager, string) {
 		Path: rigPath,
 	}
 
-	return NewManager(r), rigPath
+	mgr := NewManager(r)
+	// Default to a passing merge-landed verification so beads-only tests don't
+	// require a real git worktree. Tests exercising the gu-ilf86 guard override
+	// this field explicitly.
+	mgr.verifyMergeLanded = func(*MergeRequest) error { return nil }
+	return mgr, rigPath
 }
 
 func TestManager_StartForegroundDeprecated(t *testing.T) {
@@ -512,6 +518,200 @@ func TestStripMRIssueTimestampSuffix(t *testing.T) {
 				t.Errorf("stripMRIssueTimestampSuffix(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// fakeAncestryOps is a test double for gitAncestryOps used by the gu-ilf86
+// merge-landed verification tests.
+type fakeAncestryOps struct {
+	fetchErr      error
+	fetchedRemote string
+	fetchedBranch string
+	isAncestor    bool
+	ancestorErr   error
+	ancestorArg   string
+	descendantArg string
+}
+
+func (f *fakeAncestryOps) FetchBranch(remote, branch string) error {
+	f.fetchedRemote = remote
+	f.fetchedBranch = branch
+	return f.fetchErr
+}
+
+func (f *fakeAncestryOps) IsAncestor(ancestor, descendant string) (bool, error) {
+	f.ancestorArg = ancestor
+	f.descendantArg = descendant
+	return f.isAncestor, f.ancestorErr
+}
+
+// TestVerifyMergeCommitLanded is a pure-unit test for the gu-ilf86 guard.
+func TestVerifyMergeCommitLanded(t *testing.T) {
+	t.Run("landed on target → nil", func(t *testing.T) {
+		f := &fakeAncestryOps{isAncestor: true}
+		if err := verifyMergeCommitLanded(f, "abc123", "main"); err != nil {
+			t.Fatalf("verifyMergeCommitLanded() = %v, want nil", err)
+		}
+		if f.fetchedRemote != "origin" || f.fetchedBranch != "main" {
+			t.Errorf("fetched %s/%s, want origin/main", f.fetchedRemote, f.fetchedBranch)
+		}
+		if f.ancestorArg != "abc123" || f.descendantArg != "origin/main" {
+			t.Errorf("IsAncestor(%q,%q), want (abc123, origin/main)", f.ancestorArg, f.descendantArg)
+		}
+	})
+
+	t.Run("not an ancestor → error (silent merge-loss)", func(t *testing.T) {
+		f := &fakeAncestryOps{isAncestor: false}
+		err := verifyMergeCommitLanded(f, "abc123", "main")
+		if err == nil {
+			t.Fatal("verifyMergeCommitLanded() = nil, want error for unlanded commit")
+		}
+		if !strings.Contains(err.Error(), "did not land") {
+			t.Errorf("error = %v, want mention of 'did not land'", err)
+		}
+	})
+
+	t.Run("empty merge commit → error", func(t *testing.T) {
+		f := &fakeAncestryOps{isAncestor: true}
+		if err := verifyMergeCommitLanded(f, "  ", "main"); err == nil {
+			t.Fatal("verifyMergeCommitLanded() = nil, want error for empty merge_commit")
+		}
+		if f.fetchedRemote != "" {
+			t.Error("should not fetch when merge_commit is empty")
+		}
+	})
+
+	t.Run("empty target → error", func(t *testing.T) {
+		f := &fakeAncestryOps{isAncestor: true}
+		if err := verifyMergeCommitLanded(f, "abc123", ""); err == nil {
+			t.Fatal("verifyMergeCommitLanded() = nil, want error for empty target")
+		}
+	})
+
+	t.Run("fetch failure → error (fail closed)", func(t *testing.T) {
+		f := &fakeAncestryOps{fetchErr: errors.New("network down"), isAncestor: true}
+		if err := verifyMergeCommitLanded(f, "abc123", "main"); err == nil {
+			t.Fatal("verifyMergeCommitLanded() = nil, want error when fetch fails")
+		}
+	})
+
+	t.Run("ancestry lookup error → error (fail closed)", func(t *testing.T) {
+		f := &fakeAncestryOps{ancestorErr: errors.New("bad object")}
+		if err := verifyMergeCommitLanded(f, "abc123", "main"); err == nil {
+			t.Fatal("verifyMergeCommitLanded() = nil, want error when ancestry lookup fails")
+		}
+	})
+
+	t.Run("nil git ops → error", func(t *testing.T) {
+		if err := verifyMergeCommitLanded(nil, "abc123", "main"); err == nil {
+			t.Fatal("verifyMergeCommitLanded(nil) = nil, want error")
+		}
+	})
+}
+
+// TestManager_PostMerge_RefusesCloseWhenMergeNotLanded is the integration-level
+// regression test for gu-ilf86: PostMerge must NOT close the MR or source bead
+// when the merge commit never landed on origin/<target>.
+func TestManager_PostMerge_RefusesCloseWhenMergeNotLanded(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{
+		Title:  "Implement feature Z",
+		Labels: []string{"gt:task"},
+	})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	mrDesc := "branch: polecat/test/gt-zzz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nmerge_commit: deadbeef"
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature Z",
+		Labels:      []string{"gt:merge-request"},
+		Description: mrDesc,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	// Simulate a merge that did NOT land on origin/main.
+	mgr.verifyMergeLanded = func(*MergeRequest) error {
+		return errors.New("merge commit deadbeef is not on origin/main — merge did not land")
+	}
+
+	_, err = mgr.PostMerge(mrIssue.ID)
+	if err == nil {
+		t.Fatal("PostMerge() = nil error, want refusal when merge did not land")
+	}
+
+	// The MR bead must remain OPEN.
+	gotMR, showErr := b.Show(mrIssue.ID)
+	if showErr != nil {
+		t.Fatalf("show MR issue: %v", showErr)
+	}
+	if beads.IssueStatus(gotMR.Status).IsTerminal() {
+		t.Errorf("MR bead closed despite unlanded merge; status=%q", gotMR.Status)
+	}
+	// The source issue must remain OPEN.
+	gotSrc, showErr := b.Show(srcIssue.ID)
+	if showErr != nil {
+		t.Fatalf("show source issue: %v", showErr)
+	}
+	if beads.IssueStatus(gotSrc.Status).IsTerminal() {
+		t.Errorf("source issue closed despite unlanded merge; status=%q", gotSrc.Status)
+	}
+}
+
+// TestManager_PostMerge_AlreadyClosedMR_SkipsVerification confirms the
+// idempotent recovery path (gu-3f02d) is not blocked by the gu-ilf86 guard:
+// an already-closed MR is past the verification point, so PostMerge must still
+// complete the leftover source-issue close even with a failing verifier.
+func TestManager_PostMerge_AlreadyClosedMR_SkipsVerification(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{
+		Title:  "Implement feature W",
+		Labels: []string{"gt:task"},
+	})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	mrDesc := "branch: polecat/test/gt-www\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main"
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature W",
+		Labels:      []string{"gt:merge-request"},
+		Description: mrDesc,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	// MR already closed by a prior partial run.
+	if err := b.Close(mrIssue.ID); err != nil {
+		t.Fatalf("close MR issue: %v", err)
+	}
+
+	// A failing verifier must NOT be consulted on the already-closed path.
+	mgr.verifyMergeLanded = func(*MergeRequest) error {
+		t.Fatal("verifyMergeLanded must not be called for an already-closed MR")
+		return nil
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() on already-closed MR error = %v, want nil", err)
+	}
+	if !result.SourceIssueClosed {
+		t.Error("PostMerge() SourceIssueClosed = false, want true (idempotent recovery)")
 	}
 }
 

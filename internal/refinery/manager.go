@@ -41,6 +41,14 @@ type Manager struct {
 	rig     *rig.Rig
 	workDir string
 	output  io.Writer // Output destination for user-facing messages
+
+	// verifyMergeLanded confirms an MR's merge commit is actually present on
+	// origin/<target> before PostMerge closes the MR + source beads. It guards
+	// against silent merge-loss (gu-ilf86): if the merge step no-ops or errors
+	// but the polecat branch push already succeeded, the commit lives only on
+	// the polecat branch — closing the beads anyway strands it off mainline.
+	// Injectable for testing; defaults to defaultVerifyMergeLanded.
+	verifyMergeLanded func(mr *MergeRequest) error
 }
 
 type scoredIssue struct {
@@ -50,11 +58,13 @@ type scoredIssue struct {
 
 // NewManager creates a new refinery manager for a rig.
 func NewManager(r *rig.Rig) *Manager {
-	return &Manager{
+	m := &Manager{
 		rig:     r,
 		workDir: r.Path,
 		output:  os.Stdout,
 	}
+	m.verifyMergeLanded = m.defaultVerifyMergeLanded
+	return m
 }
 
 // SetOutput sets the output writer for user-facing messages.
@@ -710,6 +720,19 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 		_, _ = fmt.Fprintf(m.output, "  %s MR already closed\n", style.Dim.Render("—"))
 		result.MRClosed = true
 	} else {
+		// Guard against silent merge-loss (gu-ilf86): refuse to close the MR
+		// and source beads unless mr.MergeCommit is actually an ancestor of
+		// origin/<target>. The merge step can no-op or error while the polecat
+		// branch push already succeeded, leaving the commit only on the polecat
+		// branch — closing the beads then strands it off mainline forever.
+		// Fail-closed: an MR left open is recoverable by a retry; a lost merge
+		// is not. Only verify on the active-close path; an already-closed MR
+		// (idempotent gu-3f02d recovery) is past this point.
+		if m.verifyMergeLanded != nil {
+			if err := m.verifyMergeLanded(mr); err != nil {
+				return result, fmt.Errorf("refusing to close MR %s: %w", mr.ID, err)
+			}
+		}
 		if err := b.CloseWithReason("merged", mr.ID); err != nil {
 			return result, fmt.Errorf("closing MR bead: %w", err)
 		}
@@ -764,6 +787,62 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 	}
 
 	return result, nil
+}
+
+// gitAncestryOps is the subset of *git.Git used to verify a merge commit
+// actually landed on the target branch. Kept narrow so tests can inject a
+// fake without a real repository (mirrors gitForkSyncOps in fork_sync.go).
+type gitAncestryOps interface {
+	FetchBranch(remote, branch string) error
+	IsAncestor(ancestor, descendant string) (bool, error)
+}
+
+// defaultVerifyMergeLanded is the production implementation of
+// Manager.verifyMergeLanded. It opens the refinery's git worktree and delegates
+// to verifyMergeCommitLanded.
+func (m *Manager) defaultVerifyMergeLanded(mr *MergeRequest) error {
+	gitDir := filepath.Join(m.rig.Path, "refinery", "rig")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		gitDir = filepath.Join(m.rig.Path, "mayor", "rig")
+	}
+	g := git.NewGit(gitDir)
+	return verifyMergeCommitLanded(g, mr.MergeCommit, mr.TargetBranch)
+}
+
+// verifyMergeCommitLanded returns nil only when mergeCommit is non-empty and is
+// an ancestor of origin/<target> (i.e. the merge genuinely landed on mainline).
+// It fetches origin/<target> first so the local view isn't stale. Any failure —
+// empty commit, fetch error, ancestry lookup error, or "not an ancestor" — is
+// returned as an error so the caller fails closed and leaves the beads open
+// rather than silently losing the merge (gu-ilf86).
+func verifyMergeCommitLanded(g gitAncestryOps, mergeCommit, target string) error {
+	if g == nil {
+		return fmt.Errorf("nil git ops")
+	}
+	commit := strings.TrimSpace(mergeCommit)
+	if commit == "" {
+		return fmt.Errorf("merge_commit not recorded — cannot verify merge landed on origin/%s", target)
+	}
+	if strings.TrimSpace(target) == "" {
+		return fmt.Errorf("empty target branch — cannot verify merge landed")
+	}
+
+	// Refresh the remote-tracking ref so the ancestry check sees the current
+	// origin tip, not a stale snapshot. A fetch failure is fatal: we cannot
+	// confirm the commit landed, so we must not close the beads.
+	if err := g.FetchBranch("origin", target); err != nil {
+		return fmt.Errorf("fetching origin/%s to verify merge: %w", target, err)
+	}
+
+	remoteRef := "origin/" + target
+	landed, err := g.IsAncestor(commit, remoteRef)
+	if err != nil {
+		return fmt.Errorf("checking whether %s landed on %s: %w", commit, remoteRef, err)
+	}
+	if !landed {
+		return fmt.Errorf("merge commit %s is not on %s — merge did not land (possible silent merge-loss)", commit, remoteRef)
+	}
+	return nil
 }
 
 // stripMRIssueTimestampSuffix removes a trailing "--<timestamp>" or
