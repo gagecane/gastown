@@ -270,6 +270,69 @@ func (r *Recorder) CooldownSatisfied(pluginName, cooldown, grace string) (bool, 
 	return cooldownSatisfied(runs, time.Now(), graceDur), nil
 }
 
+// CronDue reports whether a plugin's cron gate is due to dispatch now. It is
+// the cron analog of CooldownSatisfied (which returns "should suppress");
+// CronDue returns "should dispatch", so callers `continue` when it is false.
+//
+// A cron gate is due when a scheduled fire has elapsed that has not yet been
+// serviced by a TERMINAL run, with the same in-flight anti-storm guard the
+// cooldown gate uses: an "inflight" dispatch record within the grace window
+// suppresses re-dispatch (so a freshly-dispatched plugin is not stormed), but
+// after grace elapses with no terminal record the gate re-opens (gu-50nbo).
+//
+// grace is derived from the plugin's execution timeout (see Plugin.DispatchGrace).
+func (r *Recorder) CronDue(pluginName, schedule, grace string) (bool, error) {
+	sched, err := parseCron(schedule)
+	if err != nil {
+		return false, fmt.Errorf("parsing cron schedule %q: %w", schedule, err)
+	}
+	graceDur, err := time.ParseDuration(grace)
+	if err != nil {
+		return false, fmt.Errorf("parsing grace duration %q: %w", grace, err)
+	}
+	now := time.Now()
+	prevFire := sched.Prev(now)
+	if prevFire.IsZero() {
+		// Impossible schedule (e.g. Feb 30) — never fires.
+		return false, nil
+	}
+	// Query a window that comfortably covers the most recent scheduled fire
+	// plus the in-flight grace, so both the terminal-run and the in-flight
+	// checks below see the records they need even for infrequent schedules.
+	window := now.Sub(prevFire) + graceDur + time.Minute
+	runs, err := r.GetRunsSince(pluginName, window.String())
+	if err != nil {
+		return false, err
+	}
+	return cronDue(sched, runs, now, graceDur), nil
+}
+
+// cronDue is the pure decision core of CronDue, split out for unit testing
+// without a live beads store. `runs` are the plugin-run beads within the query
+// window; `now` is the evaluation time and `grace` the in-flight grace window.
+func cronDue(sched *cronSchedule, runs []*PluginRunBead, now time.Time, grace time.Duration) bool {
+	prevFire := sched.Prev(now)
+	if prevFire.IsZero() {
+		return false
+	}
+	graceCutoff := now.Add(-grace)
+	for _, run := range runs {
+		if run.Result != ResultInflight {
+			// A terminal run at or after the most recent scheduled fire means
+			// this fire has already been serviced — not due.
+			if !run.CreatedAt.Before(prevFire) {
+				return false
+			}
+			continue
+		}
+		// In-flight dispatch within grace suppresses a re-dispatch storm.
+		if run.CreatedAt.After(graceCutoff) {
+			return false
+		}
+	}
+	return true
+}
+
 // cooldownSatisfied is the pure decision core of CooldownSatisfied, split out
 // for unit testing without a live beads store. `runs` are the plugin-run beads
 // within the cooldown window; `now` and `grace` define the dispatch-record

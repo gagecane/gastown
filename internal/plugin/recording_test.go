@@ -215,6 +215,86 @@ func TestDispatchGrace(t *testing.T) {
 	}
 }
 
+func TestCronDue(t *testing.T) {
+	t.Parallel()
+	// Schedule fires daily at 12:00. Evaluate at 13:00 the same day, so the
+	// most recent scheduled fire is today 12:00.
+	sched, err := parseCron("0 12 * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)
+	prevFire := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	grace := 5 * time.Minute
+
+	mk := func(result RunResult, at time.Time) *PluginRunBead {
+		return &PluginRunBead{Result: result, CreatedAt: at}
+	}
+
+	cases := []struct {
+		name string
+		runs []*PluginRunBead
+		want bool
+	}{
+		{
+			name: "no runs -> due",
+			runs: nil,
+			want: true,
+		},
+		{
+			name: "terminal run after this fire -> already serviced, not due",
+			runs: []*PluginRunBead{mk(ResultSuccess, prevFire.Add(10*time.Minute))},
+			want: false,
+		},
+		{
+			name: "terminal run exactly at fire -> serviced, not due",
+			runs: []*PluginRunBead{mk(ResultSuccess, prevFire)},
+			want: false,
+		},
+		{
+			name: "terminal run before this fire (yesterday) -> due",
+			runs: []*PluginRunBead{mk(ResultSuccess, prevFire.Add(-24*time.Hour))},
+			want: true,
+		},
+		{
+			name: "fresh inflight within grace -> suppressed, not due",
+			runs: []*PluginRunBead{mk(ResultInflight, now.Add(-2*time.Minute))},
+			want: false,
+		},
+		{
+			name: "stale inflight past grace -> gate re-opens, due",
+			runs: []*PluginRunBead{mk(ResultInflight, now.Add(-10*time.Minute))},
+			want: true,
+		},
+		{
+			name: "stale inflight + terminal completion after fire -> serviced, not due",
+			runs: []*PluginRunBead{mk(ResultInflight, now.Add(-10*time.Minute)), mk(ResultSuccess, prevFire.Add(time.Minute))},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cronDue(sched, tc.runs, now, grace)
+			if got != tc.want {
+				t.Errorf("cronDue() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCronDue_ImpossibleSchedule(t *testing.T) {
+	t.Parallel()
+	sched, err := parseCron("0 0 30 2 *") // Feb 30 never occurs
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)
+	if cronDue(sched, nil, now, 5*time.Minute) {
+		t.Error("cronDue for an impossible schedule should never be due")
+	}
+}
+
 // Integration tests for RecordRun, GetLastRun, GetRunsSince require
 // a working beads installation and are skipped in unit tests.
 // These functions shell out to `bd` commands.

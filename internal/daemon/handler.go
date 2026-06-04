@@ -308,17 +308,22 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 	recorder := plugin.NewRecorder(d.config.TownRoot)
 	router := mail.NewRouterWithTownRoot(d.config.TownRoot, d.config.TownRoot)
 
-	// Pre-pass (bounded-parallel): evaluate each plugin's cooldown gate. The gate
-	// check is a read-only `bd list` per plugin (one ~0.85s cold-start each), and
-	// running it serially per plugin dominated handleDogs latency (~60s, gu-10nch).
-	// Because the checks are side-effect-free we fan them out behind a semaphore
-	// (same pattern as gu-el5bx/gu-1h3ur) so even under contention they cannot
-	// storm the single shared Dolt server. Dispatch itself — dog claim, mail,
-	// tmux start, record — stays strictly SERIAL below so two plugins can never
-	// double-claim the same idle dog.
+	// Pre-pass (bounded-parallel): evaluate each plugin's cooldown/cron gate. The
+	// gate check is a read-only `bd list` per plugin (one ~0.85s cold-start each),
+	// and running it serially per plugin dominated handleDogs latency (~60s,
+	// gu-10nch). Because the checks are side-effect-free we fan them out behind a
+	// semaphore (same pattern as gu-el5bx/gu-1h3ur) so even under contention they
+	// cannot storm the single shared Dolt server. Dispatch itself — dog claim,
+	// mail, tmux start, record — stays strictly SERIAL below so two plugins can
+	// never double-claim the same idle dog.
 	eligible := d.filterDispatchablePlugins(plugins, recorder)
 
 	for _, p := range eligible {
+		// The trigger label recorded on the dispatch audit event, distinguishing
+		// the gate path (cooldown vs cron). filterDispatchablePlugins only returns
+		// plugins with a non-nil cooldown or cron gate, so p.Gate is safe here.
+		trigger := string(p.Gate.Type)
+
 		// Find an idle dog that doesn't already have a live tmux session.
 		// A leaked session (dog marked idle before its tmux terminated) would
 		// cause sm.Start to fail with "session already running", and since
@@ -384,7 +389,7 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 				p.Name,
 				p.RigName,
 				fmt.Sprintf("deacon/dogs/%s", idleDog.Name),
-				"cooldown",
+				trigger,
 			),
 		)
 
@@ -428,18 +433,18 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 }
 
 // filterDispatchablePlugins returns, in the input order, the plugins whose
-// cooldown gate is currently OPEN (eligible for dispatch). Manual-gate and
-// non-cooldown plugins are dropped. The per-plugin cooldown check is a
-// read-only `bd list` (one ~0.85s cold-start each); evaluating them serially
-// dominated handleDogs latency (~60s, gu-10nch), so the checks are fanned out
-// behind a semaphore (same pattern as gu-el5bx/gu-1h3ur). The checks have no
-// side effects, so concurrency is safe here; the caller dispatches serially.
+// cooldown or cron gate is currently OPEN (eligible for dispatch). Manual-gate
+// and gateless plugins are dropped. The per-plugin gate check is a read-only
+// `bd list` (one ~0.85s cold-start each); evaluating them serially dominated
+// handleDogs latency (~60s, gu-10nch), so the checks are fanned out behind a
+// semaphore (same pattern as gu-el5bx/gu-1h3ur). The checks have no side
+// effects, so concurrency is safe here; the caller dispatches serially.
 //
 // A plugin whose gate check errors is conservatively skipped (logged), matching
 // the prior serial behavior.
 func (d *Daemon) filterDispatchablePlugins(plugins []*plugin.Plugin, recorder *plugin.Recorder) []*plugin.Plugin {
-	// candidates keeps only auto-dispatchable cooldown plugins, preserving the
-	// discovery order so dispatch remains deterministic.
+	// candidates keeps only auto-dispatchable cooldown/cron plugins, preserving
+	// the discovery order so dispatch remains deterministic.
 	candidates := make([]*plugin.Plugin, 0, len(plugins))
 	for _, p := range plugins {
 		// Never auto-dispatch manual-gate plugins — they require an explicit trigger.
@@ -447,8 +452,8 @@ func (d *Daemon) filterDispatchablePlugins(plugins []*plugin.Plugin, recorder *p
 			d.logger.Printf("Handler: skipping plugin %s (gate=manual, requires explicit trigger)", p.Name)
 			continue
 		}
-		// Only dispatch plugins with cooldown gates.
-		if p.Gate == nil || p.Gate.Type != plugin.GateCooldown {
+		// Only dispatch plugins with cooldown or cron gates.
+		if p.Gate == nil || (p.Gate.Type != plugin.GateCooldown && p.Gate.Type != plugin.GateCron) {
 			continue
 		}
 		candidates = append(candidates, p)
@@ -460,9 +465,15 @@ func (d *Daemon) filterDispatchablePlugins(plugins []*plugin.Plugin, recorder *p
 	sem := make(chan struct{}, dogDispatchGateConcurrency())
 	var wg sync.WaitGroup
 	for i, p := range candidates {
-		// A plugin with no cooldown duration is always eligible (no gate query).
-		if p.Gate.Duration == "" {
+		// A cooldown plugin with no duration is always eligible (no gate query).
+		if p.Gate.Type == plugin.GateCooldown && p.Gate.Duration == "" {
 			open[i] = true
+			continue
+		}
+		// A cron plugin with no schedule can never fire — skip it (open stays false)
+		// without spawning a query goroutine.
+		if p.Gate.Type == plugin.GateCron && p.Gate.Schedule == "" {
+			d.logger.Printf("Handler: skipping cron-gate plugin %s (empty schedule)", p.Name)
 			continue
 		}
 		wg.Add(1)
@@ -471,19 +482,35 @@ func (d *Daemon) filterDispatchablePlugins(plugins []*plugin.Plugin, recorder *p
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
-			// record (dog handed work but not yet executed) only suppresses
-			// re-dispatch within an in-flight grace window — after that the gate
-			// re-opens so a silently-dead dog can't re-arm the full cooldown and
-			// drift backups unbounded (gu-50nbo).
-			cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
-			grace := p.DispatchGrace(cooldownDur)
-			satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
-			if err != nil {
-				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
-				return // conservatively skip (open[i] stays false)
+			switch p.Gate.Type {
+			case plugin.GateCron:
+				// Evaluate cron: dispatch only when a scheduled fire has elapsed
+				// that no terminal run has serviced yet. The same in-flight grace
+				// guard as cooldown prevents the heartbeat from storming a
+				// freshly-dispatched plugin (gu-50nbo).
+				grace := p.DispatchGrace(0)
+				due, err := recorder.CronDue(p.Name, p.Gate.Schedule, grace.String())
+				if err != nil {
+					d.logger.Printf("Handler: error checking cron schedule for plugin %s: %v", p.Name, err)
+					return // conservatively skip (open[i] stays false)
+				}
+				open[i] = due // gate open only when a scheduled fire is due
+
+			default: // plugin.GateCooldown
+				// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
+				// record (dog handed work but not yet executed) only suppresses
+				// re-dispatch within an in-flight grace window — after that the gate
+				// re-opens so a silently-dead dog can't re-arm the full cooldown and
+				// drift backups unbounded (gu-50nbo).
+				cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
+				grace := p.DispatchGrace(cooldownDur)
+				satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
+				if err != nil {
+					d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
+					return // conservatively skip (open[i] stays false)
+				}
+				open[i] = !satisfied // gate open only when NOT still in cooldown/in-flight
 			}
-			open[i] = !satisfied // gate open only when NOT still in cooldown/in-flight
 		}(i, p)
 	}
 	wg.Wait()
