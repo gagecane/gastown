@@ -299,23 +299,40 @@ func TestDoneCircularRedirectProtection(t *testing.T) {
 // This is critical because branch names like "polecat/furiosa-mkb0vq9f" don't
 // contain the actual issue ID (test-845.1), but the status query finds it.
 func TestFindHookedBeadForAgent(t *testing.T) {
-	// Skip: bd CLI 0.47.2 has a bug where database writes don't commit
-	// ("sql: database is closed" during auto-flush). This blocks tests
-	// that need to create issues. See internal issue for tracking.
-	t.Skip("bd CLI 0.47.2 bug: database writes don't commit")
-
+	// Each subtest gets its own isolated, container-backed beads DB so writes
+	// land in (and reads come from) a throwaway Dolt database, never the host
+	// workspace's production server. (The historical bd-0.47.2 auto-flush bug
+	// that previously blocked this test is fixed in bd >= 1.0.)
 	tests := []struct {
-		name        string
-		agentID     string
-		setupBeads  func(t *testing.T, bd *beads.Beads) // setup hooked bead
-		wantIssueID string
+		name string
+		// agentID is the agent we query hooked work for.
+		agentID string
+		// hookAssignee, when non-empty, creates a bead and hooks it to this
+		// assignee. The created bead's ID then becomes the expected result.
+		hookAssignee string
 	}{
 		{
-			name:    "hooked bead assigned to agent returns issue ID",
-			agentID: "testrig/polecats/furiosa",
-			setupBeads: func(t *testing.T, bd *beads.Beads) {
-				// Create a task and set it to hooked with assignee
-				_, err := bd.CreateWithID("test-456", beads.CreateOptions{
+			name:         "hooked bead assigned to agent returns issue ID",
+			agentID:      "testrig/polecats/furiosa",
+			hookAssignee: "testrig/polecats/furiosa",
+		},
+		{
+			name:    "no hooked beads returns empty",
+			agentID: "testrig/polecats/idle",
+		},
+		{
+			name:    "empty agent ID returns empty",
+			agentID: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, bd := setupPatrolTestDB(t)
+
+			var wantIssueID string
+			if tt.hookAssignee != "" {
+				issue, err := bd.Create(beads.CreateOptions{
 					Title:  "Task to be hooked",
 					Labels: []string{"gt:task"},
 				})
@@ -323,50 +340,18 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 					t.Fatalf("create task bead: %v", err)
 				}
 				hookedStatus := beads.StatusHooked
-				assignee := "testrig/polecats/furiosa"
-				if err := bd.Update("test-456", beads.UpdateOptions{
+				if err := bd.Update(issue.ID, beads.UpdateOptions{
 					Status:   &hookedStatus,
-					Assignee: &assignee,
+					Assignee: &tt.hookAssignee,
 				}); err != nil {
 					t.Fatalf("update bead to hooked: %v", err)
 				}
-			},
-			wantIssueID: "test-456",
-		},
-		{
-			name:        "no hooked beads returns empty",
-			agentID:     "testrig/polecats/idle",
-			setupBeads:  func(t *testing.T, bd *beads.Beads) {},
-			wantIssueID: "",
-		},
-		{
-			name:        "empty agent ID returns empty",
-			agentID:     "",
-			setupBeads:  func(t *testing.T, bd *beads.Beads) {},
-			wantIssueID: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-
-			// Initialize the beads database
-			cmd := exec.Command("bd", "init", "--prefix", "test", "--quiet")
-			cmd.Dir = tmpDir
-			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("bd init: %v\n%s", err, output)
+				wantIssueID = issue.ID
 			}
 
-			// beads.New expects the .beads directory path
-			beadsDir := filepath.Join(tmpDir, ".beads")
-			bd := beads.New(beadsDir)
-
-			tt.setupBeads(t, bd)
-
 			got := findHookedBeadForAgent(bd, tt.agentID)
-			if got != tt.wantIssueID {
-				t.Errorf("findHookedBeadForAgent(%q) = %q, want %q", tt.agentID, got, tt.wantIssueID)
+			if got != wantIssueID {
+				t.Errorf("findHookedBeadForAgent(%q) = %q, want %q", tt.agentID, got, wantIssueID)
 			}
 		})
 	}

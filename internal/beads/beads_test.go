@@ -3637,8 +3637,6 @@ func TestSetupRedirect(t *testing.T) {
 // with agent_state="nuked", avoiding the close/reopen cycle
 // that fails on Dolt backends.
 func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
-	t.Skip("bd CLI 0.47.2 bug: database writes don't commit")
-
 	tmpDir := t.TempDir()
 	bd := NewIsolated(tmpDir)
 	if err := bd.Init("test"); err != nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // captureStdout redirects os.Stdout to a pipe, calls fn, then returns whatever
@@ -375,35 +376,18 @@ func TestDetectSessionState(t *testing.T) {
 	})
 
 	t.Run("autonomous_state_hooked_bead", func(t *testing.T) {
-		// Skip: bd CLI 0.47.2 has a bug where database writes don't commit
-		// ("sql: database is closed" during auto-flush). This blocks tests
-		// that need to create issues. See internal issue for tracking.
-		t.Skip("bd CLI 0.47.2 bug: database writes don't commit")
-
-		// Skip if bd CLI is not available
-		if _, err := exec.LookPath("bd"); err != nil {
-			t.Skip("bd binary not found in PATH")
-		}
-
-		workDir := t.TempDir()
+		// Isolated, container-backed beads DB: the hooked bead is written to a
+		// throwaway Dolt database, never the host workspace's production server.
+		// (The historical bd-0.47.2 auto-flush bug that previously blocked this
+		// test is fixed in bd >= 1.0.)
+		workDir, b := setupPatrolTestDB(t)
 		townRoot := workDir
 
-		// Initialize beads database
-		initCmd := exec.Command("bd", "init", "--prefix=bd-")
-		initCmd.Dir = workDir
-		if output, err := initCmd.CombinedOutput(); err != nil {
-			t.Fatalf("bd init failed: %v\n%s", err, output)
-		}
-
-		// Write routes file
-		beadsDir := filepath.Join(workDir, ".beads")
-		routes := []beads.Route{{Prefix: "bd-", Path: "."}}
-		if err := beads.WriteRoutes(beadsDir, routes); err != nil {
-			t.Fatalf("write routes: %v", err)
-		}
+		// detectSessionState constructs its own (non-isolated) beads wrappers
+		// from ctx.WorkDir; point them at the same throwaway container DB.
+		t.Setenv("GT_DOLT_PORT", testutil.DoltContainerPort())
 
 		// Create a hooked bead assigned to beads/polecats/jade
-		b := beads.New(workDir)
 		issue, err := b.Create(beads.CreateOptions{
 			Title:    "Test hooked bead",
 			Priority: 2,
