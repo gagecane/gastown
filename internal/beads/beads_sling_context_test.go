@@ -1,10 +1,73 @@
 package beads
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
+
+// installCloseStubBD writes a fake `bd` onto PATH whose `close` subcommand
+// exits non-zero with the given stderr text, so CloseSlingContext's error
+// handling can be exercised without a real bead DB. Any other subcommand
+// succeeds with empty output.
+func installCloseStubBD(t *testing.T, closeStderr string, closeExit int) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"cmd=\"\"\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in --*) ;; *) cmd=\"$arg\"; break ;; esac\n" +
+		"done\n" +
+		"if [ \"$cmd\" = \"close\" ]; then\n" +
+		"  printf '%s\\n' '" + closeStderr + "' >&2\n" +
+		"  exit " + strconv.Itoa(closeExit) + "\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write stub bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestCloseSlingContext_NotFoundIsIdempotent verifies that a context which is
+// already gone ("issue not found") is treated as already-closed success, so
+// the dispatch path does not emit a spurious double-dispatch escalation
+// (gu-1pcst).
+func TestCloseSlingContext_NotFoundIsIdempotent(t *testing.T) {
+	installCloseStubBD(t, "issue not found: gt-wisp-x", 1)
+	b := New(t.TempDir())
+	if err := b.CloseSlingContext("gt-wisp-x", "dispatched"); err != nil {
+		t.Errorf("CloseSlingContext on a gone context should be nil, got: %v", err)
+	}
+}
+
+// TestCloseSlingContext_AlreadyClosedIsIdempotent preserves the pre-existing
+// idempotency contract for the "already closed" path.
+func TestCloseSlingContext_AlreadyClosedIsIdempotent(t *testing.T) {
+	installCloseStubBD(t, "error: issue gt-wisp-y is already closed", 1)
+	b := New(t.TempDir())
+	if err := b.CloseSlingContext("gt-wisp-y", "dispatched"); err != nil {
+		t.Errorf("CloseSlingContext on an already-closed context should be nil, got: %v", err)
+	}
+}
+
+// TestCloseSlingContext_OtherErrorPropagates ensures genuine failures (not
+// "gone" or "already closed") are still surfaced so real problems aren't
+// silently swallowed.
+func TestCloseSlingContext_OtherErrorPropagates(t *testing.T) {
+	installCloseStubBD(t, "error: database connection refused", 1)
+	b := New(t.TempDir())
+	if err := b.CloseSlingContext("gt-wisp-z", "dispatched"); err == nil {
+		t.Error("CloseSlingContext should propagate a genuine close failure, got nil")
+	}
+}
 
 func TestFormatParseSlingContextRoundTrip(t *testing.T) {
 	original := &capacity.SlingContextFields{

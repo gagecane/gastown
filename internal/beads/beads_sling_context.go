@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -118,11 +119,20 @@ func (b *Beads) ListOpenSlingContexts() ([]*Issue, error) {
 }
 
 // CloseSlingContext closes a sling context bead with a reason.
-// Idempotent: suppresses "already closed" errors so retries are safe.
+// Idempotent: a context that is already closed — or already gone entirely —
+// is in the desired state, so both "already closed" and "issue not found"
+// (ErrNotFound, e.g. the wisp was TTL-reaped out from under us) are treated
+// as success. This keeps the dispatch path from emitting a spurious
+// "double-dispatch risk" escalation when the only thing that failed was a
+// redundant close of an already-consumed context (gu-1pcst). The real
+// double-dispatch guard is the work bead's HOOKED status, not this close.
 func (b *Beads) CloseSlingContext(contextID, reason string) error {
 	_, err := b.run("close", contextID, "--reason="+reason)
-	if err != nil && strings.Contains(err.Error(), "already closed") {
-		return nil // Idempotent — already in desired state
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrNotFound) || strings.Contains(err.Error(), "already closed") {
+		return nil // Idempotent — already in desired state (closed or gone)
 	}
 	return err
 }
