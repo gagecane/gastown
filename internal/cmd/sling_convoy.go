@@ -192,6 +192,7 @@ func effectiveBaseBranch(beadID, explicit string) string {
 	if explicit != "" || beadID == "" {
 		return explicit
 	}
+	townRoot, rootErr := workspace.FindFromCwd()
 	// Primary: the base branch the bead records in its OWN attachment fields,
 	// stamped at the first dispatch (sling_dispatch.go). This is the reliable
 	// source on RE-dispatch — the DEFERRED / convoy-feed re-sling path (gs-o5f
@@ -199,18 +200,95 @@ func effectiveBaseBranch(beadID, explicit string) string {
 	// on can silently return "" and drop the bead onto the rig default base
 	// instead of its relay base (gs-n6h). Mirrors the primary/fallback convoy
 	// lookup order gt done already uses (done.go, gt-7b6wf).
-	if townRoot, err := workspace.FindFromCwd(); err == nil {
+	if rootErr == nil {
 		if bb := beadStampedBaseBranch(beadID, townRoot); bb != "" {
 			return bb
 		}
 	}
 	// Fallback: the tracking convoy's named base (first dispatch, before the bead
 	// carries its own base_branch).
-	info := getConvoyInfoForIssue(beadID)
-	if info == nil || info.BaseBranch == "" {
-		return explicit
+	if info := getConvoyInfoForIssue(beadID); info != nil && info.BaseBranch != "" {
+		return info.BaseBranch
 	}
-	return info.BaseBranch
+	// Inherited: a relay-epic SLICE is created with base_branch=<rig default>
+	// (epic-slicing / mol-idea-to-plan stamps the rig default, not the epic's
+	// relay base — gs-w7k), and on its FIRST auto-dispatch it is not yet tracked
+	// by the relay convoy, so neither its own stamped base nor its own convoy
+	// yields the relay base. gs-n6h only recovered the relay base on RE-dispatch
+	// (once the bead carries it). Walk up to the parent epic and inherit ITS
+	// relay base so the very FIRST dispatch cuts from the named branch instead of
+	// misrouting onto the rig default. No-op for non-relay beads (no ancestor
+	// carries a relay base).
+	if rootErr == nil {
+		if bb := resolveRelayBaseFromAncestors(beadID, maxRelayInheritHops, func(id string) (string, string) {
+			return beadParentAndRelayBase(id, townRoot)
+		}); bb != "" {
+			return bb
+		}
+	}
+	return explicit
+}
+
+// maxRelayInheritHops bounds the parent-epic walk in resolveRelayBaseFromAncestors
+// so a malformed parent cycle can never spin the dispatcher. Relay slices sit one
+// level under their epic; a handful of hops covers nested epics with margin.
+const maxRelayInheritHops = 8
+
+// resolveRelayBaseFromAncestors walks beadID's parent chain and returns the first
+// ancestor's relay base, or "" when no ancestor carries one. lookup(id) returns
+// (parent, relayBase) for a bead; relayBase is "" when the bead records only the
+// rig default and has no relay convoy. The walk is bounded by maxHops and skips
+// already-seen IDs so a cycle terminates. Pure (lookup is injected) for testing.
+func resolveRelayBaseFromAncestors(beadID string, maxHops int, lookup func(id string) (parent, relayBase string)) string {
+	type rec struct{ parent, base string }
+	cache := map[string]rec{}
+	get := func(id string) rec {
+		if r, ok := cache[id]; ok {
+			return r
+		}
+		p, b := lookup(id)
+		r := rec{parent: p, base: b}
+		cache[id] = r
+		return r
+	}
+	seen := map[string]bool{beadID: true}
+	cur := beadID
+	for hops := 0; hops < maxHops; hops++ {
+		parent := get(cur).parent
+		if parent == "" || seen[parent] {
+			return ""
+		}
+		seen[parent] = true
+		if base := get(parent).base; base != "" {
+			return base
+		}
+		cur = parent
+	}
+	return ""
+}
+
+// beadParentAndRelayBase reads beadID and returns its parent ID and the relay base
+// it contributes to inheritance: its own stamped base_branch when that differs
+// from the rig default, else its tracking convoy's named base, else "". Mirrors
+// the stamped/convoy resolution effectiveBaseBranch applies to the dispatched bead
+// itself, so an ancestor's relay base is recovered however it was recorded.
+func beadParentAndRelayBase(beadID, townRoot string) (parent string, relayBase string) {
+	beadsDir := beads.ResolveBeadsDirForID(filepath.Join(townRoot, ".beads"), beadID)
+	bd := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	issue, err := bd.Show(beadID)
+	if err != nil || issue == nil {
+		return "", ""
+	}
+	parent = issue.Parent
+	if af := beads.ParseAttachmentFields(issue); af != nil {
+		if bb := extractFormulaVar(af.FormulaVars, "base_branch"); bb != "" && bb != rigDefaultBranchForBead(townRoot, beadID) {
+			return parent, bb
+		}
+	}
+	if info := getConvoyInfoForIssue(beadID); info != nil && info.BaseBranch != "" {
+		relayBase = info.BaseBranch
+	}
+	return parent, relayBase
 }
 
 // beadStampedBaseBranch returns the relay base branch a bead records in its own
