@@ -38,6 +38,21 @@ type CurioConfig struct {
 	// observed on the live curio_shadow_page ledger. Mirrors the candidates-only
 	// discipline that kept Phase 1 safe.
 	PageForReal bool `json:"page_for_real,omitempty"`
+
+	// LLM gates the OFFLINE Retrospect/LLM lane (the curio-proposer binary),
+	// which is a SEPARATE switch from Enabled (the live Patrol). Keeping them
+	// independent is the kill-switch isolation invariant: curio.llm.enabled=false
+	// disables Retrospect without touching Patrol, and vice-versa. The live
+	// daemon does not run the LLM lane (it is a standalone binary), so this knob
+	// is declarative here and consumed by cmd/curio-proposer.
+	LLM *CurioLLMConfig `json:"llm,omitempty"`
+}
+
+// CurioLLMConfig holds the Retrospect/LLM lane kill switch.
+type CurioLLMConfig struct {
+	// Enabled controls whether the curio-proposer (Retrospect) lane runs.
+	// Default false: the LLM lane is opt-in, independent of the live Patrol.
+	Enabled bool `json:"enabled"`
 }
 
 // curioInterval returns the configured interval, or the default (15m).
