@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -273,6 +274,62 @@ func TestReconcileOrphanMolecules_Orchestration(t *testing.T) {
 	// Re-enqueue: burned with the open work bead as the base.
 	if burns[1].baseBead != "gu-open" || len(burns[1].molecules) != 1 || burns[1].molecules[0] != "gu-wisp-reenq" {
 		t.Errorf("reenq burn = %+v, want molecules=[gu-wisp-reenq] base=gu-open", burns[1])
+	}
+}
+
+// TestReconcileOrphanMolecules_DedupsDuplicateCandidates verifies that when
+// listOrphanWispCandidates surfaces the same wisp ID more than once (the
+// overlapping route/redirect views beadsSearchDirs can return), the wisp is
+// fetched and burned at most once — not once per duplicate (gu-adbef: a wisp
+// was reaped twice in a single pass, doubling the per-wisp bd-show + burn work).
+func TestReconcileOrphanMolecules_DedupsDuplicateCandidates(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	prevNow := timeNowForOrphanReconcile
+	timeNowForOrphanReconcile = func() time.Time { return now }
+	t.Cleanup(func() { timeNowForOrphanReconcile = prevNow })
+
+	// Same zombie wisp returned three times (duplicate dir views).
+	prevList := listOrphanWispCandidates
+	listOrphanWispCandidates = func(townRoot string, n time.Time) []*beads.Issue {
+		return []*beads.Issue{
+			{ID: "gu-wisp-dup", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-dup", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-dup", Type: "molecule", Status: "open", CreatedAt: old},
+		}
+	}
+	t.Cleanup(func() { listOrphanWispCandidates = prevList })
+
+	var fetchCount int
+	var fetchMu sync.Mutex
+	prevFetch := fetchWispInfoForReconcile
+	fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
+		fetchMu.Lock()
+		fetchCount++
+		fetchMu.Unlock()
+		return &beads.Issue{ID: wispID, Assignee: "", Dependents: []beads.IssueDep{{ID: "gu-done", Status: "closed"}}}
+	}
+	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	var burnCount int
+	prevBurn := burnExistingMoleculesForRecovery
+	burnExistingMoleculesForRecovery = func(molecules []string, beadID, townRoot string) error {
+		burnCount++
+		return nil
+	}
+	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
+
+	got := reconcileOrphanMolecules("/fake/town")
+
+	if got != 1 {
+		t.Errorf("reconciled count = %d, want 1 (deduped)", got)
+	}
+	if fetchCount != 1 {
+		t.Errorf("fetch calls = %d, want 1 (each unique wisp fetched once)", fetchCount)
+	}
+	if burnCount != 1 {
+		t.Errorf("burn calls = %d, want 1 (each unique wisp burned once)", burnCount)
 	}
 }
 

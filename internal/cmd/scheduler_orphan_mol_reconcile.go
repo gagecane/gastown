@@ -62,13 +62,52 @@ const orphanMolReconcileMinAge = 5 * time.Minute
 func reconcileOrphanMolecules(townRoot string) int {
 	now := timeNowForOrphanReconcile()
 
+	// Dedup candidates by ID. beadsSearchDirs can surface the same wisp from
+	// more than one scanned dir (overlapping route/redirect views), and the
+	// previous fold inspected + burned each duplicate separately — doubling the
+	// per-wisp bd-show and burn work every pass (observed gu-adbef: gc-wisp-zltu
+	// reaped twice in a single pass). Dedup once so each wisp is touched at most
+	// once.
+	candidates := listOrphanWispCandidates(townRoot, now)
+	seen := make(map[string]bool, len(candidates))
+	deduped := candidates[:0]
+	for _, w := range candidates {
+		if w == nil || seen[w.ID] {
+			continue
+		}
+		seen[w.ID] = true
+		deduped = append(deduped, w)
+	}
+	candidates = deduped
+
+	// Resolve each candidate's full info (a per-wisp `bd show --json`: the list
+	// view omits both assignee and dependents) concurrently behind the bounded
+	// dispatch-scan semaphore. The previous serial per-wisp fan-out cost ~17-30s
+	// with dozens of orphan wisps and ran inside dispatchScheduledWork on the
+	// dispatch budget (gu-adbef) — same serial-per-item family as gu-rz169.
+	// These reads are side-effect-free; the mutating burns below stay serial and
+	// in deterministic candidate order, so burn ordering (and its tests) is
+	// unchanged. The semaphore — not the read throttle — bounds Dolt load.
+	infos := make([]*beads.Issue, len(candidates))
+	sem := make(chan struct{}, dispatchScanConcurrency())
+	var wg sync.WaitGroup
+	for i, wisp := range candidates {
+		wg.Add(1)
+		go func(i int, wispID string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			infos[i] = fetchWispInfoForReconcile(townRoot, wispID)
+		}(i, wisp.ID)
+	}
+	wg.Wait()
+
 	reconciled := 0
-	for _, wisp := range listOrphanWispCandidates(townRoot, now) {
-		// Resolve dependents from a full bd show: the list view omits both
-		// assignee and dependents. listOrphanWispCandidates already confirmed
-		// type/status/age; here we confirm unassigned and read the work-bead
-		// linkage.
-		info := fetchWispInfoForReconcile(townRoot, wisp.ID)
+	for i, wisp := range candidates {
+		// listOrphanWispCandidates already confirmed type/status/age; here we
+		// confirm unassigned and read the work-bead linkage from the prefetched
+		// full show.
+		info := infos[i]
 		if info == nil {
 			continue
 		}
