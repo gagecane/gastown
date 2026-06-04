@@ -10,12 +10,20 @@ import (
 	"strings"
 )
 
+// disabledDirName is the subdirectory of a runtime plugins directory holding
+// plugins that have been manually disabled. A plugin moved into here stays
+// disabled across syncs: SyncPlugins will not re-copy it from source, and the
+// scanner already skips dot-prefixed directories so it never runs. This makes a
+// manual disable stick (see gs-3ew).
+const disabledDirName = ".disabled"
+
 // SyncResult records the outcome of a plugin sync operation.
 type SyncResult struct {
-	Copied  []string // plugin names that were copied/updated
-	Removed []string // plugin names that were removed (clean mode)
-	Skipped []string // plugin names that were already up-to-date
-	Errors  []string // errors encountered
+	Copied   []string // plugin names that were copied/updated
+	Removed  []string // plugin names that were removed (clean mode)
+	Skipped  []string // plugin names that were already up-to-date
+	Disabled []string // plugin names skipped because they are in .disabled/
+	Errors   []string // errors encountered
 }
 
 // SyncPlugins copies plugin directories from source to target.
@@ -40,6 +48,8 @@ func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
 		return nil, fmt.Errorf("reading source directory: %w", err)
 	}
 
+	disabled := disabledPlugins(targetDir)
+
 	srcPlugins := make(map[string]bool)
 	for _, entry := range srcEntries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
@@ -53,6 +63,18 @@ func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
 
 		srcPluginDir := filepath.Join(sourceDir, entry.Name())
 		dstPluginDir := filepath.Join(targetDir, entry.Name())
+
+		// Respect a manual disable: if the plugin sits in <target>/.disabled/,
+		// never re-copy it from source, and remove any active copy so the
+		// disable takes effect even if a prior sync already installed it (gs-3ew).
+		if disabled[entry.Name()] {
+			if err := os.RemoveAll(dstPluginDir); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", entry.Name(), err))
+				continue
+			}
+			result.Disabled = append(result.Disabled, entry.Name())
+			continue
+		}
 
 		if dirsMatch(srcPluginDir, dstPluginDir) {
 			result.Skipped = append(result.Skipped, entry.Name())
@@ -86,6 +108,27 @@ func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
 	}
 
 	return result, nil
+}
+
+// disabledPlugins returns the set of plugin names parked in <targetDir>/.disabled/.
+// A directory counts only if it contains a plugin.md, mirroring how plugins are
+// recognized everywhere else. Missing or unreadable .disabled/ yields an empty set.
+func disabledPlugins(targetDir string) map[string]bool {
+	disabled := make(map[string]bool)
+	disabledDir := filepath.Join(targetDir, disabledDirName)
+	entries, err := os.ReadDir(disabledDir)
+	if err != nil {
+		return disabled
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(disabledDir, entry.Name(), "plugin.md")); err == nil {
+			disabled[entry.Name()] = true
+		}
+	}
+	return disabled
 }
 
 // dirsMatch checks if two plugin directories have identical contents.
@@ -299,6 +342,8 @@ func DetectDrift(sourceDir, targetDir string) (*DriftReport, error) {
 		return nil, fmt.Errorf("reading source: %w", err)
 	}
 
+	disabled := disabledPlugins(targetDir)
+
 	tgtPlugins := make(map[string]bool)
 	if tgtEntries, err := os.ReadDir(targetDir); err == nil {
 		for _, entry := range tgtEntries {
@@ -313,6 +358,12 @@ func DetectDrift(sourceDir, targetDir string) (*DriftReport, error) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(sourceDir, entry.Name(), "plugin.md")); err != nil {
+			continue
+		}
+		// A manually disabled plugin is intentionally absent from the active
+		// runtime; sync won't re-copy it, so it isn't drift (gs-3ew).
+		if disabled[entry.Name()] {
+			delete(tgtPlugins, entry.Name())
 			continue
 		}
 

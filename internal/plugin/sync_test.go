@@ -187,6 +187,75 @@ func TestSyncPlugins_IgnoresNonPluginDirs(t *testing.T) {
 	}
 }
 
+func TestSyncPlugins_SkipsDisabled(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	createTestPlugin(t, srcDir, "foreign", "+++\nname = \"foreign\"\n+++\nrun foreign", nil)
+	// Plugin is parked in <target>/.disabled/ — a manual disable.
+	createTestPlugin(t, filepath.Join(dstDir, ".disabled"), "foreign",
+		"+++\nname = \"foreign\"\n+++\nrun foreign", nil)
+
+	result, err := SyncPlugins(srcDir, dstDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Disabled) != 1 || result.Disabled[0] != "foreign" {
+		t.Errorf("expected foreign reported disabled, got %v", result.Disabled)
+	}
+	if len(result.Copied) != 0 {
+		t.Errorf("expected 0 copied (plugin disabled), got %v", result.Copied)
+	}
+	// The disable must stick: no active copy should be created.
+	if _, err := os.Stat(filepath.Join(dstDir, "foreign")); !os.IsNotExist(err) {
+		t.Error("disabled plugin should not be re-copied into active runtime")
+	}
+}
+
+func TestSyncPlugins_DisabledRemovesActiveCopy(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	content := "+++\nname = \"foreign\"\n+++\nrun foreign"
+	createTestPlugin(t, srcDir, "foreign", content, nil)
+	// An active copy from a prior sync, now also disabled.
+	createTestPlugin(t, dstDir, "foreign", content, nil)
+	createTestPlugin(t, filepath.Join(dstDir, ".disabled"), "foreign", content, nil)
+
+	result, err := SyncPlugins(srcDir, dstDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Disabled) != 1 {
+		t.Errorf("expected foreign disabled, got %v", result.Disabled)
+	}
+	// Sync must remove the stale active copy so the disable takes effect.
+	if _, err := os.Stat(filepath.Join(dstDir, "foreign")); !os.IsNotExist(err) {
+		t.Error("active copy of disabled plugin should be removed")
+	}
+}
+
+func TestDetectDrift_IgnoresDisabled(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	createTestPlugin(t, srcDir, "foreign", "+++\nname = \"foreign\"\n+++\nrun", nil)
+	createTestPlugin(t, filepath.Join(dstDir, ".disabled"), "foreign",
+		"+++\nname = \"foreign\"\n+++\nrun", nil)
+
+	report, err := DetectDrift(srcDir, dstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A disabled plugin is intentionally absent — not drift, not missing.
+	if report.HasDrift() {
+		t.Errorf("disabled plugin should not register as drift: %+v", report)
+	}
+	if len(report.Missing) != 0 {
+		t.Errorf("disabled plugin should not be reported missing, got %v", report.Missing)
+	}
+}
+
 func TestDetectDrift_NoDrift(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
