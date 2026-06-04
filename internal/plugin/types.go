@@ -23,6 +23,13 @@ const (
 	// dispatchGraceBuffer is added to a plugin's execution timeout to account
 	// for dog startup and mail-pickup latency before the script begins.
 	dispatchGraceBuffer = 2 * time.Minute
+
+	// pluginStuckIntervalMultiplier sets a plugin dog's stale-clear threshold at
+	// N× the plugin's cooldown interval. A healthy run completes within one
+	// execution timeout (far below one interval), so a dog still holding the slot
+	// after this long has almost certainly hung. See Plugin.StuckThreshold and
+	// gu-9jmd3.
+	pluginStuckIntervalMultiplier = 2
 )
 
 // Plugin represents a discovered plugin definition.
@@ -190,6 +197,53 @@ func (p *Plugin) DispatchGrace(cooldown time.Duration) time.Duration {
 		grace = cooldown
 	}
 	return grace
+}
+
+// StuckThreshold returns how long a dog may hold this plugin's dispatch slot
+// (state=working) before the daemon reclaims it as stuck. It is the per-plugin
+// counterpart to the daemon's blanket stale-working timeout: short-cadence
+// critical plugins (e.g. dolt-backup, 15m interval) must not have their slot
+// monopolized for hours by a hung dog, which silently halts that plugin's whole
+// dispatch cadence (gu-9jmd3).
+//
+// The threshold is the larger of:
+//   - pluginStuckIntervalMultiplier × the cooldown interval (so a dog is given a
+//     couple of intervals of slack before being judged stuck), and
+//   - the execution timeout + startup buffer, so a plugin with a long-running
+//     script but a short cooldown is never reclaimed while it is still legitimately
+//     running. (DispatchGrace can't be reused here: it clamps to the cooldown,
+//     which would defeat this floor when the timeout exceeds the cooldown.)
+//
+// The result is clamped to the supplied blanket timeout: a per-plugin threshold
+// never exceeds the daemon-wide default (so this only ever tightens, never
+// loosens, reclamation), and a non-positive blanket is ignored. Plugins with no
+// cooldown gate (cron/condition/event) return the blanket unchanged — their
+// cadence isn't expressed as an interval here.
+func (p *Plugin) StuckThreshold(blanket time.Duration) time.Duration {
+	if p.Gate == nil || p.Gate.Type != GateCooldown || p.Gate.Duration == "" {
+		return blanket
+	}
+	cooldown, err := time.ParseDuration(p.Gate.Duration)
+	if err != nil || cooldown <= 0 {
+		return blanket
+	}
+
+	threshold := time.Duration(pluginStuckIntervalMultiplier) * cooldown
+
+	// Floor at execution timeout + startup buffer so a legitimately long run
+	// (script timeout > 2× cooldown) is never reclaimed mid-flight.
+	if p.Execution != nil && p.Execution.Timeout != "" {
+		if execTimeout, terr := time.ParseDuration(p.Execution.Timeout); terr == nil && execTimeout > 0 {
+			if floor := execTimeout + dispatchGraceBuffer; floor > threshold {
+				threshold = floor
+			}
+		}
+	}
+
+	if blanket > 0 && threshold > blanket {
+		threshold = blanket
+	}
+	return threshold
 }
 
 // IsExecWrapper returns true if this plugin is an exec-wrapper type.
