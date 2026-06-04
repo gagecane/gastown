@@ -312,26 +312,52 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			continue
 		}
 
-		// Only dispatch plugins with cooldown gates.
-		if p.Gate == nil || p.Gate.Type != plugin.GateCooldown {
+		// Only dispatch plugins with cooldown or cron gates.
+		if p.Gate == nil || (p.Gate.Type != plugin.GateCooldown && p.Gate.Type != plugin.GateCron) {
 			continue
 		}
 
-		// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
-		// record (dog handed work but not yet executed) only suppresses
-		// re-dispatch within an in-flight grace window — after that the gate
-		// re-opens so a silently-dead dog can't re-arm the full cooldown and
-		// drift backups unbounded (gu-50nbo).
-		if p.Gate.Duration != "" {
-			cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
-			grace := p.DispatchGrace(cooldownDur)
-			satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
-			if err != nil {
-				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
+		// The trigger label recorded on the dispatch audit event (and used to
+		// distinguish the two gate paths in logs).
+		trigger := string(p.Gate.Type)
+
+		switch p.Gate.Type {
+		case plugin.GateCooldown:
+			// Evaluate cooldown: skip if plugin ran recently. A bare dispatch
+			// record (dog handed work but not yet executed) only suppresses
+			// re-dispatch within an in-flight grace window — after that the gate
+			// re-opens so a silently-dead dog can't re-arm the full cooldown and
+			// drift backups unbounded (gu-50nbo).
+			if p.Gate.Duration != "" {
+				cooldownDur, _ := time.ParseDuration(p.Gate.Duration)
+				grace := p.DispatchGrace(cooldownDur)
+				satisfied, err := recorder.CooldownSatisfied(p.Name, p.Gate.Duration, grace.String())
+				if err != nil {
+					d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
+					continue
+				}
+				if satisfied {
+					continue // Still in cooldown (or a dispatch is in-flight)
+				}
+			}
+
+		case plugin.GateCron:
+			// Evaluate cron: dispatch only when a scheduled fire has elapsed
+			// that no terminal run has serviced yet. The same in-flight grace
+			// guard as cooldown prevents the heartbeat from storming a
+			// freshly-dispatched plugin (gu-50nbo).
+			if p.Gate.Schedule == "" {
+				d.logger.Printf("Handler: skipping cron-gate plugin %s (empty schedule)", p.Name)
 				continue
 			}
-			if satisfied {
-				continue // Still in cooldown (or a dispatch is in-flight)
+			grace := p.DispatchGrace(0)
+			due, err := recorder.CronDue(p.Name, p.Gate.Schedule, grace.String())
+			if err != nil {
+				d.logger.Printf("Handler: error checking cron schedule for plugin %s: %v", p.Name, err)
+				continue
+			}
+			if !due {
+				continue // Not yet due (or a dispatch is in-flight)
 			}
 		}
 
@@ -400,7 +426,7 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 				p.Name,
 				p.RigName,
 				fmt.Sprintf("deacon/dogs/%s", idleDog.Name),
-				"cooldown",
+				trigger,
 			),
 		)
 
