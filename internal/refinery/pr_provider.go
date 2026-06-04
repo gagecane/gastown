@@ -13,3 +13,15 @@ type PRProvider interface {
 	// Returns the merge commit SHA on success (if available).
 	MergePR(prNumber int, method string) (string, error)
 }
+
+// mergedPRFinder is an optional capability for PRProviders that can detect a
+// branch's already-MERGED PR. The refinery uses it to make the post-merge close
+// idempotent: when no OPEN PR exists for a branch, an already-merged PR proves
+// the work landed, so the source bead + MR wisp can still be closed instead of
+// being left as a 'ready + GIT MISSING' orphan that gets re-dispatched (gs-4uz).
+// Providers that don't implement it keep the prior behavior (no detection).
+type mergedPRFinder interface {
+	// FindMergedPRCommit returns the merge commit SHA of a MERGED PR for the
+	// branch, or "" if none. Only meaningful when no OPEN PR exists.
+	FindMergedPRCommit(branch string) (string, error)
+}

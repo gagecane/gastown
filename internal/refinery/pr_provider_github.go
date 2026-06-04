@@ -19,6 +19,11 @@ func (p *githubPRProvider) IsPRApproved(prNumber int) (bool, error) {
 	return p.git.IsPRApproved(prNumber)
 }
 
+// FindMergedPRCommit implements the optional mergedPRFinder capability (gs-4uz).
+func (p *githubPRProvider) FindMergedPRCommit(branch string) (string, error) {
+	return p.git.FindMergedPRCommit(branch)
+}
+
 func (p *githubPRProvider) MergePR(prNumber int, method string) (string, error) {
 	return p.git.GhPrMerge(prNumber, method)
 }
