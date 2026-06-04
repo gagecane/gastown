@@ -341,11 +341,12 @@ func dryRunFormula(f *formula.Formula, formulaName, targetRig string) error {
 	}
 
 	if f.Type == formula.TypeConvoy && len(f.Legs) > 0 {
-		// Generate review ID for dry-run display
-		reviewID := generateFormulaShortID()
-
 		// Parse --set key=value pairs for template rendering
 		setVars := parseSetVars(formulaRunSet)
+
+		// Generate review ID for dry-run display. Honors --set review_id=X
+		// so dry-run output matches real execution exactly (gt-4032).
+		reviewID := resolveReviewID(setVars)
 
 		// Build target description
 		var targetDescription string
@@ -527,8 +528,12 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 
 	fmt.Printf("%s Created convoy: %s\n", style.Bold.Render("✓"), convoyID)
 
-	// Generate a unique review ID for this convoy run
-	reviewID := generateFormulaShortID()
+	// Parse --set key=value pairs for template rendering
+	setVars := parseSetVars(formulaRunSet)
+
+	// Generate a unique review ID for this convoy run. Honors --set
+	// review_id=X so it matches --dry-run output exactly (gt-4032).
+	reviewID := resolveReviewID(setVars)
 
 	// Build target description
 	var targetDescription string
@@ -554,11 +559,15 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 	// Create output directory if configured
 	var outputDir string
 	if f.Output != nil && f.Output.Directory != "" {
-		// Build minimal context for directory rendering
+		// Build minimal context for directory rendering. Inject --set vars
+		// so the rendered directory matches --dry-run exactly (gt-4032).
 		dirCtx := map[string]interface{}{
 			"review_id":    reviewID,
 			"formula_name": formulaName,
 			"design_id":    designID,
+		}
+		for k, v := range setVars {
+			dirCtx[k] = v
 		}
 		outputDir = renderTemplateOrDefault(f.Output.Directory, dirCtx, ".reviews/"+reviewID)
 		warnIfTemplateLeftMissing("Output directory", outputDir)
@@ -571,9 +580,6 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 			fmt.Printf("  %s Output directory: %s\n", style.Dim.Render("📁"), outputDir)
 		}
 	}
-
-	// Parse --set key=value pairs for template rendering
-	setVars := parseSetVars(formulaRunSet)
 
 	// Step 2: Create leg beads and track them
 	legBeads := make(map[string]string) // leg.ID -> bead ID
@@ -651,7 +657,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 		}
 
 		// Track the leg with the convoy
-		if err := addTrackingRelationFn(townRoot, convoyID, legBeadID); err != nil {
+		if err := addTrackingRelationWithRetry(townRoot, convoyID, legBeadID); err != nil {
 			fmt.Printf("%s Failed to track leg %s: %v\n",
 				style.Dim.Render("Warning:"), leg.ID, err)
 		}
@@ -713,7 +719,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 				style.Dim.Render("Warning:"), err)
 		} else {
 			// Track synthesis with convoy
-			_ = addTrackingRelationFn(townRoot, convoyID, synthesisBeadID)
+			_ = addTrackingRelationWithRetry(townRoot, convoyID, synthesisBeadID)
 
 			// Add dependencies: synthesis depends on all legs
 			for _, legBeadID := range legBeads {
@@ -881,7 +887,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		}
 
 		// Track the step with the workflow
-		_ = addTrackingRelationFn(townBeads, workflowID, stepBeadID)
+		_ = addTrackingRelationWithRetry(townBeads, workflowID, stepBeadID)
 
 		// Wire dependencies: this step depends on its needs
 		for _, needID := range step.Needs {
@@ -1292,6 +1298,20 @@ func fetchPRInfo(prNumber int) (string, []map[string]interface{}) {
 	}
 
 	return prTitle, changedFiles
+}
+
+// resolveReviewID returns the explicit --set review_id=<id> when provided,
+// otherwise a fresh short ID. Shared by dry-run and real execution so both
+// paths compute identical review IDs and output paths (gt-4032).
+func resolveReviewID(setVars map[string]interface{}) string {
+	if v, ok := setVars["review_id"]; ok {
+		if s, ok := v.(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				return s
+			}
+		}
+	}
+	return generateFormulaShortID()
 }
 
 // generateFormulaShortID generates a short random ID (5 lowercase chars)
