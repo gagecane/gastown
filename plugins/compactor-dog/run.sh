@@ -114,6 +114,36 @@ log() {
   echo "[compactor-dog] $*"
 }
 
+# Resolve a usable database reference for queries. Some databases have no
+# active/checked-out branch on the Dolt server (e.g. 'beads'); `--use-db <db>`
+# then fails with "database not found: <db>" and, under set -e/pipefail, aborts
+# the whole sweep. For those, the revision-qualified form `<db>/<branch>`
+# resolves. Echoes a working reference on stdout; returns non-zero if none work.
+resolve_db_ref() {
+  local db="$1" ref
+  for ref in "$db" "$db/main" "$db/master"; do
+    if dolt --host="$DOLT_HOST" --port="$DOLT_PORT" --no-tls -u "$DOLT_USER" -p "" \
+         --use-db "$ref" sql -q "SELECT 1 FROM dolt_log LIMIT 1" \
+         --result-format csv >/dev/null 2>>"$LOGFILE"; then
+      printf '%s' "$ref"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# List base (non-system) table names for a database reference, one per line.
+# Replaces `information_schema.tables WHERE table_schema = '<db>'`, which fails
+# with "no root value found in session" under the dolt sql CLI's per-statement
+# session model. SHOW FULL TABLES already excludes dolt_* system tables; the
+# extra grep is belt-and-suspenders. Trailing `|| true` keeps an empty result
+# (or a transient query failure) from pipefail-aborting the caller.
+list_base_tables() {
+  local db_ref="$1"
+  dolt_query "$db_ref" "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'" \
+    | cut -d',' -f1 | grep -v -E '^dolt_' || true
+}
+
 # Wait for a PID with a timeout (seconds). Returns 0 if process exits in time.
 # macOS lacks `timeout` command, so we poll with sleep.
 wait_with_timeout() {
@@ -177,7 +207,15 @@ REPORT=""
 while IFS= read -r DB; do
   [[ -z "$DB" ]] && continue
 
-  COUNT=$(dolt_query "$DB" "SELECT COUNT(*) AS cnt FROM dolt_log" 2>/dev/null | head -1)
+  # Resolve a queryable reference. Branchless DBs (e.g. 'beads') need the
+  # revision-qualified `<db>/main` form. Skip (don't abort) if none resolve.
+  if ! DB_REF=$(resolve_db_ref "$DB"); then
+    log "  $DB: ERROR — no queryable branch reference (skipping)"
+    REPORT="${REPORT}${DB}: error (no branch)\n"
+    continue
+  fi
+
+  COUNT=$(dolt_query "$DB_REF" "SELECT COUNT(*) AS cnt FROM dolt_log" 2>/dev/null | head -1)
   if [[ -z "$COUNT" || "$COUNT" == "null" ]]; then
     log "  $DB: ERROR querying commit count (skipping)"
     REPORT="${REPORT}${DB}: error\n"
@@ -250,8 +288,7 @@ for entry in "${CANDIDATES[@]}"; do
 
   # Step 3a: Record pre-flight row counts for integrity verification.
   log "  Recording pre-flight row counts..."
-  PRE_TABLES=$(dolt_query "$DB" \
-    "SELECT table_name FROM information_schema.tables WHERE table_schema = '$DB' AND table_name NOT LIKE 'dolt_%' AND table_type = 'BASE TABLE'")
+  PRE_TABLES=$(list_base_tables "$DB")
 
   # Clear pre-counts file for this database.
   : > "$PRE_COUNTS_FILE"
@@ -407,8 +444,7 @@ for entry in "${CANDIDATES[@]}"; do
   done <<< "$PRE_TABLES"
 
   # Check for missing tables (tables present before but gone after).
-  POST_TABLES=$(dolt_query "$DB" \
-    "SELECT table_name FROM information_schema.tables WHERE table_schema = '$DB' AND table_name NOT LIKE 'dolt_%' AND table_type = 'BASE TABLE'")
+  POST_TABLES=$(list_base_tables "$DB")
   while IFS=$'\t' read -r TABLE _; do
     [[ -z "$TABLE" ]] && continue
     if ! printf '%s' "$POST_TABLES" | grep -qx "$TABLE"; then
