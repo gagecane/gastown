@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -173,11 +172,11 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("refusing to submit with branch=%q (no named branch detected); use --branch to specify", branch)
 	}
 
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	// Get configured default branch for this rig. Source of truth is rig config
+	// default_branch; when unreadable/empty, fall back to the repo's actual
+	// default (origin/HEAD), not a hardcoded "main" — the latter misroutes MR
+	// targets in a "mainline"-default repo (gu-wcb37).
+	defaultBranch := resolveRigDefaultBranch(townRoot, rigName, g)
 
 	if branch == defaultBranch || branch == "master" {
 		return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
