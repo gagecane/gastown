@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParsePluginMD(t *testing.T) {
@@ -1073,6 +1074,19 @@ func TestShippedPluginsHaveValidCooldownGates(t *testing.T) {
 			t.Errorf("plugin %s: gate.type is %q but gate.duration is empty — "+
 				"check plugin.md for a typo like 'cooldown = \"...\"' instead of 'duration = \"...\"'",
 				entry.Name(), p.Gate.Type)
+			continue
+		}
+		// The duration must be parseable by Go's time.ParseDuration, since
+		// that is exactly how the daemon's cooldown check evaluates it
+		// (recording.go: GetRunsSince). Go accepts only h/m/s/ms/us/ns units
+		// — a day/week literal like "7d" passes the non-empty check above but
+		// errors on every heartbeat, breaking the cooldown gate. Express
+		// multi-day cooldowns in hours (e.g. "168h" for 7 days). See gu-vir5r.
+		if _, err := time.ParseDuration(p.Gate.Duration); err != nil {
+			t.Errorf("plugin %s: gate.duration %q is not a valid Go duration: %v — "+
+				"Go's time.ParseDuration accepts only h/m/s units; express days as hours "+
+				"(e.g. \"168h\" for 7 days)",
+				entry.Name(), p.Gate.Duration, err)
 		}
 	}
 
