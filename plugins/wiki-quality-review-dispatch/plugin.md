@@ -5,7 +5,7 @@ version = 1
 
 [gate]
 type = "cooldown"
-duration = "7d"
+duration = "168h"
 
 [tracking]
 labels = ["plugin:wiki-quality-review-dispatch", "category:scheduler"]
@@ -48,10 +48,13 @@ WEEKLY (formula decision Q8). A whole-corpus IA/quality review surfaces
 slow-moving structural issues, not incident-time facts, so weekly is
 sufficient — the daily patrol owns freshness.
 
-The plugin uses a **cooldown gate of 7d** rather than a cron gate
+The plugin uses a **cooldown gate of 168h** (7 days) rather than a cron gate
 (`type = "cron"`) because the daemon's `dispatchPlugins` path currently
-honors only cooldown gates (see `internal/daemon/handler.go`). A 7d
-cooldown gives a once-per-week cadence. The intent is an off-peak schedule
+honors only cooldown gates (see `internal/daemon/handler.go`). A 168h
+cooldown gives a once-per-week cadence. Note the duration is expressed in
+hours, not days: the gate is parsed by Go's `time.ParseDuration`, which
+accepts only `h`/`m`/`s` units — a `7d` literal errors every heartbeat
+(gu-vir5r). The intent is an off-peak schedule
 (e.g. Monday ~05:00 PT, before the daily patrol); switching to a true cron
 schedule is a follow-up if/when cron-gate dispatch lands.
 
