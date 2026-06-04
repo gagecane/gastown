@@ -42,11 +42,20 @@ func checkpointDogInterval(config *DaemonPatrolConfig) time.Duration {
 
 // runtimeExcludeDirs are directories to unstage after git add -A.
 // These contain runtime/ephemeral data that should not be checkpointed.
+//
+// node_modules is listed WITHOUT a trailing slash on purpose. In casc_webapp
+// polecat worktrees node_modules is not gitignored and frequently appears as a
+// gitlink or symlink (not a real directory). A trailing-slash pathspec
+// (node_modules/) does NOT unstage a symlink entry, so the auto-WIP checkpoint
+// committed a node_modules-only gitlink — pure junk that later tripped the
+// DIRTY recovery predicate. The no-slash form `node_modules` unstages all three
+// forms (real dir, gitlink, symlink). (gu-lxrbv.)
 var runtimeExcludeDirs = []string{
 	".claude/",
 	".beads/",
 	".runtime/",
 	"__pycache__/",
+	"node_modules",
 }
 
 // runCheckpointDog auto-commits WIP changes in active polecat worktrees.
