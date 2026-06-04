@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -2654,6 +2655,66 @@ func clearDoneIntentLabel(bd *beads.Beads, agentBeadID string) {
 	}
 }
 
+// maxSilentDefers bounds how many times a work bead may be auto-deferred by
+// reason-less `gt done --status DEFERRED` exits before gt done stops silently
+// re-parking it and escalates instead (gu-hadus).
+//
+// Each reason-less DEFERRED exit re-applies the +1d cooldown (gu-vty0). The
+// scheduler releases the bead when the timer expires (releaseExpiredDeferredBeads),
+// the dispatcher re-dispatches it, and the next polecat exits DEFERRED again —
+// re-parking to the same +1d date. That loop runs forever and silently overrides
+// an operator's manual un-defer, with no concrete blocker ever recorded. A
+// DEFERRED exit that carries `--reason` is a legitimate paused-with-blocker exit
+// and resets the streak; only consecutive reason-less defers count toward this cap.
+const maxSilentDefers = 3
+
+// deferLoopLabel marks a work bead that has exceeded maxSilentDefers consecutive
+// reason-less auto-defers, so witness/mayor audits can spot the churn.
+const deferLoopLabel = "defer-loop"
+
+// deferCountLabelPrefix is the read-modify-write counter label tracking
+// consecutive reason-less auto-defers (follows the idle:N convention).
+const deferCountLabelPrefix = "defer-count:"
+
+// silentDeferCount returns the current consecutive reason-less defer count
+// recorded on the bead's defer-count:N label (0 if absent/unparseable).
+func silentDeferCount(issue *beads.Issue) int {
+	if issue == nil {
+		return 0
+	}
+	for _, label := range issue.Labels {
+		if rest, ok := strings.CutPrefix(label, deferCountLabelPrefix); ok {
+			if n, err := strconv.Atoi(rest); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// setSilentDeferCount rewrites the defer-count:N label on the bead to the given
+// value (removing any prior defer-count:* label first). A count of 0 clears the
+// label entirely — used when a DEFERRED exit records a concrete blocker via
+// --reason, resetting the streak. Non-fatal: warns but does not abort gt done.
+func setSilentDeferCount(bd *beads.Beads, issue *beads.Issue, beadID string, count int) {
+	var toRemove []string
+	for _, label := range issue.Labels {
+		if strings.HasPrefix(label, deferCountLabelPrefix) {
+			toRemove = append(toRemove, label)
+		}
+	}
+	opts := beads.UpdateOptions{RemoveLabels: toRemove}
+	if count > 0 {
+		opts.AddLabels = []string{fmt.Sprintf("%s%d", deferCountLabelPrefix, count)}
+	}
+	if len(opts.AddLabels) == 0 && len(opts.RemoveLabels) == 0 {
+		return
+	}
+	if err := bd.Update(beadID, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't update %s on %s: %v\n", deferCountLabelPrefix, beadID, err)
+	}
+}
+
 // DoneCheckpoint represents a checkpoint stage in the gt done flow (gt-aufru).
 // Checkpoints are stored as labels on the agent bead, enabling resume after
 // process interruption (context exhaustion, SIGTERM, etc.).
@@ -2882,6 +2943,45 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, stranded bo
 			fmt.Fprintf(os.Stderr, "Warning: couldn't set defer=%s on %s: %v\n", deferUntil, hookedBeadID, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "Deferred %s until %s (suppresses re-dispatch loop)\n", hookedBeadID, deferUntil)
+		}
+
+		// Break the silent defer loop (gu-hadus). A reason-less DEFERRED exit
+		// re-parks the bead to +1d every cycle; the scheduler releases it, the
+		// dispatcher re-dispatches it, and the next polecat re-defers — looping
+		// forever and silently overriding any operator un-defer. We still apply
+		// the cooldown above (so we don't reintroduce the gu-vty0 tight loop),
+		// but we count consecutive reason-less defers and, once they exceed the
+		// cap, escalate LOUDLY so witness/mayor break the cycle instead of it
+		// churning invisibly. A DEFERRED exit WITH --reason is a legitimate
+		// paused-with-blocker exit and resets the streak.
+		if hb, err := bd.Show(hookedBeadID); err == nil {
+			if strings.TrimSpace(doneReason) != "" {
+				// Concrete blocker recorded — reset the streak and clear any
+				// prior defer-loop marker; the loop is broken by the blocker note.
+				setSilentDeferCount(bd, hb, hookedBeadID, 0)
+				if beads.HasLabel(hb, deferLoopLabel) {
+					if err := bd.Update(hookedBeadID, beads.UpdateOptions{RemoveLabels: []string{deferLoopLabel}}); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: couldn't clear %s label on %s: %v\n", deferLoopLabel, hookedBeadID, err)
+					}
+				}
+			} else {
+				count := silentDeferCount(hb) + 1
+				setSilentDeferCount(bd, hb, hookedBeadID, count)
+				if count > maxSilentDefers && !beads.HasLabel(hb, deferLoopLabel) {
+					if err := bd.Update(hookedBeadID, beads.UpdateOptions{AddLabels: []string{deferLoopLabel}}); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: couldn't add %s label to %s: %v\n", deferLoopLabel, hookedBeadID, err)
+					}
+					note := fmt.Sprintf("[defer-loop gu-hadus] %s auto-deferred %d consecutive times with no --reason; "+
+						"likely an auto-re-defer overriding operator directives. Polecats are not recording a concrete blocker. "+
+						"Witness/mayor: inspect for missing fix-context or pin/close the bead.", hookedBeadID, count)
+					if _, err := bd.Run("comments", "add", hookedBeadID, note); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: couldn't record defer-loop note on %s: %v\n", hookedBeadID, err)
+					}
+					nudgeWitness(ctx.Rig, fmt.Sprintf("DEFER_LOOP %s deferred %dx with no reason — needs intervention", hookedBeadID, count))
+					fmt.Fprintf(os.Stderr, "⚠ %s deferred %d consecutive times with no --reason; tagged %s and escalated to witness\n",
+						hookedBeadID, count, deferLoopLabel)
+				}
+			}
 		}
 	}
 

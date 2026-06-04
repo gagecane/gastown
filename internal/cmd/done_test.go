@@ -427,6 +427,51 @@ func TestDeferredOffsetFlag(t *testing.T) {
 	}
 }
 
+// TestSilentDeferCount verifies the defer-count:N label parser used by the
+// silent-defer-loop breaker (gu-hadus). Absent, malformed, and unrelated
+// labels read as 0; a well-formed defer-count:N returns N.
+func TestSilentDeferCount(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   int
+	}{
+		{"nil issue handled by caller", nil, 0},
+		{"no labels", []string{}, 0},
+		{"unrelated labels", []string{"idle:3", "gt:agent"}, 0},
+		{"valid count", []string{"defer-count:2"}, 2},
+		{"count among others", []string{"foo", "defer-count:5", "bar"}, 5},
+		{"malformed count reads zero", []string{"defer-count:abc"}, 0},
+		{"zero count", []string{"defer-count:0"}, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := silentDeferCount(&beads.Issue{Labels: tt.labels})
+			if got != tt.want {
+				t.Errorf("silentDeferCount(%v) = %d, want %d", tt.labels, got, tt.want)
+			}
+		})
+	}
+
+	if got := silentDeferCount(nil); got != 0 {
+		t.Errorf("silentDeferCount(nil) = %d, want 0", got)
+	}
+}
+
+// TestMaxSilentDefersBound verifies the silent-defer cap is a positive,
+// finite bound (gu-hadus). A non-positive cap would escalate on the first
+// defer (defeating the legitimate gu-vty0 cooldown); an absurdly large one
+// would never break the loop.
+func TestMaxSilentDefersBound(t *testing.T) {
+	if maxSilentDefers < 1 {
+		t.Fatalf("maxSilentDefers must be >= 1 to preserve the gu-vty0 cooldown, got %d", maxSilentDefers)
+	}
+	if maxSilentDefers > 10 {
+		t.Errorf("maxSilentDefers=%d is too high to break the loop promptly", maxSilentDefers)
+	}
+}
+
 // TestDoneIntentLabelFormat verifies the done-intent label format matches
 // the expected pattern: done-intent:<type>:<unix-ts>
 func TestDoneIntentLabelFormat(t *testing.T) {
