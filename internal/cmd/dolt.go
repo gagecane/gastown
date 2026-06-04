@@ -621,10 +621,22 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  PID file: %s\n", doltserver.PIDFile(townRoot))
 			fmt.Printf("  State file: %s\n", doltserver.StateFile(townRoot))
 			fmt.Printf("  SQL info: %s\n", doltserver.SQLServerInfoPath(townRoot))
-			if len(state.Databases) > 0 {
+			// Reconcile against on-disk reality rather than printing the
+			// startup snapshot in state.Databases. That snapshot is frozen at
+			// server-start time and goes stale: databases dropped since startup
+			// linger as "ghost" entries (e.g. a "gt" entry that no longer exists
+			// on disk and is not served by the live server). ListDatabases scans
+			// the filesystem, skips corrupt/phantom dirs, and reflects what the
+			// server is actually serving. Fall back to the snapshot only if the
+			// live scan fails or comes back empty. (gu-q0xxx)
+			displayDatabases := state.Databases
+			if live, listErr := doltserver.ListDatabases(townRoot); listErr == nil && len(live) > 0 {
+				displayDatabases = live
+			}
+			if len(displayDatabases) > 0 {
 				owners := doltserver.CollectDatabaseOwners(townRoot)
 				fmt.Printf("  Databases:\n")
-				for _, db := range state.Databases {
+				for _, db := range displayDatabases {
 					if owner, ok := owners[db]; ok {
 						fmt.Printf("    - %-20s (%s)\n", db, owner)
 					} else {
