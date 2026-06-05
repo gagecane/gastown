@@ -5,20 +5,20 @@ import (
 	"testing"
 )
 
-func TestIsProcessRunning_CurrentProcess(t *testing.T) {
-	if !isProcessRunning(os.Getpid()) {
+func TestProcessAlive_CurrentProcess(t *testing.T) {
+	if !processAlive(os.Getpid()) {
 		t.Error("current process should be detected as running")
 	}
 }
 
-func TestIsProcessRunning_InvalidPID(t *testing.T) {
-	if isProcessRunning(99999999) {
+func TestProcessAlive_InvalidPID(t *testing.T) {
+	if processAlive(99999999) {
 		t.Error("invalid PID should not be detected as running")
 	}
 }
 
-func TestIsProcessRunning_MaxPID(t *testing.T) {
-	if isProcessRunning(2147483647) {
+func TestProcessAlive_MaxPID(t *testing.T) {
+	if processAlive(2147483647) {
 		t.Error("max PID should not be running")
 	}
 }

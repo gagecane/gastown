@@ -717,7 +717,7 @@ func verifyShutdown(t *tmux.Tmux, townRoot string) []string {
 	if pidData, err := os.ReadFile(pidFile); err == nil {
 		var pid int
 		if _, err := fmt.Sscanf(string(pidData), "%d", &pid); err == nil {
-			if isProcessRunning(pid) {
+			if processAlive(pid) {
 				respawned = append(respawned, fmt.Sprintf("gt daemon (PID %d)", pid))
 			}
 		}
@@ -836,7 +836,7 @@ func stopIdleMonitors(pids []int) int {
 		}
 		// Brief wait for graceful exit
 		time.Sleep(200 * time.Millisecond)
-		if !isProcessRunning(pid) {
+		if !processAlive(pid) {
 			stopped++
 			continue
 		}
@@ -916,11 +916,11 @@ func stopOrphanDoltServers(pids []int) int {
 		// Wait up to 3s for Dolt to flush and exit
 		for i := 0; i < 6; i++ {
 			time.Sleep(500 * time.Millisecond)
-			if !isProcessRunning(pid) {
+			if !processAlive(pid) {
 				break
 			}
 		}
-		if isProcessRunning(pid) {
+		if processAlive(pid) {
 			_ = proc.Kill()
 		}
 		stopped++

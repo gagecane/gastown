@@ -72,6 +72,10 @@ func newQuickExitCmd() *exec.Cmd {
 // Unix it uses kill(pid, 0); ESRCH (no such process) means the PID is free.
 // On Windows it unconditionally returns false — we trust the kernel to have
 // freed the PID by the time Run() returned.
+//
+// NOTE: This intentionally inlines the signal-0 check rather than calling
+// internal/liveness.PIDAlive to avoid an import cycle (liveness_test imports
+// testutil, so testutil cannot import liveness).
 func deadPIDIsAlive(pid int) bool {
 	if runtime.GOOS == "windows" {
 		return false
