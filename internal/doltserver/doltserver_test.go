@@ -5578,3 +5578,76 @@ func TestLockHolder_DetectsDeadHolder(t *testing.T) {
 		t.Errorf("processIsAlive(%d) = true, want false", got)
 	}
 }
+
+// =============================================================================
+// buildServerEnv tests (GOMEMLIMIT / GOGC defaults)
+// =============================================================================
+
+func TestBuildServerEnv_DefaultsAppliedWhenUnset(t *testing.T) {
+	base := []string{"HOME=/home/user", "PATH=/usr/bin"}
+	got := buildServerEnv(base)
+
+	var foundMem, foundGC bool
+	for _, e := range got {
+		switch {
+		case e == "GOMEMLIMIT=16GiB":
+			foundMem = true
+		case e == "GOGC=50":
+			foundGC = true
+		}
+	}
+	if !foundMem {
+		t.Error("expected GOMEMLIMIT=16GiB in env, not found")
+	}
+	if !foundGC {
+		t.Error("expected GOGC=50 in env, not found")
+	}
+}
+
+func TestBuildServerEnv_OperatorOverrideRespected(t *testing.T) {
+	base := []string{
+		"HOME=/home/user",
+		"GOMEMLIMIT=24GiB",
+		"GOGC=100",
+	}
+	got := buildServerEnv(base)
+
+	var memCount, gcCount int
+	for _, e := range got {
+		if strings.HasPrefix(e, "GOMEMLIMIT=") {
+			memCount++
+			if e != "GOMEMLIMIT=24GiB" {
+				t.Errorf("GOMEMLIMIT overridden: got %q, want GOMEMLIMIT=24GiB", e)
+			}
+		}
+		if strings.HasPrefix(e, "GOGC=") {
+			gcCount++
+			if e != "GOGC=100" {
+				t.Errorf("GOGC overridden: got %q, want GOGC=100", e)
+			}
+		}
+	}
+	if memCount != 1 {
+		t.Errorf("expected exactly 1 GOMEMLIMIT entry, got %d", memCount)
+	}
+	if gcCount != 1 {
+		t.Errorf("expected exactly 1 GOGC entry, got %d", gcCount)
+	}
+}
+
+func TestBuildServerEnv_DoesNotMutateInput(t *testing.T) {
+	base := []string{"HOME=/home/user", "PATH=/usr/bin"}
+	orig := make([]string, len(base))
+	copy(orig, base)
+
+	_ = buildServerEnv(base)
+
+	if len(base) != len(orig) {
+		t.Fatalf("base slice length changed: got %d, want %d", len(base), len(orig))
+	}
+	for i := range base {
+		if base[i] != orig[i] {
+			t.Errorf("base[%d] mutated: got %q, want %q", i, base[i], orig[i])
+		}
+	}
+}
