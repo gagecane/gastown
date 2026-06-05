@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultStrandedScanInterval = 30 * time.Second
+	defaultStrandedScanInterval = 60 * time.Second
 	eventPollInterval           = 5 * time.Second
 	eventPollMaxBackoff         = 60 * time.Second
 	// Beads lifecycle events use CURRENT_TIMESTAMP in Dolt, which is second
@@ -34,7 +34,7 @@ const (
 
 	// feedDispatchCooldown is the minimum time between sling attempts for the
 	// same ready issue from the stranded scan. Without it, a bead that is
-	// in_progress to a dead polecat is re-slung every scan tick (~30s) — and
+	// in_progress to a dead polecat is re-slung every scan tick (~60s) — and
 	// if the new polecat also dies quickly (or sling itself fails), the loop
 	// repeats indefinitely, creating spawn storms and pummeling Dolt with
 	// repeated assignment writes. See gu-iygf / hq/gt-sfo6q.
@@ -234,7 +234,7 @@ type stableCandidate struct {
 }
 
 // NewConvoyManager creates a new convoy manager.
-// scanInterval controls the periodic stranded scan; 0 uses default (30s).
+// scanInterval controls the periodic stranded scan; 0 uses default (60s).
 // stores maps store names ("hq", rig names) to beads stores for event polling.
 // nil stores disables event-driven convoy checks (stranded scan still runs),
 // unless openStores is provided for lazy initialization.
@@ -881,7 +881,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 
 // escalateSlingFailure fires a one-shot gt escalate for a stranded convoy step.
 // It is called at most once per issueID (the caller deduplicates via
-// seenSlingErrors), turning silent every-30s daemon.log spam into a single
+// seenSlingErrors), turning silent every-60s daemon.log spam into a single
 // actionable HIGH escalation (gt-3798).
 func (m *ConvoyManager) escalateSlingFailure(convoyID, issueID, errMsg string) {
 	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
