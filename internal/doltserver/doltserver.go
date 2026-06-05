@@ -2067,7 +2067,7 @@ func Start(townRoot string) error {
 	// Both vars are only set if the caller hasn't already chosen a value, so
 	// operators can tune via the environment (e.g. GOMEMLIMIT=24GiB) without
 	// editing source.
-	cmd.Env = buildServerEnv(os.Environ())
+	cmd.Env = BuildServerEnv(os.Environ())
 
 	// Detach from terminal and put dolt in its own process group so that
 	// signals sent to the parent process group (e.g. SIGHUP when the caller
@@ -2177,10 +2177,10 @@ func Start(townRoot string) error {
 	return fmt.Errorf("Dolt server process started (PID %d) and is reachable, but databases failed to load after %v (%d databases × 5s): %w\nRecovery: gt dolt stop && gt dolt start\nCheck logs with: gt dolt logs", cmd.Process.Pid, totalTimeout, dbCount, lastErr)
 }
 
-// buildServerEnv returns a copy of baseEnv with GOMEMLIMIT and GOGC defaults
+// BuildServerEnv returns a copy of baseEnv with GOMEMLIMIT and GOGC defaults
 // applied. If either variable is already present in baseEnv, it is left
 // unchanged so operators can override without editing source.
-func buildServerEnv(baseEnv []string) []string {
+func BuildServerEnv(baseEnv []string) []string {
 	env := make([]string, len(baseEnv))
 	copy(env, baseEnv)
 

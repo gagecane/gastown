@@ -5580,12 +5580,12 @@ func TestLockHolder_DetectsDeadHolder(t *testing.T) {
 }
 
 // =============================================================================
-// buildServerEnv tests (GOMEMLIMIT / GOGC defaults)
+// BuildServerEnv tests (GOMEMLIMIT / GOGC defaults)
 // =============================================================================
 
 func TestBuildServerEnv_DefaultsAppliedWhenUnset(t *testing.T) {
 	base := []string{"HOME=/home/user", "PATH=/usr/bin"}
-	got := buildServerEnv(base)
+	got := BuildServerEnv(base)
 
 	var foundMem, foundGC bool
 	for _, e := range got {
@@ -5610,7 +5610,7 @@ func TestBuildServerEnv_OperatorOverrideRespected(t *testing.T) {
 		"GOMEMLIMIT=24GiB",
 		"GOGC=100",
 	}
-	got := buildServerEnv(base)
+	got := BuildServerEnv(base)
 
 	var memCount, gcCount int
 	for _, e := range got {
@@ -5640,7 +5640,7 @@ func TestBuildServerEnv_DoesNotMutateInput(t *testing.T) {
 	orig := make([]string, len(base))
 	copy(orig, base)
 
-	_ = buildServerEnv(base)
+	_ = BuildServerEnv(base)
 
 	if len(base) != len(orig) {
 		t.Fatalf("base slice length changed: got %d, want %d", len(base), len(orig))

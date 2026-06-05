@@ -950,6 +950,11 @@ func (m *DoltServerManager) startLocked() error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
+	// Apply Go runtime memory tuning (GOMEMLIMIT/GOGC). Without this, the
+	// daemon-launched server inherits the daemon's untuned environment and can
+	// grow to 30-55 GiB RSS, triggering OOM kills. (gu-iozi6)
+	cmd.Env = doltserver.BuildServerEnv(os.Environ())
+
 	// Detach from this process group so it survives daemon restart
 	setSysProcAttr(cmd)
 
