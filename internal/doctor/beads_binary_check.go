@@ -62,8 +62,8 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: "bd found but version could not be determined",
-			FixHint: fmt.Sprintf("Try reinstalling: go install %s", deps.BeadsInstallPath),
+			Message: "bd found but version could not be determined (may be transient under host load)",
+			FixHint: "Retry later — this is usually a timeout under load, not a broken install",
 		}
 	}
 
