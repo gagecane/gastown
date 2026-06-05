@@ -806,7 +806,36 @@ func (m *Manager) defaultVerifyMergeLanded(mr *MergeRequest) error {
 		gitDir = filepath.Join(m.rig.Path, "mayor", "rig")
 	}
 	g := git.NewGit(gitDir)
-	return verifyMergeCommitLanded(g, mr.MergeCommit, mr.TargetBranch)
+
+	// Target Resolution Rule (gu-eakas): resolve the MR's target branch using
+	// the same rule the merge step uses. Polecat MRs submitted before gu-wcb37
+	// carry target="main" even when the rig's actual default branch is
+	// "mainline" (no origin/main exists). Without resolution the fetch fails
+	// and verification rejects every target=main MR as unlanded. Resolve:
+	// if target is a common default-branch alias ("main", "master") and the
+	// rig's configured default branch differs, use the rig's default instead.
+	target := resolveVerifyTarget(mr.TargetBranch, m.rig.DefaultBranch())
+
+	return verifyMergeCommitLanded(g, mr.MergeCommit, target)
+}
+
+// resolveVerifyTarget applies the Target Resolution Rule for post-merge
+// verification (gu-eakas). When the MR carries a generic default-branch alias
+// ("main", "master") but the rig is configured with a different default
+// (e.g. "mainline"), return the rig's configured default — the merge landed
+// there, not on the literal MR target string. Non-generic targets (integration
+// branches, feature branches) pass through unchanged.
+func resolveVerifyTarget(mrTarget, rigDefault string) string {
+	if mrTarget == rigDefault {
+		return mrTarget
+	}
+	// Only resolve well-known default-branch aliases. An MR targeting an
+	// integration branch (e.g. "epic/batch-42") must NOT be remapped.
+	switch mrTarget {
+	case "main", "master":
+		return rigDefault
+	}
+	return mrTarget
 }
 
 // verifyMergeCommitLanded returns nil only when mergeCommit is non-empty and is

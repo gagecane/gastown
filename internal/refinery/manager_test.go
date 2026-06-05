@@ -609,6 +609,36 @@ func TestVerifyMergeCommitLanded(t *testing.T) {
 	})
 }
 
+// TestResolveVerifyTarget tests the Target Resolution Rule (gu-eakas):
+// the post-merge verify path must resolve generic aliases (main, master) to the
+// rig's configured default branch when they differ.
+func TestResolveVerifyTarget(t *testing.T) {
+	tests := []struct {
+		name       string
+		mrTarget   string
+		rigDefault string
+		want       string
+	}{
+		{"main→mainline", "main", "mainline", "mainline"},
+		{"master→mainline", "master", "mainline", "mainline"},
+		{"main=main (no-op)", "main", "main", "main"},
+		{"mainline=mainline (no-op)", "mainline", "mainline", "mainline"},
+		{"integration branch unchanged", "epic/batch-42", "mainline", "epic/batch-42"},
+		{"feature branch unchanged", "feature/foo", "main", "feature/foo"},
+		{"main→develop", "main", "develop", "develop"},
+		{"master→main", "master", "main", "main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveVerifyTarget(tt.mrTarget, tt.rigDefault)
+			if got != tt.want {
+				t.Errorf("resolveVerifyTarget(%q, %q) = %q, want %q",
+					tt.mrTarget, tt.rigDefault, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestManager_PostMerge_RefusesCloseWhenMergeNotLanded is the integration-level
 // regression test for gu-ilf86: PostMerge must NOT close the MR or source bead
 // when the merge commit never landed on origin/<target>.
