@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // RigIsGitRepoCheck verifies the rig has a valid mayor/rig git clone.
@@ -96,6 +96,12 @@ type GitExcludeConfiguredCheck struct {
 	FixableCheck
 	missingEntries []string
 	excludePath    string
+	// staleClaudeExclude is true when info/exclude carries a legacy bare
+	// ".claude/" line. That line excludes the directory itself, so git never
+	// descends into it and the "!.claude/commands/" / "!.claude/skills/"
+	// negations are dead. Existing clones written before the gu-w1bge fix carry
+	// it; Fix migrates it in place to ".claude/*".
+	staleClaudeExclude bool
 }
 
 // NewGitExcludeConfiguredCheck creates a new git exclude check.
@@ -165,15 +171,19 @@ func (c *GitExcludeConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Read existing excludes
 	existing := make(map[string]bool)
-	if file, err := os.Open(c.excludePath); err == nil {
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+	if data, err := os.ReadFile(c.excludePath); err == nil {
+		for _, raw := range strings.Split(string(data), "\n") {
+			line := strings.TrimSpace(raw)
 			if line != "" && !strings.HasPrefix(line, "#") {
 				existing[line] = true
 			}
 		}
-		_ = file.Close() //nolint:gosec // G104: best-effort close
+		// Detect a legacy bare ".claude/" line that kills the negations (gu-w1bge).
+		if _, changed := rig.MigrateClaudeIgnorePattern(string(data)); changed {
+			c.staleClaudeExclude = true
+		}
+	} else {
+		c.staleClaudeExclude = false
 	}
 
 	// Check for missing entries. Accept either anchored (/refinery/) or
@@ -187,7 +197,7 @@ func (c *GitExcludeConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if len(c.missingEntries) == 0 {
+	if len(c.missingEntries) == 0 && !c.staleClaudeExclude {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -195,18 +205,32 @@ func (c *GitExcludeConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	var details []string
+	if len(c.missingEntries) > 0 {
+		details = append(details, fmt.Sprintf("Missing: %s", strings.Join(c.missingEntries, ", ")))
+	}
+	if c.staleClaudeExclude {
+		details = append(details, "Legacy bare .claude/ line kills the !.claude/commands/ and !.claude/skills/ negations")
+	}
+
+	msg := fmt.Sprintf("%d Gas Town directories not excluded", len(c.missingEntries))
+	if len(c.missingEntries) == 0 && c.staleClaudeExclude {
+		msg = "Legacy .claude/ exclude needs migration to .claude/*"
+	}
+
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d Gas Town directories not excluded", len(c.missingEntries)),
-		Details: []string{fmt.Sprintf("Missing: %s", strings.Join(c.missingEntries, ", "))},
-		FixHint: "Run 'gt doctor --fix' to add missing entries",
+		Message: msg,
+		Details: details,
+		FixHint: "Run 'gt doctor --fix' to repair the exclude file",
 	}
 }
 
-// Fix appends missing entries to .git/info/exclude.
+// Fix appends missing entries to .git/info/exclude and migrates any legacy
+// bare ".claude/" line to ".claude/*" so the commands/skills negations are live.
 func (c *GitExcludeConfiguredCheck) Fix(ctx *CheckContext) error {
-	if len(c.missingEntries) == 0 {
+	if len(c.missingEntries) == 0 && !c.staleClaudeExclude {
 		return nil
 	}
 
@@ -214,6 +238,25 @@ func (c *GitExcludeConfiguredCheck) Fix(ctx *CheckContext) error {
 	infoDir := filepath.Dir(c.excludePath)
 	if err := os.MkdirAll(infoDir, 0755); err != nil {
 		return fmt.Errorf("failed to create info directory: %w", err)
+	}
+
+	// Migrate a legacy bare ".claude/" line in place first. Appending alone is
+	// insufficient — a surviving bare line keeps the negations dead regardless
+	// of order (gu-w1bge).
+	if c.staleClaudeExclude {
+		data, err := os.ReadFile(c.excludePath)
+		if err != nil {
+			return fmt.Errorf("failed to read exclude file for .claude migration: %w", err)
+		}
+		if migrated, changed := rig.MigrateClaudeIgnorePattern(string(data)); changed {
+			if err := os.WriteFile(c.excludePath, []byte(migrated), 0600); err != nil {
+				return fmt.Errorf("failed to migrate .claude exclude: %w", err)
+			}
+		}
+	}
+
+	if len(c.missingEntries) == 0 {
+		return nil
 	}
 
 	// Append missing entries

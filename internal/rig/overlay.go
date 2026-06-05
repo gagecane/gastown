@@ -14,7 +14,14 @@ import (
 func gasTownIgnorePatterns() []string {
 	return []string{
 		".runtime/",
-		".claude/",
+		// Use ".claude/*" (not ".claude/") so git still descends into the
+		// directory and the negations below can re-include tracked nested
+		// files. A bare ".claude/" excludes the directory itself, which makes
+		// any "!.claude/..." negation dead — git never looks inside an
+		// excluded directory. The negations MUST follow ".claude/*" (gu-w1bge).
+		".claude/*",
+		"!.claude/commands/",
+		"!.claude/skills/",
 		".opencode/",
 		".logs/",
 		"__pycache__/",
@@ -22,6 +29,72 @@ func gasTownIgnorePatterns() []string {
 		"CLAUDE.md",
 		"CLAUDE.local.md",
 		"GEMINI.md",
+	}
+}
+
+// MigrateClaudeIgnorePattern rewrites a legacy bare ".claude/" ignore line (in
+// any of its variant forms: ".claude", ".claude/", "/.claude", "/.claude/") to
+// the traversable ".claude/*" form, in place. It returns the (possibly)
+// rewritten content and whether any change was made.
+//
+// In-place replacement is required, not appending: a bare ".claude/" line
+// excludes the directory itself, so git never descends into it and the
+// "!.claude/commands/" / "!.claude/skills/" negations are dead — even when
+// ".claude/*" is also present elsewhere in the file. The bad line must be
+// removed for the negations to take effect (gu-w1bge).
+//
+// If the file already contains ".claude/*", any bare lines are simply dropped
+// (the existing wildcard line is preserved in its position). Otherwise the
+// first bare line is replaced with ".claude/*" so its position — typically
+// ahead of the negations — is preserved.
+func MigrateClaudeIgnorePattern(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+
+	hasBare := false
+	hasWildcard := false
+	for _, line := range lines {
+		switch normalizeClaudeIgnoreLine(line) {
+		case ".claude":
+			hasBare = true
+		case ".claude/*":
+			hasWildcard = true
+		}
+	}
+	if !hasBare {
+		return content, false
+	}
+
+	out := make([]string, 0, len(lines))
+	insertedWildcard := false
+	for _, line := range lines {
+		if normalizeClaudeIgnoreLine(line) == ".claude" {
+			// Replace the first bare line with the wildcard form (unless the
+			// file already has one elsewhere); drop any further bare lines.
+			if !hasWildcard && !insertedWildcard {
+				out = append(out, ".claude/*")
+				insertedWildcard = true
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n"), true
+}
+
+// normalizeClaudeIgnoreLine classifies a .gitignore line relative to the
+// ".claude" patterns. It returns ".claude" for the legacy bare directory form
+// (with or without leading/trailing slash), ".claude/*" for the traversable
+// form, or "" for anything else (including the negations, which must be
+// preserved verbatim).
+func normalizeClaudeIgnoreLine(line string) string {
+	norm := strings.TrimPrefix(strings.TrimSpace(line), "/")
+	switch norm {
+	case ".claude", ".claude/":
+		return ".claude"
+	case ".claude/*":
+		return ".claude/*"
+	default:
+		return ""
 	}
 }
 
@@ -85,17 +158,28 @@ func EnsureGitignorePatterns(worktreePath string) error {
 	// This has regressed twice (PR #753 added it, #891 removed it,
 	// #966 re-added it). See overlay_test.go for a regression guard.
 	//
-	// .claude/ is the broad pattern (covers commands/, settings.json, rules/, etc.).
+	// .claude is ignored via ".claude/*" + "!.claude/commands/" + "!.claude/skills/".
 	// Settings are installed in gastown-managed parent directories via --settings flag,
-	// but Cursor still creates .claude/ inside worktrees at runtime. The narrow
-	// .claude/commands/ pattern missed other Cursor-created files, causing gt done
-	// to fail with "uncommitted changes would be lost" on untracked .claude/ entries.
+	// but Cursor still creates .claude/ inside worktrees at runtime. A bare ".claude/"
+	// pattern excludes the directory itself so git never descends into it, making the
+	// commands/skills negations dead (gu-w1bge). ".claude/*" ignores the contents while
+	// keeping the directory traversable so nested skill/command files can be re-included.
 	requiredPatterns := gasTownIgnorePatterns()
 
 	// Read existing gitignore content
 	var existingContent string
 	if data, err := os.ReadFile(gitignorePath); err == nil {
 		existingContent = string(data)
+	}
+
+	// Migrate any legacy bare ".claude/" line to ".claude/*" in place. Appending
+	// the new patterns is not enough — a surviving bare line keeps the negations
+	// dead regardless of order (gu-w1bge).
+	if migrated, changed := MigrateClaudeIgnorePattern(existingContent); changed {
+		if err := os.WriteFile(gitignorePath, []byte(migrated), 0644); err != nil {
+			return fmt.Errorf("migrating .claude ignore pattern in .gitignore: %w", err)
+		}
+		existingContent = migrated
 	}
 
 	// Find missing patterns
@@ -180,6 +264,16 @@ func EnsureLocalExcludePatterns(worktreePath string) error {
 		return fmt.Errorf("reading local exclude: %w", err)
 	}
 
+	// Migrate any legacy bare ".claude/" line to ".claude/*" in place so the
+	// commands/skills negations are live. Existing clones written before the
+	// gu-w1bge fix carry the bad line in .git/info/exclude.
+	if migrated, changed := MigrateClaudeIgnorePattern(existingContent); changed {
+		if err := os.WriteFile(excludePath, []byte(migrated), 0644); err != nil {
+			return fmt.Errorf("migrating .claude ignore pattern in local exclude: %w", err)
+		}
+		existingContent = migrated
+	}
+
 	var missing []string
 	for _, pattern := range gasTownLocalExcludePatterns() {
 		found := false
@@ -244,8 +338,14 @@ func gitLocalExcludePath(worktreePath string) (string, error) {
 
 // matchesGitignorePattern checks if a gitignore line covers the required pattern.
 // Handles variant forms (with/without trailing slash, leading slash) and recognizes
-// that a broader directory pattern (e.g., ".claude/") covers more specific paths
-// (e.g., ".claude/commands/").
+// that a broader directory pattern (e.g., ".runtime/") covers more specific paths
+// (e.g., ".runtime/setup-hooks/").
+//
+// Negation and wildcard patterns (e.g. "!.claude/commands/", ".claude/*") are
+// matched by exact/variant equality only — the directory-coverage heuristic
+// below MUST NOT claim a broad directory line "covers" a negation, or the
+// negation would be wrongly treated as already present and never written,
+// silently re-killing the re-inclusion of nested .claude files (gu-w1bge).
 func matchesGitignorePattern(line, pattern string) bool {
 	// Strip leading slash for comparison
 	normLine := strings.TrimPrefix(line, "/")
@@ -258,9 +358,17 @@ func matchesGitignorePattern(line, pattern string) bool {
 		return true
 	}
 
+	// Negation and wildcard patterns have no "broader covers narrower"
+	// relationship — only exact/variant equality (handled above) counts.
+	if strings.HasPrefix(normPattern, "!") || strings.Contains(normPattern, "*") {
+		return false
+	}
+
 	// A broader directory pattern covers more specific paths underneath it.
-	// e.g., ".claude/" covers ".claude/commands/"
-	if strings.HasSuffix(normLine, "/") && strings.HasPrefix(normPattern, normLine) {
+	// e.g., ".runtime/" covers ".runtime/setup-hooks/". A negation or wildcard
+	// LINE is never a broad directory cover, so exclude those forms.
+	if strings.HasSuffix(normLine, "/") && !strings.HasPrefix(normLine, "!") &&
+		strings.HasPrefix(normPattern, normLine) {
 		return true
 	}
 	// Also handle directory pattern without trailing slash

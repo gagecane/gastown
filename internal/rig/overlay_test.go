@@ -263,12 +263,19 @@ func TestEnsureGitignorePatterns_CreatesNewFile(t *testing.T) {
 		t.Fatalf("Failed to read .gitignore: %v", err)
 	}
 
-	// Check all required patterns are present (.beads/ intentionally excluded — see overlay.go)
-	patterns := []string{".runtime/", ".claude/", ".opencode/", ".logs/", "__pycache__/", "state.json"}
+	// Check all required patterns are present (.beads/ intentionally excluded — see overlay.go).
+	// .claude is now emitted as ".claude/*" + negations so the nested commands/skills
+	// re-inclusions are live (gu-w1bge).
+	patterns := []string{".runtime/", ".claude/*", "!.claude/commands/", "!.claude/skills/", ".opencode/", ".logs/", "__pycache__/", "state.json"}
 	for _, pattern := range patterns {
 		if !containsLine(string(content), pattern) {
 			t.Errorf(".gitignore missing pattern %q", pattern)
 		}
+	}
+
+	// The buggy bare ".claude/" form must NOT be emitted — it kills the negations.
+	if containsLine(string(content), ".claude/") {
+		t.Error(".gitignore must not contain bare .claude/ (kills commands/skills negations)")
 	}
 }
 
@@ -302,7 +309,7 @@ func TestEnsureGitignorePatterns_AppendsToExisting(t *testing.T) {
 	}
 
 	// Should add required patterns (.beads/ intentionally excluded — see overlay.go)
-	patterns := []string{".runtime/", ".claude/", ".opencode/", ".logs/", "__pycache__/", "state.json"}
+	patterns := []string{".runtime/", ".claude/*", "!.claude/commands/", "!.claude/skills/", ".opencode/", ".logs/", "__pycache__/", "state.json"}
 	for _, pattern := range patterns {
 		if !containsLine(string(content), pattern) {
 			t.Errorf(".gitignore missing pattern %q", pattern)
@@ -313,9 +320,9 @@ func TestEnsureGitignorePatterns_AppendsToExisting(t *testing.T) {
 func TestEnsureGitignorePatterns_SkipsExistingPatterns(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create existing .gitignore with some Gas Town patterns already.
-	// The broader ".claude/" covers ".claude/commands/", so it should
-	// not add the narrower pattern.
+	// Create existing .gitignore with some Gas Town patterns already, including
+	// the legacy bare ".claude/" line. EnsureGitignorePatterns must migrate it
+	// to ".claude/*" in place (gu-w1bge) and add the negations.
 	existing := ".runtime/\n.claude/\n.opencode/\n"
 	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(existing), 0644); err != nil {
 		t.Fatalf("Failed to create .gitignore: %v", err)
@@ -337,10 +344,20 @@ func TestEnsureGitignorePatterns_SkipsExistingPatterns(t *testing.T) {
 		t.Errorf(".runtime/ appears %d times, expected 1", count)
 	}
 
-	// .claude/ is now a direct required pattern — should not be duplicated
-	claudeCount := countOccurrences(string(content), ".claude/")
-	if claudeCount != 1 {
-		t.Errorf(".claude/ appears %d times, expected 1", claudeCount)
+	// The legacy bare ".claude/" must be migrated away (zero occurrences) and
+	// replaced by the traversable ".claude/*" form plus negations.
+	if containsLine(string(content), ".claude/") {
+		t.Error("bare .claude/ should be migrated to .claude/* (kills negations)")
+	}
+	wildcardCount := countOccurrences(string(content), ".claude/*")
+	if wildcardCount != 1 {
+		t.Errorf(".claude/* appears %d times, expected 1", wildcardCount)
+	}
+	if !containsLine(string(content), "!.claude/commands/") {
+		t.Error(".gitignore missing negation !.claude/commands/")
+	}
+	if !containsLine(string(content), "!.claude/skills/") {
+		t.Error(".gitignore missing negation !.claude/skills/")
 	}
 	opencodeCount := countOccurrences(string(content), ".opencode/")
 	if opencodeCount != 1 {
@@ -371,7 +388,9 @@ func TestEnsureGitignorePatterns_RecognizesVariants(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create existing .gitignore with variant patterns (without trailing slash).
-	// ".claude" (no trailing slash) should be recognized as covering ".claude/commands/".
+	// ".runtime"/"/.opencode" variants should still be recognized (no duplicate),
+	// while the bare "/.claude" form is a legacy claude pattern that must be
+	// migrated to ".claude/*" + negations (gu-w1bge).
 	existing := ".runtime\n/.claude\n/.opencode\n"
 	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(existing), 0644); err != nil {
 		t.Fatalf("Failed to create .gitignore: %v", err)
@@ -393,21 +412,28 @@ func TestEnsureGitignorePatterns_RecognizesVariants(t *testing.T) {
 	if runtimeCount > 1 {
 		t.Errorf(".runtime appears %d times (variant detection failed)", runtimeCount)
 	}
-
-	// /.claude (leading slash, no trailing slash) should cover .claude/
-	if containsLine(string(content), ".claude/") {
-		t.Error(".claude/ should not be added when /.claude already covers it")
-	}
 	if containsLine(string(content), ".opencode/") {
 		t.Error(".opencode/ should not be added when /.opencode already covers it")
+	}
+
+	// The bare /.claude form should be migrated to .claude/* + negations.
+	if containsLine(string(content), "/.claude") || containsLine(string(content), ".claude/") {
+		t.Error("bare /.claude should be migrated to .claude/*")
+	}
+	if !containsLine(string(content), ".claude/*") {
+		t.Error(".claude/* should be present after migration of /.claude")
+	}
+	if !containsLine(string(content), "!.claude/commands/") || !containsLine(string(content), "!.claude/skills/") {
+		t.Error("negations should be added after migrating /.claude")
 	}
 }
 
 func TestEnsureGitignorePatterns_AllPatternsPresent(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create existing .gitignore with all required patterns.
-	existing := ".runtime/\n.claude/\n.opencode/\n.beads/\n.logs/\n__pycache__/\nstate.json\nCLAUDE.md\nCLAUDE.local.md\nGEMINI.md\n"
+	// Create existing .gitignore with all required patterns in their correct
+	// (post-gu-w1bge) form: .claude/* + negations, not bare .claude/.
+	existing := ".runtime/\n.claude/*\n!.claude/commands/\n!.claude/skills/\n.opencode/\n.beads/\n.logs/\n__pycache__/\nstate.json\nCLAUDE.md\nCLAUDE.local.md\nGEMINI.md\n"
 	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(existing), 0644); err != nil {
 		t.Fatalf("Failed to create .gitignore: %v", err)
 	}
@@ -436,8 +462,8 @@ func TestEnsureGitignorePatterns_AllPatternsPresent(t *testing.T) {
 func TestEnsureGitignorePatterns_NarrowPatternPresent(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create .gitignore with the exact required patterns
-	existing := ".runtime/\n.claude/\n.opencode/\n.logs/\n__pycache__/\nstate.json\nCLAUDE.md\nCLAUDE.local.md\nGEMINI.md\n"
+	// Create .gitignore with the exact required patterns (post-gu-w1bge form).
+	existing := ".runtime/\n.claude/*\n!.claude/commands/\n!.claude/skills/\n.opencode/\n.logs/\n__pycache__/\nstate.json\nCLAUDE.md\nCLAUDE.local.md\nGEMINI.md\n"
 	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(existing), 0644); err != nil {
 		t.Fatalf("Failed to create .gitignore: %v", err)
 	}
@@ -461,9 +487,10 @@ func TestEnsureGitignorePatterns_NarrowPatternPresent(t *testing.T) {
 func TestEnsureGitignorePatterns_OldNarrowClaudeUpgraded(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Simulate old installation with narrow .claude/commands/ pattern.
-	// After upgrade, .claude/ (broad) should be added since .claude/commands/
-	// does NOT cover .claude/ (the narrow is a subset, not a superset).
+	// Simulate old installation with the narrow .claude/commands/ ignore pattern
+	// (note: this is an *ignore* of commands, not a negation). After upgrade,
+	// .claude/* + negations should be added since .claude/commands/ does NOT
+	// cover them.
 	existing := ".runtime/\n.claude/commands/\n.logs/\n"
 	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(existing), 0644); err != nil {
 		t.Fatalf("Failed to create .gitignore: %v", err)
@@ -479,9 +506,12 @@ func TestEnsureGitignorePatterns_OldNarrowClaudeUpgraded(t *testing.T) {
 		t.Fatalf("Failed to read .gitignore: %v", err)
 	}
 
-	// .claude/ should be added (old .claude/commands/ doesn't cover it)
-	if !containsLine(string(content), ".claude/") {
-		t.Error(".claude/ should be added when only .claude/commands/ was present")
+	// .claude/* should be added (old .claude/commands/ doesn't cover it)
+	if !containsLine(string(content), ".claude/*") {
+		t.Error(".claude/* should be added when only .claude/commands/ was present")
+	}
+	if !containsLine(string(content), "!.claude/commands/") || !containsLine(string(content), "!.claude/skills/") {
+		t.Error("negations should be added")
 	}
 
 	// __pycache__/ should be added
@@ -490,12 +520,13 @@ func TestEnsureGitignorePatterns_OldNarrowClaudeUpgraded(t *testing.T) {
 	}
 }
 
-func TestEnsureGitignorePatterns_UpgradePreservesBroadPattern(t *testing.T) {
+func TestEnsureGitignorePatterns_UpgradeMigratesBareClaude(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Simulate an existing installation that has .claude/ plus other Gas Town
-	// patterns but is missing __pycache__/ (added later). After upgrade,
-	// __pycache__/ should be appended.
+	// Simulate an existing installation that has the legacy bare .claude/ line
+	// plus other Gas Town patterns but is missing __pycache__/ (added later).
+	// After upgrade, __pycache__/ should be appended AND the bare .claude/ line
+	// should be migrated to .claude/* + negations (gu-w1bge).
 	existing := "# Gas Town (added by gt)\n.runtime/\n.claude/\n.logs/\n"
 	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(existing), 0644); err != nil {
 		t.Fatalf("Failed to create .gitignore: %v", err)
@@ -520,8 +551,81 @@ func TestEnsureGitignorePatterns_UpgradePreservesBroadPattern(t *testing.T) {
 	if !containsLine(string(content), ".runtime/") {
 		t.Error(".runtime/ should be preserved")
 	}
-	if !containsLine(string(content), ".claude/") {
-		t.Error(".claude/ should be preserved")
+
+	// Bare .claude/ must be migrated to .claude/* + negations.
+	if containsLine(string(content), ".claude/") {
+		t.Error("bare .claude/ should be migrated away during upgrade")
+	}
+	if !containsLine(string(content), ".claude/*") {
+		t.Error(".claude/* should be present after migration")
+	}
+	if !containsLine(string(content), "!.claude/commands/") || !containsLine(string(content), "!.claude/skills/") {
+		t.Error("negations should be present after migration")
+	}
+}
+
+// TestMigrateClaudeIgnorePattern covers the in-place migration of the legacy
+// bare ".claude/" line to the traversable ".claude/*" form (gu-w1bge).
+func TestMigrateClaudeIgnorePattern(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          string
+		wantChanged bool
+		wantOut     string
+	}{
+		{
+			name:        "bare trailing-slash form is rewritten in place",
+			in:          ".runtime/\n.claude/\n!.claude/commands/\n",
+			wantChanged: true,
+			wantOut:     ".runtime/\n.claude/*\n!.claude/commands/\n",
+		},
+		{
+			name:        "bare no-slash form is rewritten",
+			in:          ".claude\n",
+			wantChanged: true,
+			wantOut:     ".claude/*\n",
+		},
+		{
+			name:        "leading-slash bare form is rewritten",
+			in:          "/.claude\n",
+			wantChanged: true,
+			wantOut:     ".claude/*\n",
+		},
+		{
+			name:        "already-correct wildcard form is untouched",
+			in:          ".claude/*\n!.claude/commands/\n",
+			wantChanged: false,
+			wantOut:     ".claude/*\n!.claude/commands/\n",
+		},
+		{
+			name:        "no claude line at all is untouched",
+			in:          ".runtime/\n.opencode/\n",
+			wantChanged: false,
+			wantOut:     ".runtime/\n.opencode/\n",
+		},
+		{
+			name:        "bare line dropped when wildcard already present (preserve wildcard position)",
+			in:          ".claude/*\n!.claude/commands/\n.claude/\n",
+			wantChanged: true,
+			wantOut:     ".claude/*\n!.claude/commands/\n",
+		},
+		{
+			name:        "negations are never touched",
+			in:          ".claude/\n!.claude/commands/\n!.claude/skills/\n",
+			wantChanged: true,
+			wantOut:     ".claude/*\n!.claude/commands/\n!.claude/skills/\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := MigrateClaudeIgnorePattern(tt.in)
+			if changed != tt.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
+			}
+			if got != tt.wantOut {
+				t.Errorf("output mismatch:\ngot:  %q\nwant: %q", got, tt.wantOut)
+			}
+		})
 	}
 }
 
