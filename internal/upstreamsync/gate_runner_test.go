@@ -259,9 +259,17 @@ func TestRunGates_SandboxedEnv_ScrubsParentCredentials(t *testing.T) {
 	t.Setenv("PATH", os.Getenv("PATH")) // keep PATH so /usr/bin/env resolves
 
 	summary := RunGates(context.Background(), []string{
-		// `env` prints the inherited environment. If sandboxing is on,
-		// the seeded secrets must not appear.
-		"env",
+		// Probe specific variables by expanding them in the child shell
+		// rather than dumping the whole environment with `env`. A full
+		// env dump can exceed MaxGateOutputBytes (e.g. a heavily-mutated
+		// PATH in an agent session), and tail-truncation would silently
+		// drop the head of the output — making these assertions depend on
+		// where a variable happens to land in the dump. Targeted probes
+		// keep output tiny and deterministic, and verify the stronger
+		// property that the variable is actually unset in the child (not
+		// merely absent from a truncated text dump). PATH is reported as a
+		// presence flag, never echoed, so a large PATH can't bloat output.
+		`printf 'AWS=[%s] BD=[%s] PATHSET=[%s]\n' "$AWS_SECRET_ACCESS_KEY" "$BD_ACTOR" "${PATH:+yes}"`,
 	}, GateRunOptions{
 		Dir:          ".",
 		SandboxedEnv: true,
@@ -274,12 +282,12 @@ func TestRunGates_SandboxedEnv_ScrubsParentCredentials(t *testing.T) {
 	if strings.Contains(out, "S3CR3T-PHASE5-AUDIT") {
 		t.Errorf("sandboxed gate leaked AWS_SECRET_ACCESS_KEY into child env:\n%s", out)
 	}
-	if strings.Contains(out, "brahmin-test") && strings.Contains(out, "BD_ACTOR") {
+	if strings.Contains(out, "brahmin-test") {
 		t.Errorf("sandboxed gate leaked BD_ACTOR into child env:\n%s", out)
 	}
 	// PATH must survive — without it, the shell can't find subsequent commands.
-	if !strings.Contains(out, "PATH=") {
-		t.Errorf("sandboxed gate dropped PATH; child env has no command resolution")
+	if !strings.Contains(out, "PATHSET=[yes]") {
+		t.Errorf("sandboxed gate dropped PATH; child env has no command resolution:\n%s", out)
 	}
 }
 
@@ -290,7 +298,12 @@ func TestRunGates_NotSandboxed_PreservesParentEnv(t *testing.T) {
 	t.Setenv("BRAHMIN_PHASE5_PROBE", "VISIBLE")
 
 	summary := RunGates(context.Background(), []string{
-		"env",
+		// Expand just the probe variable instead of dumping the full env
+		// with `env`: a full dump can exceed MaxGateOutputBytes and get
+		// tail-truncated, dropping the probe from the captured output even
+		// though it was correctly inherited. See the sandboxed sibling
+		// test for the truncation rationale.
+		`printf 'PROBE=[%s]\n' "$BRAHMIN_PHASE5_PROBE"`,
 	}, GateRunOptions{
 		Dir:          ".",
 		SandboxedEnv: false,
@@ -298,7 +311,7 @@ func TestRunGates_NotSandboxed_PreservesParentEnv(t *testing.T) {
 	if !summary.AllPassed {
 		t.Fatalf("gate failed unexpectedly: %+v", summary)
 	}
-	if !strings.Contains(summary.Results[0].Output, "BRAHMIN_PHASE5_PROBE=VISIBLE") {
+	if !strings.Contains(summary.Results[0].Output, "PROBE=[VISIBLE]") {
 		t.Errorf("non-sandboxed gate did not inherit parent env probe; output:\n%s", summary.Results[0].Output)
 	}
 }
