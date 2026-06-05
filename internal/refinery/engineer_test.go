@@ -1086,13 +1086,21 @@ case "$*" in
 	assert_town_read_env
 	    echo '[{"id":"hq-cv-l9","title":"Cross-rig convoy","status":"open","description":"","issue_type":"convoy"}]'
     ;;
+  *"sql SELECT issue_id, depends_on_id FROM dependencies WHERE issue_id IN ("*") AND type = 'tracks' --json"*)
+    assert_town_read_env
+    echo '[{"issue_id":"hq-cv-l9","depends_on_id":"external:l9:l9-123"}]'
+    ;;
   "--allow-stale dep list hq-cv-l9 --direction=down --type=tracks --json"|"dep list hq-cv-l9 --direction=down --type=tracks --json")
     assert_town_read_env
     echo '[{"id":"external:l9:l9-123","status":"closed"}]'
     ;;
+  "--allow-stale show --json l9-123"|"show --json l9-123")
+    assert_routing_read_env
+    echo '[{"id":"l9-123","status":"closed"}]'
+    ;;
   "--allow-stale show l9-123 --json"|"show l9-123 --json")
     assert_routing_read_env
-    echo '[{"status":"closed"}]'
+    echo '[{"id":"l9-123","status":"closed"}]'
     ;;
   "--allow-stale close hq-cv-l9 -r All tracked issues completed"|"close hq-cv-l9 -r All tracked issues completed")
     assert_town_write_env
@@ -1128,6 +1136,76 @@ esac
 	}
 	if closed[0].ID != "hq-cv-l9" {
 		t.Fatalf("closed convoy ID = %q, want hq-cv-l9", closed[0].ID)
+	}
+}
+
+func TestCheckAndCloseCompletedConvoys_FallsBackOnSQLFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows - shell stubs")
+	}
+
+	tmpDir := t.TempDir()
+	townBeads := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townBeads, "metadata.json"), []byte(`{"dolt_database":"hq"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(tmpDir, "fallback-rig")
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	// bd stub that rejects SQL (simulates old bd without sql support) but
+	// supports the serial dep list + show fallback.
+	script := `#!/bin/sh
+case "$*" in
+  "--allow-stale version"|"version")
+    exit 0
+    ;;
+  *"list --status=open --json --limit=0 --flat"*)
+    echo '[{"id":"hq-cv-fb","title":"Fallback convoy","status":"open","description":"","issue_type":"convoy"}]'
+    ;;
+  *"sql "*)
+    # Simulate SQL not available
+    exit 1
+    ;;
+  *"dep list hq-cv-fb --direction=down --type=tracks --json"*)
+    echo '[{"id":"fb-dep1","status":"closed"}]'
+    ;;
+  *"show --json fb-dep1"*|*"show fb-dep1 --json"*)
+    echo '[{"id":"fb-dep1","status":"closed"}]'
+    ;;
+  *"close hq-cv-fb"*)
+    exit 0
+    ;;
+  *)
+    echo "unexpected bd args: $*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TOWN_BEADS", townBeads)
+
+	e := NewEngineer(&rig.Rig{
+		Name: "fallback-rig",
+		Path: rigDir,
+	})
+
+	closed := e.checkAndCloseCompletedConvoys(tmpDir, townBeads)
+	if len(closed) != 1 {
+		t.Fatalf("expected 1 closed convoy on SQL fallback, got %d", len(closed))
+	}
+	if closed[0].ID != "hq-cv-fb" {
+		t.Fatalf("closed convoy ID = %q, want hq-cv-fb", closed[0].ID)
 	}
 }
 

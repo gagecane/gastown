@@ -2305,6 +2305,11 @@ func refineryHasLabel(labels []string, target string) bool {
 
 // checkAndCloseCompletedConvoys finds and closes convoys where all tracked issues
 // are complete. Returns the list of convoys that were closed.
+//
+// Performance: uses a single batched SQL query to fetch all tracked deps across
+// all convoys, then a single batched bd show to resolve statuses, reducing
+// subprocess calls from O(convoys × deps) to O(1). Falls back to serial on
+// SQL failure. (gu-8zewg)
 func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []convoyInfo {
 	townReadEnv := beads.BuildReadOnlyPinnedBDEnv(os.Environ(), townBeads)
 	townMutationEnv := beads.BuildMutationPinnedBDEnv(os.Environ(), townBeads)
@@ -2322,7 +2327,7 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 		return nil
 	}
 
-	var convoys []struct {
+	var allIssues []struct {
 		ID          string   `json:"id"`
 		Title       string   `json:"title"`
 		Status      string   `json:"status"`
@@ -2330,68 +2335,64 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 		IssueType   string   `json:"issue_type"`
 		Labels      []string `json:"labels"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &allIssues); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to parse convoy list: %v\n", err)
 		return nil
 	}
 
+	// Filter to convoy beads only.
+	type convoyEntry struct {
+		ID          string
+		Title       string
+		Description string
+	}
+	var convoys []convoyEntry
+	var convoyIDs []string
+	for _, issue := range allIssues {
+		if issue.IssueType != "convoy" && !refineryHasLabel(issue.Labels, "gt:convoy") {
+			continue
+		}
+		convoys = append(convoys, convoyEntry{
+			ID:          issue.ID,
+			Title:       issue.Title,
+			Description: issue.Description,
+		})
+		convoyIDs = append(convoyIDs, issue.ID)
+	}
+
+	if len(convoys) == 0 {
+		return nil
+	}
+
+	// Step 1: Batch-fetch all tracked deps via a single SQL query.
+	// Map convoy ID -> list of extracted dep IDs.
+	convoyDeps := e.batchGetTrackedDeps(townBeads, townReadEnv, convoyIDs)
+
+	// Collect all unique dep IDs that need status resolution.
+	depIDSet := make(map[string]bool)
+	for _, deps := range convoyDeps {
+		for _, id := range deps {
+			depIDSet[id] = true
+		}
+	}
+
+	// Step 2: Batch-fetch statuses for all deps via a single bd show call.
+	depStatuses := e.batchGetDepStatuses(townRoot, townBeads, routingReadEnv, depIDSet)
+
+	// Step 3: Determine which convoys are complete and close them.
 	var closed []convoyInfo
-
 	for _, convoy := range convoys {
-		if convoy.IssueType != "convoy" && !refineryHasLabel(convoy.Labels, "gt:convoy") {
-			continue
-		}
-		// Get tracked issues for this convoy via bd dep list
-		depArgs := beads.MaybePrependAllowStaleWithEnv(townReadEnv, []string{"dep", "list", convoy.ID, "--direction=down", "--type=tracks", "--json"})
-		depCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyPinned, depArgs...)
-		var depOut bytes.Buffer
-		depCmd.Stdout = &depOut
+		deps := convoyDeps[convoy.ID]
 
-		if err := depCmd.Run(); err != nil {
-			continue
-		}
-
-		var deps []struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
-		}
-		if err := json.Unmarshal(depOut.Bytes(), &deps); err != nil {
-			continue
-		}
-
-		// Refresh statuses from home rigs (cross-rig lookup)
 		allClosed := true
-		for _, dep := range deps {
-			// Unwrap external:prefix:id format
-			depID := dep.ID
-			if strings.HasPrefix(depID, "external:") {
-				parts := strings.SplitN(depID, ":", 3)
-				if len(parts) == 3 {
-					depID = parts[2]
-				}
-			}
-
-			// Get fresh status from home rig via bd show with routing
-			showArgs := beads.MaybePrependAllowStaleWithEnv(routingReadEnv, []string{"show", depID, "--json"})
-			showCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyRouting, showArgs...)
-			var showOut bytes.Buffer
-			showCmd.Stdout = &showOut
-
-			if err := showCmd.Run(); err != nil || showOut.Len() == 0 {
+		for _, depID := range deps {
+			status, ok := depStatuses[depID]
+			if !ok {
 				// Can't verify - treat as open to be safe
 				allClosed = false
 				break
 			}
-
-			var issues []struct {
-				Status string `json:"status"`
-			}
-			if err := json.Unmarshal(showOut.Bytes(), &issues); err != nil || len(issues) == 0 {
-				allClosed = false
-				break
-			}
-
-			if issues[0].Status != "closed" && issues[0].Status != "tombstone" {
+			if status != "closed" && status != "tombstone" {
 				allClosed = false
 				break
 			}
@@ -2427,6 +2428,197 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 	}
 
 	return closed
+}
+
+// isValidConvoyID checks that a string is safe for SQL interpolation in an IN clause.
+// Allows alphanumeric, dash, dot, underscore (same rules as bead IDs).
+func isValidConvoyID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// batchGetTrackedDeps fetches all tracked dependencies for the given convoy IDs
+// in a single SQL query. Returns a map of convoy ID -> list of extracted dep IDs.
+// Falls back to per-convoy serial bd dep list on SQL failure.
+func (e *Engineer) batchGetTrackedDeps(townBeads string, townReadEnv []string, convoyIDs []string) map[string][]string {
+	result := make(map[string][]string, len(convoyIDs))
+
+	// Initialize all convoy entries so callers can distinguish "no deps" from "lookup failed".
+	for _, id := range convoyIDs {
+		result[id] = nil
+	}
+
+	// Validate IDs for safe SQL interpolation.
+	quoted := make([]string, 0, len(convoyIDs))
+	for _, id := range convoyIDs {
+		if !isValidConvoyID(id) {
+			// Unsafe ID — fall back to serial for all.
+			return e.serialGetTrackedDeps(townBeads, townReadEnv, convoyIDs)
+		}
+		quoted = append(quoted, "'"+id+"'")
+	}
+
+	query := fmt.Sprintf(
+		"SELECT issue_id, depends_on_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
+		strings.Join(quoted, ","),
+	)
+
+	sqlArgs := beads.MaybePrependAllowStaleWithEnv(townReadEnv, []string{"sql", query, "--json"})
+	sqlCmd := beads.Command(townBeads, townBeads, beads.ReadOnlyPinned, sqlArgs...)
+	var sqlOut bytes.Buffer
+	sqlCmd.Stdout = &sqlOut
+
+	if err := sqlCmd.Run(); err != nil {
+		// SQL not available or failed — fall back to serial.
+		return e.serialGetTrackedDeps(townBeads, townReadEnv, convoyIDs)
+	}
+
+	var rows []map[string]string
+	if err := json.Unmarshal(sqlOut.Bytes(), &rows); err != nil {
+		return e.serialGetTrackedDeps(townBeads, townReadEnv, convoyIDs)
+	}
+
+	// Dedup per convoy.
+	seen := make(map[string]map[string]bool, len(convoyIDs))
+	for _, row := range rows {
+		convoyID := row["issue_id"]
+		rawID := row["depends_on_id"]
+		id := beads.ExtractIssueID(rawID)
+		if convoyID == "" || id == "" {
+			continue
+		}
+		if seen[convoyID] == nil {
+			seen[convoyID] = make(map[string]bool)
+		}
+		if seen[convoyID][id] {
+			continue
+		}
+		seen[convoyID][id] = true
+		result[convoyID] = append(result[convoyID], id)
+	}
+
+	return result
+}
+
+// serialGetTrackedDeps is the fallback per-convoy serial lookup used when
+// the batched SQL query is unavailable.
+func (e *Engineer) serialGetTrackedDeps(townBeads string, townReadEnv []string, convoyIDs []string) map[string][]string {
+	result := make(map[string][]string, len(convoyIDs))
+	for _, convoyID := range convoyIDs {
+		depArgs := beads.MaybePrependAllowStaleWithEnv(townReadEnv, []string{"dep", "list", convoyID, "--direction=down", "--type=tracks", "--json"})
+		depCmd := beads.Command(townBeads, townBeads, beads.ReadOnlyPinned, depArgs...)
+		var depOut bytes.Buffer
+		depCmd.Stdout = &depOut
+
+		if err := depCmd.Run(); err != nil {
+			continue
+		}
+
+		var deps []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(depOut.Bytes(), &deps); err != nil {
+			continue
+		}
+
+		for _, dep := range deps {
+			id := beads.ExtractIssueID(dep.ID)
+			if id != "" {
+				result[convoyID] = append(result[convoyID], id)
+			}
+		}
+	}
+	return result
+}
+
+// batchGetDepStatuses fetches statuses for all dep IDs in a single bd show call
+// with routing. Returns a map of dep ID -> status string. Falls back to serial
+// per-dep bd show if the batched call fails.
+func (e *Engineer) batchGetDepStatuses(townRoot, townBeads string, routingReadEnv []string, depIDs map[string]bool) map[string]string {
+	result := make(map[string]string, len(depIDs))
+
+	if len(depIDs) == 0 {
+		return result
+	}
+
+	// Collect IDs into a slice for the bd show call.
+	ids := make([]string, 0, len(depIDs))
+	for id := range depIDs {
+		ids = append(ids, id)
+	}
+
+	// Try batched bd show with all IDs at once.
+	showArgs := append([]string{"show", "--json"}, ids...)
+	showArgs = beads.MaybePrependAllowStaleWithEnv(routingReadEnv, showArgs)
+	showCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyRouting, showArgs...)
+	var showOut bytes.Buffer
+	showCmd.Stdout = &showOut
+
+	if err := showCmd.Run(); err != nil || showOut.Len() == 0 {
+		// Batched show failed — fall back to serial per-dep lookups.
+		return e.serialGetDepStatuses(townRoot, townBeads, routingReadEnv, ids)
+	}
+
+	var issues []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(showOut.Bytes(), &issues); err != nil {
+		return e.serialGetDepStatuses(townRoot, townBeads, routingReadEnv, ids)
+	}
+
+	for _, issue := range issues {
+		result[issue.ID] = issue.Status
+	}
+
+	// If some IDs were not returned (e.g., cross-db routing issues), fetch them serially.
+	var missing []string
+	for _, id := range ids {
+		if _, ok := result[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		serial := e.serialGetDepStatuses(townRoot, townBeads, routingReadEnv, missing)
+		for id, status := range serial {
+			result[id] = status
+		}
+	}
+
+	return result
+}
+
+// serialGetDepStatuses fetches statuses one at a time, used as fallback when
+// batched bd show fails or returns incomplete results.
+func (e *Engineer) serialGetDepStatuses(townRoot, townBeads string, routingReadEnv []string, ids []string) map[string]string {
+	result := make(map[string]string, len(ids))
+	for _, depID := range ids {
+		showArgs := beads.MaybePrependAllowStaleWithEnv(routingReadEnv, []string{"show", depID, "--json"})
+		showCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyRouting, showArgs...)
+		var showOut bytes.Buffer
+		showCmd.Stdout = &showOut
+
+		if err := showCmd.Run(); err != nil || showOut.Len() == 0 {
+			continue
+		}
+
+		var issues []struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(showOut.Bytes(), &issues); err != nil || len(issues) == 0 {
+			continue
+		}
+
+		result[depID] = issues[0].Status
+	}
+	return result
 }
 
 // notifyConvoyCompletion sends notifications to convoy owner and notify addresses.
