@@ -593,6 +593,9 @@ func requireBd(t *testing.T) {
 
 func setupPatrolTestDB(t *testing.T) (string, *beads.Beads) {
 	t.Helper()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping test")
+	}
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	tmpDir := t.TempDir()
