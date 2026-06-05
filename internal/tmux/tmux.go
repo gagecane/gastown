@@ -211,7 +211,15 @@ func BuildCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 
 // Tmux wraps tmux operations.
 type Tmux struct {
-	socketName string // tmux socket name (-L flag), empty = default socket
+	socketName        string        // tmux socket name (-L flag), empty = default socket
+	dialogPollTimeout time.Duration // override for DialogPollTimeout; 0 = use constants default
+}
+
+// SetDialogPollTimeout overrides the dialog polling timeout for this instance.
+// Use in tests to avoid coupling assertions to wall-clock timing. Zero resets
+// to the default (constants.DialogPollTimeout).
+func (t *Tmux) SetDialogPollTimeout(d time.Duration) {
+	t.dialogPollTimeout = d
 }
 
 // noTownSocket is a sentinel socket name used when no town socket is configured.

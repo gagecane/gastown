@@ -34,7 +34,7 @@ func (t *Tmux) AcceptStartupDialogs(session string) error {
 // the agent hasn't rendered the dialog yet when we first check. Exits early if the
 // agent prompt appears (indicating no dialog will be shown).
 func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
-	deadline := time.Now().Add(constants.DialogPollTimeout)
+	deadline := time.Now().Add(t.effectiveDialogPollTimeout())
 	for time.Now().Before(deadline) {
 		content, err := t.CapturePane(session, 30)
 		if err != nil {
@@ -109,7 +109,7 @@ func containsPromptIndicator(content string) bool {
 // Call this after starting Claude and waiting for it to initialize (WaitForCommand),
 // but before sending any prompts.
 func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
-	deadline := time.Now().Add(constants.DialogPollTimeout)
+	deadline := time.Now().Add(t.effectiveDialogPollTimeout())
 	for time.Now().Before(deadline) {
 		content, err := t.CapturePane(session, 30)
 		if err != nil {
@@ -140,6 +140,15 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 
 	// Timeout — no dialog detected, safe to proceed
 	return nil
+}
+
+// effectiveDialogPollTimeout returns the dialog poll timeout for this instance,
+// falling back to constants.DialogPollTimeout when no override is set.
+func (t *Tmux) effectiveDialogPollTimeout() time.Duration {
+	if t.dialogPollTimeout > 0 {
+		return t.dialogPollTimeout
+	}
+	return constants.DialogPollTimeout
 }
 
 // DismissStartupDialogsBlind sends the key sequences needed to dismiss all
