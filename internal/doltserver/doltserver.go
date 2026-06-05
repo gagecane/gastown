@@ -1808,6 +1808,35 @@ func readLockHolder(lockFile string) int {
 	return pid
 }
 
+// buildServerEnv returns the environment for the daemon-launched dolt
+// sql-server subprocess. It starts from the given base environment (normally
+// os.Environ()) and appends GOMEMLIMIT/GOGC defaults that cap Dolt's Go
+// runtime memory growth. Each default is appended only if the variable is not
+// already present in base, so an operator override (e.g. GOMEMLIMIT=24GiB) is
+// preserved. See Start() for the rationale behind the specific values.
+func buildServerEnv(base []string) []string {
+	env := append([]string(nil), base...)
+	if !hasEnvKey(base, "GOMEMLIMIT") {
+		env = append(env, "GOMEMLIMIT=16GiB")
+	}
+	if !hasEnvKey(base, "GOGC") {
+		env = append(env, "GOGC=50")
+	}
+	return env
+}
+
+// hasEnvKey reports whether environ contains an assignment for key
+// (i.e. an entry of the form "key=...").
+func hasEnvKey(environ []string, key string) bool {
+	prefix := key + "="
+	for _, e := range environ {
+		if strings.HasPrefix(e, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Start starts the Dolt SQL server.
 func Start(townRoot string) error {
 	config := DefaultConfig(townRoot)
@@ -2067,14 +2096,7 @@ func Start(townRoot string) error {
 	// Both vars are only set if the caller hasn't already chosen a value, so
 	// operators can tune via the environment (e.g. GOMEMLIMIT=24GiB) without
 	// editing source.
-	env := os.Environ()
-	if _, set := os.LookupEnv("GOMEMLIMIT"); !set {
-		env = append(env, "GOMEMLIMIT=16GiB")
-	}
-	if _, set := os.LookupEnv("GOGC"); !set {
-		env = append(env, "GOGC=50")
-	}
-	cmd.Env = env
+	cmd.Env = buildServerEnv(os.Environ())
 
 	// Detach from terminal and put dolt in its own process group so that
 	// signals sent to the parent process group (e.g. SIGHUP when the caller
