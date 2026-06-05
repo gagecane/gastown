@@ -299,6 +299,7 @@ func TestDoneCircularRedirectProtection(t *testing.T) {
 // This is critical because branch names like "polecat/furiosa-mkb0vq9f" don't
 // contain the actual issue ID (test-845.1), but the status query finds it.
 func TestFindHookedBeadForAgent(t *testing.T) {
+	requireBd(t)
 	// Each subtest gets its own isolated, container-backed beads DB so writes
 	// land in (and reads come from) a throwaway Dolt database, never the host
 	// workspace's production server. (The historical bd-0.47.2 auto-flush bug

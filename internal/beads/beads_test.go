@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -3637,6 +3638,11 @@ func TestSetupRedirect(t *testing.T) {
 // with agent_state="nuked", avoiding the close/reopen cycle
 // that fails on Dolt backends.
 func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
+	// Init shells out to the real bd binary; skip in environments (e.g. the
+	// unit-test CI lane) where it isn't installed.
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd CLI not installed, skipping bd-backed lifecycle test")
+	}
 	tmpDir := t.TempDir()
 	bd := NewIsolated(tmpDir)
 	if err := bd.Init("test"); err != nil {

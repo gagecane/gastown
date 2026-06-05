@@ -376,6 +376,7 @@ func TestDetectSessionState(t *testing.T) {
 	})
 
 	t.Run("autonomous_state_hooked_bead", func(t *testing.T) {
+		requireBd(t)
 		// Isolated, container-backed beads DB: the hooked bead is written to a
 		// throwaway Dolt database, never the host workspace's production server.
 		// (The historical bd-0.47.2 auto-flush bug that previously blocked this
