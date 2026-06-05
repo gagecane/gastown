@@ -199,6 +199,27 @@ func ParseAgentFields(description string) *AgentFields {
 	return fields
 }
 
+// HasAgentRoleType reports whether a bead description carries a non-empty
+// role_type field — the authoritative marker of an agent/identity bead.
+//
+// gs-fwu: the per-rig refinery identity bead (gs-gastown-refinery) carries a
+// prose title ("Refinery for gastown - processes merge queue.") and no
+// gt:agent label, with issue_type=task and OPEN status — so every title/label/
+// type/status identity filter missed it and the scheduler dispatched it as
+// work after a daemon restart. role_type is the one field reliably set on
+// every agent bead regardless of owner, status, title, or labels, so dispatch
+// guards reject on it directly.
+//
+// Detection reuses ParseAgentFields, which only extracts role_type from a line
+// whose leading key (text before the first colon) is exactly "role_type" — the
+// agent-bead serialization format produced by FormatAgentDescription. Prose
+// that merely mentions role_type mid-sentence (e.g. gs-fwu's own description)
+// is not a leading key and does not trip the guard, so legitimate work beads
+// are unaffected.
+func HasAgentRoleType(description string) bool {
+	return ParseAgentFields(description).RoleType != ""
+}
+
 // CreateAgentBead creates an agent bead for tracking agent lifecycle.
 // The ID format is: <prefix>-<rig>-<role>-<name> (e.g., gt-gastown-polecat-Toast)
 // Use AgentBeadID() helper to generate correct IDs.

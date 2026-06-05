@@ -102,10 +102,11 @@ func IsAgentBead(info *BeadInfo) bool {
 // IsIdentityBeadInfo is the BeadInfo-backed dispatch filter. It mirrors
 // beads.IsIdentityBead for the compact status/title/labels shape used by
 // sling's bd-show wrapper. Returns true when the bead is an agent identity
-// bead (label gt:agent OR legacy issue_type=agent), a rig identity bead
-// (label gt:rig OR issue_type=rig — gs-2j6), a role definition bead
-// (label gt:role OR issue_type=role), is closed, or has a title matching
-// the identity naming convention (^<prefix>-.+-(polecat-.+|refinery)$).
+// bead (label gt:agent OR legacy issue_type=agent OR a role_type field in the
+// description — gs-fwu), a rig identity bead (label gt:rig OR issue_type=rig —
+// gs-2j6), a role definition bead (label gt:role OR issue_type=role), is
+// closed, or has a title matching the identity naming convention
+// (^<prefix>-.+-(polecat-.+|refinery)$).
 //
 // Every dispatch path (runSling, executeSling, scheduleBead) consults this
 // helper to guarantee identity beads never hook a polecat. This closes the
@@ -116,6 +117,16 @@ func IsIdentityBeadInfo(info *BeadInfo) bool {
 		return false
 	}
 	if IsAgentBead(info) {
+		return true
+	}
+	// role_type in the description is the authoritative agent-bead marker —
+	// reliably set even when the title is prose and the gt:agent label is
+	// missing. gs-fwu: the gs-gastown-refinery identity bead (role_type:
+	// refinery, prose title, no gt:agent label, issue_type=task, OPEN) slipped
+	// past every label/title/type/status filter and was dispatched as work
+	// after a daemon restart. Gating on role_type hard-excludes it independent
+	// of status/owner/hook so a restart can never make it dispatchable.
+	if beads.HasAgentRoleType(info.Description) {
 		return true
 	}
 	if info.IssueType == "rig" || info.IssueType == "role" {

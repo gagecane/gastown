@@ -529,6 +529,12 @@ func IsIdentityBead(issue *Issue) bool {
 	if IsAgentBead(issue) {
 		return true
 	}
+	// role_type in the description is the authoritative agent-bead marker —
+	// reliably set even when the title is prose and the gt:agent label is
+	// missing (gs-fwu: the gs-gastown-refinery identity bead).
+	if HasAgentRoleType(issue.Description) {
+		return true
+	}
 	if issue.Type == "rig" || issue.Type == "role" {
 		return true
 	}

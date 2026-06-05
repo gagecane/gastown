@@ -179,10 +179,22 @@ func TestIsIdentityBeadInfo(t *testing.T) {
 		{"gt:role label", &BeadInfo{Title: "crew", Status: "open", IssueType: "role", Labels: []string{"gt:role"}}, true},
 		{"role type alone", &BeadInfo{Title: "deacon", Status: "open", IssueType: "role"}, true},
 
+		// role_type criterion (gs-fwu). The per-rig refinery/witness identity
+		// beads carry a prose title, no gt:agent label, issue_type=task, and
+		// OPEN status — every other filter misses them. role_type is the
+		// authoritative marker.
+		{"refinery identity by role_type (gs-fwu)", &BeadInfo{Title: "Refinery for gastown - processes merge queue.", Status: "open", IssueType: "task", Description: "Refinery for gastown - processes merge queue.\n\nrole_type: refinery\nrig: gastown\nagent_state: idle"}, true},
+		{"crew identity by role_type", &BeadInfo{Title: "Crew worker gagecane in gastown - human-managed persistent workspace.", Status: "open", IssueType: "task", Description: "role_type: crew\nrig: gastown"}, true},
+		{"witness identity by role_type, deferred", &BeadInfo{Title: "Witness for lia_web", Status: "deferred", IssueType: "task", Description: "role_type: witness\nrig: lia_web"}, true},
+
 		// Near misses.
 		{"title has refinery mid-string but not at end", &BeadInfo{Title: "af-refinery-feature-work", Status: "open", IssueType: "task"}, false},
 		{"label looks like agent but is not", &BeadInfo{Title: "Regular work", Status: "open", Labels: []string{"gt:agentless"}}, false},
 		{"label looks like rig but is not", &BeadInfo{Title: "Regular work", Status: "open", Labels: []string{"gt:rigid"}}, false},
+		// role_type mentioned mid-prose (not a leading key) must NOT trip the
+		// guard — otherwise a real work bead describing this very fix would
+		// refuse to dispatch (the gs-2no failure mode in reverse).
+		{"role_type mentioned mid-sentence is not identity", &BeadInfo{Title: "Fix scheduler so beads with role_type set are excluded", Status: "open", IssueType: "bug", Description: "FIX: the scheduler must hard-exclude beads with role_type set (e.g. role_type:refinery) from the candidate set."}, false},
 	}
 
 	for _, tt := range tests {

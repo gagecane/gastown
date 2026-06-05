@@ -4019,6 +4019,21 @@ func TestIsIdentityBead(t *testing.T) {
 			issue: &Issue{Title: "crew", Status: "open", Type: "role", Labels: []string{"gt:role"}},
 			want:  true,
 		},
+		// role_type in description (gs-fwu): prose title, no gt:agent label,
+		// type=task, OPEN — the refinery identity bead that slipped past every
+		// other filter and got dispatched after a daemon restart.
+		{
+			name:  "refinery identity by role_type",
+			issue: &Issue{Title: "Refinery for gastown - processes merge queue.", Status: "open", Type: "task", Description: "Refinery for gastown - processes merge queue.\n\nrole_type: refinery\nrig: gastown\nagent_state: idle"},
+			want:  true,
+		},
+		// role_type mid-prose (not a leading key) must NOT classify a real work
+		// bead as identity — guards against silently un-dispatchable work.
+		{
+			name:  "role_type mentioned mid-sentence is not identity",
+			issue: &Issue{Title: "Exclude beads with role_type set", Status: "open", Type: "bug", Description: "FIX: hard-exclude beads with role_type set (role_type:refinery) from dispatch."},
+			want:  false,
+		},
 	}
 
 	for _, tt := range tests {
