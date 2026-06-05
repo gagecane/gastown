@@ -457,12 +457,62 @@ and argument signature verified to exist against the live tool (zero unverified
 invocations)."""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 8: Finalize & package (Guide ch.4)
+# Step 8: Independent review (fresh-context adversarial check)
+# Self-review by the author is weak: the agent that wrote a wrong command
+# "knows" it's right. A SEPARATE agent with fresh context catches what the
+# author is blind to. This is the gate that catches hallucinated flags,
+# misleading guidance, and over/under-triggering.
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "independent-review"
+title = "Independent review of {{skill_name}} by a fresh-context agent"
+needs = ["test-triggering", "test-functional"]
+description = """
+Get an INDEPENDENT review. Do NOT review your own skill and call it done — the
+author who hallucinated a flag will read right past it. Spawn a SEPARATE agent
+(fresh context, e.g. the Task/Agent tool or `gt sling ... --args`) and have it
+adversarially verify the skill against the live system, not against your intent.
+
+**Hand the reviewer ONLY the skill folder + the live tool** — not your
+reasoning. Instruct it to:
+
+1. **Re-verify every command/flag from scratch.** Independently extract each
+   command, subcommand, flag, and argument signature from SKILL.md and confirm
+   each against the live tool's `--help`. Flags are subcommand-scoped — a flag
+   valid on one subcommand may not exist on a sibling. Report any that don't
+   resolve. (This is the deterministic check; the reviewer may run a script:)
+   ```bash
+   F="{{skills_dir}}/{{skill_name}}/SKILL.md"; cli="<tool>"; fail=0
+   # commands: lines like `<cli> <sub>` → does `<cli> <sub> --help` succeed?
+   grep -oE "$cli [a-z][a-z-]+( [a-z][a-z-]+)?" "$F" | sort -u | while read -r _ sub rest; do
+     $cli $sub ${rest:+$rest} --help >/dev/null 2>&1 || echo "MISSING CMD: $cli $sub $rest"
+   done
+   echo "(then verify each --flag appears in ITS subcommand's --help output)"
+   ```
+2. **Cold-test triggering.** Without seeing the use cases, judge from the
+   description alone: would it fire on the intended prompts and stay silent on
+   adjacent ones? Flag over/under-triggering.
+3. **Try to BREAK it.** Follow the instructions literally on the hardest use
+   case and report any step that fails, misleads, or needs user correction.
+4. **Check guide compliance independently** (kebab-case, exact SKILL.md, no
+   README, frontmatter rules, < ~5000 words, progressive disclosure).
+
+**Act on the findings.** Every confirmed issue is a FAIL: fix the SKILL.md and
+send it back for re-review until the independent reviewer returns zero blocking
+findings. A finding you "disagree" with still gets reconciled against the live
+tool — the tool is the arbiter, not the author.
+
+**Exit criteria:** an independent, fresh-context agent has verified commands,
+triggering, and behavior against the live system and returned zero blocking
+findings; all findings fixed and re-reviewed."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 9: Finalize & package (Guide ch.4)
 # ─────────────────────────────────────────────────────────────────────────────
 [[steps]]
 id = "finalize"
 title = "Finalize and package {{skill_name}}"
-needs = ["test-triggering", "test-functional"]
+needs = ["independent-review"]
 description = """
 Prepare the skill for use/distribution. (Guide: Distribution and sharing.)
 
