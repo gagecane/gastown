@@ -387,6 +387,102 @@ Use nudges (second copy).
 	}
 }
 
+// TestTownCLAUDEmdCheck_DetectsCleanDuplicate is the regression test for
+// gs-3ig: a file with a verbatim duplicate H2 section but NO stale pattern and
+// all required sections present. The duplicate must be detected (Warning) even
+// though required-section and stale-pattern checks both pass.
+func TestTownCLAUDEmdCheck_DetectsCleanDuplicate(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctx := &CheckContext{TownRoot: tmpDir}
+
+	// Two identical Dolt sections, neither carrying the stale kill -QUIT cmd.
+	doltSection := `## Dolt Server — Operational Awareness (All Agents)
+
+Dolt is the data plane for beads.
+
+### Communication hygiene
+
+Default to nudge.
+`
+	content := "# Gas Town\n\nRun `gt prime` for full context.\n\n" + doltSection + "\n" + doltSection
+
+	claudePath := filepath.Join(tmpDir, "CLAUDE.md")
+	if err := os.WriteFile(claudePath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewTownCLAUDEmdCheck()
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for clean duplicate, got %v: %s", result.Status, result.Message)
+	}
+	if len(check.missingSections) != 0 {
+		t.Errorf("expected 0 missing sections, got %d", len(check.missingSections))
+	}
+	if len(check.stalePatterns) != 0 {
+		t.Errorf("expected 0 stale patterns, got %d", len(check.stalePatterns))
+	}
+	if len(check.duplicateHeadings) != 1 {
+		t.Fatalf("expected 1 duplicate heading, got %d: %v", len(check.duplicateHeadings), check.duplicateHeadings)
+	}
+
+	// Fix should collapse to a single copy and leave the file OK.
+	if err := check.Fix(ctx); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "## Dolt Server"); got != 1 {
+		t.Errorf("expected exactly 1 '## Dolt Server' heading after Fix, got %d", got)
+	}
+	check2 := NewTownCLAUDEmdCheck()
+	if result := check2.Run(ctx); result.Status != StatusWarning && result.Status != StatusOK {
+		t.Errorf("unexpected status after Fix: %v: %s", result.Status, result.Message)
+	}
+	if len(check2.duplicateHeadings) != 0 {
+		t.Errorf("expected no duplicates after Fix, got %v", check2.duplicateHeadings)
+	}
+}
+
+func TestCollapseDuplicateH2Sections(t *testing.T) {
+	content := `# Header
+
+Preamble.
+
+## Section One
+
+First copy content.
+
+## Section Two
+
+Section two content.
+
+## Section One
+
+Second copy content (should be dropped).
+`
+	out := collapseDuplicateH2Sections(content)
+
+	if got := strings.Count(out, "## Section One"); got != 1 {
+		t.Errorf("expected 1 '## Section One' after collapse, got %d", got)
+	}
+	if !strings.Contains(out, "First copy content") {
+		t.Error("first copy content should be preserved")
+	}
+	if strings.Contains(out, "Second copy content") {
+		t.Error("second (duplicate) copy content should be dropped")
+	}
+	if !strings.Contains(out, "## Section Two") {
+		t.Error("non-duplicated section should be preserved")
+	}
+	if !strings.Contains(out, "Preamble.") {
+		t.Error("preamble should be preserved")
+	}
+}
+
 func TestParseH2Sections(t *testing.T) {
 	content := `# Header
 

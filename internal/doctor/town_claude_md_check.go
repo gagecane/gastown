@@ -25,9 +25,10 @@ import (
 // replaces the owning H2 section wholesale with the canonical version.
 type TownCLAUDEmdCheck struct {
 	FixableCheck
-	missingSections []templates.TownRootRequiredSection
-	stalePatterns   []templates.TownRootStalePattern
-	fileMissing     bool
+	missingSections   []templates.TownRootRequiredSection
+	stalePatterns     []templates.TownRootStalePattern
+	duplicateHeadings []string
+	fileMissing       bool
 }
 
 // NewTownCLAUDEmdCheck creates a new town-root CLAUDE.md version check.
@@ -47,6 +48,7 @@ func NewTownCLAUDEmdCheck() *TownCLAUDEmdCheck {
 func (c *TownCLAUDEmdCheck) Run(ctx *CheckContext) *CheckResult {
 	c.missingSections = nil
 	c.stalePatterns = nil
+	c.duplicateHeadings = nil
 	c.fileMissing = false
 
 	claudePath := filepath.Join(ctx.TownRoot, "CLAUDE.md")
@@ -93,7 +95,15 @@ func (c *TownCLAUDEmdCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if len(missing) == 0 && len(stale) == 0 {
+	// Check for verbatim duplicate H2 sections — typically a copy-paste or
+	// merge mishap (gs-3ig). These pass the required-section check and may
+	// carry no stale pattern, so they are otherwise invisible to the doctor.
+	dups := findDuplicateH2Headings(content)
+	for _, heading := range dups {
+		details = append(details, fmt.Sprintf("Duplicate section: %s", heading))
+	}
+
+	if len(missing) == 0 && len(stale) == 0 && len(dups) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -103,6 +113,7 @@ func (c *TownCLAUDEmdCheck) Run(ctx *CheckContext) *CheckResult {
 
 	c.missingSections = missing
 	c.stalePatterns = stale
+	c.duplicateHeadings = dups
 
 	var msgParts []string
 	if len(missing) > 0 {
@@ -110,6 +121,9 @@ func (c *TownCLAUDEmdCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	if len(stale) > 0 {
 		msgParts = append(msgParts, fmt.Sprintf("%d stale instruction(s)", len(stale)))
+	}
+	if len(dups) > 0 {
+		msgParts = append(msgParts, fmt.Sprintf("%d duplicate section(s)", len(dups)))
 	}
 
 	return &CheckResult{
@@ -133,7 +147,7 @@ func (c *TownCLAUDEmdCheck) Fix(ctx *CheckContext) error {
 		return os.WriteFile(claudePath, []byte(canonical), 0644)
 	}
 
-	if len(c.missingSections) == 0 && len(c.stalePatterns) == 0 {
+	if len(c.missingSections) == 0 && len(c.stalePatterns) == 0 && len(c.duplicateHeadings) == 0 {
 		return nil
 	}
 
@@ -186,6 +200,14 @@ func (c *TownCLAUDEmdCheck) Fix(ctx *CheckContext) error {
 		current += toAppend.String()
 	}
 
+	// Third: collapse any remaining verbatim duplicate H2 sections, keeping the
+	// first occurrence. The stale-replacement pass above already collapses
+	// duplicates for stale-owning sections; this handles clean duplicates that
+	// carry no stale pattern (gs-3ig).
+	if len(c.duplicateHeadings) > 0 {
+		current = collapseDuplicateH2Sections(current)
+	}
+
 	return os.WriteFile(claudePath, []byte(current), 0644)
 }
 
@@ -236,6 +258,48 @@ func parseH2Sections(content string) []h2Section {
 	}
 
 	return sections
+}
+
+// findDuplicateH2Headings returns, in first-seen order, the H2 heading lines
+// that appear more than once in content. Verbatim duplicate H2 sections are
+// always a mistake (copy-paste or merge mishap) and bloat the agent context.
+func findDuplicateH2Headings(content string) []string {
+	counts := make(map[string]int)
+	var order []string
+	for _, sec := range parseH2Sections(content) {
+		if sec.heading == "" {
+			continue // preamble
+		}
+		if counts[sec.heading] == 0 {
+			order = append(order, sec.heading)
+		}
+		counts[sec.heading]++
+	}
+	var dups []string
+	for _, heading := range order {
+		if counts[heading] > 1 {
+			dups = append(dups, heading)
+		}
+	}
+	return dups
+}
+
+// collapseDuplicateH2Sections keeps only the first occurrence of each H2
+// heading, dropping later duplicates. The first copy's content is preserved
+// (it may carry user customizations); the preamble is always retained.
+func collapseDuplicateH2Sections(content string) string {
+	seen := make(map[string]bool)
+	var rebuilt strings.Builder
+	for _, sec := range parseH2Sections(content) {
+		if sec.heading != "" {
+			if seen[sec.heading] {
+				continue // drop duplicate
+			}
+			seen[sec.heading] = true
+		}
+		rebuilt.WriteString(sec.content)
+	}
+	return rebuilt.String()
 }
 
 // findH2SectionContent returns the full content of the first H2 section in
