@@ -19,7 +19,7 @@
 #   4. Print a per-rig summary at the end.
 #
 # Idempotency: `gt sling` is idempotent — a re-sling of an already-scheduled
-# bead returns cleanly. Calling this every cooldown cycle is safe.
+# bead returns cleanly. Calling this on every manual dispatch run is safe.
 
 set -uo pipefail
 # NOTE: not `set -e` — a single rig's failure must not abort dispatch for
@@ -207,7 +207,7 @@ for r in "${RIG_REPORTS[@]}"; do
   log "  $r"
 done
 
-# Record a receipt for the cooldown gate / digest pipeline.
+# Record a receipt for the manual gate / digest pipeline.
 RESULT="success"
 if [[ $total_failed -gt 0 && $total_slung -eq 0 ]]; then
   RESULT="failure"

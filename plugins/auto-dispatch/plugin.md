@@ -3,8 +3,7 @@ name = "auto-dispatch"
 description = "Auto-sling ready tasks to idle polecats across all rigs"
 
 [gate]
-type = "cooldown"
-duration = "2m"
+type = "manual"
 +++
 
 ## Auto-Dispatch
@@ -16,8 +15,8 @@ hook_bead is null), which would cause this plugin to underfill the scheduler
 when polecats are actually available.
 
 `gt sling <bead> <rig>` is idempotent for already-scheduled beads (returns
-"already hooked" or reuses the existing context wisp), so calling it every
-cooldown cycle for the same bead is safe.
+"already hooked" or reuses the existing context wisp), so calling it on every
+manual dispatch run for the same bead is safe.
 
 ### Steps
 
