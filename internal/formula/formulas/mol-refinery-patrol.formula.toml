@@ -384,14 +384,15 @@ Branch SHA: ${BRANCH_SHA}
 2. Rebase on target: git rebase origin/<rebase-target>
 3. Resolve conflicts
 4. Force push: git push -f origin <branch>
-5. Close this task when done
-
-The MR will be re-queued for processing after conflicts are resolved."
+5. Re-submit a fresh MR via gt done (the original MR wisp is ephemeral and may be gone — do NOT wait for it to re-queue)
+6. Close this task when done"
 ```
 
 4. **Skip this MR** (do NOT delete branch or close MR bead):
 - Leave branch intact for conflict resolution
-- Leave MR bead open (will be re-processed after resolution)
+- Leave MR bead open (the conflict-resolution task drives recovery; the MR wisp is
+  ephemeral and may be TTL-compacted away — the resolved branch re-enters via a fresh
+  gt done, NOT by re-processing this MR bead)
 - Continue to loop-check for next branch
 
 **CRITICAL**: Never delete a branch that has conflicts. The branch contains
