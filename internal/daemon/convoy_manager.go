@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -215,6 +216,13 @@ type ConvoyManager struct {
 	// stableSkipThreshold consecutive scans are skipped from the batched
 	// completion check. Reset on close events or recovery mode. See gu-0vuw1.
 	stableCandidates sync.Map // map[string]stableCandidate
+
+	// strandedCache holds the last findStranded() result and its sentinel
+	// (open convoy count + max updated_at). When the sentinel is unchanged
+	// between scans, the cached result is reused without forking a subprocess.
+	// Protected by scanMu (findStranded is only called from scan which holds it).
+	// See gu-rd9ph.
+	strandedCache *strandedCacheEntry
 }
 
 // missingBeadKey identifies a (convoy, bead) pair for the strike counter.
@@ -231,6 +239,16 @@ type missingBeadKey struct {
 type stableCandidate struct {
 	trackedCount int // TrackedCount from previous scan
 	stableCount  int // consecutive unchanged scans
+}
+
+// strandedCacheEntry holds a cached findStranded() result alongside the
+// sentinel values that were current when the result was computed. If the
+// sentinel is unchanged on the next scan, the cached result is reused without
+// forking the expensive `gt convoy stranded --json` subprocess. See gu-rd9ph.
+type strandedCacheEntry struct {
+	openCount int       // COUNT(*) of open convoy-type issues
+	maxUpdate time.Time // MAX(updated_at) of open convoy-type issues
+	result    []strandedConvoyInfo
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -697,7 +715,20 @@ func (m *ConvoyManager) checkAllConvoyCompletion() {
 }
 
 // findStranded runs `gt convoy stranded --json` and parses the output.
+// Before forking the subprocess, it queries a lightweight sentinel (open convoy
+// count + max updated_at) from the hq store. If unchanged since the last scan,
+// the cached result is reused (~50ms no-op vs ~6s fork). See gu-rd9ph.
 func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
+	// Check sentinel before forking. Skip the sentinel on recovery mode (need
+	// a fresh scan to clear stale state) or when stores aren't available.
+	if !m.recoveryMode.Load() && m.strandedCache != nil {
+		if count, maxUpd, ok := m.strandedSentinel(); ok {
+			if count == m.strandedCache.openCount && maxUpd.Equal(m.strandedCache.maxUpdate) {
+				return m.strandedCache.result, nil
+			}
+		}
+	}
+
 	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "stranded", "--json")
 	cmd.Dir = m.townRoot
 	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
@@ -717,7 +748,53 @@ func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
 		return nil, fmt.Errorf("parsing stranded JSON: %w (raw: %q)", err, raw)
 	}
 
+	// Update the cache with fresh sentinel values.
+	if count, maxUpd, ok := m.strandedSentinel(); ok {
+		m.strandedCache = &strandedCacheEntry{
+			openCount: count,
+			maxUpdate: maxUpd,
+			result:    stranded,
+		}
+	}
+
 	return stranded, nil
+}
+
+// strandedSentinel queries a cheap sentinel from the hq store: the count of
+// open convoy-type issues and their maximum updated_at timestamp. Returns
+// (count, maxUpdatedAt, true) on success, or (0, zero, false) if the query
+// cannot be performed (store unavailable, type assertion fails, etc.).
+func (m *ConvoyManager) strandedSentinel() (int, time.Time, bool) {
+	m.storesMu.Lock()
+	hqStore := m.stores["hq"]
+	m.storesMu.Unlock()
+
+	if hqStore == nil {
+		return 0, time.Time{}, false
+	}
+
+	dbAccessor, ok := hqStore.(beadsDBAccessor)
+	if !ok || dbAccessor.DB() == nil {
+		return 0, time.Time{}, false
+	}
+
+	ctx, cancel := context.WithTimeout(m.ctx, 2*time.Second)
+	defer cancel()
+
+	var count int
+	var maxUpdate sql.NullTime
+	err := dbAccessor.DB().QueryRowContext(ctx,
+		"SELECT COUNT(*), MAX(updated_at) FROM issues WHERE issue_type = 'convoy' AND status = 'open'",
+	).Scan(&count, &maxUpdate)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+
+	var t time.Time
+	if maxUpdate.Valid {
+		t = maxUpdate.Time
+	}
+	return count, t, true
 }
 
 // feedFirstReady iterates through all ready issues in a stranded convoy and
