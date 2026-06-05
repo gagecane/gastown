@@ -3560,3 +3560,158 @@ func TestFeedFirstReady_AmbiguousFailure_StillEscalates(t *testing.T) {
 		t.Errorf("ambiguous failure should record a sling error for dedup")
 	}
 }
+
+func TestStableCandidate_SkipsAfterThreshold(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// A single completion candidate (tracked=2, ready=0).
+	strandedJSON := `[{"id":"hq-stable1","title":"Stable","tracked_count":2,"ready_count":0,"ready_issues":[]}]`
+	paths := mockGtForScanTest(t, scanTestOpts{strandedJSON: strandedJSON})
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(paths.townRoot, logger, filepath.Join(paths.binDir, "gt"), 10*time.Minute, nil, nil, nil)
+
+	// Scans 1-2: candidate NOT stable → completion check fires.
+	m.scan()
+	m.scan()
+	data, err := os.ReadFile(paths.checkLogPath)
+	if err != nil {
+		t.Fatalf("check log should exist after first 2 scans: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 completion checks for first 2 scans, got %d", len(lines))
+	}
+
+	// Scan 3: candidate becomes stable → check should NOT fire.
+	m.scan()
+	data2, _ := os.ReadFile(paths.checkLogPath)
+	lines2 := strings.Split(strings.TrimSpace(string(data2)), "\n")
+	if len(lines2) != 2 {
+		t.Errorf("expected still 2 completion checks (scan 3 skipped), got %d", len(lines2))
+	}
+
+	// Verify the skip is logged.
+	found := false
+	for _, s := range logged {
+		if strings.Contains(s, "stable for") && strings.Contains(s, "skipping completion check") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected stable-skip log message, got: %v", logged)
+	}
+}
+
+func TestStableCandidate_ResetsOnTrackedCountChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Simulate 3 scans with stable tracked count.
+	if m.isStableCandidate("hq-cv1", 5) {
+		t.Fatal("should not be stable on scan 1")
+	}
+	if m.isStableCandidate("hq-cv1", 5) {
+		t.Fatal("should not be stable on scan 2")
+	}
+	if !m.isStableCandidate("hq-cv1", 5) {
+		t.Fatal("should be stable on scan 3")
+	}
+
+	// TrackedCount changes → resets to unstable.
+	if m.isStableCandidate("hq-cv1", 4) {
+		t.Fatal("should not be stable after tracked count change")
+	}
+	if m.isStableCandidate("hq-cv1", 4) {
+		t.Fatal("should not be stable on second scan after change")
+	}
+	if !m.isStableCandidate("hq-cv1", 4) {
+		t.Fatal("should be stable again on third scan with new count")
+	}
+}
+
+func TestStableCandidate_BackstopForcesRecheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Reach stable threshold.
+	for i := 0; i < stableSkipThreshold; i++ {
+		m.isStableCandidate("hq-bs", 3)
+	}
+
+	// Now stable — verify it stays stable until backstop.
+	for i := 1; i < stableBackstopScans; i++ {
+		if !m.isStableCandidate("hq-bs", 3) {
+			t.Fatalf("expected stable at scan %d (before backstop)", stableSkipThreshold+i)
+		}
+	}
+
+	// At the backstop boundary: should force a re-check (return false).
+	if m.isStableCandidate("hq-bs", 3) {
+		t.Fatal("expected backstop to force re-check")
+	}
+
+	// Next scan after backstop: should be stable again.
+	if !m.isStableCandidate("hq-bs", 3) {
+		t.Fatal("expected stable again after backstop re-check")
+	}
+}
+
+func TestStableCandidate_ResetOnCloseEvent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Make candidate stable.
+	for i := 0; i < stableSkipThreshold; i++ {
+		m.isStableCandidate("hq-close1", 2)
+	}
+	if !m.isStableCandidate("hq-close1", 2) {
+		t.Fatal("should be stable before reset")
+	}
+
+	// Simulate close event resetting all stable candidates.
+	m.resetStableCandidates()
+
+	// After reset, candidate should NOT be stable.
+	if m.isStableCandidate("hq-close1", 2) {
+		t.Fatal("should not be stable after resetStableCandidates")
+	}
+}
+
+func TestStableCandidate_ResetOnRecoveryMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Make candidate stable.
+	for i := 0; i < stableSkipThreshold+1; i++ {
+		m.isStableCandidate("hq-rec1", 4)
+	}
+
+	// Simulate recovery mode entry resetting candidates.
+	m.recoveryMode.Store(true)
+	m.resetStableCandidates()
+
+	// Should not be stable after reset.
+	if m.isStableCandidate("hq-rec1", 4) {
+		t.Fatal("should not be stable after recovery mode reset")
+	}
+}

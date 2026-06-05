@@ -65,6 +65,20 @@ const (
 	// squashed / never created. See gu-f0gq (hq-cv-p6ht2 looped 347x on
 	// non-existent ta-9emq for 19h45m).
 	missingBeadStrikeThreshold = 3
+
+	// stableSkipThreshold is the number of consecutive scans a completion
+	// candidate (tracked>0, ready=0) must remain unchanged before it is
+	// skipped. A convoy whose tracked set hasn't changed in 3 scans is
+	// unlikely to have completed between scans — the event-poll path handles
+	// close-driven completion, so the batched check is wasted work. Skipping
+	// saves one subprocess spawn per stable convoy per scan. See gu-0vuw1.
+	stableSkipThreshold = 3
+
+	// stableBackstopScans forces a re-check of stable completion candidates
+	// after this many consecutive skipped scans (~100min at 60s interval).
+	// Guards against missed close events (e.g., Dolt replication lag that
+	// outlasts the event-poll lookback).
+	stableBackstopScans = 100
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -190,12 +204,28 @@ type ConvoyManager struct {
 	// every scan cycle. Cleared on successful dispatch so a future failure
 	// (if the issue is re-queued) is escalated again. Key: issueID. (gt-3798)
 	seenSlingErrors sync.Map // map[string]bool
+
+	// stableCandidates tracks per-convoy stability for completion candidates
+	// (tracked>0, ready=0). Candidates that remain unchanged for
+	// stableSkipThreshold consecutive scans are skipped from the batched
+	// completion check. Reset on close events or recovery mode. See gu-0vuw1.
+	stableCandidates sync.Map // map[string]stableCandidate
 }
 
 // missingBeadKey identifies a (convoy, bead) pair for the strike counter.
 type missingBeadKey struct {
 	convoyID string
 	issueID  string
+}
+
+// stableCandidate tracks how long a completion candidate (tracked>0, ready=0)
+// has been unchanged across consecutive scans. When stableCount reaches
+// stableSkipThreshold the candidate is skipped (the batched completion check
+// omits it); the backstop forces a re-check every stableBackstopScans. See
+// gu-0vuw1.
+type stableCandidate struct {
+	trackedCount int // TrackedCount from previous scan
+	stableCount  int // consecutive unchanged scans
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -392,8 +422,11 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		}
 		m.logger("Convoy: event poll error (%s): %v", name, err)
 		// Signal recovery mode so the stranded scan shortens its interval and
-		// retries quickly once Dolt comes back.
+		// retries quickly once Dolt comes back. Also reset stable candidates
+		// so the first successful scan after recovery re-checks everything
+		// (close events may have been missed during the outage). See gu-0vuw1.
 		m.recoveryMode.Store(true)
+		m.resetStableCandidates()
 		return err
 	}
 
@@ -476,6 +509,10 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		}
 
 		m.logger("Convoy: close detected: %s (from %s)", issueID, name)
+		// A close event means a tracked issue may have completed — reset
+		// stability tracking so the next scan includes all candidates in
+		// the batched completion check. See gu-0vuw1.
+		m.resetStableCandidates()
 		resolver := convoy.NewStoreResolver(m.townRoot, stores)
 		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.isRigParked, resolver)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
@@ -607,6 +644,9 @@ func (m *ConvoyManager) scan() {
 			// Tracked issues exist but none are ready: either all closed
 			// (auto-close) or blocked/in-progress (no-op). Defer to the single
 			// batched completion pass below instead of one subprocess per convoy.
+			if m.isStableCandidate(c.ID, c.TrackedCount) {
+				continue
+			}
 			m.logger("Convoy %s: %d tracked issues, 0 ready — completion candidate", c.ID, c.TrackedCount)
 			completionCandidates++
 		}
@@ -1058,6 +1098,62 @@ func (m *ConvoyManager) recordFeedChurn(issueID string) {
 		m.logger("Convoy feed: %s churn ×%d — backing off to %s (gs-skv escalate-churn guard)",
 			issueID, churn, m.effectiveFeedCooldown(issueID))
 	}
+}
+
+// isStableCandidate checks whether a completion candidate (tracked>0, ready=0)
+// has been unchanged long enough to skip. Returns true if the candidate should
+// be skipped this scan. Updates the stability tracker for this convoy.
+//
+// The tracked count is used as the stability signal: if it hasn't changed for
+// stableSkipThreshold consecutive scans, the convoy is considered stable and
+// skipped from the batched completion check — the event-poll path handles
+// close-driven completion, so the subprocess is wasted work. A hard backstop
+// (stableBackstopScans) forces a periodic re-check. See gu-0vuw1.
+func (m *ConvoyManager) isStableCandidate(convoyID string, trackedCount int) bool {
+	var prev stableCandidate
+	if v, ok := m.stableCandidates.Load(convoyID); ok {
+		prev = v.(stableCandidate)
+	}
+
+	if prev.trackedCount == trackedCount && prev.trackedCount != 0 {
+		prev.stableCount++
+	} else {
+		// TrackedCount changed (or first observation) — reset.
+		prev = stableCandidate{trackedCount: trackedCount, stableCount: 1}
+	}
+
+	m.stableCandidates.Store(convoyID, prev)
+
+	if prev.stableCount < stableSkipThreshold {
+		return false
+	}
+
+	// Hard backstop: force re-check every stableBackstopScans.
+	scansSinceCheck := prev.stableCount - stableSkipThreshold
+	if scansSinceCheck > 0 && scansSinceCheck%stableBackstopScans == 0 {
+		m.logger("Convoy %s: stable backstop reached (%d scans) — forcing completion check", convoyID, prev.stableCount)
+		return false
+	}
+
+	m.logger("Convoy %s: stable for %d scans (tracked=%d) — skipping completion check", convoyID, prev.stableCount, trackedCount)
+	return true
+}
+
+// resetStableCandidateForIssue resets stability tracking for any convoy that
+// might track the given issueID. Called when a close event fires so that the
+// next scan includes the convoy in the batched completion check.
+//
+// Since stableCandidates is keyed by convoyID and we don't maintain a reverse
+// index (issueID → convoyIDs), this clears ALL stable candidate entries. This
+// is correct (benign worst case: one extra completion check for unrelated
+// convoys) and simple. The alternative (maintaining a reverse map) would add
+// complexity for negligible gain since close events are infrequent relative to
+// scan cycles.
+func (m *ConvoyManager) resetStableCandidates() {
+	m.stableCandidates.Range(func(key, _ any) bool {
+		m.stableCandidates.Delete(key)
+		return true
+	})
 }
 
 // runStartupSweep runs one convoy check pass after a brief delay to catch
