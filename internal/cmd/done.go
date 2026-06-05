@@ -135,6 +135,34 @@ func relayBaseForLocalMerge(convoyInfo *ConvoyInfo, defaultBranch string) (strin
 	return base, true
 }
 
+// mrRelayTargetOverride resolves the relay base branch an MR should target when
+// no higher-priority source already chose one. It fires only when no explicit
+// --target was given AND the running target is still the rig default — so the
+// explicit flag (step 1) and formula_vars base_branch (step 2) keep precedence.
+//
+// gs-dus: relay legs whose bead has base_branch=proto/v3-build carry that base
+// on the tracking convoy (or the bead's own stamped attachment fields), NOT in
+// formula_vars. The MR-target ladder only consulted formula_vars, so a relay
+// leg run as plain `gt done` (no --target) that did NOT fast-forward-push fell
+// through to the rig default and created an MR targeting gagecane/gt instead of
+// proto/v3-build → modify/delete conflict → MERGE_FAILED → source bead reopened
+// → re-slung → fails identically (reopen/resling churn). effectiveBaseBranch is
+// the same resolver the dispatch (gs-n6h/gs-w7k) and auto-rebase (gs-xbo) paths
+// use: stamped base → tracking convoy base → ancestor relay base.
+//
+// resolveBase is injected (effectiveBaseBranch in production) so the decision is
+// unit-testable without bd/Dolt I/O. Returns "" to keep the current target.
+func mrRelayTargetOverride(explicitTarget bool, currentTarget, defaultBranch, issueID string, resolveBase func(beadID, explicit string) string) string {
+	if explicitTarget || currentTarget != defaultBranch || issueID == "" {
+		return ""
+	}
+	relayBase := resolveBase(issueID, "")
+	if relayBase == "" || relayBase == defaultBranch {
+		return ""
+	}
+	return relayBase
+}
+
 // pushForDoneMaxAttempts is the total number of push attempts (initial + retries)
 // pushForDone makes when a transient push-infra error is observed. git push is
 // idempotent — re-pushing an already-landed commit exits 0 ("up to date") — so
@@ -1496,6 +1524,21 @@ afterSafetyNet:
 			// This is the silent failure path that caused 150+ procedure beads to
 			// target main instead of feat/contract-review-procedure.
 			style.PrintWarning("could not load source issue %s for target branch detection (Dolt/beads lookup failed) — using default branch %s", issueID, defaultBranch)
+		}
+
+		// 2b. Relay base carried on the tracking convoy or the bead's stamped
+		// attachment fields (gs-dus). The formula_vars check above only catches
+		// relay legs whose base_branch was passed as a formula var; relay legs
+		// carry their base on the convoy, which effectiveBaseBranch resolves the
+		// same way the dispatch (gs-n6h) and auto-rebase (gs-xbo) paths do.
+		// Without this, a relay leg run as plain `gt done` (no --target) on a
+		// non-FF path created an MR targeting the rig default (gagecane/gt)
+		// instead of proto/v3-build → modify/delete conflict → MERGE_FAILED →
+		// reopen/resling churn. Runs after formula_vars but before the epic-
+		// hierarchy auto-detect: a known relay base beats a heuristic guess.
+		if relayBase := mrRelayTargetOverride(explicitTarget, target, defaultBranch, issueID, effectiveBaseBranch); relayBase != "" {
+			target = relayBase
+			fmt.Printf("  Target branch: %s (relay base from convoy/stamped fields — gs-dus)\n", target)
 		}
 
 		// 3. Auto-detect integration branch from epic hierarchy (if enabled).
