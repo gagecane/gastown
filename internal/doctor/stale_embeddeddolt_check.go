@@ -33,12 +33,19 @@ func NewStaleEmbeddeddoltCheck() *StaleEmbeddeddoltCheck {
 	}
 }
 
-// Run checks for embeddeddolt directories alongside server-mode metadata.json files.
+// Run checks for embeddeddolt directories alongside server-mode metadata.json files,
+// plus orphaned embeddeddolt/ dirs at rig roots and agent subdirectories.
 func (c *StaleEmbeddeddoltCheck) Run(ctx *CheckContext) *CheckResult {
 	c.staleEmbeddeddolts = nil
 
 	// Check town root .beads
 	c.checkBeadsDir(filepath.Join(ctx.TownRoot, ".beads"))
+
+	// Check town root embeddeddolt (vestigial)
+	c.checkOrphanEmbeddeddolt(filepath.Join(ctx.TownRoot, "embeddeddolt"))
+
+	// Check .dolt-backup/embeddeddolt (vestigial)
+	c.checkOrphanEmbeddeddolt(filepath.Join(ctx.TownRoot, ".dolt-backup", "embeddeddolt"))
 
 	// Check rigs
 	rigsConfig := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
@@ -54,9 +61,22 @@ func (c *StaleEmbeddeddoltCheck) Run(ctx *CheckContext) *CheckResult {
 				// Also check mayor/rig/.beads
 				maybeBeadsPath := filepath.Join(ctx.TownRoot, rigName, "mayor", "rig", ".beads")
 				c.checkBeadsDir(maybeBeadsPath)
+
+				// Check rig root embeddeddolt (vestigial from embedded→server migration)
+				c.checkOrphanEmbeddeddolt(filepath.Join(ctx.TownRoot, rigName, "embeddeddolt"))
+
+				// Check witness/embeddeddolt
+				c.checkOrphanEmbeddeddolt(filepath.Join(ctx.TownRoot, rigName, "witness", "embeddeddolt"))
+
+				// Check mayor/rig/embeddeddolt
+				c.checkOrphanEmbeddeddolt(filepath.Join(ctx.TownRoot, rigName, "mayor", "rig", "embeddeddolt"))
 			}
 		}
 	}
+
+	// Check deacon and mayor top-level
+	c.checkOrphanEmbeddeddolt(filepath.Join(ctx.TownRoot, "deacon", "embeddeddolt"))
+	c.checkOrphanEmbeddeddolt(filepath.Join(ctx.TownRoot, "mayor", "embeddeddolt"))
 
 	if len(c.staleEmbeddeddolts) == 0 {
 		return &CheckResult{
@@ -69,14 +89,18 @@ func (c *StaleEmbeddeddoltCheck) Run(ctx *CheckContext) *CheckResult {
 	var details []string
 	for _, info := range c.staleEmbeddeddolts {
 		relPath, _ := filepath.Rel(ctx.TownRoot, info.path)
-		relMetaPath, _ := filepath.Rel(ctx.TownRoot, info.metaPath)
-		details = append(details, fmt.Sprintf("Stale embeddeddolt/ at %s alongside server-mode %s", relPath, relMetaPath))
+		if info.metaPath != "" {
+			relMetaPath, _ := filepath.Rel(ctx.TownRoot, info.metaPath)
+			details = append(details, fmt.Sprintf("Stale embeddeddolt/ at %s alongside server-mode %s", relPath, relMetaPath))
+		} else {
+			details = append(details, fmt.Sprintf("Orphan embeddeddolt/ at %s (vestigial from embedded→server migration)", relPath))
+		}
 	}
 
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d stale embeddeddolt director(ies) found alongside server-mode metadata.json", len(c.staleEmbeddeddolts)),
+		Message: fmt.Sprintf("%d stale embeddeddolt director(ies) found", len(c.staleEmbeddeddolts)),
 		Details: details,
 		FixHint: "Run 'gt doctor --fix' to remove stale embeddeddolt directories",
 	}
@@ -90,6 +114,19 @@ func (c *StaleEmbeddeddoltCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 	return nil
+}
+
+// checkOrphanEmbeddeddolt checks if an embeddeddolt/ directory exists at the given
+// path. These are vestigial from the embedded→server migration and safe to remove
+// regardless of metadata.json presence.
+func (c *StaleEmbeddeddoltCheck) checkOrphanEmbeddeddolt(path string) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return
+	}
+	c.staleEmbeddeddolts = append(c.staleEmbeddeddolts, embeddeddoltInfo{
+		path:     path,
+		metaPath: "", // No associated metadata — purely orphan
+	})
 }
 
 // checkBeadsDir checks if a .beads directory has both embeddeddolt/ and server-mode metadata.json.
