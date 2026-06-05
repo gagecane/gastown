@@ -4,8 +4,8 @@ description = "Daily dispatch of mol-casc-wiki-patrol into the casc_cdk rig"
 version = 1
 
 [gate]
-type = "cooldown"
-duration = "23h"
+type = "cron"
+schedule = "0 9 * * *"
 
 [tracking]
 labels = ["plugin:wiki-patrol-dispatch", "category:scheduler"]
@@ -41,13 +41,11 @@ cadence to **daily**. Phase 1 evidence showed that mechanical RigFacts
 change at most weekly across the 8 rigs, and 6-hourly cadence is 4× more
 expensive for under 24h freshness improvement.
 
-The plugin uses a **cooldown gate of 23h** rather than a cron gate
-(`type = "cron"`) because the daemon's `dispatchPlugins` path currently
-honors only cooldown gates (see `internal/daemon/handler.go`). A 23h
-cooldown gives a once-per-24h cadence with an hour of slop to absorb
-daemon restarts and patrol jitter. The mayor's original suggestion of a
-cron gate (`0 9 * * *`) is captured here as design intent; switching to
-a true cron schedule is a follow-up if/when cron-gate dispatch lands.
+The plugin uses a **cron gate** (`0 9 * * *`) — daily at 09:00 local
+time. The daemon's `dispatchPlugins` path evaluates cron gates via
+`Recorder.CronDue` (landed in gu-u8yy5 / commit 1b5cbecb). The in-flight
+grace window (derived from `execution.timeout`) prevents re-dispatch while
+a run is still in progress.
 
 ## Single-instance enforcement
 
@@ -78,7 +76,7 @@ isolation.
 
 ```bash
 gt plugin run wiki-patrol-dispatch              # Run if gate allows
-gt plugin run wiki-patrol-dispatch --force      # Bypass cooldown
+gt plugin run wiki-patrol-dispatch --force      # Bypass cron gate
 ```
 
 The dog dispatches `bash run.sh`. The script does the actual sling.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # wiki-patrol-dispatch/run.sh — Sling mol-casc-wiki-patrol into the casc_cdk
-# rig once per cooldown window, letting `gt sling` auto-resolve a polecat.
+# rig once per day (cron: 0 9 * * *), letting `gt sling` auto-resolve a polecat.
 #
 # This is the script implementation of plugins/wiki-patrol-dispatch/plugin.md.
 # It exists so the plugin does not depend on LLM cooperation — the daemon
@@ -29,9 +29,9 @@
 # formula scheduler still enforces single-instance via the in-flight
 # check below + the formula's own single-molecule semantics.
 #
-# Idempotency: the cooldown gate (23h) prevents same-day re-runs at the
+# Idempotency: the cron gate (0 9 * * *) prevents same-day re-runs at the
 # daemon level. The single-instance check prevents same-day double-dispatch
-# if the cooldown gate is bypassed (e.g. --force). gt sling itself is
+# if the cron gate is bypassed (e.g. --force). gt sling itself is
 # idempotent for already-hooked beads, but we never want a *new* wisp-pair
 # while an earlier one is still in flight.
 
