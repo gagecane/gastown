@@ -575,7 +575,17 @@ func countWorkingPolecatsByRig() (map[string]int, bool) {
 		return counts, false
 	}
 
-	bd := beads.New(townRoot)
+	// Collect polecat identities and their agent bead IDs in one pass, then
+	// batch-fetch all agent beads in a single bd show call instead of one
+	// subprocess per polecat session (gu-adbef). With ~8 polecats the serial
+	// approach was ~6.4s (8×0.8s); the batch is <1s.
+	type polecatEntry struct {
+		rig         string
+		agentBeadID string
+	}
+	var entries []polecatEntry
+	var agentBeadIDs []string
+
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -585,25 +595,54 @@ func countWorkingPolecatsByRig() (map[string]int, bool) {
 			continue
 		}
 
-		// Check if this polecat has hooked work
 		prefix := identity.Prefix
 		if prefix == "" {
 			prefix = session.PrefixFor(identity.Rig)
 		}
 		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, identity.Rig, identity.Name)
-		issue, err := bd.Show(agentBeadID)
-		if err != nil || issue == nil {
-			// Agent bead missing or unreachable — skip instead of counting
-			// as working. Dolt-down case (all lookups fail → count=0) is
-			// safe because polecat_spawn.go gates on Dolt health.
+		entries = append(entries, polecatEntry{rig: identity.Rig, agentBeadID: agentBeadID})
+		agentBeadIDs = append(agentBeadIDs, agentBeadID)
+	}
+
+	if len(agentBeadIDs) == 0 {
+		return counts, true
+	}
+
+	// Batch show all agent beads at once. The bd show command accepts multiple
+	// IDs and returns them as a JSON array.
+	bd := beads.New(townRoot)
+	showArgs := append([]string{"show", "--json"}, agentBeadIDs...)
+	showOut, err := bd.Run(showArgs...)
+	if err != nil {
+		// Dolt down or all lookups failed — fall back to empty (safe: over-
+		// counts zero, so no dispatch is blocked; under-count only means
+		// per-rig cap isn't enforced this cycle).
+		return counts, false
+	}
+
+	var issues []*beads.Issue
+	if err := json.Unmarshal(showOut, &issues); err != nil {
+		return counts, false
+	}
+
+	// Index fetched issues by ID for O(1) lookup.
+	issueByID := make(map[string]*beads.Issue, len(issues))
+	for _, issue := range issues {
+		if issue != nil {
+			issueByID[issue.ID] = issue
+		}
+	}
+
+	for _, entry := range entries {
+		issue := issueByID[entry.agentBeadID]
+		if issue == nil {
 			continue
 		}
-
 		fields := beads.ParseAgentFields(issue.Description)
 		if fields.HookBead == "" {
 			continue // Idle — don't count toward cap
 		}
-		counts[identity.Rig]++
+		counts[entry.rig]++
 	}
 	return counts, true
 }

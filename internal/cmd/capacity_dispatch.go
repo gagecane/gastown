@@ -759,19 +759,14 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 	}
 
 	idsByBeadsDir := groupBeadIDsByResolvedBeadsDir(townRoot, ids)
-	for beadsDir, groupedIDs := range idsByBeadsDir {
-		// Use Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,
-		// and BEADS_DOLT_PORT translation (matching how all other bd-invoking
-		// functions work). Route IDs directly instead of trying every beads dir;
-		// scheduler status/list/run sit on operator hot paths, and repeated bd show
-		// fanout dominates latency in large towns.
-		b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-		args := append([]string{"show", "--json"}, groupedIDs...)
-		out, err := b.Run(args...)
-		if err != nil {
-			continue
-		}
-		var items []struct {
+
+	// Parallelize per-beads-dir bd show calls behind the same bounded
+	// semaphore as listAllSlingContextRecords (gu-1h3ur/gu-el5bx). The serial
+	// iteration was a dominant cost on the dispatch hot path: N beads dirs ×
+	// ~0.8s each ≈ several seconds of serial subprocess overhead that now
+	// collapses to wall-clock of the slowest single dir. (gu-adbef)
+	type dirResult struct {
+		items []struct {
 			ID         string   `json:"id"`
 			Status     string   `json:"status"`
 			Title      string   `json:"title"`
@@ -779,15 +774,41 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			DeferUntil string   `json:"defer_until"`
 			Type       string   `json:"issue_type"`
 		}
-		if err := json.Unmarshal(out, &items); err == nil {
-			for _, item := range items {
-				result[item.ID] = beadStatusInfo{
-					Status:     item.Status,
-					Title:      item.Title,
-					Labels:     item.Labels,
-					DeferUntil: item.DeferUntil,
-					Type:       item.Type,
-				}
+	}
+	dirs := make([]string, 0, len(idsByBeadsDir))
+	for d := range idsByBeadsDir {
+		dirs = append(dirs, d)
+	}
+	results := make([]dirResult, len(dirs))
+	sem := make(chan struct{}, dispatchScanConcurrency())
+	var wg sync.WaitGroup
+	for i, beadsDir := range dirs {
+		wg.Add(1)
+		go func(i int, beadsDir string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+			args := append([]string{"show", "--json"}, idsByBeadsDir[beadsDir]...)
+			out, err := b.Run(args...)
+			if err != nil {
+				return
+			}
+			var r dirResult
+			_ = json.Unmarshal(out, &r.items)
+			results[i] = r
+		}(i, beadsDir)
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		for _, item := range r.items {
+			result[item.ID] = beadStatusInfo{
+				Status:     item.Status,
+				Title:      item.Title,
+				Labels:     item.Labels,
+				DeferUntil: item.DeferUntil,
+				Type:       item.Type,
 			}
 		}
 	}
@@ -1313,30 +1334,63 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 func listBlockedWorkBeadIDsWithError(townRoot string, workBeadIDs []string) (map[string]bool, error) {
 	blockedIDs := make(map[string]bool)
 	idsByBeadsDir := groupBeadIDsByResolvedBeadsDir(townRoot, workBeadIDs)
-	failCount := 0
-	var lastErr error
-	for beadsDir := range idsByBeadsDir {
-		// Use Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,
-		// and BEADS_DOLT_PORT translation.
-		b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-		blockedOut, err := b.Run("blocked", "--json")
-		if err != nil {
-			failCount++
-			lastErr = err
-			fmt.Fprintf(os.Stderr, "%s Warning: bd blocked failed for %s: %v\n",
-				style.Dim.Render("⚠"), filepath.Dir(beadsDir), err)
-			continue
-		}
-		var blockedBeads []struct {
+	if len(idsByBeadsDir) == 0 {
+		return blockedIDs, nil
+	}
+
+	// Parallelize per-beads-dir bd blocked calls behind the same bounded
+	// semaphore as the sling-context scan (gu-adbef). Same motivation as
+	// batchFetchBeadInfoByIDs: N serial subprocess calls ≈ N×0.8s that now
+	// collapse to the wall-clock of the slowest single dir.
+	type dirResult struct {
+		beadsDir string
+		blocked  []struct {
 			ID string `json:"id"`
 		}
-		if err := json.Unmarshal(blockedOut, &blockedBeads); err == nil {
-			for _, b := range blockedBeads {
-				blockedIDs[b.ID] = true
+		err error
+	}
+	dirs := make([]string, 0, len(idsByBeadsDir))
+	for d := range idsByBeadsDir {
+		dirs = append(dirs, d)
+	}
+	results := make([]dirResult, len(dirs))
+	sem := make(chan struct{}, dispatchScanConcurrency())
+	var wg sync.WaitGroup
+	for i, beadsDir := range dirs {
+		wg.Add(1)
+		go func(i int, beadsDir string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+			blockedOut, err := b.Run("blocked", "--json")
+			if err != nil {
+				results[i] = dirResult{beadsDir: beadsDir, err: err}
+				return
 			}
+			var r dirResult
+			r.beadsDir = beadsDir
+			_ = json.Unmarshal(blockedOut, &r.blocked)
+			results[i] = r
+		}(i, beadsDir)
+	}
+	wg.Wait()
+
+	failCount := 0
+	var lastErr error
+	for _, r := range results {
+		if r.err != nil {
+			failCount++
+			lastErr = r.err
+			fmt.Fprintf(os.Stderr, "%s Warning: bd blocked failed for %s: %v\n",
+				style.Dim.Render("⚠"), filepath.Dir(r.beadsDir), r.err)
+			continue
+		}
+		for _, b := range r.blocked {
+			blockedIDs[b.ID] = true
 		}
 	}
-	if failCount == len(idsByBeadsDir) && failCount > 0 {
+	if failCount == len(dirs) && failCount > 0 {
 		return nil, fmt.Errorf("all %d bd blocked queries failed (last: %w)", failCount, lastErr)
 	}
 	return blockedIDs, nil
