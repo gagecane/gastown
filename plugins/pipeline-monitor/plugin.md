@@ -1,7 +1,7 @@
 +++
 name = "pipeline-monitor"
 description = "Check Amazon Pipeline health and file P1 beads for blockers, routed to the package-owning rig, with drift-resistant cross-rig dedupe"
-version = 7
+version = 8
 
 [gate]
 type = "cooldown"
@@ -20,6 +20,10 @@ severity = "high"
 # Pipeline Monitor
 
 Check pipeline health and file actionable beads in the rig that **owns the fix** (not necessarily the rig whose package appears on the failure line), so a polecat in that rig can push the change.
+
+**v8 — Drift-resistant sentinel matching (Step 5b).** One fix on top of v7:
+
+- **Hand-rolled sentinels are now honored without a fingerprint label (Step 5b-2).** v4–v7's suppression lookup keyed on `--label fingerprint:${FP_HASH}`, so a sentinel had to carry the plugin's *computed* fingerprint hash to suppress a re-fire. Hand-rolled sentinels (filed by a human or another agent — the `cait-x10`/`cait-954` pattern) don't carry that hash because nobody hand-computes a SHA1, so the plugin re-fired the exact failure they were created to suppress (observed 2026-06-04, gc-wisp-6ihd: `cait-954` carried `sentinel` + `do-not-dispatch` and re-fired anyway). Step 5b now runs two sub-lookups: **5b-1** (keyed on the fingerprint label — unchanged fast path for plugin-filed sentinels) and **5b-2** (drift-resistant — matches a suppression-labeled bead by Build/Deploy ID label or pipeline+package+failure-type description match, the same keys Steps 5.0/5d already use). 5b-2 requires a real dedup-signal match so an unrelated sentinel can't blanket-suppress, and backfills the fingerprint label on a hit so the next cycle takes the fast path.
 
 **v7 — Fingerprint route override (Step 4.5).** One addition on top of v6:
 
@@ -470,6 +474,26 @@ the original rig to prevent the plugin from re-filing). These beads may be
 deferred (often +365d) or closed — in either case `--status open,in_progress`
 in 5a does NOT match them.
 
+A suppression bead must be honored whenever it matches the current failure,
+**regardless of how the match is established**. There are two kinds of
+suppression beads, and they match on different keys:
+
+- **Plugin-filed sentinels** carry the computed `fingerprint:${FP_HASH}` label
+  (the plugin added it when it filed or reused the bead). These match on the
+  fingerprint label — the fast, precise path (5b-1).
+- **Hand-rolled sentinels** are created by a human or another agent to stop a
+  re-fire loop (the `cait-x10` / `cait-954` pattern). A human does **not**
+  hand-compute the SHA1 fingerprint hash, so these almost never carry the
+  `fingerprint:${FP_HASH}` label. Keying suppression solely on that label
+  silently ignores them and the plugin re-fires anyway — the exact dedup gap
+  this step must close. These match on the same drift-resistant keys used
+  elsewhere in the run: the Build/Deploy ID label, or a pipeline + package +
+  failure-type description match (5b-2).
+
+Run **both** sub-lookups. The first hit in either short-circuits the rest.
+
+#### 5b-1. Keyed sentinel lookup (fingerprint label)
+
 Search every rig for beads with the fingerprint label AND any of the
 suppression labels, regardless of status:
 
@@ -491,6 +515,67 @@ for RIG in $(jq -r '.rigs | keys[]' ~/gt/rigs.json) .; do
 done
 ```
 
+If this matches, record `matched_via=fingerprint-label` for the note and audit
+trail, then go to the response block below.
+
+#### 5b-2. Drift-resistant sentinel lookup (no fingerprint label required)
+
+This catches hand-rolled sentinels that lack the computed fingerprint label.
+Search every rig for suppression-labeled beads (any status) that match the
+current failure on **either** the Build/Deploy ID label **or** a pipeline +
+package + failure-type description match. The description match mirrors the
+legacy lookup in Step 5d, so a sentinel written in prose ("suppress the
+CodegenAgentSchedulerWebApp build failure on this pipeline") is honored without
+anyone hand-computing a hash:
+
+```bash
+# Build the deterministic ID label this run exposes (Step 4), if any.
+ID_LABEL=""
+if [ -n "${DEPLOY_ID:-}" ]; then
+  ID_LABEL="deploy_id:${DEPLOY_ID}"
+elif [ -n "${BUILD_ID:-}" ]; then
+  ID_LABEL="build_id:${BUILD_ID}"
+fi
+
+for RIG in $(jq -r '.rigs | keys[]' ~/gt/rigs.json) .; do
+  DIR="$HOME/gt/$RIG"
+  [ -d "$DIR/.beads" ] || continue
+  cd "$DIR" && bd list \
+      --status open,in_progress,closed,deferred \
+      --json \
+    | jq -r --arg rig "$RIG" --arg idlbl "$ID_LABEL" \
+            --arg pipeline "$PIPELINE" --arg pkg "$PACKAGE" --arg ft "$FAILURE_TYPE" \
+        '.[]
+         | select((.labels // [])
+                  | any(. == "sentinel"
+                        or . == "do-not-dispatch"
+                        or . == "suppress:pipeline-monitor"))
+         # Require a real match on a dedup signal so an unrelated sentinel does
+         # not blanket-suppress every failure routed to its rig:
+         | select(
+             # (a) shares the Build/Deploy ID label this run exposes, OR
+             (($idlbl != "") and ((.labels // []) | any(. == $idlbl)))
+             # (b) description names this pipeline, package, AND failure type.
+             or (((.description // "") | test("Pipeline: " + $pipeline))
+                 and ((.description // "") | test("Package: " + $pkg))
+                 and ((.description // "") | test("Failure type: " + $ft)))
+           )
+         | [$rig, .id, .title] | @tsv'
+done
+```
+
+If this matches, record `matched_via=deploy-id` or `matched_via=description`
+(whichever fired) for the note and audit trail.
+
+**Backfill the fingerprint label on a hand-rolled sentinel that matched via
+5b-2** so future cycles hit the fast 5b-1 path (and stop re-scanning prose):
+
+```bash
+cd "$HOME/gt/$FOUND_RIG" && bd update "$FOUND_ID" --add-label "fingerprint:${FP_HASH}"
+```
+
+#### Response (either sub-lookup matched)
+
 **If any match is found → treat as a dedupe hit.** Do NOT file a new bead. Do
 NOT reopen the sentinel (it's intentionally deferred/closed). Append a note
 recording this cycle so the history is preserved:
@@ -498,13 +583,14 @@ recording this cycle so the history is preserved:
 ```bash
 cd "$HOME/gt/$FOUND_RIG" && bd note "$FOUND_ID" \
   "pipeline-monitor cycle $(date -u +%Y-%m-%dT%H:%M:%SZ): suppressed by sentinel. \
+matched_via=<fingerprint-label|deploy-id|description> \
 fingerprint=${FP_HASH} pipeline=<name> build_id=<id>"
 ```
 
-Record the hit in the audit bead (Step 8) and skip to Step 8. Sentinels are
-the **preferred explicit mechanism** for humans to signal "stop dispatching
-this failure" — they're cheaper and more auditable than the grace-window
-heuristic in 5c.
+Record the hit in the audit bead (Step 8), including `matched_via`, and skip to
+Step 8. Sentinels are the **preferred explicit mechanism** for humans to signal
+"stop dispatching this failure" — they're cheaper and more auditable than the
+grace-window heuristic in 5c.
 
 ### 5c. Recent-close grace window (7 days)
 
@@ -965,6 +1051,31 @@ documents the reference resolution.
 - If no prior bead exists in any rig, Step 7 files in `casc_constructs` with the routing-override block in the description.
 - Pre-v7 behavior (observed 2026-05-21..30): cala-7e9, cala-tl5 ×2, cacr-s5ct — four sequential misroutes to `casc_lambda`/`casc_crud`, each closed `no-changes` because the polecat in those rigs has no code to change. Step 4.5 is the structural fix.
 
+### S16: Hand-rolled sentinel without fingerprint label is honored (v8)
+
+- A failure re-fires on `CodegenAgentScheduler-development` for
+  `CodegenAgentSchedulerIntegTests`. A human (or another agent) has already
+  filed a hand-rolled sentinel `cait-954` in `casc_integ` with labels
+  `sentinel` + `do-not-dispatch`, a prose description naming the pipeline,
+  package, and failure type — but **no** `fingerprint:<hash>` label (nobody
+  hand-computed the SHA1).
+- Cycle N: Step 5.0 misses (sentinel has no `deploy_id`/`build_id` label yet);
+  Step 5a misses (`--label fingerprint:...` excludes the sentinel).
+- Step 5b-1 (keyed sentinel lookup) **also misses** — same `fingerprint:`
+  label requirement. This is the pre-v8 gap: the cycle fell through and
+  re-filed, re-firing `cait-954`'s failure every cooldown.
+- Step 5b-2 (drift-resistant sentinel lookup) finds `cait-954`: it carries a
+  suppression label AND its description matches `Pipeline:`/`Package:`/`Failure
+  type:` for this run (or it shares the run's Build/Deploy ID label). → dedupe
+  hit, `matched_via=description`.
+- Response: append the suppression note, **backfill `fingerprint:${FP_HASH}`
+  onto `cait-954`** so cycle N+1 short-circuits on the fast 5b-1 path, do NOT
+  file a new bead, do NOT reopen. Audit bead records the hit with `matched_via`.
+- Pre-v8 behavior (observed 2026-06-04, gc-wisp-6ihd): `cait-954` carried
+  `sentinel` + `do-not-dispatch` but the plugin re-fired it anyway because
+  Step 5b keyed suppression on the computed fingerprint label the hand-rolled
+  sentinel never had. Step 5b-2 is the structural fix.
+
 ## Rationale
 
 Filing pipeline-blocker beads in the rig that owns the code lets polecats in
@@ -1118,6 +1229,31 @@ rather than in `casc_lambda` "because the URL is a Lambda endpoint"). The
 and self-justifying; the "Remove a row after two clean cycles" rule keeps
 it from accreting forever. Same discipline as the FunctionName → Package
 table in Step 3b: evidence over speculation.
+
+**Why drift-resistant sentinel matching (v8 change):** v4 made
+suppression-labeled beads (`sentinel` / `do-not-dispatch` /
+`suppress:pipeline-monitor`) a first-class dedup signal, but it keyed the
+lookup on `--label fingerprint:${FP_HASH}` — the bead had to carry the
+plugin's *computed* fingerprint label to be honored. That's correct for
+sentinels the plugin itself filed (it added the label), but wrong for the
+case sentinels exist to solve: a **hand-rolled** sentinel filed by a human
+or another agent to stop a re-fire loop. Nobody hand-computes the SHA1
+fingerprint hash, so a hand-rolled sentinel carries the suppression label
+but not `fingerprint:<hash>` — and Step 5b's `--label fingerprint:...`
+filter excluded it. The plugin re-fired the exact failure the sentinel was
+created to suppress. Observed 2026-06-04 (gc-wisp-6ihd): `cait-954` carried
+`sentinel` + `do-not-dispatch` and the plugin re-fired it repeatedly, adding
+noise to the cait-yxit/cws-21y triage it was masking. v8 splits Step 5b into
+5b-1 (keyed, fast — unchanged behavior for plugin-filed sentinels) and 5b-2
+(drift-resistant — matches a suppression-labeled bead by Build/Deploy ID
+label or a pipeline+package+failure-type description match, the same keys
+Steps 5.0 and 5d already use). 5b-2 requires a real dedup-signal match, so an
+unrelated sentinel sitting in a rig does **not** blanket-suppress every
+failure routed there. On a 5b-2 hit the plugin backfills the computed
+fingerprint label onto the sentinel so the next cycle short-circuits on the
+fast 5b-1 path. This makes the hand-rolled sentinel mechanism — explicitly
+documented as the "preferred explicit mechanism for humans to signal stop
+dispatching" — actually work the way the rest of the plugin already claims.
 
 ## Migration Notes
 
