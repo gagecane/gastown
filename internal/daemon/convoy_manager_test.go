@@ -430,6 +430,60 @@ func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 	}
 }
 
+// TestScanStranded_PeriodicCompletionBackstop verifies that checkAllConvoyCompletion
+// fires periodically (every completionBackstopInterval scans) even when there are
+// zero completion candidates in the stranded result. This backstop catches completed
+// convoys that were excluded from findStrandedConvoys (gu-urwg6).
+func TestScanStranded_PeriodicCompletionBackstop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// No stranded convoys → completionCandidates stays 0.
+	paths := mockGtForScanTest(t, scanTestOpts{
+		strandedJSON: "[]",
+	})
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Run scans up to (but not including) the backstop interval — no check should fire.
+	for i := 0; i < completionBackstopInterval-1; i++ {
+		m.scan()
+	}
+	if _, err := os.Stat(paths.checkLogPath); err == nil {
+		data, _ := os.ReadFile(paths.checkLogPath)
+		t.Fatalf("convoy check fired before backstop interval: %s", string(data))
+	}
+
+	// The Nth scan triggers the backstop.
+	m.scan()
+	data, err := os.ReadFile(paths.checkLogPath)
+	if err != nil {
+		t.Fatalf("convoy check NOT fired at backstop interval (scan %d): %v", completionBackstopInterval, err)
+	}
+	logStr := strings.TrimSpace(string(data))
+	if logStr != "convoy check" {
+		t.Errorf("expected `convoy check` (no-id batched form), got: %q", logStr)
+	}
+
+	// Verify the backstop was logged.
+	found := false
+	for _, s := range logged {
+		if strings.Contains(s, "periodic backstop") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'periodic backstop' in log messages, got: %v", logged)
+	}
+}
+
 func TestScanStranded_DispatchFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")

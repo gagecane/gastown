@@ -79,6 +79,14 @@ const (
 	// Guards against missed close events (e.g., Dolt replication lag that
 	// outlasts the event-poll lookback).
 	stableBackstopScans = 100
+
+	// completionBackstopInterval is the number of scan ticks between
+	// unconditional completion checks. Completed convoys (all tracked closed)
+	// are excluded from findStrandedConvoys (gu-urwg6), so they no longer
+	// appear as completion candidates. This periodic backstop ensures they
+	// still get auto-closed even when the event-poll misses the close events.
+	// At 60s scan interval, 10 scans = ~10 minutes.
+	completionBackstopInterval = 10
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -223,6 +231,12 @@ type ConvoyManager struct {
 	// Protected by scanMu (findStranded is only called from scan which holds it).
 	// See gu-rd9ph.
 	strandedCache *strandedCacheEntry
+
+	// scanCount tracks the number of scan() invocations since start. Used to
+	// fire the periodic completion backstop (completionBackstopInterval) that
+	// catches completed convoys no longer reported by findStrandedConvoys.
+	// Protected by scanMu.
+	scanCount int
 }
 
 // missingBeadKey identifies a (convoy, bead) pair for the strike counter.
@@ -680,8 +694,22 @@ func (m *ConvoyManager) scan() {
 	// check` with no ID runs checkAndCloseCompletedConvoys over all open
 	// convoys in a single subprocess with a single batched tracks query, vs
 	// the previous N serial `gt convoy check <id>` spawns.
-	if completionCandidates > 0 {
-		m.logger("Convoy completion: batched check across %d candidate(s)", completionCandidates)
+	//
+	// Periodic backstop (gu-urwg6): completed convoys (all tracked closed)
+	// are now excluded from findStrandedConvoys so they no longer inflate
+	// the stranded result or burn scan cycles. But this means they never
+	// increment completionCandidates. Fire the batched check every
+	// completionBackstopInterval scans to catch them. The check is cheap
+	// when there's nothing to close (early-exits on empty/filtered convoy
+	// list) and correctness-critical when there IS something to close.
+	m.scanCount++
+	backstopDue := m.scanCount%completionBackstopInterval == 0
+	if completionCandidates > 0 || backstopDue {
+		if completionCandidates > 0 {
+			m.logger("Convoy completion: batched check across %d candidate(s)", completionCandidates)
+		} else {
+			m.logger("Convoy completion: periodic backstop (scan %d)", m.scanCount)
+		}
 		m.checkAllConvoyCompletion()
 	}
 

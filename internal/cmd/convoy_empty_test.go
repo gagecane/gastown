@@ -367,3 +367,84 @@ esac
 		t.Errorf("stuck convoy ReadyCount = %d, want 0", s.ReadyCount)
 	}
 }
+
+// TestFindStrandedConvoys_CompletedConvoyExcluded verifies that a convoy
+// with all tracked issues closed is NOT included in the stranded result.
+// Completed convoys are not stranded — they are pending auto-close via the
+// batched completion check. Including them caused the daemon to iterate over
+// them every scan tick without ever triggering the close, starving dispatch.
+// (gu-urwg6)
+func TestFindStrandedConvoys_CompletedConvoyExcluded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping convoy test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	bdPath := filepath.Join(binDir, "bd")
+
+	// Mock bd: convoy has tracked issues but ALL are closed.
+	script := `#!/bin/sh
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+
+case "$pos0" in
+  list)
+    echo '[{"id":"hq-done1","title":"Completed convoy","status":"open","labels":["gt:convoy"]}]'
+    exit 0
+    ;;
+  sql)
+    # bdDepListRawIDs / getAllTrackedIssuesByConvoy: return tracked bead IDs
+    case "$*" in
+      *"IN ("*)
+        echo '[{"issue_id":"hq-done1","depends_on_id":"gt-closed1"},{"issue_id":"hq-done1","depends_on_id":"gt-closed2"}]'
+        ;;
+      *)
+        echo '[{"depends_on_id":"gt-closed1"},{"depends_on_id":"gt-closed2"}]'
+        ;;
+    esac
+    exit 0
+    ;;
+  show)
+    # All tracked issues are closed
+    echo '[{"id":"gt-closed1","title":"Done issue 1","status":"closed","issue_type":"task","assignee":"","blocked_by":[],"blocked_by_count":0,"dependencies":[]},{"id":"gt-closed2","title":"Done issue 2","status":"closed","issue_type":"task","assignee":"","blocked_by":[],"blocked_by_count":0,"dependencies":[]}]'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stranded, err := findStrandedConvoys(townRoot)
+	if err != nil {
+		t.Fatalf("findStrandedConvoys() error: %v", err)
+	}
+
+	// The completed convoy should NOT appear in stranded results.
+	for _, s := range stranded {
+		if s.ID == "hq-done1" {
+			t.Errorf("completed convoy hq-done1 should not appear in stranded results, but found with TrackedCount=%d ReadyCount=%d", s.TrackedCount, s.ReadyCount)
+		}
+	}
+	if len(stranded) != 0 {
+		t.Errorf("expected 0 stranded convoys (completed convoys excluded), got %d", len(stranded))
+	}
+}

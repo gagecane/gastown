@@ -2085,6 +2085,24 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				Merge:        merge,
 			})
 		} else {
+			// Skip completed convoys (all tracked closed/tombstone) — they are
+			// NOT stranded, they are completed pending auto-close. Including them
+			// in the stranded result caused the daemon to iterate over them every
+			// scan tick and (once stable) never trigger the batched completion
+			// check, so they stayed open forever and the repeated iteration
+			// starved dispatch. The event-poll and periodic completion backstop
+			// in the daemon handle their auto-close. (gu-urwg6)
+			allClosed := true
+			for _, t := range tracked {
+				if t.Status != "closed" && t.Status != "tombstone" {
+					allClosed = false
+					break
+				}
+			}
+			if allClosed {
+				continue
+			}
+
 			// Has tracked issues but none are ready — include in stranded
 			// list so callers can distinguish from truly empty convoys.
 			stranded = append(stranded, strandedConvoyInfo{
