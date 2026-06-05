@@ -112,7 +112,17 @@ func (d *Daemon) runCurio() {
 	// causal half is exercised end-to-end the moment filing is enabled.
 	in.CurioBeads = d.collectCurioFiledBeads()
 
-	cands := curio.Evaluate(curio.DefaultRules(), in)
+	// Phase 1b (gu-fcwx8.3) L1 EWMA/MAD detector: advance per-series state
+	// with this cycle's observations BEFORE evaluation so Eval reads current
+	// state. The detector is a Rule that participates in Evaluate alongside the
+	// content rules.
+	if d.curioDetector == nil {
+		d.curioDetector = curio.NewEWMADetector()
+	}
+	d.curioDetector.Observe(in.EventCounts)
+
+	rules := append(curio.DefaultRules(), d.curioDetector)
+	cands := curio.Evaluate(rules, in)
 
 	// Call 1(C) reaction-count backstop: observe this cycle's candidates so a
 	// (rule,target) flapping across cycles gets frozen. The annotation

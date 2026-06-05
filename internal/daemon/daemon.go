@@ -250,6 +250,12 @@ type Daemon struct {
 	// is only touched from the serial curio patrol, so it needs no locking.
 	// Lazily initialized on the first curio cycle.
 	curioPaging *curio.PagingEngine
+
+	// curioDetector is the Phase 1b (gu-fcwx8.3) L1 EWMA/MAD statistical
+	// anomaly detector. Cross-cycle state: maintains per-series running
+	// averages and deviation estimates. Only touched from the serial curio
+	// patrol — no locking needed. Lazily initialized on the first curio cycle.
+	curioDetector *curio.EWMADetector
 }
 
 // alarmedPolecatSession is a single entry in Daemon.alarmedSessions. It
