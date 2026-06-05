@@ -56,8 +56,12 @@ Useful flags:
 gt mq submit --no-cleanup        # don't auto-shutdown (use when not a polecat)
 gt mq submit --priority 0        # bump priority (P0)
 gt mq submit --epic gt-xyz       # target an epic's integration branch
-gt mq submit --pre-verified      # attest gates already ran (re-verified locally)
+gt mq submit --resubmit          # re-submit after fixing a failed MR
 ```
+
+> To submit with a pre-verification fast-path (attesting gates already ran),
+> use `gt done --pre-verified` instead — that flag lives on `gt done`, not
+> `gt mq submit`.
 
 > If your branch name doesn't encode an issue ID, you may see a "no route for
 > prefix" warning and a skipped source-issue back-link. That's cosmetic — the
