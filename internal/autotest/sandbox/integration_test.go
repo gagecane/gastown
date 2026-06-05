@@ -53,13 +53,16 @@ func TestIntegration_5a5b5c_HandRolledFixture(t *testing.T) {
 		t.Fatalf("WarmUpGoModules: %v", err)
 	}
 
-	// Build a single CycleBudget large enough for the fast and
-	// per-target test cases but small enough that the third-run
-	// case can deliberately exhaust it. 10 seconds: ~5s headroom
-	// for the fast run (RunWithBudget charges actual elapsed, not
-	// the cap), ~750ms for the per-target run, then we manually
-	// charge the rest to drive the budget to exhaustion.
-	budget := NewCycleBudget(10 * time.Second)
+	// Build a single CycleBudget with generous headroom for the fast
+	// and per-target runs. RunWithBudget charges actual elapsed (not
+	// the cap), so a large budget is not "spent" by a fast run — it
+	// only raises the ceiling the effective per-target cap is clamped
+	// to (effective cap = min(perTargetCap, remaining budget)). The
+	// third-run case drains whatever remains explicitly, so the budget
+	// size does not need to be tuned for exhaustion. 60s is large
+	// enough that the fast subtest's 30s ctx — not the budget — is the
+	// binding deadline (see runIntegrationFastSubtest).
+	budget := NewCycleBudget(60 * time.Second)
 
 	t.Run("fast_test_passes_under_5a_5b_5c", func(t *testing.T) {
 		runIntegrationFastSubtest(t, sb, goBin, budget)
@@ -87,14 +90,19 @@ func runIntegrationFastSubtest(t *testing.T, sb *Sandbox, goBin string, budget *
 		}
 		t.Fatalf("ApplyOffline: %v", err)
 	}
-	// 5s cap (not 750ms) because this subtest only asserts the
-	// cap does NOT fire on a healthy fast test — it's not bounding
-	// performance. Under stripped env (e.g. the pre-push hook clears
-	// GOCACHE-relevant vars), cold `go test` startup + binary
-	// lookup + run can spike past 750ms intermittently (~30% flake
-	// rate observed). RunWithBudget charges actual elapsed back to
-	// the CycleBudget, so a larger cap does not consume more budget.
-	out, err := RunWithBudget(ctx, cmd, budget, 5*time.Second)
+	// This subtest only asserts the cap does NOT fire on a healthy
+	// fast test — it does not bound performance (the slow subtest
+	// covers cap-fires behavior). Any FIXED per-target cap is an
+	// inherent flake source here: under stripped env (the pre-push
+	// hook clears GOCACHE-relevant vars) and heavy parallel CI load,
+	// cold `go test` startup + binary lookup + run can spike past a
+	// tight cap (750ms flaked ~30%; a later 5s cap still flaked under
+	// load — gs-5r9). So we set the per-target cap ABOVE the 30s ctx
+	// (60s, the full budget) and let the 30s ctx be the sole deadline.
+	// A trivial stdlib `go test` finishing within 30s is robust even
+	// under load, while still catching a genuine hang. RunWithBudget
+	// charges actual elapsed, so the wide cap does not consume budget.
+	out, err := RunWithBudget(ctx, cmd, budget, 60*time.Second)
 	if err != nil {
 		s := string(out)
 		if strings.Contains(s, "operation not permitted") || strings.Contains(s, "permission denied") {
