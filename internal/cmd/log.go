@@ -429,21 +429,6 @@ func logCrashFeedEvent(townRoot, agent, session string, exitCode int) {
 	_ = events.LogFeed(events.TypeSessionDeath, agent, payload)
 }
 
-// LogEvent is a helper that logs an event from anywhere in the codebase.
-// It finds the town root and logs the event.
-func LogEvent(eventType townlog.EventType, agent, context string) error {
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return err // Silently fail if not in a workspace
-	}
-	if townRoot == "" {
-		return nil
-	}
-
-	logger := townlog.NewLogger(townRoot)
-	return logger.Log(eventType, agent, context)
-}
-
 // LogEventWithRoot logs an event when the town root is already known.
 func LogEventWithRoot(townRoot string, eventType townlog.EventType, agent, context string) error {
 	logger := townlog.NewLogger(townRoot)
@@ -451,16 +436,6 @@ func LogEventWithRoot(townRoot string, eventType townlog.EventType, agent, conte
 }
 
 // Convenience functions for common events
-
-// LogSpawn logs a spawn event.
-func LogSpawn(townRoot, agent, issueID string) error {
-	return LogEventWithRoot(townRoot, townlog.EventSpawn, agent, issueID)
-}
-
-// LogWake logs a wake event.
-func LogWake(townRoot, agent, context string) error {
-	return LogEventWithRoot(townRoot, townlog.EventWake, agent, context)
-}
 
 // LogNudge logs a nudge event.
 func LogNudge(townRoot, agent, message string) error {
@@ -486,14 +461,4 @@ func LogHandoffNoPersist(townRoot, agent, context string, persistErr error) erro
 // LogDone logs a done event.
 func LogDone(townRoot, agent, issueID string) error {
 	return LogEventWithRoot(townRoot, townlog.EventDone, agent, issueID)
-}
-
-// LogCrash logs a crash event.
-func LogCrash(townRoot, agent, reason string) error {
-	return LogEventWithRoot(townRoot, townlog.EventCrash, agent, reason)
-}
-
-// LogKill logs a kill event.
-func LogKill(townRoot, agent, reason string) error {
-	return LogEventWithRoot(townRoot, townlog.EventKill, agent, reason)
 }

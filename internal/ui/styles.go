@@ -5,7 +5,6 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -269,11 +268,6 @@ func RenderSeparator() string {
 	return MutedStyle.Render(SeparatorLight)
 }
 
-// RenderBold renders text in bold
-func RenderBold(s string) string {
-	return BoldStyle.Render(s)
-}
-
 // RenderCommand renders a command name with subtle styling
 func RenderCommand(s string) string {
 	return CommandStyle.Render(s)
@@ -296,125 +290,7 @@ func RenderFailIcon() string {
 	return FailStyle.Render(IconFail)
 }
 
-// RenderSkipIcon renders the skip icon with styling
-func RenderSkipIcon() string {
-	return MutedStyle.Render(IconSkip)
-}
-
-// RenderInfoIcon renders the info icon with styling
-func RenderInfoIcon() string {
-	return AccentStyle.Render(IconInfo)
-}
-
 // RenderFixIcon renders the fix icon (wrench emoji, double-width)
 func RenderFixIcon() string {
 	return IconFix
-}
-
-// === Issue Component Renderers ===
-
-// RenderID renders an issue ID with semantic styling
-func RenderID(id string) string {
-	return IDStyle.Render(id)
-}
-
-// RenderStatus renders a status with semantic styling
-// in_progress/blocked/pinned get color; open/closed use standard text
-func RenderStatus(status string) string {
-	switch status {
-	case "in_progress":
-		return StatusInProgressStyle.Render(status)
-	case "blocked":
-		return StatusBlockedStyle.Render(status)
-	case "pinned":
-		return StatusPinnedStyle.Render(status)
-	case "hooked":
-		return StatusHookedStyle.Render(status)
-	case "closed":
-		return StatusClosedStyle.Render(status)
-	default: // open and others
-		return StatusOpenStyle.Render(status)
-	}
-}
-
-// RenderStatusIcon returns the appropriate icon for a status with semantic coloring
-// This is the canonical source for status icon rendering - use this everywhere
-func RenderStatusIcon(status string) string {
-	switch status {
-	case "open":
-		return StatusIconOpen // no color - available but not urgent
-	case "in_progress":
-		return StatusInProgressStyle.Render(StatusIconInProgress)
-	case "blocked":
-		return StatusBlockedStyle.Render(StatusIconBlocked)
-	case "closed":
-		return StatusClosedStyle.Render(StatusIconClosed)
-	case "deferred":
-		return MutedStyle.Render(StatusIconDeferred)
-	case "pinned":
-		return StatusPinnedStyle.Render(StatusIconPinned)
-	default:
-		return "?" // unknown status
-	}
-}
-
-// RenderPriority renders a priority level with semantic styling
-// Format: "● P0" (icon + label)
-// P0/P1/P2 get color; P3/P4 use standard text
-func RenderPriority(priority int) string {
-	label := fmt.Sprintf("%s P%d", PriorityIcon, priority)
-	switch priority {
-	case 0:
-		return PriorityP0Style.Render(label)
-	case 1:
-		return PriorityP1Style.Render(label)
-	case 2:
-		return PriorityP2Style.Render(label)
-	case 3:
-		return PriorityP3Style.Render(label)
-	case 4:
-		return PriorityP4Style.Render(label)
-	default:
-		return label
-	}
-}
-
-// RenderPriorityCompact renders just the priority label without icon
-// Format: "P0"
-// Use when space is constrained or icon would be redundant
-func RenderPriorityCompact(priority int) string {
-	label := fmt.Sprintf("P%d", priority)
-	switch priority {
-	case 0:
-		return PriorityP0Style.Render(label)
-	case 1:
-		return PriorityP1Style.Render(label)
-	case 2:
-		return PriorityP2Style.Render(label)
-	case 3:
-		return PriorityP3Style.Render(label)
-	case 4:
-		return PriorityP4Style.Render(label)
-	default:
-		return label
-	}
-}
-
-// RenderType renders an issue type with semantic styling
-// bugs and epics get color; all other types use standard text
-func RenderType(issueType string) string {
-	switch issueType {
-	case "bug":
-		return TypeBugStyle.Render(issueType)
-	case "feature":
-		return TypeFeatureStyle.Render(issueType)
-	case "task":
-		return TypeTaskStyle.Render(issueType)
-	case "epic":
-		return TypeEpicStyle.Render(issueType)
-	case "chore":
-		return TypeChoreStyle.Render(issueType)
-	default:
-		return issueType
-	}
 }
