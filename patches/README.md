@@ -71,3 +71,29 @@ warnings and path mismatches in refineries.
 `GIT_CEILING_DIRECTORIES`.
 
 Discovered and applied 2026-04-27.
+
+## 0009-fix-beads-circuit-breaker-unbounded-growth.patch
+**Target:** steveyegge/beads `internal/storage/dolt/circuit.go` (NOT gastown)
+**Status:** Prepared for upstream PR, blocked by GitHub token permissions.
+
+**Bug:** Two issues in the beads circuit breaker:
+1. Per-database keying (GH#3140) creates a file per DB name. Ephemeral/test DBs
+   (testdb_*, testcontainers) mint permanent closed files never removed.
+   Observed: 35,653 files / 140MB after 8 days.
+2. `CleanStaleCircuitBreakerFiles()` globs+reads+parses the whole directory on
+   every `bd init`. With 35k files this adds ~650ms per call.
+
+**Fix:**
+- Expire CLOSED breaker files by mtime (>1h retention TTL)
+- Rate-limit the cleanup scan via a sentinel file (at most once per 5m)
+- Hot-path cost drops from O(n) to O(1) for nearly all inits
+
+**Stopgap:** The daemon-side `circuit_breaker_gc` dog in this repo already
+reaps stale closed files every 5m with 15m retention, keeping the directory
+small (~20-30 files). This upstream fix would eliminate the need for that dog.
+
+**To submit upstream:** Fork steveyegge/beads, apply this patch, submit PR.
+The gagecane PAT lacks `public_repo` fork scope — needs a broader token or
+manual fork creation.
+
+Prepared 2026-06-05.
