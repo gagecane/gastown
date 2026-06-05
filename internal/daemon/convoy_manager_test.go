@@ -3034,6 +3034,18 @@ exit 0
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
 		t.Fatalf("write mock gt: %v", err)
 	}
+	// bd show also reports "not found" — confirms the bead is truly missing
+	// (needed by confirmBeadMissing check added in gu-dvcs4).
+	bdScript := `#!/bin/sh
+if [ "$1" = "show" ]; then
+  echo "Error: bead '$2' not found" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var logged []string
@@ -3069,8 +3081,8 @@ exit 0
 	m.feedFirstReady(c)
 
 	if len(untrackCalls) != 1 {
-		t.Fatalf("expected exactly 1 untrack invocation after %d strikes, got %d: %v",
-			missingBeadStrikeThreshold, len(untrackCalls), untrackCalls)
+		t.Fatalf("expected exactly 1 untrack invocation after confirmed-missing strike, got %d: %v",
+			len(untrackCalls), untrackCalls)
 	}
 	if untrackCalls[0] != (missingBeadKey{"hq-cv-p6ht2", "gt-9emq"}) {
 		t.Errorf("untrack target = %v, want {hq-cv-p6ht2 gt-9emq}", untrackCalls[0])
