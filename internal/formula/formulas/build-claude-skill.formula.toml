@@ -1,0 +1,473 @@
+# Formula: build-claude-skill
+# Type: workflow
+#
+# Encodes Anthropic's "Complete Guide to Building Skills for Claude" as a
+# dependency-ordered workflow: plan -> scaffold -> write -> validate -> test.
+#
+# pour = true  — Steps materialized as sub-wisps (checkpoint recovery on crash)
+# pour = false — Steps read inline (root-only, restart on failure) [DEFAULT]
+
+description = """
+Build a Claude Agent Skill following Anthropic's official guide.
+
+Walks an agent from use-case definition through frontmatter, instructions,
+bundled resources, validation, and triggering/functional testing — producing
+a properly structured, portable skill folder ({{skill_name}}/SKILL.md + optional
+scripts/, references/, assets/).
+
+Covers all three guide categories via the `category` variable:
+- document-creation   — consistent high-quality output (no external tools)
+- workflow-automation  — multi-step processes with validation gates
+- mcp-enhancement      — workflow guidance layered on an MCP server
+
+## Authoring Contract
+
+You produce a single skill folder that obeys the guide's critical rules:
+- Folder + name in kebab-case, no spaces/underscores/capitals
+- File named exactly SKILL.md (case-sensitive)
+- YAML frontmatter with --- delimiters, name + description (WHAT + WHEN)
+- description under 1024 chars, no XML angle brackets, no reserved name
+- Progressive disclosure: SKILL.md stays focused; detail moves to references/
+- No README.md inside the skill folder
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Skill name has spaces/capitals | Convert to kebab-case before scaffolding |
+| Name contains "claude"/"anthropic" | Reject — reserved prefixes, rename |
+| description missing WHEN/triggers | Rewrite with explicit trigger phrases |
+| category=mcp-enhancement, no mcp_server | Ask user for the MCP server name |
+| SKILL.md exceeds ~5000 words | Move detail to references/ and link |"""
+formula = "build-claude-skill"
+type = "workflow"
+version = 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 1: Planning & design (Guide ch.2)
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "define-use-cases"
+title = "Define use cases and success criteria for {{skill_name}}"
+description = """
+Before writing anything, plan the skill. (Guide: Planning and design.)
+
+**Purpose of this skill:** {{skill_purpose}}
+**Category:** {{category}}
+**MCP server (if any):** {{mcp_server}}
+
+**1. Identify 2–3 concrete use cases.** For each, write:
+```
+Use Case: <name>
+Trigger: User says "<phrase>" or "<phrase>"
+Steps:  1. ...  2. ...  3. ...
+Result: <what success looks like>
+```
+
+**2. Decide problem-first vs tool-first framing:**
+- problem-first — user describes an outcome; skill orchestrates the steps
+- tool-first    — user has tool access; skill supplies the expert workflow
+Most skills lean one way. Note which fits {{skill_name}}.
+
+**3. Define success criteria** (aspirational targets, not hard gates):
+- Triggers on ~90% of relevant queries (10–20 test prompts)
+- Completes the workflow in fewer tool calls than the no-skill baseline
+- 0 failed tool/MCP calls per run; no user correction needed
+
+**4. List required capabilities:** built-in (code execution, file creation)
+vs MCP tool names. For mcp-enhancement, enumerate the exact MCP tool names
+you will call (they are case-sensitive).
+
+**Exit criteria:** 2–3 written use cases, a framing choice, measurable success
+criteria, and a capability list. Capture these — later steps reference them."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 2: Scaffold the folder structure (Guide ch.2 — Technical requirements)
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "scaffold"
+title = "Scaffold {{skills_dir}}/{{skill_name}}/ structure"
+needs = ["define-use-cases"]
+description = """
+Create the skill folder. (Guide: Technical requirements / Critical rules.)
+
+**1. Verify the name is legal kebab-case** and not reserved:
+```bash
+echo "{{skill_name}}" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*$' \\
+  && echo "OK: kebab-case" || echo "FAIL: use kebab-case (my-skill)"
+echo "{{skill_name}}" | grep -Eiq 'claude|anthropic' \\
+  && echo "FAIL: 'claude'/'anthropic' are reserved" || echo "OK: not reserved"
+```
+If either FAILs, stop and fix the name before continuing.
+
+**2. Create the structure** (omit dirs you won't use — progressive disclosure):
+```bash
+mkdir -p "{{skills_dir}}/{{skill_name}}"
+cd "{{skills_dir}}/{{skill_name}}"
+touch SKILL.md                 # REQUIRED — exact case
+mkdir -p scripts               # optional: executable code
+mkdir -p references            # optional: docs loaded on demand
+mkdir -p assets                # optional: templates, fonts, icons
+```
+
+**Rules:**
+- File MUST be exactly `SKILL.md` (case-sensitive). No variants.
+- Do NOT create README.md inside the folder (repo-level README is separate).
+- Only create scripts/references/assets if the skill actually needs them.
+
+**Exit criteria:** `{{skills_dir}}/{{skill_name}}/SKILL.md` exists; unused
+optional dirs removed."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 3: Write the YAML frontmatter (Guide ch.2 — "The most important part")
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "write-frontmatter"
+title = "Write SKILL.md frontmatter (name + description)"
+needs = ["scaffold"]
+description = """
+The frontmatter is how Claude decides whether to load the skill. Get it right.
+(Guide: YAML frontmatter / The description field.)
+
+**Required minimum:**
+```yaml
+---
+name: {{skill_name}}
+description: <WHAT it does> + <WHEN to use it, with specific trigger phrases>
+---
+```
+
+**description rules (this is the #1 cause of skills not triggering):**
+- MUST state BOTH what it does AND when to use it
+- Include concrete phrases the user would actually say
+- Mention relevant file types if applicable
+- Under 1024 characters
+- NO XML angle brackets ( < > ) anywhere — security restriction
+- For over-trigger control, add negative triggers: "Do NOT use for ... (use X)"
+
+Structure: [What it does] + [When to use it] + [Key capabilities].
+
+**Optional fields** (add only if useful):
+```yaml
+license: MIT
+metadata:
+  author: <name>
+  version: 1.0.0
+  mcp-server: {{mcp_server}}
+```
+
+**Self-check before moving on:**
+```bash
+F="{{skills_dir}}/{{skill_name}}/SKILL.md"
+head -1 "$F" | grep -qx -- '---' && echo "OK: opening delimiter" || echo "FAIL: needs --- on line 1"
+grep -q '^name:' "$F" && grep -q '^description:' "$F" && echo "OK: required fields" || echo "FAIL: missing name/description"
+grep -nE '[<>]' "$F" && echo "FAIL: XML angle brackets present" || echo "OK: no < >"
+```
+
+**Exit criteria:** Valid frontmatter with WHAT + WHEN description and trigger
+phrases drawn from the use cases in step 1."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 4: Write the instructions body (Guide ch.2 + ch.5 patterns)
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "write-instructions"
+title = "Write SKILL.md instructions body"
+needs = ["write-frontmatter"]
+description = """
+Write the Markdown instructions after the frontmatter. (Guide: Writing the
+main instructions / Best practices / Patterns.)
+
+**Recommended structure:**
+```markdown
+# {{skill_name}}
+
+## Instructions
+### Step 1: <first major step>
+Clear explanation + a concrete command and its expected output.
+
+## Examples
+Example 1: <common scenario>
+User says: "..."  → Actions: 1... 2...  → Result: ...
+
+## Troubleshooting
+Error: <message>  Cause: <why>  Solution: <fix>
+```
+
+**Pick the pattern that matches {{category}}** (Guide ch.5):
+- document-creation  → embed style guides, templates, quality checklist
+- workflow-automation → Pattern 1 (sequential, explicit ordering + validation
+  gates) or Pattern 3 (iterative refinement with stop criteria)
+- mcp-enhancement    → Pattern 1/2: call MCP tools by exact name in order,
+  pass data between steps, centralize error handling. Include an MCP
+  connection-failure troubleshooting section.
+
+**Best practices (non-negotiable):**
+- Be specific and actionable: give exact commands, not "validate the data".
+- Put critical instructions at the top; use `## Important` / `## Critical`.
+- Use numbered/bulleted lists; avoid ambiguous language.
+- Progressive disclosure: keep SKILL.md focused (< ~5000 words). Push detailed
+  docs to `references/` and LINK to them ("consult references/api-patterns.md").
+- For critical validations, prefer a bundled script over prose — code is
+  deterministic, language isn't (see step 5).
+
+**Exit criteria:** SKILL.md body has Instructions, Examples, and Troubleshooting
+sections; chosen pattern applied; oversized detail flagged for references/."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 5: Add bundled resources (Guide ch.1 — progressive disclosure)
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "add-resources"
+title = "Populate scripts/, references/, assets/ as needed"
+needs = ["write-instructions"]
+description = """
+Move third-level content out of SKILL.md so it loads only on demand.
+(Guide: Progressive disclosure / Use progressive disclosure.)
+
+**references/** — detailed docs SKILL.md links to but doesn't inline
+(API patterns, rate limits, pagination, error codes, long examples).
+
+**scripts/** — deterministic helpers. Prefer a script for any critical
+validation rather than trusting prose. Each script: clear name, documented
+args, predictable exit codes. Reference it from SKILL.md with the exact
+invocation, e.g. `python scripts/validate.py --input <file>`.
+
+**assets/** — templates, fonts, icons used in the skill's OUTPUT (not docs).
+
+Skip any directory the skill doesn't need, and delete the empty ones created
+in step 2:
+```bash
+cd "{{skills_dir}}/{{skill_name}}"
+for d in scripts references assets; do
+  [ -d "$d" ] && [ -z "$(ls -A "$d")" ] && rmdir "$d" && echo "removed empty $d/"
+done
+```
+
+**Exit criteria:** Every linked resource exists; no empty optional dirs remain;
+SKILL.md links to references with their relative paths."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 5b: MCP coordination guidance (Guide ch.1 "Skills + Connectors", ch.5
+# Patterns 1/2) — ONLY included when category == mcp-enhancement. Runs in
+# parallel with add-resources; validate joins both. When the condition excludes
+# this step, the compiler silently drops validate's needs edge to it.
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "mcp-coordination"
+title = "Wire {{skill_name}} to the {{mcp_server}} MCP server"
+needs = ["write-instructions"]
+condition = "{{category}} == mcp-enhancement"
+description = """
+Capture the MCP-enhancement specifics. (Guide: Skills + Connectors; Patterns 1
+"Sequential workflow orchestration" and 2 "Multi-MCP coordination".)
+
+This skill is the *recipe* on top of the {{mcp_server}} *kitchen* — it teaches
+Claude HOW to use the tools the MCP server already exposes.
+
+**1. Pin exact tool names.** List every {{mcp_server}} tool the workflow calls,
+in call order. Tool names are case-sensitive — copy them from the server's
+documentation, don't paraphrase. Reference them verbatim in SKILL.md.
+
+**2. Sequence and pass data between calls** (Pattern 1):
+```
+Step 1: call <tool_a>  → capture <id> from result
+Step 2: call <tool_b>  with id from step 1
+Step 3: validate result before proceeding
+```
+For workflows spanning multiple servers, separate them into phases and validate
+before crossing a phase boundary (Pattern 2).
+
+**3. Add an MCP error-handling section to SKILL.md.** Cover at minimum:
+- Connection refused → verify the server is connected (Settings > Extensions),
+  check auth/scopes, reconnect.
+- Auth failure → keys expired or missing scopes.
+- Isolate skill-vs-server: "use {{mcp_server}} to <do X>" directly; if that
+  fails, the issue is the server, not the skill.
+
+**4. Record metadata.** Set `metadata.mcp-server: {{mcp_server}}` in the
+frontmatter so the skill advertises its dependency.
+
+**Exit criteria:** SKILL.md names the exact {{mcp_server}} tools in order, passes
+data between them, has an MCP troubleshooting section, and declares the
+mcp-server metadata. (This step is skipped for non-MCP categories.)"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 6: Validate against the guide's checklist (Guide Reference A)
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "validate"
+title = "Validate {{skill_name}} against the guide checklist"
+needs = ["add-resources", "mcp-coordination"]
+description = """
+Run the pre-upload checklist deterministically. (Guide: Reference A.)
+
+```bash
+set -u
+D="{{skills_dir}}/{{skill_name}}"; F="$D/SKILL.md"; fail=0
+chk(){ if eval "$2"; then echo "PASS: $1"; else echo "FAIL: $1"; fail=1; fi; }
+
+# The '< >' ban and the 1024-char limit apply to the FRONTMATTER only (it lands
+# in Claude's system prompt) — NOT the instructions body, which may legitimately
+# contain '<file>' placeholders, 'x < y', shell redirects, etc. So extract the
+# frontmatter block (between the first two '---' lines) and scope those checks.
+FM=$(awk 'NR==1&&$0=="---"{i=1;next} i&&$0=="---"{exit} i{print}' "$F")
+# For the '< >' check, scrub YAML block-scalar indicators (key: | / key: >) from
+# key lines — the '>' there is legal YAML syntax, not forbidden content.
+FM_SCAN=$(printf '%s\n' "$FM" | sed -E 's/:[ \t]*[|>][+-]?[ \t]*$/:/')
+# Extract the description value, including a multi-line YAML block scalar
+# (description: | / >), stopping at the next top-level key or end of frontmatter.
+DESC=$(printf '%s\n' "$FM" | awk '
+  /^description:/{f=1; sub(/^description:[ \t]*[|>]?[+-]?[ \t]*/,""); print; next}
+  f && /^[A-Za-z0-9_-]+:/{exit}
+  f{print}')
+
+chk "folder is kebab-case"         'echo "{{skill_name}}" | grep -Eq "^[a-z0-9]+(-[a-z0-9]+)*$"'
+chk "name not reserved"            '! echo "{{skill_name}}" | grep -Eiq "claude|anthropic"'
+chk "SKILL.md exists (exact case)" 'test -f "$F"'
+chk "no README.md in folder"       '! test -f "$D/README.md"'
+chk "opening --- delimiter"        'head -1 "$F" | grep -qx -- "---"'
+chk "frontmatter block closed"     '[ -n "$FM" ]'
+chk "name field present"           'printf "%s\n" "$FM" | grep -q "^name:"'
+chk "description field present"    'printf "%s\n" "$FM" | grep -q "^description:"'
+chk "no < > in frontmatter"        '! printf "%s\n" "$FM_SCAN" | grep -qE "[<>]"'
+chk "description non-empty"        '[ -n "$DESC" ]'
+chk "description < 1024 chars"     '[ "${#DESC}" -lt 1024 ]'
+chk "SKILL.md under 5000 words"    '[ "$(wc -w < "$F")" -lt 5000 ]'
+
+[ "$fail" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "VALIDATION FAILED — fix above"
+```
+
+Manual checks the script can't fully cover:
+- description states BOTH what AND when (with real trigger phrases)
+- instructions are specific/actionable; error handling present; examples present
+- references are clearly linked
+
+If anything FAILs, return to the relevant step and fix before testing.
+
+**Exit criteria:** `ALL CHECKS PASSED` and manual checks confirmed.
+
+> Upgrade path: to enforce this on every run, wire it as a `[steps.check]` exec
+> hook (mode=exec, path=scripts/validate.sh, max_attempts=2) instead of prose."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 7a: Triggering tests (Guide ch.3) — parallel with functional tests
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "test-triggering"
+title = "Test that {{skill_name}} triggers correctly"
+needs = ["validate"]
+description = """
+Verify the skill loads at the right times and ONLY then. (Guide: Testing —
+Triggering tests.)
+
+**Build a test suite from the step-1 use cases:**
+```
+Should trigger:
+  - "<obvious phrasing of the task>"
+  - "<paraphrased request>"
+  - "<another natural variant>"
+Should NOT trigger:
+  - "What's the weather?"
+  - "<adjacent task this skill must NOT own>"
+```
+
+**Run & debug:** ask Claude "When would you use the {{skill_name}} skill?" — it
+quotes the description back. Adjust based on what's missing.
+- Under-triggering → add detail/keywords (esp. technical terms) to description.
+- Over-triggering → add negative triggers, narrow scope, be more specific.
+
+Aim for the ~90%-of-relevant-queries target from step 1.
+
+**Exit criteria:** Triggers on obvious + paraphrased prompts; does not trigger
+on unrelated/adjacent ones; description updated if needed."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 7b: Functional tests (Guide ch.3) — parallel with triggering tests
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "test-functional"
+title = "Test that {{skill_name}} produces correct output"
+needs = ["validate"]
+description = """
+Verify the skill does the job. (Guide: Testing — Functional tests +
+Performance comparison.)
+
+**Per use case, assert Given/When/Then:**
+```
+Test: <scenario>
+Given: <inputs>
+When:  skill executes the workflow
+Then:  - correct outputs produced
+       - tool/MCP calls succeed (0 failed calls)
+       - edge cases handled
+       - no user correction required
+```
+
+**Iterate on the hardest case first** until Claude succeeds, then broaden — this
+gives faster signal than wide shallow testing.
+
+**Baseline comparison** (proves value): run the same task WITHOUT the skill and
+WITH it; compare tool calls, failed calls, tokens, and back-and-forth messages.
+
+For mcp-enhancement: if MCP calls fail, test the MCP directly first ("use
+{{mcp_server}} to ...") to isolate whether the issue is the skill or the server.
+
+**Exit criteria:** All use cases pass Given/When/Then; edge cases handled;
+baseline comparison recorded."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 8: Finalize & package (Guide ch.4)
+# ─────────────────────────────────────────────────────────────────────────────
+[[steps]]
+id = "finalize"
+title = "Finalize and package {{skill_name}}"
+needs = ["test-triggering", "test-functional"]
+description = """
+Prepare the skill for use/distribution. (Guide: Distribution and sharing.)
+
+**1. Set version** in frontmatter metadata (start `version: 1.0.0`).
+
+**2. Package for upload** (Claude.ai: Settings > Capabilities > Skills):
+```bash
+cd "{{skills_dir}}"
+zip -r "{{skill_name}}.zip" "{{skill_name}}" \\
+  -x "*/.git/*" "*/__pycache__/*"
+```
+Or place the folder in the Claude Code skills directory.
+
+**3. If distributing on GitHub:** add a REPO-LEVEL README (outcomes, not
+features; install steps; example usage/screenshots) — NOT inside the skill
+folder. For MCP skills, link the skill from the MCP docs and tell the
+"MCP + skills" story.
+
+**4. Summarize** what was built: skill path, category, use cases covered,
+triggering/functional results, and the baseline comparison.
+
+**Exit criteria:** Versioned, packaged (or installed) skill + a short summary
+of capabilities and test outcomes. Skills are living docs — iterate on the
+description/instructions as real usage surfaces under/over-triggering."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables
+# ─────────────────────────────────────────────────────────────────────────────
+[vars.skill_name]
+description = "Skill folder + name, kebab-case (e.g. notion-project-setup)"
+required = true
+
+[vars.skill_purpose]
+description = "One-line: what the skill does and the problem it solves"
+required = true
+
+[vars.category]
+description = "Guide use-case category — drives which pattern to apply"
+default = "workflow-automation"
+enum = ["document-creation", "workflow-automation", "mcp-enhancement"]
+
+[vars.mcp_server]
+description = "MCP server name (required only when category=mcp-enhancement)"
+default = ""
+
+[vars.skills_dir]
+description = "Parent directory the skill folder is created in"
+default = "skills"
