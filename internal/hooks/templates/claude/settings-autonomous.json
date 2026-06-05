@@ -18,8 +18,28 @@
       "TaskStop"
     ]
   },
+  "enableAllProjectMcpServers": false,
   "enabledPlugins": {
-    "beads@beads-marketplace": false
+    "beads@beads-marketplace": false,
+    "AIPowerUserCapabilities-agent-engineering@aim": false,
+    "AIPowerUserCapabilities-autonomous-coding@aim": false,
+    "AIPowerUserCapabilities-cloudwatch-migration@aim": false,
+    "AIPowerUserCapabilities-code-review@aim": false,
+    "AIPowerUserCapabilities-comms@aim": false,
+    "AIPowerUserCapabilities-core-dev@aim": true,
+    "AIPowerUserCapabilities-multiagent@aim": false,
+    "AIPowerUserCapabilities-pipeline-ops@aim": false,
+    "AIPowerUserCapabilities-project-mgmt@aim": false,
+    "AIPowerUserCapabilities-research@aim": false,
+    "AIPowerUserCapabilities-threat-modeler@aim": false,
+    "AIPowerUserCapabilities-writing@aim": false,
+    "AmazonBuilderCoreAIAgents-pipeline-assistant@aim": false,
+    "AtlasAICapabilities-all@aim": false,
+    "MeshClawAICapabilities-all@aim": false,
+    "StoreGenAiCapabilities-all@aim": false,
+    "ScheduledCoverageBooster-all@aim": false,
+    "TalonAiCapabilities-talon-dev@aim": false,
+    "AmazonBuilderCoreAIAgents-core@aim": false
   },
   "hooks": {
     "PreToolUse": [

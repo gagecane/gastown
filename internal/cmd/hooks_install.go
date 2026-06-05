@@ -241,6 +241,30 @@ func resolveSettingsTarget(townRoot, cwd string) string {
 	}
 }
 
+// inferRoleFromPath extracts the agent role from a settings directory path.
+// Paths end in a role dir: .../witness, .../refinery, .../crew, .../polecats,
+// .../mayor, .../deacon, or .../deacon/dogs/boot.
+func inferRoleFromPath(dir string) string {
+	base := filepath.Base(dir)
+	switch base {
+	case "witness":
+		return constants.RoleWitness
+	case "refinery":
+		return constants.RoleRefinery
+	case "crew":
+		return constants.RoleCrew
+	case "polecats":
+		return constants.RolePolecat
+	case "mayor":
+		return constants.RoleMayor
+	case "deacon":
+		return constants.RoleDeacon
+	case "boot":
+		return constants.RoleBoot
+	}
+	return ""
+}
+
 // installHookTo installs a hook to a specific worktree.
 func installHookTo(worktreePath string, hookDef HookDefinition, dryRun bool) error {
 	settingsPath := filepath.Join(worktreePath, ".claude", "settings.json")
@@ -249,11 +273,6 @@ func installHookTo(worktreePath string, hookDef HookDefinition, dryRun bool) err
 	settings, err := hooks.LoadSettings(settingsPath)
 	if err != nil {
 		return fmt.Errorf("loading existing settings: %w", err)
-	}
-
-	// Initialize enabledPlugins if needed
-	if settings.EnabledPlugins == nil {
-		settings.EnabledPlugins = make(map[string]bool)
 	}
 
 	// Build and add hook entries for each matcher
@@ -267,8 +286,10 @@ func installHookTo(worktreePath string, hookDef HookDefinition, dryRun bool) err
 		settings.Hooks.AddEntry(hookDef.Event, entry)
 	}
 
-	// Ensure beads plugin is disabled (standard for Gas Town)
-	settings.EnabledPlugins["beads@beads-marketplace"] = false
+	// Ensure plugin defaults: fleet roles get all AIM plugins disabled to
+	// prevent OOM from MCP sidecar proliferation (see 2026-06-05 post-mortem).
+	role := inferRoleFromPath(worktreePath)
+	hooks.EnsurePluginDefaults(settings, role)
 
 	// Pretty print relative path
 	relPath := worktreePath

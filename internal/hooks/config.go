@@ -173,6 +173,90 @@ func addClaudePromptDefaults(out map[string]json.RawMessage) {
 	}
 }
 
+// aimPluginsToDisable lists all known AIM plugin keys that fleet agents must
+// explicitly disable. Without this, project-level settings inherit the user's
+// global ~/.claude/settings.json — which may enable 16+ plugins, each spawning
+// multiple MCP sidecar processes (~180 MB each). With 37 fleet agents that's
+// enough to OOM a 128 GB host. See OOM post-mortem 2026-06-05.
+// aimPluginsToDisable lists AIM plugins that fleet agents must NOT load.
+// AIPowerUserCapabilities-core-dev is intentionally EXCLUDED — it provides
+// the gpu-dev agent and a single full builder-mcp instance that fleet agents
+// need for bd/gt operations, CRs, builds, and internal website access.
+var aimPluginsToDisable = []string{
+	"AIPowerUserCapabilities-agent-engineering@aim",
+	"AIPowerUserCapabilities-autonomous-coding@aim",
+	"AIPowerUserCapabilities-cloudwatch-migration@aim",
+	"AIPowerUserCapabilities-code-review@aim",
+	"AIPowerUserCapabilities-comms@aim",
+	"AIPowerUserCapabilities-multiagent@aim",
+	"AIPowerUserCapabilities-pipeline-ops@aim",
+	"AIPowerUserCapabilities-project-mgmt@aim",
+	"AIPowerUserCapabilities-research@aim",
+	"AIPowerUserCapabilities-threat-modeler@aim",
+	"AIPowerUserCapabilities-writing@aim",
+	"AmazonBuilderCoreAIAgents-pipeline-assistant@aim",
+	"AmazonBuilderCoreAIAgents-core@aim",
+	"AtlasAICapabilities-all@aim",
+	"MeshClawAICapabilities-all@aim",
+	"StoreGenAiCapabilities-all@aim",
+	"ScheduledCoverageBooster-all@aim",
+	"TalonAiCapabilities-talon-dev@aim",
+}
+
+// isFleetRole returns true for roles that run as long-lived unattended daemons
+// and should not load AIM plugins (witnesses, refineries, deacon, boot, polecats).
+func isFleetRole(role string) bool {
+	switch role {
+	case constants.RoleWitness, constants.RoleRefinery, constants.RoleDeacon, constants.RoleBoot, constants.RolePolecat:
+		return true
+	}
+	return false
+}
+
+// EnsurePluginDefaults sets the standard enabledPlugins map for a given role.
+// Fleet roles (witness, refinery, deacon, boot, polecat) get all AIM plugins
+// explicitly disabled to prevent inheriting the user's global plugin config.
+// Interactive roles (mayor, crew) only get beads disabled.
+func EnsurePluginDefaults(s *SettingsJSON, role string) {
+	if s.EnabledPlugins == nil {
+		s.EnabledPlugins = make(map[string]bool)
+	}
+	s.EnabledPlugins["beads@beads-marketplace"] = false
+
+	if isFleetRole(role) {
+		for _, plugin := range aimPluginsToDisable {
+			s.EnabledPlugins[plugin] = false
+		}
+		// Also disable enableAllProjectMcpServers via Extra to prevent any
+		// MCP server auto-discovery from loading unexpected servers.
+		if s.Extra == nil {
+			s.Extra = make(map[string]json.RawMessage)
+		}
+		s.Extra["enableAllProjectMcpServers"] = json.RawMessage(`false`)
+	}
+}
+
+// HasPluginDefaults reports whether the settings already contain the correct
+// plugin configuration for the given role. For fleet roles, all AIM plugins
+// must be explicitly disabled (set to false) to prevent OOM. For interactive
+// roles (mayor, crew), no plugin enforcement is required — they're allowed to
+// inherit the user's global plugin config.
+func HasPluginDefaults(s *SettingsJSON, role string) bool {
+	if !isFleetRole(role) {
+		return true // Interactive roles don't need plugin overrides
+	}
+	if s == nil || s.EnabledPlugins == nil {
+		return false
+	}
+	for _, plugin := range aimPluginsToDisable {
+		val, ok := s.EnabledPlugins[plugin]
+		if !ok || val {
+			return false // Missing or enabled — must be explicitly false
+		}
+	}
+	return true
+}
+
 func setRaw(out map[string]json.RawMessage, key string, value []byte) {
 	out[key] = json.RawMessage(value)
 }

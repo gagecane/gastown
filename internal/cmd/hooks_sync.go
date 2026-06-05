@@ -302,7 +302,9 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 
 	// Compare hooks sections and the Claude startup defaults. Existing settings
 	// from older versions may have current hooks but still miss prompt defaults.
-	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) {
+	// Also check fleet plugin defaults — without these, agents inherit the user's
+	// global AIM plugins and OOM the host (see 2026-06-05 post-mortem).
+	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) && hooks.HasPluginDefaults(current, target.Role) {
 		return syncUnchanged, nil
 	}
 
@@ -316,11 +318,9 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	// Update hooks section, preserving all other fields (including unknown ones)
 	current.Hooks = *expected
 
-	// Ensure enabledPlugins map exists with beads disabled (Gas Town standard)
-	if current.EnabledPlugins == nil {
-		current.EnabledPlugins = make(map[string]bool)
-	}
-	current.EnabledPlugins["beads@beads-marketplace"] = false
+	// Ensure plugin defaults: fleet roles get all AIM plugins disabled to
+	// prevent OOM from MCP sidecar proliferation (see 2026-06-05 post-mortem).
+	hooks.EnsurePluginDefaults(current, target.Role)
 
 	// Create .claude directory if needed
 	claudeDir := filepath.Dir(target.Path)
