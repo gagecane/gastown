@@ -2,20 +2,26 @@
 name: crew-commit
 description: >
   Canonical commit workflow for Gas Town crew members: pre-flight checks,
-  branch creation, gt commit with agent identity, push, and PR creation.
-  Use when ready to commit and submit work for review.
-allowed-tools: "Bash(git *), Bash(gt *), Bash(gh *)"
-version: "1.0.0"
+  branch creation, gt commit with agent identity, push, and submission to the
+  Refinery merge queue. Use when ready to commit and submit work for review.
+allowed-tools: "Bash(git *), Bash(gt *)"
+version: "2.0.0"
 author: "Gas Town"
 ---
 
 # Crew Commit — Canonical Git Workflow
 
 This skill guides crew members through the standard Gas Town commit workflow:
-pre-flight → branch → stage → commit → push → PR.
+pre-flight → branch → stage → commit → push → submit to merge queue.
 
 > **⚠️ NEVER commit directly to `main`.** All crew work goes through branches
-> and pull requests. The Refinery handles merges to main.
+> and the Refinery merge queue. The Refinery rebases, validates, and merges
+> each branch to main — crew members never merge to main themselves.
+
+> **⚠️ Do NOT use `gh pr create`.** Gas Town does not merge via GitHub pull
+> requests, and the crew git token cannot create them (`gh pr create` fails
+> with "Resource not accessible by personal access token"). Submit work with
+> `gt mq submit` instead — see Step 7.
 
 ## Usage
 
@@ -165,29 +171,43 @@ git push -u origin <your-branch-name>
 
 ---
 
-## Step 7: Create Pull Request
+## Step 7: Submit to the Refinery Merge Queue
+
+Submit your pushed branch to the merge queue with `gt mq submit`. The Refinery
+(one per rig) picks it up, rebases onto the latest main, runs validation
+(build, vet, tests, checks), and merges to main when clear. On conflict it
+spawns a fresh polecat to re-implement — you do not merge to main yourself.
 
 ```bash
-gh pr create --title "<type>: <concise description>" \
-  --body "$(cat <<'EOF'
-## Summary
+# Auto-detects the issue ID from the branch name when it embeds one.
+gt mq submit
 
-- <what changed and why>
-
-## Test plan
-
-- [ ] <how to verify this works>
-
-## Notes
-
-<any context reviewers need>
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-EOF
-)"
+# If the branch name does NOT encode the issue (e.g. a fix/<desc> branch),
+# pass it explicitly so the MR links to the right bead:
+gt mq submit --issue <issue-id>
 ```
 
-After creating the PR, note the PR number from the output.
+`gt mq submit` prints the **MR ID** (for example `gu-wisp-wh0`) and records an
+`MR created: <id>` comment on the source bead. Note the MR ID — it is how you
+track the merge through the queue.
+
+Useful flags:
+- `--no-cleanup` — submit without triggering session cleanup (crew members are
+  persistent, so this is the safe default for crew; without it the command may
+  attempt polecat-style shutdown when run from a `polecat/...` branch).
+- `--issue <id>` — explicit source issue when the branch name can't be parsed.
+- `--resubmit` — resubmit after pushing a fix to a previously-rejected MR.
+- `--priority <0-4>` — override the inherited bead priority.
+
+> **Note:** `gt done` is the polecat equivalent and is **polecat-only** — it
+> errors for crew/witness/refinery roles. Crew members use `gt mq submit`.
+
+Check the queue and your MR's status any time:
+
+```bash
+gt mq list                       # Show the merge queue
+gt mq status                     # Detailed MR status for this rig
+```
 
 ---
 
@@ -196,7 +216,7 @@ After creating the PR, note the PR number from the output.
 If your work affects others or is high priority:
 
 ```bash
-notify "PR ready: <brief description> — #<PR number>"
+notify "MR submitted: <brief description> — <MR ID>"
 ```
 
 ---
@@ -209,7 +229,7 @@ notify "PR ready: <brief description> — #<PR number>"
 - [ ] Specific files staged (no secrets, no debug code)
 - [ ] Used `gt commit` (not `git commit`)
 - [ ] Branch pushed to origin
-- [ ] PR created via `gh pr create`
+- [ ] Submitted to the merge queue via `gt mq submit` (MR ID noted)
 
 ---
 
@@ -217,7 +237,9 @@ notify "PR ready: <brief description> — #<PR number>"
 
 | ❌ Don't | ✅ Do instead |
 |----------|--------------|
-| `git push origin main` | Push feature branch, create PR |
+| `git push origin main` | Push feature branch, submit via `gt mq submit` |
+| `gh pr create` | `gt mq submit` (Gas Town merges via the Refinery, not GitHub PRs) |
+| `gt done` (crew) | `gt mq submit` (`gt done` is polecat-only) |
 | `git commit` directly | `gt commit` (sets agent identity) |
 | `git add .` blindly | Stage specific files, verify with `git status` |
 | Include `shared/` or `config/` without intent | Check `git submodule status` first |
