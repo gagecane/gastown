@@ -58,13 +58,12 @@ const (
 	feedChurnWindow = 1 * time.Hour
 
 	// missingBeadStrikeThreshold is the number of consecutive "bead not found"
-	// sling failures tolerated for a single (convoy, bead) pair before the
-	// bead is auto-untracked from the convoy. N=3 absorbs transient Dolt
-	// hiccups (replication lag, brief outages) while still terminating the
-	// forever-loop produced by a tracked bead that has been deleted /
-	// squashed / never created. See gu-f0gq (hq-cv-p6ht2 looped 347x on
-	// non-existent ta-9emq for 19h45m).
-	missingBeadStrikeThreshold = 3
+	// sling failures before a confirmation re-check is triggered. Set to 1
+	// so a single failure immediately confirms via `bd show` — this is
+	// restart-proof (no state to persist across daemon lifetimes) while the
+	// confirmation check absorbs the transient-hiccup tolerance that N=3
+	// previously provided. See gu-f0gq, gu-dvcs4.
+	missingBeadStrikeThreshold = 1
 
 	// stableSkipThreshold is the number of consecutive scans a completion
 	// candidate (tracked>0, ready=0) must remain unchanged before it is
@@ -189,6 +188,12 @@ type ConvoyManager struct {
 	// becomes empty). Cleared on successful sling. See gu-f0gq.
 	missingBeadStrikes sync.Map // map[missingBeadKey]int
 
+	// confirmBeadMissingFn performs a definitive existence check (e.g.,
+	// `bd show <issueID>`) to confirm the bead truly does not exist before
+	// untracking. Returns true if the bead is genuinely missing. Overridable
+	// for tests; defaults to a `bd show` subprocess call. See gu-dvcs4.
+	confirmBeadMissingFn func(issueID string) bool
+
 	// untrackMissingBeadFn untracks issueID from convoyID. Overridable for
 	// tests; defaults to a `bd dep remove` subprocess call. Returning a
 	// non-nil error leaves the strike counter in place so the next scan
@@ -256,6 +261,7 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		gtPath:       gtPath,
 		now:          time.Now,
 	}
+	m.confirmBeadMissingFn = m.confirmBeadMissingViaBd
 	m.untrackMissingBeadFn = m.untrackMissingBeadViaBd
 	return m
 }
@@ -917,12 +923,13 @@ func (m *ConvoyManager) handleNonWorkBead(convoyID, issueID, stderrLine string) 
 		convoyID, issueID)
 }
 
-// handleMissingBeadStrike increments the strike counter for (convoyID, issueID)
-// and, when the threshold is reached, untracks the bead from the convoy so the
-// stranded scan stops re-attempting an impossible sling. The convoy itself is
-// not closed here — the next scan will see the convoy with one fewer (or zero)
-// tracked beads and the existing checkConvoyCompletion / closeEmptyConvoy paths
-// take over. (gu-f0gq)
+// handleMissingBeadStrike handles a "bead not found" sling failure. With
+// threshold=1, the first failure immediately triggers a confirmation re-check
+// (`bd show`) to verify the bead truly doesn't exist. If confirmed missing,
+// the bead is auto-untracked. If the confirmation shows the bead exists
+// (transient Dolt hiccup), the strike is cleared and no untrack occurs.
+// This is restart-proof: no in-memory counter needs to survive daemon
+// restarts. See gu-f0gq, gu-dvcs4.
 func (m *ConvoyManager) handleMissingBeadStrike(convoyID, issueID, stderrLine string) {
 	key := missingBeadKey{convoyID, issueID}
 	var count int
@@ -940,8 +947,21 @@ func (m *ConvoyManager) handleMissingBeadStrike(convoyID, issueID, stderrLine st
 		return
 	}
 
-	m.logger("Convoy %s: %s missing for %d consecutive scans — auto-untracking",
-		convoyID, issueID, count)
+	// Threshold reached — perform a definitive confirmation check before
+	// untracking. This absorbs transient Dolt hiccups (the tolerance N=3
+	// previously provided) in a single scan cycle without requiring
+	// persistent state across daemon restarts. (gu-dvcs4)
+	if m.confirmBeadMissingFn != nil && !m.confirmBeadMissingFn(issueID) {
+		// Bead exists — the sling failure was a transient hiccup. Clear
+		// the strike so the bead is retried next scan without penalty.
+		m.missingBeadStrikes.Delete(key)
+		m.logger("Convoy %s: %s confirmation check shows bead EXISTS — clearing strike (transient hiccup)",
+			convoyID, issueID)
+		return
+	}
+
+	m.logger("Convoy %s: %s confirmed missing — auto-untracking",
+		convoyID, issueID)
 	if m.untrackMissingBeadFn == nil {
 		return
 	}
@@ -977,6 +997,33 @@ func (m *ConvoyManager) untrackMissingBeadViaBd(convoyID, issueID string) error 
 		return err
 	}
 	return nil
+}
+
+// confirmBeadMissingViaBd runs `bd show <issueID>` and returns true if the bead
+// genuinely does not exist (exit code != 0 with a "not found" message). Returns
+// false (bead exists) on success or on ambiguous errors (e.g. Dolt timeout) —
+// erring on the side of NOT untracking. See gu-dvcs4.
+func (m *ConvoyManager) confirmBeadMissingViaBd(issueID string) bool {
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bd", "show", issueID)
+	cmd.Dir = m.townRoot
+	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		// Only confirm missing if stderr explicitly says "not found"
+		if sling.IsBeadNotFoundError(msg) {
+			return true
+		}
+		// Ambiguous failure (timeout, Dolt down) — don't confirm missing
+		m.logger("Convoy: confirmBeadMissing(%s): ambiguous error: %s — treating as exists", issueID, util.FirstLine(msg))
+		return false
+	}
+	// bd show succeeded — bead exists
+	return false
 }
 
 // closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.

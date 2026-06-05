@@ -3049,6 +3049,8 @@ exit 0
 		untrackCalls = append(untrackCalls, missingBeadKey{convoyID, issueID})
 		return nil
 	}
+	// Confirmation always says "yes, truly missing" (simulates bd show not-found).
+	m.confirmBeadMissingFn = func(issueID string) bool { return true }
 
 	// Drive the clock so the per-issue feed cooldown doesn't suppress later
 	// scans from re-attempting the same bead.
@@ -3062,19 +3064,9 @@ exit 0
 		ReadyIssues: []string{"gt-9emq"},
 	}
 
-	// Strike 1: first failure, no untrack yet.
+	// With threshold=1, the first sling failure triggers immediate
+	// confirmation + untrack (no multi-scan accumulation needed). (gu-dvcs4)
 	m.feedFirstReady(c)
-	if len(untrackCalls) != 0 {
-		t.Fatalf("untrack fired prematurely on strike 1: %v", untrackCalls)
-	}
-
-	// Advance past the cooldown window between each scan to mirror the live
-	// stranded-scan loop (every scan is well outside feedDispatchCooldown
-	// once the bead has been declared missing for hours).
-	for i := 2; i <= missingBeadStrikeThreshold; i++ {
-		current = current.Add(feedDispatchCooldown + time.Second)
-		m.feedFirstReady(c)
-	}
 
 	if len(untrackCalls) != 1 {
 		t.Fatalf("expected exactly 1 untrack invocation after %d strikes, got %d: %v",
@@ -3146,6 +3138,9 @@ exit 0
 		untrackCalls++
 		return nil
 	}
+	// Confirmation says "bead exists" — simulating a transient Dolt hiccup
+	// where sling fails but the bead is actually there. (gu-dvcs4)
+	m.confirmBeadMissingFn = func(issueID string) bool { return false }
 	current := time.Now()
 	m.now = func() time.Time { return current }
 
@@ -3156,12 +3151,12 @@ exit 0
 		ReadyIssues: []string{"gt-good"},
 	}
 
-	m.feedFirstReady(c) // strike 1 (transient)
+	m.feedFirstReady(c) // sling fails, but confirmation shows bead exists — strike cleared
 	current = current.Add(feedDispatchCooldown + time.Second)
-	m.feedFirstReady(c) // success — strike counter reset
+	m.feedFirstReady(c) // success (mock gt succeeds on second call)
 
 	if _, ok := m.missingBeadStrikes.Load(missingBeadKey{"hq-cv-good", "gt-good"}); ok {
-		t.Errorf("expected strike counter cleared after successful sling")
+		t.Errorf("expected strike counter cleared after confirmation showed bead exists")
 	}
 
 	// Keep slinging successfully — there should be no untrack ever.
@@ -3171,6 +3166,95 @@ exit 0
 	}
 	if untrackCalls != 0 {
 		t.Errorf("untrack fired %d times for a healthy bead; want 0", untrackCalls)
+	}
+}
+
+// TestFeedFirstReady_MissingBeadStrikes_ConfirmationAbsorbsTransient verifies
+// that when sling reports "not found" but the confirmation re-check shows the
+// bead exists (transient Dolt hiccup), no untrack occurs and the strike is
+// cleared. This is the restart-proof replacement for multi-scan strike
+// accumulation. (gu-dvcs4)
+func TestFeedFirstReady_MissingBeadStrikes_ConfirmationAbsorbsTransient(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// gt sling always fails with "bead not found".
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "bead '$2' not found" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error {
+		untrackCalls++
+		return nil
+	}
+	// Confirmation says "bead exists" — the sling failure was a transient hiccup.
+	m.confirmBeadMissingFn = func(issueID string) bool { return false }
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-transient",
+		Title:       "Transient Hiccup",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-hiccup"},
+	}
+
+	// Sling fails "not found" but confirmation shows it exists → no untrack.
+	m.feedFirstReady(c)
+	if untrackCalls != 0 {
+		t.Fatalf("untrack fired despite confirmation showing bead exists: %d", untrackCalls)
+	}
+
+	// Strike should be cleared after confirmation absorbs the hiccup.
+	if _, ok := m.missingBeadStrikes.Load(missingBeadKey{"hq-cv-transient", "gt-hiccup"}); ok {
+		t.Errorf("expected strike cleared after confirmation showed bead exists")
+	}
+
+	// Log should mention the transient hiccup was absorbed.
+	foundLog := false
+	for _, l := range logged {
+		if strings.Contains(l, "confirmation check shows bead EXISTS") && strings.Contains(l, "gt-hiccup") {
+			foundLog = true
+			break
+		}
+	}
+	if !foundLog {
+		t.Errorf("expected 'confirmation check shows bead EXISTS' log line, got: %v", logged)
+	}
+
+	// Run many more times — should never trigger untrack.
+	for i := 0; i < 10; i++ {
+		current = current.Add(feedDispatchCooldown + time.Second)
+		m.feedFirstReady(c)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("untrack eventually fired after %d scans despite confirmation absorbing; want 0", untrackCalls)
 	}
 }
 
