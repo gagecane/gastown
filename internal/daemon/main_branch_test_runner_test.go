@@ -1152,6 +1152,52 @@ Run FAILED
 	}
 }
 
+func TestIsActContainerName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"act job container", "act-Acceptance-Check-Unit-Tests-d1fb26a0", true},
+		{"act with leading slash", "/act-CDK--Lint-and-Compile-dda36f3f", true},
+		{"bare act- prefix", "act-x", true},
+		{"react substring not matched", "react-app", false},
+		{"compact substring not matched", "compact-db", false},
+		{"unrelated container", "onyx-api_server-1", false},
+		{"testcontainers dolt", "reverent_mahavira", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isActContainerName(tc.in); got != tc.want {
+				t.Errorf("isActContainerName(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldReapLeakedContainer(t *testing.T) {
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		started time.Time
+		want    bool
+	}{
+		{"just started", now.Add(-1 * time.Minute), false},
+		{"within rig timeout", now.Add(-10 * time.Minute), false},
+		{"just under threshold", now.Add(-(leakedActContainerAge - time.Minute)), false},
+		{"just over threshold", now.Add(-(leakedActContainerAge + time.Minute)), true},
+		{"leaked for hours", now.Add(-5 * time.Hour), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldReapLeakedContainer(tc.started, now); got != tc.want {
+				t.Errorf("shouldReapLeakedContainer(started=%v) = %v, want %v", tc.started, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunCommandOnWorktree_CleanupTimeoutSuppressed is the integration test
 // for gs-llj: a gate command that succeeds but whose cleanup runs past the
 // deadline must NOT be reported as a failure. We simulate this by:

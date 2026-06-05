@@ -282,6 +282,12 @@ func (d *Daemon) runMainBranchTests() {
 		return
 	}
 
+	// Sweep act CI containers leaked by prior cycles whose post-step cleanup
+	// was SIGKILLed at the deadline before act could tear them down (gs-rd8).
+	// Runs once per cycle, before any new gate run, so the host stops
+	// re-accumulating leaked containers.
+	d.reapLeakedActContainers()
+
 	timeout := mainBranchTestTimeout(d.patrolConfig)
 	flakeThreshold := mainBranchTestFlakeThreshold(d.patrolConfig)
 
@@ -960,6 +966,86 @@ func isCleanupOnlyTimeout(output []byte) bool {
 	}
 
 	return true
+}
+
+// leakedActContainerAge is how long an `act` CI container may run before
+// main_branch_test treats it as a leak and force-removes it. act spins up
+// Docker containers for local CI gates; when a gate exceeds its deadline the
+// gate's process group is SIGKILLed (util.SetProcessGroup's cancel hook —
+// see runCommandOnWorktree) mid-teardown, so act never `docker rm`s the
+// containers it started and they leak (observed Up 3-5h, compounding host
+// resource pressure across cycles — gs-rd8, same family as the Dolt leak in
+// gs-vxt). No single main_branch_test gate run approaches two hours (the
+// rig-level timeout defaults to 10m and declared per-gate budgets sum to
+// minutes), so any act container older than this is provably from a dead run
+// and safe to remove even while other rigs' gates run concurrently on the
+// shared host daemon.
+const leakedActContainerAge = 2 * time.Hour
+
+// isActContainerName reports whether a Docker container name belongs to an
+// `act` CI run. act names every job container `act-<workflow>-<job>-<hash>`;
+// Docker reports names with a leading slash. Anchoring on the `act-` prefix
+// (rather than a substring match) avoids reaping unrelated containers whose
+// name merely contains "act" (e.g. "react-app", "compact-db").
+func isActContainerName(name string) bool {
+	name = strings.TrimPrefix(name, "/")
+	return strings.HasPrefix(name, "act-")
+}
+
+// shouldReapLeakedContainer reports whether an act container last started at
+// `started` is old enough to be treated as a leak at `now`. Split out so the
+// age decision is unit-testable without a Docker daemon.
+func shouldReapLeakedContainer(started, now time.Time) bool {
+	return now.Sub(started) > leakedActContainerAge
+}
+
+// reapLeakedActContainers force-removes `act` CI containers left behind by
+// gate runs whose post-step cleanup was SIGKILLed at the deadline before act
+// could tear them down. It is the periodic self-healing leak check the patrol
+// runs once per cycle so the host stops re-accumulating leaked act containers
+// across runs (gs-rd8).
+//
+// Targets ONLY containers whose name carries the `act-` prefix (act's job
+// naming scheme) and whose start time is older than leakedActContainerAge —
+// the age gate guarantees it never removes a concurrently-running gate's live
+// container. Best-effort: all Docker errors are ignored (worst case is the
+// pre-existing leak persists one more cycle). A missing `docker` binary or
+// unreachable daemon makes this a silent no-op.
+func (d *Daemon) reapLeakedActContainers() {
+	out, err := exec.Command("docker", "ps", "-a",
+		"--no-trunc",
+		"--format", "{{.ID}}\t{{.Names}}",
+	).Output()
+	if err != nil {
+		return // docker missing/unreachable — nothing to do
+	}
+	now := time.Now()
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		id, name := fields[0], fields[1]
+		if !isActContainerName(name) {
+			continue
+		}
+		ts, err := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", id).Output()
+		if err != nil {
+			continue
+		}
+		started, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(ts)))
+		if err != nil {
+			continue
+		}
+		if shouldReapLeakedContainer(started, now) {
+			d.logger.Printf("main_branch_test: reaping leaked act container %s (%s, up %s)",
+				name, id[:min(12, len(id))], now.Sub(started).Round(time.Minute))
+			_ = exec.Command("docker", "rm", "-f", id).Run()
+		}
+	}
 }
 
 // contains checks if a string slice contains a value.
