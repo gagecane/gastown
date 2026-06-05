@@ -34,6 +34,40 @@ func newTestTmux(t *testing.T) *Tmux {
 	return NewTmux()
 }
 
+// newCleanTmux returns a Tmux instance bound to a private tmux server started
+// with `-f /dev/null` (no user config) on its own per-test socket. Use this for
+// tests that assert tmux's *builtin* default key bindings: the shared TestMain
+// server is mutated by other tests (e.g. SetCycleBindings rebinds prefix-n) and
+// the user's ~/.tmux.conf can rebind or unbind those keys — either makes a
+// builtin-default assertion flaky (gs-gpy). A clean private server removes both
+// vectors. The server is killed via t.Cleanup.
+func newCleanTmux(t *testing.T) *Tmux {
+	t.Helper()
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	sanitized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, t.Name())
+	socket := fmt.Sprintf("gt-test-clean-%d-%s", os.Getpid(), sanitized)
+	// Start the server with -f /dev/null so it loads no user config — builtin
+	// defaults (prefix-n=next-window, prefix-s=choose-tree -Zs) are guaranteed.
+	if err := exec.Command("tmux", "-u", "-L", socket, "-f", "/dev/null",
+		"new-session", "-d", "-s", "clean-bootstrap").Run(); err != nil {
+		t.Skipf("could not start clean tmux server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		// kill-server leaves a stale 0-byte socket file behind; remove it so the
+		// per-test sockets don't accumulate across runs.
+		_ = os.Remove(filepath.Join(SocketDir(), socket))
+	})
+	return NewTmuxWithSocket(socket)
+}
+
 func TestListSessionsNoServer(t *testing.T) {
 	tm := newTestTmux(t)
 	sessions, err := tm.ListSessions()
@@ -2314,23 +2348,21 @@ func TestGetKeyBinding_NoExistingBinding(t *testing.T) {
 }
 
 func TestGetKeyBinding_CapturesDefaultBinding(t *testing.T) {
-	tm := newTestTmux(t)
+	// Use a clean private server: the default prefix-n binding (next-window)
+	// must be the builtin one, undisturbed by other tests that rebind prefix-n
+	// on the shared server or by the host's ~/.tmux.conf (gs-gpy).
+	tm := newCleanTmux(t)
 
-	// Query the default tmux binding for prefix-n (next-window).
-	// This works without a running tmux server because list-keys
-	// returns builtin defaults. Skip if already a GT binding (e.g.,
-	// when running inside an active gastown session).
 	result := tm.getKeyBinding("prefix", "n")
-	if result == "" && tm.isGTBinding("prefix", "n") {
-		t.Skip("prefix-n is already a GT binding in this environment")
-	}
 	if result != "next-window" {
 		t.Errorf("expected 'next-window' for default prefix-n binding, got %q", result)
 	}
 }
 
 func TestGetKeyBinding_CapturesDefaultBindingWithArgs(t *testing.T) {
-	tm := newTestTmux(t)
+	// Clean private server so prefix-s holds its builtin default regardless of
+	// host config or other tests (see TestGetKeyBinding_CapturesDefaultBinding).
+	tm := newCleanTmux(t)
 
 	// prefix-s is "choose-tree -Zs" by default — tests multi-word command parsing
 	result := tm.getKeyBinding("prefix", "s")
