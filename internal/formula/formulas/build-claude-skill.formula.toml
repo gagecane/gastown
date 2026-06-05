@@ -210,6 +210,10 @@ Error: <message>  Cause: <why>  Solution: <fix>
   docs to `references/` and LINK to them ("consult references/api-patterns.md").
 - For critical validations, prefer a bundled script over prose — code is
   deterministic, language isn't (see step 5).
+- VERIFY commands as you write them — do not document a command or flag from
+  recall. Run `<tool> <subcommand> --help` and confirm the exact flag/argument
+  signature before committing it to SKILL.md. Hallucinated flags are the most
+  common skill defect and are checked hard in step `test-functional`.
 
 **Exit criteria:** SKILL.md body has Instructions, Examples, and Troubleshooting
 sections; chosen pattern applied; oversized detail flagged for references/."""
@@ -413,8 +417,44 @@ WITH it; compare tool calls, failed calls, tokens, and back-and-forth messages.
 For mcp-enhancement: if MCP calls fail, test the MCP directly first ("use
 {{mcp_server}} to ...") to isolate whether the issue is the skill or the server.
 
+**CRITICAL — command/flag accuracy (do NOT skip).** Structural validation
+(step `validate`) checks shape, not truth: a skill can pass every frontmatter
+check and still document a command, subcommand, or flag that does not exist.
+A skill that confidently tells the agent to run a non-existent flag is worse
+than no skill. So for ANY skill that instructs running CLI commands or tools,
+you MUST actually exercise each one — language is not evidence; execution is.
+
+1. Extract every command/flag the SKILL.md tells the agent to run:
+   ```bash
+   F="{{skills_dir}}/{{skill_name}}/SKILL.md"
+   grep -oE '<cli> [a-z][a-z-]*( [a-z][a-z-]*)?|--[a-z][a-z-]*' "$F" | sort -u
+   ```
+   (Replace `<cli>` with the tool the skill drives, e.g. `gt`, `bd`, `git`.)
+2. Verify each one against the live tool — every command/subcommand resolves
+   and every flag appears in its OWN subcommand's help (flags are
+   subcommand-scoped; a flag valid on `tool done` may NOT exist on
+   `tool submit`):
+   ```bash
+   <cli> <subcommand> --help        # confirm the subcommand exists
+   <cli> <subcommand> --help | grep -- '--<flag>'   # confirm THIS flag is here
+   ```
+3. Any command/flag that doesn't resolve is a FAIL — fix the SKILL.md and
+   re-verify. Do not hand-wave a flag because it "seems right" or exists on a
+   sibling subcommand.
+4. Confirm argument signatures too (e.g. `<rig> <id>` vs bare `<id>`) by reading
+   the `Usage:` line; a documented example with the wrong arg order is a FAIL.
+
+For MCP tools, the analog: confirm each referenced tool name exists in the
+connected server (names are case-sensitive) rather than trusting recall.
+
+> This step exists because real skills have shipped with hallucinated flags
+> that passed structural validation. Treat "every documented command runs" as
+> a hard gate, not a nicety.
+
 **Exit criteria:** All use cases pass Given/When/Then; edge cases handled;
-baseline comparison recorded."""
+baseline comparison recorded; AND every documented command, subcommand, flag,
+and argument signature verified to exist against the live tool (zero unverified
+invocations)."""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 8: Finalize & package (Guide ch.4)
