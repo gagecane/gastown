@@ -3535,6 +3535,24 @@ func RemoveDatabase(townRoot, dbName string, force bool) error {
 		return fmt.Errorf("removing database directory: %w", err)
 	}
 
+	// Verify removal stuck. Dolt's in-memory catalog can re-materialize the
+	// directory on the next connection referencing the database name (gt-zlv7l).
+	// If the dir reappears within a short window, restart the server to flush
+	// the catalog, then remove again.
+	if running {
+		time.Sleep(500 * time.Millisecond)
+		if _, err := os.Stat(dbPath); err == nil {
+			// Directory was re-materialized by the running server's catalog.
+			// Restart to flush. This is rare — only happens for databases that
+			// were heavily referenced before DROP.
+			_ = Stop(townRoot)
+			time.Sleep(200 * time.Millisecond)
+			_ = os.RemoveAll(dbPath) // Remove while server is down
+			_ = Start(townRoot)
+			InvalidateDBCache()
+		}
+	}
+
 	return nil
 }
 
