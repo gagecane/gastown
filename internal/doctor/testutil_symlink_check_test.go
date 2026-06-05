@@ -8,6 +8,19 @@ import (
 	"testing"
 )
 
+// createGastownGoMod creates a go.mod file in mayor/rig/ that identifies
+// the rig as a gastown repo (required for the testutil-symlink check to run).
+func createGastownGoMod(t *testing.T, tmpDir, rigName string) {
+	t.Helper()
+	goModPath := filepath.Join(tmpDir, rigName, "mayor", "rig", "go.mod")
+	if err := os.MkdirAll(filepath.Dir(goModPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(goModPath, []byte("module github.com/steveyegge/gastown\n\ngo 1.25\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNewTestutilSymlinkCheck(t *testing.T) {
 	check := NewTestutilSymlinkCheck()
 
@@ -38,6 +51,7 @@ func TestTestutilSymlinkCheck_NoCanonical(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	createGastownGoMod(t, tmpDir, rigName)
 
 	check := NewTestutilSymlinkCheck()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
@@ -55,6 +69,7 @@ func TestTestutilSymlinkCheck_NoCanonical(t *testing.T) {
 func TestTestutilSymlinkCheck_NoCrew(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -78,6 +93,7 @@ func TestTestutilSymlinkCheck_NoCrew(t *testing.T) {
 func TestTestutilSymlinkCheck_CrewRealDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -122,6 +138,7 @@ func TestTestutilSymlinkCheck_ValidSymlink(t *testing.T) {
 	}
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -162,6 +179,7 @@ func TestTestutilSymlinkCheck_BrokenSymlink(t *testing.T) {
 	}
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -194,6 +212,7 @@ func TestTestutilSymlinkCheck_WrongTarget(t *testing.T) {
 	}
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -229,6 +248,7 @@ func TestTestutilSymlinkCheck_WrongTarget(t *testing.T) {
 func TestTestutilSymlinkCheck_RefineryRealDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -261,6 +281,7 @@ func TestTestutilSymlinkCheck_Fix(t *testing.T) {
 	}
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil with a file
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -353,6 +374,7 @@ func TestTestutilSymlinkCheck_MultipleCrewMembers(t *testing.T) {
 	}
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -398,6 +420,7 @@ func TestTestutilSymlinkCheck_MultipleCrewMembers(t *testing.T) {
 func TestTestutilSymlinkCheck_NoInternalDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigName := "testrig"
+	createGastownGoMod(t, tmpDir, rigName)
 
 	// Create canonical testutil
 	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
@@ -418,5 +441,65 @@ func TestTestutilSymlinkCheck_NoInternalDir(t *testing.T) {
 
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK when crew has no internal/, got %v: %s", result.Status, result.Message)
+	}
+}
+
+func TestTestutilSymlinkCheck_NonGastownRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigName := "kiro_rig"
+
+	// Create a non-gastown go.mod (different module path)
+	goModPath := filepath.Join(tmpDir, rigName, "mayor", "rig", "go.mod")
+	if err := os.MkdirAll(filepath.Dir(goModPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(goModPath, []byte("module github.com/example/kiro\n\ngo 1.25\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create canonical testutil (would normally trigger a check)
+	canonical := filepath.Join(tmpDir, rigName, "mayor", "rig", "internal", "testutil")
+	if err := os.MkdirAll(canonical, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create crew worker with real testutil directory (would be flagged for gastown)
+	crewTestutil := filepath.Join(tmpDir, rigName, "crew", "worker", "internal", "testutil")
+	if err := os.MkdirAll(crewTestutil, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewTestutilSymlinkCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+
+	result := check.Run(ctx)
+
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK (skip) for non-gastown repo, got %v: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "not a gastown repo") {
+		t.Errorf("expected skip message, got %q", result.Message)
+	}
+}
+
+func TestTestutilSymlinkCheck_NoGoMod(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigName := "nomod_rig"
+
+	// Create rig without go.mod at all
+	if err := os.MkdirAll(filepath.Join(tmpDir, rigName, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewTestutilSymlinkCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+
+	result := check.Run(ctx)
+
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK (skip) when no go.mod, got %v: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "not a gastown repo") {
+		t.Errorf("expected skip message, got %q", result.Message)
 	}
 }

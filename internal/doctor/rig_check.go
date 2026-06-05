@@ -465,9 +465,65 @@ func (c *WitnessExistsCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
-	// Note: Cannot auto-fix clone without knowing the repo URL
 	if c.needsClone {
-		return fmt.Errorf("cannot auto-create witness/rig/ clone (requires repo URL)")
+		rigClone := filepath.Join(witnessDir, "rig")
+
+		// Prefer creating a worktree from the shared bare repo (.repo.git),
+		// matching how refinery/rig is created.
+		bareRepoPath := filepath.Join(c.rigPath, ".repo.git")
+		if _, err := os.Stat(bareRepoPath); err == nil {
+			bareGit := git.NewGitWithDir(bareRepoPath, "")
+			_ = bareGit.WorktreePrune()
+
+			// Detect default branch from rig config
+			rigCfgPath := filepath.Join(c.rigPath, "settings", "rig.json")
+			defaultBranch := "main"
+			if data, err := os.ReadFile(rigCfgPath); err == nil {
+				var cfg struct {
+					DefaultBranch string `json:"default_branch"`
+				}
+				if json.Unmarshal(data, &cfg) == nil && cfg.DefaultBranch != "" {
+					defaultBranch = cfg.DefaultBranch
+				}
+			}
+
+			if err := bareGit.WorktreeAddExisting(rigClone, defaultBranch); err != nil {
+				return fmt.Errorf("creating witness worktree from bare repo: %w", err)
+			}
+
+			// Configure hooks path
+			witnessGit := git.NewGit(rigClone)
+			_ = witnessGit.ConfigureHooksPath()
+			return nil
+		}
+
+		// Fall back: read git_url from config.json and clone directly.
+		configPath := filepath.Join(c.rigPath, "config.json")
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return fmt.Errorf("cannot auto-create witness/rig/ clone: no .repo.git and cannot read config.json: %w", err)
+		}
+
+		var cfg struct {
+			GitURL string `json:"git_url"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("cannot auto-create witness/rig/ clone: cannot parse config.json: %w", err)
+		}
+		if cfg.GitURL == "" {
+			return fmt.Errorf("cannot auto-create witness/rig/ clone: config.json has no git_url")
+		}
+
+		cmd := exec.Command("git", "clone", "--single-branch", "--depth", "1", cfg.GitURL, rigClone)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("cloning witness/rig/: %s", strings.TrimSpace(stderr.String()))
+		}
+
+		// Configure hooks path if .githooks exists
+		witnessGit := git.NewGit(rigClone)
+		_ = witnessGit.ConfigureHooksPath()
 	}
 
 	return nil

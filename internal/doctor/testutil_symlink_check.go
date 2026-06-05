@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,38 @@ func NewTestutilSymlinkCheck() *TestutilSymlinkCheck {
 	}
 }
 
+// gastownModulePath is the Go module path that identifies a gastown repo.
+const gastownModulePath = "github.com/steveyegge/gastown"
+
+// isGastownRepo checks whether mayor/rig is a gastown repository by reading
+// its go.mod and looking for the gastown module path (either as the module
+// declaration or as a required dependency).
+func isGastownRepo(rigPath string) bool {
+	goModPath := filepath.Join(rigPath, "mayor", "rig", "go.mod")
+	f, err := os.Open(goModPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Check module declaration: "module github.com/steveyegge/gastown"
+		if strings.HasPrefix(line, "module ") {
+			mod := strings.TrimSpace(strings.TrimPrefix(line, "module"))
+			if mod == gastownModulePath || strings.HasPrefix(mod, gastownModulePath+"/") {
+				return true
+			}
+		}
+		// Check require lines: "github.com/steveyegge/gastown v1.2.3"
+		if strings.HasPrefix(line, gastownModulePath) {
+			return true
+		}
+	}
+	return false
+}
+
 // canonicalTestutilPath returns the path to the canonical testutil directory.
 func canonicalTestutilPath(rigPath string) string {
 	return filepath.Join(rigPath, "mayor", "rig", "internal", "testutil")
@@ -47,6 +80,16 @@ func (c *TestutilSymlinkCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: "No rig specified",
+		}
+	}
+
+	// Skip for non-gastown repos: the testutil symlink convention only applies
+	// to gastown repos. Detect via go.mod module path.
+	if !isGastownRepo(rigPath) {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: "Skipped (not a gastown repo)",
 		}
 	}
 
