@@ -14,6 +14,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/sling"
 )
 
 // setupTestStore opens a real beads database for integration tests.
@@ -2912,6 +2913,69 @@ exit 0
 	}
 }
 
+// TestFeedFirstReady_ReturnsFailureCount verifies feedFirstReady reports the
+// number of failed sling attempts so scan() can drive the feed-storm monitor
+// (gc-wwpw2). With multiple ready issues that all fail, every attempt is tried
+// (the loop continues past a failure) and each increments the count.
+func TestFeedFirstReady_ReturnsFailureCount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+	// Sling always fails so every ready issue counts as a failure.
+	gtScript := "#!/bin/sh\nif [ \"$1\" = \"sling\" ]; then echo boom >&2; exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	c := strandedConvoyInfo{
+		ID: "hq-cv1", Title: "Storm", ReadyCount: 3,
+		ReadyIssues: []string{"gt-a", "gt-b", "gt-c"},
+	}
+	if got := m.feedFirstReady(c); got != 3 {
+		t.Errorf("feedFirstReady failure count = %d, want 3", got)
+	}
+}
+
+// TestMonitorFeedStorm_EscalatesWhenSustained verifies the monitor fires a HIGH
+// escalation once sling-failures stay above threshold for the consecutive-scan
+// threshold, and only once per episode.
+func TestMonitorFeedStorm_EscalatesWhenSustained(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".runtime"), 0755); err != nil {
+		t.Fatalf("mkdir .runtime: %v", err)
+	}
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	fired := 0
+	orig := fireFeedStormEscalation
+	fireFeedStormEscalation = func(_ *ConvoyManager, _ feedStormState, _ int) { fired++ }
+	defer func() { fireFeedStormEscalation = orig }()
+
+	// Below threshold: never fires.
+	m.monitorFeedStorm(feedStormFailureThreshold - 1)
+	if fired != 0 {
+		t.Fatalf("fired %d on a non-storming scan", fired)
+	}
+	// Sustained storm: fires exactly once across many scans.
+	for i := 0; i < feedStormConsecutiveThreshold+3; i++ {
+		m.monitorFeedStorm(feedStormFailureThreshold + 1)
+	}
+	if fired != 1 {
+		t.Fatalf("expected exactly 1 escalation across sustained storm, got %d", fired)
+	}
+}
+
 // TestIsBeadNotFoundError covers the stderr shapes that should trigger the
 // missing-bead strike accounting in feedFirstReady. (gu-f0gq)
 func TestIsBeadNotFoundError(t *testing.T) {
@@ -2932,7 +2996,7 @@ func TestIsBeadNotFoundError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isBeadNotFoundError(tc.in); got != tc.want {
+			if got := sling.IsBeadNotFoundError(tc.in); got != tc.want {
 				t.Errorf("isBeadNotFoundError(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
@@ -3185,7 +3249,7 @@ func TestIsClosedBeadSlingError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isClosedBeadSlingError(tc.in); got != tc.want {
+			if got := sling.IsClosedBeadSlingError(tc.in); got != tc.want {
 				t.Errorf("isClosedBeadSlingError(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
@@ -3215,7 +3279,7 @@ func TestIsStructuralNonWorkSlingError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isStructuralNonWorkSlingError(tc.in); got != tc.want {
+			if got := sling.IsStructuralNonWorkSlingError(tc.in); got != tc.want {
 				t.Errorf("isStructuralNonWorkSlingError(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
@@ -3246,7 +3310,7 @@ func TestIsActivelyWorkedSlingError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isActivelyWorkedSlingError(tc.in); got != tc.want {
+			if got := sling.IsActivelyWorkedSlingError(tc.in); got != tc.want {
 				t.Errorf("isActivelyWorkedSlingError(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
@@ -3275,7 +3339,7 @@ func TestIsDoNotDispatchSlingError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isDoNotDispatchSlingError(tc.in); got != tc.want {
+			if got := sling.IsDoNotDispatchSlingError(tc.in); got != tc.want {
 				t.Errorf("isDoNotDispatchSlingError(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})

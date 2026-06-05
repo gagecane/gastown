@@ -14,6 +14,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -580,6 +581,7 @@ func (m *ConvoyManager) scan() {
 	// (no id → checkAndCloseCompletedConvoys, already IN(...)-batched per
 	// gc-pai9b) after the loop, collapsing N subprocess spawns into one.
 	completionCandidates := 0
+	slingFailures := 0
 	for _, c := range stranded {
 		select {
 		case <-m.ctx.Done():
@@ -588,7 +590,7 @@ func (m *ConvoyManager) scan() {
 		}
 
 		if c.ReadyCount > 0 {
-			m.feedFirstReady(c)
+			slingFailures += m.feedFirstReady(c)
 		} else if c.TrackedCount == 0 {
 			// Empty convoy — but skip if it was just created (GH#2303).
 			// The sling's bd dep add may not be visible in Dolt yet.
@@ -618,6 +620,17 @@ func (m *ConvoyManager) scan() {
 		m.logger("Convoy completion: batched check across %d candidate(s)", completionCandidates)
 		m.checkAllConvoyCompletion()
 	}
+
+	// Feed-storm rate monitor (gc-wwpw2): a sustained high per-scan sling-failure
+	// count is the signature of a re-dispatch storm (gu-q1wzq) — beads re-fed
+	// every cycle that can never succeed, burning CPU + Dolt connections. No
+	// existing monitor catches it: the capacity-exhaustion monitor watches a DEAD
+	// pool (these failures never free or fill slots), and the per-bead respawn
+	// circuit breaker counts only post-spawn (these are all PRE-spawn rejections).
+	// The 2026-06-04 storm burned ~154 Dolt CPU-hrs and killed the data plane
+	// before anything noticed. Escalate HIGH once the failure count stays above
+	// threshold for several consecutive scans.
+	m.monitorFeedStorm(slingFailures)
 }
 
 // checkAllConvoyCompletion runs a single `gt convoy check` (no convoy ID) which
@@ -666,11 +679,19 @@ func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
 // (with logging) when the prefix is unresolvable, the rig has no route, the
 // rig is parked, or the sling command fails. This ensures convoys progress
 // even when some issues target unavailable rigs.
-func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
+// feedFirstReady returns the number of sling attempts that FAILED during this
+// call. A single call may try several ready issues (it `continue`s past a failed
+// one to the next), so the count can exceed 1. scan() sums these across all
+// stranded convoys to drive the feed-storm rate monitor (gc-wwpw2): a sustained
+// high per-cycle failure count is the signature of a re-dispatch storm (gu-q1wzq)
+// that no pool/respawn monitor catches, because every failure is a pre-spawn
+// rejection that never moves capacity or respawn metrics.
+func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 	if len(c.ReadyIssues) == 0 {
-		return
+		return 0
 	}
 
+	slingFailures := 0
 	for _, issueID := range c.ReadyIssues {
 		prefix := beads.ExtractPrefix(issueID)
 		if prefix == "" {
@@ -726,14 +747,15 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
+			slingFailures++
 			stderrLine := util.FirstLine(stderr.String())
 			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, stderrLine)
 			switch {
-			case isBeadNotFoundError(stderrLine):
+			case sling.IsBeadNotFoundError(stderrLine):
 				// Missing beads have their own resolution path (auto-untrack
 				// after threshold strikes) — don't also escalate them.
 				m.handleMissingBeadStrike(c.ID, issueID, stderrLine)
-			case isClosedBeadSlingError(stderrLine):
+			case sling.IsClosedBeadSlingError(stderrLine):
 				// Category A (gu-y6ild): the bead closed between the stranded
 				// scan and this feed (TOCTOU race). The work is already done —
 				// escalating is pure toil. Run a completion check so the convoy
@@ -741,7 +763,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 				// drops from the next scan's ready set on its own.
 				m.logger("Convoy %s: %s already closed (work completed) — running completion check instead of escalating", c.ID, issueID)
 				m.runConvoyCheck(c.ID) // idempotent completion+close; no escalation
-			case isDoNotDispatchSlingError(stderrLine):
+			case sling.IsDoNotDispatchSlingError(stderrLine):
 				// Category C variant (gu-q1wzq): the bead is a do-not-dispatch /
 				// pinned reference tripwire — a permanent live safety gate the
 				// scheduler refuses by design (it must stay OPEN, never hooked).
@@ -753,7 +775,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 				// branch, which escalated once but kept re-feeding on the flat 5m
 				// cooldown forever (no churn-backoff on the failure path).
 				m.handleNonWorkBead(c.ID, issueID, stderrLine)
-			case isStructuralNonWorkSlingError(stderrLine):
+			case sling.IsStructuralNonWorkSlingError(stderrLine):
 				// Category C (gu-y6ild): the bead is a structural non-work item
 				// (epic/container with open children, identity bead, sling-context
 				// wrapper, flag-like garbage, or polecat-owned). It can never be a
@@ -761,7 +783,7 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 				// the missing-bead untrack path) so the convoy can progress and
 				// auto-close, instead of escalating to the Mayor every scan.
 				m.handleNonWorkBead(c.ID, issueID, stderrLine)
-			case isActivelyWorkedSlingError(stderrLine):
+			case sling.IsActivelyWorkedSlingError(stderrLine):
 				// The bead is already hooked / in_progress to a LIVE agent (gs-2dr).
 				// sling's own dead-agent detection auto-forces dispatch when the
 				// hooked agent's session is gone, so an "already hooked" / "already
@@ -804,10 +826,11 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		// again (refused/escalated, never closing) backs off toward
 		// feedCooldownCap instead of being re-fed every 5 min (gs-skv).
 		m.recordFeedChurn(issueID)
-		return // Successfully dispatched one issue
+		return slingFailures // Successfully dispatched one issue
 	}
 
 	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+	return slingFailures
 }
 
 // escalateSlingFailure fires a one-shot gt escalate for a stranded convoy step.
@@ -825,128 +848,6 @@ func (m *ConvoyManager) escalateSlingFailure(convoyID, issueID, errMsg string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		m.logger("Convoy %s: escalation failed: %v (%s)", convoyID, err, strings.TrimSpace(string(out)))
 	}
-}
-
-// isBeadNotFoundError reports whether a sling stderr line indicates the target
-// bead does not exist. Matches the error shapes produced by verifyBeadExists
-// and bd show ("bead 'xxx' not found", "bead xxx not found", and the bd-direct
-// "no issue found matching 'xxx'" form). Match is case-insensitive and tolerant
-// of quoting variants. (gu-f0gq)
-func isBeadNotFoundError(stderrLine string) bool {
-	if stderrLine == "" {
-		return false
-	}
-	s := strings.ToLower(stderrLine)
-	// gt sling: "bead 'xxx' not found" / "bead xxx not found"
-	if strings.Contains(s, "not found") &&
-		(strings.Contains(s, "bead ") || strings.Contains(s, "issue ")) {
-		return true
-	}
-	// bd: "no issue found matching"
-	if strings.Contains(s, "no issue found matching") {
-		return true
-	}
-	return false
-}
-
-// isClosedBeadSlingError reports whether a sling stderr line indicates the
-// target bead is already closed/tombstoned — i.e. the work completed between
-// the stranded scan and this feed (a TOCTOU race). Matches the error shape
-// produced by sling's closed-bead guard: "bead <id> is closed (work already
-// completed)" / "... is tombstone (work already completed)". This is Category A
-// from gu-y6ild: a closed tracked bead should trigger a convoy completion check,
-// not a Mayor escalation. (gu-y6ild)
-func isClosedBeadSlingError(stderrLine string) bool {
-	if stderrLine == "" {
-		return false
-	}
-	return strings.Contains(strings.ToLower(stderrLine), "work already completed")
-}
-
-// isStructuralNonWorkSlingError reports whether a sling stderr line indicates
-// the target bead is a structural non-work item that can never be dispatched as
-// a convoy step (Category C from gu-y6ild). These are permanent data-shape
-// rejections from sling's guards — re-attempting the sling every scan is futile,
-// and escalating to the Mayor every time is pure toil. The bead should be
-// auto-untracked from the convoy so it can progress and auto-close.
-//
-// Matched rejections (sling.go guards):
-//   - epic container (epic title / phase:epic label / type=epic)
-//   - parent of open children (container, not a leaf work item)
-//   - identity/system bead (gt:agent label or polecat/refinery title)
-//   - sling-context wrapper (gt:sling-context label)
-//   - flag-like garbage title (flag-parsing bug)
-//   - polecat-owned bead (self-filed by a polecat)
-//
-// Deliberately NOT matched (left to escalate as genuinely-ambiguous, needing
-// Mayor judgment): mayor-only / no-polecat beads, unroutable targets, and
-// capacity-scheduler failures. A mayor-only bead is an explicit operator
-// assertion that a human must resolve it — exactly the case the Mayor should
-// still see. (gu-y6ild)
-func isStructuralNonWorkSlingError(stderrLine string) bool {
-	if stderrLine == "" {
-		return false
-	}
-	s := strings.ToLower(stderrLine)
-	switch {
-	case strings.Contains(s, "is an epic container"):
-		return true
-	case strings.Contains(s, "has open children"):
-		return true
-	case strings.Contains(s, "is an identity/system bead"):
-		return true
-	case strings.Contains(s, "is a sling-context wrapper"):
-		return true
-	case strings.Contains(s, "looks like a cli flag"):
-		return true
-	case strings.Contains(s, "is owned by a polecat"):
-		return true
-	}
-	return false
-}
-
-// isActivelyWorkedSlingError reports whether a sling stderr line indicates the
-// target bead is already hooked / in_progress to a LIVE agent — i.e. the work is
-// being performed right now, not wedged (gs-2dr). sling refuses with this error
-// ONLY after its own dead-agent detection declines to auto-force: a hooked bead
-// whose agent's session is gone is auto-re-slung, so reaching this error path
-// means the hooked agent is alive. The convoy step is therefore progressing and
-// must NOT be escalated as 'cannot dispatch / will never progress'.
-//
-// Matched sling-guard rejection shapes:
-//   - sling.go:       "bead <id> is already hooked to <agent>"
-//   - sling.go:       "bead <id> is already in_progress to <agent>"
-//   - sling_dispatch: "already hooked (use --force to re-sling)"
-//   - sling_dispatch: "already in_progress (use --force to re-sling)"
-//
-// Deliberately NOT matched: "already pinned" — a pinned bead is an explicit
-// do-not-dispatch reference, a structural state the Mayor should still see.
-func isActivelyWorkedSlingError(stderrLine string) bool {
-	if stderrLine == "" {
-		return false
-	}
-	s := strings.ToLower(stderrLine)
-	return strings.Contains(s, "already hooked") ||
-		strings.Contains(s, "already in_progress")
-}
-
-// isDoNotDispatchSlingError reports whether a sling stderr line indicates the
-// target bead is a do-not-dispatch / pinned reference tripwire — a permanent
-// live safety gate that the scheduler refuses by design and that must stay OPEN
-// (sling_dispatch.go / sling_schedule.go: "is a do-not-dispatch / pinned
-// reference tripwire ... refusing to schedule"). Unlike an actively-worked bead
-// (which is progressing and will close on its own), a tripwire NEVER becomes
-// dispatchable — its labels/type are intentional. Re-feeding it every scan is
-// pure waste: gu-q1wzq observed ~3,000 such retries in a day (≈383 per tripwire
-// bead) as the dominant share of a 6,508-retry convoy storm that spiked host
-// load. These must be permanently untracked from the convoy, not backed off.
-func isDoNotDispatchSlingError(stderrLine string) bool {
-	if stderrLine == "" {
-		return false
-	}
-	s := strings.ToLower(stderrLine)
-	return strings.Contains(s, "do-not-dispatch") ||
-		strings.Contains(s, "reference tripwire")
 }
 
 // handleNonWorkBead untracks a structural non-work bead (Category C) from the
