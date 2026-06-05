@@ -58,7 +58,7 @@ func TestFlakeWatermarkAndDedup(t *testing.T) {
 	sigB := `gates:test_sandbox`
 
 	fail := func(sig string) (bool, int) {
-		return recordFailureAndShouldEscalate(town, rigName, sig, threshold, now)
+		return recordFailureAndShouldEscalate(town, rigName, sig, "deadbeef", threshold, now)
 	}
 	pass := func() {
 		recordAttributionRun(town, rigName, "deadbeef", true, now)
@@ -100,6 +100,56 @@ func TestFlakeWatermarkAndDedup(t *testing.T) {
 	}
 	if esc, _ := fail(sigA); !esc {
 		t.Fatalf("re-break after recovery must page again at the watermark")
+	}
+}
+
+// TestRedMainBackoff proves the gs-3pe circuit-breaker: once main is confirmed
+// red on a SHA (streak reaches the watermark), the runner backs off re-running
+// the heavyweight gate suite on that same SHA — but a new commit, or a recovery,
+// re-arms a real run.
+func TestRedMainBackoff(t *testing.T) {
+	town := t.TempDir()
+	rigName := "lia_bac"
+	const threshold = 2
+	now := time.Now()
+	const shaX = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const shaY = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	sig := "gates:test"
+
+	failX := func() { recordFailureAndShouldEscalate(town, rigName, sig, shaX, threshold, now) }
+
+	// Below the watermark we must NOT back off — the first `threshold` cycles
+	// run so a single flake never wedges the runner into a permanent skip.
+	failX()
+	if shouldBackOffOnRedMain(town, rigName, shaX, threshold) {
+		t.Fatalf("backed off at streak 1 (below watermark) — would never confirm red")
+	}
+
+	// At the watermark, main is confirmed red at shaX → back off on the same SHA.
+	failX()
+	if !shouldBackOffOnRedMain(town, rigName, shaX, threshold) {
+		t.Fatalf("did not back off after confirmed red at shaX")
+	}
+
+	// A NEW commit (shaY) must re-arm a real run even while we're red.
+	if shouldBackOffOnRedMain(town, rigName, shaY, threshold) {
+		t.Fatalf("backed off on a NEW commit — would never re-check a fix")
+	}
+
+	// An empty SHA (attribution capture failed) fails open: run, don't skip.
+	if shouldBackOffOnRedMain(town, rigName, "", threshold) {
+		t.Fatalf("backed off with no SHA to anchor on")
+	}
+
+	// Recovery clears the anchor: a subsequent failure at shaX is back below the
+	// watermark and runs again rather than being mistaken for still-red.
+	recordAttributionRun(town, rigName, shaX, true, now)
+	if shouldBackOffOnRedMain(town, rigName, shaX, threshold) {
+		t.Fatalf("backed off immediately after a recovery pass")
+	}
+	failX()
+	if shouldBackOffOnRedMain(town, rigName, shaX, threshold) {
+		t.Fatalf("backed off at streak 1 after recovery (below watermark)")
 	}
 }
 

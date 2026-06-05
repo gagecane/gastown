@@ -351,8 +351,19 @@ func (d *Daemon) runMainBranchTests() {
 			d.logger.Printf("main_branch_test: aborting patrol — global gate lock unavailable: %v", lockErr)
 			return
 		}
-		currentSHA, runErr := d.testRigMainBranch(rigName, rigPath, timeout)
+		currentSHA, runErr := d.testRigMainBranch(rigName, rigPath, timeout, flakeThreshold)
 		release()
+
+		// gs-3pe: the runner backed off — main is confirmed red at this SHA and
+		// no new commit has landed. Skip without escalating and without touching
+		// the baseline, exactly like the host-kill skip below; a later cycle on a
+		// NEW commit records the real pass/fail. This is the circuit-breaker for
+		// the load-174 retry storm.
+		if runErr != nil && errors.Is(runErr, errMainRedBackoff) {
+			d.logger.Printf("main_branch_test: %s: SKIPPED — main still red at %s (already confirmed), waiting for a new commit", rigName, currentSHA)
+			tested++
+			continue
+		}
 
 		// hq-0qszq: a host-load SIGKILL is NOT a regression and NOT a pass.
 		// Skip it without escalating and without touching the attribution
@@ -387,7 +398,7 @@ func (d *Daemon) runMainBranchTests() {
 		// breaking SHA to the last-passing baseline; recordFailureAndShouldEscalate
 		// advances LastRunAt and the streak.
 		sig := failureSignature(runErr)
-		shouldEscalate, streak := recordFailureAndShouldEscalate(d.config.TownRoot, rigName, sig, flakeThreshold, now)
+		shouldEscalate, streak := recordFailureAndShouldEscalate(d.config.TownRoot, rigName, sig, currentSHA, flakeThreshold, now)
 		if shouldEscalate {
 			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d, signature=%s) — escalating: %v", rigName, streak, sig, runErr)
 			failures = append(failures, formatRigFailureSection(rigName, currentSHA, d.config.TownRoot, runErr))
@@ -446,7 +457,7 @@ func formatRigFailureSection(rigName, currentSHA, townRoot string, runErr error)
 // The SHA is returned regardless of pass/fail so callers can: (a) emit
 // `commit:` attribution on failure, and (b) update the per-rig last-passing
 // baseline on success.
-func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duration) (string, error) {
+func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duration, flakeThreshold int) (string, error) {
 	// Load gate config from the rig's config.json
 	gateCfg, err := loadRigGateConfig(rigPath)
 	if err != nil {
@@ -505,6 +516,16 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		d.logger.Printf("main_branch_test: %s: warning: could not capture HEAD SHA for attribution: %v",
 			rigName, shaErr)
 		currentSHA = ""
+	}
+
+	// gs-3pe: back off on confirmed-red main. The fetch above is cheap; the
+	// worktree add + gate suite below is the heavyweight act/Docker work. If
+	// main is already confirmed red at this SHA (streak past the flake
+	// watermark) and HEAD hasn't advanced, skip that work entirely — re-running
+	// it just spikes host load and manufactures the next "failure". Returns the
+	// SHA so the caller can log which commit we're waiting to move past.
+	if shouldBackOffOnRedMain(d.config.TownRoot, rigName, currentSHA, flakeThreshold) {
+		return currentSHA, errMainRedBackoff
 	}
 
 	// Create temporary worktree at origin/<default_branch>
@@ -776,6 +797,15 @@ const failureOutputTailSize = 50
 // TRANSIENT condition — the code under test is not a regression — so callers
 // must NOT escalate it as a main-branch failure. See hq-0qszq.
 var errGateHostKilled = errors.New("gate killed by host load (transient, not a regression)")
+
+// errMainRedBackoff marks a cycle the runner deliberately SKIPPED because main
+// is already confirmed red at the current SHA and no new commit has landed
+// (gs-3pe). It is NOT a pass and NOT a failure — callers must neither escalate
+// it nor touch the attribution baseline; the next NEW commit re-arms a real
+// run. Backing off here breaks the retry storm where re-running the heavyweight
+// act/Docker suite on a known-red SHA manufactured the load that timed out the
+// gates and read as a fresh failure.
+var errMainRedBackoff = errors.New("main confirmed red at current SHA, backing off until a new commit")
 
 // gateHostKillRetries is how many extra times a host-killed gate is re-run
 // before giving up and reporting it transient. A short backoff between attempts

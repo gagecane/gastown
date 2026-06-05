@@ -81,6 +81,16 @@ type rigAttributionEntry struct {
 	// every cycle; a new/different signature — or a recovery followed by a
 	// re-break — pages again. Cleared on any pass.
 	LastEscalatedSignature string `json:"last_escalated_signature,omitempty"`
+
+	// LastFailedSHA is the origin/<default_branch> SHA of the most recent
+	// failing cycle (gs-3pe). Once main is confirmed red on a SHA (the streak
+	// reaches the flake watermark), re-running the heavyweight gate suite on
+	// that SAME SHA every cycle just manufactures host load — the load spike
+	// then times out the gates, which reads as a fresh failure, which triggers
+	// another re-run (the load-174 estop). Only a NEW commit can turn main
+	// green again, so the runner backs off until origin/main advances past this
+	// SHA. Cleared on any pass.
+	LastFailedSHA string `json:"last_failed_sha,omitempty"`
 }
 
 // stateFileMu serializes read/modify/write of the state file. Single-process
@@ -152,9 +162,12 @@ func recordAttributionRun(townRoot, rigName, currentSHA string, passed bool, now
 			entry.LastPassingSHA = currentSHA
 		}
 		// A pass clears the flake watermark so a future break re-pages from a
-		// clean slate (hq-6qnct).
+		// clean slate (hq-6qnct), and clears the red-backoff anchor so the next
+		// failing SHA gets a fresh run instead of being mistaken for a still-red
+		// baseline (gs-3pe).
 		entry.ConsecutiveFailures = 0
 		entry.LastEscalatedSignature = ""
+		entry.LastFailedSHA = ""
 	}
 	state.Rigs[rigName] = entry
 	if err := saveMainBranchTestState(townRoot, state); err != nil {
@@ -219,7 +232,7 @@ func failureSignature(err error) string {
 //
 // Best-effort persistence: a state-write error still returns a decision so the
 // patrol proceeds (the next cycle re-derives the streak).
-func recordFailureAndShouldEscalate(townRoot, rigName, signature string, threshold int, now time.Time) (escalate bool, streak int) {
+func recordFailureAndShouldEscalate(townRoot, rigName, signature, currentSHA string, threshold int, now time.Time) (escalate bool, streak int) {
 	stateFileMu.Lock()
 	defer stateFileMu.Unlock()
 
@@ -228,6 +241,13 @@ func recordFailureAndShouldEscalate(townRoot, rigName, signature string, thresho
 	entry.LastRunAt = now.UTC().Format(time.RFC3339)
 	entry.ConsecutiveFailures++
 	streak = entry.ConsecutiveFailures
+	// Anchor the red-backoff SHA (gs-3pe). Recorded on every failure (not just
+	// escalations) so a NEW red commit that lands while main is already red —
+	// and is therefore deduped out of escalation — still updates the anchor and
+	// gets backed off after its first run, instead of re-running every cycle.
+	if currentSHA != "" {
+		entry.LastFailedSHA = currentSHA
+	}
 
 	if streak >= threshold && signature != entry.LastEscalatedSignature {
 		escalate = true
@@ -239,6 +259,35 @@ func recordFailureAndShouldEscalate(townRoot, rigName, signature string, thresho
 		fmt.Fprintf(os.Stderr, "daemon: failed to save flake state for rig %s: %v\n", rigName, err)
 	}
 	return escalate, streak
+}
+
+// shouldBackOffOnRedMain reports whether main_branch_test should skip the
+// heavyweight gate suite for a rig because main is already confirmed red at
+// currentSHA (gs-3pe). The runner backs off once the failure streak has reached
+// the flake watermark AND origin/main still sits at the SHA we last saw fail —
+// i.e. no new commit has landed that could plausibly fix the break. Re-running
+// the full act/Docker suite on a known-red SHA only manufactures host load,
+// which times out the gates and reads as a fresh failure (the self-reinforcing
+// retry storm behind the load-174 estop).
+//
+// Requiring streak >= threshold preserves the flake-confirmation semantics: the
+// first `threshold` failing cycles still run so a single load flake never
+// wedges the runner into a permanent skip without ever escalating. A threshold
+// < 1 is clamped to 1 so a misconfigured watermark can't disable the backoff.
+func shouldBackOffOnRedMain(townRoot, rigName, currentSHA string, threshold int) bool {
+	if currentSHA == "" {
+		return false // No SHA to anchor on — fail open and run.
+	}
+	if threshold < 1 {
+		threshold = 1
+	}
+	stateFileMu.Lock()
+	defer stateFileMu.Unlock()
+	entry, ok := loadMainBranchTestState(townRoot).Rigs[rigName]
+	if !ok {
+		return false
+	}
+	return entry.LastFailedSHA == currentSHA && entry.ConsecutiveFailures >= threshold
 }
 
 // readPreviousPassingSHA returns the last-passing SHA for a rig from the
