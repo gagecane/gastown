@@ -20,7 +20,12 @@
 Thumbs.db
 
 # Claude Code local state (but track commands/skills)
-.claude/
+# NOTE: use `.claude/*` (not `.claude/`) so the negations below work. A trailing
+# slash excludes the directory itself and git never descends into it, making it
+# impossible to re-include nested files. `.claude/*` ignores the contents while
+# leaving the dir traversable, so `!.claude/commands/` and `!.claude/skills/`
+# actually re-include those subtrees.
+.claude/*
 !.claude/commands/
 !.claude/skills/
 
