@@ -127,10 +127,7 @@ func initBeadsDBForServer(t *testing.T, dir, prefix string) {
 // retry's own error reporting is authoritative.
 func dropPartialBeadsDB(t *testing.T, prefix string) {
 	t.Helper()
-	port := os.Getenv("GT_DOLT_PORT")
-	if port == "" {
-		port = "3307"
-	}
+	port := testDoltPort(t)
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port))
 	if err != nil {
 		t.Logf("dropPartialBeadsDB: connect failed: %v", err)
@@ -164,10 +161,7 @@ func TestInitBeadsDBForServerRecoversFromDirtyDB(t *testing.T) {
 	}
 	requireDoltServer(t)
 
-	port := os.Getenv("GT_DOLT_PORT")
-	if port == "" {
-		port = "3307"
-	}
+	port := testDoltPort(t)
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port))
 	if err != nil {
 		t.Fatalf("connect to dolt: %v", err)
@@ -306,10 +300,7 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 
 	// Drop test databases on cleanup to prevent orphaned databases on the Dolt server.
 	t.Cleanup(func() {
-		port := os.Getenv("GT_DOLT_PORT")
-		if port == "" {
-			port = "3307"
-		}
+		port := testDoltPort(t)
 		dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
@@ -888,10 +879,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 	// server. Without this, databases from multi-rig tests persist and can
 	// contaminate subsequent tests sharing the same server (see #2832).
 	t.Cleanup(func() {
-		port := os.Getenv("GT_DOLT_PORT")
-		if port == "" {
-			port = "3307"
-		}
+		port := testDoltPort(t)
 		dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {

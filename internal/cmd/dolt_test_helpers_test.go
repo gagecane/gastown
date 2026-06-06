@@ -22,6 +22,33 @@ func requireDoltServer(t *testing.T) {
 	testutil.RequireDoltContainer(t)
 }
 
+// testDoltPort returns the port of the ephemeral Dolt test container that
+// integration tests must target for any raw-SQL CREATE/DROP DATABASE work.
+//
+// It fails the test rather than falling back to the shared PRODUCTION Dolt
+// server on :3307. Test code that CREATEs/DROPs databases on :3307 pollutes the
+// production data plane with orphan databases that accumulate forever (they hold
+// user tables, so `gt dolt cleanup` refuses to auto-remove them) — see gu-4str3.
+//
+// All callers run after requireDoltServer(t), which starts the container and
+// sets GT_DOLT_PORT process-wide to the container's randomly mapped high port
+// (and t.Skip's when Docker is unavailable). So an empty value, or the literal
+// production port 3307, can only mean a real misconfiguration — fail loudly
+// instead of silently writing to production.
+func testDoltPort(t *testing.T) string {
+	t.Helper()
+	port := os.Getenv("GT_DOLT_PORT")
+	if port == "" {
+		port = testutil.DoltContainerPort()
+	}
+	if port == "" || port == "3307" {
+		t.Fatalf("refusing to use Dolt port %q: integration tests must target the "+
+			"ephemeral test container, never the shared production server on :3307 "+
+			"(gu-4str3); did requireDoltServer(t) run?", port)
+	}
+	return port
+}
+
 // cleanupDoltServer delegates to testutil.TerminateDoltContainer.
 func cleanupDoltServer() {
 	testutil.TerminateDoltContainer()
