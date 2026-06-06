@@ -94,6 +94,62 @@ func TestParseBranchName(t *testing.T) {
 	}
 }
 
+// TestResolveBranchSourceIssue covers gu-4ngu0: a phantom id parsed from a
+// non-polecat branch name must not be recorded as the MR's source_issue.
+func TestResolveBranchSourceIssue(t *testing.T) {
+	tests := []struct {
+		name      string
+		parsed    string
+		realBeads map[string]bool
+		hooked    string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "parsed id is a real bead",
+			parsed:    "gu-t6zhb",
+			realBeads: map[string]bool{"gu-t6zhb": true},
+			want:      "gu-t6zhb",
+		},
+		{
+			name:      "phantom id falls back to hooked bead",
+			parsed:    "dolt-max",
+			realBeads: map[string]bool{"gu-wisp-dal": true},
+			hooked:    "gu-wisp-dal",
+			want:      "gu-wisp-dal",
+		},
+		{
+			name:      "phantom id with no hooked fallback errors",
+			parsed:    "upstream-main",
+			realBeads: map[string]bool{},
+			hooked:    "",
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveBranchSourceIssue(
+				tt.parsed,
+				func(id string) bool { return tt.realBeads[id] },
+				func() string { return tt.hooked },
+			)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveBranchSourceIssue() expected error, got id=%q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveBranchSourceIssue() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveBranchSourceIssue() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatMRAge(t *testing.T) {
 	tests := []struct {
 		name      string

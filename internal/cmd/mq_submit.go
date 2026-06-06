@@ -80,6 +80,26 @@ func parseBranchName(branch string) branchInfo {
 	return info
 }
 
+// resolveBranchSourceIssue validates a branch-parsed source issue id and,
+// when it doesn't exist, falls back to the bead hooked to the current agent.
+//
+// gu-4ngu0: parseBranchName greedily matches the first "word-word" token, so
+// non-polecat branches can yield a phantom id (e.g. "dolt-max" from
+// "fix/dolt-max-connections-1000"). This guards against recording that phantom
+// as the MR's source_issue. exists reports whether the parsed id is a real
+// bead; hookedFallback returns the agent's hooked bead id (or "" if none).
+// Returns the resolved id, or an error when neither the parsed id nor a hooked
+// fallback resolves to a real bead.
+func resolveBranchSourceIssue(parsed string, exists func(string) bool, hookedFallback func() string) (string, error) {
+	if exists(parsed) {
+		return parsed, nil
+	}
+	if hooked := hookedFallback(); hooked != "" {
+		return hooked, nil
+	}
+	return "", fmt.Errorf("source issue %q does not exist and no hooked bead fallback available", parsed)
+}
+
 // stripBranchTimestampSuffix removes the timestamp suffix from the issue
 // portion of a polecat branch name. The separator is "--" (current) or "@"
 // (legacy, pre-2026-04-28). When both are present, "--" takes precedence to
@@ -198,6 +218,32 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 
 	// Initialize beads for looking up source issue
 	bd := beads.New(cwd)
+
+	// gu-4ngu0: When the source issue was derived from branch-name parsing
+	// (not an explicit --issue flag), validate that it is a real bead before
+	// recording it as the MR's source_issue. parseBranchName greedily matches
+	// the FIRST "word-word" token, so non-polecat branches like
+	// "fix/dolt-max-connections-1000" or "sync/upstream-main-gu-t6zhb" yield a
+	// phantom id ("dolt-max" / "upstream-main") rather than the real bead. A
+	// phantom source_issue breaks the back-link and leaves the bead HOOKED
+	// after merge. If the parsed id doesn't exist, fall back to the bead
+	// hooked to this agent (the same fallback gt done uses); if that also
+	// fails, fail loudly with the actionable message instead of proceeding
+	// with a bogus id.
+	if mqSubmitIssue == "" && issueID != "" {
+		fromBranch := issueID
+		issueID, err = resolveBranchSourceIssue(
+			issueID,
+			func(id string) bool { _, e := bd.Show(id); return e == nil },
+			func() string { return findHookedBeadForAgent(bd, detectSender()) },
+		)
+		if err != nil {
+			return fmt.Errorf("source issue %q parsed from branch '%s' does not exist and no bead is hooked to this agent; use --issue to specify", fromBranch, branch)
+		}
+		if issueID != fromBranch {
+			fmt.Printf("  Source issue %q parsed from branch not found; using hooked bead %s\n", fromBranch, issueID)
+		}
+	}
 
 	// Determine target branch
 	// Priority: explicit --epic > formula_vars base_branch > integration branch auto-detect > rig default.
