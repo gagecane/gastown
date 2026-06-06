@@ -16,7 +16,12 @@ import (
 
 // MinBeadsVersion is the minimum compatible beads version for this Gas Town release.
 // Update this when Gas Town requires new beads features.
-const MinBeadsVersion = "0.57.0"
+//
+// 1.0.5 is the floor because it removes the per-connection compat-migration that
+// committed unrelated DATA under a "schema: auto-migrate" message on the shared
+// Dolt server (gu-9qbg5 / gu-vxjc3). Earlier versions (incl. 1.0.4) still carry
+// that churn; requiring 1.0.5+ keeps the town on the fixed line.
+const MinBeadsVersion = "1.0.5"
 
 // BeadsInstallPath is the go install path for beads.
 const BeadsInstallPath = "github.com/steveyegge/beads/cmd/bd@latest"
