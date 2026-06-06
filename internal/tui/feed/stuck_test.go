@@ -385,6 +385,38 @@ func TestCheckAll_Zombie(t *testing.T) {
 	}
 }
 
+// TestCheckAll_DogLiveSessionNotZombie is a regression test for gu-hvpwj:
+// a live dog with a long-stale agent bead must NOT be flagged as a dead
+// zombie. The bug was that deriveSessionName lacked a RoleDog case, so dog
+// liveness was probed against "hq-dog" (name dropped) instead of the real
+// "hq-dog-<name>" session — making every live dog read as dead.
+func TestCheckAll_DogLiveSessionNotZombie(t *testing.T) {
+	mock := newMockHealthSource()
+	mock.agents["hq-dog-bravo"] = &beads.Issue{
+		ID: "hq-dog-bravo",
+		// Stale bead (heartbeat writes lagged) — month-old timestamp.
+		UpdatedAt: time.Now().Add(-886 * time.Hour).Format(time.RFC3339),
+	}
+	// The dog's real session is alive.
+	mock.sessions["hq-dog-bravo"] = true
+
+	detector := NewStuckDetectorWithSource(mock)
+	agents, err := detector.CheckAll()
+	if err != nil {
+		t.Fatalf("CheckAll: %v", err)
+	}
+
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0].SessionID != "hq-dog-bravo" {
+		t.Errorf("expected session 'hq-dog-bravo', got %q", agents[0].SessionID)
+	}
+	if agents[0].State == StateZombie {
+		t.Errorf("live dog flagged as zombie (gu-hvpwj regression): state=%s", agents[0].State)
+	}
+}
+
 // TestCheckAll_MultipleAgents tests sorting with multiple agents in different states
 func TestCheckAll_MultipleAgents(t *testing.T) {
 	mock := newMockHealthSource()
@@ -564,6 +596,7 @@ func TestDeriveSessionName(t *testing.T) {
 	}{
 		{"mayor", "", "mayor", "", "hq-mayor"},
 		{"deacon", "", "deacon", "", "hq-deacon"},
+		{"dog", "", "dog", "bravo", "hq-dog-bravo"},
 		{"witness", "gastown", "witness", "", "gt-witness"},
 		{"refinery", "gastown", "refinery", "", "gt-refinery"},
 		{"crew", "gastown", "crew", "joe", "gt-crew-joe"},
