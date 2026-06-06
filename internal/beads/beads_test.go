@@ -3694,6 +3694,9 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 	tmpDir := t.TempDir()
 	bd := NewIsolated(tmpDir)
 	if err := bd.Init("test"); err != nil {
+		if strings.Contains(err.Error(), "CGO build") || strings.Contains(err.Error(), "CGO_ENABLED=0") {
+			t.Skip("bd binary lacks embedded Dolt support (CGO_ENABLED=0), skipping")
+		}
 		t.Fatalf("bd init: %v", err)
 	}
 
