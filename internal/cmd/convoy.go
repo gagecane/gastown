@@ -484,21 +484,39 @@ func runBdJSONWithOptions(dir string, allowStale bool, args ...string) ([]byte, 
 // target issues live in a different Dolt database. See GH #2624.
 //
 // dir should be the town beads directory (.beads) for HQ queries.
-// direction is "down" (issue_id → depends_on_issue_id) or "up" (depends_on_issue_id → issue_id).
+// direction is "down" (issue_id → depends_on_id) or "up" (depends_on_id → issue_id).
 // depType filters by dependency type (e.g., "tracks", "blocks"); empty means all types.
 //
 // Returns deduplicated, unwrapped issue IDs (external:prefix:id → id).
+//
+// The dependency target lives in one of three mutually-exclusive columns:
+// depends_on_issue_id (same-DB issue), depends_on_wisp_id (wisp), or
+// depends_on_external (cross-DB ref, e.g. "external:prefix:id"). Convoy
+// "tracks" deps target beads in other Dolt databases, so the target is in
+// depends_on_external and depends_on_issue_id is NULL for them.
+//
+// Production DBs expose a generated depends_on_id column that COALESCEs the
+// three, but a freshly bd-init'd schema (CI, integration tests) does NOT have
+// that column — querying it errors with errno 1105 and silently degrades to
+// the contention-prone fallback paths. To work on every schema, COALESCE the
+// three physical target columns inline rather than referencing depends_on_id.
+// (gc-ihbkn — split from gu-4671z, which over-corrected to depends_on_issue_id.)
+const depTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
+
 func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
 	// Determine query columns based on direction.
-	// "down": issueID depends on targets → SELECT depends_on_issue_id WHERE issue_id = ?
-	// "up":   issueID is depended on → SELECT issue_id WHERE depends_on_issue_id = ?
-	var selectCol, whereCol string
+	// "down": issueID depends on targets → SELECT <target> WHERE issue_id = ?
+	// "up":   issueID is depended on → SELECT issue_id WHERE <target> = ?
+	const targetAlias = "target"
+	var selectExpr, selectKey, whereExpr string
 	if direction == "up" {
-		selectCol = "issue_id"
-		whereCol = "depends_on_issue_id"
+		selectExpr = "issue_id"
+		selectKey = "issue_id"
+		whereExpr = depTargetExpr
 	} else {
-		selectCol = "depends_on_issue_id"
-		whereCol = "issue_id"
+		selectExpr = depTargetExpr + " AS " + targetAlias
+		selectKey = targetAlias
+		whereExpr = "issue_id"
 	}
 
 	// Build SQL query. Bead IDs are system-generated alphanumeric strings
@@ -507,7 +525,7 @@ func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) 
 		return nil, fmt.Errorf("invalid bead ID: %q", issueID)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM dependencies WHERE %s = '%s'", selectCol, whereCol, issueID)
+	query := fmt.Sprintf("SELECT %s FROM dependencies WHERE %s = '%s'", selectExpr, whereExpr, issueID)
 	if depType != "" {
 		if !isValidBeadID(depType) {
 			return nil, fmt.Errorf("invalid dep type: %q", depType)
@@ -529,7 +547,7 @@ func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) 
 	seen := make(map[string]bool, len(rows))
 	var ids []string
 	for _, row := range rows {
-		rawID := row[selectCol]
+		rawID := row[selectKey]
 		id := beads.ExtractIssueID(rawID)
 		if id != "" && !seen[id] {
 			seen[id] = true
@@ -575,7 +593,7 @@ func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[stri
 	}
 
 	query := fmt.Sprintf(
-		"SELECT issue_id, depends_on_issue_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
+		"SELECT issue_id, "+depTargetExpr+" AS target FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
 		strings.Join(quoted, ","),
 	)
 
@@ -601,7 +619,7 @@ func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[stri
 	seen := make(map[string]map[string]bool, len(convoyIDs))
 	for _, row := range rows {
 		convoyID := row["issue_id"]
-		rawID := row["depends_on_issue_id"]
+		rawID := row["target"]
 		id := beads.ExtractIssueID(rawID)
 		if convoyID == "" || id == "" {
 			continue

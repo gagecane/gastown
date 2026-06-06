@@ -72,11 +72,11 @@ case "$pos0" in
   sql)
     # bdDepListRawIDs: each convoy tracks one bead.
     case "$*" in
-      *"issue_id = 'hq-c1'"*) echo '[{"depends_on_issue_id":"gt-r1"}]';;
-      *"issue_id = 'hq-c2'"*) echo '[{"depends_on_issue_id":"gt-r2"}]';;
-      *"issue_id = 'hq-c3'"*) echo '[{"depends_on_issue_id":"gt-r3"}]';;
-      *"issue_id = 'hq-c4'"*) echo '[{"depends_on_issue_id":"gt-r4"}]';;
-      *"issue_id = 'hq-c5'"*) echo '[{"depends_on_issue_id":"gt-r5"}]';;
+      *"issue_id = 'hq-c1'"*) echo '[{"target":"gt-r1"}]';;
+      *"issue_id = 'hq-c2'"*) echo '[{"target":"gt-r2"}]';;
+      *"issue_id = 'hq-c3'"*) echo '[{"target":"gt-r3"}]';;
+      *"issue_id = 'hq-c4'"*) echo '[{"target":"gt-r4"}]';;
+      *"issue_id = 'hq-c5'"*) echo '[{"target":"gt-r5"}]';;
       *) echo '[]';;
     esac
     exit 0
@@ -185,9 +185,9 @@ case "$pos0" in
   sql)
     # bdDepListRawIDs: per-convoy tracked-IDs query.
     case "$*" in
-      *"issue_id = 'hq-c1'"*) echo '[{"depends_on_issue_id":"gt-r1"},{"depends_on_issue_id":"gt-r2"}]';;
-      *"issue_id = 'hq-c2'"*) echo '[{"depends_on_issue_id":"gt-r3"}]';;
-      *"issue_id = 'hq-c3'"*) echo '[{"depends_on_issue_id":"gt-r4"},{"depends_on_issue_id":"gt-r5"}]';;
+      *"issue_id = 'hq-c1'"*) echo '[{"target":"gt-r1"},{"target":"gt-r2"}]';;
+      *"issue_id = 'hq-c2'"*) echo '[{"target":"gt-r3"}]';;
+      *"issue_id = 'hq-c3'"*) echo '[{"target":"gt-r4"},{"target":"gt-r5"}]';;
       *) echo '[]';;
     esac
     exit 0
@@ -327,7 +327,7 @@ case "$pos0" in
     exit 0
     ;;
   sql)
-    echo '[{"depends_on_issue_id":"gt-scheduled1"},{"depends_on_issue_id":"gt-ready1"}]'
+    echo '[{"target":"gt-scheduled1"},{"target":"gt-ready1"}]'
     exit 0
     ;;
   show)
@@ -414,7 +414,7 @@ case "$pos0" in
     exit 0
     ;;
   sql)
-    echo '[{"depends_on_issue_id":"gt-orphan1"}]'
+    echo '[{"target":"gt-orphan1"}]'
     exit 0
     ;;
   show)
@@ -553,13 +553,13 @@ case "$pos0" in
         # Batched IN-clause path: return one edge per convoy.
         case "$*" in
           *"issue_id IN ("*)
-            echo '[{"issue_id":"hq-c1","depends_on_issue_id":"gt-r1"},{"issue_id":"hq-c2","depends_on_issue_id":"gt-r2"},{"issue_id":"hq-c3","depends_on_issue_id":"gt-r3"},{"issue_id":"hq-c4","depends_on_issue_id":"gt-r4"},{"issue_id":"hq-c5","depends_on_issue_id":"gt-r5"}]'
+            echo '[{"issue_id":"hq-c1","target":"gt-r1"},{"issue_id":"hq-c2","target":"gt-r2"},{"issue_id":"hq-c3","target":"gt-r3"},{"issue_id":"hq-c4","target":"gt-r4"},{"issue_id":"hq-c5","target":"gt-r5"}]'
             ;;
-          *"issue_id = 'hq-c1'"*) echo '[{"depends_on_issue_id":"gt-r1"}]';;
-          *"issue_id = 'hq-c2'"*) echo '[{"depends_on_issue_id":"gt-r2"}]';;
-          *"issue_id = 'hq-c3'"*) echo '[{"depends_on_issue_id":"gt-r3"}]';;
-          *"issue_id = 'hq-c4'"*) echo '[{"depends_on_issue_id":"gt-r4"}]';;
-          *"issue_id = 'hq-c5'"*) echo '[{"depends_on_issue_id":"gt-r5"}]';;
+          *"issue_id = 'hq-c1'"*) echo '[{"target":"gt-r1"}]';;
+          *"issue_id = 'hq-c2'"*) echo '[{"target":"gt-r2"}]';;
+          *"issue_id = 'hq-c3'"*) echo '[{"target":"gt-r3"}]';;
+          *"issue_id = 'hq-c4'"*) echo '[{"target":"gt-r4"}]';;
+          *"issue_id = 'hq-c5'"*) echo '[{"target":"gt-r5"}]';;
           *) echo '[]';;
         esac
         exit 0
@@ -623,11 +623,11 @@ func TestGetAllTrackedIssuesByConvoy_Equivalence(t *testing.T) {
 	script := `#!/bin/sh
 case "$*" in
   *"FROM dependencies"*"issue_id IN ("*"type = 'tracks'"*)
-    echo '[{"issue_id":"hq-c1","depends_on_issue_id":"gt-a"},{"issue_id":"hq-c3","depends_on_issue_id":"gt-b"},{"issue_id":"hq-c3","depends_on_issue_id":"gt-c"}]'
+    echo '[{"issue_id":"hq-c1","target":"gt-a"},{"issue_id":"hq-c3","target":"gt-b"},{"issue_id":"hq-c3","target":"gt-c"}]'
     exit 0
     ;;
   *"FROM dependencies"*"issue_id = 'hq-c1'"*"type = 'tracks'"*)
-    echo '[{"depends_on_issue_id":"gt-a"}]'
+    echo '[{"target":"gt-a"}]'
     exit 0
     ;;
   *"FROM dependencies"*"issue_id = 'hq-c2'"*"type = 'tracks'"*)
@@ -635,7 +635,7 @@ case "$*" in
     exit 0
     ;;
   *"FROM dependencies"*"issue_id = 'hq-c3'"*"type = 'tracks'"*)
-    echo '[{"depends_on_issue_id":"gt-b"},{"depends_on_issue_id":"gt-c"}]'
+    echo '[{"target":"gt-b"},{"target":"gt-c"}]'
     exit 0
     ;;
   *)
@@ -755,7 +755,7 @@ case "$pos0" in
     exit 0
     ;;
   sql)
-    echo '[{"depends_on_issue_id":"cadk-ready"},{"depends_on_issue_id":"cadk-blockd"}]'
+    echo '[{"target":"cadk-ready"},{"target":"cadk-blockd"}]'
     exit 0
     ;;
   show)

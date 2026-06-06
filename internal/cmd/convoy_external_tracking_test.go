@@ -140,7 +140,7 @@ case "$*" in
     exit 0
     ;;
   *sql*dependencies*)
-    echo '[{"depends_on_issue_id":"ws-foo"}]'
+    echo '[{"target":"ws-foo"}]'
     ;;
   "show ws-foo --json")
     echo "no issue found matching \"ws-foo\"" >&2

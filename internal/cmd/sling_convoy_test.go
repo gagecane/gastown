@@ -20,7 +20,7 @@ func TestConvoyTracksBeadExactMatch(t *testing.T) {
 
 	// Stub bd sql to return a tracked dep with raw beadID
 	bdScript := `#!/bin/sh
-echo '[{"depends_on_issue_id":"gt-abc123"}]'
+echo '[{"target":"gt-abc123"}]'
 `
 	bdPath := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
@@ -47,7 +47,7 @@ func TestConvoyTracksBeadExternalRef(t *testing.T) {
 
 	// Stub bd sql to return a tracked dep with external:prefix:beadID format
 	bdScript := `#!/bin/sh
-echo '[{"depends_on_issue_id":"external:gt-abc:gt-abc123"}]'
+echo '[{"target":"external:gt-abc:gt-abc123"}]'
 `
 	bdPath := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
@@ -74,7 +74,7 @@ func TestConvoyTracksBeadNoMatch(t *testing.T) {
 
 	// Stub bd sql to return a tracked dep with a different beadID
 	bdScript := `#!/bin/sh
-echo '[{"depends_on_issue_id":"gt-other456"}]'
+echo '[{"target":"gt-other456"}]'
 `
 	bdPath := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
@@ -128,7 +128,7 @@ func TestConvoyTracksBeadMultipleDeps(t *testing.T) {
 
 	// Stub bd sql to return multiple tracked deps, one of which matches
 	bdScript := `#!/bin/sh
-echo '[{"depends_on_issue_id":"gt-other1"},{"depends_on_issue_id":"external:gt-abc:gt-abc123"},{"depends_on_issue_id":"gt-other2"}]'
+echo '[{"target":"gt-other1"},{"target":"external:gt-abc:gt-abc123"},{"target":"gt-other2"}]'
 `
 	bdPath := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {

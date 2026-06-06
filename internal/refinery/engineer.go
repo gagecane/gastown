@@ -2465,8 +2465,13 @@ func (e *Engineer) batchGetTrackedDeps(townBeads string, townReadEnv []string, c
 		quoted = append(quoted, "'"+id+"'")
 	}
 
+	// COALESCE the three physical target columns (issue/wisp/external) so the
+	// query works on both production schemas (which expose a generated
+	// depends_on_id column) and freshly bd-init'd schemas (which do not). Convoy
+	// "tracks" deps target cross-DB beads stored in depends_on_external, so
+	// depends_on_issue_id alone is NULL for them. (gc-ihbkn)
 	query := fmt.Sprintf(
-		"SELECT issue_id, depends_on_issue_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
+		"SELECT issue_id, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS target FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
 		strings.Join(quoted, ","),
 	)
 
@@ -2489,7 +2494,7 @@ func (e *Engineer) batchGetTrackedDeps(townBeads string, townReadEnv []string, c
 	seen := make(map[string]map[string]bool, len(convoyIDs))
 	for _, row := range rows {
 		convoyID := row["issue_id"]
-		rawID := row["depends_on_issue_id"]
+		rawID := row["target"]
 		id := beads.ExtractIssueID(rawID)
 		if convoyID == "" || id == "" {
 			continue

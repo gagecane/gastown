@@ -503,9 +503,9 @@ shift || true
 
 case "$cmd" in
   sql)
-    # bdDepListRawIDs up: SELECT issue_id FROM dependencies WHERE depends_on_issue_id = '<beadID>' AND type = 'tracks'
+    # bdDepListRawIDs up: SELECT issue_id FROM dependencies WHERE COALESCE(...) = '<beadID>' AND type = 'tracks'
     case "$*" in
-      *"depends_on_issue_id = 'gt-bbb'"*)
+      *") = 'gt-bbb'"*)
         echo '[{"issue_id":"hq-cv-existing"}]'
         ;;
       *)
@@ -1059,7 +1059,7 @@ exit 0
 // ---------------------------------------------------------------------------
 
 // TestConvoyTracksBead_ExactMatch verifies exact bead ID match.
-// Uses bd sql --json output format (depends_on_issue_id column).
+// Uses bd sql --json output format (target column (COALESCE of issue/wisp/external)).
 func TestConvoyTracksBead_ExactMatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
@@ -1068,9 +1068,9 @@ func TestConvoyTracksBead_ExactMatch(t *testing.T) {
 	binDir := t.TempDir()
 	beadsDir := t.TempDir()
 
-	// bd sql returns rows with depends_on_issue_id column
+	// bd sql returns rows with target column (COALESCE of issue/wisp/external)
 	bdScript := `#!/bin/sh
-echo '[{"depends_on_issue_id":"gt-aaa"},{"depends_on_issue_id":"gt-bbb"}]'
+echo '[{"target":"gt-aaa"},{"target":"gt-bbb"}]'
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
@@ -1097,9 +1097,9 @@ func TestConvoyTracksBead_ExternalWrappedMatch(t *testing.T) {
 	binDir := t.TempDir()
 	beadsDir := t.TempDir()
 
-	// bd sql returns raw depends_on_issue_id which may contain external: wrapping
+	// bd sql returns the raw COALESCEd target which may contain external: wrapping
 	bdScript := `#!/bin/sh
-echo '[{"depends_on_issue_id":"external:gt:gt-abc"}]'
+echo '[{"target":"external:gt:gt-abc"}]'
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
@@ -1122,7 +1122,7 @@ func TestConvoyTracksBead_NoMatch(t *testing.T) {
 	beadsDir := t.TempDir()
 
 	bdScript := `#!/bin/sh
-echo '[{"depends_on_issue_id":"gt-aaa"}]'
+echo '[{"target":"gt-aaa"}]'
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
@@ -1578,7 +1578,7 @@ case "$cmd" in
     ;;
   sql)
     # bdDepListRawIDs down: return tracked bead IDs
-    echo '[{"depends_on_issue_id":"gt-abc"}]'
+    echo '[{"target":"gt-abc"}]'
     exit 0
     ;;
   dep)
@@ -1721,7 +1721,7 @@ shift || true
 case "$cmd" in
   sql)
     # bdDepListRawIDs down: return tracked bead IDs for convoy
-    echo '[{"depends_on_issue_id":"gt-aaa"},{"depends_on_issue_id":"gt-bbb"}]'
+    echo '[{"target":"gt-aaa"},{"target":"gt-bbb"}]'
     exit 0
     ;;
   show)
