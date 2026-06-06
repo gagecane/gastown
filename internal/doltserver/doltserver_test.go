@@ -5676,3 +5676,73 @@ func TestBuildServerEnv_DoesNotMutateInput(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteServerConfig_TransactionCommit verifies the rendered config.yaml sets
+// behavior.dolt_transaction_commit from Config.TransactionCommit. Default false
+// preserves the bd-compatible behavior; true is opt-in only (gu-tly6k load-test
+// proved true breaks bd schema migration with "Error 1105: nothing to commit").
+func TestWriteServerConfig_TransactionCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  bool
+	}{
+		{"default_false", false},
+		{"enabled_true", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "config.yaml")
+			cfg := &Config{
+				Port:           3399,
+				DataDir:        filepath.Join(dir, "data"),
+				LogLevel:       "warning",
+				EventScheduler: "OFF",
+				// DoltStatsEnabled omitted -> default system_variables block
+
+				TransactionCommit: tc.val,
+			}
+			if err := writeServerConfig(cfg, cfgPath); err != nil {
+				t.Fatalf("writeServerConfig: %v", err)
+			}
+			raw, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			var parsed struct {
+				Behavior struct {
+					DoltTransactionCommit bool `yaml:"dolt_transaction_commit"`
+				} `yaml:"behavior"`
+			}
+			if err := yaml.Unmarshal(raw, &parsed); err != nil {
+				t.Fatalf("yaml parse failed (config invalid):\n%s\nerr: %v", raw, err)
+			}
+			if parsed.Behavior.DoltTransactionCommit != tc.val {
+				t.Errorf("dolt_transaction_commit = %v, want %v\nrendered:\n%s",
+					parsed.Behavior.DoltTransactionCommit, tc.val, raw)
+			}
+		})
+	}
+}
+
+// TestDefaultConfig_TransactionCommitDefaultsFalse guards the safe default and the
+// GT_DOLT_TRANSACTION_COMMIT override wiring.
+func TestDefaultConfig_TransactionCommitDefaultsFalse(t *testing.T) {
+	t.Setenv("GT_DOLT_TRANSACTION_COMMIT", "")
+	os.Unsetenv("GT_DOLT_TRANSACTION_COMMIT")
+	if got := DefaultConfig(t.TempDir()).TransactionCommit; got != false {
+		t.Errorf("default TransactionCommit = %v, want false", got)
+	}
+
+	for _, on := range []string{"1", "true", "TRUE", "on", "yes"} {
+		t.Setenv("GT_DOLT_TRANSACTION_COMMIT", on)
+		if got := DefaultConfig(t.TempDir()).TransactionCommit; got != true {
+			t.Errorf("GT_DOLT_TRANSACTION_COMMIT=%q -> TransactionCommit=%v, want true", on, got)
+		}
+	}
+	for _, off := range []string{"0", "false", "off", "no", "garbage"} {
+		t.Setenv("GT_DOLT_TRANSACTION_COMMIT", off)
+		if got := DefaultConfig(t.TempDir()).TransactionCommit; got != false {
+			t.Errorf("GT_DOLT_TRANSACTION_COMMIT=%q -> TransactionCommit=%v, want false", off, got)
+		}
+	}
+}

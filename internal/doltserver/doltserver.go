@@ -308,6 +308,19 @@ type Config struct {
 	// config. Default is "0" to avoid background stats workers during high-churn
 	// agent workloads. Set to "omit" to leave the variable out of config.yaml.
 	DoltStatsEnabled string
+
+	// TransactionCommit controls the behavior.dolt_transaction_commit setting in
+	// managed config. When true, every SQL transaction commit also creates a Dolt
+	// commit (the txn boundary IS the Dolt commit). Default is false to preserve
+	// the current behavior and stay compatible with bd, which drives its own
+	// explicit CALL DOLT_COMMIT and whose schema migrations FAIL with
+	// "Error 1105: nothing to commit" when this is true (the working set is
+	// already auto-committed at the txn boundary, so the migration's explicit
+	// commit finds nothing staged). Configurable via GT_DOLT_TRANSACTION_COMMIT.
+	// See gu-tly6k (load-test) / gu-9qbg5 (RCA): true was a candidate fix for the
+	// hq stale-revert race but is unsafe to flip globally because it breaks bd
+	// migration on every fresh/migrating database.
+	TransactionCommit bool
 }
 
 // DefaultConfig returns the default Dolt server configuration.
@@ -340,20 +353,21 @@ func DefaultConfig(townRoot string) *Config {
 	}
 
 	config := &Config{
-		TownRoot:         townRoot,
-		Port:             DefaultPort,
-		User:             DefaultUser,
-		DataDir:          filepath.Join(townRoot, ".dolt-data"),
-		LogFile:          filepath.Join(daemonDir, "dolt.log"),
-		PidFile:          filepath.Join(daemonDir, "dolt.pid"),
-		MaxConnections:   maxConnections,
-		ReadTimeoutMs:    DefaultReadTimeoutMs,
-		WriteTimeoutMs:   DefaultWriteTimeoutMs,
-		WaitTimeoutSec:   DefaultWaitTimeoutSec,
-		TimeZone:         DefaultTimeZone,
-		LogLevel:         "warning",
-		EventScheduler:   "OFF",
-		DoltStatsEnabled: "0",
+		TownRoot:          townRoot,
+		Port:              DefaultPort,
+		User:              DefaultUser,
+		DataDir:           filepath.Join(townRoot, ".dolt-data"),
+		LogFile:           filepath.Join(daemonDir, "dolt.log"),
+		PidFile:           filepath.Join(daemonDir, "dolt.pid"),
+		MaxConnections:    maxConnections,
+		ReadTimeoutMs:     DefaultReadTimeoutMs,
+		WriteTimeoutMs:    DefaultWriteTimeoutMs,
+		WaitTimeoutSec:    DefaultWaitTimeoutSec,
+		TimeZone:          DefaultTimeZone,
+		LogLevel:          "warning",
+		EventScheduler:    "OFF",
+		DoltStatsEnabled:  "0",
+		TransactionCommit: false,
 	}
 
 	// Optional override for the idle-session timeout. Negative values disable
@@ -401,6 +415,18 @@ func DefaultConfig(townRoot string) *Config {
 	}
 	if stats, ok := os.LookupEnv("GT_DOLT_STATS_ENABLED"); ok {
 		config.DoltStatsEnabled = stats
+	}
+	// GT_DOLT_TRANSACTION_COMMIT toggles behavior.dolt_transaction_commit.
+	// Accepts 1/true/on (case-insensitive) to enable; anything else disables.
+	// WARNING: enabling breaks bd schema migration ("nothing to commit") — see
+	// the TransactionCommit field doc and gu-tly6k.
+	if tc, ok := os.LookupEnv("GT_DOLT_TRANSACTION_COMMIT"); ok {
+		switch strings.ToLower(strings.TrimSpace(tc)) {
+		case "1", "true", "on", "yes":
+			config.TransactionCommit = true
+		default:
+			config.TransactionCommit = false
+		}
 	}
 
 	if u := os.Getenv("GT_DOLT_USER"); u != "" {
@@ -1761,6 +1787,8 @@ func writeServerConfig(config *Config, configPath string) error {
 # To customize, set Gas Town environment variables:
 #   GT_DOLT_PORT, GT_DOLT_HOST, GT_DOLT_USER, GT_DOLT_PASSWORD, GT_DOLT_LOGLEVEL
 #   GT_DOLT_EVENT_SCHEDULER (OFF, ON, omit), GT_DOLT_STATS_ENABLED (0, 1, omit)
+#   GT_DOLT_TRANSACTION_COMMIT (1/true/on to enable; default off — enabling
+#     breaks bd schema migration, see gu-tly6k)
 
 log_level: %s
 
@@ -1770,7 +1798,7 @@ listener:
 data_dir: "%s"
 
 behavior:
-  dolt_transaction_commit: false
+  dolt_transaction_commit: %t
 %s  auto_gc_behavior:
     enable: false
     archive_level: 0
@@ -1782,6 +1810,7 @@ behavior:
 		readTimeoutLine,
 		writeTimeoutLine,
 		filepath.ToSlash(config.DataDir),
+		config.TransactionCommit,
 		eventSchedulerLine,
 		systemVariablesBlock,
 	)
