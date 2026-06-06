@@ -1898,6 +1898,20 @@ type MergeQueueConfig struct {
 	// When true, all gates start simultaneously; any failure = overall failure.
 	// Nil means "not configured" (refinery default applies).
 	GatesParallel *bool `json:"gates_parallel,omitempty"`
+
+	// GateMaxLoadPerCore is the host 1-minute load average per logical core
+	// above which the refinery defers running merge gates, waiting up to
+	// GateLoadWaitTimeout for the host to quiet down. This prevents
+	// resource-starvation false-negatives (JVM/OOM/esbuild BUILD FAILED) when a
+	// co-located swarm saturates the host (gu-919h0). Zero or omitted disables
+	// load-aware deferral (the gate runs immediately, as before).
+	GateMaxLoadPerCore *float64 `json:"gate_max_load_per_core,omitempty"`
+
+	// GateLoadWaitTimeout bounds how long the refinery waits for host load to
+	// subside before running the gate anyway (e.g. "5m"). A busy host must
+	// never wedge the queue forever. Only meaningful when GateMaxLoadPerCore is
+	// set. Omitted falls back to the refinery default (5m).
+	GateLoadWaitTimeout string `json:"gate_load_wait_timeout,omitempty"`
 }
 
 // GateConfig defines a single quality gate command as stored in

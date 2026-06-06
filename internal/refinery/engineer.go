@@ -198,7 +198,34 @@ type MergeQueueConfig struct {
 	// Batch holds configuration for the batch-then-bisect merge queue.
 	// When nil or MaxBatchSize <= 1, batching is disabled and MRs process sequentially.
 	Batch *BatchConfig `json:"batch,omitempty"`
+
+	// GateMaxLoadPerCore is the host 1-minute load average per logical core
+	// above which the refinery defers running merge gates. When the host is
+	// busy (e.g. a swarm of polecats running full builds on the same machine),
+	// running the gate's heavy build/test suite can spuriously fail with
+	// JVM/OOM/esbuild errors — a false-negative BUILD FAILED on a perfectly
+	// good MR (gu-919h0). When load/core exceeds this threshold the refinery
+	// waits up to GateLoadWaitTimeout for the host to quiet down before running
+	// the gate. Zero (the default) disables load-aware deferral entirely — the
+	// gate runs immediately as before.
+	GateMaxLoadPerCore float64 `json:"gate_max_load_per_core"`
+
+	// GateLoadWaitTimeout bounds how long the refinery will wait for host load
+	// to drop below GateMaxLoadPerCore before running the gate anyway. This is
+	// a safety bound: a permanently busy host must not wedge the merge queue
+	// forever. Only meaningful when GateMaxLoadPerCore > 0.
+	GateLoadWaitTimeout time.Duration `json:"gate_load_wait_timeout"`
 }
+
+// DefaultGateLoadWaitTimeout is the fallback wait bound applied when
+// GateMaxLoadPerCore is configured but GateLoadWaitTimeout is not. After this
+// long the refinery proceeds with the gate regardless of host load so a busy
+// host can never wedge the queue indefinitely.
+const DefaultGateLoadWaitTimeout = 5 * time.Minute
+
+// gateLoadRecheckInterval is how often the refinery re-samples host load while
+// waiting for it to drop below the configured threshold.
+const gateLoadRecheckInterval = 15 * time.Second
 
 // DefaultMergeQueueConfig returns sensible defaults for merge queue configuration.
 func DefaultMergeQueueConfig() *MergeQueueConfig {
@@ -288,6 +315,16 @@ type Engineer struct {
 	mergeSlotRelease      func(holder string) error
 	mergeSlotMaxRetries   int           // Max retries for slot acquisition (0 = no retry)
 	mergeSlotRetryBackoff time.Duration // Initial backoff between retries
+
+	// loadSampler, when non-nil, overrides the host load/core source used by
+	// load-aware gate deferral (gu-919h0). Tests inject a deterministic
+	// sampler here; production leaves it nil to read the real host metric.
+	loadSampler func() float64
+
+	// gateLoadRecheck, when > 0, overrides how often waitForGateLoad re-samples
+	// host load. Zero uses gateLoadRecheckInterval. Tests shrink this to keep
+	// the suite fast; production leaves it zero.
+	gateLoadRecheck time.Duration
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -383,6 +420,8 @@ func (e *Engineer) LoadConfig() error {
 		MergeStrategy        *string                   `json:"merge_strategy"`
 		VCSProvider          *string                   `json:"vcs_provider"`
 		RequireReview        *bool                     `json:"require_review"`
+		GateMaxLoadPerCore   *float64                  `json:"gate_max_load_per_core"`
+		GateLoadWaitTimeout  *string                   `json:"gate_load_wait_timeout"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -469,6 +508,22 @@ func (e *Engineer) LoadConfig() error {
 	}
 	if mqRaw.RequireReview != nil {
 		e.config.RequireReview = mqRaw.RequireReview
+	}
+	if mqRaw.GateMaxLoadPerCore != nil {
+		if *mqRaw.GateMaxLoadPerCore < 0 {
+			return fmt.Errorf("gate_max_load_per_core must be non-negative, got %v", *mqRaw.GateMaxLoadPerCore)
+		}
+		e.config.GateMaxLoadPerCore = *mqRaw.GateMaxLoadPerCore
+	}
+	if mqRaw.GateLoadWaitTimeout != nil {
+		dur, err := time.ParseDuration(*mqRaw.GateLoadWaitTimeout)
+		if err != nil {
+			return fmt.Errorf("invalid gate_load_wait_timeout %q: %w", *mqRaw.GateLoadWaitTimeout, err)
+		}
+		if dur <= 0 {
+			return fmt.Errorf("gate_load_wait_timeout must be positive, got %v", dur)
+		}
+		e.config.GateLoadWaitTimeout = dur
 	}
 
 	// Initialize the PR provider when merge_strategy=pr.
@@ -1198,6 +1253,86 @@ func (e *Engineer) runGates(ctx context.Context) ProcessResult {
 	return e.runGatesForPhase(ctx, GatePhasePreMerge)
 }
 
+// gateLoadWaitTimeout returns the configured wait bound, falling back to
+// DefaultGateLoadWaitTimeout when load-aware deferral is enabled but no
+// explicit timeout was set.
+func (e *Engineer) gateLoadWaitTimeout() time.Duration {
+	if e.config.GateLoadWaitTimeout > 0 {
+		return e.config.GateLoadWaitTimeout
+	}
+	return DefaultGateLoadWaitTimeout
+}
+
+// loadPerCore samples the host's normalized 1-minute load average. It is a
+// field so tests can inject a deterministic load source; nil means "use the
+// real host metric".
+func (e *Engineer) loadPerCore() float64 {
+	if e.loadSampler != nil {
+		return e.loadSampler()
+	}
+	return util.LoadPerCore()
+}
+
+// waitForGateLoad blocks until host load/core drops below the configured
+// threshold or the wait bound elapses, whichever comes first. It is the
+// resource-isolation mechanism for gu-919h0: when a co-located swarm of
+// polecat builds saturates the host, the refinery's heavy merge gate
+// (full build + ~1100 tests) can fail with JVM/OOM/esbuild errors that have
+// nothing to do with the MR under test. Deferring the gate until the host is
+// quiet removes that false-negative at the source.
+//
+// Behavior contract:
+//   - Threshold <= 0: disabled, returns immediately (gate runs as before).
+//   - Load unavailable (returns 0, e.g. Windows): treated as "not busy",
+//     returns immediately — we never block on an unknown metric.
+//   - Busy: re-samples every gateLoadRecheckInterval until quiet or timeout.
+//   - Timeout: returns anyway and lets the gate run. A permanently busy host
+//     must never wedge the merge queue forever; worst case is identical to
+//     today's behavior.
+//   - ctx cancellation is honored promptly.
+func (e *Engineer) waitForGateLoad(ctx context.Context, phase GatePhase) {
+	threshold := e.config.GateMaxLoadPerCore
+	if threshold <= 0 {
+		return
+	}
+
+	load := e.loadPerCore()
+	if load <= 0 || load <= threshold {
+		return // unknown metric or already quiet
+	}
+
+	timeout := e.gateLoadWaitTimeout()
+	_, _ = fmt.Fprintf(e.output, "[Engineer] %s gate deferred: host load/core %.2f exceeds %.2f, waiting up to %v for host to quiet\n",
+		phase, load, threshold, timeout)
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	recheck := gateLoadRecheckInterval
+	if e.gateLoadRecheck > 0 {
+		recheck = e.gateLoadRecheck
+	}
+	ticker := time.NewTicker(recheck)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			load = e.loadPerCore()
+			_, _ = fmt.Fprintf(e.output, "[Engineer] %s gate proceeding after load wait (load/core %.2f, threshold %.2f): %v\n",
+				phase, load, threshold, context.Cause(waitCtx))
+			return
+		case <-ticker.C:
+			load = e.loadPerCore()
+			if load <= 0 || load <= threshold {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] %s gate proceeding: host load/core %.2f at/below threshold %.2f\n",
+					phase, load, threshold)
+				return
+			}
+		}
+	}
+}
+
 // runGatesForPhase executes gates matching the given phase.
 // Gates run in parallel if GatesParallel is true; otherwise sequentially.
 // Any single gate failure means overall failure.
@@ -1216,6 +1351,11 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) Proces
 	if len(gates) == 0 {
 		return ProcessResult{Success: true}
 	}
+
+	// gu-919h0: defer the gate until the host is quiet enough to avoid
+	// resource-starvation false-negatives (JVM/OOM/esbuild) under a co-located
+	// swarm. No-op unless GateMaxLoadPerCore is configured.
+	e.waitForGateLoad(ctx, phase)
 
 	// Sort gate names for deterministic ordering
 	names := make([]string, 0, len(gates))
