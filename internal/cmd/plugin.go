@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -461,6 +463,8 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		}
 		if !gateOpen {
 			fmt.Printf("%s %s (use --force to override)\n", style.Warning.Render("Gate closed:"), gateReason)
+		} else if p.HasRunScript {
+			fmt.Printf("%s Would execute %s\n", style.Success.Render("Gate open:"), filepath.Join(p.Path, "run.sh"))
 		} else {
 			fmt.Printf("%s Would execute plugin instructions\n", style.Success.Render("Gate open:"))
 		}
@@ -473,18 +477,32 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Execute the plugin
-	// For manual runs, we print the instructions for the agent/user to execute
-	// Automatic execution via dogs is handled by gt-n08ix.2
 	fmt.Printf("%s Running plugin: %s\n", style.Success.Render("●"), p.Name)
 	if pluginRunForce && !gateOpen {
 		fmt.Printf("  %s\n", style.Dim.Render("(gate bypassed with --force)"))
 	}
+
+	// When the plugin ships a run.sh, bash-execute it directly — the same
+	// deterministic path the daemon uses (see daemon.runDoltBackupPlugin). The
+	// script is the source of truth: it records its own plugin-run receipt with
+	// the real outcome (e.g. slung/failed counts). Printing plugin.md and
+	// stamping a synthetic success here made manual `gt plugin run` a silent
+	// no-op with a misleading green receipt (gu-pf764).
+	runScript := filepath.Join(p.Path, "run.sh")
+	if p.HasRunScript {
+		if _, statErr := os.Stat(runScript); statErr != nil {
+			return fmt.Errorf("plugin %q declares a run.sh but it is missing at %s: %w", p.Name, runScript, statErr)
+		}
+		return executePluginScript(p, runScript, townRoot)
+	}
+
+	// Markdown-only plugin: print the instructions for the agent/user to follow.
 	fmt.Println()
 	fmt.Printf("%s\n", style.Bold.Render("Instructions:"))
 	fmt.Println(p.Instructions)
 
-	// Record the run
+	// Record the run. Only markdown-only plugins are recorded here; run.sh
+	// plugins record their own receipt from within the script.
 	recorder := plugin.NewRecorder(townRoot)
 	beadID, err := recorder.RecordRun(plugin.PluginRunRecord{
 		PluginName: p.Name,
@@ -498,6 +516,35 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n%s Recorded run: %s\n", style.Dim.Render("●"), beadID)
 	}
 
+	return nil
+}
+
+// executePluginScript bash-executes a plugin's run.sh, streaming its output to
+// the operator's terminal. The script owns its plugin-run receipt, so this does
+// NOT record one (recording here would either double-count or stamp a success
+// the script never reached). A non-zero exit is surfaced as an error so the
+// caller sees the failure instead of a misleading green result.
+func executePluginScript(p *plugin.Plugin, runScript, townRoot string) error {
+	fmt.Println()
+
+	ctx := context.Background()
+	if p.Execution != nil && p.Execution.Timeout != "" {
+		if timeout, err := time.ParseDuration(p.Execution.Timeout); err == nil && timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, "bash", runScript)
+	cmd.Dir = p.Path
+	cmd.Env = append(os.Environ(), "GT_TOWN_ROOT="+townRoot)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("plugin %q run.sh failed: %w", p.Name, err)
+	}
 	return nil
 }
 
