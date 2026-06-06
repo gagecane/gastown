@@ -3,11 +3,13 @@ name: gastown-formula-author
 description: |
   Author, validate, and iterate on Gas Town workflow formula TOML files.
   Use when asked to "create a formula", "write a formula", "new workflow formula",
-  "formula for X", "validate this formula", "fix this formula TOML", or
-  "add a step to formula Y". Also use when the user describes a multi-step
+  "formula for X", "validate this formula", "fix this formula TOML",
+  "add a step to formula Y", or "edit the steps/vars/prompts in formula Y".
+  Also use when the user describes a multi-step
   agent workflow they want encoded as a repeatable formula.
   Do NOT use for running existing formulas (use gt formula run),
-  or for editing formula overlays (use gt formula overlay edit).
+  or for editing a formula's per-molecule overlay (use gt formula overlay edit) —
+  editing the formula file's own contents IS in scope.
 ---
 
 # gastown-formula-author

@@ -85,3 +85,27 @@ Embedded knowledge (no external tool needed): the four-type TOML schema, DAG
 rules, variable patterns, search-path resolution, naming conventions, and the
 two template syntaxes (Handlebars `{{var}}` for workflows, Go `{{.var}}` for
 convoys).
+
+## Trigger test (gu-wfs-btzue, 2026-06-06)
+
+The description was tested empirically: fresh-context classifier agents were
+given only the competing skill descriptions (this skill plus the adjacent
+`crew-sling-work` / `crew-merge-queue` / `crew-commit`) and a suite of candidate
+prompts, then asked which single skill each prompt routes to.
+
+**Suite — should trigger:** create/write/new formula; "formula for X";
+validate/fix formula TOML; add a step; encode a multi-step workflow;
+multi-leg convoy; reorder/edit steps or vars in an existing formula file.
+**Should NOT trigger:** run an existing formula (`gt formula run`); list
+formulas; edit a per-molecule overlay (`gt formula overlay edit`); sling/dispatch
+or "kick off" a formula (→ `crew-sling-work`); generic non-Gas-Town TOML;
+unrelated coding; "what's the weather".
+
+**Results:** Round 1 (obvious phrasings) 14/14. Round 2 (hard paraphrases with
+no exact keywords) surfaced one under-trigger: *"tweak the variables block in my
+convoy formula so the leg prompts resolve"* was misrouted to the overlay
+exclusion. **Fix:** added the trigger *"edit the steps/vars/prompts in formula Y"*
+and clarified that editing a formula file's own contents is in scope while only
+**per-molecule overlay** editing is excluded. Round 3 (re-test) 6/6, with the
+overlay-vs-file-contents boundary now disambiguated correctly. Meets the ~90%
+trigger-accuracy target.
