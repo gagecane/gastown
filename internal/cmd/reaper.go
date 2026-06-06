@@ -860,6 +860,71 @@ Use --dry-run to preview closes without applying them.`,
 	},
 }
 
+var reaperReconcileOrphansGitCmd = &cobra.Command{
+	Use:   "reconcile-orphans-git",
+	Short: "Complete interrupted post-merge reconciles via git evidence (gu-hrweu)",
+	Long: `Scan every source issue still carrying the awaiting_refinery_merge label and
+complete the refinery's interrupted post-merge reconcile for any whose merge is
+provable by a commit citing the bead ID on its target branch.
+
+Background: the agent-bead reconcile ('reconcile-orphans', gu-7igu8) proves a
+merge by reading the MR wisp bead the agent bead's active_mr points at. A
+competing reaper cycle can destroy BOTH artifacts first — 'gt reaper purge'
+deletes the MR wisp and scrub-active-mr clears active_mr — leaving the merged
+work unprovable via beads, so the agent-bead pass skips it forever and the
+source issue stays non-terminal, freezing any dependent convoy.
+
+This command anchors on the two artifacts the race CANNOT destroy: the source
+issue's awaiting_refinery_merge label and the merged commit on the target
+branch (which cites the bead ID). For each labeled non-terminal source issue
+whose work is provably on the target branch, it force-closes the issue and
+clears the leaked label — exactly what the refinery's PostMerge path would have
+done.
+
+Safety: a close happens ONLY when git PROVES the merge (a citing commit on the
+target branch). When git cannot verify (no worktree, git error), the bead is
+left open — absence of proof is never proof. Already-terminal source issues are
+skipped (idempotent).
+
+Aggregates source issues across all rig databases; closes route to the owning
+rig DB via bd prefix routing.
+
+Use --dry-run to preview closes without applying them.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		townRoot, err := workspace.FindFromCwd()
+		if err != nil {
+			return fmt.Errorf("finding town root: %w", err)
+		}
+		adapter := newOrphanGitReconcileAdapter(townRoot)
+
+		result, err := reaper.ReconcileMergedOrphansByGitEvidence(adapter, adapter, reaperDryRun)
+		if err != nil {
+			return fmt.Errorf("reconcile orphans (git): %w", err)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(result))
+			return nil
+		}
+
+		prefix := ""
+		verb := "reconciled"
+		if result.DryRun {
+			prefix = "[DRY RUN] would "
+			verb = "reconcile"
+		}
+		for _, entry := range result.ReconciledEntries {
+			fmt.Printf("  %s (git evidence: citing commit on target branch)\n", entry.SourceIssue)
+		}
+		fmt.Printf("reconcile-orphans-git: scanned=%d %s%s=%d not_yet_merged=%d unverified=%d already_terminal=%d\n",
+			result.Scanned, prefix, verb, result.Reconciled, result.NotYetMerged, result.Unverified, result.AlreadyTerminal)
+		for _, a := range result.Anomalies {
+			fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+		}
+		return nil
+	},
+}
+
 var reaperScrubDanglingFKCmd = &cobra.Command{
 	Use:   "scrub-dangling-fk",
 	Short: "Clear dangling mr_id/hook_bead refs on agent beads (gu-96uxo)",
@@ -1145,6 +1210,35 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			}
 		}
 
+		// Git-evidence orphan reconcile (gu-hrweu): the durable-artifact fallback
+		// to the agent-bead reconcile above. Runs LAST — after purge has deleted
+		// MR wisps and after scrub-active-mr has cleared active_mr refs — so it
+		// catches exactly the survivors the agent-bead pass can no longer prove:
+		// non-terminal source issues still carrying awaiting_refinery_merge whose
+		// merge is provable only by a citing commit on the target branch. Closes
+		// across all rig DBs via prefix routing. Best-effort: failures logged.
+		var totalGitReconScanned, totalGitReconReconciled, totalGitReconNotMerged, totalGitReconUnverified int
+		if townRoot, twErr := workspace.FindFromCwd(); twErr != nil {
+			fmt.Printf("reconcile-orphans-git: skipped (no town root): %v\n", twErr)
+		} else {
+			adapter := newOrphanGitReconcileAdapter(townRoot)
+			gitReconResult, err := reaper.ReconcileMergedOrphansByGitEvidence(adapter, adapter, reaperDryRun)
+			if err != nil {
+				fmt.Printf("reconcile-orphans-git: error: %v\n", err)
+			} else {
+				totalGitReconScanned = gitReconResult.Scanned
+				totalGitReconReconciled = gitReconResult.Reconciled
+				totalGitReconNotMerged = gitReconResult.NotYetMerged
+				totalGitReconUnverified = gitReconResult.Unverified
+				for _, entry := range gitReconResult.ReconciledEntries {
+					fmt.Printf("  %s closed (git evidence: citing commit on target branch)\n", entry.SourceIssue)
+				}
+				for _, a := range gitReconResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+		}
+
 		// Report
 		prefix := ""
 		if reaperDryRun {
@@ -1163,6 +1257,8 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			totalScrubScanned, totalScrubCleared, totalScrubPreservedWIP, totalScrubStillPending)
 		fmt.Printf("  dangling_fk scrub: scanned=%d cleared_mr_id=%d cleared_hook_bead=%d preserved_wip=%d\n",
 			totalFKScanned, totalFKClearedMRID, totalFKClearedHook, totalFKPreservedWIP)
+		fmt.Printf("  orphan reconcile (git): scanned=%d reconciled=%d not_yet_merged=%d unverified=%d\n",
+			totalGitReconScanned, totalGitReconReconciled, totalGitReconNotMerged, totalGitReconUnverified)
 		fmt.Printf("  Open:             %d wisps remain\n", totalOpen)
 
 		return nil
@@ -1189,7 +1285,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperScrubDanglingFKCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -1200,7 +1296,7 @@ func init() {
 	}
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperScrubDanglingFKCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -1236,6 +1332,7 @@ func init() {
 	reaperCmd.AddCommand(reaperClosePluginReceiptsCmd)
 	reaperCmd.AddCommand(reaperScrubActiveMRCmd)
 	reaperCmd.AddCommand(reaperReconcileOrphansCmd)
+	reaperCmd.AddCommand(reaperReconcileOrphansGitCmd)
 	reaperCmd.AddCommand(reaperScrubDanglingFKCmd)
 	reaperCmd.AddCommand(reaperRunCmd)
 
