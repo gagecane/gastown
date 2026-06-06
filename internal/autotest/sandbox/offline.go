@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // ErrNetDropUnsupported is returned by ApplyOffline on platforms
@@ -80,6 +82,9 @@ func (s *Sandbox) WarmUpGoModules(ctx context.Context, goBin string) error {
 	if goBin == "" {
 		goBin = "go"
 	}
+	if err := s.disableGoTelemetry(); err != nil {
+		return fmt.Errorf("warm-up: disable go telemetry: %w", err)
+	}
 	steps := []struct {
 		name string
 		args []string
@@ -98,6 +103,37 @@ func (s *Sandbox) WarmUpGoModules(ctx context.Context, goBin string) error {
 		}
 	}
 	return nil
+}
+
+// disableGoTelemetry seeds a Go telemetry "mode" file set to "off"
+// inside the sandbox's config directory, before any `go` subprocess
+// runs.
+//
+// Apply pins HOME and XDG_CONFIG_HOME to worktree-internal paths, so
+// the Go toolchain resolves its telemetry directory to
+// <worktree>/.config/go/telemetry. With telemetry in its default
+// "local" mode, `go` (a) writes counter files there and (b) forks a
+// DETACHED telemetry sidecar child (golang.org/x/telemetry) that
+// keeps creating files under that directory asynchronously, AFTER the
+// parent `go` process has exited. When the worktree is an ephemeral
+// t.TempDir(), that post-exit write races t.Cleanup's RemoveAll and
+// surfaces as "TempDir RemoveAll cleanup: ... directory not empty"
+// (gu-lawyx). On the production gate path it leaves a stray child
+// touching the worktree after the gate run reports complete.
+//
+// Setting mode "off" makes telemetry.Start return before opening the
+// counter file or forking the sidecar, so nothing writes to the
+// directory out-of-band. "off" is the authoritative control: the Go
+// toolchain reads the mode exclusively from this file and provides no
+// environment-variable override (GOTELEMETRY/GOTELEMETRYDIR are
+// read-only `go env` values). Writing the file is idempotent and
+// cheap; it is the same format `go telemetry off` produces.
+func (s *Sandbox) disableGoTelemetry() error {
+	dir := filepath.Join(s.worktree, ".config", "go", "telemetry")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "mode"), []byte("off"), 0o600)
 }
 
 // NetDropSupported reports whether ApplyOffline produces a real

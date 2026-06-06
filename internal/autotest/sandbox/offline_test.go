@@ -253,3 +253,36 @@ func TestWarmUpGoModules_PropagatesError(t *testing.T) {
 		t.Fatalf("WarmUpGoModules in non-module dir = nil, want error")
 	}
 }
+
+// TestWarmUpGoModules_DisablesTelemetry is the regression test for
+// gu-lawyx. WarmUpGoModules pins the Go toolchain's HOME/XDG_CONFIG_HOME
+// into the worktree; in telemetry's default "local" mode `go` forks a
+// detached sidecar that keeps writing under <worktree>/.config/go/telemetry
+// after the parent exits, racing t.Cleanup's RemoveAll on an ephemeral
+// TempDir worktree ("directory not empty"). WarmUpGoModules must seed a
+// telemetry "mode" file set to "off" so the sidecar never starts. We assert
+// the file's content directly — it is the authoritative, deterministic
+// control (no env-var override exists).
+func TestWarmUpGoModules_DisablesTelemetry(t *testing.T) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("no go on PATH: %v", err)
+	}
+	dir := t.TempDir() // non-module dir: warm-up errors, but the mode file is seeded first
+	sb, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = sb.WarmUpGoModules(ctx, goBin)
+
+	modeFile := filepath.Join(sb.Worktree(), ".config", "go", "telemetry", "mode")
+	data, err := os.ReadFile(modeFile)
+	if err != nil {
+		t.Fatalf("telemetry mode file not written: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "off" {
+		t.Fatalf("telemetry mode = %q, want %q", got, "off")
+	}
+}
