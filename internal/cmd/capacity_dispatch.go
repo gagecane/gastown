@@ -1448,6 +1448,20 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if isNonDispatchableBead(info) {
 		return false
 	}
+	// Skip operator-reserved beads (gu-0l7he). A bead labeled mayor-only /
+	// no-polecat / human-only is unresolvable by a polecat and must stay OPEN
+	// in the human/mayor queue without being auto-slung. executeSling and
+	// scheduleBead already reject these labels, but this readiness scan did
+	// NOT — so a reserved bead still passed the candidate filter, got a
+	// sling-context wrapper, and reached dispatch where executeSling rejected
+	// it. The rejected context then re-fired every cycle (circuit-break churn),
+	// reproducing the 3×-redispatch loop on gu-6mkso (rust → nitro → raider)
+	// despite an explicit reservation. Filtering here keeps the bead out of the
+	// candidate set entirely, so it never reaches dispatch and there is no
+	// churn. Operators no longer need the DEFERRED hack to pin a reserved bead.
+	if beads.HasMayorOnlyLabel(info.Labels) {
+		return false
+	}
 	// Skip beads flagged no-auto-dispatch (gs-b2a). Unlike the permanent
 	// tripwire labels above, this only blocks the AUTOMATIC scheduler path: a
 	// human may still dispatch the bead via `gt sling`, and `gt done` may still

@@ -213,6 +213,13 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 		{"no-auto-dispatch with human-investigation (gs-b2a)", beadStatusInfo{Status: "open", Labels: []string{"no-auto-dispatch", "human-investigation"}}, false},
 		{"reference type", beadStatusInfo{Status: "open", Type: "reference"}, false},
 		{"tripwire all three", beadStatusInfo{Status: "open", Type: "reference", Labels: []string{"do-not-dispatch", "pinned"}}, false},
+		// gu-0l7he: operator-reserved beads must never auto-dispatch, even while
+		// they stay OPEN in the human/mayor queue. These labels are honored by
+		// executeSling and scheduleBead; the readiness scan must match so the
+		// bead never reaches dispatch (no circuit-break churn).
+		{"mayor-only label", beadStatusInfo{Status: "open", Labels: []string{"mayor-only"}}, false},
+		{"no-polecat label", beadStatusInfo{Status: "open", Labels: []string{"no-polecat"}}, false},
+		{"human-only label", beadStatusInfo{Status: "open", Labels: []string{"human-only"}}, false},
 		{"normal work with unrelated label still ready", beadStatusInfo{Status: "open", Labels: []string{"gt:rig"}}, true},
 	}
 	for _, tt := range tests {
