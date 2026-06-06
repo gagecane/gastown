@@ -37,12 +37,17 @@ import tomllib
 
 VALID_TYPES = {"convoy", "workflow", "expansion", "aspect"}
 
-# Handlebars control words that are not variables (see SKILL.md). Anything in a
+# Handlebars control words that are not variables. Mirrors isHandlebarsKeyword
+# in internal/formula/variable_validation.go (source of truth). Anything in a
 # {{...}} that starts with one of these, or with `/` (close) or `#` (open
 # block), or `.` (Go-template convoy syntax), is not a [vars] reference.
-HANDLEBARS_CONTROL = {"else", "this", "range", "with", "end", "if", "each", "unless", "lookup", "log"}
+HANDLEBARS_CONTROL = {"else", "this", "root", "index", "key", "first", "last",
+                      "end", "range", "with", "block", "define", "template", "nil"}
 
-DURATION_RE = re.compile(r"^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)$")
+# Go time.ParseDuration accepts a sequence of unit groups, e.g. "2h30m" or
+# "1.5h" — not just a single unit. Mirror that so the offline check matches the
+# real parser (internal/formula/parser.go validateWispTTL).
+DURATION_RE = re.compile(r"^[-+]?((\d+(\.\d+)?|\.\d+|\d+\.)(ns|us|µs|μs|ms|s|m|h))+$")
 
 
 def infer_type(f):

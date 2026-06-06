@@ -198,6 +198,16 @@ The common ones: `formula field is required`, `duplicate step id`,
 variables`. Remember: `gt formula show` does NOT validate — trust
 `scripts/validate-formula.py` and `--dry-run`.
 
+- **My formula's convoy is barely progressing / shows up in `gt convoy
+  stranded`.** If you launched it with `gt formula run` from a CREW session,
+  the step beads are crew-owned and the auto-dispatch plugin skips
+  `*/crew/*`-owned beads (the `is_agent_owner` filter), so the convoy advances
+  only on the Deacon's periodic stranded-feed cycle — slow and bursty. The
+  steps are dependency-eligible; they're just invisible to the fast dispatcher.
+  To accelerate, sling the ready steps directly: `gt sling <step-bead-id>
+  <rig>` (repeat each wave), or launch the formula from a non-crew context.
+  See engine bug gu-3y6ro.
+
 ## Reference files
 
 Loaded on demand — keep SKILL.md focused (progressive disclosure):
