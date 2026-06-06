@@ -696,6 +696,72 @@ func TestManager_PostMerge_RefusesCloseWhenMergeNotLanded(t *testing.T) {
 	}
 }
 
+// TestManager_RecordMergeCommit_PersistsAndUnblocksGuard is the regression test
+// for gu-xs9na: a refinery hand-merge has no way to populate merge_commit, so
+// PostMerge's gu-ilf86 guard fail-closes with "merge_commit not recorded".
+// RecordMergeCommit writes the landed SHA onto the MR bead so the real
+// (ancestry-based) guard can then verify it. Here we record the SHA and confirm
+// it round-trips through FindMR into mr.MergeCommit.
+func TestManager_RecordMergeCommit_PersistsAndUnblocksGuard(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init(testutil.UniqueTestPrefix(t)); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{
+		Title:  "Implement feature H",
+		Labels: []string{"gt:task"},
+	})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	// MR bead with NO merge_commit field — the hand-merge case.
+	mrDesc := "branch: polecat/test/gt-hhh\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main"
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature H",
+		Labels:      []string{"gt:merge-request"},
+		Description: mrDesc,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	// Before recording, mr.MergeCommit is empty — the guard would fail-closed.
+	mrBefore, err := mgr.FindMR(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("FindMR before record: %v", err)
+	}
+	if mrBefore.MergeCommit != "" {
+		t.Fatalf("MergeCommit = %q before record, want empty", mrBefore.MergeCommit)
+	}
+
+	const landedSHA = "1a2b3c4d5e6f"
+	if err := mgr.RecordMergeCommit(mrIssue.ID, "  "+landedSHA+"\n"); err != nil {
+		t.Fatalf("RecordMergeCommit() error: %v", err)
+	}
+
+	// The SHA must round-trip through FindMR (trimmed) so PostMerge's guard sees it.
+	mrAfter, err := mgr.FindMR(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("FindMR after record: %v", err)
+	}
+	if mrAfter.MergeCommit != landedSHA {
+		t.Errorf("MergeCommit = %q after record, want %q", mrAfter.MergeCommit, landedSHA)
+	}
+}
+
+// TestManager_RecordMergeCommit_RejectsEmptySHA guards against silently
+// recording an empty merge_commit, which would leave the guard fail-closing.
+func TestManager_RecordMergeCommit_RejectsEmptySHA(t *testing.T) {
+	mgr, _ := setupTestManager(t)
+	if err := mgr.RecordMergeCommit("gt-anything", "   "); err == nil {
+		t.Fatal("RecordMergeCommit() with empty SHA = nil error, want error")
+	}
+}
+
 // TestManager_PostMerge_AlreadyClosedMR_SkipsVerification confirms the
 // idempotent recovery path (gu-3f02d) is not blocked by the gu-ilf86 guard:
 // an already-closed MR is past the verification point, so PostMerge must still

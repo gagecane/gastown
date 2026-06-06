@@ -167,6 +167,7 @@ Examples:
 
 // Post-merge flags
 var mqPostMergeSkipBranchDelete bool
+var mqPostMergeCommit string
 
 var mqPostMergeCmd = &cobra.Command{
 	Use:   "post-merge <rig> <mr-id>",
@@ -174,15 +175,23 @@ var mqPostMergeCmd = &cobra.Command{
 	Long: `Perform post-merge cleanup after a successful merge.
 
 This command consolidates post-merge steps into a single atomic operation:
-  1. Close the MR bead (status: merged)
-  2. Close the source issue
-  3. Delete the remote polecat branch (unless --skip-branch-delete)
+  1. Record the merge commit SHA on the MR bead (if --merge-commit given)
+  2. Close the MR bead (status: merged)
+  3. Close the source issue
+  4. Delete the remote polecat branch (unless --skip-branch-delete)
 
 Designed for use by the refinery formula after a successful merge to main.
 The branch name is read from the MR bead, so no manual branch argument is needed.
 
+When the refinery merges by hand (direct strategy: verified-push to the target
+branch), pass --merge-commit <sha> with the SHA that landed on origin/<target>.
+This records merge_commit before the silent-merge-loss guard (gu-ilf86) runs, so
+cleanup is not refused with "merge_commit not recorded" (gu-xs9na). The
+automated Engineer path records this itself and need not pass the flag.
+
 Examples:
   gt mq post-merge gastown gt-mr-abc123
+  gt mq post-merge gastown gt-mr-abc123 --merge-commit 1a2b3c4d
   gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete`,
 	Args: cobra.ExactArgs(2),
 	RunE: runMQPostMerge,
@@ -334,6 +343,7 @@ func init() {
 
 	// Post-merge flags
 	mqPostMergeCmd.Flags().BoolVar(&mqPostMergeSkipBranchDelete, "skip-branch-delete", false, "Skip remote branch deletion")
+	mqPostMergeCmd.Flags().StringVar(&mqPostMergeCommit, "merge-commit", "", "SHA that landed on origin/<target>; recorded before the silent-merge-loss guard runs (use for hand-merges)")
 
 	// Add subcommands
 	mqCmd.AddCommand(mqSubmitCmd)
@@ -508,6 +518,17 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 	mgr, r, _, err := getRefineryManager(rigName)
 	if err != nil {
 		return err
+	}
+
+	// Record the landed merge SHA before cleanup runs its silent-merge-loss
+	// guard (gu-ilf86). Hand-merges (direct strategy) have no other way to
+	// populate merge_commit, so without this the guard fail-closes with
+	// "merge_commit not recorded" on every refinery hand-merge (gu-xs9na).
+	if mqPostMergeCommit != "" {
+		if err := mgr.RecordMergeCommit(mrID, mqPostMergeCommit); err != nil {
+			return fmt.Errorf("recording merge commit: %w", err)
+		}
+		fmt.Printf("  %s Recorded merge commit: %s\n", style.Success.Render("✓"), mqPostMergeCommit)
 	}
 
 	// Run beads-level cleanup (close MR bead + source issue)

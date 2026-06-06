@@ -685,6 +685,43 @@ type PostMergeResult struct {
 	SourceIssueNotFound bool // true if source issue doesn't exist (already closed or invalid)
 }
 
+// RecordMergeCommit persists the landed merge SHA onto the MR bead's
+// merge_commit field. The automated Engineer path records this in
+// HandleMRInfoSuccess (engineer.go), but a refinery that merges by hand (the
+// direct-strategy verified-push in mol-refinery-patrol) has no other way to
+// record it. Without it, PostMerge's silent-merge-loss guard (gu-ilf86) reads
+// merge_commit empty and fail-closes on every hand-merge (gu-xs9na). Callers
+// pass the SHA actually pushed to origin/<target>; the guard then verifies it
+// is an ancestor of origin/<target> before closing the beads.
+func (m *Manager) RecordMergeCommit(idOrBranch, mergeCommit string) error {
+	sha := strings.TrimSpace(mergeCommit)
+	if sha == "" {
+		return fmt.Errorf("merge commit SHA is empty")
+	}
+
+	mr, err := m.FindMR(idOrBranch)
+	if err != nil {
+		return fmt.Errorf("finding MR to record merge commit: %w", err)
+	}
+
+	b := beads.New(m.rig.BeadsPath())
+	mrBead, err := b.Show(mr.ID)
+	if err != nil {
+		return fmt.Errorf("loading MR bead %s: %w", mr.ID, err)
+	}
+
+	fields := beads.ParseMRFields(mrBead)
+	if fields == nil {
+		fields = &beads.MRFields{}
+	}
+	fields.MergeCommit = sha
+	newDesc := beads.SetMRFields(mrBead, fields)
+	if err := b.Update(mr.ID, beads.UpdateOptions{Description: &newDesc}); err != nil {
+		return fmt.Errorf("updating MR %s with merge commit: %w", mr.ID, err)
+	}
+	return nil
+}
+
 // PostMerge performs post-merge cleanup for a successfully merged MR.
 // It closes the MR bead and its source issue. Branch deletion is handled
 // by the caller since the Manager doesn't have git access.

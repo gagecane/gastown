@@ -907,12 +907,24 @@ POLECAT WORKTREES ACCUMULATE INDEFINITELY AND THE LIFECYCLE BREAKS.
 This single command handles closing the MR bead, closing the source issue, and
 deleting the remote polecat branch (respects delete_merged_branches config):
 
+**`--merge-commit` is REQUIRED for direct hand-merges (gu-xs9na).** Unlike the
+automated Engineer path, a hand-merge never records `merge_commit` on the MR
+bead, so post-merge's silent-merge-loss guard (gu-ilf86) would refuse to close
+with "merge_commit not recorded" and force manual cleanup. Pass the SHA that
+landed on `origin/<merge-target>` — that is `REMOTE_SHA` from the Step 1.5 SHA
+cross-check (equivalently `LOCAL_SHA`, since the marker+cross-check confirmed
+they match). The guard then verifies that SHA is an ancestor of
+`origin/<merge-target>` before closing. Omit `--merge-commit` only for
+`merge_strategy=pr` (the Engineer/PR path records it itself).
+
 ```bash
+# Direct strategy: pass the landed SHA so the guard can verify it (gu-xs9na).
 # If an open PR was detected in Step 1.6 (direct) or merge_strategy=pr,
-# pass --skip-branch-delete to avoid auto-closing the PR via head_ref_delete.
-# Otherwise, omit the flag.
-gt mq post-merge <rig> <mr-bead-id>            # normal (no open PR)
-gt mq post-merge <rig> <mr-bead-id> --skip-branch-delete  # open PR exists
+# also pass --skip-branch-delete to avoid auto-closing the PR via
+# head_ref_delete.
+gt mq post-merge <rig> <mr-bead-id> --merge-commit "$REMOTE_SHA"            # direct, no open PR
+gt mq post-merge <rig> <mr-bead-id> --merge-commit "$REMOTE_SHA" --skip-branch-delete  # direct, open PR exists
+gt mq post-merge <rig> <mr-bead-id> --skip-branch-delete                   # merge_strategy=pr
 ```
 
 The MR bead ID was in the MERGE_READY message or find via:
