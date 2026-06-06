@@ -58,7 +58,18 @@ func TestMain(m *testing.M) {
 	}
 
 	// Verify no goroutine leaks after all tests and cleanup complete.
-	if err := goleak.Find(); err != nil {
+	//
+	// Ignore the testcontainers-go Ryuk Reaper goroutine: when a Dolt
+	// container is started, testcontainers-go spawns a Reaper connection
+	// goroutine that blocks on its termination signal channel
+	// (reaper.go: (*Reaper).connect.func1). This goroutine is owned by the
+	// testcontainers-go library and is not deterministically torn down before
+	// TestMain's goleak.Find runs, producing a flaky infra-level leak report
+	// unrelated to gastown code. (fixes gu-hxer6)
+	leakOpts := []goleak.Option{
+		goleak.IgnoreTopFunction("github.com/testcontainers/testcontainers-go.(*Reaper).connect.func1"),
+	}
+	if err := goleak.Find(leakOpts...); err != nil {
 		fmt.Fprintf(os.Stderr, "goleak: goroutine leak detected:\n%v\n", err)
 		os.Exit(1)
 	}
