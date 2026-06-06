@@ -174,6 +174,12 @@ const (
 	// 1h is comfortably longer than even a deeply backed-off await-signal
 	// idle (~5 min cap) so a healthy idle agent will never trip this.
 	DefaultWitnessStaleRigAgentHeartbeat = 1 * time.Hour
+	// DefaultWitnessStaleRigAgentNotifyCooldown is the minimum interval between
+	// repeated STALE_RIG_AGENT escalations for the same unchanged wedged agent.
+	// 30m balances "stop flooding the Mayor every cycle" (gu-z8qzq) against
+	// "don't go silent so long a genuinely stuck agent is forgotten." The alarm
+	// still re-fires sooner if the condition materially worsens.
+	DefaultWitnessStaleRigAgentNotifyCooldown = 30 * time.Minute
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -944,4 +950,14 @@ func (wt *WitnessThresholds) StaleRigAgentHeartbeatD() time.Duration {
 		return ParseDurationOrDefault(wt.StaleRigAgentHeartbeat, DefaultWitnessStaleRigAgentHeartbeat)
 	}
 	return DefaultWitnessStaleRigAgentHeartbeat
+}
+
+// StaleRigAgentNotifyCooldownD returns the configured or default cooldown
+// between repeated STALE_RIG_AGENT escalations for the same unchanged agent.
+// (gu-z8qzq) Set to 0 to disable suppression (re-notify every patrol cycle).
+func (wt *WitnessThresholds) StaleRigAgentNotifyCooldownD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.StaleRigAgentNotifyCooldown, DefaultWitnessStaleRigAgentNotifyCooldown)
+	}
+	return DefaultWitnessStaleRigAgentNotifyCooldown
 }

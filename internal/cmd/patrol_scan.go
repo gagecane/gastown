@@ -255,9 +255,12 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// or where the daemon supervisor missed a restart and the heartbeat sat
 	// untouched for hours.
 	staleAgentThreshold := witnessCfg.StaleRigAgentHeartbeatD()
+	// Cooldown between repeated escalations for the same unchanged stale agent,
+	// so the witness stops re-mailing mayor every patrol cycle (gu-z8qzq).
+	staleAgentCooldown := witnessCfg.StaleRigAgentNotifyCooldownD()
 	// Pass $GT_SESSION so the detector never escalates the scanning agent's
 	// own heartbeat — the self-amplifying STALE_RIG_AGENT flood guard (gu-vqmmp).
-	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold, os.Getenv("GT_SESSION"))
+	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold, os.Getenv("GT_SESSION"), staleAgentCooldown)
 
 	// False-deferred bead recovery (gu-wykt). Beads that are status=deferred
 	// but whose work has shipped on origin/<default> with a commit citing the

@@ -42,7 +42,7 @@ func writeRigAgentHeartbeat(t *testing.T, townRoot, sessionName string, age time
 func TestDetectStaleRigAgentHeartbeats_DisabledByZero(t *testing.T) {
 	installFakeTmuxNoServer(t)
 
-	res := DetectStaleRigAgentHeartbeats(t.TempDir(), "testrig", nil, 0, "")
+	res := DetectStaleRigAgentHeartbeats(t.TempDir(), "testrig", nil, 0, "", 0)
 	if res == nil {
 		t.Fatalf("DetectStaleRigAgentHeartbeats returned nil")
 	}
@@ -62,7 +62,7 @@ func TestDetectStaleRigAgentHeartbeats_NoSessionNoEscalation(t *testing.T) {
 	installFakeTmuxNoServer(t)
 
 	townRoot := t.TempDir()
-	res := DetectStaleRigAgentHeartbeats(townRoot, "testrig", nil, time.Hour, "")
+	res := DetectStaleRigAgentHeartbeats(townRoot, "testrig", nil, time.Hour, "", 0)
 	if res.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2 (refinery+witness)", res.Checked)
 	}
@@ -87,7 +87,7 @@ func TestDetectStaleRigAgentHeartbeats_FreshSkips(t *testing.T) {
 	writeRigAgentHeartbeat(t, townRoot, session.RefinerySessionName(prefix), 30*time.Second)
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefix), 30*time.Second)
 
-	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "")
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0)
 	if res.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2", res.Checked)
 	}
@@ -117,7 +117,7 @@ func TestDetectStaleRigAgentHeartbeats_StaleEscalates(t *testing.T) {
 	// branch logic so a regression that escalates everything (or nothing) shows.
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefix), 30*time.Second)
 
-	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "")
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0)
 	if res.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2", res.Checked)
 	}
@@ -163,7 +163,7 @@ func TestDetectStaleRigAgentHeartbeats_SelfSkip(t *testing.T) {
 	witnessSession := session.WitnessSessionName(prefix)
 	writeRigAgentHeartbeat(t, townRoot, witnessSession, 2*time.Hour)
 
-	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, witnessSession)
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, witnessSession, 0)
 	if res.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2", res.Checked)
 	}

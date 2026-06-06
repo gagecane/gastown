@@ -568,6 +568,16 @@ type WitnessThresholds struct {
 	// with a STALE_RIG_AGENT mail. Default "1h". Set to "0" to disable.
 	// (gu-0nmw)
 	StaleRigAgentHeartbeat string `json:"stale_rig_agent_heartbeat,omitempty"`
+
+	// StaleRigAgentNotifyCooldown is the minimum interval between repeated
+	// STALE_RIG_AGENT escalations for the SAME wedged agent when the condition
+	// has not materially changed. Prevents the witness from re-mailing mayor
+	// every patrol cycle for an already-reported stale agent — the Mayor-
+	// interrupting flood documented on gu-z8qzq. Within the cooldown the alarm
+	// still re-fires if the staleness worsens (crosses a new threshold multiple)
+	// or the heartbeat transitions missing<->present. Default "30m". Set to "0"
+	// to disable suppression (re-notify every cycle, pre-gu-z8qzq behavior).
+	StaleRigAgentNotifyCooldown string `json:"stale_rig_agent_notify_cooldown,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

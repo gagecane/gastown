@@ -34,7 +34,9 @@ type StaleRigAgentResult struct {
 	// stale (the gu-rh0g failure mode: process running, agent stuck).
 	SessionAlive bool
 	// Action describes what the detector did: "escalated" when mail was sent,
-	// "skip-fresh" when the heartbeat was within threshold, etc.
+	// "skip-fresh" when the heartbeat was within threshold,
+	// "skip-cooldown" when the condition was already reported recently and has
+	// not materially changed (gu-z8qzq dedup), etc.
 	Action string
 	// MailSent is true when the escalation mail was successfully delivered
 	// to mayor (or via nudge fallback).
@@ -73,9 +75,19 @@ type DetectStaleRigAgentHeartbeatsResult struct {
 //     AND session dead, skip silently (the agent is intentionally not running).
 //     If present, compare age against the threshold.
 //   - On stale: send a HIGH-priority mail to mayor with the role, session,
-//     age, and recovery hint. The mail is plain (no dedup label on a bead —
-//     there is no bead to label) so it CAN repeat each patrol cycle. Mayor
-//     is the rate-limit authority for "this same alarm is firing again."
+//     age, and recovery hint — UNLESS the same condition was already reported
+//     within the cooldown window and has not materially worsened (gu-z8qzq).
+//
+// Dedup / cooldown (gu-z8qzq): the witness patrol runs as a fresh `gt patrol
+// scan` process each cycle, so this detector previously re-sent an identical
+// STALE_RIG_AGENT mail to mayor on EVERY cycle for the same wedged agent —
+// interrupting the Mayor mid-task on nearly every tool call during the
+// 2026-06-06 Dolt-saturation incident. A file-backed per-(rig,session) record
+// under .runtime/stale_rig_agent/ now suppresses re-notification while the
+// condition is unchanged, and re-notifies only when it materially changes:
+// the staleness band crosses a new threshold multiple, the heartbeat
+// transitions missing<->present, or the cooldown window elapses. cooldown<=0
+// disables suppression (pre-gu-z8qzq behavior / operator opt-out).
 //
 // The detector intentionally does NOT restart the agent itself — that
 // responsibility belongs to the daemon supervisor (which already runs
@@ -89,7 +101,7 @@ type DetectStaleRigAgentHeartbeatsResult struct {
 // heartbeat aged out would otherwise escalate itself every patrol cycle,
 // and cross-nudged peers re-running `gt patrol scan` would escalate theirs
 // in turn. Pass "" to disable the self-skip (e.g. in tests).
-func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration, selfSession string) *DetectStaleRigAgentHeartbeatsResult {
+func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration, selfSession string, notifyCooldown time.Duration) *DetectStaleRigAgentHeartbeatsResult {
 	result := &DetectStaleRigAgentHeartbeatsResult{}
 
 	if staleThreshold <= 0 {
@@ -161,8 +173,7 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 			// Session is alive but no heartbeat at all. This is the
 			// pre-gu-0nmw case where refinery/witness sessions never wrote
 			// a heartbeat. Treat as stale so we surface the gap.
-			item.Action = "escalated"
-			item.MailSent = sendStaleRigAgentMail(router, t, rigName, item, staleThreshold)
+			escalateStaleRigAgent(&item, router, t, townRoot, rigName, staleThreshold, notifyCooldown, now, 1, true)
 			result.Stale = append(result.Stale, item)
 			continue
 		}
@@ -177,14 +188,49 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 		// Heartbeat exceeds threshold. Escalate regardless of session state:
 		//   - Session alive + stale heartbeat = stuck process (gu-rh0g signature)
 		//   - Session dead + stale heartbeat = died, supervisor missed restart
-		// Both are mayor's problem; both deserve a fresh mail each patrol cycle
-		// until resolved.
-		item.Action = "escalated"
-		item.MailSent = sendStaleRigAgentMail(router, t, rigName, item, staleThreshold)
+		// Both are mayor's problem. The cooldown gate (gu-z8qzq) suppresses
+		// re-notifying every cycle for an unchanged condition, but re-fires when
+		// the staleness band worsens or the cooldown elapses.
+		band := staleAgentBand(item.HeartbeatAge, staleThreshold)
+		escalateStaleRigAgent(&item, router, t, townRoot, rigName, staleThreshold, notifyCooldown, now, band, false)
 		result.Stale = append(result.Stale, item)
 	}
 
 	return result
+}
+
+// escalateStaleRigAgent applies the gu-z8qzq dedup/cooldown gate, then either
+// sends the STALE_RIG_AGENT mail (recording the new notify state) or records a
+// "skip-cooldown" no-op. It mutates item.Action and item.MailSent in place.
+//
+// band is the staleness band (1 for a missing heartbeat or [1x,2x) threshold,
+// 2 for [2x,3x), ...); missing indicates a fully-absent heartbeat vs a
+// present-but-stale one. Both feed shouldNotifyStaleAgent's material-change
+// detection.
+func escalateStaleRigAgent(item *StaleRigAgentResult, router *mail.Router, t *tmux.Tmux, townRoot, rigName string, threshold, cooldown time.Duration, now time.Time, band int, missing bool) {
+	prev := readStaleAgentState(townRoot, rigName, item.SessionName)
+	if !shouldNotifyStaleAgent(prev, now, cooldown, band, missing) {
+		// Same alarm, already reported recently, condition unchanged — suppress
+		// the duplicate mail that was interrupting the Mayor every cycle.
+		item.Action = "skip-cooldown"
+		return
+	}
+
+	item.Action = "escalated"
+	item.MailSent = sendStaleRigAgentMail(router, t, rigName, *item, threshold)
+
+	// Record the notification so subsequent cycles can suppress duplicates.
+	// We record on the decision to notify (not only on successful send): a
+	// transient mail failure should not defeat the cooldown and reopen the
+	// flood. The nudge fallback inside sendStaleRigAgentMail still surfaces the
+	// alarm out-of-band.
+	if cooldown > 0 {
+		writeStaleAgentState(townRoot, rigName, item.SessionName, &staleAgentNotifyState{
+			LastNotifiedAt: now,
+			LastBand:       band,
+			LastMissing:    missing,
+		})
+	}
 }
 
 // sendStaleRigAgentMail emits a HIGH-priority mail to mayor describing the
@@ -216,7 +262,9 @@ Recovery:
   - gt %s status --json %s   (if applicable)
   - gt session restart %s/%s
 
-Dedup: this mail repeats every patrol cycle until heartbeats refresh.`,
+Dedup (gu-z8qzq): this alarm is suppressed on subsequent patrol cycles while
+the condition is unchanged. It re-fires only if the staleness worsens
+materially or after the notify-cooldown window elapses.`,
 			rigName, item.AgentRole, item.SessionName,
 			item.SessionAlive, threshold,
 			rigName, item.AgentRole,
@@ -240,7 +288,10 @@ Recovery:
   - gt %s status --json %s
   - gt session restart %s/%s
 
-Dedup: this mail repeats every patrol cycle until heartbeats refresh.`,
+Dedup (gu-z8qzq): this alarm is suppressed on subsequent patrol cycles while
+the condition is unchanged. It re-fires only if the staleness worsens
+materially (crosses a new threshold multiple) or after the notify-cooldown
+window elapses.`,
 			rigName, item.AgentRole, item.HeartbeatAge.Round(time.Second), threshold,
 			item.SessionAlive,
 			rigName, item.AgentRole,
