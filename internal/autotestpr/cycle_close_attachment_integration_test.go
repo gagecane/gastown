@@ -285,6 +285,103 @@ func TestCycleCloseHandlerRoundTrip_FilesAttachments(t *testing.T) {
 	}
 }
 
+// TestEnableProvisionsRigStateBead is the Phase 1 task 15 (gu-wc5q)
+// acceptance harness for the per-rig state-bead provisioning that the
+// `gt auto-test-pr enable` flow now wires in (see runAutoTestPREnable
+// in internal/cmd/auto_test_pr.go, which calls EnsureRigStateBead
+// between the settings-JSON write and the enabled_rigs[] CAS-append).
+//
+// Acceptance criteria from gu-wc5q:
+//
+//	(1) Pinned bead provisioned with the correct initial single-writer
+//	    metadata: {schema_version:1, state:"idle", current_cycle:null}.
+//	    The bead is pinned and Mayor-owned (never polecat per gu-gal8).
+//	(2) OQ4 fallback: the materializer query against the freshly-
+//	    provisioned bead returns empty transitions[]/rejections[]
+//	    (the read path is wired before any cycle has filed an
+//	    attachment).
+//
+// Acceptance #3 (first cycle's cycle-close handler files a transition
+// attachment that surfaces in the materialized list) is covered by
+// TestCycleCloseAttachmentRoundTrip_BothMaterialize above and the
+// phase0 e2e test.
+func TestEnableProvisionsRigStateBead(t *testing.T) {
+	if os.Getenv("GT_RUN_OQ4_SPIKE") != "1" {
+		t.Skip("provisioning acceptance skipped (set GT_RUN_OQ4_SPIKE=1 to run)")
+	}
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed")
+	}
+
+	b, _ := setupRoundTripBeads(t)
+
+	const rig = "gastown_upstream"
+
+	// Provision via the same entry point the enable flow uses.
+	issue, err := EnsureRigStateBead(b, rig)
+	if err != nil {
+		t.Skipf("EnsureRigStateBead failed (Dolt routing in test rig): %v", err)
+	}
+
+	// (1) ID, pin status, and Mayor ownership.
+	if got, want := issue.ID, RigStateBeadID(rig); got != want {
+		t.Errorf("bead ID = %q; want %q", got, want)
+	}
+	if issue.Status != beads.StatusPinned {
+		t.Errorf("bead Status = %q; want %q", issue.Status, beads.StatusPinned)
+	}
+
+	// (1) Initial single-writer metadata: idle, schema v1, null cycle.
+	state, err := UnmarshalRigState(issue.Metadata)
+	if err != nil {
+		t.Fatalf("UnmarshalRigState: %v", err)
+	}
+	if state.SchemaVersion != RigStateSchemaVersion {
+		t.Errorf("schema_version = %d; want %d", state.SchemaVersion, RigStateSchemaVersion)
+	}
+	if state.State != PerRigCycleStateIdle {
+		t.Errorf("state = %q; want %q", state.State, PerRigCycleStateIdle)
+	}
+	if state.CurrentCycle != nil {
+		t.Errorf("current_cycle = %+v; want nil", state.CurrentCycle)
+	}
+
+	// (1) The single-writer bead must NOT carry the high-cardinality
+	// logs — those live on attachment beads per the OQ4 fallback.
+	meta := string(issue.Metadata)
+	if strings.Contains(meta, "transition_log") {
+		t.Errorf("rig-state bead metadata contains 'transition_log':\n%s", meta)
+	}
+	if strings.Contains(meta, "rejection_log") {
+		t.Errorf("rig-state bead metadata contains 'rejection_log':\n%s", meta)
+	}
+
+	// EnsureRigStateBead is idempotent: a second call returns the same
+	// bead without error (enable may be re-run after a partial failure).
+	if _, err := EnsureRigStateBead(b, rig); err != nil {
+		t.Errorf("second EnsureRigStateBead (idempotency): %v", err)
+	}
+
+	// (2) Materializer over the freshly-provisioned bead returns empty
+	// (non-nil) transitions/rejections — no cycle has run yet.
+	transitions, rejections, err := MaterializeAutoTestState(b, rig)
+	if err != nil {
+		t.Fatalf("MaterializeAutoTestState: %v", err)
+	}
+	if transitions == nil {
+		t.Error("transitions = nil; want empty non-nil slice")
+	}
+	if rejections == nil {
+		t.Error("rejections = nil; want empty non-nil slice")
+	}
+	if len(transitions) != 0 {
+		t.Errorf("transitions len = %d; want 0 (freshly provisioned)", len(transitions))
+	}
+	if len(rejections) != 0 {
+		t.Errorf("rejections len = %d; want 0 (freshly provisioned)", len(rejections))
+	}
+}
+
 // --- Helpers ---
 
 // setupRoundTripBeads provisions a fresh isolated beads rig and returns

@@ -6,19 +6,24 @@
 // of the per-rig settings JSON loader (task 1) and the town-state
 // pinned bead (task 8).
 //
-// Both verbs operate on TWO surfaces atomically:
+// `enable` operates on THREE surfaces in order:
 //
 //  1. The per-rig settings JSON (durable record of intent;
 //     authoritative ground truth).
-//  2. The town-state pinned bead's `enabled_rigs[]` slice
+//  2. The per-rig `<rig>-auto-test-state` pinned bead (Phase 1 task 15,
+//     gu-wc5q). Provisioned BEFORE step 3 so the cycle's LoadRigState
+//     always finds an idle state once the rig is enabled. Mayor-owned
+//     (Actor=mayor, never polecat per gu-gal8); idempotent.
+//  3. The town-state pinned bead's `enabled_rigs[]` slice
 //     (denormalized read-cache used by `gt auto-test-pr status`).
 //
-// `enable` writes the flag THEN CAS-appends `target_rig` to
-// `enabled_rigs[]`; `disable` writes the flag false THEN CAS-removes
-// from `enabled_rigs[]`. If the second step fails after the first
-// commits, the CLI exits non-zero with a clear "settings-JSON updated
-// but town bead out-of-sync" notice — the Mayor's reconcile cycle
-// (Phase 0 task 4) heals on its next iteration.
+// `disable` operates on TWO surfaces: it writes the flag false THEN
+// CAS-removes the rig from `enabled_rigs[]` (the per-rig state bead is
+// left in place so cooldown/history survive a disable→re-enable round
+// trip). If a town-bead step fails after the settings write commits,
+// the CLI exits non-zero with a clear "settings-JSON updated but town
+// bead out-of-sync" notice — the Mayor's reconcile cycle (Phase 0
+// task 4) heals on its next iteration.
 //
 // v1 allow-lists per Q1/Q4 (synthesis):
 //   - language: "go" only; other values produce a static error
@@ -116,19 +121,22 @@ var autoTestPREnableCmd = &cobra.Command{
 	Short: "Enable auto-test-pr for a rig",
 	Long: `Enable auto-test-pr for a rig.
 
-This verb operates on two surfaces atomically:
+This verb operates on three surfaces in order:
 
   1. Writes auto_test_pr.enabled=true (plus language and any other
      fields) to the rig's settings JSON. The settings JSON is the
      authoritative ground truth.
-  2. CAS-appends the rig name to the town-state bead's enabled_rigs[]
+  2. Provisions the per-rig <rig>-auto-test-state pinned bead with the
+     initial idle state (idempotent; Mayor-owned). This runs before
+     step 3 so the cycle always finds a readable state once the rig
+     is enabled.
+  3. CAS-appends the rig name to the town-state bead's enabled_rigs[]
      slice — the denormalized read-cache used by
      ` + "`gt auto-test-pr status`" + `.
 
-If step 2 fails after step 1 commits, the CLI exits non-zero with a
-"settings-JSON updated but town bead out-of-sync" notice. The Mayor's
-reconcile cycle (Phase 0 task 4) heals enabled_rigs[] on its next
-iteration.
+If a bead step fails after step 1 commits, the CLI exits non-zero with
+a clear notice. The Mayor's reconcile cycle (Phase 0 task 4) heals
+enabled_rigs[] on its next iteration.
 
 In v1 the rig must be the pilot (gastown_upstream) and the language
 must be go. Other values are rejected with a pointer to the v2
@@ -279,10 +287,30 @@ func runAutoTestPREnable(cmd *cobra.Command, args []string) error {
 		"✓ auto_test_pr.enabled=true written to %s\n",
 		filepath.Join(rigPath, "settings", "config.json"))
 
-	// Step 2: CAS-append to town state. Surface a clear partial-write
+	bd := beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads"))
+
+	// Step 2: provision the per-rig state pinned bead BEFORE adding the
+	// rig to enabled_rigs[]. Ordering matters: once a rig appears in
+	// enabled_rigs[], the cycle's processRig calls LoadRigState and
+	// fails with ErrRigStateNotProvisioned if the pinned bead is absent.
+	// Provisioning first guarantees the cycle has an idle state to read.
+	// EnsureRigStateBead is idempotent and stamps Actor=mayor (the bead
+	// is Mayor-owned, never polecat-owned, per gu-gal8).
+	if _, err := autotestpr.EnsureRigStateBead(bd, autoTestPREnableRig); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"gt auto-test-pr enable: settings-JSON updated but per-rig state bead %s could not be provisioned: %v\n",
+			autotestpr.RigStateBeadID(autoTestPREnableRig), err)
+		fmt.Fprintln(cmd.ErrOrStderr(),
+			"  re-run `gt auto-test-pr enable` once Dolt is reachable to complete provisioning.")
+		return NewSilentExit(3)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(),
+		"✓ per-rig state bead %s provisioned (state=idle)\n",
+		autotestpr.RigStateBeadID(autoTestPREnableRig))
+
+	// Step 3: CAS-append to town state. Surface a clear partial-write
 	// notice if it fails — settings JSON is durable, so the Mayor
 	// reconcile cycle will heal enabled_rigs[] on the next tick.
-	bd := beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads"))
 	if err := autotestpr.AppendEnabledRig(bd, autoTestPREnableRig); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: settings-JSON updated but town bead out-of-sync: %v\n", err)
