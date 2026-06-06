@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -30,6 +31,49 @@ const (
 	// one extra cycle of latency for silence on single flakes is the right call.
 	defaultMainBranchTestFlakeThreshold = 2
 )
+
+// gateLockPollInterval is how often acquireGlobalGateLock retries the
+// non-blocking flock while another rig's gate suite holds it. A few seconds is
+// negligible against the 20-40min act/Docker runs the lock serializes.
+const gateLockPollInterval = 2 * time.Second
+
+// acquireGlobalGateLock serializes main_branch_test gate execution across the
+// ENTIRE town — across rigs, overlapping patrol cycles, and separate daemon
+// processes. The 2026-06-04 load-174 estop (gs-b1l) happened when act-based
+// (GitHub-Actions-in-Docker) CI suites for multiple rigs ran simultaneously:
+// lia_bac and lia_iac each ran ~17 act suites in a short window (42 total), and
+// several overlapping 20-40min Docker-heavy runs on 12 cores drove load to 174,
+// triggering an operator emergency-stop.
+//
+// A town-global flock guarantees at most one rig's gate suite runs at a time.
+// We poll a NON-blocking try-acquire rather than a blocking flock so the wait
+// honors the daemon context: on shutdown the waiter bails instead of pinning
+// the patrol loop. flock auto-releases when the holding process dies, so a
+// crashed daemon never wedges the lock — the next poll acquires it.
+//
+// The lock file lives under the daemon state directory alongside
+// main_branch_test_state.json.
+func acquireGlobalGateLock(ctx context.Context, townRoot string) (func(), error) {
+	lockDir := filepath.Join(townRoot, "daemon")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating gate lock dir: %w", err)
+	}
+	lockPath := filepath.Join(lockDir, "main_branch_test.lock")
+	for {
+		release, ok, err := lock.FlockTryAcquire(lockPath)
+		if err != nil {
+			return nil, fmt.Errorf("acquiring gate lock: %w", err)
+		}
+		if ok {
+			return release, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(gateLockPollInterval):
+		}
+	}
+}
 
 // MainBranchTestConfig holds configuration for the main_branch_test patrol.
 // This patrol periodically runs quality gates on each rig's main branch to
@@ -296,7 +340,19 @@ func (d *Daemon) runMainBranchTests() {
 
 	for _, rigName := range rigNames {
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
+
+		// Serialize each rig's gate suite behind a town-global flock so two
+		// act/Docker CI suites never run at once (gs-b1l). The lock is held
+		// only for the gate run, not the subsequent attribution/escalation
+		// bookkeeping. A lock error means the daemon context was canceled
+		// (shutdown) — abort the patrol cleanly rather than escalate.
+		release, lockErr := acquireGlobalGateLock(d.ctx, d.config.TownRoot)
+		if lockErr != nil {
+			d.logger.Printf("main_branch_test: aborting patrol — global gate lock unavailable: %v", lockErr)
+			return
+		}
 		currentSHA, runErr := d.testRigMainBranch(rigName, rigPath, timeout)
+		release()
 
 		// hq-0qszq: a host-load SIGKILL is NOT a regression and NOT a pass.
 		// Skip it without escalating and without touching the attribution

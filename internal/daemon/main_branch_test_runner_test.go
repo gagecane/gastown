@@ -1703,3 +1703,79 @@ func TestCleanupStaleWorktree_RemovesRegisteredWorktree(t *testing.T) {
 		}
 	}
 }
+
+// TestAcquireGlobalGateLock_Serializes verifies that the town-global gate lock
+// (gs-b1l) is mutually exclusive: while one holder owns it, a second acquire
+// blocks, and only succeeds after the first releases. This is the invariant
+// that prevents two act/Docker CI suites from running concurrently.
+func TestAcquireGlobalGateLock_Serializes(t *testing.T) {
+	townRoot := t.TempDir()
+	ctx := context.Background()
+
+	release1, err := acquireGlobalGateLock(ctx, townRoot)
+	if err != nil {
+		t.Fatalf("first acquire failed: %v", err)
+	}
+
+	// A second acquire must NOT succeed while the first is held. Run it in a
+	// goroutine and assert it is still blocked after a short wait.
+	acquired := make(chan func(), 1)
+	go func() {
+		release2, err := acquireGlobalGateLock(ctx, townRoot)
+		if err != nil {
+			t.Errorf("second acquire errored: %v", err)
+			return
+		}
+		acquired <- release2
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second acquire succeeded while first lock was held — lock is not exclusive")
+	case <-time.After(2 * gateLockPollInterval):
+		// Still blocked, as expected.
+	}
+
+	// Release the first lock; the waiter should now acquire it.
+	release1()
+
+	select {
+	case release2 := <-acquired:
+		release2()
+	case <-time.After(5 * gateLockPollInterval):
+		t.Fatal("second acquire did not proceed after first lock was released")
+	}
+}
+
+// TestAcquireGlobalGateLock_ContextCancel verifies that a waiter blocked on the
+// gate lock bails out when its context is canceled (daemon shutdown) rather
+// than pinning the patrol loop forever.
+func TestAcquireGlobalGateLock_ContextCancel(t *testing.T) {
+	townRoot := t.TempDir()
+
+	release1, err := acquireGlobalGateLock(context.Background(), townRoot)
+	if err != nil {
+		t.Fatalf("first acquire failed: %v", err)
+	}
+	defer release1()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := acquireGlobalGateLock(ctx, townRoot)
+		errCh <- err
+	}()
+
+	// Give the waiter a moment to enter the poll loop, then cancel.
+	time.Sleep(gateLockPollInterval / 2)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected context-cancel error, got nil (lock acquired despite held)")
+		}
+	case <-time.After(5 * gateLockPollInterval):
+		t.Fatal("waiter did not return after context cancel")
+	}
+}
