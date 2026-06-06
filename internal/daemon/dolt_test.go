@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // ============================================================================
@@ -1180,5 +1182,48 @@ func TestStop_NoInFlightAlerts_DoesNotBlock(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop() blocked even though no alert goroutines were in flight")
+	}
+}
+
+// TestConnectionCountWarning verifies the connection-saturation alarm fires at
+// 80% of the *actual* configured max (doltserver.DefaultMaxConnections), not a
+// stale hardcoded reference. Regression guard for gu-nf6aj, where the alarm
+// used maxConn=50 while the server ran with max_connections=100, so it warned
+// at the wrong count and reported nonsensical percentages.
+func TestConnectionCountWarning(t *testing.T) {
+	max := doltserver.DefaultMaxConnections
+	threshold := (max * 80) / 100
+
+	tests := []struct {
+		name      string
+		count     int
+		maxConn   int
+		wantWarn  bool
+		wantInMsg string
+	}{
+		{"below threshold is silent", threshold - 1, max, false, ""},
+		{"at threshold warns", threshold, max, true, fmt.Sprintf("max %d", max)},
+		{"saturated warns", max, max, true, fmt.Sprintf("count %d", max)},
+		{"zero maxConn falls back to default", threshold, 0, true, fmt.Sprintf("max %d", max)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := connectionCountWarning(tt.count, tt.maxConn)
+			if tt.wantWarn && got == "" {
+				t.Fatalf("connectionCountWarning(%d, %d) = \"\", want a warning", tt.count, tt.maxConn)
+			}
+			if !tt.wantWarn && got != "" {
+				t.Fatalf("connectionCountWarning(%d, %d) = %q, want \"\"", tt.count, tt.maxConn, got)
+			}
+			if tt.wantInMsg != "" && !strings.Contains(got, tt.wantInMsg) {
+				t.Errorf("warning %q does not contain %q", got, tt.wantInMsg)
+			}
+		})
+	}
+
+	// The percentage must never exceed 100 when count == maxConn — the old
+	// bug produced "160%" because count(80) was divided by the wrong max(50).
+	if got := connectionCountWarning(max, max); !strings.Contains(got, "100%") {
+		t.Errorf("at saturation, warning should report 100%%, got %q", got)
 	}
 }

@@ -872,7 +872,7 @@ listener:
   port: %d%s
   read_timeout_millis: 30000
   write_timeout_millis: 30000
-  max_connections: 100
+  max_connections: %d
 
 data_dir: %q
 
@@ -884,6 +884,7 @@ behavior:
 %s`,
 		cfg.Port,
 		hostLine,
+		doltserver.DefaultMaxConnections,
 		cfg.DataDir,
 		eventSchedulerLine,
 		systemVariablesBlock,
@@ -1160,9 +1161,26 @@ func (m *DoltServerManager) checkConnectionCount() string {
 		return ""
 	}
 
-	// Use the doltserver package default (50) as a reasonable cap reference
-	maxConn := 50
+	return connectionCountWarning(count, doltserver.DefaultMaxConnections)
+}
+
+// connectionCountWarning returns a warning string when the active connection
+// count reaches 80% of maxConn, or "" otherwise. Extracted as a pure function
+// so the threshold math is unit-testable without a live Dolt server.
+//
+// maxConn MUST be the value the server is actually started with
+// (doltserver.DefaultMaxConnections / the max_connections in the managed
+// config.yaml). A stale reference here produces a useless alarm that fires at
+// the wrong count and reports nonsensical percentages — the exact failure that
+// let the pool reach 100/100 before anything warned (gu-nf6aj).
+func connectionCountWarning(count, maxConn int) string {
+	if maxConn <= 0 {
+		maxConn = doltserver.DefaultMaxConnections
+	}
 	threshold := (maxConn * 80) / 100
+	if threshold < 1 {
+		threshold = 1
+	}
 	if count >= threshold {
 		return fmt.Sprintf("Dolt connection count %d is at %d%% of max %d — approaching limit",
 			count, (count*100)/maxConn, maxConn)
