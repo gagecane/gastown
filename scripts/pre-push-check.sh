@@ -40,8 +40,9 @@
 #
 # Integration tests:
 #   This script does NOT run `-tags=integration` tests by default — they
-#   require Docker + dolt container and take ~5 minutes. CI's Integration
-#   Tests job runs them. To run locally: `make verify-integration`.
+#   require Docker + dolt container and take ~5 minutes. They run NIGHTLY in
+#   CI (nightly-integration.yml), not on every push (gu-d9m7o). To run
+#   locally: `make verify-integration`.
 #
 # Escape hatches (use sparingly; if you're reaching regularly, file a bead):
 #   GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
