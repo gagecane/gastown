@@ -12,7 +12,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/testutil"
@@ -43,6 +45,42 @@ func runGTCmdOutput(t *testing.T, binary, dir string, env []string, args ...stri
 		t.Fatalf("gt %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, out, stderr.String())
 	}
 	return string(out)
+}
+
+// runGTCmdOutputUntil runs a gt command, retrying until the returned stdout
+// satisfies the check func or the retry budget is exhausted. It exists to absorb
+// the shared Dolt server's write-then-read visibility lag (see gu-9qbg5): a bead
+// or dependency that was just written may not be visible to the next fresh
+// connection for a short window, so a single read can observe stale state
+// (e.g. a dry-run listing fewer cross-rig children than were linked). Fixed
+// time.Sleep workarounds proved insufficient in CI; bounded polling is robust
+// to a variable lag. Returns the last stdout seen; fails the test only if the
+// command itself errors or the check never passes within the budget.
+func runGTCmdOutputUntil(t *testing.T, binary, dir string, env []string, check func(string) bool, args ...string) string {
+	t.Helper()
+	const attempts = 10
+	const interval = 500 * time.Millisecond
+	var out string
+	for i := 0; i < attempts; i++ {
+		out = runGTCmdOutput(t, binary, dir, env, args...)
+		if check(out) {
+			return out
+		}
+		if i < attempts-1 {
+			time.Sleep(interval)
+		}
+	}
+	return out
+}
+
+// containsAll reports whether s contains every substring in subs.
+func containsAll(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }
 
 // runGTCmdMayFail runs a gt command and returns combined output and any error.

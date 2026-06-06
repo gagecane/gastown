@@ -338,27 +338,39 @@ func TestSchedulerAutoConvoyCreation(t *testing.T) {
 	}
 
 	// Verify: convoy has a "tracks" dependency pointing to the rig bead.
+	// Retry the readback: the tracks dep was just written by gt sling and may
+	// lag on readback against the shared Dolt server (gu-9qbg5).
 	depArgs := beads.MaybePrependAllowStale([]string{
 		"dep", "list", fields.Convoy, fields.Convoy,
 		"--direction=down", "--type=tracks", "--json",
 	})
-	depCmd := exec.Command("bd", depArgs...)
-	depCmd.Dir = hqPath
-	depOut, err := depCmd.Output()
-	if err != nil {
-		t.Fatalf("convoy %s dep list failed: %v", fields.Convoy, err)
-	}
-	var deps []struct {
-		DependsOnID string `json:"depends_on_id"`
-	}
-	if err := json.Unmarshal(depOut, &deps); err != nil {
-		t.Fatalf("parse dep list: %v\nraw: %s", err, depOut)
-	}
+	var depOut []byte
 	foundTracked := false
-	for _, dep := range deps {
-		if strings.Contains(dep.DependsOnID, beadID) {
-			foundTracked = true
+	for i := 0; i < 10; i++ {
+		depCmd := exec.Command("bd", depArgs...)
+		depCmd.Dir = hqPath
+		out, err := depCmd.Output()
+		if err != nil {
+			t.Fatalf("convoy %s dep list failed: %v", fields.Convoy, err)
+		}
+		depOut = out
+		var deps []struct {
+			DependsOnID string `json:"depends_on_id"`
+		}
+		if err := json.Unmarshal(depOut, &deps); err != nil {
+			t.Fatalf("parse dep list: %v\nraw: %s", err, depOut)
+		}
+		for _, dep := range deps {
+			if strings.Contains(dep.DependsOnID, beadID) {
+				foundTracked = true
+				break
+			}
+		}
+		if foundTracked {
 			break
+		}
+		if i < 9 {
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 	if !foundTracked {
@@ -839,16 +851,20 @@ func TestSchedulerMultiRigEpicAutoResolve(t *testing.T) {
 
 	// Dry-run: verify auto-rig-resolution routes each child correctly.
 	// Uses --dry-run to avoid needing formula infrastructure (mol-polecat-work).
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", epicID, "--dry-run")
+	// Retry until both children are visible: the epic→child2 cross-rig dep was
+	// just written and may lag on readback against the shared Dolt server (gu-9qbg5).
+	expected1 := fmt.Sprintf("%s -> rig1", child1)
+	expected2 := fmt.Sprintf("%s -> rig2", child2)
+	out := runGTCmdOutputUntil(t, gtBinary, hqPath, env, func(o string) bool {
+		return containsAll(o, expected1, expected2)
+	}, "sling", epicID, "--dry-run")
 
 	// Verify: child1 should be routed to rig1
-	expected1 := fmt.Sprintf("%s -> rig1", child1)
 	if !strings.Contains(out, expected1) {
 		t.Errorf("epic dry-run should route %s -> rig1\noutput: %s", child1, out)
 	}
 
 	// Verify: child2 should be routed to rig2
-	expected2 := fmt.Sprintf("%s -> rig2", child2)
 	if !strings.Contains(out, expected2) {
 		t.Errorf("epic dry-run should route %s -> rig2\noutput: %s", child2, out)
 	}
@@ -944,7 +960,11 @@ func TestSchedulerEpicDetection(t *testing.T) {
 	addBeadDependencyOfType(t, epicID, child2ExtRef, "depends_on", rig1Path)
 
 	// gt sling <epic-id> deferred dispatch (max_polecats > 0) --dry-run should auto-detect epic and list children.
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", epicID, "--dry-run")
+	// Retry until both children are visible: the epic→child2 cross-rig dep was
+	// just written and may lag on readback against the shared Dolt server (gu-9qbg5).
+	out := runGTCmdOutputUntil(t, gtBinary, hqPath, env, func(o string) bool {
+		return containsAll(o, child1, child2)
+	}, "sling", epicID, "--dry-run")
 
 	// Should show both children with rig resolution.
 	if !strings.Contains(out, child1) {
@@ -999,21 +1019,22 @@ func TestSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
 	bead2ExtRef := fmt.Sprintf("external:%s:%s", bead2Prefix, bead2)
 	addBeadDependencyOfType(t, convoyID, bead2ExtRef, "tracks", hqPath)
 
-	// Wait for bd's issues.jsonl timestamp to settle (same race as
-	// TestSchedulerDirectConvoyDispatch — 1-second granularity stale check).
-	time.Sleep(2 * time.Second)
-
 	// Dry-run: verify auto-rig-resolution routes each bead correctly.
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", convoyID, "--dry-run")
+	// Retry until both tracked beads are visible: the convoy→bead tracks deps
+	// were just written and may lag on readback against the shared Dolt server
+	// (gu-9qbg5). A fixed time.Sleep here proved insufficient in CI.
+	expected1 := fmt.Sprintf("%s -> rig1", bead1)
+	expected2 := fmt.Sprintf("%s -> rig2", bead2)
+	out := runGTCmdOutputUntil(t, gtBinary, hqPath, env, func(o string) bool {
+		return containsAll(o, expected1, expected2)
+	}, "sling", convoyID, "--dry-run")
 
 	// Verify: bead1 should be routed to rig1
-	expected1 := fmt.Sprintf("%s -> rig1", bead1)
 	if !strings.Contains(out, expected1) {
 		t.Errorf("convoy dry-run should route %s -> rig1\noutput: %s", bead1, out)
 	}
 
 	// Verify: bead2 should be routed to rig2
-	expected2 := fmt.Sprintf("%s -> rig2", bead2)
 	if !strings.Contains(out, expected2) {
 		t.Errorf("convoy dry-run should route %s -> rig2\noutput: %s", bead2, out)
 	}
@@ -1224,8 +1245,12 @@ func TestSchedulerDirectEpicDispatch(t *testing.T) {
 	child2ExtRef := fmt.Sprintf("external:%s:%s", child2Prefix, child2)
 	addBeadDependencyOfType(t, epicID, child2ExtRef, "depends_on", rig1Path)
 
-	// gt sling <epic-id> --dry-run in direct mode should show direct dispatch, not scheduling
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", epicID, "--dry-run")
+	// gt sling <epic-id> --dry-run in direct mode should show direct dispatch, not scheduling.
+	// Retry until both children are visible: the epic→child2 cross-rig dep was
+	// just written and may lag on readback against the shared Dolt server (gu-9qbg5).
+	out := runGTCmdOutputUntil(t, gtBinary, hqPath, env, func(o string) bool {
+		return containsAll(o, child1, child2)
+	}, "sling", epicID, "--dry-run")
 
 	// Should mention children
 	if !strings.Contains(out, child1) {
@@ -1487,14 +1512,15 @@ func TestSchedulerDirectConvoyDispatch(t *testing.T) {
 	bead2ExtRef := fmt.Sprintf("external:%s:%s", bead2Prefix, bead2)
 	addBeadDependencyOfType(t, convoyID, bead2ExtRef, "tracks", hqPath)
 
-	// Wait for bd's issues.jsonl timestamp to settle. bd checks that the Dolt
-	// import timestamp >= jsonl mtime (1-second granularity). Without this,
-	// the sling command flakes with "database out of sync" when the jsonl write
-	// and Dolt import straddle a second boundary.
-	time.Sleep(2 * time.Second)
-
-	// gt sling <convoy-id> --dry-run in direct mode
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", convoyID, "--dry-run")
+	// gt sling <convoy-id> --dry-run in direct mode.
+	// Retry until both tracked beads are visible: the convoy→bead tracks deps
+	// were just written and may lag on readback against the shared Dolt server
+	// (gu-9qbg5). This also covers the bd issues.jsonl timestamp settle window
+	// (Dolt import timestamp >= jsonl mtime, 1-second granularity) that a fixed
+	// time.Sleep previously guarded — but which still flaked in CI.
+	out := runGTCmdOutputUntil(t, gtBinary, hqPath, env, func(o string) bool {
+		return containsAll(o, bead1, bead2)
+	}, "sling", convoyID, "--dry-run")
 
 	// Should mention tracked beads
 	if !strings.Contains(out, bead1) {
