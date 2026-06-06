@@ -447,6 +447,16 @@ you MUST actually exercise each one — language is not evidence; execution is.
 For MCP tools, the analog: confirm each referenced tool name exists in the
 connected server (names are case-sensitive) rather than trusting recall.
 
+**`--help` is NOT always the arbiter — match the source of truth to the claim.**
+Verifying *invocations* (does this command/flag exist?) against `--help` is
+correct. But when the skill documents a tool's *accepted values, data format,
+or grammar* — enum values, config keys, file schemas, type fields — `--help`
+text can be incomplete or wrong. Validate those claims against the code that
+actually parses/validates the input (the parser, schema, or validator source),
+not the help text. A documented value that `--help` lists but the validator
+rejects (or vice-versa) is a FAIL. Pick the arbiter that the running system
+actually obeys: execution for commands, the parser for accepted values.
+
 > This step exists because real skills have shipped with hallucinated flags
 > that passed structural validation. Treat "every documented command runs" as
 > a hard gate, not a nicety.
