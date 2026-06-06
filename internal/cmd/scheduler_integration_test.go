@@ -13,6 +13,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -50,12 +51,40 @@ func initBeadsDBForServer(t *testing.T, dir, prefix string) {
 	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
 		args = append(args, "--server", "--server-port", p)
 	}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	t.Logf("bd init --prefix %s in %s: exit=%v\n%s", prefix, dir, err, out)
+
+	// bd init shells out to the shared Dolt test server. Under contention on
+	// the main-CI box that server can transiently block (lock-wait /
+	// serialization) or stall mid-init. An unbounded exec.Command then hangs
+	// in CombinedOutput() until the whole job's timeout, freezing the merge
+	// queue — the observed signature was a passing "exit=<nil>" init followed
+	// by a later init that never returned (gc-ihbkn). Bound each attempt with
+	// a context timeout (a stuck bd is killed and retried instead of wedging
+	// the suite) and retry transient failures, mirroring the bounded-retry
+	// approach already used for the read sites (see bffc3192). A retry that
+	// lands on an already-created DB reports "already initialized", which we
+	// treat as success.
+	const attempts = 4
+	const perAttempt = 20 * time.Second
+	var out []byte
+	var err error
+	for i := 0; i < attempts; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), perAttempt)
+		cmd := exec.CommandContext(ctx, "bd", args...)
+		cmd.Dir = dir
+		out, err = cmd.CombinedOutput()
+		cancel()
+		t.Logf("bd init --prefix %s in %s (attempt %d/%d): exit=%v\n%s",
+			prefix, dir, i+1, attempts, err, out)
+		if err == nil || strings.Contains(string(out), "already initialized") {
+			err = nil
+			break
+		}
+		if i < attempts-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 	if err != nil {
-		t.Fatalf("bd init failed in %s: %v\n%s", dir, err, out)
+		t.Fatalf("bd init failed in %s after %d attempts: %v\n%s", dir, attempts, err, out)
 	}
 
 	// Create empty issues.jsonl to prevent bd auto-export from corrupting
