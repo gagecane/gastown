@@ -1016,6 +1016,48 @@ type PolecatPoolConfig struct {
 	// MaxConcurrent is the maximum number of working polecats for this rig.
 	// Nil or 0 means no per-rig limit (the town cap still applies).
 	MaxConcurrent *int `json:"max_concurrent,omitempty"`
+
+	// PauseOnRefineryBackoff, when true, throttles new polecat spawns for this
+	// rig while its refinery is draining a non-empty merge queue under host
+	// build pressure (gu-5wn56). This breaks the dispatch/refinery deadlock:
+	// a load-sensitive refinery that backs off waiting for build pressure to
+	// ease can never retry if an uncapped dispatcher keeps spawning polecats
+	// that each run a heavy build. Default-absent (nil/false) means the
+	// throttle is off and behavior is unchanged.
+	PauseOnRefineryBackoff *bool `json:"pause_on_refinery_backoff,omitempty"`
+
+	// RefineryBackoffLoadPerCore is the 1-minute-load-average-per-core
+	// threshold above which the host is considered under build pressure for
+	// the PauseOnRefineryBackoff throttle. Nil or non-positive means use the
+	// default (DefaultRefineryBackoffLoadPerCore). Only consulted when
+	// PauseOnRefineryBackoff is true.
+	RefineryBackoffLoadPerCore *float64 `json:"refinery_backoff_load_per_core,omitempty"`
+}
+
+// DefaultRefineryBackoffLoadPerCore is the default per-core 1-minute load
+// threshold for the PauseOnRefineryBackoff throttle. A value of 1.0 means the
+// host is considered under build pressure once the load average equals the
+// core count — the point at which an additional concurrent build would only
+// deepen the contention the refinery is waiting to clear.
+const DefaultRefineryBackoffLoadPerCore = 1.0
+
+// GetPauseOnRefineryBackoff reports whether the refinery-backoff dispatch
+// throttle is enabled for this rig. Nil-safe; defaults to false.
+func (c *PolecatPoolConfig) GetPauseOnRefineryBackoff() bool {
+	if c == nil || c.PauseOnRefineryBackoff == nil {
+		return false
+	}
+	return *c.PauseOnRefineryBackoff
+}
+
+// GetRefineryBackoffLoadPerCore returns the configured per-core load threshold
+// for the refinery-backoff throttle, or DefaultRefineryBackoffLoadPerCore when
+// unset or non-positive.
+func (c *PolecatPoolConfig) GetRefineryBackoffLoadPerCore() float64 {
+	if c == nil || c.RefineryBackoffLoadPerCore == nil || *c.RefineryBackoffLoadPerCore <= 0 {
+		return DefaultRefineryBackoffLoadPerCore
+	}
+	return *c.RefineryBackoffLoadPerCore
 }
 
 // GetMaxConcurrent returns the per-rig max concurrent polecats cap.
@@ -1038,6 +1080,24 @@ func (s *RigSettings) GetPolecatMaxConcurrent() int {
 		return 0
 	}
 	return s.Polecat.GetMaxConcurrent()
+}
+
+// GetPauseOnRefineryBackoff reports whether the refinery-backoff dispatch
+// throttle is enabled for this rig (gu-5wn56). Nil-safe; defaults to false.
+func (s *RigSettings) GetPauseOnRefineryBackoff() bool {
+	if s == nil {
+		return false
+	}
+	return s.Polecat.GetPauseOnRefineryBackoff()
+}
+
+// GetRefineryBackoffLoadPerCore returns the per-core load threshold for the
+// refinery-backoff throttle, or the default when unset. Nil-safe.
+func (s *RigSettings) GetRefineryBackoffLoadPerCore() float64 {
+	if s == nil {
+		return DefaultRefineryBackoffLoadPerCore
+	}
+	return s.Polecat.GetRefineryBackoffLoadPerCore()
 }
 
 // DefaultAutoTestPRCadenceDays is the default cadence in days between

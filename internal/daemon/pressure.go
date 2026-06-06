@@ -142,6 +142,15 @@ func AvailableMemoryGB() float64 {
 	return availableMemoryGB()
 }
 
+// LoadAverage1 returns the 1-minute load average.
+//
+// Exported so other packages (e.g. the dispatch refinery-backoff throttle,
+// gu-5wn56) can reuse the platform-specific implementation without
+// duplicating /proc/loadavg and sysctl parsing. Returns 0 when unavailable.
+func LoadAverage1() float64 {
+	return loadAverage1()
+}
+
 // loadAverage1 returns the 1-minute load average.
 // Falls back to 0 if unavailable (effectively disabling the check).
 func loadAverage1() float64 {

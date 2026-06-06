@@ -137,6 +137,17 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		}
 	}
 
+	// Refinery-backoff dispatch throttle (gu-5wn56): when opted in, refuse the
+	// spawn while this rig's refinery is draining a non-empty merge queue under
+	// host build pressure. Breaks the dispatch/refinery deadlock where uncapped
+	// dispatch keeps build pressure high so a load-sensitive refinery never
+	// retries. Opt-in per rig (default off); fails open on any query error.
+	if rigSettings, err := config.LoadRigSettings(filepath.Join(r.Path, "settings", "config.json")); err == nil {
+		if throttleErr := checkRefineryBackoffThrottle(r, rigSettings); throttleErr != nil {
+			return nil, throttleErr
+		}
+	}
+
 	// Per-bead respawn circuit breaker (clown show #22 + gu-iqji):
 	// Track how many times this bead has been slung. There are TWO tiers:
 	//

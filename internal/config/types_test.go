@@ -716,3 +716,63 @@ func TestPolecatPoolConfigJSONRoundTrip(t *testing.T) {
 		t.Errorf("minimal RigSettings should omit polecat block, got: %s", string(out))
 	}
 }
+
+func TestRigSettingsGetPauseOnRefineryBackoff(t *testing.T) {
+	t.Parallel()
+
+	tru := true
+	fls := false
+
+	tests := []struct {
+		name     string
+		settings *RigSettings
+		want     bool
+	}{
+		{"nil settings returns false", nil, false},
+		{"no polecat block returns false", &RigSettings{}, false},
+		{"empty polecat block returns false", &RigSettings{Polecat: &PolecatPoolConfig{}}, false},
+		{"explicit false returns false", &RigSettings{Polecat: &PolecatPoolConfig{PauseOnRefineryBackoff: &fls}}, false},
+		{"explicit true returns true", &RigSettings{Polecat: &PolecatPoolConfig{PauseOnRefineryBackoff: &tru}}, true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.settings.GetPauseOnRefineryBackoff(); got != tt.want {
+				t.Errorf("GetPauseOnRefineryBackoff() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRigSettingsGetRefineryBackoffLoadPerCore(t *testing.T) {
+	t.Parallel()
+
+	half := 0.5
+	neg := -2.0
+	zero := 0.0
+
+	tests := []struct {
+		name     string
+		settings *RigSettings
+		want     float64
+	}{
+		{"nil settings returns default", nil, DefaultRefineryBackoffLoadPerCore},
+		{"no polecat block returns default", &RigSettings{}, DefaultRefineryBackoffLoadPerCore},
+		{"unset threshold returns default", &RigSettings{Polecat: &PolecatPoolConfig{}}, DefaultRefineryBackoffLoadPerCore},
+		{"zero threshold returns default", &RigSettings{Polecat: &PolecatPoolConfig{RefineryBackoffLoadPerCore: &zero}}, DefaultRefineryBackoffLoadPerCore},
+		{"negative threshold returns default", &RigSettings{Polecat: &PolecatPoolConfig{RefineryBackoffLoadPerCore: &neg}}, DefaultRefineryBackoffLoadPerCore},
+		{"positive threshold returns value", &RigSettings{Polecat: &PolecatPoolConfig{RefineryBackoffLoadPerCore: &half}}, 0.5},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.settings.GetRefineryBackoffLoadPerCore(); got != tt.want {
+				t.Errorf("GetRefineryBackoffLoadPerCore() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
