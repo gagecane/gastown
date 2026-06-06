@@ -19,6 +19,7 @@ func TestPRFeedbackPatrolFormulaStructure(t *testing.T) {
 
 	wantSteps := []string{
 		"list-open-prs",
+		"check-magic-phrase",
 		"check-review-status",
 		"check-ci-status",
 		"dispatch-work",

@@ -120,6 +120,57 @@ If PR_COUNT is 0, nothing to patrol — skip to loop-or-exit.
 """
 
 [[steps]]
+id = "check-magic-phrase"
+title = "Scan auto-test-pr MR comments for the reviewer pause magic phrase (D9)"
+needs = ["list-open-prs"]
+description = """
+Scan comments on gt:auto-test-pr-labeled MRs for the exact magic phrase
+`gt auto-test-pr: pause-rig-7d`. If found, write a 7-day pause to the
+rig's state bead. This is the reviewer's "under fire" fallback — one
+comment pauses the rig without needing the CLI.
+
+**1. Identify auto-test-pr labeled PRs from the filtered set:**
+```bash
+# Get PR numbers that carry the gt:auto-test-pr label.
+# These are the only PRs whose comments we scan for the magic phrase.
+AUTO_TEST_PRS=$(gh pr list \
+  --repo {{repo}} \
+  --base {{base_branch}} \
+  --state open \
+  --label "gt:auto-test-pr" \
+  --json number \
+  --jq '.[].number' 2>/dev/null || true)
+
+if [ -z "$AUTO_TEST_PRS" ]; then
+  echo "No gt:auto-test-pr labeled PRs found — skipping magic phrase check."
+fi
+```
+
+**2. For each auto-test-pr PR, fetch comments and check for the phrase:**
+```bash
+for PR_NUM in $AUTO_TEST_PRS; do
+  # Fetch all comments (issue comments + review comments) on this PR.
+  COMMENTS=$(gh api "repos/{{repo}}/issues/${PR_NUM}/comments" \
+    --jq '.[].body' 2>/dev/null || true)
+  REVIEW_COMMENTS=$(gh api "repos/{{repo}}/pulls/${PR_NUM}/comments" \
+    --jq '.[].body' 2>/dev/null || true)
+
+  # Check each comment body via the CLI for exact-match (D9).
+  for BODY in $COMMENTS $REVIEW_COMMENTS; do
+    gt auto-test-pr check-magic-phrase --body="$BODY" --rig={{rig}}
+  done
+done
+```
+
+**Important:** The `check-magic-phrase` command is exact-match only.
+Near-misses (typos, extra text on the line, case variations) do NOT
+trigger. The command exits 0 silently when no match is found.
+
+**Exit criteria:** All auto-test-pr MR comments scanned; any magic-phrase
+pause written to the rig state bead.
+"""
+
+[[steps]]
 id = "check-review-status"
 title = "Filter PRs with review feedback needing response"
 needs = ["list-open-prs"]
