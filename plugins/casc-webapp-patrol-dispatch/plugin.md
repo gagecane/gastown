@@ -4,8 +4,8 @@ description = "Daily dispatch of casc-webapp-patrol into casc_webapp (CodeGen Sc
 version = 1
 
 [gate]
-type = "cooldown"
-duration = "23h"
+type = "cron"
+schedule = "0 9 * * *"
 
 [tracking]
 labels = ["plugin:casc-webapp-patrol-dispatch", "category:webapp-monitoring"]
@@ -43,11 +43,19 @@ Scheduler). So this plugin issues a single `gt sling`, not a per-stage loop.
 
 ## Cadence
 
-Daily, via a **cooldown gate of 23h** — the daemon's `dispatchPlugins` path
-honors cooldown gates, not cron gates (same constraint noted in
-`casc-patrol-dispatch`). 23h gives once-per-24h cadence with an hour of slop for
-daemon restarts. Switching to a true cron schedule is a follow-up if/when
-cron-gate dispatch lands.
+Daily at **09:00 host-local**, via a **cron gate** (`schedule = "0 9 * * *"`).
+The daemon's `dispatchPlugins` path evaluates cron gates through
+`Recorder.CronDue` (gastown `1b5cbecb`, "wire cron-gate evaluation into plugin
+dispatch") — `parseCron` reads a standard 5-field expression and the schedule is
+matched against the daemon host's local clock. The in-flight grace
+(`DispatchGrace`, ~`execution.timeout` + buffer) suppresses a re-dispatch storm
+around a freshly-slung run, so a missed heartbeat won't double-fire.
+
+This replaces the previous 23h cooldown gate, which gave only ~once-daily
+cadence with accumulating drift because the daemon did not yet honor cron gates.
+A fixed off-peak time (09:00) is now possible and removes that drift. The same
+switch applies to `casc-patrol-dispatch` and `wiki-patrol-dispatch`, which carry
+the identical follow-up.
 
 ## Sling syntax — don't repeat gu-fc8h / gu-xd7b
 
@@ -83,7 +91,7 @@ HIGH (run `mwinit -o`). This plugin does not manage Midway.
 
 ```bash
 gt plugin run casc-webapp-patrol-dispatch              # Run if gate allows
-gt plugin run casc-webapp-patrol-dispatch --force      # Bypass cooldown
+gt plugin run casc-webapp-patrol-dispatch --force      # Bypass gate
 ```
 
 ## Failure path

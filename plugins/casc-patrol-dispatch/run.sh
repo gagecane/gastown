@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # casc-patrol-dispatch/run.sh — Sling casc-patrol into the casc_cdk rig
-# once per day (cron: 0 9 * * *), once per stage (Beta, Gamma, Prod).
+# once per day (cron gate: 0 9 * * *), once per stage (Beta, Gamma, Prod).
 #
 # This is the script implementation of plugins/casc-patrol-dispatch/plugin.md.
 # The daemon dog executes `bash run.sh` and records the result.

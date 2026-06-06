@@ -41,11 +41,17 @@ cadence to **daily**. Phase 1 evidence showed that mechanical RigFacts
 change at most weekly across the 8 rigs, and 6-hourly cadence is 4× more
 expensive for under 24h freshness improvement.
 
-The plugin uses a **cron gate** (`0 9 * * *`) — daily at 09:00 local
-time. The daemon's `dispatchPlugins` path evaluates cron gates via
-`Recorder.CronDue` (landed in gu-u8yy5 / commit 1b5cbecb). The in-flight
-grace window (derived from `execution.timeout`) prevents re-dispatch while
-a run is still in progress.
+Daily at **09:00 host-local**, via a **cron gate** (`schedule = "0 9 * * *"`).
+The daemon's `dispatchPlugins` path evaluates cron gates through
+`Recorder.CronDue` (gastown `1b5cbecb`, "wire cron-gate evaluation into plugin
+dispatch") — `parseCron` reads a standard 5-field expression and the schedule is
+matched against the daemon host's local clock. The in-flight grace
+(`DispatchGrace`, ~`execution.timeout` + buffer) suppresses a re-dispatch storm
+around a freshly-slung run, so a missed heartbeat won't double-fire.
+
+This replaces the previous 23h cooldown gate, which gave only ~once-daily
+cadence with accumulating drift because the daemon did not yet honor cron gates.
+A fixed off-peak time (09:00) is now possible and removes that drift.
 
 ## Single-instance enforcement
 
@@ -76,7 +82,7 @@ isolation.
 
 ```bash
 gt plugin run wiki-patrol-dispatch              # Run if gate allows
-gt plugin run wiki-patrol-dispatch --force      # Bypass cron gate
+gt plugin run wiki-patrol-dispatch --force      # Bypass gate
 ```
 
 The dog dispatches `bash run.sh`. The script does the actual sling.

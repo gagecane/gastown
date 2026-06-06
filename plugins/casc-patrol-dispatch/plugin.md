@@ -42,11 +42,17 @@ Phase 1c (cadk-t4mh) shipped the formula with daily-noon-PT cadence
 ran all three stages on the same cadence; this plugin reflects that decision
 by slinging Beta, Gamma, and Prod on every dispatch.
 
-Like `wiki-patrol-dispatch`, this plugin uses a **cron gate** (`0 9 * * *`)
-— daily at 09:00 local time. The daemon's `dispatchPlugins` path evaluates
-cron gates via `Recorder.CronDue` (landed in gu-u8yy5 / commit 1b5cbecb).
-The in-flight grace window (derived from `execution.timeout = 15m`) prevents
-re-dispatch while a multi-stage run is still in progress.
+Daily at **09:00 host-local**, via a **cron gate** (`schedule = "0 9 * * *"`).
+The daemon's `dispatchPlugins` path evaluates cron gates through
+`Recorder.CronDue` (gastown `1b5cbecb`, "wire cron-gate evaluation into plugin
+dispatch") — `parseCron` reads a standard 5-field expression and the schedule is
+matched against the daemon host's local clock. The in-flight grace
+(`DispatchGrace`, ~`execution.timeout` + buffer) suppresses a re-dispatch storm
+around a freshly-slung run, so a missed heartbeat won't double-fire.
+
+This replaces the previous 23h cooldown gate, which gave only ~once-daily
+cadence with accumulating drift because the daemon did not yet honor cron gates.
+A fixed off-peak time (09:00) is now possible and removes that drift.
 
 ## What the script does
 
@@ -93,7 +99,7 @@ Brazil package working tree. Resolution order:
 
 ```bash
 gt plugin run casc-patrol-dispatch              # Run if gate allows
-gt plugin run casc-patrol-dispatch --force      # Bypass cron gate
+gt plugin run casc-patrol-dispatch --force      # Bypass gate
 ```
 
 ## Failure path

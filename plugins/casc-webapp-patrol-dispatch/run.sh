@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # casc-webapp-patrol-dispatch/run.sh — Sling casc-webapp-patrol into casc_webapp
-# once per cooldown window.
+# once per day (cron gate: 0 9 * * *).
 #
 # This is the script implementation of plugins/casc-webapp-patrol-dispatch/plugin.md.
 # The daemon dog executes `bash run.sh` and records the result.
