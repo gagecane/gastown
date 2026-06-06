@@ -382,6 +382,44 @@ human approval gate → beads with dependency graph.
 {{ cmd }} formula run mol-plan-review --plan="..." --problem="..."  # Plan review only (5 parallel legs)
 ```
 
+### Driving a Formula Convoy: Verify a Polecat Driver Exists
+
+A formula whose DAG steps are **crew-owned** (`Owner=<rig>/crew/<name>`) does NOT
+self-advance on its own. The dispatcher does not auto-sling crew-owned *task*
+steps to polecats — a `bd ready` crew-owned step can sit unclaimed indefinitely.
+The convoy only progresses when a live **polecat driver** (a `mol-polecat-work`
+step hooked to a working polecat) executes the crew-owned steps on your behalf.
+Two dispatches of the *identical* formula can behave differently: one attaches a
+driver and self-advances, the other does not and silently stalls at step 1.
+
+**After `{{ cmd }} formula run`, verify a driver was dispatched** before walking
+away or starting a completion watch loop:
+
+```bash
+{{ cmd }} convoy list                    # find your convoy id
+bd show <next-step>                      # Owner=...crew/<name> + no Assignee = crew-owned
+```
+
+If the steps are crew-owned and NO driver polecat is hooked to a step, the convoy
+will NOT self-advance. Either **hand-execute the ready steps yourself** (GUPP — if
+it's ready and yours, run it) or **re-run the formula** so `mol-polecat-work`
+attaches a driver.
+
+**Don't key a watch loop purely on "N/N complete" for crew-owned DAGs.** Add a
+no-progress-for-2-checks stall branch, or it waits forever on a driverless convoy.
+
+**Stall signature — crew-owned-no-driver (NOT a polecat push-failure):**
+- convoy Progress frozen across 2+ checks
+- `bd show <next-step>` → `Owner=...crew/<name>`, status open/ready, no Assignee
+- `bd ready` lists the step but no polecat claims it after 30s+
+- the driver polecat (if any) is on a different bead or absent
+- work is NOT git-unpushed: `{{ cmd }} polecat git-state <rig>/<pc>` is clean
+  (a `NEEDS_RECOVERY`/git-unpushed flag here is the benign post-merge
+  false-positive — deacon/reaper domain, not work-at-risk)
+
+Distinguish this from a real polecat push-failure (dirty/unpushed worktree)
+**before** escalating.
+
 ### Communication: Mail
 
 **Reading mail:**

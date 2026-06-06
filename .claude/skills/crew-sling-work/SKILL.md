@@ -149,6 +149,19 @@ Cause: agent needs a nudge or hasn't primed.
 Solution: confirm the hook with `gt hook` (as the target) and that the agent
 session is alive; the bead runs when the agent primes.
 
+**Formula convoy stalls at step 1 / never self-advances**
+Cause: the formula's DAG steps are crew-owned (`Owner=<rig>/crew/<name>`) and no
+polecat **driver** was attached. The dispatcher does not auto-sling crew-owned
+*task* steps to polecats, so a `bd ready` crew-owned step sits unclaimed and the
+convoy waits forever. Two dispatches of the same formula can differ: one attaches
+a `mol-polecat-work` driver and progresses, the other does not.
+Solution: after `gt formula run`, verify a driver was dispatched —
+`bd show <next-step>` showing `Owner=...crew/<name>` with no Assignee means
+crew-owned. Either hand-execute the ready steps yourself or re-run the formula so
+a driver attaches. Don't key a completion watch loop purely on "N/N complete" for
+crew-owned DAGs; add a no-progress stall branch. This is NOT a polecat
+push-failure — the worktree is clean (`gt polecat git-state <rig>/<pc>`).
+
 **Wrong merge strategy chosen**
 Cause: omitted `--merge`, got the default `mr`.
 Solution: re-sling with the intended `--merge=direct` or `--merge=local`, or
