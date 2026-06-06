@@ -66,6 +66,13 @@ is_agent_owner() {
   return 1
 }
 
+# is_workflow_step_bead <id> — true if the bead is a workflow step bead created
+# by `gt formula run` (executeWorkflowFormula stamps them as `<rigPrefix>-wfs-<id>`).
+# These are dispatchable polecat work even when owned by the launching agent.
+is_workflow_step_bead() {
+  [[ "$1" == *-wfs-* ]]
+}
+
 # is_known_rig <name> — checks $RIGS array for membership.
 is_known_rig() {
   local name="$1"
@@ -143,7 +150,17 @@ for rig in "${RIGS[@]}"; do
 
     # Client-side filter: agent-owned beads (orchestrator state — owning agent
     # handles them, not a polecat). See gs-myq.
-    if is_agent_owner "$owner"; then
+    #
+    # Exception: workflow step beads (id matches `*-wfs-*`) are real polecat
+    # work, not orchestrator state — `gt formula run` stamps them with the
+    # OWNER of whoever launched the run, so a crew-launched workflow produces
+    # step beads owned by `<rig>/crew/<name>`. Without this exception the
+    # is_agent_owner filter silently drops them from the fast dispatch path,
+    # leaving them to advance only on the Deacon's slow stranded-feed cycle
+    # (gu-3y6ro). Steps that genuinely route to a specific agent are still
+    # caught by the workflow_target filter below, and `gt sling`'s server-side
+    # guards remain the backstop.
+    if is_agent_owner "$owner" && ! is_workflow_step_bead "$bead_id"; then
       rig_skipped=$((rig_skipped + 1))
       continue
     fi
