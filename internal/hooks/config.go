@@ -257,6 +257,174 @@ func HasPluginDefaults(s *SettingsJSON, role string) bool {
 	return true
 }
 
+// taskToolDenials are the Claude Code tools every unattended Gas Town agent
+// must deny. TodoWrite and the Task* family produce interactive/agent-spawning
+// behavior that has no place in autonomous patrol/work loops and has caused
+// agents to wedge. These are denied for ALL managed roles except the mayor,
+// who is the human-facing interactive operator.
+var taskToolDenials = []string{
+	"TodoWrite",
+	"TaskCreate",
+	"TaskUpdate",
+	"TaskList",
+	"TaskGet",
+	"TaskOutput",
+	"TaskStop",
+}
+
+// requiredDenyForRole returns the permissions.deny entries that the managed
+// config must guarantee for a role, in canonical order.
+//
+// The deny list is safety-critical: AskUserQuestion is the tool that parks an
+// unattended agent at an interactive "1/2/3?" prompt and freezes its patrol
+// cycle (gc-wisp-mgb9). Before gu-5gj68 the deny list lived ONLY in deployed
+// settings.json files — neither base config nor overrides carried it — so
+// `gt hooks sync` could not generate or restore it, and `gt hooks diff` was
+// blind to its drift. Encoding it here makes it part of the source of truth.
+//
+// Policy (matches the pre-existing deployed configs surveyed in gu-5gj68):
+//   - mayor: human-facing interactive operator — no denials.
+//   - crew: semi-interactive workers — deny Task tools, but NOT AskUserQuestion
+//     (crew may legitimately prompt the human).
+//   - all other managed roles (witness, refinery, deacon, boot, polecat, dog):
+//     fully unattended — deny AskUserQuestion AND the Task tools.
+//
+// RequiredDenyForRole is the exported accessor for requiredDenyForRole, used by
+// the diff command to report which managed deny entries are missing.
+func RequiredDenyForRole(role string) []string {
+	return requiredDenyForRole(role)
+}
+
+func requiredDenyForRole(role string) []string {
+	switch role {
+	case constants.RoleMayor:
+		return nil
+	case constants.RoleCrew:
+		// Task tools only; crew is allowed to ask the human.
+		return append([]string(nil), taskToolDenials...)
+	default:
+		deny := make([]string, 0, len(taskToolDenials)+1)
+		deny = append(deny, "AskUserQuestion")
+		deny = append(deny, taskToolDenials...)
+		return deny
+	}
+}
+
+// EnsurePermissionDefaults guarantees the role's safety-critical permissions
+// block (defaultMode + deny list) is present in the settings, restoring any
+// drifted/dropped entries. It is additive: existing extra deny entries and
+// other permissions fields (allow, ask, etc.) are preserved; only the required
+// entries are guaranteed present and defaultMode is pinned to bypassPermissions.
+//
+// This mirrors EnsurePluginDefaults: a role-based managed field that sync
+// generates and restores so it can no longer silently drift (gu-5gj68).
+func EnsurePermissionDefaults(s *SettingsJSON, role string) {
+	if s.Extra == nil {
+		s.Extra = make(map[string]json.RawMessage)
+	}
+
+	permissions := map[string]json.RawMessage{}
+	if raw, ok := s.Extra["permissions"]; ok {
+		_ = json.Unmarshal(raw, &permissions)
+	}
+
+	// Pin defaultMode (same invariant addClaudePromptDefaults relies on).
+	permissions["defaultMode"] = json.RawMessage(`"bypassPermissions"`)
+
+	required := requiredDenyForRole(role)
+	if len(required) > 0 {
+		var deny []string
+		if raw, ok := permissions["deny"]; ok {
+			_ = json.Unmarshal(raw, &deny)
+		}
+		deny = unionPreservingOrder(required, deny)
+		if rawDeny, err := json.Marshal(deny); err == nil {
+			permissions["deny"] = rawDeny
+		}
+	}
+
+	if raw, err := json.Marshal(permissions); err == nil {
+		s.Extra["permissions"] = raw
+	}
+}
+
+// HasPermissionDefaults reports whether settings already contain the correct
+// permissions block for the role: defaultMode=bypassPermissions and every
+// required deny entry present. Extra deny entries beyond the required set do
+// not count as drift (additive policy).
+func HasPermissionDefaults(s *SettingsJSON, role string) bool {
+	if s == nil {
+		return false
+	}
+	permissions := map[string]json.RawMessage{}
+	if raw, ok := s.Extra["permissions"]; !ok || json.Unmarshal(raw, &permissions) != nil {
+		return false
+	}
+	if !rawStringEquals(permissions, "defaultMode", "bypassPermissions") {
+		return false
+	}
+
+	required := requiredDenyForRole(role)
+	if len(required) == 0 {
+		return true
+	}
+
+	var deny []string
+	if raw, ok := permissions["deny"]; !ok || json.Unmarshal(raw, &deny) != nil {
+		return false
+	}
+	present := make(map[string]bool, len(deny))
+	for _, d := range deny {
+		present[d] = true
+	}
+	for _, req := range required {
+		if !present[req] {
+			return false
+		}
+	}
+	return true
+}
+
+// CurrentDenyList returns the permissions.deny entries currently present in the
+// settings, or nil if absent/unparseable. Used by the diff command to compute
+// which managed entries are missing.
+func CurrentDenyList(s *SettingsJSON) []string {
+	if s == nil {
+		return nil
+	}
+	permissions := map[string]json.RawMessage{}
+	if raw, ok := s.Extra["permissions"]; !ok || json.Unmarshal(raw, &permissions) != nil {
+		return nil
+	}
+	var deny []string
+	if raw, ok := permissions["deny"]; ok {
+		_ = json.Unmarshal(raw, &deny)
+	}
+	return deny
+}
+
+// unionPreservingOrder returns required entries first (in their canonical
+// order), followed by any existing entries not already in required. This keeps
+// the managed entries deterministic for diffing while preserving operator- or
+// machine-added extras.
+func unionPreservingOrder(required, existing []string) []string {
+	seen := make(map[string]bool, len(required)+len(existing))
+	out := make([]string, 0, len(required)+len(existing))
+	for _, r := range required {
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	for _, e := range existing {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func setRaw(out map[string]json.RawMessage, key string, value []byte) {
 	out[key] = json.RawMessage(value)
 }

@@ -153,7 +153,13 @@ func TestSyncTargetUnchanged(t *testing.T) {
 	}
 	existing := hooks.SettingsJSON{
 		Hooks: *expected,
+		Extra: map[string]json.RawMessage{},
 	}
+	// Apply the same managed defaults sync writes, so the on-disk file
+	// represents a genuinely in-sync state (otherwise the managed permission
+	// deny list registers as drift — see gu-5gj68).
+	hooks.EnsurePluginDefaults(&existing, "crew")
+	hooks.EnsurePermissionDefaults(&existing, "crew")
 	data, marshalErr := hooks.MarshalSettings(&existing)
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
@@ -315,6 +321,67 @@ func TestSyncTargetSetsEnabledPlugins(t *testing.T) {
 	}
 	if settings.EnabledPlugins["beads@beads-marketplace"] != false {
 		t.Error("beads@beads-marketplace should be disabled")
+	}
+}
+
+func TestSyncTargetRestoresWitnessDenyList(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	base := &hooks.HooksConfig{
+		SessionStart: []hooks.HookEntry{
+			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "test"}}},
+		},
+	}
+	if err := hooks.SaveBase(base); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	// Simulate drift: a witness settings.json whose permissions block lost its
+	// safety-critical deny list (only defaultMode survived).
+	targetPath := filepath.Join(tmpDir, "witness", ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	drifted := map[string]any{
+		"permissions": map[string]any{"defaultMode": "bypassPermissions"},
+		"hooks":       map[string]any{},
+	}
+	data, err := json.MarshalIndent(drifted, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	target := hooks.Target{Path: targetPath, Key: "witness", Role: "witness"}
+
+	// The drifted deny list must register as needing an update, not "unchanged".
+	result, err := syncTarget(target, false)
+	if err != nil {
+		t.Fatalf("syncTarget failed: %v", err)
+	}
+	if result != syncUpdated {
+		t.Fatalf("expected syncUpdated (deny list drifted), got %d", result)
+	}
+
+	settings, err := hooks.LoadSettings(targetPath)
+	if err != nil {
+		t.Fatalf("LoadSettings failed: %v", err)
+	}
+	if !hooks.HasPermissionDefaults(settings, "witness") {
+		t.Fatalf("witness deny list not restored: %v", hooks.CurrentDenyList(settings))
+	}
+	deny := hooks.CurrentDenyList(settings)
+	found := false
+	for _, d := range deny {
+		if d == "AskUserQuestion" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("AskUserQuestion not restored to deny list (got %v)", deny)
 	}
 }
 

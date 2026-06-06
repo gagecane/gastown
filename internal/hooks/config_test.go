@@ -1734,3 +1734,195 @@ func TestDiscoverTargets_DogsIncluded(t *testing.T) {
 		t.Error("hidden dogs entry .tmp should be skipped, but was included")
 	}
 }
+
+// settingsWithPermissions builds a SettingsJSON whose Extra carries the given
+// permissions map (or no permissions key when perm is nil).
+func settingsWithPermissions(t *testing.T, perm map[string]any) *SettingsJSON {
+	t.Helper()
+	s := &SettingsJSON{Extra: map[string]json.RawMessage{}}
+	if perm != nil {
+		raw, err := json.Marshal(perm)
+		if err != nil {
+			t.Fatalf("marshal perm: %v", err)
+		}
+		s.Extra["permissions"] = raw
+	}
+	return s
+}
+
+func TestRequiredDenyForRole(t *testing.T) {
+	tests := []struct {
+		role        string
+		wantFirst   string // "" means empty
+		mustContain []string
+		mustOmit    []string
+		wantEmpty   bool
+	}{
+		{role: constants.RoleMayor, wantEmpty: true},
+		{
+			role:        constants.RoleCrew,
+			mustContain: []string{"TodoWrite", "TaskStop"},
+			mustOmit:    []string{"AskUserQuestion"},
+		},
+		{
+			role:        constants.RoleWitness,
+			wantFirst:   "AskUserQuestion",
+			mustContain: []string{"AskUserQuestion", "TodoWrite", "TaskStop"},
+		},
+		{
+			role:        constants.RoleRefinery,
+			mustContain: []string{"AskUserQuestion", "TaskList"},
+		},
+		{
+			role:        constants.RoleDeacon,
+			mustContain: []string{"AskUserQuestion", "TaskGet"},
+		},
+		{
+			role:        constants.RolePolecat,
+			mustContain: []string{"AskUserQuestion", "TaskCreate"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			got := requiredDenyForRole(tt.role)
+			if tt.wantEmpty {
+				if len(got) != 0 {
+					t.Fatalf("requiredDenyForRole(%q) = %v, want empty", tt.role, got)
+				}
+				return
+			}
+			if tt.wantFirst != "" && (len(got) == 0 || got[0] != tt.wantFirst) {
+				t.Errorf("requiredDenyForRole(%q) first = %v, want %q", tt.role, got, tt.wantFirst)
+			}
+			has := make(map[string]bool)
+			for _, d := range got {
+				has[d] = true
+			}
+			for _, m := range tt.mustContain {
+				if !has[m] {
+					t.Errorf("requiredDenyForRole(%q) missing %q (got %v)", tt.role, m, got)
+				}
+			}
+			for _, m := range tt.mustOmit {
+				if has[m] {
+					t.Errorf("requiredDenyForRole(%q) should omit %q (got %v)", tt.role, m, got)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsurePermissionDefaultsRestoresDenyList(t *testing.T) {
+	// Witness with a permissions block that lost its deny list entirely.
+	s := settingsWithPermissions(t, map[string]any{"defaultMode": "bypassPermissions"})
+
+	EnsurePermissionDefaults(s, constants.RoleWitness)
+
+	if !HasPermissionDefaults(s, constants.RoleWitness) {
+		t.Fatal("witness should have permission defaults after EnsurePermissionDefaults")
+	}
+	deny := CurrentDenyList(s)
+	has := make(map[string]bool)
+	for _, d := range deny {
+		has[d] = true
+	}
+	for _, req := range requiredDenyForRole(constants.RoleWitness) {
+		if !has[req] {
+			t.Errorf("deny list missing required %q after restore (got %v)", req, deny)
+		}
+	}
+}
+
+func TestEnsurePermissionDefaultsPreservesExtraDeny(t *testing.T) {
+	// Operator added a custom deny entry; restore must keep it.
+	s := settingsWithPermissions(t, map[string]any{
+		"defaultMode": "bypassPermissions",
+		"deny":        []string{"SomeCustomTool"},
+	})
+
+	EnsurePermissionDefaults(s, constants.RoleWitness)
+
+	deny := CurrentDenyList(s)
+	has := make(map[string]bool)
+	for _, d := range deny {
+		has[d] = true
+	}
+	if !has["SomeCustomTool"] {
+		t.Errorf("custom deny entry dropped during restore (got %v)", deny)
+	}
+	if !has["AskUserQuestion"] {
+		t.Errorf("required AskUserQuestion not added (got %v)", deny)
+	}
+}
+
+func TestEnsurePermissionDefaultsNoPermissionsKey(t *testing.T) {
+	// Permissions block entirely absent (worst-case drift).
+	s := &SettingsJSON{Extra: map[string]json.RawMessage{}}
+
+	EnsurePermissionDefaults(s, constants.RoleDeacon)
+
+	if !HasPermissionDefaults(s, constants.RoleDeacon) {
+		t.Fatal("deacon should have permission defaults after restore from empty")
+	}
+}
+
+func TestEnsurePermissionDefaultsMayorNoDeny(t *testing.T) {
+	s := &SettingsJSON{Extra: map[string]json.RawMessage{}}
+
+	EnsurePermissionDefaults(s, constants.RoleMayor)
+
+	// Mayor must still get defaultMode pinned, but no deny list required.
+	if !HasPermissionDefaults(s, constants.RoleMayor) {
+		t.Fatal("mayor should satisfy permission defaults (defaultMode only)")
+	}
+	if len(CurrentDenyList(s)) != 0 {
+		t.Errorf("mayor should have no managed deny entries, got %v", CurrentDenyList(s))
+	}
+}
+
+func TestHasPermissionDefaultsDetectsDrift(t *testing.T) {
+	// Witness missing AskUserQuestion → drift.
+	s := settingsWithPermissions(t, map[string]any{
+		"defaultMode": "bypassPermissions",
+		"deny":        []string{"TodoWrite"},
+	})
+	if HasPermissionDefaults(s, constants.RoleWitness) {
+		t.Error("witness missing AskUserQuestion should report drift")
+	}
+
+	// Crew with Task tools but no AskUserQuestion → satisfied (crew doesn't require it).
+	crew := settingsWithPermissions(t, map[string]any{
+		"defaultMode": "bypassPermissions",
+		"deny":        []string{"TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop"},
+	})
+	if !HasPermissionDefaults(crew, constants.RoleCrew) {
+		t.Error("crew with full Task deny list should be satisfied")
+	}
+}
+
+func TestHasPermissionDefaultsWrongDefaultMode(t *testing.T) {
+	s := settingsWithPermissions(t, map[string]any{
+		"defaultMode": "ask",
+		"deny":        requiredDenyForRole(constants.RoleWitness),
+	})
+	if HasPermissionDefaults(s, constants.RoleWitness) {
+		t.Error("wrong defaultMode should report drift")
+	}
+}
+
+func TestEnsurePermissionDefaultsIdempotent(t *testing.T) {
+	s := &SettingsJSON{Extra: map[string]json.RawMessage{}}
+	EnsurePermissionDefaults(s, constants.RoleWitness)
+	first := CurrentDenyList(s)
+	EnsurePermissionDefaults(s, constants.RoleWitness)
+	second := CurrentDenyList(s)
+	if len(first) != len(second) {
+		t.Fatalf("EnsurePermissionDefaults not idempotent: %v vs %v", first, second)
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("deny order changed on second call: %v vs %v", first, second)
+		}
+	}
+}

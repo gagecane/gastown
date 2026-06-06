@@ -79,7 +79,14 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("loading current settings for %s: %w", target.DisplayKey(), err)
 		}
 
-		if hooks.HooksEqual(expected, &current.Hooks) {
+		hooksEqual := hooks.HooksEqual(expected, &current.Hooks)
+		// Permission drift is invisible to HooksEqual: the deny list lives in
+		// the settings' permissions block, not the hooks section. Surface it
+		// here so a missing safety-critical deny entry no longer reports
+		// "in sync" (gu-5gj68).
+		permissionDrift := !hooks.HasPermissionDefaults(current, target.Role)
+
+		if hooksEqual && !permissionDrift {
 			continue
 		}
 
@@ -89,7 +96,13 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 			relPath = target.Path
 		}
 
-		changes := diffHooksConfigs(&current.Hooks, expected)
+		var changes []string
+		if !hooksEqual {
+			changes = diffHooksConfigs(&current.Hooks, expected)
+		}
+		if permissionDrift {
+			changes = append(changes, diffPermissions(current, target.Role)...)
+		}
 		if len(changes) == 0 {
 			continue
 		}
@@ -109,6 +122,31 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 
 	// Exit with code 1 to indicate changes pending (for scripting)
 	return NewSilentExit(1)
+}
+
+// diffPermissions returns formatted diff lines for the settings' permissions
+// block: the managed deny entries that sync would add to restore the role's
+// safety-critical policy (gu-5gj68). The permissions block is not part of the
+// hooks section, so HooksEqual / diffHooksConfigs cannot see it.
+func diffPermissions(current *hooks.SettingsJSON, role string) []string {
+	have := make(map[string]bool)
+	for _, d := range hooks.CurrentDenyList(current) {
+		have[d] = true
+	}
+
+	var lines []string
+	for _, req := range hooks.RequiredDenyForRole(role) {
+		if !have[req] {
+			lines = append(lines, fmt.Sprintf("  permissions.deny: %s\n",
+				diffAdd.Render(fmt.Sprintf("+ %s", req))))
+		}
+	}
+	if len(lines) > 0 {
+		header := fmt.Sprintf("  permissions: %s\n",
+			diffAdd.Render("restore managed deny list"))
+		lines = append([]string{header}, lines...)
+	}
+	return lines
 }
 
 // diffHooksConfigs compares current and expected configs, returning formatted diff lines.

@@ -304,7 +304,7 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	// from older versions may have current hooks but still miss prompt defaults.
 	// Also check fleet plugin defaults — without these, agents inherit the user's
 	// global AIM plugins and OOM the host (see 2026-06-05 post-mortem).
-	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) && hooks.HasPluginDefaults(current, target.Role) {
+	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) && hooks.HasPluginDefaults(current, target.Role) && hooks.HasPermissionDefaults(current, target.Role) {
 		return syncUnchanged, nil
 	}
 
@@ -321,6 +321,11 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	// Ensure plugin defaults: fleet roles get all AIM plugins disabled to
 	// prevent OOM from MCP sidecar proliferation (see 2026-06-05 post-mortem).
 	hooks.EnsurePluginDefaults(current, target.Role)
+
+	// Ensure permission defaults: restore the role's safety-critical deny list
+	// (AskUserQuestion + Task tools) so it can no longer silently drift away
+	// and park an unattended agent at an interactive prompt (gu-5gj68).
+	hooks.EnsurePermissionDefaults(current, target.Role)
 
 	// Create .claude directory if needed
 	claudeDir := filepath.Dir(target.Path)
