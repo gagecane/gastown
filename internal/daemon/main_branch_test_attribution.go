@@ -91,6 +91,16 @@ type rigAttributionEntry struct {
 	// green again, so the runner backs off until origin/main advances past this
 	// SHA. Cleared on any pass.
 	LastFailedSHA string `json:"last_failed_sha,omitempty"`
+
+	// LastFailureWasTimeout records whether the most recent failing cycle was a
+	// context-deadline timeout (errGateTimeout) rather than an assertion failure
+	// (gs-iz2). A timeout is ambiguous — host-load slowdown vs a genuine hang —
+	// so a timeout-red is held to a higher escalation/backoff watermark than an
+	// assertion-red (timeoutEscalationThreshold): we demand one extra
+	// confirmation cycle before paging HIGH or backing off, which suppresses
+	// single/double load-timeout false pages while a sustained timeout still
+	// escalates as a real hang. Cleared on any pass.
+	LastFailureWasTimeout bool `json:"last_failure_was_timeout,omitempty"`
 }
 
 // stateFileMu serializes read/modify/write of the state file. Single-process
@@ -168,6 +178,7 @@ func recordAttributionRun(townRoot, rigName, currentSHA string, passed bool, now
 		entry.ConsecutiveFailures = 0
 		entry.LastEscalatedSignature = ""
 		entry.LastFailedSHA = ""
+		entry.LastFailureWasTimeout = false
 	}
 	state.Rigs[rigName] = entry
 	if err := saveMainBranchTestState(townRoot, state); err != nil {
@@ -221,18 +232,36 @@ func failureSignature(err error) string {
 	return "msg:" + first
 }
 
+// timeoutEscalationThreshold returns the consecutive-failure watermark a
+// TIMEOUT-classified red must reach before main_branch_test pages HIGH or backs
+// off (gs-iz2). It is one cycle higher than the assertion watermark: a
+// context-deadline timeout is ambiguous (host-load slowdown vs a genuine hang),
+// so we demand one extra confirmation cycle. That suppresses the false page a
+// one/two-cycle load timeout would otherwise fire during the initial threshold
+// runs, while a sustained timeout still escalates as a real hang. The +1 is
+// deliberately small: the gs-b1l town-global gate flock already prevents the
+// multi-rig pile-on behind the original load storm, and each extra heavy
+// confirmation run costs host load — so we buy just enough confirmation to drop
+// transient timeouts without re-creating the retry storm gs-3pe fixed.
+func timeoutEscalationThreshold(threshold int) int {
+	return threshold + 1
+}
+
 // recordFailureAndShouldEscalate updates the per-rig flake state for a FAILED
 // cycle and reports whether this failure warrants a HIGH escalation (hq-6qnct).
 // It escalates only when the gate has failed `threshold` cycles in a row (the
 // watermark — single flakes stay silent) AND we have not already paged for this
-// exact failure signature (dedup). The streak and the escalated signature are
-// persisted BEFORE the caller emits the escalation, mirroring the file's
-// crash-safety ordering: a single dropped page on emit failure is preferable to
-// re-paging the same known-red signature on every subsequent cycle.
+// exact failure signature (dedup). A timeout-classified failure (isTimeout) is
+// held to the higher timeoutEscalationThreshold instead, so a transient
+// load-timeout doesn't false-page during the initial threshold runs (gs-iz2).
+// The streak and the escalated signature are persisted BEFORE the caller emits
+// the escalation, mirroring the file's crash-safety ordering: a single dropped
+// page on emit failure is preferable to re-paging the same known-red signature
+// on every subsequent cycle.
 //
 // Best-effort persistence: a state-write error still returns a decision so the
 // patrol proceeds (the next cycle re-derives the streak).
-func recordFailureAndShouldEscalate(townRoot, rigName, signature, currentSHA string, threshold int, now time.Time) (escalate bool, streak int) {
+func recordFailureAndShouldEscalate(townRoot, rigName, signature, currentSHA string, threshold int, isTimeout bool, now time.Time) (escalate bool, streak int) {
 	stateFileMu.Lock()
 	defer stateFileMu.Unlock()
 
@@ -248,8 +277,15 @@ func recordFailureAndShouldEscalate(townRoot, rigName, signature, currentSHA str
 	if currentSHA != "" {
 		entry.LastFailedSHA = currentSHA
 	}
+	// Record the classification so shouldBackOffOnRedMain applies the matching
+	// (higher, for timeouts) watermark on the next cycle (gs-iz2).
+	entry.LastFailureWasTimeout = isTimeout
 
-	if streak >= threshold && signature != entry.LastEscalatedSignature {
+	watermark := threshold
+	if isTimeout {
+		watermark = timeoutEscalationThreshold(threshold)
+	}
+	if streak >= watermark && signature != entry.LastEscalatedSignature {
 		escalate = true
 		entry.LastEscalatedSignature = signature
 	}
@@ -274,6 +310,11 @@ func recordFailureAndShouldEscalate(townRoot, rigName, signature, currentSHA str
 // first `threshold` failing cycles still run so a single load flake never
 // wedges the runner into a permanent skip without ever escalating. A threshold
 // < 1 is clamped to 1 so a misconfigured watermark can't disable the backoff.
+//
+// A timeout-classified red (gs-iz2) uses the higher timeoutEscalationThreshold
+// so the backoff does not fire before the timeout watermark is reached — if it
+// did, a genuine hang would be backed off after `threshold` cycles and never
+// reach the timeout watermark that escalates it, silently masking the hang.
 func shouldBackOffOnRedMain(townRoot, rigName, currentSHA string, threshold int) bool {
 	if currentSHA == "" {
 		return false // No SHA to anchor on — fail open and run.
@@ -287,7 +328,11 @@ func shouldBackOffOnRedMain(townRoot, rigName, currentSHA string, threshold int)
 	if !ok {
 		return false
 	}
-	return entry.LastFailedSHA == currentSHA && entry.ConsecutiveFailures >= threshold
+	watermark := threshold
+	if entry.LastFailureWasTimeout {
+		watermark = timeoutEscalationThreshold(threshold)
+	}
+	return entry.LastFailedSHA == currentSHA && entry.ConsecutiveFailures >= watermark
 }
 
 // readPreviousPassingSHA returns the last-passing SHA for a rig from the

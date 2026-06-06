@@ -58,7 +58,7 @@ func TestFlakeWatermarkAndDedup(t *testing.T) {
 	sigB := `gates:test_sandbox`
 
 	fail := func(sig string) (bool, int) {
-		return recordFailureAndShouldEscalate(town, rigName, sig, "deadbeef", threshold, now)
+		return recordFailureAndShouldEscalate(town, rigName, sig, "deadbeef", threshold, false, now)
 	}
 	pass := func() {
 		recordAttributionRun(town, rigName, "deadbeef", true, now)
@@ -116,7 +116,7 @@ func TestRedMainBackoff(t *testing.T) {
 	const shaY = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	sig := "gates:test"
 
-	failX := func() { recordFailureAndShouldEscalate(town, rigName, sig, shaX, threshold, now) }
+	failX := func() { recordFailureAndShouldEscalate(town, rigName, sig, shaX, threshold, false, now) }
 
 	// Below the watermark we must NOT back off — the first `threshold` cycles
 	// run so a single flake never wedges the runner into a permanent skip.
