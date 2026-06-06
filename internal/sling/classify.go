@@ -139,6 +139,28 @@ func IsDoNotDispatchSlingError(stderrLine string) bool {
 		strings.Contains(s, "reference tripwire")
 }
 
+// IsDeferredSlingError reports whether a sling stderr line indicates the target
+// bead is intentionally DEFERRED — sling refuses by design so deferred work does
+// not consume polecat slots (sling.go: "refusing to sling deferred bead <id>:
+// ..."). Unlike a structural non-work item, a deferred bead is legitimate
+// in-progress or genuinely-blocked work that is intentionally held; it becomes
+// dispatchable again the moment it is un-deferred (or re-slung with --force).
+//
+// It must therefore NOT be untracked (that would destroy real convoy tracking and
+// mask the underlying hold) and must NOT escalate as "cannot dispatch / will never
+// progress" — a deferred step is not wedged, it is waiting. The convoy
+// re-dispatch loop previously fell through to the default branch and escalated a
+// HIGH "will never progress" alert for EVERY deferred bead in EVERY system convoy
+// EVERY scan cycle, flooding the Mayor inbox (gt-3798). The correct disposition is
+// the same as an actively-worked bead: suppress the escalation and back off the
+// re-feed interval, without untracking.
+func IsDeferredSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(stderrLine), "deferred bead")
+}
+
 // SlingFailureClass categorizes a sling stderr line into a single terminal-vs-
 // transient disposition so producers can switch on one value instead of chaining
 // predicates (and risk ordering bugs). Ordering matters: closed and not-found are
@@ -162,6 +184,10 @@ const (
 	// SlingFailureActivelyWorked: hooked/in_progress to a live agent. Suppress
 	// escalation and back off; it will close on its own.
 	SlingFailureActivelyWorked
+	// SlingFailureDeferred: the bead is intentionally deferred (held off polecat
+	// slots by design). Suppress escalation and back off; it becomes dispatchable
+	// when un-deferred. NOT terminal — must not be untracked (gt-3798).
+	SlingFailureDeferred
 )
 
 // ClassifySlingFailure maps a sling stderr line to its SlingFailureClass.
@@ -178,6 +204,8 @@ func ClassifySlingFailure(stderrLine string) SlingFailureClass {
 		return SlingFailureStructuralNonWork
 	case IsActivelyWorkedSlingError(stderrLine):
 		return SlingFailureActivelyWorked
+	case IsDeferredSlingError(stderrLine):
+		return SlingFailureDeferred
 	default:
 		return SlingFailureUnknown
 	}

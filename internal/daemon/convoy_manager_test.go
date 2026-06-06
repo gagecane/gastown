@@ -3622,6 +3622,62 @@ func TestFeedFirstReady_ActivelyWorked_NoEscalate(t *testing.T) {
 	}
 }
 
+// TestFeedFirstReady_Deferred_NoEscalateNoUntrack verifies the gt-3798 fix: when
+// sling refuses a DEFERRED bead (intentionally held off polecat slots), the
+// daemon suppresses the escalation (a deferred step is waiting, not wedged — it
+// becomes dispatchable when un-deferred), does NOT untrack it (deferred beads are
+// legitimate tracked work that must survive the hold), and does NOT record a
+// sling error (so it never escalates as "cannot dispatch / will never progress").
+func TestFeedFirstReady_Deferred_NoEscalateNoUntrack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	stderr := `refusing to sling deferred bead gt-defer: "deferred to post-launch"`
+	m, invokeLog := feedFirstReadyTestEnv(t, stderr)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error { untrackCalls++; return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-defer", Title: "Deferred Step", ReadyCount: 1, ReadyIssues: []string{"gt-defer"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("deferred bead should NOT escalate, but escalate was invoked: %q", data)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("deferred bead should not untrack (real tracked work), got %d", untrackCalls)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-defer"); ok {
+		t.Errorf("deferred bead should not record a sling error")
+	}
+}
+
+// TestFeedFirstReady_Deferred_RecordsChurn verifies a deferred bead advances its
+// feed-churn streak on each failed re-feed, so the effective cooldown escalates
+// (5m→…) instead of re-attempting an intentionally-held bead every scan (gt-3798).
+func TestFeedFirstReady_Deferred_RecordsChurn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, _ := feedFirstReadyTestEnv(t, `refusing to sling deferred bead gt-defer: "held"`)
+	m.untrackMissingBeadFn = func(string, string) error { return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-defer", Title: "Deferred Step", ReadyCount: 1, ReadyIssues: []string{"gt-defer"}}
+
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-defer"); got != feedDispatchCooldown {
+		t.Fatalf("after 1 churn, cooldown = %v, want base %v", got, feedDispatchCooldown)
+	}
+
+	m.lastFeedAttempt.Delete("gt-defer")
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-defer"); got <= feedDispatchCooldown {
+		t.Errorf("after 2 churns, cooldown = %v, want > base %v (escalating backoff)", got, feedDispatchCooldown)
+	}
+}
+
 // TestFeedFirstReady_DoNotDispatch_UntracksNoEscalate verifies the gu-q1wzq fix:
 // a do-not-dispatch / pinned reference tripwire is auto-untracked on first
 // failure (like a structural non-work bead) and does NOT escalate — it can never

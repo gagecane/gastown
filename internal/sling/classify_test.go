@@ -21,6 +21,7 @@ func TestClassifySlingFailure(t *testing.T) {
 		{"structural identity", "bead gt-x is an identity/system bead", SlingFailureStructuralNonWork},
 		{"actively worked hooked", "bead gt-x is already hooked to gastown/polecats/fury", SlingFailureActivelyWorked},
 		{"actively worked in_progress", "already in_progress (use --force to re-sling)", SlingFailureActivelyWorked},
+		{"deferred", "refusing to sling deferred bead gt-x: \"deferred to post-launch\"", SlingFailureDeferred},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,7 +55,7 @@ func TestIsTerminalSlingFailure(t *testing.T) {
 			t.Errorf("IsTerminalSlingFailure(%v) = false, want true", c)
 		}
 	}
-	nonTerminal := []SlingFailureClass{SlingFailureUnknown, SlingFailureActivelyWorked}
+	nonTerminal := []SlingFailureClass{SlingFailureUnknown, SlingFailureActivelyWorked, SlingFailureDeferred}
 	for _, c := range nonTerminal {
 		if IsTerminalSlingFailure(c) {
 			t.Errorf("IsTerminalSlingFailure(%v) = true, want false", c)

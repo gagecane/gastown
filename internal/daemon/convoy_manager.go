@@ -955,6 +955,19 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 				// without untracking (the step is real and will close on its own).
 				m.logger("Convoy %s: %s already hooked/in_progress to a live agent — in progress, suppressing escalation (gs-2dr)", c.ID, issueID)
 				m.recordFeedChurn(issueID)
+			case sling.IsDeferredSlingError(stderrLine):
+				// The bead is intentionally DEFERRED (gt-3798). sling refuses by
+				// design so deferred work doesn't consume polecat slots — but a
+				// deferred step is not wedged, it's waiting: it becomes dispatchable
+				// the moment it's un-deferred. Escalating it as "cannot dispatch /
+				// will never progress" is wrong AND it re-fired every scan cycle for
+				// EVERY deferred bead in EVERY system convoy, flooding the Mayor inbox
+				// (the gt-3798 mass-escalation storm). Treat it like an actively-worked
+				// bead: suppress the escalation and back off the re-feed (5m→1h), with
+				// NO untrack — the step is legitimate tracked work that must survive
+				// the hold (deferred beads must NOT be mass-closed/untracked).
+				m.logger("Convoy %s: %s is deferred — intentionally held, suppressing escalation and backing off (gt-3798)", c.ID, issueID)
+				m.recordFeedChurn(issueID)
 			default:
 				if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
 					// Genuinely-ambiguous persistent failure (e.g. an unroutable
