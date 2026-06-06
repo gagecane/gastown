@@ -128,7 +128,7 @@ const (
 const (
 	DefaultDoltHealthCheckInterval = 30 * time.Second
 	DefaultDoltCmdTimeout          = 15 * time.Second
-	DefaultDoltMaxConnections      = 100
+	DefaultDoltMaxConnections      = 1000
 	DefaultDoltSlowQueryThreshold  = 1 * time.Second
 )
 

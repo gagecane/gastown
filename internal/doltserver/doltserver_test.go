@@ -2339,8 +2339,33 @@ func TestDefaultConfig_MaxConnections(t *testing.T) {
 	if config.MaxConnections != DefaultMaxConnections {
 		t.Errorf("MaxConnections = %d, want %d", config.MaxConnections, DefaultMaxConnections)
 	}
-	if config.MaxConnections != 100 {
-		t.Errorf("DefaultMaxConnections = %d, want 100", config.MaxConnections)
+	if config.MaxConnections != 1000 {
+		t.Errorf("DefaultMaxConnections = %d, want 1000", config.MaxConnections)
+	}
+}
+
+// TestDefaultConfig_MaxConnections_ConfigOverride verifies that
+// operational.dolt.max_connections in town config is wired into the Dolt
+// server config, so the cap is tunable without a rebuild (gu-zo723).
+func TestDefaultConfig_MaxConnections_ConfigOverride(t *testing.T) {
+	townRoot := t.TempDir()
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const override = 250
+	settingsJSON := fmt.Sprintf(
+		`{"type":"town-settings","version":1,"operational":{"dolt":{"max_connections":%d}}}`,
+		override,
+	)
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(settingsJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	config := DefaultConfig(townRoot)
+	if config.MaxConnections != override {
+		t.Errorf("MaxConnections = %d, want %d (from town config override)", config.MaxConnections, override)
 	}
 }
 

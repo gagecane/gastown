@@ -141,14 +141,24 @@ const (
 	DefaultUser = "root" // Default Dolt user (no password for local access)
 	// DefaultMaxConnections caps Dolt's connection pool.
 	//
-	// Earlier comment justified 1000 ("Dolt default; Tim Sehn confirmed 1k is
-	// fine"), but Gas Town empirical usage observed across multiple outage
-	// events showed 1-19 concurrent connections in practice. The 1000-conn pool
-	// reserves memory and contributes to oom_score, making Dolt a frequent
-	// OOM-killer target during system memory pressure. 100 is comfortably above
-	// observed peak concurrency and meaningfully reduces resident memory.
-	// See gc-1ld5e / gu-qlcr.
-	DefaultMaxConnections = 100
+	// History: this was originally 1000 ("Dolt default; Tim Sehn confirmed 1k
+	// is fine"), then lowered to 100 (gc-1ld5e / gu-qlcr) on the premise that
+	// observed concurrency was only 1-19 and the large pool inflated oom_score.
+	// That empirical 1-19 ceiling NO LONGER HOLDS: under current ~16-rig load
+	// the 100-connection cap saturates and Dolt rejects clients town-wide,
+	// causing persistent bd flakiness and blocked/degraded refineries
+	// (incident gc-yhd9o, gc-wisp-1kgwn, gc-65rm9). Restarts only clear it
+	// transiently. Per operator directive (gu-zo723) the cap is restored to
+	// 1000: pool saturation under real load is the larger active harm, and the
+	// OOM tradeoff is accepted.
+	//
+	// COUPLING: raising this back to 1000 is safe ONLY because the aggressive
+	// 30s idle-session reaping (DefaultWaitTimeoutSec, gh-3623) stays in place.
+	// That reaping now caps the connection bleed that previously caused the
+	// death spiral at the 1000-cap. Do NOT also revert DefaultWaitTimeoutSec.
+	// The durable fix for the underlying bd connection leak is gu-nf6aj.
+	// See gu-zo723 (this change), gc-1ld5e / gu-qlcr (the reversed lowering).
+	DefaultMaxConnections = 1000
 
 	// DefaultReadTimeoutMs is the server-side timeout for reading a complete request from a client.
 	// Controls how long Dolt waits for a client to send a query on an idle connection.
@@ -251,9 +261,10 @@ type Config struct {
 	PidFile string
 
 	// MaxConnections is the maximum number of simultaneous connections the server will accept.
-	// Set to 0 to use the Dolt default (1000). Gas Town defaults to 100
-	// (DefaultMaxConnections) — observed peak concurrency is ~1-19, and the
-	// lower cap reduces Dolt's resident memory and OOM-target score. See gu-qlcr.
+	// Set to 0 to use the Dolt default (1000). Gas Town defaults to
+	// DefaultMaxConnections (1000) — the earlier 100 cap saturated under
+	// ~16-rig load and rejected clients town-wide (gu-zo723, reversing
+	// gc-1ld5e). Tunable via town config (operational dolt.max_connections).
 	MaxConnections int
 
 	// ReadTimeoutMs is the server-side read timeout in milliseconds.
@@ -316,6 +327,18 @@ type Config struct {
 //   - GT_DOLT_LOGLEVEL → LogLevel (trace, debug, info, warning, error, fatal)
 func DefaultConfig(townRoot string) *Config {
 	daemonDir := filepath.Join(townRoot, "daemon")
+
+	// max_connections is tunable via town config (settings/config.json
+	// operational.dolt.max_connections) so the cap can be adjusted WITHOUT a
+	// rebuild. Resolved here (before the local `config` var shadows the config
+	// package) and falls back to DefaultMaxConnections when unset. Wired per
+	// gu-zo723 after the 100-cap saturation incident; the config path existed
+	// (config.DoltThresholds.MaxConnections / MaxConnectionsV) but was dead.
+	maxConnections := DefaultMaxConnections
+	if townRoot != "" {
+		maxConnections = config.LoadOperationalConfig(townRoot).GetDoltConfig().MaxConnectionsV()
+	}
+
 	config := &Config{
 		TownRoot:         townRoot,
 		Port:             DefaultPort,
@@ -323,7 +346,7 @@ func DefaultConfig(townRoot string) *Config {
 		DataDir:          filepath.Join(townRoot, ".dolt-data"),
 		LogFile:          filepath.Join(daemonDir, "dolt.log"),
 		PidFile:          filepath.Join(daemonDir, "dolt.pid"),
-		MaxConnections:   DefaultMaxConnections,
+		MaxConnections:   maxConnections,
 		ReadTimeoutMs:    DefaultReadTimeoutMs,
 		WriteTimeoutMs:   DefaultWriteTimeoutMs,
 		WaitTimeoutSec:   DefaultWaitTimeoutSec,

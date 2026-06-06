@@ -238,6 +238,9 @@ func TestDoltThresholds_Defaults(t *testing.T) {
 	if got := dolt.SlowQueryThresholdD(); got != DefaultDoltSlowQueryThreshold {
 		t.Errorf("SlowQueryThreshold: got %v, want %v", got, DefaultDoltSlowQueryThreshold)
 	}
+	if got := dolt.MaxConnectionsV(); got != DefaultDoltMaxConnections {
+		t.Errorf("MaxConnections: got %v, want %v", got, DefaultDoltMaxConnections)
+	}
 }
 
 func TestLoadOperationalConfig_NonexistentDir(t *testing.T) {
