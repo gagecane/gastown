@@ -648,8 +648,9 @@ exit 0
 	}
 
 	for _, tc := range []struct {
-		name string
-		opts CreateOptions
+		name   string
+		opts   CreateOptions
+		withID bool
 	}{
 		{
 			name: "explicit rig",
@@ -659,6 +660,16 @@ exit 0
 			name: "parent prefix",
 			opts: CreateOptions{Title: "Child task", Parent: "tr-parent"},
 		},
+		{
+			name:   "deterministic id explicit rig",
+			opts:   CreateOptions{Title: "Fixed merge", Rig: "testrig"},
+			withID: true,
+		},
+		{
+			name:   "deterministic id parent prefix",
+			opts:   CreateOptions{Title: "Fixed child", Parent: "tr-parent"},
+			withID: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
@@ -666,7 +677,11 @@ exit 0
 			}
 
 			bd := New(workerDir)
-			if _, err := bd.Create(tc.opts); err != nil {
+			if tc.withID {
+				if _, err := bd.CreateWithID("tr-fixed", tc.opts); err != nil {
+					t.Fatalf("CreateWithID: %v", err)
+				}
+			} else if _, err := bd.Create(tc.opts); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
 
@@ -680,6 +695,9 @@ exit 0
 			}
 			if strings.Contains(logOutput, "beads_dir="+rigBeadsDir+"\n") {
 				t.Fatalf("Create used intermediate redirect beads dir %q:\n%s", rigBeadsDir, logOutput)
+			}
+			if tc.withID && !strings.Contains(logOutput, "--id=tr-fixed") {
+				t.Fatalf("CreateWithID did not pass deterministic id:\n%s", logOutput)
 			}
 		})
 	}
@@ -748,6 +766,36 @@ exit 0
 	// The bd binary must never have been invoked — no orphaned bead written.
 	if data, readErr := os.ReadFile(logPath); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
 		t.Fatalf("bd should not have been called for unresolvable rig, but log has:\n%s", data)
+	}
+}
+
+// TestCreateWithUnknownRigErrors verifies that an unknown repo/rig alias is
+// rejected via the canonical repo-alias resolution path (#4180) with an
+// "unknown repo/rig alias" error rather than silently routing to the local DB.
+func TestCreateWithUnknownRigErrors(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir town .beads: %v", err)
+	}
+	if err := WriteRoutes(townBeadsDir, []Route{{Prefix: "hq-", Path: "."}}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	workerDir := filepath.Join(townRoot, "gastown", "polecats", "rust")
+	if err := os.MkdirAll(workerDir, 0755); err != nil {
+		t.Fatalf("mkdir worker: %v", err)
+	}
+
+	_, err := New(workerDir).Create(CreateOptions{Title: "bad rig", Rig: "missing"})
+	if err == nil || !strings.Contains(err.Error(), `unknown repo/rig alias "missing"`) {
+		t.Fatalf("Create error = %v, want unknown rig alias", err)
 	}
 }
 

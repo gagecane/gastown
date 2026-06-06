@@ -844,8 +844,10 @@ func (b *Beads) getResolvedBeadsDir() string {
 // When opts.Rig is set explicitly, an unresolvable target is a hard error: we
 // MUST NOT silently fall back to the local database, because that orphans the
 // bead in the wrong DB with a success-looking result (gu-8622x — the silent
-// cross-rig misroute data-loss class). Callers asking for a specific rig get
-// that rig's database or a loud failure, never a different DB.
+// cross-rig misroute data-loss class). Rig resolution goes through
+// ResolveRepoAliasBeadsDir for repo-alias canonicalization (#4180); callers
+// asking for a specific rig get that rig's database or a loud failure, never a
+// different DB.
 func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 	fallback := b.getResolvedBeadsDir()
 	townRoot := b.getTownRoot()
@@ -854,15 +856,10 @@ func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 		if townRoot == "" {
 			return "", fmt.Errorf("cannot route bead to rig %q: town root unavailable (refusing to create in local database and orphan the bead)", opts.Rig)
 		}
-		rigDir := GetRigDirForName(townRoot, opts.Rig)
-		if rigDir == "" {
-			return "", fmt.Errorf("cannot route bead to rig %q: rig is not registered in routes.jsonl (refusing to create in local database and orphan the bead)", opts.Rig)
+		if targetDir, ok := ResolveRepoAliasBeadsDir(townRoot, opts.Rig); ok {
+			return targetDir, nil
 		}
-		targetDir := ResolveBeadsDir(rigDir)
-		if targetDir == "" {
-			return "", fmt.Errorf("cannot route bead to rig %q: rig directory %q has no resolvable beads database (refusing to create in local database and orphan the bead)", opts.Rig, rigDir)
-		}
-		return targetDir, nil
+		return "", fmt.Errorf("cannot route bead: unknown repo/rig alias %q (refusing to create in local database and orphan the bead)", opts.Rig)
 	}
 
 	if opts.Parent != "" {
@@ -1941,6 +1938,20 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
 	if IsFlagLikeTitle(opts.Title) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
+	}
+
+	targetDir, err := b.targetBeadsDirForCreate(opts)
+	if err != nil {
+		return nil, err
+	}
+	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
+		bdForCreate := &Beads{
+			workDir:    b.workDir,
+			beadsDir:   targetDir,
+			serverPort: b.serverPort,
+			isolated:   b.isolated,
+		}
+		return bdForCreate.CreateWithID(id, opts)
 	}
 
 	args := []string{"create", "--json", "--id=" + id}

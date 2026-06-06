@@ -794,6 +794,17 @@ func printBeadsRuntimeConfig(townRoot string) {
 		parts = append(parts, "from "+cfg.Source)
 	}
 	fmt.Printf("  Beads client: %s\n", strings.Join(parts, ", "))
+	if hint := beadsScopeHint(cfg.Database, townRoot); hint != "" {
+		fmt.Print(hint)
+	}
+}
+
+func beadsScopeHint(database, townRoot string) string {
+	if database != "hq" {
+		return ""
+	}
+
+	return fmt.Sprintf("    Gas Town town beads use database hq. Use `bd -C %s <cmd>` for hq-* beads; do not use `bd --global`, which targets Beads' beads_global database.\n", townRoot)
 }
 
 func netJoinHostPort(host string, port int) string {
