@@ -3443,13 +3443,10 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 
 	for _, status := range []string{"hooked", "in_progress", "open"} {
 		args := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + assignee, "--status=" + status, "--json"})
-		if rigDir != "" {
-			args = append(args, "--repo="+rigDir)
-		}
 		cmd := exec.Command(d.bdPath, args...) //nolint:gosec // G204: args are constructed internally
 		cmd.Dir = d.config.TownRoot
 		if rigDir != "" {
-			cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(rigDir, ".beads"))
+			cmd.Env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
 		} else {
 			cmd.Env = bdReadOnlyRoutingEnv(d.config.TownRoot)
 		}

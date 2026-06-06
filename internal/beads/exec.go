@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -63,4 +64,75 @@ func SubprocessModeForArgs(args []string) SubprocessEnvMode {
 		return ReadOnlyRouting
 	}
 	return MutationRouting
+}
+
+var bdBoolGlobalFlags = map[string]bool{
+	"--allow-stale": true,
+	"--help":        true,
+	"--json":        true,
+	"--profile":     true,
+	"--quiet":       true,
+	"--verbose":     true,
+	"--version":     true,
+	"-V":            true,
+	"-h":            true,
+	"-q":            true,
+	"-v":            true,
+}
+
+var bdTargetSelectorFlags = map[string]bool{
+	"--db":        true,
+	"--directory": true,
+	"--global":    true,
+	"--sandbox":   true,
+	"-C":          true,
+}
+
+// BDSubcommandIndex returns the argv index of bd's subcommand after recognized
+// bd global flags. Unknown leading flags fail closed so proxy allowlists cannot
+// be bypassed by treating command flags as globals.
+func BDSubcommandIndex(argv []string) (int, bool) {
+	if len(argv) < 2 || argv[0] != "bd" {
+		return 0, false
+	}
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if arg == "--" {
+			return 0, false
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return i, true
+		}
+		if _, _, ok := strings.Cut(arg, "="); ok {
+			return 0, false
+		}
+		if bdBoolGlobalFlags[arg] {
+			continue
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+// HasBDTargetSelectorFlag reports whether argv contains bd globals that can
+// override the database or working directory selected by Gas Town. The proxy
+// rejects these even after the subcommand because bd accepts globals anywhere.
+func HasBDTargetSelectorFlag(argv []string) bool {
+	if len(argv) == 0 || argv[0] != "bd" {
+		return false
+	}
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if arg == "--" {
+			return false
+		}
+		name := arg
+		if cut, _, ok := strings.Cut(arg, "="); ok {
+			name = cut
+		}
+		if bdTargetSelectorFlags[name] {
+			return true
+		}
+	}
+	return false
 }

@@ -648,8 +648,9 @@ exit 0
 	}
 
 	for _, tc := range []struct {
-		name string
-		opts CreateOptions
+		name   string
+		opts   CreateOptions
+		withID bool
 	}{
 		{
 			name: "explicit rig",
@@ -659,6 +660,16 @@ exit 0
 			name: "parent prefix",
 			opts: CreateOptions{Title: "Child task", Parent: "tr-parent"},
 		},
+		{
+			name:   "deterministic id explicit rig",
+			opts:   CreateOptions{Title: "Fixed merge", Rig: "testrig"},
+			withID: true,
+		},
+		{
+			name:   "deterministic id parent prefix",
+			opts:   CreateOptions{Title: "Fixed child", Parent: "tr-parent"},
+			withID: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
@@ -666,7 +677,11 @@ exit 0
 			}
 
 			bd := New(workerDir)
-			if _, err := bd.Create(tc.opts); err != nil {
+			if tc.withID {
+				if _, err := bd.CreateWithID("tr-fixed", tc.opts); err != nil {
+					t.Fatalf("CreateWithID: %v", err)
+				}
+			} else if _, err := bd.Create(tc.opts); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
 
@@ -680,6 +695,9 @@ exit 0
 			}
 			if strings.Contains(logOutput, "beads_dir="+rigBeadsDir+"\n") {
 				t.Fatalf("Create used intermediate redirect beads dir %q:\n%s", rigBeadsDir, logOutput)
+			}
+			if tc.withID && !strings.Contains(logOutput, "--id=tr-fixed") {
+				t.Fatalf("CreateWithID did not pass deterministic id:\n%s", logOutput)
 			}
 		})
 	}

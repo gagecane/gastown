@@ -111,6 +111,14 @@ func BuildMutationRoutingBDEnv(base []string, fallbackBeadsDir string) []string 
 	return forceBDMutation(BuildRoutingBDEnv(base, fallbackBeadsDir))
 }
 
+// BuildMutationNeutralBDEnv returns env for a mutating bd subprocess whose argv
+// contains an explicit native target such as --repo=<path>. It strips inherited
+// Gas Town target selectors and suppresses side effects without adding BEADS_DIR
+// or town Dolt connection metadata that could change native bd path semantics.
+func BuildMutationNeutralBDEnv(base []string) []string {
+	return forceBDMutation(SuppressBDSideEffects(StripBDTargetEnv(base)))
+}
+
 // ArgsAreReadOnly classifies bd CLI arguments for env policy. Unknown commands
 // are treated as mutations so they cannot accidentally inherit read-only mode.
 func ArgsAreReadOnly(args []string) bool {
