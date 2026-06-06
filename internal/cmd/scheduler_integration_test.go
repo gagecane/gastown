@@ -63,8 +63,22 @@ func initBeadsDBForServer(t *testing.T, dir, prefix string) {
 	// approach already used for the read sites (see bffc3192). A retry that
 	// lands on an already-created DB reports "already initialized", which we
 	// treat as success.
+	//
+	// CRITICAL recovery step (gu-l35ur): when the context timeout SIGKILLs
+	// `bd init --server` mid-schema-creation, it leaves a half-migrated,
+	// "dirty" database on the server (the DB is CREATEd but its tables are
+	// only partially migrated). A naive retry then fails *permanently* with
+	//   "schema migration: pending schema migrations alter pre-existing dirty
+	//    tables: ..."
+	// which is NOT "already initialized", so every subsequent attempt fails
+	// and the test goes red (the prior timeout-only fix in 9542c595 traded an
+	// MQ-freeze hang for a reliable red). Before each retry we therefore DROP
+	// the partial database on the server and remove the local .beads dir so
+	// the next attempt starts from a clean slate. Verified: dropping the
+	// server-side DB is the essential step — a fresh local dir alone does not
+	// recover, but dropping the DB does.
 	const attempts = 4
-	const perAttempt = 20 * time.Second
+	const perAttempt = 60 * time.Second
 	var out []byte
 	var err error
 	for i := 0; i < attempts; i++ {
@@ -80,6 +94,11 @@ func initBeadsDBForServer(t *testing.T, dir, prefix string) {
 			break
 		}
 		if i < attempts-1 {
+			// Clear any half-migrated state a killed attempt left behind so
+			// the retry starts clean (see comment above). The server DB is
+			// named by the bare prefix (not "beads_"+prefix).
+			dropPartialBeadsDB(t, prefix)
+			_ = os.RemoveAll(filepath.Join(dir, ".beads"))
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
@@ -97,6 +116,98 @@ func initBeadsDBForServer(t *testing.T, dir, prefix string) {
 	if err := beads.EnsureCustomTypes(filepath.Join(dir, ".beads")); err != nil {
 		t.Fatalf("ensure custom types in %s: %v", dir, err)
 	}
+}
+
+// dropPartialBeadsDB drops a half-migrated beads database left behind when a
+// `bd init --server` attempt is killed by the context timeout (gu-l35ur). The
+// database is named by the bare prefix (bd's --prefix maps directly to the Dolt
+// database name; there is no "beads_" prefix). Purging dropped databases clears
+// them from Dolt's in-memory catalog so the retry's fresh init does not collide
+// with a phantom entry. Best-effort: all errors are logged, not fatal — the
+// retry's own error reporting is authoritative.
+func dropPartialBeadsDB(t *testing.T, prefix string) {
+	t.Helper()
+	port := os.Getenv("GT_DOLT_PORT")
+	if port == "" {
+		port = "3307"
+	}
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port))
+	if err != nil {
+		t.Logf("dropPartialBeadsDB: connect failed: %v", err)
+		return
+	}
+	defer db.Close()
+	if _, err := db.Exec("DROP DATABASE IF EXISTS `" + prefix + "`"); err != nil {
+		t.Logf("dropPartialBeadsDB: DROP %s failed: %v", prefix, err)
+	}
+	if _, err := db.Exec("CALL dolt_purge_dropped_databases()"); err != nil {
+		t.Logf("dropPartialBeadsDB: purge failed: %v", err)
+	}
+}
+
+// TestInitBeadsDBForServerRecoversFromDirtyDB is a regression test for gu-l35ur.
+//
+// When the context timeout in initBeadsDBForServer SIGKILLs `bd init --server`
+// mid-schema-creation (under CI contention), it leaves a half-migrated "dirty"
+// database on the server. A naive retry then fails permanently with
+// "schema migration: pending schema migrations alter pre-existing dirty
+// tables", which is not "already initialized" — so every attempt fails and the
+// suite goes red. This test seeds exactly that dirty state (a database at the
+// target prefix holding partial beads tables but no completed migration), then
+// asserts initBeadsDBForServer recovers by dropping the partial DB and retrying.
+//
+// Without the drop-and-retry recovery this test fails on the first attempt and
+// never succeeds; with it, the second attempt inits cleanly.
+func TestInitBeadsDBForServerRecoversFromDirtyDB(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping")
+	}
+	requireDoltServer(t)
+
+	port := os.Getenv("GT_DOLT_PORT")
+	if port == "" {
+		port = "3307"
+	}
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port))
+	if err != nil {
+		t.Fatalf("connect to dolt: %v", err)
+	}
+	defer db.Close()
+
+	// Unique prefix so we never collide with other tests on the shared server.
+	prefix := fmt.Sprintf("dirty%d", schedulerTestCounter.Add(1))
+	t.Cleanup(func() { dropPartialBeadsDB(t, prefix) })
+
+	// Seed a dirty database: a DB at the prefix with partial beads tables and
+	// no schema_migrations row — the exact state a SIGKILLed init leaves and the
+	// state that makes a fresh `bd init` fail with "pending schema migrations
+	// alter pre-existing dirty tables".
+	for _, stmt := range []string{
+		"DROP DATABASE IF EXISTS `" + prefix + "`",
+		"CREATE DATABASE `" + prefix + "`",
+		"CREATE TABLE `" + prefix + "`.comments (id int)",
+		"CREATE TABLE `" + prefix + "`.events (id int)",
+		"CREATE TABLE `" + prefix + "`.issues (id int)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed dirty DB (%q): %v", stmt, err)
+		}
+	}
+
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	configureTestGitIdentity(t, tmpDir)
+
+	dir := filepath.Join(tmpDir, "rig")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Should recover via drop-and-retry; a failure here is a t.Fatalf inside
+	// the helper, which fails this test.
+	initBeadsDBForServer(t, dir, prefix)
 }
 
 // setupSchedulerIntegrationTown creates a minimal town filesystem for scheduler tests.
@@ -206,11 +317,18 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 			return
 		}
 		defer db.Close()
+		// bd's --prefix maps directly to the Dolt database name (e.g. prefix
+		// "h3" -> database "h3"), NOT "beads_h3". Dropping "beads_"+prefix was
+		// a no-op, so per-test databases accumulated for the whole suite and
+		// worsened the server contention that makes bd init time out (gu-l35ur).
+		// Drop the bare-prefix name; purge to clear Dolt's catalog.
 		for _, prefix := range []string{hqPrefix, rigPrefix} {
-			dbName := "beads_" + prefix
-			if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
-				t.Logf("cleanup: failed to drop %s: %v", dbName, err)
+			if _, err := db.Exec("DROP DATABASE IF EXISTS `" + prefix + "`"); err != nil {
+				t.Logf("cleanup: failed to drop %s: %v", prefix, err)
 			}
+		}
+		if _, err := db.Exec("CALL dolt_purge_dropped_databases()"); err != nil {
+			t.Logf("cleanup: purge failed: %v", err)
 		}
 	})
 
@@ -781,11 +899,15 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 			return
 		}
 		defer db.Close()
+		// Drop the bare-prefix database names bd actually creates (not
+		// "beads_"+prefix, which never matched — see gu-l35ur).
 		for _, prefix := range []string{hqPrefix, rig1Prefix, rig2Prefix} {
-			dbName := "beads_" + prefix
-			if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
-				t.Logf("cleanup: failed to drop %s: %v", dbName, err)
+			if _, err := db.Exec("DROP DATABASE IF EXISTS `" + prefix + "`"); err != nil {
+				t.Logf("cleanup: failed to drop %s: %v", prefix, err)
 			}
+		}
+		if _, err := db.Exec("CALL dolt_purge_dropped_databases()"); err != nil {
+			t.Logf("cleanup: purge failed: %v", err)
 		}
 	})
 
