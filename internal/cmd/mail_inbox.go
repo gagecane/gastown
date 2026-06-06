@@ -580,13 +580,23 @@ func runMailMarkRead(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 		marked := 0
+		var threadIDs []string
+		seenThread := make(map[string]bool)
 		for _, msg := range messages {
 			if err := mailbox.MarkReadOnly(msg.ID); err != nil {
 				style.PrintWarning("could not mark %s as read: %v", msg.ID, err)
 			} else {
 				marked++
+				if msg.ThreadID != "" && !seenThread[msg.ThreadID] {
+					seenThread[msg.ThreadID] = true
+					threadIDs = append(threadIDs, msg.ThreadID)
+				}
 			}
 		}
+		// Marking read is an explicit "I've handled this" signal, so clear any
+		// queued reply-reminder nudges for these threads — otherwise they keep
+		// re-firing for already-handled mail. See gu-4dc2w.
+		clearReplyRemindersForThreads(address, threadIDs)
 		fmt.Printf("%s Marked %d messages as read\n", style.Bold.Render("✓"), marked)
 		return nil
 	}
@@ -594,6 +604,9 @@ func runMailMarkRead(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("message ID required (or use --all to mark all as read)")
 	}
+
+	// Snapshot thread IDs before marking so we can clear reply-reminders after.
+	threadIDs := collectThreadIDsForIDs(mailbox, args)
 
 	// Mark all specified messages as read
 	marked := 0
@@ -605,6 +618,10 @@ func runMailMarkRead(cmd *cobra.Command, args []string) error {
 			marked++
 		}
 	}
+	// Marking read is an explicit "I've handled this" signal, so clear any
+	// queued reply-reminder nudges for these threads — otherwise they keep
+	// re-firing for already-handled mail. See gu-4dc2w.
+	clearReplyRemindersForThreads(address, threadIDs)
 
 	// Report results
 	if len(errors) > 0 {

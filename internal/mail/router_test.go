@@ -1874,9 +1874,12 @@ func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) 
 		}
 	}
 
+	// Escalations are acknowledged via `gt escalate ack`, not answered with a
+	// `gt mail send` reply, so no deferred reply-reminder should be queued.
+	// See gu-4dc2w.
 	remaining, _ := nudge.Pending(townRoot, sessionName)
-	if remaining != 1 {
-		t.Fatalf("expected 1 deferred reply-reminder after draining escalation nudge, got %d", remaining)
+	if remaining != 0 {
+		t.Fatalf("expected 0 deferred reply-reminders after draining escalation nudge, got %d", remaining)
 	}
 }
 
@@ -2128,6 +2131,28 @@ func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {
 	pending, _ := nudge.Pending(townRoot, "gt-gastown-crew-alice")
 	if pending != 0 {
 		t.Errorf("TypeReply should not enqueue a reminder, got %d", pending)
+	}
+}
+
+// TestEnqueueReplyReminder_SkipsEscalation verifies that escalation mail does
+// not enqueue a reply-reminder. Escalations are acknowledged via
+// `gt escalate ack`, not answered with a `gt mail send` reply, so a
+// reply-reminder nags for the wrong disposition and re-fires after ack. See
+// gu-4dc2w.
+func TestEnqueueReplyReminder_SkipsEscalation(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+	msg := &Message{
+		From:    "gastown/witness",
+		To:      "mayor/",
+		Subject: "STALE_RIG_AGENT gastown/refinery (no heartbeat)",
+		Type:    TypeEscalation,
+	}
+	r.enqueueReplyReminder(msg, "gt-mayor")
+
+	pending, _ := nudge.Pending(townRoot, "gt-mayor")
+	if pending != 0 {
+		t.Errorf("TypeEscalation should not enqueue a reminder, got %d", pending)
 	}
 }
 

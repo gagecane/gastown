@@ -1955,6 +1955,13 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if msg.Type == TypeReply {
 		return // Already a reply — reminder would be redundant
 	}
+	if msg.Type == TypeEscalation {
+		// Escalations are acknowledged via `gt escalate ack`, not answered with
+		// a `gt mail send` reply. A reply-reminder here nags for the wrong
+		// disposition and re-fires after the escalation is already acked. See
+		// gu-4dc2w.
+		return
+	}
 	if isPluginDispatchSubject(msg.Subject) {
 		return // Plugin-dispatch is informational — no reply expected. See gt-swirk.
 	}
