@@ -241,13 +241,65 @@ func addBeadDependency(t *testing.T, blocked, blocker, dir string) {
 // addBeadDependencyOfType adds a dependency with a specific type (e.g., "tracks",
 // "depends_on"). The from bead must exist in the local DB at dir; the to bead can
 // be in a different DB if routes.jsonl is present in dir's .beads/.
+//
+// After the write it verifies the dep is durably readable via the same SQL path
+// production uses (bdDepListRawIDs), re-issuing the dep-add if the row is not yet
+// visible. The plain read-retry added in bffc3192 was insufficient because the
+// Dolt write-then-read lag (gu-9qbg5) is not purely a read-visibility delay: a
+// `bd dep add` can ack success while its commit is still staged on another
+// connection ("nothing to commit" no-ops), so a later fresh connection — like
+// the one `gt sling --dry-run` opens — never sees the row no matter how long it
+// polls. Re-issuing the idempotent dep-add forces the staged write through. This
+// is what makes the downstream cross-rig dry-run assertions reliable under CI
+// contention (the cross-rig external: dep was the one consistently dropped).
 func addBeadDependencyOfType(t *testing.T, from, to, depType, dir string) {
 	t.Helper()
-	cmd := exec.Command("bd", "dep", "add", from, to, "--type="+depType)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bd dep add %s %s --type=%s failed: %v\n%s", from, to, depType, err, out)
+
+	runDepAdd := func() {
+		cmd := exec.Command("bd", "dep", "add", from, to, "--type="+depType)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd dep add %s %s --type=%s failed: %v\n%s", from, to, depType, err, out)
+		}
 	}
+
+	runDepAdd()
+	ensureDepDurable(t, from, to, depType, dir)
+}
+
+// ensureDepDurable polls the production dependency read path until the just-added
+// dep (from -> to, of depType) is visible, re-issuing the dep-add between polls to
+// recover acked-but-uncommitted writes (gu-9qbg5). It targets the same query
+// getEpicChildren/convoy resolution run, so a pass here guarantees the downstream
+// dry-run will see the dep. Cross-rig (external:) targets are matched on their
+// unwrapped bead ID, mirroring bdDepListRawIDs' ExtractIssueID handling.
+func ensureDepDurable(t *testing.T, from, to, depType, dir string) {
+	t.Helper()
+	want := beads.ExtractIssueID(to)
+
+	const polls = 20
+	const interval = 250 * time.Millisecond
+	for i := 0; i < polls; i++ {
+		ids, err := bdDepListRawIDs(dir, from, "down", depType)
+		if err == nil {
+			for _, id := range ids {
+				if id == want {
+					return
+				}
+			}
+		}
+		// Re-issue the idempotent dep-add periodically: if the original write
+		// was acked but its commit is still staged (gu-9qbg5), polling alone
+		// will never observe it. A no-op re-add is cheap and forces durability.
+		if i > 0 && i%4 == 0 {
+			cmd := exec.Command("bd", "dep", "add", from, to, "--type="+depType)
+			cmd.Dir = dir
+			_, _ = cmd.CombinedOutput()
+		}
+		time.Sleep(interval)
+	}
+	t.Fatalf("dep %s -> %s (type=%s) not durably readable in %s after %d polls",
+		from, to, depType, dir, polls)
 }
 
 // slingToScheduler runs `gt sling <bead> <rig> --hook-raw-bead` in deferred mode.
