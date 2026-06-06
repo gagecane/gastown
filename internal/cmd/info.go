@@ -75,6 +75,17 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.2.1",
+		Date:    "2026-06-06",
+		Changes: []string{
+			"CHANGED: Shell integration add-offer is now opt-in (set GASTOWN_OFFER_ADD=1); by default the hook is silent and only exports GT_TOWN_ROOT/GT_RIG inside known rigs.",
+			"FIX: bash shell hook no longer re-prompts to add a repo on every command, and an interrupted (Ctrl-C) prompt no longer loops across restored terminal sessions.",
+			"FIX: bd create repo aliases route canonically (gh#4180).",
+			"FIX: mail reply-to is inferred from the inbox so reply-reminders clear (gt-zzob).",
+			"FIX: gt doctor rig-config-sync accepts prefix-named Dolt databases (gt-5hd2).",
+		},
+	},
+	{
 		Version: "1.2.0",
 		Date:    "2026-05-27",
 		Changes: []string{
