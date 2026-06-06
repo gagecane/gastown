@@ -849,6 +849,28 @@ func (g *Git) ConfigureHooksPath() error {
 	return configureHooksPath(g.workDir)
 }
 
+// EffectiveHooksDir returns the absolute directory git actually runs hooks from
+// for the repo rooted at repoPath. When core.hooksPath is set (as beads does in
+// the town root, pointing at .beads/hooks), git ignores .git/hooks entirely and
+// runs hooks only from the configured path. Callers that install hooks (e.g. the
+// town-root branch-protection guard) MUST target this directory, not a hardcoded
+// .git/hooks, or the hook will be silently inert. A relative core.hooksPath is
+// resolved against repoPath, matching git's own behavior.
+func EffectiveHooksDir(repoPath string) string {
+	cmd := exec.Command("git", "-C", repoPath, "config", "--get", "core.hooksPath")
+	util.SetDetachedProcessGroup(cmd)
+	out, err := cmd.Output()
+	if err == nil {
+		if hp := strings.TrimSpace(string(out)); hp != "" {
+			if filepath.IsAbs(hp) {
+				return hp
+			}
+			return filepath.Join(repoPath, hp)
+		}
+	}
+	return filepath.Join(repoPath, ".git", "hooks")
+}
+
 // configureRefspec sets remote.origin.fetch to the standard refspec for bare repos.
 // Bare clones don't have this set by default, which breaks worktrees that need to
 // fetch and see origin/* refs. Without this, `git fetch` only updates FETCH_HEAD

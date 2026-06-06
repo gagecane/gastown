@@ -254,6 +254,33 @@ Additional hooks exist in settings.json files but are not yet in the registry:
 >
 > The registry is the menu. The base/overrides are the order.
 
+## Town-root branch protection (git hook)
+
+Separate from the agent-context hooks above, Gas Town installs a git
+`post-checkout` hook in the **town root** (`~/gt`) that auto-reverts any
+checkout of a non-default branch. The town root is shared infrastructure —
+every agent's `gt` commands resolve config (`rigs.json`, routes, daemon state)
+against it, so checking out a feature branch there is a fleet-wide disruption,
+not a local action. Doing so makes `gt` emit `Town root is on branch X (should
+be main)` on nearly every command town-wide until someone returns it to main.
+
+**Convention (all crew/agents):** never `git checkout` a non-default branch on
+the shared town root. Do branch and commit work in a `git worktree add` clone
+or your polecat/crew worktree — never on `~/gt` itself.
+
+**Guard:** the `post-checkout` hook is the automated backstop. It is installed
+by `gt git-init` and repaired by `gt doctor --fix` (the `branch-protection`
+check).
+
+> **`core.hooksPath` gotcha (gu-izs7x):** beads sets `core.hooksPath` on the
+> town root to `.beads/hooks`. When `core.hooksPath` is set, git ignores
+> `.git/hooks` **entirely** and runs hooks only from the configured directory.
+> So the branch-protection hook must be installed into the *effective* hooks
+> directory (`git.EffectiveHooksDir`), prepended ahead of the beads-managed
+> block so both run. Installing into a hardcoded `.git/hooks` leaves the guard
+> silently inert — the failure mode behind the gu-izs7x incident, where a crew
+> session checked the town root onto a feature branch and flooded the fleet.
+
 ## Known Gaps
 
 1. **Registry doesn't cover all active hooks** — Several hooks in settings.json
