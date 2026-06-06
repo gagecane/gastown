@@ -56,7 +56,7 @@ func TestConvoyFeedWorkflow_Integration(t *testing.T) {
 	// Step 5: Verify computed variables have defaults (not required as inputs)
 	computedVars := []string{
 		"ready_count", "available_count", "dispatch_count",
-		"issue_id", "title", "rig", "polecat",
+		"issue_id", "issue_title", "rig", "polecat",
 		"error", "error_count", "report_summary",
 	}
 	for _, name := range computedVars {
@@ -142,6 +142,60 @@ func TestAllDogFormulas_CanBeWisped(t *testing.T) {
 			}
 			if !hasRequired {
 				t.Log("Warning: formula has no required input variables")
+			}
+		})
+	}
+}
+
+// TestDogFormulas_NoTitleVarCollision is a regression test for gu-0agil.
+//
+// `bd mol cook` derives the root wisp title as the formula name UNLESS the
+// formula declares a variable named "title", in which case it uses the
+// "{{title}}" placeholder. If such a "title" var exists with an empty default
+// and isn't supplied at sling time, the root wisp title resolves to "" and
+// `bd mol wisp` fails with "validation failed for issue : title is required".
+//
+// This broke the documented stranded-convoy recovery path:
+//
+//	gt sling mol-convoy-feed deacon/dogs --var convoy=<id>
+//
+// mol-convoy-feed had declared [vars.title] (default="") purely so {{title}}
+// doc handlebars in its report step passed ValidateTemplateVariables. The fix
+// renamed that var to issue_title, removing the collision with cook's reserved
+// "title" var. This test ensures no dog formula reintroduces the collision.
+func TestDogFormulas_NoTitleVarCollision(t *testing.T) {
+	dogFormulas := []string{
+		constants.MolConvoyFeed,
+		constants.MolConvoyCleanup,
+		"mol-dep-propagate",
+		"mol-digest-generate",
+		"mol-orphan-scan",
+		"mol-session-gc",
+	}
+
+	formulasDir := "formulas"
+	for _, name := range dogFormulas {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(formulasDir, name+".formula.toml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Skipf("Formula not found: %v", err)
+			}
+
+			f, err := Parse(data)
+			if err != nil {
+				t.Fatalf("Parse failed: %v", err)
+			}
+
+			// A "title" var collides with cook's reserved root-title handling.
+			// It's only safe if it's a required input (cook then gets a real
+			// value at sling time). An optional/empty-default "title" var
+			// produces an empty root wisp title and fails wisp creation.
+			if v, ok := f.Vars["title"]; ok && !v.Required {
+				t.Errorf("formula %s declares an optional 'title' var, which collides "+
+					"with cook's reserved root-title handling and yields an empty wisp "+
+					"title at sling time (gu-0agil). Rename it (e.g. issue_title) or "+
+					"mark it required.", name)
 			}
 		})
 	}

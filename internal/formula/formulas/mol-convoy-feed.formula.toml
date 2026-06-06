@@ -188,13 +188,13 @@ Create summary report of convoy feeding actions.
 
 ### Dispatched Work
 {{#each dispatched}}
-- {{issue_id}}: {{title}} → {{rig}}/{{polecat}}
+- {{issue_id}}: {{issue_title}} → {{rig}}/{{polecat}}
 {{/each}}
 
 ### Skipped (no capacity)
 {{#if skipped}}
 {{#each skipped}}
-- {{issue_id}}: {{title}} (will retry next cycle)
+- {{issue_id}}: {{issue_title}} (will retry next cycle)
 {{/each}}
 {{else}}
 (none)
@@ -294,6 +294,6 @@ default = ""
 description = "Target rig for dispatch (computed during execution)"
 default = ""
 
-[vars.title]
+[vars.issue_title]
 description = "Issue title (computed during execution)"
 default = ""
