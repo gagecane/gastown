@@ -11,8 +11,81 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// resolveHeartbeatSession returns the tmux session name to use for heartbeat
+// writes, deriving it when GT_SESSION is absent from the process environment.
+//
+// gu-urr85: the between-turn keepalive and idle keepalive read GT_SESSION via
+// os.Getenv and SILENTLY NO-OP when it is empty. Several daemon-spawned agents
+// (deacon observed; likely witness/refinery too) end up with an empty
+// GT_SESSION in their shell env — so the heartbeat ages monotonically while the
+// session is alive, producing the "fresh=true but frozen timestamp" stall
+// signature that floods witnesses with false escalations. A liveness primitive
+// that silently does nothing is the core footgun.
+//
+// Resolution order (all in-process, cheap):
+//  1. GT_SESSION env — the normal, fastest path.
+//  2. tmux pane resolution — works regardless of whether GT_SESSION was
+//     exported into the shell, by walking the pane PID tree for the session
+//     this process actually runs in. This covers every daemon-spawned agent
+//     since they all run inside a tmux session.
+//  3. Role-derived deterministic name — last resort for singleton roles
+//     (deacon/mayor/witness/refinery) whose session name is computable from
+//     GT_ROLE even with no tmux (e.g. a detached subprocess).
+//
+// Returns ("", "") only when no source resolves. The source string is for
+// observability ("env", "tmux", "role") so callers can warn when they fell
+// back rather than silently masking env loss.
+func resolveHeartbeatSession() (name, source string) {
+	if s := os.Getenv("GT_SESSION"); s != "" {
+		return s, "env"
+	}
+
+	// tmux pane resolution: robust for any agent running inside tmux, even
+	// when GT_SESSION never made it into the process env.
+	if os.Getenv("TMUX") != "" {
+		if s, err := tmux.NewTmux().ResolveCurrentSession(); err == nil && s != "" {
+			return s, "tmux"
+		}
+	}
+
+	// Role-derived fallback: singleton roles have deterministic session names.
+	if s := roleDerivedSessionName(); s != "" {
+		return s, "role"
+	}
+
+	return "", ""
+}
+
+// roleDerivedSessionName computes the deterministic tmux session name for the
+// current role when it can be determined from the environment. Only singleton
+// roles (deacon, mayor, witness, refinery) have a name derivable without an
+// agent name; multi-instance roles (crew, polecat) return "" since their name
+// requires an instance identifier we can't recover from a lost env.
+func roleDerivedSessionName() string {
+	info, err := GetRole()
+	if err != nil {
+		return ""
+	}
+	switch info.Role {
+	case RoleDeacon:
+		return session.DeaconSessionName()
+	case RoleMayor:
+		return session.MayorSessionName()
+	case RoleWitness:
+		if info.Rig != "" {
+			return session.WitnessSessionName(session.PrefixFor(info.Rig))
+		}
+	case RoleRefinery:
+		if info.Rig != "" {
+			return session.RefinerySessionName(session.PrefixFor(info.Rig))
+		}
+	}
+	return ""
+}
 
 var heartbeatCmd = &cobra.Command{
 	Use:     "heartbeat",
@@ -136,9 +209,17 @@ func init() {
 }
 
 func runHeartbeat(cmd *cobra.Command, args []string) error {
-	sessionName := os.Getenv("GT_SESSION")
+	// gu-urr85: derive the session when GT_SESSION is missing rather than
+	// erroring, so an agent whose shell env lost GT_SESSION can still report
+	// its state instead of leaving the heartbeat to age into false-stale.
+	sessionName, source := resolveHeartbeatSession()
 	if sessionName == "" {
-		return fmt.Errorf("GT_SESSION not set (not running in a Gas Town session)")
+		return fmt.Errorf("GT_SESSION not set and no session could be derived (not running in a Gas Town session)")
+	}
+	if source != "env" {
+		fmt.Fprintf(os.Stderr,
+			"gt heartbeat: GT_SESSION not set; using %q (derived via %s, GT_ROLE=%q pid=%d). See gu-urr85.\n",
+			sessionName, source, os.Getenv("GT_ROLE"), os.Getpid())
 	}
 
 	townRoot, err := workspace.FindFromCwd()
@@ -173,13 +254,22 @@ func runHeartbeat(cmd *cobra.Command, args []string) error {
 // dead_agent_reap_timeout to prevent a wedged agent from suppressing
 // detection forever.
 func runHeartbeatKeepalive(_ *cobra.Command, _ []string) error {
-	sessionName := os.Getenv("GT_SESSION")
+	// gu-urr85: derive the session when GT_SESSION is missing instead of
+	// silently no-oping. A no-op here is the recurring deacon-stall cause —
+	// the heartbeat ages while the session is alive, tripping false-stale
+	// detection. Only no-op when even derivation fails (genuinely no session).
+	sessionName, source := resolveHeartbeatSession()
 	if sessionName == "" {
 		// UX leg strong opinion: don't fail builds. Warn so an operator
 		// running this manually sees the no-op, but exit 0 so a build
 		// wrapper's `gt heartbeat keepalive` doesn't break the build.
-		fmt.Fprintln(os.Stderr, "gt heartbeat keepalive: GT_SESSION not set, skipping (no-op)")
+		fmt.Fprintln(os.Stderr, "gt heartbeat keepalive: GT_SESSION not set and no session could be derived, skipping (no-op)")
 		return nil
+	}
+	if source != "env" {
+		fmt.Fprintf(os.Stderr,
+			"gt heartbeat keepalive: GT_SESSION not set; using %q (derived via %s, GT_ROLE=%q pid=%d). See gu-urr85.\n",
+			sessionName, source, os.Getenv("GT_ROLE"), os.Getpid())
 	}
 
 	townRoot, err := workspace.FindFromCwd()

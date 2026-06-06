@@ -230,8 +230,12 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	// (1h threshold) eventually trips on a perfectly healthy idle agent,
 	// flooding mayor with false escalations. A background keepalive ticker
 	// bumps the session heartbeat on its cadence so idle != stale. Best-effort:
-	// a no-op when GT_SESSION is unset (cancel is then a no-op too).
-	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
+	// a no-op only when no session can be derived at all (cancel is then a
+	// no-op too). gu-urr85: derive the session when GT_SESSION is unset
+	// (daemon-spawned agents can lose it from their shell env) instead of
+	// silently skipping — a skipped idle keepalive lets the heartbeat age
+	// into false-stale across the whole 5–15m backoff window.
+	if sessionName, _ := resolveHeartbeatSession(); sessionName != "" {
 		stopKeepalive := polecat.WithKeepalive(townRoot, sessionName, "await-signal", polecat.DefaultKeepaliveInterval)
 		defer stopKeepalive()
 	}
