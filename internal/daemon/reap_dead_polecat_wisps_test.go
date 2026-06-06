@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -117,6 +118,9 @@ func writeHeartbeatAge(t *testing.T, townRoot, sessionName string, age time.Dura
 // logger that writes to logBuf.
 func newReapTestDaemon(t *testing.T, logBuf *strings.Builder, bdPath string) (*Daemon, string) {
 	t.Helper()
+	// Suppress event writes to prevent phantom session_death events from
+	// leaking into the live town feed file. (gu-wmf2r)
+	t.Cleanup(events.SuppressWrites())
 	townRoot := t.TempDir()
 
 	// Register "myr" prefix for rig "myrig" so PolecatSessionName resolves

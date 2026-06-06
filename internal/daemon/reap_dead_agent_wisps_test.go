@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -68,6 +69,9 @@ func agentBeadJSON(id, assignee, status string, age time.Duration) string {
 // tempdir townroot, fake bd on PATH, registered prefix for "myrig" -> "myr".
 func newAgentReapDaemon(t *testing.T, logBuf *strings.Builder, bdPath string) (*Daemon, string) {
 	t.Helper()
+	// Suppress event writes to prevent phantom session_death events from
+	// leaking into the live town feed file. (gu-wmf2r)
+	t.Cleanup(events.SuppressWrites())
 	townRoot := t.TempDir()
 
 	old := session.DefaultRegistry()

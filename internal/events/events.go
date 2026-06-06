@@ -96,6 +96,17 @@ const (
 // EventsFile is the name of the raw events log.
 const EventsFile = ".events.jsonl"
 
+// suppressWrites disables all event file writes when true. Used by tests
+// to prevent phantom events leaking into the live town feed. (gu-wmf2r)
+var suppressWrites bool
+
+// SuppressWrites prevents event writes for the duration of a test. Returns
+// a restore function that re-enables writes.
+func SuppressWrites() func() {
+	suppressWrites = true
+	return func() { suppressWrites = false }
+}
+
 // Log writes an event to the events log.
 // The event is appended to ~/gt/.events.jsonl.
 // Returns nil if logging fails (events are best-effort).
@@ -125,6 +136,10 @@ func LogAudit(eventType, actor string, payload map[string]interface{}) error {
 // Uses flock for cross-process synchronization — sync.Mutex only protects
 // intra-process goroutines, but multiple gt processes write concurrently.
 func write(event Event) error {
+	if suppressWrites {
+		return nil
+	}
+
 	// Find town root
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
