@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // BranchProtectionCheck verifies that the post-checkout hook includes branch
@@ -109,7 +111,10 @@ func (c *BranchProtectionCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	hookPath := filepath.Join(gitDir, "hooks", "post-checkout")
+	// Install into the directory git actually runs hooks from. The town root
+	// sets core.hooksPath to .beads/hooks (via beads), so .git/hooks is ignored —
+	// checking .git/hooks there would pass while the real hook is missing (gu-izs7x).
+	hookPath := filepath.Join(git.EffectiveHooksDir(ctx.TownRoot), "post-checkout")
 
 	// Check if post-checkout hook exists
 	content, err := os.ReadFile(hookPath)
@@ -164,7 +169,7 @@ func (c *BranchProtectionCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	hooksDir := filepath.Join(ctx.TownRoot, ".git", "hooks")
+	hooksDir := git.EffectiveHooksDir(ctx.TownRoot)
 
 	// Ensure hooks directory exists
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {

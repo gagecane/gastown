@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -416,8 +417,14 @@ func InstallPreCheckoutHook(hqRoot string) error {
 
 // InstallBranchProtection adds branch protection to the post-checkout hook.
 // If a non-main branch is checked out in the town root, it auto-reverts to main.
+//
+// The hook is installed into the directory git actually runs hooks from
+// (core.hooksPath if set, else .git/hooks). The town root sets core.hooksPath to
+// .beads/hooks via beads, which makes git ignore .git/hooks entirely — installing
+// into .git/hooks there leaves the guard inert (the gu-izs7x incident). Prepending
+// the protection block before any existing (beads-managed) content keeps both running.
 func InstallBranchProtection(hqRoot string) error {
-	hooksDir := filepath.Join(hqRoot, ".git", "hooks")
+	hooksDir := git.EffectiveHooksDir(hqRoot)
 
 	// Ensure hooks directory exists
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
@@ -484,7 +491,7 @@ func IsPreCheckoutHookInstalled(hqRoot string) bool {
 
 // IsBranchProtectionInstalled checks if branch protection is in post-checkout.
 func IsBranchProtectionInstalled(hqRoot string) bool {
-	hookPath := filepath.Join(hqRoot, ".git", "hooks", "post-checkout")
+	hookPath := filepath.Join(git.EffectiveHooksDir(hqRoot), "post-checkout")
 
 	content, err := os.ReadFile(hookPath)
 	if err != nil {

@@ -4414,3 +4414,48 @@ func TestCloneBareSkipsHooksPath(t *testing.T) {
 		t.Errorf("CloneBare: core.hooksPath = %q, want empty — bare clones should skip hook wiring", got)
 	}
 }
+
+// TestEffectiveHooksDir verifies that EffectiveHooksDir honors core.hooksPath.
+// This is the gu-izs7x root cause: the town root sets core.hooksPath=.beads/hooks
+// (via beads), so git ignores .git/hooks entirely. Hook installers must target the
+// effective dir or the branch-protection guard is silently inert.
+func TestEffectiveHooksDir(t *testing.T) {
+	newRepo := func(t *testing.T) string {
+		t.Helper()
+		repo := t.TempDir()
+		if err := exec.Command("git", "init", repo).Run(); err != nil {
+			t.Fatalf("git init: %v", err)
+		}
+		return repo
+	}
+
+	t.Run("unset returns .git/hooks", func(t *testing.T) {
+		repo := newRepo(t)
+		want := filepath.Join(repo, ".git", "hooks")
+		if got := EffectiveHooksDir(repo); got != want {
+			t.Errorf("EffectiveHooksDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("relative hooksPath resolves against repo", func(t *testing.T) {
+		repo := newRepo(t)
+		if err := exec.Command("git", "-C", repo, "config", "core.hooksPath", ".beads/hooks").Run(); err != nil {
+			t.Fatalf("set hooksPath: %v", err)
+		}
+		want := filepath.Join(repo, ".beads", "hooks")
+		if got := EffectiveHooksDir(repo); got != want {
+			t.Errorf("EffectiveHooksDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("absolute hooksPath returned verbatim", func(t *testing.T) {
+		repo := newRepo(t)
+		abs := filepath.Join(t.TempDir(), "custom-hooks")
+		if err := exec.Command("git", "-C", repo, "config", "core.hooksPath", abs).Run(); err != nil {
+			t.Fatalf("set hooksPath: %v", err)
+		}
+		if got := EffectiveHooksDir(repo); got != abs {
+			t.Errorf("EffectiveHooksDir = %q, want %q", got, abs)
+		}
+	})
+}
