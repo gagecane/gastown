@@ -25,6 +25,18 @@ fi
 #   <default_branch>, beads-sync  - Direct work branches
 #   polecat/*                     - Polecat working branches (Refinery merges these)
 #   integration/*                 - Integration branches (created by gt mq integration)
+#   preserved/*                   - Off-host backup refs for unpushed/stashed work
+#                                   (never merged, never reach main; see manager.go
+#                                    preserveUnpushedHead / preserveAndClearBranchStashes)
+
+# Track whether every ref in this push targets refs/heads/preserved/* — pure
+# backup refs that the Refinery never scans and that never reach main. The CI
+# gate runner at the bottom is meaningless for them (it checks the working tree,
+# not the pushed SHA) and its multi-minute cost on a cold cache blows past the
+# 60s push timeout, stranding the very work the preservation ref exists to back
+# up (gu-p9b2v). When the push is preserved-only we skip the gates entirely.
+pushed_any_branch=0
+pushing_only_preserved=1
 
 while read local_ref local_sha remote_ref remote_sha; do
   # Skip tags - they're allowed for releases
@@ -34,8 +46,13 @@ while read local_ref local_sha remote_ref remote_sha; do
 
   branch="${remote_ref#refs/heads/}"
 
+  pushed_any_branch=1
+  if [[ "$branch" != preserved/* ]]; then
+    pushing_only_preserved=0
+  fi
+
   case "$branch" in
-    "${default_branch}"|beads-sync|polecat/*|integration/*)
+    "${default_branch}"|beads-sync|polecat/*|integration/*|preserved/*)
       # Allowed branches
       ;;
     *)
@@ -106,6 +123,18 @@ done
 #   - 'go' is not on PATH (non-Go developer environments)
 #
 # See scripts/pre-push-check.sh for gate details and env hygiene.
+
+# Skip the gate runner for preserved-only pushes (gu-p9b2v). refs/heads/preserved/*
+# are off-host backups of unpushed/stashed work: the Refinery never scans them and
+# they never reach main, so the gates (which check the working tree, not the pushed
+# SHA) prove nothing about them. Worse, on a cold cache the gates run for minutes and
+# trip the 60s push timeout in preserveUnpushedHead / preserveAndClearBranchStashes,
+# stranding the work the backup ref was meant to protect. Gates still run for any push
+# that touches a non-preserved ref (including a mixed push).
+if [[ "$pushed_any_branch" == "1" ]] && [[ "$pushing_only_preserved" == "1" ]]; then
+  echo "pre-push: preservation-only push (refs/heads/preserved/*) — skipping CI gates." >&2
+  exit 0
+fi
 
 script_dir=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [[ -n "$script_dir" ]] && [[ -x "$script_dir/scripts/pre-push-check.sh" ]]; then

@@ -214,6 +214,57 @@ unset GT_INTEGRATION_LAND 2>/dev/null || true
 assert_block "FF integration merge blocked" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
+# Test 11: Push to preserved/* branch — allowed (off-host backup ref, gu-p9b2v)
+echo "Test 11: Push to preserved/* branch"
+setup_repos
+cd "$TMPDIR/local"
+git checkout -b preserved/dust/stash-abc123 >/dev/null 2>&1
+echo "preserved work" >> file.txt
+git add file.txt && git commit -m "preserved work" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_pass "Preserved branch push allowed" run_hook "refs/heads/preserved/dust/stash-abc123" "$local_sha" "refs/heads/preserved/dust/stash-abc123" "0000000000000000000000000000000000000000"
+cleanup
+
+# install_failing_gate writes a scripts/pre-push-check.sh into the working repo
+# that always exits 1, so we can prove whether the hook invokes the gate runner.
+install_failing_gate() {
+  mkdir -p "$TMPDIR/local/scripts"
+  cat > "$TMPDIR/local/scripts/pre-push-check.sh" <<'GATE'
+#!/bin/bash
+echo "fake gate: failing on purpose" >&2
+exit 1
+GATE
+  chmod +x "$TMPDIR/local/scripts/pre-push-check.sh"
+}
+
+# Test 12: Preserved-only push SKIPS the CI gate runner (gu-p9b2v).
+# A gate that always fails must NOT block a preserved/* push, because the gates
+# are skipped for preservation backups.
+echo "Test 12: Preserved-only push skips gate runner"
+setup_repos
+cd "$TMPDIR/local"
+install_failing_gate
+git checkout -b preserved/dust/stash-def456 >/dev/null 2>&1
+echo "preserved work" >> file.txt
+git add file.txt && git commit -m "preserved work" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_pass "Preserved-only push skips failing gates" run_hook "refs/heads/preserved/dust/stash-def456" "$local_sha" "refs/heads/preserved/dust/stash-def456" "0000000000000000000000000000000000000000"
+cleanup
+
+# Test 13: Non-preserved push STILL runs the gate runner (skip is preserved-only).
+# A failing gate must block a normal default-branch push — proving the gu-p9b2v
+# exemption is scoped strictly to preserved/* and didn't disable gates globally.
+echo "Test 13: Default-branch push still runs gate runner"
+setup_repos
+cd "$TMPDIR/local"
+install_failing_gate
+remote_sha=$(get_sha HEAD)
+echo "change" >> file.txt
+git add file.txt && git commit -m "normal change" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Default-branch push blocked by failing gate" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 if [[ $FAIL -gt 0 ]]; then
