@@ -56,7 +56,7 @@ case "$pos0" in
     case "$*" in
       *"IN ("*)
         # Batched tracks query for all convoys at once.
-        echo '[{"issue_id":"hq-cv-a","depends_on_id":"gt-done1"},{"issue_id":"hq-cv-b","depends_on_id":"gt-open1"}]'
+        echo '[{"issue_id":"hq-cv-a","depends_on_issue_id":"gt-done1"},{"issue_id":"hq-cv-b","depends_on_issue_id":"gt-open1"}]'
         ;;
       *)
         # Any per-convoy serial query (the regression) returns nothing —
@@ -179,7 +179,7 @@ case "$pos0" in
   sql)
     echo "$*" >> "` + sqlLog + `"
     case "$*" in
-      *"IN ("*) echo '[{"issue_id":"hq-cv-go","depends_on_id":"gt-done1"}]' ;;
+      *"IN ("*) echo '[{"issue_id":"hq-cv-go","depends_on_issue_id":"gt-done1"}]' ;;
       *) echo '[]' ;;
     esac
     exit 0

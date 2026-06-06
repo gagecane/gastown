@@ -236,7 +236,7 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 	joinClause = `LEFT JOIN (
 		SELECT DISTINCT wd.issue_id
 		FROM wisp_dependencies wd
-		LEFT JOIN wisps pw ON pw.id = wd.depends_on_id LEFT JOIN issues pi ON pi.id = wd.depends_on_id
+		LEFT JOIN wisps pw ON pw.id = wd.depends_on_issue_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
 		WHERE wd.type = 'parent-child'
 		AND (pw.status IN ('open', 'hooked', 'in_progress') OR pi.status IN ('open', 'in_progress'))
 	) open_parent ON open_parent.issue_id = w.id`
@@ -255,7 +255,7 @@ const LabelSlingContext = "gt:sling-context"
 //
 // A sling-context wisp is created with `dep add <context> <workbead>
 // --type=tracks`, i.e. the context's wisp_dependencies row has issue_id=context
-// and depends_on_id=workbead. The work bead lives in the issues table. If the
+// and depends_on_issue_id=workbead. The work bead lives in the issues table. If the
 // reaper closes/purges the context by age while its work bead is still open,
 // the scheduler can dispatch against a now-missing context and CloseSlingContext
 // fails with "issue not found" — a double-dispatch risk (gu-i0oaq / gu-ycihb).
@@ -269,7 +269,7 @@ func liveTrackedContextExcludeJoin(dbName string) (joinClause, whereCondition st
 		SELECT DISTINCT wd.issue_id
 		FROM wisp_dependencies wd
 		INNER JOIN wisp_labels wl ON wl.issue_id = wd.issue_id AND wl.label = '` + LabelSlingContext + `'
-		LEFT JOIN wisps tw ON tw.id = wd.depends_on_id LEFT JOIN issues ti ON ti.id = wd.depends_on_id
+		LEFT JOIN wisps tw ON tw.id = wd.depends_on_issue_id LEFT JOIN issues ti ON ti.id = wd.depends_on_issue_id
 		WHERE wd.type = 'tracks'
 		AND (tw.status IN ('open', 'hooked', 'in_progress') OR ti.status IN ('open', 'in_progress'))
 	) live_tracked ON live_tracked.issue_id = w.id`
@@ -347,11 +347,11 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		AND i.issue_type != 'epic'
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM dependencies d
-			INNER JOIN issues dep ON d.depends_on_id = dep.id
+			INNER JOIN issues dep ON d.depends_on_issue_id = dep.id
 			WHERE dep.status IN ('open', 'in_progress')
 		)
 		AND i.id NOT IN (
-			SELECT DISTINCT d.depends_on_id FROM dependencies d
+			SELECT DISTINCT d.depends_on_issue_id FROM dependencies d
 			INNER JOIN issues blocker ON d.issue_id = blocker.id
 			WHERE blocker.status IN ('open', 'in_progress')
 		)`
@@ -371,7 +371,7 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	// Anomaly detection: dangling parent references.
 	danglingQuery := `
 		SELECT COUNT(*) FROM wisp_dependencies wd
-		LEFT JOIN wisps pw ON pw.id = wd.depends_on_id LEFT JOIN issues pi ON pi.id = wd.depends_on_id
+		LEFT JOIN wisps pw ON pw.id = wd.depends_on_issue_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
 		WHERE wd.type = 'parent-child' AND pw.id IS NULL AND pi.id IS NULL`
 	var danglingCount int
 	if err := db.QueryRowContext(ctx, danglingQuery).Scan(&danglingCount); err == nil && danglingCount > 0 {
@@ -686,11 +686,11 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 		)
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM `+"`%s`"+`.dependencies d
-			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_id = dep.id
+			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_issue_id = dep.id
 			WHERE dep.status IN ('open', 'in_progress')
 		)
 		AND i.id NOT IN (
-			SELECT DISTINCT d.depends_on_id FROM `+"`%s`"+`.dependencies d
+			SELECT DISTINCT d.depends_on_issue_id FROM `+"`%s`"+`.dependencies d
 			INNER JOIN `+"`%s`"+`.issues blocker ON d.issue_id = blocker.id
 			WHERE blocker.status IN ('open', 'in_progress')
 		)`, dbName, dbName, dbName, dbName, dbName)
@@ -839,7 +839,7 @@ func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery, primaryTable stri
 
 		// Clean up reverse dependency references to prevent dangling parent refs.
 		// Non-fatal: primary delete below is what matters.
-		delReverse := fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_id IN %s", inClause)
+		delReverse := fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_issue_id IN %s", inClause)
 		_, _ = db.ExecContext(ctx, delReverse, args...)
 
 		delPrimary := fmt.Sprintf("DELETE FROM `%s` WHERE id IN %s", primaryTable, inClause) //nolint:gosec // G201: primaryTable is internal

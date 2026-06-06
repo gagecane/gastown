@@ -45,7 +45,7 @@ case "$pos0" in
         first=1
         for c in $(echo "$*" | grep -o "hq-cv-[0-9]*"); do
           if [ $first -eq 0 ]; then printf ','; fi
-          printf '{"issue_id":"%s","depends_on_id":"gt-done-%s"}' "$c" "$c"
+          printf '{"issue_id":"%s","depends_on_issue_id":"gt-done-%s"}' "$c" "$c"
           first=0
         done
         printf ']'

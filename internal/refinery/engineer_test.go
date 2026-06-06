@@ -1086,9 +1086,9 @@ case "$*" in
 	assert_town_read_env
 	    echo '[{"id":"hq-cv-l9","title":"Cross-rig convoy","status":"open","description":"","issue_type":"convoy"}]'
     ;;
-  *"sql SELECT issue_id, depends_on_id FROM dependencies WHERE issue_id IN ("*") AND type = 'tracks' --json"*)
+  *"sql SELECT issue_id, depends_on_issue_id FROM dependencies WHERE issue_id IN ("*") AND type = 'tracks' --json"*)
     assert_town_read_env
-    echo '[{"issue_id":"hq-cv-l9","depends_on_id":"external:l9:l9-123"}]'
+    echo '[{"issue_id":"hq-cv-l9","depends_on_issue_id":"external:l9:l9-123"}]'
     ;;
   "--allow-stale dep list hq-cv-l9 --direction=down --type=tracks --json"|"dep list hq-cv-l9 --direction=down --type=tracks --json")
     assert_town_read_env

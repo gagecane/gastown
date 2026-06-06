@@ -484,20 +484,20 @@ func runBdJSONWithOptions(dir string, allowStale bool, args ...string) ([]byte, 
 // target issues live in a different Dolt database. See GH #2624.
 //
 // dir should be the town beads directory (.beads) for HQ queries.
-// direction is "down" (issue_id → depends_on_id) or "up" (depends_on_id → issue_id).
+// direction is "down" (issue_id → depends_on_issue_id) or "up" (depends_on_issue_id → issue_id).
 // depType filters by dependency type (e.g., "tracks", "blocks"); empty means all types.
 //
 // Returns deduplicated, unwrapped issue IDs (external:prefix:id → id).
 func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
 	// Determine query columns based on direction.
-	// "down": issueID depends on targets → SELECT depends_on_id WHERE issue_id = ?
-	// "up":   issueID is depended on → SELECT issue_id WHERE depends_on_id = ?
+	// "down": issueID depends on targets → SELECT depends_on_issue_id WHERE issue_id = ?
+	// "up":   issueID is depended on → SELECT issue_id WHERE depends_on_issue_id = ?
 	var selectCol, whereCol string
 	if direction == "up" {
 		selectCol = "issue_id"
-		whereCol = "depends_on_id"
+		whereCol = "depends_on_issue_id"
 	} else {
-		selectCol = "depends_on_id"
+		selectCol = "depends_on_issue_id"
 		whereCol = "issue_id"
 	}
 
@@ -575,7 +575,7 @@ func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[stri
 	}
 
 	query := fmt.Sprintf(
-		"SELECT issue_id, depends_on_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
+		"SELECT issue_id, depends_on_issue_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
 		strings.Join(quoted, ","),
 	)
 
@@ -601,7 +601,7 @@ func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[stri
 	seen := make(map[string]map[string]bool, len(convoyIDs))
 	for _, row := range rows {
 		convoyID := row["issue_id"]
-		rawID := row["depends_on_id"]
+		rawID := row["depends_on_issue_id"]
 		id := beads.ExtractIssueID(rawID)
 		if convoyID == "" || id == "" {
 			continue
@@ -2586,6 +2586,21 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting tracked issues for %s: %w", convoyID, err)
 	}
 
+	// Guard: if tracked is empty but convoy is open, retry once. A 0/0 read
+	// under Dolt contention is indistinguishable from "genuinely empty" without
+	// a retry. This prevents false-complete signals to automation. (gu-4671z)
+	trackedUnreliable := false
+	if len(tracked) == 0 && normalizeConvoyStatus(convoy.Status) == convoyStatusOpen {
+		time.Sleep(200 * time.Millisecond)
+		tracked, err = getTrackedIssues(townBeads, convoyID)
+		if err != nil {
+			return fmt.Errorf("getting tracked issues for %s (retry): %w", convoyID, err)
+		}
+		if len(tracked) == 0 {
+			trackedUnreliable = true
+		}
+	}
+
 	// Count completed
 	completed := 0
 	for _, t := range tracked {
@@ -2609,6 +2624,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 			Tracked       []trackedIssueInfo `json:"tracked"`
 			Completed     int                `json:"completed"`
 			Total         int                `json:"total"`
+			Unreliable    bool               `json:"unreliable,omitempty"`
 		}
 		out := jsonStatus{
 			ID:            convoy.ID,
@@ -2620,6 +2636,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 			Tracked:       tracked,
 			Completed:     completed,
 			Total:         len(tracked),
+			Unreliable:    trackedUnreliable,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -2639,7 +2656,11 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 	if merge != "" {
 		fmt.Printf("  Merge:     %s\n", merge)
 	}
-	fmt.Printf("  Progress:  %d/%d completed\n", completed, len(tracked))
+	if trackedUnreliable {
+		fmt.Printf("  Progress:  %s\n", style.Warning.Render("⚠ 0/0 — tracked issues could not be resolved (retry failed; Dolt contention?)"))
+	} else {
+		fmt.Printf("  Progress:  %d/%d completed\n", completed, len(tracked))
+	}
 	fmt.Printf("  Created:   %s\n", convoy.CreatedAt)
 	if convoy.ClosedAt != "" {
 		fmt.Printf("  Closed:    %s\n", convoy.ClosedAt)

@@ -2466,7 +2466,7 @@ func (e *Engineer) batchGetTrackedDeps(townBeads string, townReadEnv []string, c
 	}
 
 	query := fmt.Sprintf(
-		"SELECT issue_id, depends_on_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
+		"SELECT issue_id, depends_on_issue_id FROM dependencies WHERE issue_id IN (%s) AND type = 'tracks'",
 		strings.Join(quoted, ","),
 	)
 
@@ -2489,7 +2489,7 @@ func (e *Engineer) batchGetTrackedDeps(townBeads string, townReadEnv []string, c
 	seen := make(map[string]map[string]bool, len(convoyIDs))
 	for _, row := range rows {
 		convoyID := row["issue_id"]
-		rawID := row["depends_on_id"]
+		rawID := row["depends_on_issue_id"]
 		id := beads.ExtractIssueID(rawID)
 		if convoyID == "" || id == "" {
 			continue

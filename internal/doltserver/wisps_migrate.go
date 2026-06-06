@@ -291,7 +291,7 @@ func copyAuxiliaryData(workDir string, result *MigrateWispsResult) error {
 
 	// Copy dependencies
 	if err := bdSQL(workDir,
-		"INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id) SELECT d.issue_id, d.depends_on_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id FROM dependencies d INNER JOIN wisps w ON d.issue_id = w.id"); err != nil {
+		"INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_issue_id, type, created_at, created_by, metadata, thread_id) SELECT d.issue_id, d.depends_on_issue_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id FROM dependencies d INNER JOIN wisps w ON d.issue_id = w.id"); err != nil {
 		if !strings.Contains(err.Error(), "nothing") {
 			return fmt.Errorf("copying dependencies: %w", err)
 		}
@@ -493,14 +493,14 @@ var wispAuxTableDDLs = []wispAuxTableDDL{
 		name: "wisp_dependencies",
 		ddl: `CREATE TABLE wisp_dependencies (
   issue_id varchar(255) NOT NULL,
-  depends_on_id varchar(255) NOT NULL,
+  depends_on_issue_id varchar(255) NOT NULL,
   type varchar(32) NOT NULL DEFAULT 'blocks',
   created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   created_by varchar(255) NOT NULL DEFAULT '',
   metadata json,
   thread_id varchar(255) DEFAULT '',
-  PRIMARY KEY (issue_id, depends_on_id),
-  KEY idx_wisp_deps_depends_on (depends_on_id)
+  PRIMARY KEY (issue_id, depends_on_issue_id),
+  KEY idx_wisp_deps_depends_on (depends_on_issue_id)
 )`,
 	},
 }

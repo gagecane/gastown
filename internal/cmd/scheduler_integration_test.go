@@ -349,7 +349,7 @@ func TestSchedulerAutoConvoyCreation(t *testing.T) {
 		t.Fatalf("convoy %s dep list failed: %v", fields.Convoy, err)
 	}
 	var deps []struct {
-		DependsOnID string `json:"depends_on_id"`
+		DependsOnID string `json:"depends_on_issue_id"`
 	}
 	if err := json.Unmarshal(depOut, &deps); err != nil {
 		t.Fatalf("parse dep list: %v\nraw: %s", err, depOut)
