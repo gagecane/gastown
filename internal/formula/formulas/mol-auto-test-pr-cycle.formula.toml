@@ -1,51 +1,64 @@
 description = """
-Standing patrol that drives the auto-test-pr cycle (Phase 0 task 4).
+Thin standing patrol that drives the auto-test-pr cycle for one rig.
 
-Once per tick (recommended cadence: hourly), the Mayor runs one cycle:
+Once per tick (default cadence: daily), the patrol does the minimum
+needed to keep at most one auto-test-pr MR in flight per rig and to
+respect the rig's dispatch cadence. It owns no state machine: the heavy
+pick → dispatch → revise logic lives in the slung pipeline
+(`mol-auto-test-pr-pipeline`), and durable opt-in lives in the rig's
+settings JSON. Per tick:
 
-  0. Reconcile `town-auto-test-pr-state.enabled_rigs[]` against the
-     settings-JSON ground truth (Round 3 fix #4 self-heal).
-  1. D18 cooldown-release: for each opted-in rig in `cooled-down`,
-     CAS-transition `cooled-down → idle` if `now - last_transition.at
-     >= cadence_days * 24h`. `paused-by-circuit-breaker` does NOT
-     auto-release.
-  2. Read `town-auto-test-pr-state` for global pause / circuit-breaker.
-  3. For each opted-in rig: read `<rig>-auto-test-state`; skip unless
-     `state == idle` and not per-rig-paused.
-  4. CAS-transition `idle → picking`; on commit failure, skip (another
-     tick owns this rig).
-  5. Target picking: candidates from `git log --since=30d` × coverage
-     profile, ranked by (churn × uncovered_branches), per-file 21-day
-     rejection cooldown applied, uncovered branches ordered by
-     line-distance to recent churn (NG5).
-  6. CAS-transition `picking → dispatched`; file the dispatch bead
-     (JSON envelope per synthesis §Interface); sling-attach to the
-     polecat pool at the lowest priority floor.
+  1. Read `auto_test_pr.enabled` / `auto_test_pr.paused` from the rig's
+     settings JSON — skip the tick if disabled or paused.
+  2. List open MR beads labeled `gt:auto-test-pr` for this rig — skip if
+     ANY is open (the ≤1-MR-per-rig invariant; never stack a second).
+  3. Cadence: find the most recently CLOSED `gt:auto-test-pr` MR bead;
+     if it closed less than `cadence_days` ago, skip this tick.
+  4. Sling the pipeline: `gt formula run mol-auto-test-pr-pipeline
+     --rig <rig>`. The pipeline picks a target and produces the branch
+     + MR; the patrol does not.
+  5. Sleep one tick interval, then respawn back to step 1.
 
-## Inert until a rig opts in (Phase 0)
+## Why a thin patrol (replaces the old RunCycle state machine)
 
-This formula is registered in the Mayor's patrol set in Phase 0, but
-the cycle SHORT-CIRCUITS at step 2 whenever no rig has
-`auto_test_pr.enabled=true`: the reconcile step computes an empty
-`enabled_rigs[]`, and `RunCycle` returns early with
-`exit_reason="no-rigs-enabled"`. No per-rig bead is touched, no work is
-dispatched. Phase 1 activation (gu-gmj0r) is a single settings flag flip
-— `gt auto-test-pr enable --rig=<rig>` — after which the same cycle code
-begins picking targets and dispatching. The Go implementation lives in
-`internal/autotestpr/cycle.go` (RunCycle); this formula is the
-patrol-shell that invokes it each tick.
+The previous version invoked an in-process Go `RunCycle`
+(internal/autotestpr/cycle.go) that owned pinned-bead CAS transitions,
+enabled-rig reconcile, cooldown release, and target ranking. That entire
+surface was deleted (gu-wfs-hyvmo) in favor of:
 
-## Missing town-bead is non-fatal (Round 2 fix #10)
+  - opt-in via the rig settings JSON `auto_test_pr` block (operator
+    authority), read directly here — no town-state bead, no reconcile;
+  - the ≤1-MR-per-rig invariant enforced by an MR-bead existence check
+    instead of a `picking`/`dispatched` state machine;
+  - cadence enforced by the age of the last closed MR bead instead of a
+    `cooled-down → idle` CAS timer;
+  - all pick/dispatch/size-budget logic moved into the slung
+    `mol-auto-test-pr-pipeline` formula.
 
-If `town-auto-test-pr-state` is not provisioned (partial Phase 0
-revert), the cycle emits a structured warning and exits 0 — it does NOT
-panic. Run `gt auto-test-pr status` to auto-provision the town bead.
+This patrol is therefore a scheduler shell only: read settings, check
+in-flight + cadence, sling, sleep, respawn. There is no Go entry point
+left to call.
+
+## Inert until a rig opts in
+
+The patrol short-circuits at step 1 whenever the rig's settings JSON has
+no `auto_test_pr` block or `enabled=false`: it logs `disabled` and falls
+straight through to the sleep/respawn step. No MR is queried, no work is
+slung. Flipping `auto_test_pr.enabled=true` in the rig settings JSON
+activates dispatch on the next tick.
+
+## Missing settings is non-fatal
+
+If the rig settings JSON is absent or unparseable, the patrol treats the
+rig as disabled (logs a structured warning, exits the tick cleanly) and
+respawns. It never panics or escalates from a tick.
 
 ## Design context
 
   - .designs/auto-test-pr/synthesis.md §"Proposed Design component 1"
   - .designs/auto-test-pr/integration.md §"Phase 0 — task 4"
-  - .plan-reviews/auto-test-pr/review-round-3.md (fix #4: reconcile)
+  - Change manifest: gu-wfs-2jxii (DELETE/REWRITE/SEED/BUILD-BREAK)
+  - Sibling patrol style: mol-auto-test-pr-branch-gc.formula.toml
 """
 
 formula = "mol-auto-test-pr-cycle"
@@ -56,74 +69,214 @@ version = 1
 description = "Type of wisp created for this molecule. Patrols loop continuously."
 default = "patrol"
 
-[vars.scan_interval_seconds]
-description = "Seconds to sleep between cycle ticks (default 3600 = hourly)."
-default = "3600"
+[vars.rig]
+description = "Name of the rig this cycle patrol drives (e.g. gastown_upstream). Settings JSON is read from $HOME/gt/<rig>/settings/config.json."
+default = "UNSET_RIG"
 
 [vars.auto_test_label]
-description = "Bead label identifying auto-test-pr cycle / dispatch beads."
+description = "Bead label identifying auto-test-pr MR / cycle beads."
 default = "gt:auto-test-pr"
 
-[[steps]]
-id = "run-cycle-tick"
-title = "Run one auto-test-pr cycle tick"
-description = """
-Execute one tick of the auto-test-pr cycle via the Mayor's in-process
-RunCycle entry point (internal/autotestpr/cycle.go). The tick performs
-the reconcile, cooldown-release, town-state read, and (when rigs are
-opted in) per-rig pick → dispatch steps described above.
+[vars.pipeline_formula]
+description = "Formula slung when a tick decides to dispatch auto-test work."
+default = "mol-auto-test-pr-pipeline"
 
-**1. Run the tick:**
+[vars.scan_interval_seconds]
+description = "Seconds to sleep between cycle ticks (default 86400 = daily). Cadence_days from rig settings is the dispatch gate; this is how often the patrol re-checks it."
+default = "86400"
+
+[[steps]]
+id = "check-enabled"
+title = "Read opt-in: skip the tick if disabled or paused"
+description = """
+Read the rig's settings JSON and decide whether this tick may proceed.
+This is the opt-in gate (replaces the deleted town-state / enabled_rigs
+reconcile). The rig settings JSON is the authoritative source.
+
+**1. Reset the per-tick skip sentinel:**
 ```bash
-gt auto-test-pr cycle-tick
+SKIP=/tmp/atpr-cycle-skip.{{rig}}
+rm -f "$SKIP"
 ```
 
-`cycle-tick` reconciles `enabled_rigs[]`, runs the D18 cooldown-release
-for any cooled-down rigs whose cadence has elapsed, reads the town
-state, and processes each opted-in idle rig. It prints the structured
-CycleResult (reconciled, enabled_rigs, exit_reason, rigs_processed).
+**2. Read enabled / paused from the rig settings JSON:**
+```bash
+SETTINGS="$HOME/gt/{{rig}}/settings/config.json"
+if [ ! -f "$SETTINGS" ]; then
+  echo "auto-test-pr cycle [{{rig}}]: settings JSON missing ($SETTINGS) — treating as disabled."
+  echo "disabled: no settings" > "$SKIP"
+else
+  ENABLED=$(jq -r '.auto_test_pr.enabled // false' "$SETTINGS" 2>/dev/null)
+  PAUSED=$(jq -r '.auto_test_pr.paused // false' "$SETTINGS" 2>/dev/null)
+  if [ "$ENABLED" != "true" ]; then
+    echo "auto-test-pr cycle [{{rig}}]: auto_test_pr.enabled is not true — skipping tick."
+    echo "disabled: enabled=$ENABLED" > "$SKIP"
+  elif [ "$PAUSED" = "true" ]; then
+    echo "auto-test-pr cycle [{{rig}}]: auto_test_pr.paused is true — skipping tick."
+    echo "paused" > "$SKIP"
+  else
+    echo "auto-test-pr cycle [{{rig}}]: enabled and not paused — proceeding."
+  fi
+fi
+```
 
-**2. Interpret the result (do not error on inert exits):**
-- `exit_reason=no-rigs-enabled` — expected in Phase 0. Nothing to do.
-- `exit_reason=town-bead-missing` — degraded; the cycle warned and
-  exited 0. A separate provisioning step (task 8) owns the fix; do NOT
-  panic or escalate from the tick.
-- `exit_reason=global-pause` / `circuit-breaker` — town-wide hold in
-  effect; the cycle correctly did no per-rig work.
-- empty `exit_reason` with `rigs_processed>0` — the cycle dispatched
-  auto-test work for one or more rigs this tick.
+If the JSON is malformed, `jq` yields the `// false` fallback, so a bad
+file degrades to "disabled" rather than erroring the tick.
 
-**Exit criteria:** One cycle tick ran to completion; the CycleResult was
-logged. No per-rig bead is mutated when no rig is opted in."""
+**Exit criteria:** The skip sentinel `/tmp/atpr-cycle-skip.{{rig}}`
+exists iff this tick must NOT dispatch (disabled, paused, or missing
+settings). Either way the patrol continues to the next step."""
+
+[[steps]]
+id = "check-in-flight"
+title = "Skip if any gt:auto-test-pr MR is already open"
+needs = ["check-enabled"]
+description = """
+Enforce the ≤1-MR-per-rig invariant. If any MR bead labeled
+`{{auto_test_label}}` is open for this rig, do not sling a second one.
+This replaces the deleted `picking`/`dispatched` CAS state.
+
+**1. Honor an earlier skip decision:**
+```bash
+SKIP=/tmp/atpr-cycle-skip.{{rig}}
+if [ -f "$SKIP" ]; then
+  echo "auto-test-pr cycle [{{rig}}]: tick already skipped ($(cat "$SKIP")) — nothing to check."
+else
+  # 2. Count open auto-test-pr MR beads for this rig.
+  OPEN_MRS=$(bd list \\
+               --label "{{auto_test_label}}" \\
+               --status open,in_progress,blocked \\
+               --limit 0 \\
+               --json 2>/dev/null \\
+             | jq -r 'length' 2>/dev/null)
+  OPEN_MRS=${OPEN_MRS:-0}
+  if [ "$OPEN_MRS" -gt 0 ]; then
+    echo "auto-test-pr cycle [{{rig}}]: ${OPEN_MRS} open {{auto_test_label}} MR(s) in flight — skipping tick (<=1 per rig)."
+    echo "in-flight: $OPEN_MRS open MR(s)" > "$SKIP"
+  else
+    echo "auto-test-pr cycle [{{rig}}]: no open {{auto_test_label}} MRs — clear to consider dispatch."
+  fi
+fi
+```
+
+**Exit criteria:** If an open auto-test-pr MR exists, the skip sentinel
+is set so no second pipeline is slung this tick."""
+
+[[steps]]
+id = "check-cadence"
+title = "Skip if the last MR closed within cadence_days"
+needs = ["check-in-flight"]
+description = """
+Respect the rig's dispatch cadence. Find the most recently CLOSED MR
+bead labeled `{{auto_test_label}}`; if it closed less than
+`cadence_days` (from the rig settings JSON, default 7) ago, skip this
+tick. This replaces the deleted `cooled-down → idle` CAS timer.
+
+**1. Honor an earlier skip decision:**
+```bash
+SKIP=/tmp/atpr-cycle-skip.{{rig}}
+if [ -f "$SKIP" ]; then
+  echo "auto-test-pr cycle [{{rig}}]: tick already skipped ($(cat "$SKIP")) — cadence check unnecessary."
+else
+  SETTINGS="$HOME/gt/{{rig}}/settings/config.json"
+  CADENCE_DAYS=$(jq -r '.auto_test_pr.cadence_days // 7' "$SETTINGS" 2>/dev/null)
+  case "$CADENCE_DAYS" in
+    ''|*[!0-9]*) CADENCE_DAYS=7 ;;   # default if absent / non-numeric
+  esac
+
+  # 2. Most recent closed_at among closed auto-test-pr MR beads.
+  LAST_CLOSED=$(bd list \\
+                  --label "{{auto_test_label}}" \\
+                  --status closed \\
+                  --limit 0 \\
+                  --json 2>/dev/null \\
+                | jq -r '[.[].closed_at // empty] | max // empty' 2>/dev/null)
+
+  if [ -z "$LAST_CLOSED" ]; then
+    echo "auto-test-pr cycle [{{rig}}]: no prior closed {{auto_test_label}} MR — cadence satisfied (first dispatch)."
+  else
+    NOW=$(date +%s)
+    LAST_TS=$(date -d "$LAST_CLOSED" +%s 2>/dev/null || echo 0)
+    AGE_DAYS=$(( ( NOW - LAST_TS ) / 86400 ))
+    if [ "$LAST_TS" -gt 0 ] && [ "$AGE_DAYS" -lt "$CADENCE_DAYS" ]; then
+      echo "auto-test-pr cycle [{{rig}}]: last MR closed ${AGE_DAYS}d ago (< ${CADENCE_DAYS}d cadence) — skipping tick."
+      echo "cadence: last MR ${AGE_DAYS}d < ${CADENCE_DAYS}d" > "$SKIP"
+    else
+      echo "auto-test-pr cycle [{{rig}}]: last MR closed ${AGE_DAYS}d ago (>= ${CADENCE_DAYS}d cadence) — clear to dispatch."
+    fi
+  fi
+fi
+```
+
+**Exit criteria:** If the cadence window has not elapsed, the skip
+sentinel is set so no pipeline is slung this tick."""
+
+[[steps]]
+id = "sling-pipeline"
+title = "Sling the auto-test-pr pipeline (if not skipped)"
+needs = ["check-cadence"]
+# Lifecycle: the side effect is the slung pipeline molecule. There is no
+# consumer bead here — mol-auto-test-pr-pipeline owns the dispatched work
+# and its own MR. In a skipped tick this step is a no-op.
+description = """
+If no skip sentinel was set by the gating steps, sling the pipeline for
+this rig. The pipeline owns target picking, the size budget, branch
+creation, and MR-bead creation — the patrol only kicks it off.
+
+**1. Sling only when the tick is clear:**
+```bash
+SKIP=/tmp/atpr-cycle-skip.{{rig}}
+if [ -f "$SKIP" ]; then
+  echo "auto-test-pr cycle [{{rig}}]: tick skipped ($(cat "$SKIP")) — not slinging {{pipeline_formula}}."
+else
+  echo "auto-test-pr cycle [{{rig}}]: dispatching {{pipeline_formula}} for {{rig}}."
+  gt formula run {{pipeline_formula}} --rig {{rig}}
+fi
+```
+
+**Note:** `gt formula run` pours and dispatches `{{pipeline_formula}}`;
+the resulting polecat produces the `auto-test/<rig>/<bead>` branch and
+the `{{auto_test_label}}`-labeled MR bead that the next tick's in-flight
+check will see.
+
+**Exit criteria:** Either the pipeline was slung for this rig, or the
+tick was skipped with a logged reason."""
 
 [[steps]]
 id = "loop-or-exit"
 title = "Sleep then respawn for the next cycle tick"
-needs = ["run-cycle-tick"]
+needs = ["sling-pipeline"]
+# Lifecycle: Patrol respawns each interval (default {{scan_interval_seconds}}=86400,
+# daily). The respawn reuses the patrol molecule (no new bead created); the
+# daemon's zombie-scan handles a respawn that never happens. TTL caps the gap.
 wisp_ttl = "30m"
 consumer_bead_id = "next auto-test-pr cycle tick (self-respawn)"
 description = """
-Sleep for the configured interval, then respawn the patrol for the next
-tick. The respawn reuses the patrol molecule (no new bead created); the
-daemon's zombie-scan handles a respawn that never happens.
+Clean up the per-tick sentinel, then sleep for the configured interval
+and respawn for the next tick.
 
-**1. Sleep before the next tick:**
+**1. Clean up the per-tick skip sentinel:**
 ```bash
-echo "auto-test-pr cycle tick complete. Sleeping {{scan_interval_seconds}}s."
+rm -f /tmp/atpr-cycle-skip.{{rig}}
+```
+
+**2. Sleep before the next tick:**
+```bash
+echo "auto-test-pr cycle [{{rig}}] tick complete. Sleeping {{scan_interval_seconds}}s before next tick."
 sleep {{scan_interval_seconds}}
 ```
 
-**2. Respawn by looping back to run-cycle-tick:**
+**3. Respawn by looping back to check-enabled:**
 ```bash
-bd mol step respawn --target run-cycle-tick
+bd mol step respawn --target check-enabled
 ```
 
 **Context filling:** If the session is near context capacity, hand off
 rather than respawning:
 ```bash
 gt handoff -y \\
-  -s "auto-test-pr cycle ticking" \\
-  -m "Next tick: reconcile enabled_rigs, run cooldown-release, process opted-in rigs."
+  -s "auto-test-pr cycle ticking [{{rig}}]" \\
+  -m "Next tick: read opt-in, check in-flight MR + cadence, sling {{pipeline_formula}} if clear."
 ```
 
 **Exit criteria:** Next cycle tick initiated (via respawn or handoff)."""

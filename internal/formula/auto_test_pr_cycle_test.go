@@ -6,8 +6,14 @@ import (
 
 // TestAutoTestPRCycleFormulaStructure verifies the mol-auto-test-pr-cycle
 // patrol formula parses, is a valid workflow with the documented step
-// DAG, and declares its key vars with the documented defaults. This is
-// the inert standing-patrol shell for Phase 0 task 4 (gu-2n7xi).
+// DAG, and declares its key vars with the documented defaults.
+//
+// gu-wfs-56hza rewrote this formula from the old in-process RunCycle
+// state-machine shell (steps: run-cycle-tick -> loop-or-exit, which
+// invoked the now-deleted internal/autotestpr/cycle.go) into a thin
+// standing patrol: read opt-in -> check in-flight MR -> check cadence
+// -> sling mol-auto-test-pr-pipeline -> sleep+respawn. The step DAG and
+// vars asserted here track that new design.
 func TestAutoTestPRCycleFormulaStructure(t *testing.T) {
 	f, err := ParseFile("formulas/mol-auto-test-pr-cycle.formula.toml")
 	if err != nil {
@@ -27,7 +33,15 @@ func TestAutoTestPRCycleFormulaStructure(t *testing.T) {
 		t.Errorf("Validate: %v", err)
 	}
 
-	wantSteps := []string{"run-cycle-tick", "loop-or-exit"}
+	// The thin-patrol step DAG: each gating step feeds the next, the
+	// sling step consumes all gates, and loop-or-exit respawns last.
+	wantSteps := []string{
+		"check-enabled",
+		"check-in-flight",
+		"check-cadence",
+		"sling-pipeline",
+		"loop-or-exit",
+	}
 	if len(f.Steps) != len(wantSteps) {
 		t.Errorf("step count = %d, want %d", len(f.Steps), len(wantSteps))
 	}
@@ -37,7 +51,8 @@ func TestAutoTestPRCycleFormulaStructure(t *testing.T) {
 		}
 	}
 
-	// loop-or-exit must depend on run-cycle-tick (tick before respawn).
+	// Steps form a linear gating chain; verify topological order matches
+	// the documented sequence (each step before the one that needs it).
 	order, err := f.TopologicalSort()
 	if err != nil {
 		t.Fatalf("TopologicalSort: %v", err)
@@ -46,7 +61,25 @@ func TestAutoTestPRCycleFormulaStructure(t *testing.T) {
 	for i, id := range order {
 		pos[id] = i
 	}
-	if pos["run-cycle-tick"] >= pos["loop-or-exit"] {
-		t.Errorf("run-cycle-tick must come before loop-or-exit, got order %v", order)
+	for i := 1; i < len(wantSteps); i++ {
+		prev, cur := wantSteps[i-1], wantSteps[i]
+		if pos[prev] >= pos[cur] {
+			t.Errorf("%s must come before %s, got order %v", prev, cur, order)
+		}
+	}
+
+	// Key vars the patrol depends on at runtime must be declared.
+	wantVars := []string{"rig", "auto_test_label", "pipeline_formula", "scan_interval_seconds"}
+	for _, name := range wantVars {
+		if _, ok := f.Vars[name]; !ok {
+			t.Errorf("var %q not declared", name)
+		}
+	}
+
+	// The pipeline this patrol slings must default to the pipeline formula.
+	if v, ok := f.Vars["pipeline_formula"]; ok {
+		if v.Default != "mol-auto-test-pr-pipeline" {
+			t.Errorf("pipeline_formula default = %q, want mol-auto-test-pr-pipeline", v.Default)
+		}
 	}
 }
