@@ -1391,6 +1391,82 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	return nil
 }
 
+// preservePushMaxAttempts is the total number of push attempts (initial +
+// retries) pushPreservationRef makes against a transient push-infra error. A
+// preservation push to refs/heads/preserved/* is idempotent — re-pushing an
+// already-landed ref exits 0 ("up to date") — so retrying cannot corrupt or
+// duplicate work.
+const preservePushMaxAttempts = 3
+
+// preservePushRetryBackoff is the base backoff between transient-error retries.
+// Attempt N waits preservePushRetryBackoff * N before retrying (2s, 4s).
+var preservePushRetryBackoff = 2 * time.Second
+
+// isTransientPreservePushError reports whether a failed preservation push looks
+// like a transient push-infra blip (network reset, server 5xx, timeout, hung-up
+// connection) rather than a deterministic rejection. The 60s push timeout
+// surfaces as "timed out after 1m0s (remote may be unreachable)" — exactly the
+// gu-iu9tt WORK-AT-RISK strand — so it counts as transient and worth retrying.
+// Mirrors cmd.isTransientPushError (gu-1or22); duplicated here because the
+// polecat package must not import internal/cmd.
+func isTransientPreservePushError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	transientMarkers := []string{
+		"timed out",
+		"remote may be unreachable",
+		"connection reset",
+		"connection refused",
+		"connection timed out",
+		"operation timed out",
+		"could not resolve host",
+		"failed to connect",
+		"the remote end hung up unexpectedly",
+		"early eof",
+		"rpc failed",
+		"broken pipe",
+		"tls handshake",
+		"gnutls_handshake",
+		"recv failure",
+		"send failure",
+		"temporary failure",
+		"internal server error",
+		"503",
+		"502",
+		"504",
+	}
+	for _, marker := range transientMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// pushPreservationRef pushes a preservation refspec to origin, retrying a
+// bounded number of times on a transient push-infra error with backoff
+// (gu-iu9tt). The 60s push timeout that stranded inherited-stash preservation
+// on polecat reuse is transient — the remote was briefly unreachable, not
+// permanently rejecting — so one or two backoff retries recover the durable
+// origin anchor instead of leaving the stash in place. Deterministic failures
+// (the few that exist for a fresh preservation ref) fall through after the
+// first attempt. The push itself is idempotent, so retries are always safe.
+func pushPreservationRef(wt *git.Git, refspec string) error {
+	var err error
+	for attempt := 1; attempt <= preservePushMaxAttempts; attempt++ {
+		err = wt.Push("origin", refspec, false)
+		if err == nil || !isTransientPreservePushError(err) || attempt == preservePushMaxAttempts {
+			return err
+		}
+		backoff := preservePushRetryBackoff * time.Duration(attempt)
+		style.PrintWarning("preservation push attempt %d/%d failed (transient): %v — retrying in %s", attempt, preservePushMaxAttempts, err, backoff)
+		time.Sleep(backoff)
+	}
+	return err
+}
+
 // preserveUnpushedHead anchors the worktree's HEAD commit to a durable,
 // GC-safe ref in the bare repo before the worktree is destroyed — UNLESS the
 // commit is already reachable from the rig's base branch (already merged, so
@@ -1452,7 +1528,7 @@ func (m *Manager) preserveUnpushedHead(name, clonePath string, repoGit *git.Git)
 	// pipeline — even a --force discard just leaves a ref to prune by hand. The
 	// worktree still exists here (removal happens next), so it can reach origin.
 	originRef := fmt.Sprintf("refs/heads/preserved/%s/%s", name, short)
-	if err := wt.Push("origin", head+":"+originRef, false); err != nil {
+	if err := pushPreservationRef(wt, head+":"+originRef); err != nil {
 		style.PrintWarning("WORK AT RISK: could not push preservation ref %s to origin for %s: %v (local anchor %s retained)", originRef, name, err, preservedRef)
 		return
 	}
@@ -1516,7 +1592,7 @@ func (m *Manager) preserveAndClearBranchStashes(name, clonePath string, repoGit 
 		// local anchor still holds the work — but we keep the stash too, since a
 		// box loss would otherwise drop it. Fail-closed: do NOT drop.
 		originRef := fmt.Sprintf("refs/heads/preserved/%s/stash-%s", name, short)
-		if err := wt.Push("origin", sha+":"+originRef, false); err != nil {
+		if err := pushPreservationRef(wt, sha+":"+originRef); err != nil {
 			style.PrintWarning("WORK AT RISK: could not push inherited stash preservation ref %s to origin for %s: %v (local anchor %s retained, stash left in place)", originRef, name, err, preservedRef)
 			continue
 		}

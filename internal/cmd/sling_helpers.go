@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -256,6 +257,15 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 	// bond and refuses with "bead has existing molecule(s)".
 	for _, molID := range molecules {
 		if err := bd.RemoveDependency(beadID, molID); err != nil {
+			// A purged molecule wisp (EphemeralPurgeAge, gu-25jx5) is already in
+			// the desired state — its dep bond is gone with it — so ErrNotFound
+			// ("issue not found") is idempotent success, not a warning. Without
+			// this, re-slinging over a stale/purged molecule emits a spurious
+			// "Could not remove dep bond … issue not found" (gu-iu9tt), mirroring
+			// the CloseSlingContext idempotency for TTL-reaped wisps.
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
 			fmt.Printf("  %s Could not remove dep bond %s → %s: %v\n",
 				style.Dim.Render("Warning:"), beadID, molID, err)
 			// Non-fatal: the detach already cleared the description pointer.
@@ -271,7 +281,11 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 			style.PrintWarning("burn: could not close descendants of %s: %v", molID, err)
 		}
 	}
-	if err := bd.ForceCloseWithReason("burned: force re-sling", molecules...); err != nil {
+	if err := bd.ForceCloseWithReason("burned: force re-sling", molecules...); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		// As with RemoveDependency above, a purged wisp is already closed-and-gone
+		// (the desired end state), so ErrNotFound is idempotent success — suppress
+		// the spurious "Could not close molecule wisp(s): issue not found" warning
+		// on re-sling over a stale/purged molecule (gu-iu9tt).
 		fmt.Printf("  %s Could not close molecule wisp(s): %v\n",
 			style.Dim.Render("Warning:"), err)
 		// Close failure is non-fatal — the detach already succeeded, so the bead
