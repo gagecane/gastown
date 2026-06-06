@@ -107,9 +107,35 @@ Batch Slinging:
 
   When multiple beads are provided with a rig target, each bead gets its own
   polecat. This parallelizes work dispatch without running gt sling N times.
-  Use --max-concurrent to throttle spawn rate and prevent Dolt server overload.`,
-	Args: cobra.MinimumNArgs(1),
+  Use --max-concurrent to throttle spawn rate and prevent Dolt server overload.
+
+Sling All Ready Work (--all):
+  gt sling --all gastown            # Sling every ready bead in gastown
+  gt sling --all --rig gastown      # Equivalent (rig via flag)
+  gt sling --all gastown --dry-run  # Preview the set without slinging
+
+  --all enumerates ready beads exactly as 'gt ready --rig <rig>' does
+  (open + unblocked, minus formula scaffolds, wisps, identity/epic/mayor-only
+  beads) and slings each to its own polecat. The per-bead server-side guards
+  still apply, so non-dispatchable beads are skipped with a reason. Unlike the
+  unattended auto-dispatcher, --all includes agent/crew-owned beads — an
+  operator running --all is explicitly asking to sling everything ready.`,
+	Args: slingArgsValidator,
 	RunE: runSling,
+}
+
+// slingArgsValidator enforces the positional-argument contract. Normally sling
+// requires at least one positional (the bead/formula). The --all sweep mode
+// relaxes this: the rig may be supplied via --rig (zero positionals) or as a
+// single positional (the rig name), so --all accepts 0 or 1 positional args.
+func slingArgsValidator(cmd *cobra.Command, args []string) error {
+	if slingAll {
+		if len(args) > 1 {
+			return fmt.Errorf("--all accepts at most one positional argument (the rig); got %d", len(args))
+		}
+		return nil
+	}
+	return cobra.MinimumNArgs(1)(cmd, args)
 }
 
 var (
@@ -143,6 +169,8 @@ var (
 	slingPriorityFloor string // --priority-floor: dispatch priority floor (normal/low/lowest)
 	slingReviews       string // --reviews: mark this bead a review gate that reviews <build-bead> (gs-bo1)
 	slingReviewGate    bool   // --review-gate: mark this bead a review gate (gt:review-gate label)
+	slingAll           bool   // --all: sling every ready, dispatchable bead in a rig
+	slingAllRig        string // --rig: explicit rig for --all (alternative to positional)
 )
 
 func init() {
@@ -176,6 +204,8 @@ func init() {
 	slingCmd.Flags().StringVar(&slingPriorityFloor, "priority-floor", "", "Dispatch priority floor: normal (default), low, or lowest. Lower-priority beads yield to higher-priority ones when capacity is constrained")
 	slingCmd.Flags().StringVar(&slingReviews, "reviews", "", "Mark this bead as a review gate reviewing the named build bead (adds gt:review-gate label + reviews: field; activates the builder-independence guard)")
 	slingCmd.Flags().BoolVar(&slingReviewGate, "review-gate", false, "Mark this bead as a review gate (gt:review-gate label). Combine with --reviews to name the build bead under review")
+	slingCmd.Flags().BoolVar(&slingAll, "all", false, "Sling every ready, dispatchable bead in a rig (e.g. gt sling --all <rig>)")
+	slingCmd.Flags().StringVar(&slingAllRig, "rig", "", "Rig target for --all (alternative to the positional rig argument)")
 
 	slingCmd.AddCommand(slingRespawnResetCmd)
 	rootCmd.AddCommand(slingCmd)
@@ -235,6 +265,23 @@ func parseSlingInvocation() (slingInvocation, error) {
 		}
 	} else if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" {
 		return inv, fmt.Errorf("polecats cannot sling (use gt done for handoff)")
+	}
+
+	// --all is a bulk-sweep mode that has no single bead/formula argument, so
+	// it is incompatible with the formula-on-bead (--on) and review-gate flags
+	// that target a specific bead. Reject the combination early with a clear
+	// message rather than silently ignoring those flags.
+	if slingAll {
+		if slingOnTarget != "" {
+			return inv, fmt.Errorf("--all cannot be combined with --on (--all sweeps a rig's ready beads; --on targets a single bead)")
+		}
+		if slingReviews != "" || slingReviewGate {
+			return inv, fmt.Errorf("--all cannot be combined with --reviews / --review-gate (those mark a single bead as a review gate)")
+		}
+	} else if slingAllRig != "" {
+		// --rig only configures the --all sweep target. Without --all it has no
+		// effect; reject rather than silently ignore so the operator notices.
+		return inv, fmt.Errorf("--rig is only valid with --all (did you mean: gt sling --all %s?)", slingAllRig)
 	}
 
 	// Validate --merge flag if provided
@@ -346,6 +393,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Note: Internal agent IDs like "mayor/" are outputs, not user inputs.
 	for i := range args {
 		args[i] = strings.TrimRight(args[i], "/")
+	}
+
+	// --all sweep mode: sling every ready, dispatchable bead in a rig.
+	// The rig comes from --rig or a single positional. Runs before the rest of
+	// the single-bead dispatch logic since there is no bead argument to parse.
+	if slingAll {
+		if slingAllRig == "" && len(args) == 1 {
+			slingAllRig = args[0]
+		}
+		return runSlingAll(townRoot, townBeadsDir)
 	}
 
 	// --crew flag: expand target from "<rig>" to "<rig>/crew/<name>"
