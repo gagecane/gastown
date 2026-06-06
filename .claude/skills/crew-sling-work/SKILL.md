@@ -36,6 +36,14 @@ bd ready              # find dispatchable work
 bd show <id>          # confirm the bead is the right one
 ```
 
+> ⚠️ **Invariant: `gt sling <bead> <rig>` only works if `<bead>` lives in
+> `<rig>`'s beads DB.** A bead's prefix determines its DB (see `routes.jsonl`):
+> e.g. `gc-`/`hq-` → town root, `gu-` → the `gastown_upstream` rig. A bead filed
+> from a town-root crew session gets the `gc-` prefix and routes to the town DB,
+> so slinging it to a rig polecat will hard-fail. **File rig-scoped work in the
+> rig** so it gets the rig prefix: `bd new --repo <rig> "..."` (or run `bd new`
+> from the rig dir). Reserve town-root beads for cross-rig/town coordination.
+
 Target resolution (most common forms):
 
 | Target | Meaning |
@@ -145,3 +153,12 @@ session is alive; the bead runs when the agent primes.
 Cause: omitted `--merge`, got the default `mr`.
 Solution: re-sling with the intended `--merge=direct` or `--merge=local`, or
 update the convoy's strategy.
+
+**Error: "bead `<id>` is not present in target rig `<rig>` beads database"**
+Cause: the bead lives in a different DB than the target rig. A bead's prefix pins
+it to one DB (e.g. a `gc-` bead filed from a town-root crew session lives in the
+town DB), and `gt sling <bead> <rig>` requires the bead to already live in
+`<rig>`'s DB. A town-root bead can never be slung to a rig polecat.
+Solution: recreate the bead in the rig DB (`bd new --repo <rig> "..."`, or run
+`bd new` from the rig dir) so it gets the rig prefix, then sling; close the
+town-root original as a duplicate.
