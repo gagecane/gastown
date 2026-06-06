@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gt done --no-code` exit for verify/report-only beads** (gu-gc4ex) —
+  Verify-only and report-only tasks dispatched with a CODE formula
+  (`mol-polecat-work`) produce zero commits by design, but `gt done` blocked
+  their COMPLETED close: the zero-commit guard rejected the empty branch and
+  the commit-citation guard (gu-kruw) demanded a commit referencing the bead
+  ID — which `--skip-verify` deliberately does not bypass. The only exits were
+  ESCALATED/DEFERRED, neither of which fit a genuinely-done no-code task, so a
+  whole class of beads stranded (incident gc-wisp-mj2p). The new `--no-code`
+  flag is an explicit "COMPLETED — no code change required" signal: it treats
+  the bead like a `no_merge`/`review_only` task at runtime (bypassing both
+  guards) and closes it with an audited `no_code_reason`. Like `--skip-verify`,
+  it requires a `--reason` rationale (or `GT_NO_CODE_REASON`). The
+  citation-guard error message now offers `--no-code` as a fourth exit so
+  polecats discover it.
+
 - **`event_channel_gc` daemon patrol** (gu-5bf4f) — File-based channel events
   under `events/<channel>/*.event` are a fire-and-forget fan-out: `await-event`
   reads all pending events on each wake and keeps no offset/cursor, so consumers

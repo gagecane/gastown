@@ -222,6 +222,137 @@ func TestSkipVerifyRequiresReason_NoOpWhenFlagUnset(t *testing.T) {
 	}
 }
 
+// TestNoCodeRequiresReason_RejectsEmptyReason verifies the gu-gc4ex
+// rationale gate: --no-code with no --reason and no GT_NO_CODE_REASON env
+// var must be rejected by runDone before any state mutation. Mirrors the
+// gu-kruw --skip-verify-reason gate. (gu-gc4ex)
+func TestNoCodeRequiresReason_RejectsEmptyReason(t *testing.T) {
+	prevNoCode := doneNoCode
+	prevReason := doneReason
+	prevEnv, hadEnv := os.LookupEnv("GT_NO_CODE_REASON")
+	t.Cleanup(func() {
+		doneNoCode = prevNoCode
+		doneReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_NO_CODE_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_NO_CODE_REASON")
+		}
+	})
+
+	doneNoCode = true
+	doneReason = ""
+	os.Unsetenv("GT_NO_CODE_REASON")
+
+	err := validateNoCode()
+	if err == nil {
+		t.Fatal("validateNoCode accepted --no-code with empty reason — gu-gc4ex guard broken")
+	}
+	for _, want := range []string{"--no-code", "reason", "gu-gc4ex"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message missing %q: %q", want, err.Error())
+		}
+	}
+}
+
+// TestNoCodeRequiresReason_AcceptsFlagReason verifies that a non-empty
+// --reason satisfies the --no-code gate. (gu-gc4ex)
+func TestNoCodeRequiresReason_AcceptsFlagReason(t *testing.T) {
+	prevNoCode := doneNoCode
+	prevReason := doneReason
+	prevEnv, hadEnv := os.LookupEnv("GT_NO_CODE_REASON")
+	t.Cleanup(func() {
+		doneNoCode = prevNoCode
+		doneReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_NO_CODE_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_NO_CODE_REASON")
+		}
+	})
+
+	doneNoCode = true
+	doneReason = "verify-only: all checks passed, no code change required"
+	os.Unsetenv("GT_NO_CODE_REASON")
+
+	if err := validateNoCode(); err != nil {
+		t.Fatalf("validateNoCode rejected a valid reason: %v", err)
+	}
+}
+
+// TestNoCodeRequiresReason_AcceptsEnvReason verifies that GT_NO_CODE_REASON
+// satisfies the gate when --reason is empty, and that it populates
+// doneReason for the downstream close-reason. (gu-gc4ex)
+func TestNoCodeRequiresReason_AcceptsEnvReason(t *testing.T) {
+	prevNoCode := doneNoCode
+	prevReason := doneReason
+	prevEnv, hadEnv := os.LookupEnv("GT_NO_CODE_REASON")
+	t.Cleanup(func() {
+		doneNoCode = prevNoCode
+		doneReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_NO_CODE_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_NO_CODE_REASON")
+		}
+	})
+
+	doneNoCode = true
+	doneReason = ""
+	os.Setenv("GT_NO_CODE_REASON", "wrapper-injected: nightly verify run")
+
+	if err := validateNoCode(); err != nil {
+		t.Fatalf("validateNoCode rejected env-supplied reason: %v", err)
+	}
+	if doneReason != "wrapper-injected: nightly verify run" {
+		t.Errorf("expected env reason to populate doneReason, got %q", doneReason)
+	}
+}
+
+// TestNoCodeRequiresReason_RejectsWhitespaceOnly verifies the gate trims
+// whitespace — --no-code --reason="   " is rejected like an empty reason.
+// (gu-gc4ex)
+func TestNoCodeRequiresReason_RejectsWhitespaceOnly(t *testing.T) {
+	prevNoCode := doneNoCode
+	prevReason := doneReason
+	prevEnv, hadEnv := os.LookupEnv("GT_NO_CODE_REASON")
+	t.Cleanup(func() {
+		doneNoCode = prevNoCode
+		doneReason = prevReason
+		if hadEnv {
+			os.Setenv("GT_NO_CODE_REASON", prevEnv)
+		} else {
+			os.Unsetenv("GT_NO_CODE_REASON")
+		}
+	})
+
+	doneNoCode = true
+	doneReason = "   \t  "
+	os.Unsetenv("GT_NO_CODE_REASON")
+
+	if err := validateNoCode(); err == nil {
+		t.Fatal("validateNoCode accepted whitespace-only reason — guard broken")
+	}
+}
+
+// TestNoCodeRequiresReason_NoOpWhenFlagUnset verifies the gate is a no-op
+// when --no-code is not set; --reason may be safely empty. (gu-gc4ex)
+func TestNoCodeRequiresReason_NoOpWhenFlagUnset(t *testing.T) {
+	prevNoCode := doneNoCode
+	prevReason := doneReason
+	t.Cleanup(func() {
+		doneNoCode = prevNoCode
+		doneReason = prevReason
+	})
+
+	doneNoCode = false
+	doneReason = ""
+
+	if err := validateNoCode(); err != nil {
+		t.Fatalf("validateNoCode errored without --no-code set: %v", err)
+	}
+}
+
 // --- Test helpers ---
 
 // newTestGitRepo creates a temp git repo with one initial commit and returns

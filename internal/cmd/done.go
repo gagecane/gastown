@@ -56,6 +56,7 @@ Examples:
   gt done --pre-verified --target feat/contract-review  # Pre-verified with explicit target
   gt done --issue gt-abc               # Explicit issue ID
   gt done --skip-verify                # Audit-only escape hatch for non-code closes
+  gt done --no-code --reason "verify-only: all checks passed, no code change required"  # Close a verify/report-only bead
   gt done --status ESCALATED           # Signal blocker, skip MR
   gt done --status DEFERRED            # Pause work, skip MR
   gt done --status DEFERRED --reason "spec-unclear: need API contract for auth endpoint"`,
@@ -73,6 +74,7 @@ var (
 	doneTarget           string
 	doneSkipVerify       bool
 	doneSkipVerifyReason string
+	doneNoCode           bool
 	doneReason           string
 	doneDeferUntil       string
 )
@@ -333,6 +335,37 @@ func validateSkipVerifyReason() error {
 	return nil
 }
 
+// validateNoCode enforces that --no-code carries a non-empty rationale via
+// the --reason flag. --no-code is the explicit "COMPLETED — no code change
+// required" exit for verify/report-only beads that were dispatched with a
+// CODE formula (mol-polecat-work) and therefore produce zero commits by
+// design (gu-gc4ex). Without it, such beads strand on gt done: the
+// zero-commit guard and the commit-citation guard (gu-kruw) both block a
+// COMPLETED close, and --skip-verify does not bypass the citation guard.
+//
+// The reason requirement mirrors the gu-kruw --skip-verify-reason gate:
+// a no-code close still mutates bead state (closes it), so the rationale is
+// recorded in the close reason for the audit trail. Falls back to the
+// GT_NO_CODE_REASON env var when --reason is empty.
+//
+// No-op when --no-code is not set.
+func validateNoCode() error {
+	if !doneNoCode {
+		return nil
+	}
+	if strings.TrimSpace(doneReason) == "" {
+		doneReason = strings.TrimSpace(os.Getenv("GT_NO_CODE_REASON"))
+	}
+	doneReason = strings.TrimSpace(doneReason)
+	if doneReason == "" {
+		return fmt.Errorf("--no-code requires --reason=<text> (or GT_NO_CODE_REASON env var).\n" +
+			"--no-code closes a verify/report-only bead that has no commits by design (gu-gc4ex).\n" +
+			"Record why no code was required so the close is auditable, e.g.:\n" +
+			"  gt done --no-code --reason=\"verify-only: all checks passed, no code change required\"")
+	}
+	return nil
+}
+
 // shortSHA abbreviates a git SHA for human-readable diagnostic output.
 // Returns the first 8 characters, or the full value if shorter. Used by
 // the gu-vtkn staleness guard to report stash-parent vs. HEAD divergence.
@@ -355,6 +388,7 @@ func init() {
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
 	doneCmd.Flags().StringVar(&doneSkipVerifyReason, "skip-verify-reason", "", "Required when --skip-verify is set: human-readable rationale recorded in audit comment (gu-kruw). Falls back to GT_SKIP_VERIFY_REASON env var.")
+	doneCmd.Flags().BoolVar(&doneNoCode, "no-code", false, "Complete a verify/report-only bead that has no commits by design (gu-gc4ex). Bypasses the zero-commit and commit-citation guards; requires --reason.")
 	doneCmd.Flags().StringVar(&doneDeferUntil, "defer-until", "", "For --status=DEFERRED: when the bead becomes dispatchable again (e.g., +6h, +1d, tomorrow). Default: "+defaultDeferredOffset)
 
 	rootCmd.AddCommand(doneCmd)
@@ -378,6 +412,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if err := validateSkipVerifyReason(); err != nil {
+		return err
+	}
+
+	if err := validateNoCode(); err != nil {
 		return err
 	}
 
@@ -730,8 +768,12 @@ afterSafetyNet:
 		// this is a non-code task (email, research, analysis, PRD review)
 		// where zero commits is expected.
 		// Must be checked before the zero-commit guard below (GH#2496, gt-kvf).
-		isNoMergeTask := false
-		if issueID != "" {
+		// --no-code is the explicit polecat-driven equivalent of a no_merge/
+		// review_only bead: a verify/report-only task dispatched with a CODE
+		// formula produces zero commits, so it must bypass the same guards
+		// (gu-gc4ex). validateNoCode already enforced a --reason rationale.
+		isNoMergeTask := doneNoCode
+		if !isNoMergeTask && issueID != "" {
 			noMergeBd := beads.New(cwd)
 			if noMergeIssue, showErr := noMergeBd.Show(issueID); showErr == nil {
 				if af := beads.ParseAttachmentFields(noMergeIssue); af != nil && (af.NoMerge || af.ReviewOnly) {
@@ -813,6 +855,9 @@ afterSafetyNet:
 					closeAttachedWispNoMR(bd, issueID)
 
 					closeReason := "Completed with no code changes (already fixed or pushed directly to main)"
+					if doneNoCode {
+						closeReason = fmt.Sprintf("Completed — no code change required (--no-code, gu-gc4ex)\nno_code_reason: %s", doneReason)
+					}
 					noMRCommitSHA, _ := g.Rev("HEAD")
 
 					// gu-kruw: The bead-citation guard (gu-551r) is a logical
@@ -834,6 +879,8 @@ afterSafetyNet:
 								"--skip-verify does NOT bypass this check (gu-kruw): the citation guard\n"+
 								"protects the close-reason metadata regardless of push verification.\n\n"+
 								"Choose one:\n"+
+								"  • If this is a verify/report-only bead with no code to ship by design:\n"+
+								"      gt done --no-code --reason=\"<why no code was required>\" (gu-gc4ex)\n"+
 								"  • If the work was done in a sibling commit you should be on:\n"+
 								"      git rebase / cherry-pick the right commit, then re-run gt done\n"+
 								"  • If the bead is genuinely already complete (e.g. duplicate of work\n"+
