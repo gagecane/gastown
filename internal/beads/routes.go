@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // Route represents a prefix-to-path routing rule.
@@ -531,6 +532,31 @@ func ValidateRigPrefix(townRoot, rigName, beadID string) error {
 			beadID, actualPrefix, rigName, expectedPrefix)
 	}
 	return nil
+}
+
+// townLevelAssigneeRoles are the first address components that denote a
+// town-level (non-rig) assignee. Beads assigned to these belong in the town
+// (hq) database, so RigFromAssignee returns "" for them.
+var townLevelAssigneeRoles = map[string]bool{
+	constants.RoleMayor:  true,
+	constants.RoleDeacon: true,
+}
+
+// RigFromAssignee returns the rig component of an assignee address, or "" when
+// the assignee is town-level or unrecognized. Assignee addresses are of the
+// form "<rig>/<role>/<name>" for rig-scoped agents (e.g.
+// "gastown_upstream/crew/canewiw" → "gastown_upstream") and "mayor/",
+// "deacon/", or "deacon/dogs/<name>" for town-level agents (→ "").
+//
+// This is the routing key for bd create: the assignee names the rig that owns
+// the work, which is the rig whose database the bead should be written to —
+// independent of the caller's cwd.
+func RigFromAssignee(assignee string) string {
+	first, _, _ := strings.Cut(strings.TrimSpace(assignee), "/")
+	if first == "" || townLevelAssigneeRoles[first] {
+		return ""
+	}
+	return first
 }
 
 // ResolveHookDir determines the directory for running bd update on a bead.

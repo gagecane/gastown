@@ -728,3 +728,28 @@ func TestValidateRigPrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestRigFromAssignee(t *testing.T) {
+	tests := []struct {
+		name     string
+		assignee string
+		want     string
+	}{
+		{"rig crew agent", "gastown_upstream/crew/canewiw", "gastown_upstream"},
+		{"rig polecat", "gastown_upstream/polecats/rust", "gastown_upstream"},
+		{"rig witness", "gastown_upstream/witness", "gastown_upstream"},
+		{"mayor town-level", "mayor/", ""},
+		{"deacon town-level", "deacon/", ""},
+		{"deacon dog town-level", "deacon/dogs/alpha", ""},
+		{"bare mayor", "mayor", ""},
+		{"empty", "", ""},
+		{"whitespace trimmed", "  gastown_upstream/crew/x  ", "gastown_upstream"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RigFromAssignee(tc.assignee); got != tc.want {
+				t.Errorf("RigFromAssignee(%q) = %q, want %q", tc.assignee, got, tc.want)
+			}
+		})
+	}
+}

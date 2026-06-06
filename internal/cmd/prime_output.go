@@ -382,7 +382,8 @@ func outputCommandQuickReference(ctx RoleContext) {
 		fmt.Printf("| Kill stuck polecat | `%s polecat nuke <rig>/<name> --force` | ~~gt polecat kill~~ (not a command) |\n", c)
 		fmt.Printf("| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
 		fmt.Printf("| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
-		fmt.Println("| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
+		fmt.Printf("| Create a rig-scoped issue | `%s bead create \"title\" -a <rig>/...` | ~~bd create~~ from town cwd (lands in hq DB, invisible to the rig) |\n", c)
+		fmt.Println("| Create a town-level issue | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
 
 	case RoleCrew:
 		fmt.Println("| Want to... | Correct command | Common mistake |")
