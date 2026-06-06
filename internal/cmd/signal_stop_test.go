@@ -127,6 +127,85 @@ func TestIsSelfHandoffBead(t *testing.T) {
 	}
 }
 
+func TestIsSelfPatrolWisp(t *testing.T) {
+	tests := []struct {
+		name string
+		bead *beads.Issue
+		want bool
+	}{
+		{
+			name: "nil bead",
+			bead: nil,
+			want: false,
+		},
+		{
+			name: "witness patrol wisp",
+			bead: &beads.Issue{
+				Title: "mol-witness-patrol",
+				Type:  "molecule",
+			},
+			want: true,
+		},
+		{
+			name: "refinery patrol wisp",
+			bead: &beads.Issue{
+				Title: "mol-refinery-patrol",
+				Type:  "molecule",
+			},
+			want: true,
+		},
+		{
+			name: "deacon patrol wisp",
+			bead: &beads.Issue{
+				Title: "mol-deacon-patrol",
+				Type:  "molecule",
+			},
+			want: true,
+		},
+		{
+			name: "patrol wisp with trailing suffix in title",
+			bead: &beads.Issue{
+				Title: "mol-witness-patrol cycle 12",
+				Type:  "molecule",
+			},
+			want: true,
+		},
+		{
+			name: "genuine slung work bug",
+			bead: &beads.Issue{
+				Title: "Fix the auth bug",
+				Type:  "bug",
+			},
+			want: false,
+		},
+		{
+			name: "non-patrol molecule (real work)",
+			bead: &beads.Issue{
+				Title: "mol-implement-feature",
+				Type:  "molecule",
+			},
+			want: false,
+		},
+		{
+			name: "title merely contains patrol word but wrong prefix",
+			bead: &beads.Issue{
+				Title: "Investigate mol-witness-patrol hot-loop regression",
+				Type:  "bug",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isSelfPatrolWisp(tt.bead)
+			if got != tt.want {
+				t.Errorf("isSelfPatrolWisp() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOutputStopAllow(t *testing.T) {
 	// outputStopAllow should not return an error
 	err := outputStopAllow()

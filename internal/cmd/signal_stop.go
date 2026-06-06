@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -177,8 +178,11 @@ func checkStopSlungWork(townRoot string) string {
 		hookBead, err := b.Show(agentBead.HookBead)
 		if err == nil && hookBead != nil {
 			// Only block if the hooked work is in "hooked" status (not yet claimed)
-			// and isn't a self-handoff continuity bead (gu-8g439).
-			if hookBead.Status == beads.StatusHooked && !isSelfHandoffBead(hookBead) {
+			// and isn't a self-handoff continuity bead (gu-8g439) or a
+			// self-spawned patrol continuity wisp (gu-bo9xg).
+			if hookBead.Status == beads.StatusHooked &&
+				!isSelfHandoffBead(hookBead) &&
+				!isSelfPatrolWisp(hookBead) {
 				return fmt.Sprintf("[gt signal stop] Work slung to you: %s — \"%s\"\n\n"+
 					"Run `gt hook` to see details, then execute the work.",
 					hookBead.ID, hookBead.Title)
@@ -208,6 +212,16 @@ func checkStopSlungWork(townRoot string) string {
 			if isSelfHandoffBead(bead) {
 				continue
 			}
+			// Skip self-spawned patrol continuity wisps. Patrol formulas
+			// hook a fresh wisp to their own agent every cycle (autoSpawnPatrol)
+			// as a self-respawn primitive; the formula's own await-event/
+			// await-signal backoff governs cadence. Treating the wisp as fresh
+			// slung work pre-empts that backoff and re-blocks every cycle —
+			// each `gt patrol report` mints a new wisp ID so the stop-state
+			// dedup never catches it, producing a fleet-wide hot-loop (gu-bo9xg).
+			if isSelfPatrolWisp(bead) {
+				continue
+			}
 			return fmt.Sprintf("[gt signal stop] Work slung to you: %s — \"%s\"\n\n"+
 				"Run `gt hook` to see details, then execute the work.",
 				bead.ID, bead.Title)
@@ -229,6 +243,34 @@ func isSelfHandoffBead(bead *beads.Issue) bool {
 		return false
 	}
 	return beads.HasLabel(bead, "gt:message") && strings.Contains(bead.Title, "HANDOFF")
+}
+
+// isSelfPatrolWisp reports whether a hooked bead is a self-spawned patrol
+// continuity wisp rather than genuine slung work. Patrol formulas
+// (mol-witness-patrol, mol-refinery-patrol, mol-deacon-patrol) hook a fresh
+// wisp to their own agent at the start of every cycle via autoSpawnPatrol, as
+// a self-respawn primitive so `gt mol status` sees the active patrol. The
+// patrol's own await-event/await-signal step provides the idle backoff (~5m).
+//
+// The stop hook must NOT treat these wisps as fresh slung work: doing so blocks
+// the turn boundary and pre-empts the formula's backoff sleep, re-firing the
+// patrol immediately. Because `gt patrol report` mints a NEW wisp ID each cycle,
+// the stop-state reason-dedup never matches, so the wisp re-blocks on every
+// cycle — a fleet-wide hot-loop of empty patrols (gu-bo9xg). Mirrors
+// isSelfHandoffBead, which guards the same path for handoff continuity beads.
+//
+// Detection matches the same signal findActivePatrol uses: the wisp is a
+// molecule whose title begins with a patrol formula name.
+func isSelfPatrolWisp(bead *beads.Issue) bool {
+	if bead == nil {
+		return false
+	}
+	for _, molName := range constants.PatrolFormulas() {
+		if strings.HasPrefix(bead.Title, molName) {
+			return true
+		}
+	}
+	return false
 }
 
 // stopState tracks the last block reason to prevent infinite notification loops.
