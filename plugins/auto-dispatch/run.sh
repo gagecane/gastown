@@ -8,15 +8,25 @@
 # `bash`-executes.
 #
 # Behavior mirrors plugin.md:
-#   1. Discover rigs from $GT_TOWN_ROOT/mayor/rigs.json.
-#   2. For each rig, fetch `bd ready --json` and filter out non-dispatchable
-#      beads (identity beads, epics, wisps, agent-owned, workflow-orchestrator
-#      beads, etc.).
-#   3. For each remaining bead (sorted P1 > P2 > P3 > P4), invoke
+#   1. Discover ready work via a single `gt ready --json` call. This resolves
+#      each rig's beads dir via rig.BeadsPath()+redirect (NOT a CWD-based
+#      `cd $rig && bd ready`, which silently fails for rigs whose Dolt DB
+#      doesn't match the directory name — see gu-1ykb1: `cd gastown_upstream &&
+#      bd ready` errored with `database "gc" not found`, was swallowed by
+#      `2>/dev/null`, and dropped 19 ready beads from dispatch). `gt ready`
+#      also pre-applies the identity/epic/wisp/formula-scaffold/route filters
+#      in Go, so this script no longer re-implements them in bash.
+#   2. Skip the `town` source: its hq-* convoy/cross-rig beads are not per-rig
+#      dispatchable work and must not be fed to `gt sling <id> <rig>`.
+#   3. For each rig source, filter out the remaining non-dispatchable beads
+#      that `gt ready` does NOT cover: agent-assigned beads (with the
+#      `*-wfs-*` workflow-step exception), `wrong-rig:<rig>`-labeled beads,
+#      and workflow_target-to-non-rig beads.
+#   4. For each remaining bead (sorted P1 > P2 > P3 > P4), invoke
 #      `gt sling <bead-id> <rig>`. The server-side guards in `gt sling`
 #      enforce the same filters defensively; this script's filters are
 #      best-effort and exist to avoid noisy errors.
-#   4. Print a per-rig summary at the end.
+#   5. Print a per-rig summary at the end.
 #
 # Idempotency: `gt sling` is idempotent — a re-sling of an already-scheduled
 # bead returns cleanly. Calling this on every manual dispatch run is safe.
@@ -49,9 +59,11 @@ if [[ ${#RIGS[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Known agent role keywords used to detect agent-owned beads. The owner field
-# carries an address like "mayor", "deacon", "<rig>/witness", "<rig>/polecats/<name>".
-# A human owner is typically an email or a free-form name with no slash.
+# Known agent role keywords used to detect agent-assigned beads. The bead's
+# assignee carries an address like "mayor", "deacon", "<rig>/witness",
+# "<rig>/polecats/<name>". `gt ready --json` exposes this address in the
+# `assignee` field (the `owner` field there is the human email and is not an
+# address), so this heuristic is fed `.assignee`.
 is_agent_owner() {
   local owner="$1"
   [[ -z "$owner" ]] && return 1
@@ -97,6 +109,28 @@ extract_workflow_target() {
   ' <<<"$1"
 }
 
+# --- Discover ready work (single `gt ready --json` call) ---------------------
+
+# `gt ready --json` resolves each rig's beads dir via rig.BeadsPath()+redirect
+# and pre-applies the identity/epic/wisp/formula-scaffold/route filters in Go.
+# This replaces the old per-rig `(cd $rig && bd ready --json)` loop, whose
+# CWD-based resolution silently failed for rigs whose Dolt DB name differs from
+# the directory name (gu-1ykb1: `cd gastown_upstream && bd ready` errored with
+# `database "gc" not found`, was swallowed by `2>/dev/null`, and dropped 19
+# ready beads from dispatch).
+READY_JSON=$(gt ready --json 2>/dev/null)
+if [[ -z "$READY_JSON" || "$READY_JSON" == "null" ]]; then
+  log "ERROR: gt ready --json returned no output"
+  exit 1
+fi
+
+# Surface per-source errors that gt ready reported (e.g. a rig whose Dolt DB is
+# down). These are no longer silently swallowed.
+while IFS=$'\t' read -r err_src err_msg; do
+  [[ -z "$err_src" ]] && continue
+  log "source=$err_src ready error: $err_msg"
+done < <(jq -r '.sources[] | select(.error != null and .error != "") | [.name, .error] | @tsv' <<<"$READY_JSON")
+
 # --- Per-rig dispatch loop ---------------------------------------------------
 
 total_slung=0
@@ -106,7 +140,14 @@ total_skipped=0
 total_failed=0
 declare -a RIG_REPORTS
 
-for rig in "${RIGS[@]}"; do
+# Iterate rig sources from gt ready, skipping the `town` source: its hq-*
+# convoy/cross-rig beads are not per-rig dispatchable work and must not be fed
+# to `gt sling <id> <rig>`.
+mapfile -t READY_SOURCES < <(jq -r '.sources[] | select(.name != "town") | .name' <<<"$READY_JSON")
+
+for rig in "${READY_SOURCES[@]}"; do
+  [[ -z "$rig" ]] && continue
+
   rig_dir="${TOWN_ROOT}/${rig}"
   if [[ ! -d "$rig_dir" ]]; then
     log "Skipping rig=$rig (no directory at $rig_dir)"
@@ -114,27 +155,30 @@ for rig in "${RIGS[@]}"; do
     continue
   fi
 
-  ready_json=$(cd "$rig_dir" && bd ready --json -n 200 2>/dev/null)
-  if [[ -z "$ready_json" || "$ready_json" == "null" || "$ready_json" == "[]" ]]; then
-    RIG_REPORTS+=("$rig: 0 ready")
-    continue
-  fi
-
-  # Sort by priority (P1 first; treat missing priority as 99 so it sinks).
-  # Output: tab-separated id<TAB>owner<TAB>labels<TAB>description (description is the rest of the line).
+  # Extract this source's issues, sorted by priority (P1 first; treat missing
+  # priority as 99 so it sinks).
+  # Output: tab-separated id<TAB>assignee<TAB>labels<TAB>description.
+  # `gt ready` exposes the agent address in `assignee` (not `owner`).
   # Labels are joined with commas and wrapped in commas (",foo,bar,") so substring
   # checks like ",wrong-rig:${rig}," cannot accidentally match a label prefix.
-  # We tolerate missing fields by defaulting to "".
-  bead_lines=$(jq -r '
-    sort_by(.priority // 99)
+  # Newlines in the description are tunneled through \x01 so each bead stays on
+  # one tsv line (restored below). We tolerate missing fields by defaulting to "".
+  bead_lines=$(jq -r --arg rig "$rig" '
+    ((.sources[] | select(.name == $rig) | .issues) // [])
+    | sort_by(.priority // 99)
     | .[]
-    | [.id, (.owner // ""), ((.labels // []) | join(",")), (.description // "" | gsub("\n"; ""))]
+    | [.id, (.assignee // ""), ((.labels // []) | join(",")), (.description // "" | gsub("\n"; ""))]
     | @tsv
-  ' <<<"$ready_json") || {
-    log "rig=$rig: failed to parse bd ready output"
+  ' <<<"$READY_JSON") || {
+    log "rig=$rig: failed to parse gt ready output"
     RIG_REPORTS+=("$rig: parse error")
     continue
   }
+
+  if [[ -z "$bead_lines" ]]; then
+    RIG_REPORTS+=("$rig: 0 ready")
+    continue
+  fi
 
   rig_slung=0
   rig_new=0
@@ -142,14 +186,15 @@ for rig in "${RIGS[@]}"; do
   rig_skipped=0
   rig_failed=0
 
-  while IFS=$'\t' read -r bead_id owner labels description; do
+  while IFS=$'\t' read -r bead_id assignee labels description; do
     [[ -z "$bead_id" ]] && continue
 
     # Restore newlines that we tunneled through tsv.
     description="${description//$'\x01'/$'\n'}"
 
-    # Client-side filter: agent-owned beads (orchestrator state — owning agent
-    # handles them, not a polecat). See gs-myq.
+    # Client-side filter: agent-assigned beads (orchestrator state — owning agent
+    # handles them, not a polecat). See gs-myq. `gt ready` carries the agent
+    # address in `assignee`.
     #
     # Exception: workflow step beads (id matches `*-wfs-*`) are real polecat
     # work, not orchestrator state — `gt formula run` stamps them with the
@@ -160,7 +205,7 @@ for rig in "${RIGS[@]}"; do
     # (gu-3y6ro). Steps that genuinely route to a specific agent are still
     # caught by the workflow_target filter below, and `gt sling`'s server-side
     # guards remain the backstop.
-    if is_agent_owner "$owner" && ! is_workflow_step_bead "$bead_id"; then
+    if is_agent_owner "$assignee" && ! is_workflow_step_bead "$bead_id"; then
       rig_skipped=$((rig_skipped + 1))
       continue
     fi
