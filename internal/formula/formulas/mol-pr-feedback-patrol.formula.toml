@@ -202,6 +202,27 @@ consumer_bead_id = "assigned polecat (full task bead, not ephemeral)"
 description = """
 For each finding in /tmp/patrol-findings.txt, create a work bead and sling a polecat.
 
+## Label-Keyed Dispatch (Phase 2 task 19, gu-vvl4y)
+
+Before generic dispatch, check whether the PR carries the `gt:auto-test-pr`
+label AND the rig's feature flag `feature_flags.auto_test_pr_revision_routing`
+is true. When both conditions hold, dispatch `mol-polecat-work-test-improver`
+in `mode=revise` instead of the generic review-feedback handler.
+
+**Label-keyed routing decision tree:**
+1. PR has label `gt:auto-test-pr` AND feature flag enabled → dispatch via
+   `gt auto-test-pr revise --mr=<mr-bead>` (which files a sling-context
+   with formula=mol-polecat-work-test-improver, mode=revise).
+2. PR does NOT have `gt:auto-test-pr` label OR feature flag is disabled →
+   fall through to generic dispatch below (existing behavior preserved).
+
+**Check feature flag (early return if disabled):**
+```bash
+# Read the rig's feature_flags.auto_test_pr_revision_routing from settings.
+# gt rig settings get outputs the JSON value; absent/false → generic path.
+AUTO_TEST_PR_ROUTING=$(gt rig settings get {{rig}} feature_flags.auto_test_pr_revision_routing 2>/dev/null || echo "false")
+```
+
 **Safety valve — check open bead count first:**
 ```bash
 OPEN_COUNT=$(bd list --label {{patrol_label}} --status open 2>/dev/null | wc -l || echo "0")
@@ -221,7 +242,28 @@ while IFS=: read -r TYPE PR_NUM PR_URL PR_TITLE EXTRA; do
     continue
   fi
 
-  # Construct bead body based on type
+  # --- Label-keyed dispatch: gt:auto-test-pr routing ---
+  # For review-feedback findings, check if this PR carries the auto-test-pr
+  # label. If so (and the feature flag is enabled), route to the revision
+  # formula instead of the generic handler.
+  if [ "$TYPE" = "review-feedback" ] && [ "$AUTO_TEST_PR_ROUTING" = "true" ]; then
+    # Check if the PR has the gt:auto-test-pr label
+    PR_LABELS=$(gh pr view "$PR_NUM" --repo {{repo}} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+    if echo "$PR_LABELS" | grep -q "gt:auto-test-pr"; then
+      # Find the MR bead for this PR to pass to the revise command
+      MR_BEAD=$(bd list --label "gt:auto-test-pr" --label "pr-num-${PR_NUM}" --status open --format id 2>/dev/null | head -1)
+      if [ -n "$MR_BEAD" ]; then
+        echo "Label-keyed dispatch: PR #${PR_NUM} has gt:auto-test-pr → routing to mol-polecat-work-test-improver (mode=revise)"
+        gt auto-test-pr revise --mr="$MR_BEAD" 2>/dev/null || echo "Warning: revise dispatch failed for PR #${PR_NUM}"
+        continue
+      fi
+      # No MR bead found — fall through to generic dispatch
+      echo "PR #${PR_NUM} has gt:auto-test-pr label but no MR bead found — using generic dispatch"
+    fi
+  fi
+  # --- End label-keyed dispatch ---
+
+  # Construct bead body based on type (generic dispatch path)
   if [ "$TYPE" = "review-feedback" ]; then
     TITLE="Address review feedback on PR #${PR_NUM}: ${PR_TITLE}"
     BODY="## PR Review Feedback Needs Response
@@ -275,7 +317,8 @@ Dispatched by mol-pr-feedback-patrol."
 done < /tmp/patrol-findings.txt
 ```
 
-**Exit criteria:** All actionable PRs have either a newly created+slung bead, or were
+**Exit criteria:** All actionable PRs have either a newly created+slung bead, were
+routed to mol-polecat-work-test-improver via label-keyed dispatch, or were
 skipped because an open bead already exists.
 """
 

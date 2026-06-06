@@ -784,6 +784,11 @@ type RigSettings struct {
 	// (operator/Mayor authority), not in the in-repo rig manifest.
 	AutoTestPR *AutoTestPRConfig `json:"auto_test_pr,omitempty"`
 
+	// FeatureFlags holds per-rig feature flag booleans. Default-absent (nil)
+	// means all flags use their compiled-in defaults. Flags gate new behavior
+	// so it can be enabled per-rig after validation.
+	FeatureFlags *FeatureFlagsConfig `json:"feature_flags,omitempty"`
+
 	// UpstreamSync configures per-rig upstream sync behavior. Default-absent
 	// (nil) means disabled. When enabled, the Deacon patrol periodically
 	// checks the upstream remote for new commits and triggers a sync cycle
@@ -1145,6 +1150,39 @@ func (s *RigSettings) GetAutoTestPR() *AutoTestPRConfig {
 		return nil
 	}
 	return s.AutoTestPR
+}
+
+// FeatureFlagsConfig holds per-rig feature flag booleans that gate new
+// behavior behind an explicit opt-in. Each flag defaults to false (off)
+// when absent or when the entire block is nil, so adding a new flag
+// is always safe — no existing rig is affected until explicitly enabled.
+type FeatureFlagsConfig struct {
+	// AutoTestPRRevisionRouting enables label-keyed dispatch in
+	// mol-pr-feedback-patrol. When true AND a PR carries the
+	// gt:auto-test-pr label, the patrol dispatches
+	// mol-polecat-work-test-improver in mode=revise instead of the
+	// generic review-feedback handler.
+	// Default: false (Phase 2 task 19; flip after integration tests pass).
+	AutoTestPRRevisionRouting bool `json:"auto_test_pr_revision_routing"`
+}
+
+// GetFeatureFlags returns the rig's FeatureFlagsConfig. Nil-safe;
+// returns nil when the rig has no settings or no feature_flags block.
+func (s *RigSettings) GetFeatureFlags() *FeatureFlagsConfig {
+	if s == nil {
+		return nil
+	}
+	return s.FeatureFlags
+}
+
+// IsAutoTestPRRevisionRouting reports whether the patrol should route
+// gt:auto-test-pr labeled PRs to the revision formula. Nil-safe:
+// returns false when the config or the flag block is absent.
+func (f *FeatureFlagsConfig) IsAutoTestPRRevisionRouting() bool {
+	if f == nil {
+		return false
+	}
+	return f.AutoTestPRRevisionRouting
 }
 
 // CrewConfig represents crew workspace settings for a rig.
