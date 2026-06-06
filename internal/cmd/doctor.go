@@ -234,6 +234,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewCheckMisclassifiedWisps())
 	d.Register(doctor.NewCheckJSONLBloat())
 	d.Register(doctor.NewStaleBeadsRedirectCheck())
+	d.Register(doctor.NewTrackedIgnoredBeadsBackupCheck())
 	d.Register(doctor.NewBeadsRedirectTargetCheck())
 	d.Register(doctor.NewStaleRuntimeFilesCheck())
 	d.Register(doctor.NewBranchCheck())
