@@ -1406,6 +1406,32 @@ func listBlockedWorkBeadIDs(townRoot string) map[string]bool {
 	return ids
 }
 
+// isBeadBlockedByOpenDeps reports whether a single bead has open blocking
+// dependencies, using the same `bd blocked` authority the deferred dispatcher
+// trusts (listBlockedWorkBeadIDsWithError → isScheduledWorkBeadReady). It is the
+// single-bead analog used by the direct-dispatch guard in executeSling.
+//
+// Fails OPEN: on any query error the bead is treated as NOT blocked. The guard
+// exists to surface a known-blocked bead loudly instead of silently dropping it;
+// it must never turn a transient `bd blocked` failure into a refusal that a plain
+// `gt sling` would not otherwise have hit.
+func isBeadBlockedByOpenDeps(townRoot, beadID string) bool {
+	blocked, err := listBlockedWorkBeadIDsWithError(townRoot, []string{beadID})
+	if err != nil {
+		return false // fail open — never block dispatch on a query error
+	}
+	return blocked[beadID]
+}
+
+// isBeadBlockedByOpenDepsFn and shouldDeferDispatchFn are injectable seams for
+// the direct-dispatch blocked-deps guard in executeSling (gu-gzng2). Injected as
+// variables so unit tests can drive the guard without a real `bd blocked`
+// subprocess or an on-disk town settings file.
+var (
+	isBeadBlockedByOpenDepsFn = isBeadBlockedByOpenDeps
+	shouldDeferDispatchFn     = shouldDeferDispatch
+)
+
 func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool, blockedWorkIDs map[string]bool) bool {
 	if !found || blockedWorkIDs[workBeadID] {
 		return false

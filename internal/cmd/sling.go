@@ -119,7 +119,22 @@ Sling All Ready Work (--all):
   beads) and slings each to its own polecat. The per-bead server-side guards
   still apply, so non-dispatchable beads are skipped with a reason. Unlike the
   unattended auto-dispatcher, --all includes agent/crew-owned beads — an
-  operator running --all is explicitly asking to sling everything ready.`,
+  operator running --all is explicitly asking to sling everything ready.
+
+Dispatch Modes (direct vs deferred):
+  The town's scheduler.max_polecats setting controls how sling dispatches:
+
+    direct   (max_polecats <= 0): sling spawns a polecat immediately if there
+             is capacity. There is NO persistent queue — a bead that is BLOCKED
+             by open dependencies cannot be held, so sling REFUSES it rather
+             than silently dropping it (gu-gzng2). Re-sling once unblocked, pass
+             --force to dispatch anyway, or switch to deferred dispatch.
+    deferred (max_polecats >  0): sling enqueues a durable sling context. Blocked
+             beads are HELD and auto-dispatched when their blockers close, and
+             dispatch is capped at max_polecats concurrent polecats.
+
+  Enable deferred dispatch (hold blocked work automatically):
+    gt config set scheduler.max_polecats <N>`,
 	Args: slingArgsValidator,
 	RunE: runSling,
 }

@@ -312,6 +312,33 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, beads.WrongRigLabelPrefix, params.RigName)
 	}
 
+	// Direct-dispatch blocked-deps guard (gu-gzng2). In direct-dispatch mode
+	// (scheduler.max_polecats <= 0) there is no persistent pending queue: a bead
+	// slung while blocked by open dependencies cannot be held and re-dispatched
+	// when its blockers later close — it is silently dropped from the scheduler.
+	// Refuse it loudly instead, naming the held alternative (deferred dispatch),
+	// so the silent drop stops surprising callers (especially convoy bulk-sling).
+	//
+	// Gated to direct mode only: the deferred dispatcher already filters blocked
+	// beads upstream (getReadySlingContexts / isScheduledWorkBeadReady) and HOLDS
+	// them in their sling context until ready, so a blocked bead never reaches
+	// executeSling on that path. Adding a hard refusal here unconditionally would
+	// turn that healthy held state into a circuit-breaking dispatch failure.
+	//
+	// IS bypassable by an explicit --force, for the operator who knowingly wants
+	// to pre-spawn a polecat on soon-to-clear work. Placed after the cheap
+	// in-memory structural guards above so the `bd blocked` subprocess is only
+	// paid for a bead that would otherwise dispatch.
+	if !params.Force {
+		if deferred, _ := shouldDeferDispatchFn(); !deferred && isBeadBlockedByOpenDepsFn(townRoot, params.BeadID) {
+			result.ErrMsg = "blocked by open dependencies"
+			return result, fmt.Errorf("bead %s is blocked by open dependencies: %q\n"+
+				"In direct-dispatch mode it cannot be queued — it would be silently dropped, not held until its blockers close.\n"+
+				"Options: re-sling it once unblocked, pass --force to dispatch anyway, or enable deferred dispatch so blocked work is held automatically: gt config set scheduler.max_polecats <N>",
+				params.BeadID, info.Title)
+		}
+	}
+
 	// Save explicit force state before dead-agent auto-force, so the deferred
 	// gate below still requires an explicit --force for deferred beads.
 	explicitForce := params.Force

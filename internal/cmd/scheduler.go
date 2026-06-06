@@ -41,7 +41,16 @@ Subcommands:
 
 Config:
   gt config set scheduler.max_polecats 5    # Enable deferred dispatch
-  gt config set scheduler.max_polecats -1   # Direct dispatch (default)`,
+  gt config set scheduler.max_polecats -1   # Direct dispatch (default)
+
+Dispatch modes:
+  deferred (max_polecats > 0): sling enqueues a durable sling context. Work
+           blocked by open dependencies is HELD and auto-dispatched once its
+           blockers close; concurrency is capped at max_polecats polecats.
+  direct   (max_polecats <= 0): sling spawns a polecat immediately and keeps NO
+           pending queue. A bead slung while blocked cannot be held, so sling
+           refuses it instead of silently dropping it (gu-gzng2). To have blocked
+           work held automatically, enable deferred dispatch above.`,
 	RunE: requireSubcommand,
 }
 
