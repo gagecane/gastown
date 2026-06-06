@@ -321,7 +321,14 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	// No parent check needed — closed wisps past the delete age are unconditionally purgeable.
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m) query
 	// cost with 1800+ closed wisps, leading to CPU spikes and connection timeouts (gt-wvd2).
-	purgeQuery := "SELECT COUNT(*) FROM wisps w WHERE " + closedWispPurgeWhere
+	// The live-tracked guard, however, is retained: a closed sling-context wisp must not be
+	// purged while its tracked work bead is still open/in-flight, or the scheduler loses
+	// track of slung work (bead reverts to plain open-ready) and may double-dispatch the
+	// still-running polecat (gu-25jx5). It uses the same O(n+m) LEFT JOIN anti-pattern as
+	// the reap-path guard, so it does not reintroduce the gt-wvd2 O(n*m) cost. Must stay in
+	// lockstep with purgeClosedWisps so scan never reports candidates the purge won't delete.
+	purgeQuery := fmt.Sprintf(
+		"SELECT COUNT(*) FROM wisps w %s WHERE %s AND %s", trackedJoin, closedWispPurgeWhere, trackedWhere)
 	if err := db.QueryRowContext(ctx, purgeQuery, now.Add(-purgeAge), now.Add(-EphemeralPurgeAge)).Scan(&result.PurgeCandidates); err != nil {
 		return nil, fmt.Errorf("count purge candidates: %w", err)
 	}
@@ -539,12 +546,18 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 	deleteCutoff := time.Now().UTC().Add(-purgeAge)
 	ephemeralCutoff := time.Now().UTC().Add(-EphemeralPurgeAge)
 	var anomalies []Anomaly
+	trackedJoin, trackedWhere := liveTrackedContextExcludeJoin(dbName)
 
 	// Digest: count by wisp_type.
 	// No parent check — closed wisps past the delete age are unconditionally purgeable.
 	// The parent check (correlated subqueries on wisp_dependencies) was causing O(n*m)
 	// query cost with 1800+ closed wisps, leading to CPU spikes and timeouts (gt-wvd2).
-	digestQuery := "SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w WHERE " + closedWispPurgeWhere + " GROUP BY wtype"
+	// The live-tracked guard spares closed sling-context wisps whose work bead is still
+	// open (gu-25jx5); it uses the O(n+m) LEFT JOIN anti-pattern so the gt-wvd2 cost does
+	// not return. Must match Scan()'s purge count so scan>0/purge=0 drift cannot appear.
+	digestQuery := fmt.Sprintf(
+		"SELECT COALESCE(w.wisp_type, 'unknown') AS wtype, COUNT(*) AS cnt FROM wisps w %s WHERE %s AND %s GROUP BY wtype",
+		trackedJoin, closedWispPurgeWhere, trackedWhere)
 	rows, err := db.QueryContext(ctx, digestQuery, deleteCutoff, ephemeralCutoff)
 	if err != nil {
 		return 0, nil, fmt.Errorf("digest query: %w", err)
@@ -578,10 +591,12 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
 	}()
 
-	// Batch delete — simple status+age filter, no parent check needed for purge.
+	// Batch delete — status+age filter plus the live-tracked sling-context guard so an
+	// in-flight context is never purged while its work bead is open (gu-25jx5). Must stay
+	// in lockstep with the digest query above and Scan()'s purge count.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE "+closedWispPurgeWhere+" LIMIT %d",
-		DefaultBatchSize)
+		"SELECT w.id FROM wisps w %s WHERE %s AND %s LIMIT %d",
+		trackedJoin, closedWispPurgeWhere, trackedWhere, DefaultBatchSize)
 	auxTables := []string{"wisp_labels", "wisp_comments", "wisp_events", "wisp_dependencies"}
 
 	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, "wisps", auxTables, deleteCutoff, ephemeralCutoff)

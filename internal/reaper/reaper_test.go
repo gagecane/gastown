@@ -378,6 +378,45 @@ func TestReapAndScanShareTrackedGuard(t *testing.T) {
 	}
 }
 
+// TestPurgeRespectsLiveTrackedContext pins gu-25jx5: the purge path must also
+// wire the live-tracked sling-context guard so a closed sling-context wisp is not
+// purged at the EphemeralPurgeAge (1h) horizon while its tracked work bead is still
+// open/in-flight. Without it, the scheduler loses track of slung work and may
+// double-dispatch the still-running polecat. The guard must appear in both Scan()'s
+// purge-candidate count and purgeClosedWisps so the two stay in lockstep (no
+// scan>0/purge=0 drift), mirroring TestReapAndScanShareTrackedGuard.
+func TestPurgeRespectsLiveTrackedContext(t *testing.T) {
+	data, err := os.ReadFile("reaper.go")
+	if err != nil {
+		t.Fatalf("read reaper.go: %v", err)
+	}
+	source := string(data)
+	scanStart := strings.Index(source, "func Scan(")
+	reapStart := strings.Index(source, "func Reap(")
+	purgeStart := strings.Index(source, "func purgeClosedWisps(")
+	if scanStart == -1 || reapStart == -1 || purgeStart == -1 || reapStart <= scanStart {
+		t.Fatalf("could not isolate Scan()/purgeClosedWisps() bodies")
+	}
+	// Scan()'s purge-candidate count lives between func Scan( and func Reap(.
+	scanBody := source[scanStart:reapStart]
+	if !strings.Contains(scanBody, "purgeQuery") || !strings.Contains(scanBody, "trackedJoin") {
+		t.Error("Scan() purge count must apply the live-tracked guard (trackedJoin) — gu-25jx5")
+	}
+	purgeEnd := strings.Index(source[purgeStart:], "\nfunc ")
+	if purgeEnd == -1 {
+		purgeEnd = len(source) - purgeStart
+	}
+	purgeBody := source[purgeStart : purgeStart+purgeEnd]
+	if !strings.Contains(purgeBody, "liveTrackedContextExcludeJoin") {
+		t.Error("purgeClosedWisps must apply liveTrackedContextExcludeJoin (lockstep with Scan) — gu-25jx5")
+	}
+	// Both the digest count and the batch-delete id query must carry the guard,
+	// or one of them would still purge a live sling-context.
+	if strings.Count(purgeBody, "trackedWhere") < 2 {
+		t.Errorf("purgeClosedWisps must apply trackedWhere to both digest and batch-delete queries, got %d use(s)", strings.Count(purgeBody, "trackedWhere"))
+	}
+}
+
 // TestCloseStaleHookedMolsQueryShape verifies that CloseStaleHookedMols targets
 // the wisps table with the correct status/title/agent filters. GH#3767.
 // TestAutoAddCommitsAreGuarded ensures every DOLT_COMMIT('-Am', ...) site in the
