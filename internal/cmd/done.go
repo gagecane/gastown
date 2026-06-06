@@ -163,6 +163,42 @@ func mrRelayTargetOverride(explicitTarget bool, currentTarget, defaultBranch, is
 	return relayBase
 }
 
+// correctPhantomMainTarget is a safety net against MRs that target a literal
+// "main" branch which does not exist on the rig's remote (gu-aucji). It returns
+// the corrected target, or currentTarget unchanged when no correction applies.
+//
+// Why this is needed even though resolveRigDefaultBranch exists: the polecat
+// formula renders `gt done --target {{base_branch}}`, and {{base_branch}} can
+// fall back to the formula's static TOML default ("main") when gt prime cannot
+// read the bead's stamped base_branch=<rig default> formula var (e.g. a Dolt
+// read-lag window, gu-9qbg5). An explicit --target is authoritative and
+// deliberately bypasses resolveRigDefaultBranch, so a phantom "main" sails
+// through to the MR. On a mainline-only rig (talontriage) the refinery then has
+// to manually retarget every occurrence — recurring toil and a latent
+// wrong-merge risk if a rig ever carried BOTH main and mainline.
+//
+// The correction fires ONLY in the unambiguous footgun case: the running target
+// is literally "main", the rig's real default branch is something else, and
+// origin/main genuinely does not exist on the remote. In that case "main" can
+// only be the phantom default, never a deliberate choice — so we rewrite it to
+// the rig default. It is a strict no-op when the rig default IS main, when the
+// target was never "main", or when origin/main actually exists (then "main" may
+// be intentional and we must not second-guess it). branchExists is injected so
+// the decision is unit-testable without a live remote.
+func correctPhantomMainTarget(currentTarget, defaultBranch string, branchExists func(remote, branch string) (bool, error)) string {
+	if currentTarget != "main" || defaultBranch == "" || defaultBranch == "main" {
+		return currentTarget
+	}
+	// Only rewrite when origin/main is confirmed ABSENT. On any error querying
+	// the remote, leave the target untouched — we never want a transient remote
+	// hiccup to silently retarget an MR.
+	exists, err := branchExists("origin", "main")
+	if err != nil || exists {
+		return currentTarget
+	}
+	return defaultBranch
+}
+
 // pushForDoneMaxAttempts is the total number of push attempts (initial + retries)
 // pushForDone makes when a transient push-infra error is observed. git push is
 // idempotent — re-pushing an already-landed commit exits 0 ("up to date") — so
@@ -1555,6 +1591,18 @@ afterSafetyNet:
 					target = autoTarget
 				}
 			}
+		}
+
+		// 4. Phantom-"main" safety net (gu-aucji). Any path above — most often an
+		// explicit --target {{base_branch}} that fell back to the formula's "main"
+		// default because gt prime couldn't read the stamped base_branch var — can
+		// leave target=="main" on a rig whose real default is not main. Rewrite it
+		// to the rig default when origin/main does not exist, so a mainline-only
+		// rig never emits an unmergeable target=main MR. No-op for main-default
+		// rigs and when origin/main actually exists.
+		if corrected := correctPhantomMainTarget(target, defaultBranch, g.RemoteBranchExists); corrected != target {
+			style.PrintWarning("MR target was %q but rig default is %q and origin/main does not exist — retargeting to %q (gu-aucji)", target, defaultBranch, corrected)
+			target = corrected
 		}
 
 		// Get source issue for priority inheritance

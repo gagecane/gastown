@@ -288,6 +288,15 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Phantom-"main" safety net (gu-aucji): a base_branch=main formula var that
+	// leaked onto the bead resolves target to "main" even on a mainline-only rig.
+	// Rewrite to the rig default when origin/main does not exist, mirroring the
+	// guard in gt done. No-op for main-default rigs and when origin/main exists.
+	if corrected := correctPhantomMainTarget(target, defaultBranch, g.RemoteBranchExists); corrected != target {
+		style.PrintWarning("MR target was %q but rig default is %q and origin/main does not exist — retargeting to %q (gu-aucji)", target, defaultBranch, corrected)
+		target = corrected
+	}
+
 	// Get source issue for priority inheritance and dependency check
 	var priority int
 	var sourceIssue *beads.Issue
