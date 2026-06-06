@@ -503,6 +503,97 @@ func runBdJSONWithOptions(dir string, allowStale bool, args ...string) ([]byte, 
 // (gc-ihbkn — split from gu-4671z, which over-corrected to depends_on_issue_id.)
 const depTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
 
+// runBdSQLDepRows runs a dependency-table `bd sql ... --json` query and returns
+// the decoded rows. It exists to harden the raw dep-read path against the
+// silent cross-DB data loss that surfaced as flaky scheduler_integration_test.go
+// failures (gc-ihbkn).
+//
+// Two failure modes are handled that the previous inline parse missed:
+//
+//  1. `bd sql` reports query errors in a JSON ENVELOPE ({"error": "..."}) and
+//     still exits 0 — so runBdJSON returns no error, but unmarshalling into the
+//     row array fails. Under Dolt contention on the shared CI server the query
+//     intermittently returns a transient error (lock wait timeout, serialization
+//     failure, "try restarting transaction"). The old code treated that parse
+//     failure as fatal; callers then cascaded to bd dep list / bd show fallbacks
+//     that silently DROP cross-database deps (verified: both return empty for an
+//     external: tracks dep), producing "convoy has no tracked issues" and dropped
+//     epic children.
+//
+//  2. The same transient errors as a non-zero exit from bd itself.
+//
+// On a transient error we retry with a short backoff rather than returning an
+// error (which would trigger the lossy fallback). The COALESCE column fix is
+// what makes the happy-path query correct; this is what keeps it from silently
+// degrading when the server is busy.
+func runBdSQLDepRows(dir, query string) ([]map[string]string, error) {
+	const maxAttempts = 4
+	const baseBackoff = 150 * time.Millisecond
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(baseBackoff * time.Duration(attempt))
+		}
+
+		out, err := runBdJSON(dir, "sql", query, "--json")
+		if err != nil {
+			lastErr = err
+			if isTransientDepQueryErr(err.Error()) {
+				continue
+			}
+			return nil, err
+		}
+
+		// bd sql emits query errors as a {"error": "..."} envelope with exit 0.
+		// Detect it before attempting to decode the row array.
+		var env struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(out, &env) == nil && env.Error != "" {
+			lastErr = fmt.Errorf("bd sql query error: %s", env.Error)
+			if isTransientDepQueryErr(env.Error) {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		var rows []map[string]string
+		if err := json.Unmarshal(out, &rows); err != nil {
+			return nil, fmt.Errorf("parsing dep sql: %w", err)
+		}
+		return rows, nil
+	}
+	return nil, fmt.Errorf("bd sql dep query failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// isTransientDepQueryErr reports whether a bd sql error message indicates a
+// retryable Dolt-contention condition (as opposed to a deterministic error
+// like a syntax error or missing column). Mirrors the classification in
+// doltserver.isDoltRetryableError. (gc-ihbkn)
+func isTransientDepQueryErr(msg string) bool {
+	for _, marker := range []string{
+		"lock wait timeout",
+		"serialization failure",
+		"try restarting transaction",
+		"optimistic lock",
+		"cannot update manifest",
+		"database is read only",
+		"deadlock",
+		"connection refused",
+		"i/o timeout",
+		"read timed out",
+		"bad connection",
+		"broken pipe",
+		"EOF",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
 	// Determine query columns based on direction.
 	// "down": issueID depends on targets → SELECT <target> WHERE issue_id = ?
@@ -533,15 +624,9 @@ func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) 
 		query += fmt.Sprintf(" AND type = '%s'", depType)
 	}
 
-	out, err := runBdJSON(dir, "sql", query, "--json")
+	rows, err := runBdSQLDepRows(dir, query)
 	if err != nil {
 		return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, err)
-	}
-
-	// Parse JSON array of single-column rows
-	var rows []map[string]string
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parsing dep sql for %s: %w", issueID, err)
 	}
 
 	seen := make(map[string]bool, len(rows))
@@ -605,14 +690,44 @@ func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[stri
 	// route through the context-bounded bdCmd.Output() path instead. On timeout
 	// the caller (findStrandedConvoys / checkAndCloseCompletedConvoys) degrades
 	// to per-convoy lookups rather than hanging the whole sweep.
-	out, err := BdCmd("sql", query, "--json").Dir(townBeads).StripBeadsDir().Output()
-	if err != nil {
-		return nil, fmt.Errorf("bd sql for batched tracked deps: %w", err)
-	}
-
+	// Retry transient Dolt-contention errors rather than letting the caller
+	// degrade to the cross-DB-lossy per-convoy fallback (gc-ihbkn). bd sql
+	// reports query errors in a {"error": "..."} envelope with exit 0, so the
+	// envelope is checked explicitly in addition to the process exit code.
+	const maxAttempts = 4
+	const baseBackoff = 150 * time.Millisecond
 	var rows []map[string]string
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parsing batched dep sql: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(baseBackoff * time.Duration(attempt))
+		}
+		out, err := BdCmd("sql", query, "--json").Dir(townBeads).StripBeadsDir().Output()
+		if err != nil {
+			lastErr = fmt.Errorf("bd sql for batched tracked deps: %w", err)
+			if isTransientDepQueryErr(err.Error()) {
+				continue
+			}
+			return nil, lastErr
+		}
+		var env struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(out, &env) == nil && env.Error != "" {
+			lastErr = fmt.Errorf("bd sql for batched tracked deps: %s", env.Error)
+			if isTransientDepQueryErr(env.Error) {
+				continue
+			}
+			return nil, lastErr
+		}
+		if err := json.Unmarshal(out, &rows); err != nil {
+			return nil, fmt.Errorf("parsing batched dep sql: %w", err)
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 
 	// Dedup per convoy.
