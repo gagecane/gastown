@@ -306,6 +306,14 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// gu-czolf: Auto-prioritize fork-sync/rebase MRs to P0.
+	// When the fork falls behind upstream, rebase-check fails fork-wide. The
+	// only MR that fixes it is the sync MR — it must sort ahead of the doomed
+	// MRs it unblocks, never behind them.
+	if isForkSyncBranch(branch) && mqSubmitPriority < 0 {
+		priority = 0
+	}
+
 	// Enforce molecule step dependencies before allowing submit.
 	// If the source issue has an attached molecule, verify that prerequisite
 	// steps are complete. This prevents polecats from skipping steps like
@@ -639,4 +647,15 @@ Please verify state and execute lifecycle action.
 			return nil // Don't fail the MR submission just because cleanup timed out
 		}
 	}
+}
+
+// isForkSyncBranch returns true if the branch name indicates a fork-sync or
+// upstream-rebase operation. These MRs unblock the entire queue when
+// rebase-check fails fork-wide, so they must auto-file at P0. (gu-czolf)
+func isForkSyncBranch(branch string) bool {
+	return strings.HasPrefix(branch, "sync/upstream") ||
+		strings.HasPrefix(branch, "sync/fork") ||
+		strings.Contains(branch, "upstream-sync") ||
+		strings.Contains(branch, "fork-sync") ||
+		strings.Contains(branch, "rebase-upstream")
 }
