@@ -37,17 +37,19 @@ gate at the end (`--dry-run`) is non-negotiable.
 
 ### Step 1: Pick the formula type
 
-The `type` field is one of four values (see `internal/formula/types.go`):
+The `type` field is one of four values:
 
 | Type        | Execution model                                  | Key fields                          |
 |-------------|--------------------------------------------------|-------------------------------------|
 | `workflow`  | Sequential steps with a dependency DAG           | `[[steps]]` with `needs`            |
 | `convoy`    | Parallel legs + a synthesis step                 | `[inputs]`, `[prompts]`, `[[legs]]`, `[synthesis]` |
-| `expansion` | Template steps that replace one target step      | `[[template]]` with `{target}` macro |
-| `aspect`    | Cross-cutting advice woven around matched steps  | `[[advice]]`, `[[pointcuts]]`       |
+| `expansion` | Template steps that replace one target step      | `[[template]]` with `[compose.expand]` |
+| `aspect`    | Cross-cutting parallel analysis (convoy-like)    | `[[aspects]]`                       |
 
 If unsure, ask the user how the work executes: "one agent doing ordered steps"
 → `workflow`; "several agents in parallel then a merge" → `convoy`.
+
+For the complete per-type field list, see [`references/schema.md`](references/schema.md).
 
 ### Step 2: Scaffold a starter file
 
@@ -127,13 +129,22 @@ treated as variables and need no declaration.
 
 ### Step 6: Validate (the gate — do not skip)
 
+Two complementary validators. Run the offline one in the edit loop, the
+authoritative parser as the final gate.
+
 ```bash
+# Offline structural check (no rig needed). Mirrors parser.go and also catches
+# undeclared {{var}} usage and filename/stem mismatch.
+python3 scripts/validate-formula.py <path/to/name.formula.toml>
+
+# Authoritative parser + dispatch preview (the gate).
 gt formula run <name> --dry-run --rig <rig>
 ```
 
 Exit 0 with a dispatch preview = the formula parses, has no cycles, and all
 `needs` references resolve. A non-zero exit prints the exact problem (see
-Troubleshooting). Re-run until clean. Then confirm the rendered shape:
+[`references/troubleshooting.md`](references/troubleshooting.md)). Re-run until
+clean. Then confirm the rendered shape:
 
 ```bash
 gt formula show <name>      # human-readable: type, vars, step tree
@@ -177,154 +188,28 @@ confirm no cycle and the new ID resolves.
 
 ## Troubleshooting
 
-| Error (from `--dry-run`) | Cause | Fix |
-|---|---|---|
-| `formula field is required` | Missing top-level `formula = "..."` | Add it; match the filename stem |
-| `invalid formula type "X"` | `type` not one of convoy/workflow/expansion/aspect | Use a valid type |
-| `workflow formula requires at least one step` | No `[[steps]]` blocks | Add at least one step |
-| `duplicate step id: X` | Two steps share an `id` | Make IDs unique |
-| `step "X" needs unknown step: Y` | `needs` points at a non-existent ID (often a typo) | Correct the referenced ID |
-| `cycle detected involving: X` | Steps depend on each other in a loop | Break the cycle; `needs` must form a DAG |
-| `convoy formula requires at least one leg` | Convoy with no `[[legs]]` | Add legs |
-| `synthesis depends_on references unknown leg: X` | `[synthesis].depends_on` names a missing leg | Fix the leg ID |
-| `missing required variables` (at `gt formula run`) | A `{{var}}` is used but not in `[vars]` | Declare it in `[vars]` (use `default=""` for computed vars) |
-| `formula "X" not found in search paths` | File misnamed or in wrong dir | Name it `X.formula.toml` in a search-path dir (Step 7) |
-| `gt formula show` looks fine but `--dry-run` fails | `show` does not validate | Trust `--dry-run`, not `show` |
+When a validator rejects the formula, look up the exact error string, its
+cause, and the fix in [`references/troubleshooting.md`](references/troubleshooting.md).
+The common ones: `formula field is required`, `duplicate step id`,
+`step "X" needs unknown step: Y`, `cycle detected involving: X`,
+`synthesis depends_on references unknown leg: X`, and `missing required
+variables`. Remember: `gt formula show` does NOT validate — trust
+`scripts/validate-formula.py` and `--dry-run`.
 
-For deep schema questions (every field per type), read
-`internal/formula/types.go`; for the exact validation rules, read
+## Reference files
+
+Loaded on demand — keep SKILL.md focused (progressive disclosure):
+
+- [`references/schema.md`](references/schema.md) — complete per-type field
+  reference (workflow, convoy, expansion, aspect), composition, variables, and
+  type inference. Consult for any field not in the quick examples above.
+- [`references/troubleshooting.md`](references/troubleshooting.md) — every
+  validation error string → cause → fix.
+- [`references/design-notes.md`](references/design-notes.md) — skill-design
+  metadata (use cases, framing, success criteria, capabilities) for maintainers.
+- [`scripts/validate-formula.py`](scripts/validate-formula.py) — offline
+  structural validator. Run `python3 scripts/validate-formula.py <file>` in the
+  edit loop before the `--dry-run` gate.
+
+For the source of truth, read `internal/formula/types.go` (schema) and
 `internal/formula/parser.go` (`Validate`, `checkCycles`).
-
-## Use Cases and Success Criteria
-
-### Use Case 1: Author a new workflow formula from scratch
-
-**Trigger:** User says "create a formula for X", "write a workflow formula",
-"I need a formula that does X then Y then Z", or "encode this workflow as a formula"
-
-**Steps:**
-1. Clarify formula type (workflow, convoy, patrol, expansion, aspect) based on
-   the user's described execution model
-2. Determine variables needed (from user description or by asking)
-3. Generate the `.formula.toml` file with correct TOML structure:
-   - Top-level fields: `description`, `formula`, `type`, `version`
-   - Steps/legs/aspects with proper dependency DAGs (`needs` field)
-   - Variable declarations with descriptions, defaults, and required flags
-4. Write to the appropriate formulas directory
-5. Validate with `gt formula run <name> --dry-run --rig <rig>` (parse check, DAG
-   cycle detection, `needs` resolution), then `gt formula show <name>` to confirm
-   the rendered tree
-
-**Result:** A syntactically valid, well-structured formula TOML file placed in
-the correct search path, passing `gt formula run --dry-run` and viewable via
-`gt formula show <name>`.
-
----
-
-### Use Case 2: Validate and fix an existing formula
-
-**Trigger:** User says "validate this formula", "check my formula TOML",
-"why won't this formula parse", "fix this formula", or shows a formula
-that `gt formula run --dry-run` rejects
-
-**Steps:**
-1. Read the formula file (or accept pasted TOML content)
-2. Run structural validation:
-   - TOML syntax (valid TOML?)
-   - Required fields present (`formula`, `type`, `description`)
-   - Type-specific fields match (workflow needs `[[steps]]`, convoy needs `[[legs]]`)
-   - Step dependency DAG is acyclic
-   - All `needs` references point to existing step IDs
-   - Variables referenced in `{{var}}` placeholders are declared in `[vars]`
-   - No duplicate step/leg IDs
-   (run `gt formula run <name> --dry-run --rig <rig>` to surface parse, cycle,
-   and dangling-`needs` errors — `gt formula show` does NOT validate)
-3. Report issues with line-level context and suggested fixes
-4. Apply fixes if user approves
-5. Re-validate until clean
-
-**Result:** Formula passes `gt formula run <name> --dry-run` without errors; all
-structural issues resolved with explanations.
-
----
-
-### Use Case 3: Add/modify steps in an existing formula
-
-**Trigger:** User says "add a step to formula X", "insert a gate step before
-the build", "change the deploy step to also run lint", or "reorder these steps"
-
-**Steps:**
-1. Load the existing formula via file read
-2. Parse the step dependency graph
-3. Determine where the new/modified step fits in the DAG
-4. Update `needs` fields to maintain correct ordering
-5. Write the modified TOML preserving existing formatting/comments
-6. Validate the result (no cycles, no dangling refs)
-
-**Result:** Modified formula with correct step ordering, no broken dependencies,
-validated via `gt formula run <name> --dry-run`.
-
----
-
-## Framing Choice: Tool-first
-
-This skill is **tool-first**. The user has access to the `gt formula` CLI tooling
-and the formula TOML format. The skill supplies the expert workflow knowledge:
-correct TOML structure, valid field combinations per formula type, dependency
-DAG rules, variable declaration patterns, and the conventions that make formulas
-work well in the Gas Town execution model.
-
-The user already knows WHAT they want the formula to do; the skill knows HOW
-to encode that intent correctly in the formula TOML format.
-
----
-
-## Success Criteria
-
-1. **Trigger accuracy (~90%):** Triggers on formula-authoring/validation requests.
-   Test prompts:
-   - "Create a patrol formula for nightly DB backup" -> triggers
-   - "Write a convoy formula with 3 legs" -> triggers
-   - "This formula won't parse, can you fix it?" -> triggers
-   - "Add a lint step before the deploy step" -> triggers
-   - "Encode my workflow as a formula" -> triggers
-   - "Run the code-review formula" -> does NOT trigger
-   - "Show me what formulas are available" -> does NOT trigger
-   - "Edit the overlay for mol-polecat-work" -> does NOT trigger
-
-2. **Fewer tool calls than baseline:** Without the skill, an agent must:
-   discover the TOML schema by reading source code, examine multiple example
-   formulas, trial-and-error the structure. With the skill: direct generation
-   from known schema in 2-3 tool calls (write file + validate).
-
-3. **Zero failed tool/MCP calls per run:** All generated TOML parses correctly
-   on first `gt formula run --dry-run` invocation. No user correction needed for
-   structural issues.
-
-4. **Correct by construction:** Generated formulas pass the internal parser
-   (internal/formula/parser.go) without modification.
-
----
-
-## Required Capabilities
-
-### Built-in (no MCP needed):
-- **File creation/editing:** Write `.formula.toml` files to disk
-- **Code execution (Bash):** Run `gt formula run <name> --dry-run --rig <rig>` to
-  validate, `gt formula show <name>` to view the rendered tree, `gt formula list`
-  to check placement, `gt formula create` for scaffolding
-- **File reading:** Read existing formulas for reference patterns, read
-  `internal/formula/types.go` for schema reference
-
-### Key knowledge embedded in skill (no external tool needed):
-- Formula TOML schema (all four types: workflow, convoy, expansion, aspect)
-- Step dependency DAG rules (needs field, cycle detection)
-- Variable declaration patterns (`[vars.X]` tables vs shorthand strings)
-- Search path resolution (project > user > orchestrator)
-- Naming conventions (kebab-case with `.formula.toml` suffix)
-- Type-specific required/optional fields
-- Template variable syntax (`{{variable_name}}` for workflows,
-  `{{.variable_name}}` for convoys/Go templates)
-
-### No MCP tools required
-This is a pure workflow-automation skill using built-in file and shell capabilities.
