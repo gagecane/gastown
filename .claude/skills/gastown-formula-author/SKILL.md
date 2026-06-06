@@ -1,5 +1,6 @@
 ---
 name: gastown-formula-author
+version: 1.0.0
 description: |
   Author, validate, and iterate on Gas Town workflow formula TOML files.
   Use when asked to "create a formula", "write a formula", "new workflow formula",
