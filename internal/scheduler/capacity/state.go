@@ -116,3 +116,22 @@ func (s *SchedulerState) RecordDispatch(count int) {
 	s.LastDispatchAt = time.Now().UTC().Format(time.RFC3339)
 	s.LastDispatchCount = count
 }
+
+// RecordDispatchEvent stamps last_dispatch_at/count on the persisted scheduler
+// state for a successful dispatch. It reloads the state fresh before stamping so
+// it never clobbers a concurrent `gt scheduler pause` (mirrors the
+// read-modify-write pattern dispatch has always used).
+//
+// This is the single place every dispatch path records the timestamp. Calling it
+// from the universal dispatch chokepoint (executeSling) keeps last_dispatch_at
+// honest across ALL dispatch paths — fresh spawn, idle-polecat reuse, convoy /
+// epic / batch dispatch, and manual sling — not just the scheduler's batch loop
+// (gu-rzv7v: the field was frozen for hours because only one path stamped it).
+func RecordDispatchEvent(townRoot string, count int) error {
+	state, err := LoadState(townRoot)
+	if err != nil {
+		return err
+	}
+	state.RecordDispatch(count)
+	return SaveState(townRoot, state)
+}

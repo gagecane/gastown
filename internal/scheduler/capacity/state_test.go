@@ -128,6 +128,63 @@ func TestRecordDispatch(t *testing.T) {
 	}
 }
 
+func TestRecordDispatchEvent_StampsFreshState(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	before := time.Now().UTC()
+	if err := RecordDispatchEvent(tmpDir, 1); err != nil {
+		t.Fatalf("RecordDispatchEvent: %v", err)
+	}
+	after := time.Now().UTC()
+
+	state, err := LoadState(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadState after RecordDispatchEvent: %v", err)
+	}
+	if state.LastDispatchCount != 1 {
+		t.Errorf("LastDispatchCount: got %d, want 1", state.LastDispatchCount)
+	}
+	ts, err := time.Parse(time.RFC3339, state.LastDispatchAt)
+	if err != nil {
+		t.Fatalf("LastDispatchAt is not valid RFC3339: %q, err: %v", state.LastDispatchAt, err)
+	}
+	if ts.Before(before.Truncate(time.Second)) || ts.After(after.Add(time.Second)) {
+		t.Errorf("LastDispatchAt %v not between %v and %v", ts, before, after)
+	}
+}
+
+func TestRecordDispatchEvent_PreservesPauseState(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// A concurrent pause writes paused=true; a dispatch stamp must not clobber it.
+	paused := &SchedulerState{}
+	paused.SetPaused("operator")
+	if err := SaveState(tmpDir, paused); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	if err := RecordDispatchEvent(tmpDir, 3); err != nil {
+		t.Fatalf("RecordDispatchEvent: %v", err)
+	}
+
+	state, err := LoadState(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !state.Paused {
+		t.Error("RecordDispatchEvent clobbered Paused state")
+	}
+	if state.PausedBy != "operator" {
+		t.Errorf("PausedBy: got %q, want %q", state.PausedBy, "operator")
+	}
+	if state.LastDispatchCount != 3 {
+		t.Errorf("LastDispatchCount: got %d, want 3", state.LastDispatchCount)
+	}
+	if state.LastDispatchAt == "" {
+		t.Error("LastDispatchAt was not stamped")
+	}
+}
+
 func TestSaveState_CreatesRuntimeDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	runtimeDir := filepath.Join(tmpDir, ".runtime")

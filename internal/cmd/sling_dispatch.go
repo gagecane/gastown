@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -615,6 +616,16 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 	fmt.Printf("  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
 	_ = pane
+
+	// Stamp last_dispatch_at on the universal dispatch chokepoint so the field
+	// reflects EVERY successful dispatch — fresh spawn, idle-polecat reuse,
+	// convoy / epic / batch dispatch, and manual sling — not just the scheduler's
+	// batch loop (gu-rzv7v). Best-effort: a state-write failure must not fail an
+	// otherwise-successful dispatch. The scheduler's post-cycle RecordDispatch
+	// still overwrites with the batch count for that path (runs after this).
+	if err := capacity.RecordDispatchEvent(townRoot, 1); err != nil {
+		fmt.Printf("  %s Could not record dispatch timestamp: %v\n", style.Dim.Render("Warning:"), err)
+	}
 
 	result.Success = true
 	return result, nil
