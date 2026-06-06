@@ -108,10 +108,20 @@ const (
 	// history that drove the bump from 5m/20m to 16m/30m.
 	DefaultDeaconHeartbeatStaleThreshold = 16 * time.Minute
 	DefaultDeaconHeartbeatVeryStale      = 30 * time.Minute
-	DefaultMaxRedispatches               = 3
-	DefaultRedispatchCooldown            = 5 * time.Minute
-	DefaultMaxFeedsPerCycle              = 3
-	DefaultFeedCooldown                  = 10 * time.Minute
+	// DefaultDeaconCycleStallThreshold is how long the deacon's heartbeat cycle
+	// counter may stay UNCHANGED (while wall-clock advances) before the daemon
+	// treats the deacon as hung — even if the absolute heartbeat age has not yet
+	// crossed the stale threshold. This catches monotonic-age hangs (gu-qwjj3)
+	// where the cycle freezes but age climbs slowly. The stall check only fires
+	// when active work is in flight, so a legitimate await-signal idle backoff
+	// (which also freezes the cycle) does not trip it — preserving the gu-70rg
+	// false-positive fix. Set below the 16m absolute stale threshold so a genuine
+	// hang is caught sooner than the age gate alone would.
+	DefaultDeaconCycleStallThreshold = 7 * time.Minute
+	DefaultMaxRedispatches           = 3
+	DefaultRedispatchCooldown        = 5 * time.Minute
+	DefaultMaxFeedsPerCycle          = 3
+	DefaultFeedCooldown              = 10 * time.Minute
 )
 
 // Polecat defaults.
@@ -610,6 +620,14 @@ func (d *DeaconThresholds) HeartbeatVeryStaleThresholdD() time.Duration {
 		return ParseDurationOrDefault(d.HeartbeatVeryStaleThreshold, DefaultDeaconHeartbeatVeryStale)
 	}
 	return DefaultDeaconHeartbeatVeryStale
+}
+
+// CycleStallThresholdD returns the configured or default cycle-stall threshold.
+func (d *DeaconThresholds) CycleStallThresholdD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.CycleStallThreshold, DefaultDeaconCycleStallThreshold)
+	}
+	return DefaultDeaconCycleStallThreshold
 }
 
 // MaxRedispatchesV returns the configured or default max redispatches.

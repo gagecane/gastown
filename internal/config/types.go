@@ -430,6 +430,11 @@ type DeaconThresholds struct {
 	// HeartbeatVeryStaleThreshold is age at which heartbeat is very stale (default "15m").
 	HeartbeatVeryStaleThreshold string `json:"heartbeat_very_stale_threshold,omitempty"`
 
+	// CycleStallThreshold is how long the deacon heartbeat cycle counter may
+	// stay unchanged (while work is in flight) before the deacon is treated as
+	// hung, independent of absolute heartbeat age (default "7m"). See gu-qwjj3.
+	CycleStallThreshold string `json:"cycle_stall_threshold,omitempty"`
+
 	// MaxRedispatches is max times a bead can be re-dispatched before escalating (default 3).
 	MaxRedispatches *int `json:"max_redispatches,omitempty"`
 

@@ -81,6 +81,15 @@ type Daemon struct {
 	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
 	deaconLastStarted time.Time
 
+	// deaconCycleStall tracks the last-observed deacon heartbeat cycle number and
+	// when it was last seen to ADVANCE. Used by checkDeaconHeartbeat to detect a
+	// monotonic-age hang (gu-qwjj3): the heartbeat cycle freezes while wall-clock
+	// keeps advancing, so the absolute-age gate still reports "fresh" for minutes.
+	// Zero values mean "not yet observed". Only accessed from the heartbeat loop
+	// goroutine - no sync needed.
+	lastDeaconCycle       int64
+	lastDeaconCycleChange time.Time
+
 	// deaconAgeFallbackLogged tracks whether we've already logged the one-time
 	// notice that checkDeaconAge had to recover deaconLastStarted from the tmux
 	// session creation time (because the deacon was started via a path that
@@ -1820,6 +1829,35 @@ func (d *Daemon) deaconGracePeriod() time.Duration {
 	return d.loadOperationalConfig().GetDaemonConfig().DeaconGracePeriodD()
 }
 
+// deaconCycleStallThreshold returns the config-driven duration the deacon
+// heartbeat cycle counter may stay frozen (while work is in flight) before the
+// daemon treats the deacon as hung. See gu-qwjj3.
+func (d *Daemon) deaconCycleStallThreshold() time.Duration {
+	return d.loadOperationalConfig().GetDeaconConfig().CycleStallThresholdD()
+}
+
+// observeDeaconCycle updates the cycle-stall tracker from the latest heartbeat
+// and returns how long the heartbeat's cycle counter has been frozen while
+// wall-clock advanced. A zero duration means the cycle just advanced (the deacon
+// is making progress) or this is the first observation.
+//
+// This is the robust signal for a monotonic-age hang (gu-qwjj3): a stuck deacon
+// keeps a constant cycle while time passes, whereas a healthy idle deacon also
+// keeps a constant cycle — the two are distinguished by hasActiveWork at the
+// call site, not here.
+func (d *Daemon) observeDeaconCycle(hb *deacon.Heartbeat) time.Duration {
+	if hb == nil {
+		return 0
+	}
+	now := time.Now()
+	if hb.Cycle != d.lastDeaconCycle || d.lastDeaconCycleChange.IsZero() {
+		d.lastDeaconCycle = hb.Cycle
+		d.lastDeaconCycleChange = now
+		return 0
+	}
+	return now.Sub(d.lastDeaconCycleChange)
+}
+
 // checkDeaconHeartbeat checks if the Deacon is making progress.
 // This is a belt-and-suspenders fallback in case Boot doesn't detect stuck states.
 // Uses the heartbeat file that the Deacon updates on each patrol cycle.
@@ -1901,8 +1939,35 @@ func (d *Daemon) checkDeaconHeartbeat() {
 
 	age := hb.Age()
 
-	// If heartbeat is fresh (< 5 min), nothing to do
+	// Cycle-stall detection (gu-qwjj3): a hung deacon keeps a CONSTANT cycle
+	// counter while wall-clock advances. The absolute-age gate below would still
+	// report "fresh" for up to the stale threshold (16m), missing a genuine hang
+	// where age climbs 3m->6m->7m but hasn't crossed the cutoff. Detect
+	// non-advancement directly. The tracker must be updated every tick (even when
+	// fresh), so observe before the freshness early-return.
+	stallDur := d.observeDeaconCycle(hb)
+
+	// If heartbeat is fresh by absolute age, the only remaining hang signal is a
+	// frozen cycle. Nudge if the cycle has been stalled past the threshold AND
+	// work is in flight. Gating on hasActiveWork preserves the gu-70rg fix: a
+	// legitimately idle deacon in await-signal backoff also freezes its cycle and
+	// must NOT be nudged (that interrupts exponential backoff for nothing).
 	if hb.IsFresh() {
+		if stallDur >= d.deaconCycleStallThreshold() && d.hasActiveWork() {
+			hasSession, err := d.tmux.HasSession(sessionName)
+			if err != nil {
+				d.logger.Printf("Error checking Deacon session: %v", err)
+				return
+			}
+			if !hasSession {
+				return
+			}
+			d.logger.Printf("STUCK DEACON: heartbeat cycle frozen at %d for %s while work in flight (age %s still within fresh threshold) - nudging session %s",
+				hb.Cycle, stallDur.Round(time.Second), age.Round(time.Second), sessionName)
+			if err := d.tmux.NudgeSession(sessionName, "HEALTH_CHECK: heartbeat cycle stalled, respond to confirm responsiveness"); err != nil {
+				d.logger.Printf("Error nudging stalled Deacon: %v", err)
+			}
+		}
 		return
 	}
 
