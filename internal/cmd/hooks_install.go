@@ -243,7 +243,7 @@ func resolveSettingsTarget(townRoot, cwd string) string {
 
 // inferRoleFromPath extracts the agent role from a settings directory path.
 // Paths end in a role dir: .../witness, .../refinery, .../crew, .../polecats,
-// .../mayor, .../deacon, or .../deacon/dogs/boot.
+// .../mayor, .../deacon, .../deacon/dogs/boot, or .../deacon/dogs/<name>.
 func inferRoleFromPath(dir string) string {
 	base := filepath.Base(dir)
 	switch base {
@@ -261,6 +261,12 @@ func inferRoleFromPath(dir string) string {
 		return constants.RoleDeacon
 	case "boot":
 		return constants.RoleBoot
+	}
+	// Dogs live under deacon/dogs/<name>; their directory name is arbitrary,
+	// so detect them by parent directory. Dogs are unattended fleet daemons and
+	// must get plugin defaults disabled (see 2026-06-05 OOM post-mortem).
+	if filepath.Base(filepath.Dir(dir)) == "dogs" {
+		return constants.RoleDog
 	}
 	return ""
 }

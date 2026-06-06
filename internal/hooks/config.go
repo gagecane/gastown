@@ -204,17 +204,17 @@ var aimPluginsToDisable = []string{
 }
 
 // isFleetRole returns true for roles that run as long-lived unattended daemons
-// and should not load AIM plugins (witnesses, refineries, deacon, boot, polecats).
+// and should not load AIM plugins (witnesses, refineries, deacon, boot, polecats, dogs).
 func isFleetRole(role string) bool {
 	switch role {
-	case constants.RoleWitness, constants.RoleRefinery, constants.RoleDeacon, constants.RoleBoot, constants.RolePolecat:
+	case constants.RoleWitness, constants.RoleRefinery, constants.RoleDeacon, constants.RoleBoot, constants.RolePolecat, constants.RoleDog:
 		return true
 	}
 	return false
 }
 
 // EnsurePluginDefaults sets the standard enabledPlugins map for a given role.
-// Fleet roles (witness, refinery, deacon, boot, polecat) get all AIM plugins
+// Fleet roles (witness, refinery, deacon, boot, polecat, dog) get all AIM plugins
 // explicitly disabled to prevent inheriting the user's global plugin config.
 // Interactive roles (mayor, crew) only get beads disabled.
 func EnsurePluginDefaults(s *SettingsJSON, role string) {
@@ -611,17 +611,31 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 		Role: "deacon",
 	})
 
-	// Boot watchdog — ephemeral Claude agent in deacon/dogs/boot/.
-	// Only added when the directory exists (gitignored and optional).
-	// Adding it here ensures HooksSyncCheck manages the file and Fix() preserves
-	// custom fields (e.g. model) via the LoadSettings → MarshalSettings round-trip.
-	bootDir := filepath.Join(townRoot, "deacon", "dogs", "boot")
-	if info, err := os.Stat(bootDir); err == nil && info.IsDir() {
-		targets = append(targets, Target{
-			Path: filepath.Join(bootDir, ".claude", "settings.json"),
-			Key:  "boot",
-			Role: "boot",
-		})
+	// Dogs — town-level single-instance Claude agents in deacon/dogs/<name>/.
+	// Each dog's directory IS its working directory and settings dir. They are
+	// unattended fleet daemons, so they must be managed targets (plugin-disabled)
+	// to avoid inheriting the user's global AIM plugin config and OOMing the host
+	// (see 2026-06-05 OOM post-mortem). Boot is a well-known dog and keeps its
+	// dedicated role; all other dogs use Role "dog". Only added when the dogs
+	// directory exists (gitignored and optional). Hidden entries are skipped.
+	dogsDir := filepath.Join(townRoot, "deacon", "dogs")
+	if entries, err := os.ReadDir(dogsDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			role := constants.RoleDog
+			key := "dog"
+			if entry.Name() == "boot" {
+				role = constants.RoleBoot
+				key = "boot"
+			}
+			targets = append(targets, Target{
+				Path: filepath.Join(dogsDir, entry.Name(), ".claude", "settings.json"),
+				Key:  key,
+				Role: role,
+			})
+		}
 	}
 
 	// Scan rigs

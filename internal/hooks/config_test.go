@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // setTestHome sets HOME (and USERPROFILE on Windows) so that
@@ -1591,5 +1593,144 @@ func TestMarshalConfig(t *testing.T) {
 
 	if len(loaded.SessionStart) != 1 {
 		t.Errorf("round-trip lost SessionStart hooks")
+	}
+}
+
+// --- Plugin defaults / fleet-role coverage (OOM fix, 2026-06-05 post-mortem) ---
+
+// TestEnsurePluginDefaults_FleetRolesDisableAIM verifies every fleet role gets
+// all AIM plugins disabled (keeping core-dev) plus enableAllProjectMcpServers=false,
+// while interactive roles only get beads disabled and keep AIM plugins inheritable.
+func TestEnsurePluginDefaults_FleetRolesDisableAIM(t *testing.T) {
+	fleetRoles := []string{
+		constants.RoleWitness, constants.RoleRefinery, constants.RoleDeacon,
+		constants.RoleBoot, constants.RolePolecat, constants.RoleDog,
+	}
+	for _, role := range fleetRoles {
+		t.Run("fleet/"+role, func(t *testing.T) {
+			s := &SettingsJSON{}
+			EnsurePluginDefaults(s, role)
+
+			for _, plugin := range aimPluginsToDisable {
+				if v, ok := s.EnabledPlugins[plugin]; !ok || v {
+					t.Errorf("plugin %q = (%v, present=%v), want explicitly false", plugin, v, ok)
+				}
+			}
+			if v, ok := s.EnabledPlugins["beads@beads-marketplace"]; !ok || v {
+				t.Errorf("beads plugin = (%v, present=%v), want explicitly false", v, ok)
+			}
+			raw, ok := s.Extra["enableAllProjectMcpServers"]
+			if !ok || string(raw) != "false" {
+				t.Errorf("enableAllProjectMcpServers = (%q, present=%v), want false", string(raw), ok)
+			}
+			// HasPluginDefaults must agree the config is now correct.
+			if !HasPluginDefaults(s, role) {
+				t.Errorf("HasPluginDefaults(%q) = false after EnsurePluginDefaults, want true", role)
+			}
+		})
+	}
+
+	interactiveRoles := []string{constants.RoleMayor, constants.RoleCrew}
+	for _, role := range interactiveRoles {
+		t.Run("interactive/"+role, func(t *testing.T) {
+			s := &SettingsJSON{}
+			EnsurePluginDefaults(s, role)
+
+			if v, ok := s.EnabledPlugins["beads@beads-marketplace"]; !ok || v {
+				t.Errorf("beads plugin = (%v, present=%v), want explicitly false", v, ok)
+			}
+			// AIM plugins must NOT be force-disabled for interactive roles.
+			for _, plugin := range aimPluginsToDisable {
+				if _, ok := s.EnabledPlugins[plugin]; ok {
+					t.Errorf("interactive role %q should not set AIM plugin %q", role, plugin)
+				}
+			}
+			if _, ok := s.Extra["enableAllProjectMcpServers"]; ok {
+				t.Errorf("interactive role %q should not set enableAllProjectMcpServers", role)
+			}
+			// HasPluginDefaults is a no-op (true) for interactive roles.
+			if !HasPluginDefaults(s, role) {
+				t.Errorf("HasPluginDefaults(%q) = false, want true for interactive role", role)
+			}
+		})
+	}
+}
+
+// TestHasPluginDefaults_DetectsMissingOrEnabled verifies the drift detector
+// flags fleet settings that are missing an AIM-disable or have one enabled.
+func TestHasPluginDefaults_DetectsMissingOrEnabled(t *testing.T) {
+	// nil settings for a fleet role => not configured.
+	if HasPluginDefaults(nil, constants.RoleDog) {
+		t.Error("HasPluginDefaults(nil, dog) = true, want false")
+	}
+
+	// All disabled except one enabled => drift.
+	s := &SettingsJSON{}
+	EnsurePluginDefaults(s, constants.RoleDog)
+	s.EnabledPlugins[aimPluginsToDisable[0]] = true
+	if HasPluginDefaults(s, constants.RoleDog) {
+		t.Errorf("HasPluginDefaults with %q enabled = true, want false", aimPluginsToDisable[0])
+	}
+
+	// Missing one entry => drift.
+	s2 := &SettingsJSON{}
+	EnsurePluginDefaults(s2, constants.RoleDog)
+	delete(s2.EnabledPlugins, aimPluginsToDisable[0])
+	if HasPluginDefaults(s2, constants.RoleDog) {
+		t.Errorf("HasPluginDefaults missing %q = true, want false", aimPluginsToDisable[0])
+	}
+}
+
+// TestDiscoverTargets_DogsIncluded verifies that arbitrary dogs under
+// deacon/dogs/* are enumerated as fleet targets (role "dog"), boot keeps its
+// dedicated role, and hidden entries are skipped.
+func TestDiscoverTargets_DogsIncluded(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "boot"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "charlie"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "delta"), 0755)
+	// Hidden entry must be skipped.
+	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", ".tmp"), 0755)
+
+	targets, err := DiscoverTargets(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverTargets failed: %v", err)
+	}
+
+	byPath := make(map[string]Target)
+	for _, tgt := range targets {
+		byPath[tgt.Path] = tgt
+	}
+
+	// boot keeps its dedicated role.
+	bootPath := filepath.Join(tmpDir, "deacon", "dogs", "boot", ".claude", "settings.json")
+	if tgt, ok := byPath[bootPath]; !ok {
+		t.Error("expected boot target, not found")
+	} else if tgt.Role != constants.RoleBoot {
+		t.Errorf("boot target Role = %q, want %q", tgt.Role, constants.RoleBoot)
+	}
+
+	// Arbitrary dogs are fleet targets with role "dog".
+	for _, name := range []string{"charlie", "delta"} {
+		p := filepath.Join(tmpDir, "deacon", "dogs", name, ".claude", "settings.json")
+		tgt, ok := byPath[p]
+		if !ok {
+			t.Errorf("expected dog target for %q, not found", name)
+			continue
+		}
+		if tgt.Role != constants.RoleDog {
+			t.Errorf("dog %q Role = %q, want %q", name, tgt.Role, constants.RoleDog)
+		}
+		if !isFleetRole(tgt.Role) {
+			t.Errorf("dog %q role %q not recognized as fleet role", name, tgt.Role)
+		}
+	}
+
+	// Hidden entry must not appear.
+	hidden := filepath.Join(tmpDir, "deacon", "dogs", ".tmp", ".claude", "settings.json")
+	if _, ok := byPath[hidden]; ok {
+		t.Error("hidden dogs entry .tmp should be skipped, but was included")
 	}
 }
