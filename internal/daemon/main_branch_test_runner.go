@@ -398,14 +398,22 @@ func (d *Daemon) runMainBranchTests() {
 		// breaking SHA to the last-passing baseline; recordFailureAndShouldEscalate
 		// advances LastRunAt and the streak.
 		sig := failureSignature(runErr)
-		shouldEscalate, streak := recordFailureAndShouldEscalate(d.config.TownRoot, rigName, sig, currentSHA, flakeThreshold, now)
+		isTimeout := isTimeoutFailure(runErr)
+		shouldEscalate, streak := recordFailureAndShouldEscalate(d.config.TownRoot, rigName, sig, currentSHA, flakeThreshold, isTimeout, now)
+		// gs-iz2: a timeout-classified red is held to a higher watermark than an
+		// assertion red, so log the effective watermark (not the raw assertion
+		// threshold) when below it.
+		watermark := flakeThreshold
+		if isTimeout {
+			watermark = timeoutEscalationThreshold(flakeThreshold)
+		}
 		if shouldEscalate {
-			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d, signature=%s) — escalating: %v", rigName, streak, sig, runErr)
+			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d, signature=%s, timeout=%t) — escalating: %v", rigName, streak, sig, isTimeout, runErr)
 			failures = append(failures, formatRigFailureSection(rigName, currentSHA, d.config.TownRoot, runErr))
 			failed++
 		} else {
-			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d/%d, signature=%s) — below flake watermark or already paged, not escalating: %v",
-				rigName, streak, flakeThreshold, sig, runErr)
+			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d/%d, signature=%s, timeout=%t) — below flake watermark or already paged, not escalating: %v",
+				rigName, streak, watermark, sig, isTimeout, runErr)
 		}
 		tested++
 	}
@@ -807,6 +815,16 @@ var errGateHostKilled = errors.New("gate killed by host load (transient, not a r
 // gates and read as a fresh failure.
 var errMainRedBackoff = errors.New("main confirmed red at current SHA, backing off until a new commit")
 
+// errGateTimeout marks a gate that exceeded its deadline (context deadline
+// exceeded) rather than failing an assertion. A timeout is AMBIGUOUS: under
+// host load it's a transient slowdown (like a host-kill), but a genuine
+// regression that HANGS also times out. So unlike errGateHostKilled we do NOT
+// silently skip it — masking timeouts would hide real hangs (gs-iz2). Instead
+// the patrol requires a higher confirmation watermark before paging a
+// timeout-red (a one/two-cycle load timeout never false-pages), while a
+// sustained timeout still escalates as a real hang.
+var errGateTimeout = errors.New("gate exceeded deadline (timeout, not an assertion failure)")
+
 // gateHostKillRetries is how many extra times a host-killed gate is re-run
 // before giving up and reporting it transient. A short backoff between attempts
 // lets a load/swap spike subside.
@@ -844,6 +862,20 @@ func isHostKill(ctx context.Context, err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "signal: killed") ||
 		strings.Contains(msg, "signal: terminated")
+}
+
+// isTimeoutFailure reports whether a gate failure is a context-deadline
+// timeout (errGateTimeout) rather than a deterministic assertion/exit failure
+// (gs-iz2). It matches BOTH the wrapped sentinel — the legacy test_command
+// path propagates the error chain — AND the flattened string form, because the
+// gates path joins per-gate errors into a plain string (fmt.Sprintf with %v),
+// dropping the chain. String-matching the sentinel's message keeps the
+// classification working through both runner paths.
+func isTimeoutFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, errGateTimeout) || strings.Contains(err.Error(), errGateTimeout.Error())
 }
 
 // runCommandOnWorktree runs a single shell command in the given worktree
@@ -907,6 +939,15 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 		d.logger.Printf("main_branch_test: %s: %s: still SIGKILLed after %d attempts — host load, marking transient (NOT a regression)",
 			rigName, label, gateHostKillRetries+1)
 		return fmt.Errorf("%w: %s (%v)", errGateHostKilled, label, err)
+	}
+
+	// gs-iz2: our own deadline fired (not a host kill, not a cleanup-only
+	// false positive handled above) — the gate exceeded its budget. Mark it as
+	// a timeout so the patrol can hold it to a higher confirmation watermark
+	// before paging: a one-off slowdown under host load shouldn't false-page,
+	// while a sustained timeout still escalates as a real hang.
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%w: %s (%v)\n%s", errGateTimeout, label, err, formatFailureOutput(string(output), failureOutputTailSize))
 	}
 
 	return fmt.Errorf("%s failed: %v\n%s", label, err, formatFailureOutput(string(output), failureOutputTailSize))
