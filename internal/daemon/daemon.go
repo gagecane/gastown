@@ -220,24 +220,8 @@ type Daemon struct {
 	// lifetime, before any patrol agent can be started on the current socket.
 	legacySocketCleanupOnce sync.Once
 
-	// mrCycleCloseHandler is invoked by mr_cycle_close_dog once per closed
-	// gt:auto-test-pr MR bead. Phase 0 task 3c (gu-xrxm6) wires the Mayor
-	// cycle-close handler in via SetMRCycleCloseHandler. Nil means "use the
-	// noop handler" — the dog still runs, dedups, and writes ack labels;
-	// it just logs and drops events. Only accessed from the heartbeat
-	// goroutine (where the patrol fires), so no sync needed.
-	mrCycleCloseHandler MRCycleCloseHandler
-
-	// mainCIBreakHandler is invoked by main_ci_break_dog once per qualifying
-	// main_branch_test escalation (commit attributed, MR bead carries
-	// gt:auto-test-pr). Phase 0 task 11 Part B (gu-smn4) wires the D16
-	// auto-revert handler in via SetMainCIBreakHandler. Nil means "use the
-	// noop handler." Only accessed from the heartbeat goroutine.
-	mainCIBreakHandler MainCIBreakHandler
-
 	// doltBreaker is a per-process circuit breaker shared across patrol
-	// dogs that issue bd subprocess calls (main_ci_break_dog,
-	// mr_cycle_close_dog, failure_classifier_dog). When Dolt is
+	// dogs that issue bd subprocess calls (failure_classifier_dog). When Dolt is
 	// unhealthy, every dog would otherwise retry on its own cadence,
 	// amplifying load on a recovering server and producing N
 	// independent error streams in daemon.log. The shared breaker
@@ -908,25 +892,11 @@ func (d *Daemon) Run() (err error) {
 				d.runFailureClassifier()
 			}
 
-		case <-patrols.mrCycleClose:
-			// MR cycle-close dog — polls closed gt:auto-test-pr MR beads and
-			// dispatches cycle-close events to the registered handler.
-			if !d.isShutdownInProgress() {
-				d.runMRCycleCloseDog()
-			}
-
 		case <-patrols.curio:
 			// Curio dog — runs declarative content rules over live Gastown
 			// state and emits candidates to HQ Dolt (candidates only, Phase 1).
 			if !d.isShutdownInProgress() {
 				d.runCurio()
-			}
-
-		case <-patrols.mainCIBreak:
-			// Main CI-break dog — watches main_branch_test escalations, resolves
-			// commit → MR bead, checks auto-test-pr opt-in, dispatches to D16 handler.
-			if !d.isShutdownInProgress() {
-				d.runMainCIBreakDog()
 			}
 
 		case <-patrols.nudgeQueueGC:

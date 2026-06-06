@@ -21,9 +21,7 @@ type patrolTickers struct {
 	quotaDog             <-chan time.Time
 	pollerDog            <-chan time.Time
 	failureClassifier    <-chan time.Time
-	mrCycleClose         <-chan time.Time
 	curio                <-chan time.Time
-	mainCIBreak          <-chan time.Time
 	nudgeQueueGC         <-chan time.Time
 	restartPending       <-chan time.Time
 	circuitBreak         <-chan time.Time
@@ -93,9 +91,7 @@ func (d *Daemon) setupPatrolTickers() (patrolTickers, func()) {
 	pt.quotaDog = add("quota_dog", quotaDogInterval(d.patrolConfig), "Quota dog")
 	pt.pollerDog = add("poller_dog", pollerDogInterval(d.patrolConfig), "Poller dog")
 	pt.failureClassifier = add("failure_classifier", failureClassifierInterval(d.patrolConfig), "Failure classifier")
-	pt.mrCycleClose = add("mr_cycle_close", mrCycleCloseInterval(d.patrolConfig), "MR cycle-close dog")
 	pt.curio = add("curio", curioInterval(d.patrolConfig), "Curio")
-	pt.mainCIBreak = add("main_ci_break", mainCIBreakInterval(d.patrolConfig), "Main CI-break dog")
 	pt.nudgeQueueGC = add("nudge_queue_gc", nudgeQueueGCInterval(d.patrolConfig), "Nudge queue GC")
 	pt.restartPending = add("restart_pending", restartPendingInterval(d.patrolConfig), "Restart-pending dog")
 	pt.circuitBreak = add("circuit_break", circuitBreakInterval(d.patrolConfig), "Circuit-break dog")

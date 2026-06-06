@@ -140,8 +140,6 @@ type PatrolsConfig struct {
 	PollerDog            *PollerDogConfig            `json:"poller_dog,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 	FailureClassifier    *FailureClassifierConfig    `json:"failure_classifier,omitempty"`
-	MRCycleClose         *MRCycleCloseConfig         `json:"mr_cycle_close,omitempty"`
-	MainCIBreak          *MainCIBreakConfig          `json:"main_ci_break,omitempty"`
 	NudgeQueueGC         *NudgeQueueGCConfig         `json:"nudge_queue_gc,omitempty"`
 	CircuitBreakerGC     *CircuitBreakerGCConfig     `json:"circuit_breaker_gc,omitempty"`
 	RestartPending       *RestartPendingConfig       `json:"restart_pending,omitempty"`
@@ -343,22 +341,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.FailureClassifier.Enabled
-	}
-	if patrol == "mr_cycle_close" {
-		if config == nil || config.Patrols == nil || config.Patrols.MRCycleClose == nil {
-			return false
-		}
-		return config.Patrols.MRCycleClose.Enabled
-	}
-	if patrol == "main_ci_break" {
-		// Opt-in patrol: D16 SEV-1 auto-revert path. Disabled by default
-		// so installs that have not yet rolled out auto-test-pr don't
-		// silently start the dog. Phase 1 entry flips this on once the
-		// pilot rig opts in (gu-gmj0r).
-		if config == nil || config.Patrols == nil || config.Patrols.MainCIBreak == nil {
-			return false
-		}
-		return config.Patrols.MainCIBreak.Enabled
 	}
 	if patrol == "curio" {
 		// Opt-in: Phase 1 is candidates-only and must not run until explicitly
