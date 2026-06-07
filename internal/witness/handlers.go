@@ -2101,6 +2101,11 @@ const (
 	// auto-restart cap (or with dirty work); escalated to mayor instead of
 	// restarting again (gs-4lk).
 	ZombieBlankToolsCapped ZombieClassification = "blank-tools-capped"
+	// ZombieStuckInDoneCapped: stuck-in-done recurred past the per-bead
+	// auto-restart cap; escalated to mayor instead of restarting again. The
+	// restart re-enters the same stalled gt-done flow, so a polecat that keeps
+	// re-sticking is not self-healing and must not loop forever (gu-5npkm).
+	ZombieStuckInDoneCapped ZombieClassification = "stuck-in-done-capped"
 )
 
 // ImpliesActiveWork returns true if this classification indicates the polecat
@@ -2111,7 +2116,8 @@ func (c ZombieClassification) ImpliesActiveWork() bool {
 	switch c {
 	case ZombieStuckInDone, ZombieAgentDeadInSession, ZombieBeadClosedStillRunning,
 		ZombieDoneIntentDead, ZombieSessionDeadActive, ZombieAgentSelfReportedStuck,
-		ZombieNeverHeartbeated, ZombieBlankToolsRestarted, ZombieBlankToolsCapped:
+		ZombieNeverHeartbeated, ZombieBlankToolsRestarted, ZombieBlankToolsCapped,
+		ZombieStuckInDoneCapped:
 		return true
 	default:
 		return false
@@ -2326,13 +2332,33 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// gt-dsgp: Restart instead of nuke — the session is stuck trying to exit,
 	// a fresh start will let it retry or pick up its hook cleanly.
 	if doneIntent != nil && time.Since(doneIntent.Timestamp) > witCfg.DoneIntentStuckTimeoutD() {
+		age := time.Since(doneIntent.Timestamp).Round(time.Second)
+
+		// gu-5npkm: Per-bead restart cap. Restarting a stuck-in-done polecat
+		// re-enters the SAME stalled gt-done flow (e.g. push/MR/dolt I/O blocked
+		// under host load), so it re-sticks and the witness re-flags it every
+		// patrol cycle — observed as the same polecats recurring with done-intent
+		// age GROWING (15m→33m) across restarts. Past the cap, stop looping and
+		// escalate to the mayor instead, mirroring the blank-tools cap (gs-4lk).
+		if snapHook != "" && ShouldEscalateStuckInDone(workDir, snapHook) {
+			zombie := ZombieResult{
+				PolecatName:    polecatName,
+				AgentState:     snapState,
+				Classification: ZombieStuckInDoneCapped,
+				HookBead:       snapHook,
+				WasActive:      true,
+				Action:         fmt.Sprintf("escalated-stuck-in-done (restart cap %d reached for %s, done-intent age=%v)", MaxStuckInDoneAutoRestarts, snapHook, age),
+			}
+			return zombie, true
+		}
+
 		zombie := ZombieResult{
 			PolecatName:    polecatName,
 			AgentState:     snapState,
 			Classification: ZombieStuckInDone,
 			HookBead:       snapHook,
 			WasActive:      true,
-			Action:         fmt.Sprintf("restarted-stuck-session (done-intent age=%v)", time.Since(doneIntent.Timestamp).Round(time.Second)),
+			Action:         fmt.Sprintf("restarted-stuck-session (done-intent age=%v)", age),
 		}
 		// TOCTOU guard (gt-0pst): Re-check session liveness before restarting.
 		// The session could have exited normally between our initial check and here.
@@ -2348,6 +2374,11 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 				zombie.Error = err
 				zombie.Action = fmt.Sprintf("restart-stuck-session-failed: %v", err)
 			}
+		} else if snapHook != "" {
+			// gu-5npkm: count only successful restarts toward the cap. A skipped
+			// (rate-limited) or failed restart didn't consume a recovery attempt.
+			count := RecordStuckInDoneRestart(workDir, snapHook)
+			zombie.Action = fmt.Sprintf("restarted-stuck-session (restart %d/%d, done-intent age=%v)", count, MaxStuckInDoneAutoRestarts, age)
 		}
 		return zombie, true
 	}
