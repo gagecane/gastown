@@ -29,6 +29,14 @@ type SchedulerConfig struct {
 	// SpawnDelay is the delay between spawns to prevent Dolt lock contention.
 	// Default: "0s".
 	SpawnDelay string `json:"spawn_delay,omitempty"`
+
+	// MaxLoadPerCore is the host 1-minute load average per logical core above
+	// which polecat admission is refused — in ALL dispatch modes, including
+	// uncapped direct dispatch (MaxPolecats <= 0). nil/absent or <= 0 = disabled
+	// (default). This is the host-load backpressure that the capacity cap alone
+	// does not provide on the direct-dispatch path, where admission is granted
+	// immediately with no load check (gu-5j7p4).
+	MaxLoadPerCore *float64 `json:"max_load_per_core,omitempty"`
 }
 
 // DefaultSchedulerConfig returns a SchedulerConfig with sensible defaults.
@@ -65,6 +73,16 @@ func (c *SchedulerConfig) GetSpawnDelay() time.Duration {
 		return 0
 	}
 	return ParseDurationOrDefault(c.SpawnDelay, 0)
+}
+
+// GetMaxLoadPerCore returns the configured host load-per-core admission
+// threshold, or 0 (disabled) when unset or non-positive. When > 0, polecat
+// admission is refused in all dispatch modes once host load/core exceeds it.
+func (c *SchedulerConfig) GetMaxLoadPerCore() float64 {
+	if c == nil || c.MaxLoadPerCore == nil || *c.MaxLoadPerCore <= 0 {
+		return 0
+	}
+	return *c.MaxLoadPerCore
 }
 
 // IsDeferred returns true when the scheduler is configured for deferred dispatch

@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 const polecatAdmissionReservationTTL = 30 * time.Minute
@@ -62,6 +63,54 @@ func invalidatePolecatCapacityCache(townRoot string) {
 }
 
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
+
+// polecatAdmissionLoadPerCore returns the host 1-minute load average per
+// logical core. A test seam; production wires it to the real load reader.
+// Returns 0 when load is unavailable (e.g. Windows), which fails open — an
+// unreadable load average must never block dispatch.
+var polecatAdmissionLoadPerCore = util.LoadPerCore
+
+// checkPolecatLoadThrottle refuses admission when the configured host
+// load-per-core ceiling (scheduler.max_load_per_core) is exceeded. Unlike the
+// capacity cap, this gate runs in ALL dispatch modes — including uncapped
+// direct dispatch (max_polecats <= 0), the path that saturated the host in the
+// gu-5j7p4 meltdown by granting admission immediately with zero load
+// backpressure.
+//
+// Opt-in (default 0 = disabled) and fail-open on unknown load (0), matching the
+// PressureCPUThreshold and refinery-backoff conventions. The returned error is
+// retryable: the bead stays queued and the next dispatch re-evaluates once load
+// eases.
+func checkPolecatLoadThrottle(townRoot, rigName, beadID string) error {
+	threshold, err := configuredSchedulerMaxLoadPerCore(townRoot)
+	if err != nil {
+		return err
+	}
+	if threshold <= 0 {
+		return nil
+	}
+	loadPerCore := polecatAdmissionLoadPerCore()
+	if loadPerCore <= 0 || loadPerCore <= threshold {
+		return nil
+	}
+	return fmt.Errorf("polecat admission denied: host load/core %.2f exceeds "+
+		"scheduler.max_load_per_core %.2f (rig %s bead %s). Deferring spawn so host "+
+		"load can ease; bead stays queued and retries on the next dispatch. "+
+		"Disable: gt config set scheduler.max_load_per_core 0",
+		loadPerCore, threshold, rigName, beadID)
+}
+
+func configuredSchedulerMaxLoadPerCore(townRoot string) (float64, error) {
+	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return 0, fmt.Errorf("loading town settings for polecat admission: %w", err)
+	}
+	schedulerCfg := settings.Scheduler
+	if schedulerCfg == nil {
+		schedulerCfg = capacity.DefaultSchedulerConfig()
+	}
+	return schedulerCfg.GetMaxLoadPerCore(), nil
+}
 
 type polecatCapacitySnapshot struct {
 	Max             int `json:"max"`
@@ -133,6 +182,13 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
+	}
+	// Host-load backpressure gate runs in ALL dispatch modes, including
+	// uncapped direct dispatch (max <= 0). This is the missing throttle that
+	// let the host saturate in gu-5j7p4 — the capacity cap below only guards
+	// the deferred (max > 0) path.
+	if err := checkPolecatLoadThrottle(townRoot, rigName, beadID); err != nil {
+		return nil, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, err
 	}
 	if max <= 0 {
 		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
