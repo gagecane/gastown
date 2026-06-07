@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -43,7 +44,7 @@ func Emit(channel, eventType string, payloadPairs []string) (string, error) {
 		return "", fmt.Errorf("creating event directory: %w", err)
 	}
 
-	return emitToDir(eventDir, channel, eventType, payloadPairs)
+	return emitToDir(townRoot, eventDir, channel, eventType, payloadPairs)
 }
 
 // EmitToTown creates an event file using an explicit town root.
@@ -57,7 +58,7 @@ func EmitToTown(townRoot, channel, eventType string, payloadPairs []string) (str
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		return "", fmt.Errorf("creating event directory: %w", err)
 	}
-	return emitToDir(eventDir, channel, eventType, payloadPairs)
+	return emitToDir(townRoot, eventDir, channel, eventType, payloadPairs)
 }
 
 // GCResult summarizes what GCOlderThan removed in a single sweep.
@@ -155,8 +156,28 @@ func pruneOlderInDir(dir string, cutoff time.Time) (removed, errs int) {
 	return removed, errs
 }
 
+// rigIsRegistered reports whether rigName resolves to a rig registered in
+// mayor/rigs.json under townRoot.
+//
+// Fail-open: returns true (event passes) when the registry is missing,
+// unreadable, or empty. Silently dropping every event on a transient FS glitch
+// is a worse failure mode than the occasional unregistered-rig event we are
+// trying to filter — the same policy filterKnownRigs uses for backups.
+func rigIsRegistered(townRoot, rigName string) bool {
+	if townRoot == "" {
+		return true
+	}
+	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	if err != nil || rigsConfig == nil || len(rigsConfig.Rigs) == 0 {
+		return true
+	}
+	_, ok := rigsConfig.Rigs[rigName]
+	return ok
+}
+
 // emitToDir writes an event file to the given directory.
-func emitToDir(eventDir, channel, eventType string, payloadPairs []string) (string, error) {
+func emitToDir(townRoot, eventDir, channel, eventType string, payloadPairs []string) (string, error) {
 	if !ValidChannelName.MatchString(channel) {
 		return "", fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", channel)
 	}
@@ -167,6 +188,23 @@ func emitToDir(eventDir, channel, eventType string, payloadPairs []string) (stri
 		if found {
 			payload[key] = val
 		}
+	}
+
+	// gu-capht: drop events tagged with a rig that does not resolve to a
+	// registered rig in mayor/rigs.json. Test traffic (e.g. sling/mq
+	// exercises) emits MQ_SUBMIT events with rig=nonexistent-rig that no
+	// real refinery owns; the town-global refinery channel never deletes
+	// non-matching events (gu-5qpfi), so they accumulate and re-fire empty
+	// refinery patrol cycles. Rejecting at the emit layer keeps the pollution
+	// off the bus entirely rather than per-refinery.
+	//
+	// Fail-open, mirroring filterKnownRigs and eventMatchesRig: only reject
+	// when the rig is present, non-empty, AND rigs.json is readable with at
+	// least one registered rig that does not contain it. A missing/unreadable
+	// registry, an empty registry, or an event with no rig payload all pass
+	// through unchanged.
+	if rigName := payload["rig"]; rigName != "" && !rigIsRegistered(townRoot, rigName) {
+		return "", fmt.Errorf("rejecting %s event on channel %q: rig %q is not registered in mayor/rigs.json", eventType, channel, rigName)
 	}
 
 	now := time.Now()

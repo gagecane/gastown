@@ -95,6 +95,119 @@ func TestValidChannelName(t *testing.T) {
 	}
 }
 
+// writeRigsConfig writes a minimal mayor/rigs.json registering the given rig
+// names under townRoot, for exercising the rig-registration emit filter.
+func writeRigsConfig(t *testing.T, townRoot string, rigNames ...string) {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatalf("creating mayor dir: %v", err)
+	}
+	rigs := make(map[string]map[string]any, len(rigNames))
+	for _, name := range rigNames {
+		rigs[name] = map[string]any{"git_url": "https://example.com/" + name + ".git"}
+	}
+	data, err := json.Marshal(map[string]any{"version": 1, "rigs": rigs})
+	if err != nil {
+		t.Fatalf("marshaling rigs.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), data, 0644); err != nil {
+		t.Fatalf("writing rigs.json: %v", err)
+	}
+}
+
+// countEvents returns the number of .event files in the channel directory.
+func countEvents(t *testing.T, townRoot, channel string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(townRoot, "events", channel))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("reading channel dir: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".event") {
+			n++
+		}
+	}
+	return n
+}
+
+// gu-capht: events tagged with a rig absent from a populated rigs.json are
+// rejected at the emit layer so they never reach the refinery patrol loop.
+func TestEmitToTown_RejectsUnregisteredRig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigsConfig(t, townRoot, "gastown_upstream", "casc_webapp")
+
+	_, err := EmitToTown(townRoot, "refinery", "MQ_SUBMIT", []string{
+		"source=sling",
+		"rig=nonexistent-rig",
+		"message=test message",
+	})
+	if err == nil {
+		t.Fatal("expected error rejecting unregistered rig, got nil")
+	}
+	if !strings.Contains(err.Error(), "nonexistent-rig") {
+		t.Errorf("error should name the offending rig, got: %v", err)
+	}
+	if n := countEvents(t, townRoot, "refinery"); n != 0 {
+		t.Errorf("rejected event should not be written, found %d event file(s)", n)
+	}
+}
+
+// A rig that IS registered passes through and is written normally.
+func TestEmitToTown_AllowsRegisteredRig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigsConfig(t, townRoot, "gastown_upstream")
+
+	path, err := EmitToTown(townRoot, "refinery", "MQ_SUBMIT", []string{
+		"rig=gastown_upstream",
+	})
+	if err != nil {
+		t.Fatalf("EmitToTown rejected a registered rig: %v", err)
+	}
+	if !strings.HasSuffix(path, ".event") {
+		t.Errorf("expected .event suffix, got %q", path)
+	}
+}
+
+// Fail-open: when rigs.json is missing, the rig filter must not drop events.
+func TestEmitToTown_FailsOpenWithoutRigsConfig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir() // no mayor/rigs.json
+
+	path, err := EmitToTown(townRoot, "refinery", "MQ_SUBMIT", []string{
+		"rig=anything",
+	})
+	if err != nil {
+		t.Fatalf("expected fail-open (no rigs.json), got error: %v", err)
+	}
+	if !strings.HasSuffix(path, ".event") {
+		t.Errorf("expected .event suffix, got %q", path)
+	}
+}
+
+// An event with no rig payload is never filtered, regardless of registry state.
+func TestEmitToTown_NoRigPayloadAlwaysPasses(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRigsConfig(t, townRoot, "gastown_upstream")
+
+	path, err := EmitToTown(townRoot, "mayor", "SLOT_OPEN", []string{
+		"source=witness",
+	})
+	if err != nil {
+		t.Fatalf("event without rig payload should pass, got error: %v", err)
+	}
+	if !strings.HasSuffix(path, ".event") {
+		t.Errorf("expected .event suffix, got %q", path)
+	}
+}
+
 func TestEmitToTown_CreatesDirectory(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
