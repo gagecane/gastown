@@ -3116,7 +3116,7 @@ exit 0
 		return nil
 	}
 	// Confirmation always says "yes, truly missing" (simulates bd show not-found).
-	m.confirmBeadMissingFn = func(issueID string) bool { return true }
+	m.checkBeadExistenceFn = func(issueID string) beadExistence { return beadMissing }
 
 	// Drive the clock so the per-issue feed cooldown doesn't suppress later
 	// scans from re-attempting the same bead.
@@ -3206,7 +3206,7 @@ exit 0
 	}
 	// Confirmation says "bead exists" — simulating a transient Dolt hiccup
 	// where sling fails but the bead is actually there. (gu-dvcs4)
-	m.confirmBeadMissingFn = func(issueID string) bool { return false }
+	m.checkBeadExistenceFn = func(issueID string) beadExistence { return beadExists }
 	current := time.Now()
 	m.now = func() time.Time { return current }
 
@@ -3280,7 +3280,7 @@ exit 0
 		return nil
 	}
 	// Confirmation says "bead exists" — the sling failure was a transient hiccup.
-	m.confirmBeadMissingFn = func(issueID string) bool { return false }
+	m.checkBeadExistenceFn = func(issueID string) beadExistence { return beadExists }
 	current := time.Now()
 	m.now = func() time.Time { return current }
 
@@ -3321,6 +3321,98 @@ exit 0
 	}
 	if untrackCalls != 0 {
 		t.Errorf("untrack eventually fired after %d scans despite confirmation absorbing; want 0", untrackCalls)
+	}
+}
+
+// TestFeedFirstReady_MissingBeadStrikes_AmbiguousInfraErrorDoesNotUntrack
+// verifies that when sling reports "not found" but the existence re-check hits
+// an infra error (Dolt circuit-breaker open / connection refused / timeout) and
+// returns beadCheckAmbiguous, the bead is NOT untracked. The strike is left in
+// place so the check is retried on the next scan once Dolt recovers, rather than
+// collapsing "could not determine state" into a state verdict. (gu-3hi1f)
+func TestFeedFirstReady_MissingBeadStrikes_AmbiguousInfraErrorDoesNotUntrack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// gt sling always fails with "bead not found" (the symptom during a Dolt
+	// outage where the bead is invisible, not actually deleted).
+	gtScript := `#!/bin/sh
+if [ "$1" = "sling" ]; then
+  echo "bead '$2' not found" >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error {
+		untrackCalls++
+		return nil
+	}
+	// Existence check hits the Dolt circuit-breaker — could not determine state.
+	m.checkBeadExistenceFn = func(issueID string) beadExistence { return beadCheckAmbiguous }
+	current := time.Now()
+	m.now = func() time.Time { return current }
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-outage",
+		Title:       "Dolt Outage",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-outage"},
+	}
+
+	// Sling fails "not found" but the existence check is ambiguous → no untrack.
+	m.feedFirstReady(c)
+	if untrackCalls != 0 {
+		t.Fatalf("untrack fired despite ambiguous existence check: %d", untrackCalls)
+	}
+
+	// The strike must REMAIN so the check is retried next scan (do NOT clear it,
+	// unlike the bead-exists path which clears the strike).
+	if _, ok := m.missingBeadStrikes.Load(missingBeadKey{"hq-cv-outage", "gt-outage"}); !ok {
+		t.Errorf("expected strike retained after ambiguous infra error (retryable), but it was cleared")
+	}
+
+	// Log should mention the ambiguous-not-untracking disposition.
+	foundLog := false
+	for _, l := range logged {
+		if strings.Contains(l, "ambiguous") && strings.Contains(l, "gt-outage") && strings.Contains(l, "not untracking") {
+			foundLog = true
+			break
+		}
+	}
+	if !foundLog {
+		t.Errorf("expected ambiguous-not-untracking log line, got: %v", logged)
+	}
+
+	// Repeated scans during the outage must never untrack.
+	for i := 0; i < 10; i++ {
+		current = current.Add(feedDispatchCooldown + time.Second)
+		m.feedFirstReady(c)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("untrack fired after %d scans during ambiguous outage; want 0", untrackCalls)
 	}
 }
 

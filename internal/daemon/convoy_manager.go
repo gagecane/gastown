@@ -197,11 +197,14 @@ type ConvoyManager struct {
 	// becomes empty). Cleared on successful sling. See gu-f0gq.
 	missingBeadStrikes sync.Map // map[missingBeadKey]int
 
-	// confirmBeadMissingFn performs a definitive existence check (e.g.,
-	// `bd show <issueID>`) to confirm the bead truly does not exist before
-	// untracking. Returns true if the bead is genuinely missing. Overridable
-	// for tests; defaults to a `bd show` subprocess call. See gu-dvcs4.
-	confirmBeadMissingFn func(issueID string) bool
+	// checkBeadExistenceFn performs a definitive existence check (e.g.,
+	// `bd show <issueID>`) before untracking. It returns a TRI-STATE
+	// (beadExists / beadMissing / beadCheckAmbiguous) so an "I could not
+	// determine state" infra error (Dolt circuit-breaker open, connection
+	// refused, timeout) is never collapsed into a state verdict. Overridable
+	// for tests; defaults to a `bd show` subprocess call. See gu-dvcs4
+	// (existence check) and gu-3hi1f (ambiguous-vs-state separation).
+	checkBeadExistenceFn func(issueID string) beadExistence
 
 	// untrackMissingBeadFn untracks issueID from convoyID. Overridable for
 	// tests; defaults to a `bd dep remove` subprocess call. Returning a
@@ -293,7 +296,7 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		gtPath:       gtPath,
 		now:          time.Now,
 	}
-	m.confirmBeadMissingFn = m.confirmBeadMissingViaBd
+	m.checkBeadExistenceFn = m.checkBeadExistenceViaBd
 	m.untrackMissingBeadFn = m.untrackMissingBeadViaBd
 	return m
 }
@@ -1069,13 +1072,28 @@ func (m *ConvoyManager) handleMissingBeadStrike(convoyID, issueID, stderrLine st
 	// untracking. This absorbs transient Dolt hiccups (the tolerance N=3
 	// previously provided) in a single scan cycle without requiring
 	// persistent state across daemon restarts. (gu-dvcs4)
-	if m.confirmBeadMissingFn != nil && !m.confirmBeadMissingFn(issueID) {
-		// Bead exists — the sling failure was a transient hiccup. Clear
-		// the strike so the bead is retried next scan without penalty.
-		m.missingBeadStrikes.Delete(key)
-		m.logger("Convoy %s: %s confirmation check shows bead EXISTS — clearing strike (transient hiccup)",
-			convoyID, issueID)
-		return
+	if m.checkBeadExistenceFn != nil {
+		switch m.checkBeadExistenceFn(issueID) {
+		case beadExists:
+			// Bead exists — the sling failure was a transient hiccup. Clear
+			// the strike so the bead is retried next scan without penalty.
+			m.missingBeadStrikes.Delete(key)
+			m.logger("Convoy %s: %s confirmation check shows bead EXISTS — clearing strike (transient hiccup)",
+				convoyID, issueID)
+			return
+		case beadCheckAmbiguous:
+			// Infra error (Dolt circuit-breaker open, connection refused,
+			// timeout) — we could NOT determine whether the bead exists.
+			// Do NOT collapse this into a state verdict (gu-3hi1f). Leave
+			// the strike in place (do not untrack, do not clear) so the
+			// existence check is retried next scan once Dolt recovers,
+			// rather than untracking a bead that may well exist.
+			m.logger("Convoy %s: %s existence check ambiguous (infra error) — retrying next scan, not untracking (gu-3hi1f)",
+				convoyID, issueID)
+			return
+		case beadMissing:
+			// fall through to untrack below
+		}
 	}
 
 	m.logger("Convoy %s: %s confirmed missing — auto-untracking",
@@ -1117,11 +1135,30 @@ func (m *ConvoyManager) untrackMissingBeadViaBd(convoyID, issueID string) error 
 	return nil
 }
 
-// confirmBeadMissingViaBd runs `bd show <issueID>` and returns true if the bead
-// genuinely does not exist (exit code != 0 with a "not found" message). Returns
-// false (bead exists) on success or on ambiguous errors (e.g. Dolt timeout) —
-// erring on the side of NOT untracking. See gu-dvcs4.
-func (m *ConvoyManager) confirmBeadMissingViaBd(issueID string) bool {
+// beadExistence is the tri-state result of an existence check. It deliberately
+// separates "I could not determine state" (beadCheckAmbiguous) from the two
+// real states so an infra error is never folded into a state verdict (gu-3hi1f).
+type beadExistence int
+
+const (
+	// beadExists: the bead was definitively found (the check succeeded).
+	beadExists beadExistence = iota
+	// beadMissing: the bead definitively does not exist ("not found" error).
+	beadMissing
+	// beadCheckAmbiguous: the check could not determine state (Dolt
+	// circuit-breaker open, connection refused, timeout). NOT a state — the
+	// caller must retry rather than infer existence or absence.
+	beadCheckAmbiguous
+)
+
+// checkBeadExistenceViaBd runs `bd show <issueID>` and reports a tri-state
+// result. It returns beadMissing only when stderr explicitly says "not found",
+// beadExists on success, and beadCheckAmbiguous on any other failure (Dolt
+// circuit-breaker open, connection refused, timeout). An ambiguous infra error
+// must NOT be interpreted as a bead state — collapsing it into "exists" made
+// dispatch decisions during a Dolt outage on assumptions rather than real
+// state. See gu-dvcs4 (existence check) and gu-3hi1f (this separation).
+func (m *ConvoyManager) checkBeadExistenceViaBd(issueID string) beadExistence {
 	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bd", "show", issueID)
@@ -1134,14 +1171,15 @@ func (m *ConvoyManager) confirmBeadMissingViaBd(issueID string) bool {
 		msg := strings.TrimSpace(stderr.String())
 		// Only confirm missing if stderr explicitly says "not found"
 		if sling.IsBeadNotFoundError(msg) {
-			return true
+			return beadMissing
 		}
-		// Ambiguous failure (timeout, Dolt down) — don't confirm missing
-		m.logger("Convoy: confirmBeadMissing(%s): ambiguous error: %s — treating as exists", issueID, util.FirstLine(msg))
-		return false
+		// Ambiguous failure (circuit-breaker, timeout, Dolt down) — could not
+		// determine state. Caller retries; do NOT infer existence (gu-3hi1f).
+		m.logger("Convoy: checkBeadExistence(%s): ambiguous error: %s — could not determine state, will retry", issueID, util.FirstLine(msg))
+		return beadCheckAmbiguous
 	}
 	// bd show succeeded — bead exists
-	return false
+	return beadExists
 }
 
 // closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.
