@@ -1,6 +1,37 @@
 package daemon
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestDogWispArgsRootOnly is the regression guard for gu-stcak: dog molecule
+// pours MUST pass --root-only so `bd mol wisp` does not materialize child
+// step-wisps that dogMol.close() never closes (they would leak open until the
+// 24h reaper purge, accumulating faster than they age out).
+func TestDogWispArgsRootOnly(t *testing.T) {
+	args := dogWispArgs("mol-dog-doctor", map[string]string{"port": "3307"})
+
+	if len(args) < 3 || args[0] != "mol" || args[1] != "wisp" || args[2] != "mol-dog-doctor" {
+		t.Fatalf("dogWispArgs: unexpected prefix %v", args)
+	}
+
+	hasRootOnly := false
+	for _, a := range args {
+		if a == "--root-only" {
+			hasRootOnly = true
+		}
+	}
+	if !hasRootOnly {
+		t.Errorf("dogWispArgs missing --root-only flag; got %v", args)
+	}
+
+	// Vars must still be forwarded.
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--var port=3307") {
+		t.Errorf("dogWispArgs dropped --var; got %v", args)
+	}
+}
 
 // TestLoadFormulaSteps verifies that dog formula step IDs are loaded from the
 // formula file (embedded tier), since `bd mol wisp` no longer materializes
