@@ -371,6 +371,34 @@ func TestFilterIdentityBeads(t *testing.T) {
 			input:    &beads.Issue{ID: "gu-recov", Title: "Normal work", Type: "task", Labels: []string{"awaiting_refinery_recovery"}},
 			filtered: false,
 		},
+
+		// gu-7h278: identity-bead signals the OLD hand-rolled filter missed but
+		// the sling guard (dispatch.IsIdentityBeadInfo) catches. Sharing the
+		// predicate closes the ready-vs-sling drift that surfaced these as
+		// phantom ready work then refused them at sling time.
+		{
+			// rc-yne in the bug: a witness agent identity bead whose role_type
+			// marker lives in the description (prose title, stale/no gt:agent
+			// label). IsAgentBead/title-regex both miss it; role_type catches it.
+			name:     "role_type description marker filtered",
+			input:    &beads.Issue{ID: "rc-yne", Title: "ralphconfig witness agent bead", Type: "task", Description: "role_type: witness\nrig: ralphconfig"},
+			filtered: true,
+		},
+		{
+			name:     "issue_type=rig filtered",
+			input:    &beads.Issue{ID: "gu-rigtyped", Title: "Plain title", Type: "rig"},
+			filtered: true,
+		},
+		{
+			name:     "issue_type=role filtered",
+			input:    &beads.Issue{ID: "gu-roletyped", Title: "Plain title", Type: "role"},
+			filtered: true,
+		},
+		{
+			name:     "closed bead filtered",
+			input:    &beads.Issue{ID: "gu-closed", Title: "Already done", Type: "task", Status: "closed"},
+			filtered: true,
+		},
 	}
 
 	for _, tt := range tests {

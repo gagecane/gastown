@@ -421,39 +421,38 @@ func getWispIDs(beadsPath string) map[string]bool {
 // filterIdentityBeads removes agent, role, and rig identity beads from the list.
 // These are status trackers, not actionable work items.
 //
-// Since bd ready --json doesn't include labels, we filter by:
-//   - issue_type "agent" (agent lifecycle beads)
-//   - Labels if present (gt:agent, gt:role, gt:rig)
+// The identity/system exclusion shares the SAME predicate the sling-time guard
+// uses — dispatch.IsIdentityBeadInfo (gu-7h278). Previously this function
+// hand-rolled a narrower subset (gt:agent label, IsAgentBead, identity title
+// regex) and so MISSED beads that the sling guard catches: those carrying a
+// role_type marker in the description, issue_type=rig/role, or status=closed.
+// The mismatch let identity beads like a witness agent bead (empty description,
+// role_type set) appear as phantom "ready" work, then get refused by
+// `gt sling` with "is an identity/system bead ... — refusing to schedule".
+// Routing both surfaces through one predicate keeps the ready filter and the
+// dispatch guard from drifting.
+//
+// Beyond IsIdentityBeadInfo we keep two ID-shape checks as defense-in-depth for
+// the `bd ready --json` subprocess path, whose rows can omit labels:
 //   - ID suffix "-role" (role definition beads like hq-crew-role)
-//   - ID prefix matching "<prefix>-rig-" (rig identity beads like gt-rig-gastown)
-//   - Title matching the identity naming convention
-//     (e.g. <prefix>-<rig>-polecat-<name>, <prefix>-<rig>-witness, etc. —
-//     see beads.IsIdentityBeadTitle). This is defense-in-depth for cases
-//     where doctor --fix re-creates identity beads with a work-like type
-//     but keeps the canonical title (gu-huta).
+//   - ID containing "-rig-" (rig identity beads like gt-rig-gastown)
 func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
-	identityLabels := map[string]bool{
-		"gt:agent": true,
-		"gt:role":  true,
-		"gt:rig":   true,
-	}
-
 	filtered := make([]*beads.Issue, 0, len(issues))
 	for _, issue := range issues {
-		// Filter by issue_type (agent beads)
-		if beads.IsAgentBead(issue) {
-			continue
+		info := &dispatch.BeadInfo{
+			ID:          issue.ID,
+			Title:       issue.Title,
+			Status:      issue.Status,
+			Description: issue.Description,
+			Labels:      issue.Labels,
+			IssueType:   issue.Type,
 		}
 
-		// Filter by labels (when available)
-		skip := false
-		for _, label := range issue.Labels {
-			if identityLabels[label] {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		// Identity/system beads — the shared dispatch predicate. Covers
+		// gt:agent/gt:role/gt:rig labels, legacy issue_type=agent/rig/role,
+		// the role_type description marker, closed status, and the
+		// polecat/crew/refinery/witness/dog/mayor/deacon identity title regex.
+		if dispatch.IsIdentityBeadInfo(info) {
 			continue
 		}
 
@@ -464,14 +463,6 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 
 		// Filter rig identity beads (IDs containing "-rig-")
 		if strings.Contains(issue.ID, "-rig-") {
-			continue
-		}
-
-		// Filter beads whose title matches the identity naming convention
-		// (polecat/crew/refinery/witness/dog/mayor/deacon). This catches
-		// identity beads that slip through when labels/type are stale,
-		// which is exactly the class of bugs gu-huta was filed to fix.
-		if beads.IsIdentityBeadTitle(issue.Title) {
 			continue
 		}
 
@@ -486,11 +477,8 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 		// every cycle. Sharing dispatch.IsContainerBeadInfo with the sling
 		// guard keeps the two from drifting (the single-predicate fix the bug
 		// recommended, also covering the gu-7h278 identity-bead variant which
-		// IsAgentBead/IsIdentityBeadTitle above already handle).
-		if dispatch.IsContainerBeadInfo(&dispatch.BeadInfo{
-			IssueType: issue.Type,
-			Labels:    issue.Labels,
-		}) {
+		// IsIdentityBeadInfo above already handles).
+		if dispatch.IsContainerBeadInfo(info) {
 			continue
 		}
 
@@ -502,11 +490,7 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 		// survives title rewrites (ta-823: "EPIC: Triage Queue" kept reaching
 		// polecats until the label guard was added). Shares the same predicate
 		// the sling guard uses.
-		if dispatch.IsEpicLikeBeadInfo(&dispatch.BeadInfo{
-			IssueType: issue.Type,
-			Title:     issue.Title,
-			Labels:    issue.Labels,
-		}) {
+		if dispatch.IsEpicLikeBeadInfo(info) {
 			continue
 		}
 
@@ -532,7 +516,7 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 		// this filter, the auto-dispatcher pulls them via bd ready and
 		// re-slings them every cooldown; the polecat closes no-changes and
 		// the cycle repeats. Observed on ta-wisp-1z3 at 3+ iterations.
-		if beads.HasMayorOnlyLabel(issue.Labels) {
+		if dispatch.IsMayorOnlyBeadInfo(info) {
 			continue
 		}
 
