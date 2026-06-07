@@ -68,6 +68,18 @@ func reconcileOrphanMolecules(townRoot string, deadline time.Time) int {
 	now := timeNowForOrphanReconcile()
 
 	reconciled := 0
+	// Dedup candidates by wisp ID. listOrphanWispCandidates scans one dir per
+	// rig, deduped by *resolved .beads path* (beadsSearchDirs), but two distinct
+	// paths can still front the same underlying Dolt database: a sibling dir whose
+	// .beads has no metadata/redirect/own-DB (e.g. gastown/.beads) falls through to
+	// the same shared `hq` database as the town root. Both dirs then return the
+	// identical wisp rows, so the same wisp would be burned once per overlapping
+	// dir within a single tick (gu-h7baw). This was the dominant cause of the
+	// observed ~2x reconcile inflation — 1859 of 1866 extra burns were the same
+	// wisp appearing twice in one tick, not cross-tick re-selection as originally
+	// suspected. A wisp ID maps to exactly one logical database (prefix→db is 1:1
+	// via routes.jsonl), so collapsing duplicate IDs here is always safe.
+	seenThisTick := make(map[string]bool)
 	candidates := listOrphanWispCandidates(townRoot, now)
 	for i, wisp := range candidates {
 		// Yield to placement once the maintenance budget is spent. The wisp burn
@@ -78,6 +90,10 @@ func reconcileOrphanMolecules(townRoot string, deadline time.Time) int {
 				style.Dim.Render("○"), reconciled, len(candidates)-i)
 			break
 		}
+		if seenThisTick[wisp.ID] {
+			continue
+		}
+		seenThisTick[wisp.ID] = true
 		// Resolve dependents from a full bd show: the list view omits both
 		// assignee and dependents. listOrphanWispCandidates already confirmed
 		// type/status/age; here we confirm unassigned and read the work-bead

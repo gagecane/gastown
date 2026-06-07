@@ -627,3 +627,59 @@ func TestReconcileOrphanMolecules_ZeroDeadlineUnbounded(t *testing.T) {
 		t.Errorf("reconciled count = %d, want 3 (zero deadline = unbounded)", got)
 	}
 }
+
+// TestReconcileOrphanMolecules_DedupsDuplicateCandidates verifies that when the
+// candidate list contains the same wisp ID more than once — which happens when
+// two scanned dirs front the same shared Dolt database (e.g. a sibling dir with
+// no own DB falls through to the town `hq` database, gu-h7baw) — the pass burns
+// it exactly once. Without the dedup the same zombie is fetched and burned once
+// per duplicate, inflating the reconcile count ~2x and flooding the log.
+func TestReconcileOrphanMolecules_DedupsDuplicateCandidates(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	prevNow := timeNowForOrphanReconcile
+	timeNowForOrphanReconcile = func() time.Time { return now }
+	t.Cleanup(func() { timeNowForOrphanReconcile = prevNow })
+
+	// The same wisp appears twice (overlapping-dir scan), plus a distinct one.
+	prevList := listOrphanWispCandidates
+	listOrphanWispCandidates = func(townRoot string, n time.Time) []*beads.Issue {
+		return []*beads.Issue{
+			{ID: "gc-wisp-dup", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gc-wisp-other", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gc-wisp-dup", Type: "molecule", Status: "open", CreatedAt: old},
+		}
+	}
+	t.Cleanup(func() { listOrphanWispCandidates = prevList })
+
+	// Count how many times each wisp is fetched — the dedup should also avoid
+	// the redundant bd show, not just the redundant burn.
+	fetchCount := map[string]int{}
+	prevFetch := fetchWispInfoForReconcile
+	fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
+		fetchCount[wispID]++
+		return &beads.Issue{ID: wispID, Assignee: "", Dependents: nil}
+	}
+	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	var burned []string
+	prevBurn := burnExistingMoleculesForRecovery
+	burnExistingMoleculesForRecovery = func(molecules []string, beadID, townRoot string) error {
+		burned = append(burned, molecules...)
+		return nil
+	}
+	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
+
+	got := reconcileOrphanMolecules("/fake/town", time.Time{})
+
+	if got != 2 {
+		t.Errorf("reconciled count = %d, want 2 (dup collapsed to one + other)", got)
+	}
+	if len(burned) != 2 {
+		t.Fatalf("burn calls = %d, want 2: %v", len(burned), burned)
+	}
+	if fetchCount["gc-wisp-dup"] != 1 {
+		t.Errorf("gc-wisp-dup fetched %d times, want 1 (dup must skip before bd show)", fetchCount["gc-wisp-dup"])
+	}
+}
