@@ -1252,6 +1252,36 @@ func getSessionPane(sessionName string) (string, error) {
 	return lines[0], nil
 }
 
+// handoffTitleMaxBytes is the beads issue-title validation limit (bytes, not
+// runes — beads validates with len()). A handoff subject longer than this makes
+// the mail bead fail to persist, dropping the successor's context (gu-44usw).
+const handoffTitleMaxBytes = 500
+
+// fitHandoffSubject ensures the handoff subject fits within the beads title
+// byte limit. If the subject is too long, it is truncated rune-safe (so the
+// 🤝 prefix is never split) and the full original subject is prepended to the
+// body so no context is lost. Returns the possibly-truncated subject and the
+// possibly-augmented message.
+func fitHandoffSubject(subject, message string) (string, string) {
+	if len(subject) <= handoffTitleMaxBytes {
+		return subject, message
+	}
+
+	// Preserve the full subject in the body before truncating the title.
+	message = "Full handoff subject (truncated in title):\n" + subject + "\n\n" + message
+
+	const ellipsis = "..."
+	// Reserve room for the ellipsis within the byte budget.
+	budget := handoffTitleMaxBytes - len(ellipsis)
+	runes := []rune(subject)
+	// Add runes until adding the next one would exceed the byte budget.
+	n := 0
+	for n < len(runes) && len(string(runes[:n+1])) <= budget {
+		n++
+	}
+	return string(runes[:n]) + ellipsis, message
+}
+
 // sendHandoffMail sends a handoff mail to self and auto-hooks it.
 // Returns the created bead ID and any error.
 func sendHandoffMail(subject, message string) (string, error) {
@@ -1266,6 +1296,13 @@ func sendHandoffMail(subject, message string) (string, error) {
 	if message == "" {
 		message = "Context cycling. Check bd ready for pending work."
 	}
+
+	// The mail bead's title (subject) is validated by beads to be <=500 bytes.
+	// Agent patrol handoffs sometimes pass a rich status summary as the subject,
+	// blowing past the limit so the handoff mail silently fails to persist and
+	// the next session loses its context (gu-44usw). Truncate the title to fit
+	// and preserve the full original subject in the body so nothing is lost.
+	subject, message = fitHandoffSubject(subject, message)
 
 	// Detect agent identity for self-mail
 	agentID, _, _, err := resolveSelfTarget()

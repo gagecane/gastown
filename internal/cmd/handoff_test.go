@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -957,6 +958,65 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 
 		if elapsed > 1*time.Second {
 			t.Errorf("mayor should be exempt from cooldown, but waited %v", elapsed)
+		}
+	})
+}
+
+func TestFitHandoffSubject(t *testing.T) {
+	t.Run("short_subject_unchanged", func(t *testing.T) {
+		subj := "🤝 HANDOFF: routine cycle"
+		msg := "body text"
+		gotSubj, gotMsg := fitHandoffSubject(subj, msg)
+		if gotSubj != subj {
+			t.Errorf("subject changed: got %q, want %q", gotSubj, subj)
+		}
+		if gotMsg != msg {
+			t.Errorf("message changed: got %q, want %q", gotMsg, msg)
+		}
+	})
+
+	t.Run("long_subject_truncated_to_byte_limit", func(t *testing.T) {
+		// Reproduces gu-44usw: a rich status summary crammed into the title.
+		subj := "🤝 HANDOFF: " + strings.Repeat("status detail ", 100) // ~1400 bytes
+		msg := "original body"
+		gotSubj, gotMsg := fitHandoffSubject(subj, msg)
+
+		if len(gotSubj) > handoffTitleMaxBytes {
+			t.Errorf("truncated subject is %d bytes, exceeds limit %d", len(gotSubj), handoffTitleMaxBytes)
+		}
+		if !strings.HasSuffix(gotSubj, "...") {
+			t.Errorf("expected ellipsis suffix, got %q", gotSubj)
+		}
+		// Full original subject must be preserved in the body so context isn't lost.
+		if !strings.Contains(gotMsg, subj) {
+			t.Errorf("full subject not preserved in body: %q", gotMsg)
+		}
+		if !strings.Contains(gotMsg, msg) {
+			t.Errorf("original message not preserved in body: %q", gotMsg)
+		}
+	})
+
+	t.Run("truncation_is_rune_safe", func(t *testing.T) {
+		// Multi-byte runes near the boundary must not be split.
+		subj := strings.Repeat("世", 400) // 1200 bytes, all 3-byte runes
+		gotSubj, _ := fitHandoffSubject(subj, "body")
+		if len(gotSubj) > handoffTitleMaxBytes {
+			t.Errorf("truncated subject is %d bytes, exceeds limit", len(gotSubj))
+		}
+		if !utf8.ValidString(gotSubj) {
+			t.Errorf("truncation split a multi-byte rune: %q", gotSubj)
+		}
+	})
+
+	t.Run("emoji_prefix_not_split", func(t *testing.T) {
+		// The 🤝 prefix is 4 bytes; a boundary near the start must not split it.
+		subj := "🤝" + strings.Repeat("x", 600)
+		gotSubj, _ := fitHandoffSubject(subj, "body")
+		if !utf8.ValidString(gotSubj) {
+			t.Errorf("truncation produced invalid UTF-8: %q", gotSubj)
+		}
+		if len(gotSubj) > handoffTitleMaxBytes {
+			t.Errorf("truncated subject is %d bytes, exceeds limit", len(gotSubj))
 		}
 	})
 }
