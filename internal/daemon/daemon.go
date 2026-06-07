@@ -2571,9 +2571,27 @@ func (d *Daemon) killDefaultPrefixGhosts() {
 func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 	stores := make(map[string]beadsdk.Storage)
 
+	// Idle-connection lifetime for the daemon's long-lived store pools. These
+	// pools persist for the daemon's lifetime and are queried on a tight cadence
+	// (the convoy event poll hits every store every 5s), so the Go pool parks
+	// idle connections between queries. The beads SDK leaves ConnMaxIdleTime
+	// unset (0 = never retire idle conns) and only sets ConnMaxLifetime(5m) —
+	// but the managed Dolt server reaps idle sessions server-side at
+	// wait_timeout (DefaultWaitTimeoutSec = 30s, gh-3623). When the pool then
+	// hands out a connection Dolt already closed, the query fails with "socket
+	// state is broken"; the pool discards it and dials a fresh one, leaking the
+	// half-closed socket into FIN-WAIT-2. Repeated every poll across every store
+	// this churns connection IDs and climbs the daemon's held-connection count
+	// monotonically toward the 1000 cap → town-wide Dolt outage (gu-g7q6z, the
+	// regression of the convoy hq hot-loop). Retiring idle conns well before the
+	// server's wait_timeout keeps the pool's idle entries provably live, so the
+	// pool never reuses a server-killed socket and FIN-WAIT-2 stops accumulating.
+	idleTimeout := daemonStoreIdleTimeout(d.config.TownRoot)
+
 	// Town-level store (hq)
 	hqBeadsDir := filepath.Join(d.config.TownRoot, ".beads")
 	if store, err := beadsdk.OpenFromConfig(d.ctx, hqBeadsDir); err == nil {
+		d.tuneStorePool("hq", store, idleTimeout)
 		stores["hq"] = store
 	} else {
 		d.logger.Printf("Convoy: hq beads store unavailable: %s", util.FirstLine(err.Error()))
@@ -2590,6 +2608,7 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 			d.logger.Printf("Convoy: %s beads store unavailable: %s", rigName, util.FirstLine(err.Error()))
 			continue
 		}
+		d.tuneStorePool(rigName, store, idleTimeout)
 		stores[rigName] = store
 	}
 
@@ -2609,6 +2628,47 @@ func (d *Daemon) openBeadsStores() (map[string]beadsdk.Storage, error) {
 	}
 	d.logger.Printf("Convoy: opened %d beads store(s): %v", len(stores), names)
 	return stores, nil
+}
+
+// daemonStoreIdleTimeout returns the ConnMaxIdleTime to apply to the daemon's
+// long-lived beads-store pools so the Go pool retires idle connections before
+// the managed Dolt server reaps them at wait_timeout. It reads the server's
+// configured wait_timeout (DefaultWaitTimeoutSec / GT_DOLT_WAIT_TIMEOUT) and
+// targets half of it, so a parked connection is always retired client-side with
+// comfortable margin before the server-side reap. A non-positive wait_timeout
+// (override disabled → Dolt's 8-hour default) means the server is not reaping
+// aggressively, so a fixed 15s idle timeout is used to still bound idle parking
+// without depending on the long server default.
+func daemonStoreIdleTimeout(townRoot string) time.Duration {
+	const fallback = 15 * time.Second
+	waitSec := doltserver.DefaultConfig(townRoot).WaitTimeoutSec
+	if waitSec <= 0 {
+		return fallback
+	}
+	// Half the server's wait_timeout: always strictly below it, so a parked
+	// connection is retired client-side with margin before the server reaps it.
+	// waitSec is an integer count of seconds (>=1 here), so this is >=500ms and
+	// never rounds to zero.
+	idle := time.Duration(waitSec) * time.Second / 2
+	if idle > fallback {
+		idle = fallback
+	}
+	return idle
+}
+
+// tuneStorePool sets ConnMaxIdleTime on a store's underlying *sql.DB so idle
+// pooled connections are retired before the Dolt server's wait_timeout closes
+// them server-side. Without this the pool reuses server-killed sockets, fails
+// with "socket state is broken", and leaks the discarded sockets into
+// FIN-WAIT-2 — the gu-g7q6z connection storm. Best-effort: stores that don't
+// expose the raw pool (no beadsDBAccessor) keep the SDK defaults.
+func (d *Daemon) tuneStorePool(name string, store beadsdk.Storage, idleTimeout time.Duration) {
+	accessor, ok := store.(beadsDBAccessor)
+	if !ok || accessor.DB() == nil {
+		return
+	}
+	accessor.DB().SetConnMaxIdleTime(idleTimeout)
+	d.logger.Printf("Convoy: tuned %s store pool ConnMaxIdleTime=%s (below Dolt wait_timeout to prevent FIN-WAIT-2 leak, gu-g7q6z)", name, idleTimeout)
 }
 
 // getKnownRigs returns list of registered rig names.

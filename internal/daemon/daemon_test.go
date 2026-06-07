@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -1354,5 +1355,70 @@ func TestRigStatusCache_LookupStore(t *testing.T) {
 	d.rigStatusCacheMu.Unlock()
 	if _, ok := d.rigStatusCacheLookup("alpha"); ok {
 		t.Errorf("lookup should treat entries older than rigStatusCacheTTL as absent")
+	}
+}
+
+func TestDaemonStoreIdleTimeout(t *testing.T) {
+	townRoot := t.TempDir()
+
+	tests := []struct {
+		name        string
+		waitTimeout string // GT_DOLT_WAIT_TIMEOUT value; "" = unset (use default 30s)
+		want        time.Duration
+	}{
+		{
+			// Default wait_timeout=30s → idle timeout = half = 15s.
+			name:        "default wait_timeout",
+			waitTimeout: "",
+			want:        15 * time.Second,
+		},
+		{
+			// Short wait_timeout=10s → half = 5s.
+			name:        "short wait_timeout",
+			waitTimeout: "10",
+			want:        5 * time.Second,
+		},
+		{
+			// Large wait_timeout=600s → half (300s) is capped at the 15s fallback
+			// so idle conns are still bounded tightly.
+			name:        "large wait_timeout capped at fallback",
+			waitTimeout: "600",
+			want:        15 * time.Second,
+		},
+		{
+			// wait_timeout disabled (negative → 0) → fixed 15s fallback.
+			name:        "disabled wait_timeout uses fallback",
+			waitTimeout: "-1",
+			want:        15 * time.Second,
+		},
+		{
+			// Tiny wait_timeout=1s → half = 500ms, still strictly below the
+			// server reap so the pool never reuses a killed connection.
+			name:        "tiny wait_timeout halved",
+			waitTimeout: "1",
+			want:        500 * time.Millisecond,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.waitTimeout == "" {
+				t.Setenv("GT_DOLT_WAIT_TIMEOUT", "")
+				os.Unsetenv("GT_DOLT_WAIT_TIMEOUT")
+			} else {
+				t.Setenv("GT_DOLT_WAIT_TIMEOUT", tc.waitTimeout)
+			}
+			got := daemonStoreIdleTimeout(townRoot)
+			if got != tc.want {
+				t.Errorf("daemonStoreIdleTimeout() = %v, want %v", got, tc.want)
+			}
+			// The idle timeout must always be strictly below the server's
+			// wait_timeout when the server is reaping, or the pool could still
+			// hand out a server-killed connection (the gu-g7q6z leak).
+			waitSec := doltserver.DefaultConfig(townRoot).WaitTimeoutSec
+			if waitSec > 0 && got >= time.Duration(waitSec)*time.Second {
+				t.Errorf("idle timeout %v must be below wait_timeout %ds to prevent FIN-WAIT-2 leak", got, waitSec)
+			}
+		})
 	}
 }
