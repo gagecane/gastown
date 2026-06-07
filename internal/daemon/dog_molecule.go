@@ -48,13 +48,7 @@ func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *do
 		logger:   d.logger,
 	}
 
-	// Build args: bd mol wisp <formula> --var k=v ...
-	args := []string{"mol", "wisp", formulaName}
-	for k, v := range vars {
-		args = append(args, "--var", fmt.Sprintf("%s=%s", k, v))
-	}
-
-	out, err := dm.runBd(args...)
+	out, err := dm.runBd(dogWispArgs(formulaName, vars)...)
 	if err != nil {
 		d.logger.Printf("dog_molecule: pour %s failed (non-fatal): %v", formulaName, err)
 		return dm
@@ -75,6 +69,24 @@ func (d *Daemon) pourDogMolecule(formulaName string, vars map[string]string) *do
 
 	d.logger.Printf("dog_molecule: poured %s → %s (%d steps)", formulaName, dm.rootID, len(dm.steps))
 	return dm
+}
+
+// dogWispArgs builds the argv for `bd mol wisp` that pours a dog molecule.
+//
+// --root-only is REQUIRED: without it, `bd mol wisp` materializes one child
+// step-issue per formula [[steps]] entry, but dogMol.close() only closes the
+// ROOT wisp. The orphaned step children then linger open until the 24h reaper
+// purge. Dogs run on tight cadences (doctor every 5m → ~288 cycles/day × 3
+// steps), so they accumulate faster than they age out, driving the open wisp
+// count monotonically past the reaper alert threshold (gu-stcak). Steps are
+// read from the formula file (see loadFormulaSteps), so no child beads are
+// needed — closeStep/failStep are observability-only.
+func dogWispArgs(formulaName string, vars map[string]string) []string {
+	args := []string{"mol", "wisp", formulaName, "--root-only"}
+	for k, v := range vars {
+		args = append(args, "--var", fmt.Sprintf("%s=%s", k, v))
+	}
+	return args
 }
 
 // loadFormulaSteps reads the formula file and records its declared step IDs.
