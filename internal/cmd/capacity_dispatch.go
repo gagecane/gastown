@@ -841,8 +841,13 @@ func groupBeadIDsByResolvedBeadsDir(townRoot string, ids []string) map[string][]
 // Sling contexts are queried from HQ only (authoritative). Work bead readiness
 // is checked across all rig dirs since work beads live in rig-local DBs.
 func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
-	// 1. List all open sling context beads from HQ (authoritative)
-	allContexts := listAllSlingContextRecords(townRoot)
+	// 1. List all open sling context beads from HQ (authoritative). Use the
+	// error-aware variant: a total Dolt outage must surface as an error here,
+	// not as an empty queue that silently no-ops dispatch (gu-tnmuj).
+	allContexts, err := listAllSlingContextRecordsWithError(townRoot)
+	if err != nil {
+		return nil, err
+	}
 
 	if len(allContexts) == 0 {
 		return nil, nil
@@ -1276,7 +1281,27 @@ func dispatchScanConcurrency() int {
 }
 
 func listAllSlingContextRecords(townRoot string) []slingContextRecord {
-	var records []slingContextRecord
+	// Display/maintenance callers tolerate partial failure: drop the error and
+	// return whatever dirs answered. The dispatch hot path uses the error-aware
+	// variant so a total Dolt outage cannot masquerade as an empty queue (gu-tnmuj).
+	records, _ := listAllSlingContextRecordsWithError(townRoot)
+	return records
+}
+
+// listAllSlingContextRecordsWithError is the error-aware variant of
+// listAllSlingContextRecords. It returns an error ONLY when EVERY scanned dir
+// failed (e.g. a total Dolt circuit-breaker outage), mirroring the
+// all-dirs-failed contract of listBlockedWorkBeadIDsWithError.
+//
+// This distinction is load-bearing for dispatch self-recovery (gu-tnmuj): when
+// Dolt is fully down, every per-dir ListOpenSlingContexts fails. Without an
+// error signal the scan returns an empty slice that is indistinguishable from
+// "no work queued" — so the dispatch loop silently no-ops, `gt scheduler status`
+// reports queued_ready=0, and the scheduler_stuck watchdog (which keys on
+// QueuedReady>0) is blinded. Propagating an error instead surfaces the outage in
+// daemon.log and lets the next heartbeat resume dispatch naturally once Dolt
+// recovers, rather than requiring a manual daemon restart.
+func listAllSlingContextRecordsWithError(townRoot string) ([]slingContextRecord, error) {
 	// Scan each rig's sling-contexts concurrently behind a bounded semaphore.
 	// This per-rig `bd` fan-out (one ListOpenSlingContexts cold-start per dir,
 	// ~0.65s each × ~19 dirs ≈ 12s serial) runs on the dispatch hot path inside
@@ -1286,12 +1311,7 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 	// (gu-el5bx): the semaphore — not the read throttle — bounds Dolt load, so we
 	// keep WithoutReadThrottle (gu-pug66's deliberately lock-free dispatch path).
 	dirs := beadsSearchDirs(townRoot)
-	type dirResult struct {
-		dir      string
-		beadsDir string
-		contexts []*beads.Issue
-	}
-	results := make([]dirResult, len(dirs))
+	results := make([]slingContextDirResult, len(dirs))
 	sem := make(chan struct{}, dispatchScanConcurrency())
 	var wg sync.WaitGroup
 	for i, dir := range dirs {
@@ -1301,23 +1321,56 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			beadsDir := beads.ResolveBeadsDir(dir)
-			results[i] = dirResult{dir: dir, beadsDir: beadsDir}
+			results[i] = slingContextDirResult{dir: dir, beadsDir: beadsDir}
 			b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
 			contexts, err := b.ListOpenSlingContexts()
 			if err != nil {
-				return // Partial failure is acceptable — skip unavailable dirs
+				// Partial failure is acceptable — skip unavailable dirs. Record
+				// the error so the caller can distinguish "every dir failed"
+				// (Dolt outage) from "no work queued" (gu-tnmuj).
+				results[i].err = err
+				return
 			}
 			results[i].contexts = contexts
 		}(i, dir)
 	}
 	wg.Wait()
 
-	// Fold results in dir order (deterministic): dedup by ctx.ID alone, since bd
-	// prefix routing can return the same bead from multiple BEADS_DIR pins when
-	// routes.jsonl maps the bead's prefix to a sibling DB (gu-38ov). Iterating
-	// results in stable order keeps the oldest-context-wins dedup deterministic.
+	return foldSlingContextDirResults(results)
+}
+
+// slingContextDirResult is one per-dir outcome of the sling-context fan-out:
+// either the dir's open contexts or the error from its bd query.
+type slingContextDirResult struct {
+	dir      string
+	beadsDir string
+	contexts []*beads.Issue
+	err      error
+}
+
+// foldSlingContextDirResults collapses per-dir scan results into the deduped
+// record list, returning an error ONLY when every scanned dir failed.
+//
+// Dedup is by ctx.ID alone, since bd prefix routing can return the same bead
+// from multiple BEADS_DIR pins when routes.jsonl maps the bead's prefix to a
+// sibling DB (gu-38ov). Iterating results in stable dir order keeps the
+// oldest-context-wins dedup deterministic.
+//
+// The all-dirs-failed → error contract is the Dolt-outage signature (gu-tnmuj):
+// surface it so dispatch logs the outage and retries rather than silently
+// treating a down database as an empty queue. Pure (no I/O) so the decision is
+// unit-testable without a live Dolt server.
+func foldSlingContextDirResults(results []slingContextDirResult) ([]slingContextRecord, error) {
+	var records []slingContextRecord
 	seen := make(map[string]bool)
+	failCount := 0
+	var lastErr error
 	for _, r := range results {
+		if r.err != nil {
+			failCount++
+			lastErr = r.err
+			continue
+		}
 		for _, ctx := range r.contexts {
 			if seen[ctx.ID] {
 				continue
@@ -1326,7 +1379,11 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 			records = append(records, slingContextRecord{issue: ctx, workDir: r.dir, beadsDir: r.beadsDir})
 		}
 	}
-	return records
+
+	if failCount > 0 && failCount == len(results) {
+		return nil, fmt.Errorf("all %d sling-context scans failed (last: %w)", failCount, lastErr)
+	}
+	return records, nil
 }
 
 // listBlockedWorkBeadIDsWithError returns a set of work bead IDs that have active blockers.

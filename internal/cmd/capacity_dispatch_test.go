@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -370,4 +371,77 @@ func TestDispatchMaintenanceDue(t *testing.T) {
 	if dispatchMaintenanceDue(town) {
 		t.Fatal("call right after a due-run should NOT be due (re-stamped)")
 	}
+}
+
+// TestFoldSlingContextDirResults guards the dispatch self-recovery contract
+// (gu-tnmuj): the per-dir sling-context fan-out must distinguish a total Dolt
+// outage (every dir errored) from a genuinely empty queue. A silent empty-on-
+// error return is what wedged dispatch after a circuit-breaker outage — it
+// looked like "no work" forever until a manual daemon restart.
+func TestFoldSlingContextDirResults(t *testing.T) {
+	ctxA := &beads.Issue{ID: "gu-ctx-a"}
+	ctxB := &beads.Issue{ID: "gu-ctx-b"}
+	errDolt := errors.New("circuit breaker is open")
+
+	t.Run("all dirs failed returns error", func(t *testing.T) {
+		_, err := foldSlingContextDirResults([]slingContextDirResult{
+			{dir: "d1", err: errDolt},
+			{dir: "d2", err: errDolt},
+		})
+		if err == nil {
+			t.Fatal("expected error when every dir failed (Dolt-outage signature), got nil")
+		}
+		if !errors.Is(err, errDolt) {
+			t.Fatalf("expected wrapped last error, got %v", err)
+		}
+	})
+
+	t.Run("empty queue is not an error", func(t *testing.T) {
+		records, err := foldSlingContextDirResults([]slingContextDirResult{
+			{dir: "d1"},
+			{dir: "d2"},
+		})
+		if err != nil {
+			t.Fatalf("empty queue must not error (distinct from outage), got %v", err)
+		}
+		if len(records) != 0 {
+			t.Fatalf("expected 0 records, got %d", len(records))
+		}
+	})
+
+	t.Run("partial failure tolerated", func(t *testing.T) {
+		records, err := foldSlingContextDirResults([]slingContextDirResult{
+			{dir: "d1", contexts: []*beads.Issue{ctxA}},
+			{dir: "d2", err: errDolt},
+		})
+		if err != nil {
+			t.Fatalf("partial failure must not error (some dirs answered), got %v", err)
+		}
+		if len(records) != 1 || records[0].issue.ID != "gu-ctx-a" {
+			t.Fatalf("expected 1 record gu-ctx-a, got %+v", records)
+		}
+	})
+
+	t.Run("dedup by id across dirs", func(t *testing.T) {
+		records, err := foldSlingContextDirResults([]slingContextDirResult{
+			{dir: "d1", contexts: []*beads.Issue{ctxA, ctxB}},
+			{dir: "d2", contexts: []*beads.Issue{ctxA}}, // prefix-routing duplicate
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(records) != 2 {
+			t.Fatalf("expected 2 deduped records, got %d", len(records))
+		}
+	})
+
+	t.Run("no dirs is not an error", func(t *testing.T) {
+		records, err := foldSlingContextDirResults(nil)
+		if err != nil {
+			t.Fatalf("zero dirs must not error, got %v", err)
+		}
+		if len(records) != 0 {
+			t.Fatalf("expected 0 records, got %d", len(records))
+		}
+	})
 }
