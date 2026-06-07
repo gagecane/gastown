@@ -247,12 +247,6 @@ func validateRigSettings(c *RigSettings) error {
 // ErrInvalidOnConflict indicates an invalid on_conflict strategy.
 var ErrInvalidOnConflict = errors.New("invalid on_conflict strategy")
 
-// ErrInvalidAutoTestPRLanguage indicates the auto_test_pr.language value
-// is not in the v1 allow-list. Returned as a typed error (not a panic) so
-// callers — notably `gt auto-test-pr enable` — can route the operator to
-// the v2 follow-up bead instead of failing opaquely.
-var ErrInvalidAutoTestPRLanguage = errors.New("invalid auto_test_pr.language")
-
 // ErrInvalidAutoTestPRCadence indicates the auto_test_pr.cadence_days
 // value is negative. Zero is treated as "use default" by the consumer
 // (see AutoTestPRConfig.GetCadenceDays); only explicitly-negative
@@ -263,24 +257,11 @@ var ErrInvalidAutoTestPRCadence = errors.New("invalid auto_test_pr.cadence_days"
 // settings JSON. The block is treated as opt-in; absent or zero-valued
 // fields fall back to documented defaults at consumer-call time. The
 // validator only rejects values that are actively wrong (negative
-// cadence, non-allow-listed language) — empty is fine because the block
-// can ship in a "disabled, awaiting opt-in" form.
+// cadence) — empty is fine because the block can ship in a "disabled,
+// awaiting opt-in" form.
 func validateAutoTestPRConfig(c *AutoTestPRConfig) error {
 	if c == nil {
 		return nil
-	}
-	if c.Language != "" {
-		allowed := false
-		for _, lang := range AutoTestPRSupportedLanguages {
-			if c.Language == lang {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return fmt.Errorf("%w: got %q, want one of %v",
-				ErrInvalidAutoTestPRLanguage, c.Language, AutoTestPRSupportedLanguages)
-		}
 	}
 	if c.CadenceDays < 0 {
 		return fmt.Errorf("%w: must be >= 0, got %d",

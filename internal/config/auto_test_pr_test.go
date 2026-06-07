@@ -5,7 +5,7 @@
 //	a. absent auto_test_pr block → returns disabled config with default
 //	   cadence/skip_dirs.
 //	b. well-formed block → returns parsed auto_test_pr.* keys.
-//	c. malformed JSON or unknown language value → returns typed error
+//	c. malformed JSON or negative cadence → returns typed error
 //	   (not a panic).
 
 package config
@@ -89,7 +89,6 @@ func TestLoadRigSettings_AutoTestPRWellFormed_ParsesAllKeys(t *testing.T) {
 	  "version": 1,
 	  "auto_test_pr": {
 	    "enabled": true,
-	    "language": "go",
 	    "cadence_days": 14,
 	    "conventions_path": "docs/test-conventions.md",
 	    "skip_dirs": ["vendor", "internal/generated"]
@@ -107,9 +106,6 @@ func TestLoadRigSettings_AutoTestPRWellFormed_ParsesAllKeys(t *testing.T) {
 	}
 	if !atpr.IsEnabled() {
 		t.Error("IsEnabled() = false; want true")
-	}
-	if got, want := atpr.Language, "go"; got != want {
-		t.Errorf("Language = %q; want %q", got, want)
 	}
 	if got, want := atpr.GetCadenceDays(), 14; got != want {
 		t.Errorf("GetCadenceDays() = %d; want %d", got, want)
@@ -131,7 +127,7 @@ func TestLoadRigSettings_AutoTestPRMalformedJSON_ReturnsTypedError(t *testing.T)
 	body := `{
 	  "type": "rig-settings",
 	  "version": 1,
-	  "auto_test_pr": { "enabled": true, "language": "go", }
+	  "auto_test_pr": { "enabled": true, "cadence_days": 14, }
 	}`
 	path := writeRigSettingsFile(t, body)
 
@@ -145,30 +141,6 @@ func TestLoadRigSettings_AutoTestPRMalformedJSON_ReturnsTypedError(t *testing.T)
 	var syntaxErr *json.SyntaxError
 	if !errors.As(err, &syntaxErr) {
 		t.Errorf("error type = %T; want *json.SyntaxError. err = %v", err, err)
-	}
-}
-
-func TestLoadRigSettings_AutoTestPRUnknownLanguage_ReturnsTypedError(t *testing.T) {
-	t.Parallel()
-
-	// Acceptance (c) part 2: a syntactically-valid block with a language
-	// outside the v1 allow-list must surface ErrInvalidAutoTestPRLanguage so
-	// `gt auto-test-pr enable` can pattern-match and route the operator to
-	// the v2 follow-up bead. Pinning the sentinel ensures the CLI's typed
-	// matching keeps working as the validator evolves.
-	body := `{
-	  "type": "rig-settings",
-	  "version": 1,
-	  "auto_test_pr": { "enabled": true, "language": "rust" }
-	}`
-	path := writeRigSettingsFile(t, body)
-
-	_, err := LoadRigSettings(path)
-	if err == nil {
-		t.Fatal("expected error for unknown language, got nil")
-	}
-	if !errors.Is(err, ErrInvalidAutoTestPRLanguage) {
-		t.Errorf("errors.Is(err, ErrInvalidAutoTestPRLanguage) = false; err = %v", err)
 	}
 }
 
@@ -197,8 +169,8 @@ func TestLoadRigSettings_AutoTestPRNegativeCadence_ReturnsTypedError(t *testing.
 func TestLoadRigSettings_AutoTestPRDisabledBlockShipsCleanly(t *testing.T) {
 	t.Parallel()
 
-	// "Shape ships, opt-in deferred": a block with enabled=false and no
-	// language should validate, so the per-rig settings JSON can carry the
+	// "Shape ships, opt-in deferred": a block with enabled=false should
+	// validate, so the per-rig settings JSON can carry the
 	// stanza ahead of the operator-driven `gt auto-test-pr enable` flip.
 	body := `{
 	  "type": "rig-settings",
@@ -250,7 +222,7 @@ func TestAutoTestPRConfig_RequiresReviewApproval(t *testing.T) {
 		},
 		{
 			name: "block present, key unset -> default true",
-			cfg:  &AutoTestPRConfig{Enabled: true, Language: "go"},
+			cfg:  &AutoTestPRConfig{Enabled: true},
 			want: true,
 		},
 		{
@@ -282,7 +254,7 @@ func TestLoadRigSettings_RequireReviewApproval_RoundTrip(t *testing.T) {
 	bodyTrue := `{
 	  "type": "rig-settings",
 	  "version": 1,
-	  "auto_test_pr": { "enabled": true, "language": "go", "require_review_approval": true }
+	  "auto_test_pr": { "enabled": true, "require_review_approval": true }
 	}`
 	pathTrue := writeRigSettingsFile(t, bodyTrue)
 	settings, err := LoadRigSettings(pathTrue)
@@ -299,7 +271,7 @@ func TestLoadRigSettings_RequireReviewApproval_RoundTrip(t *testing.T) {
 	bodyFalse := `{
 	  "type": "rig-settings",
 	  "version": 1,
-	  "auto_test_pr": { "enabled": true, "language": "go", "require_review_approval": false }
+	  "auto_test_pr": { "enabled": true, "require_review_approval": false }
 	}`
 	pathFalse := writeRigSettingsFile(t, bodyFalse)
 	settings2, err := LoadRigSettings(pathFalse)
@@ -321,7 +293,7 @@ func TestLoadRigSettings_RequireReviewApproval_RoundTrip(t *testing.T) {
 	bodyAbsent := `{
 	  "type": "rig-settings",
 	  "version": 1,
-	  "auto_test_pr": { "enabled": true, "language": "go" }
+	  "auto_test_pr": { "enabled": true }
 	}`
 	pathAbsent := writeRigSettingsFile(t, bodyAbsent)
 	settings3, err := LoadRigSettings(pathAbsent)
