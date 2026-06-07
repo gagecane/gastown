@@ -3963,7 +3963,41 @@ func (d *Daemon) reclaimStalledCleanPolecats() {
 	})
 }
 
-// reclaimRigStalledCleanPolecats reclaims cleanly-stalled debris for one rig.
+// Warm-pool high/low-water marks for husk trimming (gu-kii6z). Idle-clean
+// dead-session polecats are normally PRESERVED as a reuse warm pool (fast
+// dispatch — gu-o086 / hq-uzubf). But they are skipped by BOTH reapers
+// (reapIdlePolecat requires a live session; isReclaimCandidate excludes
+// idle+clean), so they accumulate unbounded toward the maxPolecatDirsPerRig
+// spawn cap (30, in internal/cmd/polecat_spawn.go). At the cap, fresh
+// allocation is blocked and dispatch wedges even with free capacity and ready
+// work — the gu-kii6z stall. The mayor's reclaim experiment confirmed it:
+// nuking idle-clean dead-session husks immediately resumed dispatch. Once a rig
+// crosses the high-water mark, trim husks down to the low-water mark, leaving a
+// healthy warm pool plus headroom below the cap for fresh spawns. nuke (no
+// --force) still gates every destroy on clean+no-work, so only husks are ever
+// removed.
+const (
+	polecatWarmPoolHighWater = 20
+	polecatWarmPoolLowWater  = 10
+)
+
+// warmPoolTrimBudget returns how many idle-clean dead-session husks to trim for
+// a rig with dirCount polecat directories: zero until the high-water mark, then
+// enough to bring the rig down to the low-water mark. Pure (no I/O) so the
+// pressure policy is unit-testable independent of tmux/beads/nuke.
+func warmPoolTrimBudget(dirCount int) int {
+	if dirCount < polecatWarmPoolHighWater {
+		return 0
+	}
+	budget := dirCount - polecatWarmPoolLowWater
+	if budget < 0 {
+		return 0
+	}
+	return budget
+}
+
+// reclaimRigStalledCleanPolecats reclaims cleanly-stalled debris for one rig,
+// then trims excess idle-clean dead-session warm-pool husks under pool pressure.
 func (d *Daemon) reclaimRigStalledCleanPolecats(rigName string) {
 	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
 	polecats, err := listPolecatWorktrees(polecatsDir)
@@ -3973,6 +4007,78 @@ func (d *Daemon) reclaimRigStalledCleanPolecats(rigName string) {
 	for _, polecatName := range polecats {
 		d.reclaimStalledCleanPolecat(rigName, polecatName)
 	}
+
+	// gu-kii6z: pool-pressure trim of idle-clean dead-session warm-pool husks.
+	// Re-list (the debris pass above may have already freed dirs) and, if still
+	// over the high-water mark, trim husks down to the low-water mark.
+	d.trimWarmPoolHusks(rigName)
+}
+
+// trimWarmPoolHusks removes idle-clean dead-session warm-pool husks for a rig
+// when its polecat-directory count is over the high-water mark, down to the
+// low-water mark (gu-kii6z). Without this, husks skipped by both reapers fill
+// the maxPolecatDirsPerRig spawn cap and wedge dispatch despite free capacity.
+func (d *Daemon) trimWarmPoolHusks(rigName string) {
+	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
+	polecats, err := listPolecatWorktrees(polecatsDir)
+	if err != nil {
+		return
+	}
+	budget := warmPoolTrimBudget(len(polecats))
+	if budget <= 0 {
+		return
+	}
+	for _, polecatName := range polecats {
+		if budget <= 0 {
+			break
+		}
+		if d.reclaimWarmPoolHusk(rigName, polecatName) {
+			budget--
+		}
+	}
+}
+
+// reclaimWarmPoolHusk reclaims a single idle-clean dead-session warm-pool husk,
+// returning true only when it actually nuked one (so the trim budget tracks
+// real reclaims). It applies the same dead-session + no-open-hook guards as the
+// debris reclaimer; the destroy still goes through `gt polecat nuke` (no
+// --force), which refuses anything carrying work.
+func (d *Daemon) reclaimWarmPoolHusk(rigName, polecatName string) bool {
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+
+	// Live sessions are owned by other patrols.
+	if alive, err := d.tmux.HasSession(sessionName); err != nil || alive {
+		return false
+	}
+
+	prefix := beads.GetPrefixForRig(d.config.TownRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	info, err := d.getAgentBeadInfo(agentBeadID)
+	if err != nil {
+		return false // Can't classify — leave it for the crash detector / witness.
+	}
+
+	if !isWarmPoolHusk(info) {
+		return false
+	}
+
+	// Open hooked work → not an idle husk; leave for the witness recovery path.
+	if info.HookBead != "" && !d.isBeadClosed(info.HookBead) {
+		return false
+	}
+
+	return d.nukeCleanStalledPolecat(rigName, polecatName)
+}
+
+// isWarmPoolHusk reports whether a DEAD-session polecat is a reusable idle warm
+// slot: state=idle, cleanup=clean, no push/MR-failure flags, no active MR.
+// These are exactly the slots isReclaimCandidate PRESERVES (correct for normal
+// operation), but they are skipped by both reapers and accumulate to the spawn
+// cap, so the pool-pressure trim removes them when a rig is oversized (gu-kii6z).
+func isWarmPoolHusk(info *AgentBeadInfo) bool {
+	return beads.AgentState(info.State) == beads.AgentStateIdle &&
+		info.CleanupStatus == "clean" &&
+		!info.PushFailed && !info.MRFailed && info.ActiveMR == ""
 }
 
 // reclaimStalledCleanPolecat reclaims a single cleanly-stalled polecat (gs-9wz).
@@ -4096,7 +4202,9 @@ func isStalledReclaimCandidate(s beads.AgentState) bool {
 // the safety net working as intended — that polecat stays for witness/mayor
 // recovery. Shelling out (rather than importing polecat.Manager) mirrors
 // dispatchQueuedWork and avoids a daemon↔cmd import cycle.
-func (d *Daemon) nukeCleanStalledPolecat(rigName, polecatName string) {
+// Returns true only when nuke succeeded (a polecat was actually reclaimed), so
+// pool-pressure callers can budget against real reclaims (gu-kii6z).
+func (d *Daemon) nukeCleanStalledPolecat(rigName, polecatName string) bool {
 	target := fmt.Sprintf("%s/%s", rigName, polecatName)
 	ctx, cancel := context.WithTimeout(d.ctx, 90*time.Second)
 	defer cancel()
@@ -4110,9 +4218,10 @@ func (d *Daemon) nukeCleanStalledPolecat(rigName, polecatName string) {
 		// Expected when the polecat isn't clean (nuke refused to destroy work).
 		// Stay silent to avoid per-cycle log spam — the polecat remains visible
 		// via `gt scheduler status` and is handled by witness/mayor recovery.
-		return
+		return false
 	}
 	d.logger.Printf("Reclaimed cleanly-stalled polecat %s — capacity freed (gs-9wz)", target)
+	return true
 }
 
 // cleanupOrphanedProcesses kills orphaned claude subagent processes.

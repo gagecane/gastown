@@ -81,3 +81,64 @@ func TestIsReclaimCandidate(t *testing.T) {
 		}
 	}
 }
+
+// TestWarmPoolTrimBudget locks down the pool-pressure policy (gu-kii6z): no
+// trimming below the high-water mark (warm pool preserved for fast reuse), and
+// once at/above it, trim down to the low-water mark — never below. This is what
+// keeps idle-clean dead-session husks (skipped by both reapers) from filling
+// the maxPolecatDirsPerRig spawn cap and wedging dispatch.
+func TestWarmPoolTrimBudget(t *testing.T) {
+	cases := []struct {
+		dirCount int
+		want     int
+	}{
+		{0, 0},
+		{polecatWarmPoolLowWater, 0},      // below high-water: preserve
+		{polecatWarmPoolHighWater - 1, 0}, // just below: preserve
+		{polecatWarmPoolHighWater, polecatWarmPoolHighWater - polecatWarmPoolLowWater}, // at high-water: trim to low
+		{30, 30 - polecatWarmPoolLowWater},                                             // at spawn cap: trim hard to low-water
+	}
+	for _, tc := range cases {
+		got := warmPoolTrimBudget(tc.dirCount)
+		if got != tc.want {
+			t.Errorf("warmPoolTrimBudget(%d) = %d, want %d", tc.dirCount, got, tc.want)
+		}
+		// Invariant: trimming never drops a rig below the low-water mark.
+		if remaining := tc.dirCount - got; got > 0 && remaining < polecatWarmPoolLowWater {
+			t.Errorf("warmPoolTrimBudget(%d)=%d leaves %d dirs, below low-water %d",
+				tc.dirCount, got, remaining, polecatWarmPoolLowWater)
+		}
+	}
+}
+
+// TestIsWarmPoolHusk verifies the husk classifier matches exactly the
+// reusable-idle warm slot (state=idle, clean, no flags, no active MR) — the
+// population isReclaimCandidate deliberately preserves but that the
+// pool-pressure trim removes when a rig is oversized (gu-kii6z). Anything with a
+// residual, a non-idle state, or an active MR is NOT a husk (left to the
+// existing debris/recovery paths).
+func TestIsWarmPoolHusk(t *testing.T) {
+	cases := []struct {
+		name string
+		info *AgentBeadInfo
+		want bool
+	}{
+		{"idle clean reusable husk", &AgentBeadInfo{State: "idle", CleanupStatus: "clean"}, true},
+
+		{"idle empty cleanup (unknown — not a clean husk)", &AgentBeadInfo{State: "idle", CleanupStatus: ""}, false},
+		{"idle has_uncommitted (residual)", &AgentBeadInfo{State: "idle", CleanupStatus: "has_uncommitted"}, false},
+		{"idle push-failed flag", &AgentBeadInfo{State: "idle", CleanupStatus: "clean", PushFailed: true}, false},
+		{"idle mr-failed flag", &AgentBeadInfo{State: "idle", CleanupStatus: "clean", MRFailed: true}, false},
+		{"idle active MR", &AgentBeadInfo{State: "idle", CleanupStatus: "clean", ActiveMR: "gt-mr-1"}, false},
+
+		{"working", &AgentBeadInfo{State: "working", CleanupStatus: "clean"}, false},
+		{"stuck", &AgentBeadInfo{State: "stuck", CleanupStatus: "clean"}, false},
+		{"done", &AgentBeadInfo{State: "done", CleanupStatus: "clean"}, false},
+		{"nuked", &AgentBeadInfo{State: "nuked", CleanupStatus: "clean"}, false},
+	}
+	for _, tc := range cases {
+		if got := isWarmPoolHusk(tc.info); got != tc.want {
+			t.Errorf("%s: isWarmPoolHusk(%+v) = %v, want %v", tc.name, tc.info, got, tc.want)
+		}
+	}
+}
