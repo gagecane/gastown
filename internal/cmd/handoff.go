@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -1252,6 +1253,24 @@ func getSessionPane(sessionName string) (string, error) {
 	return lines[0], nil
 }
 
+// handoffMaxSubjectLen is the maximum subject length for handoff mail, matching
+// the beads title column (varchar(500)). Subjects longer than this are rejected
+// by the database, so we truncate before creating the bead.
+const handoffMaxSubjectLen = 500
+
+// truncateSubjectForTitle truncates subject to at most maxLen runes, appending an
+// ellipsis when truncation occurs. Length is measured in runes (not bytes) so the
+// result fits the varchar(maxLen) column even when the subject contains multi-byte
+// characters such as the 🤝 handoff prefix.
+func truncateSubjectForTitle(subject string, maxLen int) string {
+	if utf8.RuneCountInString(subject) <= maxLen {
+		return subject
+	}
+	const ellipsis = "…"
+	runes := []rune(subject)
+	return string(runes[:maxLen-utf8.RuneCountInString(ellipsis)]) + ellipsis
+}
+
 // sendHandoffMail sends a handoff mail to self and auto-hooks it.
 // Returns the created bead ID and any error.
 func sendHandoffMail(subject, message string) (string, error) {
@@ -1261,6 +1280,12 @@ func sendHandoffMail(subject, message string) (string, error) {
 	} else if !strings.Contains(subject, "HANDOFF") {
 		subject = "🤝 HANDOFF: " + subject
 	}
+
+	// Truncate to fit the beads title column (varchar(500)). Over-long subjects
+	// — e.g. from `gt handoff -c` collecting state into the subject — silently
+	// fail the underlying `bd create`, so the handoff mail never persists and
+	// the successor session starts with no context (gu-arva7).
+	subject = truncateSubjectForTitle(subject, handoffMaxSubjectLen)
 
 	// Default message if not provided
 	if message == "" {

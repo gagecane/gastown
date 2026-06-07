@@ -7,12 +7,49 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+func TestTruncateSubjectForTitle(t *testing.T) {
+	t.Run("short subject unchanged", func(t *testing.T) {
+		s := "🤝 HANDOFF: quick note"
+		if got := truncateSubjectForTitle(s, handoffMaxSubjectLen); got != s {
+			t.Errorf("got %q, want unchanged %q", got, s)
+		}
+	})
+
+	t.Run("exactly at limit unchanged", func(t *testing.T) {
+		s := strings.Repeat("a", handoffMaxSubjectLen)
+		if got := truncateSubjectForTitle(s, handoffMaxSubjectLen); got != s {
+			t.Errorf("subject at limit should be unchanged, got len %d", utf8.RuneCountInString(got))
+		}
+	})
+
+	t.Run("over limit truncated to fit", func(t *testing.T) {
+		s := strings.Repeat("a", handoffMaxSubjectLen+200)
+		got := truncateSubjectForTitle(s, handoffMaxSubjectLen)
+		if n := utf8.RuneCountInString(got); n != handoffMaxSubjectLen {
+			t.Errorf("truncated length = %d runes, want %d", n, handoffMaxSubjectLen)
+		}
+		if !strings.HasSuffix(got, "…") {
+			t.Errorf("truncated subject should end with ellipsis, got %q", got)
+		}
+	})
+
+	t.Run("multibyte subject measured in runes", func(t *testing.T) {
+		// 600 multi-byte runes far exceed 500 bytes; ensure rune-based truncation.
+		s := strings.Repeat("🤝", handoffMaxSubjectLen+100)
+		got := truncateSubjectForTitle(s, handoffMaxSubjectLen)
+		if n := utf8.RuneCountInString(got); n != handoffMaxSubjectLen {
+			t.Errorf("truncated length = %d runes, want %d", n, handoffMaxSubjectLen)
+		}
+	})
+}
 
 func setupHandoffTestRegistry(t *testing.T) {
 	t.Helper()
