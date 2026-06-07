@@ -424,10 +424,10 @@ type DeaconThresholds struct {
 	// Cooldown is minimum time between force-kills of same agent (default "5m").
 	Cooldown string `json:"cooldown,omitempty"`
 
-	// HeartbeatStaleThreshold is age at which deacon heartbeat is stale (default "5m").
+	// HeartbeatStaleThreshold is age at which deacon heartbeat is stale (default "16m").
 	HeartbeatStaleThreshold string `json:"heartbeat_stale_threshold,omitempty"`
 
-	// HeartbeatVeryStaleThreshold is age at which heartbeat is very stale (default "15m").
+	// HeartbeatVeryStaleThreshold is age at which heartbeat is very stale (default "30m").
 	HeartbeatVeryStaleThreshold string `json:"heartbeat_very_stale_threshold,omitempty"`
 
 	// CycleStallThreshold is how long the deacon heartbeat cycle counter may
