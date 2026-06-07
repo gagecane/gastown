@@ -242,6 +242,113 @@ func TestAcquirePolecatAdmissionDisabledWhenSchedulerCapNonPositive(t *testing.T
 	}
 }
 
+// setSchedulerMaxLoadPerCore sets scheduler.max_load_per_core on a town's
+// settings, preserving the existing scheduler config.
+func setSchedulerMaxLoadPerCore(t *testing.T, townRoot string, threshold float64) {
+	t.Helper()
+	settingsPath := config.TownSettingsPath(townRoot)
+	settings, err := config.LoadOrCreateTownSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateTownSettings: %v", err)
+	}
+	if settings.Scheduler == nil {
+		settings.Scheduler = capacity.DefaultSchedulerConfig()
+	}
+	settings.Scheduler.MaxLoadPerCore = &threshold
+	if err := config.SaveTownSettings(settingsPath, settings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+}
+
+func TestAcquirePolecatAdmissionRefusesWhenHostLoadExceedsThreshold(t *testing.T) {
+	// Gate must apply even in direct dispatch (max=-1), the uncapped mode that
+	// caused the gu-5j7p4 host meltdown.
+	for _, maxPolecats := range []int{-1, 0, 2} {
+		t.Run("max", func(t *testing.T) {
+			townRoot := setupPolecatCapacityTestTown(t, maxPolecats)
+			setSchedulerMaxLoadPerCore(t, townRoot, 2.5)
+
+			oldLoad := admissionLoadPerCore
+			admissionLoadPerCore = func() float64 { return 3.0 } // above threshold
+			defer func() { admissionLoadPerCore = oldLoad }()
+
+			handle, snapshot, err := acquirePolecatAdmission(townRoot, "gastown", "gt-load", "test")
+			if err == nil {
+				if handle != nil {
+					handle.Release()
+				}
+				t.Fatalf("expected admission denial for max=%d under high load", maxPolecats)
+			}
+			var admissionErr *polecatCapacityAdmissionError
+			if !errors.As(err, &admissionErr) {
+				t.Fatalf("error = %v, want polecatCapacityAdmissionError", err)
+			}
+			if !strings.Contains(err.Error(), "max_load_per_core") {
+				t.Fatalf("error %q should mention max_load_per_core", err.Error())
+			}
+			if snapshot.Max != maxPolecats {
+				t.Fatalf("snapshot max = %d, want %d", snapshot.Max, maxPolecats)
+			}
+			// No reservation should be written when the load gate refuses.
+			if _, statErr := os.Stat(polecatAdmissionDir(townRoot)); !os.IsNotExist(statErr) {
+				if entries, _ := os.ReadDir(polecatAdmissionDir(townRoot)); len(entries) != 0 {
+					t.Fatalf("reservation written despite load denial: %d entries", len(entries))
+				}
+			}
+		})
+	}
+}
+
+func TestAcquirePolecatAdmissionAllowsWhenLoadBelowThreshold(t *testing.T) {
+	townRoot := setupPolecatCapacityTestTown(t, -1)
+	setSchedulerMaxLoadPerCore(t, townRoot, 2.5)
+
+	oldLoad := admissionLoadPerCore
+	admissionLoadPerCore = func() float64 { return 1.0 } // below threshold
+	defer func() { admissionLoadPerCore = oldLoad }()
+
+	handle, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-load", "test")
+	if err != nil {
+		t.Fatalf("admission denied below threshold: %v", err)
+	}
+	defer handle.Release()
+	if !handle.disabled {
+		t.Fatalf("direct-dispatch handle should be disabled (no reservation)")
+	}
+}
+
+func TestAcquirePolecatAdmissionLoadGateDisabledByDefault(t *testing.T) {
+	// With no scheduler.max_load_per_core configured, even a high load reading
+	// must not throttle (opt-in, fail-open).
+	townRoot := setupPolecatCapacityTestTown(t, -1)
+
+	oldLoad := admissionLoadPerCore
+	admissionLoadPerCore = func() float64 { return 99.0 }
+	defer func() { admissionLoadPerCore = oldLoad }()
+
+	handle, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-load", "test")
+	if err != nil {
+		t.Fatalf("admission denied with gate disabled: %v", err)
+	}
+	defer handle.Release()
+}
+
+func TestAcquirePolecatAdmissionLoadGateUnknownLoadFailsOpen(t *testing.T) {
+	// A load reading of 0 means "unknown" (e.g. Windows) and must never throttle.
+	townRoot := setupPolecatCapacityTestTown(t, -1)
+	setSchedulerMaxLoadPerCore(t, townRoot, 2.5)
+
+	oldLoad := admissionLoadPerCore
+	admissionLoadPerCore = func() float64 { return 0 }
+	defer func() { admissionLoadPerCore = oldLoad }()
+
+	handle, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-load", "test")
+	if err != nil {
+		t.Fatalf("admission denied on unknown load: %v", err)
+	}
+	defer handle.Release()
+}
+
 func TestConcurrentPolecatAdmissionReservationsDoNotExceedCap(t *testing.T) {
 	townRoot := setupPolecatCapacityTestTown(t, 1)
 	start := make(chan struct{})

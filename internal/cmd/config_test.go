@@ -792,6 +792,50 @@ func TestConfigSetGet(t *testing.T) {
 		}
 	})
 
+	t.Run("set and get scheduler.max_load_per_core", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		settingsPath := config.TownSettingsPath(townRoot)
+
+		originalWd, _ := os.Getwd()
+		defer os.Chdir(originalWd)
+		if err := os.Chdir(townRoot); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+
+		cmd := &cobra.Command{}
+		if err := runConfigSet(cmd, []string{"scheduler.max_load_per_core", "2.5"}); err != nil {
+			t.Fatalf("runConfigSet failed: %v", err)
+		}
+
+		loaded, err := config.LoadOrCreateTownSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		if loaded.Scheduler == nil || loaded.Scheduler.GetMaxLoadPerCore() != 2.5 {
+			t.Fatalf("GetMaxLoadPerCore = %v, want 2.5", loaded.Scheduler.GetMaxLoadPerCore())
+		}
+
+		if err := runConfigGet(cmd, []string{"scheduler.max_load_per_core"}); err != nil {
+			t.Fatalf("runConfigGet failed: %v", err)
+		}
+	})
+
+	t.Run("set scheduler.max_load_per_core rejects negative", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+
+		originalWd, _ := os.Getwd()
+		defer os.Chdir(originalWd)
+		if err := os.Chdir(townRoot); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+
+		cmd := &cobra.Command{}
+		err := runConfigSet(cmd, []string{"scheduler.max_load_per_core", "-1"})
+		if err == nil {
+			t.Fatal("expected error for negative max_load_per_core")
+		}
+	})
+
 	t.Run("set cli_theme rejects invalid value", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 

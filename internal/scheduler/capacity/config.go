@@ -29,6 +29,15 @@ type SchedulerConfig struct {
 	// SpawnDelay is the delay between spawns to prevent Dolt lock contention.
 	// Default: "0s".
 	SpawnDelay string `json:"spawn_delay,omitempty"`
+
+	// MaxLoadPerCore is the host 1-minute-load-average-per-core above which
+	// polecat admission is refused, regardless of dispatch mode. This is the
+	// last-resort host-saturation guard: it applies even in direct dispatch
+	// (MaxPolecats <= 0), which otherwise has NO concurrency backpressure and
+	// can let an uncapped swarm of brazil-builds + dolt churn saturate the host
+	// (gu-5j7p4: load 166 on 64 cores). Nil or non-positive disables the gate
+	// (the default), so existing towns are unaffected until they opt in.
+	MaxLoadPerCore *float64 `json:"max_load_per_core,omitempty"`
 }
 
 // DefaultSchedulerConfig returns a SchedulerConfig with sensible defaults.
@@ -71,6 +80,15 @@ func (c *SchedulerConfig) GetSpawnDelay() time.Duration {
 // (max_polecats > 0). Returns false for direct dispatch (-1) and disabled (0).
 func (c *SchedulerConfig) IsDeferred() bool {
 	return c.GetMaxPolecats() > 0
+}
+
+// GetMaxLoadPerCore returns the configured per-core load admission threshold, or
+// 0 (gate disabled) when unset or non-positive.
+func (c *SchedulerConfig) GetMaxLoadPerCore() float64 {
+	if c == nil || c.MaxLoadPerCore == nil || *c.MaxLoadPerCore <= 0 {
+		return 0
+	}
+	return *c.MaxLoadPerCore
 }
 
 // ParseDurationOrDefault parses a Go duration string, returning fallback on error or empty input.

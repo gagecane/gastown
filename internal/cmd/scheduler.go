@@ -40,8 +40,9 @@ Subcommands:
   gt scheduler clear     # Remove beads from scheduler
 
 Config:
-  gt config set scheduler.max_polecats 5    # Enable deferred dispatch
-  gt config set scheduler.max_polecats -1   # Direct dispatch (default)
+  gt config set scheduler.max_polecats 5         # Enable deferred dispatch
+  gt config set scheduler.max_polecats -1        # Direct dispatch (default)
+  gt config set scheduler.max_load_per_core 2.5  # Refuse spawns above this per-core load
 
 Dispatch modes:
   deferred (max_polecats > 0): sling enqueues a durable sling context. Work
@@ -50,7 +51,12 @@ Dispatch modes:
   direct   (max_polecats <= 0): sling spawns a polecat immediately and keeps NO
            pending queue. A bead slung while blocked cannot be held, so sling
            refuses it instead of silently dropping it (gu-gzng2). To have blocked
-           work held automatically, enable deferred dispatch above.`,
+           work held automatically, enable deferred dispatch above.
+
+Host-saturation guard:
+  max_load_per_core sets a per-core 1-min load ceiling that refuses polecat
+  admission in BOTH modes — including uncapped direct dispatch, which otherwise
+  has no concurrency backpressure (gu-5j7p4). 0 (default) disables the gate.`,
 	RunE: requireSubcommand,
 }
 

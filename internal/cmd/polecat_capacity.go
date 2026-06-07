@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 const polecatAdmissionReservationTTL = 30 * time.Minute
@@ -62,6 +63,10 @@ func invalidatePolecatCapacityCache(townRoot string) {
 }
 
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
+
+// admissionLoadPerCore reports the host 1-minute load average per logical core.
+// It is a seam so tests can drive the host-load admission gate deterministically.
+var admissionLoadPerCore = util.LoadPerCore
 
 type polecatCapacitySnapshot struct {
 	Max             int `json:"max"`
@@ -134,6 +139,31 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
 	}
+
+	// Host-saturation guard (gu-5j7p4): refuse admission when the host's
+	// per-core load exceeds the configured ceiling. This runs BEFORE the
+	// dispatch-mode branch so it protects direct dispatch (max <= 0) too — the
+	// uncapped mode that, with no concurrency backpressure, let a swarm of
+	// brazil-builds + dolt churn drive load to 166 on 64 cores. Opt-in and
+	// fail-open: disabled unless scheduler.max_load_per_core is set, and a load
+	// reading of 0 ("unknown", e.g. Windows) never throttles.
+	if threshold, terr := configuredSchedulerMaxLoadPerCore(townRoot); terr != nil {
+		return nil, polecatCapacitySnapshot{}, terr
+	} else if threshold > 0 {
+		if loadPerCore := admissionLoadPerCore(); loadPerCore > threshold {
+			snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
+			return nil, snapshot, &polecatCapacityAdmissionError{
+				Snapshot: snapshot,
+				Rig:      rigName,
+				Bead:     beadID,
+				Reason: fmt.Sprintf(
+					"host load/core %.2f exceeds scheduler.max_load_per_core %.2f; deferring spawn so the host can quiet down. Bead stays queued. Lower load or raise the threshold: gt config set scheduler.max_load_per_core <value>",
+					loadPerCore, threshold,
+				),
+			}
+		}
+	}
+
 	if max <= 0 {
 		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
 	}
@@ -180,6 +210,18 @@ func configuredSchedulerMaxPolecats(townRoot string) (int, error) {
 		schedulerCfg = capacity.DefaultSchedulerConfig()
 	}
 	return schedulerCfg.GetMaxPolecats(), nil
+}
+
+func configuredSchedulerMaxLoadPerCore(townRoot string) (float64, error) {
+	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return 0, fmt.Errorf("loading town settings for polecat admission: %w", err)
+	}
+	schedulerCfg := settings.Scheduler
+	if schedulerCfg == nil {
+		schedulerCfg = capacity.DefaultSchedulerConfig()
+	}
+	return schedulerCfg.GetMaxLoadPerCore(), nil
 }
 
 func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, error) {
