@@ -30,6 +30,14 @@ var (
 	ErrNotInstalled = errors.New("bd not installed: run 'pip install beads-cli' or see https://github.com/anthropics/beads")
 	ErrNotFound     = errors.New("issue not found")
 	ErrFlagTitle    = errors.New("title looks like a CLI flag (starts with '-'); use --title=\"...\" to set flag-like titles intentionally")
+	// ErrIDCollision is returned when a bead ID exists in both the issues and
+	// wisps tables, making a lookup ambiguous. This is a persistent data state
+	// (a wisp shadowing a real issue ID), not a transient failure — retrying
+	// will not resolve it. Callers that gate behavior on a bead lookup (e.g.
+	// the daemon's parked/docked check) must NOT treat this like a Dolt outage:
+	// an ambiguous lookup says nothing about the bead's status labels, so it
+	// must not be read as "parked/not operational". See gu-feg02.
+	ErrIDCollision = errors.New("bead ID exists in both issues and wisps")
 )
 
 // bdAllowStale caches whether the installed bd supports --allow-stale.
@@ -1166,6 +1174,15 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 	if strings.Contains(stderr, "not found") || strings.Contains(stderr, "Issue not found") ||
 		strings.Contains(stderr, "no issue found") {
 		return ErrNotFound
+	}
+
+	// ID collision: the bead ID exists in both the issues and wisps tables, so
+	// bd cannot disambiguate the lookup. This is a persistent data state, not a
+	// transient failure — callers gating on a lookup (daemon parked/docked
+	// check) must distinguish it from a Dolt outage so they don't read it as
+	// "not operational" and silently park a healthy rig. See gu-feg02.
+	if strings.Contains(stderr, "exists in both issues and wisps") {
+		return ErrIDCollision
 	}
 
 	if stderr != "" {

@@ -114,6 +114,37 @@ func TestIsRigParkedOrDockedE_OtherError(t *testing.T) {
 	}
 }
 
+// TestIsRigParkedOrDockedE_IDCollision verifies that when bd reports the rig
+// identity bead ID exists in both the issues and wisps tables, the error
+// surfaces as beads.ErrIDCollision (and NOT as ErrRigBeadNotFound). The daemon
+// relies on this to treat the rig as operational rather than silently parking
+// it. Regression test for gu-feg02.
+func TestIsRigParkedOrDockedE_IDCollision(t *testing.T) {
+	tmpDir := t.TempDir()
+	setupRig(t, tmpDir, "collisionrig", "cr")
+
+	// bd stub: the canonical collision error from a duplicated ID across the
+	// issues and wisps tables.
+	writeStubBd(t, `Error: id "cr-rig-collisionrig" exists in both issues and wisps`, 1)
+
+	blocked, reason, err := IsRigParkedOrDockedE(tmpDir, "collisionrig")
+	if err == nil {
+		t.Fatal("expected an error for ID collision, got nil")
+	}
+	if !errors.Is(err, beads.ErrIDCollision) {
+		t.Errorf("expected beads.ErrIDCollision, got %v (type %T)", err, err)
+	}
+	if errors.Is(err, ErrRigBeadNotFound) {
+		t.Errorf("ID collision must NOT be wrapped as ErrRigBeadNotFound — callers treat these differently; got %v", err)
+	}
+	if blocked {
+		t.Errorf("expected blocked=false for ID collision, got true")
+	}
+	if reason != "" {
+		t.Errorf("expected empty reason for ID collision, got %q", reason)
+	}
+}
+
 // TestIsRigParkedOrDockedE_PrefixMissing verifies that when the rig prefix
 // cannot be resolved (neither rigs.json nor the rig's config.json supplies
 // one), a distinct error is returned so daemon fail-safe logic can

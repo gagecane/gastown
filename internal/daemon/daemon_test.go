@@ -1013,6 +1013,77 @@ exit 1
 	}
 }
 
+// TestIsRigOperational_IDCollision_LogsOnceAndOperational verifies the gu-feg02
+// fix: when the rig identity bead ID exists in both the issues and wisps tables
+// (an ambiguous lookup), the daemon must treat the rig as OPERATIONAL — not
+// silently park it — and emit the warning only once per daemon run rather than
+// on every heartbeat. Pre-fix, this collision fell through the transient-error
+// branch to "assuming not operational", parking healthy rigs and flooding
+// daemon.log with 20K+ warnings.
+func TestIsRigOperational_IDCollision_LogsOnceAndOperational(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	rigName := "collisionrig"
+	rigPath := filepath.Join(tmpDir, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(rigPath, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"beads": {"prefix": "cr"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigsJSON := `{"version":1,"rigs":{"collisionrig":{"beads":{"prefix":"cr"}}}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub bd so Show() reports the canonical collision error, exercising the
+	// beads.ErrIDCollision path.
+	stubDir := t.TempDir()
+	stubScript := `#!/bin/sh
+cat >&2 <<'EOT'
+Error: id "cr-rig-collisionrig" exists in both issues and wisps
+EOT
+exit 1
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: tmpDir},
+		logger: log.New(&logBuf, "", 0),
+	}
+
+	for i := 0; i < 10; i++ {
+		operational, reason := d.isRigOperational(rigName)
+		if !operational {
+			t.Errorf("heartbeat %d: expected operational=true for rig with ID collision, got false (reason=%q)", i, reason)
+		}
+	}
+
+	logs := logBuf.String()
+	collisionCount := strings.Count(logs, "identity bead ID collision")
+	if collisionCount != 1 {
+		t.Errorf("expected exactly one 'identity bead ID collision' warning (log-once), got %d; log output:\n%s", collisionCount, logs)
+	}
+	// The collision must NOT be treated as a transient Dolt failure.
+	if strings.Contains(logs, "Dolt unavailable") {
+		t.Errorf("ID collision should not produce 'Dolt unavailable' warning (that's for transient errors); log output:\n%s", logs)
+	}
+	// The pre-fix warning format must not recur.
+	if strings.Contains(logs, "no recent cache; assuming not operational") {
+		t.Errorf("ID collision should not produce the 'assuming not operational' fail-safe spam; log output:\n%s", logs)
+	}
+}
+
 // TestIsRigOperational_DoltDown_StillFailsSafe guards against a regression
 // where relaxing the missing-bead path accidentally also relaxed the
 // transient-Dolt-failure path. A rig whose identity bead cannot be queried

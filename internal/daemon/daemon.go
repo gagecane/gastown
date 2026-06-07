@@ -159,6 +159,17 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	missingRigBeadLogged map[string]bool
 
+	// collisionRigBeadLogged tracks which rig names have already had their
+	// "rig identity bead ID collision" warning emitted for this daemon run.
+	// A collision (the rig bead ID exists in both the issues and wisps tables)
+	// is a persistent data state that made isRigOperational read the rig as
+	// "not operational" every heartbeat, silently parking healthy rigs and
+	// flooding daemon.log (20K+ warnings observed across talontriage,
+	// ralphconfig, agentforge, ralph). We now treat collisions as operational
+	// and log once. See gu-feg02.
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	collisionRigBeadLogged map[string]bool
+
 	// operatorStoppedRefineryLogged tracks which rig names have already
 	// emitted the "refinery stopped by operator, skipping auto-restart"
 	// message for the current stopped episode. Cleared when a rig is
@@ -2679,6 +2690,28 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 			// the wisp layer is authoritative for parked while the bead
 			// is missing, and we don't want a future Dolt outage to lock
 			// in stale not-blocked state via the cache.
+		} else if errors.Is(err, beads.ErrIDCollision) {
+			// The rig identity bead ID exists in BOTH the issues and wisps
+			// tables, so bd cannot disambiguate the lookup. This is a
+			// persistent data state (a wisp shadowing the real issue ID), not
+			// a transient Dolt failure — retrying won't resolve it, and an
+			// ambiguous lookup says nothing about the bead's status labels. So
+			// it must NOT be read as "parked/not operational": doing so
+			// silently parks a healthy rig every heartbeat and floods
+			// daemon.log (gu-feg02). The wisp layer (authoritative for parked)
+			// was already checked in checkParkedOrDocked before the colliding
+			// bead lookup, so a wisp-parked rig is still respected. Treat as
+			// operational and log ONCE. Do NOT cache "not-blocked" — the
+			// underlying duplicate should be de-duplicated operationally, and
+			// we don't want a future outage to lock in stale state via cache.
+			if !d.collisionRigBeadLogged[rigName] {
+				if d.collisionRigBeadLogged == nil {
+					d.collisionRigBeadLogged = make(map[string]bool)
+				}
+				d.collisionRigBeadLogged[rigName] = true
+				d.logger.Printf("Warning: rig %s identity bead ID collision (exists in both issues and wisps) — docked/parked state cannot be read (treating as operational; de-duplicate the rig bead to resolve)", rigName)
+			}
+			// Fall through to auto_restart check below.
 		} else {
 			// Transient error class (Dolt unavailable, CGO hiccup, bd binary
 			// build mismatch, network blip). Before falling back to the
