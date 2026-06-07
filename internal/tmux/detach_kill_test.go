@@ -77,11 +77,12 @@ func TestDetachedKillSession(t *testing.T) {
 	// sleeps 1s then runs `tmux kill-session`; under CI load the spawn +
 	// scheduling slack can exceed a fixed-duration sleep, producing flakes.
 	// Use a generous polling deadline instead — we still verify the kill
-	// happens, just without racing on a tight timing assumption. 60s is
+	// happens, just without racing on a tight timing assumption. 120s is
 	// chosen to absorb pathological scheduler latency under full
-	// `go test ./...` pressure (gu-zyxl); a real regression where the
-	// subprocess never spawns or never issues the kill still fails fast.
-	if waitForSessionGone(t, tm, sessionName, 60*time.Second) {
+	// `go test ./...` pressure (gu-zyxl, gu-49zso — observed a 60.07s
+	// overrun, just past the old 60s deadline); a real regression where the
+	// subprocess never spawns or never issues the kill still fails.
+	if waitForSessionGone(t, tm, sessionName, 120*time.Second) {
 		return
 	}
 	dumpDetachedKillLog(t, logPath)
@@ -90,9 +91,19 @@ func TestDetachedKillSession(t *testing.T) {
 
 // waitForSessionGone polls HasSession until the session is absent or the
 // deadline elapses. Returns true if the session disappeared.
+//
+// The poll interval backs off from 50ms to a 1s cap. Each poll spawns a
+// `tmux has-session` subprocess; a fixed tight interval over a multi-second
+// wait would spawn hundreds of them, adding to the same `go test ./...`
+// contention storm that starves the detached killer in the first place
+// (gu-49zso). Backoff keeps the happy path fast — the kill lands ~1s in, so
+// the early tight polls still catch it promptly — while throttling spawns
+// during a pathologically long wait.
 func waitForSessionGone(t *testing.T, tm *Tmux, name string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	interval := 50 * time.Millisecond
+	const maxInterval = 1 * time.Second
 	for time.Now().Before(deadline) {
 		has, err := tm.HasSession(name)
 		if err != nil {
@@ -101,7 +112,13 @@ func waitForSessionGone(t *testing.T, tm *Tmux, name string, timeout time.Durati
 		if !has {
 			return true
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(interval)
+		if interval < maxInterval {
+			interval *= 2
+			if interval > maxInterval {
+				interval = maxInterval
+			}
+		}
 	}
 	return false
 }
@@ -136,7 +153,7 @@ func TestDetachedKillSessionWithProcesses(t *testing.T) {
 
 	// Poll for the detached subprocess to kill the session (see comment in
 	// TestDetachedKillSession — fixed sleeps race under CI load).
-	if waitForSessionGone(t, tm, sessionName, 60*time.Second) {
+	if waitForSessionGone(t, tm, sessionName, 120*time.Second) {
 		return
 	}
 	dumpDetachedKillLog(t, logPath)
