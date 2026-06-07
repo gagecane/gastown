@@ -61,7 +61,7 @@ func TestPRFeedbackPatrolDispatchStepContainsLabelKeyedDispatch(t *testing.T) {
 	checks := []string{
 		"gt:auto-test-pr",
 		"auto_test_pr_revision_routing",
-		"mol-polecat-work-test-improver",
+		"mol-auto-test-pr-pipeline",
 		"mode=revise",
 		"Label-Keyed Dispatch",
 	}

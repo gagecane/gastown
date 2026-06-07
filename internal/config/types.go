@@ -1247,7 +1247,7 @@ type FeatureFlagsConfig struct {
 	// AutoTestPRRevisionRouting enables label-keyed dispatch in
 	// mol-pr-feedback-patrol. When true AND a PR carries the
 	// gt:auto-test-pr label, the patrol dispatches
-	// mol-polecat-work-test-improver in mode=revise instead of the
+	// mol-auto-test-pr-pipeline in mode=revise instead of the
 	// generic review-feedback handler.
 	// Default: false (Phase 2 task 19; flip after integration tests pass).
 	AutoTestPRRevisionRouting bool `json:"auto_test_pr_revision_routing"`

@@ -257,13 +257,18 @@ For each finding in /tmp/patrol-findings.txt, create a work bead and sling a pol
 
 Before generic dispatch, check whether the PR carries the `gt:auto-test-pr`
 label AND the rig's feature flag `feature_flags.auto_test_pr_revision_routing`
-is true. When both conditions hold, dispatch `mol-polecat-work-test-improver`
+is true. When both conditions hold, dispatch `mol-auto-test-pr-pipeline`
 in `mode=revise` instead of the generic review-feedback handler.
 
 **Label-keyed routing decision tree:**
-1. PR has label `gt:auto-test-pr` AND feature flag enabled → dispatch via
-   `gt auto-test-pr revise --mr=<mr-bead>` (which files a sling-context
-   with formula=mol-polecat-work-test-improver, mode=revise).
+1. PR has label `gt:auto-test-pr` AND feature flag enabled → dispatch the
+   `mol-auto-test-pr-pipeline` formula in `mode=revise` via
+   `gt formula run mol-auto-test-pr-pipeline --rig <rig> --set mode=revise --set mr_bead=<mr-bead>`.
+   This is a formula-first dispatch — there is no `gt auto-test-pr` CLI
+   (the legacy command tree was removed in the simplified v1 design;
+   `mol-polecat-work-test-improver` was superseded by
+   `mol-auto-test-pr-pipeline`, the decomposed pipeline that owns the
+   revise run). See `.designs/auto-test-pr/simplified-v1.md`.
 2. PR does NOT have `gt:auto-test-pr` label OR feature flag is disabled →
    fall through to generic dispatch below (existing behavior preserved).
 
@@ -296,16 +301,20 @@ while IFS=: read -r TYPE PR_NUM PR_URL PR_TITLE EXTRA; do
   # --- Label-keyed dispatch: gt:auto-test-pr routing ---
   # For review-feedback findings, check if this PR carries the auto-test-pr
   # label. If so (and the feature flag is enabled), route to the revision
-  # formula instead of the generic handler.
+  # pipeline instead of the generic handler. This is a formula-first
+  # dispatch: there is no `gt auto-test-pr` CLI (removed in the simplified
+  # v1 design); the revise run is owned by the mol-auto-test-pr-pipeline
+  # formula in mode=revise.
   if [ "$TYPE" = "review-feedback" ] && [ "$AUTO_TEST_PR_ROUTING" = "true" ]; then
     # Check if the PR has the gt:auto-test-pr label
     PR_LABELS=$(gh pr view "$PR_NUM" --repo {{repo}} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo "")
     if echo "$PR_LABELS" | grep -q "gt:auto-test-pr"; then
-      # Find the MR bead for this PR to pass to the revise command
+      # Find the MR bead for this PR to pass to the revise pipeline
       MR_BEAD=$(bd list --label "gt:auto-test-pr" --label "pr-num-${PR_NUM}" --status open --format id 2>/dev/null | head -1)
       if [ -n "$MR_BEAD" ]; then
-        echo "Label-keyed dispatch: PR #${PR_NUM} has gt:auto-test-pr → routing to mol-polecat-work-test-improver (mode=revise)"
-        gt auto-test-pr revise --mr="$MR_BEAD" 2>/dev/null || echo "Warning: revise dispatch failed for PR #${PR_NUM}"
+        echo "Label-keyed dispatch: PR #${PR_NUM} has gt:auto-test-pr → routing to mol-auto-test-pr-pipeline (mode=revise)"
+        gt formula run mol-auto-test-pr-pipeline --rig {{rig}} --set mode=revise --set mr_bead="$MR_BEAD" 2>/dev/null \
+          || echo "Warning: revise dispatch failed for PR #${PR_NUM}"
         continue
       fi
       # No MR bead found — fall through to generic dispatch
@@ -369,7 +378,7 @@ done < /tmp/patrol-findings.txt
 ```
 
 **Exit criteria:** All actionable PRs have either a newly created+slung bead, were
-routed to mol-polecat-work-test-improver via label-keyed dispatch, or were
+routed to mol-auto-test-pr-pipeline via label-keyed dispatch, or were
 skipped because an open bead already exists.
 """
 
