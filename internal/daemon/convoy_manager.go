@@ -87,6 +87,15 @@ const (
 	// still get auto-closed even when the event-poll misses the close events.
 	// At 60s scan interval, 10 scans = ~10 minutes.
 	completionBackstopInterval = 10
+
+	// feedLogThrottleInterval throttles the repeating per-scan feeder "skip"
+	// log lines (in-feed-cooldown and no-dispatchable-issues). The line is
+	// emitted on the first occurrence and then every Nth repeat, so a
+	// single-child convoy whose child is being worked by a live agent no
+	// longer logs every ~60s scan indefinitely. At a 60s scan interval,
+	// 30 = roughly one line every 30 minutes per quiescent convoy. The
+	// dispatch behavior is unchanged; only log volume is reduced (gu-5d3a3).
+	feedLogThrottleInterval = 30
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -221,6 +230,19 @@ type ConvoyManager struct {
 	// every scan cycle. Cleared on successful dispatch so a future failure
 	// (if the issue is re-queued) is escalated again. Key: issueID. (gt-3798)
 	seenSlingErrors sync.Map // map[string]bool
+
+	// feedSkipLog throttles the per-scan "skip" log lines emitted when a
+	// convoy's only ready child is non-dispatchable (in feed cooldown) and
+	// thus no issue can be fed. The dispatch logic itself is already correctly
+	// throttled (the gs-skv churn backoff), but these informational skip lines
+	// re-fired every ~60s scan for every single-child convoy whose child was
+	// hooked/in_progress to a live agent — dominating daemon.log (gu-5d3a3:
+	// ~44K "no dispatchable issues" + ~32K "in feed cooldown" lines). The
+	// counter logs the first occurrence then every feedLogThrottleInterval-th,
+	// mirroring the zombie re-detection dedup (gu-50qv). Keys are prefixed
+	// ("cd:"+issueID for cooldown skips, "nd:"+convoyID for the per-convoy
+	// no-dispatchable line) and reset when the convoy makes progress.
+	feedSkipLog sync.Map // map[string]int
 
 	// stableCandidates tracks per-convoy stability for completion candidates
 	// (tracked>0, ready=0). Candidates that remain unchanged for
@@ -870,9 +892,16 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 		// fails or the new polecat dies fast. Skip this issue (try the next
 		// ready one) if we slung it within feedDispatchCooldown.
 		if m.inFeedCooldown(issueID) {
-			m.logger("Convoy %s: %s in feed cooldown, skipping", c.ID, issueID)
+			// Throttle this line: a single-child convoy whose child is being
+			// worked by a live agent re-enters cooldown every scan, so logging
+			// it per-cycle dominated daemon.log (gu-5d3a3). Log first + every
+			// Nth repeat.
+			if emit, count := m.shouldLogFeedSkip("cd:" + issueID); emit {
+				m.logger("Convoy %s: %s in feed cooldown, skipping (×%d)", c.ID, issueID, count)
+			}
 			continue
 		}
+		m.resetFeedSkipLog("cd:" + issueID)
 
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
 
@@ -993,10 +1022,19 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 		// again (refused/escalated, never closing) backs off toward
 		// feedCooldownCap instead of being re-fed every 5 min (gs-skv).
 		m.recordFeedChurn(issueID)
+		// Convoy made progress this scan — reset the per-convoy "no
+		// dispatchable" throttle so a future stall logs immediately (gu-5d3a3).
+		m.resetFeedSkipLog("nd:" + c.ID)
 		return slingFailures // Successfully dispatched one issue
 	}
 
-	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+	// Throttle: a single-child convoy whose only child is non-dispatchable
+	// (in cooldown / hooked to a live agent) reaches this line every scan,
+	// producing the bulk of daemon.log volume (gu-5d3a3). Log first + every
+	// Nth repeat per convoy.
+	if emit, count := m.shouldLogFeedSkip("nd:" + c.ID); emit {
+		m.logger("Convoy %s: no dispatchable issues (all %d skipped) (×%d)", c.ID, len(c.ReadyIssues), count)
+	}
 	return slingFailures
 }
 
@@ -1268,6 +1306,30 @@ func (m *ConvoyManager) inFeedCooldown(issueID string) bool {
 // within the effective cooldown skip it. See gu-iygf.
 func (m *ConvoyManager) recordFeedAttempt(issueID string) {
 	m.lastFeedAttempt.Store(issueID, m.now())
+}
+
+// shouldLogFeedSkip reports whether a repeating feeder "skip" log line keyed
+// by `key` should be emitted this scan. It returns true on the first
+// occurrence and then once every feedLogThrottleInterval repeats, so a
+// quiescent single-child convoy stops re-logging the same skip every scan
+// (gu-5d3a3). The repeat count is returned so callers can surface it. The
+// counter is reset via resetFeedSkipLog once the convoy makes progress.
+func (m *ConvoyManager) shouldLogFeedSkip(key string) (emit bool, count int) {
+	var n int
+	if v, ok := m.feedSkipLog.Load(key); ok {
+		if c, ok := v.(int); ok {
+			n = c
+		}
+	}
+	n++
+	m.feedSkipLog.Store(key, n)
+	return n == 1 || n%feedLogThrottleInterval == 0, n
+}
+
+// resetFeedSkipLog clears the throttle counter for key so the next skip after
+// progress logs immediately rather than being suppressed by a stale count.
+func (m *ConvoyManager) resetFeedSkipLog(key string) {
+	m.feedSkipLog.Delete(key)
 }
 
 // recordFeedChurn advances issueID's escalate-churn streak (gs-skv). It is

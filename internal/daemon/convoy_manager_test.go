@@ -4135,3 +4135,101 @@ func TestStrandedSentinel_NoStore_ReturnsFalse(t *testing.T) {
 		t.Fatal("strandedSentinel should return false when no store is available")
 	}
 }
+
+// TestFeedFirstReady_SkipLogsAreThrottled verifies that a single-child convoy
+// whose only child stays in feed cooldown across many scans does NOT emit the
+// "in feed cooldown" / "no dispatchable issues" lines every scan, but instead
+// logs the first occurrence then only every feedLogThrottleInterval-th repeat.
+// This is the gu-5d3a3 fix: those two lines previously dominated daemon.log.
+func TestFeedFirstReady_SkipLogsAreThrottled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+	// gt sling always succeeds (not exercised after the first dispatch — the
+	// cooldown suppresses subsequent slings).
+	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var cooldownLines, noDispatchLines int
+	logger := func(format string, args ...interface{}) {
+		s := fmt.Sprintf(format, args...)
+		if strings.Contains(s, "in feed cooldown") {
+			cooldownLines++
+		}
+		if strings.Contains(s, "no dispatchable issues") {
+			noDispatchLines++
+		}
+	}
+
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Single Child",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-child1"},
+	}
+
+	// First scan dispatches the child. Subsequent scans hit the cooldown and
+	// reach both throttled log lines. Run enough scans to cross the throttle
+	// interval at least twice.
+	const scans = 2*feedLogThrottleInterval + 5
+	for i := 0; i < scans; i++ {
+		m.feedFirstReady(c)
+	}
+
+	// After the first dispatch there are scans-1 cooldown skips. With first +
+	// every-Nth-repeat throttling, the count must be far below scans-1.
+	cooldownSkips := scans - 1
+	maxExpected := 1 + cooldownSkips/feedLogThrottleInterval + 1 // generous upper bound
+	if cooldownLines == 0 {
+		t.Errorf("expected at least one 'in feed cooldown' line, got 0")
+	}
+	if cooldownLines > maxExpected {
+		t.Errorf("'in feed cooldown' not throttled: got %d lines over %d skips (want ≤ %d)",
+			cooldownLines, cooldownSkips, maxExpected)
+	}
+	if noDispatchLines == 0 {
+		t.Errorf("expected at least one 'no dispatchable issues' line, got 0")
+	}
+	if noDispatchLines > maxExpected {
+		t.Errorf("'no dispatchable issues' not throttled: got %d lines over %d scans (want ≤ %d)",
+			noDispatchLines, scans, maxExpected)
+	}
+}
+
+// TestShouldLogFeedSkip_FirstAndEveryNth verifies the throttle helper emits on
+// the first call and then once per feedLogThrottleInterval, and that reset
+// makes the next call emit immediately again.
+func TestShouldLogFeedSkip_FirstAndEveryNth(t *testing.T) {
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	emits := 0
+	for i := 1; i <= feedLogThrottleInterval; i++ {
+		if emit, _ := m.shouldLogFeedSkip("k"); emit {
+			emits++
+		}
+	}
+	// Calls 1 (first) and feedLogThrottleInterval (Nth) emit → 2.
+	if emits != 2 {
+		t.Errorf("expected 2 emits over %d calls, got %d", feedLogThrottleInterval, emits)
+	}
+
+	// Reset → next call emits immediately (count restarts at 1).
+	m.resetFeedSkipLog("k")
+	if emit, count := m.shouldLogFeedSkip("k"); !emit || count != 1 {
+		t.Errorf("after reset expected emit=true count=1, got emit=%v count=%d", emit, count)
+	}
+}
