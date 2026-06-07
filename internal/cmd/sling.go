@@ -836,6 +836,20 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID, info.Title, beadID)
 	}
 
+	// Awaiting-refinery-merge guard (gu-ea25u). A source bead carrying
+	// awaiting_refinery_merge already has a submitted MR that the refinery has
+	// not yet merged to origin/main; the bead stays open only so the refinery's
+	// PostMerge path can close it with the real commit_sha. Re-slinging it
+	// spawns a fresh polecat that finds the work complete, declines with no
+	// commits, and defers — a wasted slot plus host/Dolt load (fury×2, pipboy
+	// in one day). The refinery clears the label on merge (or the reaper for a
+	// proven-merged orphan), which is the correct re-dispatch path. Not bypassed
+	// by --force — the work is genuinely in flight, not a dispatch preference.
+	if isAwaitingMergeBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is awaiting refinery merge (label awaiting_refinery_merge) — its MR is submitted and in the merge queue; the refinery will close it on merge",
+			beadID, info.Title)
+	}
+
 	// Open-children guard (gu-fs88). A bead that is the parent of any
 	// non-closed child is a container, not a work item — the children
 	// track the actual work. Hooking such a bead to a polecat leaves the

@@ -223,6 +223,21 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Title)
 	}
 
+	// Awaiting-refinery-merge guard (gu-ea25u). A source bead carrying the
+	// awaiting_refinery_merge label already has a submitted MR that the
+	// refinery has not yet merged to origin/main — the work is done and the
+	// bead stays open only so the refinery's PostMerge path can close it with
+	// the real commit_sha. Creating a sling context for it spawns a fresh
+	// polecat that finds the work complete, declines with no commits, and
+	// defers — a wasted slot plus host/Dolt load (fury×2, pipboy in one day).
+	// The label is cleared by the refinery on merge (or the reaper for a
+	// proven-merged orphan), which is the correct re-dispatch path; not
+	// bypassed by --force.
+	if isAwaitingMergeBeadInfo(info) {
+		return fmt.Errorf("bead %s is awaiting refinery merge (label %s): %q — refusing to schedule. Its MR is submitted and in the merge queue; the refinery will close it on merge",
+			beadID, "awaiting_refinery_merge", info.Title)
+	}
+
 	// Reference/tripwire guard (hq-9jeyo). A bead labeled do-not-dispatch /
 	// pinned, or issue_type=reference, is a permanent live safety gate, never
 	// work. Refusing here prevents the sling-context AND the auto-convoy from

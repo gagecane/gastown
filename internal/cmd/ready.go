@@ -510,6 +510,22 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
+		// Filter beads already in flight to the refinery (gu-ea25u). A source
+		// bead carrying the awaiting_refinery_merge label has a submitted MR
+		// that the refinery has not yet merged — the work is done and the bead
+		// stays open only so the refinery's PostMerge path can close it with the
+		// real on-main commit_sha. bd ready does NOT exclude these, so they
+		// surfaced as phantom ready work and the auto-dispatcher re-slung them
+		// every cycle (fury×2, pipboy in one day): a fresh polecat spawns, finds
+		// the work complete, declines with no commits, and defers — wasted slot
+		// plus host/Dolt load. Sharing dispatch.IsAwaitingMergeBeadInfo with the
+		// sling guards keeps the readiness filter and the dispatch guard aligned.
+		if dispatch.IsAwaitingMergeBeadInfo(&dispatch.BeadInfo{
+			Labels: issue.Labels,
+		}) {
+			continue
+		}
+
 		// Filter beads carrying the mayor-only / no-polecat labels (gu-bk6e).
 		// These mark work that structurally requires mayor-scope or human
 		// intervention (town root edits, origin config, cross-rig). Without

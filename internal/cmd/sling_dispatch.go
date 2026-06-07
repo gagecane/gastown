@@ -243,6 +243,20 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Title, params.BeadID)
 	}
 
+	// Awaiting-refinery-merge guard (gu-ea25u). Batch sling and the deferred
+	// scheduler funnel through executeSling; without this, a source bead that
+	// already submitted an MR (label awaiting_refinery_merge, kept open until
+	// the refinery's PostMerge closes it) is re-dispatched every cycle. The
+	// fresh polecat finds the work complete, declines with no commits, and
+	// defers — wasted slot plus host/Dolt load (fury×2, pipboy in one day). The
+	// refinery clears the label on merge (or the reaper for a proven-merged
+	// orphan), which is the correct re-dispatch path; not bypassed by --force.
+	if isAwaitingMergeBeadInfo(info) {
+		result.ErrMsg = "awaiting-refinery-merge"
+		return result, fmt.Errorf("bead %s is awaiting refinery merge (label awaiting_refinery_merge): %q — its MR is submitted and in the merge queue; the refinery will close it on merge, not a fresh polecat",
+			params.BeadID, info.Title)
+	}
+
 	// Reference/tripwire guard (gs-9ct, follow-up to hq-9jeyo). A bead labeled
 	// do-not-dispatch / pinned, or issue_type=reference, is a permanent live
 	// safety gate, never work. hq-9jeyo added this guard to scheduleBead (the

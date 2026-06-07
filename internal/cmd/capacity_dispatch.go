@@ -1519,6 +1519,21 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if beads.HasMayorOnlyLabel(info.Labels) {
 		return false
 	}
+	// Skip beads already in flight to the refinery (gu-ea25u). A source bead
+	// carrying awaiting_refinery_merge has a submitted MR that the refinery has
+	// not yet merged to origin/main; it stays open ONLY so the refinery's
+	// PostMerge path can close it with the real commit_sha. The auto-dispatcher
+	// did NOT check this, so it re-selected the bead every cycle, wrapped it in
+	// a fresh sling-context, and handed it to a polecat that found the work
+	// complete, declined with no commits, and deferred — a wasted slot plus
+	// host/Dolt load (fury×2, pipboy in one day). Filtering here keeps the bead
+	// out of the candidate set entirely so it never reaches dispatch (same
+	// no-churn approach as the mayor-only guard above). The refinery clears the
+	// label on merge (or the reaper for a proven-merged orphan), which re-opens
+	// the bead for dispatch only if there is genuinely more work to do.
+	if hasLabel(info.Labels, labelAwaitingRefineryMerge) {
+		return false
+	}
 	// Skip beads flagged no-auto-dispatch (gs-b2a). Unlike the permanent
 	// tripwire labels above, this only blocks the AUTOMATIC scheduler path: a
 	// human may still dispatch the bead via `gt sling`, and `gt done` may still
@@ -1569,6 +1584,12 @@ const (
 	// while still allowing manual `gt sling` and `gt done` (gs-b2a). Unlike the
 	// tripwire labels above it is checked only in the dispatch readiness gate.
 	labelNoAutoDispatch = "no-auto-dispatch"
+	// labelAwaitingRefineryMerge marks a source bead whose polecat already
+	// submitted an MR that the refinery has not yet merged to origin/main
+	// (completion.MarkAwaitingRefineryMerge, gu-treq). The bead stays open for
+	// the refinery's PostMerge close; the dispatch readiness gate skips it so
+	// the work-in-flight bead is not re-slung to a fresh polecat (gu-ea25u).
+	labelAwaitingRefineryMerge = "awaiting_refinery_merge"
 )
 
 // isNonDispatchableLabelSet is the canonical reference/tripwire test on a raw

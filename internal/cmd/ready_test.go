@@ -352,6 +352,25 @@ func TestFilterIdentityBeads(t *testing.T) {
 			input:    &beads.Issue{ID: "gu-plural", Title: "Normal work", Type: "task", Labels: []string{"phase:epics"}},
 			filtered: false,
 		},
+		// gu-ea25u: a source bead with an MR in flight (awaiting_refinery_merge)
+		// is work-already-done, not ready work — bd ready does not exclude it, so
+		// the auto-dispatcher re-slung it every cycle. filterIdentityBeads now
+		// drops it via dispatch.IsAwaitingMergeBeadInfo.
+		{
+			name:     "awaiting_refinery_merge label filtered",
+			input:    &beads.Issue{ID: "gu-inflight", Title: "Fix dispatcher", Type: "bug", Labels: []string{"awaiting_refinery_merge"}},
+			filtered: true,
+		},
+		{
+			name:     "awaiting_refinery_merge among other labels filtered",
+			input:    &beads.Issue{ID: "gu-inflight2", Title: "Fix dispatcher", Type: "bug", Labels: []string{"bug", "awaiting_refinery_merge"}},
+			filtered: true,
+		},
+		{
+			name:     "awaiting_refinery_recovery does NOT filter here",
+			input:    &beads.Issue{ID: "gu-recov", Title: "Normal work", Type: "task", Labels: []string{"awaiting_refinery_recovery"}},
+			filtered: false,
+		},
 	}
 
 	for _, tt := range tests {

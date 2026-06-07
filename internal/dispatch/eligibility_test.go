@@ -521,6 +521,40 @@ func TestIsReferenceTripwireBeadInfo(t *testing.T) {
 	}
 }
 
+// TestIsAwaitingMergeBeadInfo verifies the gu-ea25u guard: a source bead
+// carrying the awaiting_refinery_merge label has an MR in flight and must not
+// be re-dispatched to a fresh polecat.
+func TestIsAwaitingMergeBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *BeadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &BeadInfo{}, false},
+
+		// Positive: the in-flight label, even alongside an open status (the
+		// bead stays open until the refinery's PostMerge closes it).
+		{"awaiting_refinery_merge label", &BeadInfo{Title: "Fix bug", Status: "in_progress", Labels: []string{"awaiting_refinery_merge"}}, true},
+		{"label among others", &BeadInfo{Title: "Fix bug", Status: "open", Labels: []string{"bug", "awaiting_refinery_merge"}}, true},
+
+		// Negative: ordinary work beads and near-miss labels.
+		{"plain task", &BeadInfo{Title: "Fix bug", Status: "open", Labels: []string{"bug"}}, false},
+		{"no labels", &BeadInfo{Title: "Fix bug", Status: "open"}, false},
+		// awaiting_refinery_recovery is a DIFFERENT label (dead-refinery/no-MR
+		// case) and must not match this guard.
+		{"awaiting_refinery_recovery is not a match", &BeadInfo{Title: "Fix bug", Status: "open", Labels: []string{"awaiting_refinery_recovery"}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsAwaitingMergeBeadInfo(tt.info); got != tt.want {
+				t.Errorf("IsAwaitingMergeBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsSlingContextBeadInfo verifies the gu-hfr3 guard that prevents a
 // sling-context wrapper from being re-scheduled (which would nest wrappers).
 func TestIsSlingContextBeadInfo(t *testing.T) {

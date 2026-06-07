@@ -103,6 +103,60 @@ exit 0
 	}
 }
 
+// TestExecuteSling_AwaitingRefineryMergeBead verifies the gu-ea25u guard:
+// executeSling rejects a source bead carrying the awaiting_refinery_merge label
+// (MR already submitted, refinery has not yet merged). Batch sling and the
+// deferred scheduler funnel through executeSling, so this is where the
+// re-dispatch loop (fury×2, pipboy) was caught. --force must not bypass it —
+// the work is genuinely in flight, not a dispatch preference.
+func TestExecuteSling_AwaitingRefineryMergeBead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	bdShow := `#!/bin/sh
+case "$1" in
+  show)
+    echo '[{"title":"Fix dispatcher re-dispatch","status":"in_progress","assignee":"","description":"","labels":["bug","awaiting_refinery_merge"]}]'
+    ;;
+esac
+exit 0
+`
+	for _, force := range []bool{false, true} {
+		name := "no-force"
+		if force {
+			name = "force does not bypass"
+		}
+		t.Run(name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			binDir := filepath.Join(townRoot, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeBDStub(t, binDir, bdShow, "")
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			result, err := executeSling(SlingParams{
+				BeadID:   "gu-inflight",
+				RigName:  "testrig",
+				TownRoot: townRoot,
+				Force:    force,
+			})
+			if err == nil {
+				t.Fatal("expected error slinging an awaiting_refinery_merge bead, got nil")
+			}
+			if result.ErrMsg != "awaiting-refinery-merge" {
+				t.Errorf("ErrMsg = %q, want awaiting-refinery-merge", result.ErrMsg)
+			}
+			if !strings.Contains(err.Error(), "awaiting_refinery_merge") {
+				t.Errorf("error should name the label: %v", err)
+			}
+		})
+	}
+}
+
 // TestExecuteSling_RealTaskPassesTripwireGuard is the negative case: an ordinary
 // task with unrelated labels must not be mis-classified as a tripwire.
 func TestExecuteSling_RealTaskPassesTripwireGuard(t *testing.T) {

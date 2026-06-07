@@ -221,6 +221,12 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 		{"mayor-only label", beadStatusInfo{Status: "open", Labels: []string{"mayor-only"}}, false},
 		{"no-polecat label", beadStatusInfo{Status: "open", Labels: []string{"no-polecat"}}, false},
 		{"human-only label", beadStatusInfo{Status: "open", Labels: []string{"human-only"}}, false},
+		// gu-ea25u: a source bead with an MR in flight (awaiting_refinery_merge)
+		// must not be re-selected as a dispatch candidate. It stays open only for
+		// the refinery's PostMerge close.
+		{"awaiting_refinery_merge label", beadStatusInfo{Status: "open", Labels: []string{"awaiting_refinery_merge"}}, false},
+		{"awaiting_refinery_merge among others", beadStatusInfo{Status: "open", Labels: []string{"bug", "awaiting_refinery_merge"}}, false},
+		{"awaiting_refinery_recovery is NOT filtered here", beadStatusInfo{Status: "open", Labels: []string{"awaiting_refinery_recovery"}}, true},
 		{"normal work with unrelated label still ready", beadStatusInfo{Status: "open", Labels: []string{"gt:rig"}}, true},
 	}
 	for _, tt := range tests {

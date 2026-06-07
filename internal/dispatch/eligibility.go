@@ -23,6 +23,11 @@ const (
 	issueTypeReference = "reference"
 	labelDoNotDispatch = "do-not-dispatch"
 	labelPinned        = "pinned"
+	// labelAwaitingRefineryMerge marks a source bead whose polecat already
+	// submitted an MR that the refinery has not yet merged to origin/main.
+	// Mirrors completion.awaitingRefineryMergeLabel (kept local so dispatch
+	// does not depend on internal/polecat/completion).
+	labelAwaitingRefineryMerge = "awaiting_refinery_merge"
 )
 
 // BeadInfo holds the status, assignee, and metadata for a bead — the compact
@@ -200,6 +205,29 @@ func IsContainerBeadInfo(info *BeadInfo) bool {
 		return true
 	}
 	return hasLabel(info.Labels, "gt:epic") || hasLabel(info.Labels, "gt:convoy")
+}
+
+// IsAwaitingMergeBeadInfo reports whether the bead is work already in flight to
+// the refinery — i.e. it carries the awaiting_refinery_merge label. Such a bead
+// has a submitted MR that the refinery has not yet merged to origin/main; the
+// work is done and the bead stays open only so the refinery's PostMerge path can
+// close it with the real on-main commit_sha (completion.MarkAwaitingRefineryMerge,
+// gu-treq). It is NOT dispatchable: re-slinging it spawns a fresh polecat that
+// finds the work complete, declines with no commits, and defers — a wasted
+// session plus host/Dolt load.
+//
+// gu-ea25u: `bd ready` does not exclude beads carrying this label, so a source
+// bead that is in_progress + awaiting_refinery_merge surfaces as phantom ready
+// work and the auto-dispatcher re-slings it every cycle until the refinery
+// merges (observed 3+ times in one day: fury×2, pipboy). Both `gt ready` and the
+// sling guards now share this predicate so the readiness filter and the dispatch
+// guard cannot drift — the single-predicate approach gu-9j93s established for the
+// epic/convoy container gate.
+func IsAwaitingMergeBeadInfo(info *BeadInfo) bool {
+	if info == nil {
+		return false
+	}
+	return hasLabel(info.Labels, labelAwaitingRefineryMerge)
 }
 
 // IsMayorOnlyBeadInfo reports whether the bead carries the mayor-only or
