@@ -241,20 +241,25 @@ func (r *Recorder) CountRunsSince(pluginName string, since string) (int, error) 
 }
 
 // CooldownSatisfied reports whether a plugin's cooldown gate should suppress a
-// new run. It distinguishes a real completion from a bare dispatch record:
+// new run. It distinguishes a real completion from a bare dispatch record or a
+// transient failure:
 //
-//   - A TERMINAL run (any result other than "inflight" — success, failure,
-//     skipped) within the cooldown window satisfies the full cooldown. This
-//     matches the historical CountRunsSince semantics for completed runs.
+//   - A COMPLETED run ("success" or "skipped") within the cooldown window
+//     satisfies the full cooldown — the work actually finished (or was
+//     deliberately skipped), so there is nothing to retry.
 //   - An IN-FLIGHT record ("inflight", written when work is handed to a
-//     dog before it executes) suppresses re-dispatch only within the short
-//     `grace` window. After grace elapses with no terminal record, the gate
-//     re-opens so the next heartbeat can re-dispatch / run in-process.
+//     dog before it executes) or a FAILED run ("failure") suppresses
+//     re-dispatch only within the short `grace` window. After grace elapses
+//     with no completed record, the gate re-opens so the next heartbeat can
+//     re-dispatch / run in-process — i.e. a transient failure is RETRIED, not
+//     left to burn the full cooldown.
 //
-// This closes gu-50nbo: a dog that dies after dispatch but before running
-// run.sh no longer re-arms the full cooldown, so backup freshness can no longer
-// drift unbounded. It preserves the anti-storm guarantee (055747cd) because a
-// freshly-dispatched plugin is still suppressed for the in-flight grace window.
+// This closes gu-50nbo (a dog that dies after dispatch no longer re-arms the
+// full cooldown, so backup freshness can no longer drift unbounded) and
+// gu-oj3nl (a single transient 'sling failed' no longer silently disables a
+// weekly cooldown-gated plugin for its full window). It preserves the anti-storm
+// guarantee (055747cd) because a freshly-dispatched or just-failed plugin is
+// still suppressed for the grace window.
 //
 // grace must be <= cooldown for dispatch records to fall within the query
 // window; callers derive grace from the plugin's execution timeout.
@@ -345,12 +350,22 @@ func cronDue(sched *cronSchedule, runs []*PluginRunBead, now time.Time) bool {
 func cooldownSatisfied(runs []*PluginRunBead, now time.Time, grace time.Duration) bool {
 	graceCutoff := now.Add(-grace)
 	for _, run := range runs {
-		if run.Result != ResultInflight {
-			// A terminal run within the cooldown window satisfies the gate.
-			return true
-		}
-		// In-flight record: satisfies only while still within the grace window.
-		if run.CreatedAt.After(graceCutoff) {
+		switch run.Result {
+		case ResultInflight, ResultFailure:
+			// A bare dispatch (inflight) or a FAILED run satisfies the gate only
+			// while still within the grace window. After grace the gate re-opens so
+			// the plugin is RETRIED instead of burning the full cooldown on a
+			// transient failure (gu-oj3nl: a single 'sling failed' on the weekly
+			// wiki-quality dispatch silently disabled it for the full 168h). The
+			// grace window still prevents the heartbeat from storming a
+			// just-failed / just-dispatched plugin.
+			if run.CreatedAt.After(graceCutoff) {
+				return true
+			}
+		default:
+			// A successful or skipped run within the cooldown window satisfies the
+			// full cooldown — the work actually completed (or was deliberately
+			// skipped), so there is nothing to retry.
 			return true
 		}
 	}

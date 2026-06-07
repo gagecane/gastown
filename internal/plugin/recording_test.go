@@ -130,8 +130,23 @@ func TestCooldownSatisfied(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "terminal failure within window -> satisfied (a real run happened)",
-			runs: []*PluginRunBead{mk(ResultFailure, 10)},
+			name: "terminal skipped within window -> satisfied (deliberately skipped, nothing to retry)",
+			runs: []*PluginRunBead{mk(ResultSkipped, 10)},
+			want: true,
+		},
+		{
+			name: "fresh failure within grace -> satisfied (don't storm a just-failed plugin)",
+			runs: []*PluginRunBead{mk(ResultFailure, 2)},
+			want: true,
+		},
+		{
+			name: "stale failure past grace -> gate re-opens for retry (gu-oj3nl: was burning full cooldown)",
+			runs: []*PluginRunBead{mk(ResultFailure, 9)},
+			want: false,
+		},
+		{
+			name: "stale failure + later success -> satisfied by completion",
+			runs: []*PluginRunBead{mk(ResultFailure, 9), mk(ResultSuccess, 8)},
 			want: true,
 		},
 		{
