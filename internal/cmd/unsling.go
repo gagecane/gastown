@@ -41,8 +41,9 @@ Related commands:
   gt sling <bead>    # Hook + start (inverse of unsling)
   gt hook <bead>     # Hook without starting
   gt hook      # See what's on your hook`,
-	Args: cobra.MaximumNArgs(2),
-	RunE: runUnsling,
+	Args:         cobra.MaximumNArgs(2),
+	RunE:         runUnsling,
+	SilenceUsage: true, // Don't print usage on operational errors (e.g. incomplete work, bead not hooked) — the syntax was valid
 }
 
 var (
