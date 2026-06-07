@@ -558,6 +558,44 @@ func TestEnsureGitignoreEntry_AppendsToExisting(t *testing.T) {
 	}
 }
 
+// TestCreatePluginDirectories_IgnoresAgentInstructionFilesSymmetrically guards
+// against the CLAUDE.md/AGENTS.md split misconfig (gu-h57sg). bd init writes
+// BOTH a real AGENTS.md and a stub CLAUDE.md into each rig; the rig .gitignore
+// must ignore them symmetrically so the town repo never tracks the stub
+// CLAUDE.md while hiding the real AGENTS.md.
+func TestCreatePluginDirectories_IgnoresAgentInstructionFilesSymmetrically(t *testing.T) {
+	root, rigsConfig := setupTestTown(t)
+	manager := NewManager(root, rigsConfig, git.NewGit(root))
+
+	rigPath := filepath.Join(root, "testrig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	if err := manager.createPluginDirectories(rigPath); err != nil {
+		t.Fatalf("createPluginDirectories: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(rigPath, ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading rig .gitignore: %v", err)
+	}
+	got := string(content)
+
+	for _, entry := range []string{"AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", "GEMINI.md"} {
+		found := false
+		for _, line := range strings.Split(got, "\n") {
+			if strings.TrimSpace(line) == entry {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("rig .gitignore missing agent-instruction entry %q; content:\n%s", entry, got)
+		}
+	}
+}
+
 func TestInitBeads_TrackedBeads_CreatesRedirect(t *testing.T) {
 	t.Parallel()
 	// When the cloned repo has tracked beads (mayor/rig/.beads exists),

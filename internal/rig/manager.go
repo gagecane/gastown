@@ -2200,7 +2200,20 @@ See docs/deacon-plugins.md for full documentation.
 		// GT configuration files
 		"config.json",
 		"state.json",
+		// Agent-instruction files written by `bd init` into the rig (not by
+		// Gas Town). These must be ignored SYMMETRICALLY: bd init drops both a
+		// real AGENTS.md (substantive multi-provider guidance) and a
+		// beads-integration STUB CLAUDE.md (placeholder Build/Architecture/
+		// Conventions). Ignoring only AGENTS.md made the town repo track the
+		// stub CLAUDE.md while hiding the real AGENTS.md — so an agent told to
+		// "edit CLAUDE.md" was steered to a town-tracked stub, and committing
+		// it forced an operation on the shared town root (incident gc-zafdy,
+		// root-cause gu-h57sg). Keep this list in sync with the worktree
+		// patterns in gasTownIgnorePatterns().
 		"AGENTS.md",
+		"CLAUDE.md",
+		"CLAUDE.local.md",
+		"GEMINI.md",
 	}
 	for _, entry := range gitignoreEntries {
 		if err := m.ensureGitignoreEntry(gitignorePath, entry); err != nil {
