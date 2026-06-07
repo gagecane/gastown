@@ -120,15 +120,25 @@ func detectRigMismatchFromTitle(title, targetRig string, rigs []*rig.Rig) []stri
 // used elsewhere in this package, e.g., warnIfKiroPolecatTarget).
 var titleMismatchWarner = warnIfTitleMentionsForeignRig
 
-// warnIfTitleMentionsForeignRig emits a stderr warning when the bead's title
-// names a registered rig OTHER than targetRig. Best-effort — failures resolving
-// the rig list are silently swallowed so this never blocks dispatch.
+// warnIfTitleMentionsForeignRig emits an advisory when the bead's title names a
+// registered rig OTHER than targetRig. Best-effort — failures resolving the rig
+// list are silently swallowed so this never blocks dispatch.
 //
-// This is a SOFT warning, not an error. Title mentions can be legitimate
+// This is a SOFT advisory, not an error. Title mentions can be legitimate
 // (epic breakdowns, cross-rig coordination, dependency notes); refusing
 // schedule on heuristic alone would block valid work. The hard guards
 // (checkSchedulePrefixParity, checkCrossRigGuard) still refuse beads whose
-// PREFIX is provably wrong for the target rig.
+// PREFIX is provably wrong for the target rig. Because those guards run first,
+// this advisory ONLY fires when the prefix is correct for the target — so it is
+// always a "proceeding" false-positive notice, never a dispatch blocker.
+//
+// It is written to STDOUT, not stderr (gu-ceocu). The convoy feeder classifies
+// sling failures on util.FirstLine(stderr); when this advisory landed on stderr
+// it shadowed the bead's REAL failure line (e.g. "already hooked"), forcing
+// every title-mentioning bead down the feeder's default branch — escalate-once
+// + flat re-feed forever — instead of the backoff/suppress/untrack disposition
+// its true failure class already has. Keeping the advisory off the error stream
+// lets the real error reach the classifier so the existing remediation applies.
 //
 // Fixes one mode of gu-an4y: bootstrap-pattern beads filed under one rig's
 // prefix that target work in a sibling rig. The dispatch path correctly
@@ -147,7 +157,7 @@ func warnIfTitleMentionsForeignRig(townRoot, targetRig, beadID, title string) {
 	if len(mismatches) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr,
+	fmt.Fprintf(os.Stdout,
 		"%s Bead %s title mentions rig(s) %s but is being scheduled to %q.\n"+
 			"   If this work targets a sibling rig, refile under that rig's prefix:\n"+
 			"     cd <target-rig> && bd create --title=...\n"+
