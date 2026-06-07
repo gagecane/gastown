@@ -178,6 +178,16 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		// wasn't updated). Clean them up so gt hook and gt unsling stay consistent.
 		cleaned := cleanStaleHookedBeads(cmd, b, agentID, targetBeadID, townRoot, beadsPath, dryRun)
 		if !cleaned {
+			// If the user named a specific bead that is assigned to the agent
+			// but isn't on its active hook slot, say so specifically instead of
+			// the generic "nothing hooked" — otherwise it reads like the bead
+			// isn't theirs at all (gu-u7num).
+			if targetBeadID != "" {
+				if msg := unslingNotActiveSlotMsg(b, townRoot, beadsPath, targetBeadID, agentID, ""); msg != "" {
+					fmt.Printf("%s %s\n", style.Dim.Render("ℹ"), msg)
+					return nil
+				}
+			}
 			if targetAgent != "" {
 				fmt.Printf("%s No work hooked for %s\n", style.Dim.Render("ℹ"), agentID)
 			} else {
@@ -187,8 +197,16 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		return nil
 	}
 
-	// If specific bead requested, verify it matches
+	// If specific bead requested, verify it matches the active hook slot.
+	// A bead can be assigned to the agent (assignee) without being on its
+	// active hook slot — in that case unsling can't detach it via this path.
+	// Emit a specific diagnostic rather than a terse mismatch so the user
+	// knows WHY and what to do, instead of reading it as a syntax error
+	// (gu-u7num).
 	if targetBeadID != "" && hookedBeadID != targetBeadID {
+		if msg := unslingNotActiveSlotMsg(b, townRoot, beadsPath, targetBeadID, agentID, hookedBeadID); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
 		return fmt.Errorf("bead %s is not hooked (current hook: %s)", targetBeadID, hookedBeadID)
 	}
 
@@ -279,6 +297,60 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	fmt.Printf("  Agent %s hook cleared (was: %s)\n", agentID, hookedBeadID)
 
 	return nil
+}
+
+// unslingNotActiveSlotMsg builds a specific diagnostic for the case where the
+// user named a bead that is ASSIGNED to the agent (assignee) but is not on the
+// agent's ACTIVE hook slot. unsling-with-bead only operates on the active slot,
+// so without this the command either prints a terse "not hooked" error or the
+// generic "nothing hooked" message — neither explains the assignee-vs-active-slot
+// distinction, and (combined with the old missing SilenceUsage) it read like a
+// syntax mistake (gu-u7num).
+//
+// Returns "" when the named bead is not assigned to the agent (or can't be
+// resolved), so callers fall back to their existing generic messaging.
+//
+// currentHook is the bead on the active slot, or "" if the slot is empty.
+func unslingNotActiveSlotMsg(b *beads.Beads, townRoot, beadsPath, targetBeadID, agentID, currentHook string) string {
+	// Resolve the target bead, which may live in a different database than the
+	// agent (prefix-based routing), with a town-level fallback for hq-* beads.
+	targetPath := beads.ResolveHookDir(townRoot, targetBeadID, beadsPath)
+	tb := b
+	if targetPath != beadsPath {
+		tb = beads.New(targetPath)
+	}
+	bead, err := tb.Show(targetBeadID)
+	if (err != nil || bead == nil) && townRoot != "" {
+		townB := beads.New(filepath.Join(townRoot, ".beads"))
+		if tBead, tErr := townB.Show(targetBeadID); tErr == nil && tBead != nil {
+			bead, err = tBead, nil
+		}
+	}
+	if err != nil || bead == nil {
+		return ""
+	}
+
+	// Only emit the specific message when the bead is genuinely assigned to the
+	// agent. The assignee may be stored in normalized form (rig/name).
+	if bead.Assignee != agentID && bead.Assignee != mailNormalizedAgentID(agentID) {
+		return ""
+	}
+
+	return formatNotActiveSlotMsg(targetBeadID, agentID, currentHook)
+}
+
+// formatNotActiveSlotMsg renders the assignee-but-not-active-slot diagnostic.
+// currentHook is the bead on the active slot, or "" if the slot is empty.
+func formatNotActiveSlotMsg(targetBeadID, agentID, currentHook string) string {
+	slot := "its active hook slot is empty"
+	if currentHook != "" {
+		slot = fmt.Sprintf("its active hook slot holds %s", currentHook)
+	}
+	return fmt.Sprintf(
+		"%s is assigned to %s but not on its active hook slot (%s).\n"+
+			"  unsling only detaches the active slot. To re-route this bead, use:\n"+
+			"    gt sling %s <new-target> --force --no-convoy",
+		targetBeadID, agentID, slot, targetBeadID)
 }
 
 // cleanStaleHookedBeads finds and cleans up beads with status "hooked" assigned to
