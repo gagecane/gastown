@@ -249,6 +249,23 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
       GIT_PREFIX GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS \
       GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
+# --- Upfront banner (gu-enqh0) -------------------------------------------
+#
+# A push launched in a background / non-tty context runs these gates for up
+# to ~2 min before contacting origin, with no network activity and (until the
+# first gate prints) no visible output — so it reads as a hung push and invites
+# a spurious retry that just re-runs the same gates. Announce the work the
+# instant it begins, before the first gate, so even a backgrounded push shows
+# immediate progress and the caller knows the wait is expected and how to skip
+# the slow tier.
+if [[ "$SKIP_SLOW" == "1" ]]; then
+  echo "pre-push: running fast gates (build/vet/gofmt/lint) before contacting origin — expected, the push is not hung." >&2
+else
+  echo "pre-push: running gates (build/vet/gofmt/lint + full 'go test ./...', up to ~2 min) before contacting origin." >&2
+  echo "pre-push: this is EXPECTED — the push is not hung and has not yet reached origin. To skip the slow test tier:" >&2
+  echo "pre-push:   GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON=\"<why>\" git push" >&2
+fi
+
 # --- FAST GATE 1: go build ------------------------------------------------
 
 echo "pre-push: [fast] go build ./... (compile check)" >&2

@@ -787,6 +787,68 @@ test_slow_gate_under_wall_passes() {
   PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo"
 }
 
+# --- gu-enqh0: upfront banner before gates -------------------------------
+#
+# A backgrounded / non-tty push runs the gates for ~2 min before contacting
+# origin, with no output until the first gate prints — which reads as a hung
+# push and invites a spurious retry. The script must announce the gate run
+# (and, on the default path, the ~2 min cost + the skip hint) BEFORE the first
+# gate executes, so even a backgrounded push shows immediate progress.
+
+# Test: default run prints the banner announcing gates + the skip hint, and it
+# appears BEFORE the first gate ('go build') output.
+test_banner_printed_by_default() {
+  run_with_stubs \
+    'echo "go-called: $*" >&2; exit 0' \
+    'exit 0' \
+    0
+  if [[ $RC -ne 0 ]]; then
+    echo "FAIL: default run should pass when all stubs pass (got rc=$RC)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  if ! echo "$OUT" | grep -qi "before contacting origin"; then
+    echo "FAIL: default run should print an upfront banner before gates" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  if ! echo "$OUT" | grep -q "GT_SKIP_PREPUSH=1"; then
+    echo "FAIL: default banner should include the slow-tier skip hint" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  # The banner must precede the first gate's output.
+  local banner_line build_line
+  banner_line=$(echo "$OUT" | grep -n "before contacting origin" | head -1 | cut -d: -f1)
+  build_line=$(echo "$OUT" | grep -n "go-called: build" | head -1 | cut -d: -f1)
+  if [[ -z "$banner_line" || -z "$build_line" ]] || (( banner_line >= build_line )); then
+    echo "FAIL: banner (line $banner_line) should precede 'go build' (line $build_line)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  PASS=$((PASS + 1)); cleanup_last_run
+}
+
+# Test: under GT_SKIP_PREPUSH=1 the banner announces the fast-gate-only run
+# (and does NOT promise the ~2 min slow tier, which is skipped).
+test_banner_printed_under_skip() {
+  run_with_stubs \
+    'echo "go-called: $*" >&2; exit 0' \
+    'exit 0' \
+    1
+  if [[ $RC -ne 0 ]]; then
+    echo "FAIL: skip run should pass when fast gates pass (got rc=$RC)" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  if ! echo "$OUT" | grep -qi "running fast gates"; then
+    echo "FAIL: skip run should print a fast-gates-only banner before gates" >&2
+    echo "$OUT" >&2
+    FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  PASS=$((PASS + 1)); cleanup_last_run
+}
+
 # Only run the functional test if we have a real `go` on PATH — otherwise
 # pre-push-check.sh short-circuits before the unset matters.
 if command -v go >/dev/null 2>&1; then
@@ -816,6 +878,9 @@ if command -v git >/dev/null 2>&1; then
   # gu-zadrb: slow-gate hard wall-clock group timeout
   test_slow_gate_wall_clock_timeout_rejects
   test_slow_gate_under_wall_passes
+  # gu-enqh0: upfront banner before gates
+  test_banner_printed_by_default
+  test_banner_printed_under_skip
 fi
 
 echo ""
