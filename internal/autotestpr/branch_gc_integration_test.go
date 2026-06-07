@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,7 +213,7 @@ func seedAttachment(t *testing.T, b *beads.Beads, kind string, meta map[string]i
 func assertBeadClosed(t *testing.T, closures []AttachmentClosure, kind, titleContains string) {
 	t.Helper()
 	for _, c := range closures {
-		if c.Kind == kind && (c.BeadID == titleContains || contains(c.Reason, titleContains)) {
+		if c.Kind == kind && (c.BeadID == titleContains || strings.Contains(c.Reason, titleContains)) {
 			return // Found it
 		}
 	}

@@ -707,10 +707,22 @@ func initTownBeads(townPath string) error {
 	// DefaultConfig resolves the port from config.yaml > GT_DOLT_PORT env > default (3307).
 	// Forward GT_DOLT_PORT so bd connects to the correct server when a
 	// non-default port is configured (e.g., ephemeral test servers in CI).
+	// Pre-create .beads with 0700 so bd init does not abort on its
+	// permission check (bd >= 1.0.5 rejects the recommended-0700 dir when it
+	// inherits the process umask of 0755). MkdirAll is a no-op if it exists.
+	beadsDirPath := filepath.Join(townPath, ".beads")
+	if err := os.MkdirAll(beadsDirPath, 0700); err != nil {
+		return fmt.Errorf("creating .beads directory: %w", err)
+	}
+	// chmod explicitly in case the directory pre-existed with looser perms.
+	if err := os.Chmod(beadsDirPath, 0700); err != nil {
+		return fmt.Errorf("setting .beads directory permissions: %w", err)
+	}
+
 	bdInitArgs := buildBdInitArgs(townPath)
 	cmd := exec.Command("bd", bdInitArgs...)
 	cmd.Dir = townPath
-	cmd.Env = withBeadsDirEnv(filepath.Join(townPath, ".beads"))
+	cmd.Env = withBeadsDirEnv(beadsDirPath)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
