@@ -59,32 +59,6 @@ if [[ ${#RIGS[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Known agent role keywords used to detect agent-assigned beads. The bead's
-# assignee carries an address like "mayor", "deacon", "<rig>/witness",
-# "<rig>/polecats/<name>". `gt ready --json` exposes this address in the
-# `assignee` field (the `owner` field there is the human email and is not an
-# address), so this heuristic is fed `.assignee`.
-is_agent_owner() {
-  local owner="$1"
-  [[ -z "$owner" ]] && return 1
-  case "$owner" in
-    mayor|mayor/*|deacon|deacon/*) return 0 ;;
-  esac
-  if [[ "$owner" == */witness || "$owner" == */witness/* ]]; then return 0; fi
-  if [[ "$owner" == */refinery || "$owner" == */refinery/* ]]; then return 0; fi
-  if [[ "$owner" == */polecats/* ]]; then return 0; fi
-  if [[ "$owner" == */crew/* ]]; then return 0; fi
-  if [[ "$owner" == */dogs/* ]]; then return 0; fi
-  return 1
-}
-
-# is_workflow_step_bead <id> — true if the bead is a workflow step bead created
-# by `gt formula run` (executeWorkflowFormula stamps them as `<rigPrefix>-wfs-<id>`).
-# These are dispatchable polecat work even when owned by the launching agent.
-is_workflow_step_bead() {
-  [[ "$1" == *-wfs-* ]]
-}
-
 # is_known_rig <name> — checks $RIGS array for membership.
 is_known_rig() {
   local name="$1"
@@ -157,8 +131,7 @@ for rig in "${READY_SOURCES[@]}"; do
 
   # Extract this source's issues, sorted by priority (P1 first; treat missing
   # priority as 99 so it sinks).
-  # Output: tab-separated id<TAB>assignee<TAB>labels<TAB>description.
-  # `gt ready` exposes the agent address in `assignee` (not `owner`).
+  # Output: tab-separated id<TAB>labels<TAB>description.
   # Labels are joined with commas and wrapped in commas (",foo,bar,") so substring
   # checks like ",wrong-rig:${rig}," cannot accidentally match a label prefix.
   # Newlines in the description are tunneled through \x01 so each bead stays on
@@ -167,7 +140,7 @@ for rig in "${READY_SOURCES[@]}"; do
     ((.sources[] | select(.name == $rig) | .issues) // [])
     | sort_by(.priority // 99)
     | .[]
-    | [.id, (.assignee // ""), ((.labels // []) | join(",")), (.description // "" | gsub("\n"; ""))]
+    | [.id, ((.labels // []) | join(",")), (.description // "" | gsub("\n"; ""))]
     | @tsv
   ' <<<"$READY_JSON") || {
     log "rig=$rig: failed to parse gt ready output"
@@ -186,29 +159,25 @@ for rig in "${READY_SOURCES[@]}"; do
   rig_skipped=0
   rig_failed=0
 
-  while IFS=$'\t' read -r bead_id assignee labels description; do
+  while IFS=$'\t' read -r bead_id labels description; do
     [[ -z "$bead_id" ]] && continue
 
     # Restore newlines that we tunneled through tsv.
     description="${description//$'\x01'/$'\n'}"
 
-    # Client-side filter: agent-assigned beads (orchestrator state — owning agent
-    # handles them, not a polecat). See gs-myq. `gt ready` carries the agent
-    # address in `assignee`.
-    #
-    # Exception: workflow step beads (id matches `*-wfs-*`) are real polecat
-    # work, not orchestrator state — `gt formula run` stamps them with the
-    # OWNER of whoever launched the run, so a crew-launched workflow produces
-    # step beads owned by `<rig>/crew/<name>`. Without this exception the
-    # is_agent_owner filter silently drops them from the fast dispatch path,
-    # leaving them to advance only on the Deacon's slow stranded-feed cycle
-    # (gu-3y6ro). Steps that genuinely route to a specific agent are still
-    # caught by the workflow_target filter below, and `gt sling`'s server-side
-    # guards remain the backstop.
-    if is_agent_owner "$assignee" && ! is_workflow_step_bead "$bead_id"; then
-      rig_skipped=$((rig_skipped + 1))
-      continue
-    fi
+    # NOTE: This script intentionally does NOT filter on the bead's assignee.
+    # `gt ready` returns only `open` beads — an assignee on an open ready bead is
+    # an ownership/responsibility tag (e.g. mayor files a bug and tags it
+    # `<rig>/crew/<name>`), NOT a signal that an agent is actively working it
+    # (hooked/in_progress beads never appear in `gt ready`). An earlier
+    # `is_agent_owner` filter skipped any assignee matching mayor/deacon/
+    # witness/refinery/crew/polecats/dogs, which silently dropped legitimately
+    # dispatchable open beads from the fast path (gu-7h278 analysis: 5 open
+    # crew-assigned bugs in gastown_upstream were never slung). `gt sling`'s
+    # server-side guards are the authoritative gate — they refuse polecat-OWNED,
+    # identity/system, epic, sling-context, deferred, and live-hooked beads
+    # defensively — so any bead that genuinely must not be dispatched is rejected
+    # there, idempotently and without this client-side heuristic.
 
     # Client-side filter: bead is labeled wrong-rig:<this-rig> — a polecat
     # in this rig (or an operator) has already asserted that the work does
