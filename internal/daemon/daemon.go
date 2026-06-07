@@ -33,6 +33,7 @@ import (
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/feed"
+	"github.com/steveyegge/gastown/internal/formula"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -630,6 +631,20 @@ func (d *Daemon) Run() (err error) {
 	// COMPLETED with the branch pushed but the MR silently stranded (the gastown
 	// 40% strand rate). Defaulting it here on every startup makes the fix stick.
 	d.ensureRigsDoltAutoCommit()
+
+	// Self-heal the town formula runtime registry from the embedded (git-tracked)
+	// formula source on every startup (gu-ef7e0). The git-tracked formulas in
+	// internal/formula/formulas/ are the source of truth; they are embedded into
+	// the binary and provisioned to ~/gt/.beads/formulas/ at install time. But a
+	// formula *fix* that lands in source (e.g. gu-0agil renamed mol-convoy-feed's
+	// title var) never reaches the hand-synced runtime registry that `gt sling` /
+	// the deacon actually read — the same repo-vs-runtime deployment-drift class
+	// that previously forced manual `cp SOURCE -> RUNTIME` point-fixes on one host.
+	// A deploy rebuilds the binary and restarts the daemon onto it, so doing the
+	// reconcile here makes every formula fix reach the runtime automatically.
+	// UpdateFormulas only overwrites unmodified/outdated copies; operator-modified
+	// formulas (tracked in .installed.json) are left untouched.
+	d.ensureFormulasSynced()
 
 	// Write PID file with nonce for ownership verification
 	if _, err := writePIDFile(d.config.PidFile, os.Getpid()); err != nil {
@@ -1363,6 +1378,30 @@ func (d *Daemon) ensureRigsDoltAutoCommit() {
 		} else {
 			d.logger.Printf("Committed dolt.auto-commit=on self-heal in %s", entry.gitRoot)
 		}
+	}
+}
+
+// ensureFormulasSynced reconciles the town formula runtime registry
+// (TownRoot/.beads/formulas/) with the embedded, git-tracked formula source on
+// every daemon startup (gu-ef7e0). A deploy rebuilds the gt binary and restarts
+// the daemon onto it, so an outdated runtime copy of a formula whose source was
+// fixed gets refreshed here automatically — closing the repo-vs-runtime
+// deployment-drift gap that previously required a manual `cp SOURCE -> RUNTIME`.
+//
+// formula.UpdateFormulas only rewrites copies it can prove are safe (outdated
+// copies that match the last-installed hash, missing copies, or untracked
+// copies); operator-modified formulas tracked in .installed.json are skipped, so
+// this never clobbers a deliberate local customization. Best-effort: any error
+// logs and proceeds — a stale runtime formula must not block daemon startup.
+func (d *Daemon) ensureFormulasSynced() {
+	updated, skipped, reinstalled, err := formula.UpdateFormulas(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("Warning: could not sync formula runtime registry: %v", err)
+		return
+	}
+	if updated > 0 || reinstalled > 0 {
+		d.logger.Printf("Formula runtime sync: %d updated, %d reinstalled, %d skipped (operator-modified)",
+			updated, reinstalled, skipped)
 	}
 }
 
