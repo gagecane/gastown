@@ -79,6 +79,19 @@ func reconcileOrphanMolecules(townRoot string) int {
 			continue
 		}
 
+		// gu-bdzbd: this is the authoritative identity gate. The list view
+		// (`bd mol wisp list --json`) carries neither issue_type nor labels, so
+		// isOrphanMoleculeWispListEntry cannot distinguish a real molecule from a
+		// mail/dog-step/plugin-run wisp — they all just have a "-wisp-" ID. The
+		// `bd show` fetch above DOES return issue_type and labels, so we enforce
+		// the molecule-only scope here. Without this, the pass force-burned
+		// type=task/chore operational wisps (dog/patrol formula steps, plugin
+		// runs) — ~99% of observed burns — and would silently destroy any
+		// unassigned mail (mail.go defaults --wisp=true).
+		if !isReconcilableMoleculeWisp(info) {
+			continue
+		}
+
 		// gs-bpq: an open merge-request wisp is a pending merge that
 		// intentionally outlives its submitting polecat — it sits in the merge
 		// queue until the refinery merges it. A polecat self-terminates right
@@ -194,9 +207,29 @@ func isOrphanMoleculeWispListEntry(w *beads.Issue, now time.Time, ttl time.Durat
 	if w == nil {
 		return false
 	}
-	// Identity: type=molecule is authoritative, but the list view sometimes
-	// omits issue_type, so fall back to the "-wisp-" ID convention.
-	if w.Type != "molecule" && !strings.Contains(w.ID, "-wisp-") {
+	// Never reap mail. `gt mail send` defaults --wisp=true, so every message is
+	// an ephemeral bead with a "-wisp-" ID (but issue_type=task, carrying the
+	// gt:message label). Mail GC belongs to the mail TTL reaper, not this pass;
+	// burning an unassigned message here would silently destroy it (gu-bdzbd).
+	if beads.HasLabel(w, mailMessageLabel) {
+		return false
+	}
+	// Identity must be type-authoritative. The "-wisp-" ID convention is NOT a
+	// sufficient signal: dog/patrol formula steps, plugin-run wisps, and mail
+	// all get "-wisp-" IDs while being type=task/chore, and burning them is out
+	// of this molecule-reconcile pass's scope (gu-bdzbd). Only treat a wisp as a
+	// molecule candidate when its type says so. The "-wisp-" ID is used only as
+	// a fallback when the list view omitted issue_type entirely.
+	switch {
+	case w.Type == "molecule":
+		// Authoritative match.
+	case w.Type == "":
+		// Type omitted by the list view — fall back to the ID convention.
+		if !strings.Contains(w.ID, "-wisp-") {
+			return false
+		}
+	default:
+		// type is set and is not "molecule" (task/chore/agent/…) — not ours.
 		return false
 	}
 	if w.Status != "open" {
@@ -206,6 +239,34 @@ func isOrphanMoleculeWispListEntry(w *beads.Issue, now time.Time, ttl time.Durat
 		return false // Too fresh — may be a healthy mid-dispatch wisp.
 	}
 	return true
+}
+
+// isReconcilableMoleculeWisp reports whether a wisp loaded via `bd show --json`
+// (which, unlike the list view, carries issue_type and labels) is actually a
+// molecule this pass is allowed to reap. This is the authoritative identity
+// gate (gu-bdzbd): the list filter can only see the "-wisp-" ID convention,
+// which mail, dog/patrol formula steps, and plugin-run wisps all share.
+//
+// In scope: issue_type=molecule, OR issue_type empty with a "-wisp-" ID (a
+// defensive fallback for any show response that omits the type). Explicitly out
+// of scope: anything labeled gt:message (mail — GC'd by the mail TTL reaper) and
+// any non-molecule type (task/chore/agent/…), whose lifecycles are owned
+// elsewhere.
+func isReconcilableMoleculeWisp(info *beads.Issue) bool {
+	if info == nil {
+		return false
+	}
+	if beads.HasLabel(info, mailMessageLabel) {
+		return false
+	}
+	switch {
+	case info.Type == "molecule":
+		return true
+	case info.Type == "":
+		return strings.Contains(info.ID, "-wisp-")
+	default:
+		return false
+	}
 }
 
 // timeNowForOrphanReconcile is a clock seam for the reconcile TTL check.
@@ -306,3 +367,9 @@ var fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
 // this reconcile path's import set. The orphan pass uses it to recognize — and
 // never reap — pending merge-request wisps (gs-bpq).
 const mergeRequestWispLabel = "gt:merge-request"
+
+// mailMessageLabel is the label every `gt mail send` bead carries (mail.go
+// defaults --wisp=true, so messages live in the wisps table with "-wisp-" IDs
+// but issue_type=task). The orphan pass uses it to recognize — and never reap —
+// mail, whose GC belongs to the mail TTL reaper (gu-bdzbd).
+const mailMessageLabel = "gt:message"

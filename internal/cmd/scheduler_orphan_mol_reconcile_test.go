@@ -43,6 +43,32 @@ func TestIsOrphanMoleculeWispListEntry(t *testing.T) {
 			want: false,
 		},
 		{
+			// gu-bdzbd: a task-type wisp (dog/patrol formula step, plugin-run)
+			// has a "-wisp-" ID but must NOT be treated as a molecule. The old
+			// `type != molecule && !contains("-wisp-")` check let it through.
+			name: "task-type wisp ID → skip (not a molecule)",
+			w:    &beads.Issue{ID: "gc-wisp-task", Type: "task", Status: "open", CreatedAt: old},
+			want: false,
+		},
+		{
+			name: "chore-type wisp ID → skip (formula step, not a molecule)",
+			w:    &beads.Issue{ID: "gc-wisp-chore", Type: "chore", Status: "open", CreatedAt: old},
+			want: false,
+		},
+		{
+			// gu-bdzbd: mail is sent as a wisp by default (gt:message label).
+			// Even with type omitted (so the ID fallback would otherwise match),
+			// mail must never be a reconcile candidate.
+			name: "mail wisp (gt:message) → skip even when type omitted",
+			w:    &beads.Issue{ID: "gc-wisp-mail", Type: "", Status: "open", CreatedAt: old, Labels: []string{"gt:message", "msg-type:notification"}},
+			want: false,
+		},
+		{
+			name: "mail wisp typed task → skip",
+			w:    &beads.Issue{ID: "gc-wisp-mail2", Type: "task", Status: "open", CreatedAt: old, Labels: []string{"gt:message"}},
+			want: false,
+		},
+		{
 			name: "closed wisp → skip",
 			w:    &beads.Issue{ID: "gu-wisp-ccc", Type: "molecule", Status: "closed", CreatedAt: old},
 			want: false,
@@ -71,6 +97,123 @@ func TestIsOrphanMoleculeWispListEntry(t *testing.T) {
 				t.Errorf("isOrphanMoleculeWispListEntry() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestIsReconcilableMoleculeWisp covers the authoritative show-side identity
+// gate (gu-bdzbd). Unlike the list view, `bd show` carries issue_type and
+// labels, so this is where mail / non-molecule wisps are excluded for real.
+func TestIsReconcilableMoleculeWisp(t *testing.T) {
+	tests := []struct {
+		name string
+		info *beads.Issue
+		want bool
+	}{
+		{
+			name: "nil → false",
+			info: nil,
+			want: false,
+		},
+		{
+			name: "molecule type → reconcilable",
+			info: &beads.Issue{ID: "gc-wisp-mol", Type: "molecule"},
+			want: true,
+		},
+		{
+			name: "type omitted but -wisp- ID → reconcilable (fallback)",
+			info: &beads.Issue{ID: "gc-wisp-x", Type: ""},
+			want: true,
+		},
+		{
+			name: "type omitted, non-wisp ID → not reconcilable",
+			info: &beads.Issue{ID: "gc-abc", Type: ""},
+			want: false,
+		},
+		{
+			name: "task wisp (dog/patrol step) → NOT reconcilable",
+			info: &beads.Issue{ID: "gc-wisp-task", Type: "task"},
+			want: false,
+		},
+		{
+			name: "chore wisp (formula step) → NOT reconcilable",
+			info: &beads.Issue{ID: "gc-wisp-chore", Type: "chore"},
+			want: false,
+		},
+		{
+			name: "mail (gt:message, task) → NOT reconcilable",
+			info: &beads.Issue{ID: "gc-wisp-mail", Type: "task", Labels: []string{"gt:message", "msg-type:notification"}},
+			want: false,
+		},
+		{
+			name: "mail with molecule type still excluded by label guard",
+			info: &beads.Issue{ID: "gc-wisp-mail2", Type: "molecule", Labels: []string{"gt:message"}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReconcilableMoleculeWisp(tt.info); got != tt.want {
+				t.Errorf("isReconcilableMoleculeWisp() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReconcileOrphanMolecules_SkipsNonMoleculeAndMail verifies the production
+// path (gu-bdzbd): the list view can't see issue_type/labels, so a task-type
+// dog-step wisp and a mail wisp both reach the bd-show fetch as "-wisp-" IDs —
+// and must be skipped there, never burned, while a real molecule zombie beside
+// them is still reaped.
+func TestReconcileOrphanMolecules_SkipsNonMoleculeAndMail(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	prevNow := timeNowForOrphanReconcile
+	timeNowForOrphanReconcile = func() time.Time { return now }
+	t.Cleanup(func() { timeNowForOrphanReconcile = prevNow })
+
+	// List view: emits NO issue_type and NO labels (as real bd mol wisp list
+	// does), so every entry looks identical here — just a "-wisp-" ID.
+	prevList := listOrphanWispCandidates
+	listOrphanWispCandidates = func(townRoot string, n time.Time) []*beads.Issue {
+		return []*beads.Issue{
+			{ID: "gc-wisp-mol", Status: "open", CreatedAt: old},
+			{ID: "gc-wisp-dogstep", Status: "open", CreatedAt: old},
+			{ID: "gc-wisp-mail", Status: "open", CreatedAt: old},
+		}
+	}
+	t.Cleanup(func() { listOrphanWispCandidates = prevList })
+
+	// Show: carries the real issue_type + labels.
+	prevFetch := fetchWispInfoForReconcile
+	fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
+		switch wispID {
+		case "gc-wisp-mol": // real molecule zombie → burn
+			return &beads.Issue{ID: wispID, Type: "molecule", Assignee: "", Dependents: nil}
+		case "gc-wisp-dogstep": // operational dog/patrol step → skip
+			return &beads.Issue{ID: wispID, Type: "chore", Assignee: "", Dependents: nil}
+		case "gc-wisp-mail": // mail → skip
+			return &beads.Issue{ID: wispID, Type: "task", Assignee: "", Labels: []string{"gt:message"}, Dependents: nil}
+		}
+		return nil
+	}
+	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	var burned []string
+	prevBurn := burnExistingMoleculesForRecovery
+	burnExistingMoleculesForRecovery = func(molecules []string, beadID, townRoot string) error {
+		burned = append(burned, molecules...)
+		return nil
+	}
+	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
+
+	got := reconcileOrphanMolecules("/fake/town")
+	if got != 1 {
+		t.Errorf("reconciled count = %d, want 1 (only the real molecule)", got)
+	}
+	if len(burned) != 1 || burned[0] != "gc-wisp-mol" {
+		t.Errorf("burned = %v, want [gc-wisp-mol] (dog-step and mail must never be reaped)", burned)
 	}
 }
 
