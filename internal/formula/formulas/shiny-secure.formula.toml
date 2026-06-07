@@ -1,8 +1,10 @@
-description = "Shiny workflow with security audit aspect applied."
+# NOTE: aspect weaving (compose.aspects) is not yet implemented in the formula
+# engine — it is recorded but not acted upon (see internal/formula/parser.go).
+# Until it lands, run the `security-audit` aspect formula separately rather than
+# relying on automatic composition here. The earlier `compose.aspects` claim was
+# a no-op and was removed (gu-45gw7).
+description = "Shiny workflow. Run the `security-audit` aspect formula alongside it for security analysis."
 extends = ["shiny"]
 formula = "shiny-secure"
 type = "workflow"
 version = 1
-
-[compose]
-aspects = ["security-audit"]

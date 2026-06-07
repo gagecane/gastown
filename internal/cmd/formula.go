@@ -452,6 +452,17 @@ func dryRunFormula(f *formula.Formula, formulaName, targetRig string) error {
 		}
 	}
 
+	if f.Type == formula.TypeAspect && len(f.Aspects) > 0 {
+		fmt.Printf("\n  Aspects (%d parallel):\n", len(f.Aspects))
+		for _, aspect := range f.Aspects {
+			focusStr := ""
+			if aspect.Focus != "" {
+				focusStr = fmt.Sprintf(" [focus: %s]", aspect.Focus)
+			}
+			fmt.Printf("    • %s: %s%s\n", aspect.ID, aspect.Title, focusStr)
+		}
+	}
+
 	return nil
 }
 

@@ -1,38 +1,28 @@
-description = "Cross-cutting security concern. Applies security scanning before and after implementation steps."
+description = "Cross-cutting security analysis. Reviews code in parallel across secrets, dependencies, SAST/OWASP, and post-change verification aspects."
 formula = "security-audit"
 type = "aspect"
 version = 1
 
-[[advice]]
-target = "implement"
-[advice.around]
+[[aspects]]
+id = "secrets"
+title = "Secrets and Credentials Review"
+focus = "Hardcoded secrets, credentials, and tokens"
+description = "Scan for hardcoded secrets, credentials, API keys, and tokens in the changed scope. Flag anything that should be sourced from a secrets manager or environment instead."
 
-[[advice.around.after]]
-description = "Post-implementation security scan. Scan new code for vulnerabilities (SAST). Check for hardcoded secrets. Review for OWASP Top 10 issues."
-id = "{step.id}-security-postscan"
-title = "Security postscan for {step.id}"
+[[aspects]]
+id = "dependencies"
+title = "Dependency Vulnerability Review"
+focus = "Known vulnerabilities in dependencies"
+description = "Check dependencies introduced or modified by the change for known vulnerabilities (CVEs). Flag outdated or insecure dependency versions."
 
-[[advice.around.before]]
-description = "Pre-implementation security check. Review for secrets/credentials in scope. Check dependencies for known vulnerabilities."
-id = "{step.id}-security-prescan"
-title = "Security prescan for {step.id}"
+[[aspects]]
+id = "sast"
+title = "Static Analysis and OWASP Review"
+focus = "OWASP Top 10 and SAST findings"
+description = "Static analysis of new code for vulnerabilities. Review for OWASP Top 10 issues: injection, broken authentication, sensitive data exposure, and similar classes."
 
-[[advice]]
-target = "submit"
-[advice.around]
-
-[[advice.around.after]]
-description = "Post-submission security verification. Confirm no new vulnerabilities introduced."
-id = "{step.id}-security-postscan"
-title = "Security postscan for {step.id}"
-
-[[advice.around.before]]
-description = "Pre-submission security check. Final vulnerability scan before merge."
-id = "{step.id}-security-prescan"
-title = "Security prescan for {step.id}"
-
-[[pointcuts]]
-glob = "implement"
-
-[[pointcuts]]
-glob = "submit"
+[[aspects]]
+id = "verification"
+title = "Post-Change Security Verification"
+focus = "No new vulnerabilities introduced"
+description = "Final verification that the change introduces no new vulnerabilities before merge. Confirm prior security findings are resolved and the change is safe to land."
