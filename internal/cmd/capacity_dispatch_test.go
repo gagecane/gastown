@@ -45,6 +45,40 @@ func TestDispatchScanConcurrency(t *testing.T) {
 	}
 }
 
+// TestDispatchScanDeadline guards the fan-out-level wall-clock backstop for
+// listAllSlingContextRecords (gu-ek3mf). A `bd` fork that wedges in the os/exec
+// Start() syscall is not reaped by the per-subprocess context timeout, so the
+// scan needs its own deadline to avoid freezing the dispatch caller. Defaults
+// to 120s; GT_DISPATCH_SCAN_DEADLINE_SEC overrides with a positive int seconds;
+// zero / negative / junk fall back to the default so a fat-fingered env can
+// never disable the backstop.
+func TestDispatchScanDeadline(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{"default when unset", "", 120 * time.Second},
+		{"override 30", "30", 30 * time.Second},
+		{"override 1", "1", 1 * time.Second},
+		{"zero falls back", "0", 120 * time.Second},
+		{"negative falls back", "-5", 120 * time.Second},
+		{"junk falls back", "soon", 120 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env == "" {
+				os.Unsetenv("GT_DISPATCH_SCAN_DEADLINE_SEC")
+			} else {
+				t.Setenv("GT_DISPATCH_SCAN_DEADLINE_SEC", tt.env)
+			}
+			if got := dispatchScanDeadline(); got != tt.want {
+				t.Errorf("dispatchScanDeadline() with env=%q = %v, want %v", tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldFireCrossRigEscalation_Debounces(t *testing.T) {
 	resetCrossRigEscalationStateForTest()
 	t.Cleanup(resetCrossRigEscalationStateForTest)

@@ -1275,6 +1275,28 @@ func dispatchScanConcurrency() int {
 	return def
 }
 
+// dispatchScanDeadline bounds the TOTAL wall-clock of the
+// listAllSlingContextRecords fan-out. Each per-rig `bd` fork already gets a 60s
+// exec.CommandContext timeout in internal/beads, but that timeout only arms
+// AFTER os/exec Cmd.Start returns — a fork that wedges in the Start() syscall
+// under Dolt contention is never killed by it, so a single stuck dir would
+// block the result collector forever and freeze the dispatch caller (and, in
+// CI, the integration suite until the 10m job timeout, freezing the merge queue —
+// gu-ek3mf). This deadline is the backstop: when it elapses we return whatever
+// results completed and let the wedged goroutine(s) drain on their own. Default
+// 120s is ~40x a normal scan, generous enough never to truncate a legitimately
+// slow-but-bounded scan while staying well under the 10m freeze. Tunable via
+// GT_DISPATCH_SCAN_DEADLINE_SEC (positive int seconds).
+func dispatchScanDeadline() time.Duration {
+	const def = 120 * time.Second
+	if v := os.Getenv("GT_DISPATCH_SCAN_DEADLINE_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return def
+}
+
 func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 	var records []slingContextRecord
 	// Scan each rig's sling-contexts concurrently behind a bounded semaphore.
@@ -1287,35 +1309,56 @@ func listAllSlingContextRecords(townRoot string) []slingContextRecord {
 	// keep WithoutReadThrottle (gu-pug66's deliberately lock-free dispatch path).
 	dirs := beadsSearchDirs(townRoot)
 	type dirResult struct {
+		idx      int
 		dir      string
 		beadsDir string
 		contexts []*beads.Issue
 	}
-	results := make([]dirResult, len(dirs))
 	sem := make(chan struct{}, dispatchScanConcurrency())
-	var wg sync.WaitGroup
+	// Buffered so a worker whose dir fork wedges past the deadline can still
+	// send without blocking on a no-longer-listening receiver (no goroutine
+	// leak beyond the wedged fork itself, which the 60s exec timeout reaps).
+	resultCh := make(chan dirResult, len(dirs))
 	for i, dir := range dirs {
-		wg.Add(1)
 		go func(i int, dir string) {
-			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			beadsDir := beads.ResolveBeadsDir(dir)
-			results[i] = dirResult{dir: dir, beadsDir: beadsDir}
 			b := beads.NewWithBeadsDir(dir, beadsDir).WithoutReadThrottle()
 			contexts, err := b.ListOpenSlingContexts()
 			if err != nil {
-				return // Partial failure is acceptable — skip unavailable dirs
+				// Partial failure is acceptable — still report the dir so the
+				// deadline path can't mistake a clean error for a wedge.
+				resultCh <- dirResult{idx: i, dir: dir, beadsDir: beadsDir}
+				return
 			}
-			results[i].contexts = contexts
+			resultCh <- dirResult{idx: i, dir: dir, beadsDir: beadsDir, contexts: contexts}
 		}(i, dir)
 	}
-	wg.Wait()
+
+	// Collect with a fan-out-level deadline. A single dir whose `bd` fork wedges
+	// in the os/exec Start() syscall is NOT reaped by the per-subprocess context
+	// timeout (that timer only arms after Start returns), so without this
+	// backstop one stuck dir would block forever and freeze the dispatch caller
+	// (gu-ek3mf). On deadline we proceed with whatever completed.
+	results := make([]dirResult, 0, len(dirs))
+	deadline := time.NewTimer(dispatchScanDeadline())
+	defer deadline.Stop()
+	for collected := 0; collected < len(dirs); collected++ {
+		select {
+		case r := <-resultCh:
+			results = append(results, r)
+		case <-deadline.C:
+			collected = len(dirs) // stop waiting; use partial results
+		}
+	}
 
 	// Fold results in dir order (deterministic): dedup by ctx.ID alone, since bd
 	// prefix routing can return the same bead from multiple BEADS_DIR pins when
-	// routes.jsonl maps the bead's prefix to a sibling DB (gu-38ov). Iterating
-	// results in stable order keeps the oldest-context-wins dedup deterministic.
+	// routes.jsonl maps the bead's prefix to a sibling DB (gu-38ov). Sorting by
+	// the original dir index keeps the oldest-context-wins dedup deterministic
+	// regardless of completion order.
+	sort.Slice(results, func(i, j int) bool { return results[i].idx < results[j].idx })
 	seen := make(map[string]bool)
 	for _, r := range results {
 		for _, ctx := range r.contexts {
