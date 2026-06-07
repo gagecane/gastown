@@ -56,6 +56,43 @@ func TestParseEtime(t *testing.T) {
 	}
 }
 
+func TestIsRealAgentArgv(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+		want bool
+	}{
+		// Real agent processes — argv basename is an agent binary.
+		{"claude bare", "claude --dangerously-skip-permissions", true},
+		{"claude full path", "/home/u/.toolbox/tools/claude-code/2.1.168/bin/claude --model x", true},
+		{"kiro-cli", "kiro-cli --no-interactive", true},
+		{"codex full path", "/usr/local/bin/codex --foo", true},
+		{"cursor-agent", "/opt/cursor/cursor-agent -f", true},
+
+		// Kernel threads — bracketed argv must never match (gu-40hy7).
+		{"kthreadd", "[kthreadd]", false},
+		{"kworker", "[kworker/R-kvfree_rcu_reclaim]", false},
+		{"pool_workqueue", "[pool_workqueue_release]", false},
+
+		// Coincidental / truncated comm collisions — argv basename is not an agent.
+		{"ssm-agent-worker", "/usr/bin/ssm-agent-worker --serve", false},
+		{"stub-agent", "stub-agent", false},
+		{"node not claude", "/usr/bin/node /some/other/app.js", false},
+
+		// Degenerate input.
+		{"empty", "", false},
+		{"whitespace", "   ", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRealAgentArgv(tt.args); got != tt.want {
+				t.Errorf("isRealAgentArgv(%q) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFindOrphanedClaudeProcesses(t *testing.T) {
 	// Live test that checks for orphaned processes on the current system.
 	// Should not fail — just returns whatever orphans exist (likely none in CI).

@@ -420,6 +420,42 @@ func isAgentOrphanCommName(cmdLower string) bool {
 	}
 }
 
+// isRealAgentArgv reports whether a process's full argv (the ps "args" field)
+// belongs to a genuine agent runtime, as opposed to a kernel thread or a
+// process whose truncated "comm" coincidentally collides with an agent name.
+//
+// The orphan/zombie reaper pre-filters candidates by the ps "comm" field, but
+// bare comm matching is a known landmine (gu-40hy7): the kernel renders threads
+// with bracketed comms ([kthreadd], [kworker/...], [pool_workqueue_release]) and
+// comm is truncated to 15 chars, so unrelated processes (e.g. an "ssm-agent-worker"
+// truncated toward "agent") can masquerade as agents. Counting — and worse,
+// killing — those is catastrophic. We require the argv's executable basename to
+// actually be one of our agent binaries; this fails safe (no match → not killed).
+func isRealAgentArgv(args string) bool {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return false
+	}
+	// Kernel threads render their argv as a bracketed comm, e.g. "[kthreadd]".
+	if strings.HasPrefix(args, "[") {
+		return false
+	}
+	// The executable is the first whitespace-delimited token of argv.
+	exe := strings.ToLower(filepath.Base(strings.Fields(args)[0]))
+	return isAgentOrphanCommName(exe)
+}
+
+// isRealAgentProcess validates that the given PID is a genuine agent process by
+// inspecting its full argv via ps, rather than trusting the collision-prone
+// comm field alone. Returns false if argv cannot be read (fail safe).
+func isRealAgentProcess(pid int) bool {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+	if err != nil {
+		return false
+	}
+	return isRealAgentArgv(string(out))
+}
+
 // OrphanedProcess represents a claude process running without a controlling terminal.
 type OrphanedProcess struct {
 	PID      int
@@ -486,6 +522,14 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 		// Match known agent comm names (claude family, opencode, Cursor, Copilot CLI)
 		cmdLower := strings.ToLower(cmd)
 		if !isAgentOrphanCommName(cmdLower) {
+			continue
+		}
+
+		// Validate against full argv before trusting the comm match.
+		// Bare comm matching collides with kernel threads ([kthreadd],
+		// [kworker/...]) and truncated/coincidental names (gu-40hy7); confirm
+		// the executable's argv basename is genuinely an agent binary.
+		if !isRealAgentProcess(pid) {
 			continue
 		}
 
@@ -600,6 +644,14 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 
 		cmdLower := strings.ToLower(cmd)
 		if !isAgentOrphanCommName(cmdLower) {
+			continue
+		}
+
+		// Validate against full argv before trusting the comm match.
+		// Bare comm matching collides with kernel threads ([kthreadd],
+		// [kworker/...]) and truncated/coincidental names (gu-40hy7); confirm
+		// the executable's argv basename is genuinely an agent binary.
+		if !isRealAgentProcess(pid) {
 			continue
 		}
 
@@ -900,6 +952,12 @@ func isProcessStillOrphaned(pid int) bool {
 
 	// If it now has a real TTY, it's been adopted
 	if tty != "?" && tty != "??" {
+		return false
+	}
+
+	// Re-validate argv: guards against PID reuse during the grace window
+	// (a recycled PID could now be a kernel thread or non-agent process).
+	if !isRealAgentProcess(pid) {
 		return false
 	}
 
