@@ -1124,12 +1124,6 @@ const DefaultAutoTestPRCadenceDays = 7
 // hard fail per design.
 const DefaultAutoTestPRConventionsPath = ".gt/auto-test-pr/conventions.md"
 
-// AutoTestPRSupportedLanguages is the v1 language allow-list. Per
-// PRD Q4 / synthesis decision D? the v1 pilot is Go-only; unknown
-// values are rejected by validation as a typed error so callers can
-// distinguish "unknown language" from "malformed JSON".
-var AutoTestPRSupportedLanguages = []string{"go"}
-
 // AutoTestPRConfig represents per-rig auto-test-pr configuration. It
 // lives in the rig's settings JSON (operator authority), NOT in the
 // in-repo rig manifest. Default-absent (nil pointer on RigSettings)
@@ -1144,13 +1138,6 @@ type AutoTestPRConfig struct {
 	// that flips this; the polecat formula honors the value at
 	// dispatch time.
 	Enabled bool `json:"enabled"`
-
-	// Language is the v1 language allow-list selector. Only "go" is
-	// accepted in v1; other values fail validation with a typed
-	// error (not a panic) so the CLI can route users to the v2
-	// follow-up bead. Empty string is allowed when Enabled=false to
-	// support a "shape ships, opt-in deferred" stanza.
-	Language string `json:"language,omitempty"`
 
 	// CadenceDays is the minimum number of days between auto-test-pr
 	// cycles for this rig. 0 (the JSON-absent default) means

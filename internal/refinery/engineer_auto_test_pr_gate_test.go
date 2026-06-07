@@ -200,7 +200,6 @@ func TestAutoTestPRApprovalRequired_TrueWhenExplicitlyTrue(t *testing.T) {
 		"version": 1,
 		"auto_test_pr": map[string]interface{}{
 			"enabled":                 true,
-			"language":                "go",
 			"require_review_approval": true,
 		},
 	}
@@ -229,7 +228,6 @@ func TestAutoTestPRApprovalRequired_FalseOnlyWhenExplicitlyFalse(t *testing.T) {
 		"version": 1,
 		"auto_test_pr": map[string]interface{}{
 			"enabled":                 true,
-			"language":                "go",
 			"require_review_approval": false,
 		},
 	}
@@ -254,9 +252,9 @@ func TestAutoTestPRApprovalRequired_DefaultTrueOnMalformedSettings(t *testing.T)
 	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
 		t.Fatalf("mkdir settings: %v", err)
 	}
-	// Invalid language triggers ErrInvalidAutoTestPRLanguage; the
+	// Negative cadence triggers ErrInvalidAutoTestPRCadence; the
 	// loader returns an error and a nil settings struct.
-	body := `{"type":"rig-settings","version":1,"auto_test_pr":{"language":"rust"}}`
+	body := `{"type":"rig-settings","version":1,"auto_test_pr":{"cadence_days":-1}}`
 	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(body), 0o600); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
