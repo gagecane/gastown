@@ -4085,6 +4085,15 @@ func TestIsIdentityBead(t *testing.T) {
 			issue: &Issue{Title: "Exclude beads with role_type set", Status: "open", Type: "bug", Description: "FIX: hard-exclude beads with role_type set (role_type:refinery) from dispatch."},
 			want:  false,
 		},
+		// rc-yne: a bug report that QUOTES the canonical agent-bead marker block
+		// (indented) in its fix instructions must NOT be classified as identity.
+		// ParseAgentFields TrimSpace-es each line, so the indented `  role_type:`
+		// used to parse as a real key and refuse dispatch of a legitimate bug.
+		{
+			name:  "indented quoted role_type marker is not identity",
+			issue: &Issue{Title: "witness agent bead has empty description", Status: "open", Type: "bug", Description: "Fix: restore canonical description preserving labels:\n\n  Witness for ralphconfig\n\n  role_type: witness\n  rig: ralphconfig\n  agent_state: idle"},
+			want:  false,
+		},
 	}
 
 	for _, tt := range tests {

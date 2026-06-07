@@ -210,14 +210,34 @@ func ParseAgentFields(description string) *AgentFields {
 // every agent bead regardless of owner, status, title, or labels, so dispatch
 // guards reject on it directly.
 //
-// Detection reuses ParseAgentFields, which only extracts role_type from a line
-// whose leading key (text before the first colon) is exactly "role_type" — the
-// agent-bead serialization format produced by FormatAgentDescription. Prose
-// that merely mentions role_type mid-sentence (e.g. gs-fwu's own description)
-// is not a leading key and does not trip the guard, so legitimate work beads
-// are unaffected.
+// Detection requires a column-0 `role_type:` line with a non-empty value — the
+// exact form FormatAgentDescription emits (the marker block is never indented).
+// We deliberately do NOT reuse ParseAgentFields here: it TrimSpace-es each line
+// before extracting the key, so an indented block-quoted marker — e.g. a bug
+// report that quotes the canonical agent-bead format in its fix instructions —
+// parses as a real `role_type` key and trips the guard, making a legitimate
+// work bead un-slingable (rc-yne: a P2 bug about agent-bead markers refused
+// dispatch because its description quoted `  role_type: witness`). Anchoring at
+// column 0 matches every real agent bead (gs-fwu) while letting prose — whether
+// mid-sentence or indented/quoted — pass through untouched.
 func HasAgentRoleType(description string) bool {
-	return ParseAgentFields(description).RoleType != ""
+	for _, line := range strings.Split(description, "\n") {
+		if !strings.HasPrefix(line, "role_type") {
+			continue // indented or prose mention — not the authoritative marker
+		}
+		colonIdx := strings.Index(line, ":")
+		if colonIdx == -1 {
+			continue
+		}
+		if strings.TrimSpace(line[:colonIdx]) != "role_type" {
+			continue
+		}
+		value := strings.TrimSpace(line[colonIdx+1:])
+		if value != "" && value != "null" {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateAgentBead creates an agent bead for tracking agent lifecycle.
