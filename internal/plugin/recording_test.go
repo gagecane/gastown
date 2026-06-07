@@ -225,7 +225,6 @@ func TestCronDue(t *testing.T) {
 	}
 	now := time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)
 	prevFire := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
-	grace := 5 * time.Minute
 
 	mk := func(result RunResult, at time.Time) *PluginRunBead {
 		return &PluginRunBead{Result: result, CreatedAt: at}
@@ -257,25 +256,38 @@ func TestCronDue(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "fresh inflight within grace -> suppressed, not due",
-			runs: []*PluginRunBead{mk(ResultInflight, now.Add(-2*time.Minute))},
+			// The daemon's dispatch record for this fire suppresses re-dispatch
+			// for the rest of the day even though no terminal receipt followed —
+			// this is the gu-jifj5 storm guard: a cron fire dispatched once must
+			// not re-fire until the next scheduled fire.
+			name: "inflight at this fire, no terminal receipt -> serviced, not due",
+			runs: []*PluginRunBead{mk(ResultInflight, prevFire.Add(time.Minute))},
 			want: false,
 		},
 		{
-			name: "stale inflight past grace -> gate re-opens, due",
-			runs: []*PluginRunBead{mk(ResultInflight, now.Add(-10*time.Minute))},
+			// A long-elapsed inflight is still "after this fire" while prevFire is
+			// today's 12:00 — it stays suppressed until tomorrow's fire advances
+			// prevFire past it. (Old cooldown-style grace-reopen is gone.)
+			name: "inflight long after this fire -> still serviced, not due",
+			runs: []*PluginRunBead{mk(ResultInflight, now.Add(-30*time.Minute))},
+			want: false,
+		},
+		{
+			// Yesterday's dispatch record does not service today's fire.
+			name: "inflight before this fire (yesterday) -> due",
+			runs: []*PluginRunBead{mk(ResultInflight, prevFire.Add(-24*time.Hour))},
 			want: true,
 		},
 		{
 			name: "stale inflight + terminal completion after fire -> serviced, not due",
-			runs: []*PluginRunBead{mk(ResultInflight, now.Add(-10*time.Minute)), mk(ResultSuccess, prevFire.Add(time.Minute))},
+			runs: []*PluginRunBead{mk(ResultInflight, prevFire.Add(time.Minute)), mk(ResultSuccess, prevFire.Add(2*time.Minute))},
 			want: false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := cronDue(sched, tc.runs, now, grace)
+			got := cronDue(sched, tc.runs, now)
 			if got != tc.want {
 				t.Errorf("cronDue() = %v, want %v", got, tc.want)
 			}
@@ -290,7 +302,7 @@ func TestCronDue_ImpossibleSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)
-	if cronDue(sched, nil, now, 5*time.Minute) {
+	if cronDue(sched, nil, now) {
 		t.Error("cronDue for an impossible schedule should never be due")
 	}
 }

@@ -274,13 +274,24 @@ func (r *Recorder) CooldownSatisfied(pluginName, cooldown, grace string) (bool, 
 // the cron analog of CooldownSatisfied (which returns "should suppress");
 // CronDue returns "should dispatch", so callers `continue` when it is false.
 //
-// A cron gate is due when a scheduled fire has elapsed that has not yet been
-// serviced by a TERMINAL run, with the same in-flight anti-storm guard the
-// cooldown gate uses: an "inflight" dispatch record within the grace window
-// suppresses re-dispatch (so a freshly-dispatched plugin is not stormed), but
-// after grace elapses with no terminal record the gate re-opens (gu-50nbo).
+// A cron gate is due when the most recent scheduled fire has not yet been
+// serviced by ANY dispatch record — inflight or terminal. The daemon writes an
+// inflight record the moment it hands the plugin to a dog (handler.go), so that
+// record alone proves this fire was already dispatched and suppresses re-fire
+// until the NEXT scheduled fire, when prevFire advances past the record.
 //
-// grace is derived from the plugin's execution timeout (see Plugin.DispatchGrace).
+// This differs deliberately from the cooldown gate's in-flight handling: a
+// cooldown is a *minimum interval* where a dog that dies after dispatch should
+// be retried within the window (gu-50nbo), so a stale inflight there re-opens
+// after grace. A cron gate is a *scheduled fire* — once today's fire has been
+// dispatched it must not re-fire until tomorrow's, even if the dog never wrote a
+// terminal receipt. Reusing the cooldown's grace-reopen here re-fired daily cron
+// plugins every grace window all day (gu-jifj5). The tradeoff: a dog that dies
+// after dispatch skips that day's run, which self-corrects at the next fire — an
+// acceptable cost for a daily idempotent patrol versus a re-dispatch storm.
+//
+// grace is accepted for signature parity with CooldownSatisfied and is used only
+// to pad the lookback query window; the due decision no longer depends on it.
 func (r *Recorder) CronDue(pluginName, schedule, grace string) (bool, error) {
 	sched, err := parseCron(schedule)
 	if err != nil {
@@ -297,36 +308,30 @@ func (r *Recorder) CronDue(pluginName, schedule, grace string) (bool, error) {
 		return false, nil
 	}
 	// Query a window that comfortably covers the most recent scheduled fire
-	// plus the in-flight grace, so both the terminal-run and the in-flight
-	// checks below see the records they need even for infrequent schedules.
+	// (plus a small pad) so the serviced check below sees the dispatch record
+	// for this fire even for infrequent schedules.
 	window := now.Sub(prevFire) + graceDur + time.Minute
 	runs, err := r.GetRunsSince(pluginName, window.String())
 	if err != nil {
 		return false, err
 	}
-	return cronDue(sched, runs, now, graceDur), nil
+	return cronDue(sched, runs, now), nil
 }
 
 // cronDue is the pure decision core of CronDue, split out for unit testing
 // without a live beads store. `runs` are the plugin-run beads within the query
-// window; `now` is the evaluation time and `grace` the in-flight grace window.
-func cronDue(sched *cronSchedule, runs []*PluginRunBead, now time.Time, grace time.Duration) bool {
+// window; `now` is the evaluation time.
+func cronDue(sched *cronSchedule, runs []*PluginRunBead, now time.Time) bool {
 	prevFire := sched.Prev(now)
 	if prevFire.IsZero() {
 		return false
 	}
-	graceCutoff := now.Add(-grace)
 	for _, run := range runs {
-		if run.Result != ResultInflight {
-			// A terminal run at or after the most recent scheduled fire means
-			// this fire has already been serviced — not due.
-			if !run.CreatedAt.Before(prevFire) {
-				return false
-			}
-			continue
-		}
-		// In-flight dispatch within grace suppresses a re-dispatch storm.
-		if run.CreatedAt.After(graceCutoff) {
+		// Any dispatch record (inflight OR terminal) at or after the most recent
+		// scheduled fire means this fire has already been serviced — the daemon
+		// already dispatched for it. Suppress until the next scheduled fire, when
+		// prevFire advances past this record and the gate re-opens.
+		if !run.CreatedAt.Before(prevFire) {
 			return false
 		}
 	}
