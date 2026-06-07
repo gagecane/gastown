@@ -196,10 +196,27 @@ func isLogWaitTimeoutErr(err error) bool {
 		strings.Contains(msg, doltContainerReadyLog)
 }
 
+// isContainerVanishedErr returns true if the error is the Docker daemon
+// reporting that the container Docker was asked to start no longer exists:
+//
+//	container start: Error response from daemon: No such container: e09af75a...
+//
+// This happens when a container is created but vanishes before the start call
+// lands — e.g. the testcontainers Ryuk reaper or a concurrent `docker prune`
+// removes it under daemon resource pressure during a full concurrent suite.
+// It is an infra flake, not a logic or image failure: a fresh retry creates a
+// new container with a new ID, so it is safe to retry. See bead gu-4aurv.
+func isContainerVanishedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "no such container")
+}
+
 // isTransientStartupErr returns true for errors that are worth retrying
 // when starting a Dolt test container.
 func isTransientStartupErr(err error) bool {
-	return isReaperRemovingErr(err) || isLogWaitTimeoutErr(err)
+	return isReaperRemovingErr(err) || isLogWaitTimeoutErr(err) || isContainerVanishedErr(err)
 }
 
 // isDockerUnavailableErr returns true if the error indicates the Docker

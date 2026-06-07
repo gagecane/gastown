@@ -111,6 +111,43 @@ func TestIsLogWaitTimeoutErr(t *testing.T) {
 	}
 }
 
+func TestIsContainerVanishedErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "real no-such-container from daemon",
+			// Format from the gu-4aurv refinery-merge flake.
+			err:  errors.New(`container start: Error response from daemon: No such container: e09af75a1234`),
+			want: true,
+		},
+		{
+			name: "lowercase variant",
+			err:  errors.New("no such container: abc123"),
+			want: true,
+		},
+		{
+			name: "unrelated error",
+			err:  errors.New("connection refused"),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isContainerVanishedErr(tt.err); got != tt.want {
+				t.Errorf("isContainerVanishedErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsTransientStartupErr(t *testing.T) {
 	tests := []struct {
 		name string
@@ -130,6 +167,11 @@ func TestIsTransientStartupErr(t *testing.T) {
 		{
 			name: "log wait timeout",
 			err:  errors.New(`"Server ready. Accepting connections." matched 0 times, expected 1`),
+			want: true,
+		},
+		{
+			name: "container vanished",
+			err:  errors.New(`container start: Error response from daemon: No such container: e09af75a1234`),
 			want: true,
 		},
 		{
