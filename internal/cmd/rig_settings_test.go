@@ -168,6 +168,153 @@ func TestRigSettingsShow(t *testing.T) {
 	})
 }
 
+// TestRigSettingsGet is a regression test for gu-eqn9d:
+// `gt rig settings get <rig> <key-path>` must read a single (possibly nested)
+// value. Previously `get` was only an alias for `show` (ExactArgs(1)), so
+// passing a key path failed with "accepts 1 arg(s), received 2", which made
+// the mol-pr-feedback-patrol feature-flag read permanently fall back to false.
+func TestRigSettingsGet(t *testing.T) {
+	t.Run("gets top-level string value bare", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForSettings(t)
+		rigPath := filepath.Join(townRoot, rigName)
+
+		settingsPath := filepath.Join(rigPath, "settings", "config.json")
+		settings := config.NewRigSettings()
+		settings.Agent = "claude"
+		if err := config.SaveRigSettings(settingsPath, settings); err != nil {
+			t.Fatalf("save settings: %v", err)
+		}
+
+		got, err := getNestedValue(settings, "agent")
+		if err != nil {
+			t.Fatalf("getNestedValue error: %v", err)
+		}
+		if formatValueForOutput(got) != "claude" {
+			t.Errorf("get agent = %q, want %q", formatValueForOutput(got), "claude")
+		}
+	})
+
+	t.Run("gets nested value with dot notation", func(t *testing.T) {
+		settings := config.NewRigSettings()
+		settings.RoleAgents = map[string]string{"witness": "gemini"}
+
+		got, err := getNestedValue(settings, "role_agents.witness")
+		if err != nil {
+			t.Fatalf("getNestedValue error: %v", err)
+		}
+		if formatValueForOutput(got) != "gemini" {
+			t.Errorf("get role_agents.witness = %q, want %q", formatValueForOutput(got), "gemini")
+		}
+	})
+
+	t.Run("gets feature flag bool bare", func(t *testing.T) {
+		settings := config.NewRigSettings()
+		settings.FeatureFlags = &config.FeatureFlagsConfig{
+			AutoTestPRRevisionRouting: true,
+		}
+
+		got, err := getNestedValue(settings, "feature_flags.auto_test_pr_revision_routing")
+		if err != nil {
+			t.Fatalf("getNestedValue error: %v", err)
+		}
+		if formatValueForOutput(got) != "true" {
+			t.Errorf("get feature flag = %q, want %q", formatValueForOutput(got), "true")
+		}
+	})
+
+	t.Run("missing key path errors so callers can default", func(t *testing.T) {
+		// feature_flags is omitempty; when absent the getter must error,
+		// which lets the formula's `|| echo false` fallback engage.
+		settings := config.NewRigSettings()
+
+		_, err := getNestedValue(settings, "feature_flags.auto_test_pr_revision_routing")
+		if err == nil {
+			t.Fatal("expected error for absent feature_flags block")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("error should mention 'not found', got: %v", err)
+		}
+	})
+
+	t.Run("intermediate non-object segment errors", func(t *testing.T) {
+		settings := config.NewRigSettings()
+		settings.Agent = "claude"
+
+		_, err := getNestedValue(settings, "agent.subkey")
+		if err == nil {
+			t.Fatal("expected error when descending into a scalar")
+		}
+		if !strings.Contains(err.Error(), "not an object") {
+			t.Errorf("error should mention 'not an object', got: %v", err)
+		}
+	})
+
+	t.Run("empty key path errors", func(t *testing.T) {
+		settings := config.NewRigSettings()
+		_, err := getNestedValue(settings, "")
+		if err == nil {
+			t.Fatal("expected error for empty key path")
+		}
+		if !strings.Contains(err.Error(), "empty") {
+			t.Errorf("error should mention 'empty', got: %v", err)
+		}
+	})
+
+	t.Run("formats object as compact JSON", func(t *testing.T) {
+		settings := config.NewRigSettings()
+		settings.RoleAgents = map[string]string{"witness": "gemini"}
+
+		got, err := getNestedValue(settings, "role_agents")
+		if err != nil {
+			t.Fatalf("getNestedValue error: %v", err)
+		}
+		out := formatValueForOutput(got)
+		if !strings.Contains(out, `"witness":"gemini"`) {
+			t.Errorf("object output = %q, want compact JSON containing witness", out)
+		}
+	})
+
+	t.Run("end-to-end via runRigSettingsGet", func(t *testing.T) {
+		townRoot, rigName := setupTestRigForSettings(t)
+		rigPath := filepath.Join(townRoot, rigName)
+
+		settingsPath := filepath.Join(rigPath, "settings", "config.json")
+		settings := config.NewRigSettings()
+		settings.Agent = "claude"
+		if err := config.SaveRigSettings(settingsPath, settings); err != nil {
+			t.Fatalf("save settings: %v", err)
+		}
+
+		if err := runRigSettingsGet(rigSettingsGetCmd, []string{rigName, "agent"}); err != nil {
+			t.Fatalf("runRigSettingsGet error: %v", err)
+		}
+	})
+
+	t.Run("error case: invalid rig", func(t *testing.T) {
+		_, _ = setupTestRigForSettings(t)
+
+		err := runRigSettingsGet(rigSettingsGetCmd, []string{"nonexistent", "agent"})
+		if err == nil {
+			t.Fatal("expected error for invalid rig")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("error message should mention 'not found', got: %v", err)
+		}
+	})
+
+	t.Run("error case: settings file not found", func(t *testing.T) {
+		_, rigName := setupTestRigForSettings(t)
+
+		err := runRigSettingsGet(rigSettingsGetCmd, []string{rigName, "agent"})
+		if err == nil {
+			t.Fatal("expected error when settings file doesn't exist")
+		}
+		if !strings.Contains(err.Error(), "no settings file") {
+			t.Errorf("error message should mention 'no settings file', got: %v", err)
+		}
+	})
+}
+
 func TestRigSettingsSet(t *testing.T) {
 	t.Run("sets top-level keys", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForSettings(t)

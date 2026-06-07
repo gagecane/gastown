@@ -36,9 +36,8 @@ Use dot notation to access nested keys (e.g., role_agents.witness).`,
 }
 
 var rigSettingsShowCmd = &cobra.Command{
-	Use:     "show <rig>",
-	Aliases: []string{"get"},
-	Short:   "Display all settings",
+	Use:   "show <rig>",
+	Short: "Display all settings",
 	Long: `Display all settings for a rig.
 
 Shows the complete settings/config.json file as formatted JSON.
@@ -47,6 +46,27 @@ Example:
   gt rig settings show gastown`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRigSettingsShow,
+}
+
+var rigSettingsGetCmd = &cobra.Command{
+	Use:   "get <rig> <key-path>",
+	Short: "Get a single settings value",
+	Long: `Get a single settings value using dot notation for nested keys.
+
+Prints the value for the given key path. Scalars (strings, booleans,
+numbers) are printed bare so the output is easy to consume from scripts;
+objects and arrays are printed as compact JSON.
+
+Exits non-zero if the key path is not present, which lets callers fall
+back to a default:
+  FLAG=$(gt rig settings get gastown feature_flags.some_flag 2>/dev/null || echo "false")
+
+Examples:
+  gt rig settings get gastown agent
+  gt rig settings get gastown role_agents.witness
+  gt rig settings get gastown feature_flags.auto_test_pr_revision_routing`,
+	Args: cobra.ExactArgs(2),
+	RunE: runRigSettingsGet,
 }
 
 var rigSettingsSetCmd = &cobra.Command{
@@ -91,6 +111,7 @@ Examples:
 func init() {
 	rigCmd.AddCommand(rigSettingsCmd)
 	rigSettingsCmd.AddCommand(rigSettingsShowCmd)
+	rigSettingsCmd.AddCommand(rigSettingsGetCmd)
 	rigSettingsCmd.AddCommand(rigSettingsSetCmd)
 	rigSettingsCmd.AddCommand(rigSettingsUnsetCmd)
 }
@@ -121,6 +142,33 @@ func runRigSettingsShow(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println(string(data))
+	return nil
+}
+
+func runRigSettingsGet(cmd *cobra.Command, args []string) error {
+	rigName := args[0]
+	keyPath := args[1]
+
+	_, r, err := getRig(rigName)
+	if err != nil {
+		return err
+	}
+
+	settingsPath := filepath.Join(r.Path, "settings", "config.json")
+	settings, err := config.LoadRigSettings(settingsPath)
+	if err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			return fmt.Errorf("no settings file found at %s", settingsPath)
+		}
+		return fmt.Errorf("loading settings: %w", err)
+	}
+
+	value, err := getNestedValue(settings, keyPath)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(formatValueForOutput(value))
 	return nil
 }
 
@@ -229,6 +277,72 @@ func parseValue(s string) interface{} {
 
 	// Default to string
 	return s
+}
+
+// getNestedValue reads a value from a nested structure using dot notation.
+// For example, "feature_flags.auto_test_pr_revision_routing" returns
+// settings.FeatureFlags.AutoTestPRRevisionRouting. Returns an error if any
+// segment of the path is missing or if an intermediate segment is not an
+// object.
+func getNestedValue(obj interface{}, keyPath string) (interface{}, error) {
+	keys := strings.Split(keyPath, ".")
+	if len(keys) == 0 || (len(keys) == 1 && keys[0] == "") {
+		return nil, fmt.Errorf("empty key path")
+	}
+
+	// Convert to a generic map so we can walk the path by key name.
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling object: %w", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("unmarshaling object: %w", err)
+	}
+
+	var current interface{} = m
+	for i, key := range keys {
+		asMap, ok := current.(map[string]interface{})
+		if !ok {
+			parent := strings.Join(keys[:i], ".")
+			return nil, fmt.Errorf("key path %q not found: %q is not an object", keyPath, parent)
+		}
+		next, exists := asMap[key]
+		if !exists {
+			return nil, fmt.Errorf("key path %q not found", keyPath)
+		}
+		current = next
+	}
+
+	return current, nil
+}
+
+// formatValueForOutput renders a settings value for `get` output. Scalars are
+// printed bare (no quotes) so scripts can consume them directly; objects and
+// arrays are printed as compact JSON.
+func formatValueForOutput(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	case nil:
+		return "null"
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case map[string]interface{}, []interface{}:
+		data, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return string(data)
+	default:
+		return fmt.Sprintf("%v", val)
+	}
 }
 
 // setNestedValue sets a value in a nested structure using dot notation.
