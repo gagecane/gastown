@@ -2357,6 +2357,19 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 		return false
 	}
 
+	// Skip beads deferred to a future time (gu-w7mgd). `gt done --status
+	// DEFERRED` sets defer_until WITHOUT flipping status off "open", so the
+	// status checks below would otherwise treat a future-deferred bead as
+	// ready. The actual dispatch path (feedNextReadyIssue) already skips these,
+	// so without this guard the stranded scan reports a convoy as having ready
+	// work every cycle, dispatches a dog, and the dog finds "no ready issues" —
+	// the re-dispatch noise this fix removes (gu-z8qzq dedup family). Mirror the
+	// `bd ready` filter (defer_until > now → hidden). On an unparseable
+	// defer_until we fall through to ready rather than stranding the bead.
+	if expired, err := isDeferUntilExpired(t.DeferUntil, time.Now()); err == nil && t.DeferUntil != "" && !expired {
+		return false
+	}
+
 	// Scheduled beads are not stranded — they're waiting for dispatch capacity.
 	if scheduledSet[t.ID] {
 		return false
@@ -3144,6 +3157,7 @@ type trackedIssueInfo struct {
 	Labels      []string `json:"labels,omitempty"`       // Bead labels (propagated from trackedDependency)
 	Description string   `json:"description,omitempty"`  // Bead description (used by ship-verification gate, gu-j7u5)
 	CloseReason string   `json:"close_reason,omitempty"` // Why the bead was closed (used by ship-verification gate, gu-yy39)
+	DeferUntil  string   `json:"defer_until,omitempty"`  // RFC3339 defer window; future-deferred beads are not ready (gu-w7mgd)
 	Worker      string   `json:"worker,omitempty"`       // Worker currently assigned (e.g., gastown/nux)
 	WorkerAge   string   `json:"worker_age,omitempty"`   // How long worker has been on this issue
 }
@@ -3159,6 +3173,7 @@ type trackedDependency struct {
 	Labels         []string `json:"labels"`
 	Description    string   `json:"-"` // Description from fresh bd show (used by ship-verification, gu-j7u5)
 	CloseReason    string   `json:"-"` // close_reason from fresh bd show (used by ship-verification, gu-yy39)
+	DeferUntil     string   `json:"-"` // defer_until from fresh bd show (suppresses re-dispatch of deferred beads, gu-w7mgd)
 	Blocked        bool     `json:"-"`
 }
 
@@ -3183,6 +3198,7 @@ func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
 	dep.Labels = details.Labels
 	dep.Description = details.Description
 	dep.CloseReason = details.CloseReason
+	dep.DeferUntil = details.DeferUntil
 }
 
 // getTrackedIssues gets issues tracked by a convoy with fresh cross-rig details.
@@ -3302,6 +3318,7 @@ func buildTrackedIssueInfosFromCache(
 			Labels:      dep.Labels,
 			Description: dep.Description,
 			CloseReason: dep.CloseReason,
+			DeferUntil:  dep.DeferUntil,
 		}
 
 		if worker, ok := workersMap[dep.ID]; ok {
@@ -3400,6 +3417,7 @@ type issueDetailsJSON struct {
 	BlockedBy      []string          `json:"blocked_by"`
 	BlockedByCount int               `json:"blocked_by_count"`
 	CloseReason    string            `json:"close_reason"`
+	DeferUntil     string            `json:"defer_until"`
 	Dependencies   []issueDependency `json:"dependencies"`
 }
 
@@ -3415,6 +3433,7 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 		BlockedBy:      issue.BlockedBy,
 		BlockedByCount: issue.BlockedByCount,
 		CloseReason:    issue.CloseReason,
+		DeferUntil:     issue.DeferUntil,
 		Dependencies:   issue.Dependencies,
 	}
 }
@@ -3431,6 +3450,7 @@ type issueDetails struct {
 	BlockedBy      []string
 	BlockedByCount int
 	CloseReason    string
+	DeferUntil     string
 	Dependencies   []issueDependency
 }
 

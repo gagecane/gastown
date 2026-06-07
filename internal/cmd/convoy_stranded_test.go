@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
@@ -41,6 +42,39 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 			in: trackedIssueInfo{
 				Status:  "in_progress",
 				Blocked: false,
+			},
+			want: true,
+		},
+		{
+			// gu-w7mgd: a bead deferred to the future is NOT ready — the
+			// dispatch path skips it, so the stranded scan must too, else the
+			// convoy-feeder re-dispatches a dog every cycle that finds nothing.
+			name: "future-deferred open issue not ready",
+			in: trackedIssueInfo{
+				Status:     "open",
+				Blocked:    false,
+				DeferUntil: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			},
+			want: false,
+		},
+		{
+			// An expired defer window means the bead is dispatchable again.
+			name: "past-deferred open issue is ready",
+			in: trackedIssueInfo{
+				Status:     "open",
+				Blocked:    false,
+				DeferUntil: time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+			},
+			want: true,
+		},
+		{
+			// An unparseable defer_until must not strand the bead — fall through
+			// to ready rather than suppressing it forever.
+			name: "unparseable defer_until falls through to ready",
+			in: trackedIssueInfo{
+				Status:     "open",
+				Blocked:    false,
+				DeferUntil: "not-a-timestamp",
 			},
 			want: true,
 		},
