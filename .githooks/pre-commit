@@ -184,7 +184,8 @@ fi
 
 if ! command -v golangci-lint >/dev/null 2>&1; then
   echo "⚠ pre-commit: 'golangci-lint' not found on PATH — skipping lint." >&2
-  echo "  CI will still run the full lint; install locally for faster feedback." >&2
+  echo "  CI will still run the full lint; install locally for faster feedback:" >&2
+  echo "    mise use -g golangci-lint@2.11.4   (corp-proxy-safe; matches CI)" >&2
   exit 0
 fi
 

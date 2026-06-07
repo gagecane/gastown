@@ -335,8 +335,10 @@ fi
 # If golangci-lint isn't installed locally, behavior splits on repo type
 # (gs-812): in a Go repo this gate fails CLOSED (block + audit), because a
 # missing linter is exactly how lint failures slipped onto main in the window
-# between push and CI catch. Non-Go checkouts skip gracefully. Install requires
-# `go install` + the version lock from .github/workflows/ci.yml. (gu-lint-fastgate)
+# between push and CI catch. Non-Go checkouts skip gracefully. Install via
+# `mise use -g golangci-lint@2.11.4` (corp-proxy-safe) at the version lock from
+# .github/workflows/ci.yml; the block message lists the install routes.
+# (gu-lint-fastgate, gu-8z815)
 
 if command -v golangci-lint >/dev/null 2>&1; then
   echo "pre-push: [fast] golangci-lint run (static analysis)" >&2
@@ -366,8 +368,20 @@ In a Go repo this gate now fails CLOSED. The block is recorded in
 
 Probed for golangci-lint in: ${PROBE_DIRS}
 
-Fix: install it, then re-push:
-  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+Fix: install golangci-lint v2.11.4 (matches CI), then re-push.
+
+  Preferred (works behind the corp Go-proxy DNS sinkhole — pulls the GitHub
+  release binary directly, no proxy.golang.org):
+    mise use -g golangci-lint@2.11.4
+
+  Or download the pinned release binary straight from GitHub:
+    https://github.com/golangci/golangci-lint/releases/tag/v2.11.4
+    (extract and put 'golangci-lint' on your PATH, e.g. ~/.local/bin)
+
+  Fallback (only if your Go module proxy reaches proxy.golang.org —
+  this FAILS on standard Amazon dev hosts where it is DNS-sinkholed):
+    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+
 To bypass ALL hooks anyway (not recommended): git push --no-verify.
 EOF
   exit 1
