@@ -325,6 +325,17 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		return 0, fmt.Errorf("acquiring dispatch lock: %w", err)
 	}
 	if !locked {
+		// Another dispatch holds the lock (commonly the daemon's periodic tick,
+		// or a long-running interactive run grinding the maintenance fan-out over
+		// a large wisp backlog). Surface this on the interactive path so a blocked
+		// `gt scheduler run` is not mistaken for a no-op — previously it returned
+		// silently, making lock starvation invisible (a wedged run looked like
+		// "0 dispatched, nothing to do"). Suppressed under the daemon, which polls
+		// frequently and would spam its log.
+		if !isDaemonDispatch() {
+			fmt.Printf("%s Dispatch already in progress (lock held by another scheduler run or the daemon); skipping. Retry shortly.\n",
+				style.Dim.Render("○"))
+		}
 		return 0, nil
 	}
 	defer func() { _ = fileLock.Unlock() }()
