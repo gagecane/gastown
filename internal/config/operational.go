@@ -180,6 +180,13 @@ const (
 	// "don't go silent so long a genuinely stuck agent is forgotten." The alarm
 	// still re-fires sooner if the condition materially worsens.
 	DefaultWitnessStaleRigAgentNotifyCooldown = 30 * time.Minute
+	// DefaultWitnessStaleRigAgentCorrelationWindow is the town-wide window over
+	// which STALE_RIG_AGENT escalations from different rigs fold into one
+	// thread (gu-nejgh). 15m is short enough that distinct incidents stay
+	// distinct (a wedged agent in rig A this hour won't silence a separate
+	// wedge in rig B next hour) but long enough to capture the simultaneous
+	// fan-out of a single town-wide event across staggered 5m patrol cycles.
+	DefaultWitnessStaleRigAgentCorrelationWindow = 15 * time.Minute
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -960,4 +967,14 @@ func (wt *WitnessThresholds) StaleRigAgentNotifyCooldownD() time.Duration {
 		return ParseDurationOrDefault(wt.StaleRigAgentNotifyCooldown, DefaultWitnessStaleRigAgentNotifyCooldown)
 	}
 	return DefaultWitnessStaleRigAgentNotifyCooldown
+}
+
+// StaleRigAgentCorrelationWindowD returns the configured or default town-wide
+// window over which STALE_RIG_AGENT escalations from different rigs fold into a
+// single thread. (gu-nejgh) Set to 0 to disable correlation (every agent sends).
+func (wt *WitnessThresholds) StaleRigAgentCorrelationWindowD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.StaleRigAgentCorrelationWindow, DefaultWitnessStaleRigAgentCorrelationWindow)
+	}
+	return DefaultWitnessStaleRigAgentCorrelationWindow
 }

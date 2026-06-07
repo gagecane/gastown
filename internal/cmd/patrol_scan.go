@@ -107,6 +107,7 @@ type PatrolScanStaleRigAgentItem struct {
 	HeartbeatMissing bool   `json:"heartbeat_missing"`
 	SessionAlive     bool   `json:"session_alive"`
 	Action           string `json:"action"`
+	CorrelatedInto   string `json:"correlated_into,omitempty"`
 	MailSent         bool   `json:"mail_sent"`
 	Error            string `json:"error,omitempty"`
 }
@@ -258,9 +259,13 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// Cooldown between repeated escalations for the same unchanged stale agent,
 	// so the witness stops re-mailing mayor every patrol cycle (gu-z8qzq).
 	staleAgentCooldown := witnessCfg.StaleRigAgentNotifyCooldownD()
+	// Town-wide window over which STALE_RIG_AGENT escalations from DIFFERENT
+	// rigs fold into a single thread, so a town-wide incident produces one
+	// escalation instead of M independent HIGH mails to mayor (gu-nejgh).
+	staleAgentCorrelationWindow := witnessCfg.StaleRigAgentCorrelationWindowD()
 	// Pass $GT_SESSION so the detector never escalates the scanning agent's
 	// own heartbeat — the self-amplifying STALE_RIG_AGENT flood guard (gu-vqmmp).
-	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold, os.Getenv("GT_SESSION"), staleAgentCooldown)
+	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold, os.Getenv("GT_SESSION"), staleAgentCooldown, staleAgentCorrelationWindow)
 
 	// False-deferred bead recovery (gu-wykt). Beads that are status=deferred
 	// but whose work has shipped on origin/<default> with a commit citing the
@@ -483,6 +488,7 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 				HeartbeatMissing: s.HeartbeatMissing,
 				SessionAlive:     s.SessionAlive,
 				Action:           s.Action,
+				CorrelatedInto:   s.CorrelatedInto,
 				MailSent:         s.MailSent,
 			}
 			if s.Error != nil {
@@ -693,6 +699,9 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 				}
 				fmt.Printf("  ● %s/%s: age=%s session_alive=%v action=%s\n",
 					rigName, s.AgentRole, ageStr, s.SessionAlive, s.Action)
+				if s.CorrelatedInto != "" {
+					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("correlated into %s (gu-nejgh)", s.CorrelatedInto)))
+				}
 				if s.Error != nil {
 					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", s.Error)))
 				}

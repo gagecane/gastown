@@ -578,6 +578,18 @@ type WitnessThresholds struct {
 	// or the heartbeat transitions missing<->present. Default "30m". Set to "0"
 	// to disable suppression (re-notify every cycle, pre-gu-z8qzq behavior).
 	StaleRigAgentNotifyCooldown string `json:"stale_rig_agent_notify_cooldown,omitempty"`
+
+	// StaleRigAgentCorrelationWindow is the town-wide window over which
+	// STALE_RIG_AGENT escalations from DIFFERENT rigs are folded into a single
+	// escalation thread. During a town-wide incident (e.g. Dolt saturation
+	// wedging every rig at once) each rig's witness independently escalates its
+	// own wedged refinery/witness; without correlation that is M near-
+	// simultaneous HIGH mails to mayor for one root cause. The first agent to
+	// escalate within the window leads (sends); every other (rig,session) that
+	// escalates inside the window folds into the lead's thread with no mail.
+	// Default "15m". Set to "0" to disable correlation (every agent sends —
+	// pre-gu-nejgh behavior). (gu-nejgh, follow-up #4 to gu-z8qzq)
+	StaleRigAgentCorrelationWindow string `json:"stale_rig_agent_correlation_window,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

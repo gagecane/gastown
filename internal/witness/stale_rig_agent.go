@@ -36,8 +36,14 @@ type StaleRigAgentResult struct {
 	// Action describes what the detector did: "escalated" when mail was sent,
 	// "skip-fresh" when the heartbeat was within threshold,
 	// "skip-cooldown" when the condition was already reported recently and has
-	// not materially changed (gu-z8qzq dedup), etc.
+	// not materially changed (gu-z8qzq dedup), "skip-correlated" when the alarm
+	// folded into another rig's concurrent STALE_RIG_AGENT escalation for the
+	// same town-wide root cause (gu-nejgh), etc.
 	Action string
+	// CorrelatedInto is the lead agent's "rig/session" key when Action is
+	// "skip-correlated" — the escalation thread this alarm folded into. Empty
+	// otherwise. (gu-nejgh)
+	CorrelatedInto string
 	// MailSent is true when the escalation mail was successfully delivered
 	// to mayor (or via nudge fallback).
 	MailSent bool
@@ -101,7 +107,17 @@ type DetectStaleRigAgentHeartbeatsResult struct {
 // heartbeat aged out would otherwise escalate itself every patrol cycle,
 // and cross-nudged peers re-running `gt patrol scan` would escalate theirs
 // in turn. Pass "" to disable the self-skip (e.g. in tests).
-func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration, selfSession string, notifyCooldown time.Duration) *DetectStaleRigAgentHeartbeatsResult {
+//
+// Cross-rig correlation (gu-nejgh): during a town-wide incident every rig's
+// witness independently detects its own wedged refinery/witness and — even
+// with the per-(rig,session) cooldown above — would each send one HIGH
+// escalation, flooding mayor with M near-simultaneous mails for ONE root
+// cause. correlationWindow folds that burst into a single thread: the first
+// agent to escalate within the window leads (sends), and every other
+// (rig,session) that escalates inside the window folds into the lead's thread
+// with Action="skip-correlated" and no mail. correlationWindow<=0 disables
+// correlation (every agent sends), the operator opt-out.
+func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration, selfSession string, notifyCooldown, correlationWindow time.Duration) *DetectStaleRigAgentHeartbeatsResult {
 	result := &DetectStaleRigAgentHeartbeatsResult{}
 
 	if staleThreshold <= 0 {
@@ -173,7 +189,7 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 			// Session is alive but no heartbeat at all. This is the
 			// pre-gu-0nmw case where refinery/witness sessions never wrote
 			// a heartbeat. Treat as stale so we surface the gap.
-			escalateStaleRigAgent(&item, router, t, townRoot, rigName, staleThreshold, notifyCooldown, now, 1, true)
+			escalateStaleRigAgent(&item, router, t, townRoot, rigName, staleThreshold, notifyCooldown, correlationWindow, now, 1, true)
 			result.Stale = append(result.Stale, item)
 			continue
 		}
@@ -192,27 +208,62 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 		// re-notifying every cycle for an unchanged condition, but re-fires when
 		// the staleness band worsens or the cooldown elapses.
 		band := staleAgentBand(item.HeartbeatAge, staleThreshold)
-		escalateStaleRigAgent(&item, router, t, townRoot, rigName, staleThreshold, notifyCooldown, now, band, false)
+		escalateStaleRigAgent(&item, router, t, townRoot, rigName, staleThreshold, notifyCooldown, correlationWindow, now, band, false)
 		result.Stale = append(result.Stale, item)
 	}
 
 	return result
 }
 
-// escalateStaleRigAgent applies the gu-z8qzq dedup/cooldown gate, then either
-// sends the STALE_RIG_AGENT mail (recording the new notify state) or records a
-// "skip-cooldown" no-op. It mutates item.Action and item.MailSent in place.
+// escalateStaleRigAgent applies the gu-z8qzq dedup/cooldown gate and the
+// gu-nejgh cross-rig correlation gate, then either sends the STALE_RIG_AGENT
+// mail (recording the new notify state) or records a "skip-*" no-op. It mutates
+// item.Action, item.CorrelatedInto, and item.MailSent in place.
+//
+// Gate order:
+//  1. Cooldown (per-(rig,session)): suppress the SAME agent re-firing every
+//     patrol cycle for an unchanged condition (skip-cooldown).
+//  2. Correlation (town-wide): once an agent passes the cooldown gate and would
+//     escalate, fold it into a concurrent escalation from another rig for the
+//     same root-cause window — only the window's lead sends (skip-correlated).
+//
+// Cooldown is applied first so a stale agent's own re-fires never count as new
+// members of a correlation window; correlation only collapses genuinely fresh
+// escalations from DISTINCT agents within a short window.
 //
 // band is the staleness band (1 for a missing heartbeat or [1x,2x) threshold,
 // 2 for [2x,3x), ...); missing indicates a fully-absent heartbeat vs a
 // present-but-stale one. Both feed shouldNotifyStaleAgent's material-change
 // detection.
-func escalateStaleRigAgent(item *StaleRigAgentResult, router *mail.Router, t *tmux.Tmux, townRoot, rigName string, threshold, cooldown time.Duration, now time.Time, band int, missing bool) {
+func escalateStaleRigAgent(item *StaleRigAgentResult, router *mail.Router, t *tmux.Tmux, townRoot, rigName string, threshold, cooldown, correlationWindow time.Duration, now time.Time, band int, missing bool) {
 	prev := readStaleAgentState(townRoot, rigName, item.SessionName)
 	if !shouldNotifyStaleAgent(prev, now, cooldown, band, missing) {
 		// Same alarm, already reported recently, condition unchanged — suppress
 		// the duplicate mail that was interrupting the Mayor every cycle.
 		item.Action = "skip-cooldown"
+		return
+	}
+
+	// Cross-rig correlation (gu-nejgh): the cooldown gate has cleared this as a
+	// genuinely fresh escalation. If another rig already opened a correlation
+	// window for the same town-wide incident, fold into its thread instead of
+	// sending an independent HIGH mail to mayor.
+	decision := joinOrLeadStaleAgentCorrelation(townRoot, rigName, item.SessionName, now, correlationWindow)
+	if !decision.IsLead {
+		item.Action = "skip-correlated"
+		item.CorrelatedInto = decision.FoldedInto
+		// Record the notify state anyway: this agent's condition WAS observed and
+		// folded, so its per-(rig,session) cooldown should start now. Otherwise
+		// the next cycle treats it as a brand-new first observation and the
+		// cooldown gate would wave it through again the moment the correlation
+		// window closes, defeating both gates.
+		if cooldown > 0 {
+			writeStaleAgentState(townRoot, rigName, item.SessionName, &staleAgentNotifyState{
+				LastNotifiedAt: now,
+				LastBand:       band,
+				LastMissing:    missing,
+			})
+		}
 		return
 	}
 

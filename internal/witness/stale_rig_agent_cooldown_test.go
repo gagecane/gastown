@@ -146,14 +146,14 @@ func TestDetectStaleRigAgentHeartbeats_CooldownSuppressesSecondCycle(t *testing.
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefix), 30*time.Second)
 
 	// Cycle 1: cooldown enabled, first observation -> escalate.
-	res1 := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 30*time.Minute)
+	res1 := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 30*time.Minute, 0)
 	ref1 := findStaleResult(res1, "refinery")
 	if ref1 == nil || ref1.Action != "escalated" {
 		t.Fatalf("cycle 1 refinery Action = %v, want escalated", ref1)
 	}
 
 	// Cycle 2: same condition (heartbeat still ~2h, same band) -> suppressed.
-	res2 := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 30*time.Minute)
+	res2 := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 30*time.Minute, 0)
 	ref2 := findStaleResult(res2, "refinery")
 	if ref2 == nil || ref2.Action != "skip-cooldown" {
 		t.Fatalf("cycle 2 refinery Action = %v, want skip-cooldown", ref2)
@@ -176,7 +176,7 @@ func TestDetectStaleRigAgentHeartbeats_CooldownDisabledReNotifies(t *testing.T) 
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefix), 30*time.Second)
 
 	for cycle := 1; cycle <= 2; cycle++ {
-		res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0)
+		res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0)
 		ref := findStaleResult(res, "refinery")
 		if ref == nil || ref.Action != "escalated" {
 			t.Fatalf("cycle %d refinery Action = %v, want escalated (cooldown disabled)", cycle, ref)
