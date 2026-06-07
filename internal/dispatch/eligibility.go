@@ -171,6 +171,37 @@ func IsEpicLikeBeadInfo(info *BeadInfo) bool {
 	return beads.HasEpicPhaseLabel(info.Labels)
 }
 
+// IsContainerBeadInfo reports whether the bead is a real epic or convoy
+// container — a bead whose issue_type or gt:epic/gt:convoy label marks it as a
+// parent that tracks work via its children, not a dispatchable work item.
+//
+// This is the type/label-level container check that IsEpicLikeBeadInfo
+// deliberately does NOT cover: that helper only fires on the data-hygiene gap
+// where a non-epic TYPE disagrees with an "EPIC:" title (it early-returns false
+// for issue_type=="epic"). The actual sling guard rejects real epics/convoys in
+// detectSchedulerIDType ("epic cannot be scheduled with an explicit rig"), but
+// nothing in the readiness path shared that rule.
+//
+// gu-9j93s: `bd ready` does NOT filter type=epic beads (despite a long-standing
+// assumption in filterIdentityBeads that "real epics are already filtered by bd
+// ready"). So real epics surfaced as phantom ready work, got fed to
+// `gt sling <id> <rig>`, and were refused by detectSchedulerIDType every cycle —
+// noisy, and inflating ready counts. Both `gt ready` and `gt sling` now share
+// this predicate so the readiness filter and the dispatch guard cannot drift.
+//
+// Mirrors detectSchedulerIDType's classification: issue_type epic/convoy, or the
+// gt:epic / gt:convoy label. (The "EPIC:"-title data-hygiene fallback is covered
+// separately by IsEpicLikeBeadInfo so callers can compose both.)
+func IsContainerBeadInfo(info *BeadInfo) bool {
+	if info == nil {
+		return false
+	}
+	if info.IssueType == "epic" || info.IssueType == "convoy" {
+		return true
+	}
+	return hasLabel(info.Labels, "gt:epic") || hasLabel(info.Labels, "gt:convoy")
+}
+
 // IsMayorOnlyBeadInfo reports whether the bead carries the mayor-only or
 // no-polecat label, which marks it as unresolvable by a polecat.
 //

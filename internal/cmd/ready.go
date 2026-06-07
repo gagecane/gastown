@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
@@ -474,22 +475,38 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
-		// Filter beads whose title marks them as epics (data-hygiene guard,
-		// gu-smr1). A bead with "EPIC:" prefix and issue_type=task is a
-		// miscategorised container — it must not reach an auto-dispatched
-		// polecat. Real epics (type=epic) are already filtered by bd ready.
-		if issue.Type != "epic" && beads.IsEpicLikeTitle(issue.Title) {
+		// Filter epic/convoy CONTAINER beads (gu-9j93s). A bead whose
+		// issue_type is epic/convoy, or that carries the gt:epic / gt:convoy
+		// label, is a parent that tracks work via its children — never
+		// dispatchable work itself. `gt sling` rejects these in
+		// detectSchedulerIDType ("epic cannot be scheduled with an explicit
+		// rig"), but the readiness filter long ASSUMED "real epics are already
+		// filtered by bd ready" — they are NOT. So real epics surfaced as
+		// phantom ready work, were fed to `gt sling <id> <rig>`, and bounced
+		// every cycle. Sharing dispatch.IsContainerBeadInfo with the sling
+		// guard keeps the two from drifting (the single-predicate fix the bug
+		// recommended, also covering the gu-7h278 identity-bead variant which
+		// IsAgentBead/IsIdentityBeadTitle above already handle).
+		if dispatch.IsContainerBeadInfo(&dispatch.BeadInfo{
+			IssueType: issue.Type,
+			Labels:    issue.Labels,
+		}) {
 			continue
 		}
 
-		// Filter beads carrying the phase:epic label (gu-fs88). Dog
-		// dispatcher kept hooking ta-823 ("EPIC: Triage Queue") to polecats
-		// even though the title guard above should have caught it — the
-		// label provides a second, type-independent signal that also
-		// survives title rewrites. Real epics (type=epic) are already
-		// filtered by bd ready's type filter; this catches the common
-		// data-hygiene case where a task/bug carries the phase label.
-		if issue.Type != "epic" && beads.HasEpicPhaseLabel(issue.Labels) {
+		// Filter beads whose title marks them as epics, or that carry the
+		// phase:epic label, while their TYPE disagrees (data-hygiene guard,
+		// gu-smr1 / gu-fs88). A bead with an "EPIC:" prefix or phase:epic label
+		// but issue_type=task/bug is a miscategorised container that the type
+		// check above won't catch. The label is a type-independent signal that
+		// survives title rewrites (ta-823: "EPIC: Triage Queue" kept reaching
+		// polecats until the label guard was added). Shares the same predicate
+		// the sling guard uses.
+		if dispatch.IsEpicLikeBeadInfo(&dispatch.BeadInfo{
+			IssueType: issue.Type,
+			Title:     issue.Title,
+			Labels:    issue.Labels,
+		}) {
 			continue
 		}
 

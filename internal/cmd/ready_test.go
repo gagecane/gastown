@@ -317,15 +317,34 @@ func TestFilterIdentityBeads(t *testing.T) {
 			input:    &beads.Issue{ID: "gu-ta827", Title: "Multi-phase work", Type: "task", Labels: []string{"gt:coord", "phase:epic"}},
 			filtered: true,
 		},
-		// Real epics (type=epic) are already filtered by bd ready upstream,
-		// but defense-in-depth: phase:epic on a real epic still falls through
-		// to the identity filter's "issue.Type != epic" guard and stays
-		// (upstream filter removes it first). This test just documents that
-		// behaviour.
+		// gu-9j93s: real epics (type=epic) are NOT filtered by bd ready —
+		// the old "caught upstream" assumption was false, so they surfaced as
+		// phantom ready work that `gt sling` then refused. filterIdentityBeads
+		// now drops them itself via dispatch.IsContainerBeadInfo.
 		{
-			name:     "phase:epic on real epic passes this filter (caught upstream)",
-			input:    &beads.Issue{ID: "gu-real-epic", Title: "Real epic", Type: "epic", Labels: []string{"phase:epic"}},
-			filtered: false,
+			name:     "real epic (type=epic) filtered",
+			input:    &beads.Issue{ID: "gu-real-epic", Title: "Real epic", Type: "epic"},
+			filtered: true,
+		},
+		{
+			name:     "real epic with phase:epic label filtered",
+			input:    &beads.Issue{ID: "gu-real-epic2", Title: "Real epic", Type: "epic", Labels: []string{"phase:epic"}},
+			filtered: true,
+		},
+		{
+			name:     "convoy container (type=convoy) filtered",
+			input:    &beads.Issue{ID: "gu-cv-x", Title: "Convoy container", Type: "convoy"},
+			filtered: true,
+		},
+		{
+			name:     "gt:epic label on task filtered",
+			input:    &beads.Issue{ID: "gu-lblepic", Title: "Plain title", Type: "task", Labels: []string{"gt:epic"}},
+			filtered: true,
+		},
+		{
+			name:     "gt:convoy label on task filtered",
+			input:    &beads.Issue{ID: "gu-lblcv", Title: "Plain title", Type: "task", Labels: []string{"gt:convoy"}},
+			filtered: true,
 		},
 		// Near-miss label must not filter.
 		{

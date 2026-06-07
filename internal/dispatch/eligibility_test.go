@@ -346,6 +346,47 @@ func TestIsEpicLikeBeadInfo_PhaseEpicLabel(t *testing.T) {
 	}
 }
 
+// TestIsContainerBeadInfo verifies the gu-9j93s container gate: real epics and
+// convoys (by issue_type or gt:epic/gt:convoy label) are non-dispatchable
+// containers. Unlike IsEpicLikeBeadInfo (which fires only when a non-epic TYPE
+// has an "EPIC:" title), this catches type=epic/convoy directly — the case
+// bd ready failed to filter, surfacing phantom ready work that sling refused.
+func TestIsContainerBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *BeadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &BeadInfo{}, false},
+
+		// Positive: real containers by type.
+		{"type=epic", &BeadInfo{Title: "Real epic", IssueType: "epic"}, true},
+		{"type=convoy", &BeadInfo{Title: "Convoy", IssueType: "convoy"}, true},
+		{"type=epic with phase:epic label", &BeadInfo{Title: "Real epic", IssueType: "epic", Labels: []string{"phase:epic"}}, true},
+
+		// Positive: containers by label even when type is slingable.
+		{"gt:epic label on task", &BeadInfo{Title: "Plain", IssueType: "task", Labels: []string{"gt:epic"}}, true},
+		{"gt:convoy label on task", &BeadInfo{Title: "Plain", IssueType: "task", Labels: []string{"gt:convoy"}}, true},
+
+		// Negative: ordinary work beads.
+		{"plain task", &BeadInfo{Title: "Fix bug", IssueType: "task"}, false},
+		{"bug", &BeadInfo{Title: "Crash on save", IssueType: "bug"}, false},
+		// EPIC:-titled task is NOT caught here (that's IsEpicLikeBeadInfo's job).
+		{"EPIC: title task not caught by container gate", &BeadInfo{Title: "EPIC: thing", IssueType: "task"}, false},
+		// Near-miss label must not match.
+		{"phase:epic label alone (not gt:epic)", &BeadInfo{Title: "Work", IssueType: "task", Labels: []string{"phase:epic"}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsContainerBeadInfo(tt.info); got != tt.want {
+				t.Errorf("IsContainerBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsMayorOnlyBeadInfo verifies the gu-bk6e dispatch gate: beads carrying
 // the mayor-only or no-polecat label must be rejected from polecat dispatch
 // regardless of title, type, or status.
