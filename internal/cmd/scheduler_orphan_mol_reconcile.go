@@ -59,11 +59,25 @@ const orphanMolReconcileMinAge = 5 * time.Minute
 //
 // Best-effort: per-dir / per-wisp errors are logged and skipped so a single bad
 // wisp never stalls the dispatch tick. Returns the number of wisps reconciled.
-func reconcileOrphanMolecules(townRoot string) int {
+// deadline, when non-zero, bounds the serial per-wisp bd-show loop: once it
+// passes, the pass returns and defers its remaining candidates to the next
+// dispatch tick. This keeps a large orphan-wisp backlog from consuming the whole
+// daemon dispatch window and starving placement (gu-t6jqq). A zero deadline means
+// unbounded (interactive runs / tests).
+func reconcileOrphanMolecules(townRoot string, deadline time.Time) int {
 	now := timeNowForOrphanReconcile()
 
 	reconciled := 0
-	for _, wisp := range listOrphanWispCandidates(townRoot, now) {
+	candidates := listOrphanWispCandidates(townRoot, now)
+	for i, wisp := range candidates {
+		// Yield to placement once the maintenance budget is spent. The wisp burn
+		// is idempotent and the candidate set is re-enumerated next tick, so the
+		// deferred tail is reconciled later with no lost work.
+		if !deadline.IsZero() && i > 0 && timeNowForOrphanReconcile().After(deadline) {
+			fmt.Fprintf(os.Stderr, "%s orphan-mol reconcile: maintenance budget elapsed — reconciled %d, deferred %d wisp(s) to next tick\n",
+				style.Dim.Render("○"), reconciled, len(candidates)-i)
+			break
+		}
 		// Resolve dependents from a full bd show: the list view omits both
 		// assignee and dependents. listOrphanWispCandidates already confirmed
 		// type/status/age; here we confirm unassigned and read the work-bead

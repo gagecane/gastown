@@ -208,7 +208,7 @@ func TestReconcileOrphanMolecules_SkipsNonMoleculeAndMail(t *testing.T) {
 	}
 	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
 
-	got := reconcileOrphanMolecules("/fake/town")
+	got := reconcileOrphanMolecules("/fake/town", time.Time{})
 	if got != 1 {
 		t.Errorf("reconciled count = %d, want 1 (only the real molecule)", got)
 	}
@@ -392,7 +392,7 @@ func TestReconcileOrphanMolecules_SkipsMergeRequestWisp(t *testing.T) {
 	}
 	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
 
-	got := reconcileOrphanMolecules("/fake/town")
+	got := reconcileOrphanMolecules("/fake/town", time.Time{})
 	if got != 1 {
 		t.Errorf("reconciled count = %d, want 1 (only the plain zombie)", got)
 	}
@@ -455,7 +455,7 @@ func TestReconcileOrphanMolecules_Orchestration(t *testing.T) {
 	}
 	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
 
-	got := reconcileOrphanMolecules("/fake/town")
+	got := reconcileOrphanMolecules("/fake/town", time.Time{})
 
 	if got != 2 {
 		t.Errorf("reconciled count = %d, want 2 (zombie + reenq)", got)
@@ -516,12 +516,114 @@ func TestReconcileOrphanMolecules_SkipsAssignedAndLive(t *testing.T) {
 	}
 	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
 
-	got := reconcileOrphanMolecules("/fake/town")
+	got := reconcileOrphanMolecules("/fake/town", time.Time{})
 
 	if got != 0 {
 		t.Errorf("reconciled count = %d, want 0", got)
 	}
 	if burnCount != 0 {
 		t.Errorf("burn calls = %d, want 0 (nothing should be touched)", burnCount)
+	}
+}
+
+// TestReconcileOrphanMolecules_DeadlineDefersTail verifies that a non-zero
+// maintenance deadline bounds the serial per-wisp loop: once the clock passes
+// the deadline, the pass reconciles what it has and defers the rest to the next
+// tick rather than grinding the whole backlog and starving placement (gu-t6jqq).
+func TestReconcileOrphanMolecules_DeadlineDefersTail(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	old := base.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	// Clock: the first call (the top-of-func `now`) returns base; every later
+	// call (the per-iteration deadline check) returns base+2h, which is After
+	// the base+1m deadline — so the loop breaks at the first post-candidate
+	// check, after processing exactly one candidate.
+	var calls int
+	prevNow := timeNowForOrphanReconcile
+	timeNowForOrphanReconcile = func() time.Time {
+		calls++
+		if calls == 1 {
+			return base
+		}
+		return base.Add(2 * time.Hour)
+	}
+	t.Cleanup(func() { timeNowForOrphanReconcile = prevNow })
+
+	prevList := listOrphanWispCandidates
+	listOrphanWispCandidates = func(townRoot string, n time.Time) []*beads.Issue {
+		return []*beads.Issue{
+			{ID: "gu-wisp-1", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-2", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-3", Type: "molecule", Status: "open", CreatedAt: old},
+		}
+	}
+	t.Cleanup(func() { listOrphanWispCandidates = prevList })
+
+	prevFetch := fetchWispInfoForReconcile
+	fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
+		// Every candidate is a plain burnable zombie (no live dependents).
+		return &beads.Issue{ID: wispID, Assignee: "", Dependents: nil}
+	}
+	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	var burned []string
+	prevBurn := burnExistingMoleculesForRecovery
+	burnExistingMoleculesForRecovery = func(molecules []string, beadID, townRoot string) error {
+		burned = append(burned, molecules...)
+		return nil
+	}
+	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
+
+	deadline := base.Add(1 * time.Minute)
+	got := reconcileOrphanMolecules("/fake/town", deadline)
+
+	if got != 1 {
+		t.Errorf("reconciled count = %d, want 1 (deadline defers the tail after the first candidate)", got)
+	}
+	if len(burned) != 1 || burned[0] != "gu-wisp-1" {
+		t.Errorf("burned = %v, want [gu-wisp-1] (remaining candidates deferred to next tick)", burned)
+	}
+}
+
+// TestReconcileOrphanMolecules_ZeroDeadlineUnbounded verifies that a zero
+// deadline disables the cap and the full candidate set is processed.
+func TestReconcileOrphanMolecules_ZeroDeadlineUnbounded(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	old := base.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	// Even though the clock jumps far ahead on every call, a zero deadline must
+	// never trigger the budget break.
+	prevNow := timeNowForOrphanReconcile
+	timeNowForOrphanReconcile = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { timeNowForOrphanReconcile = prevNow })
+
+	prevList := listOrphanWispCandidates
+	listOrphanWispCandidates = func(townRoot string, n time.Time) []*beads.Issue {
+		return []*beads.Issue{
+			{ID: "gu-wisp-1", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-2", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-3", Type: "molecule", Status: "open", CreatedAt: old},
+		}
+	}
+	t.Cleanup(func() { listOrphanWispCandidates = prevList })
+
+	prevFetch := fetchWispInfoForReconcile
+	fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
+		return &beads.Issue{ID: wispID, Assignee: "", Dependents: nil}
+	}
+	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	var burned []string
+	prevBurn := burnExistingMoleculesForRecovery
+	burnExistingMoleculesForRecovery = func(molecules []string, beadID, townRoot string) error {
+		burned = append(burned, molecules...)
+		return nil
+	}
+	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
+
+	got := reconcileOrphanMolecules("/fake/town", time.Time{})
+
+	if got != 3 {
+		t.Errorf("reconciled count = %d, want 3 (zero deadline = unbounded)", got)
 	}
 }

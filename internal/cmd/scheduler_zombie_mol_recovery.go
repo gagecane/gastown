@@ -56,7 +56,11 @@ const zombieMolRecoveryMinAge = 5 * time.Minute
 // Best-effort: per-bead errors are logged and skipped so a single bad
 // bead doesn't stall the dispatch tick. Returns the number of work beads
 // for which at least one molecule was burned.
-func recoverZombieMolecules(townRoot string) int {
+// deadline, when non-zero, bounds the per-dir bd-show recovery loop: once it
+// passes, the pass returns and defers remaining dirs to the next dispatch tick,
+// so a large backlog cannot starve placement (gu-t6jqq). A zero deadline means
+// unbounded (interactive runs / tests).
+func recoverZombieMolecules(townRoot string, deadline time.Time) int {
 	contexts := listAllSlingContextRecords(townRoot)
 	if len(contexts) == 0 {
 		return 0
@@ -95,7 +99,17 @@ func recoverZombieMolecules(townRoot string) int {
 	}
 
 	recovered := 0
+	processedDirs := 0
 	for beadsDir, ids := range candidatesByDir {
+		// Yield to placement once the maintenance budget is spent. Burn is
+		// idempotent and candidates are re-enumerated next tick, so deferring
+		// the remaining dirs loses no work.
+		if !deadline.IsZero() && processedDirs > 0 && timeNowForZombieRecovery().After(deadline) {
+			fmt.Fprintf(os.Stderr, "%s zombie-mol recovery: maintenance budget elapsed — recovered %d, deferred %d dir(s) to next tick\n",
+				style.Dim.Render("○"), recovered, len(candidatesByDir)-processedDirs)
+			break
+		}
+		processedDirs++
 		// Use the same Beads wrapper pattern as batchFetchBeadInfoByIDs so
 		// BEADS_DIR / dolt port resolution match. We need the full bead info
 		// (including dependencies), which batchFetchBeadInfoByIDs strips, so

@@ -85,6 +85,35 @@ const maxDispatchFailures = 3
 // interactive `gt scheduler run` path stays unbounded.
 const daemonDispatchBudget = 4*time.Minute + 30*time.Second
 
+// maintenanceBudget bounds how long the pre-dispatch maintenance passes
+// (recoverZombieMolecules, reconcileOrphanMolecules) may run before yielding to
+// the latency-critical placement loop. These passes do a serial `bd show` per
+// candidate; under a large orphan-wisp backlog reconcileOrphanMolecules alone
+// was observed taking 3m50s–4m14s and consuming the ENTIRE 5m daemon dispatch
+// window, so the daemon SIGKILLed `gt scheduler run` before any work was placed
+// (425 "Scheduler dispatch timed out after 5m" events; gu-t6jqq). The maintenance
+// passes ran BEFORE cycle.Deadline was set, so the placement budget didn't cover
+// them. Capping maintenance at dispatchStart+maintenanceBudget keeps it strictly
+// independent of (and subordinate to) placement: a bounded pass simply defers its
+// tail to the next tick — these passes are best-effort and already gated to run
+// at most once per dispatchMaintenanceInterval, so nothing it cleans up lingers
+// materially longer. 90s reconciles a meaningful chunk each cycle while leaving
+// >3m of the daemon budget for placement. Tunable via GT_DISPATCH_MAINT_BUDGET.
+const maintenanceBudget = 90 * time.Second
+
+// resolveMaintenanceBudget returns maintenanceBudget, overridable via
+// GT_DISPATCH_MAINT_BUDGET (a parseable duration, e.g. "45s"). A value <= 0
+// disables the cap (restores the old unbounded behavior) for operators who
+// want a full reconcile pass on an interactive run.
+func resolveMaintenanceBudget() time.Duration {
+	if v := os.Getenv("GT_DISPATCH_MAINT_BUDGET"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return maintenanceBudget
+}
+
 // --- Capacity-exhaustion monitor (hq-ly5yj) --------------------------------
 //
 // When the pool can't place ANY ready work — every slot recovery_blocked, with
@@ -252,6 +281,14 @@ const dispatchPhaseSlowThreshold = 5 * time.Second
 // in daemon.log when the daemon shells `gt scheduler run`) when a pass exceeds
 // dispatchPhaseSlowThreshold, or for every pass under GT_HEARTBEAT_PROFILE.
 func dispatchPhase(name string, fn func()) {
+	// Emit a start line so the operator sees which maintenance pass is running
+	// during the otherwise-silent pre-placement window. Before this, a large
+	// orphan-wisp backlog made `gt scheduler run` sit silent for minutes with no
+	// indication of progress (gu-t6jqq); the only output was a post-hoc SLOW
+	// warning. The line goes to stderr (same stream as the SLOW/profile lines)
+	// and is captured into the daemon log under GT_DAEMON=1.
+	fmt.Fprintf(os.Stderr, "%s dispatch maintenance %q…\n", style.Dim.Render("→"), name)
+
 	start := time.Now()
 	fn()
 	elapsed := time.Since(start)
@@ -387,6 +424,15 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	}
 	spawnDelay := schedulerCfg.GetSpawnDelay()
 
+	// Announce that dispatch has started doing work. Without this the command is
+	// silent through the pre-placement maintenance window (and the ready-context
+	// query), which on a large backlog looks like a hang (gu-t6jqq). Suppressed
+	// in dry-run, which prints its own plan.
+	if !dryRun {
+		fmt.Printf("%s Scheduler dispatch starting (max %d, batch %d)…\n",
+			style.Dim.Render("○"), maxPolecats, batchSize)
+	}
+
 	// Pre-dispatch maintenance passes (gu-pjrz3 option-b): these four per-rig bd
 	// fan-outs (stale-context cleanup, deferred-release, zombie-molecule recovery,
 	// orphan-wisp reconcile) are CLEANUP/reconcile, not dispatch-critical — yet
@@ -401,6 +447,17 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	// most one interval longer), just not blocking every placement. Skipped in
 	// dry-run (never mutates).
 	if !dryRun && dispatchMaintenanceDue(townRoot) {
+		// Cap the heavy serial-fan-out passes (recoverZombieMolecules,
+		// reconcileOrphanMolecules) at dispatchStart+maintenanceBudget so they
+		// can never consume the whole dispatch window and starve placement
+		// (gu-t6jqq). A zero deadline (GT_DISPATCH_MAINT_BUDGET<=0) disables the
+		// cap. The two cheap passes below are not deadline-gated — they don't
+		// fan out per-wisp.
+		var maintDeadline time.Time
+		if b := resolveMaintenanceBudget(); b > 0 {
+			maintDeadline = dispatchStart.Add(b)
+		}
+
 		dispatchPhase("cleanupStaleContexts", func() { cleanupStaleContexts(townRoot) })
 
 		dispatchPhase("releaseExpiredDeferredBeads", func() {
@@ -410,14 +467,14 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		})
 
 		dispatchPhase("recoverZombieMolecules", func() {
-			if recovered := recoverZombieMolecules(townRoot); recovered > 0 {
+			if recovered := recoverZombieMolecules(townRoot, maintDeadline); recovered > 0 {
 				fmt.Printf("%s Recovered %d work bead(s) from zombie-molecule wedge\n",
 					style.Dim.Render("○"), recovered)
 			}
 		})
 
 		dispatchPhase("reconcileOrphanMolecules", func() {
-			if reconciled := reconcileOrphanMolecules(townRoot); reconciled > 0 {
+			if reconciled := reconcileOrphanMolecules(townRoot, maintDeadline); reconciled > 0 {
 				fmt.Printf("%s Reconciled %d orphaned molecule wisp(s)\n",
 					style.Dim.Render("○"), reconciled)
 			}
@@ -547,6 +604,12 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		printDryRunPlan(plan, lastCapacitySnapshot, batchSize)
 		return 0, nil
 	}
+
+	// The ready-context query (QueryPending → getReadySlingContexts) is itself a
+	// multi-rig scan that runs silently inside cycle.Run(). Announce the
+	// transition from maintenance to placement so the operator knows the
+	// maintenance window is over and work is being queried/placed.
+	fmt.Printf("%s Querying ready work and placing…\n", style.Dim.Render("○"))
 
 	report, err := cycle.Run()
 	if err != nil {
