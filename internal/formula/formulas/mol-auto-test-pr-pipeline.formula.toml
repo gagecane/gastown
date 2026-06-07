@@ -1,0 +1,245 @@
+description = """
+Decomposed, language-agnostic auto-test-pr pipeline: one polecat per
+responsibility. Discovers the test/coverage harness, selects a target
+file, researches conventions + code pointers, implements tests, runs a
+bounded quality-review loop back to the implementer, then retros the
+run (documents friction into the conventions sheet + files beads) before
+finishing. Produces one small, human-reviewed, test-only MR.
+
+Replaces the monolithic mol-polecat-work-test-improver with single-
+responsibility agents (see .designs/auto-test-pr/simplified-v1.md). No
+language coupling: the discover step learns how to run tests/coverage
+for whatever language the rig is in, so the rig needs no language config.
+
+## Iteration
+
+The review -> implement loop is NOT a DAG edge (the parser rejects
+cycles). The review-tests step, on rejection, runs
+`bd mol step respawn --target implement-tests` with its feedback; the
+built-in respawn limit (3) bounds the loop. On acceptance, review-tests
+submits the MR via `gt done`.
+
+## Footprint
+
+~7 step beads and up to ~9 agent sessions per produced PR (the review
+loop adds re-runs). This deliberately spends the 1-agent/2-bead budget
+of the monolithic design to buy single-responsibility agents, a bounded
+quality loop, and a self-improving conventions sheet. Intended for a
+weekly cadence, not hourly.
+"""
+
+formula = "mol-auto-test-pr-pipeline"
+type = "workflow"
+version = 1
+
+[vars]
+[vars.rig]
+description = "The rig this pipeline produces a test PR for."
+required = true
+
+[vars.base_branch]
+description = "Branch to rebase on / target the MR at."
+default = "main"
+
+[vars.conventions_path]
+description = "In-repo conventions sheet the pipeline reads and the retro step updates."
+default = ".gt/auto-test-pr/conventions.md"
+
+[vars.churn_window_days]
+description = "How many days of git history to consider when ranking churned files."
+default = "30"
+
+[vars.max_files]
+description = "Max number of files the implementer may touch (blast-radius cap)."
+default = "3"
+
+[vars.max_added_loc]
+description = "Max added test LOC (blast-radius cap)."
+default = "200"
+
+[vars.label]
+description = "Label applied to the produced MR; also the in-flight-detection key."
+default = "gt:auto-test-pr"
+
+[[steps]]
+id = "discover-harness"
+title = "Discover the test + coverage harness for {{rig}}"
+acceptance = "Test command, coverage command (or 'none'), and test-file glob are written to the work bead."
+description = """
+SINGLE RESPONSIBILITY: figure out HOW to run tests and measure coverage
+for this rig, language-agnostically. Do NOT write or pick tests.
+
+1. Detect the language/build system from repo markers (go.mod, Config,
+   package.json, pyproject.toml, Cargo.toml, pom.xml, etc.).
+2. Determine the canonical commands by reading the README/CONTRIBUTING
+   and any build config — NOT from a hardcoded language table:
+   - `test_command`  — exits non-zero on failure.
+   - `coverage_command` — emits a coverage number; if none is feasible,
+     record "none" (the coverage-delta gate becomes advisory).
+   - `test_file_glob` — the convention for test files (e.g. `**/*_test.go`,
+     `**/test_*.py`, `**/*.test.ts`). This is the output allow-list.
+3. Sanity-check: run `test_command` once on the clean tree; it MUST be
+   green before this pipeline adds anything (never build on a red tree).
+
+Record the three values as a JSON note on the work bead for downstream
+steps. If the tree is red or no test harness is discoverable, exit
+`gt done --status DEFERRED` with the reason — do NOT proceed.
+
+**Exit criteria:** harness JSON recorded; clean-tree tests are green.
+"""
+
+[[steps]]
+id = "select-target"
+title = "Select one target file for {{rig}}"
+needs = ["discover-harness"]
+acceptance = "Exactly one target file chosen and recorded, with rationale; or DEFERRED if none eligible."
+description = """
+SINGLE RESPONSIBILITY: pick the ONE file most worth testing. Do NOT
+research conventions or write tests.
+
+1. Compute churn over the last {{churn_window_days}} days
+   (`git log --since`).
+2. Cross-reference with coverage (via the discovered coverage command,
+   if any) to find recently-changed, under-covered files.
+3. Exclude any path listed in `{{conventions_path}}`'s sibling
+   `skip.txt` (reviewer-rejected targets).
+4. Rank by (churn x uncovered-ness) and choose the single top file.
+   Honor the {{max_files}} cap — v1 picks ONE file.
+
+Record the chosen path + a one-line rationale on the work bead. If
+nothing is eligible (no churn, everything covered, all skipped), exit
+`gt done --status DEFERRED` — a clean no-op is success.
+
+**Exit criteria:** one target path recorded, or DEFERRED with reason.
+"""
+
+[[steps]]
+id = "research-conventions"
+title = "Research test conventions + code pointers for the target"
+needs = ["select-target"]
+acceptance = "A research note lists conventions, reusable helpers, and concrete code pointers for the target."
+description = """
+SINGLE RESPONSIBILITY: gather everything the implementer needs so it
+writes idiomatic tests fast. Do NOT write tests yourself.
+
+1. Read `{{conventions_path}}` (the accumulated house style for this rig).
+2. Study existing sibling tests for the target's package/module: naming,
+   table-driven patterns, mocking/fixtures, assertion libraries.
+3. Identify reusable test helpers/utilities already in the repo
+   (so the implementer reuses rather than reinvents).
+4. Read the target file: enumerate the specific uncovered branches /
+   behaviors worth testing, with file:line code pointers.
+
+Write a concise research note (conventions to follow, helpers to reuse,
+exact code pointers, branches to cover) onto the work bead for the
+implementer.
+
+**Exit criteria:** research note with conventions + helpers + code
+pointers recorded.
+"""
+
+[[steps]]
+id = "implement-tests"
+title = "Implement tests for the target file"
+needs = ["research-conventions"]
+acceptance = "New tests written following the research note; local test_command green; only test-glob files changed."
+description = """
+SINGLE RESPONSIBILITY: write the tests. Follow the research note exactly;
+do NOT re-research or self-grade beyond making them pass.
+
+1. Read the research note and reviewer feedback (present on the work
+   bead if this is a respawn from review-tests).
+2. Write new tests for the target file's uncovered branches, following
+   the discovered conventions and reusing the identified helpers.
+3. Constraints (hard): only create/modify files matching the discovered
+   `test_file_glob`; no non-test source changes; <= {{max_added_loc}}
+   added test LOC; <= {{max_files}} files.
+4. Run the discovered `test_command` locally until green. If you
+   discover a real product bug, do NOT fix it here — note it for the
+   retro step to file as a separate bead, and skip that branch.
+5. Commit the tests on a branch off {{base_branch}}.
+
+**Exit criteria:** committed tests; local tests green; allow-list and
+size caps satisfied.
+"""
+
+[[steps]]
+id = "review-tests"
+title = "Quality-review the tests (loop back on reject; submit on pass)"
+needs = ["implement-tests"]
+acceptance = "Tests pass quality gates AND a gt:auto-test-pr MR is submitted; OR respawned back to implement-tests with feedback."
+description = """
+SINGLE RESPONSIBILITY: judge test QUALITY as an independent reviewer,
+then either bounce back to the implementer or submit. Do NOT rewrite the
+tests yourself.
+
+Run the quality gates (all command-driven, language-agnostic):
+  - allow-list: every changed file matches the discovered test glob.
+  - tests pass: run `test_command`, require exit 0.
+  - coverage up: run `coverage_command` before/after, require delta > 0
+    (advisory if coverage was "none").
+  - flakiness: run `test_command` N times (default 5), require all green.
+  - gitleaks: `gitleaks detect` on the diff, zero findings.
+  - judgment: are these meaningful (exercise real branches) and NOT
+    tautological / assertion-free / over-mocked?
+
+**On REJECT** — record specific, actionable feedback on the work bead,
+then loop back to the implementer:
+```bash
+bd mol step respawn --target implement-tests
+```
+The respawn limit (3) bounds this loop; if exhausted, exit
+`gt done --status DEFERRED` noting the tests could not reach the bar.
+
+**On PASS** — submit the MR through the normal flow, labeled so the
+patrol's in-flight check ({{label}}) sees it:
+```bash
+gt done --pre-verified --target {{base_branch}}
+```
+(the MR bead MUST carry the {{label}} label).
+
+**Exit criteria:** either a respawn to implement-tests with feedback, or
+a submitted {{label}} MR.
+"""
+
+[[steps]]
+id = "retro"
+title = "Retro: document friction, file beads"
+needs = ["review-tests"]
+acceptance = "Conventions sheet updated with newly-learned friction/patterns; any product bugs or follow-ups filed as beads."
+description = """
+SINGLE RESPONSIBILITY: make the NEXT run cheaper and higher-quality.
+This is the self-improving step. Do NOT touch the MR.
+
+1. Review the whole pipeline run for friction: ambiguous conventions,
+   missing helpers, harness quirks, repeated reviewer feedback, dead
+   ends the implementer hit.
+2. Update `{{conventions_path}}` with the durable lessons (new house
+   rules, helper pointers, gotchas) so future runs encounter less
+   friction and produce better tests. Commit it (this commit is
+   separate from the test MR).
+3. File beads for anything that needs human/other-agent action:
+   - product bugs surfaced while testing (separate bead, never bundled
+     into the test PR);
+   - tooling/harness gaps;
+   - files to add to `skip.txt` if a target was a poor choice.
+
+**Exit criteria:** conventions sheet updated + committed; follow-up
+beads filed (or an explicit "no friction this run" note).
+"""
+
+[[steps]]
+id = "done"
+title = "Finish the auto-test-pr pipeline run"
+needs = ["retro"]
+acceptance = "Run summary recorded; pipeline complete."
+description = """
+Record a one-paragraph run summary on the work bead: target chosen,
+MR id (or DEFERRED reason), review-loop iterations, and conventions/bead
+updates from the retro. Then finish.
+
+The standing patrol (separate formula) is responsible for cadence and
+the in-flight {{label}} check; this pipeline does one run end-to-end.
+
+**Exit criteria:** run summary recorded; pipeline done.
+"""
