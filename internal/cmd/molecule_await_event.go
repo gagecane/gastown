@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,17 +163,32 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating event directory: %w", err)
 	}
 
-	// Read current idle cycles and backoff window from agent bead
+	// Read current idle cycles and backoff window from agent bead.
+	// agentBeadUsable gates the bead-state writes below; it goes false on an
+	// ID collision so we don't churn doomed writes against an unresolvable bead.
 	var idleCycles int
 	var backoffUntil time.Time
 	var beadsDir string
+	agentBeadUsable := false
 	if awaitEventAgentBead != "" {
 		workDir, wdErr := findLocalBeadsDir()
 		if wdErr == nil {
 			beadsDir = beads.ResolveBeadsDir(workDir)
+			agentBeadUsable = true
 			labels, labErr := getAgentLabels(awaitEventAgentBead, beadsDir)
 			if labErr != nil {
-				if !awaitEventQuiet {
+				// ID collision: the agent bead ID exists in BOTH the issues and
+				// wisps tables, so bd cannot disambiguate. Persistent data state,
+				// not a transient miss — disable bead-state writes this cycle and
+				// emit one actionable de-duplication hint. See gu-yjj79.
+				if errors.Is(labErr, beads.ErrIDCollision) {
+					agentBeadUsable = false
+					if !awaitEventQuiet {
+						fmt.Printf("%s Agent bead %s has an ID collision (exists in both issues and wisps); "+
+							"idle/backoff state disabled this cycle — de-duplicate the bead to restore it (starting at idle=0)\n",
+							style.Dim.Render("⚠"), awaitEventAgentBead)
+					}
+				} else if !awaitEventQuiet {
 					fmt.Printf("%s Could not read agent bead (starting at idle=0): %v\n",
 						style.Dim.Render("⚠"), labErr)
 				}
@@ -221,7 +237,7 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	}
 
 	// Persist backoff-until for crash recovery
-	if awaitEventAgentBead != "" && beadsDir != "" {
+	if agentBeadUsable && beadsDir != "" {
 		_ = setAgentBackoffUntil(awaitEventAgentBead, beadsDir, now.Add(timeout))
 	}
 
@@ -243,7 +259,7 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	result.Elapsed = time.Since(startTime)
 
 	// Update agent bead idle cycles and heartbeat
-	if awaitEventAgentBead != "" && beadsDir != "" {
+	if agentBeadUsable && beadsDir != "" {
 		// Always update heartbeat (both event and timeout) so witness doesn't
 		// think we're dead during long idle periods.
 		_ = updateAgentHeartbeat(awaitEventAgentBead, beadsDir)

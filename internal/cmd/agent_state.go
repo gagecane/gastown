@@ -361,6 +361,17 @@ func getAllAgentLabels(agentBead, beadsDir string) ([]string, error) {
 
 	if err := cmd.Run(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
+		// ID collision: the agent bead ID exists in BOTH the issues and wisps
+		// tables, so bd cannot disambiguate the lookup. This is a persistent
+		// data state (a stray wisp shadowing the gt:agent identity bead), not a
+		// transient failure — retrying won't resolve it. Surface it as the
+		// shared sentinel so the await-signal/await-event state machine can
+		// treat it distinctly: one actionable de-duplication hint instead of
+		// three confusing per-operation errors every patrol cycle. See
+		// gu-yjj79 (the agent-bead sibling of the rig-bead fix gu-feg02).
+		if strings.Contains(errMsg, "exists in both issues and wisps") {
+			return nil, beads.ErrIDCollision
+		}
 		if strings.Contains(errMsg, "not found") {
 			return nil, fmt.Errorf("agent bead not found: %s", agentBead)
 		}

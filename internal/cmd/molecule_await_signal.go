@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -148,14 +149,33 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 
 	beadsDir := beads.ResolveBeadsDir(workDir)
 
-	// Read current idle cycles and backoff window from agent bead (if specified)
+	// Read current idle cycles and backoff window from agent bead (if specified).
+	// agentBeadUsable gates the bead-based idle/backoff/heartbeat writes below.
+	// It goes false on an ID collision so we don't churn three doomed writes
+	// (idle, backoff, heartbeat) per patrol cycle against an unresolvable bead.
+	agentBeadUsable := awaitSignalAgentBead != ""
 	var idleCycles int
 	var backoffUntil time.Time // zero value means no active window
 	if awaitSignalAgentBead != "" {
 		labels, err := getAgentLabels(awaitSignalAgentBead, beadsDir)
 		if err != nil {
-			// Agent bead might not exist yet - that's OK, start at 0
-			if !awaitSignalQuiet {
+			// ID collision: the agent bead ID exists in BOTH the issues and
+			// wisps tables (a stray wisp shadowing the gt:agent identity bead),
+			// so bd cannot disambiguate. This is a persistent data state, not a
+			// transient miss — every read AND write this cycle would fail the
+			// same way. Disable the bead-state writes and emit one actionable
+			// de-duplication hint instead of three confusing per-op errors.
+			// The file-based heartbeat keepalive (below) is unaffected, so
+			// liveness is preserved. See gu-yjj79 (sibling of rig-bead gu-feg02).
+			if errors.Is(err, beads.ErrIDCollision) {
+				agentBeadUsable = false
+				if !awaitSignalQuiet {
+					fmt.Printf("%s Agent bead %s has an ID collision (exists in both issues and wisps); "+
+						"idle/backoff state disabled this cycle — de-duplicate the bead to restore it (starting at idle=0)\n",
+						style.Dim.Render("⚠"), awaitSignalAgentBead)
+				}
+			} else if !awaitSignalQuiet {
+				// Agent bead might not exist yet - that's OK, start at 0
 				fmt.Printf("%s Could not read agent bead (starting at idle=0): %v\n",
 					style.Dim.Render("⚠"), err)
 			}
@@ -197,7 +217,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	}
 
 	// Persist the backoff window end time so interrupted invocations can resume.
-	if awaitSignalAgentBead != "" && !resumed {
+	if agentBeadUsable && !resumed {
 		windowEnd := now.Add(timeout)
 		if err := setAgentBackoffUntil(awaitSignalAgentBead, beadsDir, windowEnd); err != nil {
 			if !awaitSignalQuiet {
@@ -252,7 +272,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	result.Elapsed = time.Since(startTime)
 
 	// On timeout, increment idle cycles and clear backoff window
-	if result.Reason == "timeout" && awaitSignalAgentBead != "" {
+	if result.Reason == "timeout" && agentBeadUsable {
 		newIdleCycles := idleCycles + 1
 		if err := setAgentIdleCycles(awaitSignalAgentBead, beadsDir, newIdleCycles); err != nil {
 			if !awaitSignalQuiet {
@@ -271,7 +291,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 		}
 		// Clear the backoff window — timeout completed normally
 		_ = clearAgentBackoffUntil(awaitSignalAgentBead, beadsDir)
-	} else if result.Reason == "signal" && awaitSignalAgentBead != "" {
+	} else if result.Reason == "signal" && agentBeadUsable {
 		// On signal, update last_activity to prove agent is alive
 		if err := updateAgentHeartbeat(awaitSignalAgentBead, beadsDir); err != nil {
 			if !awaitSignalQuiet {
