@@ -210,7 +210,10 @@ func searchAgentBeadsInDir(beadsDir string, wisps bool, role, rig string) []agen
 	if wisps {
 		args = []string{"mol", "wisp", "list", "--json"}
 	} else {
-		args = []string{"list", "--label=gt:agent", "--include-infra", "--json", "--flat", "--no-pager", "--limit=0"}
+		// --all keeps closed agent beads discoverable: the reaper or a manual
+		// close should not make `gt agents resolve` blind to an agent's identity
+		// bead (gu-016x1). pickBestAgentBead already prefers open over closed.
+		args = []string{"list", "--label=gt:agent", "--include-infra", "--all", "--json", "--flat", "--no-pager", "--limit=0"}
 	}
 
 	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool

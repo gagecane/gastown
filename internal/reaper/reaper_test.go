@@ -309,6 +309,34 @@ func TestScanExcludesAgentBeads(t *testing.T) {
 	}
 }
 
+// TestAutoCloseExcludesAgentBeads pins the gu-016x1 fix: AutoClose must never
+// close agent infra beads (gt:agent label or legacy issue_type='agent').
+// Auto-closing them strips their heartbeat/idle/backoff state and makes
+// `gt agents resolve` return {}, since its bd-list query excludes closed beads.
+func TestAutoCloseExcludesAgentBeads(t *testing.T) {
+	sourcePath := "reaper.go"
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sourcePath, err)
+	}
+	source := string(data)
+	start := strings.Index(source, "func AutoClose(")
+	if start == -1 {
+		t.Fatalf("could not find func AutoClose( in %s", sourcePath)
+	}
+	end := strings.Index(source[start:], "\n}\n")
+	if end == -1 {
+		t.Fatalf("could not isolate AutoClose() body in %s", sourcePath)
+	}
+	body := source[start : start+end]
+	if !strings.Contains(body, "i.issue_type != 'agent'") {
+		t.Fatalf("expected AutoClose() to exclude legacy agent beads (issue_type='agent'), body was:\n%s", body)
+	}
+	if !strings.Contains(body, "'gt:agent'") {
+		t.Fatalf("expected AutoClose() label exclusion to include 'gt:agent', body was:\n%s", body)
+	}
+}
+
 // TestLiveTrackedContextExcludeJoin pins the gu-ycihb sling-context guard: the
 // reaper must not age-reap a gt:sling-context wisp whose tracked work bead is
 // still open, which would otherwise produce the gu-i0oaq dispatch-close race.

@@ -352,6 +352,11 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		AND i.updated_at < ?
 		AND i.priority > 1
 		AND i.issue_type != 'epic'
+		AND i.issue_type != 'agent'
+		AND i.id NOT IN (
+			SELECT DISTINCT l.issue_id FROM labels l
+			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent')
+		)
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM dependencies d
 			INNER JOIN issues dep ON d.depends_on_issue_id = dep.id
@@ -695,9 +700,10 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 		AND i.updated_at < ?
 		AND i.priority > 1
 		AND i.issue_type != 'epic'
+		AND i.issue_type != 'agent'
 		AND i.id NOT IN (
 			SELECT DISTINCT l.issue_id FROM `+"`%s`"+`.labels l
-			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig')
+			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent')
 		)
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM `+"`%s`"+`.dependencies d
