@@ -823,6 +823,22 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID, info.Title, info.Title, info.IssueType, info.Labels, beadID)
 	}
 
+	// Container-type guard (gu-xymp6). A bead whose issue_type is epic, convoy,
+	// or molecule (or that carries the gt:epic / gt:convoy / gt:molecule label)
+	// is a non-work container that tracks work via its children or steps. The
+	// 1-arg sling path reroutes epics/convoys via detectSchedulerIDType, but the
+	// 2-arg explicit-rig path here (used by deacon auto-dispatch and the daemon
+	// convoy feed) bypasses that detection. Without this guard a molecule/epic
+	// bead reaches a polecat AND gets wrapped in a "Work: ..." auto-convoy —
+	// e.g. cadk-82a, the Type=molecule witness-patrol CV bead, risking corruption
+	// of patrol history. Shares dispatch.IsContainerBeadInfo with the `gt ready`
+	// filter so the two cannot drift. Not bypassed by --force — fix the data
+	// (bd update --type=task) if this bead really is dispatchable work.
+	if isContainerBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is a non-work container (issue_type=%q, labels=%v) — epics, convoys, and molecules track work via children/steps and are not dispatchable.\nIf this is wrong, fix the data: bd update %s --type=task",
+			beadID, info.Title, info.IssueType, info.Labels, beadID)
+	}
+
 	// Mayor-only guard (gu-bk6e). A bead carrying mayor-only or no-polecat
 	// is an explicit operator assertion that no polecat can resolve it
 	// (town root edits, origin config, cross-rig coordination, human

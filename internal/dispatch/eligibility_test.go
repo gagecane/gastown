@@ -363,11 +363,13 @@ func TestIsContainerBeadInfo(t *testing.T) {
 		// Positive: real containers by type.
 		{"type=epic", &BeadInfo{Title: "Real epic", IssueType: "epic"}, true},
 		{"type=convoy", &BeadInfo{Title: "Convoy", IssueType: "convoy"}, true},
+		{"type=molecule", &BeadInfo{Title: "Witness Patrol", IssueType: "molecule"}, true},
 		{"type=epic with phase:epic label", &BeadInfo{Title: "Real epic", IssueType: "epic", Labels: []string{"phase:epic"}}, true},
 
 		// Positive: containers by label even when type is slingable.
 		{"gt:epic label on task", &BeadInfo{Title: "Plain", IssueType: "task", Labels: []string{"gt:epic"}}, true},
 		{"gt:convoy label on task", &BeadInfo{Title: "Plain", IssueType: "task", Labels: []string{"gt:convoy"}}, true},
+		{"gt:molecule label on task", &BeadInfo{Title: "Plain", IssueType: "task", Labels: []string{"gt:molecule"}}, true},
 
 		// Negative: ordinary work beads.
 		{"plain task", &BeadInfo{Title: "Fix bug", IssueType: "task"}, false},

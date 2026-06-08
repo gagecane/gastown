@@ -210,6 +210,20 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Title, info.IssueType, beadID)
 	}
 
+	// Container-type guard (gu-xymp6). scheduleBead is the last stop before a
+	// sling context is created and an auto-convoy is spun up. A bead whose
+	// issue_type is epic, convoy, or molecule (or carrying gt:epic / gt:convoy /
+	// gt:molecule) is a non-work container — never dispatchable. detectSchedulerIDType
+	// reroutes epics/convoys on the 1-arg path, but scheduleBead is reachable
+	// directly by deferred/convoy callers on the 2-arg explicit-rig path that
+	// bypasses it. Refusing here prevents a sling-context AND a "Work: ..." convoy
+	// from ever wrapping a non-work bead (cadk-82a molecule witness-patrol CV).
+	// Shares dispatch.IsContainerBeadInfo with `gt ready`; not bypassed by --force.
+	if isContainerBeadInfo(info) {
+		return fmt.Errorf("bead %s is a non-work container (issue_type=%q, labels=%v): %q — refusing to schedule. Epics, convoys, and molecules track work via children/steps; fix the data with bd update %s --type=task if this is wrong",
+			beadID, info.IssueType, info.Labels, info.Title, beadID)
+	}
+
 	// Mayor-only guard (gu-bk6e). scheduleBead is the last stop before a
 	// sling context is created and a polecat is selected. Without this
 	// guard, a bead labeled mayor-only / no-polecat that slips past the

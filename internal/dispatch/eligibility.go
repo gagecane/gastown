@@ -176,35 +176,49 @@ func IsEpicLikeBeadInfo(info *BeadInfo) bool {
 	return beads.HasEpicPhaseLabel(info.Labels)
 }
 
-// IsContainerBeadInfo reports whether the bead is a real epic or convoy
-// container — a bead whose issue_type or gt:epic/gt:convoy label marks it as a
-// parent that tracks work via its children, not a dispatchable work item.
+// IsContainerBeadInfo reports whether the bead is a non-work container — an
+// epic, convoy, or molecule wisp — a bead whose issue_type or
+// gt:epic/gt:convoy/gt:molecule label marks it as a workflow/parent structure
+// that tracks work via its children or steps, not a dispatchable work item.
 //
 // This is the type/label-level container check that IsEpicLikeBeadInfo
 // deliberately does NOT cover: that helper only fires on the data-hygiene gap
 // where a non-epic TYPE disagrees with an "EPIC:" title (it early-returns false
-// for issue_type=="epic"). The actual sling guard rejects real epics/convoys in
+// for issue_type=="epic"). The 1-arg sling path reroutes epics/convoys via
 // detectSchedulerIDType ("epic cannot be scheduled with an explicit rig"), but
-// nothing in the readiness path shared that rule.
+// the 2-arg explicit-rig path (gt sling <id> <rig>, used by deacon auto-dispatch
+// and the daemon convoy feed) SKIPS detectSchedulerIDType and so never shared
+// that rule — nor did the readiness path.
 //
 // gu-9j93s: `bd ready` does NOT filter type=epic beads (despite a long-standing
 // assumption in filterIdentityBeads that "real epics are already filtered by bd
 // ready"). So real epics surfaced as phantom ready work, got fed to
 // `gt sling <id> <rig>`, and were refused by detectSchedulerIDType every cycle —
-// noisy, and inflating ready counts. Both `gt ready` and `gt sling` now share
-// this predicate so the readiness filter and the dispatch guard cannot drift.
+// noisy, and inflating ready counts.
 //
-// Mirrors detectSchedulerIDType's classification: issue_type epic/convoy, or the
-// gt:epic / gt:convoy label. (The "EPIC:"-title data-hygiene fallback is covered
+// gu-xymp6: the same divergence let molecule/epic/convoy beads reach a polecat
+// on the 2-arg explicit-rig sling path (which bypasses detectSchedulerIDType).
+// An auto-convoy ("Work: <title>") was created wrapping a non-work bead — e.g.
+// cadk-82a, a Type=molecule witness-patrol CV bead — then a polecat was spawned
+// to commit against it, risking corruption of patrol history. Wiring this shared
+// predicate into runSling / executeSling / scheduleBead closes that path so the
+// readiness filter and every dispatch guard cannot drift.
+//
+// Mirrors detectSchedulerIDType's classification (issue_type epic/convoy, or the
+// gt:epic / gt:convoy label), extended with molecule (type=molecule or the
+// gt:molecule label). (The "EPIC:"-title data-hygiene fallback is covered
 // separately by IsEpicLikeBeadInfo so callers can compose both.)
 func IsContainerBeadInfo(info *BeadInfo) bool {
 	if info == nil {
 		return false
 	}
-	if info.IssueType == "epic" || info.IssueType == "convoy" {
+	switch info.IssueType {
+	case "epic", "convoy", "molecule":
 		return true
 	}
-	return hasLabel(info.Labels, "gt:epic") || hasLabel(info.Labels, "gt:convoy")
+	return hasLabel(info.Labels, "gt:epic") ||
+		hasLabel(info.Labels, "gt:convoy") ||
+		hasLabel(info.Labels, "gt:molecule")
 }
 
 // IsAwaitingMergeBeadInfo reports whether the bead is work already in flight to

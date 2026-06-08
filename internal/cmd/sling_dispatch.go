@@ -231,6 +231,22 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Title, info.IssueType, info.Labels, params.BeadID)
 	}
 
+	// Container-type guard (gu-xymp6). Reject beads whose issue_type is epic,
+	// convoy, or molecule (or that carry the gt:epic / gt:convoy / gt:molecule
+	// label) — non-work containers that track work via children/steps. executeSling
+	// is the universal dispatch chokepoint for batch sling and the deferred
+	// scheduler; the 2-arg explicit-rig sling path that reaches it bypasses
+	// detectSchedulerIDType, so without this guard a molecule/epic bead spawns a
+	// polecat and creates a "Work: ..." auto-convoy wrapping a non-work bead
+	// (cadk-82a, the Type=molecule witness-patrol CV bead — risking patrol-history
+	// corruption). Shares dispatch.IsContainerBeadInfo with `gt ready`. Not
+	// bypassed by --force — fix the data (bd update --type=task) instead.
+	if isContainerBeadInfo(info) {
+		result.ErrMsg = "container bead"
+		return result, fmt.Errorf("bead %s is a non-work container: title=%q, issue_type=%q, labels=%v — epics, convoys, and molecules track work via children/steps and are not dispatchable.\nIf this is wrong, fix the data: bd update %s --type=task",
+			params.BeadID, info.Title, info.IssueType, info.Labels, params.BeadID)
+	}
+
 	// Mayor-only guard (gu-bk6e). Batch sling and deferred scheduler
 	// funnel through executeSling; without this, an escalation labeled
 	// mayor-only / no-polecat is re-dispatched every cooldown cycle after

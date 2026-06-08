@@ -70,6 +70,64 @@ exit 0
 	}
 }
 
+// TestExecuteSling_MoleculeContainer verifies the gu-xymp6 dispatch gate:
+// executeSling rejects a bead whose issue_type is "molecule" (a non-work
+// container that tracks work via its steps). The 2-arg explicit-rig sling path
+// that funnels through executeSling bypasses detectSchedulerIDType, so without
+// this guard a molecule bead — e.g. cadk-82a, the witness-patrol CV bead — would
+// spawn a polecat and get wrapped in a "Work: ..." auto-convoy, risking
+// corruption of patrol history.
+func TestExecuteSling_MoleculeContainer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	// issue_type=molecule with a prose title and no identity/epic signals — only
+	// the container-type guard should reject it.
+	bdScript := `#!/bin/sh
+case "$1" in
+  show)
+    echo '[{"title":"Witness Patrol","status":"open","assignee":"","description":"","issue_type":"molecule","labels":[]}]'
+    ;;
+  children)
+    echo '[]'
+    ;;
+esac
+exit 0
+`
+	writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	params := SlingParams{
+		BeadID:   "cadk-82a",
+		RigName:  "testrig",
+		TownRoot: townRoot,
+	}
+
+	result, err := executeSling(params)
+	if err == nil {
+		t.Fatal("expected error when slinging molecule container bead, got nil")
+	}
+	if result.ErrMsg != "container bead" {
+		t.Errorf("expected ErrMsg=\"container bead\", got %q", result.ErrMsg)
+	}
+	if !strings.Contains(err.Error(), "non-work container") {
+		t.Errorf("error should mention non-work container: %v", err)
+	}
+	if !strings.Contains(err.Error(), "molecule") {
+		t.Errorf("error should mention molecule: %v", err)
+	}
+}
+
 // TestExecuteSling_OpenChildren verifies the gu-fs88 dispatch gate:
 // executeSling rejects beads that have any non-closed child, regardless of
 // epic labels or title prefixes. A parent bead is a container — the children
