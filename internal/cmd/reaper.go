@@ -640,6 +640,114 @@ Use --dry-run to preview closures without applying them.`,
 	},
 }
 
+var reaperProcessedMailTTL string
+
+var reaperReapProcessedMailCmd = &cobra.Command{
+	Use:   "reap-processed-mail",
+	Short: "Close processed (read/acked) message & escalation beads",
+	Long: `Close message and escalation beads that have been PROCESSED (read or
+acknowledged) and are older than the TTL, with reason "processed".
+
+Every escalation/mail to the mayor creates a permanent bead in the hq DB
+(labeled gt:message or gt:escalation). 'gt mail mark-read' adds 'read' +
+'delivery:acked'; 'gt escalate ack' adds 'acked' — but neither closes the
+bead. So fully-processed notifications stay status='open' forever, growing
+the DB and polluting 'bd ready' / 'bd list'. This command closes those
+acted-on notifications after a short audit window.
+
+Only PROCESSED beads are swept — an un-acked escalation stays open so it
+still demands attention. This complements reap-open-mail (blind TTL on
+gt:message only, never touches gt:escalation).
+
+Excludes:
+  - Un-processed beads (no read/delivery:acked/acked label)
+  - Agent heartbeat beads (issue_type='agent')
+  - Hooked, pinned, or closed beads (filtered by the WHERE clause)
+  - Beads labeled gt:standing-orders, gt:keep, gt:role, or gt:rig
+  - Beads with a live consumer_bead_id (per ConsumerAliveClause, gu-ub1l)
+
+When --db is provided, operates on a single database. When omitted,
+auto-discovers all databases on the Dolt server.
+
+Use --dry-run to preview closures without applying them.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ttl, err := time.ParseDuration(reaperProcessedMailTTL)
+		if err != nil {
+			return fmt.Errorf("invalid --ttl: %w", err)
+		}
+
+		databases := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		if reaperDB != "" {
+			databases = strings.Split(reaperDB, ",")
+		}
+
+		var results []*reaper.ProcessedMailResult
+		for _, dbName := range databases {
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				continue
+			}
+
+			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				continue
+			}
+
+			if ok, err := reaper.HasReaperSchema(db); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
+				db.Close()
+				continue
+			} else if !ok {
+				db.Close()
+				continue
+			}
+
+			result, err := reaper.ReapProcessedMail(db, dbName, ttl, reaperDryRun)
+			db.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: reap-processed-mail error: %v\n", dbName, err)
+				continue
+			}
+			results = append(results, result)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(results))
+		} else {
+			var totalClosed, totalRemain int
+			for _, r := range results {
+				prefix := ""
+				verb := "closed"
+				if r.DryRun {
+					prefix = "[DRY RUN] would "
+					verb = "close"
+				}
+				for _, entry := range r.ClosedEntries {
+					fmt.Printf("  %s %s (%dd processed, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				fmt.Printf("%s: %s%s %d processed mail/escalation bead(s), %d remain open\n",
+					r.Database, prefix, verb, r.Closed, r.ProcessedRemain)
+				for _, a := range r.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+				totalClosed += r.Closed
+				totalRemain += r.ProcessedRemain
+			}
+			if len(results) > 1 {
+				prefix := ""
+				if reaperDryRun {
+					prefix = "[DRY RUN] "
+				}
+				fmt.Printf("\n%sReap-processed-mail summary (%d databases): closed %d, %d remain open\n",
+					prefix, len(results), totalClosed, totalRemain)
+			}
+		}
+		return nil
+	},
+}
+
 var reaperPluginReceiptAge string
 
 var reaperClosePluginReceiptsCmd = &cobra.Command{
@@ -1023,10 +1131,15 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		if err != nil {
 			return fmt.Errorf("invalid --open-mail-ttl: %w", err)
 		}
+		processedMailTTL, err := time.ParseDuration(reaperProcessedMailTTL)
+		if err != nil {
+			return fmt.Errorf("invalid --processed-mail-ttl: %w", err)
+		}
 
 		var totalReaped, totalPurged, totalMailPurged, totalClosed, totalOpen int
 		var totalHookedMailClosed int
 		var totalOpenMailClosed int
+		var totalProcessedMailClosed int
 
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(i); err != nil {
@@ -1120,6 +1233,22 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 				}
 				totalOpenMailClosed += openMailResult.Closed
 				for _, a := range openMailResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+
+			// Reap processed mail (gu-ctspx: read/acked message & escalation
+			// beads that ack/mark-read never closed, past a short audit TTL)
+			processedMailResult, err := reaper.ReapProcessedMail(db, dbName, processedMailTTL, reaperDryRun)
+			if err != nil {
+				fmt.Printf("%s: reap-processed-mail error: %v\n", dbName, err)
+			} else {
+				for _, entry := range processedMailResult.ClosedEntries {
+					fmt.Printf("  %s %s (%dd processed, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				totalProcessedMailClosed += processedMailResult.Closed
+				for _, a := range processedMailResult.Anomalies {
 					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
 				}
 			}
@@ -1251,6 +1380,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		fmt.Printf("  Closed:           %d stale issues\n", totalClosed)
 		fmt.Printf("  Hooked-mail TTL:  %d ttl-expired\n", totalHookedMailClosed)
 		fmt.Printf("  Open-mail TTL:    %d ttl-expired\n", totalOpenMailClosed)
+		fmt.Printf("  Processed-mail:   %d closed\n", totalProcessedMailClosed)
 		fmt.Printf("  orphan reconcile: scanned=%d reconciled=%d preserved_wip=%d\n",
 			totalReconScanned, totalReconReconciled, totalReconPreservedWIP)
 		fmt.Printf("  active_mr scrub:  scanned=%d cleared=%d preserved_wip=%d still_pending=%d\n",
@@ -1285,7 +1415,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -1296,7 +1426,7 @@ func init() {
 	}
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -1322,6 +1452,10 @@ func init() {
 	reaperReapOpenMailCmd.Flags().StringVar(&reaperOpenMailTTL, "ttl", reaper.DefaultOpenMailTTL.String(), "Max open-mail age before closing as ttl-expired")
 	reaperRunCmd.Flags().StringVar(&reaperOpenMailTTL, "open-mail-ttl", reaper.DefaultOpenMailTTL.String(), "Max open-mail age before closing as ttl-expired")
 
+	// Processed-mail TTL flag (gu-ctspx). Default aligns with DefaultProcessedMailTTL.
+	reaperReapProcessedMailCmd.Flags().StringVar(&reaperProcessedMailTTL, "ttl", reaper.DefaultProcessedMailTTL.String(), "Max processed (read/acked) mail age before closing")
+	reaperRunCmd.Flags().StringVar(&reaperProcessedMailTTL, "processed-mail-ttl", reaper.DefaultProcessedMailTTL.String(), "Max processed (read/acked) mail age before closing")
+
 	reaperCmd.AddCommand(reaperDatabasesCmd)
 	reaperCmd.AddCommand(reaperScanCmd)
 	reaperCmd.AddCommand(reaperReapCmd)
@@ -1329,6 +1463,7 @@ func init() {
 	reaperCmd.AddCommand(reaperAutoCloseCmd)
 	reaperCmd.AddCommand(reaperReapHookedMailCmd)
 	reaperCmd.AddCommand(reaperReapOpenMailCmd)
+	reaperCmd.AddCommand(reaperReapProcessedMailCmd)
 	reaperCmd.AddCommand(reaperClosePluginReceiptsCmd)
 	reaperCmd.AddCommand(reaperScrubActiveMRCmd)
 	reaperCmd.AddCommand(reaperReconcileOrphansCmd)
