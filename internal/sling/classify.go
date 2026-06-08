@@ -161,6 +161,36 @@ func IsDeferredSlingError(stderrLine string) bool {
 	return strings.Contains(strings.ToLower(stderrLine), "deferred bead")
 }
 
+// IsAwaitingRefineryMergeSlingError reports whether a sling stderr line indicates
+// the target bead is awaiting refinery merge — it has a submitted MR sitting in
+// the merge queue and is kept OPEN only so the refinery's PostMerge path can close
+// it with the real commit_sha (gu-ea25u). sling/schedule/dispatch all refuse such
+// a bead by design (re-slinging spawns a fresh polecat that finds the work done).
+//
+// Matched sling-guard rejection shapes (all carry the phrase "awaiting refinery
+// merge" and the "awaiting_refinery_merge" label name):
+//   - sling.go:          "refusing to sling bead <id>: %q is awaiting refinery merge (label awaiting_refinery_merge) — ..."
+//   - sling_dispatch.go: "bead <id> is awaiting refinery merge (label awaiting_refinery_merge): %q — ..."
+//   - sling_schedule.go: "bead <id> is awaiting refinery merge (label awaiting_refinery_merge): %q — refusing to schedule ..."
+//
+// This is a BENIGN, self-resolving in-flight state — not a wedge. The refinery
+// clears the label on merge (or the reaper for a proven-merged orphan), which is
+// the correct re-dispatch path. The convoy re-dispatch loop previously fell through
+// to the default branch and escalated a HIGH "cannot dispatch / will never
+// progress" alert for EVERY such bead EVERY scan cycle, flooding the Mayor inbox
+// across all rigs (the gt-3798 escalation storm). The correct disposition is the
+// same as a deferred / actively-worked bead: suppress the escalation and back off
+// the re-feed interval, WITHOUT untracking (the step is legitimate tracked work
+// that will close on merge).
+func IsAwaitingRefineryMergeSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	s := strings.ToLower(stderrLine)
+	return strings.Contains(s, "awaiting refinery merge") ||
+		strings.Contains(s, "awaiting_refinery_merge")
+}
+
 // SlingFailureClass categorizes a sling stderr line into a single terminal-vs-
 // transient disposition so producers can switch on one value instead of chaining
 // predicates (and risk ordering bugs). Ordering matters: closed and not-found are
@@ -188,6 +218,12 @@ const (
 	// slots by design). Suppress escalation and back off; it becomes dispatchable
 	// when un-deferred. NOT terminal — must not be untracked (gt-3798).
 	SlingFailureDeferred
+	// SlingFailureAwaitingMerge: the bead has a submitted MR in the refinery merge
+	// queue (label awaiting_refinery_merge) and is kept open until the refinery's
+	// PostMerge path closes it. A benign, self-resolving in-flight state — suppress
+	// escalation and back off; the refinery clears the label on merge. NOT terminal
+	// — must not be untracked (gu-ea25u, gt-3798).
+	SlingFailureAwaitingMerge
 )
 
 // ClassifySlingFailure maps a sling stderr line to its SlingFailureClass.
@@ -206,6 +242,8 @@ func ClassifySlingFailure(stderrLine string) SlingFailureClass {
 		return SlingFailureActivelyWorked
 	case IsDeferredSlingError(stderrLine):
 		return SlingFailureDeferred
+	case IsAwaitingRefineryMergeSlingError(stderrLine):
+		return SlingFailureAwaitingMerge
 	default:
 		return SlingFailureUnknown
 	}

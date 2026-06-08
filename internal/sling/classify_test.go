@@ -22,6 +22,9 @@ func TestClassifySlingFailure(t *testing.T) {
 		{"actively worked hooked", "bead gt-x is already hooked to gastown/polecats/fury", SlingFailureActivelyWorked},
 		{"actively worked in_progress", "already in_progress (use --force to re-sling)", SlingFailureActivelyWorked},
 		{"deferred", "refusing to sling deferred bead gt-x: \"deferred to post-launch\"", SlingFailureDeferred},
+		{"awaiting merge (sling.go)", `refusing to sling bead gt-x: "fix thing" is awaiting refinery merge (label awaiting_refinery_merge) — its MR is submitted and in the merge queue; the refinery will close it on merge`, SlingFailureAwaitingMerge},
+		{"awaiting merge (schedule)", `bead gt-x is awaiting refinery merge (label awaiting_refinery_merge): "fix thing" — refusing to schedule`, SlingFailureAwaitingMerge},
+		{"awaiting merge case-insensitive", "BEAD gt-x is Awaiting Refinery Merge", SlingFailureAwaitingMerge},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -55,7 +58,7 @@ func TestIsTerminalSlingFailure(t *testing.T) {
 			t.Errorf("IsTerminalSlingFailure(%v) = false, want true", c)
 		}
 	}
-	nonTerminal := []SlingFailureClass{SlingFailureUnknown, SlingFailureActivelyWorked, SlingFailureDeferred}
+	nonTerminal := []SlingFailureClass{SlingFailureUnknown, SlingFailureActivelyWorked, SlingFailureDeferred, SlingFailureAwaitingMerge}
 	for _, c := range nonTerminal {
 		if IsTerminalSlingFailure(c) {
 			t.Errorf("IsTerminalSlingFailure(%v) = true, want false", c)

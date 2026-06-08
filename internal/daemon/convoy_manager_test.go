@@ -3845,6 +3845,92 @@ func TestFeedFirstReady_Deferred_RecordsChurn(t *testing.T) {
 	}
 }
 
+// TestIsAwaitingRefineryMergeSlingError covers the stderr shapes sling/schedule/
+// dispatch emit for a bead awaiting refinery merge (gu-ea25u) — and the shapes
+// that must NOT match so they route to their own handlers / still escalate.
+func TestIsAwaitingRefineryMergeSlingError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"sling.go shape", `refusing to sling bead gt-x: "fix thing" is awaiting refinery merge (label awaiting_refinery_merge) — its MR is submitted and in the merge queue; the refinery will close it on merge`, true},
+		{"dispatch shape", `bead gt-x is awaiting refinery merge (label awaiting_refinery_merge): "fix thing" — its MR is submitted and in the merge queue; the refinery will close it on merge, not a fresh polecat`, true},
+		{"schedule shape", `bead gt-x is awaiting refinery merge (label awaiting_refinery_merge): "fix thing" — refusing to schedule. Its MR is submitted and in the merge queue`, true},
+		{"label only", "carries label awaiting_refinery_merge", true},
+		{"case insensitive", "BEAD gt-x is Awaiting Refinery Merge", true},
+		// Must NOT match — distinct handler paths / genuinely-ambiguous.
+		{"deferred", `refusing to sling deferred bead gt-x: "held"`, false},
+		{"actively worked", "bead gt-x is already hooked to gastown/polecats/x", false},
+		{"not found", "bead 'gt-x' not found", false},
+		{"mayor-only", `"x" is labeled mayor-only / no-polecat`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sling.IsAwaitingRefineryMergeSlingError(tc.in); got != tc.want {
+				t.Errorf("IsAwaitingRefineryMergeSlingError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFeedFirstReady_AwaitingMerge_NoEscalateNoUntrack verifies the gt-3798
+// escalation-storm fix: when sling refuses a bead awaiting refinery merge (MR
+// submitted, sitting in the merge queue), the daemon suppresses the escalation (a
+// benign self-resolving in-flight state — the refinery closes it on merge), does
+// NOT untrack it (legitimate tracked work), and does NOT record a sling error (so
+// it never escalates as "cannot dispatch / will never progress").
+func TestFeedFirstReady_AwaitingMerge_NoEscalateNoUntrack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	stderr := `refusing to sling bead gt-merge: "fix thing" is awaiting refinery merge (label awaiting_refinery_merge) — its MR is submitted and in the merge queue; the refinery will close it on merge`
+	m, invokeLog := feedFirstReadyTestEnv(t, stderr)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error { untrackCalls++; return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-merge", Title: "Awaiting Merge Step", ReadyCount: 1, ReadyIssues: []string{"gt-merge"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("awaiting-merge bead should NOT escalate, but escalate was invoked: %q", data)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("awaiting-merge bead should not untrack (real tracked work), got %d", untrackCalls)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-merge"); ok {
+		t.Errorf("awaiting-merge bead should not record a sling error")
+	}
+}
+
+// TestFeedFirstReady_AwaitingMerge_RecordsChurn verifies an awaiting-merge bead
+// advances its feed-churn streak on each failed re-feed, so the effective cooldown
+// escalates (5m→…) instead of re-attempting an in-flight MR every scan (gt-3798).
+func TestFeedFirstReady_AwaitingMerge_RecordsChurn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, _ := feedFirstReadyTestEnv(t, `bead gt-merge is awaiting refinery merge (label awaiting_refinery_merge): "fix thing"`)
+	m.untrackMissingBeadFn = func(string, string) error { return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-merge", Title: "Awaiting Merge Step", ReadyCount: 1, ReadyIssues: []string{"gt-merge"}}
+
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-merge"); got != feedDispatchCooldown {
+		t.Fatalf("after 1 churn, cooldown = %v, want base %v", got, feedDispatchCooldown)
+	}
+
+	m.lastFeedAttempt.Delete("gt-merge")
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-merge"); got <= feedDispatchCooldown {
+		t.Errorf("after 2 churns, cooldown = %v, want > base %v (escalating backoff)", got, feedDispatchCooldown)
+	}
+}
+
 // TestFeedFirstReady_DoNotDispatch_UntracksNoEscalate verifies the gu-q1wzq fix:
 // a do-not-dispatch / pinned reference tripwire is auto-untracked on first
 // failure (like a structural non-work bead) and does NOT escalate — it can never

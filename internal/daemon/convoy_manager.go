@@ -1020,6 +1020,23 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 				// the hold (deferred beads must NOT be mass-closed/untracked).
 				m.logger("Convoy %s: %s is deferred — intentionally held, suppressing escalation and backing off (gt-3798)", c.ID, issueID)
 				m.recordFeedChurn(issueID)
+			case sling.IsAwaitingRefineryMergeSlingError(stderrLine):
+				// The bead is awaiting refinery merge (gu-ea25u): its MR is
+				// submitted and sitting in the merge queue, and the bead is kept
+				// OPEN only so the refinery's PostMerge path can close it with the
+				// real commit_sha. sling refuses by design (re-slinging spawns a
+				// fresh polecat that finds the work complete). This is a BENIGN,
+				// self-resolving in-flight state — normal merge-queue latency, not a
+				// stall: the refinery clears the label on merge (or the reaper for a
+				// proven-merged orphan). Escalating it as "cannot dispatch / will
+				// never progress" is both wrong (it WILL progress) and re-fired every
+				// scan cycle for EVERY such bead across ALL rigs whose refineries are
+				// actively merging, drowning the Mayor inbox (gt-3798 escalation
+				// storm). Treat it like a deferred/actively-worked bead: suppress the
+				// escalation and back off the re-feed (5m→1h), with NO untrack — the
+				// step is legitimate tracked work that will close on merge.
+				m.logger("Convoy %s: %s is awaiting refinery merge — MR queued, suppressing escalation and backing off (gu-ea25u)", c.ID, issueID)
+				m.recordFeedChurn(issueID)
 			default:
 				if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
 					// Genuinely-ambiguous persistent failure (e.g. an unroutable
