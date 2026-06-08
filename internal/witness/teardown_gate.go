@@ -21,6 +21,13 @@
 //	    — work is already on the rig's default branch (fast-forward, regular
 //	    merge, squash-merge via cherry-pick patch-id), or the polecat
 //	    produced no commits beyond base.
+//	(d) An open gt:merge-request wisp exists for the polecat's branch at its
+//	    current HEAD SHA (gs-3ece). The MR wisp is only created by `gt done`
+//	    after a verified push, so its existence is durable proof-of-push even
+//	    when (b)'s live ls-remote is flaky or transiently fails. This closes
+//	    the false-positive where a pushed branch with an enqueued MR was
+//	    refused archive ("no proof of push") and re-flagged as a zombie every
+//	    witness patrol cycle until the refinery merged the MR.
 //
 // If none hold, the polecat almost certainly has unmerged local-only work
 // that would be irrecoverably lost by teardown. The gate returns an error
@@ -34,6 +41,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/pushlog"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -49,6 +57,15 @@ var ErrTeardownUnsafe = errors.New("teardown gate: no proof of push")
 // requiring a real origin remote on disk.
 var teardownLivePushVerify = func(g *git.Git, branch, commit string) error {
 	return g.VerifyPushedCommit("origin", branch, commit)
+}
+
+// teardownFindMRForBranchAndSHA is the open-merge-request push-proof predicate
+// (d). Factored out as a package-level var so tests can override it without a
+// real beads/Dolt backend. Returns the matching open MR wisp (or nil) for the
+// branch at the given commit SHA.
+var teardownFindMRForBranchAndSHA = func(workDir, branch, commitSHA string) (*beads.Issue, error) {
+	b := beads.New(beads.ResolveBeadsDir(workDir))
+	return b.FindMRForBranchAndSHA(branch, commitSHA)
 }
 
 // VerifyTeardownSafe is the public entrypoint to the pre-teardown gate.
@@ -117,6 +134,13 @@ func _verifyTeardownSafe(workDir, rigName, polecatName string) error {
 
 	// (b) Live VerifyPushedCommit.
 	if err := teardownLivePushVerify(g, branch, headSHA); err == nil {
+		return nil
+	}
+
+	// (d) Open merge-request wisp for this branch at the current HEAD SHA.
+	// The MR wisp is created by `gt done` only after a verified push, so it is
+	// durable proof-of-push even when (b)'s live ls-remote is flaky (gs-3ece).
+	if mr, err := teardownFindMRForBranchAndSHA(workDir, branch, headSHA); err == nil && mr != nil {
 		return nil
 	}
 

@@ -10,6 +10,7 @@
 //   - empty polecat (no commits beyond base) → safe via (c)
 //   - durable push receipt matching HEAD → safe via (a)
 //   - live VerifyPushedCommit success → safe via (b)
+//   - open merge-request wisp for branch+SHA → safe via (d) (gs-3ece)
 //   - none of the predicates hold → unsafe with ErrTeardownUnsafe
 //   - detached HEAD with unmerged work → unsafe (always escalate)
 //   - stale push receipt (different SHA, no live verify, no merge) → unsafe
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/pushlog"
 )
@@ -44,6 +46,15 @@ func withLivePushVerify(t *testing.T, fn func(*git.Git, string, string) error) {
 	old := teardownLivePushVerify
 	teardownLivePushVerify = fn
 	t.Cleanup(func() { teardownLivePushVerify = old })
+}
+
+// withFindMR swaps teardownFindMRForBranchAndSHA for the test. Stubbing it keeps
+// the gate from reaching a real beads/Dolt backend during unit tests.
+func withFindMR(t *testing.T, fn func(workDir, branch, commitSHA string) (*beads.Issue, error)) {
+	t.Helper()
+	old := teardownFindMRForBranchAndSHA
+	teardownFindMRForBranchAndSHA = fn
+	t.Cleanup(func() { teardownFindMRForBranchAndSHA = old })
 }
 
 // makeTownRoot creates a minimal town root (mayor/town.json marker) under a
@@ -250,6 +261,41 @@ func TestVerifyTeardownSafe_LivePushVerify(t *testing.T) {
 	}
 }
 
+// TestVerifyTeardownSafe_OpenMRWisp covers predicate (d) (gs-3ece): not merged,
+// no receipt, live ls-remote fails (simulating the flaky-origin false positive),
+// but an open gt:merge-request wisp exists for the branch at the current HEAD.
+// The MR wisp proves the branch was pushed, so the gate must report safe.
+func TestVerifyTeardownSafe_OpenMRWisp(t *testing.T) {
+	root := makeTownRoot(t)
+	_, branch, headSHA := makePolecatGitRepo(t, root, "testrig", "nux", "polecat/nux/with-mr")
+
+	withClassify(t, func(string, string, string) (MergeCheckResult, error) {
+		return MergeCheckNotMerged, nil
+	})
+	withLivePushVerify(t, func(*git.Git, string, string) error {
+		return fmt.Errorf("origin ls-remote flaky (simulated false positive)")
+	})
+
+	called := false
+	withFindMR(t, func(workDir, gotBranch, gotSHA string) (*beads.Issue, error) {
+		called = true
+		if gotBranch != branch {
+			t.Errorf("find MR branch = %q, want %q", gotBranch, branch)
+		}
+		if gotSHA != headSHA {
+			t.Errorf("find MR sha = %q, want %q", gotSHA, headSHA)
+		}
+		return &beads.Issue{ID: "gs-wisp-mr"}, nil
+	})
+
+	if err := _verifyTeardownSafe(root, "testrig", "nux"); err != nil {
+		t.Errorf("err = %v, want nil (open MR wisp → safe)", err)
+	}
+	if !called {
+		t.Error("teardownFindMRForBranchAndSHA was not called")
+	}
+}
+
 // TestVerifyTeardownSafe_NoProofUnsafe covers the failure case: not merged, no
 // receipt, no live origin tip → escalate, do not nuke. This is the gu-ftlw /
 // gu-r63t scenario.
@@ -262,6 +308,9 @@ func TestVerifyTeardownSafe_NoProofUnsafe(t *testing.T) {
 	})
 	withLivePushVerify(t, func(*git.Git, string, string) error {
 		return fmt.Errorf("origin branch reaped")
+	})
+	withFindMR(t, func(string, string, string) (*beads.Issue, error) {
+		return nil, nil // no MR wisp → predicate (d) does not fire
 	})
 
 	err := _verifyTeardownSafe(root, "testrig", "nux")
@@ -306,6 +355,9 @@ func TestVerifyTeardownSafe_StalePushReceiptUnsafe(t *testing.T) {
 	})
 	withLivePushVerify(t, func(*git.Git, string, string) error {
 		return fmt.Errorf("origin branch reaped")
+	})
+	withFindMR(t, func(string, string, string) (*beads.Issue, error) {
+		return nil, nil // no matching MR wisp → predicate (d) does not fire
 	})
 
 	err := _verifyTeardownSafe(root, "testrig", "nux")
