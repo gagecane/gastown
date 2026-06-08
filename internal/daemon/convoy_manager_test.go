@@ -2720,6 +2720,81 @@ func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
 	}
 }
 
+// transientErrThenEventsStore returns an error on its first GetAllEventsSince
+// call (simulating Dolt still warming up right after a daemon restart) and the
+// given events on every subsequent call. Used to reproduce gs-rx1: a store that
+// errors during the initial warm-up cycle must still run its warm-up — and thus
+// ABSORB, not replay, its historical close backlog — on its first successful poll.
+type transientErrThenEventsStore struct {
+	beadsdk.Storage // embedded to satisfy unimplemented methods
+	events          []*beadsdk.Event
+	calls           int
+}
+
+func (s *transientErrThenEventsStore) GetAllEventsSince(_ context.Context, _ time.Time) ([]*beadsdk.Event, error) {
+	s.calls++
+	if s.calls == 1 {
+		return nil, fmt.Errorf("Error 2003 (HY000): connection refused")
+	}
+	return s.events, nil
+}
+
+// TestPollStore_TransientErrorDuringWarmup_NoBacklogReplay reproduces gs-rx1.
+// When the hq store errors on the first poll (Dolt warming up after a restart),
+// the store must NOT be promoted to the processing phase. Its first SUCCESSFUL
+// poll has to run warm-up so the accumulated close backlog is absorbed (marks +
+// HWM advance) instead of replayed as a storm of "close detected" events that
+// each fork a CheckConvoysForIssue subprocess and starve dispatch for minutes.
+func TestPollStore_TransientErrorDuringWarmup_NoBacklogReplay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// A backlog of already-closed convoy-wisps — the historical events a freshly
+	// restarted daemon sees when it first reads from epoch.
+	backlog := []*beadsdk.Event{
+		{ID: "evt-1", IssueID: "hq-wisp-backlog1", EventType: beadsdk.EventClosed, CreatedAt: time.Now().UTC()},
+		{ID: "evt-2", IssueID: "hq-wisp-backlog2", EventType: beadsdk.EventClosed, CreatedAt: time.Now().UTC()},
+	}
+	stub := &transientErrThenEventsStore{events: backlog}
+	stores := map[string]beadsdk.Storage{"hq": stub}
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	// Exercise the production warm-up path: do NOT set m.seeded.
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
+
+	// First poll: the store errors (Dolt still warming up after restart).
+	if hadError := m.pollStoresSnapshot(m.stores); !hadError {
+		t.Fatal("expected first poll to report an error")
+	}
+
+	// Second poll: the store recovers and returns its full close backlog. Because
+	// the store never completed warm-up, this cycle must warm up (absorb the
+	// backlog) rather than replay it as fresh closes.
+	m.pollStoresSnapshot(m.stores)
+
+	for _, s := range logged {
+		if strings.Contains(s, "close detected") {
+			t.Fatalf("backlog close was replayed after a transient warm-up error (gs-rx1); logs: %v", logged)
+		}
+	}
+
+	// The store must now be seeded so subsequent polls process genuinely new
+	// closes (rather than re-warming-up forever). The backlog events were marked
+	// processed during warm-up, so they will not replay on later polls either.
+	if _, warmed := m.seededStores.Load("hq"); !warmed {
+		t.Errorf("expected hq to be seeded after its first successful poll")
+	}
+	for _, ev := range backlog {
+		if _, marked := m.processedLifecycleEvents.Load(ev.ID); !marked {
+			t.Errorf("expected warm-up to mark backlog event %s processed", ev.ID)
+		}
+	}
+}
+
 // TestFeedFirstReady_PerIssueCooldown_SkipsRepeat verifies that a ready issue
 // slung within feedDispatchCooldown is skipped on the next scan even though
 // `gt convoy stranded` still reports it as ready. This is the gu-iygf fix:

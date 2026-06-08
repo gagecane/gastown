@@ -167,10 +167,24 @@ type ConvoyManager struct {
 	// Key matches stores map keys ("hq", "gastown", etc.).
 	lastEventIDs sync.Map // map[string]time.Time
 
-	// seeded is true once the first poll cycle has run (warm-up).
-	// The first cycle advances high-water marks without processing events,
-	// preventing a burst of historical event replay on daemon restart.
+	// seeded, when true, forces every store straight into the processing phase,
+	// bypassing the per-store warm-up entirely. Production never sets it — there
+	// the per-store seededStores map governs warm-up so each store is seeded only
+	// after its OWN first successful poll (gs-rx1). It remains as an all-stores
+	// fast path used by tests that assert close-event processing directly.
 	seeded atomic.Bool
+
+	// seededStores records which stores have completed their one-time warm-up
+	// poll (advanced the high-water mark and marked pre-existing lifecycle events
+	// processed). A store is recorded only after a SUCCESSFUL poll, so a store
+	// that errored on the initial cycle — e.g. Dolt still warming up right after
+	// a daemon restart — re-runs warm-up on its next successful poll instead of
+	// being force-promoted to processing. Force-promotion was the gs-rx1 bug: the
+	// errored store's HWM stayed at epoch, so the next successful poll replayed
+	// its entire close backlog (~18k convoy-wisps) as fresh closes, firing a
+	// CheckConvoysForIssue per historical close and starving dispatch for minutes.
+	// Key matches stores map keys ("hq", rig names).
+	seededStores sync.Map // map[string]bool
 
 	// processedCloses tracks issue IDs whose current closed state has already
 	// been processed. This prevents duplicate convoy checks when the same close
@@ -427,11 +441,11 @@ func (m *ConvoyManager) runEventPoll() {
 }
 
 // pollStoresSnapshot polls events from all non-parked stores in the snapshot.
-// The first call is a warm-up: it advances high-water marks without
-// processing events, preventing a burst of historical replay on restart.
-// A per-cycle seen set deduplicates close events across stores so each
-// issueID is processed at most once per poll cycle.
-// Returns true if any store poll encountered an error.
+// Each store's first SUCCESSFUL poll is a warm-up that advances its high-water
+// mark without processing events, preventing a burst of historical replay on
+// restart (see pollStore / seededStores). A per-cycle seen set deduplicates
+// close events across stores so each issueID is processed at most once per poll
+// cycle. Returns true if any store poll encountered an error.
 func (m *ConvoyManager) pollStoresSnapshot(stores map[string]beadsdk.Storage) bool {
 	seen := make(map[string]bool)
 	hadError := false
@@ -443,7 +457,6 @@ func (m *ConvoyManager) pollStoresSnapshot(stores map[string]beadsdk.Storage) bo
 			hadError = true
 		}
 	}
-	m.seeded.CompareAndSwap(false, true)
 	return hadError
 }
 
@@ -501,9 +514,15 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 	}
 	m.lastEventIDs.Store(name, highWater)
 
-	// First poll cycle is warm-up only: advance marks, skip processing.
-	// This prevents replaying the entire event history on daemon restart.
-	if !m.seeded.Load() {
+	// First poll cycle for THIS store is warm-up only: advance marks, skip
+	// processing. This prevents replaying the entire event history on daemon
+	// restart. Seeding is recorded per-store (seededStores) and only HERE, after
+	// a successful fetch + HWM advance — so a store that errored on an earlier
+	// cycle (Dolt still warming up post-restart) is not yet seeded and runs its
+	// warm-up on its first SUCCESSFUL poll, rather than being promoted to
+	// processing and replaying its whole close backlog (gs-rx1). The global
+	// m.seeded flag is an all-stores fast path used by tests.
+	if _, warmed := m.seededStores.Load(name); !warmed && !m.seeded.Load() {
 		for _, e := range events {
 			if e.ID == "" {
 				continue
@@ -512,6 +531,7 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 				m.processedLifecycleEvents.Store(e.ID, true)
 			}
 		}
+		m.seededStores.Store(name, true)
 		return nil
 	}
 
