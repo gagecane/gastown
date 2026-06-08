@@ -2656,19 +2656,55 @@ func daemonStoreIdleTimeout(townRoot string) time.Duration {
 	return idle
 }
 
-// tuneStorePool sets ConnMaxIdleTime on a store's underlying *sql.DB so idle
-// pooled connections are retired before the Dolt server's wait_timeout closes
-// them server-side. Without this the pool reuses server-killed sockets, fails
-// with "socket state is broken", and leaks the discarded sockets into
-// FIN-WAIT-2 — the gu-g7q6z connection storm. Best-effort: stores that don't
-// expose the raw pool (no beadsDBAccessor) keep the SDK defaults.
+// tuneStorePool hardens a store's underlying *sql.DB against the gu-g7q6z
+// connection storm. It applies two complementary settings:
+//
+//  1. ConnMaxIdleTime (idleTimeout): retires idle pooled connections before the
+//     Dolt server's wait_timeout reaps them server-side. Without this the pool
+//     reuses server-killed sockets, fails with "socket state is broken", and
+//     leaks the discarded sockets into FIN-WAIT-2.
+//
+//  2. MaxIdleConns raised to equal MaxOpenConns (symmetric pool). The SDK opens
+//     the server pool with MaxOpenConns=10 but MaxIdleConns=5. When a query
+//     burst (e.g. the 5s event poll across 18 stores colliding with a Dolt
+//     latency spike) drives concurrency above 5, every connection returned
+//     beyond the 5-idle cap is CLOSED ON RETURN rather than parked. Under a
+//     loaded/slow server those client-initiated closes pile into FIN-WAIT-2
+//     faster than they drain, and the churn accelerates as Dolt slows — the
+//     monotonic, accelerating climb seen in all three near-outages. The
+//     ConnMaxIdleTime fix alone never addressed this close-on-return path
+//     (those conns are not "idle", they are actively cycling). Making the pool
+//     symmetric means a returned connection is always parked for reuse and
+//     retired cleanly via ConnMaxIdleTime, never closed-on-return under load.
+//
+// Best-effort: stores that don't expose the raw pool (no beadsDBAccessor) keep
+// the SDK defaults.
 func (d *Daemon) tuneStorePool(name string, store beadsdk.Storage, idleTimeout time.Duration) {
 	accessor, ok := store.(beadsDBAccessor)
 	if !ok || accessor.DB() == nil {
 		return
 	}
-	accessor.DB().SetConnMaxIdleTime(idleTimeout)
-	d.logger.Printf("Convoy: tuned %s store pool ConnMaxIdleTime=%s (below Dolt wait_timeout to prevent FIN-WAIT-2 leak, gu-g7q6z)", name, idleTimeout)
+	maxIdle := tunePoolDB(accessor.DB(), idleTimeout)
+	d.logger.Printf("Convoy: tuned %s store pool ConnMaxIdleTime=%s MaxIdleConns=%d (symmetric pool + idle retire below Dolt wait_timeout to prevent FIN-WAIT-2 leak, gu-g7q6z)", name, idleTimeout, maxIdle)
+}
+
+// tunePoolDB applies the gu-g7q6z connection-storm hardening to a raw *sql.DB
+// pool and returns the MaxIdleConns it set (for logging). Split out from
+// tuneStorePool so the pool math is unit-testable without faking the full
+// beadsdk.Storage interface. See tuneStorePool for the rationale.
+func tunePoolDB(db *sql.DB, idleTimeout time.Duration) int {
+	if db == nil {
+		return 0
+	}
+	db.SetConnMaxIdleTime(idleTimeout)
+	// Park every open connection as idle so none is closed on return under a
+	// query burst (the FIN-WAIT-2 close-on-return churn). MaxOpenConnections is
+	// the pool's open cap as configured by the SDK (10 in server mode).
+	maxOpen := db.Stats().MaxOpenConnections
+	if maxOpen > 0 {
+		db.SetMaxIdleConns(maxOpen)
+	}
+	return maxOpen
 }
 
 // getKnownRigs returns list of registered rig names.

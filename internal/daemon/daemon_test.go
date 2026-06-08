@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/testutil"
@@ -1420,5 +1422,44 @@ func TestDaemonStoreIdleTimeout(t *testing.T) {
 				t.Errorf("idle timeout %v must be below wait_timeout %ds to prevent FIN-WAIT-2 leak", got, waitSec)
 			}
 		})
+	}
+}
+
+// TestTunePoolDBSymmetric verifies the daemon store-pool hardening makes the
+// pool symmetric (MaxIdleConns == MaxOpenConns) so connections returned under a
+// query burst are parked for reuse instead of closed-on-return — the
+// close-on-return path that leaked sockets into FIN-WAIT-2 (gu-g7q6z) and that
+// the ConnMaxIdleTime-only fix did not address.
+func TestTunePoolDBSymmetric(t *testing.T) {
+	// sql.Open is lazy — no connection is made, so this needs no live server.
+	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:3307)/hq")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	// Reproduce the SDK server-mode pool shape: open cap 10, idle cap 5.
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+
+	maxIdle := tunePoolDB(db, 15*time.Second)
+
+	if maxIdle != 10 {
+		t.Errorf("tunePoolDB returned MaxIdleConns=%d, want 10 (== MaxOpenConns)", maxIdle)
+	}
+	stats := db.Stats()
+	if stats.MaxIdleClosed != 0 {
+		t.Errorf("MaxIdleClosed=%d, want 0 — no idle conns should be closed yet", stats.MaxIdleClosed)
+	}
+	if stats.MaxOpenConnections != 10 {
+		t.Errorf("MaxOpenConnections=%d, want 10 (unchanged)", stats.MaxOpenConnections)
+	}
+}
+
+// TestTunePoolDBNilSafe verifies tunePoolDB is a no-op on a nil pool (a store
+// that doesn't expose its raw *sql.DB keeps SDK defaults).
+func TestTunePoolDBNilSafe(t *testing.T) {
+	if got := tunePoolDB(nil, 15*time.Second); got != 0 {
+		t.Errorf("tunePoolDB(nil) = %d, want 0", got)
 	}
 }
