@@ -158,6 +158,11 @@ type Var struct {
 	Description string `toml:"description"`
 	Required    bool   `toml:"required"`
 	Default     string `toml:"default"`
+	// Pattern is an optional RE2 regular expression that a provided value must
+	// fully match (e.g. "^[A-Z]+-[0-9]+$" for a JIRA ticket). Empty means no
+	// format constraint. Enforced as a hard gate at dispatch by
+	// (*Formula).ValidateProvidedVars.
+	Pattern string `toml:"pattern"`
 }
 
 // UnmarshalTOML allows Var to be decoded from either a plain string
@@ -181,6 +186,11 @@ func (v *Var) UnmarshalTOML(data any) error {
 		if d, ok := val["default"]; ok {
 			if s, ok := d.(string); ok {
 				v.Default = s
+			}
+		}
+		if p, ok := val["pattern"]; ok {
+			if s, ok := p.(string); ok {
+				v.Pattern = s
 			}
 		}
 		return nil

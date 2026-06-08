@@ -1063,6 +1063,18 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 	// Route bd mutations (wisp/bond) to the correct beads context for the target bead.
 	formulaWorkDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
 
+	// Hard gate (gs-4th0): enforce the formula's declared required-var / pattern
+	// contract before cooking or instantiating the wisp. feature/issue are
+	// auto-injected from the bead, so include them in the provided set. Mirrors
+	// the standalone-sling gate in runSlingFormula.
+	gateVars := append([]string{
+		fmt.Sprintf("feature=%s", title),
+		fmt.Sprintf("issue=%s", beadID),
+	}, extraVars...)
+	if err := validateFormulaRequiredVars(formulaName, townRoot, rigFromWorkDir(townRoot, formulaWorkDir), gateVars); err != nil {
+		return nil, err
+	}
+
 	// Step 1: Cook the formula (ensures proto exists)
 	// If cook fails, retry with the embedded formula extracted to a temp file.
 	// This handles non-gastown rigs that don't have formulas provisioned on disk.

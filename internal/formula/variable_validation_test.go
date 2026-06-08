@@ -230,3 +230,108 @@ func TestAllEmbeddedFormulas_VariableValidation(t *testing.T) {
 		t.Errorf("Formulas with undefined template variables:\n%s", strings.Join(failures, "\n"))
 	}
 }
+
+// TestValidateProvidedVars covers the gs-4th0 hard gate: required vars must be
+// present, pattern-constrained vars must match their format, defaults satisfy
+// requirements, and required inputs are enforced too.
+func TestValidateProvidedVars(t *testing.T) {
+	jiraPattern := "^[A-Z]+-[0-9]+$"
+	tests := []struct {
+		name     string
+		formula  Formula
+		provided map[string]string
+		wantErr  string // substring; "" means expect success
+	}{
+		{
+			name: "required var present and matching",
+			formula: Formula{Name: "f", Vars: map[string]Var{
+				"jira_ticket": {Required: true, Pattern: jiraPattern},
+			}},
+			provided: map[string]string{"jira_ticket": "LIA-1234"},
+			wantErr:  "",
+		},
+		{
+			name: "required var missing",
+			formula: Formula{Name: "mol-lia-pr-work", Vars: map[string]Var{
+				"jira_ticket": {Required: true, Pattern: jiraPattern},
+			}},
+			provided: map[string]string{},
+			wantErr:  "missing required var \"jira_ticket\"",
+		},
+		{
+			name: "required var present but empty",
+			formula: Formula{Name: "f", Vars: map[string]Var{
+				"jira_ticket": {Required: true, Pattern: jiraPattern},
+			}},
+			provided: map[string]string{"jira_ticket": ""},
+			wantErr:  "missing required var",
+		},
+		{
+			name: "invalid format rejected",
+			formula: Formula{Name: "f", Vars: map[string]Var{
+				"jira_ticket": {Required: true, Pattern: jiraPattern},
+			}},
+			provided: map[string]string{"jira_ticket": "gs-4th0"},
+			wantErr:  "does not match required format",
+		},
+		{
+			name: "default satisfies required",
+			formula: Formula{Name: "f", Vars: map[string]Var{
+				"base_branch": {Required: true, Default: "main"},
+			}},
+			provided: map[string]string{},
+			wantErr:  "",
+		},
+		{
+			name: "pattern only enforced when supplied",
+			formula: Formula{Name: "f", Vars: map[string]Var{
+				"jira_ticket": {Pattern: jiraPattern},
+			}},
+			provided: map[string]string{},
+			wantErr:  "",
+		},
+		{
+			name: "invalid pattern surfaced as error",
+			formula: Formula{Name: "f", Vars: map[string]Var{
+				"jira_ticket": {Pattern: "([A-Z"},
+			}},
+			provided: map[string]string{"jira_ticket": "X"},
+			wantErr:  "invalid pattern",
+		},
+		{
+			name: "required input missing",
+			formula: Formula{Name: "f", Inputs: map[string]Input{
+				"target_repo": {Required: true},
+			}},
+			provided: map[string]string{},
+			wantErr:  "missing required input \"target_repo\"",
+		},
+		{
+			name: "multiple problems collected",
+			formula: Formula{Name: "f", Vars: map[string]Var{
+				"jira_ticket": {Required: true, Pattern: jiraPattern},
+				"other":       {Required: true},
+			}},
+			provided: map[string]string{},
+			wantErr:  "other",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.formula.ValidateProvidedVars(tt.provided)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected success, got error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}

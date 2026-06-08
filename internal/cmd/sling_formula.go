@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -147,6 +148,72 @@ func findHookedFormulaSingleton(workDir, targetAgent, formulaName string) (*bead
 
 var findHookedFormulaSingletonFn = findHookedFormulaSingleton
 
+// rigFromTarget extracts the rig name from a sling target argument so the
+// formula-resolution tiers (rig > town > embedded) can find a rig-level
+// override. Returns "" when no rig can be determined.
+func rigFromTarget(target string) string {
+	if target == "" {
+		return ""
+	}
+	if rn, isRig := IsRigName(target); isRig {
+		return rn
+	}
+	if idx := strings.IndexByte(target, '/'); idx > 0 {
+		return target[:idx]
+	}
+	return ""
+}
+
+// rigFromWorkDir extracts the rig name from a resolved beads work directory of
+// the form <townRoot>/<rig>/.beads so the formula-resolution tiers can find a
+// rig-level override. Returns "" when the path is not under townRoot or names
+// no rig (e.g. the town-level .beads dir).
+func rigFromWorkDir(townRoot, workDir string) string {
+	rel, err := filepath.Rel(townRoot, workDir)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 || parts[0] == "." || parts[0] == ".." || parts[0] == ".beads" {
+		return ""
+	}
+	return parts[0]
+}
+
+// validateFormulaRequiredVars is the hard gate for gs-4th0: it resolves the
+// named formula and enforces its declared required-var / pattern contract
+// against the supplied --var values BEFORE any dispatch side effects (polecat
+// spawn, wisp instantiation). A formula that declares a required var (e.g.
+// mol-lia-pr-work requiring a jira_ticket matching ^[A-Z]+-[0-9]+$) cannot be
+// slung without it, closing the prose-only enforcement gap that let a
+// non-compliant polecat reach a customer-repo PR step.
+//
+// It fails closed only when it can positively parse the formula and prove a
+// violation. If the formula content can't be resolved or parsed here (some
+// formulas live only in bd's store), it returns nil and lets the existing
+// cook/wisp path proceed unchanged — the gate only ever adds rejections.
+func validateFormulaRequiredVars(formulaName, townRoot, rigName string, vars []string) error {
+	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
+	if err != nil {
+		// Mirror verifyFormulaExists: retry with the mol- prefix.
+		content, err = formula.ResolveFormulaContent("mol-"+formulaName, townRoot, rigName)
+		if err != nil {
+			return nil
+		}
+	}
+	f, err := formula.Parse(content)
+	if err != nil {
+		return nil
+	}
+	provided := make(map[string]string, len(vars))
+	for _, kv := range vars {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			provided[kv[:eq]] = kv[eq+1:]
+		}
+	}
+	return f.ValidateProvidedVars(provided)
+}
+
 // runSlingFormula handles standalone formula slinging.
 // Flow: cook → wisp → attach to hook → nudge
 func runSlingFormula(ctx context.Context, args []string) error {
@@ -164,6 +231,22 @@ func runSlingFormula(ctx context.Context, args []string) error {
 	if len(args) > 1 {
 		target = args[1]
 	}
+
+	// Hard gate (gs-4th0): enforce the formula's declared required-var / pattern
+	// contract BEFORE any side effects (polecat spawn via resolveTarget, wisp
+	// instantiation). Runs for dry-run and real slings alike, so a formula that
+	// requires a var (e.g. jira_ticket) cannot be dispatched without it.
+	//
+	// For standalone formula sling the wisp IS the work, so `issue` is
+	// auto-injected downstream as issue=<wispRootID> (see storedVars below).
+	// Mirror that here so a formula that marks `issue` required (e.g.
+	// mol-polecat-work) is not falsely rejected. A user-supplied --var issue
+	// still wins (later entries override the sentinel during parsing).
+	gateVars := append([]string{"issue=pending"}, slingVars...)
+	if err := validateFormulaRequiredVars(formulaName, townRoot, rigFromTarget(target), gateVars); err != nil {
+		return err
+	}
+
 	var admission *polecatAdmissionHandle
 	if !slingDryRun && target != "" {
 		admissionRig := ""
