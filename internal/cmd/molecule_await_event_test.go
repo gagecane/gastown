@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 func TestCalculateEventTimeout(t *testing.T) {
@@ -753,5 +756,58 @@ func TestEventMatchesRig(t *testing.T) {
 					tt.content, tt.expectedRig, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRunMoleculeAwaitEvent_KeepaliveBumpsHeartbeat is the gu-sis9u regression:
+// while blocked in await-event, the idle keepalive must refresh the session
+// heartbeat so an idle patrol agent (refinery) does not drift into
+// MAYBE_DEAD/grace. await-event had been left out of the gu-urr85 fix that
+// added this ticker to await-signal. WithKeepalive bumps immediately (before
+// the first tick), so a pre-existing event that returns fast still proves the
+// heartbeat was written.
+func TestRunMoleculeAwaitEvent_KeepaliveBumpsHeartbeat(t *testing.T) {
+	townRoot := setupTestTownForDeacon(t)
+	t.Setenv("TMUX", "")
+	t.Setenv("GT_SESSION", "")
+	t.Setenv("GT_ROLE", "gastown/witness")
+	t.Setenv("GT_RIG", "gastown")
+
+	// A pending event makes await-event return immediately.
+	eventDir := filepath.Join(townRoot, "events", "refinery")
+	if err := os.MkdirAll(eventDir, 0755); err != nil {
+		t.Fatalf("mkdir event dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(eventDir, "001.event"),
+		[]byte(`{"type":"MERGE_READY"}`), 0644); err != nil {
+		t.Fatalf("write event: %v", err)
+	}
+
+	// Configure command vars; restore after.
+	prevChannel, prevTimeout, prevQuiet := awaitEventChannel, awaitEventTimeout, awaitEventQuiet
+	prevBase, prevMult, prevMax := awaitEventBackoffBase, awaitEventBackoffMult, awaitEventBackoffMax
+	prevBead, prevCleanup, prevFilter := awaitEventAgentBead, awaitEventCleanup, awaitEventFilterRig
+	prevCheck, prevJSON := awaitEventContextCheckInterval, moleculeJSON
+	t.Cleanup(func() {
+		awaitEventChannel, awaitEventTimeout, awaitEventQuiet = prevChannel, prevTimeout, prevQuiet
+		awaitEventBackoffBase, awaitEventBackoffMult, awaitEventBackoffMax = prevBase, prevMult, prevMax
+		awaitEventAgentBead, awaitEventCleanup, awaitEventFilterRig = prevBead, prevCleanup, prevFilter
+		awaitEventContextCheckInterval, moleculeJSON = prevCheck, prevJSON
+	})
+	awaitEventChannel = "refinery"
+	awaitEventTimeout = "1s"
+	awaitEventQuiet = true
+	awaitEventBackoffBase, awaitEventBackoffMult, awaitEventBackoffMax = "", 2, ""
+	awaitEventAgentBead, awaitEventCleanup, awaitEventFilterRig = "", false, ""
+	awaitEventContextCheckInterval, moleculeJSON = "", false
+
+	if err := runMoleculeAwaitEvent(&cobra.Command{}, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitEvent: %v", err)
+	}
+
+	want := session.WitnessSessionName(session.PrefixFor("gastown"))
+	path := filepath.Join(townRoot, ".runtime", "heartbeats", want+".json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("await-event keepalive should have written runtime heartbeat %s: %v", path, err)
 	}
 }

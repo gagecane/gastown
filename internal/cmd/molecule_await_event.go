@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/channelevents"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -247,6 +248,23 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	}
 
 	startTime := time.Now()
+
+	// Idle-heartbeat keepalive (gu-vqmmp / gu-urr85). await-event is the
+	// primary wake mechanism for the refinery patrol; an idle agent spends
+	// most of its time blocked here, up to the backoff cap (10–15m). While
+	// blocked it runs no `gt` commands, so persistentPreRun never refreshes
+	// the session heartbeat file — and the heartbeat ages monotonically into
+	// MAYBE_DEAD/grace, recovering only when an external deacon ping restarts
+	// the loop (gu-sis9u). A background keepalive ticker bumps the session
+	// heartbeat on its cadence so idle != stale. This mirrors the await-signal
+	// fix exactly; await-event had been left out. Best-effort: a no-op only
+	// when no session can be derived at all (cancel is then a no-op too).
+	// gu-urr85: derive the session when GT_SESSION is unset (daemon-spawned
+	// agents can lose it from their shell env) instead of silently skipping.
+	if sessionName, _ := resolveHeartbeatSession(); sessionName != "" {
+		stopKeepalive := polecat.WithKeepalive(townRoot, sessionName, "await-event", polecat.DefaultKeepaliveInterval)
+		defer stopKeepalive()
+	}
 
 	// Wait for events
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
