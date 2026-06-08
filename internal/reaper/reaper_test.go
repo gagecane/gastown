@@ -478,3 +478,36 @@ func TestCloseStaleHookedMolsQueryShape(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoCloseExcludesAgentBeads pins the gu-016x1 guard: agent infra beads
+// carry the gt:agent label with issue_type=task and OPEN status, so the wisp
+// issue_type!='agent' exclusion does not protect them. AutoClose operates on the
+// issues table and must exclude gt:agent by label — otherwise an idle agent bead
+// gets close_reason='stale:auto-closed by reaper', and 'gt agents resolve' (which
+// lists only open beads) can no longer find it.
+func TestAutoCloseExcludesAgentBeads(t *testing.T) {
+	data, err := os.ReadFile("reaper.go")
+	if err != nil {
+		t.Fatalf("read reaper.go: %v", err)
+	}
+	source := string(data)
+
+	funcStart := strings.Index(source, "func AutoClose(")
+	if funcStart == -1 {
+		t.Fatal("AutoClose not found in reaper.go")
+	}
+	funcBody := source[funcStart:]
+	if nextFunc := strings.Index(funcBody[1:], "\nfunc "); nextFunc != -1 {
+		funcBody = funcBody[:nextFunc+1]
+	}
+
+	// The label exclusion list must include gt:agent alongside the other
+	// permanent-reference labels.
+	for _, want := range []string{
+		"'gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent'",
+	} {
+		if !strings.Contains(funcBody, want) {
+			t.Errorf("AutoClose label exclusion missing %q; agent beads would be auto-closed", want)
+		}
+	}
+}
