@@ -2,6 +2,7 @@ package ciwatcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -125,6 +126,14 @@ type PollResult struct {
 	// superseded the break (the regression was resolved and main advanced).
 	// Applies on both cold and warm polls; see gs-218.
 	SupersededSuppressed int
+
+	// Skipped is true when the rig has no pollable Actions runs — the repo
+	// does not exist (e.g. origin points at a fork that was never created) or
+	// Actions is disabled. The watcher treats this as a benign no-op rather
+	// than a hard error so the plugin doesn't surface a 404 every cooldown
+	// cycle (gu-qfhvw). SkipReason carries the detail for the summary line.
+	Skipped    bool
+	SkipReason string
 }
 
 // Process inspects the most recent completed runs on the target branch and
@@ -135,6 +144,16 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 
 	runs, err := w.fetcher.CompletedRuns(ctx, w.cfg.TargetBranch, w.cfg.RunLimit)
 	if err != nil {
+		// A missing repo or disabled Actions (HTTP 404) is a benign,
+		// persistent condition, not a transient fetch failure. Report it as a
+		// clean skip so the poll plugin records a success receipt instead of
+		// failing every cooldown cycle (gu-qfhvw).
+		if errors.Is(err, ErrRunsUnavailable) {
+			res.Skipped = true
+			res.SkipReason = err.Error()
+			w.logf("ciwatcher: rig=%s skipped — %v", w.cfg.Rig, err)
+			return res, nil
+		}
 		return res, fmt.Errorf("ciwatcher: fetch runs: %w", err)
 	}
 	res.RunsConsidered = len(runs)

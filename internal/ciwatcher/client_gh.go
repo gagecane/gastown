@@ -4,12 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// ErrRunsUnavailable signals that the host has no pollable Actions runs for
+// the rig: the repo does not exist (e.g. a fork that was never created) or
+// Actions is disabled. GitHub returns HTTP 404 on the runs endpoint in both
+// cases. This is a benign, persistent condition — not a transient fetch
+// failure — so the watcher treats it as "nothing to poll" and skips the rig
+// rather than surfacing a hard error every cooldown cycle (gu-qfhvw).
+var ErrRunsUnavailable = errors.New("ciwatcher: runs endpoint unavailable (repo missing or Actions disabled)")
 
 // GHRunFetcher implements RunFetcher using the `gh` CLI. The CLI is the path
 // of least resistance: it handles auth (host config / GITHUB_TOKEN), pagination
@@ -88,6 +97,14 @@ func (g *GHRunFetcher) CompletedRuns(ctx context.Context, branch string, limit i
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// A 404 on the Actions runs endpoint means the repo does not exist
+		// (e.g. origin points at a fork that was never created) or Actions is
+		// disabled. This is a benign, persistent condition — wrap it in the
+		// ErrRunsUnavailable sentinel so the watcher can skip the rig instead
+		// of treating every cooldown cycle as a hard failure (gu-qfhvw).
+		if isRunsNotFoundErr(stderr.String()) {
+			return nil, fmt.Errorf("%w (repo=%s, stderr: %s)", ErrRunsUnavailable, g.originRepo(ctx), strings.TrimSpace(stderr.String()))
+		}
 		return nil, fmt.Errorf("gh run list: %w (stderr: %s)", err, stderr.String())
 	}
 
@@ -173,6 +190,15 @@ func parseGitHubRepo(remoteURL string) string {
 		return ""
 	}
 	return parts[0] + "/" + parts[1]
+}
+
+// isRunsNotFoundErr reports whether a `gh run list` stderr indicates the runs
+// endpoint returned HTTP 404 — the repo does not exist or Actions is disabled.
+// gh's stderr for this case looks like:
+//
+//	failed to get runs: HTTP 404: Not Found (https://api.github.com/repos/owner/repo/actions/runs?...)
+func isRunsNotFoundErr(stderr string) bool {
+	return strings.Contains(stderr, "HTTP 404")
 }
 
 // mapGHConclusion translates GitHub Actions' conclusion strings to our enum.

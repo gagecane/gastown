@@ -208,10 +208,17 @@ func runCIWatcherPoll(cmd *cobra.Command, args []string) error {
 			FreezeCleared        bool   `json:"freeze_cleared"`
 			ColdStartSuppressed  int    `json:"cold_start_suppressed"`
 			SupersededSuppressed int    `json:"superseded_suppressed"`
-		}{rigName, branch, res.RunsConsidered, res.RunsProcessed, res.FailuresHandled, res.FreezeWritten, res.FreezeCleared, res.ColdStartSuppressed, res.SupersededSuppressed}
+			Skipped              bool   `json:"skipped"`
+			SkipReason           string `json:"skip_reason,omitempty"`
+		}{rigName, branch, res.RunsConsidered, res.RunsProcessed, res.FailuresHandled, res.FreezeWritten, res.FreezeCleared, res.ColdStartSuppressed, res.SupersededSuppressed, res.Skipped, res.SkipReason}
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
 		return enc.Encode(out)
+	}
+
+	if res.Skipped {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "ciwatcher: rig=%s branch=%s skipped (%s)\n", rigName, branch, res.SkipReason)
+		return nil
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(),

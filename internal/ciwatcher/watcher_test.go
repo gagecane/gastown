@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +326,31 @@ func TestWatcherFetchError(t *testing.T) {
 	w, _ := newWatcher(t, town, nil, errors.New("boom"), fb, fm)
 	if _, err := w.Process(context.Background()); err == nil {
 		t.Fatal("expected error on fetch failure")
+	}
+}
+
+// TestWatcherSkipsUnavailableRuns is the gu-qfhvw regression: a rig whose
+// repo does not exist or has Actions disabled (HTTP 404 on the runs endpoint)
+// must be reported as a clean skip — Process returns no error so the poll
+// plugin records a success receipt instead of failing every cooldown cycle.
+func TestWatcherSkipsUnavailableRuns(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads()
+	fm := &fakeMailer{}
+	fetchErr := fmt.Errorf("%w (repo=owner/missing, stderr: HTTP 404)", ErrRunsUnavailable)
+	w, buf := newWatcher(t, town, nil, fetchErr, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("404 should be a clean skip, got error: %v", err)
+	}
+	if !res.Skipped {
+		t.Errorf("expected res.Skipped=true, got %+v", res)
+	}
+	if res.FreezeWritten || len(fb.reopens) != 0 {
+		t.Errorf("a skip must not freeze or reopen: %+v reopens=%v", res, fb.reopens)
+	}
+	if !strings.Contains(buf.String(), "skipped") {
+		t.Errorf("expected a skip log line, got: %q", buf.String())
 	}
 }
 

@@ -40,6 +40,21 @@ func TestParseGitHubRepo(t *testing.T) {
 	}
 }
 
+func TestIsRunsNotFoundErr(t *testing.T) {
+	cases := map[string]bool{
+		"failed to get runs: HTTP 404: Not Found (https://api.github.com/repos/owner/repo/actions/runs?...)": true,
+		"HTTP 404": true,
+		"failed to get runs: HTTP 403: Forbidden": false,
+		"some other error":                        false,
+		"":                                        false,
+	}
+	for in, want := range cases {
+		if got := isRunsNotFoundErr(in); got != want {
+			t.Errorf("isRunsNotFoundErr(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestConclusionIsFailureLike(t *testing.T) {
 	failureLike := []Conclusion{ConclusionFailure, ConclusionTimedOut, ConclusionStartupFailure}
 	for _, c := range failureLike {

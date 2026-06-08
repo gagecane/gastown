@@ -93,6 +93,17 @@ for line in "${RIG_LINES[@]}"; do
     continue
   fi
 
+  # A rig with no pollable Actions (repo missing or Actions disabled) returns
+  # rc=0 with skipped=true. Report it as a skip, not a successful poll, so a
+  # missing fork doesn't masquerade as a healthy CI watch (gu-qfhvw).
+  skipped=$(jq -r '.skipped // false' <<<"$poll_out" 2>/dev/null || echo "false")
+  if [[ "$skipped" == "true" ]]; then
+    total_skipped=$((total_skipped + 1))
+    skipreason=$(jq -r '.skip_reason // "no pollable Actions runs"' <<<"$poll_out" 2>/dev/null || echo "no pollable Actions runs")
+    RIG_REPORTS+=("$rig: skipped ($skipreason)")
+    continue
+  fi
+
   total_polled=$((total_polled + 1))
 
   # Best-effort field extraction from the JSON summary. If parse fails, fall
