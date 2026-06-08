@@ -425,6 +425,17 @@ func tryReuseIdlePolecat(
 		return nil, false
 	}
 
+	// gs-lgof: quiesce stale mail from this idle polecat's PRIOR assignment.
+	// Any mail unread at reuse time predates this fresh dispatch; left unread it
+	// would be injected by the next prime and could trick the agent into no-code-
+	// closing the freshly-hooked bead. Mark read (not delete) — best-effort.
+	reuseAddress := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+	if n, err := quiesceReusedPolecatMail(reuseAddress); err != nil {
+		fmt.Printf("  Warning: could not quiesce stale mail for reused %s: %v\n", polecatName, err)
+	} else if n > 0 {
+		fmt.Printf("  Quiesced %d stale message(s) from %s inbox (gs-lgof)\n", n, reuseAddress)
+	}
+
 	polecatSessMgr := polecat.NewSessionManager(t, r)
 	sessionName := polecatSessMgr.SessionName(polecatName)
 
