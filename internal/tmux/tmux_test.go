@@ -2004,7 +2004,11 @@ func TestNudgeSession_WithStoredPaneID(t *testing.T) {
 // The wake's resize dance ends by setting the targeted window's window-size
 // option to "latest". By pre-setting both windows to "manual" and checking which
 // one flips to "latest" after the nudge, we can assert the agent's window — not
+<<<<<<< HEAD
 // the active window — was the one woken. (gu-n146i / upstream PR #4164)
+=======
+// the active window — was the one woken.
+>>>>>>> upstream/main
 func TestNudgeSession_WakesAgentWindowNotActiveWindow(t *testing.T) {
 	tm := newTestTmux(t)
 	sessionName := "gt-test-nudge-multiwin-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
