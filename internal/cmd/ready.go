@@ -264,11 +264,19 @@ func runReady(cmd *cobra.Command, args []string) error {
 
 func printReadyHuman(result ReadyResult) error {
 	if result.Summary.Total == 0 {
-		fmt.Println("No ready work across town.")
+		if readyRig != "" {
+			fmt.Printf("No ready work for rig %q.\n", readyRig)
+		} else {
+			fmt.Println("No ready work across town.")
+		}
 		return nil
 	}
 
-	fmt.Printf("%s Ready work across town:\n\n", style.Bold.Render("📋"))
+	if readyRig != "" {
+		fmt.Printf("%s Ready work for rig %s:\n\n", style.Bold.Render("📋"), readyRig)
+	} else {
+		fmt.Printf("%s Ready work across town:\n\n", style.Bold.Render("📋"))
+	}
 
 	for _, src := range result.Sources {
 		if src.Error != "" {

@@ -450,3 +450,62 @@ func TestFilterReadyIssuesByRoute(t *testing.T) {
 		t.Fatalf("rig filtered IDs = %v, want %v", got, want)
 	}
 }
+
+// TestPrintReadyHumanRigScopedMessages verifies that --rig scoping produces
+// rig-aware messages rather than the misleading "across town" phrasing (gu-y9br7).
+func TestPrintReadyHumanRigScopedMessages(t *testing.T) {
+	origRig := readyRig
+	defer func() { readyRig = origRig }()
+
+	// Empty result, scoped to a rig: must not claim "across town".
+	t.Run("empty rig scoped", func(t *testing.T) {
+		readyRig = "casc_webapp"
+		out := captureStdout(t, func() {
+			if err := printReadyHuman(ReadyResult{}); err != nil {
+				t.Fatalf("printReadyHuman: %v", err)
+			}
+		})
+		if strings.Contains(out, "across town") {
+			t.Errorf("rig-scoped empty result must not say 'across town', got: %q", out)
+		}
+		if !strings.Contains(out, "casc_webapp") {
+			t.Errorf("rig-scoped empty result should name the rig, got: %q", out)
+		}
+	})
+
+	// Empty result, no rig: keeps the town-wide message.
+	t.Run("empty town wide", func(t *testing.T) {
+		readyRig = ""
+		out := captureStdout(t, func() {
+			if err := printReadyHuman(ReadyResult{}); err != nil {
+				t.Fatalf("printReadyHuman: %v", err)
+			}
+		})
+		if !strings.Contains(out, "No ready work across town.") {
+			t.Errorf("town-wide empty result should keep across-town message, got: %q", out)
+		}
+	})
+
+	// Non-empty result, scoped to a rig: header names the rig, not "across town".
+	t.Run("non-empty rig scoped header", func(t *testing.T) {
+		readyRig = "casc_webapp"
+		result := ReadyResult{
+			Sources: []ReadySource{{
+				Name:   "casc_webapp",
+				Issues: []*beads.Issue{{ID: "casw-1", Title: "work", Priority: 3}},
+			}},
+			Summary: ReadySummary{Total: 1, P3Count: 1},
+		}
+		out := captureStdout(t, func() {
+			if err := printReadyHuman(result); err != nil {
+				t.Fatalf("printReadyHuman: %v", err)
+			}
+		})
+		if strings.Contains(out, "across town") {
+			t.Errorf("rig-scoped header must not say 'across town', got: %q", out)
+		}
+		if !strings.Contains(out, "casc_webapp") {
+			t.Errorf("rig-scoped header should name the rig, got: %q", out)
+		}
+	})
+}
