@@ -960,6 +960,20 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 	return nil
 }
 
+// EnsureFullFetchRefspec widens remote.origin.fetch to the standard
+// +refs/heads/*:refs/remotes/origin/* and fetches origin/* so that origin/main
+// (and other branches) resolve in a checkout originally created with a
+// single-branch clone.
+//
+// Single-branch clones (CloneBranch) set a narrow refspec like
+// +refs/heads/<defaultBranch>:refs/remotes/origin/<defaultBranch>. When the
+// rig's default branch is not main, origin/main never resolves, breaking any
+// tooling that assumes it (base detection, diffs). Calling this after
+// provisioning such a checkout makes the standard origin/* refs available.
+func (g *Git) EnsureFullFetchRefspec() error {
+	return configureRefspec(g.workDir, false)
+}
+
 // CloneBareWithReference clones a bare repository using a local repo as an object reference.
 // Uses --single-branch --depth 1 for efficiency on repos with many branches.
 func (g *Git) CloneBareWithReference(url, dest, reference string) error {
