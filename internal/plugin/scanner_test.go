@@ -847,6 +847,105 @@ func TestFormatMailBody_WithRunScript(t *testing.T) {
 	}
 }
 
+func TestFormatMailBody_RunScriptWithEnv(t *testing.T) {
+	p := &Plugin{
+		Name:         "orphan-reaper",
+		Description:  "Reaps orphans",
+		Path:         "/home/user/gt/plugins/orphan-reaper",
+		HasRunScript: true,
+		Execution: &Execution{
+			Env: map[string]string{
+				"REAPER_DRY_RUN": "1",
+				"LOG_LEVEL":      "debug",
+			},
+		},
+	}
+
+	body := p.FormatMailBody()
+
+	// Env must be rendered as a sorted prefix before `bash run.sh`. Keys sort
+	// alphabetically: LOG_LEVEL before REAPER_DRY_RUN.
+	want := "cd /home/user/gt/plugins/orphan-reaper && LOG_LEVEL='debug' REAPER_DRY_RUN='1' bash run.sh"
+	if !strings.Contains(body, want) {
+		t.Errorf("expected mail body to contain %q, got:\n%s", want, body)
+	}
+}
+
+func TestFormatMailBody_RunScriptNoEnv(t *testing.T) {
+	p := &Plugin{
+		Name:         "test-plugin",
+		Description:  "A test plugin",
+		Path:         "/home/user/gt/plugins/test-plugin",
+		HasRunScript: true,
+		Execution:    &Execution{}, // present but no env
+	}
+
+	body := p.FormatMailBody()
+
+	// With no env configured, the command must be unchanged (no stray prefix).
+	if !strings.Contains(body, "cd /home/user/gt/plugins/test-plugin && bash run.sh") {
+		t.Errorf("expected unprefixed run.sh command, got:\n%s", body)
+	}
+}
+
+func TestFormatMailBody_RunScriptEnvQuoting(t *testing.T) {
+	p := &Plugin{
+		Name:         "quoting",
+		Description:  "Quoting edge cases",
+		Path:         "/tmp/p",
+		HasRunScript: true,
+		Execution: &Execution{
+			Env: map[string]string{
+				"SPACED": "a b c",
+				"QUOTED": "it's",
+			},
+		},
+	}
+
+	body := p.FormatMailBody()
+
+	// Values with spaces stay single-quoted; embedded single quotes use the
+	// '\'' close-reopen idiom.
+	if !strings.Contains(body, `SPACED='a b c'`) {
+		t.Errorf("expected spaced value to be single-quoted, got:\n%s", body)
+	}
+	if !strings.Contains(body, `QUOTED='it'\''s'`) {
+		t.Errorf("expected single-quote escaping, got:\n%s", body)
+	}
+}
+
+func TestParsePluginMD_ExecutionEnv(t *testing.T) {
+	content := []byte(`+++
+name = "orphan-reaper"
+description = "Reaps orphans"
+version = 1
+
+[execution]
+type = "script"
+
+[execution.env]
+REAPER_DRY_RUN = "1"
+LOG_LEVEL = "debug"
++++
+
+# Orphan Reaper
+`)
+
+	p, err := parsePluginMD(content, "/test/orphan-reaper", LocationRig, "gastown")
+	if err != nil {
+		t.Fatalf("parsePluginMD failed: %v", err)
+	}
+	if p.Execution == nil {
+		t.Fatal("expected execution to be non-nil")
+	}
+	if got := p.Execution.Env["REAPER_DRY_RUN"]; got != "1" {
+		t.Errorf("expected REAPER_DRY_RUN='1', got %q", got)
+	}
+	if got := p.Execution.Env["LOG_LEVEL"]; got != "debug" {
+		t.Errorf("expected LOG_LEVEL='debug', got %q", got)
+	}
+}
+
 func TestParsePluginMD_ExecWrapper(t *testing.T) {
 	content := []byte(`+++
 name = "exitbox-sandbox"

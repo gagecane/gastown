@@ -10,6 +10,7 @@ package plugin
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -152,6 +153,14 @@ type Execution struct {
 
 	// Timeout is the maximum execution time (e.g., "5m").
 	Timeout string `json:"timeout,omitempty" toml:"timeout,omitempty"`
+
+	// Env holds per-plugin environment variable defaults injected as a
+	// `KEY=val` prefix before `bash run.sh` (run-script plugins only). This
+	// lets a plugin.md declare safety defaults like REAPER_DRY_RUN=1 in its
+	// [execution] table. Keys are emitted in sorted order for deterministic
+	// output. Ignored for agent-type plugins, which interpret markdown rather
+	// than executing a shell command.
+	Env map[string]string `json:"env,omitempty" toml:"env,omitempty"`
 
 	// NotifyOnFailure escalates on failure.
 	NotifyOnFailure bool `json:"notify_on_failure" toml:"notify_on_failure"`
@@ -296,6 +305,31 @@ func (p *Plugin) Summary() PluginSummary {
 	}
 }
 
+// envPrefix renders the plugin's [execution] env table as a shell command
+// prefix (e.g. `FOO='bar' BAZ='qux' `) suitable for prepending to `bash
+// run.sh`. Keys are emitted in sorted order so the output is deterministic,
+// and values are single-quoted to stay safe against spaces and shell
+// metacharacters. Returns "" when no env is configured.
+func (p *Plugin) envPrefix() string {
+	if p.Execution == nil || len(p.Execution.Env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(p.Execution.Env))
+	for k := range p.Execution.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var sb strings.Builder
+	for _, k := range keys {
+		// Single-quote the value, escaping any embedded single quotes via the
+		// standard '\'' close-reopen idiom.
+		quoted := strings.ReplaceAll(p.Execution.Env[k], "'", `'\''`)
+		sb.WriteString(fmt.Sprintf("%s='%s' ", k, quoted))
+	}
+	return sb.String()
+}
+
 // FormatMailBody formats the plugin as instructions for a dog worker.
 // This is the canonical formatting used by both the daemon dispatcher
 // and the gt dog dispatch command.
@@ -305,13 +339,13 @@ func (p *Plugin) FormatMailBody() string {
 			"Execute the following plugin script:\n\n"+
 				"**Plugin**: %s\n"+
 				"**Description**: %s\n\n"+
-				"```bash\ncd %s && bash run.sh\n```\n\n"+
+				"```bash\ncd %s && %sbash run.sh\n```\n\n"+
 				"Run this command EXACTLY. Do NOT interpret the plugin.md instructions.\n"+
 				"Do NOT write your own implementation. Just run the script and report the output.\n\n"+
 				"After completion:\n"+
 				"1. The script should record a plugin-run receipt. If it did not, create one with `bd create --ephemeral` using labels `type:plugin-run`, `plugin:%s`, and `result:<outcome>`.\n"+
 				"2. Run `gt dog done` — this clears your work and auto-terminates the session. Run this even if recording fails.\n",
-			p.Name, p.Description, p.Path, p.Name)
+			p.Name, p.Description, p.Path, p.envPrefix(), p.Name)
 	}
 
 	var sb strings.Builder

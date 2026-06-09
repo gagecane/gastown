@@ -192,6 +192,13 @@ digest = true|false            # Include in daily digest
 timeout = "5m"            # Max execution time
 notify_on_failure = true  # Escalate on failure
 severity = "low"          # Escalation severity if failed
+
+# Per-plugin environment defaults for run.sh plugins. Rendered as a
+# `KEY='val'` prefix before `bash run.sh` (keys sorted, values single-quoted).
+# Use for declarative safety defaults, e.g. dry-run-by-default. Ignored by
+# agent-type plugins, which interpret the markdown body rather than a script.
+[execution.env]
+REAPER_DRY_RUN = "1"
 ```
 
 ### Gate Types
