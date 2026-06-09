@@ -3886,19 +3886,31 @@ func EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, doltDatabase 
 		}
 	}
 
-	// Ensure server connection fields match the authoritative config.
-	// bd reads dolt_server_host and dolt_server_port from metadata.json to
-	// connect to the Dolt server. Stale values (e.g., port 13729 from a
-	// previous bd init) cause "connection refused" errors.
-	wantHost := config.EffectiveHost()
-	wantPort := float64(config.Port) // JSON numbers are float64
-	if existing["dolt_server_host"] != wantHost {
-		existing["dolt_server_host"] = wantHost
+	// bd v1.0.5+ deprecated dolt_server_host / dolt_server_port in metadata.json
+	// in favor of the gitignored port file at .beads/dolt-server.port (GH#2372 —
+	// git-tracked metadata.json values cause cross-project data leakage on
+	// shared servers and produce a deprecation warning on every bd invocation).
+	//
+	// Migration: if the legacy fields are present, drop them so the warning
+	// stops firing. Existing read paths in internal/beads (database.go,
+	// beads.go) and internal/cmd/dolt.go still tolerate the old fields for one
+	// release cycle, so towns mid-migration keep working. (gu-pkamt)
+	if _, ok := existing["dolt_server_host"]; ok {
+		delete(existing, "dolt_server_host")
 		changed = true
 	}
-	if existing["dolt_server_port"] != wantPort {
-		existing["dolt_server_port"] = wantPort
+	if _, ok := existing["dolt_server_port"]; ok {
+		delete(existing, "dolt_server_port")
 		changed = true
+	}
+
+	// Write the authoritative port to the bd-preferred port file. This is what
+	// bd v1.0.5+ reads first, and writing it here keeps gt's central server
+	// reachable without polluting metadata.json.
+	wantPort := config.Port
+	portFilePath := filepath.Join(beadsDir, "dolt-server.port")
+	if err := writePortFileIfChanged(portFilePath, wantPort); err != nil {
+		return fmt.Errorf("writing dolt-server.port: %w", err)
 	}
 
 	// Fast path: avoid rewriting metadata.json when already correct.
@@ -3916,6 +3928,20 @@ func EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, doltDatabase 
 	}
 
 	return nil
+}
+
+// writePortFileIfChanged writes the given port to path atomically, but only
+// when the existing contents do not already match. This keeps the file's
+// mtime stable across no-op EnsureMetadata calls and avoids writes when the
+// port is already correct.
+func writePortFileIfChanged(path string, port int) error {
+	want := strconv.Itoa(port) + "\n"
+	if existing, err := os.ReadFile(path); err == nil {
+		if strings.TrimSpace(string(existing)) == strings.TrimSpace(want) {
+			return nil
+		}
+	}
+	return atomicfile.WriteFile(path, []byte(want), 0600)
 }
 
 // buildRigPrefixMap reads rigs.json and returns a map from Dolt database name
