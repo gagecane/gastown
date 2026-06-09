@@ -39,6 +39,7 @@ var SystemDefaults = map[string]interface{}{
 	"dnd":                     false,
 	"polecat_branch_template": "", // Empty = use default behavior (polecat/{name}/...)
 	"default_formula":         "mol-polecat-work",
+	"main_target_formula":     "", // Empty = no override; use default_formula even for base=main (gs-njym)
 }
 
 // StackingKeys defines which keys use stacking semantics (values add up).

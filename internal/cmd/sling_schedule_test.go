@@ -276,6 +276,101 @@ func TestResolveFormulaForBead(t *testing.T) {
 	})
 }
 
+// TestResolveFormulaForBeadWithBase verifies the gs-njym main-target override:
+// a bead resolving to base=main on a rig whose default_formula is an
+// integration-branch dev-work workflow is dispatched with the rig's configured
+// main_target_formula instead, while explicit flags and labels keep precedence.
+func TestResolveFormulaForBeadWithBase(t *testing.T) {
+	t.Parallel()
+
+	const devFormula = "mol-lia-dev-work"
+	const prFormula = "mol-lia-pr-work"
+	const label = "gt:formula:mol-pw-adversarial-review"
+	const labelFormula = "mol-pw-adversarial-review"
+
+	// newRig builds a temp rig whose default formula is the dev-work workflow
+	// and (optionally) sets a main_target_formula override.
+	newRig := func(t *testing.T, mainTarget string) (townRoot, rigName string) {
+		t.Helper()
+		townRoot = t.TempDir()
+		rigName = "lia"
+		_ = os.MkdirAll(filepath.Join(townRoot, rigName), 0o755)
+		wispCfg := wisp.NewConfig(townRoot, rigName)
+		if err := wispCfg.Set("default_formula", devFormula); err != nil {
+			t.Fatalf("set default_formula: %v", err)
+		}
+		if mainTarget != "" {
+			if err := wispCfg.Set("main_target_formula", mainTarget); err != nil {
+				t.Fatalf("set main_target_formula: %v", err)
+			}
+		}
+		return townRoot, rigName
+	}
+
+	t.Run("base=main selects main_target_formula over dev-work default", func(t *testing.T) {
+		t.Parallel()
+		townRoot, rigName := newRig(t, prFormula)
+		got := resolveFormulaForBeadWithBase("", false, townRoot, rigName, nil, "main")
+		if got != prFormula {
+			t.Errorf("got %q, want %q", got, prFormula)
+		}
+	})
+
+	t.Run("base=main without main_target_formula keeps dev-work default", func(t *testing.T) {
+		t.Parallel()
+		townRoot, rigName := newRig(t, "")
+		got := resolveFormulaForBeadWithBase("", false, townRoot, rigName, nil, "main")
+		if got != devFormula {
+			t.Errorf("got %q, want %q", got, devFormula)
+		}
+	})
+
+	t.Run("non-main base keeps dev-work default even with override set", func(t *testing.T) {
+		t.Parallel()
+		townRoot, rigName := newRig(t, prFormula)
+		got := resolveFormulaForBeadWithBase("", false, townRoot, rigName, nil, "integration/v3")
+		if got != devFormula {
+			t.Errorf("got %q, want %q", got, devFormula)
+		}
+	})
+
+	t.Run("empty base keeps dev-work default", func(t *testing.T) {
+		t.Parallel()
+		townRoot, rigName := newRig(t, prFormula)
+		got := resolveFormulaForBeadWithBase("", false, townRoot, rigName, nil, "")
+		if got != devFormula {
+			t.Errorf("got %q, want %q", got, devFormula)
+		}
+	})
+
+	t.Run("explicit flag wins over main-target override", func(t *testing.T) {
+		t.Parallel()
+		townRoot, rigName := newRig(t, prFormula)
+		got := resolveFormulaForBeadWithBase("mol-custom", false, townRoot, rigName, nil, "main")
+		if got != "mol-custom" {
+			t.Errorf("got %q, want %q", got, "mol-custom")
+		}
+	})
+
+	t.Run("gt:formula label wins over main-target override", func(t *testing.T) {
+		t.Parallel()
+		townRoot, rigName := newRig(t, prFormula)
+		got := resolveFormulaForBeadWithBase("", false, townRoot, rigName, []string{label}, "main")
+		if got != labelFormula {
+			t.Errorf("got %q, want %q", got, labelFormula)
+		}
+	})
+
+	t.Run("hookRawBead ignores main-target override", func(t *testing.T) {
+		t.Parallel()
+		townRoot, rigName := newRig(t, prFormula)
+		got := resolveFormulaForBeadWithBase("", true, townRoot, rigName, nil, "main")
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+}
+
 // TestCheckSchedulePrefixParity verifies the enqueue-time cross-rig-prefix
 // guard mirrors the dispatcher's unconditional AcceptsPrefix check. This
 // is the parity fix for gu-5ooj: without this, `gt sling <bead> <rig>
