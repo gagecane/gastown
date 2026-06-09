@@ -173,3 +173,58 @@ jobs:
   # on them caused repeated merge-queue freezes from flaky bd-init timing
   # (gu-d9m7o, gu-xzc5p). Keep per-push CI to the fast jobs above; integration
   # coverage stays nightly, matching the original cadence established in #1888.
+
+  # Smoke test: the `gt install` happy path on every push/PR. The unit suite
+  # above runs with -short and does NOT install bd or Dolt, so flag/schema
+  # regressions in the bd init contract (e.g. v1.0.5 deprecating --force,
+  # gu-hat6y) silently land on main and only show up 24h later in nightly cron.
+  # This job runs one e2e test that drives `gt install` end-to-end through
+  # the real bd binary — tight enough to fit in push CI (<3 min), broad
+  # enough to catch the regression class that hid for 3 nights.
+  install-smoke:
+    name: Install Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Install ICU4C development headers
+        run: sudo apt-get install -y libicu-dev
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@gastown.test"
+
+      - name: Cache beads (bd)
+        id: cache-beads
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/go/bin/bd
+          key: beads-smoke-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install beads (bd)
+        if: steps.cache-beads.outputs.cache-hit != 'true'
+        run: go install github.com/steveyegge/beads/cmd/bd@v1.0.5
+
+      - name: Install Dolt
+        run: |
+          curl -sL https://github.com/dolthub/dolt/releases/download/v2.0.7/dolt-linux-amd64.tar.gz | tar xz
+          mv dolt-linux-amd64/bin/dolt ~/go/bin/dolt
+
+      - name: Add to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Dolt
+        run: |
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@gastown.test"
+
+      - name: Run install smoke test
+        run: go test -tags=e2e -timeout=5m -count=1 -v -run TestInstallCreatesCorrectStructure ./internal/cmd/...
