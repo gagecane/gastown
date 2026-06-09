@@ -147,6 +147,7 @@ type PatrolsConfig struct {
 	Curio                *CurioConfig                `json:"curio,omitempty"`
 	SchedulerStuck       *SchedulerStuckConfig       `json:"scheduler_stuck,omitempty"`
 	EventChannelGC       *EventChannelGCConfig       `json:"event_channel_gc,omitempty"`
+	BranchSync           *BranchSyncConfig           `json:"branch_sync,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -410,6 +411,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.CircuitBreakerGC.Enabled
+	}
+
+	if patrol == "branch_sync" {
+		// Opt-in: keeps a long-lived branch merged from a source branch on a
+		// real customer repo, so it must never run unless explicitly enabled
+		// AND given targets. A missing config means disabled.
+		if config == nil || config.Patrols == nil || config.Patrols.BranchSync == nil {
+			return false
+		}
+		return config.Patrols.BranchSync.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

@@ -974,6 +974,16 @@ func (d *Daemon) Run() (err error) {
 				d.runCircuitBreakerGC()
 			}
 
+		case <-patrols.branchSync:
+			// Branch sync — keeps each configured long-lived branch merged from
+			// its source branch (e.g. gagecane/gt <- main) on a throwaway
+			// worktree. Clean merges are pushed to the target branch; conflicts
+			// abort cleanly and file+sling a bead to the rig crew. Never touches
+			// or pushes the source branch, never force-pushes (gs-auhe).
+			if !d.isShutdownInProgress() {
+				d.syncBranches()
+			}
+
 		case <-timer.C:
 			d.heartbeat(state)
 

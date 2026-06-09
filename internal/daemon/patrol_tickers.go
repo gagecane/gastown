@@ -28,6 +28,7 @@ type patrolTickers struct {
 	schedulerStuck       <-chan time.Time
 	eventChannelGC       <-chan time.Time
 	circuitBreakerGC     <-chan time.Time
+	branchSync           <-chan time.Time
 }
 
 // setupPatrolTickers creates a ticker for each active patrol and returns their
@@ -98,6 +99,7 @@ func (d *Daemon) setupPatrolTickers() (patrolTickers, func()) {
 	pt.schedulerStuck = add("scheduler_stuck", schedulerStuckInterval(d.patrolConfig), "Scheduler-stuck dog")
 	pt.eventChannelGC = add("event_channel_gc", eventChannelGCInterval(d.patrolConfig), "Event channel GC")
 	pt.circuitBreakerGC = add("circuit_breaker_gc", circuitBreakerGCInterval(d.patrolConfig), "Circuit-breaker GC")
+	pt.branchSync = add("branch_sync", branchSyncInterval(d.patrolConfig), "Branch sync")
 
 	stop := func() {
 		for _, t := range tickers {
