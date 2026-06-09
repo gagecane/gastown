@@ -143,6 +143,60 @@ func TestWorktreeOnDefaultBranchCheck_DeaconDogOnMainline_Warning(t *testing.T) 
 	}
 }
 
+// TestWorktreeOnDefaultBranchCheck_SymlinkedTownRoot_OK reproduces gu-hyfbg:
+// when the town root is reached through a symlinked path (e.g. /home/<user>
+// -> /local/home/<user>), `git worktree list` reports the REAL path while the
+// allowlist is built from the symlinked ctx.TownRoot. A plain filepath.Clean
+// comparison fails and the refinery/rig worktree is falsely flagged. With
+// EvalSymlinks-based resolution the refinery is correctly excluded.
+func TestWorktreeOnDefaultBranchCheck_SymlinkedTownRoot_OK(t *testing.T) {
+	// realTownRoot is the on-disk path that git will report; symlinkedTownRoot
+	// is the path we hand the check (mirrors $HOME being symlinked).
+	realParent := t.TempDir()
+	realTownRoot := filepath.Join(realParent, "real-town")
+	if err := os.MkdirAll(realTownRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkedTownRoot := filepath.Join(realParent, "linked-town")
+	if err := os.Symlink(realTownRoot, symlinkedTownRoot); err != nil {
+		t.Skipf("symlinks not supported on this platform: %v", err)
+	}
+
+	// Build the rig + refinery worktree under the REAL path (as git sees it).
+	defaultBranch := "main"
+	rigName := "testrig"
+	rigDir := filepath.Join(realTownRoot, rigName)
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configBytes := []byte(`{"name":"testrig","default_branch":"` + defaultBranch + `"}`)
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), configBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	bareRepo := filepath.Join(rigDir, ".repo.git")
+	runGit(t, "", "init", "--bare", "-b", defaultBranch, bareRepo)
+	tmpInit := bareRepo + "-init"
+	runGit(t, "", "init", "-b", defaultBranch, tmpInit)
+	runGit(t, tmpInit, "commit", "--allow-empty", "-m", "initial")
+	runGit(t, tmpInit, "remote", "add", "bare", bareRepo)
+	runGit(t, tmpInit, "push", "bare", defaultBranch)
+	os.RemoveAll(tmpInit)
+	runGit(t, bareRepo, "symbolic-ref", "HEAD", "refs/heads/"+defaultBranch)
+	refineryRig := filepath.Join(rigDir, "refinery", "rig")
+	if err := os.MkdirAll(filepath.Dir(refineryRig), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, bareRepo, "worktree", "add", refineryRig, defaultBranch)
+
+	// Run the check with the SYMLINKED town root (as gt derives from $HOME).
+	check := NewWorktreeOnDefaultBranchCheck()
+	result := check.Run(&CheckContext{TownRoot: symlinkedTownRoot})
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK for refinery/rig under symlinked town root, got %v: %s\nDetails: %v",
+			result.Status, result.Message, result.Details)
+	}
+}
+
 func TestIsAllowedDefaultBranchWorktree(t *testing.T) {
 	rigPath := "/gt/myrig"
 	tests := []struct {
