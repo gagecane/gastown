@@ -4,7 +4,8 @@ description = "Reap orphaned (ppid==1) claude-code otelcol/MCP helper processes"
 version = 1
 
 [gate]
-type = "manual"
+type = "cooldown"
+duration = "30m"
 
 [tracking]
 labels = ["plugin:orphan-reaper", "category:cleanup"]
@@ -31,40 +32,31 @@ The dog runs `run.sh` verbatim — deterministic shell, no AI interpretation
 (a pure `/proc` scan plus signals). The same script backs both this Gas Town
 daemon-dog plugin (preferred) and the standalone-cron fallback (spec §10, §12).
 
-## Safety: manual gate (ships disabled)
+## Gate: cooldown (active)
 
-This manifest ships with `[gate] type = "manual"` on purpose. The daemon's
-`filterDispatchablePlugins` (`internal/daemon/handler.go`) **never** auto-dispatches
-manual-gate plugins, so the reaper lands discoverable and runnable on demand but
-**cannot auto-kill anything** until an operator promotes it. This is the
-code-enforced version of the dry-run safety gate: a `[execution.env]` table in
-`plugin.md` would be inert (the `Execution` struct has no env field and
-`FormatMailBody` dispatches a bare `cd … && bash run.sh` with no env prefix), so
-relying on it for safety would let the first auto-discovery dispatch run live.
-The manual gate removes that risk entirely.
+This manifest is **active** on a 30-minute cooldown gate (spec §7, §12.3): the
+daemon auto-dispatches the reaper at most once per 30-minute window.
 
-Trigger a controlled run on demand:
+It originally shipped with `[gate] type = "manual"` as a code-enforced safety
+gate — the daemon's `filterDispatchablePlugins` (`internal/daemon/handler.go`)
+**never** auto-dispatches manual-gate plugins, so the reaper landed discoverable
+and runnable on demand but could not auto-kill anything until an operator
+promoted it. (A `[execution.env]` dry-run default would have been inert: the
+`Execution` struct has no env field and `FormatMailBody` dispatches a bare
+`cd … && bash run.sh` with no env prefix — see follow-up gu-jqrwk.) The manual
+gate was promoted to cooldown in operator step E (bead gu-ilbht) after live
+validation confirmed dry-run parity, a clean synthesized-orphan reap, and a
+successful end-to-end daemon dispatch.
+
+Trigger a controlled out-of-cycle run on demand:
 
 ```bash
-gt dog dispatch --plugin orphan-reaper          # one manual run
+gt dog dispatch --plugin orphan-reaper            # one manual run
 gt dog dispatch --plugin orphan-reaper --dry-run  # show what would dispatch
 ```
 
-## Activation (operator step E — bead gu-ilbht)
-
-After the live validation step confirms dry-run parity and clean digests, the
-operator promotes the gate to a 30-minute cooldown (spec §7, §12.3):
-
-```toml
-[gate]
-type = "cooldown"
-duration = "30m"
-```
-
-Until then, the operator runs the reaper manually — first with `REAPER_DRY_RUN=1`
-to confirm the candidate set (spec §12.6 step 2), then live. The dry-run
-behavior lives in `run.sh` itself (`REAPER_DRY_RUN`, default per spec §5); the
-script handles the safety default, not this manifest.
+The dry-run behavior lives in `run.sh` itself (`REAPER_DRY_RUN`, default per
+spec §5); the script handles the safety default, not this manifest.
 
 ## Cadence (once promoted)
 
