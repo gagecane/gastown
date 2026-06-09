@@ -377,6 +377,74 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	return removed, nil
 }
 
+// DeferKindByThread pushes the DeliverAfter of queued nudges matching both the
+// kind and thread ID forward to the given time, re-arming their delivery timer.
+// Returns the number of nudges deferred. Only queued .json files are touched;
+// in-flight .claimed files are left for concurrent drainers.
+//
+// Used so that engaging with a thread (e.g. `gt mail read`) re-arms its
+// reply-reminder instead of letting it fire mid-investigation. The recipient
+// gets a fresh grace window to reply before being nudged. ExpiresAt is left
+// unchanged, so a thread that is read repeatedly but never replied to still
+// expires on its original TTL rather than nagging forever. See gu-uaxgi.
+func DeferKindByThread(townRoot, session, kind, threadID string, deliverAfter time.Time) (int, error) {
+	if kind == "" || threadID == "" {
+		return 0, nil
+	}
+
+	dir := queueDir(townRoot, session)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading nudge queue: %w", err)
+	}
+
+	deferred := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return deferred, fmt.Errorf("reading queued nudge %s: %w", entry.Name(), err)
+		}
+
+		var n QueuedNudge
+		if err := json.Unmarshal(data, &n); err != nil {
+			continue
+		}
+		if n.Kind != kind || n.ThreadID != threadID {
+			continue
+		}
+		// Only push forward; never pull a deadline earlier.
+		if !n.DeliverAfter.IsZero() && !deliverAfter.After(n.DeliverAfter) {
+			continue
+		}
+
+		n.DeliverAfter = deliverAfter
+		updated, err := json.MarshalIndent(n, "", "  ")
+		if err != nil {
+			return deferred, fmt.Errorf("marshaling deferred nudge %s: %w", entry.Name(), err)
+		}
+		if err := os.WriteFile(path, updated, 0644); err != nil {
+			if os.IsNotExist(err) {
+				continue // raced with Drain
+			}
+			return deferred, fmt.Errorf("writing deferred nudge %s: %w", entry.Name(), err)
+		}
+		deferred++
+	}
+
+	return deferred, nil
+}
+
 // HasKindByThread returns true if at least one queued nudge for the given
 // session matches both the kind and thread ID. Used to enforce per-thread
 // reminder budgets (e.g., reply-reminder fires once per thread, not once

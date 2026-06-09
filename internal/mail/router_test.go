@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1960,7 +1961,7 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 		t.Errorf("reminder should be deferred, but Drain returned %d nudges", len(nudges))
 	}
 
-	// File still in queue — confirm DeliverAfter is ~30s ahead.
+	// File still in queue — confirm DeliverAfter is ~one reply-reminder delay ahead.
 	dir := filepath.Join(townRoot, ".runtime", "nudge_queue", sessionID)
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
@@ -1979,10 +1980,11 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 	if q.DeliverAfter.IsZero() {
 		t.Error("DeliverAfter should be set")
 	}
-	minDelay := before.Add(29 * time.Second)
-	maxDelay := after.Add(31 * time.Second)
+	wantDelay := config.LoadOperationalConfig(townRoot).GetMailConfig().ReplyReminderDelayD()
+	minDelay := before.Add(wantDelay - time.Second)
+	maxDelay := after.Add(wantDelay + time.Second)
 	if q.DeliverAfter.Before(minDelay) || q.DeliverAfter.After(maxDelay) {
-		t.Errorf("DeliverAfter = %v, want ~30s from [%v, %v]", q.DeliverAfter, before, after)
+		t.Errorf("DeliverAfter = %v, want ~%v from [%v, %v]", q.DeliverAfter, wantDelay, before, after)
 	}
 	if !strings.Contains(q.Message, msg.From) {
 		t.Errorf("reminder message should mention sender %q, got %q", msg.From, q.Message)

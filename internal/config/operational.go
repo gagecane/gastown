@@ -144,11 +144,16 @@ const (
 
 // Mail defaults.
 const (
-	DefaultMailIdleNotifyTimeout  = 3 * time.Second
-	DefaultMailBdReadTimeout      = 60 * time.Second
-	DefaultMailBdWriteTimeout     = 60 * time.Second
-	DefaultMailMaxConcurrentAcks  = 8
-	DefaultMailReplyReminderDelay = 30 * time.Second
+	DefaultMailIdleNotifyTimeout = 3 * time.Second
+	DefaultMailBdReadTimeout     = 60 * time.Second
+	DefaultMailBdWriteTimeout    = 60 * time.Second
+	DefaultMailMaxConcurrentAcks = 8
+	// DefaultMailReplyReminderDelay is the grace period after mail arrives
+	// before the reply-reminder nudge fires. Set long enough that an agent
+	// can read and investigate a thread before being nudged; reading the
+	// message also re-arms this window (see Router.DeferReplyReminders). The
+	// previous 30s default fired mid-investigation. See gu-uaxgi.
+	DefaultMailReplyReminderDelay = 5 * time.Minute
 )
 
 // Web defaults.

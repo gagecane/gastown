@@ -2013,6 +2013,31 @@ func (r *Router) ClearReplyReminders(address, threadID string) error {
 	return firstErr
 }
 
+// DeferReplyReminders re-arms any queued reply-reminder nudges for the given
+// recipient identity and thread, pushing their delivery out by one full
+// reply-reminder delay from now. Called when the recipient engages with a
+// thread (e.g. reads the message) so that investigating before replying does
+// not trip the reminder mid-work. Best-effort: errors are returned but the
+// caller treats them as non-fatal. See gu-uaxgi.
+func (r *Router) DeferReplyReminders(address, threadID string) error {
+	if r.townRoot == "" || threadID == "" {
+		return nil
+	}
+	delay := config.LoadOperationalConfig(r.townRoot).GetMailConfig().ReplyReminderDelayD()
+	if delay <= 0 {
+		return nil // Reminders disabled — nothing to defer
+	}
+	deliverAfter := time.Now().Add(delay)
+
+	var firstErr error
+	for _, sessionID := range AddressToSessionIDs(address) {
+		if _, err := nudge.DeferKindByThread(r.townRoot, sessionID, "reply-reminder", threadID, deliverAfter); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // ClearReplyRemindersBySubject removes queued reply-reminder nudges that match
 // (originalFrom, originalSubject) under the sender's session. Used when an
 // agent sends an ad-hoc "Re: <subject>" reply without --reply-to: the new

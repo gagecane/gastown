@@ -60,6 +60,24 @@ func clearReplyRemindersForThreads(address string, threadIDs []string) {
 	}
 }
 
+// deferReplyReminderForThread is a best-effort re-arm of the queued
+// reply-reminder for a single thread the recipient just engaged with (e.g. via
+// `gt mail read`). Errors are logged as warnings — this is not load-bearing.
+// See gu-uaxgi.
+func deferReplyReminderForThread(address, threadID string) {
+	if address == "" || threadID == "" {
+		return
+	}
+	workDir, err := findMailWorkDir()
+	if err != nil {
+		return
+	}
+	router := mail.NewRouter(workDir)
+	if err := router.DeferReplyReminders(address, threadID); err != nil {
+		style.PrintWarning("could not defer reply reminder for thread %s: %v", threadID, err)
+	}
+}
+
 // getMailbox returns the mailbox for the given address.
 func getMailbox(address string) (*mail.Mailbox, error) {
 	// All mail uses town beads (two-level architecture)
@@ -237,6 +255,11 @@ func runMailRead(cmd *cobra.Command, args []string) error {
 		// Non-fatal: message was retrieved, just couldn't mark
 		style.PrintWarning("could not mark message as read: %v", err)
 	}
+
+	// Reading a message means the recipient is engaging with the thread, so
+	// re-arm any queued reply-reminder for it: investigating before replying
+	// should not trip the reminder mid-work. Best-effort. See gu-uaxgi.
+	deferReplyReminderForThread(address, msg.ThreadID)
 
 	// JSON output
 	if mailReadJSON {

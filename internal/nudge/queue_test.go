@@ -1,6 +1,7 @@
 package nudge
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -649,6 +650,93 @@ func TestRemoveKindByThread(t *testing.T) {
 	}
 	if nudges[1].Message != "other-thread" {
 		t.Fatalf("nudges[1].Message = %q, want %q", nudges[1].Message, "other-thread")
+	}
+}
+
+// TestDeferKindByThread covers re-arming a thread's reply-reminder when the
+// recipient engages with it (e.g. via `gt mail read`): matching nudges get
+// their DeliverAfter pushed forward, non-matching ones are untouched, the
+// deadline never moves earlier, and ExpiresAt is preserved. See gu-uaxgi.
+func TestDeferKindByThread(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-defer"
+
+	now := time.Now()
+	due := now.Add(-time.Minute) // already past — would deliver now
+	expiry := now.Add(time.Hour) // TTL must survive the defer
+
+	target := QueuedNudge{Sender: "system", Message: "target", Kind: "reply-reminder", ThreadID: "thread-1", DeliverAfter: due, ExpiresAt: expiry}
+	otherKind := QueuedNudge{Sender: "system", Message: "other-kind", Kind: "mail", ThreadID: "thread-1", DeliverAfter: due, ExpiresAt: expiry}
+	otherThread := QueuedNudge{Sender: "system", Message: "other-thread", Kind: "reply-reminder", ThreadID: "thread-2", DeliverAfter: due, ExpiresAt: expiry}
+
+	for _, n := range []QueuedNudge{target, otherKind, otherThread} {
+		if err := Enqueue(townRoot, session, n); err != nil {
+			t.Fatalf("Enqueue(%q): %v", n.Message, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	newDeliver := now.Add(5 * time.Minute)
+	deferred, err := DeferKindByThread(townRoot, session, "reply-reminder", "thread-1", newDeliver)
+	if err != nil {
+		t.Fatalf("DeferKindByThread: %v", err)
+	}
+	if deferred != 1 {
+		t.Fatalf("deferred = %d, want 1 (only thread-1 reply-reminder)", deferred)
+	}
+
+	// Empty-arg guards return 0 without error.
+	if n, err := DeferKindByThread(townRoot, session, "", "thread-1", newDeliver); err != nil || n != 0 {
+		t.Fatalf("DeferKindByThread(empty kind): got n=%d err=%v, want 0/nil", n, err)
+	}
+
+	// The target nudge is now in the future, so Drain skips it but does not
+	// discard it; the other two were past-due and matching neither filter, so
+	// they drain.
+	drained, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(drained) != 2 {
+		t.Fatalf("Drain returned %d nudges, want 2 (target deferred into future)", len(drained))
+	}
+
+	// Inspect the still-queued target: DeliverAfter pushed forward, TTL intact.
+	dir := queueDir(townRoot, session)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 remaining queued file, got %d", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var q QueuedNudge
+	if err := json.Unmarshal(data, &q); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if q.Message != "target" {
+		t.Fatalf("remaining nudge = %q, want %q", q.Message, "target")
+	}
+	if !q.DeliverAfter.Equal(newDeliver) {
+		t.Errorf("DeliverAfter = %v, want %v", q.DeliverAfter, newDeliver)
+	}
+	if !q.ExpiresAt.Equal(expiry) {
+		t.Errorf("ExpiresAt = %v, want %v (must be preserved)", q.ExpiresAt, expiry)
+	}
+
+	// Re-arming with an earlier time must not pull the deadline back.
+	earlier := now.Add(time.Minute)
+	if _, err := DeferKindByThread(townRoot, session, "reply-reminder", "thread-1", earlier); err != nil {
+		t.Fatalf("DeferKindByThread (earlier): %v", err)
+	}
+	data, _ = os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	_ = json.Unmarshal(data, &q)
+	if !q.DeliverAfter.Equal(newDeliver) {
+		t.Errorf("DeliverAfter moved earlier to %v, want unchanged %v", q.DeliverAfter, newDeliver)
 	}
 }
 
