@@ -73,7 +73,7 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 		return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), "")
 	}
 	env = append(env, "BEADS_DIR="+beadsDir)
-	env = append(env, doltTargetEnvFromBeadsDir(beadsDir)...)
+	env = append(env, doltTargetEnvFromBeadsDir(env, beadsDir)...)
 	return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), beadsDir)
 }
 
@@ -82,7 +82,7 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 // connection host/port from fallbackBeadsDir so routing can choose the database.
 func BuildRoutingBDEnv(base []string, fallbackBeadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
-	env = append(env, doltTargetEnvFromBeadsDir(fallbackBeadsDir)...)
+	env = append(env, doltTargetEnvFromBeadsDir(env, fallbackBeadsDir)...)
 	return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), fallbackBeadsDir)
 }
 
@@ -196,22 +196,32 @@ func forceBDMutation(env []string) []string {
 	return append(env, "BD_DOLT_AUTO_COMMIT=on")
 }
 
-func doltTargetEnvFromBeadsDir(beadsDir string) []string {
+func doltTargetEnvFromBeadsDir(base []string, beadsDir string) []string {
 	if beadsDir == "" {
 		return nil
 	}
 	meta := readDoltMetadata(beadsDir)
 	var env []string
-	// Only set BEADS_DOLT_DATA_DIR when:
-	//   - the rig is NOT configured for server mode (no Host/Port in metadata), AND
-	//   - the data dir actually exists on disk.
+	// Only set BEADS_DOLT_DATA_DIR when NO Dolt server is available for this
+	// town, AND the data dir actually exists on disk.
+	//
 	// bd v1.0.3+ honors BEADS_DOLT_DATA_DIR even when server mode is selected,
 	// and uses it as a database lookup root that overrides the server-side
-	// DB. With our shared-server topology, the town-level .dolt-data either
-	// doesn't exist or maps to a stale embedded DB — pointing bd at it makes
-	// rig-prefixed bead lookups fail with "not found" (gu-6a68).
-	if meta.Host == "" && meta.Port == "" {
-		if townRoot := FindTownRoot(filepath.Dir(beadsDir)); townRoot != "" {
+	// DB. With our shared-server topology, the town-level .dolt-data is the
+	// running server's OWN data directory — pointing bd at it makes bd open
+	// those files in embedded mode (a second writer to the live server) and
+	// silently create a stray non-namespaced "beads" database there, a
+	// slowly-growing orphan that also breaks the reaper's schema expectations
+	// (gs-9hra). It also makes rig-prefixed bead lookups fail with "not found"
+	// (gu-6a68).
+	//
+	// A server is "available" when the rig metadata records one, the daemon
+	// exported GT_DOLT_PORT/GT_DOLT_HOST, or the town itself runs in
+	// shared-server mode. Only when none of those hold is embedded .dolt-data
+	// the legitimate backend, so the fallback is restricted to that case.
+	if meta.Host == "" && meta.Port == "" &&
+		envValue(base, "GT_DOLT_PORT") == "" && envValue(base, "GT_DOLT_HOST") == "" {
+		if townRoot := FindTownRoot(filepath.Dir(beadsDir)); townRoot != "" && !townUsesSharedServer(townRoot) {
 			dataDir := filepath.Join(townRoot, ".dolt-data")
 			if _, err := os.Stat(dataDir); err == nil {
 				env = append(env, "BEADS_DOLT_DATA_DIR="+dataDir)
@@ -226,6 +236,15 @@ func doltTargetEnvFromBeadsDir(beadsDir string) []string {
 		env = append(env, "BEADS_DOLT_PORT="+meta.Port)
 	}
 	return env
+}
+
+// townUsesSharedServer reports whether the town at townRoot runs a shared Dolt
+// server, per its own .beads metadata (dolt_server_host/port or a dolt-server.port
+// file). When it does, no rig may fall back to embedded .dolt-data — that would
+// open the server's own data directory and spawn a stray "beads" DB (gs-9hra).
+func townUsesSharedServer(townRoot string) bool {
+	meta := readDoltMetadata(filepath.Join(townRoot, ".beads"))
+	return meta.Host != "" || meta.Port != ""
 }
 
 type doltMetadata struct {

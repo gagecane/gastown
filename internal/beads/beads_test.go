@@ -348,6 +348,83 @@ func TestBuildPinnedBDEnv_LeakGuardSkipsWhenServerSelected(t *testing.T) {
 	}
 }
 
+// TestBuildPinnedBDEnv_OmitsTownDataDirWhenServerExported reproduces the
+// production gs-9hra leak: a rig whose metadata lacks a server host/port runs
+// under a daemon that exported GT_DOLT_PORT, and the town-level .dolt-data (the
+// shared server's OWN data directory) exists on disk. The old code pointed bd at
+// that data dir in embedded mode, spawning a stray non-namespaced "beads" DB
+// inside the live server's files. With a server available, the data-dir fallback
+// must be omitted and the server target used instead.
+func TestBuildPinnedBDEnv_OmitsTownDataDirWhenServerExported(t *testing.T) {
+	tempTownRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tempTownRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempTownRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(tempTownRoot, "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Rig metadata records a database but no server host/port.
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"rigdb"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The shared server's data dir exists at the town root.
+	if err := os.MkdirAll(filepath.Join(tempTownRoot, ".dolt-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin", "GT_DOLT_PORT=3307"}, beadsDir)
+	got := envMap(env)
+	if value, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
+		t.Fatalf("BEADS_DOLT_DATA_DIR must be omitted when a Dolt server is exported, got %q in %v", value, env)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "3307" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 3307 (server target) in %v", got["BEADS_DOLT_SERVER_PORT"], env)
+	}
+}
+
+// TestBuildPinnedBDEnv_OmitsTownDataDirForSharedServerTown verifies the
+// defensive signal: even without GT_DOLT_PORT in the env, a rig that lacks its
+// own server metadata must NOT fall back to embedded .dolt-data when the town's
+// own .beads metadata shows it runs a shared server (gs-9hra).
+func TestBuildPinnedBDEnv_OmitsTownDataDirForSharedServerTown(t *testing.T) {
+	tempTownRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tempTownRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempTownRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Town .beads declares shared-server mode.
+	townBeads := filepath.Join(tempTownRoot, ".beads")
+	if err := os.MkdirAll(townBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townBeads, "metadata.json"), []byte(`{"dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Rig metadata records a database but no server host/port.
+	beadsDir := filepath.Join(tempTownRoot, "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_database":"rigdb"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempTownRoot, ".dolt-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := BuildPinnedBDEnv([]string{"PATH=/usr/bin"}, beadsDir)
+	got := envMap(env)
+	if value, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
+		t.Fatalf("BEADS_DOLT_DATA_DIR must be omitted for a shared-server town, got %q in %v", value, env)
+	}
+}
+
 func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
 	env := SuppressBDSideEffects([]string{
 		"PATH=/usr/bin",
