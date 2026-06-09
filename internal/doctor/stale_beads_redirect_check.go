@@ -287,13 +287,16 @@ func hasRedirectWithStaleFiles(beadsDir string) bool {
 		return false
 	}
 
-	// When metadata.json declares a dolt_database, cleanStaleBeadsFiles may
-	// preserve it (see shouldPreserveRedirectMetadata). If metadata.json is
-	// the ONLY match in this directory, flagging would produce a warning
-	// whose --fix is a no-op (we'd "clean" nothing). Skip metadata.json
-	// from the stale-trigger list in that case so the check and the fix
-	// stay symmetric.
-	skipMetadata := metadataDoltDatabase(beadsDir) != ""
+	// Mirror cleanStaleBeadsFiles exactly: skip metadata.json from the
+	// stale-trigger list ONLY when the fix would also preserve it (see
+	// shouldPreserveRedirectMetadata). When metadata.json declares a
+	// dolt_database that DISAGREES with the redirect target's database, the
+	// fix removes it — so the trigger must flag it, or the stale file is never
+	// detected (the gastown_upstream "gc"-vs-redirect-target case). Using the
+	// looser "any dolt_database present" predicate here broke that symmetry:
+	// drifted metadata was skipped by Run yet cleaned by Fix, so doctor never
+	// surfaced it.
+	skipMetadata := shouldPreserveRedirectMetadata(beadsDir)
 
 	// Check for any stale files
 	for _, pattern := range staleFilePatterns {

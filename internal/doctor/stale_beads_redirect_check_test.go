@@ -687,6 +687,71 @@ func TestStaleBeadsRedirectCheck_MetadataOnlyWithDoltDB(t *testing.T) {
 	}
 }
 
+// TestStaleBeadsRedirectCheck_DriftedMetadataFlaggedAndFixed verifies that
+// metadata.json whose dolt_database DISAGREES with the redirect target's
+// database is flagged by Run AND removed by Fix. This is the gastown_upstream
+// regression: the rig root carried stale embedded-mode metadata
+// (dolt_database "gc") while the redirect target declared the real server DB.
+// The old Run trigger skipped any metadata.json that declared a dolt_database,
+// so doctor never surfaced the drift even though Fix would have cleaned it —
+// leaving raw `bd` from the rig root broken with `database "gc" not found`.
+func TestStaleBeadsRedirectCheck_DriftedMetadataFlaggedAndFixed(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	rigBeads := filepath.Join(rigDir, ".beads")
+	canonicalBeads := filepath.Join(rigDir, "mayor", "rig", ".beads")
+
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(canonicalBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig root redirects to the canonical (server-mode) beads.
+	if err := os.WriteFile(filepath.Join(rigBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Canonical metadata declares the real server database.
+	if err := os.WriteFile(filepath.Join(canonicalBeads, "metadata.json"), []byte(`{"dolt_database":"myrig"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Stale embedded-mode metadata at the rig root — DISAGREES with target.
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"dolt_mode":"embedded","dolt_database":"gc"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewStaleBeadsRedirectCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+
+	// Run must flag the drifted metadata as a stale file.
+	result := check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for drifted metadata.json, got %v: %q (details=%v)",
+			result.Status, result.Message, result.Details)
+	}
+
+	// Fix must remove the stale rig-root metadata while preserving the redirect.
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigBeads, "metadata.json")); !os.IsNotExist(err) {
+		t.Errorf("drifted metadata.json should be removed after fix, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigBeads, "redirect")); err != nil {
+		t.Errorf("redirect should be preserved: %v", err)
+	}
+
+	// Re-run must be clean.
+	result = check.Run(ctx)
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK after fix, got %v: %q", result.Status, result.Message)
+	}
+}
+
 // TestStaleBeadsRedirectCheck_MetadataPlusOtherStaleFile verifies that when
 // metadata.json (protected) coexists with a genuinely stale file (e.g.
 // daemon.lock) in the same .beads dir, the check STILL flags — metadata.json
