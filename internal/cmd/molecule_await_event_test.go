@@ -632,6 +632,36 @@ func TestEffortLevelContextYield(t *testing.T) {
 	}
 }
 
+func TestFinalizeAwaitEventResultQueueReady(t *testing.T) {
+	// queue-ready (startup probe found a backlog) must reset idle to 0 and force
+	// EffortLevel "full" so the refinery runs a full patrol and drains the queue,
+	// even when the agent had accumulated idle cycles before the restart.
+	result := &AwaitEventResult{
+		Reason:   "queue-ready",
+		ReadyMRs: 3,
+	}
+
+	// agentBeadUsable=false / empty beadsDir skips the bead writes, exercising
+	// only the in-memory bookkeeping (idle reset + effort level).
+	finalizeAwaitEventResult(result, 5 /* idleCycles */, false, "")
+
+	if result.IdleCycles != 0 {
+		t.Errorf("queue-ready should reset IdleCycles to 0, got %d", result.IdleCycles)
+	}
+	if result.EffortLevel != "full" {
+		t.Errorf("queue-ready should produce EffortLevel 'full', got %q", result.EffortLevel)
+	}
+}
+
+func TestProbeReadyMRsForRigEmptyRig(t *testing.T) {
+	// An empty rig name (no --filter-rig) must not probe — it returns ok=false
+	// so the caller falls through to the normal event-file wait.
+	count, ok := probeReadyMRsForRig("")
+	if ok {
+		t.Errorf("probeReadyMRsForRig(\"\") should return ok=false, got ok=true count=%d", count)
+	}
+}
+
 func TestEventFileStruct(t *testing.T) {
 	ef := EventFile{
 		Path:    "/home/gt/events/refinery/12345.event",

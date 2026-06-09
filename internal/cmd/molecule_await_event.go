@@ -105,11 +105,12 @@ EXAMPLES:
 
 // AwaitEventResult is the result of an await-event operation.
 type AwaitEventResult struct {
-	Reason      string        `json:"reason"`                // "event" or "timeout"
+	Reason      string        `json:"reason"`                // "event", "queue-ready", "timeout", or "context-yield"
 	Elapsed     time.Duration `json:"elapsed"`               // how long we waited
 	Events      []EventFile   `json:"events,omitempty"`      // event files found
 	IdleCycles  int           `json:"idle_cycles,omitempty"` // current idle cycle count
 	EffortLevel string        `json:"effort_level"`          // "full" or "abbreviated"
+	ReadyMRs    int           `json:"ready_mrs,omitempty"`   // pending MRs found by the startup queue probe (reason "queue-ready")
 }
 
 // EventFile represents a single event file.
@@ -249,6 +250,27 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 
 	startTime := time.Now()
 
+	// Startup queue probe (gs-goya). Before blocking on the event-file channel,
+	// check whether the rig's merge queue already has actionable MRs. After a
+	// session restart the refinery re-enters await-event, but the MERGE_READY
+	// events that would have woken it may have been consumed+cleaned in a prior
+	// cycle, or the MRs may have gone ready while it was down — so no event file
+	// exists and it would sleep through a live backlog until an external nudge.
+	// Probing here lets the refinery re-arm and claim that backlog itself. Only
+	// the refinery uses --filter-rig, so this is scoped to the refinery channel;
+	// best-effort, so a probe failure falls through to the normal wait.
+	if awaitEventFilterRig != "" {
+		if ready, ok := probeReadyMRsForRig(awaitEventFilterRig); ok && ready > 0 {
+			result := &AwaitEventResult{
+				Reason:   "queue-ready",
+				ReadyMRs: ready,
+				Elapsed:  time.Since(startTime),
+			}
+			finalizeAwaitEventResult(result, idleCycles, agentBeadUsable, beadsDir)
+			return outputAwaitEventResult(result)
+		}
+	}
+
 	// Idle-heartbeat keepalive (gu-vqmmp / gu-urr85). await-event is the
 	// primary wake mechanism for the refinery patrol; an idle agent spends
 	// most of its time blocked here, up to the backoff cap (10–15m). While
@@ -276,6 +298,14 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	}
 	result.Elapsed = time.Since(startTime)
 
+	finalizeAwaitEventResult(result, idleCycles, agentBeadUsable, beadsDir)
+	return outputAwaitEventResult(result)
+}
+
+// finalizeAwaitEventResult updates agent-bead idle/heartbeat/backoff state,
+// cleans up consumed event files, and sets the effort level for the next patrol
+// cycle. Shared by the normal wait path and the startup queue-probe short-circuit.
+func finalizeAwaitEventResult(result *AwaitEventResult, idleCycles int, agentBeadUsable bool, beadsDir string) {
 	// Update agent bead idle cycles and heartbeat
 	if agentBeadUsable && beadsDir != "" {
 		// Always update heartbeat (both event and timeout) so witness doesn't
@@ -292,8 +322,9 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 			} else {
 				result.IdleCycles = newIdle
 			}
-		} else if result.Reason == "event" {
-			// Reset idle on event received
+		} else if result.Reason == "event" || result.Reason == "queue-ready" {
+			// Reset idle: real work arrived (event) or the startup probe found a
+			// ready backlog (queue-ready). Either way we're no longer idle.
 			if idleCycles > 0 {
 				_ = setAgentIdleCycles(awaitEventAgentBead, beadsDir, 0)
 			}
@@ -302,7 +333,7 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		// For "context-yield": idle cycles unchanged — we yielded early for context
 		// assessment, not because the full backoff window elapsed.
 
-		// Clear backoff-until — we completed (event, timeout, or context-yield)
+		// Clear backoff-until — we completed (event, queue-ready, timeout, or context-yield)
 		_ = clearAgentBackoffUntil(awaitEventAgentBead, beadsDir)
 	}
 
@@ -315,13 +346,16 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 
 	// Set effort level based on idle cycles.
 	// context-yield forces full effort: context-check must not be abbreviated.
-	if result.Reason == "event" || result.Reason == "context-yield" || result.IdleCycles == 0 {
+	// queue-ready forces full effort: there is a real backlog to drain.
+	if result.Reason == "event" || result.Reason == "queue-ready" || result.Reason == "context-yield" || result.IdleCycles == 0 {
 		result.EffortLevel = "full"
 	} else {
 		result.EffortLevel = "abbreviated"
 	}
+}
 
-	// Output
+// outputAwaitEventResult renders the result as JSON or human-readable text.
+func outputAwaitEventResult(result *AwaitEventResult) error {
 	if moleculeJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -342,6 +376,9 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 					}
 				}
 			}
+		case "queue-ready":
+			fmt.Printf("%s %d ready MR(s) already in the queue — claiming without waiting for a nudge\n",
+				style.Bold.Render("✓"), result.ReadyMRs)
 		case "timeout":
 			fmt.Printf("%s Timeout after %v (idle cycle: %d)\n",
 				style.Dim.Render("⏱"), result.Elapsed.Round(time.Millisecond), result.IdleCycles)
@@ -364,6 +401,36 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// probeReadyMRsForRig counts actionable (open, unblocked) merge requests in the
+// given rig's merge queue. It re-arms the refinery patrol after a session
+// restart: await-event only ever watched the event-file channel, so a refinery
+// that came up with MRs already ready (events emitted+cleaned before the
+// restart, or MRs that went ready while it was down) would sleep until an
+// external nudge re-emitted an event (gs-goya). Probing the queue on entry lets
+// the loop claim that pre-existing backlog itself.
+//
+// Best-effort: a nil/zero count or any resolution/query error returns ok=false,
+// and the caller falls through to the normal event-file wait. The MRs live in
+// the rig's beads DB (typically a redirect to mayor/rig/.beads), so we scope the
+// lister to the rig's BeadsPath and reuse refineryMQProber for the rig-scoping
+// logic shared with the queue-scan gate (gu-6hzv) and the witness idle-MQ
+// suppression (gs-ecdg).
+func probeReadyMRsForRig(rigName string) (int, bool) {
+	if rigName == "" {
+		return 0, false
+	}
+	_, r, err := getRig(rigName)
+	if err != nil || r == nil {
+		return 0, false
+	}
+	prober := refineryMQProber{lister: beads.New(r.BeadsPath())}
+	count, err := prober.PendingMergeRequestCount(rigName)
+	if err != nil {
+		return 0, false
+	}
+	return count, true
 }
 
 // calculateEventTimeout mirrors calculateEffectiveTimeout for await-event.
