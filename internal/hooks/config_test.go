@@ -1596,88 +1596,166 @@ func TestMarshalConfig(t *testing.T) {
 	}
 }
 
-// --- Plugin defaults / fleet-role coverage (OOM fix, 2026-06-05 post-mortem) ---
+// --- Plugin defaults / town-configurable override layer (gu-eiumt) ---
+//
+// The Amazon-specific AIM disable-list is no longer hardcoded in shared Go.
+// ExpectedPlugins layers the town's on-disk plugin overrides on top of the
+// shared neutral default (beads disabled), and ApplyExpectedPlugins/
+// HasExpectedPlugins are the write/read sides. The OOM guard (2026-06-05
+// post-mortem) is now supplied by a town override file, not the binary.
 
-// TestEnsurePluginDefaults_FleetRolesDisableAIM verifies every fleet role gets
-// all AIM plugins disabled (keeping core-dev) plus enableAllProjectMcpServers=false,
-// while interactive roles only get beads disabled and keep AIM plugins inheritable.
-func TestEnsurePluginDefaults_FleetRolesDisableAIM(t *testing.T) {
-	fleetRoles := []string{
-		constants.RoleWitness, constants.RoleRefinery, constants.RoleDeacon,
-		constants.RoleBoot, constants.RolePolecat, constants.RoleDog,
-	}
-	for _, role := range fleetRoles {
-		t.Run("fleet/"+role, func(t *testing.T) {
-			s := &SettingsJSON{}
-			EnsurePluginDefaults(s, role)
+// TestExpectedPlugins_NeutralDefaultNoOverride verifies that, with no override
+// file, every role resolves to just the neutral beads-disabled default and no
+// Amazon plugin names appear.
+func TestExpectedPlugins_NeutralDefaultNoOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
 
-			for _, plugin := range aimPluginsToDisable {
-				if v, ok := s.EnabledPlugins[plugin]; !ok || v {
-					t.Errorf("plugin %q = (%v, present=%v), want explicitly false", plugin, v, ok)
-				}
+	for _, target := range []string{"witness", "polecats", "crew", "mayor", "gastown/crew"} {
+		t.Run(target, func(t *testing.T) {
+			got, err := ExpectedPlugins(target)
+			if err != nil {
+				t.Fatalf("ExpectedPlugins(%q): %v", target, err)
 			}
-			if v, ok := s.EnabledPlugins["beads@beads-marketplace"]; !ok || v {
+			if v, ok := got[neutralBeadsPlugin]; !ok || v {
 				t.Errorf("beads plugin = (%v, present=%v), want explicitly false", v, ok)
 			}
-			raw, ok := s.Extra["enableAllProjectMcpServers"]
-			if !ok || string(raw) != "false" {
-				t.Errorf("enableAllProjectMcpServers = (%q, present=%v), want false", string(raw), ok)
-			}
-			// HasPluginDefaults must agree the config is now correct.
-			if !HasPluginDefaults(s, role) {
-				t.Errorf("HasPluginDefaults(%q) = false after EnsurePluginDefaults, want true", role)
-			}
-		})
-	}
-
-	interactiveRoles := []string{constants.RoleMayor, constants.RoleCrew}
-	for _, role := range interactiveRoles {
-		t.Run("interactive/"+role, func(t *testing.T) {
-			s := &SettingsJSON{}
-			EnsurePluginDefaults(s, role)
-
-			if v, ok := s.EnabledPlugins["beads@beads-marketplace"]; !ok || v {
-				t.Errorf("beads plugin = (%v, present=%v), want explicitly false", v, ok)
-			}
-			// AIM plugins must NOT be force-disabled for interactive roles.
-			for _, plugin := range aimPluginsToDisable {
-				if _, ok := s.EnabledPlugins[plugin]; ok {
-					t.Errorf("interactive role %q should not set AIM plugin %q", role, plugin)
-				}
-			}
-			if _, ok := s.Extra["enableAllProjectMcpServers"]; ok {
-				t.Errorf("interactive role %q should not set enableAllProjectMcpServers", role)
-			}
-			// HasPluginDefaults is a no-op (true) for interactive roles.
-			if !HasPluginDefaults(s, role) {
-				t.Errorf("HasPluginDefaults(%q) = false, want true for interactive role", role)
+			if len(got) != 1 {
+				t.Errorf("expected only the neutral default, got %d entries: %v", len(got), got)
 			}
 		})
 	}
 }
 
-// TestHasPluginDefaults_DetectsMissingOrEnabled verifies the drift detector
-// flags fleet settings that are missing an AIM-disable or have one enabled.
-func TestHasPluginDefaults_DetectsMissingOrEnabled(t *testing.T) {
-	// nil settings for a fleet role => not configured.
-	if HasPluginDefaults(nil, constants.RoleDog) {
-		t.Error("HasPluginDefaults(nil, dog) = true, want false")
+// TestExpectedPlugins_OverrideLayering verifies that a role-level override
+// supplies a plugin policy and that a more-specific rig/role override wins
+// per-plugin.
+func TestExpectedPlugins_OverrideLayering(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	writePluginOverride(t, "polecats", map[string]bool{
+		"SomePlugin-core":      true,
+		"SomeOther-all@market": false,
+	})
+	writePluginOverride(t, "gastown/polecats", map[string]bool{
+		"SomeOther-all@market": true, // rig/role flips the role-level value
+	})
+
+	got, err := ExpectedPlugins("gastown/polecats")
+	if err != nil {
+		t.Fatalf("ExpectedPlugins: %v", err)
+	}
+	if got[neutralBeadsPlugin] != false {
+		t.Errorf("beads = %v, want false (neutral default preserved)", got[neutralBeadsPlugin])
+	}
+	if got["SomePlugin-core"] != true {
+		t.Errorf("SomePlugin-core = %v, want true (from role override)", got["SomePlugin-core"])
+	}
+	if got["SomeOther-all@market"] != true {
+		t.Errorf("SomeOther = %v, want true (rig/role override wins)", got["SomeOther-all@market"])
+	}
+}
+
+// TestApplyAndHasExpectedPlugins verifies the write/read round-trip, including
+// the fleet-only enableAllProjectMcpServers pin and additive (extra-entries-ok)
+// drift semantics.
+func TestApplyAndHasExpectedPlugins(t *testing.T) {
+	expected := map[string]bool{
+		neutralBeadsPlugin:     false,
+		"SomePlugin-core":      true,
+		"SomeOther-all@market": false,
 	}
 
-	// All disabled except one enabled => drift.
+	t.Run("fleet", func(t *testing.T) {
+		s := &SettingsJSON{}
+		ApplyExpectedPlugins(s, constants.RolePolecat, expected)
+
+		for plugin, want := range expected {
+			if got, ok := s.EnabledPlugins[plugin]; !ok || got != want {
+				t.Errorf("plugin %q = (%v, present=%v), want %v", plugin, got, ok, want)
+			}
+		}
+		raw, ok := s.Extra["enableAllProjectMcpServers"]
+		if !ok || string(raw) != "false" {
+			t.Errorf("enableAllProjectMcpServers = (%q, present=%v), want false", string(raw), ok)
+		}
+		if !HasExpectedPlugins(s, constants.RolePolecat, expected) {
+			t.Error("HasExpectedPlugins = false after Apply, want true")
+		}
+		// Extra entries beyond expected are fine (additive policy).
+		s.EnabledPlugins["unrelated@x"] = true
+		if !HasExpectedPlugins(s, constants.RolePolecat, expected) {
+			t.Error("HasExpectedPlugins = false with extra entry, want true (additive)")
+		}
+	})
+
+	t.Run("interactive", func(t *testing.T) {
+		s := &SettingsJSON{}
+		ApplyExpectedPlugins(s, constants.RoleCrew, expected)
+		// Interactive roles do NOT get enableAllProjectMcpServers pinned.
+		if _, ok := s.Extra["enableAllProjectMcpServers"]; ok {
+			t.Error("interactive role should not set enableAllProjectMcpServers")
+		}
+		if !HasExpectedPlugins(s, constants.RoleCrew, expected) {
+			t.Error("HasExpectedPlugins = false after Apply, want true")
+		}
+	})
+}
+
+// TestHasExpectedPlugins_DetectsDrift verifies the drift detector flags missing,
+// flipped, or (for fleet) an unset enableAllProjectMcpServers.
+func TestHasExpectedPlugins_DetectsDrift(t *testing.T) {
+	expected := map[string]bool{
+		neutralBeadsPlugin: false,
+		"X-all@market":     false,
+	}
+
+	// nil settings => not configured.
+	if HasExpectedPlugins(nil, constants.RoleDog, expected) {
+		t.Error("HasExpectedPlugins(nil) = true, want false")
+	}
+
+	// Flipped value => drift.
 	s := &SettingsJSON{}
-	EnsurePluginDefaults(s, constants.RoleDog)
-	s.EnabledPlugins[aimPluginsToDisable[0]] = true
-	if HasPluginDefaults(s, constants.RoleDog) {
-		t.Errorf("HasPluginDefaults with %q enabled = true, want false", aimPluginsToDisable[0])
+	ApplyExpectedPlugins(s, constants.RoleDog, expected)
+	s.EnabledPlugins["X-all@market"] = true
+	if HasExpectedPlugins(s, constants.RoleDog, expected) {
+		t.Error("HasExpectedPlugins with flipped entry = true, want false")
 	}
 
-	// Missing one entry => drift.
+	// Missing entry => drift.
 	s2 := &SettingsJSON{}
-	EnsurePluginDefaults(s2, constants.RoleDog)
-	delete(s2.EnabledPlugins, aimPluginsToDisable[0])
-	if HasPluginDefaults(s2, constants.RoleDog) {
-		t.Errorf("HasPluginDefaults missing %q = true, want false", aimPluginsToDisable[0])
+	ApplyExpectedPlugins(s2, constants.RoleDog, expected)
+	delete(s2.EnabledPlugins, "X-all@market")
+	if HasExpectedPlugins(s2, constants.RoleDog, expected) {
+		t.Error("HasExpectedPlugins missing entry = true, want false")
+	}
+
+	// Fleet role missing enableAllProjectMcpServers => drift.
+	s3 := &SettingsJSON{}
+	ApplyExpectedPlugins(s3, constants.RoleDog, expected)
+	delete(s3.Extra, "enableAllProjectMcpServers")
+	if HasExpectedPlugins(s3, constants.RoleDog, expected) {
+		t.Error("HasExpectedPlugins fleet missing enableAllProjectMcpServers = true, want false")
+	}
+}
+
+// writePluginOverride writes an enabledPlugins-carrying override file for target
+// under the test home's ~/.gt/hooks-overrides/.
+func writePluginOverride(t *testing.T, target string, plugins map[string]bool) {
+	t.Helper()
+	path := OverridePath(target)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir overrides: %v", err)
+	}
+	wrapper := map[string]interface{}{"enabledPlugins": plugins}
+	data, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal override: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write override: %v", err)
 	}
 }
 

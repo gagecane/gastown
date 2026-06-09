@@ -173,38 +173,19 @@ func addClaudePromptDefaults(out map[string]json.RawMessage) {
 	}
 }
 
-// aimPluginsToDisable lists all known AIM plugin keys that fleet agents must
-// explicitly disable. Without this, project-level settings inherit the user's
-// global ~/.claude/settings.json — which may enable 16+ plugins, each spawning
-// multiple MCP sidecar processes (~180 MB each). With 37 fleet agents that's
-// enough to OOM a 128 GB host. See OOM post-mortem 2026-06-05.
-// aimPluginsToDisable lists AIM plugins that fleet agents must NOT load.
-// AIPowerUserCapabilities-core-dev is intentionally EXCLUDED — it provides
-// the gpu-dev agent and a single full builder-mcp instance that fleet agents
-// need for bd/gt operations, CRs, builds, and internal website access.
-var aimPluginsToDisable = []string{
-	"AIPowerUserCapabilities-agent-engineering@aim",
-	"AIPowerUserCapabilities-autonomous-coding@aim",
-	"AIPowerUserCapabilities-cloudwatch-migration@aim",
-	"AIPowerUserCapabilities-code-review@aim",
-	"AIPowerUserCapabilities-comms@aim",
-	"AIPowerUserCapabilities-multiagent@aim",
-	"AIPowerUserCapabilities-pipeline-ops@aim",
-	"AIPowerUserCapabilities-project-mgmt@aim",
-	"AIPowerUserCapabilities-research@aim",
-	"AIPowerUserCapabilities-threat-modeler@aim",
-	"AIPowerUserCapabilities-writing@aim",
-	"AmazonBuilderCoreAIAgents-pipeline-assistant@aim",
-	"AmazonBuilderCoreAIAgents-core@aim",
-	"AtlasAICapabilities-all@aim",
-	"MeshClawAICapabilities-all@aim",
-	"StoreGenAiCapabilities-all@aim",
-	"ScheduledCoverageBooster-all@aim",
-	"TalonAiCapabilities-talon-dev@aim",
-}
+// neutralBeadsPlugin is the one plugin key the shared (upstream) code disables
+// for every managed role: the beads marketplace plugin, which conflicts with
+// Gas Town's own `bd`. It carries no Amazon/AIM coupling, so it stays in shared
+// source. Any town-specific plugin policy (e.g. disabling Amazon AIM plugins to
+// prevent the MCP-sidecar OOM documented in the 2026-06-05 post-mortem) is
+// supplied out-of-band by the on-disk override layer — see ExpectedPlugins.
+const neutralBeadsPlugin = "beads@beads-marketplace"
 
 // isFleetRole returns true for roles that run as long-lived unattended daemons
-// and should not load AIM plugins (witnesses, refineries, deacon, boot, polecats, dogs).
+// (witnesses, refineries, deacon, boot, polecats, dogs). Fleet roles get
+// enableAllProjectMcpServers pinned false so no MCP auto-discovery can load
+// unexpected servers; the specific plugin disable-list is town-configured via
+// the override layer rather than hardcoded here.
 func isFleetRole(role string) bool {
 	switch role {
 	case constants.RoleWitness, constants.RoleRefinery, constants.RoleDeacon, constants.RoleBoot, constants.RolePolecat, constants.RoleDog:
@@ -213,22 +194,47 @@ func isFleetRole(role string) bool {
 	return false
 }
 
-// EnsurePluginDefaults sets the standard enabledPlugins map for a given role.
-// Fleet roles (witness, refinery, deacon, boot, polecat, dog) get all AIM plugins
-// explicitly disabled to prevent inheriting the user's global plugin config.
-// Interactive roles (mayor, crew) only get beads disabled.
-func EnsurePluginDefaults(s *SettingsJSON, role string) {
+// ExpectedPlugins computes the authoritative enabledPlugins map for a role by
+// layering the town's on-disk plugin overrides on top of the shared neutral
+// default. The neutral default disables only the beads marketplace plugin. Each
+// override key applicable to the target (role, then rig/role) may supply an
+// enabledPlugins map; later (more specific) keys win per-plugin.
+//
+// This replaces the previously hardcoded, Amazon-specific aimPluginsToDisable
+// list: a town that needs to disable AIM plugins (to avoid the fleet OOM)
+// supplies them via ~/.gt/hooks-overrides/<target>.json, and the shared binary
+// ships no Amazon plugin names. Applies to ALL managed roles, including the
+// interactive mayor/crew, so crew can be given the lean single-builder-mcp list.
+func ExpectedPlugins(target string) (map[string]bool, error) {
+	result := map[string]bool{neutralBeadsPlugin: false}
+	for _, overrideKey := range GetApplicableOverrides(target) {
+		ov, err := LoadOverridePlugins(overrideKey)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("loading plugin override %q: %w", overrideKey, err)
+		}
+		for plugin, enabled := range ov {
+			result[plugin] = enabled
+		}
+	}
+	return result, nil
+}
+
+// ApplyExpectedPlugins writes the resolved plugin map into the settings,
+// merging into any existing enabledPlugins (override-supplied entries win).
+// For fleet roles it also pins enableAllProjectMcpServers=false to block MCP
+// auto-discovery. This is the write-side counterpart to ExpectedPlugins and
+// replaces the role-branching EnsurePluginDefaults.
+func ApplyExpectedPlugins(s *SettingsJSON, role string, expected map[string]bool) {
 	if s.EnabledPlugins == nil {
 		s.EnabledPlugins = make(map[string]bool)
 	}
-	s.EnabledPlugins["beads@beads-marketplace"] = false
-
+	for plugin, enabled := range expected {
+		s.EnabledPlugins[plugin] = enabled
+	}
 	if isFleetRole(role) {
-		for _, plugin := range aimPluginsToDisable {
-			s.EnabledPlugins[plugin] = false
-		}
-		// Also disable enableAllProjectMcpServers via Extra to prevent any
-		// MCP server auto-discovery from loading unexpected servers.
 		if s.Extra == nil {
 			s.Extra = make(map[string]json.RawMessage)
 		}
@@ -236,22 +242,23 @@ func EnsurePluginDefaults(s *SettingsJSON, role string) {
 	}
 }
 
-// HasPluginDefaults reports whether the settings already contain the correct
-// plugin configuration for the given role. For fleet roles, all AIM plugins
-// must be explicitly disabled (set to false) to prevent OOM. For interactive
-// roles (mayor, crew), no plugin enforcement is required — they're allowed to
-// inherit the user's global plugin config.
-func HasPluginDefaults(s *SettingsJSON, role string) bool {
-	if !isFleetRole(role) {
-		return true // Interactive roles don't need plugin overrides
-	}
+// HasExpectedPlugins reports whether the settings already carry every entry in
+// the expected plugin map (matching value), and — for fleet roles —
+// enableAllProjectMcpServers=false. Extra plugin entries beyond the expected
+// set do not count as drift (additive policy, matching HasPermissionDefaults).
+func HasExpectedPlugins(s *SettingsJSON, role string, expected map[string]bool) bool {
 	if s == nil || s.EnabledPlugins == nil {
 		return false
 	}
-	for _, plugin := range aimPluginsToDisable {
-		val, ok := s.EnabledPlugins[plugin]
-		if !ok || val {
-			return false // Missing or enabled — must be explicitly false
+	for plugin, want := range expected {
+		got, ok := s.EnabledPlugins[plugin]
+		if !ok || got != want {
+			return false
+		}
+	}
+	if isFleetRole(role) {
+		if !rawBoolEquals(s.Extra, "enableAllProjectMcpServers", false) {
+			return false
 		}
 	}
 	return true
@@ -1288,6 +1295,39 @@ func LoadOverride(target string) (*HooksConfig, error) {
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
+	}
+	return nil, os.ErrNotExist
+}
+
+// LoadOverridePlugins loads the enabledPlugins map carried by an override file
+// for the given target, using the same cascading directory search as
+// LoadOverride. The map lives under a top-level "enabledPlugins" key in the
+// same ~/.gt/hooks-overrides/<target>.json file as the hook overrides; the
+// hooks loader (loadConfig) ignores it, and this reader ignores the hooks. The
+// first file found across gtConfigDirs wins. Returns os.ErrNotExist if no
+// override file exists in any location; a file that exists but carries no
+// enabledPlugins key yields an empty (non-nil) map and no error.
+func LoadOverridePlugins(target string) (map[string]bool, error) {
+	safe := strings.ReplaceAll(target, "/", "__")
+	for _, dir := range gtConfigDirs() {
+		path := filepath.Join(dir, "hooks-overrides", safe+".json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		var wrapper struct {
+			EnabledPlugins map[string]bool `json:"enabledPlugins"`
+		}
+		if err := json.Unmarshal(data, &wrapper); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		if wrapper.EnabledPlugins == nil {
+			return map[string]bool{}, nil
+		}
+		return wrapper.EnabledPlugins, nil
 	}
 	return nil, os.ErrNotExist
 }

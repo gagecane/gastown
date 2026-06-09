@@ -271,6 +271,27 @@ func inferRoleFromPath(dir string) string {
 	return ""
 }
 
+// overrideKeyForRole maps a singular role constant to its role-level override
+// key, matching the keys used by DiscoverTargets and the hooks override files.
+// The polecat role keys off "polecats" (plural, the override-file convention);
+// boot and dog key off their own DiscoverTargets keys so a town can ship
+// boot.json / dog.json plugin overrides. An unknown role yields the empty key,
+// which ExpectedPlugins treats as "neutral default only".
+func overrideKeyForRole(role string) string {
+	switch role {
+	case constants.RolePolecat:
+		return "polecats"
+	case constants.RoleBoot:
+		return "boot"
+	case constants.RoleDog:
+		return "dog"
+	case constants.RoleWitness, constants.RoleRefinery, constants.RoleCrew,
+		constants.RoleMayor, constants.RoleDeacon:
+		return role
+	}
+	return ""
+}
+
 // installHookTo installs a hook to a specific worktree.
 func installHookTo(worktreePath string, hookDef HookDefinition, dryRun bool) error {
 	settingsPath := filepath.Join(worktreePath, ".claude", "settings.json")
@@ -292,10 +313,18 @@ func installHookTo(worktreePath string, hookDef HookDefinition, dryRun bool) err
 		settings.Hooks.AddEntry(hookDef.Event, entry)
 	}
 
-	// Ensure plugin defaults: fleet roles get all AIM plugins disabled to
-	// prevent OOM from MCP sidecar proliferation (see 2026-06-05 post-mortem).
+	// Ensure plugin defaults: the shared neutral default disables only the beads
+	// plugin; the town's on-disk override layer supplies any further policy
+	// (e.g. disabling AIM plugins to prevent the MCP-sidecar OOM documented in
+	// the 2026-06-05 post-mortem). Keyed by override target, so it applies to
+	// fleet and interactive roles alike. The install path has no rig context, so
+	// it resolves the role-level override key only.
 	role := inferRoleFromPath(worktreePath)
-	hooks.EnsurePluginDefaults(settings, role)
+	expectedPlugins, err := hooks.ExpectedPlugins(overrideKeyForRole(role))
+	if err != nil {
+		return fmt.Errorf("computing expected plugins: %w", err)
+	}
+	hooks.ApplyExpectedPlugins(settings, role, expectedPlugins)
 
 	// Pretty print relative path
 	relPath := worktreePath

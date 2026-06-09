@@ -158,7 +158,11 @@ func TestSyncTargetUnchanged(t *testing.T) {
 	// Apply the same managed defaults sync writes, so the on-disk file
 	// represents a genuinely in-sync state (otherwise the managed permission
 	// deny list registers as drift — see gu-5gj68).
-	hooks.EnsurePluginDefaults(&existing, "crew")
+	expectedPlugins, err := hooks.ExpectedPlugins("crew")
+	if err != nil {
+		t.Fatalf("ExpectedPlugins failed: %v", err)
+	}
+	hooks.ApplyExpectedPlugins(&existing, "crew", expectedPlugins)
 	hooks.EnsurePermissionDefaults(&existing, "crew")
 	data, marshalErr := hooks.MarshalSettings(&existing)
 	if marshalErr != nil {

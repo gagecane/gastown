@@ -290,6 +290,16 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 		return 0, fmt.Errorf("computing expected config: %w", err)
 	}
 
+	// Compute expected enabledPlugins for this target: the shared neutral
+	// default (beads disabled) plus the town's on-disk plugin overrides. This
+	// replaces the previously hardcoded AIM disable-list; a town that needs to
+	// disable AIM plugins (to avoid the MCP-sidecar OOM, see 2026-06-05
+	// post-mortem) ships them in ~/.gt/hooks-overrides/<target>.json.
+	expectedPlugins, err := hooks.ExpectedPlugins(target.Key)
+	if err != nil {
+		return 0, fmt.Errorf("computing expected plugins: %w", err)
+	}
+
 	// Load existing settings (returns zero-value if file doesn't exist)
 	current, err := hooks.LoadSettings(target.Path)
 	if err != nil {
@@ -302,9 +312,10 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 
 	// Compare hooks sections and the Claude startup defaults. Existing settings
 	// from older versions may have current hooks but still miss prompt defaults.
-	// Also check fleet plugin defaults — without these, agents inherit the user's
-	// global AIM plugins and OOM the host (see 2026-06-05 post-mortem).
-	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) && hooks.HasPluginDefaults(current, target.Role) && hooks.HasPermissionDefaults(current, target.Role) {
+	// Also check plugin defaults — without the town's plugin policy applied,
+	// agents inherit the user's global AIM plugins and OOM the host (see
+	// 2026-06-05 post-mortem).
+	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) && hooks.HasExpectedPlugins(current, target.Role, expectedPlugins) && hooks.HasPermissionDefaults(current, target.Role) {
 		return syncUnchanged, nil
 	}
 
@@ -318,9 +329,10 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	// Update hooks section, preserving all other fields (including unknown ones)
 	current.Hooks = *expected
 
-	// Ensure plugin defaults: fleet roles get all AIM plugins disabled to
-	// prevent OOM from MCP sidecar proliferation (see 2026-06-05 post-mortem).
-	hooks.EnsurePluginDefaults(current, target.Role)
+	// Apply plugin defaults: shared neutral default plus the town's on-disk
+	// plugin overrides (e.g. AIM disable-list to prevent MCP sidecar OOM, see
+	// 2026-06-05 post-mortem). Applies to fleet and interactive roles alike.
+	hooks.ApplyExpectedPlugins(current, target.Role, expectedPlugins)
 
 	// Ensure permission defaults: restore the role's safety-critical deny list
 	// (AskUserQuestion + Task tools) so it can no longer silently drift away

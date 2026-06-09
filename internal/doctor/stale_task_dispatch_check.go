@@ -145,10 +145,14 @@ func (c *StaleTaskDispatchCheck) Fix(ctx *CheckContext) error {
 
 		current.Hooks = *expected
 
-		if current.EnabledPlugins == nil {
-			current.EnabledPlugins = make(map[string]bool)
+		// Apply the town's plugin policy (shared neutral default + on-disk
+		// overrides), matching syncTarget so the fix fully converges.
+		expectedPlugins, err := hooks.ExpectedPlugins(target.Key)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.DisplayKey(), err))
+			continue
 		}
-		current.EnabledPlugins["beads@beads-marketplace"] = false
+		hooks.ApplyExpectedPlugins(current, target.Role, expectedPlugins)
 
 		claudeDir := filepath.Dir(target.Path)
 		if err := os.MkdirAll(claudeDir, 0755); err != nil {
