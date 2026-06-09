@@ -1578,6 +1578,21 @@ func rigFromBeadID(beadID string) string {
 	return beads.GetRigNameForPrefix(townRoot, prefix)
 }
 
+// rigFromBead resolves a bead's rig, honoring a 'gt:rig:<name>' label override
+// before falling back to ID-prefix resolution. The override is honored only
+// when <name> names a real rig in this town. This lets a cross-rig child of an
+// epic — whose ID prefix points at the epic's home rig — be staged onto the rig
+// its deliverable actually lives in, so the mountain dispatches it there rather
+// than to the epic's home rig (gs-8h8j).
+func rigFromBead(beadID string, labels []string) string {
+	if want := beads.RigFromLabels(labels); want != "" {
+		if townRoot, err := workspace.FindFromCwd(); err == nil && beads.IsKnownRig(townRoot, want) {
+			return want
+		}
+	}
+	return rigFromBeadID(beadID)
+}
+
 // beadsDirForID resolves the .beads directory that owns a given bead ID by
 // looking up its prefix in routes.jsonl. This is needed for CWD-sensitive bd
 // commands like `bd list --parent=` which only search the local database.
@@ -1647,7 +1662,7 @@ func collectEpicBeads(epicID string) ([]BeadInfo, []DepInfo, error) {
 			Title:  current.Title,
 			Type:   current.IssueType,
 			Status: current.Status,
-			Rig:    rigFromBeadID(current.ID),
+			Rig:    rigFromBead(current.ID, current.Labels),
 		})
 
 		// Fetch deps for this bead.
@@ -1695,7 +1710,7 @@ func collectTaskListBeads(taskIDs []string) ([]BeadInfo, []DepInfo, error) {
 			Title:  result.Title,
 			Type:   result.IssueType,
 			Status: result.Status,
-			Rig:    rigFromBeadID(result.ID),
+			Rig:    rigFromBead(result.ID, result.Labels),
 		})
 
 		// Fetch deps.

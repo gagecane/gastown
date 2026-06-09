@@ -412,6 +412,34 @@ func FormulaFromLabels(labels []string) string {
 	return ""
 }
 
+// RigLabelPrefix declares the rig a bead MUST be dispatched to, as a
+// machine-readable label 'gt:rig:<rig-name>' (e.g. 'gt:rig:lia-health-iac').
+// It is the first-class carrier for cross-rig dispatch intent.
+//
+// gs-8h8j: a cross-rig epic's children share the epic's ID prefix (e.g.
+// 'lb-1tee.9' inherits 'lb-'), so prefix-based rig resolution dispatches every
+// child to the epic's home rig — even children whose deliverable lives in a
+// different repo/rig. Those mis-routed children land on one-repo-bound polecats
+// that can't do the work and close no-changes + escalate. This label lets the
+// epic author (or operator) stamp a child with the rig its deliverable actually
+// lives in; the override outranks prefix resolution but never an explicit
+// --rig/sling target. Mirrors FormulaLabelPrefix: labels have no TTL, survive
+// arbitrarily long blockers, and are never auto-written by the dispatch path.
+const RigLabelPrefix = "gt:rig:"
+
+// RigFromLabels returns the rig declared by a 'gt:rig:<name>' label, or "" if
+// none is present. The first such label wins (a bead should carry at most one).
+// The returned value is the raw rig segment; callers verify it names a real rig
+// before applying it (an unknown rig falls back to prefix resolution).
+func RigFromLabels(labels []string) string {
+	for _, l := range labels {
+		if r, ok := strings.CutPrefix(l, RigLabelPrefix); ok && r != "" {
+			return r
+		}
+	}
+	return ""
+}
+
 // Issue represents a beads issue.
 type Issue struct {
 	ID          string   `json:"id"`

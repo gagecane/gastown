@@ -1182,6 +1182,34 @@ func TestFormulaFromLabels(t *testing.T) {
 	}
 }
 
+func TestRigFromLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"nil labels", nil, ""},
+		{"empty labels", []string{}, ""},
+		{"no rig label", []string{"bug", "p2"}, ""},
+		{"single rig label", []string{"gt:rig:lia-health-iac"}, "lia-health-iac"},
+		{"rig label mixed with others", []string{"bug", "gt:rig:gastown", "p2"}, "gastown"},
+		// Empty-suffix label is malformed — ignore it.
+		{"empty suffix ignored", []string{"gt:rig:"}, ""},
+		// First valid label wins when (malformed) duplicates exist.
+		{"first valid wins", []string{"gt:rig:", "gt:rig:rig-a", "gt:rig:rig-b"}, "rig-a"},
+		// Must not match the formula or wrong-rig prefixes.
+		{"formula label ignored", []string{"gt:formula:mol-evolve", "wrong-rig:foo"}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RigFromLabels(tt.labels); got != tt.want {
+				t.Errorf("RigFromLabels(%v) = %q, want %q", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 	bdAllowStaleMu.Lock()
 	prevPath := bdAllowStalePath

@@ -75,7 +75,7 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 			continue
 		}
 
-		rigName := resolveRigForBead(townRoot, t.ID)
+		rigName := resolveRigForBeadWithLabels(townRoot, t.ID, t.Labels)
 		if rigName == "" {
 			skippedNoRig++
 			prefix := beads.ExtractPrefix(t.ID)
@@ -191,7 +191,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 			skippedAssigned++
 			continue
 		}
-		rigName := resolveRigForBead(townRoot, t.ID)
+		rigName := resolveRigForBeadWithLabels(townRoot, t.ID, t.Labels)
 		if rigName == "" {
 			skippedNoRig++
 			prefix := beads.ExtractPrefix(t.ID)

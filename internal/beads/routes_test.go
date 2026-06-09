@@ -145,6 +145,51 @@ func TestGetRigPathForPrefix(t *testing.T) {
 	}
 }
 
+func TestIsKnownRig(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	routesContent := `{"prefix": "ap-", "path": "ai_platform/mayor/rig"}
+{"prefix": "gt-", "path": "gastown/mayor/rig"}
+{"prefix": "hq-", "path": "."}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		rigName string
+		want    bool
+	}{
+		{"gastown", true},
+		{"ai_platform", true},
+		{"unknown_rig", false},
+		{"", false},
+		// Town-level route (path ".") names no rig.
+		{".", false},
+		// Must match the first path segment exactly, not a substring.
+		{"mayor", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.rigName, func(t *testing.T) {
+			if got := IsKnownRig(tmpDir, tc.rigName); got != tc.want {
+				t.Errorf("IsKnownRig(%q, %q) = %v, want %v", tmpDir, tc.rigName, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsKnownRig_NoRoutesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	if IsKnownRig(tmpDir, "gastown") {
+		t.Errorf("Expected false when no routes file")
+	}
+}
+
 func TestGetRigPathForPrefix_NoRoutesFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	// No routes.jsonl file
