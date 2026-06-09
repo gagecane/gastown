@@ -89,7 +89,15 @@ var nudgeCmd = &cobra.Command{
 	Use:         "nudge <target> [message]",
 	GroupID:     GroupComm,
 	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
-	Short:       "Send a synchronous message to any Gas Town worker",
+	// SilenceUsage prevents Cobra from dumping the full usage/flags block when
+	// runNudge returns a runtime error (unresolved target, rig-not-found,
+	// session-missing, DND, etc.). Without it, every genuine delivery failure
+	// buried its real error message under a usage dump — which read as "nudge
+	// rejected my valid invocation and printed usage instead of sending" and
+	// intermittently broke agent-to-agent comms. The error itself is already
+	// printed by Cobra; we only suppress the misleading usage block. (gu-6p3m9)
+	SilenceUsage: true,
+	Short:        "Send a synchronous message to any Gas Town worker",
 	Long: `Universal messaging API for Gas Town worker-to-worker communication.
 
 Delivers a message to any worker's Claude Code session: polecats, crew,
