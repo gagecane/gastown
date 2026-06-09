@@ -38,7 +38,10 @@ type StaleRigAgentResult struct {
 	// "skip-cooldown" when the condition was already reported recently and has
 	// not materially changed (gu-z8qzq dedup), "skip-correlated" when the alarm
 	// folded into another rig's concurrent STALE_RIG_AGENT escalation for the
-	// same town-wide root cause (gu-nejgh), etc.
+	// same town-wide root cause (gu-nejgh), "skip-idle-empty-mq" when a
+	// refinery's heartbeat is stale but its session is alive and its merge
+	// queue is empty — a harmlessly-idle refinery, not a wedged one (gs-ecdg),
+	// etc.
 	Action string
 	// CorrelatedInto is the lead agent's "rig/session" key when Action is
 	// "skip-correlated" — the escalation thread this alarm folded into. Empty
@@ -58,6 +61,16 @@ type DetectStaleRigAgentHeartbeatsResult struct {
 	Checked int
 	Stale   []StaleRigAgentResult
 	Errors  []error
+}
+
+// MergeQueueProber reports the number of actionable (open, unblocked) merge
+// requests in a rig's merge queue. The refinery staleness check (gs-ecdg) uses
+// it to distinguish a harmlessly-idle refinery (empty queue — nothing to merge,
+// so it legitimately stops touching its heartbeat) from a genuinely wedged one
+// (queue non-empty but not draining — the gu-rh0g signature). A nil prober
+// disables the check: every stale refinery escalates, the pre-gs-ecdg behavior.
+type MergeQueueProber interface {
+	PendingMergeRequestCount(rigName string) (int, error)
 }
 
 // DetectStaleRigAgentHeartbeats scans the rig's refinery and witness heartbeat
@@ -117,7 +130,19 @@ type DetectStaleRigAgentHeartbeatsResult struct {
 // (rig,session) that escalates inside the window folds into the lead's thread
 // with Action="skip-correlated" and no mail. correlationWindow<=0 disables
 // correlation (every agent sends), the operator opt-out.
-func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration, selfSession string, notifyCooldown, correlationWindow time.Duration) *DetectStaleRigAgentHeartbeatsResult {
+//
+// Idle refinery suppression (gs-ecdg): an idle refinery whose merge queue is
+// persistently empty stops refreshing its heartbeat — its patrol loop only
+// wakes on MQ activity, so after hours of an empty queue the heartbeat ages
+// past threshold even though the refinery is healthy (just idle-quiet). That
+// produced recurring FALSE STALE_RIG_AGENT escalations to mayor. When mqProber
+// is non-nil and reports the rig's queue empty for an ALIVE refinery, the stale
+// heartbeat is suppressed (Action="skip-idle-empty-mq"). The detector still
+// escalates a stale refinery whose session is DEAD (supervisor missed a
+// restart) or whose queue is NON-empty (real wedge: work waiting, not
+// draining). A nil prober disables suppression. The witness candidate is never
+// suppressed — it has no merge queue and a wedged witness is always actionable.
+func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router, staleThreshold time.Duration, selfSession string, notifyCooldown, correlationWindow time.Duration, mqProber MergeQueueProber) *DetectStaleRigAgentHeartbeatsResult {
 	result := &DetectStaleRigAgentHeartbeatsResult{}
 
 	if staleThreshold <= 0 {
@@ -199,6 +224,24 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 			item.Action = "skip-fresh"
 			result.Stale = append(result.Stale, item)
 			continue
+		}
+
+		// Idle refinery suppression (gs-ecdg): a refinery whose merge queue is
+		// empty legitimately stops refreshing its heartbeat when idle — its
+		// patrol loop only wakes on MQ activity. When the session is ALIVE and
+		// the rig's queue has no actionable MRs, a stale heartbeat is a FALSE
+		// alarm: there is nothing to merge, so "idle-quiet" is healthy, not
+		// wedged. Suppress it. We still escalate when the session is dead
+		// (handled below — SessionAlive is false) or the queue is non-empty
+		// (the gu-rh0g signature: work waiting, refinery not draining it). A
+		// query error falls through to escalate — never suppress a potential
+		// wedge on a transient signal failure.
+		if c.role == "refinery" && item.SessionAlive && mqProber != nil {
+			if pending, probeErr := mqProber.PendingMergeRequestCount(rigName); probeErr == nil && pending == 0 {
+				item.Action = "skip-idle-empty-mq"
+				result.Stale = append(result.Stale, item)
+				continue
+			}
 		}
 
 		// Heartbeat exceeds threshold. Escalate regardless of session state:

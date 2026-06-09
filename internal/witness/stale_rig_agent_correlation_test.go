@@ -138,14 +138,14 @@ func TestDetectStaleRigAgentHeartbeats_CrossRigCorrelation(t *testing.T) {
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefixB), 30*time.Second)
 
 	// rigA scans first — its refinery leads and escalates.
-	resA := DetectStaleRigAgentHeartbeats(townRoot, "rigA", nil, time.Hour, "", 30*time.Minute, 15*time.Minute)
+	resA := DetectStaleRigAgentHeartbeats(townRoot, "rigA", nil, time.Hour, "", 30*time.Minute, 15*time.Minute, nil)
 	refA := findStaleResult(resA, "refinery")
 	if refA == nil || refA.Action != "escalated" {
 		t.Fatalf("rigA refinery Action = %v, want escalated", refA)
 	}
 
 	// rigB scans within the window — its refinery folds into rigA's thread.
-	resB := DetectStaleRigAgentHeartbeats(townRoot, "rigB", nil, time.Hour, "", 30*time.Minute, 15*time.Minute)
+	resB := DetectStaleRigAgentHeartbeats(townRoot, "rigB", nil, time.Hour, "", 30*time.Minute, 15*time.Minute, nil)
 	refB := findStaleResult(resB, "refinery")
 	if refB == nil || refB.Action != "skip-correlated" {
 		t.Fatalf("rigB refinery Action = %v, want skip-correlated", refB)
@@ -174,8 +174,8 @@ func TestDetectStaleRigAgentHeartbeats_CorrelationDisabledBothEscalate(t *testin
 	writeRigAgentHeartbeat(t, townRoot, session.RefinerySessionName(prefixB), 2*time.Hour)
 	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefixB), 30*time.Second)
 
-	resA := DetectStaleRigAgentHeartbeats(townRoot, "rigA", nil, time.Hour, "", 30*time.Minute, 0)
-	resB := DetectStaleRigAgentHeartbeats(townRoot, "rigB", nil, time.Hour, "", 30*time.Minute, 0)
+	resA := DetectStaleRigAgentHeartbeats(townRoot, "rigA", nil, time.Hour, "", 30*time.Minute, 0, nil)
+	resB := DetectStaleRigAgentHeartbeats(townRoot, "rigB", nil, time.Hour, "", 30*time.Minute, 0, nil)
 
 	if r := findStaleResult(resA, "refinery"); r == nil || r.Action != "escalated" {
 		t.Fatalf("rigA refinery Action = %v, want escalated (correlation disabled)", r)

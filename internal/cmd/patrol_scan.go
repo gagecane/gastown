@@ -8,12 +8,36 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// refineryMQProber adapts a rig's beads handle to witness.MergeQueueProber.
+// It reuses pendingMRsForRig so the merge-queue rig-scoping logic stays
+// single-sourced with the queue-scan verification gate (gu-6hzv). Used by the
+// stale-rig-agent scan to suppress false STALE_RIG_AGENT escalations for an
+// idle refinery whose queue is empty (gs-ecdg).
+type refineryMQProber struct {
+	lister mrLister
+}
+
+// PendingMergeRequestCount returns the number of actionable (open, unblocked)
+// MRs in the rig's merge queue.
+func (p refineryMQProber) PendingMergeRequestCount(rigName string) (int, error) {
+	issues, err := p.lister.ListMergeRequests(beads.ListOptions{
+		Label:    "gt:merge-request",
+		Status:   "open",
+		Priority: -1,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(pendingMRsForRig(issues, rigName)), nil
+}
 
 var (
 	patrolScanJSON    bool
@@ -265,7 +289,17 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	staleAgentCorrelationWindow := witnessCfg.StaleRigAgentCorrelationWindowD()
 	// Pass $GT_SESSION so the detector never escalates the scanning agent's
 	// own heartbeat — the self-amplifying STALE_RIG_AGENT flood guard (gu-vqmmp).
-	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold, os.Getenv("GT_SESSION"), staleAgentCooldown, staleAgentCorrelationWindow)
+	//
+	// Build a merge-queue prober so the detector can suppress false
+	// STALE_RIG_AGENT escalations for an idle refinery whose queue is empty
+	// (gs-ecdg). The MRs live in the rig's beads DB (typically a redirect to
+	// mayor/rig/.beads), so query that, not the town root. If the rig can't be
+	// resolved, leave the prober nil — the detector then escalates as before.
+	var mqProber witness.MergeQueueProber
+	if _, r, rigErr := getRig(rigName); rigErr == nil && r != nil {
+		mqProber = refineryMQProber{lister: beads.New(r.BeadsPath())}
+	}
+	staleAgentResult := witness.DetectStaleRigAgentHeartbeats(workDir, rigName, router, staleAgentThreshold, os.Getenv("GT_SESSION"), staleAgentCooldown, staleAgentCorrelationWindow, mqProber)
 
 	// False-deferred bead recovery (gu-wykt). Beads that are status=deferred
 	// but whose work has shipped on origin/<default> with a commit citing the
