@@ -32,11 +32,10 @@ func TestBuildBdInitArgs_AlwaysIncludesServerPort(t *testing.T) {
 	if args[5] != "3307" {
 		t.Fatalf("expected default port 3307, got %q", args[5])
 	}
-	// --force is required on bd >= 1.0.0 so init reliably persists issue_prefix
-	// when a server-side Dolt database already exists (see upstream 84594d11).
-	// Assert its positional location to catch accidental reordering/removal.
-	if args[6] != "--force" {
-		t.Fatalf("expected args[6] = --force, got %q", args[6])
+	// --reinit-local replaces the deprecated --force (bd >= 1.0.5) so init
+	// re-initializes when a server-side Dolt database already exists.
+	if args[6] != "--reinit-local" {
+		t.Fatalf("expected args[6] = --reinit-local, got %q", args[6])
 	}
 }
 

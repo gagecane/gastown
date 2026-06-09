@@ -361,6 +361,16 @@ func runInstall(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("initializing HQ Dolt database: %w", err)
 			}
 
+			// Commit the Dolt working set so bd init's schema migration does not
+			// see "dirty tables" left by InitRig/EnsureRigIssuePrefix. Without
+			// this, bd >= 1.0.5 refuses to migrate pre-existing uncommitted tables.
+			hqDBDir := filepath.Join(absPath, ".dolt-data", "hq")
+			if err := doltserver.CommitWorkingSet(hqDBDir); err != nil {
+				// Non-fatal: if nothing to commit or dir doesn't exist yet, that's fine.
+				// Only warn so we don't block install on edge cases.
+				fmt.Fprintf(os.Stderr, "Warning: could not commit HQ working set: %v\n", err)
+			}
+
 			// Start the Dolt server — bd commands need a running server.
 			// The server stays running after install (it's lightweight infrastructure,
 			// like a database). Stop it with 'gt dolt stop' when not needed.
@@ -662,14 +672,13 @@ Your role is set by the GT_ROLE environment variable and injected by ` + "`" + c
 // buildBdInitArgs returns the arguments for `bd init` including the correct
 // --server-port derived from the town's Dolt configuration.
 //
-// --force is required on bd >= 1.0.0: without it, `bd init` silently no-ops
-// when the server-side Dolt database already exists (e.g., from a previous
-// failed install or a parallel polecat setup), leaving issue_prefix unset on
-// the server-side DB. See upstream commit 84594d11 (bd 1.0+ compat).
+// --reinit-local re-initializes a database that already exists on the server
+// (e.g., from InitRig's offline dolt init or a previous partial install).
+// This replaced --force which bd >= 1.0.5 deprecated.
 func buildBdInitArgs(townPath string) []string {
 	cfg := doltserver.DefaultConfig(townPath)
 	return []string{"init", "--prefix", "hq", "--server",
-		"--server-port", strconv.Itoa(cfg.Port), "--force"}
+		"--server-port", strconv.Itoa(cfg.Port), "--reinit-local"}
 }
 
 // initTownBeads initializes town-level beads database using bd init.
