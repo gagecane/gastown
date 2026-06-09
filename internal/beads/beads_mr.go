@@ -116,3 +116,31 @@ func MatchesMRSourceIssue(description, issueID string) bool {
 	needle := "source_issue: " + issueID + "\n"
 	return strings.Contains(description, needle)
 }
+
+// RepointSupersededMRAgent re-points the agent bead that owns oldMR so its
+// active_mr references newMRID — the MR that supersedes oldMR.
+//
+// When a polecat's MR is superseded (a re-submission for the same source issue
+// closes the prior MR), the superseded MR's owning agent bead is left with
+// active_mr pointing at the now-CLOSED MR. The polecat that created it has
+// usually exited, so that agent bead is dead. The post-merge orphan reconcile
+// (gu-7igu8) keys off active_mr being proven-MERGED to complete the close; a
+// superseded MR never merges, so the reconcile never fires for that agent bead
+// and `gt polecat nuke` refuses (active_mr=closed superseded MR but the source
+// bead is still HOOKED), forcing manual recovery on every multi-MR swarm
+// (gs-stvm). Re-pointing active_mr at the live superseding MR lets the reconcile
+// and nuke follow the MR that actually merges.
+//
+// No-op when oldMR is nil or carries no agent_bead field (nothing to re-point).
+// Agent beads live in the town/HQ database, so the update routes through
+// ForAgentBead regardless of which rig the MR bead lives in.
+func (b *Beads) RepointSupersededMRAgent(oldMR *Issue, newMRID string) error {
+	if oldMR == nil {
+		return nil
+	}
+	fields := ParseMRFields(oldMR)
+	if fields == nil || fields.AgentBead == "" {
+		return nil
+	}
+	return b.ForAgentBead().UpdateAgentActiveMR(fields.AgentBead, newMRID)
+}

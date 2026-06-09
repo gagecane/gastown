@@ -2185,6 +2185,15 @@ func submitToMergeQueue(p mrSubmitParams) (mrID string, mrFailed bool) {
 						continue
 					}
 					fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
+
+					// gs-stvm: re-point the superseded MR's owning agent bead to the
+					// new MR. Otherwise that (usually dead) polecat's agent bead keeps
+					// active_mr pointing at this now-CLOSED MR; the post-merge orphan
+					// reconcile never fires for it and `gt polecat nuke` refuses,
+					// leaving the slot stuck until manual recovery.
+					if repointErr := p.bd.RepointSupersededMRAgent(old, mrID); repointErr != nil {
+						style.PrintWarning("could not re-point superseded MR %s agent bead: %v", old.ID, repointErr)
+					}
 				}
 			}
 		}

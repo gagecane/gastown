@@ -447,6 +447,13 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 					}
 					fmt.Printf("  %s Superseded old MR: %s\n", style.Dim.Render("○"), old.ID)
 
+					// gs-stvm: re-point the superseded MR's owning agent bead to the
+					// new MR so the post-merge orphan reconcile and `gt polecat nuke`
+					// follow the MR that actually merges instead of this closed one.
+					if repointErr := bd.RepointSupersededMRAgent(old, mrIssue.ID); repointErr != nil {
+						style.PrintWarning("could not re-point superseded MR %s agent bead: %v", old.ID, repointErr)
+					}
+
 					// Delete the old remote branch to auto-close the GitHub PR.
 					// Only polecat branches — non-polecat branches may belong to
 					// contributor forks; deleting them closes upstream PRs. (GH#2669)
