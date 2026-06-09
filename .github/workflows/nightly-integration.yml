@@ -12,7 +12,7 @@ jobs:
   integration-full:
     name: Full Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -61,4 +61,9 @@ jobs:
         run: go build -v ./cmd/gt
 
       - name: Run all integration tests
-        run: gotestsum --format testname --junitfile junit.xml -- -v -tags=integration -timeout=20m ./...
+        # internal/cmd is the long pole: its ~27 Dolt-backed TestScheduler*
+        # integration tests run serially at 30-50s each (daemon poll cycles),
+        # so the package binary alone needs ~35m. The previous 20m per-package
+        # timeout killed it mid-run (gs-8zeq). 40m gives headroom; the job-level
+        # timeout-minutes above bounds total wall-clock.
+        run: gotestsum --format testname --junitfile junit.xml -- -v -tags=integration -timeout=40m ./...
