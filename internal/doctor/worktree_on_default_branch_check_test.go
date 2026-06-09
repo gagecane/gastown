@@ -143,6 +143,30 @@ func TestWorktreeOnDefaultBranchCheck_DeaconDogOnMainline_Warning(t *testing.T) 
 	}
 }
 
+// TestWorktreeOnDefaultBranchCheck_SymlinkedTownRoot_OK reproduces the bug
+// where a symlinked town root (e.g. /home -> /local/home) caused every
+// refinery/rig worktree to be falsely flagged. `git worktree list` reports
+// symlink-resolved paths while the allow-list derived from ctx.TownRoot was
+// unresolved, so the string compare never matched. The check must still pass
+// when only refinery/rig is on the default branch, even via a symlinked root.
+func TestWorktreeOnDefaultBranchCheck_SymlinkedTownRoot_OK(t *testing.T) {
+	realRoot, _, _ := setupRigWithBareRepoAndRefinery(t, "mainline")
+
+	// Create a sibling symlink pointing at the real town root, mimicking the
+	// /home -> /local/home topology, and run the check through the symlink.
+	linkRoot := filepath.Join(t.TempDir(), "town-link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	check := NewWorktreeOnDefaultBranchCheck()
+	result := check.Run(&CheckContext{TownRoot: linkRoot})
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK for refinery-only via symlinked town root, got %v: %s\nDetails: %v",
+			result.Status, result.Message, result.Details)
+	}
+}
+
 func TestIsAllowedDefaultBranchWorktree(t *testing.T) {
 	rigPath := "/gt/myrig"
 	tests := []struct {

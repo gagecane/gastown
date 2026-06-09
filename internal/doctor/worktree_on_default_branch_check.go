@@ -137,13 +137,17 @@ func (c *WorktreeOnDefaultBranchCheck) Run(ctx *CheckContext) *CheckResult {
 // isAllowedDefaultBranchWorktree returns true if the given worktree path is
 // an intentional consumer of the default branch (refinery/rig or mayor/rig).
 func isAllowedDefaultBranchWorktree(rigPath, worktreePath string) bool {
-	// Normalize paths for comparison. Using EvalSymlinks would be nicer but
-	// is unnecessarily expensive here; string prefix matches are fine because
-	// these paths are controlled by gt itself.
-	wt := filepath.Clean(worktreePath)
+	// `git worktree list` always reports symlink-resolved paths (e.g.
+	// /local/home/...), whereas rigPath derives from ctx.TownRoot, which can
+	// be an unresolved symlink (e.g. /home/... when /home is symlinked to
+	// /local/home). A plain string compare then never matches and every
+	// refinery/rig worktree is falsely flagged. Resolve symlinks on both
+	// sides before comparing. Cost is negligible (a few stat calls per
+	// worktree inside a diagnostic command).
+	wt := resolveSymlinksOrClean(worktreePath)
 	allowed := []string{
-		filepath.Clean(filepath.Join(rigPath, "refinery", "rig")),
-		filepath.Clean(filepath.Join(rigPath, "mayor", "rig")),
+		resolveSymlinksOrClean(filepath.Join(rigPath, "refinery", "rig")),
+		resolveSymlinksOrClean(filepath.Join(rigPath, "mayor", "rig")),
 	}
 	for _, a := range allowed {
 		if wt == a {
@@ -151,6 +155,19 @@ func isAllowedDefaultBranchWorktree(rigPath, worktreePath string) bool {
 		}
 	}
 	return false
+}
+
+// resolveSymlinksOrClean returns the symlink-resolved absolute path, falling
+// back to filepath.Clean when the path cannot be resolved (e.g. it does not
+// exist on disk, as in unit tests using synthetic paths).
+func resolveSymlinksOrClean(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
 }
 
 // resolveRigDefaultBranch returns the rig's default branch, trying:
