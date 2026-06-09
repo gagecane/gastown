@@ -898,6 +898,81 @@ func TestCloneBareHasOriginRefs(t *testing.T) {
 	}
 }
 
+// TestEnsureFullFetchRefspec verifies that after a single-branch clone of a
+// non-main default branch (which leaves a narrow remote.origin.fetch refspec so
+// origin/main does not resolve), EnsureFullFetchRefspec widens the refspec and
+// fetches origin/* so origin/main resolves. This reproduces the gs-9bh0 bug
+// where crew checkouts provisioned on a non-main default branch broke any
+// tooling that assumes origin/main.
+func TestEnsureFullFetchRefspec(t *testing.T) {
+	tmp := t.TempDir()
+
+	remoteDir := filepath.Join(tmp, "remote")
+	if err := os.MkdirAll(remoteDir, 0755); err != nil {
+		t.Fatalf("mkdir remote: %v", err)
+	}
+	runGit := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit(remoteDir, "init")
+	runGit(remoteDir, "config", "user.email", "test@test.com")
+	runGit(remoteDir, "config", "user.name", "Test User")
+	runGit(remoteDir, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(remoteDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGit(remoteDir, "add", ".")
+	runGit(remoteDir, "commit", "-m", "initial")
+
+	// Create a non-main default branch and make it the remote's HEAD, mirroring
+	// a rig whose default_branch is not main.
+	runGit(remoteDir, "checkout", "-b", "feature/default")
+	if err := os.WriteFile(filepath.Join(remoteDir, "FEATURE.md"), []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGit(remoteDir, "add", ".")
+	runGit(remoteDir, "commit", "-m", "feature")
+	runGit(remoteDir, "symbolic-ref", "HEAD", "refs/heads/feature/default")
+
+	// Single-branch clone of the non-main default branch (what CloneBranch does
+	// for crew provisioning).
+	cloneDir := filepath.Join(tmp, "clone")
+	g := NewGit(tmp)
+	if err := g.CloneBranch(remoteDir, cloneDir, "feature/default"); err != nil {
+		t.Fatalf("CloneBranch: %v", err)
+	}
+
+	cloneGit := NewGit(cloneDir)
+
+	// Precondition: origin/main must NOT resolve yet (narrow refspec).
+	if _, err := cloneGit.run("rev-parse", "--verify", "--quiet", "origin/main"); err == nil {
+		t.Fatal("precondition violated: origin/main should not resolve after single-branch clone")
+	}
+
+	// Apply the fix.
+	if err := cloneGit.EnsureFullFetchRefspec(); err != nil {
+		t.Fatalf("EnsureFullFetchRefspec: %v", err)
+	}
+
+	// origin/main must now resolve.
+	if _, err := cloneGit.run("rev-parse", "--verify", "--quiet", "origin/main"); err != nil {
+		t.Errorf("origin/main should resolve after EnsureFullFetchRefspec: %v", err)
+	}
+
+	// The refspec should now be the standard wide form.
+	out, err := cloneGit.run("config", "--get", "remote.origin.fetch")
+	if err != nil {
+		t.Fatalf("reading refspec: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "+refs/heads/*:refs/remotes/origin/*" {
+		t.Errorf("refspec = %q, want +refs/heads/*:refs/remotes/origin/*", got)
+	}
+}
+
 func TestCloneBareEmptyRepoSkipsMissingHeadFetch(t *testing.T) {
 	tmp := t.TempDir()
 	remoteDir := filepath.Join(tmp, "remote")
