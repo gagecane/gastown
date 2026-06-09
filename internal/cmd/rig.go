@@ -448,7 +448,10 @@ func checkUncommittedWork(r *rig.Rig, rigName, operation string, force bool) (pr
 			}{p.Name, fmt.Errorf("no status returned")})
 			continue
 		}
-		if !status.Clean() {
+		// gu-oi0al: agent runtime state (.beads/, .claude/, .runtime/, etc.) is
+		// regenerated on demand and does not represent work-in-progress at risk
+		// across a reboot. Skip polecats whose only "dirt" is runtime artifacts.
+		if !status.CleanForShutdown() {
 			problemPolecats = append(problemPolecats, struct {
 				name   string
 				status *git.UncommittedWorkStatus
@@ -463,7 +466,7 @@ func checkUncommittedWork(r *rig.Rig, rigName, operation string, force bool) (pr
 		fmt.Printf("\n%s Cannot %s %s - polecats have uncommitted work:\n",
 			style.Warning.Render("⚠"), operation, rigName)
 		for _, pp := range problemPolecats {
-			fmt.Printf("  %s: %s\n", style.Bold.Render(pp.name), pp.status.String())
+			fmt.Printf("  %s: %s\n", style.Bold.Render(pp.name), pp.status.BlockingSummary())
 		}
 	}
 	if len(checkErrors) > 0 {

@@ -5,14 +5,21 @@
 // idle. Each transition is CAS-protected via TransitionTo and
 // recorded as a SyncAttempt entry on the per-rig state bead.
 //
-// Phase 4 (gu-g5gh) extends the conflict path: when a fast-forward
-// is not possible, we run the complexity gate (file/hunk thresholds
+// Phase 4 (gu-g5gh) extends the conflict path: when a merge has real
+// conflicts, we run the complexity gate (file/hunk thresholds
 // + restricted-path allowlist), and either dispatch a polecat for
 // autonomous resolution (StateChecking → StateResolving + work bead)
 // or escalate to a human (StateFailed with structured reason). After
 // any failure path, the circuit breaker is consulted: if N consecutive
 // failures have accumulated, the rig auto-pauses (StateFailed →
 // StatePaused) so polecat slots aren't burned retrying a wedged sync.
+//
+// gu-oedcu (2026-06-09): the clean non-FF case is now automated. When
+// origin/main has commits upstream lacks AND a `git merge upstream/main`
+// would be conflict-free (the common fork-divergent shape), this verb
+// performs a real `git merge --no-ff` instead of bailing, runs gates,
+// and pushes — closing the loop the bead `[fork-sync]` tracking
+// described.
 //
 // The --dry-run flag short-circuits before any git ops: it prints
 // the current divergence and what would happen, leaving the state
@@ -52,10 +59,16 @@ var upstreamSyncCmd = &cobra.Command{
 	Long: `Trigger an immediate upstream-sync cycle for a rig: fetch upstream,
 merge into the target branch, run the configured gate suite, and push.
 
-Phase 2 only handles the fast-path (no conflicts). On conflict the cycle
-transitions to FAILED with the conflicting files recorded on the state
-bead — an operator must resolve manually until Phase 3 wires polecat
-dispatch into the deacon patrol.
+Three merge cases are handled automatically:
+
+  1. Fast-forward — origin/main is an ancestor of upstream/main.
+     git merge --ff-only.
+  2. Non-FF but clean — fork has divergent commits upstream lacks but
+     no real conflicts (the common fork-divergent case). Performs a
+     real git merge --no-ff upstream/main commit, then runs gates +
+     push exactly like the FF case.
+  3. Non-FF with conflicts — dispatches a polecat for autonomous
+     resolution when the conflict is resolvable, escalates otherwise.
 
 Examples:
 
@@ -184,40 +197,83 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(5)
 	}
 
-	// Determine merge strategy. Fast-forward is the happy path.
+	// Pick a merge strategy. Three cases (gu-oedcu):
+	//
+	//  1. Fast-forward possible — origin/main is an ancestor of
+	//     upstream/main. Existing FF path.
+	//  2. Non-FF but CLEAN — fork has divergent commits but no real
+	//     conflicts (the common fork-divergent case the bead describes:
+	//     origin has commits upstream lacks; a real `git merge` would
+	//     succeed). Perform `git merge --no-ff upstream/main` then run
+	//     gates + push exactly like the FF path. This is the path that
+	//     was previously rejected with "manual review required" — turning
+	//     it into the routine automated case is the whole point of this
+	//     change.
+	//  3. Non-FF with conflicts — hand off via the existing
+	//     complexity-gated polecat-dispatch path (handleMergeConflict).
 	canFastForward := isAncestor(gitDir, targetRef, upstreamRef)
 	if !canFastForward {
-		// Phase 4: detect conflicts, evaluate complexity, and either
-		// dispatch a polecat (resolvable) or escalate (restricted /
-		// too complex). All failure paths consult the circuit breaker
-		// before returning so a wedged rig auto-pauses.
-		exitCode := handleNonFastForward(
-			cmd, bd, rigPrefix, rigName, gitDir, syncCfg, &attempt,
-			upstreamRef, targetRef)
-		// Skip the breaker check when the dispatch path took us to
-		// StateResolving (exitCode==0) — only attempt-failure paths trip.
-		if exitCode != 0 {
+		// Probe conflicts non-destructively before deciding whether
+		// this is case 2 (clean merge — automate) or case 3 (real
+		// conflicts — dispatch).
+		report, derr := upstreamsync.DetectConflicts(gitDir, targetRef, upstreamRef)
+		if derr != nil {
+			attempt.Outcome = "conflict-detect-error"
+			attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			attempt.Conflicts = []string{fmt.Sprintf("conflict detection failed: %v", derr)}
+			_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
+			fmt.Fprintf(stderr, "gt upstream sync: cannot detect conflicts: %v\n", derr)
 			maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
+			return NewSilentExit(6)
 		}
-		if exitCode == 0 {
+
+		if !report.IsClean() {
+			// Case 3: real conflicts. Existing complexity-gated path
+			// dispatches a polecat or escalates. All failure paths
+			// consult the circuit breaker before returning so a
+			// wedged rig auto-pauses. Skip the breaker check when
+			// dispatch took us to StateResolving (exitCode==0) —
+			// only attempt-failure paths trip.
+			exitCode := handleMergeConflict(
+				cmd, bd, rigPrefix, rigName, syncCfg, &attempt, report)
+			if exitCode != 0 {
+				maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
+				return NewSilentExit(exitCode)
+			}
 			return nil
 		}
-		return NewSilentExit(exitCode)
-	}
 
-	// Transition checking → syncing.
-	if err := transitionWithAttempt(bd, rigPrefix, upstreamsync.StateSyncing, &attempt); err != nil {
-		return fmt.Errorf("transition to syncing: %w", err)
-	}
-
-	fmt.Fprintf(stdout, "Fast-forwarding %s to %s...\n", targetRef, shortSHA(upstreamSHA))
-	if err := gitFastForward(gitDir, syncCfg); err != nil {
-		attempt.Outcome = "error"
-		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-		_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
-		fmt.Fprintf(stderr, "gt upstream sync: fast-forward failed: %v\n", err)
-		maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
-		return NewSilentExit(7)
+		// Case 2: clean non-FF merge. Record the actual strategy on
+		// the attempt so `gt upstream history` can distinguish a
+		// fork-sync merge commit from a fast-forward. Then transition
+		// to syncing and perform the real `git merge --no-ff`.
+		attempt.Strategy = "merge"
+		if err := transitionWithAttempt(bd, rigPrefix, upstreamsync.StateSyncing, &attempt); err != nil {
+			return fmt.Errorf("transition to syncing: %w", err)
+		}
+		fmt.Fprintf(stdout, "Merging %s into %s (--no-ff, clean)...\n", upstreamRef, targetRef)
+		if err := gitMergeUpstream(gitDir, syncCfg); err != nil {
+			attempt.Outcome = "merge-error"
+			attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
+			fmt.Fprintf(stderr, "gt upstream sync: merge failed: %v\n", err)
+			maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
+			return NewSilentExit(7)
+		}
+	} else {
+		// Case 1: fast-forward.
+		if err := transitionWithAttempt(bd, rigPrefix, upstreamsync.StateSyncing, &attempt); err != nil {
+			return fmt.Errorf("transition to syncing: %w", err)
+		}
+		fmt.Fprintf(stdout, "Fast-forwarding %s to %s...\n", targetRef, shortSHA(upstreamSHA))
+		if err := gitFastForward(gitDir, syncCfg); err != nil {
+			attempt.Outcome = "error"
+			attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			_ = appendAttemptAndTransition(bd, rigPrefix, attempt, upstreamsync.StateFailed)
+			fmt.Fprintf(stderr, "gt upstream sync: fast-forward failed: %v\n", err)
+			maybeReportCircuitBreaker(stderr, bd, rigPrefix, syncCfg)
+			return NewSilentExit(7)
+		}
 	}
 
 	// Transition syncing → gating, run gates.
@@ -422,6 +478,37 @@ func gitFastForward(gitDir string, cfg *config.UpstreamSyncConfig) error {
 	return nil
 }
 
+// gitMergeUpstream performs a real (no-ff) merge of upstream into the
+// target branch with a fixed commit message. Used for the clean
+// non-fast-forward case (gu-oedcu) where the fork has divergent commits
+// upstream lacks but the merge has no conflicts. Aborts the merge on
+// failure so the working tree is left clean.
+//
+// The --no-ff form is required so the resulting commit has upstream as
+// a second parent, which keeps `scripts/check-upstream-rebased.sh` happy
+// (and matches the topology preservation already done in the refinery's
+// fork_sync path).
+func gitMergeUpstream(gitDir string, cfg *config.UpstreamSyncConfig) error {
+	target := cfg.GetTargetBranch()
+	upstream := cfg.GetUpstreamRemote() + "/" + cfg.GetUpstreamBranch()
+
+	// Checkout target branch first so the merge updates it in place.
+	if out, err := exec.Command("git", "-C", gitDir, "checkout", target).CombinedOutput(); err != nil {
+		return fmt.Errorf("checkout %s: %w: %s", target, err, strings.TrimSpace(string(out)))
+	}
+	msg := fmt.Sprintf("Merge %s into %s (upstream sync)", upstream, target)
+	out, err := exec.Command("git", "-C", gitDir, "merge", "--no-ff", "--no-edit",
+		"-m", msg, upstream).CombinedOutput()
+	if err != nil {
+		// Best-effort abort so we don't leave a half-merged worktree
+		// behind. merge-tree said this should have been clean, so a
+		// failure here is unexpected — the abort is a safety net.
+		_, _ = exec.Command("git", "-C", gitDir, "merge", "--abort").CombinedOutput()
+		return fmt.Errorf("merge --no-ff %s: %w: %s", upstream, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // gitPush pushes the target branch to origin.
 func gitPush(gitDir string, cfg *config.UpstreamSyncConfig) error {
 	out, err := exec.Command("git", "-C", gitDir, "push", "origin",
@@ -450,54 +537,46 @@ func iconForGate(r upstreamsync.GateResult) string {
 // stdout/stderr we hand to printers (defense against API drift).
 var _ io.Writer = (*strings.Builder)(nil)
 
-// handleNonFastForward is the Phase 4 conflict-resolution decision
-// point. When the upstream merge cannot be fast-forwarded:
+// handleMergeConflict is the conflict-resolution decision point. The
+// caller has already detected non-empty conflicts via DetectConflicts;
+// this function:
 //
-//  1. Detect conflicts non-destructively via DetectConflicts
-//     (`git merge-tree`).
-//  2. Evaluate the configured complexity policy + restricted-path
+//  1. Evaluates the configured complexity policy + restricted-path
 //     allowlist via EvaluateComplexity.
-//  3. If the conflict is resolvable AND the rig's ConflictResolution
+//  2. If the conflict is resolvable AND the rig's ConflictResolution
 //     mode is "agent": dispatch a polecat (StateChecking →
 //     StateResolving + sling-context). Returns 0 on success.
-//  4. Otherwise: record the failure with structured reason
+//  3. Otherwise: record the failure with structured reason
 //     (StateChecking → StateFailed). Returns a non-zero exit code
 //     so callers can update the circuit breaker.
 //
 // The function takes ownership of mutating CurrentAttempt's
 // Conflicts/PolecatBead/ResolutionBranch fields when dispatching, so
 // the state bead reflects the in-flight resolution.
-func handleNonFastForward(
+//
+// Renamed from handleNonFastForward (gu-oedcu): clean non-FF merges
+// are now performed inline by the caller, so this path is reached only
+// when there are real conflicts to triage.
+func handleMergeConflict(
 	cmd *cobra.Command,
 	bd *beads.Beads,
-	rigPrefix, rigName, gitDir string,
+	rigPrefix, rigName string,
 	cfg *config.UpstreamSyncConfig,
 	attempt *upstreamsync.SyncAttempt,
-	upstreamRef, targetRef string,
+	report upstreamsync.ConflictReport,
 ) int {
 	stderr := cmd.ErrOrStderr()
 	stdout := cmd.OutOrStdout()
 
-	// 1. Detect conflicts non-destructively. A failure here means we
-	// can't reason about the merge — escalate without dispatching.
-	report, err := upstreamsync.DetectConflicts(gitDir, targetRef, upstreamRef)
-	if err != nil {
-		attempt.Outcome = "conflict-detect-error"
-		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-		attempt.Conflicts = []string{fmt.Sprintf("conflict detection failed: %v", err)}
-		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
-		fmt.Fprintf(stderr, "gt upstream sync: cannot detect conflicts: %v\n", err)
-		return 6
-	}
-
-	// Defensive: if merge-tree reported clean but we couldn't FF, treat
-	// as an unknown-shape conflict and escalate.
+	// Caller's contract: DetectConflicts has already run and reported
+	// conflicts. An empty list here would be a programming error, not
+	// a recoverable input.
 	if report.IsClean() {
 		attempt.Outcome = "conflict"
 		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-		attempt.Conflicts = []string{"non-fast-forward but no files reported by merge-tree"}
+		attempt.Conflicts = []string{"handleMergeConflict invoked with empty conflict report"}
 		_ = appendAttemptAndTransition(bd, rigPrefix, *attempt, upstreamsync.StateFailed)
-		fmt.Fprintln(stderr, "gt upstream sync: non-FF merge with no detectable conflict files — manual review required")
+		fmt.Fprintln(stderr, "gt upstream sync: internal error — empty conflict report")
 		return 6
 	}
 
@@ -584,7 +663,7 @@ func handleNonFastForward(
 
 	// 4. Transition StateChecking → StateResolving and stamp the
 	// dispatched work bead onto CurrentAttempt for audit / recovery.
-	err = upstreamsync.TransitionTo(bd, rigPrefix, upstreamsync.StateResolving, func(s *upstreamsync.SyncStateMetadata) error {
+	err := upstreamsync.TransitionTo(bd, rigPrefix, upstreamsync.StateResolving, func(s *upstreamsync.SyncStateMetadata) error {
 		s.State = upstreamsync.StateResolving
 		if s.CurrentAttempt == nil {
 			s.CurrentAttempt = &upstreamsync.CurrentAttempt{

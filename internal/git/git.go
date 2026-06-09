@@ -3432,6 +3432,22 @@ func (s *UncommittedWorkStatus) NonRuntimePaths() []string {
 	return paths
 }
 
+// CleanForShutdown returns true if the worktree has no work that would be lost
+// across a rig shutdown/reboot. Stashes and unpushed commits always count as
+// real work; uncommitted *file* changes are evaluated through the runtime
+// exclusion policy so agent runtime state (.beads/, .claude/, .runtime/, etc.)
+// does not falsely block reboots (gu-oi0al).
+//
+// Used by `gt rig shutdown|stop|reboot|restart`. For `gt done` semantics, see
+// CleanExcludingRuntime — that variant intentionally ignores stashes/unpushed
+// because they're handled separately on the completion path.
+func (s *UncommittedWorkStatus) CleanForShutdown() bool {
+	if s.StashCount > 0 || s.UnpushedCommits > 0 {
+		return false
+	}
+	return s.CleanExcludingRuntime()
+}
+
 // CleanExcludingRuntime returns true if the only uncommitted changes are
 // runtime artifacts covered by the centralized exclusion policy.
 // Used by gt done to avoid blocking completion on toolchain-managed files.
@@ -3459,6 +3475,30 @@ func (s *UncommittedWorkStatus) CleanExcludingRuntime() bool {
 	}
 
 	return true
+}
+
+// BlockingSummary returns a human-readable summary describing only the work
+// that would prevent a clean shutdown — non-runtime files, unmerged files,
+// stashes, and unpushed commits. Returns "clean" when CleanForShutdown is true.
+func (s *UncommittedWorkStatus) BlockingSummary() string {
+	var issues []string
+	nonRuntime := s.NonRuntimePaths()
+	if len(nonRuntime) > 0 {
+		issues = append(issues, fmt.Sprintf("%d uncommitted change(s)", len(nonRuntime)))
+	}
+	if len(s.UnmergedFiles) > 0 {
+		issues = append(issues, fmt.Sprintf("unmerged: %s", strings.Join(s.UnmergedFiles, ", ")))
+	}
+	if s.StashCount > 0 {
+		issues = append(issues, fmt.Sprintf("%d stash(es)", s.StashCount))
+	}
+	if s.UnpushedCommits > 0 {
+		issues = append(issues, fmt.Sprintf("%d unpushed commit(s)", s.UnpushedCommits))
+	}
+	if len(issues) == 0 {
+		return "clean"
+	}
+	return strings.Join(issues, ", ")
 }
 
 // String returns a human-readable summary of uncommitted work.

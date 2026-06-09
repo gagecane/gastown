@@ -22,6 +22,7 @@ This is infrastructure cleanup work:
 | purge_age | config | Max closed wisp age before purging (default 7d) |
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
+| processed_mail_ttl | config | Max processed (read/acked) message/escalation age before close (default 1h) |
 | alert_threshold | config | Open wisp count that triggers escalation (default 500) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
@@ -268,9 +269,45 @@ gt reaper reap-open-mail --db=<name> --port={{dolt_port}} \\
 **Exit criteria:** Stale open mail closed with reason ttl-expired."""
 
 [[steps]]
+id = "reap-processed-mail"
+title = "Reap processed message & escalation beads (gu-ctspx)"
+needs = ["reap-open-mail"]
+description = """
+Close message and escalation beads that have been PROCESSED (read or
+acknowledged) and are older than the TTL. This closes the gap left by
+auto-close (excludes P0/P1), reap-hooked-mail (only status='hooked'), and
+reap-open-mail (blind TTL on gt:message only, never touches gt:escalation).
+
+Context: every escalation/mail to the mayor creates a permanent hq bead
+(labeled gt:message or gt:escalation). `gt escalate ack` adds the `acked`
+label; `gt mail mark-read` adds `read` + `delivery:acked` — but NEITHER
+closes the bead. So fully-processed notifications stay status='open'
+forever, growing the DB and polluting `bd ready`/`bd list`/reaper scans.
+Operators have had to manually bulk-close 30+ such beads.
+
+**1. For each database:**
+```bash
+gt reaper reap-processed-mail --db=<name> --port={{dolt_port}} \\
+  --ttl={{processed_mail_ttl}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**2. Inspect results:**
+- Verify closed beads carry a processed label (read/delivery:acked/acked)
+- A large closed count on the first cycle is expected (backlog drain)
+
+**Exclusions (do NOT escalate if these remain open):**
+- Un-processed beads (no read/delivery:acked/acked label) — still need attention
+- Agent heartbeat beads (issue_type='agent')
+- Beads labeled gt:standing-orders, gt:keep, gt:role, gt:rig
+- Beads with a live consumer_bead_id (per ConsumerAliveClause, gu-ub1l)
+
+**Exit criteria:** Processed message/escalation beads closed with reason processed."""
+
+[[steps]]
 id = "scrub-active-mr"
 title = "Scrub stale active_mr refs on agent beads (gu-dhqm)"
-needs = ["reap-open-mail"]
+needs = ["reap-processed-mail"]
 description = """
 Re-evaluate every agent bead's `active_mr` field and clear it when the
 referenced MR and source issue are both terminal.
@@ -370,6 +407,10 @@ default = "24h"
 [vars.open_mail_ttl]
 description = "Max open-mail age before ttl-expired close (gu-ckly; default 24h)"
 default = "24h"
+
+[vars.processed_mail_ttl]
+description = "Max processed (read/acked) message/escalation age before close (gu-ctspx; default 1h)"
+default = "1h"
 
 [vars.alert_threshold]
 description = "Open wisp count that triggers escalation warning"

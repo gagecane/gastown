@@ -104,6 +104,34 @@ Not yet implemented as CLI flags; currently use `--to` for explicit routing.
 | `gate_timeout` | Gate didn't resolve in time | Deacon |
 | `lifecycle` | Worker stuck or needs recycle | Witness |
 
+## Routing by Category
+
+Mayor has fleet/infrastructure credentials but **does not** hold arbitrary
+Isengard or Conduit account credentials. Asks that require assuming a specific
+AWS account, invoking a production Lambda, or mutating IAM in a target account
+must go to the human operator — Mayor cannot fulfill them and a round-trip
+through Mayor wastes a cycle.
+
+Use this table to pick the recipient before opening an escalation:
+
+| Ask category | Examples | Route to |
+|--------------|----------|----------|
+| Polecat / rig / fleet recovery | Stuck nuke, refinery wedge, dispatch stall | **Mayor** |
+| Bead routing / dispatch | Re-pick dropped MR, re-sling, convoy stuck | **Mayor** |
+| Human-bound paperwork | Security review, PII classification, design ruling | **Human owner** |
+| AWS account assumption | `aws sts assume-role`, Isengard/Conduit creds for a specific 12-digit account | **Human operator** (not Mayor) |
+| Ad-hoc AWS invoke / IAM mutation | `lambda:InvokeFunction` in prod account, IAM role/policy edits | **Human operator** (not Mayor) |
+| On-call / ops escalation | Live customer impact, prod outage | **On-call rotation** |
+
+**Rule of thumb:** if the ask names a specific AWS account number, role ARN,
+or production resource that requires an account-scoped credential to act on,
+it is operator-bound. File it directly with the human — do not route through
+Mayor first.
+
+Reference incident: `gc-wisp-r6gh` -> `gc-wisp-hs98` (2026-06-09). A polecat
+asked Mayor to invoke a prod Lambda in account 394824060724; Mayor replied
+"operator-bound (canewiw human)". The round-trip was avoidable.
+
 ## Commands
 
 ### gt escalate
