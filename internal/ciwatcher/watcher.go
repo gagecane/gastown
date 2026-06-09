@@ -14,6 +14,16 @@ import (
 // to triage outstanding regressions.
 const LabelBrokeMainCI = "broke-main-ci"
 
+// EventPush is the GitHub Actions trigger event for a commit landing on a
+// branch — the canonical "post-merge" signal. Only push-event failures on the
+// target branch represent a regression introduced by a recent merge that
+// should freeze the queue. Scheduled-cron failures (E2E, Nightly) run on a
+// timer against pre-existing main state and must NOT freeze the queue
+// (gu-y94l1). The Event field is populated from gh's --json event for the
+// GitHub fetcher; alternative hosts may leave it empty, in which case the
+// watcher falls back to its legacy "freeze on any failure" behavior.
+const EventPush = "push"
+
 // DefaultRunLimit caps how many recent runs the watcher pulls per poll. Two
 // minutes of polling at GitHub Actions' typical post-merge cadence yields
 // at most a handful of runs; 50 is comfortable head-room.
@@ -126,6 +136,15 @@ type PollResult struct {
 	// superseded the break (the regression was resolved and main advanced).
 	// Applies on both cold and warm polls; see gs-218.
 	SupersededSuppressed int
+
+	// NonPushFailureSuppressed counts failed runs that were recorded as seen
+	// but NOT escalated because the trigger event was not "push" (e.g.
+	// scheduled-cron observability runs like E2E, Nightly Integration). These
+	// runs do not represent a post-merge regression — they fail against
+	// pre-existing main state on a timer — so freezing the queue on them
+	// blocks every MR landing until a human unfreezes (gu-y94l1). Empty Event
+	// strings still flow through the legacy path.
+	NonPushFailureSuppressed int
 
 	// Skipped is true when the rig has no pollable Actions runs — the repo
 	// does not exist (e.g. origin points at a fork that was never created) or
@@ -246,9 +265,27 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 			continue
 		}
 
+		// Suppress failures from non-push events (gu-y94l1). Scheduled-cron
+		// workflows (E2E, Nightly Integration) run on a TIMER against main's
+		// existing state, not against a specific MR. When they fail on a
+		// pre-existing condition, every cron run spuriously freezes the queue
+		// and forces manual unfreeze. The freeze is only meaningful for
+		// per-merge gate failures, identified by event="push" on the target
+		// branch. Empty Event (host did not report it) flows through the
+		// legacy path so non-GitHub backends still get coverage. Successes
+		// are NOT scoped — any green run on main, regardless of trigger,
+		// indicates main is healthy and can clear a freeze.
+		if run.Conclusion.IsFailureLike() && run.Event != "" && run.Event != EventPush {
+			w.logf("ciwatcher: non-push failure suppressed run id=%s sha=%s event=%s workflow=%q (queue freeze is push-event only)",
+				run.ID, shortSHA(run.HeadSHA), run.Event, run.Workflow)
+			res.NonPushFailureSuppressed++
+			seen.Mark(run.ID, w.clock.Now())
+			continue
+		}
+
 		res.RunsProcessed++
 
-		w.logf("ciwatcher: processing run id=%s sha=%s conclusion=%s", run.ID, shortSHA(run.HeadSHA), run.Conclusion)
+		w.logf("ciwatcher: processing run id=%s sha=%s conclusion=%s event=%s", run.ID, shortSHA(run.HeadSHA), run.Conclusion, run.Event)
 
 		switch {
 		case run.Conclusion.IsFailureLike():
