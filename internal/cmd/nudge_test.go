@@ -428,6 +428,17 @@ func TestValidModeMapsMatchConstants(t *testing.T) {
 	}
 }
 
+func TestNudgeSilencesUsageOnError(t *testing.T) {
+	// Regression for gu-6p3m9: without SilenceUsage, Cobra dumps the full
+	// usage/flags block whenever runNudge returns a runtime error (unresolved
+	// target, rig-not-found, session-missing, DND). That buried the real error
+	// under usage noise and read as "nudge rejected a valid invocation and
+	// printed usage instead of sending", intermittently breaking agent comms.
+	if !nudgeCmd.SilenceUsage {
+		t.Error("nudgeCmd.SilenceUsage must be true so delivery failures show a clean error, not a usage dump")
+	}
+}
+
 func TestIdleWatcherTimeout(t *testing.T) {
 	// Verify the watcher timeout is in a reasonable range.
 	if idleWatcherTimeout < 10*time.Second {
