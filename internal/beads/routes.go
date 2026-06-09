@@ -472,6 +472,31 @@ func GetRigNameForPrefix(townRoot, prefix string) string {
 	return ""
 }
 
+// IsKnownRig reports whether rigName is a real rig in this town — i.e. some
+// route in routes.jsonl maps a prefix to a path whose first segment is rigName.
+// Used to validate a 'gt:rig:<name>' label override before honoring it; an
+// unknown rig falls back to prefix-based resolution (gs-8h8j).
+func IsKnownRig(townRoot, rigName string) bool {
+	if rigName == "" {
+		return false
+	}
+	beadsDir := filepath.Join(townRoot, ".beads")
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil || routes == nil {
+		return false
+	}
+	for _, r := range routes {
+		if r.Path == "." {
+			continue
+		}
+		parts := strings.SplitN(r.Path, "/", 2)
+		if len(parts) > 0 && parts[0] == rigName {
+			return true
+		}
+	}
+	return false
+}
+
 // ResolveBeadsDirForID resolves the correct .beads directory for a given bead ID
 // based on prefix routing. currentBeadsDir is the caller's default beads directory
 // (typically the town-level .beads). If the bead ID's prefix maps to a different
