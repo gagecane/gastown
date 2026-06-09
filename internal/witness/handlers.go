@@ -2600,6 +2600,31 @@ func isOpenHookStatus(status string) bool {
 	}
 }
 
+// completedOutcomeForExit reports whether the agent bead carries a durable
+// terminal lifecycle outcome (gs-2m1b) that was recorded at or after the given
+// exit attempt began. gt done writes the outcome only once it reaches the
+// completion-metadata step (after closing the bead / submitting the MR), so an
+// outcome timestamped no earlier than the done-intent timestamp proves this
+// gt done invocation finished its core work — even if every transient signal
+// (completion metadata, active MR, closed bead) was already cleared. The
+// timestamp guard ensures a stale outcome from a previous assignment cannot
+// suppress detection of a genuine crash on a new one.
+func completedOutcomeForExit(snap *agentBeadSnapshot, exitStarted time.Time) bool {
+	if snap == nil || snap.Fields == nil {
+		return false
+	}
+	if !beads.IsCompletedOutcome(snap.Fields.LastOutcome) || snap.Fields.LastOutcomeTime == "" {
+		return false
+	}
+	recordedAt, err := time.Parse(time.RFC3339, snap.Fields.LastOutcomeTime)
+	if err != nil {
+		return false
+	}
+	// Allow a small clock-skew tolerance so a near-simultaneous outcome still
+	// counts as belonging to this exit attempt.
+	return !recordedAt.Before(exitStarted.Add(-2 * time.Minute))
+}
+
 func hasSuccessfulSubmissionEvidence(snap *agentBeadSnapshot) bool {
 	if snap == nil {
 		return false
@@ -2666,6 +2691,17 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			return ZombieResult{}, false
 		}
 		if terminalSafeDoneSnapshot(bd, workDir, rigName, polecatName, snap) {
+			return ZombieResult{}, false
+		}
+		// gs-2m1b: durable terminal lifecycle outcome. A done-intent label can
+		// linger when gt done crashes during its final label cleanup, even
+		// though the core work (bead close / MR submission) already finished.
+		// The completion metadata, active MR, and bead-closed signals above may
+		// all have been cleared by routine witness processing by now, but the
+		// durable outcome persists. If the polecat recorded a completed outcome
+		// at or after this exit attempt began, gt done reached its completion
+		// write — the dead session is expected, not a crash mid-work.
+		if completedOutcomeForExit(snap, doneIntent.Timestamp) {
 			return ZombieResult{}, false
 		}
 
