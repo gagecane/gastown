@@ -518,6 +518,174 @@ func TestWatcherCurrentBreakEscalatesDespiteEarlierSuccess(t *testing.T) {
 	}
 }
 
+// TestWatcherSuppressesScheduledCronFailure is the gu-y94l1 regression: a
+// failed scheduled-cron run on main (E2E, Nightly Integration) must NOT
+// freeze the queue — those workflows run on a timer against pre-existing
+// main state and have no per-MR attribution. Before the fix, every nightly
+// cron failure on a pre-existing condition spuriously froze gastown_upstream
+// and forced the mayor to manually unfreeze each cycle.
+func TestWatcherSuppressesScheduledCronFailure(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	runs := []CIRun{
+		{
+			ID:                "800",
+			HeadSHA:           "abcdef12",
+			HeadCommitSubject: "fix: thing (gu-aaa)",
+			Conclusion:        ConclusionFailure,
+			Branch:            "main",
+			URL:               "https://example.test/run/800",
+			Workflow:          "Nightly Integration Tests",
+			Event:             "schedule",
+		},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.NonPushFailureSuppressed != 1 {
+		t.Errorf("NonPushFailureSuppressed = %d, want 1", res.NonPushFailureSuppressed)
+	}
+	if res.FailuresHandled != 0 {
+		t.Errorf("FailuresHandled = %d, want 0 (scheduled-cron must not freeze)", res.FailuresHandled)
+	}
+	if res.FreezeWritten {
+		t.Errorf("FreezeWritten = true; scheduled-cron failures must not freeze the queue")
+	}
+	if len(fm.sent) != 0 {
+		t.Errorf("expected no mail for scheduled-cron failure, got %d: %v", len(fm.sent), fm.sent)
+	}
+	if len(fb.reopens) != 0 {
+		t.Errorf("expected no bead reopen for scheduled-cron failure, got %v", fb.reopens)
+	}
+	frozen, _ := IsFrozen(town, "alpha")
+	if frozen {
+		t.Errorf("queue should not be frozen by scheduled-cron failure")
+	}
+	// Run must be marked seen so the next poll doesn't reprocess.
+	seen, _ := LoadSeenRuns(town, "alpha")
+	if !seen.Has("800") {
+		t.Errorf("run 800 should be marked seen even though escalation was suppressed")
+	}
+}
+
+// TestWatcherSuppressesWorkflowDispatchFailure verifies the suppression covers
+// all non-push events, not just schedule. workflow_dispatch (manual reruns),
+// issue_comment (auto-label workflows), etc. are also out of scope for
+// queue-freeze policy.
+func TestWatcherSuppressesWorkflowDispatchFailure(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	runs := []CIRun{
+		{ID: "801", HeadSHA: "ab", HeadCommitSubject: "fix (gu-aaa)", Conclusion: ConclusionFailure, Branch: "main", URL: "u", Event: "workflow_dispatch"},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NonPushFailureSuppressed != 1 || res.FreezeWritten {
+		t.Errorf("workflow_dispatch failure should be suppressed, got %+v", res)
+	}
+}
+
+// TestWatcherPushFailureStillFreezes verifies the suppression is scoped: a
+// failed push-event run (a real post-merge regression) must still freeze the
+// queue exactly as before. This is the canonical case the watcher exists for.
+func TestWatcherPushFailureStillFreezes(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	runs := []CIRun{
+		{
+			ID:                "802",
+			HeadSHA:           "deadbeef",
+			HeadCommitSubject: "fix(refinery): handle slot timeout (gu-aaa)",
+			Conclusion:        ConclusionFailure,
+			Branch:            "main",
+			URL:               "https://example.test/run/802",
+			Workflow:          "CI",
+			Event:             "push",
+		},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.NonPushFailureSuppressed != 0 {
+		t.Errorf("push failure must not be suppressed, got NonPushFailureSuppressed=%d", res.NonPushFailureSuppressed)
+	}
+	if res.FailuresHandled != 1 || !res.FreezeWritten {
+		t.Errorf("push failure must freeze the queue, got %+v", res)
+	}
+	if len(fb.reopens) != 1 || fb.reopens[0] != "gu-aaa" {
+		t.Errorf("push failure should reopen attributed bead, got %v", fb.reopens)
+	}
+	frozen, _ := IsFrozen(town, "alpha")
+	if !frozen {
+		t.Errorf("push failure should freeze the queue")
+	}
+}
+
+// TestWatcherEmptyEventFallsBackToLegacyFreeze verifies backward compatibility:
+// a host that does not populate Event (empty string) still gets the legacy
+// "freeze on any failure" behavior so non-GitHub backends are not silently
+// disabled.
+func TestWatcherEmptyEventFallsBackToLegacyFreeze(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	runs := []CIRun{
+		// No Event field — legacy fetcher / non-gh host.
+		{ID: "803", HeadSHA: "ab", HeadCommitSubject: "fix (gu-aaa)", Conclusion: ConclusionFailure, Branch: "main", URL: "u"},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NonPushFailureSuppressed != 0 {
+		t.Errorf("empty Event should not trigger non-push suppression, got %d", res.NonPushFailureSuppressed)
+	}
+	if res.FailuresHandled != 1 || !res.FreezeWritten {
+		t.Errorf("empty-event failure should fall back to legacy freeze, got %+v", res)
+	}
+}
+
+// TestWatcherScheduledCronSuccessClearsFreeze verifies the success path is
+// NOT scoped to push events. A green scheduled-cron run on main genuinely
+// indicates main is healthy, so it should clear an existing freeze just like
+// a green push run would. This keeps the watcher liberal about clearing —
+// the cost of an unwanted clear is much smaller than the cost of an unwanted
+// freeze (the scenario this whole fix exists to prevent).
+func TestWatcherScheduledCronSuccessClearsFreeze(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	if err := WriteFreeze(town, FreezeFile{Rig: "alpha", BeadID: "gu-aaa", Reason: "stale freeze"}); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		{ID: "900", HeadSHA: "feedface", Conclusion: ConclusionSuccess, Branch: "main", URL: "u", Event: "schedule"},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.FreezeCleared {
+		t.Errorf("scheduled-cron success on main should still clear an existing freeze")
+	}
+	frozen, _ := IsFrozen(town, "alpha")
+	if frozen {
+		t.Errorf("freeze should be cleared")
+	}
+}
+
 func TestWatcherMailFailureKeepsRunUnseen(t *testing.T) {
 	town := t.TempDir()
 	fb := newFakeBeads("gu-aaa")

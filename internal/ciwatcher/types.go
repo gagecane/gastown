@@ -81,6 +81,17 @@ type CIRun struct {
 	// for the configured target branch (typically "main") before invoking
 	// Process(); this field is informational.
 	Branch string
+
+	// Event is the GitHub Actions trigger event ("push", "schedule",
+	// "workflow_dispatch", "issue_comment", etc.). The watcher uses this to
+	// scope the freeze policy: only "push" failures on the target branch
+	// represent a post-merge regression that should freeze the queue.
+	// Scheduled-cron failures (E2E, Nightly) are observability checks against
+	// pre-existing main state, not per-merge gates, and must not freeze the
+	// queue (gu-y94l1). Empty string means the host did not report an event;
+	// the watcher falls back to legacy "freeze on any failure" behavior so
+	// hosts without event metadata still benefit from coverage.
+	Event string
 }
 
 // RunFetcher abstracts the host-specific "list recent completed runs on

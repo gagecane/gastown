@@ -53,6 +53,7 @@ type ghRunListEntry struct {
 	Name        string    `json:"name"`
 	Status      string    `json:"status"`
 	Conclusion  string    `json:"conclusion"`
+	Event       string    `json:"event"`
 	URL         string    `json:"url"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -78,7 +79,7 @@ func (g *GHRunFetcher) CompletedRuns(ctx context.Context, branch string, limit i
 		"--branch", branch,
 		"--status", "completed",
 		"--limit", strconv.Itoa(limit),
-		"--json", "databaseId,headBranch,headSha,name,status,conclusion,url,updatedAt,createdAt,startedAt",
+		"--json", "databaseId,headBranch,headSha,name,status,conclusion,event,url,updatedAt,createdAt,startedAt",
 	}
 	// Pin gh to the origin remote's repo (the town's push target). The rig is a
 	// fork with two remotes (origin=town, upstream=parent); with no default repo
@@ -124,6 +125,7 @@ func (g *GHRunFetcher) CompletedRuns(ctx context.Context, branch string, limit i
 			URL:               e.URL,
 			Workflow:          e.Name,
 			Branch:            e.HeadBranch,
+			Event:             e.Event,
 		})
 	}
 	return runs, nil
