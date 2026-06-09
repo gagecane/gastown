@@ -10,6 +10,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os/exec"
 	"strings"
@@ -19,6 +20,18 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
+
+// gtTestSubprocessTimeout caps how long a single `gt` subprocess can run inside
+// scheduler integration test helpers before we fail fast. Without this, a
+// wedged `gt` subprocess (Dolt hang, deprecation-warning flood, regression in
+// `gt sling`, etc.) would block the test until the package-wide 20-minute
+// `go test -timeout=20m` fired — masking the real failure behind ~50 phantom
+// `FAIL (-1.00s)` entries from sibling tests parked on `t.Parallel()`. See
+// gu-q326r for the cascade-failure analysis. Mirrors the per-attempt context
+// timeout pattern already used by initBeadsDBForServer (commits 9542c595,
+// bffc3192, d0a5a89a). 90s leaves headroom for `gt sling` chains that fan out
+// into several `bd` calls (each capped at 30s).
+const gtTestSubprocessTimeout = 90 * time.Second
 
 // --- Environment helpers ---
 
@@ -35,12 +48,17 @@ func cleanSchedulerTestEnv(tmpHome string) []string {
 // Fails the test if the command exits non-zero.
 func runGTCmdOutput(t *testing.T, binary, dir string, env []string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(binary, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), gtTestSubprocessTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("gt %v timed out after %s\nstdout:\n%s\nstderr:\n%s", args, gtTestSubprocessTimeout, out, stderr.String())
+	}
 	if err != nil {
 		t.Fatalf("gt %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, out, stderr.String())
 	}
@@ -87,10 +105,15 @@ func containsAll(s string, subs ...string) bool {
 // Does NOT fail the test on non-zero exit.
 func runGTCmdMayFail(t *testing.T, binary, dir string, env []string, args ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(binary, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), gtTestSubprocessTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("gt %v timed out after %s\noutput:\n%s", args, gtTestSubprocessTimeout, out)
+	}
 	return string(out), err
 }
 
