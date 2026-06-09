@@ -187,42 +187,80 @@ func convoyBaseFromFields(description string) string {
 // is cut from the named branch (proto/v3-build) rather than the rig default
 // (gs-9ct #1: "worktree had nothing to edit" when the named-branch work was
 // absent from the rig default). Returns explicit unchanged when there is no
-// convoy base to inherit, so non-relay slings are unaffected.
+// convoy base to inherit, so non-relay slings are unaffected. The precedence
+// order is owned by the pure resolveBasePrecedence below; see its doc for the
+// gs-nfjm / gs-n6h / gs-w7k rationale.
 func effectiveBaseBranch(beadID, explicit string) string {
 	if explicit != "" || beadID == "" {
 		return explicit
 	}
 	townRoot, rootErr := workspace.FindFromCwd()
-	// Primary: the base branch the bead records in its OWN attachment fields,
-	// stamped at the first dispatch (sling_dispatch.go). This is the reliable
-	// source on RE-dispatch — the DEFERRED / convoy-feed re-sling path (gs-o5f
-	// family) — where the cross-rig dep resolution getConvoyInfoForIssue depends
-	// on can silently return "" and drop the bead onto the rig default base
-	// instead of its relay base (gs-n6h). Mirrors the primary/fallback convoy
-	// lookup order gt done already uses (done.go, gt-7b6wf).
-	if rootErr == nil {
-		if bb := beadStampedBaseBranch(beadID, townRoot); bb != "" {
-			return bb
+	// The bead's CURRENT tracking convoy. On RE-dispatch under a re-activated
+	// mountain/convoy this is the NEW convoy, so its configured base overrides a
+	// base stamped under the bead's ORIGINAL convoy (gs-nfjm).
+	convoyBase := func() string {
+		if info := getConvoyInfoForIssue(beadID); info != nil {
+			return info.BaseBranch
 		}
+		return ""
 	}
-	// Fallback: the tracking convoy's named base (first dispatch, before the bead
-	// carries its own base_branch).
-	if info := getConvoyInfoForIssue(beadID); info != nil && info.BaseBranch != "" {
-		return info.BaseBranch
+	// The base the bead records in its OWN attachment fields, stamped at the
+	// first dispatch (sling_dispatch.go). Fallback for RE-dispatch — the
+	// DEFERRED / convoy-feed re-sling path (gs-o5f family) — where the cross-rig
+	// dep resolution getConvoyInfoForIssue depends on can silently return "" and
+	// would otherwise drop the bead onto the rig default base instead of its
+	// relay base (gs-n6h).
+	stampedBase := func() string {
+		if rootErr != nil {
+			return ""
+		}
+		return beadStampedBaseBranch(beadID, townRoot)
 	}
-	// Inherited: a relay-epic SLICE is created with base_branch=<rig default>
-	// (epic-slicing / mol-idea-to-plan stamps the rig default, not the epic's
-	// relay base — gs-w7k), and on its FIRST auto-dispatch it is not yet tracked
-	// by the relay convoy, so neither its own stamped base nor its own convoy
-	// yields the relay base. gs-n6h only recovered the relay base on RE-dispatch
-	// (once the bead carries it). Walk up to the parent epic and inherit ITS
-	// relay base so the very FIRST dispatch cuts from the named branch instead of
-	// misrouting onto the rig default. No-op for non-relay beads (no ancestor
-	// carries a relay base).
-	if rootErr == nil {
-		if bb := resolveRelayBaseFromAncestors(beadID, maxRelayInheritHops, func(id string) (string, string) {
+	// A relay-epic SLICE is created with base_branch=<rig default> (epic-slicing
+	// / mol-idea-to-plan stamps the rig default, not the epic's relay base —
+	// gs-w7k), and on its FIRST auto-dispatch it is not yet tracked by the relay
+	// convoy, so neither its own stamped base nor its own convoy yields the relay
+	// base. Walk up to the parent epic and inherit ITS relay base so the very
+	// FIRST dispatch cuts from the named branch instead of misrouting onto the
+	// rig default. No-op for non-relay beads (no ancestor carries a relay base).
+	ancestorBase := func() string {
+		if rootErr != nil {
+			return ""
+		}
+		return resolveRelayBaseFromAncestors(beadID, maxRelayInheritHops, func(id string) (string, string) {
 			return beadParentAndRelayBase(id, townRoot)
-		}); bb != "" {
+		})
+	}
+	return resolveBasePrecedence(explicit, convoyBase, stampedBase, ancestorBase)
+}
+
+// resolveBasePrecedence picks the dispatch base branch from the candidate
+// sources in precedence order, returning the first non-empty value:
+//
+//  1. explicit  — an explicit --base-branch flag always wins.
+//  2. convoy    — the bead's CURRENT tracking convoy base. On RE-dispatch this
+//     is the re-activated mountain/convoy, so its base overrides a base the
+//     child stamped under its ORIGINAL convoy (gs-nfjm): clearing the stale
+//     sticky base is no longer required to re-route a child onto a new epic
+//     integration branch.
+//  3. stamped   — the base the bead stamped at its first dispatch. Recovers the
+//     relay base on RE-dispatch when the convoy lookup silently returns "" on
+//     cross-rig dep resolution (gs-n6h).
+//  4. ancestor  — a parent epic's relay base, for a relay slice's FIRST dispatch
+//     before it is tracked by the relay convoy (gs-w7k).
+//
+// The source callbacks are evaluated lazily (each only when the higher-priority
+// sources are empty) so cheaper sources short-circuit the bd/Dolt lookups the
+// later ones perform. A nil callback is skipped. Pure for testing.
+func resolveBasePrecedence(explicit string, sources ...func() string) string {
+	if explicit != "" {
+		return explicit
+	}
+	for _, src := range sources {
+		if src == nil {
+			continue
+		}
+		if bb := src(); bb != "" {
 			return bb
 		}
 	}
