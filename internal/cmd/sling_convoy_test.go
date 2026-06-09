@@ -220,6 +220,83 @@ func TestEffectiveBaseBranch_ExplicitWins(t *testing.T) {
 	}
 }
 
+// TestResolveBasePrecedence covers the dispatch base-branch precedence order
+// (gs-nfjm). The source callbacks are injected so the decision is exercised
+// without bd/Dolt. Key case: the CURRENT tracking convoy base must override a
+// base stamped under the bead's ORIGINAL convoy on re-dispatch.
+func TestResolveBasePrecedence(t *testing.T) {
+	konst := func(s string) func() string { return func() string { return s } }
+	// track which sources were evaluated, to assert lazy short-circuiting.
+	tracked := func(s string, calls *int) func() string {
+		return func() string { *calls++; return s }
+	}
+
+	t.Run("explicit always wins", func(t *testing.T) {
+		got := resolveBasePrecedence("feat/explicit", konst("conv"), konst("stamp"), konst("anc"))
+		if got != "feat/explicit" {
+			t.Errorf("explicit must win: got %q", got)
+		}
+	})
+
+	t.Run("convoy overrides stamped on re-dispatch (gs-nfjm)", func(t *testing.T) {
+		// Original convoy stamped main; re-activated mountain configures the
+		// epic integration branch. The current convoy base must win.
+		got := resolveBasePrecedence("",
+			konst("integration/epic"), // current tracking convoy (mountain B)
+			konst("main"),             // sticky base stamped under convoy A
+			konst(""))
+		if got != "integration/epic" {
+			t.Errorf("current convoy base must override stale stamped base: got %q", got)
+		}
+	})
+
+	t.Run("stamped is the fallback when convoy lookup returns empty (gs-n6h)", func(t *testing.T) {
+		got := resolveBasePrecedence("",
+			konst(""),        // cross-rig dep resolution silently returned ""
+			konst("relay/x"), // base recovered from the bead's own stamp
+			konst("ignored"))
+		if got != "relay/x" {
+			t.Errorf("stamped base must recover relay base when convoy is empty: got %q", got)
+		}
+	})
+
+	t.Run("ancestor relay base is the last resort (gs-w7k)", func(t *testing.T) {
+		got := resolveBasePrecedence("", konst(""), konst(""), konst("epic/relay"))
+		if got != "epic/relay" {
+			t.Errorf("ancestor relay base must be used when convoy+stamped empty: got %q", got)
+		}
+	})
+
+	t.Run("all empty returns explicit unchanged", func(t *testing.T) {
+		if got := resolveBasePrecedence("", konst(""), konst(""), konst("")); got != "" {
+			t.Errorf("no source must return explicit unchanged: got %q", got)
+		}
+	})
+
+	t.Run("lower-priority sources are not evaluated when a higher one matches", func(t *testing.T) {
+		convoyCalls, stampedCalls, ancestorCalls := 0, 0, 0
+		got := resolveBasePrecedence("",
+			tracked("integration/epic", &convoyCalls),
+			tracked("main", &stampedCalls),
+			tracked("epic/relay", &ancestorCalls))
+		if got != "integration/epic" {
+			t.Fatalf("convoy base must win: got %q", got)
+		}
+		if convoyCalls != 1 {
+			t.Errorf("convoy source must be evaluated once: got %d", convoyCalls)
+		}
+		if stampedCalls != 0 || ancestorCalls != 0 {
+			t.Errorf("lower-priority sources must not be evaluated: stamped=%d ancestor=%d", stampedCalls, ancestorCalls)
+		}
+	})
+
+	t.Run("nil sources are skipped", func(t *testing.T) {
+		if got := resolveBasePrecedence("", nil, konst("relay/x"), nil); got != "relay/x" {
+			t.Errorf("nil sources must be skipped: got %q", got)
+		}
+	})
+}
+
 // TestRigDefaultBranchForBead_Fallbacks verifies the rig-default resolver used
 // to distinguish a genuine relay base from the formula's base_branch=<default>
 // var (gs-n6h). Unresolvable prefix/rig/config all fall back to "main".
