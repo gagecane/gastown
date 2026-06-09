@@ -95,7 +95,25 @@ type PatrolScanOutput struct {
 	Stranded       *PatrolScanStrandedOutput   `json:"stranded_assignees,omitempty"`
 	StaleRigAgents *PatrolScanStaleRigAgentOut `json:"stale_rig_agents,omitempty"`
 	FalseDeferred  *PatrolScanFalseDeferredOut `json:"false_deferred,omitempty"`
+	StaleParks     *PatrolScanStaleParkOut     `json:"stale_parks,omitempty"`
 	Receipts       []witness.PatrolReceipt     `json:"receipts,omitempty"`
+}
+
+// PatrolScanStaleParkOut holds stale-park recovery results (gs-du4h).
+type PatrolScanStaleParkOut struct {
+	Checked   int                       `json:"checked"`
+	Found     int                       `json:"found"`
+	Recovered []PatrolScanStaleParkItem `json:"recovered,omitempty"`
+	Errors    []string                  `json:"errors,omitempty"`
+}
+
+// PatrolScanStaleParkItem is a single stale-park recovery in scan output.
+type PatrolScanStaleParkItem struct {
+	BeadID           string   `json:"bead_id"`
+	ResolvedBlockers []string `json:"resolved_blockers,omitempty"`
+	DetachedMolecule string   `json:"detached_molecule,omitempty"`
+	Unblocked        bool     `json:"unblocked"`
+	Error            string   `json:"error,omitempty"`
 }
 
 // PatrolScanFalseDeferredOut holds false-deferred recovery results (gu-wykt).
@@ -307,6 +325,13 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// (Pattern A close-validation) but for the deferred-state escape hatch.
 	falseDeferredResult := witness.DiscoverDeferredButShipped(bd, workDir, rigName)
 
+	// Stale-park recovery (gs-du4h). Beads parked at status=blocked whose
+	// blocking dependencies have all closed — bd does not auto-flip the
+	// dependent back to open or drop the satisfied dep edge, so a ready bead
+	// stays BLOCKED forever. Unblock it (drop closed blocker edges + stale
+	// molecule bond, flip to open, nudge deacon).
+	staleParkResult := witness.DetectStaleParkedBeads(bd, workDir, rigName)
+
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
 
@@ -322,10 +347,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, receipts)
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -380,7 +405,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, staleParkResult *witness.DetectStaleParkedBeadsResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -561,12 +586,38 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.FalseDeferred = fd
 	}
 
+	// Stale-park recovery (gs-du4h)
+	if staleParkResult != nil {
+		sp := &PatrolScanStaleParkOut{
+			Checked: staleParkResult.Checked,
+		}
+		for _, r := range staleParkResult.Recovered {
+			if r.Unblocked {
+				sp.Found++
+			}
+			item := PatrolScanStaleParkItem{
+				BeadID:           r.BeadID,
+				ResolvedBlockers: r.ResolvedBlockers,
+				DetachedMolecule: r.DetachedMolecule,
+				Unblocked:        r.Unblocked,
+			}
+			if r.Error != nil {
+				item.Error = r.Error.Error()
+			}
+			sp.Recovered = append(sp.Recovered, item)
+		}
+		for _, e := range staleParkResult.Errors {
+			sp.Errors = append(sp.Errors, e.Error())
+		}
+		output.StaleParks = sp
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, staleParkResult *witness.DetectStaleParkedBeadsResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -780,6 +831,47 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			}
 			if len(falseDeferredResult.Errors) > 0 && patrolScanVerbose {
 				for _, e := range falseDeferredResult.Errors {
+					fmt.Printf("    - %v\n", e)
+				}
+			}
+			fmt.Println()
+		}
+	}
+
+	// Stale-park recovery (gs-du4h)
+	if staleParkResult != nil {
+		unblocked := 0
+		for _, r := range staleParkResult.Recovered {
+			if r.Unblocked {
+				unblocked++
+			}
+		}
+		if unblocked > 0 || patrolScanVerbose {
+			fmt.Printf("%s Stale-Park Recovery: checked %d blocked bead(s)\n",
+				style.Bold.Render("🅿"), staleParkResult.Checked)
+
+			if unblocked == 0 && !patrolScanVerbose {
+				fmt.Printf("  %s\n", style.Dim.Render("No stale parks recovered"))
+			} else {
+				for _, r := range staleParkResult.Recovered {
+					if !r.Unblocked && !patrolScanVerbose {
+						continue
+					}
+					fmt.Printf("  ● %s: unblocked=%t", r.BeadID, r.Unblocked)
+					if len(r.ResolvedBlockers) > 0 {
+						fmt.Printf("  blockers=%s", strings.Join(r.ResolvedBlockers, ","))
+					}
+					if r.DetachedMolecule != "" {
+						fmt.Printf("  molecule=%s", r.DetachedMolecule)
+					}
+					fmt.Println()
+					if r.Error != nil {
+						fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", r.Error)))
+					}
+				}
+			}
+			if len(staleParkResult.Errors) > 0 && patrolScanVerbose {
+				for _, e := range staleParkResult.Errors {
 					fmt.Printf("    - %v\n", e)
 				}
 			}
