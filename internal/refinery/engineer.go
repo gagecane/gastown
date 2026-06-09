@@ -1519,20 +1519,27 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 	// Use ForceCloseWithReason to bypass dependency checks — the source issue
 	// may have an attached molecule (wisp) whose open steps would block a
 	// normal close. This matches how gt done handles closures.
-	if mr.SourceIssue != "" {
+	//
+	// Defense-in-depth: strip any "--<ts>"/"@<ts>" suffix from source_issue
+	// before closing (gs-bn94). The recovery path (Manager.PostMerge) already
+	// does this for gu-y2w; without the same strip here, the PRIMARY merge path
+	// (batch + single-MR) fails to find the real bug bead when an older binary
+	// wrote a convoy/timestamp-suffixed ID into source_issue, leaving the child
+	// bead OPEN/HOOKED after its MR merged.
+	if sourceIssue := stripMRIssueTimestampSuffix(mr.SourceIssue); sourceIssue != "" {
 		closeReason := fmt.Sprintf("Merged in %s", mr.ID)
 		if result.MergeCommit != "" {
 			closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, mr.Target, result.MergeCommit)
 		}
-		if err := e.beads.ForceCloseWithReason(closeReason, mr.SourceIssue); err != nil {
+		if err := e.beads.ForceCloseWithReason(closeReason, sourceIssue); err != nil {
 			// Check if already closed (by polecat's gt done) — that's fine
-			if issue, showErr := e.beads.Show(mr.SourceIssue); showErr == nil && beads.IssueStatus(issue.Status).IsTerminal() {
-				_, _ = fmt.Fprintf(e.output, "[Engineer] Source issue already closed: %s\n", mr.SourceIssue)
+			if issue, showErr := e.beads.Show(sourceIssue); showErr == nil && beads.IssueStatus(issue.Status).IsTerminal() {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Source issue already closed: %s\n", sourceIssue)
 			} else {
-				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close source issue %s: %v\n", mr.SourceIssue, err)
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close source issue %s: %v\n", sourceIssue, err)
 			}
 		} else {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Closed source issue: %s\n", mr.SourceIssue)
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Closed source issue: %s\n", sourceIssue)
 		}
 	}
 
