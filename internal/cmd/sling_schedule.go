@@ -578,6 +578,19 @@ func resolveRigForBead(townRoot, beadID string) string {
 	return beads.GetRigNameForPrefix(townRoot, prefix)
 }
 
+// resolveRigForBeadWithLabels resolves the rig for a bead, honoring a
+// 'gt:rig:<name>' label override before falling back to ID-prefix resolution.
+// The override is honored only when <name> names a real rig in this town; an
+// unknown rig falls through to the prefix. This lets a cross-rig child of an
+// epic — whose ID prefix points at the epic's home rig — be dispatched to the
+// rig its deliverable actually lives in (gs-8h8j).
+func resolveRigForBeadWithLabels(townRoot, beadID string, labels []string) string {
+	if want := beads.RigFromLabels(labels); want != "" && beads.IsKnownRig(townRoot, want) {
+		return want
+	}
+	return resolveRigForBead(townRoot, beadID)
+}
+
 // resolveFormula determines the formula name from user flags and rig settings.
 // Resolution order:
 //  1. Explicit --formula flag
