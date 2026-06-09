@@ -565,6 +565,61 @@ func TestParseAgentFields_WithCompletionMetadata(t *testing.T) {
 	}
 }
 
+// --- Durable terminal lifecycle outcome (gs-2m1b) ---
+
+func TestAgentFieldsLastOutcomeRoundTrip(t *testing.T) {
+	original := &AgentFields{
+		RoleType:        "polecat",
+		Rig:             "gastown",
+		AgentState:      "idle",
+		LastOutcome:     OutcomeCompletedMerged,
+		LastOutcomeTime: "2026-06-09T20:41:01Z",
+	}
+
+	formatted := FormatAgentDescription("Polecat capable", original)
+	if !strings.Contains(formatted, "last_outcome: completed-merged") {
+		t.Errorf("missing last_outcome in formatted output:\n%s", formatted)
+	}
+	if !strings.Contains(formatted, "last_outcome_time: 2026-06-09T20:41:01Z") {
+		t.Errorf("missing last_outcome_time in formatted output:\n%s", formatted)
+	}
+
+	parsed := ParseAgentFields(formatted)
+	if parsed.LastOutcome != OutcomeCompletedMerged {
+		t.Errorf("LastOutcome: got %q, want %q", parsed.LastOutcome, OutcomeCompletedMerged)
+	}
+	if parsed.LastOutcomeTime != "2026-06-09T20:41:01Z" {
+		t.Errorf("LastOutcomeTime: got %q, want %q", parsed.LastOutcomeTime, "2026-06-09T20:41:01Z")
+	}
+}
+
+func TestAgentFieldsLastOutcomeOmittedWhenEmpty(t *testing.T) {
+	fields := &AgentFields{RoleType: "polecat", AgentState: "working"}
+	formatted := FormatAgentDescription("Polecat capable", fields)
+	for _, keyword := range []string{"last_outcome:", "last_outcome_time:"} {
+		if strings.Contains(formatted, keyword) {
+			t.Errorf("empty field %q should not appear in output:\n%s", keyword, formatted)
+		}
+	}
+}
+
+func TestIsCompletedOutcome(t *testing.T) {
+	completed := []string{
+		OutcomeCompletedMerged, OutcomeCompletedPushed, OutcomeCompletedStranded,
+		OutcomeCompletedUnpushed, OutcomeDeferred, OutcomeEscalated,
+	}
+	for _, o := range completed {
+		if !IsCompletedOutcome(o) {
+			t.Errorf("IsCompletedOutcome(%q) = false, want true", o)
+		}
+	}
+	for _, o := range []string{"", "died-clean", "running", "unknown"} {
+		if IsCompletedOutcome(o) {
+			t.Errorf("IsCompletedOutcome(%q) = true, want false", o)
+		}
+	}
+}
+
 // --- Convoy watcher tests ---
 
 func TestConvoyFieldsWatchersRoundTrip(t *testing.T) {

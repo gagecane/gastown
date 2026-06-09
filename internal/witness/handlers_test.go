@@ -716,6 +716,66 @@ func TestHasPendingMRCleanupWispFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCompletedOutcomeForExit verifies the durable-outcome guard (gs-2m1b):
+// a polecat with a recorded completed outcome timestamped at/after its exit
+// attempt is treated as finished, while a stale outcome, missing outcome, or
+// non-completed value is not.
+func TestCompletedOutcomeForExit(t *testing.T) {
+	exitStarted := time.Date(2026, 6, 9, 20, 41, 0, 0, time.UTC)
+	rfc := func(tm time.Time) string { return tm.Format(time.RFC3339) }
+
+	tests := []struct {
+		name string
+		snap *agentBeadSnapshot
+		want bool
+	}{
+		{"nil snap", nil, false},
+		{"nil fields", &agentBeadSnapshot{}, false},
+		{
+			"completed outcome at exit time",
+			&agentBeadSnapshot{Fields: &beads.AgentFields{LastOutcome: beads.OutcomeCompletedMerged, LastOutcomeTime: rfc(exitStarted)}},
+			true,
+		},
+		{
+			"completed outcome after exit time",
+			&agentBeadSnapshot{Fields: &beads.AgentFields{LastOutcome: beads.OutcomeCompletedPushed, LastOutcomeTime: rfc(exitStarted.Add(30 * time.Second))}},
+			true,
+		},
+		{
+			"within clock-skew tolerance",
+			&agentBeadSnapshot{Fields: &beads.AgentFields{LastOutcome: beads.OutcomeCompletedMerged, LastOutcomeTime: rfc(exitStarted.Add(-time.Minute))}},
+			true,
+		},
+		{
+			"stale outcome from prior assignment",
+			&agentBeadSnapshot{Fields: &beads.AgentFields{LastOutcome: beads.OutcomeCompletedMerged, LastOutcomeTime: rfc(exitStarted.Add(-time.Hour))}},
+			false,
+		},
+		{
+			"missing outcome time",
+			&agentBeadSnapshot{Fields: &beads.AgentFields{LastOutcome: beads.OutcomeCompletedMerged}},
+			false,
+		},
+		{
+			"no outcome recorded",
+			&agentBeadSnapshot{Fields: &beads.AgentFields{LastOutcomeTime: rfc(exitStarted)}},
+			false,
+		},
+		{
+			"unparseable outcome time",
+			&agentBeadSnapshot{Fields: &beads.AgentFields{LastOutcome: beads.OutcomeCompletedMerged, LastOutcomeTime: "not-a-time"}},
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := completedOutcomeForExit(tt.snap, exitStarted); got != tt.want {
+				t.Errorf("completedOutcomeForExit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTerminalSafeDoneSnapshot(t *testing.T) {
 	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
 	bd, _ := mockBd(
