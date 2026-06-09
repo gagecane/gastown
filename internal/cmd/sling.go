@@ -1178,12 +1178,18 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		// pre-staged review gate's intended formula survives this bare
 		// auto-apply path instead of being clobbered by the system default
 		// (gs-zq0 / gs-am8 GAP 1). Explicit --formula still wins.
-		formulaName = resolveFormulaForBead(slingFormula, false, townRoot, targetRig, info.Labels)
+		// A bead resolving to the protected mainline (base=main) must not be
+		// auto-dispatched with an integration-branch dev-work default that
+		// refuses main targets; prefer the rig's main_target_formula when set
+		// (gs-njym). Explicit --formula and gt:formula: labels still win.
+		formulaName = resolveFormulaForBeadWithBase(slingFormula, false, townRoot, targetRig, info.Labels, effectiveBase)
 		switch {
 		case slingFormula != "":
 			fmt.Printf("  Applying %s for polecat work...\n", formulaName)
 		case beads.FormulaFromLabels(info.Labels) != "":
 			fmt.Printf("  Applying %s (declared by %s label)...\n", formulaName, beads.FormulaLabelPrefix)
+		case effectiveBase == "main" && mainTargetFormula(townRoot, targetRig) != "":
+			fmt.Printf("  Selecting %s for main-targeting bead...\n", formulaName)
 		default:
 			fmt.Printf("  Auto-applying %s for polecat work...\n", formulaName)
 		}

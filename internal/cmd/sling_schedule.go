@@ -621,6 +621,44 @@ func resolveFormulaForBead(explicit string, hookRawBead bool, townRoot, rigName 
 	return resolveFormula(explicit, hookRawBead, townRoot, rigName)
 }
 
+// mainTargetFormula returns the rig-configured formula to use when a bead
+// resolves to the protected mainline (base=main), or "" when the rig has not
+// configured one. A rig whose default_formula is an integration-branch
+// dev-work workflow (which correctly REFUSES main targets) sets
+// main_target_formula to a PR+review workflow so main-targeting beads are
+// dispatched with the right formula instead of round-tripping through a wasted
+// dev-work dispatch + ESCALATED close (gs-njym). Configured via:
+//
+//	gt rig config set <rig> main_target_formula mol-lia-pr-work
+func mainTargetFormula(townRoot, rigName string) string {
+	if townRoot == "" || rigName == "" {
+		return ""
+	}
+	r := &rig.Rig{
+		Name: rigName,
+		Path: filepath.Join(townRoot, rigName),
+	}
+	return r.GetStringConfig("main_target_formula")
+}
+
+// resolveFormulaForBeadWithBase extends resolveFormulaForBead with target-base
+// awareness (gs-njym). When a bead resolves to the protected mainline
+// (baseBranch == "main") and the rig configures a main_target_formula, that
+// formula is selected instead of the rig DEFAULT. The override only displaces
+// the auto-applied default: an explicit --formula flag, a 'gt:formula:<name>'
+// label, or hook-raw-bead all keep their existing precedence by falling through
+// to resolveFormulaForBead unchanged. This stops a rig whose default is an
+// integration-branch dev-work workflow from auto-dispatching main-targeting
+// beads into a wasted ESCALATED round-trip.
+func resolveFormulaForBeadWithBase(explicit string, hookRawBead bool, townRoot, rigName string, labels []string, baseBranch string) string {
+	if explicit == "" && !hookRawBead && baseBranch == "main" && beads.FormulaFromLabels(labels) == "" {
+		if mf := mainTargetFormula(townRoot, rigName); mf != "" {
+			return mf
+		}
+	}
+	return resolveFormulaForBead(explicit, hookRawBead, townRoot, rigName, labels)
+}
+
 // slingContextTTL is the maximum age of a sling context before it's considered
 // stale and ignored by areScheduled(). This prevents orphaned sling contexts
 // (from failed spawns or throttled dispatches) from permanently blocking tasks.
