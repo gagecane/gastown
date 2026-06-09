@@ -2056,11 +2056,12 @@ func TestEnsureMetadata_RepairsMissingDoltFields(t *testing.T) {
 	}
 }
 
-// TestEnsureMetadata_RepairsStalePort tests that EnsureMetadata overwrites
-// a stale dolt_server_port (e.g., 13729 from a previous bd init) with the
-// correct port from DefaultConfig. This is the root cause of "connection
-// refused" errors reported by community users after gt dolt fix-metadata.
-func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
+// TestEnsureMetadata_MigratesLegacyServerFields verifies that EnsureMetadata
+// removes the deprecated dolt_server_host / dolt_server_port fields from
+// metadata.json (bd v1.0.5+ emits a deprecation warning on every invocation
+// when these are present) and writes the authoritative port to the
+// gitignored port file at .beads/dolt-server.port. (gu-pkamt)
+func TestEnsureMetadata_MigratesLegacyServerFields(t *testing.T) {
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -2068,8 +2069,8 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate stale metadata with wrong port (13729 instead of 3307)
-	stale := map[string]interface{}{
+	// Simulate legacy metadata carrying the deprecated server fields.
+	legacy := map[string]interface{}{
 		"backend":          "dolt",
 		"database":         "dolt",
 		"dolt_mode":        "server",
@@ -2077,7 +2078,7 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 		"dolt_server_host": "127.0.0.1",
 		"dolt_server_port": 13729,
 	}
-	data, _ := json.Marshal(stale)
+	data, _ := json.Marshal(legacy)
 	metaPath := filepath.Join(beadsDir, "metadata.json")
 	if err := os.WriteFile(metaPath, data, 0600); err != nil {
 		t.Fatal(err)
@@ -2096,13 +2097,26 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 		t.Fatalf("parsing metadata: %v", err)
 	}
 
-	// Port should now be the default (3307), not the stale 13729
-	wantPort := float64(DefaultPort)
-	if meta["dolt_server_port"] != wantPort {
-		t.Errorf("dolt_server_port = %v, want %v", meta["dolt_server_port"], wantPort)
+	if _, ok := meta["dolt_server_port"]; ok {
+		t.Errorf("dolt_server_port should be removed, got %v", meta["dolt_server_port"])
 	}
-	if meta["dolt_server_host"] != "127.0.0.1" {
-		t.Errorf("dolt_server_host = %v, want 127.0.0.1", meta["dolt_server_host"])
+	if _, ok := meta["dolt_server_host"]; ok {
+		t.Errorf("dolt_server_host should be removed, got %v", meta["dolt_server_host"])
+	}
+	// Other fields must be preserved.
+	if meta["dolt_database"] != "hq" {
+		t.Errorf("dolt_database = %v, want hq", meta["dolt_database"])
+	}
+
+	// The port file must contain the authoritative DefaultConfig port.
+	portPath := filepath.Join(beadsDir, "dolt-server.port")
+	portBytes, err := os.ReadFile(portPath)
+	if err != nil {
+		t.Fatalf("reading dolt-server.port: %v", err)
+	}
+	wantPort := strconv.Itoa(DefaultPort)
+	if got := strings.TrimSpace(string(portBytes)); got != wantPort {
+		t.Errorf("dolt-server.port = %q, want %q", got, wantPort)
 	}
 }
 
