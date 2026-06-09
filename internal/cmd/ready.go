@@ -528,6 +528,19 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
+		// Filter beads tagged human-only in the title (gs-4pe6). A bracketed
+		// [HUMAN] / [HUMAN-ONLY] title tag declares work that structurally
+		// requires a human (user-observation studies, sign-offs, judgment
+		// calls). The human-only *label* is already caught by the mayor-only
+		// filter above, but the common convention is the title tag, which had
+		// no enforced attribute — so such beads were swept into convoys and
+		// slung to polecats (lb-wcdw.15, a 20-min user study). Sharing
+		// dispatch.IsHumanOnlyBeadInfo with the sling guards keeps the
+		// readiness filter and the dispatch guards aligned.
+		if dispatch.IsHumanOnlyBeadInfo(info) {
+			continue
+		}
+
 		filtered = append(filtered, issue)
 	}
 	return filtered

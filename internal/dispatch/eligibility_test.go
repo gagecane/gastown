@@ -502,6 +502,91 @@ func TestIsMayorOnlyBeadInfo(t *testing.T) {
 	}
 }
 
+// TestIsHumanOnlyBeadInfo verifies the gs-4pe6 guard: beads marked human-only
+// by a bracketed [HUMAN] / [HUMAN-ONLY] title tag (or the human-only label) must
+// be refused so the convoy/auto-dispatch path stops sweeping them to polecats.
+func TestIsHumanOnlyBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *BeadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &BeadInfo{}, false},
+
+		// Positive: [HUMAN] title tag (the gap this closes — no label set).
+		{"[HUMAN] prefix tag (lb-wcdw.15 shape)", &BeadInfo{
+			Title:     "[HUMAN] Run a 20-min user-observation study",
+			IssueType: "task",
+			Status:    "open",
+		}, true},
+		{"[HUMAN] after another bracket tag", &BeadInfo{
+			Title:     "[BUG][HUMAN] verify by watching real users",
+			IssueType: "bug",
+			Status:    "open",
+		}, true},
+		{"[HUMAN-ONLY] variant", &BeadInfo{
+			Title:     "[HUMAN-ONLY] sign-off on launch copy",
+			IssueType: "task",
+			Status:    "open",
+		}, true},
+		{"[Human only] case + space variant", &BeadInfo{
+			Title:     "[Human only] judgment call on pricing",
+			IssueType: "task",
+			Status:    "open",
+		}, true},
+
+		// Positive: human-only label alone (also covered by mayor-only gate).
+		{"human-only label, no title tag", &BeadInfo{
+			Title:     "Meta-investigation: re-dispatch pattern",
+			IssueType: "bug",
+			Status:    "open",
+			Labels:    []string{"human-only"},
+		}, true},
+
+		// Negative: ordinary work beads pass through.
+		{"plain task", &BeadInfo{
+			Title:     "Fix parser bug",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+		{"prose 'human' without bracket tag", &BeadInfo{
+			Title:     "Add human-readable error messages",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+		{"humanoid is not a tag", &BeadInfo{
+			Title:     "Render humanoid avatar",
+			IssueType: "task",
+			Status:    "open",
+		}, false},
+		// gs-4pe6 itself: its title mentions "[HUMAN]" mid-prose while
+		// describing the marker, and its description quotes "Do NOT
+		// auto-dispatch". It is a real, slingable bug and must NOT self-filter —
+		// the tag is only honored in the leading bracket run, and description
+		// text is never matched.
+		{"gs-4pe6 self-reference: [HUMAN] mid-title, not a leading tag", &BeadInfo{
+			Title:       "Convoy/auto-dispatch ignores [HUMAN]/human-only beads",
+			IssueType:   "bug",
+			Status:      "open",
+			Description: "lb-wcdw.15 is marked [HUMAN]; 'Do NOT auto-dispatch'.",
+		}, false},
+		{"[HUMAN] after a non-tag word is not a leading tag", &BeadInfo{
+			Title:     "[BUG] fix [HUMAN] glyph rendering",
+			IssueType: "bug",
+			Status:    "open",
+		}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsHumanOnlyBeadInfo(tt.info); got != tt.want {
+				t.Errorf("IsHumanOnlyBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsReferenceTripwireBeadInfo verifies the hq-9jeyo guard: reference /
 // gate tripwire beads (do-not-dispatch / pinned labels, or issue_type=reference)
 // must never be slung.

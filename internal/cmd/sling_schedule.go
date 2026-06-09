@@ -237,6 +237,18 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Title)
 	}
 
+	// Human-only guard (gs-4pe6). A bracketed [HUMAN] / [HUMAN-ONLY] title tag
+	// (or the human-only label) declares work that structurally requires a human
+	// — user-observation studies, sign-offs, judgment calls — that no polecat can
+	// complete by changing code. Before this guard the tag was inert free text,
+	// so a human-only bead swept into a convoy reached scheduleBead and spawned a
+	// polecat that could only close no-changes (lb-wcdw.15). Shares
+	// dispatch.IsHumanOnlyBeadInfo with `gt ready`; not bypassed by --force.
+	if isHumanOnlyBeadInfo(info) {
+		return fmt.Errorf("bead %s is marked human-only ([HUMAN] title tag or human-only label): %q — refusing to schedule. This work requires a human, not a polecat; remove the tag/label first if that assessment is wrong",
+			beadID, info.Title)
+	}
+
 	// Awaiting-refinery-merge guard (gu-ea25u). A source bead carrying the
 	// awaiting_refinery_merge label already has a submitted MR that the
 	// refinery has not yet merged to origin/main — the work is done and the

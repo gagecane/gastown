@@ -954,6 +954,46 @@ func TestIsEpicLikeTitle(t *testing.T) {
 	}
 }
 
+// TestIsHumanOnlyTitle verifies the gs-4pe6 title-hygiene signal: a bracketed
+// [HUMAN] / [HUMAN-ONLY] tag in the leading run of title tags marks human-only
+// work. The tag must NOT be honored mid-prose, so a bead that merely mentions
+// "[HUMAN]" while describing the marker does not self-filter.
+func TestIsHumanOnlyTitle(t *testing.T) {
+	tests := []struct {
+		title string
+		want  bool
+	}{
+		// Match — leading [HUMAN] tag
+		{"[HUMAN] Run a 20-min user-observation study", true},
+		{"[HUMAN-ONLY] sign-off on launch copy", true},
+		{"[Human only] judgment call on pricing", true},
+		{"[human_only] meta-investigation", true},
+		// Match — [HUMAN] after another leading bracket tag
+		{"[BUG][HUMAN] verify by watching real users", true},
+		{"[P1] [HUMAN] sign-off required", true},
+		// Match — single emoji / non-ASCII leader
+		{"🧑 [HUMAN] field study", true},
+
+		// No match — mid-prose mention (gs-4pe6's own title shape)
+		{"Convoy/auto-dispatch ignores [HUMAN]/human-only beads", false},
+		{"[BUG] fix [HUMAN] glyph rendering", false}, // [HUMAN] not in leading run
+		// No match — prose / lookalikes
+		{"Add human-readable error messages", false},
+		{"Render humanoid avatar", false},
+		{"(human) checkpoint", false},
+		{"human review needed", false},
+		{"[HUMANS] plural is a different tag", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		got := IsHumanOnlyTitle(tt.title)
+		if got != tt.want {
+			t.Errorf("IsHumanOnlyTitle(%q) = %v, want %v", tt.title, got, tt.want)
+		}
+	}
+}
+
 // TestHasEpicPhaseLabel verifies the gu-fs88 dispatch signal: a bead carrying
 // the phase:epic label is an epic container regardless of its title or type.
 // The check must be an exact match — substrings like "phase:epics" or

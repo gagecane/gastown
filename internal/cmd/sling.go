@@ -852,6 +852,17 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID, info.Title, beadID)
 	}
 
+	// Human-only guard (gs-4pe6). A bracketed [HUMAN] / [HUMAN-ONLY] title tag
+	// (or the human-only label) declares work that structurally requires a human
+	// — user-observation studies, sign-offs, judgment calls. The tag was inert
+	// free text, so a convoy swept lb-wcdw.15 (a 20-min user study) to a polecat
+	// that could only close no-changes. Shares dispatch.IsHumanOnlyBeadInfo with
+	// `gt ready`; not bypassed by --force.
+	if isHumanOnlyBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is marked human-only ([HUMAN] title tag or human-only label) — this work requires a human, not a polecat.\nRemove the tag/label first if this is wrong (e.g. bd update %s --remove-label=human-only, or edit the title)",
+			beadID, info.Title, beadID)
+	}
+
 	// Awaiting-refinery-merge guard (gu-ea25u). A source bead carrying
 	// awaiting_refinery_merge already has a submitted MR that the refinery has
 	// not yet merged to origin/main; the bead stays open only so the refinery's

@@ -83,6 +83,7 @@ var (
 	isEpicLikeBeadInfo          = dispatch.IsEpicLikeBeadInfo
 	isContainerBeadInfo         = dispatch.IsContainerBeadInfo
 	isMayorOnlyBeadInfo         = dispatch.IsMayorOnlyBeadInfo
+	isHumanOnlyBeadInfo         = dispatch.IsHumanOnlyBeadInfo
 	isAwaitingMergeBeadInfo     = dispatch.IsAwaitingMergeBeadInfo
 	isReferenceTripwireBeadInfo = dispatch.IsReferenceTripwireBeadInfo
 	isSlingContextBeadInfo      = dispatch.IsSlingContextBeadInfo

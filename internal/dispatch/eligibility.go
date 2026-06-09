@@ -268,6 +268,37 @@ func IsMayorOnlyBeadInfo(info *BeadInfo) bool {
 	return beads.HasMayorOnlyLabel(info.Labels)
 }
 
+// IsHumanOnlyBeadInfo reports whether the bead is marked human-only — either by
+// the human-only label (also covered by IsMayorOnlyBeadInfo) or, the gap this
+// closes, by a bracketed [HUMAN] / [HUMAN-ONLY] tag in the title.
+//
+// gs-4pe6: human-only work was declared only in free text — a [HUMAN] title tag
+// plus a "Do NOT auto-dispatch" description note — with no enforced attribute the
+// dispatcher respected. The label gate (IsMayorOnlyBeadInfo → HasMayorOnlyLabel)
+// only fires when an operator attaches the literal human-only label, but the
+// common convention is the title tag. So a 20-min user-observation study
+// (lb-wcdw.15, "[HUMAN] ...") was swept into a convoy by the deacon dispatch path
+// and slung to polecat rictus, wasting a dispatch + slot and requiring manual
+// mayor recovery (detach molecule, defer, reassign to a human).
+//
+// This is the title-hygiene leg, mirroring how IsEpicLikeBeadInfo backstops the
+// epic-label gate with an "EPIC:" title check. Wired into both `gt ready` and the
+// sling/schedule guards so the readiness filter and every dispatch guard share
+// one predicate and cannot drift.
+//
+// Not bypassed by --force — the tag is an explicit assertion that the work needs
+// a human, not a dispatch preference. Remove the [HUMAN] tag (or relabel) first
+// if that assessment is wrong.
+func IsHumanOnlyBeadInfo(info *BeadInfo) bool {
+	if info == nil {
+		return false
+	}
+	if beads.HasMayorOnlyLabel(info.Labels) {
+		return true
+	}
+	return beads.IsHumanOnlyTitle(info.Title)
+}
+
 // IsReferenceTripwireBeadInfo reports whether a bead is a permanent reference
 // or gate tripwire — do-not-dispatch / pinned labels, or issue_type=reference
 // (hq-9jeyo). Such beads stay OPEN forever as live safety gates and must never

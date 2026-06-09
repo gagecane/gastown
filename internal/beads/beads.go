@@ -291,6 +291,45 @@ func HasMayorOnlyLabel(labels []string) bool {
 	return false
 }
 
+// humanOnlyTitleRe matches a bracketed [HUMAN] / [HUMAN-ONLY] tag in the LEADING
+// run of bracket tags on a title. Operators tag human-only work this way (e.g.
+// "[HUMAN] Run a 20-min user study", or "[BUG][HUMAN] ...") to declare that
+// resolution structurally requires a human and the bead must never be
+// auto-dispatched to a polecat. Case and an optional -/_/space separator before
+// "ONLY" are tolerated, and the tag may sit after other leading bracket tags.
+//
+// Anchoring to the leading bracket run is deliberate: it keeps the tag from
+// matching mid-prose, so a bead that merely *mentions* "[HUMAN]" while
+// describing the marker (gs-4pe6's own title, "...ignores [HUMAN]/human-only
+// beads...") does not self-filter.
+//
+// Matches: "[HUMAN] ...", "[BUG][HUMAN] ...", "[Human-only] ...", "[HUMAN ONLY]"
+// Does NOT match: "Convoy ignores [HUMAN] beads", "human review needed",
+// "(human) checkpoint", "humanoid bead", "[BUG] fix [HUMAN] glyph"
+var humanOnlyTitleRe = regexp.MustCompile(`(?i)^\s*(?:[^\x00-\x7F]\s*)?(?:\[[^\]]*\]\s*)*\[\s*human(?:[-_ ]?only)?\s*\]`)
+
+// IsHumanOnlyTitle reports whether the title carries a bracketed [HUMAN] /
+// [HUMAN-ONLY] tag marking the bead as human-only work.
+//
+// gs-4pe6: human-only work was marked only in free text — a [HUMAN] title tag
+// and a "Do NOT auto-dispatch" description note — with no enforced attribute the
+// dispatcher respected. The HumanOnlyLabel gate (HasMayorOnlyLabel) only fires
+// when an operator remembers to attach the literal label; the far more common
+// [HUMAN] title tag stayed inert, so a 20-min user-observation study
+// (lb-wcdw.15) was swept into a convoy and dispatched to a polecat. This is the
+// title-hygiene leg that mirrors IsEpicLikeTitle for epics: it lets the
+// readiness filter and dispatch guards honor the tag even when no label is set.
+//
+// Title-only by design. The description free text ("Do NOT auto-dispatch") is
+// deliberately NOT matched: bug reports that quote or discuss the marker (gs-4pe6
+// itself quotes it) would otherwise self-filter.
+func IsHumanOnlyTitle(title string) bool {
+	if title == "" {
+		return false
+	}
+	return humanOnlyTitleRe.MatchString(title)
+}
+
 // WrongRigLabelPrefix marks a bead as already-routed-to-the-wrong-rig once.
 // Apply as 'wrong-rig:<rig>' (e.g. 'wrong-rig:casc_lambda') after a polecat in
 // that rig closes the bead no-changes because the work belongs elsewhere.

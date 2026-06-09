@@ -259,6 +259,19 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Title, params.BeadID)
 	}
 
+	// Human-only guard (gs-4pe6). The mayor-only guard above catches the
+	// human-only *label*; this catches the far more common bracketed [HUMAN] /
+	// [HUMAN-ONLY] *title* tag, which had no enforced attribute. Batch sling and
+	// the deferred/convoy scheduler funnel through executeSling, so a human-only
+	// bead swept into a convoy (lb-wcdw.15, a 20-min user study) reached here and
+	// spawned a polecat that could only close no-changes. Shares
+	// dispatch.IsHumanOnlyBeadInfo with `gt ready`; not bypassed by --force.
+	if isHumanOnlyBeadInfo(info) {
+		result.ErrMsg = "human-only"
+		return result, fmt.Errorf("bead %s is marked human-only ([HUMAN] title tag or human-only label): %q — this work requires a human, not a polecat.\nRemove the tag/label first if this is wrong (e.g. bd update %s --remove-label=human-only, or edit the title)",
+			params.BeadID, info.Title, params.BeadID)
+	}
+
 	// Awaiting-refinery-merge guard (gu-ea25u). Batch sling and the deferred
 	// scheduler funnel through executeSling; without this, a source bead that
 	// already submitted an MR (label awaiting_refinery_merge, kept open until
