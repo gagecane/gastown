@@ -264,6 +264,11 @@ func writeTownJSON(t *testing.T, path string, data interface{}) {
 // tmux is unavailable. The socket server is killed on test cleanup so this
 // test never touches the user's default tmux server. Follows the pattern
 // used by requireNotifyTestSocket in internal/mail/router_test.go.
+//
+// The "gt-test-" prefix matches tmux.PruneDeadTestSockets so a stale socket
+// file from a SIGKILLed test run is reaped automatically on the next
+// 'gt agents' scan, instead of accumulating in /tmp/tmux-UID forever
+// (gu-ez6ha follow-on to gu-wb67v).
 func requireIntegrationTmuxSocket(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -272,7 +277,7 @@ func requireIntegrationTmuxSocket(t *testing.T) string {
 	// Use test name for unique socket per test to prevent cleanup interference.
 	// Sanitize: tmux socket names cannot contain slashes or dots.
 	safe := strings.NewReplacer("/", "-", ".", "-").Replace(t.Name())
-	socket := fmt.Sprintf("gt-config-test-%s-%d", safe, os.Getpid())
+	socket := fmt.Sprintf("gt-test-config-%s-%d", safe, os.Getpid())
 	// intentionally bare — pre-kill any stale server on this per-test socket.
 	// Cannot use tmux.BuildCommand: the test explicitly manages its own
 	// isolated socket independent of the package-level default.
