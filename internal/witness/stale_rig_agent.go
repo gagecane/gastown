@@ -3,6 +3,7 @@ package witness
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/mail"
@@ -33,6 +34,30 @@ type StaleRigAgentResult struct {
 	// detector still fires when the session is alive but the heartbeat is
 	// stale (the gu-rh0g failure mode: process running, agent stuck).
 	SessionAlive bool
+	// LastState is the agent-reported state from the last heartbeat write
+	// (v2/v3): "working", "idle", "exiting", or "stuck". Empty for a v1
+	// heartbeat or a missing one. This is the key triage signal the responder
+	// previously had to recover with a manual tmux pane capture every time
+	// (gu-8ni5o): "idle"/"exiting" means the agent finished its last cycle
+	// cleanly and is parked at the prompt (a likely FALSE POSITIVE), while
+	// "working"/"stuck" means it froze mid-operation (the gu-rh0g real wedge).
+	LastState polecat.HeartbeatState
+	// LastLiveness is the v3 write classification of the last heartbeat:
+	// "alive", "keepalive", or "exiting". "exiting" confirms the agent
+	// completed its last cycle cleanly via gt done before going quiet.
+	LastLiveness polecat.LivenessSignal
+	// LastKeepaliveOp is the v3 operation label active at the last heartbeat
+	// (e.g. "llm-call", "go-test"). Names the operation an agent was mid-flight
+	// on when its heartbeat froze — the missing "what was it doing" context.
+	LastKeepaliveOp string
+	// LastContext is the v2 free-text description of what the agent was doing.
+	LastContext string
+	// LastBead is the hook bead the agent was working when it last heartbeat.
+	LastBead string
+	// ExpectedIdleUntil is the agent's TTL-bounded self-report of when it
+	// expects to be idle until. When in the future, a stale heartbeat is an
+	// expected idle, not a wedge.
+	ExpectedIdleUntil time.Time
 	// Action describes what the detector did: "escalated" when mail was sent,
 	// "skip-fresh" when the heartbeat was within threshold,
 	// "skip-cooldown" when the condition was already reported recently and has
@@ -219,6 +244,17 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 			continue
 		}
 
+		// Carry the agent-reported state forward into the result/escalation so
+		// the responder can disposition idle-vs-mid-op without a manual tmux
+		// pane capture (gu-8ni5o). These come straight off the heartbeat the
+		// agent itself wrote on its last gt command.
+		item.LastState = hb.EffectiveState()
+		item.LastLiveness = hb.Liveness
+		item.LastKeepaliveOp = hb.KeepaliveOp
+		item.LastContext = hb.Context
+		item.LastBead = hb.Bead
+		item.ExpectedIdleUntil = hb.ExpectedIdleUntil
+
 		item.HeartbeatAge = now.Sub(hb.Timestamp)
 		if item.HeartbeatAge < staleThreshold {
 			item.Action = "skip-fresh"
@@ -365,12 +401,13 @@ materially or after the notify-cooldown window elapses.`,
 			item.AgentRole, rigName,
 			rigName, item.AgentRole)
 	} else {
-		subject = fmt.Sprintf("STALE_RIG_AGENT %s/%s (heartbeat age=%s, session_alive=%v)",
-			rigName, item.AgentRole, item.HeartbeatAge.Round(time.Second), item.SessionAlive)
+		subject = fmt.Sprintf("STALE_RIG_AGENT %s/%s (heartbeat age=%s, session_alive=%v, last_state=%s)",
+			rigName, item.AgentRole, item.HeartbeatAge.Round(time.Second), item.SessionAlive, item.LastState)
 		body = fmt.Sprintf(`Rig-level agent %s/%s heartbeat is %s old (threshold %s).
 
 Session alive: %v
 
+%s
 If the session is alive, the process is up but the agent loop is wedged —
 e.g. stuck mid-merge for refinery, blocked on a prompt for witness. This is
 the gu-rh0g signature: process running, work loop frozen.
@@ -388,6 +425,7 @@ materially (crosses a new threshold multiple) or after the notify-cooldown
 window elapses.`,
 			rigName, item.AgentRole, item.HeartbeatAge.Round(time.Second), threshold,
 			item.SessionAlive,
+			staleAgentTriageContext(item),
 			rigName, item.AgentRole,
 			item.AgentRole, rigName,
 			rigName, item.AgentRole)
@@ -414,4 +452,72 @@ window elapses.`,
 		}
 	}
 	return false
+}
+
+// staleAgentTriageContext renders the agent-reported heartbeat state into a
+// triage block the responder can read instead of running a manual tmux pane
+// capture to distinguish a false-positive idle from a real mid-op wedge
+// (gu-8ni5o). It returns "" for a v1 heartbeat that carried no state, so the
+// mail simply omits the block rather than printing empty fields.
+//
+// The disposition hint is intentionally a recommendation, not a verdict: the
+// state is the agent's own last self-report and a truly wedged agent can have
+// stopped before updating it. The responder still owns the call — but now
+// starts from the right prior instead of from zero.
+func staleAgentTriageContext(item StaleRigAgentResult) string {
+	// v1 heartbeat (no state field at all): nothing to add. EffectiveState
+	// defaults to "working" for v1, so distinguish via the raw fields.
+	if item.LastState == "" && item.LastLiveness == "" && item.LastKeepaliveOp == "" &&
+		item.LastContext == "" && item.LastBead == "" && item.ExpectedIdleUntil.IsZero() {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Last self-reported state (from the agent's own heartbeat — saves a manual\n")
+	sb.WriteString("tmux pane capture to triage idle-vs-mid-op):\n")
+	if item.LastState != "" {
+		fmt.Fprintf(&sb, "  state:      %s\n", item.LastState)
+	}
+	if item.LastLiveness != "" {
+		fmt.Fprintf(&sb, "  liveness:   %s\n", item.LastLiveness)
+	}
+	if item.LastKeepaliveOp != "" {
+		fmt.Fprintf(&sb, "  op:         %s\n", item.LastKeepaliveOp)
+	}
+	if item.LastBead != "" {
+		fmt.Fprintf(&sb, "  bead:       %s\n", item.LastBead)
+	}
+	if item.LastContext != "" {
+		fmt.Fprintf(&sb, "  context:    %s\n", item.LastContext)
+	}
+	if !item.ExpectedIdleUntil.IsZero() {
+		fmt.Fprintf(&sb, "  idle-until: %s\n", item.ExpectedIdleUntil.UTC().Format(time.RFC3339))
+	}
+
+	fmt.Fprintf(&sb, "Disposition: %s\n", staleAgentDisposition(item))
+	return sb.String()
+}
+
+// staleAgentDisposition maps the agent's last self-reported state to a
+// likely-false-positive vs likely-real-wedge hint. The clean-cycle states
+// (idle/exiting) indicate the agent finished its last cycle and parked; the
+// in-flight states (working/stuck) indicate it froze mid-operation — the
+// gu-rh0g signature the responder most needs to act on.
+func staleAgentDisposition(item StaleRigAgentResult) string {
+	if !item.ExpectedIdleUntil.IsZero() && item.ExpectedIdleUntil.After(time.Now().UTC()) {
+		return "LIKELY FALSE POSITIVE — agent self-reported an expected-idle window that " +
+			"has not elapsed yet. Verify the window is honest before acting."
+	}
+	switch item.LastState {
+	case polecat.HeartbeatExiting, polecat.HeartbeatIdle:
+		return "LIKELY FALSE POSITIVE — last cycle completed cleanly (idle/exiting); " +
+			"agent is parked at the prompt, not wedged mid-op. Confirm before restarting."
+	case polecat.HeartbeatStuck:
+		return "LIKELY REAL WEDGE — agent self-reported STUCK. Restart is probably warranted."
+	case polecat.HeartbeatWorking:
+		return "LIKELY REAL WEDGE — last state was 'working' and the heartbeat then froze " +
+			"(gu-rh0g signature: mid-op, not idle). Capture the pane to confirm, then restart."
+	default:
+		return "UNKNOWN — no agent-reported state; fall back to a manual tmux pane capture."
+	}
 }

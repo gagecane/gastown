@@ -39,7 +39,8 @@ var SystemDefaults = map[string]interface{}{
 	"dnd":                     false,
 	"polecat_branch_template": "", // Empty = use default behavior (polecat/{name}/...)
 	"default_formula":         "mol-polecat-work",
-	"main_target_formula":     "", // Empty = no override; use default_formula even for base=main (gs-njym)
+	"main_target_formula":     "",    // Empty = no override; use default_formula even for base=main (gs-njym)
+	"customer_repo":           false, // If true, origin is the customer's real remote: never push gastown-internal branches (preserved/*) there (gs-8p5r)
 }
 
 // StackingKeys defines which keys use stacking semantics (values add up).

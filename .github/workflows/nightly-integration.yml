@@ -8,11 +8,88 @@ on:
 permissions:
   contents: read
 
+# Number of parallel shards the integration suite is split across. The long
+# pole is internal/cmd's ~27 Dolt-backed TestScheduler* tests (serial, ~35m).
+# Splitting the full suite N ways on separate runners — each with its own
+# ephemeral testcontainers Dolt (TestMain) — cuts wall-clock to ~suite/N with
+# zero shared-server contention. Raise N if the suite grows; the partition
+# rebalances automatically (see the discover job).
+env:
+  SHARDS: '4'
+
 jobs:
-  integration-full:
-    name: Full Integration Tests
+  # Enumerate every integration test once and partition the names into SHARDS
+  # disjoint files by round-robin (index % SHARDS). This auto-balances as tests
+  # are added — no per-test bookkeeping — and a hard guard fails the run if the
+  # union of shards does not reproduce the full list (no silent under-coverage).
+  discover:
+    name: Discover & Partition Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      shards: ${{ steps.partition.outputs.shards }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Enumerate and partition integration tests
+        id: partition
+        run: |
+          set -euo pipefail
+          # -list compiles the test binaries but runs neither TestMain nor any
+          # test, so no Dolt is needed here.
+          go test -tags=integration -list '.*' ./... 2>/dev/null \
+            | grep -E '^Test' | sort -u > all.txt
+          total=$(wc -l < all.txt)
+          if [ "$total" -eq 0 ]; then
+            echo "::error::no integration tests enumerated" >&2
+            exit 1
+          fi
+          echo "Enumerated $total integration test names across $SHARDS shards"
+
+          # Round-robin assignment: line i (0-based) -> shard i % SHARDS.
+          awk -v n="$SHARDS" '{ print > ("shard-" ((NR-1)%n) ".txt") }' all.txt
+
+          # GUARD: every shard must be non-empty and the union must equal the
+          # full list exactly — otherwise some tests would silently never run.
+          for i in $(seq 0 $((SHARDS-1))); do
+            if [ ! -s "shard-$i.txt" ]; then
+              echo "::error::shard $i is empty ($total tests, $SHARDS shards)" >&2
+              exit 1
+            fi
+          done
+          cat shard-*.txt | sort -u > union.txt
+          if ! diff -q all.txt union.txt >/dev/null; then
+            echo "::error::partition union != full test list" >&2
+            diff all.txt union.txt | head -20 >&2 || true
+            exit 1
+          fi
+
+          # Emit the matrix shard indices, e.g. ["0","1","2","3"].
+          shards=$(seq 0 $((SHARDS-1)) | jq -R . | jq -cs .)
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+
+      - name: Upload partition
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-partition
+          path: shard-*.txt
+          retention-days: 1
+
+  integration-shard:
+    name: Integration Shard ${{ matrix.shard }}
+    needs: discover
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.discover.outputs.shards) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -60,10 +137,19 @@ jobs:
       - name: Build
         run: go build -v ./cmd/gt
 
-      - name: Run all integration tests
-        # internal/cmd is the long pole: its ~27 Dolt-backed TestScheduler*
-        # integration tests run serially at 30-50s each (daemon poll cycles),
-        # so the package binary alone needs ~35m. The previous 20m per-package
-        # timeout killed it mid-run (gs-8zeq). 40m gives headroom; the job-level
-        # timeout-minutes above bounds total wall-clock.
-        run: gotestsum --format testname --junitfile junit.xml -- -v -tags=integration -timeout=40m ./...
+      - name: Download partition
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: test-partition
+
+      - name: Run integration tests (shard ${{ matrix.shard }})
+        # This shard runs only the tests assigned to it by the discover job.
+        # internal/cmd's TestMain boots one ephemeral Dolt container per shard
+        # process (separate runners), so there is no shared-server contention
+        # between shards. -run filters which tests execute; the package still
+        # compiles fully, so the long pole is split ~suite/SHARDS ways.
+        run: |
+          set -euo pipefail
+          pattern="^($(paste -sd'|' "shard-${{ matrix.shard }}.txt"))$"
+          gotestsum --format testname --junitfile junit.xml -- \
+            -v -tags=integration -timeout=40m -run "$pattern" ./...
