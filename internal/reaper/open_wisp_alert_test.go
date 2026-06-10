@@ -1,6 +1,7 @@
 package reaper
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,5 +119,61 @@ func TestOpenWispAlertSignatureStableAcrossDrift(t *testing.T) {
 	}
 	if a.Severity != b.Severity {
 		t.Errorf("severity drifted within band: %q vs %q", a.Severity, b.Severity)
+	}
+}
+
+func TestEscalateArgsNilWhenNotFiring(t *testing.T) {
+	a := EvaluateOpenWispAlert(700, 800)
+	if got := a.EscalateArgs(700, 800); got != nil {
+		t.Fatalf("EscalateArgs on non-firing alert = %v, want nil", got)
+	}
+}
+
+// TestEscalateArgsCarriesDedupMetadata verifies the firing alert produces a
+// `gt escalate` arg vector wired for close-aware dedup: the bucket signature
+// (not the exact count) and the band's cooldown as the dedup window. This is
+// what stops the every-cycle re-fire described in gu-ka8aj.
+func TestEscalateArgsCarriesDedupMetadata(t *testing.T) {
+	a := EvaluateOpenWispAlert(812, 800) // band 1, medium, 4h
+	args := a.EscalateArgs(812, 800)
+	joined := strings.Join(args, " ")
+
+	wantSubstrings := []string{
+		"escalate",
+		"-s medium",
+		"--dedup",
+		"--signature=reaper:open-wisp-breach:b1",
+		"--dedup-window=4h0m0s",
+		"--source=" + openWispAlertSource,
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(joined, want) {
+			t.Errorf("EscalateArgs missing %q\n  got: %s", want, joined)
+		}
+	}
+
+	// The exact count belongs in the human-readable title/reason, never the
+	// dedup signature — otherwise drift defeats dedup.
+	for i, arg := range args {
+		if arg == "--signature=reaper:open-wisp-breach:b1" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--signature=") {
+			t.Errorf("unexpected signature arg at %d: %q", i, arg)
+		}
+	}
+}
+
+func TestEscalateArgsHighBandUsesShortCooldown(t *testing.T) {
+	a := EvaluateOpenWispAlert(1700, 800) // band 2, high, 1h
+	joined := strings.Join(a.EscalateArgs(1700, 800), " ")
+	if !strings.Contains(joined, "-s high") {
+		t.Errorf("band 2 should escalate at high severity; got: %s", joined)
+	}
+	if !strings.Contains(joined, "--dedup-window=1h0m0s") {
+		t.Errorf("band 2 should use 1h cooldown window; got: %s", joined)
+	}
+	if !strings.Contains(joined, "--signature=reaper:open-wisp-breach:b2") {
+		t.Errorf("band 2 signature mismatch; got: %s", joined)
 	}
 }
