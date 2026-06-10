@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"go.uber.org/goleak"
 
@@ -80,8 +81,27 @@ func TestMain(m *testing.M) {
 		goleak.IgnoreTopFunction("github.com/dolthub/dolt/go/libraries/events.(*sendingThread).run"),
 		goleak.IgnoreTopFunction("github.com/dolthub/dolt/go/libraries/events.NewCollector.func1"),
 	}
-	if err := goleak.Find(leakOpts...); err != nil {
-		fmt.Fprintf(os.Stderr, "goleak: goroutine leak detected:\n%v\n", err)
+	//
+	// Dolt-backed stores opened by tests (via setupTestStore → beadsdk.Open)
+	// run on a database/sql connection pool, which spawns connectionOpener and
+	// connectionCleaner goroutines. Every test's cleanup calls store.Close(),
+	// signaling these to exit — but (*DB).Close() does not block until they
+	// actually return. Under the goroutine churn at the end of this large suite
+	// the pool goroutines occasionally outlive goleak's internal retry budget
+	// (~430ms in v1.3.0: 20 retries capped at 100ms), producing a flaky leak
+	// report. Rather than permanently IgnoreTopFunction those — which would also
+	// mask a genuinely unclosed DB — retry Find with extra grace: a pool that is
+	// merely draining settles within a few hundred ms, while a real leak (a
+	// goroutine that never exits) still fails after every attempt. (gs-wtce)
+	var leakErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if leakErr = goleak.Find(leakOpts...); leakErr == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if leakErr != nil {
+		fmt.Fprintf(os.Stderr, "goleak: goroutine leak detected:\n%v\n", leakErr)
 		os.Exit(1)
 	}
 
