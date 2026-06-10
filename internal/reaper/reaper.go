@@ -397,6 +397,25 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	return result, nil
 }
 
+// CountOpenWisps returns the number of open/hooked/in_progress wisps in a
+// single database. It is the lightweight count used by `gt reaper
+// alert-open-wisps` to decide whether the open-wisp escalation should fire,
+// without running a full scan. Databases without the reaper schema return 0.
+func CountOpenWisps(db *sql.DB) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var open int
+	openQuery := "SELECT COUNT(*) FROM wisps WHERE status IN ('open', 'hooked', 'in_progress')"
+	if err := db.QueryRowContext(ctx, openQuery).Scan(&open); err != nil {
+		if isTableNotFound(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("count open wisps: %w", err)
+	}
+	return open, nil
+}
+
 // Reap closes stale wisps in a database whose parent molecule is already closed.
 // UPDATEs are batched to avoid holding a write lock for extended periods on large tables.
 func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapResult, error) {

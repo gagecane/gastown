@@ -80,7 +80,14 @@ gt reaper scan --db=<name> --port={{dolt_port}} \\
 - Check the `anomalies` array in the JSON output
 - Flag any `dangling_parent_ref` anomalies — these indicate wisps with
   parent dependency records pointing to purged/missing parents
-- If `open_wisps` exceeds {{alert_threshold}}, escalate
+- Raise the open-wisp-count alert via the deduplicated command (do NOT
+  freeform `gt escalate` — that re-fires every cycle, gu-ka8aj):
+```bash
+gt reaper alert-open-wisps --threshold={{alert_threshold}} --port={{dolt_port}}
+```
+  This counts open wisps across all databases and escalates only when the
+  threshold-breach band changes or the cooldown window elapses, so normal
+  count drift no longer spams the Mayor.
 
 **4. Decide whether to proceed:**
 - If no candidates found across all databases, skip remaining steps

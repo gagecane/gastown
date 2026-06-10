@@ -112,7 +112,13 @@ func TestBuildRestartEscalationMessage_IncludesStateAndAction(t *testing.T) {
 		Title:       "daemon-restart-pending: gt binary upgraded to v1.2.3",
 		Description: "rebuild-gt upgraded the on-disk binary. Daemon still on old code.",
 	}
-	msg := d.buildRestartEscalationMessage(b)
+	msg := d.buildRestartEscalationMessage(b, restartForwardCheck{
+		Computed:      true,
+		Forward:       true,
+		RunningCommit: "aaaaaaaaaaaa1111",
+		RepoCommit:    "bbbbbbbbbbbb2222",
+		CompareRef:    "main",
+	})
 
 	// Acceptance (b): escalation must carry enough state for an agent to gate.
 	for _, want := range []string{
@@ -120,6 +126,7 @@ func TestBuildRestartEscalationMessage_IncludesStateAndAction(t *testing.T) {
 		"upgraded to v1.2.3",                // which binary is pending (from title)
 		"OLD in-memory image",               // why it matters
 		"gt daemon stop && gt daemon start", // the gated action
+		"FORWARD-ONLY",                      // pre-computed ancestry verdict (gu-8ni5o)
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("escalation message missing %q.\nGot:\n%s", want, msg)
@@ -133,10 +140,68 @@ func TestBuildRestartEscalationMessage_IncludesStateAndAction(t *testing.T) {
 	}
 }
 
+// TestBuildRestartEscalationMessage_NotForwardWarns verifies the escalation
+// surfaces the NOT-forward verdict loudly so the responder does not blindly
+// restart into a downgrade/diverge (gu-8ni5o).
+func TestBuildRestartEscalationMessage_NotForwardWarns(t *testing.T) {
+	d := &Daemon{}
+	msg := d.buildRestartEscalationMessage(
+		restartPendingBead{ID: "gu-nf", Title: "daemon-restart-pending"},
+		restartForwardCheck{
+			Computed:      true,
+			Forward:       false,
+			RunningCommit: "aaaaaaaaaaaa1111",
+			RepoCommit:    "cccccccccccc3333",
+			CompareRef:    "main",
+		},
+	)
+	if !strings.Contains(msg, "NOT FORWARD-ONLY") {
+		t.Errorf("expected NOT-forward warning in message; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "aaaaaaaaaaaa") || !strings.Contains(msg, "cccccccccccc") {
+		t.Errorf("expected both running and new commits in message; got:\n%s", msg)
+	}
+}
+
+// TestBuildRestartEscalationMessage_UnknownVerdictFallback verifies that when
+// the verdict could not be pre-computed, the escalation still tells the
+// responder how to run the manual check (gu-8ni5o).
+func TestBuildRestartEscalationMessage_UnknownVerdictFallback(t *testing.T) {
+	d := &Daemon{}
+	msg := d.buildRestartEscalationMessage(
+		restartPendingBead{ID: "gu-uv", Title: "daemon-restart-pending"},
+		restartForwardCheck{Detail: "could not locate gt source repo"},
+	)
+	if !strings.Contains(msg, "UNKNOWN") {
+		t.Errorf("expected UNKNOWN verdict in message; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "merge-base --is-ancestor") {
+		t.Errorf("expected manual fallback instructions; got:\n%s", msg)
+	}
+}
+
+func TestRestartForwardCheck_RenderAlreadyUpToDate(t *testing.T) {
+	fc := restartForwardCheck{
+		Computed:      true,
+		Forward:       true,
+		RunningCommit: "aaaaaaaaaaaa1111",
+		RepoCommit:    "aaaaaaaaaaaa1111",
+		CompareRef:    "main",
+		Detail:        "running daemon is already at the repo tip (no newer commit to advance to)",
+	}
+	out := fc.render()
+	if !strings.Contains(out, "FORWARD-ONLY ✓") {
+		t.Errorf("expected forward verdict; got:\n%s", out)
+	}
+	if !strings.Contains(out, "already at the repo tip") {
+		t.Errorf("expected up-to-date note; got:\n%s", out)
+	}
+}
+
 func TestBuildRestartEscalationMessage_FirstLineIsSingleLineTitle(t *testing.T) {
 	// d.escalate uses the first line as the bd title, which must be single-line.
 	d := &Daemon{}
-	msg := d.buildRestartEscalationMessage(restartPendingBead{ID: "gu-x", Title: "t"})
+	msg := d.buildRestartEscalationMessage(restartPendingBead{ID: "gu-x", Title: "t"}, restartForwardCheck{})
 	firstLine := msg
 	if idx := strings.IndexByte(msg, '\n'); idx >= 0 {
 		firstLine = msg[:idx]

@@ -46,3 +46,24 @@ func TestDirSizeHuman_NonexistentDir(t *testing.T) {
 		t.Errorf("nonexistent dir: got %q, want %q", got, "0 B")
 	}
 }
+
+// TestDoltSQLCmd_Flags ensures the -q/--query and -r/--result-format flags
+// are registered on `gt dolt sql` so non-interactive scripted queries work
+// (gu-86sy2).
+func TestDoltSQLCmd_Flags(t *testing.T) {
+	q := doltSQLCmd.Flags().Lookup("query")
+	if q == nil {
+		t.Fatal("expected --query flag to be registered on doltSQLCmd")
+	}
+	if q.Shorthand != "q" {
+		t.Errorf("--query shorthand = %q, want %q", q.Shorthand, "q")
+	}
+
+	r := doltSQLCmd.Flags().Lookup("result-format")
+	if r == nil {
+		t.Fatal("expected --result-format flag to be registered on doltSQLCmd")
+	}
+	if r.Shorthand != "r" {
+		t.Errorf("--result-format shorthand = %q, want %q", r.Shorthand, "r")
+	}
+}
