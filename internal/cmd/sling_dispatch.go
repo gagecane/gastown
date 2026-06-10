@@ -340,6 +340,26 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Owner, info.Title)
 	}
 
+	// Refinery-owned bead guard (gu-pi35l). Sibling of the polecat-owner guard
+	// above for owners shaped `<rig>/refinery`. The convoy stranded scan was
+	// observed slinging cacr-wfs-xegy2 (owner=casc_crud/refinery) every cycle
+	// to a polecat that closed no-changes. Not bypassed by --force.
+	if isRefineryOwnedBeadInfo(info) {
+		result.ErrMsg = "refinery-owned"
+		return result, fmt.Errorf("bead %s is owned by a refinery (%s): %q — refinery-owned beads track merge-queue / patrol state and are not polecat work. Reassign the owner first if this assessment is wrong",
+			params.BeadID, info.Owner, info.Title)
+	}
+
+	// Refinery workflow-step guard (gu-pi35l, variant 2). Beads matching
+	// `*-wfs-*` are ephemeral steps internal to refinery formulas (e.g.
+	// mol-refinery-patrol). Same `-wfs-` substring `gt done` uses to recognize
+	// workflow steps. Not bypassed by --force — workflow steps are never
+	// polecat work.
+	if isRefineryWorkflowStepID(params.BeadID) {
+		result.ErrMsg = "refinery-workflow-step"
+		return result, fmt.Errorf("bead %s is a refinery workflow step (id matches *-wfs-*): %q — workflow steps are managed by the workflow engine, not by polecats", params.BeadID, info.Title)
+	}
+
 	// Wrong-rig label guard (gu-mhfs). When a bead carries a wrong-rig:<rig>
 	// label asserting that prior dispatch to that rig was wrong (e.g. polecat
 	// closed it "no-changes — belongs in another rig"), refuse to re-dispatch
