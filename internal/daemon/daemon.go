@@ -4481,14 +4481,7 @@ func (d *Daemon) dispatchQueuedWork() {
 	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")
 	setSysProcAttr(cmd)
 	cmd.Dir = d.config.TownRoot
-	// Set GT_ROLE=daemon so detectActor() reports a traceable origin instead
-	// of "unknown" when the dispatcher writes dispatched_by on hooked beads
-	// (gu-pi35l acceptance: "Log the actual caller for dispatched_by — replace
-	// 'unknown' with traceable origin"). The daemon is the canonical
-	// dispatch caller from the heartbeat path; without GT_ROLE the subprocess
-	// has no rig/cwd that GetRole can use to identify itself, so every
-	// dispatched_by ended up as "unknown" (cacr-r8ne / cacr-wfs-xegy2 / cacr-4ujm).
-	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1", "GT_ROLE=daemon")
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		d.logger.Printf("Scheduler dispatch timed out after 5m")

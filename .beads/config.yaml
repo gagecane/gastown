@@ -33,12 +33,6 @@
 # - github.org
 # - github.repo
 
-# Cross-project dependencies (gt-o3is)
-# Maps project names to paths for external dependency resolution
-# Format: external:<project>:<capability> in bd dep commands
-external_projects:
-  beads: ../../../beads/mayor/rig
-
 # Custom issue types for Gas Town (fallback when database is unavailable)
 types.custom: "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"
 
@@ -55,3 +49,8 @@ export.auto: "false"
 
 sync.remote: "git+ssh://git@github.com/gagecane/gastown.git"
 dolt.auto-commit: "on"
+
+storage.backend: dolt
+dolt.server: "127.0.0.1"
+dolt.port: 3307
+dolt.auto-start: "false"

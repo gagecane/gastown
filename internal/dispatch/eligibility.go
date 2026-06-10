@@ -411,57 +411,6 @@ func IsPolecatOwnedBeadInfo(info *BeadInfo) bool {
 	return parts[0] != "" && parts[2] != ""
 }
 
-// IsRefineryWorkflowStepID reports whether the bead ID matches the refinery
-// workflow-step naming convention (`<prefix>-wfs-<short>`). These beads are
-// ephemeral steps internal to mol-refinery-patrol and similar refinery
-// formulas — they are managed by the workflow engine, not by polecats, and
-// must never be slung to the polecat lane.
-//
-// gu-pi35l (variant 2): the town scheduler dispatched cacr-wfs-xegy2 (a
-// `Merge and push` refinery workflow step owned by casc_crud/refinery) to
-// polecat jasper with attached_formula=mol-polecat-work. The polecat had
-// nothing meaningful to do (the step belongs to the refinery's own state
-// machine) so it closed no-changes — but the dispatch burned a polecat
-// session and the workflow engine's view of the step diverged from reality.
-// Refusing dispatch on the `-wfs-` substring is a stable, label-free signal
-// that survives any owner/title hygiene gaps.
-//
-// Same matching rule used by `gt done` to recognize workflow-step beads
-// (internal/cmd/done.go: strings.Contains(hookedBeadID, "-wfs-")).
-func IsRefineryWorkflowStepID(beadID string) bool {
-	return strings.Contains(beadID, "-wfs-")
-}
-
-// IsRefineryOwnedBeadInfo reports whether the bead's owner address identifies
-// a refinery agent (`<rig>/refinery`). Refinery-owned beads track the rig's
-// merge-queue / patrol state machine; they are not work items a polecat can
-// resolve. Dispatching one spawns a polecat that finds nothing actionable and
-// closes no-changes, wasting a slot.
-//
-// gu-pi35l: the cacr-wfs-xegy2 variant carried owner=casc_crud/refinery and
-// dispatched to a polecat anyway because the existing IsPolecatOwnedBeadInfo
-// guard only matched the `<rig>/polecats/<name>` shape. This is the
-// refinery-owner sibling of that guard.
-//
-// Not bypassed by --force — the contract violation is independent of
-// dispatch intent. If a refinery genuinely needs to file polecat work, the
-// owner should be reassigned to a human or to the mayor first.
-func IsRefineryOwnedBeadInfo(info *BeadInfo) bool {
-	if info == nil {
-		return false
-	}
-	owner := strings.TrimSpace(info.Owner)
-	if owner == "" {
-		return false
-	}
-	parts := strings.Split(owner, "/")
-	// Canonical refinery address: exactly 2 segments — rig, "refinery".
-	if len(parts) != 2 {
-		return false
-	}
-	return parts[0] != "" && parts[1] == "refinery"
-}
-
 // IsEmptyAssignee reports whether the assignee field is unset. Treats the
 // literal sentinel "none" as empty: the operator workaround for clearing an
 // assignee was `bd update --assignee none`, which stores the string "none"

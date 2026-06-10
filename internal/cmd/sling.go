@@ -914,26 +914,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID, info.Title, info.Owner)
 	}
 
-	// Refinery-owned bead guard (gu-pi35l). A bead whose owner is
-	// `<rig>/refinery` tracks the rig's merge-queue / patrol state machine
-	// and is not work a polecat can resolve. The convoy stranded scan was
-	// observed slinging cacr-wfs-xegy2 (owner=casc_crud/refinery) to a polecat
-	// every cycle. Sibling of the polecat-owner guard above; not bypassed by
-	// --force — the contract violation is independent of dispatch intent.
-	if isRefineryOwnedBeadInfo(info) {
-		return fmt.Errorf("refusing to sling bead %s: %q is owned by a refinery (%s) — refinery-owned beads track merge-queue / patrol state and are not polecat work.\nReassign the owner first if this assessment is wrong",
-			beadID, info.Title, info.Owner)
-	}
-
-	// Refinery workflow-step guard (gu-pi35l, variant 2). Beads whose ID
-	// matches `*-wfs-*` are ephemeral steps internal to refinery formulas —
-	// managed by the workflow engine, not by polecats. Mirrors the same
-	// `-wfs-` substring `gt done` uses to recognize workflow steps.
-	// Not bypassed by --force — workflow steps are never polecat work.
-	if isRefineryWorkflowStepID(beadID) {
-		return fmt.Errorf("refusing to sling bead %s: id matches *-wfs-* (refinery workflow step): %q.\nWorkflow steps are managed by the workflow engine, not by polecats", beadID, info.Title)
-	}
-
 	// Guard against slinging deferred beads (gt-1326mw).
 	// Deferred work (e.g., "deferred to post-launch") should not consume polecat slots.
 	// Use --force to override when intentionally re-activating deferred work.

@@ -772,7 +772,7 @@ func cleanupStaleContexts(townRoot string) {
 	}
 
 	// Batch-fetch work bead info for only the specific IDs we need
-	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
+	workBeadInfo, workBeadLookupFailed := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
 
 	// Second pass: close contexts whose work beads are stale.
 	// Note: in_progress is intentionally excluded — the work bead is being
@@ -789,21 +789,51 @@ func cleanupStaleContexts(townRoot string) {
 	for i, ctx := range staleCheckContexts {
 		fields := staleCheckFields[i]
 		info, found := workBeadInfo[fields.WorkBeadID]
-		if found {
-			if info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone" {
-				b := beadsForContext(townRoot, fields)
-				_ = b.CloseSlingContext(ctx.issue.ID, "stale-work-bead")
-			}
+		reason := staleContextCloseReason(
+			found, info.Status,
+			workBeadLookupFailed[fields.WorkBeadID],
+			isContextOlderThan(ctx.issue, now, slingContextTTL),
+		)
+		if reason == "" {
 			continue
 		}
-		// Work bead not found. Only close if the context has aged past the
-		// TTL — guards against transient bd show failures and against
-		// closing a context before its work bead finishes committing.
-		if isContextOlderThan(ctx.issue, now, slingContextTTL) {
-			b := beadsForContext(townRoot, fields)
-			_ = b.CloseSlingContext(ctx.issue.ID, "missing-work-bead")
-		}
+		b := beadsForContext(townRoot, fields)
+		_ = b.CloseSlingContext(ctx.issue.ID, reason)
 	}
+}
+
+// staleContextCloseReason decides whether — and with what reason — a sling
+// context should be closed during the stale-context sweep, given the looked-up
+// state of its work bead. Returns "" to keep the context open. Pure so the
+// gs-2no invariant is unit-testable without bd/Dolt I/O.
+//
+//   - workBeadFound + terminal status (hooked/closed/tombstone): "stale-work-bead".
+//     in_progress is intentionally NOT terminal — the bead is being worked and
+//     bd ready won't re-dispatch it, so the context stays open until done.
+//   - !workBeadFound + lookupFailed: "" — the work bead's status is UNKNOWN
+//     (bd show errored under Dolt degradation/timeout), NOT absent. Never reap
+//     an active context on that guess: doing so silently breaks dispatch
+//     (gs-2no — lb-wcdw.5 stayed OPEN but its context was reaped as missing
+//     during a bd-list timeout). Retry next cycle when the query recovers.
+//   - !workBeadFound + !lookupFailed + agedPastTTL: "missing-work-bead". bd show
+//     exits 0 for genuinely-missing IDs, so a clean not-found means the bead is
+//     really gone; reap the dangling context past the TTL (gu-hfr3). The TTL
+//     also avoids racing in-flight bead creation.
+func staleContextCloseReason(workBeadFound bool, workBeadStatus string, lookupFailed, agedPastTTL bool) string {
+	if workBeadFound {
+		switch workBeadStatus {
+		case "hooked", "closed", "tombstone":
+			return "stale-work-bead"
+		}
+		return ""
+	}
+	if lookupFailed {
+		return ""
+	}
+	if agedPastTTL {
+		return "missing-work-bead"
+	}
+	return ""
 }
 
 // isContextOlderThan delegates to sling.ContextOlderThan: reports whether the
@@ -823,13 +853,29 @@ type beadStatusInfo struct {
 	Type       string
 }
 
-// batchFetchBeadInfoByIDs returns a map of bead ID → status+title+labels for specific beads.
-// Uses `bd show` with multiple IDs per rig directory instead of fetching all beads.
-// This avoids the O(minutes) latency of `bd list --all --json --limit=0` on large repos.
-func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatusInfo {
+// batchFetchBeadInfoByIDs returns a map of bead ID → status+title+labels for
+// specific beads, plus the set of bead IDs whose lookup could NOT be performed
+// because the `bd show` for their beads-dir errored (process/connection
+// failure — e.g. Dolt degradation or timeout).
+//
+// The two return values let callers distinguish a genuinely-absent bead from
+// one whose status is merely UNKNOWN (gs-2no): `bd show` exits 0 even when some
+// requested IDs do not exist (it prints a per-ID error to stderr and returns
+// the ones it found), so a bead absent from BOTH maps was queried successfully
+// and genuinely does not exist. A bead in the failed set could not be queried
+// at all and must NOT be treated as deleted — reaping its still-open
+// sling-context as "missing-work-bead" on a transient query failure silently
+// breaks dispatch (the gs-2no incident: lb-wcdw.5 stayed OPEN but its active
+// context lb-wisp-ph0 was reaped during Dolt degradation).
+//
+// Uses `bd show` with multiple IDs per rig directory instead of fetching all
+// beads. This avoids the O(minutes) latency of `bd list --all --json --limit=0`
+// on large repos.
+func batchFetchBeadInfoByIDs(townRoot string, ids []string) (map[string]beadStatusInfo, map[string]bool) {
 	result := make(map[string]beadStatusInfo)
+	failed := make(map[string]bool)
 	if len(ids) == 0 {
-		return result
+		return result, failed
 	}
 
 	idsByBeadsDir := groupBeadIDsByResolvedBeadsDir(townRoot, ids)
@@ -848,6 +894,9 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			DeferUntil string   `json:"defer_until"`
 			Type       string   `json:"issue_type"`
 		}
+		// failedIDs is the dir's requested IDs when the lookup errored — their
+		// status is unknown, not absent (gs-2no).
+		failedIDs []string
 	}
 	dirs := make([]string, 0, len(idsByBeadsDir))
 	for d := range idsByBeadsDir {
@@ -863,19 +912,31 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-			args := append([]string{"show", "--json"}, idsByBeadsDir[beadsDir]...)
+			dirIDs := idsByBeadsDir[beadsDir]
+			args := append([]string{"show", "--json"}, dirIDs...)
 			out, err := b.Run(args...)
 			if err != nil {
+				// Query failed (process/connection error) — status of every ID
+				// in this dir is unknown. bd exits 0 for genuinely-missing IDs,
+				// so a non-nil err here is a real infra failure, not absence.
+				results[i] = dirResult{failedIDs: dirIDs}
 				return
 			}
 			var r dirResult
-			_ = json.Unmarshal(out, &r.items)
+			if uerr := json.Unmarshal(out, &r.items); uerr != nil {
+				// Unparseable output — also treat as unknown, not absent.
+				r.items = nil
+				r.failedIDs = dirIDs
+			}
 			results[i] = r
 		}(i, beadsDir)
 	}
 	wg.Wait()
 
 	for _, r := range results {
+		for _, id := range r.failedIDs {
+			failed[id] = true
+		}
 		for _, item := range r.items {
 			result[item.ID] = beadStatusInfo{
 				Status:     item.Status,
@@ -886,7 +947,7 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			}
 		}
 	}
-	return result
+	return result, failed
 }
 
 func groupBeadIDsByResolvedBeadsDir(townRoot string, ids []string) map[string][]string {
@@ -945,7 +1006,7 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 		}
 		workBeadIDs = append(workBeadIDs, fields.WorkBeadID)
 	}
-	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
+	workBeadInfo, _ := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
 	blockedWorkIDs, blockedErr := listBlockedWorkBeadIDsWithError(townRoot, workBeadIDs)
 	if blockedErr != nil {
 		return nil, blockedErr
@@ -1568,15 +1629,6 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 		return false
 	}
 	if info.Status != "open" {
-		return false
-	}
-	// Refinery workflow-step guard (gu-pi35l, variant 2). Defense-in-depth
-	// against any stale sling-context that already wraps a workflow-step
-	// bead (the new scheduleBead guard prevents future ones from being
-	// created, but existing contexts still need to be filtered out of the
-	// dispatch candidate set). `-wfs-` is the same substring `gt done` and
-	// the convoy stranded scan use to recognize workflow steps.
-	if strings.Contains(workBeadID, "-wfs-") {
 		return false
 	}
 	// Never dispatch a bead marked as not-work (hq-9jeyo). Reference/gate

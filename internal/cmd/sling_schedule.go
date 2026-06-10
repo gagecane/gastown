@@ -297,47 +297,6 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Owner, info.Title)
 	}
 
-	// Refinery-owned bead guard (gu-pi35l). A bead whose owner is
-	// `<rig>/refinery` tracks the rig's own merge-queue / patrol state machine
-	// and is not work a polecat can resolve. Without this guard the convoy
-	// stranded scan slung cacr-wfs-xegy2 (owner=casc_crud/refinery) to polecat
-	// jasper, which closed no-changes and burned a slot. Sibling of the
-	// polecat-owner guard above; not bypassed by --force.
-	if isRefineryOwnedBeadInfo(info) {
-		return fmt.Errorf("bead %s is owned by a refinery (%s): %q — refusing to schedule. Refinery-owned beads track merge-queue / patrol state and are not polecat work; reassign the owner first if this assessment is wrong",
-			beadID, info.Owner, info.Title)
-	}
-
-	// Refinery workflow-step guard (gu-pi35l, variant 2). Beads whose ID
-	// matches `*-wfs-*` are ephemeral steps internal to refinery formulas —
-	// managed by the workflow engine, not by polecats. Dispatching one spawns
-	// a polecat with nothing actionable to do; the polecat closes no-changes
-	// and the workflow engine's view of the step diverges from reality. The
-	// same `-wfs-` substring is what `gt done` uses to recognize workflow
-	// steps (internal/cmd/done.go); mirroring it here keeps the conventions
-	// in sync. Not bypassed by --force — workflow steps are never polecat work.
-	if isRefineryWorkflowStepID(beadID) {
-		return fmt.Errorf("bead %s is a refinery workflow step (id matches *-wfs-*): %q — refusing to schedule. Workflow steps are managed by the workflow engine, not by polecats",
-			beadID, info.Title)
-	}
-
-	// Deferred-status guard (gu-pi35l). `gt done --status DEFERRED` (and
-	// operator `bd update --status=deferred`) flips the bead off "open", and
-	// `bd ready` correctly hides it — but scheduleBead previously had no
-	// status check that recognized "deferred", so a convoy stranded re-feed
-	// (which calls `gt sling <id> <rig>` and routes through scheduleBead in
-	// deferred-dispatch mode) created a sling-context for the deferred bead
-	// every cycle. The downstream readiness gate (isScheduledWorkBeadReady)
-	// requires status=open and so refused to actually dispatch, but the
-	// per-cycle context churn still bumped defer-counts and re-fired
-	// observability noise. Refuse here so deferred beads never enter the
-	// queue at all. Not bypassed by --force — un-defer the bead first if the
-	// deferral is wrong.
-	if isDeferredBead(info) {
-		return fmt.Errorf("bead %s is deferred (status=%q): %q — refusing to schedule. Un-defer the bead first if the deferral is no longer correct",
-			beadID, info.Status, info.Title)
-	}
-
 	// Open-children guard (gu-r8b0q, extends gu-fs88). A bead that is the
 	// parent of any non-closed child is a container — the children track the
 	// real work — and must never get a sling context. executeSling already

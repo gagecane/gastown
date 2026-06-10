@@ -89,8 +89,6 @@ var (
 	isSlingContextBeadInfo      = dispatch.IsSlingContextBeadInfo
 	isWrongRigBeadForTarget     = dispatch.IsWrongRigBeadForTarget
 	isPolecatOwnedBeadInfo      = dispatch.IsPolecatOwnedBeadInfo
-	isRefineryOwnedBeadInfo     = dispatch.IsRefineryOwnedBeadInfo
-	isRefineryWorkflowStepID    = dispatch.IsRefineryWorkflowStepID
 	isEmptyAssignee             = dispatch.IsEmptyAssignee
 	collectExistingMolecules    = dispatch.CollectExistingMolecules
 
