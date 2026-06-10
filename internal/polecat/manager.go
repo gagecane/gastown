@@ -1467,6 +1467,16 @@ func pushPreservationRef(wt *git.Git, refspec string) error {
 	return err
 }
 
+// originPreservationAllowed reports whether gastown-internal preservation refs
+// (refs/heads/preserved/*) may be pushed to the rig's origin. For customer-repo
+// rigs (customer_repo=true), origin IS the customer's real remote, so pushing
+// gastown-internal branches there leaks agent names + bead IDs into the
+// customer's repo (gs-8p5r). Such rigs rely on the local bare-repo anchor only;
+// they forgo the box-loss durability net rather than leak.
+func (m *Manager) originPreservationAllowed() bool {
+	return !m.rig.GetBoolConfig("customer_repo")
+}
+
 // preserveUnpushedHead anchors the worktree's HEAD commit to a durable,
 // GC-safe ref in the bare repo before the worktree is destroyed — UNLESS the
 // commit is already reachable from the rig's base branch (already merged, so
@@ -1527,6 +1537,14 @@ func (m *Manager) preserveUnpushedHead(name, clonePath string, repoGit *git.Git)
 	// merged), so the work is durable on origin without leaking into the merge
 	// pipeline — even a --force discard just leaves a ref to prune by hand. The
 	// worktree still exists here (removal happens next), so it can reach origin.
+	//
+	// Skipped on customer-repo rigs: origin is the customer's real remote, so a
+	// refs/heads/preserved/* branch there leaks agent names + bead IDs into the
+	// customer repo (gs-8p5r). The local bare-repo anchor above is the only net.
+	if !m.originPreservationAllowed() {
+		style.PrintWarning("preserved unpushed work LOCALLY for %s: %s = %s (customer-repo rig — skipped ORIGIN push to avoid leaking gastown-internal branch; recover from bare repo: git -C <rig>/.repo.git log %s)", name, preservedRef, short, preservedRef)
+		return
+	}
 	originRef := fmt.Sprintf("refs/heads/preserved/%s/%s", name, short)
 	if err := pushPreservationRef(wt, head+":"+originRef); err != nil {
 		style.PrintWarning("WORK AT RISK: could not push preservation ref %s to origin for %s: %v (local anchor %s retained)", originRef, name, err, preservedRef)
@@ -1591,20 +1609,34 @@ func (m *Manager) preserveAndClearBranchStashes(name, clonePath string, repoGit 
 		// the refinery, so it stays out of the merge pipeline). If this fails the
 		// local anchor still holds the work — but we keep the stash too, since a
 		// box loss would otherwise drop it. Fail-closed: do NOT drop.
+		//
+		// Skipped on customer-repo rigs: origin is the customer's real remote, so
+		// a refs/heads/preserved/* branch there leaks agent names + bead IDs into
+		// the customer repo (gs-8p5r). The local anchor above still holds the
+		// work, so the stash is safe to drop — we forgo only the box-loss net.
 		originRef := fmt.Sprintf("refs/heads/preserved/%s/stash-%s", name, short)
-		if err := pushPreservationRef(wt, sha+":"+originRef); err != nil {
-			style.PrintWarning("WORK AT RISK: could not push inherited stash preservation ref %s to origin for %s: %v (local anchor %s retained, stash left in place)", originRef, name, err, preservedRef)
-			continue
+		pushedToOrigin := false
+		if m.originPreservationAllowed() {
+			if err := pushPreservationRef(wt, sha+":"+originRef); err != nil {
+				style.PrintWarning("WORK AT RISK: could not push inherited stash preservation ref %s to origin for %s: %v (local anchor %s retained, stash left in place)", originRef, name, err, preservedRef)
+				continue
+			}
+			pushedToOrigin = true
 		}
 
-		// 3. Both anchors hold — safe to drop the inherited stash so it no longer
-		// trips has_stash or leaks into the new occupant.
+		// 3. Local anchor holds (plus origin when not a customer rig) — safe to
+		// drop the inherited stash so it no longer trips has_stash or leaks into
+		// the new occupant.
 		if err := wt.StashDrop(e.Ref); err != nil {
-			style.PrintWarning("preserved inherited stash %s to %s but could not drop it: %v", short, originRef, err)
+			style.PrintWarning("preserved inherited stash %s to %s but could not drop it: %v", short, preservedRef, err)
 			continue
 		}
 		cleared++
-		style.PrintWarning("preserved+cleared inherited stash for %s: %s = %s (recover: git fetch origin refs/heads/preserved/%s/stash-%s)", name, originRef, short, name, short)
+		if pushedToOrigin {
+			style.PrintWarning("preserved+cleared inherited stash for %s: %s = %s (recover: git fetch origin refs/heads/preserved/%s/stash-%s)", name, originRef, short, name, short)
+		} else {
+			style.PrintWarning("preserved+cleared inherited stash for %s LOCALLY: %s = %s (customer-repo rig — skipped ORIGIN push; recover from bare repo: git -C <rig>/.repo.git log %s)", name, preservedRef, short, preservedRef)
+		}
 	}
 	return cleared
 }
