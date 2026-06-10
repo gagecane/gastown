@@ -1002,6 +1002,18 @@ func (d *Daemon) Run() (err error) {
 				d.syncBranches()
 			}
 
+		case <-patrols.agentHeartbeat:
+			// Agent-heartbeat dog — closes the who-watches-the-watchers gap
+			// (gu-tl2gs). A wedged witness can't escalate its own staleness;
+			// the daemon scans every rig's refinery+witness heartbeats from
+			// outside the witness process so a fully wedged rig still
+			// surfaces. Reuses witness.DetectStaleRigAgentHeartbeats so
+			// daemon-side and witness-side observations share dedup state and
+			// don't double-escalate.
+			if !d.isShutdownInProgress() {
+				d.runAgentHeartbeatDog()
+			}
+
 		case <-timer.C:
 			d.heartbeat(state)
 

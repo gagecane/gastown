@@ -91,6 +91,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				IntervalStr:  "1h",
 				RetentionStr: "168h",
 			},
+			AgentHeartbeat: &AgentHeartbeatConfig{
+				Enabled:     true,
+				IntervalStr: "5m",
+			},
 		},
 	}
 }
@@ -174,6 +178,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.EventChannelGC == nil {
 		p.EventChannelGC = d.EventChannelGC
+		changed = true
+	}
+	if p.AgentHeartbeat == nil {
+		p.AgentHeartbeat = d.AgentHeartbeat
 		changed = true
 	}
 
