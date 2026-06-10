@@ -1639,8 +1639,23 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	// NeedsApproval: PR exists but lacks required approving review (merge_strategy=pr).
 	// Not a failure — the MR stays in queue and will be retried on the next poll.
 	// No polecat notification needed; the PR just needs a human review on GitHub.
+	//
+	// Emit a structured refinery_paused event so the witness can surface the
+	// indefinite hold (gu-t3why). The pause itself is correct uncertainty
+	// handling, but without telemetry the queue piles up silently — exactly
+	// the failure mode this bead exists to close.
 	if result.NeedsApproval {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: PR awaiting human approval, will retry next poll\n", mr.ID)
+		_ = events.LogFeed(events.TypeRefineryPaused, e.rig.Name+"/refinery",
+			events.RefineryPausedPayload(
+				e.rig.Name,
+				mr.ID,
+				mr.Branch,
+				mr.SourceIssue,
+				"pr_needs_approval",
+				result.Error,
+				"github_pr_review",
+			))
 		return
 	}
 
@@ -2100,8 +2115,29 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 		// approved-by:<user> label. MRs without gt:auto-test-pr are
 		// unaffected (backwards-compat). Ordered AFTER the owned-direct
 		// skip so owned-direct semantics still win.
+		//
+		// Emit a structured refinery_paused event so the witness can surface
+		// the indefinite hold (gu-t3why). Mirrors the NeedsApproval path in
+		// HandleMRInfoFailure — both are "queue is correctly paused awaiting
+		// human direction" states that previously had zero observable signal.
 		if shouldHoldForAutoTestPRApproval(issue, requireAutoTestPRApproval) {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Holding MR %s: gt:auto-test-pr requires approved-by:<user> (D15)\n", issue.ID)
+			fields := beads.ParseMRFields(issue)
+			var branch, sourceIssue string
+			if fields != nil {
+				branch = fields.Branch
+				sourceIssue = fields.SourceIssue
+			}
+			_ = events.LogFeed(events.TypeRefineryPaused, e.rig.Name+"/refinery",
+				events.RefineryPausedPayload(
+					e.rig.Name,
+					issue.ID,
+					branch,
+					sourceIssue,
+					"auto_test_pr_needs_approved_by_label",
+					fmt.Sprintf("MR %s carries gt:auto-test-pr but no approved-by:<user> label — refinery is holding pending maintainer approval", issue.ID),
+					"approved-by:<user> label",
+				))
 			continue
 		}
 
