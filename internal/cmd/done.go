@@ -1872,17 +1872,24 @@ func teardownAfterDone(p teardownParams) {
 	// done (exit=COMPLETED)") even when the polecat's commits were stranded
 	// on a polecat branch — destroying real work and trust signals.
 	//
-	// gu-treq: on merge-queue rigs, even when push+MR succeed the work has
-	// NOT yet shipped to origin/main — refinery merges the polecat branch
-	// asynchronously. Compute awaitingRefineryMerge so the hooked bead stays
-	// open until refinery's PostMerge path closes it with the real on-main
-	// commit_sha. Pattern A guards (gu-551r commit-references-bead) live
-	// inside refinery's close path; the refinery is merging the polecat's
-	// own commits so the citation is correct by construction.
-	awaitingRefineryMerge := p.exitType == ExitCompleted &&
-		!p.pushFailed && !p.mrFailed &&
-		p.mrID != "" &&
-		completion.IsMergeQueueRig(p.townRoot, p.rigName)
+	// gu-treq: when push+MR succeed the work has NOT yet shipped to
+	// origin/main — refinery merges the polecat branch asynchronously.
+	// Compute awaitingRefineryMerge so the hooked bead stays open until
+	// refinery's PostMerge path closes it with the real on-main commit_sha.
+	// Pattern A guards (gu-551r commit-references-bead) live inside refinery's
+	// close path; the refinery is merging the polecat's own commits so the
+	// citation is correct by construction.
+	//
+	// gu-y2w7g: the discriminator is "was an MR successfully created?", NOT
+	// "is this a merge-queue rig?". MR-bead creation in the mr-strategy path
+	// is not gated on completion.IsMergeQueueRig — so when an MR exists but the
+	// rig doesn't report merge_queue.enabled (settings unreadable, or the flag
+	// is unset), the old IsMergeQueueRig gate let the bead false-close while
+	// the commit sat only on a feature branch, never on origin/main (incident
+	// cacr-d9to0/uqpnf: closed 06-06, never landed). If we got here with an MR,
+	// the work is awaiting merge regardless of rig detection — refinery (or a
+	// recovery sweep over the awaiting_refinery_merge label) owns the close.
+	awaitingRefineryMerge := shouldAwaitRefineryMerge(p.exitType, p.pushFailed, p.mrFailed, p.mrID)
 	updateAgentStateOnDone(p.cwd, p.townRoot, p.exitType, p.issueID, p.pushFailed || p.mrFailed, awaitingRefineryMerge, p.mrID, p.branch)
 
 	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
@@ -2999,6 +3006,28 @@ func firstLine(s string) string {
 // invariant even if a future code path populates mrID outside COMPLETED.
 func shouldNudgeRefinery(exitType, mrID string) bool {
 	return exitType == ExitCompleted && mrID != ""
+}
+
+// shouldAwaitRefineryMerge reports whether the hooked bead must stay OPEN
+// (labeled awaiting_refinery_merge) instead of being closed by gt done.
+//
+// The single sufficient condition is: a COMPLETED exit that successfully
+// created an MR bead (mrID set, push not failed, MR not failed). Reaching this
+// point with an MR means the polecat's commit is on a feature branch and an MR
+// bead exists, but the work is NOT yet on origin/main — only the refinery's
+// PostMerge path (or a recovery sweep over the label) can prove the merge
+// landed and close the bead with the real on-main commit_sha.
+//
+// gu-y2w7g: this deliberately does NOT consult completion.IsMergeQueueRig.
+// MR-bead creation in the mr-strategy path is not gated on that check, so
+// gating the close-deferral on it produced stranded commits: an MR existed but
+// the rig wasn't detected as merge-queue-managed (settings unreadable or
+// merge_queue.enabled unset), so the bead false-closed while the commit never
+// reached origin/main (incident cacr-d9to0/uqpnf). Non-MR completion paths
+// (direct/local/no_merge) close the bead themselves and never reach here with
+// mrID set, so this predicate cannot regress them.
+func shouldAwaitRefineryMerge(exitType string, pushFailed, mrFailed bool, mrID string) bool {
+	return exitType == ExitCompleted && !pushFailed && !mrFailed && mrID != ""
 }
 
 // deriveLifecycleOutcome maps a gt done exit into a durable terminal lifecycle

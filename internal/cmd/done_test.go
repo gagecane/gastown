@@ -524,6 +524,39 @@ func TestShouldNudgeRefinery(t *testing.T) {
 	}
 }
 
+// TestShouldAwaitRefineryMerge pins the gu-y2w7g fix: the discriminator for
+// leaving the hooked bead open is "a COMPLETED exit created an MR" — NOT
+// whether the rig is detected as merge-queue-managed. The old gate consulted
+// completion.IsMergeQueueRig, which let an existing MR false-close the bead
+// when settings were unreadable / merge_queue.enabled was unset, stranding the
+// commit on a feature branch (incident cacr-d9to0/uqpnf).
+func TestShouldAwaitRefineryMerge(t *testing.T) {
+	tests := []struct {
+		name       string
+		exitType   string
+		pushFailed bool
+		mrFailed   bool
+		mrID       string
+		want       bool
+	}{
+		{"completed with MR awaits merge", ExitCompleted, false, false, "gt-mr-1", true},
+		{"completed without MR closes (direct/local/no-merge path)", ExitCompleted, false, false, "", false},
+		{"push failed never awaits (stranded path owns it)", ExitCompleted, true, false, "gt-mr-1", false},
+		{"mr failed never awaits (stranded path owns it)", ExitCompleted, false, true, "gt-mr-1", false},
+		{"deferred with stray MR does not await", ExitDeferred, false, false, "gt-mr-1", false},
+		{"escalated with stray MR does not await", ExitEscalated, false, false, "gt-mr-1", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldAwaitRefineryMerge(tt.exitType, tt.pushFailed, tt.mrFailed, tt.mrID); got != tt.want {
+				t.Errorf("shouldAwaitRefineryMerge(%q, push=%v, mr=%v, %q) = %v, want %v",
+					tt.exitType, tt.pushFailed, tt.mrFailed, tt.mrID, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestClearDoneIntentLabel verifies that clearDoneIntentLabel removes
 // only done-intent labels while preserving other labels.
 func TestClearDoneIntentLabel(t *testing.T) {
