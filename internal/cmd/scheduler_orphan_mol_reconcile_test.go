@@ -346,6 +346,152 @@ func TestBurnBaseBeadForWisp(t *testing.T) {
 	}
 }
 
+// TestAllHookedDependentsDead verifies the dead-owner upgrade predicate
+// (gu-q483x): a Skip verdict is only upgraded to Reenqueue when EVERY
+// hooked/in_progress work-bead dependent is provably dead. Any live or
+// undeterminable owner — or no hooked dependent at all — keeps Skip.
+func TestAllHookedDependentsDead(t *testing.T) {
+	dead := map[string]bool{"gu-dead": true, "gu-dead2": true}
+	ownerDead := func(id string) bool { return dead[id] }
+
+	tests := []struct {
+		name       string
+		dependents []beads.IssueDep
+		want       bool
+	}{
+		{
+			name:       "no dependents → false (nothing to upgrade)",
+			dependents: nil,
+			want:       false,
+		},
+		{
+			name:       "only open/closed deps, no hooked → false",
+			dependents: []beads.IssueDep{{ID: "gu-open", Status: "open"}, {ID: "gu-done", Status: "closed"}},
+			want:       false,
+		},
+		{
+			name:       "single hooked dep, owner dead → true",
+			dependents: []beads.IssueDep{{ID: "gu-dead", Status: "hooked"}},
+			want:       true,
+		},
+		{
+			name:       "single in_progress dep, owner dead → true",
+			dependents: []beads.IssueDep{{ID: "gu-dead", Status: "in_progress"}},
+			want:       true,
+		},
+		{
+			name:       "single hooked dep, owner alive → false (fail closed)",
+			dependents: []beads.IssueDep{{ID: "gu-live", Status: "hooked"}},
+			want:       false,
+		},
+		{
+			name: "two hooked deps, both dead → true",
+			dependents: []beads.IssueDep{
+				{ID: "gu-dead", Status: "hooked"},
+				{ID: "gu-dead2", Status: "in_progress"},
+			},
+			want: true,
+		},
+		{
+			name: "two hooked deps, one alive → false (fail closed)",
+			dependents: []beads.IssueDep{
+				{ID: "gu-dead", Status: "hooked"},
+				{ID: "gu-live", Status: "in_progress"},
+			},
+			want: false,
+		},
+		{
+			name: "wisp-to-wisp hooked dep ignored, no real hooked dep → false",
+			dependents: []beads.IssueDep{
+				{ID: "gu-wisp-other", Status: "hooked"},
+			},
+			want: false,
+		},
+		{
+			name: "dead hooked dep beside an open dep → true (open is irrelevant here)",
+			dependents: []beads.IssueDep{
+				{ID: "gu-dead", Status: "hooked"},
+				{ID: "gu-open", Status: "open"},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := allHookedDependentsDead(tt.dependents, ownerDead)
+			if got != tt.want {
+				t.Errorf("allHookedDependentsDead() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReconcileOrphanMolecules_DeadHookUpgrade verifies the gu-q483x dead-owner
+// upgrade end-to-end: a wisp whose only dependent is hooked to a DEAD session is
+// burned (Skip→Reenqueue), while an identical wisp whose dependent is hooked to a
+// LIVE session is left untouched. This closes the stranded-convoy dead-hook wedge
+// without burning a wisp out from under a live worker.
+func TestReconcileOrphanMolecules_DeadHookUpgrade(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	prevNow := timeNowForOrphanReconcile
+	timeNowForOrphanReconcile = func() time.Time { return now }
+	t.Cleanup(func() { timeNowForOrphanReconcile = prevNow })
+
+	prevList := listOrphanWispCandidates
+	listOrphanWispCandidates = func(townRoot string, n time.Time) []*beads.Issue {
+		return []*beads.Issue{
+			{ID: "gu-wisp-deadhook", Type: "molecule", Status: "open", CreatedAt: old},
+			{ID: "gu-wisp-livehook", Type: "molecule", Status: "open", CreatedAt: old},
+		}
+	}
+	t.Cleanup(func() { listOrphanWispCandidates = prevList })
+
+	prevFetch := fetchWispInfoForReconcile
+	fetchWispInfoForReconcile = func(townRoot, wispID string) *beads.Issue {
+		switch wispID {
+		case "gu-wisp-deadhook": // hooked to a dead polecat → upgrade + burn
+			return &beads.Issue{ID: wispID, Assignee: "", Dependents: []beads.IssueDep{{ID: "gu-deadwork", Status: "hooked"}}}
+		case "gu-wisp-livehook": // hooked to a live polecat → skip
+			return &beads.Issue{ID: wispID, Assignee: "", Dependents: []beads.IssueDep{{ID: "gu-livework", Status: "in_progress"}}}
+		}
+		return nil
+	}
+	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	prevOwnerDead := dependentOwnerDead
+	dependentOwnerDead = func(townRoot, beadID string) bool { return beadID == "gu-deadwork" }
+	t.Cleanup(func() { dependentOwnerDead = prevOwnerDead })
+
+	type burnCall struct {
+		molecules []string
+		baseBead  string
+	}
+	var burns []burnCall
+	prevBurn := burnExistingMoleculesForRecovery
+	burnExistingMoleculesForRecovery = func(molecules []string, beadID, townRoot string) error {
+		burns = append(burns, burnCall{molecules: molecules, baseBead: beadID})
+		return nil
+	}
+	t.Cleanup(func() { burnExistingMoleculesForRecovery = prevBurn })
+
+	got := reconcileOrphanMolecules("/fake/town", time.Time{})
+
+	if got != 1 {
+		t.Errorf("reconciled count = %d, want 1 (only the dead-hook wisp)", got)
+	}
+	if len(burns) != 1 {
+		t.Fatalf("burn calls = %d, want 1: %+v", len(burns), burns)
+	}
+	// The dead-hook wisp is burned against its hooked dependent (so detach
+	// clears the bead's attached_molecule + dep bond, unblocking re-dispatch).
+	if burns[0].baseBead != "gu-deadwork" || len(burns[0].molecules) != 1 || burns[0].molecules[0] != "gu-wisp-deadhook" {
+		t.Errorf("burn = %+v, want molecules=[gu-wisp-deadhook] base=gu-deadwork", burns[0])
+	}
+}
+
 // TestReconcileOrphanMolecules_SkipsMergeRequestWisp verifies that an open
 // merge-request wisp is NEVER reaped by the orphan pass (gs-bpq) — it is a
 // pending merge that intentionally outlives its self-terminated submitter — while
@@ -442,6 +588,12 @@ func TestReconcileOrphanMolecules_Orchestration(t *testing.T) {
 	}
 	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
 
+	// gu-busy's owner is alive — keeps the gu-wisp-live skip (no dead-owner
+	// upgrade). Stub so the test never shells out to real bd/tmux (gu-q483x).
+	prevOwnerDead := dependentOwnerDead
+	dependentOwnerDead = func(townRoot, beadID string) bool { return false }
+	t.Cleanup(func() { dependentOwnerDead = prevOwnerDead })
+
 	// Capture burns.
 	type burnCall struct {
 		molecules []string
@@ -507,6 +659,12 @@ func TestReconcileOrphanMolecules_SkipsAssignedAndLive(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { fetchWispInfoForReconcile = prevFetch })
+
+	// gu-busy's owner is alive — the hooked dependent must NOT trigger a
+	// dead-owner upgrade. Stub so the test stays hermetic (gu-q483x).
+	prevOwnerDead := dependentOwnerDead
+	dependentOwnerDead = func(townRoot, beadID string) bool { return false }
+	t.Cleanup(func() { dependentOwnerDead = prevOwnerDead })
 
 	var burnCount int
 	prevBurn := burnExistingMoleculesForRecovery
