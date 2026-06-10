@@ -590,6 +590,15 @@ type WitnessThresholds struct {
 	// Default "15m". Set to "0" to disable correlation (every agent sends —
 	// pre-gu-nejgh behavior). (gu-nejgh, follow-up #4 to gu-z8qzq)
 	StaleRigAgentCorrelationWindow string `json:"stale_rig_agent_correlation_window,omitempty"`
+
+	// RefineryPausedLookback is the window over which the witness patrol scans
+	// ~/gt/.events.jsonl for refinery_paused events. The refinery emits one
+	// such event per poll cycle that an MR is held awaiting human direction
+	// (PR needs approving review, auto-test-pr awaits an approved-by:<user>
+	// label). The scan deduplicates per (rig, MR) so a queue silently piling
+	// up for hours surfaces as one rolled-up entry the witness can act on.
+	// Default "6h". Set to "0" to disable the scan. (gu-t3why)
+	RefineryPausedLookback string `json:"refinery_paused_lookback,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

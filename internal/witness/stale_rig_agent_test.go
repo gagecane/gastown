@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,3 +194,103 @@ func TestDetectStaleRigAgentHeartbeats_SelfSkip(t *testing.T) {
 		t.Errorf("refinery Action = %q, want escalated", refinery.Action)
 	}
 }
+
+// writeRigAgentHeartbeatV3 writes a v3 heartbeat with explicit agent-reported
+// state so the staleness detector can carry it into the escalation (gu-8ni5o).
+func writeRigAgentHeartbeatV3(t *testing.T, townRoot, sessionName string, age time.Duration, state polecat.HeartbeatState, op, ctx, bead string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir heartbeats: %v", err)
+	}
+	hb := polecat.SessionHeartbeat{
+		Timestamp:   time.Now().UTC().Add(-age),
+		State:       state,
+		KeepaliveOp: op,
+		Context:     ctx,
+		Bead:        bead,
+	}
+	data, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatalf("marshal heartbeat: %v", err)
+	}
+	path := filepath.Join(dir, sessionName+".json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+}
+
+// TestDetectStaleRigAgentHeartbeats_CarriesAgentState verifies the detector
+// surfaces the agent's last-reported state on the result so the escalation can
+// include idle-vs-mid-op triage context without a manual pane capture (gu-8ni5o).
+func TestDetectStaleRigAgentHeartbeats_CarriesAgentState(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	prefix := session.PrefixFor(rigName)
+	writeRigAgentHeartbeatV3(t, townRoot, session.RefinerySessionName(prefix), 2*time.Hour,
+		polecat.HeartbeatWorking, "go-test", "running gate", "gu-bead1")
+	writeRigAgentHeartbeat(t, townRoot, session.WitnessSessionName(prefix), 30*time.Second)
+
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
+
+	var refinery *StaleRigAgentResult
+	for i := range res.Stale {
+		if res.Stale[i].AgentRole == "refinery" {
+			refinery = &res.Stale[i]
+		}
+	}
+	if refinery == nil {
+		t.Fatal("missing refinery result")
+	}
+	if refinery.LastState != polecat.HeartbeatWorking {
+		t.Errorf("LastState = %q, want working", refinery.LastState)
+	}
+	if refinery.LastKeepaliveOp != "go-test" {
+		t.Errorf("LastKeepaliveOp = %q, want go-test", refinery.LastKeepaliveOp)
+	}
+	if refinery.LastBead != "gu-bead1" {
+		t.Errorf("LastBead = %q, want gu-bead1", refinery.LastBead)
+	}
+}
+
+func TestStaleAgentDisposition(t *testing.T) {
+	cases := []struct {
+		name string
+		item StaleRigAgentResult
+		want string // substring expected in the disposition
+	}{
+		{"idle is false positive", StaleRigAgentResult{LastState: polecat.HeartbeatIdle}, "FALSE POSITIVE"},
+		{"exiting is false positive", StaleRigAgentResult{LastState: polecat.HeartbeatExiting}, "FALSE POSITIVE"},
+		{"working is real wedge", StaleRigAgentResult{LastState: polecat.HeartbeatWorking}, "REAL WEDGE"},
+		{"stuck is real wedge", StaleRigAgentResult{LastState: polecat.HeartbeatStuck}, "REAL WEDGE"},
+		{"no state is unknown", StaleRigAgentResult{}, "UNKNOWN"},
+		{"future idle-until is false positive", StaleRigAgentResult{
+			LastState:         polecat.HeartbeatWorking,
+			ExpectedIdleUntil: time.Now().UTC().Add(time.Hour),
+		}, "FALSE POSITIVE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := staleAgentDisposition(tc.item)
+			if !contains(got, tc.want) {
+				t.Errorf("disposition = %q, want substring %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStaleAgentTriageContext_EmptyForV1 verifies a v1 heartbeat (no state)
+// yields no triage block, so the mail omits it rather than printing blanks.
+func TestStaleAgentTriageContext_EmptyForV1(t *testing.T) {
+	if got := staleAgentTriageContext(StaleRigAgentResult{}); got != "" {
+		t.Errorf("expected empty triage context for v1 heartbeat, got:\n%s", got)
+	}
+	got := staleAgentTriageContext(StaleRigAgentResult{LastState: polecat.HeartbeatWorking})
+	if !contains(got, "REAL WEDGE") || !contains(got, "state:") {
+		t.Errorf("expected triage block with state+disposition, got:\n%s", got)
+	}
+}
+
+func contains(s, sub string) bool { return strings.Contains(s, sub) }

@@ -1216,6 +1216,10 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         filepath.Join(townRoot, ".beads"),
+		// The capacity pipeline's OnSuccess closes this dispatch's own context
+		// (CloseSlingContext "dispatched"); reconciling here would race/double-close
+		// the very context being dispatched (gu-afpjj).
+		SkipContextReconcile: true,
 	}
 
 	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)
@@ -1629,6 +1633,15 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 		return false
 	}
 	if info.Status != "open" {
+		return false
+	}
+	// Refinery workflow-step guard (gu-pi35l, variant 2). Defense-in-depth
+	// against any stale sling-context that already wraps a workflow-step
+	// bead (the new scheduleBead guard prevents future ones from being
+	// created, but existing contexts still need to be filtered out of the
+	// dispatch candidate set). `-wfs-` is the same substring `gt done` and
+	// the convoy stranded scan use to recognize workflow steps.
+	if strings.Contains(workBeadID, "-wfs-") {
 		return false
 	}
 	// Never dispatch a bead marked as not-work (hq-9jeyo). Reference/gate
