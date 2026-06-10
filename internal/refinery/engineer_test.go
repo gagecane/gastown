@@ -1053,7 +1053,14 @@ assert_town_read_env() {
     echo "read env not read-only: BD_READONLY=$BD_READONLY BD_DOLT_AUTO_COMMIT=$BD_DOLT_AUTO_COMMIT" >&2
     exit 1
   fi
-  if [ -n "$BEADS_DOLT_SERVER_DATABASE" ] || [ -n "$BEADS_DB" ] || [ -n "$BD_DB" ] || [ -n "$BEADS_DOLT_DATA_DIR" ]; then
+  # The town beads dir records dolt_database:hq, so the pinned env must select
+  # that database (BEADS_DOLT_SERVER_DATABASE=hq). What must NOT leak is the
+  # stale inherited "wrong" value or the other stale target selectors.
+  if [ "$BEADS_DOLT_SERVER_DATABASE" != "hq" ]; then
+    echo "town read env not pinned to hq: BEADS_DOLT_SERVER_DATABASE=$BEADS_DOLT_SERVER_DATABASE" >&2
+    exit 1
+  fi
+  if [ -n "$BEADS_DB" ] || [ -n "$BD_DB" ] || [ -n "$BEADS_DOLT_DATA_DIR" ]; then
     echo "stale target env leaked" >&2
     exit 1
   fi
