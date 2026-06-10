@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -1395,6 +1396,87 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 	},
 }
 
+var reaperAlertThreshold int
+
+var reaperAlertOpenWispsCmd = &cobra.Command{
+	Use:   "alert-open-wisps",
+	Short: "Escalate (deduped) when open-wisp count exceeds the alert threshold",
+	Long: `Count open wisps across all databases and, if the total exceeds the
+alert threshold, raise a deduplicated escalation to the Mayor.
+
+This replaces the old freeform escalate in the mol-dog-reaper formula, which
+created a fresh escalation bead every cycle because each cycle's slightly-
+different count produced a new signature (gu-ka8aj). The escalation here uses a
+stable signature built from the threshold-breach BAND, not the exact count, so
+normal workload drift within one band collapses to a single escalation:
+
+  - band 1 ([1x,2x) threshold): medium severity, 4h cooldown
+  - band 2+ (>=2x threshold):   high severity,   1h cooldown
+
+Cooldown is applied as the --dedup-window so the escalation does not re-fire
+immediately after a previous one closes. Use --dry-run to print the escalation
+that would be raised without raising it.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// threshold defaults to DefaultAlertThreshold via the flag; threshold <= 0
+		// is honored as "alerting disabled" by EvaluateOpenWispAlert (operator opt-out).
+		threshold := reaperAlertThreshold
+		if threshold <= 0 {
+			fmt.Println("open-wisp alerting disabled (threshold <= 0)")
+			return nil
+		}
+
+		databases := reaperDatabaseNames()
+		var totalOpen int
+		for i, dbName := range databases {
+			if err := waitBeforeReaperDatabase(i); err != nil {
+				return err
+			}
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				continue
+			}
+			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				continue
+			}
+			open, err := reaper.CountOpenWisps(db)
+			db.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: count error: %v\n", dbName, err)
+				continue
+			}
+			totalOpen += open
+		}
+
+		alert := reaper.EvaluateOpenWispAlert(totalOpen, threshold)
+		if !alert.Fire {
+			fmt.Printf("open wisps within threshold: %d <= %d (no escalation)\n", totalOpen, threshold)
+			return nil
+		}
+
+		escalateArgs := alert.EscalateArgs(totalOpen, threshold)
+		if reaperDryRun {
+			fmt.Printf("[DRY RUN] would escalate (%s, band %d, cooldown %s): %d open wisps exceed %d\n",
+				alert.Severity, alert.Bucket, alert.Cooldown, totalOpen, threshold)
+			fmt.Printf("[DRY RUN] gt %s\n", strings.Join(escalateArgs, " "))
+			return nil
+		}
+
+		gtPath, err := os.Executable()
+		if err != nil || gtPath == "" {
+			gtPath = "gt"
+		}
+		escalateCmd := exec.Command(gtPath, escalateArgs...) //nolint:gosec // G204: args constructed internally from validated alert metadata
+		escalateCmd.Stdout = os.Stdout
+		escalateCmd.Stderr = os.Stderr
+		if err := escalateCmd.Run(); err != nil {
+			return fmt.Errorf("raise open-wisp escalation: %w", err)
+		}
+		return nil
+	},
+}
+
 func init() {
 	// Shared flags
 	// GH#2601: Default host/port from env vars for non-localhost setups.
@@ -1415,15 +1497,19 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd, reaperAlertOpenWispsCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
 		cmd.Flags().BoolVar(&reaperDryRun, "dry-run", false, "Report what would happen without acting")
 	}
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperAlertOpenWispsCmd} {
 		cmd.Flags().StringVar(&reaperDBDelay, "db-delay", "250ms", "Delay between databases to reduce Dolt load")
 	}
+
+	// Open-wisp alert threshold flag (gu-ka8aj). Defaults to DefaultAlertThreshold.
+	reaperAlertOpenWispsCmd.Flags().IntVar(&reaperAlertThreshold, "threshold", reaper.DefaultAlertThreshold,
+		"Open-wisp count above which to escalate")
 
 	// JSON output flag for single-db commands
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
@@ -1470,6 +1556,7 @@ func init() {
 	reaperCmd.AddCommand(reaperReconcileOrphansGitCmd)
 	reaperCmd.AddCommand(reaperScrubDanglingFKCmd)
 	reaperCmd.AddCommand(reaperRunCmd)
+	reaperCmd.AddCommand(reaperAlertOpenWispsCmd)
 
 	rootCmd.AddCommand(reaperCmd)
 }

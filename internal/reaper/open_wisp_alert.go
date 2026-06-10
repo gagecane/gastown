@@ -19,6 +19,11 @@ import (
 // one band collapses to a single escalation. Re-firing only happens when the
 // breach crosses into a higher (more severe) band or the cooldown window
 // elapses.
+//
+// The single production caller is `gt reaper alert-open-wisps`, which the
+// mol-dog-reaper formula invokes in place of the old freeform escalate. It
+// evaluates the breach here and, on Fire, execs `gt escalate --dedup` with the
+// signature and cooldown returned below.
 
 const (
 	// openWispMediumCooldown is the minimum spacing between repeat escalations
@@ -50,8 +55,7 @@ type OpenWispAlert struct {
 
 // EvaluateOpenWispAlert decides whether an open-wisp escalation should fire and,
 // if so, returns its stable dedup metadata. It makes no I/O and is the single
-// source of truth shared by the daemon inline path and the `gt reaper
-// alert-open-wisps` CLI helper.
+// source of truth used by the `gt reaper alert-open-wisps` command.
 //
 // threshold <= 0 is treated as "alerting disabled" (never fire) so an operator
 // can opt out via config without a special case at every call site.
@@ -72,5 +76,40 @@ func EvaluateOpenWispAlert(open, threshold int) OpenWispAlert {
 		Severity:  severity,
 		Cooldown:  cooldown,
 		Signature: fmt.Sprintf("reaper:open-wisp-breach:b%d", bucket),
+	}
+}
+
+// openWispAlertSource identifies this alert's origin in escalation routing and
+// is also reused as the dedup signature's stable namespace.
+const openWispAlertSource = "reaper:open-wisp-count"
+
+// EscalateArgs returns the `gt escalate` argument vector for a firing alert
+// (excluding the leading "gt"/"escalate"). It is exported as a method so the
+// CLI command stays a thin exec wrapper and the full argument shape — severity,
+// dedup signature, and close-aware cooldown window — is covered by unit tests
+// rather than only exercised at runtime.
+//
+// Callers MUST check Fire before invoking; calling on a non-firing alert
+// returns nil.
+func (a OpenWispAlert) EscalateArgs(open, threshold int) []string {
+	if !a.Fire {
+		return nil
+	}
+	title := fmt.Sprintf("%d open wisps exceed alert threshold (%d)", open, threshold)
+	reason := fmt.Sprintf(
+		"Open wisp count %d is %dx the alert threshold of %d (breach band %d). "+
+			"Investigate wisp lifecycle — this escalation deduplicates on the "+
+			"breach band, so it will not re-fire for normal count drift within "+
+			"the same band until the cooldown (%s) elapses.",
+		open, a.Bucket, threshold, a.Bucket, a.Cooldown)
+	return []string{
+		"escalate",
+		"-s", a.Severity,
+		title,
+		"--source=" + openWispAlertSource,
+		"--dedup",
+		"--signature=" + a.Signature,
+		"--dedup-window=" + a.Cooldown.String(),
+		"-r", reason,
 	}
 }
