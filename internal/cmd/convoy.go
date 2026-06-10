@@ -2352,6 +2352,31 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 		return false
 	}
 
+	// Deferred-status guard (gu-pi35l). `bd defer` (and `gt done --status
+	// DEFERRED`) flip status to "deferred" — the actual dispatch path
+	// (runSling / executeSling) refuses these via IsDeferredBead, so the
+	// stranded scan must too. Without this, a deferred bead with no
+	// assignee falls through the `t.Status == "open" && t.Assignee == ""`
+	// branch below as ready, the convoy feeder calls `gt sling`, sling
+	// rejects it (or in deferred-dispatch mode creates a churned context),
+	// and the cycle repeats every scan tick. The scheduler's auto-release
+	// pass (releaseExpiredDeferredBeads) flips status back to open once
+	// the defer window expires; until then deferred work is intentionally
+	// held. Mirror the runSling / scheduleBead deferred guard.
+	if t.Status == "deferred" {
+		return false
+	}
+
+	// Refinery workflow-step guard (gu-pi35l, variant 2). Beads with
+	// `-wfs-` in their ID are ephemeral steps internal to refinery
+	// formulas; the workflow engine — not a polecat — owns their
+	// lifecycle. Without this guard the convoy stranded scan re-feeds
+	// them every cycle, the polecat closes no-changes, and the workflow
+	// engine's view of the step diverges from reality.
+	if strings.Contains(t.ID, "-wfs-") {
+		return false
+	}
+
 	// Must not be blocked
 	if t.Blocked {
 		return false
