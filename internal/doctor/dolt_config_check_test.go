@@ -63,6 +63,47 @@ func TestDoltConfigCheck_DetectsPolecatRedirectConfig(t *testing.T) {
 	}
 }
 
+func TestDoltConfigCheck_FixDefaultsHostWhenMetadataHostMissing(t *testing.T) {
+	// Regression for gs-qki8: when metadata.json has no dolt_server_host (or an
+	// empty one), the fixer must still write a real address, not dolt.server: "".
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_mode":"server","dolt_server_port":3307,"dolt_database":"hq"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: hq\nissue-prefix: hq\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewDoltConfigCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	if result := check.Run(ctx); result.Status != StatusError {
+		t.Fatalf("Status = %v, want %v", result.Status, StatusError)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, `dolt.server: ""`) {
+		t.Fatalf("fixer wrote empty dolt.server:\n%s", got)
+	}
+	if !strings.Contains(got, `dolt.server: "127.0.0.1"`) {
+		t.Fatalf("config.yaml missing default dolt.server after fix:\n%s", got)
+	}
+
+	if result := check.Run(ctx); result.Status != StatusOK {
+		t.Fatalf("Status after fix = %v, want %v: %s details=%v", result.Status, StatusOK, result.Message, result.Details)
+	}
+}
+
 func TestDoltConfigCheck_FixAddsMissingKeysOnly(t *testing.T) {
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
