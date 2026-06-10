@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -215,5 +216,128 @@ func TestFormatSlingContextDescription_SpecialChars(t *testing.T) {
 	}
 	if parsed.LastFailure != fields.LastFailure {
 		t.Errorf("LastFailure roundtrip failed:\ngot:  %q\nwant: %q", parsed.LastFailure, fields.LastFailure)
+	}
+}
+
+// installReconcileStubBD writes a fake `bd` whose `list` subcommand emits the
+// given JSON array (the open sling-contexts) and whose `close` subcommand
+// appends the closed ID to a log file. Returns the log file path so the test
+// can assert exactly which contexts were closed.
+func installReconcileStubBD(t *testing.T, listJSON string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	binDir := t.TempDir()
+	logFile := filepath.Join(binDir, "closed.log")
+	// Single-quote the JSON for the heredoc; the fixtures below contain no
+	// single quotes, so this is safe.
+	script := "#!/bin/sh\n" +
+		"cmd=\"\"\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in --*) ;; *) cmd=\"$arg\"; break ;; esac\n" +
+		"done\n" +
+		"if [ \"$cmd\" = \"list\" ]; then\n" +
+		"  cat <<'JSONEOF'\n" + listJSON + "\nJSONEOF\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$cmd\" = \"close\" ]; then\n" +
+		"  seen_close=\"\"\n" +
+		"  for arg in \"$@\"; do\n" +
+		"    if [ -n \"$seen_close\" ]; then\n" +
+		"      case \"$arg\" in --*) ;; *) printf '%s\\n' \"$arg\" >> '" + logFile + "'; break ;; esac\n" +
+		"    fi\n" +
+		"    case \"$arg\" in close) seen_close=1 ;; esac\n" +
+		"  done\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write stub bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logFile
+}
+
+func readClosedLog(t *testing.T, logFile string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logFile)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read closed log: %v", err)
+	}
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" {
+			ids = append(ids, line)
+		}
+	}
+	return ids
+}
+
+// TestReconcileOpenSlingContexts_ClosesStaleMatchingContexts is the core
+// gu-afpjj regression: a stale OPEN context tracking the work bead must be
+// closed so `bd close <workBead>` no longer needs --force, while contexts for
+// OTHER work beads are left untouched.
+func TestReconcileOpenSlingContexts_ClosesStaleMatchingContexts(t *testing.T) {
+	listJSON := `[
+	  {"id":"gu-wisp-stale","description":"{\"version\":1,\"work_bead_id\":\"gu-afpjj\",\"target_rig\":\"gastown_upstream\"}"},
+	  {"id":"gu-wisp-other","description":"{\"version\":1,\"work_bead_id\":\"gu-other\",\"target_rig\":\"gastown_upstream\"}"}
+	]`
+	logFile := installReconcileStubBD(t, listJSON)
+	b := New(t.TempDir())
+
+	closed, err := b.ReconcileOpenSlingContexts("gu-afpjj", "", "superseded by re-sling")
+	if err != nil {
+		t.Fatalf("ReconcileOpenSlingContexts: %v", err)
+	}
+	if len(closed) != 1 || closed[0] != "gu-wisp-stale" {
+		t.Errorf("returned closed IDs: got %v, want [gu-wisp-stale]", closed)
+	}
+	if got := readClosedLog(t, logFile); len(got) != 1 || got[0] != "gu-wisp-stale" {
+		t.Errorf("bd close called for: got %v, want [gu-wisp-stale]", got)
+	}
+}
+
+// TestReconcileOpenSlingContexts_ExcludesActiveContext verifies the optExcludeID
+// guard: the just-created/active context for the same work bead is preserved so
+// the scheduler's own bookkeeping is never double-closed.
+func TestReconcileOpenSlingContexts_ExcludesActiveContext(t *testing.T) {
+	listJSON := `[
+	  {"id":"gu-wisp-stale","description":"{\"version\":1,\"work_bead_id\":\"gu-afpjj\",\"target_rig\":\"gastown_upstream\"}"},
+	  {"id":"gu-wisp-active","description":"{\"version\":1,\"work_bead_id\":\"gu-afpjj\",\"target_rig\":\"gastown_upstream\"}"}
+	]`
+	logFile := installReconcileStubBD(t, listJSON)
+	b := New(t.TempDir())
+
+	closed, err := b.ReconcileOpenSlingContexts("gu-afpjj", "gu-wisp-active", "superseded by re-sling")
+	if err != nil {
+		t.Fatalf("ReconcileOpenSlingContexts: %v", err)
+	}
+	if len(closed) != 1 || closed[0] != "gu-wisp-stale" {
+		t.Errorf("returned closed IDs: got %v, want [gu-wisp-stale]", closed)
+	}
+	if got := readClosedLog(t, logFile); len(got) != 1 || got[0] != "gu-wisp-stale" {
+		t.Errorf("bd close called for: got %v, want [gu-wisp-stale] (active context must be excluded)", got)
+	}
+}
+
+// TestReconcileOpenSlingContexts_NoMatchIsNoOp confirms an empty/no-match list
+// closes nothing and returns no IDs.
+func TestReconcileOpenSlingContexts_NoMatchIsNoOp(t *testing.T) {
+	logFile := installReconcileStubBD(t, "No issues found.")
+	b := New(t.TempDir())
+
+	closed, err := b.ReconcileOpenSlingContexts("gu-afpjj", "", "superseded by re-sling")
+	if err != nil {
+		t.Fatalf("ReconcileOpenSlingContexts: %v", err)
+	}
+	if len(closed) != 0 {
+		t.Errorf("expected no contexts closed, got %v", closed)
+	}
+	if got := readClosedLog(t, logFile); len(got) != 0 {
+		t.Errorf("expected no bd close calls, got %v", got)
 	}
 }
