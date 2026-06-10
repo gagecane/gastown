@@ -405,7 +405,38 @@ func init() {
 	rootCmd.AddCommand(doltCmd)
 }
 
+// guardDoltLifecycleRole blocks refinery agents from running Dolt lifecycle
+// commands (start/stop/restart). Dolt is the shared data plane and restarts are
+// operator-owned: per the CLAUDE.md Dolt protocol, refineries must capture
+// diagnostics (gt dolt dump) and escalate, never restart the server. Without
+// this guard, a refinery hitting a Dolt outage may "restart now" unilaterally
+// and destroy the evidence needed for RCA (see gu-k00y0 / hq:gc-vkwkfr).
+//
+// The guard keys off GT_ROLE so it only fires for the autonomous refinery agent
+// — humans and operators (no GT_ROLE, or a different role) are unaffected.
+func guardDoltLifecycleRole(action string) error {
+	envRole := os.Getenv(EnvGTRole)
+	if envRole == "" {
+		return nil
+	}
+	role, _, _ := parseRoleString(envRole)
+	if role != RoleRefinery {
+		return nil
+	}
+	return fmt.Errorf(`refusing to %s the Dolt server: this is operator-owned and the refinery role must not restart the shared data plane (GT_ROLE=%q).
+
+Dolt restarts destroy the evidence needed to diagnose hangs. Instead:
+  1. gt dolt dump      # capture diagnostics without signaling Dolt
+  2. gt dolt status    # capture server status
+  3. gt escalate -s HIGH "Dolt: <symptom>"   # let the operator decide
+
+See the CLAUDE.md Dolt protocol and gu-k00y0`, action, envRole)
+}
+
 func runDoltStart(cmd *cobra.Command, args []string) error {
+	if err := guardDoltLifecycleRole("start"); err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
@@ -492,6 +523,9 @@ func runDoltKillImposters(cmd *cobra.Command, args []string) error {
 }
 
 func runDoltStop(cmd *cobra.Command, args []string) error {
+	if err := guardDoltLifecycleRole("stop"); err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
@@ -513,6 +547,9 @@ func runDoltStop(cmd *cobra.Command, args []string) error {
 }
 
 func runDoltRestart(cmd *cobra.Command, args []string) error {
+	if err := guardDoltLifecycleRole("restart"); err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
