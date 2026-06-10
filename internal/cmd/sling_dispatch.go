@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -46,6 +47,15 @@ type SlingParams struct {
 	CallerContext    string // Identifies the caller for shutdown messages (e.g., "queue-dispatch", "batch-sling")
 	TownRoot         string
 	BeadsDir         string
+
+	// SkipContextReconcile suppresses the post-dispatch close of stale open
+	// sling-contexts for this work bead (gu-afpjj). The scheduler-dispatch path
+	// owns the lifecycle of its own context via the capacity pipeline's
+	// OnSuccess close, so it sets this true to avoid double-closing the very
+	// context it is about to reconcile. Direct/manual sling paths leave it false
+	// so a re-sling cleans up the orphan context a failed initial sling left
+	// behind, letting `bd close <workBead>` succeed without --force.
+	SkipContextReconcile bool
 }
 
 // SlingResult captures the outcome of executeSling for caller-level tracking.
@@ -338,6 +348,26 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		result.ErrMsg = "polecat-owned"
 		return result, fmt.Errorf("bead %s is owned by a polecat (%s): %q — polecats may not dispatch their own work. Reassign the owner (e.g. to a human or mayor) before re-slinging",
 			params.BeadID, info.Owner, info.Title)
+	}
+
+	// Refinery-owned bead guard (gu-pi35l). Sibling of the polecat-owner guard
+	// above for owners shaped `<rig>/refinery`. The convoy stranded scan was
+	// observed slinging cacr-wfs-xegy2 (owner=casc_crud/refinery) every cycle
+	// to a polecat that closed no-changes. Not bypassed by --force.
+	if isRefineryOwnedBeadInfo(info) {
+		result.ErrMsg = "refinery-owned"
+		return result, fmt.Errorf("bead %s is owned by a refinery (%s): %q — refinery-owned beads track merge-queue / patrol state and are not polecat work. Reassign the owner first if this assessment is wrong",
+			params.BeadID, info.Owner, info.Title)
+	}
+
+	// Refinery workflow-step guard (gu-pi35l, variant 2). Beads matching
+	// `*-wfs-*` are ephemeral steps internal to refinery formulas (e.g.
+	// mol-refinery-patrol). Same `-wfs-` substring `gt done` uses to recognize
+	// workflow steps. Not bypassed by --force — workflow steps are never
+	// polecat work.
+	if isRefineryWorkflowStepID(params.BeadID) {
+		result.ErrMsg = "refinery-workflow-step"
+		return result, fmt.Errorf("bead %s is a refinery workflow step (id matches *-wfs-*): %q — workflow steps are managed by the workflow engine, not by polecats", params.BeadID, info.Title)
 	}
 
 	// Wrong-rig label guard (gu-mhfs). When a bead carries a wrong-rig:<rig>
@@ -686,8 +716,36 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		fmt.Printf("  %s Could not record dispatch timestamp: %v\n", style.Dim.Render("Warning:"), err)
 	}
 
+	// Reconcile stale sling-contexts a failed initial sling left open (gu-afpjj).
+	// The scheduler-dispatch path closes its own context via the capacity
+	// pipeline's OnSuccess and sets SkipContextReconcile to avoid double-closing.
+	if !params.SkipContextReconcile {
+		reconcileStaleSlingContexts(townRoot, params.RigName, params.BeadID)
+	}
+
 	result.Success = true
 	return result, nil
+}
+
+// reconcileStaleSlingContexts closes any OPEN sling-contexts that still track
+// workBeadID after a successful direct dispatch (gu-afpjj). A failed initial
+// sling leaves its context open; its `tracks` dependency on the work bead then
+// forces `bd close <workBead> --force`. Closing the orphans as "superseded"
+// here lets the work bead close cleanly. Best-effort: the work is already hooked
+// and running, so a list/close hiccup is logged, never fatal.
+func reconcileStaleSlingContexts(townRoot, rigName, workBeadID string) {
+	rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, rigName)
+	rigBeads := beads.NewWithBeadsDir(townRoot, rigBeadsDir)
+	closed, err := rigBeads.ReconcileOpenSlingContexts(workBeadID, "", "superseded by re-sling")
+	if err != nil {
+		fmt.Printf("  %s Could not reconcile stale sling-contexts for %s: %v\n",
+			style.Dim.Render("Warning:"), workBeadID, err)
+		return
+	}
+	if len(closed) > 0 {
+		fmt.Printf("  %s Closed %d stale sling-context(s) as superseded: %s\n",
+			style.Dim.Render("○"), len(closed), strings.Join(closed, ", "))
+	}
 }
 
 // findTownRoot is defined in hook.go

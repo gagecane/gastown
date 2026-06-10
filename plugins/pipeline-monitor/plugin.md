@@ -1,7 +1,7 @@
 +++
 name = "pipeline-monitor"
 description = "Check Amazon Pipeline health and file P1 beads for blockers, routed to the package-owning rig, with drift-resistant cross-rig dedupe"
-version = 8
+version = 9
 
 [gate]
 type = "cooldown"
@@ -20,6 +20,11 @@ severity = "high"
 # Pipeline Monitor
 
 Check pipeline health and file actionable beads in the rig that **owns the fix** (not necessarily the rig whose package appears on the failure line), so a polecat in that rig can push the change.
+
+**v9 — Close-reason-aware grace window (Step 5c).** One fix on top of v8:
+
+- **A grace-window bead closed "fix is in another rig / operational fix elsewhere" is now treated as an intentional suppression, not a stale re-fire (Step 5c-0).** v6 escalates HIGH on the 2nd+ grace-window re-fire because a stale closed bead has three plausible causes (real regression, intentional suppression, or misroute) and the plugin can't pick between them. But one of those causes is machine-readable: when the polecat closed the bead with a reason saying *the fix lives elsewhere* (another rig, operational/test-infra, Bindle-auth, `--no-code`), the close was correct and the failure should be suppressed — exactly the case a hand-rolled sentinel exists to cover. v6 had no way to see that and escalated HIGH every cooldown cycle, so the only fix was for a human to hand-roll a sentinel (observed 2026-06-10: `cait-hzcj`/`cacr-3kyu`, both Bindle-auth-403-class closures requiring an operational fix in another rig). Step 5c-0 parses `close_reason` for fix-is-elsewhere patterns; on a match it **backfills the `sentinel` + `do-not-dispatch` labels** onto the closed bead (so the next cycle short-circuits on Step 5b), appends a note, and does **NOT** escalate. This automates the hand-rolled-sentinel workaround the symptom report calls out.
+- **Genuine grace-window escalations now carry a "previously closed as <bead-id>" breadcrumb (Step 5c step 2).** When Step 5c *does* escalate (the close reason is not fix-is-elsewhere), the escalation message now names the prior closed/deferred bead and its close reason explicitly, so the overseer can see at a glance that this is a re-fire of an already-triaged bead rather than a fresh failure.
 
 **v8 — Drift-resistant sentinel matching (Step 5b).** One fix on top of v7:
 
@@ -625,7 +630,59 @@ within the grace window, which almost always means either:
 
 1. The fix didn't actually land (regression), OR
 2. The bead was closed prematurely / misrouted, OR
-3. A sentinel should have been filed but wasn't.
+3. A sentinel should have been filed but wasn't, OR
+4. The close was correct because **the fix lives elsewhere** (another rig,
+   operational/test-infra) — an intentional suppression that nobody encoded as
+   a sentinel label.
+
+#### 5c-0. Close-reason-aware suppression (runs before escalation)
+
+Cause (4) above is machine-readable: the polecat recorded *why* it closed the
+bead in `close_reason`. When that reason says the fix is not in this rig's
+code — it's in another rig, it's operational/test-infra, it's a Bindle-auth
+class failure, or it was closed `--no-code` / `no-changes` — the close was
+correct and the failure should be suppressed, exactly like a hand-rolled
+sentinel. Re-firing a HIGH escalation every cooldown cycle (the v6 path) just
+forces a human to hand-roll the sentinel that the close reason already implied.
+Step 5c-0 reads the close reason and, on a fix-is-elsewhere match, converts the
+closed bead into an explicit sentinel instead of escalating.
+
+```bash
+# $PRIOR_REASON is the close_reason of the grace-window bead found above.
+FIX_ELSEWHERE=""
+case "$PRIOR_REASON" in
+  *"fix is in"*|*"fix lives in"*|*"tracked in"*|*"tracked elsewhere"* \
+  |*"wrong rig"*|*"other rig"*|*"another rig"* \
+  |*"operational"*|*"test-infra"*|*"test infra"*|*"infra fix"* \
+  |*"Bindle"*|*"--no-code"*|*"no-code"*|*"no_code"*|*"no-changes"*|*"no code change"*)
+    FIX_ELSEWHERE=1
+    ;;
+esac
+
+if [ -n "$FIX_ELSEWHERE" ]; then
+  # The close was correct; the fix is not this rig's code. Make the suppression
+  # explicit so Step 5b honors it on the next cycle — no more escalation churn.
+  cd "$HOME/gt/$FOUND_RIG" && bd update "$FOUND_ID" \
+    --add-label "sentinel,do-not-dispatch,fingerprint:${FP_HASH}"
+  cd "$HOME/gt/$FOUND_RIG" && bd note "$FOUND_ID" \
+    "pipeline-monitor cycle $(date -u +%Y-%m-%dT%H:%M:%SZ): same fingerprint \
+re-fired but close_reason indicates the fix is elsewhere \
+('$PRIOR_REASON'). Backfilled sentinel + do-not-dispatch labels so future \
+cycles suppress via Step 5b. fingerprint=${FP_HASH} build_id=<id>. \
+Did NOT escalate (close-reason-aware suppression, Step 5c-0)."
+  # Record in the audit bead (Step 8) with reason close-reason-suppressed,
+  # then SKIP the escalation path below. Do NOT reopen, do NOT file new.
+fi
+```
+
+**If Step 5c-0 fired (`FIX_ELSEWHERE` set) → skip the Response escalation block
+below** (the note + sentinel backfill is the complete response) and go to Step
+8. Audit-trail records the hit with `dedupe_via=5c` and
+`suppression=close-reason`.
+
+**If Step 5c-0 did NOT fire → continue to the Response block below** (genuine
+stale re-fire: regression, premature close, or misroute the close reason
+doesn't explain).
 
 Response:
 
@@ -660,6 +717,7 @@ label ('sentinel' + 'do-not-dispatch') so future cycles honor it explicitly."
      gt escalate -s HIGH \
        "pipeline-monitor: stale grace-window re-fire (${PRIOR_REFIRE_COUNT}x) on $FOUND_RIG/$FOUND_ID" \
        -m "Bead: $FOUND_RIG/$FOUND_ID
+Previously closed as: $FOUND_RIG/$FOUND_ID (grace-window re-fire of an already-triaged bead, not a fresh failure)
 Status: closed/deferred but fingerprint $FP_HASH still failing
 Re-fires: ${PRIOR_REFIRE_COUNT} (this cycle counted)
 Close reason: '$PRIOR_REASON'
@@ -686,9 +744,12 @@ and cait-13v (11 days)."
    ```
    WARN: grace-window hit. fingerprint=<hash> existing_bead=<rig>/<id> \
          status=<closed|deferred> last_updated=<ts> refire_count=<N> \
-         escalated=<yes|no> \
+         escalated=<yes|no> suppression=<none|close-reason> \
          → appended note, did not refile. Consider sentinel if intentional.
    ```
+
+   When Step 5c-0 fired, set `escalated=no suppression=close-reason` — the
+   sentinel backfill replaced the escalation.
 
 If **no** grace-window match is found, proceed to Step 5d (legacy lookup).
 
@@ -1076,6 +1137,37 @@ documents the reference resolution.
   Step 5b keyed suppression on the computed fingerprint label the hand-rolled
   sentinel never had. Step 5b-2 is the structural fix.
 
+### S17: Close-reason-aware suppression replaces escalation churn (v9)
+
+- Prior cycle filed `cait-hzcj` in `casc_integ` with fingerprint `FP-T`. A
+  polecat closed it with reason `no-changes: Bindle-auth 403 — fix is in the
+  test-infra/operational lane, not this rig's code`.
+- Cycle N+1: same `FP-T` re-fires within the 7d grace window. Step 5c finds the
+  closed `cait-hzcj`. Step 5c-0 parses `close_reason`, matches `Bindle` /
+  `fix is in` / `operational` / `no-changes` → `FIX_ELSEWHERE=1`. Backfills
+  `sentinel` + `do-not-dispatch` + `fingerprint:FP-T`, appends a note, does
+  **NOT** escalate. Skips the Response escalation block.
+- Cycle N+2: Step 5b-1 now finds the backfilled sentinel by fingerprint label
+  and suppresses cleanly — no grace-window churn at all.
+- Pre-v9 behavior (observed 2026-06-10, `cait-hzcj`/`cacr-3kyu`): Step 5c
+  escalated HIGH every cooldown cycle because v6 couldn't tell an
+  intentional-but-unlabeled close from a stale one; a human had to hand-roll a
+  sentinel to stop the bleed. v9 reads the close reason and rolls the sentinel
+  automatically.
+
+### S18: Genuine stale re-fire still escalates, now with a breadcrumb (v9)
+
+- Prior cycle filed `casw-Q` in `casc_webapp` with fingerprint `FP-U`. A polecat
+  closed it `fixed in <commit>` (a real fix-here close, not fix-elsewhere).
+- Cycle N+1: same `FP-U` re-fires (the fix regressed or didn't actually land).
+  Step 5c finds `casw-Q`. Step 5c-0 parses `close_reason` → no fix-is-elsewhere
+  match → `FIX_ELSEWHERE` empty → continues to the Response escalation block.
+- On the 2nd+ re-fire, the HIGH escalation now includes
+  `Previously closed as: casc_webapp/casw-Q (grace-window re-fire of an
+  already-triaged bead, not a fresh failure)` so the overseer immediately sees
+  this is a re-fire, not a new failure. The v6 escalate-on-stale behavior is
+  otherwise unchanged.
+
 ## Rationale
 
 Filing pipeline-blocker beads in the rig that owns the code lets polecats in
@@ -1254,6 +1346,32 @@ fingerprint label onto the sentinel so the next cycle short-circuits on the
 fast 5b-1 path. This makes the hand-rolled sentinel mechanism — explicitly
 documented as the "preferred explicit mechanism for humans to signal stop
 dispatching" — actually work the way the rest of the plugin already claims.
+
+**Why close-reason-aware grace window (v9 change):** v6 made every 2nd+
+grace-window re-fire escalate HIGH because a stale closed bead has three
+plausible causes the plugin couldn't distinguish — real regression,
+intentional suppression, or misroute. But one of those causes is recorded in
+machine-readable form the moment the polecat closes the bead: the
+`close_reason`. When a polecat closes a bead `no-changes` because the fix is
+operational, in another rig, or a Bindle-auth-class failure, the close is
+correct and the failure should be suppressed — that's precisely what a
+hand-rolled sentinel is for. v6 had no path to that conclusion, so it
+escalated every cooldown cycle and the only remedy was for a human to
+hand-roll the sentinel the close reason already implied (observed 2026-06-10:
+`cait-hzcj`/`cacr-3kyu`, both Bindle-auth-403-class closures needing an
+operational/test-infra fix elsewhere, re-firing HIGH every cycle). Step 5c-0
+reads the close reason, and on a fix-is-elsewhere match it backfills the
+`sentinel` + `do-not-dispatch` labels itself, converting the implicit
+"closed because fix is elsewhere" into the explicit suppression Step 5b
+already honors — no human hand-rolling, no escalation churn. The match is a
+conservative substring set (`fix is in`, `tracked in`, `wrong rig`,
+`operational`, `Bindle`, `no-code`, `no-changes`, etc.); a close reason that
+doesn't match still falls through to the v6 escalation path, so a real
+regression closed `fixed in <commit>` is unaffected. The breadcrumb addition
+(`Previously closed as <bead-id>` in the escalation message) is the cheap
+companion fix: when the plugin *does* escalate a genuine stale re-fire, the
+overseer can see at a glance it's a re-fire of an already-triaged bead, not a
+fresh failure.
 
 ## Migration Notes
 

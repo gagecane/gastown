@@ -69,6 +69,15 @@ const (
 	TypeMergeFailed  = "merge_failed"
 	TypeMergeSkipped = "merge_skipped"
 
+	// TypeRefineryPaused is emitted when the refinery defers an MR awaiting
+	// human direction (PR needs approving review, auto-test-pr awaits
+	// approved-by:<user> label, etc.). The pause is correct uncertainty
+	// handling, but without a structured signal the queue piles up silently
+	// — see gu-t3why / hq:gc-o66p90. The witness's DetectRefineryPaused scan
+	// reads these events to surface the deferred MR(s) separately from
+	// STALE_RIG_AGENT (which only fires on heartbeat lag).
+	TypeRefineryPaused = "refinery_paused"
+
 	// Scheduler events
 	TypeSchedulerEnqueue        = "scheduler_enqueue"         // Bead scheduled for deferred dispatch
 	TypeSchedulerDispatch       = "scheduler_dispatch"        // Bead dispatched from scheduler
@@ -253,6 +262,47 @@ func MergePayload(mrID, worker, branch, reason string) map[string]interface{} {
 	}
 	if reason != "" {
 		p["reason"] = reason
+	}
+	return p
+}
+
+// RefineryPausedPayload creates a payload for refinery pause events.
+//
+// rig: the rig whose refinery paused (e.g. "gastown_upstream")
+// mrID: the merge-request bead ID being held in queue
+// branch: the source branch of the held MR
+// sourceIssue: the issue ID being merged (may be empty for ad-hoc MRs)
+// reason: short machine-readable reason tag, e.g. "pr_needs_approval",
+//
+//	"auto_test_pr_needs_approved_by_label"
+//
+// details: free-form human-readable diagnostic text suitable for a witness
+//
+//	escalation body (e.g. "PR #123 requires approving review before merge")
+//
+// suspectedConvention: optional best-guess of the convention/policy the
+//
+//	pause is waiting on (e.g. "github_pr_review",
+//	"approved-by:<user> label"); empty when unknown
+func RefineryPausedPayload(rig, mrID, branch, sourceIssue, reason, details, suspectedConvention string) map[string]interface{} {
+	p := map[string]interface{}{
+		"rig":    rig,
+		"reason": reason,
+	}
+	if mrID != "" {
+		p["mr"] = mrID
+	}
+	if branch != "" {
+		p["branch"] = branch
+	}
+	if sourceIssue != "" {
+		p["source_issue"] = sourceIssue
+	}
+	if details != "" {
+		p["details"] = details
+	}
+	if suspectedConvention != "" {
+		p["suspected_convention"] = suspectedConvention
 	}
 	return p
 }

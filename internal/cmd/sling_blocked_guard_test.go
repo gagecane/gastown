@@ -61,7 +61,7 @@ func TestExecuteSling_BlockedInDirectMode_Rejected(t *testing.T) {
 	townRoot := installBlockedGuardStubs(t, true /*blocked*/, false /*deferred*/)
 
 	result, err := executeSling(SlingParams{
-		BeadID:   "gu-wfs-vyaf2",
+		BeadID:   "gu-vyaf2",
 		RigName:  "testrig",
 		TownRoot: townRoot,
 	})
@@ -88,7 +88,7 @@ func TestExecuteSling_BlockedInDeferredMode_NotRejected(t *testing.T) {
 	townRoot := installBlockedGuardStubs(t, true /*blocked*/, true /*deferred*/)
 
 	result, _ := executeSling(SlingParams{
-		BeadID:   "gu-wfs-vyaf2",
+		BeadID:   "gu-vyaf2",
 		RigName:  "testrig",
 		TownRoot: townRoot,
 	})
@@ -104,7 +104,7 @@ func TestExecuteSling_BlockedWithForce_NotRejected(t *testing.T) {
 	townRoot := installBlockedGuardStubs(t, true /*blocked*/, false /*deferred*/)
 
 	result, _ := executeSling(SlingParams{
-		BeadID:   "gu-wfs-vyaf2",
+		BeadID:   "gu-vyaf2",
 		RigName:  "testrig",
 		TownRoot: townRoot,
 		Force:    true,
@@ -120,7 +120,7 @@ func TestExecuteSling_UnblockedInDirectMode_NotRejected(t *testing.T) {
 	townRoot := installBlockedGuardStubs(t, false /*blocked*/, false /*deferred*/)
 
 	result, _ := executeSling(SlingParams{
-		BeadID:   "gu-wfs-vyaf2",
+		BeadID:   "gu-vyaf2",
 		RigName:  "testrig",
 		TownRoot: townRoot,
 	})
@@ -158,7 +158,7 @@ exit 0
 	writeBDStub(t, binDir, bdScript, "")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if isBeadBlockedByOpenDeps(townRoot, "gu-wfs-vyaf2") {
+	if isBeadBlockedByOpenDeps(townRoot, "gu-vyaf2") {
 		t.Error("isBeadBlockedByOpenDeps must fail open (return false) when bd blocked errors")
 	}
 }
