@@ -516,6 +516,20 @@ func (c *Curator) generateSummary(event *events.Event) string {
 		}
 		return "Merge failed"
 
+	case events.TypeRefineryPaused:
+		mrID, _ := event.Payload["mr"].(string)
+		reason, _ := event.Payload["reason"].(string)
+		switch {
+		case mrID != "" && reason != "":
+			return fmt.Sprintf("Refinery paused on MR %s: %s", mrID, reason)
+		case mrID != "":
+			return fmt.Sprintf("Refinery paused on MR %s", mrID)
+		case reason != "":
+			return fmt.Sprintf("Refinery paused: %s", reason)
+		default:
+			return "Refinery paused (awaiting human direction)"
+		}
+
 	case events.TypeSessionDeath:
 		session, _ := event.Payload["session"].(string)
 		reason, _ := event.Payload["reason"].(string)

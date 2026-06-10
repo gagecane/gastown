@@ -133,11 +133,22 @@ SIGQUIT, so default diagnostics gather process metadata and recent logs only.`,
 
 var doltSQLCmd = &cobra.Command{
 	Use:   "sql",
-	Short: "Open Dolt SQL shell",
-	Long: `Open an interactive SQL shell to the Dolt database.
+	Short: "Open Dolt SQL shell or run a one-shot query",
+	Long: `Open an interactive SQL shell, or run a one-shot query non-interactively.
 
 Works in both embedded mode (no server) and server mode.
-For multi-client access, start the server first with 'gt dolt start'.`,
+For multi-client access, start the server first with 'gt dolt start'.
+
+Non-interactive mode:
+  Pass -q/--query <sql> to run a single statement and exit. Combine with
+  -r/--result-format (e.g. csv, json) to format the output for scripts.
+  When -q is set, stdin is not consumed and no TTY is required, so this
+  works in pipelines, scripts, and headless agents.
+
+Examples:
+  gt dolt sql                              # interactive shell
+  gt dolt sql -q "USE gastown; SELECT 1"   # one-shot query
+  gt dolt sql -q "SELECT id FROM issues" -r csv`,
 	RunE: runDoltSQL,
 }
 
@@ -339,6 +350,9 @@ var (
 	doltSyncGC          bool
 	doltPullDry         bool
 	doltPullDB          string
+
+	doltSQLQuery        string
+	doltSQLResultFormat string
 )
 
 func init() {
@@ -384,6 +398,9 @@ func init() {
 
 	doltMigrateWispsCmd.Flags().BoolVar(&doltMigrateWispsDry, "dry-run", false, "Preview what would be migrated without making changes")
 	doltMigrateWispsCmd.Flags().StringVar(&doltMigrateWispsDB, "db", "", "Target database (default: auto-detect from rig)")
+
+	doltSQLCmd.Flags().StringVarP(&doltSQLQuery, "query", "q", "", "Run a one-shot SQL query non-interactively and exit")
+	doltSQLCmd.Flags().StringVarP(&doltSQLResultFormat, "result-format", "r", "", "Output format for -q results (e.g. tabular, csv, json)")
 
 	rootCmd.AddCommand(doltCmd)
 }
@@ -908,6 +925,17 @@ func runDoltSQL(cmd *cobra.Command, args []string) error {
 
 	config := doltserver.DefaultConfig(townRoot)
 
+	// Build extra args for non-interactive query mode (-q/--query, -r/--result-format).
+	// When -q is set, dolt runs the query and exits without consuming stdin or
+	// requiring a TTY — this is what makes scripted/headless SQL work.
+	var queryArgs []string
+	if doltSQLResultFormat != "" {
+		queryArgs = append(queryArgs, "-r", doltSQLResultFormat)
+	}
+	if doltSQLQuery != "" {
+		queryArgs = append(queryArgs, "-q", doltSQLQuery)
+	}
+
 	// Check if server is running - if so, connect via Dolt SQL client
 	running, _, _ := doltserver.IsRunning(townRoot)
 	if running {
@@ -924,13 +952,20 @@ func runDoltSQL(cmd *cobra.Command, args []string) error {
 			"--no-tls",
 			"sql",
 		}
+		sqlArgs = append(sqlArgs, queryArgs...)
 		sqlCmd := exec.Command("dolt", sqlArgs...)
 		// GH#2537: Set cmd.Dir to prevent stray .doltcfg/privileges.db in CWD.
 		sqlCmd.Dir = config.DataDir
-		if config.Password != "" {
-			sqlCmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
+		// Always set DOLT_CLI_PASSWORD (even empty) so dolt does not prompt
+		// interactively. Without this, piping SQL via stdin fails with
+		// "inappropriate ioctl for device" / "Enter password" in headless
+		// contexts. (gu-86sy2)
+		sqlCmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
+		// Only attach stdin in interactive mode. With -q the query comes from
+		// the flag, so leaving stdin nil keeps headless agents safe.
+		if doltSQLQuery == "" {
+			sqlCmd.Stdin = os.Stdin
 		}
-		sqlCmd.Stdin = os.Stdin
 		sqlCmd.Stdout = os.Stdout
 		sqlCmd.Stderr = os.Stderr
 		return sqlCmd.Run()
@@ -948,11 +983,20 @@ func runDoltSQL(cmd *cobra.Command, args []string) error {
 
 	// Use first database for embedded SQL shell
 	dbDir := doltserver.RigDatabaseDir(townRoot, databases[0])
-	fmt.Printf("Using database: %s (start server with 'gt dolt start' for multi-database access)\n\n", databases[0])
+	if doltSQLQuery == "" {
+		// Only print this banner in interactive mode to keep -q output
+		// machine-parseable.
+		fmt.Printf("Using database: %s (start server with 'gt dolt start' for multi-database access)\n\n", databases[0])
+	}
 
-	sqlCmd := exec.Command("dolt", "sql")
+	embeddedArgs := append([]string{"sql"}, queryArgs...)
+	sqlCmd := exec.Command("dolt", embeddedArgs...)
 	sqlCmd.Dir = dbDir
-	sqlCmd.Stdin = os.Stdin
+	// Suppress interactive password prompts in embedded mode too.
+	sqlCmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
+	if doltSQLQuery == "" {
+		sqlCmd.Stdin = os.Stdin
+	}
 	sqlCmd.Stdout = os.Stdout
 	sqlCmd.Stderr = os.Stderr
 

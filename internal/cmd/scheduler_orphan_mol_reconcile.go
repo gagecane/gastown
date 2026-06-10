@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // orphanMolReconcileMinAge is the minimum age an open, unassigned molecule
@@ -137,7 +138,25 @@ func reconcileOrphanMolecules(townRoot string, deadline time.Time) int {
 
 		action := reconcileDecision(info.Dependents)
 		if action == orphanWispActionSkip {
-			continue
+			// Dead-owner upgrade (gu-q483x). reconcileDecision Skips any wisp
+			// whose dependent is hooked/in_progress, treating it as a live owner.
+			// But the convoy stranded scan (isReadyIssue) already treats a bead
+			// hooked to a DEAD tmux session as re-dispatchable. When the two
+			// disagree the bead deadlocks: the stranded scan wants to re-feed it,
+			// but this wisp's `blocks` dep keeps it out of the ready set
+			// (info.Blocked) and reconcile refuses to clear the wisp — the exact
+			// manual `bd close <orphan-wisp>` + re-sling wedge from the incident
+			// reports (convoy hq-wf-hbjqq, ta-wisp-2tsn/qrdj). Upgrade
+			// Skip→Reenqueue only when EVERY hooked/in_progress dependent is
+			// provably dead (session gone). Any live or undeterminable owner
+			// keeps Skip (fail-closed — never burn a wisp out from under a
+			// worker we cannot positively rule dead).
+			if !allHookedDependentsDead(info.Dependents, func(id string) bool {
+				return dependentOwnerDead(townRoot, id)
+			}) {
+				continue
+			}
+			action = orphanWispActionReenqueue
 		}
 
 		// Both burn and re-enqueue reduce to "burn the stale wisp". Use a live
@@ -209,6 +228,66 @@ func reconcileDecision(dependents []beads.IssueDep) orphanWispAction {
 		return orphanWispActionReenqueue
 	}
 	return orphanWispActionBurn
+}
+
+// allHookedDependentsDead reports whether EVERY hooked/in_progress work-bead
+// dependent of an orphan wisp is owned by a provably-dead session. Returns
+// false the moment any such dependent's owner cannot be confirmed dead — so a
+// single live (or undeterminable) owner keeps the wisp untouched. Returns false
+// when there are no hooked/in_progress work-bead dependents at all: that is not
+// the dead-hook wedge this upgrade targets (reconcileDecision already routes
+// open→Reenqueue and all-closed→Burn), so there is nothing to upgrade.
+//
+// ownerDead is injected so tests don't need a real tmux/bd; production passes a
+// closure over dependentOwnerDead.
+func allHookedDependentsDead(dependents []beads.IssueDep, ownerDead func(beadID string) bool) bool {
+	sawHookedDep := false
+	for _, dep := range dependents {
+		if strings.Contains(dep.ID, "-wisp-") {
+			continue // Not a work bead.
+		}
+		if dep.Status != "hooked" && dep.Status != "in_progress" {
+			continue
+		}
+		sawHookedDep = true
+		if !ownerDead(dep.ID) {
+			return false // Live or undeterminable owner — fail closed.
+		}
+	}
+	return sawHookedDep
+}
+
+// dependentOwnerDead reports whether the work bead beadID is held by a
+// provably-dead session: its assignee's tmux session does not exist. Mirrors
+// the liveness bar isReadyIssue uses for the convoy stranded scan, so the two
+// passes agree on which hooked beads are re-dispatchable. Fail-closed: any
+// inability to determine the owner (bd show fails, no assignee, unparseable
+// session) returns false so the wisp is left for a human rather than burned.
+//
+// Declared as a var so the orchestration test can stub the tmux/bd dependency.
+var dependentOwnerDead = func(townRoot, beadID string) bool {
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	beadsDir := beads.ResolveBeadsDirForID(townBeadsDir, beadID)
+	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir).WithoutReadThrottle()
+	out, err := b.Run("show", "--json", beadID)
+	if err != nil || len(out) == 0 || (out[0] != '[' && out[0] != '{') {
+		return false
+	}
+	var infos []*beads.Issue
+	if err := json.Unmarshal(out, &infos); err != nil || len(infos) == 0 || infos[0] == nil {
+		return false
+	}
+	assignee := infos[0].Assignee
+	if dispatch.IsEmptyAssignee(assignee) {
+		return false // No owner to rule dead — defer to a human.
+	}
+	sessionName, _ := assigneeToSessionName(assignee)
+	if sessionName == "" {
+		return false // Can't map to a session — fail closed.
+	}
+	// Session absent ⇒ owner dead. Same check as isReadyIssue (convoy.go).
+	err = tmux.BuildCommand("has-session", "-t", sessionName).Run()
+	return err != nil
 }
 
 // burnBaseBeadForWisp returns the bead ID to pass as the burn "base". Prefer a

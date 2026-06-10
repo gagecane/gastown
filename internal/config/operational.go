@@ -192,6 +192,13 @@ const (
 	// wedge in rig B next hour) but long enough to capture the simultaneous
 	// fan-out of a single town-wide event across staggered 5m patrol cycles.
 	DefaultWitnessStaleRigAgentCorrelationWindow = 15 * time.Minute
+	// DefaultWitnessRefineryPausedLookback is the lookback window over which
+	// the refinery_paused detector scans the events log (gu-t3why). Picks up
+	// the same paused MR across multiple poll cycles so a queue silently
+	// piling up for hours becomes one rolled-up entry in the patrol output.
+	// 6h covers the typical "operator was off shift" window that produced
+	// the original 15h-blocked-MR incident.
+	DefaultWitnessRefineryPausedLookback = 6 * time.Hour
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -982,4 +989,14 @@ func (wt *WitnessThresholds) StaleRigAgentCorrelationWindowD() time.Duration {
 		return ParseDurationOrDefault(wt.StaleRigAgentCorrelationWindow, DefaultWitnessStaleRigAgentCorrelationWindow)
 	}
 	return DefaultWitnessStaleRigAgentCorrelationWindow
+}
+
+// RefineryPausedLookbackD returns the configured or default lookback window
+// over which the refinery_paused detector scans the events log. (gu-t3why)
+// Set to 0 to disable the scan.
+func (wt *WitnessThresholds) RefineryPausedLookbackD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.RefineryPausedLookback, DefaultWitnessRefineryPausedLookback)
+	}
+	return DefaultWitnessRefineryPausedLookback
 }

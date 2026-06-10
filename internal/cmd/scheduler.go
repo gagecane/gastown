@@ -440,7 +440,7 @@ func listScheduledBeads(townRoot string) []scheduledBeadInfo {
 	// bd blocked is fast because it reads the cached blocked set; bd ready walks
 	// the full ready graph and is too slow for scheduler display paths.
 	blockedWorkIDs, _ := listBlockedWorkBeadIDsWithError(townRoot, workBeadIDs)
-	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
+	workBeadInfo, _ := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
 
 	seenWork := make(map[string]bool)
 	var result []scheduledBeadInfo
