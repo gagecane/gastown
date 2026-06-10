@@ -180,22 +180,68 @@ func runConvoyAdd(ctx context.Context, townRoot, convoyID, issueID, gtPath strin
 
 // getTrackingConvoys returns convoy IDs that track the given issue.
 // Uses SDK GetDependentsWithMetadata filtered by type "tracks".
+//
+// Cross-rig tracks deps (gu-v6zcx): when a convoy in the hq store tracks a
+// bead in a different rig, the dependency target is stored in
+// `depends_on_external` as "external:<prefix>:<id>" rather than in
+// `depends_on_issue_id` as the bare id. (See addTrackingRelation /
+// trackingDependsOnID.) GetDependentsWithMetadata's COALESCE-based lookup
+// requires the caller to query the EXACT stored form. Querying only the
+// bare id misses cross-rig tracking convoys, which silenced the entire
+// event-driven continuation feed for mountain convoys: a tracked bead's
+// close in another rig would never fire CheckConvoysForIssue's downstream
+// completion check or feedNextReadyIssue, so the next ready bead in the
+// wave waited for the 60s stranded-scan poll. We now query both the bare
+// and external-wrapped forms and dedupe the result.
 func getTrackingConvoys(ctx context.Context, store beadsdk.Storage, issueID string, logger func(format string, args ...interface{})) []string {
-	dependents, err := store.GetDependentsWithMetadata(ctx, issueID)
-	if err != nil {
-		if logger != nil {
-			logger("Convoy: getTrackingConvoys(%s) store error: %v", issueID, err)
-		}
+	if store == nil || issueID == "" {
 		return nil
 	}
 
+	queryForms := trackingLookupForms(issueID)
+	seen := make(map[string]bool, len(queryForms))
 	convoyIDs := make([]string, 0)
-	for _, d := range dependents {
-		if string(d.DependencyType) == "tracks" {
+	for _, q := range queryForms {
+		dependents, err := store.GetDependentsWithMetadata(ctx, q)
+		if err != nil {
+			if logger != nil {
+				logger("Convoy: getTrackingConvoys(%s) store error: %v", q, err)
+			}
+			continue
+		}
+		for _, d := range dependents {
+			if string(d.DependencyType) != "tracks" {
+				continue
+			}
+			if seen[d.ID] {
+				continue
+			}
+			seen[d.ID] = true
 			convoyIDs = append(convoyIDs, d.ID)
 		}
 	}
 	return convoyIDs
+}
+
+// trackingLookupForms returns the set of dependency-target strings under which
+// a tracking dependency for issueID may have been stored. For an issue with a
+// prefix (e.g. "ta-zync.20"), this is both the bare id and the external-wrapped
+// form ("external:ta:ta-zync.20") — same-rig tracks deps store the bare id
+// while cross-rig tracks deps store the external-wrapped id (see
+// trackingDependsOnID in internal/cmd/tracking_relations.go).
+func trackingLookupForms(issueID string) []string {
+	if strings.HasPrefix(issueID, "external:") {
+		return []string{issueID}
+	}
+	forms := []string{issueID}
+	prefix := beads.ExtractPrefix(issueID)
+	if prefix != "" {
+		external := fmt.Sprintf("external:%s:%s", strings.TrimSuffix(prefix, "-"), issueID)
+		if external != issueID {
+			forms = append(forms, external)
+		}
+	}
+	return forms
 }
 
 // isConvoyClosed checks if a convoy is already closed.
