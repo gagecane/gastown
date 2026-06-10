@@ -217,6 +217,26 @@ EOF
   exit 0
 fi
 
+# --- Capture town root for the gate-slot semaphore (gs-orsm) --------------
+#
+# The host-wide concurrency cap below locates its shared slot dir under the
+# town root. Capture it from GT_TOWN_ROOT BEFORE the env scrub unsets it; fall
+# back to walking up for the mayor/town.json marker so a manual push without
+# the agent env still finds the shared dir. Empty means "no town root known" —
+# the cap then skips (best-effort). See acquire_gate_slot below.
+
+GATE_SEM_TOWN_ROOT="${GT_TOWN_ROOT:-}"
+if [[ -z "$GATE_SEM_TOWN_ROOT" ]]; then
+  _walk="$REPO_ROOT"
+  while [[ -n "$_walk" && "$_walk" != "/" ]]; do
+    if [[ -f "$_walk/mayor/town.json" ]]; then
+      GATE_SEM_TOWN_ROOT="$_walk"
+      break
+    fi
+    _walk=$(dirname "$_walk")
+  done
+fi
+
 # --- Clean env so tests don't inherit developer's GT_TOWN_ROOT ------------
 #
 # Tests that need a workspace must create their own marker (mayor/town.json).
@@ -248,6 +268,81 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
       GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_NAMESPACE \
       GIT_PREFIX GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS \
       GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+
+# --- Host-wide concurrency cap on heavy go gate runs (gs-orsm) ------------
+#
+# The 2026-06-09 load-742 estop: many polecat/refinery worktrees ran this
+# script's heavy go build/vet/lint/test gates CONCURRENTLY across all rigs
+# with NO global cap. 25+ simultaneous Go linker processes exhausted swap and
+# risked OOM (deacon CRITICAL hq-tghws). The `gt done --pre-verified` path was
+# already capped by a cross-process counting semaphore (gu-0iyrn:
+# internal/lock.FlockSemaphore over <townRoot>/.runtime/locks/gate-slots), but
+# this pre-push path was uncapped — the recurrence vector.
+#
+# Fix: acquire one slot from that SAME semaphore pool before running the heavy
+# gates, so pre-push and gt-done share a single host-wide bound on concurrent
+# full-suite go runs. We reimplement the slot scan with bash flock(1), which
+# takes the same flock(2) advisory lock as the Go side (syscall.Flock), so the
+# two implementations interoperate on the identical slot-N.flock files. Cap
+# size honors the same GT_GATE_CONCURRENCY knob the Go side reads (default 2);
+# GT_GATE_SLOT_WAIT_SECONDS bounds the wait (default 600, matching the Go
+# side's 10m) and lets tests shrink it.
+#
+# Best-effort: if flock is unavailable, no town root is known, or all slots
+# stay held past the wait, we proceed UNTHROTTLED rather than block a push. The
+# cap is an overload guard, not a correctness gate. The held slot is released
+# on script exit (the EXIT trap closes the fd; process exit would anyway).
+
+GATE_SLOT_FD=""
+
+release_gate_slot() {
+  if [[ -n "$GATE_SLOT_FD" ]]; then
+    # Group-scope the stderr redirect: a bare `exec FD>&- 2>/dev/null` would
+    # redirect THIS shell's stderr to /dev/null permanently.
+    { exec {GATE_SLOT_FD}>&-; } 2>/dev/null || true
+    GATE_SLOT_FD=""
+  fi
+}
+trap release_gate_slot EXIT
+
+acquire_gate_slot() {
+  command -v flock >/dev/null 2>&1 || return 0
+  [[ -n "$GATE_SEM_TOWN_ROOT" ]] || return 0
+
+  local slot_dir="$GATE_SEM_TOWN_ROOT/.runtime/locks/gate-slots"
+  mkdir -p "$slot_dir" 2>/dev/null || return 0
+
+  local n="${GT_GATE_CONCURRENCY:-2}"
+  [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || n=2
+
+  local wait_s="${GT_GATE_SLOT_WAIT_SECONDS:-600}"
+  local waited=0 i fd
+  while :; do
+    for (( i=0; i<n; i++ )); do
+      # Group-scope the stderr redirect — a bare `exec {fd}>file 2>/dev/null`
+      # would redirect THIS shell's stderr to /dev/null for the rest of the
+      # run (the `2>/dev/null` applies to the current shell via exec), silently
+      # swallowing every later gate message. The group restores stderr after.
+      if { exec {fd}>"$slot_dir/slot-$i.flock"; } 2>/dev/null; then
+        if flock -n "$fd"; then
+          GATE_SLOT_FD=$fd
+          return 0
+        fi
+        { exec {fd}>&-; } 2>/dev/null || true
+      fi
+    done
+    if (( waited >= wait_s )); then
+      echo "pre-push: all $n gate slots held for ${wait_s}s — proceeding without the host-wide concurrency cap (gs-orsm)." >&2
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+}
+
+# Take a slot before the heavy gates below. Held through the slow gate and
+# released on exit. Bounds concurrent build/vet/lint/test runs host-wide.
+acquire_gate_slot
 
 # --- Upfront banner (gu-enqh0) -------------------------------------------
 #

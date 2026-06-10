@@ -75,10 +75,21 @@ func TestMain(m *testing.M) {
 	// embedded Dolt store, and have no env-var off switch — so goleak reports
 	// them whenever a Dolt-backed store is opened. Library-owned, not gastown's
 	// to tear down. (gs-8zeq)
+	//
+	// Also ignore database/sql's connection-pool maintenance goroutines. Each
+	// beadsdk.Open dials the Dolt container through the go-sql-driver/mysql
+	// driver, which makes the stdlib database/sql package spawn a
+	// connectionOpener (and, once a conn-max lifetime is set, a
+	// connectionCleaner) goroutine per *sql.DB. store.Close() signals these to
+	// stop, but they exit asynchronously after Close() returns — so under load
+	// goleak.Find can observe them mid-teardown even though every store has been
+	// closed. The exit is a transient race, not an unreleased resource. (gs-wtce)
 	leakOpts := []goleak.Option{
 		goleak.IgnoreTopFunction("github.com/testcontainers/testcontainers-go.(*Reaper).connect.func1"),
 		goleak.IgnoreTopFunction("github.com/dolthub/dolt/go/libraries/events.(*sendingThread).run"),
 		goleak.IgnoreTopFunction("github.com/dolthub/dolt/go/libraries/events.NewCollector.func1"),
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
+		goleak.IgnoreTopFunction("database/sql.(*DB).connectionCleaner"),
 	}
 	if err := goleak.Find(leakOpts...); err != nil {
 		fmt.Fprintf(os.Stderr, "goleak: goroutine leak detected:\n%v\n", err)

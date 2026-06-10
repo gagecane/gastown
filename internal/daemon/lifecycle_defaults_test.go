@@ -172,6 +172,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			SchedulerStuck:       &SchedulerStuckConfig{Enabled: false},
 			EventChannelGC:       &EventChannelGCConfig{Enabled: false},
 			CircuitBreakerGC:     &CircuitBreakerGCConfig{Enabled: false},
+			AgentHeartbeat:       &AgentHeartbeatConfig{Enabled: false},
 		},
 	}
 

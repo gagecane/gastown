@@ -259,6 +259,76 @@ func TestScanStranded_FeedsReadyIssues(t *testing.T) {
 	}
 }
 
+// TestScanStranded_SkipsClosedConvoy is the regression guard for gs-cxex: the
+// stranded cache (gu-rd9ph) keys its sentinel on the open-convoy count + max
+// convoy updated_at, so a convoy that has closed (or whose tracked bead closed)
+// without shifting that sentinel keeps being served as a stale "feedable"
+// entry. The feed loop then re-slings the convoy's already-completed bead every
+// scan — sling refuses (bead closed) but the loop churns daemon.log for hours.
+// scan() must read the convoy's live status, skip feeding closed convoys, and
+// invalidate the cache so the next scan recomputes a fresh stranded set.
+func TestScanStranded_SkipsClosedConvoy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	convoy := &beadsdk.Issue{
+		ID:        "hq-cvclosed",
+		Title:     "Completed convoy",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, convoy, "test"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.CloseIssue(ctx, convoy.ID, "all tracked done", "test", ""); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+
+	// Mock gt reports the now-closed convoy as feedable — simulating a stale
+	// stranded-cache result that survived the convoy's close.
+	paths := mockGtForScanTest(t, scanTestOpts{
+		strandedJSON: `[{"id":"hq-cvclosed","title":"Completed convoy","ready_count":1,"ready_issues":["gt-issue1"]}]`,
+		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
+	})
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m.scan()
+
+	// No sling should fire for a closed convoy's bead.
+	if data, err := os.ReadFile(paths.slingLogPath); err == nil {
+		t.Errorf("expected NO sling for closed convoy, but sling was invoked: %q", data)
+	}
+
+	// Cache must be invalidated so the next scan recomputes without the convoy.
+	if m.strandedCache != nil {
+		t.Error("expected stranded cache to be invalidated after dropping a closed convoy")
+	}
+
+	found := false
+	for _, s := range logged {
+		if strings.Contains(s, "hq-cvclosed") && strings.Contains(s, "closed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected closed-convoy drop log for hq-cvclosed, got: %v", logged)
+	}
+}
+
 func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")

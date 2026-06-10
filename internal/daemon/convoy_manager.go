@@ -710,6 +710,20 @@ func (m *ConvoyManager) scan() {
 		}
 
 		if c.ReadyCount > 0 {
+			// Freshness guard (gs-cxex): the stranded cache (gu-rd9ph) can serve
+			// a result captured while this convoy was open with a ready bead. If
+			// the convoy has since closed without shifting the cache sentinel,
+			// the cached entry re-feeds its already-completed bead every scan —
+			// sling refuses (bead closed) but the loop churns daemon.log for
+			// hours. Drop closed convoys here and invalidate the cache so the
+			// next scan recomputes a fresh stranded set without the released
+			// convoy. Also closes the TOCTOU window where a convoy closes
+			// between findStranded computing the result and this feed.
+			if m.convoyClosed(c.ID) {
+				m.logger("Convoy %s: closed — dropping stale feed entry, invalidating stranded cache (gs-cxex)", c.ID)
+				m.strandedCache = nil
+				continue
+			}
 			slingFailures += m.feedFirstReady(c)
 		} else if c.TrackedCount == 0 {
 			// Empty convoy — but skip if it was just created (GH#2303).
@@ -868,6 +882,39 @@ func (m *ConvoyManager) strandedSentinel() (int, time.Time, bool) {
 		t = maxUpdate.Time
 	}
 	return count, t, true
+}
+
+// convoyClosed reports whether convoyID is closed in the hq store. It is a
+// freshness guard for the stranded-feed loop (gs-cxex): the stranded cache
+// (gu-rd9ph) keys its sentinel on the open-convoy count + max convoy
+// updated_at, which is BLIND to a convoy closing without shifting that
+// sentinel (e.g. other open convoys keep the count/max stable). A stale cache
+// entry then re-feeds an already-completed convoy's bead every scan — sling
+// correctly refuses (bead closed, work done) but the loop churns daemon.log
+// for hours with zero progress. Reading the convoy's live status lets scan()
+// drop these released convoys before feeding.
+//
+// Fails OPEN (returns false → feed proceeds) when the store is unavailable or
+// the convoy can't be read: the existing sling-failure paths
+// (IsClosedBeadSlingError etc.) still handle a stale bead safely, so a missed
+// read here degrades only to the pre-fix behavior, never to a wrong dispatch.
+func (m *ConvoyManager) convoyClosed(convoyID string) bool {
+	m.storesMu.Lock()
+	hqStore := m.stores["hq"]
+	m.storesMu.Unlock()
+
+	if hqStore == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(m.ctx, 2*time.Second)
+	defer cancel()
+
+	issue, err := hqStore.GetIssue(ctx, convoyID)
+	if err != nil || issue == nil {
+		return false
+	}
+	return string(issue.Status) == "closed"
 }
 
 // feedFirstReady iterates through all ready issues in a stranded convoy and
