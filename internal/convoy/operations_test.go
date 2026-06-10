@@ -40,6 +40,118 @@ func TestExtractIssueID(t *testing.T) {
 	}
 }
 
+// TestTrackingLookupForms verifies that trackingLookupForms returns both the
+// bare and external-wrapped forms for a same-rig-style id, the bare-only form
+// for an id with no extractable prefix, and the external-only form when the
+// caller passes an already-wrapped id. (gu-v6zcx)
+func TestTrackingLookupForms(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []string
+	}{
+		{
+			name:  "id with prefix yields bare + external-wrapped",
+			input: "ta-zync.20",
+			want:  []string{"ta-zync.20", "external:ta:ta-zync.20"},
+		},
+		{
+			name:  "hq convoy id",
+			input: "hq-cv-fuuj0",
+			want:  []string{"hq-cv-fuuj0", "external:hq:hq-cv-fuuj0"},
+		},
+		{
+			name:  "already-wrapped id is passed through unchanged",
+			input: "external:ta:ta-zync.20",
+			want:  []string{"external:ta:ta-zync.20"},
+		},
+		{
+			name:  "id without dash yields bare only",
+			input: "noprefix",
+			want:  []string{"noprefix"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := trackingLookupForms(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("trackingLookupForms(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			for i, w := range tt.want {
+				if got[i] != w {
+					t.Errorf("trackingLookupForms(%q)[%d] = %q, want %q", tt.input, i, got[i], w)
+				}
+			}
+		})
+	}
+}
+
+// TestGetTrackingConvoys_FindsCrossRigTracksDep is the regression test for
+// gu-v6zcx. A convoy in the hq store tracks a bead from another rig — the
+// dependency target is stored as "external:<prefix>:<id>" rather than the bare
+// id. getTrackingConvoys must find this convoy when callers (the daemon's
+// event-poll path) pass in the bare id from the close event. Without this,
+// CheckConvoysForIssue is a no-op for cross-rig closes and mountain convoys
+// strand between waves.
+func TestGetTrackingConvoys_FindsCrossRigTracksDep(t *testing.T) {
+	store := useSharedStore(t)
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	convoy := &beadsdk.Issue{
+		ID:        "test-trkconvoy",
+		Title:     "Convoy tracking cross-rig bead",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.CreateIssue(ctx, convoy, "test"); err != nil {
+		t.Fatalf("CreateIssue convoy: %v", err)
+	}
+
+	// Add a tracks dep keyed by external:<prefix>:<id> (the wire form used
+	// when convoys track beads in a different rig — see
+	// internal/cmd/tracking_relations.go's trackingDependsOnID).
+	dep := &beadsdk.Dependency{
+		IssueID:     convoy.ID,
+		DependsOnID: "external:ta:ta-zync20",
+		Type:        beadsdk.DependencyType("tracks"),
+		CreatedAt:   now,
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency cross-rig tracks: %v", err)
+	}
+
+	// Caller passes the bare id (this is what the close event reports).
+	// Pre-fix this returned []; post-fix the external-form lookup finds the convoy.
+	got := getTrackingConvoys(ctx, store, "ta-zync20", nil)
+	if len(got) == 0 {
+		// Skip in embedded-mode environments where GetDependentsWithMetadata
+		// can't see the row at all (a known embedded-Dolt limitation: see the
+		// fail-open path in TestIsIssueBlocked_BlockedByOpenBlocker).
+		if deps, err := store.GetDependentsWithMetadata(ctx, "external:ta:ta-zync20"); err != nil || len(deps) == 0 {
+			t.Skipf("GetDependentsWithMetadata not supported in embedded mode (deps=%d, err=%v)", len(deps), err)
+		}
+		t.Fatalf("getTrackingConvoys(ta-zync20) = [], want [%s]", convoy.ID)
+	}
+
+	found := false
+	for _, id := range got {
+		if id == convoy.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("getTrackingConvoys(ta-zync20) = %v, want to contain %s", got, convoy.ID)
+	}
+}
+
 func TestIsSlingableType(t *testing.T) {
 	tests := []struct {
 		issueType string
