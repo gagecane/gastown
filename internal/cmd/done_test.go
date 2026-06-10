@@ -1846,3 +1846,33 @@ func TestNudgeRefineryGuardLogic(t *testing.T) {
 		})
 	}
 }
+
+// TestDeriveLifecycleOutcome verifies the durable terminal lifecycle outcome
+// mapping (gs-2m1b): each gt done exit maps to the correct persisted outcome.
+func TestDeriveLifecycleOutcome(t *testing.T) {
+	tests := []struct {
+		name       string
+		exitType   string
+		mrID       string
+		mrFailed   bool
+		pushFailed bool
+		want       string
+	}{
+		{"completed with MR", ExitCompleted, "gt-mr-1", false, false, beads.OutcomeCompletedMerged},
+		{"completed no MR", ExitCompleted, "", false, false, beads.OutcomeCompletedPushed},
+		{"completed MR failed", ExitCompleted, "", true, false, beads.OutcomeCompletedStranded},
+		{"completed push failed", ExitCompleted, "gt-mr-1", false, true, beads.OutcomeCompletedUnpushed},
+		{"push failed dominates mr failed", ExitCompleted, "", true, true, beads.OutcomeCompletedUnpushed},
+		{"deferred", ExitDeferred, "", false, false, beads.OutcomeDeferred},
+		{"escalated", ExitEscalated, "", false, false, beads.OutcomeEscalated},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deriveLifecycleOutcome(tt.exitType, tt.mrID, tt.mrFailed, tt.pushFailed)
+			if got != tt.want {
+				t.Errorf("deriveLifecycleOutcome(%q, %q, %v, %v) = %q, want %q",
+					tt.exitType, tt.mrID, tt.mrFailed, tt.pushFailed, got, tt.want)
+			}
+		})
+	}
+}

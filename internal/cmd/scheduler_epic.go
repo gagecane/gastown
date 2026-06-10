@@ -76,7 +76,7 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 			continue
 		}
 
-		rigName := resolveRigForBead(townRoot, c.ID)
+		rigName := resolveRigForBeadWithLabels(townRoot, c.ID, c.Labels)
 		if rigName == "" {
 			skippedNoRig++
 			prefix := beads.ExtractPrefix(c.ID)
@@ -191,7 +191,7 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 			skippedAssigned++
 			continue
 		}
-		rigName := resolveRigForBead(townRoot, c.ID)
+		rigName := resolveRigForBeadWithLabels(townRoot, c.ID, c.Labels)
 		if rigName == "" {
 			skippedNoRig++
 			prefix := beads.ExtractPrefix(c.ID)

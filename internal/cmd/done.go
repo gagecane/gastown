@@ -1843,6 +1843,7 @@ func teardownAfterDone(p teardownParams) {
 			MRFailed:       p.mrFailed,
 			PushFailed:     p.pushFailed,
 			CompletionTime: time.Now().UTC().Format(time.RFC3339),
+			LastOutcome:    deriveLifecycleOutcome(p.exitType, p.mrID, p.mrFailed, p.pushFailed),
 		}
 		if err := completionBd.UpdateAgentCompletion(p.agentBeadID, meta); err != nil {
 			style.PrintWarning("could not write completion metadata to agent bead: %v", err)
@@ -2998,6 +2999,33 @@ func firstLine(s string) string {
 // invariant even if a future code path populates mrID outside COMPLETED.
 func shouldNudgeRefinery(exitType, mrID string) bool {
 	return exitType == ExitCompleted && mrID != ""
+}
+
+// deriveLifecycleOutcome maps a gt done exit into a durable terminal lifecycle
+// outcome (gs-2m1b). The outcome is persisted on the agent bead and — unlike the
+// ephemeral completion metadata — survives the witness's routine completion
+// processing, giving zombie-patrol and dispatch a durable signal that
+// distinguishes "completed + cleaned up" from "died mid-work" (which leaves no
+// recent outcome). gt done only ever records the completed-* / deferred /
+// escalated outcomes; the died-* cases are inferred from the absence of one.
+func deriveLifecycleOutcome(exitType, mrID string, mrFailed, pushFailed bool) string {
+	switch exitType {
+	case ExitEscalated:
+		return beads.OutcomeEscalated
+	case ExitDeferred:
+		return beads.OutcomeDeferred
+	default: // ExitCompleted
+		switch {
+		case pushFailed:
+			return beads.OutcomeCompletedUnpushed
+		case mrFailed:
+			return beads.OutcomeCompletedStranded
+		case mrID != "":
+			return beads.OutcomeCompletedMerged
+		default:
+			return beads.OutcomeCompletedPushed
+		}
+	}
 }
 
 // setDoneIntentLabel writes a done-intent:<type>:<unix-ts> label on the agent bead

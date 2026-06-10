@@ -491,3 +491,65 @@ func TestCheckSchedulePrefixParity_EmptyRigPrefixFailsOpen(t *testing.T) {
 		t.Errorf("empty rig prefix should fail open, got error: %v", err)
 	}
 }
+
+// TestResolveRigForBeadWithLabels verifies the gs-8h8j cross-rig override: a
+// 'gt:rig:<name>' label routes a bead to the named rig (when it exists),
+// overriding ID-prefix resolution; an unknown rig or absent label falls back
+// to the prefix.
+func TestResolveRigForBeadWithLabels(t *testing.T) {
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routes := strings.Join([]string{
+		`{"prefix":"lb-","path":"lia-health-backend/mayor/rig"}`,
+		`{"prefix":"iac-","path":"lia-health-iac/mayor/rig"}`,
+		`{"prefix":"hq-","path":"."}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		beadID string
+		labels []string
+		want   string
+	}{
+		{
+			name:   "no label falls back to prefix",
+			beadID: "lb-1tee.9",
+			labels: nil,
+			want:   "lia-health-backend",
+		},
+		{
+			name:   "label overrides prefix to a real rig",
+			beadID: "lb-1tee.9",
+			labels: []string{"bug", "gt:rig:lia-health-iac"},
+			want:   "lia-health-iac",
+		},
+		{
+			name:   "unknown rig label falls back to prefix",
+			beadID: "lb-1tee.9",
+			labels: []string{"gt:rig:does-not-exist"},
+			want:   "lia-health-backend",
+		},
+		{
+			name:   "label matching prefix rig is a no-op",
+			beadID: "lb-1tee.2",
+			labels: []string{"gt:rig:lia-health-backend"},
+			want:   "lia-health-backend",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveRigForBeadWithLabels(townRoot, tc.beadID, tc.labels); got != tc.want {
+				t.Errorf("resolveRigForBeadWithLabels(%q, %v) = %q, want %q",
+					tc.beadID, tc.labels, got, tc.want)
+			}
+		})
+	}
+}
