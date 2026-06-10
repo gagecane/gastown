@@ -55,3 +55,7 @@ export.auto: "false"
 
 sync.remote: "git+ssh://git@github.com/gagecane/gastown.git"
 dolt.auto-commit: "on"
+
+storage.backend: dolt
+dolt.server: ""
+dolt.port: 3307
