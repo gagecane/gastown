@@ -73,7 +73,7 @@ func (c *DoltConfigCheck) Run(ctx *CheckContext) *CheckResult {
 				return filepath.SkipDir
 			}
 			seen[path] = true
-			c.checkBeadsDir(ctx, path, defaultCfg.Host, defaultCfg.Port, &details)
+			c.checkBeadsDir(ctx, path, defaultCfg.EffectiveHost(), defaultCfg.Port, &details)
 			return filepath.SkipDir
 		}
 		return nil
