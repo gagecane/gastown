@@ -329,3 +329,61 @@ func TestTypeDaemonPluginDispatch_ConstantValue(t *testing.T) {
 			TypeDaemonPluginDispatch, "daemon.plugin.dispatch")
 	}
 }
+
+func TestRefineryPausedPayload_AllFields(t *testing.T) {
+	p := RefineryPausedPayload(
+		"gastown_upstream",
+		"gu-mr-abc",
+		"polecat/nitro/gu-t3why",
+		"gu-t3why",
+		"pr_needs_approval",
+		"PR #123 requires approving review before merge",
+		"github_pr_review",
+	)
+	if p["rig"] != "gastown_upstream" {
+		t.Errorf("rig = %v, want gastown_upstream", p["rig"])
+	}
+	if p["mr"] != "gu-mr-abc" {
+		t.Errorf("mr = %v, want gu-mr-abc", p["mr"])
+	}
+	if p["branch"] != "polecat/nitro/gu-t3why" {
+		t.Errorf("branch = %v", p["branch"])
+	}
+	if p["source_issue"] != "gu-t3why" {
+		t.Errorf("source_issue = %v", p["source_issue"])
+	}
+	if p["reason"] != "pr_needs_approval" {
+		t.Errorf("reason = %v", p["reason"])
+	}
+	if p["details"] != "PR #123 requires approving review before merge" {
+		t.Errorf("details = %v", p["details"])
+	}
+	if p["suspected_convention"] != "github_pr_review" {
+		t.Errorf("suspected_convention = %v", p["suspected_convention"])
+	}
+}
+
+func TestRefineryPausedPayload_OmitEmptyOptional(t *testing.T) {
+	// Required: rig + reason. Everything else is optional and omitted when empty
+	// so consumers can rely on key presence as a "we have data" signal.
+	p := RefineryPausedPayload("gastown_upstream", "", "", "", "pr_needs_approval", "", "")
+	if p["rig"] != "gastown_upstream" {
+		t.Errorf("rig = %v, want gastown_upstream", p["rig"])
+	}
+	if p["reason"] != "pr_needs_approval" {
+		t.Errorf("reason = %v, want pr_needs_approval", p["reason"])
+	}
+	for _, key := range []string{"mr", "branch", "source_issue", "details", "suspected_convention"} {
+		if _, ok := p[key]; ok {
+			t.Errorf("%s should be omitted when empty, got %v", key, p[key])
+		}
+	}
+}
+
+func TestTypeRefineryPaused_ConstantValue(t *testing.T) {
+	// The witness's DetectRefineryPaused scan keys off this exact string;
+	// renaming it silently would break dashboards and patrol output.
+	if TypeRefineryPaused != "refinery_paused" {
+		t.Errorf("TypeRefineryPaused = %q, want refinery_paused", TypeRefineryPaused)
+	}
+}

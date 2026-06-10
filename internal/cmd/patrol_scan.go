@@ -93,10 +93,35 @@ type PatrolScanOutput struct {
 	Completions    *PatrolScanCompleteOutput   `json:"completions,omitempty"`
 	PostHoc        *PatrolScanPostHocOutput    `json:"post_hoc_completions,omitempty"`
 	Stranded       *PatrolScanStrandedOutput   `json:"stranded_assignees,omitempty"`
-	StaleRigAgents *PatrolScanStaleRigAgentOut `json:"stale_rig_agents,omitempty"`
-	FalseDeferred  *PatrolScanFalseDeferredOut `json:"false_deferred,omitempty"`
-	StaleParks     *PatrolScanStaleParkOut     `json:"stale_parks,omitempty"`
-	Receipts       []witness.PatrolReceipt     `json:"receipts,omitempty"`
+	StaleRigAgents  *PatrolScanStaleRigAgentOut  `json:"stale_rig_agents,omitempty"`
+	FalseDeferred   *PatrolScanFalseDeferredOut  `json:"false_deferred,omitempty"`
+	StaleParks      *PatrolScanStaleParkOut      `json:"stale_parks,omitempty"`
+	RefineryPaused  *PatrolScanRefineryPausedOut `json:"refinery_paused,omitempty"`
+	Receipts        []witness.PatrolReceipt      `json:"receipts,omitempty"`
+}
+
+// PatrolScanRefineryPausedOut holds refinery_paused detection results (gu-t3why).
+type PatrolScanRefineryPausedOut struct {
+	Scanned int                           `json:"scanned"`
+	Found   int                           `json:"found"`
+	Items   []PatrolScanRefineryPausedItem `json:"items,omitempty"`
+	Errors  []string                       `json:"errors,omitempty"`
+}
+
+// PatrolScanRefineryPausedItem is a single deduplicated paused-MR observation
+// surfaced by the refinery_paused scan.
+type PatrolScanRefineryPausedItem struct {
+	Rig                 string `json:"rig"`
+	MRID                string `json:"mr_id,omitempty"`
+	Branch              string `json:"branch,omitempty"`
+	SourceIssue         string `json:"source_issue,omitempty"`
+	Reason              string `json:"reason"`
+	Details             string `json:"details,omitempty"`
+	SuspectedConvention string `json:"suspected_convention,omitempty"`
+	FirstSeen           string `json:"first_seen"`
+	LastSeen            string `json:"last_seen"`
+	Count               int    `json:"count"`
+	HeldDurationSecs    int64  `json:"held_duration_seconds"`
 }
 
 // PatrolScanStaleParkOut holds stale-park recovery results (gs-du4h).
@@ -332,6 +357,15 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// molecule bond, flip to open, nudge deacon).
 	staleParkResult := witness.DetectStaleParkedBeads(bd, workDir, rigName)
 
+	// Refinery-paused detection (gu-t3why). The refinery emits a structured
+	// refinery_paused event each poll an MR is held awaiting human direction
+	// (PR needs approving review, auto-test-pr awaits approved-by:<user>).
+	// Without this scan the queue piles up silently — exactly the failure
+	// mode this bead exists to close. Filtered to the current rig so each
+	// rig's witness surfaces only its own held MRs.
+	refineryPausedLookback := witnessCfg.RefineryPausedLookbackD()
+	refineryPausedResult := witness.DetectRefineryPaused(workDir, rigName, refineryPausedLookback)
+
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
 
@@ -347,10 +381,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, refineryPausedResult, receipts)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, refineryPausedResult, receipts)
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -405,7 +439,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, staleParkResult *witness.DetectStaleParkedBeadsResult, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, staleParkResult *witness.DetectStaleParkedBeadsResult, refineryPausedResult *witness.DetectRefineryPausedResult, receipts []witness.PatrolReceipt) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -612,12 +646,43 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 		output.StaleParks = sp
 	}
 
+	// Refinery paused (gu-t3why)
+	if refineryPausedResult != nil {
+		rp := &PatrolScanRefineryPausedOut{
+			Scanned: refineryPausedResult.Scanned,
+			Found:   len(refineryPausedResult.Paused),
+		}
+		for _, p := range refineryPausedResult.Paused {
+			held := int64(p.LastSeen.Sub(p.FirstSeen).Seconds())
+			if held < 0 {
+				held = 0
+			}
+			rp.Items = append(rp.Items, PatrolScanRefineryPausedItem{
+				Rig:                 p.Rig,
+				MRID:                p.MRID,
+				Branch:              p.Branch,
+				SourceIssue:         p.SourceIssue,
+				Reason:              p.Reason,
+				Details:             p.Details,
+				SuspectedConvention: p.SuspectedConvention,
+				FirstSeen:           p.FirstSeen.UTC().Format(time.RFC3339),
+				LastSeen:            p.LastSeen.UTC().Format(time.RFC3339),
+				Count:               p.Count,
+				HeldDurationSecs:    held,
+			})
+		}
+		for _, e := range refineryPausedResult.Errors {
+			rp.Errors = append(rp.Errors, e.Error())
+		}
+		output.RefineryPaused = rp
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(output)
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, staleParkResult *witness.DetectStaleParkedBeadsResult, _ []witness.PatrolReceipt) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, postHocResult *witness.DiscoverPostHocCompletionsResult, strandedResult *witness.DetectStaleInProgressBeadsResult, staleAgentResult *witness.DetectStaleRigAgentHeartbeatsResult, falseDeferredResult *witness.DiscoverDeferredButShippedResult, staleParkResult *witness.DetectStaleParkedBeadsResult, refineryPausedResult *witness.DetectRefineryPausedResult, _ []witness.PatrolReceipt) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -877,6 +942,39 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			}
 			fmt.Println()
 		}
+	}
+
+	// Refinery paused (gu-t3why) — surface MRs the refinery is correctly
+	// holding awaiting human direction, but where nothing else will tell the
+	// operator the queue has gone quiet for that reason.
+	if refineryPausedResult != nil && (len(refineryPausedResult.Paused) > 0 || patrolScanVerbose) {
+		fmt.Printf("%s Refinery Paused: %d held MR(s) (scanned %d events)\n",
+			style.Bold.Render("⏸"), len(refineryPausedResult.Paused), refineryPausedResult.Scanned)
+		if len(refineryPausedResult.Paused) == 0 {
+			fmt.Printf("  %s\n", style.Dim.Render("No paused MRs in lookback window"))
+		} else {
+			for _, p := range refineryPausedResult.Paused {
+				held := p.LastSeen.Sub(p.FirstSeen).Round(time.Second)
+				fmt.Printf("  ● %s: reason=%s held=%s count=%d",
+					p.MRID, p.Reason, held, p.Count)
+				if p.SuspectedConvention != "" {
+					fmt.Printf("  convention=%s", p.SuspectedConvention)
+				}
+				fmt.Println()
+				if p.Branch != "" || p.SourceIssue != "" {
+					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("branch=%s source=%s", p.Branch, p.SourceIssue)))
+				}
+				if p.Details != "" && patrolScanVerbose {
+					fmt.Printf("    %s\n", style.Dim.Render(p.Details))
+				}
+			}
+		}
+		if len(refineryPausedResult.Errors) > 0 && patrolScanVerbose {
+			for _, e := range refineryPausedResult.Errors {
+				fmt.Printf("    - %v\n", e)
+			}
+		}
+		fmt.Println()
 	}
 
 	// Summary
