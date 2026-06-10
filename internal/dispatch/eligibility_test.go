@@ -962,3 +962,99 @@ func TestIsEmptyAssignee(t *testing.T) {
 		})
 	}
 }
+
+// TestIsRefineryWorkflowStepID verifies the gu-pi35l variant-2 guard: bead IDs
+// matching the `*-wfs-*` refinery workflow-step convention must be recognized
+// so the dispatcher never slings them to the polecat lane.
+func TestIsRefineryWorkflowStepID(t *testing.T) {
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		// Positive: the cacr-wfs-xegy2 variant and other workflow-step IDs.
+		{"cacr-wfs-xegy2", true},
+		{"gu-wfs-abc123", true},
+		{"casc_crud-wfs-merge", true},
+
+		// Negative: ordinary work-bead IDs (the common case).
+		{"gu-pi35l", false},
+		{"cacr-r8ne", false},
+		{"gu-wisp-88fp", false},
+		{"", false},
+
+		// Negative: substrings that resemble but are not the `-wfs-` marker.
+		{"gu-wfsx", false},
+		{"gu-awfs-1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			if got := IsRefineryWorkflowStepID(tt.id); got != tt.want {
+				t.Errorf("IsRefineryWorkflowStepID(%q) = %v, want %v", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsRefineryOwnedBeadInfo verifies the gu-pi35l guard: beads owned by a
+// `<rig>/refinery` address track merge-queue / patrol state and must not be
+// dispatched to a polecat.
+func TestIsRefineryOwnedBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *BeadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty info", &BeadInfo{}, false},
+
+		// Positive: canonical "<rig>/refinery" addresses.
+		{"casc_crud refinery (cacr-wfs-xegy2 shape)", &BeadInfo{
+			Title: "Merge and push",
+			Owner: "casc_crud/refinery",
+		}, true},
+		{"gastown_upstream refinery", &BeadInfo{
+			Owner: "gastown_upstream/refinery",
+		}, true},
+		{"hyphenated rig", &BeadInfo{
+			Owner: "my-rig/refinery",
+		}, true},
+
+		// Negative: plain user owners and other agents.
+		{"email owner", &BeadInfo{
+			Owner: "canewiw@amazon.com",
+		}, false},
+		{"empty owner", &BeadInfo{
+			Owner: "",
+		}, false},
+		{"whitespace-only owner", &BeadInfo{
+			Owner: "   ",
+		}, false},
+		{"witness sublevel", &BeadInfo{
+			Owner: "gastown/witness",
+		}, false},
+		{"polecat owner (3 segments)", &BeadInfo{
+			Owner: "gastown/polecats/fury",
+		}, false},
+
+		// Negative: malformed shapes that resemble but are not canonical.
+		{"deeper path beyond 2 segments", &BeadInfo{
+			Owner: "rig/refinery/extra",
+		}, false},
+		{"missing rig segment", &BeadInfo{
+			Owner: "/refinery",
+		}, false},
+		{"refinery-prefixed but not the literal segment", &BeadInfo{
+			Owner: "rig/refinery-backup",
+		}, false},
+		{"capitalization differs (Refinery)", &BeadInfo{
+			Owner: "rig/Refinery",
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsRefineryOwnedBeadInfo(tt.info); got != tt.want {
+				t.Errorf("IsRefineryOwnedBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
