@@ -685,6 +685,24 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Println("Feed curator started")
 	}
 
+	// Ensure the daemon-managed Dolt server is running BEFORE opening any beads
+	// stores. openBeadsStores() below is the first boot operation that connects
+	// to Dolt (one beadsdk.OpenFromConfig per rig). If Dolt is DOWN at daemon
+	// start — e.g. OOM-killed during a host-overload storm — the embedded beads
+	// SDK can't reach the configured server and falls back to auto-starting a
+	// bare embedded Dolt rooted at each rig's .beads/dolt, with no --config and
+	// cwd inherited from the rig dir. Those wrong-dir imposters serve EMPTY
+	// databases on the shared port and cause a town-wide bd outage (gs-0s1l).
+	// EnsureRunning launches the server via the configured --config/data_dir
+	// (same path the heartbeat uses), so the stores connect to the real server
+	// instead of spawning imposters. The first heartbeat re-checks this; doing it
+	// here just closes the boot-time window before any beads connection.
+	if d.doltServer != nil && d.doltServer.IsEnabled() {
+		if err := d.doltServer.EnsureRunning(); err != nil {
+			d.logger.Printf("Warning: failed to ensure Dolt server running at startup: %v", err)
+		}
+	}
+
 	// Start convoy manager (event-driven + periodic stranded scan)
 	// Try opening beads stores eagerly; if Dolt isn't ready yet,
 	// pass the opener as a callback for lazy retry on each poll tick.
@@ -982,6 +1000,18 @@ func (d *Daemon) Run() (err error) {
 			// or pushes the source branch, never force-pushes (gs-auhe).
 			if !d.isShutdownInProgress() {
 				d.syncBranches()
+			}
+
+		case <-patrols.agentHeartbeat:
+			// Agent-heartbeat dog — closes the who-watches-the-watchers gap
+			// (gu-tl2gs). A wedged witness can't escalate its own staleness;
+			// the daemon scans every rig's refinery+witness heartbeats from
+			// outside the witness process so a fully wedged rig still
+			// surfaces. Reuses witness.DetectStaleRigAgentHeartbeats so
+			// daemon-side and witness-side observations share dedup state and
+			// don't double-escalate.
+			if !d.isShutdownInProgress() {
+				d.runAgentHeartbeatDog()
 			}
 
 		case <-timer.C:

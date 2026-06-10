@@ -56,6 +56,43 @@ type AgentFields struct {
 	MRFailed        bool   // True when MR creation was attempted but failed
 	PushFailed      bool   // True when branch push to origin failed (gas-556)
 	CompletionTime  string // RFC3339 timestamp of when gt done was called
+
+	// Durable terminal lifecycle outcome (gs-2m1b). Unlike the completion
+	// metadata above (which the witness clears after routine processing), these
+	// two fields persist until the polecat is re-slung with new work or reset.
+	// They give witnesses and dispatch a durable signal that distinguishes
+	// "completed + cleaned up" from "died mid-work" (the latter shows no recent
+	// outcome). gt done records only the completed-* / deferred / escalated
+	// outcomes; the died-* cases are inferred from the absence of one.
+	LastOutcome     string // See Outcome* constants
+	LastOutcomeTime string // RFC3339 timestamp of when LastOutcome was recorded
+}
+
+// Durable terminal lifecycle outcome values (gs-2m1b). Recorded by gt done on
+// the agent bead and read by witness zombie-patrol + dispatch.
+const (
+	OutcomeCompletedMerged   = "completed-merged"   // COMPLETED, MR submitted to merge queue
+	OutcomeCompletedPushed   = "completed-pushed"   // COMPLETED, branch pushed, no MR (direct/local)
+	OutcomeCompletedStranded = "completed-stranded" // COMPLETED but MR creation failed (work on branch)
+	OutcomeCompletedUnpushed = "completed-unpushed" // COMPLETED but push failed (work committed locally only)
+	OutcomeDeferred          = "deferred"           // DEFERRED exit (nothing to do / not applicable)
+	OutcomeEscalated         = "escalated"          // ESCALATED exit (stuck, needs attention)
+)
+
+// IsCompletedOutcome reports whether a LastOutcome value indicates the polecat
+// reached the completion-metadata write in gt done (i.e. its core work — bead
+// close / MR submission — finished), as opposed to no outcome at all. All of
+// the recorded outcomes qualify: even the stranded/unpushed variants mean gt
+// done ran to completion (the work is recoverable on the branch), so the dead
+// session is expected and the polecat is not a crash-mid-work zombie.
+func IsCompletedOutcome(outcome string) bool {
+	switch outcome {
+	case OutcomeCompletedMerged, OutcomeCompletedPushed, OutcomeCompletedStranded,
+		OutcomeCompletedUnpushed, OutcomeDeferred, OutcomeEscalated:
+		return true
+	default:
+		return false
+	}
 }
 
 // Notification level constants
@@ -136,6 +173,13 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 	if fields.CompletionTime != "" {
 		lines = append(lines, fmt.Sprintf("completion_time: %s", fields.CompletionTime))
 	}
+	// Durable terminal lifecycle outcome (gs-2m1b)
+	if fields.LastOutcome != "" {
+		lines = append(lines, fmt.Sprintf("last_outcome: %s", fields.LastOutcome))
+	}
+	if fields.LastOutcomeTime != "" {
+		lines = append(lines, fmt.Sprintf("last_outcome_time: %s", fields.LastOutcomeTime))
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -193,6 +237,11 @@ func ParseAgentFields(description string) *AgentFields {
 			fields.PushFailed = value == "true"
 		case "completion_time":
 			fields.CompletionTime = value
+		// Durable terminal lifecycle outcome (gs-2m1b)
+		case "last_outcome":
+			fields.LastOutcome = value
+		case "last_outcome_time":
+			fields.LastOutcomeTime = value
 		}
 	}
 
@@ -418,6 +467,9 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 	fields.MRFailed = false
 	fields.PushFailed = false
 	fields.CompletionTime = ""
+	// Clear the durable outcome too (gs-2m1b): a reset sandbox has no outcome.
+	fields.LastOutcome = ""
+	fields.LastOutcomeTime = ""
 
 	// Update description with cleared fields
 	description := FormatAgentDescription(issue.Title, fields)
@@ -466,6 +518,9 @@ type AgentFieldUpdates struct {
 	MRFailed        *bool
 	PushFailed      *bool // True when branch push to origin failed (gas-556)
 	CompletionTime  *string
+	// Durable terminal lifecycle outcome (gs-2m1b)
+	LastOutcome     *string
+	LastOutcomeTime *string
 }
 
 // UpdateAgentDescriptionFields atomically updates one or more agent description
@@ -541,6 +596,13 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 	if updates.CompletionTime != nil {
 		fields.CompletionTime = *updates.CompletionTime
 	}
+	// Durable terminal lifecycle outcome (gs-2m1b)
+	if updates.LastOutcome != nil {
+		fields.LastOutcome = *updates.LastOutcome
+	}
+	if updates.LastOutcomeTime != nil {
+		fields.LastOutcomeTime = *updates.LastOutcomeTime
+	}
 
 	description := FormatAgentDescription(issue.Title, fields)
 	return b.Update(id, UpdateOptions{Description: &description})
@@ -579,6 +641,7 @@ type CompletionMetadata struct {
 	MRFailed       bool   // True when MR creation was attempted but failed
 	PushFailed     bool   // True when branch push to origin failed (gas-556)
 	CompletionTime string // RFC3339 timestamp
+	LastOutcome    string // Durable terminal lifecycle outcome (gs-2m1b); see Outcome* constants
 }
 
 // UpdateAgentCompletion atomically writes all completion metadata fields
@@ -586,7 +649,7 @@ type CompletionMetadata struct {
 func (b *Beads) UpdateAgentCompletion(id string, meta *CompletionMetadata) error {
 	mrFailed := meta.MRFailed
 	pushFailed := meta.PushFailed
-	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
+	updates := AgentFieldUpdates{
 		ExitType:        &meta.ExitType,
 		MRID:            &meta.MRID,
 		Branch:          &meta.Branch,
@@ -594,7 +657,16 @@ func (b *Beads) UpdateAgentCompletion(id string, meta *CompletionMetadata) error
 		MRFailed:        &mrFailed,
 		PushFailed:      &pushFailed,
 		CompletionTime:  &meta.CompletionTime,
-	})
+	}
+	// Durable terminal lifecycle outcome (gs-2m1b): persisted alongside the
+	// completion metadata but NOT cleared when the witness processes the
+	// completion, so it survives as the success-vs-death discriminator.
+	if meta.LastOutcome != "" {
+		outcome := meta.LastOutcome
+		updates.LastOutcome = &outcome
+		updates.LastOutcomeTime = &meta.CompletionTime
+	}
+	return b.UpdateAgentDescriptionFields(id, updates)
 }
 
 // ClearAgentCompletion removes all completion metadata fields from an agent bead.
@@ -610,6 +682,10 @@ func (b *Beads) ClearAgentCompletion(id string) error {
 		MRFailed:        &notFailed,
 		PushFailed:      &notFailed,
 		CompletionTime:  &empty,
+		// Clear the durable outcome too (gs-2m1b): re-slinging with new work
+		// makes the prior outcome stale.
+		LastOutcome:     &empty,
+		LastOutcomeTime: &empty,
 	})
 }
 

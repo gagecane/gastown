@@ -213,6 +213,25 @@ When `polecat_branch_template` is empty or not set:
 "work/{name}/{issue}"
 ```
 
+#### Customer-Repo Rigs (`customer_repo`)
+
+For rigs whose `origin` is a customer's real remote (not a Gas Town–owned
+repo), set `customer_repo: true`. When enabled, polecat teardown's preservation
+safety-net (which anchors unpushed work and inherited stashes) keeps the
+durable **local** bare-repo anchor but **never pushes** `refs/heads/preserved/*`
+branches to `origin`. This prevents gastown-internal branch names (which embed
+agent names and bead IDs) from leaking into the customer's repo (gs-8p5r).
+
+```bash
+# Persistent (recommended for customer rigs):
+gt rig config set <rig> customer_repo true --global
+```
+
+Default is `false` (Gas Town's own repos preserve to origin for box-loss
+durability). On a customer rig the box-loss net is intentionally forgone in
+favor of not leaking; work remains recoverable from the rig's bare repo
+(`git -C <rig>/.repo.git log refs/preserved/...`).
+
 ## Formula Format
 
 ```toml

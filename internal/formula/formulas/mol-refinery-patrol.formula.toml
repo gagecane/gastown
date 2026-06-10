@@ -1315,6 +1315,9 @@ gt mol step await-event --channel refinery --agent-bead YOUR_AGENT_BEAD \
 ```
 
 This command:
+0. Probes the rig's merge queue on entry: if ready MRs already exist (e.g. after
+   a session restart, before any new event arrives), returns IMMEDIATELY with
+   `reason: queue-ready` so you claim the backlog without waiting for a nudge
 1. Watches `~/gt/events/refinery/` for event files (polling-based)
 2. Returns IMMEDIATELY when an event is emitted (MERGE_READY, PATROL_WAKE, MQ_SUBMIT)
 3. `--filter-rig` skips events from other rigs (prevents spurious wakeups)
@@ -1338,6 +1341,11 @@ Reset the idle counter and start next patrol cycle:
 ```bash
 gt agent state YOUR_AGENT_BEAD --set idle=0
 ```
+
+**On queue-ready** (startup probe found ready MRs without an event):
+The refinery came up (or re-armed) with MRs already waiting in the queue.
+`await-event` already reset the idle counter and emitted `EFFORT: full`.
+Start a full patrol cycle immediately and drain the backlog — do NOT wait for a nudge.
 
 **On timeout** (no events):
 The idle counter was auto-incremented. Continue to next patrol cycle

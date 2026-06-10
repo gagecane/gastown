@@ -148,6 +148,7 @@ type PatrolsConfig struct {
 	SchedulerStuck       *SchedulerStuckConfig       `json:"scheduler_stuck,omitempty"`
 	EventChannelGC       *EventChannelGCConfig       `json:"event_channel_gc,omitempty"`
 	BranchSync           *BranchSyncConfig           `json:"branch_sync,omitempty"`
+	AgentHeartbeat       *AgentHeartbeatConfig       `json:"agent_heartbeat,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -421,6 +422,19 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.BranchSync.Enabled
+	}
+
+	if patrol == "agent_heartbeat" {
+		// Default-enabled (gu-tl2gs): closes the who-watches-the-watchers gap.
+		// A wedged witness cannot escalate its own staleness; the daemon dog
+		// is the only fallback for that case, so it must run out of the box,
+		// including on towns whose daemon.json predates this addition. The
+		// dog only escalates (never auto-restarts), so it is safe to default
+		// on.
+		if config == nil || config.Patrols == nil || config.Patrols.AgentHeartbeat == nil {
+			return true
+		}
+		return config.Patrols.AgentHeartbeat.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

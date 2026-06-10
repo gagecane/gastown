@@ -450,4 +450,42 @@ func TestFoldSlingContextDirResults(t *testing.T) {
 			t.Fatalf("expected 0 records, got %d", len(records))
 		}
 	})
+
+}
+
+// TestStaleContextCloseReason pins the gs-2no fix: the stale-context sweep must
+// NOT reap an active sling-context when its work bead could not be queried
+// (Dolt degradation), only when the bead is genuinely missing or terminal.
+func TestStaleContextCloseReason(t *testing.T) {
+	tests := []struct {
+		name         string
+		found        bool
+		status       string
+		lookupFailed bool
+		agedPastTTL  bool
+		want         string
+	}{
+		// Terminal statuses close immediately, regardless of age.
+		{"found hooked", true, "hooked", false, false, "stale-work-bead"},
+		{"found closed", true, "closed", false, true, "stale-work-bead"},
+		{"found tombstone", true, "tombstone", false, false, "stale-work-bead"},
+		// Live statuses keep the context open.
+		{"found open", true, "open", false, true, ""},
+		{"found in_progress", true, "in_progress", false, true, ""},
+		// gs-2no core: lookup failed (status unknown) — never reap, even aged.
+		{"lookup failed, aged", false, "", true, true, ""},
+		{"lookup failed, not aged", false, "", true, false, ""},
+		// Genuinely missing: reap only once aged past TTL.
+		{"genuinely missing, aged", false, "", false, true, "missing-work-bead"},
+		{"genuinely missing, not aged", false, "", false, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := staleContextCloseReason(tt.found, tt.status, tt.lookupFailed, tt.agedPastTTL)
+			if got != tt.want {
+				t.Errorf("staleContextCloseReason(found=%v,status=%q,lookupFailed=%v,aged=%v) = %q, want %q",
+					tt.found, tt.status, tt.lookupFailed, tt.agedPastTTL, got, tt.want)
+			}
+		})
+	}
 }

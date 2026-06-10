@@ -265,6 +265,16 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 	}
 
 	crewGit := git.NewGit(crewPath)
+
+	// CloneBranch leaves a narrow remote.origin.fetch refspec (only the rig's
+	// default branch). When the default branch is not main, origin/main never
+	// resolves, breaking tooling that assumes it. Widen the refspec and fetch
+	// origin/* so base detection and diffs work. Best-effort: a failure here
+	// (e.g. offline) must not block crew creation.
+	if err := crewGit.EnsureFullFetchRefspec(); err != nil {
+		style.PrintWarning("could not widen origin fetch refspec for crew %s: %v", name, err)
+	}
+
 	branchName := defaultBranch
 
 	// Optionally create a working branch

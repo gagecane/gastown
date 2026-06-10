@@ -13,6 +13,14 @@
 
 set -euo pipefail
 
+# Neutralize the ambient town root so the gate-slot concurrency cap (gs-orsm)
+# is a no-op in tests that don't explicitly exercise it. Without this, a dev
+# (or agent) running this suite from a shell with GT_TOWN_ROOT set would engage
+# the REAL host-wide semaphore — acquiring real slots and, if both are held by
+# a live gt-done gate run, blocking the suite for the full wait. The cap tests
+# below set GT_TOWN_ROOT explicitly in their own `env` line, overriding this.
+export GT_TOWN_ROOT=
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$SCRIPT_DIR/pre-push-check.sh"
 
@@ -674,6 +682,155 @@ test_probe_finds_tools_off_base_path() {
   PASS=$((PASS + 1)); rm -rf "$repo" "$probedir"
 }
 
+# --- gs-orsm: host-wide gate-slot concurrency cap ------------------------
+#
+# pre-push-check.sh acquires one slot from the shared FlockSemaphore pool
+# (<townRoot>/.runtime/locks/gate-slots) before the heavy gates, bounding how
+# many full-suite go runs execute at once host-wide. These tests exercise the
+# bash flock(1) slot scan with GT_GATE_CONCURRENCY=1 so a single pre-held slot
+# fills the pool.
+
+# Helper: build a stubdir (go/gofmt that exit 0) + a town root with a slot dir.
+# Echoes "stubdir tmprepo townroot".
+make_cap_fixture() {
+  local stubdir tmprepo townroot
+  stubdir=$(mktemp -d)
+  tmprepo=$(mktemp -d)
+  townroot=$(mktemp -d)
+  printf '#!/bin/bash\nexit 0\n' > "$stubdir/go";    chmod +x "$stubdir/go"
+  printf '#!/bin/bash\nexit 0\n' > "$stubdir/gofmt"; chmod +x "$stubdir/gofmt"
+  mkdir -p "$townroot/.runtime/locks/gate-slots"
+  ( cd "$tmprepo" && git init -q && \
+      git config user.email "test@example.com" && \
+      git config user.name "test" && \
+      git commit -q --allow-empty -m init ) >/dev/null 2>&1
+  printf '%s %s %s\n' "$stubdir" "$tmprepo" "$townroot"
+}
+
+# Test: when the only slot is already held, the script waits out
+# GT_GATE_SLOT_WAIT_SECONDS and then proceeds unthrottled (push still passes),
+# printing the "proceeding without the host-wide concurrency cap" notice.
+test_gate_slot_cap_proceeds_when_full() {
+  local stubdir tmprepo townroot
+  read -r stubdir tmprepo townroot < <(make_cap_fixture)
+  local slot="$townroot/.runtime/locks/gate-slots/slot-0.flock"
+  local ready; ready=$(mktemp -u)
+
+  # Hold the single slot for the duration of the script run.
+  ( exec 9>"$slot"; flock 9; : > "$ready"; sleep 30 ) &
+  local holder=$!
+  # Wait until the holder has actually taken the lock.
+  local tries=0
+  while [[ ! -f "$ready" && $tries -lt 50 ]]; do sleep 0.1; tries=$((tries + 1)); done
+
+  local rc=0 out
+  out=$(
+    cd "$tmprepo" && \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    GT_TOWN_ROOT="$townroot" GT_GATE_CONCURRENCY=1 GT_GATE_SLOT_WAIT_SECONDS=2 \
+    GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON=pre-verified \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  rm -f "$ready"
+
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL: full gate pool should proceed unthrottled, not fail the push (got rc=$rc)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
+  fi
+  if ! echo "$out" | grep -qi "proceeding without the host-wide concurrency cap"; then
+    echo "FAIL: a full pool past the wait should print the unthrottled-proceed notice" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"
+}
+
+# Test: when a slot is free, the script acquires it (does NOT print the
+# unthrottled-proceed notice) and the push passes — and while the gates run the
+# slot is genuinely locked, so an external non-blocking flock fails.
+test_gate_slot_cap_acquires_when_free() {
+  local stubdir tmprepo townroot
+  read -r stubdir tmprepo townroot < <(make_cap_fixture)
+  local slot="$townroot/.runtime/locks/gate-slots/slot-0.flock"
+  local probed; probed=$(mktemp -u)
+
+  # `go` stub blocks on a fifo so we can probe the lock mid-run. Replace the
+  # plain stub with one that, on its first call, signals readiness and waits.
+  local fifo="$townroot/go-gate.fifo"
+  mkfifo "$fifo"
+  # Only the FIRST `go` invocation (build) blocks on the fifo so we can probe
+  # the lock mid-run; later invocations (vet, ...) return immediately, else
+  # they'd block forever on a fifo we only feed once.
+  cat > "$stubdir/go" <<EOF
+#!/bin/bash
+if [[ ! -f "$probed" ]]; then
+  echo running > "$probed"
+  read -r _ < "$fifo"
+fi
+exit 0
+EOF
+  chmod +x "$stubdir/go"
+
+  local rc=0 out
+  (
+    cd "$tmprepo" && \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    GT_TOWN_ROOT="$townroot" GT_GATE_CONCURRENCY=1 GT_GATE_SLOT_WAIT_SECONDS=2 \
+    GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON=pre-verified \
+    bash "$SCRIPT" > "$townroot/out.txt" 2>&1
+    echo $? > "$townroot/rc.txt"
+  ) &
+  local runner=$!
+
+  # Wait until a gate is running (slot held), then probe the lock.
+  local tries=0
+  while [[ ! -f "$probed" && $tries -lt 100 ]]; do sleep 0.1; tries=$((tries + 1)); done
+  local lock_busy=1
+  if ( exec 9>"$slot"; flock -n 9 ); then
+    lock_busy=0   # we got the lock — the script did NOT hold it (bug)
+  fi
+  # Release the blocked gate stub so the script finishes.
+  echo go > "$fifo"
+  wait "$runner" 2>/dev/null || true
+  out=$(cat "$townroot/out.txt" 2>/dev/null)
+  rc=$(cat "$townroot/rc.txt" 2>/dev/null || echo 1)
+
+  if [[ "$lock_busy" -ne 1 ]]; then
+    echo "FAIL: while gates run the slot should be locked (external flock -n should fail)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot" "$probed"; return
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    echo "FAIL: with a free slot the push should pass (got rc=$rc)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot" "$probed"; return
+  fi
+  if echo "$out" | grep -qi "proceeding without the host-wide concurrency cap"; then
+    echo "FAIL: with a free slot the script should acquire it, not proceed unthrottled" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot" "$probed"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot" "$probed"
+}
+
+# Test: with no town root known (no GT_TOWN_ROOT, no mayor/town.json), the cap
+# is a silent no-op and the push passes normally.
+test_gate_slot_cap_skips_without_town_root() {
+  run_with_stubs \
+    'echo "go-called: $*" >&2; exit 0' \
+    'exit 0' \
+    0
+  if [[ $RC -ne 0 ]]; then
+    echo "FAIL: no town root should skip the cap and pass (got rc=$RC)" >&2
+    echo "$OUT" >&2; FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  if echo "$OUT" | grep -qi "concurrency cap"; then
+    echo "FAIL: no town root should not mention the concurrency cap at all" >&2
+    echo "$OUT" >&2; FAIL=$((FAIL + 1)); cleanup_last_run; return
+  fi
+  PASS=$((PASS + 1)); cleanup_last_run
+}
+
 # --- gu-zadrb: slow-gate hard wall-clock group timeout -------------------
 #
 # The slow gate ('go test ./...') has been observed to hang PAST go's own
@@ -875,6 +1032,10 @@ if command -v git >/dev/null 2>&1; then
   test_go_absent_skips_in_non_go_repo
   test_lint_absent_blocks_in_go_repo
   test_probe_finds_tools_off_base_path
+  # gs-orsm: host-wide gate-slot concurrency cap
+  test_gate_slot_cap_proceeds_when_full
+  test_gate_slot_cap_acquires_when_free
+  test_gate_slot_cap_skips_without_town_root
   # gu-zadrb: slow-gate hard wall-clock group timeout
   test_slow_gate_wall_clock_timeout_rejects
   test_slow_gate_under_wall_passes
