@@ -142,3 +142,44 @@ func (b *Beads) UpdateSlingContextFields(contextID string, fields *capacity.Slin
 	description := FormatSlingContextDescription(fields)
 	return b.Update(contextID, UpdateOptions{Description: &description})
 }
+
+// ReconcileOpenSlingContexts closes every OPEN sling context that tracks the
+// given work bead, except optExcludeID (pass "" to close all). It returns the
+// IDs that were closed.
+//
+// This is the direct-dispatch counterpart to scheduleBead's stale-context
+// recovery (gu-afpjj). A failed initial sling leaves a sling context OPEN — the
+// context bead carries a `tracks` dependency on the work bead, so `bd close
+// <workBead>` then refuses without --force. The deferred path (scheduleBead)
+// already recycles such contexts before re-scheduling, but the direct dispatch
+// chokepoint (executeSling) and the inline runSling path never touched them, so
+// a manual re-sling ran the work yet left the stale context dangling. Calling
+// this after a successful direct sling closes the orphans as "superseded" so the
+// work bead closes cleanly without --force.
+//
+// Idempotent and best-effort per context: CloseSlingContext already treats an
+// already-closed or TTL-reaped (not-found) context as success, so a redundant
+// call is harmless. A list error is returned to the caller, which logs but does
+// not fail the dispatch — the work is already hooked and running.
+func (b *Beads) ReconcileOpenSlingContexts(workBeadID, optExcludeID, reason string) ([]string, error) {
+	contexts, err := b.ListOpenSlingContexts()
+	if err != nil {
+		return nil, err
+	}
+
+	var closed []string
+	for _, ctx := range contexts {
+		if ctx.ID == optExcludeID {
+			continue
+		}
+		fields := ParseSlingContextFields(ctx.Description)
+		if fields == nil || fields.WorkBeadID != workBeadID {
+			continue
+		}
+		if err := b.CloseSlingContext(ctx.ID, reason); err != nil {
+			return closed, fmt.Errorf("closing stale sling context %s: %w", ctx.ID, err)
+		}
+		closed = append(closed, ctx.ID)
+	}
+	return closed, nil
+}

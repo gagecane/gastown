@@ -1441,6 +1441,17 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// Reconcile stale sling-contexts a failed initial sling left open (gu-afpjj).
+	// The inline path handles re-slinging to an existing polecat target, which can
+	// leave the same orphan context the rig-target path (executeSling) cleans up.
+	// Scoped to polecat targets — the rig is the first address segment and the
+	// failed-dispatch class only produces sling-contexts for rig-bound work.
+	if parts := strings.SplitN(targetAgent, "/", 2); len(parts) >= 1 && parts[0] != "" {
+		if _, isRig := IsRigName(parts[0]); isRig {
+			reconcileStaleSlingContexts(townRoot, parts[0], beadID)
+		}
+	}
+
 	return nil
 }
 
