@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -130,6 +131,58 @@ func TestMatcherDisplay(t *testing.T) {
 
 	if got := matcherDisplay("Bash(git*)"); got != `"Bash(git*)"` {
 		t.Errorf("specific matcher: got %q", got)
+	}
+}
+
+func TestDiffPluginsNoChanges(t *testing.T) {
+	expected := map[string]bool{
+		"AIPowerUserCapabilities-core-dev@aim": true,
+		"AtlasAICapabilities-all@aim":          false,
+	}
+	current := &hooks.SettingsJSON{EnabledPlugins: map[string]bool{
+		"AIPowerUserCapabilities-core-dev@aim": true,
+		"AtlasAICapabilities-all@aim":          false,
+		// Extra entry beyond the expected set must not be flagged (additive policy).
+		"beads@beads-marketplace": false,
+	}}
+
+	if lines := diffPlugins(current, expected); len(lines) != 0 {
+		t.Errorf("expected no diff lines when policy already satisfied, got %d", len(lines))
+		for _, l := range lines {
+			t.Logf("  line: %q", l)
+		}
+	}
+}
+
+func TestDiffPluginsMissingEntry(t *testing.T) {
+	expected := map[string]bool{
+		"AtlasAICapabilities-all@aim": false,
+	}
+	// enabledPlugins absent entirely — the gu-1r6wa sprawl case.
+	current := &hooks.SettingsJSON{}
+
+	lines := diffPlugins(current, expected)
+	if len(lines) == 0 {
+		t.Fatal("expected diff lines when managed plugin policy is missing")
+	}
+	joined := strings.Join(lines, "")
+	if !strings.Contains(joined, "AtlasAICapabilities-all@aim=false") {
+		t.Errorf("expected diff to name the missing plugin, got: %q", joined)
+	}
+}
+
+func TestDiffPluginsWrongValue(t *testing.T) {
+	expected := map[string]bool{
+		"AtlasAICapabilities-all@aim": false,
+	}
+	// Plugin present but ENABLED — AIM re-enabled it, exactly the MCP-sprawl drift.
+	current := &hooks.SettingsJSON{EnabledPlugins: map[string]bool{
+		"AtlasAICapabilities-all@aim": true,
+	}}
+
+	lines := diffPlugins(current, expected)
+	if len(lines) == 0 {
+		t.Fatal("expected diff lines when a managed plugin has the wrong value")
 	}
 }
 

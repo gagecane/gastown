@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -74,6 +75,11 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("computing expected config for %s: %w", target.DisplayKey(), err)
 		}
 
+		expectedPlugins, err := hooks.ExpectedPlugins(target.Key)
+		if err != nil {
+			return fmt.Errorf("computing expected plugins for %s: %w", target.DisplayKey(), err)
+		}
+
 		current, err := hooks.LoadSettings(target.Path)
 		if err != nil {
 			return fmt.Errorf("loading current settings for %s: %w", target.DisplayKey(), err)
@@ -85,8 +91,14 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 		// here so a missing safety-critical deny entry no longer reports
 		// "in sync" (gu-5gj68).
 		permissionDrift := !hooks.HasPermissionDefaults(current, target.Role)
+		// Plugin drift is likewise invisible to HooksEqual: enabledPlugins lives
+		// outside the hooks section. Without this, a settings file that lost the
+		// town's AIM-disable policy (e.g. recreated by gt up --restore, or an AIM
+		// plugin update) falsely reported "in sync" even though sync would
+		// restore the policy — the MCP-sprawl blind spot from gu-1r6wa.
+		pluginDrift := !hooks.HasExpectedPlugins(current, target.Role, expectedPlugins)
 
-		if hooksEqual && !permissionDrift {
+		if hooksEqual && !permissionDrift && !pluginDrift {
 			continue
 		}
 
@@ -102,6 +114,9 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 		}
 		if permissionDrift {
 			changes = append(changes, diffPermissions(current, target.Role)...)
+		}
+		if pluginDrift {
+			changes = append(changes, diffPlugins(current, expectedPlugins)...)
 		}
 		if len(changes) == 0 {
 			continue
@@ -147,6 +162,45 @@ func diffPermissions(current *hooks.SettingsJSON, role string) []string {
 		lines = append([]string{header}, lines...)
 	}
 	return lines
+}
+
+// diffPlugins returns formatted diff lines for the settings' enabledPlugins
+// block: the managed plugin entries that sync would add or correct to restore
+// the town's plugin policy (gu-1r6wa). enabledPlugins is not part of the hooks
+// section, so HooksEqual / diffHooksConfigs cannot see it. Additive policy
+// mirrors HasExpectedPlugins: only entries whose value differs from (or are
+// absent in) the current settings are reported; extra plugins beyond the
+// expected set are not flagged.
+func diffPlugins(current *hooks.SettingsJSON, expected map[string]bool) []string {
+	have := current.EnabledPlugins
+
+	var lines []string
+	for _, plugin := range sortedPluginKeys(expected) {
+		want := expected[plugin]
+		got, ok := have[plugin]
+		if ok && got == want {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("  enabledPlugins: %s\n",
+			diffAdd.Render(fmt.Sprintf("+ %s=%t", plugin, want))))
+	}
+	if len(lines) > 0 {
+		header := fmt.Sprintf("  enabledPlugins: %s\n",
+			diffAdd.Render("restore managed plugin policy"))
+		lines = append([]string{header}, lines...)
+	}
+	return lines
+}
+
+// sortedPluginKeys returns the keys of a plugin map in deterministic order so
+// diff output is stable across runs.
+func sortedPluginKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // diffHooksConfigs compares current and expected configs, returning formatted diff lines.
