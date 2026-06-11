@@ -217,6 +217,39 @@ func (m *Manager) GetNamePool() *NamePool {
 	return m.namePool
 }
 
+// lockAcquireTimeout bounds how long a file-lock acquisition will block before
+// failing fast. A blocking flock.Lock() can pile up futex waiters under
+// contention; bounding it keeps gt processes from hanging indefinitely.
+// It is a var (not const) so tests can shorten it.
+var lockAcquireTimeout = 30 * time.Second
+
+// lockRetryDelay is how often TryLockContext re-polls for the lock.
+const lockRetryDelay = 100 * time.Millisecond
+
+// acquireBounded acquires an exclusive file lock at lockPath, but bounds the
+// wait with lockAcquireTimeout instead of blocking forever. It fails fast with
+// a descriptive error if the lock is still held when the deadline expires.
+// Caller must defer fl.Unlock() on success.
+func acquireBounded(lockPath, what string) (*flock.Flock, error) {
+	fl := flock.New(lockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), lockAcquireTimeout)
+	defer cancel()
+	locked, err := fl.TryLockContext(ctx, lockRetryDelay)
+	if err != nil {
+		// TryLockContext returns the context error (DeadlineExceeded) when the
+		// lock stays held until the deadline. Surface that as a fail-fast
+		// "lock held" error rather than an opaque context message.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("acquiring %s: lock held, timed out after %s", what, lockAcquireTimeout)
+		}
+		return nil, fmt.Errorf("acquiring %s: %w", what, err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("acquiring %s: lock held, timed out after %s", what, lockAcquireTimeout)
+	}
+	return fl, nil
+}
+
 // lockPolecat acquires an exclusive file lock for a specific polecat.
 // This prevents concurrent gt processes from racing on the same polecat's
 // filesystem operations (Add, Remove, RepairWorktree).
@@ -227,11 +260,7 @@ func (m *Manager) lockPolecat(name string) (*flock.Flock, error) {
 		return nil, fmt.Errorf("creating lock dir: %w", err)
 	}
 	lockPath := filepath.Join(lockDir, fmt.Sprintf("polecat-%s.lock", name))
-	fl := flock.New(lockPath)
-	if err := fl.Lock(); err != nil {
-		return nil, fmt.Errorf("acquiring polecat lock for %s: %w", name, err)
-	}
-	return fl, nil
+	return acquireBounded(lockPath, fmt.Sprintf("polecat lock for %s", name))
 }
 
 // lockPool acquires an exclusive file lock for name pool operations.
@@ -243,11 +272,7 @@ func (m *Manager) lockPool() (*flock.Flock, error) {
 		return nil, fmt.Errorf("creating lock dir: %w", err)
 	}
 	lockPath := filepath.Join(lockDir, "polecat-pool.lock")
-	fl := flock.New(lockPath)
-	if err := fl.Lock(); err != nil {
-		return nil, fmt.Errorf("acquiring pool lock: %w", err)
-	}
-	return fl, nil
+	return acquireBounded(lockPath, "pool lock")
 }
 
 // CheckDoltHealth verifies that the Dolt database is reachable before spawning.
