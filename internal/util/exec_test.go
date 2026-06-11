@@ -1,10 +1,13 @@
 package util
 
 import (
+	"context"
+	"errors"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExecWithOutput(t *testing.T) {
@@ -54,6 +57,57 @@ func TestExecRun(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("expected error for failing command")
+	}
+}
+
+func TestExecRunContext(t *testing.T) {
+	// Test successful command
+	var err error
+	if runtime.GOOS == "windows" {
+		err = ExecRunContext(context.Background(), ".", "cmd", "/c", "exit /b 0")
+	} else {
+		err = ExecRunContext(context.Background(), ".", "true")
+	}
+	if err != nil {
+		t.Fatalf("ExecRunContext failed: %v", err)
+	}
+
+	// Test command that fails (non-zero exit, no timeout)
+	if runtime.GOOS == "windows" {
+		err = ExecRunContext(context.Background(), ".", "cmd", "/c", "exit /b 1")
+	} else {
+		err = ExecRunContext(context.Background(), ".", "false")
+	}
+	if err == nil {
+		t.Error("expected error for failing command")
+	}
+}
+
+// TestExecRunContext_TimeoutGroupKills is the gu-odhqc regression guard: a child
+// that blocks longer than the context deadline must be killed (not awaited
+// forever), and the returned error must carry the context-deadline cause so
+// callers can distinguish a timeout from a normal failure.
+func TestExecRunContext_TimeoutGroupKills(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sleep semantics differ on Windows")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	// `sleep 30` would hang the caller for 30s without the deadline + group-kill.
+	err := ExecRunContext(ctx, ".", "sleep", "30")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected DeadlineExceeded in error chain, got %v", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("ExecRunContext did not honor the deadline: took %v", elapsed)
 	}
 }
 

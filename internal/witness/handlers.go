@@ -37,6 +37,15 @@ import (
 // constants.HungSessionThreshold (single source of truth).
 var HungSessionThresholdMinutes = int(constants.HungSessionThreshold.Minutes())
 
+// nukePolecatTimeout bounds the `gt polecat nuke` shell-out so a wedged nuke
+// (observed hanging >4.5m on futex_wait_queue when the per-polecat flock is
+// held by a prior hung nuke — gu-odhqc) can never wedge the witness patrol
+// scan. On timeout the child's whole process group is SIGKILLed, which also
+// releases any flock it held and breaks the retry pile-up at its source.
+// Matches the daemon's nukeCleanStalledPolecat budget (90s) so both audited
+// nuke paths fail the same way.
+const nukePolecatTimeout = 90 * time.Second
+
 // initRegistryFromWorkDir initializes the session prefix and agent registries
 // from a work directory. This ensures session.PrefixFor(rigName) returns the
 // correct rig prefix (e.g., "tr" for testrig) instead of the default "gt",
@@ -1153,10 +1162,20 @@ func NukePolecat(bd *BdCli, workDir, rigName, polecatName string) error {
 		_ = t.KillSession(sessionName)
 	}
 
-	// Now run gt polecat nuke to clean up worktree, branch, and beads
+	// Now run gt polecat nuke to clean up worktree, branch, and beads.
+	//
+	// gu-odhqc: bound the shell-out with a wall-clock timeout + group-kill. The
+	// real nuke can hang indefinitely on futex_wait_queue (blocking flock.Lock
+	// in lockPolecat) when a prior hung nuke still holds the per-polecat lock.
+	// Synchronous and unbounded, that hang wedges the entire witness patrol scan
+	// and blocks zombie/stale detection rig-wide. ExecRunContext SIGKILLs the
+	// child's process group on timeout, releasing the flock and breaking the
+	// pile-up. Mirrors the daemon's nukeCleanStalledPolecat (90s budget).
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
 
-	if err := util.ExecRun(workDir, "gt", "polecat", "nuke", address); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), nukePolecatTimeout)
+	defer cancel()
+	if err := util.ExecRunContext(ctx, workDir, "gt", "polecat", "nuke", address); err != nil {
 		return fmt.Errorf("nuke failed: %w", err)
 	}
 
