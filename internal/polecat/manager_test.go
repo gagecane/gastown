@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
@@ -2636,5 +2639,48 @@ func TestAddWithOptions_RejectsRedundantRigPrefix(t *testing.T) {
 	polecatDir := filepath.Join(root, "polecats", "casc_cdk-cat")
 	if _, err := os.Stat(polecatDir); !os.IsNotExist(err) {
 		t.Errorf("polecat dir %s should not exist after rejected AddWithOptions", polecatDir)
+	}
+}
+
+// TestLockPolecatTimesOutWhenContended verifies that lockPolecat fails fast with
+// a timeout error instead of blocking indefinitely when another process already
+// holds the lock. This is the regression guard for gu-ay53c: a blocking
+// flock.Lock() with no deadline caused futex_wait_queue pile-ups.
+func TestLockPolecatTimesOutWhenContended(t *testing.T) {
+	// Shrink the timeout so the contended path resolves quickly.
+	origTimeout, origRetry := lockAcquireTimeout, lockRetryInterval
+	lockAcquireTimeout = 200 * time.Millisecond
+	lockRetryInterval = 20 * time.Millisecond
+	t.Cleanup(func() {
+		lockAcquireTimeout = origTimeout
+		lockRetryInterval = origRetry
+	})
+
+	rigPath := t.TempDir()
+	mgr := &Manager{rig: &rig.Rig{Name: "testrig", Path: rigPath}}
+
+	// First acquire succeeds and holds the lock.
+	fl, err := mgr.lockPolecat("furiosa")
+	if err != nil {
+		t.Fatalf("first lockPolecat failed: %v", err)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	// A second acquire from an independent flock handle on the same path must
+	// time out rather than block forever.
+	lockPath := filepath.Join(rigPath, ".runtime", "locks", "polecat-furiosa.lock")
+	contender := flock.New(lockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), lockAcquireTimeout)
+	defer cancel()
+
+	start := time.Now()
+	locked, err := contender.TryLockContext(ctx, lockRetryInterval)
+	elapsed := time.Since(start)
+	if err == nil && locked {
+		_ = contender.Unlock()
+		t.Fatal("expected contended lock to time out, but it was acquired")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("contended lock took %s; expected fail-fast within ~%s", elapsed, lockAcquireTimeout)
 	}
 }
