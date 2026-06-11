@@ -104,6 +104,14 @@ const (
 	// it's considered hung. Overridable per-role via RoleHealthConfig.
 	// Configurable via operational.session.hung_session_threshold.
 	HungSessionThreshold = 30 * time.Minute
+
+	// PolecatNukeTimeout bounds a single `gt polecat nuke` subprocess invoked
+	// by the witness patrol scan. A hung nuke (futex_wait_queue, >4.5m
+	// observed) wedges the whole scan, blocking zombie/stale detection for the
+	// rig (gu-odhqc). At the deadline the nuke's entire process group is
+	// SIGKILLed so the scan proceeds. Generous enough for an honest nuke
+	// (session kill + worktree rm + branch delete + bead reset).
+	PolecatNukeTimeout = 120 * time.Second
 )
 
 // Directory names within a Gas Town workspace.

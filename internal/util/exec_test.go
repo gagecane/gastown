@@ -1,10 +1,12 @@
 package util
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExecWithOutput(t *testing.T) {
@@ -54,6 +56,65 @@ func TestExecRun(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("expected error for failing command")
+	}
+}
+
+func TestExecRunWithTimeout_Success(t *testing.T) {
+	var err error
+	if runtime.GOOS == "windows" {
+		err = ExecRunWithTimeout(5*time.Second, ".", "cmd", "/c", "exit /b 0")
+	} else {
+		err = ExecRunWithTimeout(5*time.Second, ".", "true")
+	}
+	if err != nil {
+		t.Fatalf("ExecRunWithTimeout(success) returned error: %v", err)
+	}
+}
+
+func TestExecRunWithTimeout_NonZeroExit(t *testing.T) {
+	var err error
+	if runtime.GOOS == "windows" {
+		err = ExecRunWithTimeout(5*time.Second, ".", "cmd", "/c", "exit /b 1")
+	} else {
+		err = ExecRunWithTimeout(5*time.Second, ".", "false")
+	}
+	if err == nil {
+		t.Fatal("expected error for failing command")
+	}
+	// A genuine non-zero exit must NOT be reported as a timeout.
+	if errors.Is(err, ErrExecTimeout) {
+		t.Errorf("non-zero exit misclassified as timeout: %v", err)
+	}
+}
+
+// TestExecRunWithTimeout_TimesOut is the regression guard for gu-odhqc: a
+// command that would otherwise hang forever must be killed at the deadline and
+// surface ErrExecTimeout, not block the caller.
+func TestExecRunWithTimeout_TimesOut(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sleep-based hang test is unix-only")
+	}
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		// Sleep far longer than the timeout — stands in for a hung nuke.
+		done <- ExecRunWithTimeout(200*time.Millisecond, ".", "sleep", "30")
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected timeout error, got nil")
+		}
+		if !errors.Is(err, ErrExecTimeout) {
+			t.Errorf("expected ErrExecTimeout, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("returned after %v — timeout did not fire promptly", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ExecRunWithTimeout did not return — hung command was not killed")
 	}
 }
 

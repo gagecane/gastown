@@ -15,8 +15,51 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+// TestNukePolecat_RefusesWithActiveRecoveryMarker is the regression guard for
+// gu-odhqc fix (2): the patrol-scan nuke path must honor an active
+// mark-recovered marker. Before the fix the scan re-spawned `gt polecat nuke`
+// on a marked slot every cycle, piling up futex-hanging nukes.
+func TestNukePolecat_RefusesWithActiveRecoveryMarker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ACP/process detection not reliable on Windows")
+	}
+	townRoot := makeTownRoot(t)
+
+	const rigName = "gastown"
+	const polecatName = "guzzle"
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+
+	// Operator marks the slot recovered with a healthy TTL.
+	if err := polecat.WriteRecoveryMarker(townRoot, sessionName, "witness", "manual push", time.Hour); err != nil {
+		t.Fatalf("WriteRecoveryMarker: %v", err)
+	}
+
+	// workDir == townRoot so workDirToTownRoot resolves back to townRoot and the
+	// marker (keyed by sessionName) is found. The marker gate sits before the
+	// pending-MR/teardown gates, so a nil-ish bd is never dereferenced.
+	err := NukePolecat(DefaultBdCli(), townRoot, rigName, polecatName)
+	if err == nil {
+		t.Fatal("NukePolecat should refuse when a recovery marker is active, got nil")
+	}
+	if !strings.Contains(err.Error(), "recovery marker") {
+		t.Errorf("expected refusal citing recovery marker, got: %v", err)
+	}
+
+	// After clearing the marker the gate no longer fires. We don't assert a full
+	// successful nuke here (that needs a real worktree + tmux); we only assert
+	// the failure is NOT the marker refusal — i.e. the gate let execution past.
+	if err := polecat.ClearRecoveryMarker(townRoot, sessionName); err != nil {
+		t.Fatalf("ClearRecoveryMarker: %v", err)
+	}
+	if err := NukePolecat(DefaultBdCli(), townRoot, rigName, polecatName); err != nil &&
+		strings.Contains(err.Error(), "recovery marker") {
+		t.Errorf("marker gate still firing after clear: %v", err)
+	}
+}
 
 func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 	townRoot := t.TempDir()

@@ -1117,9 +1117,28 @@ func NukePolecat(bd *BdCli, workDir, rigName, polecatName string) error {
 		return fmt.Errorf("refusing to nuke %s/%s: %s", rigName, polecatName, reason)
 	}
 
+	// Initialize the prefix registry before any session-name computation so
+	// session.PrefixFor resolves the same prefix the writer used when creating
+	// the recovery marker (and the bead-ID helpers below).
+	initRegistryFromWorkDir(workDir)
+
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+
+	// Recovery-marker gate (gu-odhqc): honor an active `mark-recovered` marker.
+	// An operator (witness/mayor) sets this after an out-of-band recovery to
+	// tell automated actors "I've got this slot — skip it." The manual/dog nuke
+	// path already consults the marker, but the patrol-scan nuke path did NOT:
+	// the scan kept re-spawning `gt polecat nuke` on a marked slot every cycle,
+	// piling up futex-hanging nukes. Refusing here closes that gap so a marked
+	// slot is left for the operator until the marker's TTL expires. Checked
+	// early — before the expensive teardown verification — so a marked slot
+	// short-circuits with no wasted work.
+	if polecat.HasActiveRecoveryMarker(townRoot, sessionName) {
+		return fmt.Errorf("refusing to nuke %s/%s: active recovery marker (gu-odhqc)", rigName, polecatName)
+	}
+
 	// Safety gate (gt-6a9d): refuse to nuke if MR is pending in refinery.
 	// Nuking deletes the remote branch, which the refinery needs to merge.
-	initRegistryFromWorkDir(workDir)
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 	if hasPendingMR(bd, workDir, rigName, polecatName, agentBeadID) {
@@ -1139,7 +1158,6 @@ func NukePolecat(bd *BdCli, workDir, rigName, polecatName string) error {
 	// We do this explicitly here because gt polecat nuke may fail to kill the
 	// session due to rig loading issues or race conditions with IsRunning checks.
 	// See: gt-g9ft5 - sessions were piling up because nuke wasn't killing them.
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 	t := tmux.NewTmux()
 
 	// Check if session exists and kill it
@@ -1153,10 +1171,18 @@ func NukePolecat(bd *BdCli, workDir, rigName, polecatName string) error {
 		_ = t.KillSession(sessionName)
 	}
 
-	// Now run gt polecat nuke to clean up worktree, branch, and beads
+	// Now run gt polecat nuke to clean up worktree, branch, and beads.
+	//
+	// gu-odhqc: bound this with a wall-clock timeout + process-group kill. The
+	// real-nuke path can hang on futex_wait_queue (>4.5m observed) — e.g. on an
+	// orphaned forking process pinning the worktree — and the old unbounded
+	// ExecRun wedged the entire witness patrol scan, blocking zombie/stale
+	// detection for the whole rig. On timeout the nuke's entire process group
+	// is SIGKILLed and the scan moves on; a stuck slot is far less harmful than
+	// a stuck scan.
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
 
-	if err := util.ExecRun(workDir, "gt", "polecat", "nuke", address); err != nil {
+	if err := util.ExecRunWithTimeout(constants.PolecatNukeTimeout, workDir, "gt", "polecat", "nuke", address); err != nil {
 		return fmt.Errorf("nuke failed: %w", err)
 	}
 
