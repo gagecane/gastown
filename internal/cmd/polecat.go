@@ -1356,7 +1356,20 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			}
 		}
 		loadGitState()
-		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr)
+		// gu-5dq1d: when the assigned work is terminal (bead/MR merged) AND the
+		// only "unpushed" delta is the squash-merge-trap signature — redundant
+		// commit objects whose patches are all already on the comparison base —
+		// suppress the has_unpushed blocker. The work landed on main under a new
+		// SHA (refinery squash); the local worktree commit is patch-redundant and
+		// a stale tracking ref merely made the branch look 1-ahead. Nuking
+		// discards nothing at risk. workTerminal is the discriminator that keeps
+		// gu-7nrd's divergent-reproduction trap (independent local commit, work
+		// NOT terminal) reporting NEEDS_RECOVERY.
+		suppressUnpushed := workTerminal && unpushedCommitsAreSquashMergeRedundant(gitState)
+		if suppressUnpushed {
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("suppressed_squash_merge_redundant_unpushed=%d comparison_base=%s work_ref=terminal", gitState.UnpushedCommits, gitState.ComparisonBase))
+		}
+		applyGitStateToWorkstateInput(&input, p.ClonePath, gitState, gitErr, suppressUnpushed)
 	}
 
 	status.CleanupStatus = input.CleanupStatus
@@ -1427,7 +1440,32 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath string, gitState *GitState, gitErr error) {
+// unpushedCommitsAreSquashMergeRedundant reports whether a worktree's nonzero
+// "unpushed" count is purely the squash-merge-trap signature (gu-5dq1d): commit
+// OBJECTS that exist on no remote ref — so gu-7nrd's unreachable-from-remotes
+// check counts them — BUT whose patches are ALL already present on the
+// comparison base (UnpreservedPatchCount == 0). In that state the WORK is
+// preserved on the base branch (`git cherry -v` shows every commit with a '-'
+// prefix); only redundant commit objects would be discarded by a nuke. This is
+// the refinery-squash false positive: the polecat's work landed on main under a
+// new SHA, leaving the local worktree commit redundant while a stale tracking
+// ref made the branch look 1-ahead and wedged recovery.
+//
+// This signature is NOT sufficient on its own to declare the worktree safe: an
+// independent local commit whose content coincidentally matches the base
+// (gu-7nrd's divergent-reproduction trap) is git-indistinguishable from it. The
+// caller MUST additionally require the assigned work to be terminal (bead/MR
+// merged) before suppressing the blocker.
+func unpushedCommitsAreSquashMergeRedundant(gitState *GitState) bool {
+	return gitState != nil &&
+		gitState.UnpushedCommits > 0 &&
+		gitState.UnpreservedPatchCount == 0 &&
+		gitState.ComparisonBase != "" &&
+		gitState.StashCount == 0 &&
+		len(gitState.UncommittedFiles) == 0
+}
+
+func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath string, gitState *GitState, gitErr error, suppressUnpushed bool) {
 	if gitErr != nil {
 		input.GitCheckFailed = true
 		input.GitCheckFailedReason = recoveryGitStateBlocker(worktreePath, gitState, gitErr)
@@ -1436,7 +1474,7 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 	if gitState == nil || gitState.Clean {
 		return
 	}
-	if gitState.UnpushedCommits > 0 {
+	if gitState.UnpushedCommits > 0 && !suppressUnpushed {
 		input.UnpushedCommits = gitState.UnpushedCommits
 	}
 	if gitState.StashCount > 0 {

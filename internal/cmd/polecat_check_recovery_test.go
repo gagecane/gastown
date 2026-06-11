@@ -616,6 +616,95 @@ func TestStaleCleanWithRealUnpushedStillBlocks(t *testing.T) {
 	}
 }
 
+// TestUnpushedCommitsAreSquashMergeRedundant is the gu-5dq1d regression guard:
+// the signature is nonzero UnpushedCommits (gu-7nrd unreachable-from-remotes
+// trap fired) but UnpreservedPatchCount==0 with a real ComparisonBase, a clean
+// tree, and no stash — i.e. redundant squash-merged commit objects whose work
+// is fully preserved on the base. Any other shape (real unpreserved patch,
+// missing base, dirty tree, stash) must NOT match.
+func TestUnpushedCommitsAreSquashMergeRedundant(t *testing.T) {
+	tests := []struct {
+		name  string
+		state *GitState
+		want  bool
+	}{
+		{
+			name:  "squash-merge redundant signature matches",
+			state: &GitState{UnpushedCommits: 1, UnpreservedPatchCount: 0, ComparisonBase: "origin/main"},
+			want:  true,
+		},
+		{
+			name:  "nil state does not match",
+			state: nil,
+			want:  false,
+		},
+		{
+			name:  "zero unpushed does not match",
+			state: &GitState{UnpushedCommits: 0, ComparisonBase: "origin/main"},
+			want:  false,
+		},
+		{
+			name:  "unpreserved patch (real divergent work) does not match",
+			state: &GitState{UnpushedCommits: 1, UnpreservedPatchCount: 1, ComparisonBase: "origin/main"},
+			want:  false,
+		},
+		{
+			name:  "no comparison base does not match",
+			state: &GitState{UnpushedCommits: 1, UnpreservedPatchCount: 0, ComparisonBase: ""},
+			want:  false,
+		},
+		{
+			name:  "stash present does not match",
+			state: &GitState{UnpushedCommits: 1, UnpreservedPatchCount: 0, ComparisonBase: "origin/main", StashCount: 1},
+			want:  false,
+		},
+		{
+			name:  "uncommitted files present does not match",
+			state: &GitState{UnpushedCommits: 1, UnpreservedPatchCount: 0, ComparisonBase: "origin/main", UncommittedFiles: []string{"a.go"}},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := unpushedCommitsAreSquashMergeRedundant(tt.state); got != tt.want {
+				t.Errorf("unpushedCommitsAreSquashMergeRedundant(%+v) = %v, want %v", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyGitStateToWorkstateInput_SquashMergeSuppression proves the
+// gu-5dq1d end-to-end policy: with suppressUnpushed=true the redundant
+// squash-merge "unpushed" delta is dropped so DecideWorkstate yields
+// SAFE_TO_NUKE, while suppressUnpushed=false (or a real unpushed delta) still
+// blocks with NEEDS_RECOVERY. This is the safety boundary — suppression must
+// flip the verdict ONLY when the caller has already proven the work terminal.
+func TestApplyGitStateToWorkstateInput_SquashMergeSuppression(t *testing.T) {
+	redundant := &GitState{UnpushedCommits: 1, UnpreservedPatchCount: 0, ComparisonBase: "origin/main"}
+
+	t.Run("suppressed redundant unpushed is safe to nuke", func(t *testing.T) {
+		input := polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, Branch: "polecat/foo"}
+		applyGitStateToWorkstateInput(&input, "/tmp/polecat", redundant, nil, true)
+		if input.UnpushedCommits != 0 {
+			t.Fatalf("UnpushedCommits = %d, want 0 (suppressed)", input.UnpushedCommits)
+		}
+		if d := polecat.DecideWorkstate(input); d.Verdict != polecat.WorkstateVerdictSafeToNuke {
+			t.Fatalf("verdict = %q, want SAFE_TO_NUKE (blockers=%v)", d.Verdict, d.Blockers)
+		}
+	})
+
+	t.Run("unsuppressed redundant unpushed still blocks", func(t *testing.T) {
+		input := polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, Branch: "polecat/foo"}
+		applyGitStateToWorkstateInput(&input, "/tmp/polecat", redundant, nil, false)
+		if input.UnpushedCommits != 1 {
+			t.Fatalf("UnpushedCommits = %d, want 1 (not suppressed)", input.UnpushedCommits)
+		}
+		if d := polecat.DecideWorkstate(input); d.Verdict != polecat.WorkstateVerdictNeedsRecovery {
+			t.Fatalf("verdict = %q, want NEEDS_RECOVERY", d.Verdict)
+		}
+	})
+}
+
 func TestActiveMRBlocker(t *testing.T) {
 	tests := []struct {
 		name       string
