@@ -10,6 +10,12 @@ import (
 )
 
 func TestInstallForRole_RoleAware(t *testing.T) {
+	// Isolate HOME so no real ~/.gt/hooks-overrides mcpServers block overlays
+	// onto the template; this test asserts byte-equality with the bare template
+	// (the opt-out path). The override overlay is covered by
+	// TestInstallForRole_ProvisionsHostLocalMCPServers.
+	setTestHome(t, t.TempDir())
+
 	// Claude has autonomous/interactive variants
 	tests := []struct {
 		name     string
@@ -1056,4 +1062,85 @@ func TestEnsureDeny(t *testing.T) {
 			t.Error("expected error for invalid JSON")
 		}
 	})
+}
+
+// TestInstallForRole_ProvisionsHostLocalMCPServers guards the gu-oyz0i fix: a
+// freshly-provisioned Claude worktree on a host that has opted into an
+// mcpServers override must be born WITH that server (e.g. builder-mcp), not
+// drift bare until the next periodic `gt hooks sync`. The override lives in
+// ~/.gt/hooks-overrides/<role>.json, host-local and opt-in.
+func TestInstallForRole_ProvisionsHostLocalMCPServers(t *testing.T) {
+	tmpHome := t.TempDir()
+	setTestHome(t, tmpHome)
+
+	// Host-local opt-in: polecats override carries an mcpServers block.
+	overridePath := OverridePath("polecats")
+	if err := os.MkdirAll(filepath.Dir(overridePath), 0755); err != nil {
+		t.Fatalf("creating overrides dir: %v", err)
+	}
+	override := `{
+  "enabledPlugins": {"AIPowerUserCapabilities-core-dev@aim": true},
+  "mcpServers": {"builder-mcp": {"command": "builder-mcp"}}
+}`
+	if err := os.WriteFile(overridePath, []byte(override), 0644); err != nil {
+		t.Fatalf("writing override: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings struct {
+		MCPServers     map[string]json.RawMessage `json:"mcpServers"`
+		EnabledPlugins map[string]bool            `json:"enabledPlugins"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	if _, ok := settings.MCPServers["builder-mcp"]; !ok {
+		t.Fatalf("freshly-provisioned settings missing builder-mcp; got mcpServers=%v", settings.MCPServers)
+	}
+	if !settings.EnabledPlugins["AIPowerUserCapabilities-core-dev@aim"] {
+		t.Errorf("plugin policy not applied on provisioning; got enabledPlugins=%v", settings.EnabledPlugins)
+	}
+	// The shared neutral default must still be present.
+	if settings.EnabledPlugins["beads@beads-marketplace"] {
+		t.Errorf("neutral beads-disable default lost; got enabledPlugins=%v", settings.EnabledPlugins)
+	}
+}
+
+// TestInstallForRole_NoMCPOverrideStaysBare guards the opt-out path: a host with
+// no mcpServers override must get the bare template verbatim (zero behavior
+// change), so towns that never configured MCP servers see no mcpServers block
+// injected.
+func TestInstallForRole_NoMCPOverrideStaysBare(t *testing.T) {
+	tmpHome := t.TempDir()
+	setTestHome(t, tmpHome)
+
+	dir := t.TempDir()
+	if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+
+	// Byte-identical to the rendered template (no override overlay applied).
+	want, err := resolveAndSubstitute("claude", "settings-autonomous.json", "polecat")
+	if err != nil {
+		t.Fatalf("resolveAndSubstitute: %v", err)
+	}
+	if string(data) != string(want) {
+		t.Errorf("bare provisioning diverged from template: got %d bytes, want %d bytes", len(data), len(want))
+	}
+	if strings.Contains(string(data), "mcpServers") {
+		t.Error("bare provisioning unexpectedly injected an mcpServers block")
+	}
 }

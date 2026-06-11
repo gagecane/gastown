@@ -26,6 +26,10 @@ import (
 // post-condition contract — N concurrent writers leave a valid JSON file
 // matching the template — which is what atomic-via-rename guarantees.
 func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
+	// Isolate HOME so no real ~/.gt/hooks-overrides overlay perturbs the
+	// byte-for-byte template comparison below (gu-oyz0i opt-out path).
+	setTestHome(t, t.TempDir())
+
 	dir := t.TempDir()
 	const concurrency = 64
 

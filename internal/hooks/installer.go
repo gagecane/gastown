@@ -398,11 +398,91 @@ func resolveAIMGuardrail() string {
 	return ""
 }
 
+// overrideKeyForRole maps a singular role constant to its role-level override
+// key, matching the file names under ~/.gt/hooks-overrides/. The polecat role
+// keys off "polecats" (plural, the override-file convention); boot and dog key
+// off their own names. An unknown role yields the empty key, which
+// ExpectedMCPServers/ExpectedPlugins treat as "neutral default only".
+//
+// This mirrors cmd.overrideKeyForRole, replicated here to avoid a cmd→hooks
+// import cycle (the cmd helper cannot be reused from this package).
+func overrideKeyForRole(role string) string {
+	switch role {
+	case constants.RolePolecat:
+		return "polecats"
+	case constants.RoleBoot:
+		return constants.RoleBoot
+	case constants.RoleDog:
+		return constants.RoleDog
+	case constants.RoleWitness, constants.RoleRefinery, constants.RoleCrew,
+		constants.RoleMayor, constants.RoleDeacon:
+		return role
+	}
+	return ""
+}
+
+// applyClaudeOverrides applies the host-local MCP server policy (and, when it
+// fires, the plugin policy) to a freshly-rendered Claude settings template,
+// returning the re-marshaled bytes. It is the provisioning-path counterpart to
+// syncTarget/installHookTo so that a newly respawned worktree is born with
+// builder-mcp instead of drifting bare until the next periodic `gt hooks sync`
+// (gu-oyz0i — the ~90s respawn race on busy rigs).
+//
+// Gated on a non-empty mcpServers override: a host/town that has not opted in
+// (no mcpServers key in ~/.gt/hooks-overrides/<role>.json) resolves to an empty
+// expected map, so this returns the template bytes unchanged — zero behavior
+// change, no Amazon/tool names in shared source. When it does fire, the plugin
+// policy is applied in the same pass so the opted-in host converges fully.
+func applyClaudeOverrides(content []byte, role string) ([]byte, error) {
+	key := overrideKeyForRole(role)
+
+	expectedMCP, err := ExpectedMCPServers(key)
+	if err != nil {
+		return nil, fmt.Errorf("computing expected mcpServers: %w", err)
+	}
+	if len(expectedMCP) == 0 {
+		// Not opted in — preserve the bare template verbatim.
+		return content, nil
+	}
+
+	settings, err := UnmarshalSettings(content)
+	if err != nil {
+		// Don't fail provisioning on a malformed template — fall back to the
+		// raw bytes (matches the deny-injection path's best-effort behavior).
+		return content, nil //nolint:nilerr // best-effort overlay; template wins
+	}
+
+	expectedPlugins, err := ExpectedPlugins(key)
+	if err != nil {
+		return nil, fmt.Errorf("computing expected plugins: %w", err)
+	}
+	ApplyExpectedPlugins(settings, role, expectedPlugins)
+	ApplyExpectedMCPServers(settings, expectedMCP)
+
+	data, err := MarshalSettings(settings)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling settings with overrides: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
 // writeTemplate resolves a template, substitutes placeholders, and writes it to targetPath.
 func writeTemplate(provider, role, hooksFile, targetPath string) error {
 	content, err := resolveAndSubstitute(provider, hooksFile, role)
 	if err != nil {
 		return err
+	}
+
+	// For Claude settings files, overlay the host-local mcpServers (and plugin)
+	// policy so a freshly-provisioned worktree is born with builder-mcp rather
+	// than drifting bare until the next `gt hooks sync` (gu-oyz0i). No-op when
+	// the host has not configured an mcpServers override.
+	if provider == "claude" && isSettingsFile(hooksFile) {
+		if overlaid, oerr := applyClaudeOverrides(content, role); oerr == nil {
+			content = overlaid
+		} else {
+			return oerr
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
