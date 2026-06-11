@@ -48,7 +48,7 @@ NOT anomalies (do NOT escalate these):
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 2
+version = 3
 
 [squash]
 trigger = "on_complete"
@@ -182,9 +182,47 @@ references are cleaned up to prevent dangling parent refs.
 **Exit criteria:** Old closed wisps and mail purged."""
 
 [[steps]]
+id = "flush-wisps"
+title = "Flush dolt_ignored wisp working set to HEAD (gu-tqtwt)"
+needs = ["purge"]
+description = """
+Commit the dolt_ignored wisp tables (wisps, wisp_events, wisp_labels,
+wisp_comments, wisp_dependencies) to Dolt HEAD so their churn does not
+accumulate unbounded in the working set.
+
+Context: bd commits the issue tables on every op, but the wisp tables are
+dolt_ignored, so bd's DOLT_COMMIT('-Am') never stages them. bd's
+pre-migration dirty-table guard reads the raw dolt_diff('HEAD','WORKING')
+— which DOES see ignored tables — so once the backlog is large enough,
+schema-init aborts ("pending schema migrations alter pre-existing dirty
+tables") and every --json/capacity query fails. The deadlock is
+self-sustaining: bd's own commit path runs the same guard on connect, so
+bd cannot flush the working set it needs to clear the guard. Recovering
+required an out-of-band Dolt server restart (gu-tqtwt). This step runs over
+the reaper's raw connection, which never invokes bd's guard, bounding the
+backlog every cycle.
+
+**1. For each database:**
+```bash
+gt reaper flush-wisps --db=<name> --port={{dolt_port}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**2. Inspect results:**
+- A non-zero `flushed` count is normal on busy rigs — it is the pending
+  wisp churn that was just committed to HEAD.
+- Check for `dolt_commit_failed` anomalies — the working set may not have
+  been persisted, leaving the backlog to keep growing.
+
+**Safety:** Only the wisp tables are force-staged, so the commit cannot
+sweep in unrelated working-set changes. No-ops cleanly when nothing pending.
+
+**Exit criteria:** Pending wisp working-set changes committed to HEAD."""
+
+[[steps]]
 id = "auto-close"
 title = "Auto-close stale issues"
-needs = ["purge"]
+needs = ["flush-wisps"]
 description = """
 Close issues that have been open with no status change past stale_issue_age.
 

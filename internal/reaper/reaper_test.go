@@ -506,3 +506,80 @@ func TestCloseStaleHookedMolsQueryShape(t *testing.T) {
 		}
 	}
 }
+
+// TestWispFlushDiffQueryReadsDiffStatNotStatus verifies the wisp-flush pending
+// query reads dolt_diff_stat, not dolt_status. This is the crux of gu-tqtwt:
+// the wisp tables are dolt_ignored, so dolt_status never reports them — only a
+// HEAD->WORKING diff surfaces their accumulating churn. Reading dolt_status
+// here would always report zero pending and the flush would never fire.
+func TestWispFlushDiffQueryReadsDiffStatNotStatus(t *testing.T) {
+	if !strings.Contains(wispPendingDiffQuery, "dolt_diff_stat('HEAD', 'WORKING')") {
+		t.Errorf("wispPendingDiffQuery must read dolt_diff_stat(HEAD,WORKING), got: %s", wispPendingDiffQuery)
+	}
+	if strings.Contains(wispPendingDiffQuery, "dolt_status") {
+		t.Errorf("wispPendingDiffQuery must NOT read dolt_status (it never reports dolt_ignored tables), got: %s", wispPendingDiffQuery)
+	}
+}
+
+// TestWispFlushDiffQueryEscapesLikeUnderscore verifies the LIKE pattern escapes
+// the underscore so it matches the literal 'wisp_' prefix, not 'wispX' for any
+// single character X. An unescaped 'wisp_%' would also match unrelated tables
+// like 'wispy' or any future 'wispNNN'.
+func TestWispFlushDiffQueryEscapesLikeUnderscore(t *testing.T) {
+	if !strings.Contains(wispPendingDiffQuery, `LIKE 'wisp\_%'`) {
+		t.Errorf("wispPendingDiffQuery must escape the LIKE underscore as 'wisp\\_%%', got: %s", wispPendingDiffQuery)
+	}
+	// The bare 'wisps' table is dolt_ignored under a separate pattern and would
+	// not be caught by 'wisp_%', so it must be matched explicitly.
+	if !strings.Contains(wispPendingDiffQuery, "table_name = 'wisps'") {
+		t.Errorf("wispPendingDiffQuery must explicitly match the 'wisps' table, got: %s", wispPendingDiffQuery)
+	}
+}
+
+// TestWispTablesQueryStagesParentFirst verifies the staging-table enumeration
+// scopes to the wisp namespace and orders the FK parent ('wisps') first. The
+// aux tables (wisp_dependencies, etc.) carry foreign keys referencing wisps, so
+// the parent must be staged alongside — and ahead of — its children, or the
+// flush commit fails the FK check (observed live on casc_constructs).
+func TestWispTablesQueryStagesParentFirst(t *testing.T) {
+	if !strings.Contains(wispTablesQuery, "information_schema.tables") {
+		t.Errorf("wispTablesQuery must enumerate existing tables via information_schema, got: %s", wispTablesQuery)
+	}
+	if !strings.Contains(wispTablesQuery, "table_schema = DATABASE()") {
+		t.Errorf("wispTablesQuery must scope to the current database, got: %s", wispTablesQuery)
+	}
+	if !strings.Contains(wispTablesQuery, `LIKE 'wisp\_%'`) || !strings.Contains(wispTablesQuery, "table_name = 'wisps'") {
+		t.Errorf("wispTablesQuery must match both 'wisps' and the escaped 'wisp\\_%%' namespace, got: %s", wispTablesQuery)
+	}
+	// The FK parent must sort first: ORDER BY (table_name = 'wisps') DESC.
+	if !strings.Contains(wispTablesQuery, "(table_name = 'wisps') DESC") {
+		t.Errorf("wispTablesQuery must order the FK parent 'wisps' first, got: %s", wispTablesQuery)
+	}
+}
+
+// TestWispFlushForcesAddNotPlainAdd verifies the flush force-stages each table.
+// dolt_ignored tables are skipped by a plain DOLT_ADD; only DOLT_ADD('--force')
+// stages them, which is the whole point of the flush (gu-tqtwt).
+func TestWispFlushForcesAddNotPlainAdd(t *testing.T) {
+	data, err := os.ReadFile("reaper.go")
+	if err != nil {
+		t.Fatalf("read reaper.go: %v", err)
+	}
+	source := string(data)
+	funcStart := strings.Index(source, "func FlushWispWorkingSet(")
+	if funcStart == -1 {
+		t.Fatal("FlushWispWorkingSet not found in reaper.go")
+	}
+	funcBody := source[funcStart:]
+	if nextFunc := strings.Index(funcBody[1:], "\nfunc "); nextFunc != -1 {
+		funcBody = funcBody[:nextFunc+1]
+	}
+	if !strings.Contains(funcBody, "CALL DOLT_ADD('--force', ?)") {
+		t.Errorf("FlushWispWorkingSet must force-stage wisp tables via DOLT_ADD('--force', ?)")
+	}
+	// It must NOT use '-Am' (which would silently skip the dolt_ignored tables
+	// and could sweep in unrelated working-set changes).
+	if strings.Contains(funcBody, "DOLT_COMMIT('-Am'") {
+		t.Errorf("FlushWispWorkingSet must not use DOLT_COMMIT('-Am') — it skips dolt_ignored tables and risks sweeping unrelated changes")
+	}
+}

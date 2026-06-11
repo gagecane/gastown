@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -143,6 +144,18 @@ type PurgeResult struct {
 	MailPurged  int       `json:"mail_purged"`
 	DryRun      bool      `json:"dry_run,omitempty"`
 	Anomalies   []Anomaly `json:"anomalies,omitempty"`
+}
+
+// FlushWispResult holds the results of a wisp working-set flush.
+type FlushWispResult struct {
+	Database string `json:"database"`
+	// Flushed is the total number of pending row changes (added + modified +
+	// deleted across all wisp tables) that were committed to HEAD this cycle.
+	Flushed int `json:"flushed"`
+	// Tables lists the wisp tables that had pending changes flushed.
+	Tables    []string  `json:"tables,omitempty"`
+	DryRun    bool      `json:"dry_run,omitempty"`
+	Anomalies []Anomaly `json:"anomalies,omitempty"`
 }
 
 // ClosedEntry records an individual issue closure with details for logging.
@@ -702,6 +715,147 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 	}
 
 	return totalDeleted, nil
+}
+
+// wispPendingDiffQuery counts pending HEAD->WORKING row changes for the wisp
+// tables. It reads dolt_diff_stat (not dolt_status) deliberately: the wisp
+// tables are dolt_ignored, so dolt_status never reports them — the exact reason
+// their churn accumulates unbounded in the working set. The escaped underscore
+// in the LIKE pattern matches the literal 'wisp_' prefix, not any single char.
+const wispPendingDiffQuery = `
+	SELECT table_name,
+	       COALESCE(rows_added, 0) + COALESCE(rows_modified, 0) + COALESCE(rows_deleted, 0) AS pending
+	FROM dolt_diff_stat('HEAD', 'WORKING')
+	WHERE table_name = 'wisps' OR table_name LIKE 'wisp\_%'`
+
+// wispTablesQuery lists the wisp tables that actually exist in the current
+// database, ordered so 'wisps' (the FK parent of the aux tables) sorts first
+// and the staging order is deterministic. The aux tables (wisp_dependencies,
+// etc.) carry foreign keys referencing wisps, so a commit that stages a child
+// without the parent fails — the full existing set must be staged together.
+const wispTablesQuery = `
+	SELECT table_name FROM information_schema.tables
+	WHERE table_schema = DATABASE()
+	  AND (table_name = 'wisps' OR table_name LIKE 'wisp\_%')
+	ORDER BY (table_name = 'wisps') DESC, table_name`
+
+// FlushWispWorkingSet commits the dolt_ignored wisp_* tables to Dolt HEAD.
+//
+// bd commits the issue tables on every op, but the wisp tables (wisps,
+// wisp_events, wisp_labels, wisp_comments, wisp_dependencies, ...) are
+// dolt_ignored, so bd's DOLT_COMMIT('-Am') never stages them. Their churn
+// accumulates unbounded in the Dolt working set. bd's pre-migration dirty-table
+// guard reads the raw dolt_diff('HEAD','WORKING') — which DOES see ignored
+// tables — so once the backlog is large enough, schema-init aborts with
+// "pending schema migrations alter pre-existing dirty tables" and every
+// --json/capacity query fails. The deadlock is self-sustaining: bd's own commit
+// path runs the same guard on connect, so bd cannot flush the working set it
+// needs to clear the guard. Recovering required an out-of-band Dolt server
+// restart (gu-tqtwt).
+//
+// This flush runs over the reaper's raw MySQL connection — which never invokes
+// bd's schema-init guard — so it is the bd-native-free escape hatch the issue
+// calls for. It force-stages the wisp tables (DOLT_ADD --force, required because
+// the tables are dolt_ignored) and commits, bounding the working-set backlog
+// every reaper cycle so no rig ever crosses the migration-deadlock threshold.
+//
+// All existing wisp tables are staged together — not just the changed ones —
+// because the aux tables carry foreign keys referencing wisps; committing a
+// child without its parent fails the FK check. Only wisp tables are staged, so
+// the commit cannot sweep in unrelated working-set changes. The flush no-ops
+// cleanly when there is nothing pending.
+func FlushWispWorkingSet(db *sql.DB, dbName string, dryRun bool) (*FlushWispResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	result := &FlushWispResult{Database: dbName, DryRun: dryRun}
+
+	// Determine which wisp tables have pending HEAD->WORKING changes.
+	rows, err := db.QueryContext(ctx, wispPendingDiffQuery)
+	if err != nil {
+		if isTableNotFound(err) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("read wisp working-set diff: %w", err)
+	}
+	pending := make(map[string]int)
+	for rows.Next() {
+		var table string
+		var n int
+		if err := rows.Scan(&table, &n); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan wisp diff row: %w", err)
+		}
+		if n > 0 {
+			pending[table] = n
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close wisp diff rows: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return result, nil
+	}
+
+	// Report only the tables that changed, with their pending row counts. The
+	// reported set is what callers log; it is intentionally narrower than the
+	// staged set below.
+	for table, n := range pending {
+		result.Tables = append(result.Tables, table)
+		result.Flushed += n
+	}
+	sort.Strings(result.Tables)
+
+	if dryRun {
+		return result, nil
+	}
+
+	// Enumerate every existing wisp table so the FK parent (wisps) is staged
+	// alongside its dependent aux tables. Staging a child without its parent
+	// fails the FK check on commit.
+	allRows, err := db.QueryContext(ctx, wispTablesQuery)
+	if err != nil {
+		return nil, fmt.Errorf("list wisp tables: %w", err)
+	}
+	var stageTables []string
+	for allRows.Next() {
+		var table string
+		if err := allRows.Scan(&table); err != nil {
+			_ = allRows.Close()
+			return nil, fmt.Errorf("scan wisp table name: %w", err)
+		}
+		stageTables = append(stageTables, table)
+	}
+	if err := allRows.Close(); err != nil {
+		return nil, fmt.Errorf("close wisp table rows: %w", err)
+	}
+
+	// Force-stage each wisp table. --force is required because the tables are
+	// dolt_ignored; a plain DOLT_ADD would skip them. Only wisp tables are
+	// staged, so the subsequent commit cannot sweep in unrelated changes.
+	for _, table := range stageTables {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('--force', ?)", table); err != nil {
+			return result, fmt.Errorf("force-stage %s: %w", table, err)
+		}
+	}
+
+	commitMsg := fmt.Sprintf("reaper: flush %d pending wisp row change(s) across %d table(s) in %s",
+		result.Flushed, len(result.Tables), dbName)
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", commitMsg); err != nil {
+		// "nothing to commit" can race in if a concurrent flush already landed
+		// the changes; treat it as a benign no-op rather than an error.
+		if isNothingToCommit(err) {
+			return result, nil
+		}
+		result.Anomalies = append(result.Anomalies, Anomaly{
+			Type:    "dolt_commit_failed",
+			Message: fmt.Sprintf("dolt commit after wisp flush failed: %v", err),
+		})
+		return result, nil
+	}
+
+	return result, nil
 }
 
 // AutoClose closes issues that have been open with no updates past staleAge.

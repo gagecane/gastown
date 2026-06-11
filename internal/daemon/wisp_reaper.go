@@ -274,6 +274,49 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		mol.closeStep("purge")
 	}
 
+	// Step 3a: Flush the dolt_ignored wisp_* working set to HEAD (gu-tqtwt).
+	// bd never commits the wisp tables (they are dolt_ignored), so their churn
+	// accumulates unbounded in the Dolt working set until bd's pre-migration
+	// dirty-table guard deadlocks on the oldest/highest-volume rigs and every
+	// --json/capacity query starts failing. The reaper's raw connection bypasses
+	// that guard, so flushing here bounds the backlog every cycle.
+	flushErrors := 0
+	var totalWispFlushed int
+	for _, dbName := range databases {
+		if err := reaper.ValidateDBName(dbName); err != nil {
+			continue
+		}
+		db, err := reaper.OpenDB("127.0.0.1", port, dbName, 30*time.Second, 30*time.Second)
+		if err != nil {
+			flushErrors++
+			continue
+		}
+		if ok, _ := reaper.HasReaperSchema(db); !ok {
+			db.Close()
+			continue
+		}
+		result, err := reaper.FlushWispWorkingSet(db, dbName, dryRun)
+		db.Close()
+		if err != nil {
+			d.logger.Printf("wisp_reaper: %s: wisp flush error: %v", dbName, err)
+			flushErrors++
+			continue
+		}
+		totalWispFlushed += result.Flushed
+		if result.Flushed > 0 {
+			d.logger.Printf("wisp_reaper: %s: flushed %d pending wisp row change(s) across %v",
+				dbName, result.Flushed, result.Tables)
+		}
+		for _, a := range result.Anomalies {
+			d.logger.Printf("wisp_reaper: %s: ANOMALY: %s", dbName, a.Message)
+		}
+	}
+	if flushErrors > 0 {
+		mol.failStep("wisp-flush", fmt.Sprintf("%d databases had wisp flush errors", flushErrors))
+	} else {
+		mol.closeStep("wisp-flush")
+	}
+
 	// Step 3b: Close plugin receipts (fast-track — 1h instead of 7d stale age)
 	pluginReceiptAge := 1 * time.Hour
 	var totalPluginClosed int
@@ -478,8 +521,8 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
 			totalOpen, wispAlertThreshold)
 	}
-	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d hooked_closed=%d auto_closed=%d orphan_recon_scanned=%d orphan_reconciled=%d orphan_recon_preserved=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d dangling_fk_scanned=%d dangling_fk_cleared_mr_id=%d dangling_fk_cleared_hook=%d dangling_fk_preserved=%d open=%d databases=%d dryRun=%v",
-		totalReaped, totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalHookedClosed, totalAutoClosed,
+	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d wisp_flushed=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d hooked_closed=%d auto_closed=%d orphan_recon_scanned=%d orphan_reconciled=%d orphan_recon_preserved=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d dangling_fk_scanned=%d dangling_fk_cleared_mr_id=%d dangling_fk_cleared_hook=%d dangling_fk_preserved=%d open=%d databases=%d dryRun=%v",
+		totalReaped, totalPurged, totalWispFlushed, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalHookedClosed, totalAutoClosed,
 		reconScanned, reconReconciled, reconPreservedWIP,
 		scrubScanned, scrubCleared, scrubPreservedWIP, scrubStillPending,
 		fkScanned, fkClearedMRID, fkClearedHook, fkPreservedWIP,

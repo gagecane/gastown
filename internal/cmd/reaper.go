@@ -842,6 +842,102 @@ Use --dry-run to preview closures without applying them.`,
 	},
 }
 
+var reaperFlushWispsCmd = &cobra.Command{
+	Use:   "flush-wisps",
+	Short: "Flush the dolt_ignored wisp_* working set to HEAD (gu-tqtwt)",
+	Long: `Commit the dolt_ignored wisp tables (wisps, wisp_events, wisp_labels,
+wisp_comments, wisp_dependencies) to Dolt HEAD.
+
+Background: bd commits the issue tables on every op, but the wisp tables are
+dolt_ignored, so bd's DOLT_COMMIT('-Am') never stages them. Their churn
+accumulates unbounded in the Dolt working set. bd's pre-migration dirty-table
+guard reads the raw dolt_diff('HEAD','WORKING') — which DOES see ignored tables
+— so once the backlog is large enough, schema-init aborts ("pending schema
+migrations alter pre-existing dirty tables") and every --json/capacity query
+fails. The deadlock is self-sustaining: bd's own commit path runs the same
+guard on connect, so bd cannot flush the working set it needs to clear the
+guard (gu-tqtwt).
+
+This command runs over a raw MySQL connection that never invokes bd's
+schema-init guard, force-staging each wisp table (DOLT_ADD --force) and
+committing. It is the bd-native-free escape hatch for the deadlock, and the
+daemon runs it every reaper cycle to bound the backlog so no rig crosses the
+threshold.
+
+When --db is provided, operates on a single database. When omitted,
+auto-discovers all databases on the Dolt server.
+
+Use --dry-run to preview what would be flushed without committing.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		databases := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		if reaperDB != "" {
+			databases = strings.Split(reaperDB, ",")
+		}
+
+		var results []*reaper.FlushWispResult
+		for _, dbName := range databases {
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				continue
+			}
+
+			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				continue
+			}
+
+			if ok, err := reaper.HasReaperSchema(db); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
+				db.Close()
+				continue
+			} else if !ok {
+				db.Close()
+				continue
+			}
+
+			result, err := reaper.FlushWispWorkingSet(db, dbName, reaperDryRun)
+			db.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: flush-wisps error: %v\n", dbName, err)
+				continue
+			}
+			results = append(results, result)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(results))
+		} else {
+			var totalFlushed int
+			for _, r := range results {
+				prefix := ""
+				verb := "flushed"
+				if r.DryRun {
+					prefix = "[DRY RUN] would "
+					verb = "flush"
+				}
+				if r.Flushed > 0 {
+					fmt.Printf("%s: %s%s %d pending wisp row change(s) across %v\n",
+						r.Database, prefix, verb, r.Flushed, r.Tables)
+				}
+				for _, a := range r.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+				totalFlushed += r.Flushed
+			}
+			if len(results) > 1 {
+				prefix := ""
+				if reaperDryRun {
+					prefix = "[DRY RUN] "
+				}
+				fmt.Printf("\n%sFlush-wisps summary (%d databases): flushed %d pending row change(s)\n",
+					prefix, len(results), totalFlushed)
+			}
+		}
+		return nil
+	},
+}
+
 var reaperScrubActiveMRCmd = &cobra.Command{
 	Use:   "scrub-active-mr",
 	Short: "Clear stale active_mr refs on agent beads (gu-dhqm)",
@@ -1141,6 +1237,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		var totalHookedMailClosed int
 		var totalOpenMailClosed int
 		var totalProcessedMailClosed int
+		var totalWispFlushed int
 
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(i); err != nil {
@@ -1194,6 +1291,22 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			} else {
 				totalPurged += purgeResult.WispsPurged
 				totalMailPurged += purgeResult.MailPurged
+			}
+
+			// Flush dolt_ignored wisp working set to HEAD (gu-tqtwt). Bounds the
+			// backlog that otherwise deadlocks bd's pre-migration guard.
+			flushResult, err := reaper.FlushWispWorkingSet(db, dbName, reaperDryRun)
+			if err != nil {
+				fmt.Printf("%s: wisp flush error: %v\n", dbName, err)
+			} else {
+				totalWispFlushed += flushResult.Flushed
+				if flushResult.Flushed > 0 {
+					fmt.Printf("  %s: flushed %d pending wisp row change(s) across %v\n",
+						dbName, flushResult.Flushed, flushResult.Tables)
+				}
+				for _, a := range flushResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
 			}
 
 			// Auto-close
@@ -1378,6 +1491,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		fmt.Printf("  Databases:        %d\n", len(databases))
 		fmt.Printf("  Reaped:           %d\n", totalReaped)
 		fmt.Printf("  Purged:           %d wisps, %d mail\n", totalPurged, totalMailPurged)
+		fmt.Printf("  Wisp flushed:     %d pending row change(s)\n", totalWispFlushed)
 		fmt.Printf("  Closed:           %d stale issues\n", totalClosed)
 		fmt.Printf("  Hooked-mail TTL:  %d ttl-expired\n", totalHookedMailClosed)
 		fmt.Printf("  Open-mail TTL:    %d ttl-expired\n", totalOpenMailClosed)
@@ -1497,7 +1611,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd, reaperAlertOpenWispsCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperFlushWispsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd, reaperAlertOpenWispsCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -1512,7 +1626,7 @@ func init() {
 		"Open-wisp count above which to escalate")
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperFlushWispsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -1551,6 +1665,7 @@ func init() {
 	reaperCmd.AddCommand(reaperReapOpenMailCmd)
 	reaperCmd.AddCommand(reaperReapProcessedMailCmd)
 	reaperCmd.AddCommand(reaperClosePluginReceiptsCmd)
+	reaperCmd.AddCommand(reaperFlushWispsCmd)
 	reaperCmd.AddCommand(reaperScrubActiveMRCmd)
 	reaperCmd.AddCommand(reaperReconcileOrphansCmd)
 	reaperCmd.AddCommand(reaperReconcileOrphansGitCmd)
