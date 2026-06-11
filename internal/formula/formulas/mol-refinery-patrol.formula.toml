@@ -652,7 +652,23 @@ refinery worktree would fail (or silently detach) in that case.
 # tokens (gu-vph7 live incident, 2026-05-30: agent reported a successful
 # push as "rejected" and latched into manual hold; mayor verified via
 # `git ls-remote` that the push had landed cleanly).
+#
+# GT_SKIP_PREPUSH=1 is REQUIRED here too (gu-2bvvz). The pre-push hook's SLOW
+# gate re-runs the full `go test ./...` suite (~2-4 min, hard wall 360s) on
+# the pushed tip. But the run-tests step above ALREADY ran the full quality +
+# test suite on this exact rebased `temp` tip — the pushed commit is byte-for-
+# byte what we tested. Re-running tests in the hook is pure redundant work, and
+# its multi-minute cost exceeds the refinery task's SIGTERM/termination window:
+# the push gets killed mid-gate (WRAPPER_EXIT=124), stranding the merge and
+# stalling the whole queue (gu-2bvvz live incident, 2026-06-11: queue flat at 9
+# pending, main frozen, mayor had to hand-merge via GT_SKIP_PREPUSH). This is
+# exactly the redundant-gate case the `gt done --pre-verified` contract solves.
+# The FAST gates (build/vet/gofmt/golangci-lint) STILL run — they are cheap and
+# unconditional — so a stale-base or unformatted push is still caught. The skip
+# is audited: the hook appends a record to .runtime/prepush-skips.jsonl (gu-zy57).
 PUSH_RESULT=$(GT_ALLOW_DIRECT_MAIN=1 \
+  GT_SKIP_PREPUSH=1 \
+  GT_SKIP_PREPUSH_REASON="pre-verified: run-tests step ran full suite on this rebased tip (gu-2bvvz)" \
   scripts/git-push-verified.sh origin HEAD:<merge-target>)
 PUSH_RC=$?
 echo "$PUSH_RESULT"
