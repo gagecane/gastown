@@ -185,5 +185,53 @@ func warnIfNotDefaultBranch(dir, roleName, rigPath string) {
 		roleName,
 		branch,
 		defaultBranch)
-	fmt.Printf("  Use --reset to switch to %s, or continue at your own risk.\n\n", defaultBranch)
+
+	// Detect in-flight work so we can recommend the non-destructive --resume path
+	// when there's something to preserve, and --reset to discard it.
+	if work, err := g.CheckUncommittedWork(); err == nil && work != nil &&
+		(work.HasUncommittedChanges || work.StashCount > 0 || work.UnpushedCommits > 0) {
+		fmt.Printf("  In-flight work detected (%s).\n", work.String())
+		fmt.Printf("  Use --resume to continue this work, or --reset to discard it and switch to %s.\n\n", defaultBranch)
+		return
+	}
+
+	fmt.Printf("  Use --resume to keep this branch, --reset to switch to %s, or continue at your own risk.\n\n", defaultBranch)
+}
+
+// resumeWorkspace handles `gt crew at --resume`: it preserves any in-flight work
+// on the current branch instead of resetting to the default branch. When the
+// workspace is clean and already on the default branch, it is a no-op so that
+// --resume falls through to normal startup. The session's hook and checkpoint
+// (.polecat-checkpoint.json) already survive session death and are surfaced by
+// `gt prime`, so resume only needs to avoid the destructive reset and report
+// what the previous session left behind.
+func resumeWorkspace(dir, roleName, rigPath string) {
+	g := git.NewGit(dir)
+
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		return
+	}
+
+	defaultBranch := "main"
+	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
+
+	work, _ := g.CheckUncommittedWork()
+	hasWIP := work != nil && (work.HasUncommittedChanges || work.StashCount > 0 || work.UnpushedCommits > 0)
+
+	// No prior work to resume: clean tree on the default branch → no-op startup.
+	if branch == defaultBranch && !hasWIP {
+		return
+	}
+
+	fmt.Printf("\n%s Resuming %s on branch '%s'.\n",
+		style.Success.Render("↻"),
+		roleName,
+		branch)
+	if hasWIP {
+		fmt.Printf("  Preserving in-flight work: %s\n", work.String())
+	}
+	fmt.Printf("  Hook and checkpoint state will be restored by 'gt prime'.\n\n")
 }

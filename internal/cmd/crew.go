@@ -24,6 +24,7 @@ var (
 	crewDebug         bool
 	crewReset         bool
 	crewResume        string
+	crewAtResume      bool
 )
 
 var crewCmd = &cobra.Command{
@@ -376,6 +377,7 @@ func init() {
 	crewAtCmd.Flags().StringVar(&crewAgentOverride, "agent", "", "Agent alias to run crew worker with (overrides rig/town default)")
 	crewAtCmd.Flags().BoolVar(&crewDebug, "debug", false, "Show debug output for troubleshooting")
 	crewAtCmd.Flags().BoolVar(&crewReset, "reset", false, "Reset workspace to default branch (checkout and pull)")
+	crewAtCmd.Flags().BoolVar(&crewAtResume, "resume", false, "Resume prior session's in-flight work (preserves WIP branch; no-op if clean on default branch)")
 
 	crewRemoveCmd.Flags().StringVar(&crewRig, "rig", "", "Rig to use")
 	crewRemoveCmd.Flags().BoolVar(&crewForce, "force", false, "Force remove (skip safety checks)")
