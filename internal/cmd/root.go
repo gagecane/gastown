@@ -128,6 +128,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 		if err := session.InitRegistry(townRoot); err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: failed to initialize town registry: %v\n", err)
 		}
+		suppressBeadsDoltAutoStart()
 	}
 
 	beadsExempt := isCommandOrAncestorExempt(cmd, beadsExemptCommands)
@@ -162,6 +163,27 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "   Run %s for details.\n\n", style.Dim.Render("gt doctor"))
 	}
 	return nil
+}
+
+// suppressBeadsDoltAutoStart disables bd's embedded Dolt auto-start for direct
+// `gt` CLI invocations from a rig CWD (human/cron/hook), mirroring the
+// suppression already applied to spawned agents (config.AgentEnv) and the daemon
+// process (internal/daemon).
+//
+// Without this, when the shared centralized Dolt server on :3307 is momentarily
+// down, an in-process beads OpenStore inside a gt command auto-starts a rogue
+// embedded server rooted at the CWD-relative <rig>/.beads/dolt. That directory
+// is empty/uninitialized, so it binds :3307 and serves EMPTY databases town-wide
+// — a fake total-data-loss outage even though real data is intact in
+// ~/.dolt-data (gu-ohu3n, companion deacon report gc-96zaij).
+//
+// Honors explicit operator opt-in: if BEADS_DOLT_AUTO_START is already set in the
+// environment, it is left untouched. Idempotent.
+func suppressBeadsDoltAutoStart() {
+	if _, ok := os.LookupEnv("BEADS_DOLT_AUTO_START"); ok {
+		return
+	}
+	_ = os.Setenv("BEADS_DOLT_AUTO_START", "0")
 }
 
 func isCommandOrAncestorExempt(cmd *cobra.Command, exemptions map[string]bool) bool {

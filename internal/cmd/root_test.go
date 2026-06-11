@@ -442,3 +442,32 @@ func TestCheckStaleBinaryWarning_DebugOverride(t *testing.T) {
 	checkStaleBinaryWarning()
 	_ = w.Close()
 }
+
+// TestSuppressBeadsDoltAutoStart_SetsWhenUnset verifies that a direct gt command
+// run from inside a town disables bd's embedded Dolt auto-start, preventing the
+// rogue rig-local server on :3307 that serves EMPTY DBs town-wide (gu-ohu3n).
+func TestSuppressBeadsDoltAutoStart_SetsWhenUnset(t *testing.T) {
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	if err := os.Unsetenv("BEADS_DOLT_AUTO_START"); err != nil {
+		t.Fatal(err)
+	}
+
+	suppressBeadsDoltAutoStart()
+
+	if got := os.Getenv("BEADS_DOLT_AUTO_START"); got != "0" {
+		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+	}
+}
+
+// TestSuppressBeadsDoltAutoStart_HonorsOperatorOptIn verifies that an explicit
+// operator-set value is left untouched, so a human who deliberately enables
+// auto-start is not overridden.
+func TestSuppressBeadsDoltAutoStart_HonorsOperatorOptIn(t *testing.T) {
+	t.Setenv("BEADS_DOLT_AUTO_START", "1")
+
+	suppressBeadsDoltAutoStart()
+
+	if got := os.Getenv("BEADS_DOLT_AUTO_START"); got != "1" {
+		t.Fatalf("BEADS_DOLT_AUTO_START = %q, want operator value %q preserved", got, "1")
+	}
+}
