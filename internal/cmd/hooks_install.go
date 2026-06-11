@@ -271,25 +271,10 @@ func inferRoleFromPath(dir string) string {
 	return ""
 }
 
-// overrideKeyForRole maps a singular role constant to its role-level override
-// key, matching the keys used by DiscoverTargets and the hooks override files.
-// The polecat role keys off "polecats" (plural, the override-file convention);
-// boot and dog key off their own DiscoverTargets keys so a town can ship
-// boot.json / dog.json plugin overrides. An unknown role yields the empty key,
-// which ExpectedPlugins treats as "neutral default only".
+// overrideKeyForRole delegates to hooks.OverrideKeyForRole, the canonical
+// role→override-key mapping shared with the provisioning path.
 func overrideKeyForRole(role string) string {
-	switch role {
-	case constants.RolePolecat:
-		return "polecats"
-	case constants.RoleBoot:
-		return "boot"
-	case constants.RoleDog:
-		return "dog"
-	case constants.RoleWitness, constants.RoleRefinery, constants.RoleCrew,
-		constants.RoleMayor, constants.RoleDeacon:
-		return role
-	}
-	return ""
+	return hooks.OverrideKeyForRole(role)
 }
 
 // installHookTo installs a hook to a specific worktree.

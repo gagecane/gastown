@@ -1641,6 +1641,31 @@ func DefaultBase() *HooksConfig {
 	}
 }
 
+// OverrideKeyForRole maps a singular role constant to its role-level override
+// key, matching the keys used by DiscoverTargets and the hooks override files.
+// The polecat role keys off "polecats" (plural, the override-file convention);
+// boot and dog key off their own DiscoverTargets keys so a town can ship
+// boot.json / dog.json overrides. An unknown role yields the empty key, which
+// ExpectedPlugins/ExpectedMCPServers treat as "neutral default only".
+//
+// This is the canonical role→override-key mapping shared by the provisioning
+// path (InstallForRole) and the cmd-layer install path, so both resolve the
+// same host-local override files.
+func OverrideKeyForRole(role string) string {
+	switch role {
+	case constants.RolePolecat:
+		return "polecats"
+	case constants.RoleBoot:
+		return "boot"
+	case constants.RoleDog:
+		return "dog"
+	case constants.RoleWitness, constants.RoleRefinery, constants.RoleCrew,
+		constants.RoleMayor, constants.RoleDeacon:
+		return role
+	}
+	return ""
+}
+
 // GetApplicableOverrides returns the override keys in order of specificity
 // for a given target. More specific overrides are applied later (and win).
 //

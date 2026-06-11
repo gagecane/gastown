@@ -1057,3 +1057,103 @@ func TestEnsureDeny(t *testing.T) {
 		}
 	})
 }
+
+// --- gu-oyz0i: provisioning path injects host-local mcpServers override ---
+//
+// gt hooks sync/install apply the town's mcpServers override, but the
+// provisioning path (InstallForRole -> writeTemplate) wrote the bare template
+// with no mcpServers block and relied on a follow-up sync — a race the fresh
+// agent session routinely won, starting up with builder-mcp missing. These
+// tests pin that freshly-provisioned Claude settings carry the override at
+// write time, while hosts with no override see byte-identical output.
+
+// TestInstallForRole_InjectsMCPServersFromOverride verifies a freshly
+// provisioned polecat settings.json carries the host-local mcpServers override.
+func TestInstallForRole_InjectsMCPServersFromOverride(t *testing.T) {
+	tmpHome := t.TempDir()
+	setTestHome(t, tmpHome)
+	writeMCPServerOverride(t, "polecats", map[string]string{
+		"builder-mcp": `{"command":"builder-mcp","args":[]}`,
+		"serena":      `{"command":"uvx","args":["serena"]}`,
+	})
+
+	dir := t.TempDir()
+	if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("settings not valid JSON: %v", err)
+	}
+	for _, name := range []string{"builder-mcp", "serena"} {
+		if _, ok := settings.MCPServers[name]; !ok {
+			t.Errorf("mcpServers missing %q; provisioning must inject the override (gu-oyz0i). got: %v", name, settings.MCPServers)
+		}
+	}
+	// {{GT_BIN}} substitution must still have run after injection.
+	if strings.Contains(string(data), "{{GT_BIN}}") {
+		t.Error("settings contain unresolved {{GT_BIN}} placeholder after mcpServers injection")
+	}
+}
+
+// TestInstallForRole_NoMCPOverrideIsByteIdentical verifies that with no override
+// configured, the provisioned content matches the bare resolved template exactly
+// — preserving default behavior for hosts that ship no mcpServers policy.
+func TestInstallForRole_NoMCPOverrideIsByteIdentical(t *testing.T) {
+	tmpHome := t.TempDir()
+	setTestHome(t, tmpHome) // no override files written
+
+	dir := t.TempDir()
+	if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	want, err := resolveAndSubstitute("claude", "settings-autonomous.json", "polecat")
+	if err != nil {
+		t.Fatalf("resolveAndSubstitute: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("content differs from bare template with no override: got %d bytes, want %d", len(got), len(want))
+	}
+	if strings.Contains(string(got), "mcpServers") {
+		t.Error("settings contain mcpServers with no override configured")
+	}
+}
+
+// TestInjectMCPServers_PreservesOtherFields verifies injection adds mcpServers
+// without disturbing existing keys (plugins, permissions, hooks).
+func TestInjectMCPServers_PreservesOtherFields(t *testing.T) {
+	tmpHome := t.TempDir()
+	setTestHome(t, tmpHome)
+	writeMCPServerOverride(t, "polecats", map[string]string{
+		"builder-mcp": `{"command":"builder-mcp","args":[]}`,
+	})
+
+	base, err := resolveTemplate("claude", "settings.json", "polecat")
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	out, err := injectMCPServers(base, "polecat")
+	if err != nil {
+		t.Fatalf("injectMCPServers: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("result not valid JSON: %v", err)
+	}
+	for _, key := range []string{"enabledPlugins", "permissions", "hooks", "enableAllProjectMcpServers", "mcpServers"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("injected settings missing key %q", key)
+		}
+	}
+}

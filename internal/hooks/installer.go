@@ -164,6 +164,44 @@ func ensureDeny(content []byte, entry string) ([]byte, error) {
 	return json.MarshalIndent(root, "", "  ")
 }
 
+// injectMCPServers merges the town's host-local mcpServers override for the
+// role into a Claude settings.json body. It resolves the override via the same
+// ExpectedMCPServers/ApplyExpectedMCPServers path used by `gt hooks sync` and
+// `gt hooks install`, so the provisioning path and the sync path converge on
+// identical content.
+//
+// When no override is configured (empty expected map), ApplyExpectedMCPServers
+// is a no-op and the content is returned byte-identical, preserving default
+// behavior for towns/hosts that ship no mcpServers policy. Returns an error
+// only if content is not valid JSON.
+func injectMCPServers(content []byte, role string) ([]byte, error) {
+	expected, err := ExpectedMCPServers(OverrideKeyForRole(role))
+	if err != nil {
+		return nil, err
+	}
+	if len(expected) == 0 {
+		return content, nil // no override — preserve bytes exactly
+	}
+	settings, err := UnmarshalSettings(content)
+	if err != nil {
+		return nil, err
+	}
+	ApplyExpectedMCPServers(settings, expected)
+	if settings.Extra == nil {
+		return content, nil
+	}
+	raw, ok := settings.Extra["mcpServers"]
+	if !ok {
+		return content, nil
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(content, &root); err != nil {
+		return nil, err
+	}
+	root["mcpServers"] = raw
+	return json.MarshalIndent(root, "", "  ")
+}
+
 // autonomousDenySet returns the deny entries the canonical claude autonomous
 // settings template requires, as a set. Empty on parse failure.
 func autonomousDenySet() map[string]bool {
@@ -298,6 +336,23 @@ func resolveAndSubstitute(provider, hooksFile, role string) ([]byte, error) {
 	// it (autonomous), so their output stays byte-identical.
 	if provider == "claude" && isSettingsFile(hooksFile) && role == constants.RoleMayor {
 		if injected, derr := ensureDeny(content, askUserQuestionTool); derr == nil {
+			content = injected
+		}
+	}
+
+	// Inject the town's host-local mcpServers policy (e.g. builder-mcp, serena)
+	// directly into freshly-provisioned Claude settings. Without this, a newly
+	// scaffolded polecat/crew settings.json carries the bare template (plugins +
+	// enableAllProjectMcpServers=false but NO mcpServers block) and only gets the
+	// servers once a follow-up `gt hooks sync` reaches it — a race the fresh agent
+	// session routinely wins, starting up with builder-mcp missing on busy rigs
+	// (gu-oyz0i). Applying the override at write time closes the gap.
+	//
+	// The server names live only in ~/.gt/hooks-overrides/<role>.json, never in
+	// shared source, so a host with no override resolves to an empty map and this
+	// is a byte-identical no-op — default behavior is unchanged for other towns.
+	if provider == "claude" && isSettingsFile(hooksFile) {
+		if injected, derr := injectMCPServers(content, role); derr == nil {
 			content = injected
 		}
 	}
