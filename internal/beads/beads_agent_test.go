@@ -600,3 +600,51 @@ func TestUpdate_RigPrefixedAgentBeadUsesTownRoot(t *testing.T) {
 		t.Fatalf("mock bd log missing routed update call:\n%s", logOutput)
 	}
 }
+
+// TestAgentBeadLabels pins the gu-8r6u6 contract: every agent bead gets
+// gt:agent, and persistent-infra agents (refinery/witness/dog) additionally get
+// the gt:pinned protective label so the reaper never auto-closes them as stale.
+func TestAgentBeadLabels(t *testing.T) {
+	tests := []struct {
+		roleType string
+		wantPin  bool
+	}{
+		{"refinery", true},
+		{"witness", true},
+		{"dog", true},
+		{"polecat", false},
+		{"crew", false},
+		{"mayor", false},
+		{"deacon", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.roleType, func(t *testing.T) {
+			labels := agentBeadLabels(&AgentFields{RoleType: tc.roleType})
+			if !containsStr(labels, LabelAgent) {
+				t.Errorf("role %q: labels %v missing %s", tc.roleType, labels, LabelAgent)
+			}
+			gotPin := containsStr(labels, LabelPinned)
+			if gotPin != tc.wantPin {
+				t.Errorf("role %q: gt:pinned present=%v, want %v (labels %v)", tc.roleType, gotPin, tc.wantPin, labels)
+			}
+			if IsPersistentInfraRole(tc.roleType) != tc.wantPin {
+				t.Errorf("role %q: IsPersistentInfraRole=%v, want %v", tc.roleType, IsPersistentInfraRole(tc.roleType), tc.wantPin)
+			}
+		})
+	}
+
+	// Nil fields must not panic and must still yield gt:agent.
+	if labels := agentBeadLabels(nil); !containsStr(labels, LabelAgent) {
+		t.Errorf("nil fields: labels %v missing %s", labels, LabelAgent)
+	}
+}
+
+func containsStr(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}

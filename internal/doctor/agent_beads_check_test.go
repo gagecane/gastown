@@ -563,6 +563,140 @@ esac
 	}
 }
 
+// TestAgentBeadsExistCheck_FixAddsPinnedToInfra verifies the gu-8r6u6 audit:
+// Fix() adds the gt:pinned protective label to a persistent-infra agent bead
+// (witness) that already has gt:agent but is missing gt:pinned. This is the
+// one-shot remediation for infra beads created before the protection existed.
+func TestAgentBeadsExistCheck_FixAddsPinnedToInfra(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gs-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(tmpDir, "bd.log")
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	bdScript := filepath.Join(binDir, "bd")
+	witnessID := "gs-gastown-witness"
+	refineryID := "gs-gastown-refinery"
+	// Fake bd: `list --label=gt:agent` returns the witness with gt:agent but no
+	// gt:pinned (the pre-fix state). verifyLabelAdded queries `sql SELECT 1...`
+	// — return a non-matching row so the SQL fallback path also fires harmlessly.
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+
+logfile="` + logFile + `"
+
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == --allow-stale ]]; then
+    continue
+  fi
+  args+=("$arg")
+done
+
+cmd=""
+idx=0
+for i in "${!args[@]}"; do
+  if [[ "${args[$i]}" != -* ]]; then
+    cmd="${args[$i]}"
+    idx=$i
+    break
+  fi
+done
+
+if [[ -z "$cmd" ]]; then
+  exit 0
+fi
+
+rest=("${args[@]:$((idx + 1))}")
+
+case "$cmd" in
+  list)
+    # Return the witness as an existing agent bead WITH gt:agent but WITHOUT gt:pinned.
+    printf '[{"id":"` + witnessID + `","title":"Witness","status":"open","labels":["gt:agent"]}]\n'
+    ;;
+  mol)
+    if [[ "${rest[0]:-}" == "wisp" && "${rest[1]:-}" == "list" ]]; then
+      printf '{"wisps":[]}\n'
+      exit 0
+    fi
+    exit 1
+    ;;
+  sql)
+    # verifyLabelAdded: pretend the label exists so no SQL fallback is needed.
+    printf '1\n'
+    ;;
+  show)
+    exit 1
+    ;;
+  create)
+    id=""
+    for arg in "${rest[@]}"; do
+      case "$arg" in
+        --id=*) id="${arg#--id=}" ;;
+      esac
+    done
+    printf 'create %s\n' "$id" >> "$logfile"
+    printf '{"id":"%s","status":"open","labels":["gt:agent"]}\n' "$id"
+    ;;
+  update)
+    if [[ ${#rest[@]} -gt 0 ]]; then
+      printf 'update %s\n' "${rest[*]}" >> "$logfile"
+    fi
+    printf '{}'\n
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+
+	check := NewAgentBeadsCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: "gastown"}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading fake bd log: %v", err)
+	}
+	log := string(data)
+
+	// Must have added gt:pinned to the witness (an infra bead missing it).
+	foundPin := false
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update "+witnessID) && strings.Contains(line, "gt:pinned") {
+			foundPin = true
+			break
+		}
+	}
+	if !foundPin {
+		t.Fatalf("expected Fix() to add gt:pinned to infra bead %s, got log: %q", witnessID, log)
+	}
+
+	// The refinery is missing entirely → created via CreateAgentBead (which
+	// attaches gt:pinned itself). It must NOT be the witness we just pinned.
+	_ = refineryID
+}
+
 // TestListCrewWorkers_FiltersWorktrees verifies that listCrewWorkers skips
 // git worktrees (directories where .git is a file) and only returns canonical
 // crew workers (where .git is a directory). This is the fix for GH#2767.

@@ -68,6 +68,43 @@ type AgentFields struct {
 	LastOutcomeTime string // RFC3339 timestamp of when LastOutcome was recorded
 }
 
+// LabelAgent marks a bead as an agent/identity bead.
+const LabelAgent = "gt:agent"
+
+// LabelPinned is the protective never-reap label. It is attached to the
+// persistent infra agent beads (refinery/witness/dog) alongside gt:agent so a
+// single missing label cannot expose an infra bead to the reaper's stale
+// auto-close. Must match reaper.LabelPinned. See gu-8r6u6.
+const LabelPinned = "gt:pinned"
+
+// persistentInfraRoleTypes are the role_type values whose agent beads are
+// long-lived rig/town infrastructure (not transient workers). They get the
+// gt:pinned protective label at creation time. Must stay in sync with
+// reaper.persistentInfraRoles. See gu-8r6u6.
+var persistentInfraRoleTypes = map[string]bool{
+	"refinery": true,
+	"witness":  true,
+	"dog":      true,
+}
+
+// IsPersistentInfraRole reports whether a role_type denotes a persistent infra
+// agent (refinery/witness/dog) that must carry the gt:pinned protective label.
+func IsPersistentInfraRole(roleType string) bool {
+	return persistentInfraRoleTypes[roleType]
+}
+
+// agentBeadLabels returns the labels an agent bead should be created with.
+// Every agent bead gets gt:agent; persistent infra agents (refinery/witness/dog)
+// additionally get gt:pinned so they are protected from the reaper's stale
+// auto-close even if the gt:agent label is later lost (gu-8r6u6).
+func agentBeadLabels(fields *AgentFields) []string {
+	labels := []string{LabelAgent}
+	if fields != nil && IsPersistentInfraRole(fields.RoleType) {
+		labels = append(labels, LabelPinned)
+	}
+	return labels
+}
+
 // Durable terminal lifecycle outcome values (gs-2m1b). Recorded by gt done on
 // the agent bead and read by witness zombie-patrol + dispatch.
 const (
@@ -321,7 +358,7 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 			"--title=" + title,
 			"--description=" + description,
 			"--type=task",
-			"--labels=gt:agent",
+			"--labels=" + strings.Join(agentBeadLabels(fields), ","),
 		}
 		if NeedsForceForID(id) {
 			a = append(a, "--force")
@@ -415,7 +452,7 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 	updateOpts := UpdateOptions{
 		Title:       &title,
 		Description: &description,
-		SetLabels:   []string{"gt:agent"},
+		SetLabels:   agentBeadLabels(fields),
 	}
 	if err := target.Update(id, updateOpts); err != nil {
 		return nil, fmt.Errorf("updating agent bead: %w", err)

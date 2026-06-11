@@ -263,6 +263,38 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 // with capacity.LabelSlingContext.
 const LabelSlingContext = "gt:sling-context"
 
+// LabelPinned is the protective label that marks a bead as never-reapable.
+// Bootstrap (gt rig add) and gt doctor --fix attach it to the persistent infra
+// agent beads (refinery/witness/dog) alongside gt:agent so a single missing
+// label cannot expose an infra bead to auto-close. See gu-8r6u6.
+const LabelPinned = "gt:pinned"
+
+// persistentInfraRoles are the role_type values whose agent beads represent
+// long-lived rig/town infrastructure (not transient workers). Their beads must
+// never be auto-closed as "stale": closing one strips its heartbeat/idle/backoff
+// state, breaks `gt agents resolve --agent-bead`, and wedges the witness/refinery
+// patrol loop (gu-8r6u6; evidence cae2-sle, mrd-d6n). These strings are internal
+// constants — never user input — so interpolating them into a LIKE pattern is
+// injection-safe.
+var persistentInfraRoles = []string{"refinery", "witness", "dog"}
+
+// staleInfraRoleExcludeSQL returns AND-prefixed SQL conditions that exclude
+// agent beads carrying a persistent-infra role_type from a stale-issue sweep.
+// It is a label-independent, belt-and-suspenders defense: even if an infra bead
+// loses its gt:agent / gt:pinned label (the failure mode behind gu-8r6u6), its
+// description still carries `role_type: <role>` and this guard spares it.
+//
+// The alias is the issues-table alias used by the caller's query ("i"). Shared
+// by AutoClose() and Scan() so their stale candidate sets stay in lockstep.
+func staleInfraRoleExcludeSQL(alias string) string {
+	var b strings.Builder
+	for _, role := range persistentInfraRoles {
+		// role is an internal constant (refinery/witness/dog), never user input.
+		fmt.Fprintf(&b, "\n\t\t\tAND %s.description NOT LIKE '%%role_type: %s%%'", alias, role)
+	}
+	return b.String()
+}
+
 // liveTrackedContextExcludeJoin returns a LEFT JOIN clause and WHERE condition
 // that excludes sling-context wisps whose tracked work bead is still open.
 //
@@ -359,6 +391,9 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 
 	// Count stale issue candidates.
 	// Same caveat: issues/dependencies tables may live on a separate Dolt instance.
+	// Must match AutoClose()'s eligibility exactly, including the gt:pinned label
+	// exclusion and the persistent-infra role_type guard (gu-8r6u6), otherwise scan
+	// can report candidates that AutoClose will never close.
 	staleQuery := `
 		SELECT COUNT(*) FROM issues i
 		WHERE i.status IN ('open', 'in_progress')
@@ -368,8 +403,8 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		AND i.issue_type != 'agent'
 		AND i.id NOT IN (
 			SELECT DISTINCT l.issue_id FROM labels l
-			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent')
-		)
+			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent', 'gt:pinned')
+		)` + staleInfraRoleExcludeSQL("i") + `
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM dependencies d
 			INNER JOIN issues dep ON d.depends_on_issue_id = dep.id
@@ -868,6 +903,11 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 	staleCutoff := time.Now().UTC().Add(-staleAge)
 	result := &AutoCloseResult{Database: dbName, DryRun: dryRun}
 
+	// The gt:pinned label and the persistent-infra role_type guard
+	// (staleInfraRoleExcludeSQL) protect long-lived infra agent beads
+	// (refinery/witness/dog) from being auto-closed as stale. The role_type
+	// guard is label-independent, so an infra bead survives even if it loses its
+	// gt:agent / gt:pinned labels — the failure mode behind gu-8r6u6.
 	whereClause := fmt.Sprintf(`
 		i.status IN ('open', 'in_progress')
 		AND i.updated_at < ?
@@ -876,8 +916,8 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 		AND i.issue_type != 'agent'
 		AND i.id NOT IN (
 			SELECT DISTINCT l.issue_id FROM `+"`%s`"+`.labels l
-			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent')
-		)
+			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent', 'gt:pinned')
+		)`+staleInfraRoleExcludeSQL("i")+`
 		AND i.id NOT IN (
 			SELECT DISTINCT d.issue_id FROM `+"`%s`"+`.dependencies d
 			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_issue_id = dep.id
