@@ -95,10 +95,22 @@ func trimJSONForError(jsonOutput []byte) string {
 	return s
 }
 
-// verifyFormulaExists checks that the formula exists using bd formula show.
+// verifyFormulaExists checks that the formula exists using bd formula show,
+// falling back to the rig-aware on-disk resolver.
 // Formulas are TOML files (.formula.toml).
 // Requests stale-read compatibility for consistency with verifyBeadExists.
-func verifyFormulaExists(formulaName string) error {
+//
+// townRoot/rigName give the on-disk fallback its search context. A rig-scoped
+// formula (e.g. casc-patrol, shipped only at
+// <townRoot>/<rig>/.beads/formulas/casc-patrol.formula.toml) is invisible to
+// `bd formula show` run from the town/daemon context — `bd` resolves formulas
+// from the current beads store, not from a sibling rig's .beads/formulas dir.
+// That gap made daily patrol dispatch (casc-patrol-dispatch) fail every run
+// with "formula not found" despite the formula existing (gu-sw6cx, gu-b7xnj).
+// formula.ResolveFormulaContent applies the rig > town > embedded precedence,
+// so passing the target rig lets a rig-scoped formula resolve. Pass "" for
+// townRoot/rigName to skip the on-disk fallback (bd-only check).
+func verifyFormulaExists(formulaName, townRoot, rigName string) error {
 	// Try bd formula show (handles all formula file formats)
 	// Use Output() instead of Run() to detect bd exit 0 bug:
 	// when formula not found, bd may exit 0 but produce empty stdout.
@@ -114,6 +126,17 @@ func verifyFormulaExists(formulaName string) error {
 		AllowStale().
 		Stderr(io.Discard).Output(); err == nil && len(out) > 0 {
 		return nil
+	}
+
+	// Rig-aware on-disk fallback (gu-sw6cx): resolve rig-scoped formulas that
+	// `bd formula show` cannot see from the town/daemon context.
+	if townRoot != "" {
+		if _, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName); err == nil {
+			return nil
+		}
+		if _, err := formula.ResolveFormulaContent("mol-"+formulaName, townRoot, rigName); err == nil {
+			return nil
+		}
 	}
 
 	return fmt.Errorf("formula '%s' not found (check 'bd formula list')", formulaName)

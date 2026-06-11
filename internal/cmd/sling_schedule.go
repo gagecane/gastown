@@ -378,7 +378,7 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		// runs the intended formula.
 		if shouldReattachFormula(opts.Force, opts.Formula, existingFields) {
 			if opts.Formula != "" {
-				if err := verifyFormulaExists(opts.Formula); err != nil {
+				if err := verifyFormulaExists(opts.Formula, townRoot, rigName); err != nil {
 					return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
 				}
 			}
@@ -461,7 +461,7 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	}
 
 	if opts.Formula != "" {
-		if err := verifyFormulaExists(opts.Formula); err != nil {
+		if err := verifyFormulaExists(opts.Formula, townRoot, rigName); err != nil {
 			return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
 		}
 	}
