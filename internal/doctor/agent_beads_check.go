@@ -76,6 +76,7 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	var missing []string
 	var missingLabel []string
+	var missingPinned []string
 	var checked int
 
 	// Build combined sets of known agent beads from both issues and wisps tables.
@@ -117,12 +118,17 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// checkAgentBead verifies an agent bead exists (in issues or wisps table).
 	// Label checking only applies to beads found in the issues table (wisps
-	// don't expose labels in their list output).
-	checkAgentBead := func(id string) {
+	// don't expose labels in their list output). pinnedRole marks persistent
+	// infra agents (witness/refinery/dog) that must additionally carry the
+	// gt:pinned protective label (gu-8r6u6).
+	checkAgentBead := func(id string, pinnedRole bool) {
 		if issue, exists := allAgentBeads[id]; exists {
 			// Found in issues table — check label
 			if !beads.HasLabel(issue, "gt:agent") {
 				missingLabel = append(missingLabel, id)
+			}
+			if pinnedRole && !beads.HasLabel(issue, beads.LabelPinned) {
+				missingPinned = append(missingPinned, id)
 			}
 		} else if !allWispIDs[id] {
 			// Not in issues or wisps
@@ -131,12 +137,12 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		checked++
 	}
 
-	// Check global agents (Mayor, Deacon)
+	// Check global agents (Mayor, Deacon). Neither is a pinned infra role.
 	deaconID := beads.DeaconBeadIDTown()
 	mayorID := beads.MayorBeadIDTown()
 
-	checkAgentBead(deaconID)
-	checkAgentBead(mayorID)
+	checkAgentBead(deaconID, false)
+	checkAgentBead(mayorID, false)
 
 	if len(prefixToRig) == 0 {
 		// No rigs to check, but we still checked global agents
@@ -165,29 +171,29 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		witnessID := beads.WitnessBeadIDWithPrefix(prefix, rigName)
 		refineryID := beads.RefineryBeadIDWithPrefix(prefix, rigName)
 
-		checkAgentBead(witnessID)
-		checkAgentBead(refineryID)
+		checkAgentBead(witnessID, true)
+		checkAgentBead(refineryID, true)
 
 		// Check crew worker agents
 		crewWorkers := listCrewWorkers(ctx.TownRoot, rigName)
 		for _, workerName := range crewWorkers {
 			crewID := beads.CrewBeadIDWithPrefix(prefix, rigName, workerName)
-			checkAgentBead(crewID)
+			checkAgentBead(crewID, false)
 		}
 
 		// Check polecat agents
 		polecatWorkers := listPolecats(ctx.TownRoot, rigName)
 		for _, polecatName := range polecatWorkers {
 			polecatID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-			checkAgentBead(polecatID)
+			checkAgentBead(polecatID, false)
 		}
 	}
 
-	if len(missing) == 0 && len(missingLabel) == 0 {
+	if len(missing) == 0 && len(missingLabel) == 0 && len(missingPinned) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("All %d agent beads exist with gt:agent label", checked),
+			Message: fmt.Sprintf("All %d agent beads exist with required labels", checked),
 		}
 	}
 
@@ -201,12 +207,24 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	if len(missingLabel) > 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("%d agent bead(s) missing gt:agent label", len(missingLabel)),
+			Details: missingLabel,
+			FixHint: "Run 'gt doctor --fix' to add missing labels",
+		}
+	}
+
+	// Only pinned-label gaps remain: infra agents (witness/refinery/dog) that
+	// lack the gt:pinned reaper-protection label (gu-8r6u6).
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d agent bead(s) missing gt:agent label", len(missingLabel)),
-		Details: missingLabel,
-		FixHint: "Run 'gt doctor --fix' to add missing labels",
+		Message: fmt.Sprintf("%d infra agent bead(s) missing gt:pinned label", len(missingPinned)),
+		Details: missingPinned,
+		FixHint: "Run 'gt doctor --fix' to add the gt:pinned protective label",
 	}
 }
 
@@ -253,6 +271,24 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// ghost-dispatch loops (gu-ypjm). Operators pin identity beads to prevent
 	// the dog dispatcher from treating them as ready work, and doctor must not
 	// defeat that workaround by reopening them (gu-dl1s).
+	// ensurePinnedLabel adds the gt:pinned protective label to an existing bead
+	// whose role is a persistent infrastructure agent (witness/refinery/dog) and
+	// that is missing it. This is the repeatable cross-rig audit half of gu-8r6u6:
+	// beads created before gt:pinned existed get the label backfilled. Best-effort
+	// with SQL fallback, mirroring the gt:agent ensure path. No-op for ephemeral
+	// roles (polecat, crew) and beads that already carry the label.
+	ensurePinnedLabel := func(bd *beads.Beads, workDir, id string, issue *beads.Issue, fields *beads.AgentFields) {
+		if fields == nil || !beads.IsPinnedRole(fields.RoleType) {
+			return
+		}
+		if issue != nil && beads.HasLabel(issue, beads.LabelPinned) {
+			return
+		}
+		if err := bd.Update(id, beads.UpdateOptions{AddLabels: []string{beads.LabelPinned}}); err != nil || !verifyLabelAdded(workDir, id, beads.LabelPinned) {
+			_ = addLabelSQL(workDir, id, beads.LabelPinned)
+		}
+	}
+
 	fixAgentBead := func(bd *beads.Beads, workDir, id, desc string, fields *beads.AgentFields) error {
 		// Check issues table first
 		if issue, exists := allAgentBeads[id]; exists {
@@ -276,6 +312,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 					}
 				}
 			}
+			ensurePinnedLabel(bd, workDir, id, issue, fields)
 			return nil
 		}
 
@@ -287,6 +324,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 				if !beads.HasLabel(issue, "gt:agent") {
 					_ = bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
 				}
+				ensurePinnedLabel(bd, workDir, id, issue, fields)
 			}
 			return nil
 		}
@@ -303,6 +341,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 				if !beads.HasLabel(issue, "gt:agent") {
 					_ = bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
 				}
+				ensurePinnedLabel(bd, workDir, id, issue, fields)
 				return nil
 			case "closed":
 				// Bead exists but is closed — REOPEN it instead of recreating.
@@ -314,6 +353,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 				if !beads.HasLabel(issue, "gt:agent") {
 					_ = bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
 				}
+				ensurePinnedLabel(bd, workDir, id, issue, fields)
 				return nil
 			}
 		}
@@ -327,6 +367,12 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		// wisp_labels. Doctor checks query wisps via JOIN wisp_labels, so the label
 		// must exist there or the check still reports the bead as missing. See gt-3vx.
 		_ = addWispLabelSQL(workDir, id, "gt:agent")
+		// Pinned infra agents (witness/refinery/dog) also need gt:pinned in
+		// wisp_labels for the same reason — CreateAgentBead writes it to the
+		// labels table but not wisp_labels (gu-8r6u6).
+		if beads.IsPinnedRole(fields.RoleType) {
+			_ = addWispLabelSQL(workDir, id, beads.LabelPinned)
+		}
 		return nil
 	}
 

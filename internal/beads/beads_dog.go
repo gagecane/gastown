@@ -15,6 +15,7 @@ func (b *Beads) CreateDogAgentBead(name, location string) (*Issue, error) {
 	beadID := DogBeadIDTown(name) // Use canonical ID: hq-dog-<name>
 	labels := []string{
 		"gt:agent",
+		LabelPinned, // dogs are persistent agents — never reap (gu-8r6u6)
 		"role_type:dog",
 		"rig:town",
 		"location:" + location,

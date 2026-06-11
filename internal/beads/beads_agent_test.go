@@ -457,6 +457,59 @@ func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
 	// Work bead status=hooked and assignee=<agent> is now the authoritative source.
 }
 
+// TestCreateAgentBead_PinsInfraRoles verifies gu-8r6u6: persistent infra agents
+// (witness/refinery/dog) get the gt:pinned protective label at creation so the
+// reaper never auto-closes them, while ephemeral roles (polecat/crew) do not.
+func TestCreateAgentBead_PinsInfraRoles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+
+	cases := []struct {
+		role    string
+		id      string
+		wantPin bool
+	}{
+		{"witness", "gt-gastown-witness", true},
+		{"refinery", "gt-gastown-refinery", true},
+		{"polecat", "gt-gastown-polecat-nux", false},
+		{"crew", "gt-gastown-crew-joe", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			townRoot, _ := filepath.EvalSymlinks(t.TempDir())
+			if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+				t.Fatalf("mkdir .beads: %v", err)
+			}
+			logPath := filepath.Join(townRoot, "bd.log")
+			installMockBDCreateRecorder(t, logPath)
+
+			bd := NewIsolated(townRoot)
+			if _, err := bd.CreateAgentBead(tc.id, tc.id, &AgentFields{
+				RoleType:   tc.role,
+				Rig:        "gastown",
+				AgentState: "idle",
+			}); err != nil {
+				t.Fatalf("CreateAgentBead: %v", err)
+			}
+
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read mock bd log: %v", err)
+			}
+			log := string(data)
+			gotPin := strings.Contains(log, "--labels=gt:agent,"+LabelPinned)
+			if gotPin != tc.wantPin {
+				t.Fatalf("role %q: gt:pinned present=%v, want %v\nlog:\n%s", tc.role, gotPin, tc.wantPin, log)
+			}
+			if !strings.Contains(log, "--labels=gt:agent") {
+				t.Fatalf("role %q: expected gt:agent label in create args\nlog:\n%s", tc.role, log)
+			}
+		})
+	}
+}
+
 func TestCreateAgentBead_ParsesMockCreateOutput(t *testing.T) {
 	raw := []byte(`{"id":"pt-imported-polecat-shiny","title":"shiny","status":"open"}`)
 	var issue Issue

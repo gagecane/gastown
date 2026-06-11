@@ -335,6 +335,12 @@ func TestAutoCloseExcludesAgentBeads(t *testing.T) {
 	if !strings.Contains(body, "'gt:agent'") {
 		t.Fatalf("expected AutoClose() label exclusion to include 'gt:agent', body was:\n%s", body)
 	}
+	// gu-8r6u6: gt:pinned is the belt-and-suspenders protective label for
+	// persistent infra agents (witness/refinery/dog). AutoClose must spare it
+	// even if a bead somehow lost its gt:agent label.
+	if !strings.Contains(body, "'gt:pinned'") {
+		t.Fatalf("expected AutoClose() label exclusion to include 'gt:pinned', body was:\n%s", body)
+	}
 }
 
 // TestLiveTrackedContextExcludeJoin pins the gu-ycihb sling-context guard: the

@@ -4013,6 +4013,31 @@ func TestIsAgentBead(t *testing.T) {
 	}
 }
 
+// TestIsPinnedRole pins the gu-8r6u6 contract: persistent infra agents
+// (witness/refinery/dog) are pinned roles whose beads must never be reaped;
+// ephemeral roles (polecat/crew) and unknowns are not.
+func TestIsPinnedRole(t *testing.T) {
+	tests := []struct {
+		role string
+		want bool
+	}{
+		{"witness", true},
+		{"refinery", true},
+		{"dog", true},
+		{"polecat", false},
+		{"crew", false},
+		{"mayor", false},
+		{"deacon", false},
+		{"", false},
+		{"WITNESS", false}, // case-sensitive: role_type values are lowercase
+	}
+	for _, tt := range tests {
+		if got := IsPinnedRole(tt.role); got != tt.want {
+			t.Errorf("IsPinnedRole(%q) = %v, want %v", tt.role, got, tt.want)
+		}
+	}
+}
+
 // TestIsIdentityBeadTitle verifies the naming-convention regex used by the
 // ghost-dispatch filter (gu-ypjm / gu-3znx / gu-huta). Matches identity beads
 // with titles like "<prefix>-<rig>-polecat-<name>", "<prefix>-<rig>-refinery",

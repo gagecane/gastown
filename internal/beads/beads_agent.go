@@ -315,13 +315,21 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 
 	description := FormatAgentDescription(title, fields)
 
+	// Persistent infrastructure agents (witness, refinery, dog) carry the
+	// gt:pinned label so the stale-issue reaper never auto-closes them — a
+	// belt-and-suspenders backstop alongside the gt:agent exclusion (gu-8r6u6).
+	labels := "gt:agent"
+	if fields != nil && IsPinnedRole(fields.RoleType) {
+		labels += "," + LabelPinned
+	}
+
 	buildArgs := func() []string {
 		a := []string{"create", "--json",
 			"--id=" + id,
 			"--title=" + title,
 			"--description=" + description,
 			"--type=task",
-			"--labels=gt:agent",
+			"--labels=" + labels,
 		}
 		if NeedsForceForID(id) {
 			a = append(a, "--force")

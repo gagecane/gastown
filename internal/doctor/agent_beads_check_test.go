@@ -431,6 +431,109 @@ esac
 	}
 }
 
+// TestAgentBeadsExistCheck_PinnedLabelAudit verifies gu-8r6u6: Run() flags a
+// witness/refinery infra bead that has gt:agent but is missing the gt:pinned
+// protective label, and Fix() backfills it. This is the repeatable cross-rig
+// audit half of the fix — beads created before gt:pinned existed get the label
+// added so the reaper never auto-closes them.
+func TestAgentBeadsExistCheck_PinnedLabelAudit(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gs-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(tmpDir, "bd.log")
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Fake bd: `list` returns the witness with gt:agent only (no gt:pinned).
+	// The refinery is returned fully labeled. Globals (mayor/deacon) are also
+	// returned so they aren't reported as missing. update logs its args.
+	witnessID := "gs-gastown-witness"
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+logfile="` + logFile + `"
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == --allow-stale ]]; then continue; fi
+  args+=("$arg")
+done
+cmd=""
+idx=0
+for i in "${!args[@]}"; do
+  if [[ "${args[$i]}" != -* ]]; then cmd="${args[$i]}"; idx=$i; break; fi
+done
+if [[ -z "$cmd" ]]; then exit 0; fi
+rest=("${args[@]:$((idx + 1))}")
+case "$cmd" in
+  list)
+    printf '[%s,%s,%s,%s]\n' \
+      '{"id":"hq-deacon","title":"hq-deacon","status":"open","labels":["gt:agent"]}' \
+      '{"id":"hq-mayor","title":"hq-mayor","status":"open","labels":["gt:agent"]}' \
+      '{"id":"gs-gastown-witness","title":"gs-gastown-witness","status":"open","labels":["gt:agent"]}' \
+      '{"id":"gs-gastown-refinery","title":"gs-gastown-refinery","status":"open","labels":["gt:agent","gt:pinned"]}'
+    ;;
+  mol)
+    if [[ "${rest[0]:-}" == "wisp" && "${rest[1]:-}" == "list" ]]; then printf '{"wisps":[]}\n'; exit 0; fi
+    exit 1 ;;
+  show)
+    printf '[{"id":"%s","title":"%s","status":"open","labels":["gt:agent"]}]\n' "${rest[0]:-}" "${rest[0]:-}" ;;
+  update)
+    printf 'update %s\n' "${rest[*]}" >> "$logfile"
+    printf '{}\n' ;;
+  *) exit 0 ;;
+esac
+`
+	bdScript := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+
+	check := NewAgentBeadsCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: "gastown"}
+
+	// Run() must flag the missing gt:pinned label (Warning, not OK — otherwise
+	// the doctor harness never invokes Fix()).
+	result := check.Run(ctx)
+	if result.Status == StatusOK {
+		t.Fatalf("expected Run() to flag missing gt:pinned, got OK: %s", result.Message)
+	}
+	if !strings.Contains(strings.Join(result.Details, ","), witnessID) {
+		t.Fatalf("expected Run() details to name %s, got: %v", witnessID, result.Details)
+	}
+
+	// Fix() must add gt:pinned to the witness.
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading fake bd log: %v", err)
+	}
+	log := string(data)
+	foundPinUpdate := false
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update "+witnessID) && strings.Contains(line, "gt:pinned") {
+			foundPinUpdate = true
+			break
+		}
+	}
+	if !foundPinUpdate {
+		t.Fatalf("expected Fix() to add gt:pinned to %s, got log: %q", witnessID, log)
+	}
+}
+
 // TestAgentBeadsExistCheck_FixReopensClosed verifies that Fix() still reopens
 // agent beads with status=closed. This guards the existing behaviour from
 // d7ef2d6e (doctor --fix reopens closed agent beads instead of recreating)

@@ -516,6 +516,29 @@ func HasUncheckedCriteria(issue *Issue) int {
 	return count
 }
 
+// LabelPinned is the protective label applied to persistent infrastructure
+// agent beads (witness, refinery, dog) so the reaper never auto-closes them.
+// It is a belt-and-suspenders backstop alongside the gt:agent exclusion: a
+// reaper that closes a singleton rig agent's bead strips its heartbeat/idle/
+// backoff state and breaks `gt agents resolve`, churning the rig's patrol
+// cadence (gu-8r6u6, hq:gc-yh553y). Pinned-role beads carry both gt:agent and
+// gt:pinned.
+const LabelPinned = "gt:pinned"
+
+// IsPinnedRole reports whether an agent role_type identifies a persistent
+// singleton infrastructure agent that must never be reaped. These roles
+// (witness, refinery, dog) have durable identity that survives session death,
+// unlike ephemeral polecats. Their beads are tagged gt:pinned at creation so a
+// stale-issue reaper protects them regardless of their gt:agent label.
+func IsPinnedRole(roleType string) bool {
+	switch roleType {
+	case "witness", "refinery", "dog":
+		return true
+	default:
+		return false
+	}
+}
+
 // IsAgentBead checks if an issue is an agent bead by checking for the gt:agent
 // label (preferred) or the legacy type == "agent" field. This handles the migration
 // from type-based to label-based agent identification (see gt-vja7b).
