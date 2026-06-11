@@ -1731,6 +1731,13 @@ func (g *Git) DeleteRemoteBranch(remote, branch string) error {
 	return err
 }
 
+// DeleteRemoteBranchIfAt deletes a remote branch only if it still points at expectedHash.
+func (g *Git) DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error {
+	ref := "refs/heads/" + branch
+	_, err := g.runWithTimeout(pushTimeout, "push", "--force-with-lease="+ref+":"+expectedHash, remote, ":"+ref)
+	return err
+}
+
 // HasOpenPR checks whether the given branch has an open pull request on GitHub.
 // Uses the gh CLI to query for open PRs with the branch as head ref.
 // Returns false on any error (fail-open: branch deletion proceeds if gh is unavailable).

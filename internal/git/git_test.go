@@ -3457,6 +3457,76 @@ func TestListPushRemoteRefsWithHashesUsesPushURLHash(t *testing.T) {
 	}
 }
 
+func TestDeleteRemoteBranchIfAtRejectsChangedBranch(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	branch := "polecat/lease-test"
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "lease.txt"), []byte("old"), 0644); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	if err := g.Add("lease.txt"); err != nil {
+		t.Fatalf("Add old: %v", err)
+	}
+	if err := g.Commit("lease old"); err != nil {
+		t.Fatalf("Commit old: %v", err)
+	}
+	oldHash, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev old: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push old: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "lease.txt"), []byte("new"), 0644); err != nil {
+		t.Fatalf("write new: %v", err)
+	}
+	if err := g.Add("lease.txt"); err != nil {
+		t.Fatalf("Add new: %v", err)
+	}
+	if err := g.Commit("lease new"); err != nil {
+		t.Fatalf("Commit new: %v", err)
+	}
+	newHash, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev new: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push new: %v", err)
+	}
+
+	if err := g.DeleteRemoteBranchIfAt("origin", branch, oldHash); err == nil {
+		t.Fatal("DeleteRemoteBranchIfAt should reject a branch that advanced")
+	}
+	exists, err := g.RemoteBranchExists("origin", branch)
+	if err != nil {
+		t.Fatalf("RemoteBranchExists after rejected delete: %v", err)
+	}
+	if !exists {
+		t.Fatal("branch should still exist after rejected delete")
+	}
+	if err := g.DeleteRemoteBranchIfAt("origin", branch, newHash); err != nil {
+		t.Fatalf("DeleteRemoteBranchIfAt current hash: %v", err)
+	}
+	exists, err = g.RemoteBranchExists("origin", branch)
+	if err != nil {
+		t.Fatalf("RemoteBranchExists after delete: %v", err)
+	}
+	if exists {
+		t.Fatal("branch should be deleted when expected hash matches")
+	}
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+}
+
 // TestPushRemoteBranchExists_NoPushURL verifies that PushRemoteBranchExists
 // falls back to RemoteBranchExists when no custom push URL is configured.
 func TestPushRemoteBranchExists_NoPushURL(t *testing.T) {
