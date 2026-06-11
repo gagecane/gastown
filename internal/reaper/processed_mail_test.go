@@ -152,6 +152,88 @@ func TestReapProcessedMailSweepsOpenAndInProgress(t *testing.T) {
 	}
 }
 
+// TestReapProcessedWispMailTargetsWispTables is the central guard for gu-2md8k:
+// the wisp sweep must operate on the wisps / wisp_labels tables (not issues /
+// labels), still gate on the processed done-label, exclude agents, and target
+// only open/in_progress (never hooked). Without this the processed
+// message/escalation beads that the open-wisp alert actually counts are never
+// drained.
+func TestReapProcessedWispMailTargetsWispTables(t *testing.T) {
+	data, err := os.ReadFile("processed_mail.go")
+	if err != nil {
+		t.Fatalf("read processed_mail.go: %v", err)
+	}
+	src := string(data)
+
+	reapStart := strings.Index(src, "func ReapProcessedWispMail(")
+	if reapStart < 0 {
+		t.Fatal("ReapProcessedWispMail function not found")
+	}
+	reapEnd := strings.Index(src[reapStart:], "\nfunc ")
+	if reapEnd < 0 {
+		reapEnd = len(src) - reapStart
+	}
+	reapBody := src[reapStart : reapStart+reapEnd]
+
+	if !strings.Contains(reapBody, "FROM wisps w") {
+		t.Error("ReapProcessedWispMail must SELECT FROM the wisps table (gu-2md8k)")
+	}
+	if !strings.Contains(reapBody, "wisp_labels") {
+		t.Error("ReapProcessedWispMail must join the wisp_labels table")
+	}
+	if !strings.Contains(reapBody, "UPDATE wisps SET status='closed'") {
+		t.Error("ReapProcessedWispMail must close rows in the wisps table")
+	}
+	if strings.Contains(reapBody, "FROM issues") {
+		t.Error("ReapProcessedWispMail must NOT touch the issues table — that is ReapProcessedMail's job")
+	}
+	// Same processed gate + exclusions as the issues sweep.
+	if !strings.Contains(reapBody, "done_l") || !strings.Contains(reapBody, "processedMailDoneLabels") {
+		t.Error("ReapProcessedWispMail must gate on the processed done-label set")
+	}
+	if !strings.Contains(reapBody, "type_l") || !strings.Contains(reapBody, "processedMailTypeLabels") {
+		t.Error("ReapProcessedWispMail must gate on the gt:message/gt:escalation type-label set")
+	}
+	if !strings.Contains(reapBody, "'open'") || !strings.Contains(reapBody, "'in_progress'") {
+		t.Error("ReapProcessedWispMail must target status='open' and 'in_progress'")
+	}
+	if strings.Contains(reapBody, "'hooked'") {
+		t.Error("ReapProcessedWispMail must NOT target status='hooked'")
+	}
+	if !strings.Contains(reapBody, "issue_type != 'agent'") {
+		t.Error("ReapProcessedWispMail must exclude agent beads")
+	}
+}
+
+// TestProcessedWispMailCountQueryCutoffPlaceholder verifies the wisps-table
+// count-query builder emits the created_at age filter only when a cutoff is
+// requested, and always gates on the type/done labels and the wisp-resolved
+// live-consumer exclusion.
+func TestProcessedWispMailCountQueryCutoffPlaceholder(t *testing.T) {
+	preserve := []string{"gt:keep"}
+
+	withCutoff := processedWispMailCountQuery(preserve, true)
+	if !strings.Contains(withCutoff, "w.created_at < ?") {
+		t.Error("processedWispMailCountQuery(withCutoff=true) must include the created_at age filter")
+	}
+
+	noCutoff := processedWispMailCountQuery(preserve, false)
+	if strings.Contains(noCutoff, "w.created_at < ?") {
+		t.Error("processedWispMailCountQuery(withCutoff=false) must NOT include the created_at age filter")
+	}
+	for _, q := range []string{withCutoff, noCutoff} {
+		if !strings.Contains(q, "FROM wisps w") || !strings.Contains(q, "wisp_labels") {
+			t.Errorf("count query must target wisp tables: %s", q)
+		}
+		if !strings.Contains(q, "type_l.label IN") || !strings.Contains(q, "done_l.label IN") {
+			t.Errorf("count query missing type/done label gates: %s", q)
+		}
+		if !strings.Contains(q, "FROM wisps c") {
+			t.Errorf("count query must resolve the live consumer against wisps, not issues: %s", q)
+		}
+	}
+}
+
 // TestProcessedMailCountQueryCutoffPlaceholder verifies the shared count-query
 // builder emits the created_at age filter only when a cutoff is requested.
 func TestProcessedMailCountQueryCutoffPlaceholder(t *testing.T) {

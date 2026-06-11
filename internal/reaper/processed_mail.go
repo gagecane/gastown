@@ -157,6 +157,278 @@ func processedMailCountQuery(preserveLabels []string, withCutoff bool) string {
 		ConsumerAliveClause)
 }
 
+// wispProcessedMailConsumerAliveClause mirrors ConsumerAliveClause but resolves
+// the consumer bead against the wisps table rather than issues. Processed
+// notifications that live in wisps reference any live consumer there; the
+// issues-table clause would never match a wisp id, so the wisp sweep needs its
+// own clause to honor the same "skip if a live consumer is waiting" guard.
+const wispProcessedMailConsumerAliveClause = `
+	NOT EXISTS (
+		SELECT 1 FROM wisps c
+		WHERE c.id = JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.consumer_bead_id'))
+		AND c.status != 'closed'
+	)`
+
+// ScanProcessedWispMail is the wisps-table counterpart of ScanProcessedMail. It
+// counts processed (read/acked) message+escalation beads that live in the
+// dolt-ignored wisps table — the copies the open-wisp alert's CountOpenWisps
+// actually counts. Returns the total still open and the subset past the TTL.
+// Does not modify any data.
+//
+// The same processed gate, agent exclusion, preserve labels, and live-consumer
+// exclusion as ReapProcessedWispMail apply, so the reported counts reflect
+// beads actually subject to the sweep.
+func ScanProcessedWispMail(db *sql.DB, dbName string, ttl time.Duration) (total, candidates int, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	preserveLabels := []string{"gt:standing-orders", "gt:keep", "gt:role", "gt:rig"}
+
+	baseArgs := func(extra ...interface{}) []interface{} {
+		args := make([]interface{}, 0, len(processedMailTypeLabels)+len(processedMailDoneLabels)+len(preserveLabels)+len(extra))
+		args = append(args, extra...)
+		for _, l := range processedMailTypeLabels {
+			args = append(args, l)
+		}
+		for _, l := range processedMailDoneLabels {
+			args = append(args, l)
+		}
+		for _, l := range preserveLabels {
+			args = append(args, l)
+		}
+		return args
+	}
+
+	totalQuery := processedWispMailCountQuery(preserveLabels, false)
+	if err := db.QueryRowContext(ctx, totalQuery, baseArgs()...).Scan(&total); err != nil {
+		if isTableNotFound(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("count processed wisp mail total: %w", err)
+	}
+
+	if total == 0 {
+		return 0, 0, nil
+	}
+
+	cutoff := time.Now().UTC().Add(-ttl)
+	candQuery := processedWispMailCountQuery(preserveLabels, true)
+	if err := db.QueryRowContext(ctx, candQuery, baseArgs(cutoff)...).Scan(&candidates); err != nil {
+		if isTableNotFound(err) {
+			return total, 0, nil
+		}
+		return total, 0, fmt.Errorf("count processed wisp mail candidates: %w", err)
+	}
+
+	return total, candidates, nil
+}
+
+// processedWispMailCountQuery is the wisps-table counterpart of
+// processedMailCountQuery. Placeholder order: [cutoff?], type-labels,
+// done-labels, preserve-labels.
+func processedWispMailCountQuery(preserveLabels []string, withCutoff bool) string {
+	ageFilter := ""
+	if withCutoff {
+		ageFilter = "AND w.created_at < ?\n\t\t"
+	}
+	return fmt.Sprintf(`
+		SELECT COUNT(DISTINCT w.id) FROM wisps w
+		INNER JOIN wisp_labels type_l ON w.id = type_l.issue_id
+		INNER JOIN wisp_labels done_l ON w.id = done_l.issue_id
+		WHERE w.status IN ('open', 'in_progress')
+		AND w.issue_type != 'agent'
+		%sAND type_l.label IN (%s)
+		AND done_l.label IN (%s)
+		AND w.id NOT IN (
+			SELECT l2.issue_id FROM wisp_labels l2
+			WHERE l2.label IN (%s)
+		)
+		AND %s`,
+		ageFilter,
+		sqlPlaceholders(len(processedMailTypeLabels)),
+		sqlPlaceholders(len(processedMailDoneLabels)),
+		sqlPlaceholders(len(preserveLabels)),
+		wispProcessedMailConsumerAliveClause)
+}
+
+// ReapProcessedWispMail is the wisps-table counterpart of ReapProcessedMail. It
+// closes PROCESSED (read/acked) message and escalation beads that live in the
+// dolt-ignored wisps table, older than the TTL, with reason "processed".
+//
+// This completes gu-ctspx (originating bug gu-2md8k): mail/escalation
+// notifications are created in BOTH the version-controlled issues table and
+// the dolt-ignored wisps table. ReapProcessedMail drains only the issues
+// copies, but the open-wisp alert's CountOpenWisps counts the wisps table — so
+// processed notifications stranded in wisps were never swept and kept tripping
+// the reaper open-wisp threshold. This function drains the wisp copies on the
+// same processed gate.
+//
+// The exclusion set matches ReapProcessedMail (un-processed beads, agent beads,
+// preserve labels, live consumer) but resolves all of them against the wisps
+// tables. Like ReapProcessedMail it targets only status='open'/'in_progress'
+// and never 'hooked'.
+func ReapProcessedWispMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (*ProcessedMailResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cutoff := time.Now().UTC().Add(-ttl)
+	result := &ProcessedMailResult{Database: dbName, DryRun: dryRun}
+
+	preserveLabels := []string{"gt:standing-orders", "gt:keep", "gt:role", "gt:rig"}
+
+	selectQuery := fmt.Sprintf(`
+		SELECT DISTINCT w.id, w.title, w.created_at FROM wisps w
+		INNER JOIN wisp_labels type_l ON w.id = type_l.issue_id
+		INNER JOIN wisp_labels done_l ON w.id = done_l.issue_id
+		WHERE w.status IN ('open', 'in_progress')
+		AND w.issue_type != 'agent'
+		AND w.created_at < ?
+		AND type_l.label IN (%s)
+		AND done_l.label IN (%s)
+		AND w.id NOT IN (
+			SELECT l2.issue_id FROM wisp_labels l2
+			WHERE l2.label IN (%s)
+		)
+		AND %s
+		LIMIT %d`,
+		sqlPlaceholders(len(processedMailTypeLabels)),
+		sqlPlaceholders(len(processedMailDoneLabels)),
+		sqlPlaceholders(len(preserveLabels)),
+		wispProcessedMailConsumerAliveClause, DefaultBatchSize)
+
+	args := []interface{}{cutoff}
+	for _, lbl := range processedMailTypeLabels {
+		args = append(args, lbl)
+	}
+	for _, lbl := range processedMailDoneLabels {
+		args = append(args, lbl)
+	}
+	for _, lbl := range preserveLabels {
+		args = append(args, lbl)
+	}
+
+	type candidate struct {
+		id        string
+		title     string
+		createdAt time.Time
+	}
+
+	now := time.Now().UTC()
+	totalClosed := 0
+
+	for {
+		rows, err := db.QueryContext(ctx, selectQuery, args...)
+		if err != nil {
+			if isTableNotFound(err) {
+				return result, nil
+			}
+			return nil, fmt.Errorf("select processed wisp mail batch: %w", err)
+		}
+
+		var batch []candidate
+		for rows.Next() {
+			var c candidate
+			if err := rows.Scan(&c.id, &c.title, &c.createdAt); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan processed wisp mail row: %w", err)
+			}
+			batch = append(batch, c)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close processed wisp mail rows: %w", err)
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, c := range batch {
+			result.ClosedEntries = append(result.ClosedEntries, ClosedEntry{
+				ID:       c.id,
+				Title:    c.title,
+				AgeDays:  int(now.Sub(c.createdAt).Hours() / 24),
+				Database: dbName,
+			})
+		}
+
+		if dryRun {
+			totalClosed += len(batch)
+			break
+		}
+
+		placeholders := make([]string, len(batch))
+		updateArgs := make([]interface{}, 0, len(batch))
+		for i, c := range batch {
+			placeholders[i] = "?"
+			updateArgs = append(updateArgs, c.id)
+		}
+		inClause := strings.Join(placeholders, ",")
+
+		updateQuery := fmt.Sprintf(
+			"UPDATE wisps SET status='closed', closed_at=NOW() WHERE id IN (%s)",
+			inClause)
+
+		if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+			return result, fmt.Errorf("disable autocommit: %w", err)
+		}
+
+		sqlResult, err := db.ExecContext(ctx, updateQuery, updateArgs...)
+		if err != nil {
+			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+			return result, fmt.Errorf("close processed wisp mail batch: %w", err)
+		}
+		affected, _ := sqlResult.RowsAffected()
+		totalClosed += int(affected)
+
+		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+			return result, fmt.Errorf("sql commit: %w", err)
+		}
+		commitMsg := fmt.Sprintf("reaper: close %d processed wisp mail/escalation beads in %s", int(affected), dbName)
+		// The wisp tables are dolt-ignored, so DOLT_COMMIT('-Am') stages
+		// nothing and hasWorkingSetChanges is normally false here — guard the
+		// commit so the no-op does not spam dolt.log (gu-leuwr).
+		if hasWorkingSetChanges(ctx, db) {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
+				if !isNothingToCommit(err) {
+					result.Anomalies = append(result.Anomalies, Anomaly{
+						Type:    "dolt_commit_failed",
+						Message: fmt.Sprintf("dolt commit after processed-wisp-mail reap failed: %v", err),
+					})
+				}
+			}
+		}
+		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+
+		if len(batch) < DefaultBatchSize {
+			break
+		}
+	}
+
+	result.Closed = totalClosed
+
+	// Count remaining processed wisp mail for the report, applying the same
+	// exclusions as the select above.
+	remainQuery := processedWispMailCountQuery(preserveLabels, false)
+	remainArgs := make([]interface{}, 0, len(processedMailTypeLabels)+len(processedMailDoneLabels)+len(preserveLabels))
+	for _, lbl := range processedMailTypeLabels {
+		remainArgs = append(remainArgs, lbl)
+	}
+	for _, lbl := range processedMailDoneLabels {
+		remainArgs = append(remainArgs, lbl)
+	}
+	for _, lbl := range preserveLabels {
+		remainArgs = append(remainArgs, lbl)
+	}
+	if err := db.QueryRowContext(ctx, remainQuery, remainArgs...).Scan(&result.ProcessedRemain); err != nil {
+		if !isTableNotFound(err) {
+			return result, fmt.Errorf("count processed wisp mail remain: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
 // ReapProcessedMail closes PROCESSED (read/acked) message and escalation beads
 // older than the TTL with reason "processed". Returns the count of closed
 // beads and any remaining processed-but-open mail. Safe to call when the

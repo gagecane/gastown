@@ -705,10 +705,24 @@ Use --dry-run to preview closures without applying them.`,
 			}
 
 			result, err := reaper.ReapProcessedMail(db, dbName, ttl, reaperDryRun)
-			db.Close()
 			if err != nil {
+				db.Close()
 				fmt.Fprintf(os.Stderr, "%s: reap-processed-mail error: %v\n", dbName, err)
 				continue
+			}
+			// Also drain the dolt-ignored wisps copies (gu-2md8k): the same
+			// processed message/escalation beads accumulate there and are what
+			// the open-wisp alert counts. Merge the wisp closures into the same
+			// result so the per-db report reflects both tables.
+			wispResult, werr := reaper.ReapProcessedWispMail(db, dbName, ttl, reaperDryRun)
+			db.Close()
+			if werr != nil {
+				fmt.Fprintf(os.Stderr, "%s: reap-processed-wisp-mail error: %v\n", dbName, werr)
+			} else {
+				result.Closed += wispResult.Closed
+				result.ProcessedRemain += wispResult.ProcessedRemain
+				result.ClosedEntries = append(result.ClosedEntries, wispResult.ClosedEntries...)
+				result.Anomalies = append(result.Anomalies, wispResult.Anomalies...)
 			}
 			results = append(results, result)
 		}
@@ -1363,6 +1377,24 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 				}
 				totalProcessedMailClosed += processedMailResult.Closed
 				for _, a := range processedMailResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+
+			// Reap processed WISP mail (gu-2md8k: the same read/acked
+			// message & escalation beads also accumulate in the dolt-ignored
+			// wisps table, which is what the open-wisp alert counts; the
+			// issues-only sweep above never drains them)
+			processedWispMailResult, err := reaper.ReapProcessedWispMail(db, dbName, processedMailTTL, reaperDryRun)
+			if err != nil {
+				fmt.Printf("%s: reap-processed-wisp-mail error: %v\n", dbName, err)
+			} else {
+				for _, entry := range processedWispMailResult.ClosedEntries {
+					fmt.Printf("  %s %s (%dd processed wisp, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				totalProcessedMailClosed += processedWispMailResult.Closed
+				for _, a := range processedWispMailResult.Anomalies {
 					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
 				}
 			}
