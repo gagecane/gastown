@@ -85,6 +85,7 @@ var (
 	convoyListStatus   string
 	convoyListAll      bool
 	convoyListTree     bool
+	convoyListRig      string
 	convoyInteractive  bool
 	convoyStrandedJSON bool
 	convoyCloseReason  string
@@ -272,6 +273,7 @@ Examples:
   gt convoy list --all        # All convoys (open + closed)
   gt convoy list --status=closed  # Recently landed
   gt convoy list --tree       # Show convoy + child status tree
+  gt convoy list --rig=casc_webapp  # Only convoys for one rig
   gt convoy list --json`,
 	SilenceUsage: true,
 	RunE:         runConvoyList,
@@ -401,6 +403,7 @@ func init() {
 	convoyListCmd.Flags().StringVar(&convoyListStatus, "status", "", "Filter by status (open, closed)")
 	convoyListCmd.Flags().BoolVar(&convoyListAll, "all", false, "Show all convoys (open and closed)")
 	convoyListCmd.Flags().BoolVar(&convoyListTree, "tree", false, "Show convoy + child status tree")
+	convoyListCmd.Flags().StringVar(&convoyListRig, "rig", "", "Filter by rig (e.g. casc_webapp)")
 
 	// Interactive TUI flag (on parent command)
 	convoyCmd.Flags().BoolVarP(&convoyInteractive, "interactive", "i", false, "Interactive tree view")
@@ -2922,12 +2925,34 @@ func runConvoyList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing convoys: %w", err)
 	}
 
+	// Resolve each convoy's rig once, then apply the --rig filter. The map is
+	// reused for the JSON `rig` field below so rig resolution runs at most once
+	// per convoy. Only computed when needed (JSON output or --rig filter), since
+	// it costs a tracked-ID lookup per convoy that the plain text view doesn't.
+	var rigByConvoy map[string]string
+	if convoyListJSON || convoyListRig != "" {
+		rigByConvoy = make(map[string]string, len(convoys))
+		for _, c := range convoys {
+			rigByConvoy[c.ID] = convoyRig(townBeads, c)
+		}
+	}
+	if convoyListRig != "" {
+		filtered := convoys[:0]
+		for _, c := range convoys {
+			if rigByConvoy[c.ID] == convoyListRig {
+				filtered = append(filtered, c)
+			}
+		}
+		convoys = filtered
+	}
+
 	if convoyListJSON {
 		// Enrich each convoy with tracked issues and completion counts
 		type convoyListEntry struct {
 			ID        string             `json:"id"`
 			Title     string             `json:"title"`
 			Status    string             `json:"status"`
+			Rig       string             `json:"rig"`
 			CreatedAt string             `json:"created_at"`
 			Tracked   []trackedIssueInfo `json:"tracked"`
 			Completed int                `json:"completed"`
@@ -2953,6 +2978,7 @@ func runConvoyList(cmd *cobra.Command, args []string) error {
 				ID:        c.ID,
 				Title:     c.Title,
 				Status:    c.Status,
+				Rig:       rigByConvoy[c.ID],
 				CreatedAt: c.CreatedAt,
 				Tracked:   tracked,
 				Completed: completed,
@@ -3069,6 +3095,29 @@ type convoyListIssue struct {
 
 func isConvoyIssue(issueType string, labels []string) bool {
 	return issueType == "convoy" || hasLabel(labels, "gt:convoy")
+}
+
+// convoyRig resolves the rig a convoy belongs to. It honors a 'gt:rig:<name>'
+// label on the convoy itself when that names a real rig, otherwise it derives
+// the rig from the first tracked bead whose ID prefix maps to a rig. Returns ""
+// when no rig can be resolved (e.g. a convoy tracking only town-level beads).
+//
+// Resolution uses only the cheap tracked-ID lookup (no per-bead bd show
+// fan-out), so it is safe to call for every convoy in list/filter paths.
+func convoyRig(townBeads string, c convoyListIssue) string {
+	if want := beads.RigFromLabels(c.Labels); want != "" && beads.IsKnownRig(townBeads, want) {
+		return want
+	}
+	trackedIDs, err := getTrackedIssueIDs(townBeads, c.ID)
+	if err != nil {
+		return ""
+	}
+	for _, id := range trackedIDs {
+		if rig := beads.GetRigNameForPrefix(townBeads, beads.ExtractPrefix(id)); rig != "" {
+			return rig
+		}
+	}
+	return ""
 }
 
 func convoyLabels(owned bool) string {
