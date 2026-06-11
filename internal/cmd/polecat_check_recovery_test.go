@@ -493,6 +493,7 @@ func TestHookBeadSafeForCleanup(t *testing.T) {
 	tests := []struct {
 		name         string
 		hookBead     string
+		owner        string
 		bd           issueShower
 		wantSafe     bool
 		wantTerminal bool
@@ -500,13 +501,18 @@ func TestHookBeadSafeForCleanup(t *testing.T) {
 	}{
 		{name: "empty hook", wantSafe: true},
 		{name: "terminal hook", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: "closed"}}, wantSafe: true, wantTerminal: true},
-		{name: "open hook blocks", hookBead: "gt-work", bd: fakeIssueShower{issue: &beads.Issue{Status: "open"}}, wantBlocker: "hook_bead=gt-work status=open"},
+		{name: "open hook blocks", hookBead: "gt-work", owner: "gastown/polecats/nux", bd: fakeIssueShower{issue: &beads.Issue{Status: "open", Assignee: "gastown/polecats/nux"}}, wantBlocker: "hook_bead=gt-work status=open"},
 		{name: "lookup error blocks", hookBead: "gt-work", bd: fakeIssueShower{err: errors.New("bd exploded")}, wantBlocker: "lookup_error"},
+		// gu-l4gl5: non-terminal hook reassigned to a different owner is a stale
+		// worktree pointer, not work-at-risk — safe (but not terminal).
+		{name: "open hook reassigned is stale", hookBead: "gt-work", owner: "gastown/polecats/nux", bd: fakeIssueShower{issue: &beads.Issue{Status: "open", Assignee: "gastown/polecats/slit"}}, wantSafe: true},
+		// No assignee cannot prove reassignment, so it still blocks.
+		{name: "open hook no assignee blocks", hookBead: "gt-work", owner: "gastown/polecats/nux", bd: fakeIssueShower{issue: &beads.Issue{Status: "open"}}, wantBlocker: "hook_bead=gt-work status=open"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotSafe, gotTerminal, blocker := hookBeadSafeForCleanup(tt.bd, tt.hookBead)
+			gotSafe, gotTerminal, blocker := hookBeadSafeForCleanup(tt.bd, tt.hookBead, tt.owner)
 			if gotSafe != tt.wantSafe || gotTerminal != tt.wantTerminal {
 				t.Fatalf("hookBeadSafeForCleanup() = (%v, %v), want (%v, %v)", gotSafe, gotTerminal, tt.wantSafe, tt.wantTerminal)
 			}
