@@ -43,7 +43,7 @@ func TestLoadFormulaSteps(t *testing.T) {
 		want    []string
 	}{
 		{"mol-dog-checkpoint", []string{"scan", "checkpoint", "report"}},
-		{"mol-dog-reaper", []string{"scan", "reap", "purge", "auto-close", "report"}},
+		{"mol-dog-reaper", []string{"scan", "reap", "purge", "flush-wisps", "auto-close", "report"}},
 		{"mol-dog-doctor", []string{"probe", "inspect", "report"}},
 		{"mol-dog-backup", []string{"sync", "offsite", "report"}},
 	}

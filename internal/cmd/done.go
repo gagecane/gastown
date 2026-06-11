@@ -2307,9 +2307,33 @@ func pushBranchWithFallbacks(g *git.Git, townRoot, rigName, branch, defaultBranc
 	// Without refspec, git push follows the tracking config — polecat branches
 	// track origin/main, so a bare push sends commits to main directly,
 	// bypassing the MR/refinery flow (G20 root cause).
-	fmt.Printf("Pushing branch to remote...\n")
 	refspec := branch + ":" + branch
 	pushedCommitSHA, _ := g.Rev("HEAD")
+
+	// Skip the push entirely when origin/<branch> already points at our HEAD
+	// (gu-r96tr). A polecat that manually pushed its branch before `gt done`
+	// (all gates green locally) leaves origin/<branch> == HEAD, so the push
+	// below would deliver nothing — git reports "Everything up-to-date". But
+	// git STILL fires the pre-push hook on that no-op push, and the hook
+	// re-runs the full ~2min `go test ./...` suite. During a finish-storm,
+	// 15+ polecats doing this redundant re-run pile up on the host-wide
+	// gate-slot semaphore (gs-orsm) and `gt done` blocks ~30min in the push
+	// timeout. Detecting the no-op here avoids invoking the hook at all.
+	//
+	// Conservative: only skip on an exact tip==HEAD match against the push
+	// target (PushRemoteBranchTip honors a divergent pushurl, matching where
+	// the push would write). Any read error, empty tip, or mismatch falls
+	// through to the normal push — no behavior change. The caller still
+	// verifies origin/<branch> after this returns, so a skip cannot mask a
+	// commit that never actually reached origin.
+	if pushedCommitSHA != "" {
+		if tip, tipErr := g.PushRemoteBranchTip("origin", branch); tipErr == nil && tip == pushedCommitSHA {
+			fmt.Printf("%s Branch already at HEAD on origin — skipping redundant push + pre-push gate re-run (gu-r96tr)\n", style.Bold.Render("✓"))
+			return pushedCommitSHA, nil
+		}
+	}
+
+	fmt.Printf("Pushing branch to remote...\n")
 	pushErr := pushForDone(g, refspec)
 	if pushErr != nil {
 		// Primary push failed — try fallback from the bare repo (GH #1348).

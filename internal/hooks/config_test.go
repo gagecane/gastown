@@ -1759,6 +1759,210 @@ func writePluginOverride(t *testing.T, target string, plugins map[string]bool) {
 	}
 }
 
+// --- mcpServers managed field / town-configurable override layer (gu-2nmnt) ---
+//
+// Mirrors the enabledPlugins layer: Amazon-/tool-specific server names
+// (builder-mcp, serena) ship in ~/.gt/hooks-overrides/<target>.json, not in
+// shared Go. ExpectedMCPServers layers the town's on-disk mcpServers overrides;
+// ApplyExpectedMCPServers/HasExpectedMCPServers are the write/read sides.
+
+// TestExpectedMCPServers_EmptyWhenNoOverride verifies that, with no override
+// file, every role resolves to an empty map and no server names appear.
+func TestExpectedMCPServers_EmptyWhenNoOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	for _, target := range []string{"witness", "polecats", "crew", "mayor", "gastown/crew"} {
+		t.Run(target, func(t *testing.T) {
+			got, err := ExpectedMCPServers(target)
+			if err != nil {
+				t.Fatalf("ExpectedMCPServers(%q): %v", target, err)
+			}
+			if len(got) != 0 {
+				t.Errorf("expected empty mcpServers map, got %d entries: %v", len(got), got)
+			}
+		})
+	}
+}
+
+// TestExpectedMCPServers_OverrideLayering verifies that a role-level override
+// supplies servers and a more-specific rig/role override wins per-server.
+func TestExpectedMCPServers_OverrideLayering(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	writeMCPServerOverride(t, "polecats", map[string]string{
+		"serena":      `{"command":"uvx","args":["serena"]}`,
+		"builder-mcp": `{"command":"builder-mcp","args":[]}`,
+	})
+	writeMCPServerOverride(t, "gastown/polecats", map[string]string{
+		"builder-mcp": `{"command":"builder-mcp","args":["--flag"]}`, // rig/role flips it
+	})
+
+	got, err := ExpectedMCPServers("gastown/polecats")
+	if err != nil {
+		t.Fatalf("ExpectedMCPServers: %v", err)
+	}
+	if _, ok := got["serena"]; !ok {
+		t.Errorf("serena missing (should come from role override)")
+	}
+	if !rawJSONEqual(got["builder-mcp"], json.RawMessage(`{"command":"builder-mcp","args":["--flag"]}`)) {
+		t.Errorf("builder-mcp = %s, want rig/role override value", got["builder-mcp"])
+	}
+}
+
+// TestApplyAndHasExpectedMCPServers verifies the write/read round-trip and the
+// additive (extra-entries-ok) drift semantics.
+func TestApplyAndHasExpectedMCPServers(t *testing.T) {
+	expected := map[string]json.RawMessage{
+		"serena":      json.RawMessage(`{"command":"uvx","args":["serena"]}`),
+		"builder-mcp": json.RawMessage(`{"command":"builder-mcp","args":[]}`),
+	}
+
+	s := &SettingsJSON{}
+	ApplyExpectedMCPServers(s, expected)
+
+	if !HasExpectedMCPServers(s, expected) {
+		t.Fatal("HasExpectedMCPServers = false after Apply, want true")
+	}
+
+	// Extra servers beyond expected are fine (additive policy).
+	current := CurrentMCPServers(s)
+	if len(current) != 2 {
+		t.Fatalf("expected 2 servers after Apply, got %d", len(current))
+	}
+	current["unrelated"] = json.RawMessage(`{"command":"x"}`)
+	raw, _ := json.Marshal(current)
+	s.Extra["mcpServers"] = raw
+	if !HasExpectedMCPServers(s, expected) {
+		t.Error("HasExpectedMCPServers = false with extra entry, want true (additive)")
+	}
+}
+
+// TestApplyExpectedMCPServers_PreservesExisting verifies Apply merges into an
+// existing mcpServers block rather than replacing it.
+func TestApplyExpectedMCPServers_PreservesExisting(t *testing.T) {
+	s := &SettingsJSON{Extra: map[string]json.RawMessage{
+		"mcpServers": json.RawMessage(`{"operator-added":{"command":"keep"}}`),
+	}}
+	expected := map[string]json.RawMessage{
+		"builder-mcp": json.RawMessage(`{"command":"builder-mcp"}`),
+	}
+	ApplyExpectedMCPServers(s, expected)
+
+	got := CurrentMCPServers(s)
+	if _, ok := got["operator-added"]; !ok {
+		t.Error("Apply dropped operator-added server")
+	}
+	if _, ok := got["builder-mcp"]; !ok {
+		t.Error("Apply did not add builder-mcp")
+	}
+}
+
+// TestApplyExpectedMCPServers_EmptyIsNoOp verifies an empty expected map does
+// not touch the settings (towns without MCP config see no change).
+func TestApplyExpectedMCPServers_EmptyIsNoOp(t *testing.T) {
+	s := &SettingsJSON{}
+	ApplyExpectedMCPServers(s, map[string]json.RawMessage{})
+	if _, ok := s.Extra["mcpServers"]; ok {
+		t.Error("empty expected should not create an mcpServers block")
+	}
+	// And an empty expected map is trivially satisfied.
+	if !HasExpectedMCPServers(s, map[string]json.RawMessage{}) {
+		t.Error("HasExpectedMCPServers(empty) should be true")
+	}
+	if !HasExpectedMCPServers(nil, map[string]json.RawMessage{}) {
+		t.Error("HasExpectedMCPServers(nil, empty) should be true")
+	}
+}
+
+// TestHasExpectedMCPServers_DetectsDrift verifies the drift detector flags
+// missing or modified servers.
+func TestHasExpectedMCPServers_DetectsDrift(t *testing.T) {
+	expected := map[string]json.RawMessage{
+		"builder-mcp": json.RawMessage(`{"command":"builder-mcp","args":[]}`),
+	}
+
+	// nil settings with a non-empty expectation => not configured.
+	if HasExpectedMCPServers(nil, expected) {
+		t.Error("HasExpectedMCPServers(nil) = true, want false")
+	}
+
+	// Missing server => drift.
+	empty := &SettingsJSON{}
+	if HasExpectedMCPServers(empty, expected) {
+		t.Error("HasExpectedMCPServers with no mcpServers block = true, want false")
+	}
+
+	// Modified definition => drift.
+	s := &SettingsJSON{}
+	ApplyExpectedMCPServers(s, expected)
+	current := CurrentMCPServers(s)
+	current["builder-mcp"] = json.RawMessage(`{"command":"WRONG"}`)
+	raw, _ := json.Marshal(current)
+	s.Extra["mcpServers"] = raw
+	if HasExpectedMCPServers(s, expected) {
+		t.Error("HasExpectedMCPServers with modified server = true, want false")
+	}
+}
+
+// TestHasExpectedMCPServers_KeyOrderInsensitive verifies a server definition
+// with reordered keys is not treated as drift.
+func TestHasExpectedMCPServers_KeyOrderInsensitive(t *testing.T) {
+	expected := map[string]json.RawMessage{
+		"builder-mcp": json.RawMessage(`{"command":"builder-mcp","args":[],"env":{}}`),
+	}
+	s := &SettingsJSON{Extra: map[string]json.RawMessage{
+		"mcpServers": json.RawMessage(`{"builder-mcp":{"env":{},"args":[],"command":"builder-mcp"}}`),
+	}}
+	if !HasExpectedMCPServers(s, expected) {
+		t.Error("reordered keys should not count as drift")
+	}
+}
+
+// TestLoadOverrideMCPServers_MissingAndEmpty verifies load semantics: missing
+// file => ErrNotExist; present file without mcpServers => empty non-nil map.
+func TestLoadOverrideMCPServers_MissingAndEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	if _, err := LoadOverrideMCPServers("polecats"); !os.IsNotExist(err) {
+		t.Errorf("expected ErrNotExist for missing override, got %v", err)
+	}
+
+	// Write an override that carries only enabledPlugins (no mcpServers).
+	writePluginOverride(t, "polecats", map[string]bool{"X-core": true})
+	got, err := LoadOverrideMCPServers("polecats")
+	if err != nil {
+		t.Fatalf("LoadOverrideMCPServers: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("expected empty non-nil map for override without mcpServers, got %v", got)
+	}
+}
+
+// writeMCPServerOverride writes an mcpServers-carrying override file for target
+// under the test home's ~/.gt/hooks-overrides/. Values are raw JSON strings.
+func writeMCPServerOverride(t *testing.T, target string, servers map[string]string) {
+	t.Helper()
+	path := OverridePath(target)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir overrides: %v", err)
+	}
+	mcp := make(map[string]json.RawMessage, len(servers))
+	for name, def := range servers {
+		mcp[name] = json.RawMessage(def)
+	}
+	wrapper := map[string]interface{}{"mcpServers": mcp}
+	data, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal override: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+}
+
 // TestDiscoverTargets_DogsIncluded verifies that arbitrary dogs under
 // deacon/dogs/* are enumerated as fleet targets (role "dog"), boot keeps its
 // dedicated role, and hidden entries are skipped.
