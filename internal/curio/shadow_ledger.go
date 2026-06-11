@@ -46,9 +46,17 @@ var shadowPageDDL = `CREATE TABLE ` + shadowPageTable + ` (
   KEY idx_curio_shadow_page_window (window_id)
 )`
 
-// ensureShadowTable creates the shadow-page ledger table if absent. Mirrors
-// Store.ensureTables; safe to call repeatedly. Kept separate from ensureTables
-// so build 2a's candidate/ledger schema is untouched and this is additive.
+// ensureShadowTable creates the shadow-page ledger table if absent and commits
+// it to Dolt HEAD. Mirrors Store.ensureTables; safe to call repeatedly. Kept
+// separate from ensureTables so build 2a's candidate/ledger schema is untouched
+// and this is additive.
+//
+// Commits via commitTables (explicit DOLT_ADD of just this table), NOT
+// DOLT_COMMIT('-Am', ...): the sweep entangled the ledger schema with unrelated
+// hq churn, and the old code swallowed commit failures (return nil) so the
+// table could stay working-set-only and re-trigger "no root value" every
+// session. commitTables is keyed off dolt_status, so it also flushes a
+// previously uncommitted ledger table on a later open.
 func (s *Store) ensureShadowTable() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -57,18 +65,12 @@ func (s *Store) ensureShadowTable() error {
 	if err != nil {
 		return err
 	}
-	if exists {
-		return nil
+	if !exists {
+		if _, err := s.db.ExecContext(ctx, shadowPageDDL); err != nil {
+			return err
+		}
 	}
-	if _, err := s.db.ExecContext(ctx, shadowPageDDL); err != nil {
-		return err
-	}
-	// Commit the DDL to Dolt history (mirrors ensureTables). Non-fatal on failure:
-	// the working-set table is usable even without a commit.
-	if _, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'curio: create shadow-page ledger')"); err != nil {
-		return nil //nolint:nilerr // intentional: working-set table is usable
-	}
-	return nil
+	return s.commitTables(ctx, "curio: create shadow-page ledger", shadowPageTable)
 }
 
 // RecordShadowPages appends one row per action to the shadow ledger, stamping
