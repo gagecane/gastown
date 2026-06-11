@@ -120,6 +120,21 @@ func stripBranchTimestampSuffix(issue string) string {
 	return issue
 }
 
+// wipCheckpointTipWarning returns a warning message when the given branch-tip
+// commit message is a `WIP: checkpoint (auto)` checkpoint, or "" otherwise.
+// gu-weo4x criterion 3: `gt mq submit` warns (does not block) when the tip
+// matches /^WIP: checkpoint/ so the worker squashes or recommits before the
+// refinery refuses the all-WIP merge. Extracted as a pure helper for testing.
+func wipCheckpointTipWarning(tipMessage string) string {
+	subj := strings.SplitN(strings.TrimSpace(tipMessage), "\n", 2)[0]
+	if !strings.HasPrefix(subj, "WIP: checkpoint") {
+		return ""
+	}
+	return fmt.Sprintf("branch tip is a WIP checkpoint commit (%q).\n"+
+		"  The refinery refuses to merge branches whose only commits are WIP checkpoints.\n"+
+		"  Add a real commit (or squash the WIP) before this MR can land.", subj)
+}
+
 func runMqSubmit(cmd *cobra.Command, args []string) error {
 	// Find workspace
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -200,6 +215,19 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 
 	if branch == defaultBranch || branch == "master" {
 		return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
+	}
+
+	// gu-weo4x: warn when the branch tip is a `WIP: checkpoint (auto)` commit.
+	// checkpoint_dog no longer commits to the branch, but a tip can still be a
+	// WIP from older sessions or a manual checkpoint. Submitting it would make
+	// the refinery refuse the merge (all-WIP) or, if a real commit is buried
+	// underneath, land a confusing squash message. Surface it loudly so the
+	// worker squashes or recommits before the refinery does. Warning only —
+	// never blocks the submit.
+	if tipSubject, tipErr := g.GetBranchCommitMessage(branch); tipErr == nil {
+		if w := wipCheckpointTipWarning(tipSubject); w != "" {
+			style.PrintWarning("%s", w)
+		}
 	}
 
 	// Parse branch info

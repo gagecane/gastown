@@ -627,6 +627,14 @@ type ProcessResult struct {
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
 	NoMerge        bool // Source issue has no_merge flag — intentionally blocked, not a failure
 	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
+	// WIPOnly indicates the source branch contains ONLY `WIP: checkpoint (auto)`
+	// commits (no real deliverable). The refinery refuses to merge it — squashing
+	// an all-WIP branch would land a checkpoint commit on mainline or ship empty
+	// work. The branch + MR are preserved so the polecat (or a re-dispatch) can
+	// add a real commit and resubmit. Treated like a build failure for nudging:
+	// the worker has something to fix. (gu-weo4x)
+	WIPOnly bool
+
 	// PushFailed indicates `git push` (or its post-push verification) failed,
 	// most often a non-ff rejection from a sibling MR that landed first during
 	// convoy fan-out (gu-wj3f). The local squash commit is rolled back and the
@@ -697,6 +705,24 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			Success:  false,
 			Conflict: true,
 			Error:    fmt.Sprintf("merge conflicts in: %v", conflicts),
+		}
+	}
+
+	// Step 3.4: Refuse to merge an all-WIP branch (gu-weo4x). If every commit
+	// on the branch relative to its target is a `WIP: checkpoint (auto)`
+	// checkpoint, there is no real deliverable — squashing it would land a
+	// checkpoint commit on mainline (gu-zd2 pollution) or ship empty work. A
+	// branch with a real commit plus a WIP tip is NOT all-WIP and proceeds
+	// (getMergeMessage/BestCommitMessage promotes the real message). Fail-safe:
+	// a detection error never blocks the merge — log and continue.
+	if onlyWIP, wipErr := checkpoint.OnlyWIPCommits(e.git.WorkDir(), branch, "origin/"+target); wipErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: all-WIP detection failed (%v) — proceeding with merge\n", wipErr)
+	} else if onlyWIP {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Refusing to merge %s: branch contains only WIP checkpoint commits (no real deliverable)\n", branch)
+		return ProcessResult{
+			Success: false,
+			WIPOnly: true,
+			Error:   fmt.Sprintf("branch %s contains only 'WIP: checkpoint (auto)' commits — no real work to merge; add a real commit and resubmit", branch),
 		}
 	}
 
@@ -1684,6 +1710,10 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 		failureType = "conflict"
 	} else if result.TestsFailed {
 		failureType = "tests"
+	} else if result.WIPOnly {
+		// gu-weo4x: branch has only WIP checkpoint commits — the worker must
+		// add a real commit before the MR can land.
+		failureType = "wip-only"
 	} else if result.PushFailed {
 		// gu-wj3f: surface push failures distinctly so the polecat knows to
 		// rebase onto the new origin/<target> tip rather than re-running

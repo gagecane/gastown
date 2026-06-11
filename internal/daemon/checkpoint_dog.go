@@ -143,10 +143,21 @@ func (d *Daemon) checkpointRigPolecats(rigName string) (int, int) {
 	return scanned, checkpointed
 }
 
-// checkpointWorktree creates a WIP checkpoint commit for a single worktree.
-// Returns true if a checkpoint was created.
+// checkpointWorktree snapshots uncommitted work in a single worktree to a
+// namespaced backup ref WITHOUT touching the worktree's branch tip, index, or
+// working tree. Returns true if a new backup snapshot was created.
+//
+// gu-weo4x: checkpoint_dog used to `git add -A && git commit` directly on the
+// polecat's branch, leaving a `WIP: checkpoint (auto)` commit as the branch
+// tip. When a session ended abnormally that WIP commit looked like a real
+// deliverable from the outside — the refinery could squash-merge it onto
+// mainline, or the merge queue would pause "awaiting direction" for hours.
+// The fix snapshots the same content (additions + modifications, runtime dirs
+// and tracked-file deletions excluded) into refs/backup/<rig>/<polecat>/<tree>
+// via a TEMPORARY index, so the branch tip stays exactly where the agent left
+// it and the work is still fully recoverable from the backup ref.
 func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
-	// Check git status (exclude runtime dirs from consideration)
+	// Check git status — a clean worktree has nothing to back up.
 	statusOut, err := runGitCmd(workDir, "status", "--porcelain")
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git status failed in %s/%s: %v", rigName, polecatName, err)
@@ -156,79 +167,163 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 		return false // Clean worktree
 	}
 
-	// Secondary safety net (gu-y3r): if the last commit on HEAD is already a
-	// WIP checkpoint AND there are no tracked-file modifications vs HEAD,
-	// whatever `status --porcelain` flagged is untracked/ephemeral churn
-	// the existing exclusion list does not cover. Committing it would
-	// produce yet another near-empty WIP commit that pollutes the branch
-	// (see gu-y3r incident: idle polecat produced two duplicate WIPs that
-	// nearly contaminated the merge queue on nuke-push).
-	//
-	// The strict "HEAD is already WIP" condition preserves the current
-	// behavior for the first checkpoint after a real commit (we still want
-	// to capture untracked work once), and only suppresses consecutive
-	// duplicate WIPs on a stalled polecat.
-	if noNewTrackedChangesVsHEAD(workDir) && headIsWIPCheckpoint(workDir) {
-		d.logger.Printf("checkpoint_dog: skipping WIP in %s/%s: no changes since last checkpoint",
-			rigName, polecatName)
+	ref, created, err := snapshotToBackupRef(workDir, rigName, polecatName)
+	if err != nil {
+		d.logger.Printf("checkpoint_dog: backup snapshot failed in %s/%s: %v", rigName, polecatName, err)
+		return false
+	}
+	if !created {
+		// Either nothing survived the exclusion filter (only runtime/ephemeral
+		// churn) or an identical snapshot already exists — no new backup needed.
+		d.logger.Printf("checkpoint_dog: nothing new to back up in %s/%s", rigName, polecatName)
 		return false
 	}
 
-	// Stage everything
-	if _, err := runGitCmd(workDir, "add", "-A"); err != nil {
-		d.logger.Printf("checkpoint_dog: git add -A failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+	d.logger.Printf("checkpoint_dog: backed up WIP in %s/%s to %s (branch tip untouched)",
+		rigName, polecatName, ref)
+	return true
+}
+
+// snapshotToBackupRef captures the worktree's uncommitted work into a backup
+// ref using a temporary index, leaving the real index, working tree, and
+// branch tip untouched. It returns the ref name, whether a new snapshot was
+// created, and any error.
+//
+// Content selection mirrors the historical checkpoint_dog behavior:
+//   - stage everything (git add -A) into a TEMP index seeded from HEAD,
+//   - unstage runtime/ephemeral directories (runtimeExcludeDirs),
+//   - unstage deletions of tracked files (preserve work, never record deletes).
+//
+// The resulting tree is committed with commit-tree (parented on HEAD when one
+// exists) and planted at refs/backup/<rig>/<polecat>/<treeSHA>. Naming the ref
+// by the tree SHA makes the operation idempotent: if the worktree content has
+// not changed since the last cycle, the same ref already points at that tree
+// and we skip the write (created=false). When the snapshot tree equals HEAD's
+// tree (only excluded churn was present) there is nothing to back up.
+func snapshotToBackupRef(workDir, rigName, polecatName string) (string, bool, error) {
+	// Temp index file: git writes the staging area here instead of .git/index,
+	// so the worktree's real index is never disturbed. Created in the OS temp
+	// dir (git does not require the index to live inside the repo).
+	tmpIndex, err := os.CreateTemp("", "gt-checkpoint-index-*")
+	if err != nil {
+		return "", false, fmt.Errorf("create temp index: %w", err)
+	}
+	tmpPath := tmpIndex.Name()
+	_ = tmpIndex.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	env := []string{"GIT_INDEX_FILE=" + tmpPath}
+
+	// Resolve HEAD (may be absent in a brand-new repo with no commits).
+	headSHA, headErr := runGitCmd(workDir, "rev-parse", "--verify", "HEAD")
+	hasHead := headErr == nil && headSHA != ""
+
+	// Seed the temp index from HEAD so `git add -A` produces a diff relative to
+	// the last commit (matching the old commit-based behavior). Without a HEAD,
+	// start from an empty index.
+	if hasHead {
+		if _, err := runGitCmdEnv(workDir, env, "read-tree", "HEAD"); err != nil {
+			return "", false, fmt.Errorf("read-tree HEAD into temp index: %w", err)
+		}
+	} else {
+		if _, err := runGitCmdEnv(workDir, env, "read-tree", "--empty"); err != nil {
+			return "", false, fmt.Errorf("read-tree --empty into temp index: %w", err)
+		}
 	}
 
-	// Unstage runtime/ephemeral directories
+	// Stage everything into the temp index.
+	if _, err := runGitCmdEnv(workDir, env, "add", "-A"); err != nil {
+		return "", false, fmt.Errorf("git add -A (temp index): %w", err)
+	}
+
+	// Unstage runtime/ephemeral directories (safe even if absent).
 	for _, dir := range runtimeExcludeDirs {
-		// git reset HEAD -- <dir> is safe even if dir doesn't exist (exits 0)
-		_, _ = runGitCmd(workDir, "reset", "HEAD", "--", dir)
+		_, _ = runGitCmdEnv(workDir, env, "reset", "--", dir)
 	}
 
-	// Unstage deletions of tracked files. A checkpoint should preserve work
-	// (additions + modifications), never commit deletions of tracked files.
-	// This prevents the bug where a polecat's working tree has a missing
-	// tracked file and the checkpoint commits the deletion (gt-pvx fix).
-	if delOut, err := runGitCmd(workDir, "diff", "--cached", "--name-only", "--diff-filter=D"); err == nil {
+	// Unstage deletions of tracked files — a checkpoint preserves work
+	// (additions + modifications), never records deletions of tracked files.
+	if delOut, err := runGitCmdEnv(workDir, env, "diff", "--cached", "--name-only", "--diff-filter=D"); err == nil {
 		if dels := strings.TrimSpace(delOut); dels != "" {
 			for _, f := range strings.Split(dels, "\n") {
 				if f != "" {
-					_, _ = runGitCmd(workDir, "reset", "HEAD", "--", f)
+					_, _ = runGitCmdEnv(workDir, env, "reset", "--", f)
 				}
 			}
 		}
 	}
 
-	// Check if anything is staged after exclusions
-	diffOut, err := runGitCmd(workDir, "diff", "--cached", "--quiet")
-	if err == nil && strings.TrimSpace(diffOut) == "" {
-		// --quiet exits 0 if no diff → nothing staged
-		return false
+	// Write the staged tree.
+	tree, err := runGitCmdEnv(workDir, env, "write-tree")
+	if err != nil {
+		return "", false, fmt.Errorf("write-tree (temp index): %w", err)
+	}
+	tree = strings.TrimSpace(tree)
+	if tree == "" {
+		return "", false, fmt.Errorf("write-tree returned empty tree")
 	}
 
-	// Defensive guard: refuse to commit if this worktree's branch exists at
-	// origin. Daemon-initiated commits on shared branches (main, mainline,
-	// or a polecat branch that has already been submitted to the MQ) cause
-	// merge-queue disruption and hours of confusion chasing "WIP: checkpoint
-	// (auto)" commits that appeared out of nowhere. Unstage and skip.
-	if err := guardDaemonCommit(workDir); err != nil {
-		d.logger.Printf("checkpoint_dog: %v — skipping checkpoint in %s/%s",
-			err, rigName, polecatName)
-		// Undo the staging so we don't leave the worktree in a half-committed
-		// state. `git reset HEAD` is a no-op if nothing was staged.
-		_, _ = runGitCmd(workDir, "reset", "HEAD")
-		return false
+	// If the snapshot tree equals HEAD's tree, only excluded churn was present
+	// — there is nothing new to back up.
+	if hasHead {
+		if headTree, err := runGitCmd(workDir, "rev-parse", "--verify", "HEAD^{tree}"); err == nil {
+			if strings.TrimSpace(headTree) == tree {
+				return "", false, nil
+			}
+		}
 	}
 
-	// Commit the checkpoint
-	if _, err := runGitCmd(workDir, "commit", "-m", "WIP: checkpoint (auto)"); err != nil {
-		d.logger.Printf("checkpoint_dog: git commit failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+	ref := fmt.Sprintf("refs/backup/%s/%s/%s",
+		sanitizeBackupRefComponent(rigName),
+		sanitizeBackupRefComponent(polecatName),
+		tree)
+
+	// Idempotency: if a backup ref for this exact tree already exists, the
+	// content is unchanged since the last cycle — skip the redundant write.
+	if existing, err := runGitCmd(workDir, "rev-parse", "--verify", "--quiet", ref); err == nil && strings.TrimSpace(existing) != "" {
+		return ref, false, nil
 	}
 
-	d.logger.Printf("checkpoint_dog: created WIP checkpoint in %s/%s", rigName, polecatName)
-	return true
+	// Commit the tree (parented on HEAD when available) so the snapshot is a
+	// reachable commit object, then plant it at the backup ref.
+	commitArgs := []string{"commit-tree", tree, "-m", "WIP: checkpoint (auto)"}
+	if hasHead {
+		commitArgs = append(commitArgs, "-p", headSHA)
+	}
+	commit, err := runGitCmd(workDir, commitArgs...)
+	if err != nil {
+		return "", false, fmt.Errorf("commit-tree: %w", err)
+	}
+	commit = strings.TrimSpace(commit)
+
+	if _, err := runGitCmd(workDir, "update-ref", "-m", "checkpoint_dog autosave", ref, commit); err != nil {
+		return "", false, fmt.Errorf("update-ref %s: %w", ref, err)
+	}
+
+	return ref, true, nil
+}
+
+// sanitizeBackupRefComponent maps an arbitrary string to a form safe to use as
+// one segment of a git ref path: anything outside [A-Za-z0-9._-] becomes "-",
+// and leading/trailing dots/dashes are trimmed (git refuses or special-cases
+// them). Returns "unknown" for inputs that sanitize to empty so the ref path
+// never contains an empty segment.
+func sanitizeBackupRefComponent(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), ".-")
+	if out == "" {
+		return "unknown"
+	}
+	return out
 }
 
 // isGitWorktree reports whether the given directory is the root of a git
@@ -263,8 +358,19 @@ func resolveCheckpointWorkDir(polecatsDir, polecatName, rigName string) string {
 
 // runGitCmd executes a git command in the given directory and returns stdout.
 func runGitCmd(workDir string, args ...string) (string, error) {
+	return runGitCmdEnv(workDir, nil, args...)
+}
+
+// runGitCmdEnv is runGitCmd with extra environment variables appended to the
+// process environment. Used by the backup-ref snapshot path to point git at a
+// temporary index via GIT_INDEX_FILE so the worktree's real index is never
+// touched. A nil/empty extraEnv inherits the parent environment unchanged.
+func runGitCmdEnv(workDir string, extraEnv []string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = workDir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	util.SetDetachedProcessGroup(cmd)
 
 	var stdout, stderr bytes.Buffer

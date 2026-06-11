@@ -119,3 +119,32 @@ func TestValidateMoleculePrereqs(t *testing.T) {
 		})
 	}
 }
+
+// TestWIPCheckpointTipWarning covers gu-weo4x criterion 3: gt mq submit warns
+// (without blocking) when the branch tip is a WIP checkpoint commit.
+func TestWIPCheckpointTipWarning(t *testing.T) {
+	cases := []struct {
+		name    string
+		tip     string
+		wantHit bool
+	}{
+		{"exact auto checkpoint", "WIP: checkpoint (auto)", true},
+		{"wip checkpoint prefix variant", "WIP: checkpoint before resume", true},
+		{"multiline wip tip", "WIP: checkpoint (auto)\n\nbody text", true},
+		{"leading whitespace", "  WIP: checkpoint (auto)", true},
+		{"real conventional commit", "feat(refinery): refuse all-WIP merges", false},
+		{"wip but not checkpoint", "WIP: still drafting", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wipCheckpointTipWarning(tc.tip)
+			if tc.wantHit && got == "" {
+				t.Errorf("expected a warning for tip %q, got none", tc.tip)
+			}
+			if !tc.wantHit && got != "" {
+				t.Errorf("expected no warning for tip %q, got %q", tc.tip, got)
+			}
+		})
+	}
+}
