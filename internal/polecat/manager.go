@@ -48,7 +48,18 @@ const (
 	// 3 retries (total backoff ~3.5s) is sufficient to ride out transient
 	// Dolt hiccups without punishing interactive workflows.
 	doltStateRetries = 3
+
+	// polecatLockRetryInterval is how often TryLockContext re-polls the flock.
+	polecatLockRetryInterval = 100 * time.Millisecond
 )
+
+// polecatLockTimeout bounds how long lockPolecat/lockPool wait to acquire their
+// flock before failing fast. A blocking flock.Lock() with no deadline piles up
+// when a wedged prior operation (e.g. a hung 'gt polecat nuke') still holds the
+// lock — every subsequent caller blocks indefinitely on the flock (observed as
+// futex_wait_queue), stacking hung processes. Bounding the acquire surfaces a
+// clear "lock held" error instead (gu-ay53c). It is a var so tests can shrink it.
+var polecatLockTimeout = 30 * time.Second
 
 // doltBackoff calculates exponential backoff with ±25% jitter for a given attempt (1-indexed).
 // Formula: base * 2^(attempt-1) * (1 ± 25% random), capped at doltBackoffMax.
@@ -228,8 +239,14 @@ func (m *Manager) lockPolecat(name string) (*flock.Flock, error) {
 	}
 	lockPath := filepath.Join(lockDir, fmt.Sprintf("polecat-%s.lock", name))
 	fl := flock.New(lockPath)
-	if err := fl.Lock(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), polecatLockTimeout)
+	defer cancel()
+	locked, err := fl.TryLockContext(ctx, polecatLockRetryInterval)
+	if err != nil {
 		return nil, fmt.Errorf("acquiring polecat lock for %s: %w", name, err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("timeout acquiring polecat lock for %s after %s (lock held: %s)", name, polecatLockTimeout, lockPath)
 	}
 	return fl, nil
 }
@@ -244,8 +261,14 @@ func (m *Manager) lockPool() (*flock.Flock, error) {
 	}
 	lockPath := filepath.Join(lockDir, "polecat-pool.lock")
 	fl := flock.New(lockPath)
-	if err := fl.Lock(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), polecatLockTimeout)
+	defer cancel()
+	locked, err := fl.TryLockContext(ctx, polecatLockRetryInterval)
+	if err != nil {
 		return nil, fmt.Errorf("acquiring pool lock: %w", err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("timeout acquiring pool lock after %s (lock held: %s)", polecatLockTimeout, lockPath)
 	}
 	return fl, nil
 }
