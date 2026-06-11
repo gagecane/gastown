@@ -778,10 +778,59 @@ func (d *Daemon) runGateWithTimeout(ctx context.Context, rigName, workDir, name 
 	return d.runCommandOnWorktree(ctx, rigName, workDir, name, gc.Cmd)
 }
 
+// gateDoltEnvDenyPrefixes lists env-var name prefixes scrubbed from the gate
+// subprocess environment so that `go test ./...` does NOT inherit the
+// production daemon's Dolt-routing variables (gu-5ja0e).
+//
+// The daemon process runs with GT_DOLT_PORT/BEADS_DOLT_PORT pinned to the
+// shared production Dolt server (3307). Passing those through to the gate's
+// `go test` defeats the beads test-isolation safety net: PreventTestDoltLeak
+// (internal/beads/database.go) only pins a test fixture to an isolated embedded
+// data dir when NO Dolt-routing var is set — when it sees an inherited
+// GT_DOLT_PORT/BEADS_DOLT_PORT it assumes a legitimate test container and bails,
+// so any beads-backed test then connects to production :3307 and leaks orphan
+// databases into .dolt-data/. Container-backed integration tests are unaffected:
+// they start their own container and set GT_DOLT_PORT process-wide from inside
+// the test (testutil.StartIsolatedDoltContainer / RequireDoltContainer), so
+// scrubbing the inherited value cannot route them to production.
+var gateDoltEnvDenyPrefixes = []string{
+	"GT_DOLT_",    // GT_DOLT_PORT, GT_DOLT_HOST
+	"BEADS_DOLT_", // BEADS_DOLT_PORT, BEADS_DOLT_SERVER_HOST, BEADS_DOLT_SERVER_PORT
+	"DOLT_",       // raw dolt client overrides
+}
+
+// stripGateDoltEnv returns a copy of env with Dolt-routing variables removed
+// per gateDoltEnvDenyPrefixes. Pure function for unit-testing the filter.
+func stripGateDoltEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			out = append(out, kv)
+			continue
+		}
+		key := kv[:eq]
+		denied := false
+		for _, p := range gateDoltEnvDenyPrefixes {
+			if strings.HasPrefix(key, p) {
+				denied = true
+				break
+			}
+		}
+		if !denied {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // gateEnv builds the subprocess environment for gate commands.
 // PATH is augmented with common user tool directories so commands like yarn,
 // act, etc. are discoverable even when the daemon runs with a minimal
 // inherited PATH (e.g. when started as a background service).
+//
+// Dolt-routing variables are scrubbed (gu-5ja0e) so gate `go test` runs cannot
+// connect to the production Dolt server; see gateDoltEnvDenyPrefixes.
 func gateEnv(townRoot string) []string {
 	home, _ := os.UserHomeDir()
 	dirs := []string{
@@ -791,7 +840,7 @@ func gateEnv(townRoot string) []string {
 		"/usr/local/bin",
 	}
 	enriched := strings.Join(append(dirs, os.Getenv("PATH")), string(os.PathListSeparator))
-	return append(os.Environ(), "CI=true", "PATH="+enriched)
+	return append(stripGateDoltEnv(os.Environ()), "CI=true", "PATH="+enriched)
 }
 
 // failureOutputTailSize is the number of trailing output lines kept verbatim

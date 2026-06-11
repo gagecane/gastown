@@ -524,6 +524,68 @@ func TestGateEnv(t *testing.T) {
 	}
 }
 
+// TestGateEnvScrubsDoltRouting is the gu-5ja0e regression: the daemon runs with
+// GT_DOLT_PORT/BEADS_DOLT_PORT pinned to the production Dolt server (3307). If
+// gateEnv passes those through to the gate's `go test`, beads-backed tests
+// connect to production Dolt and leak orphan databases into .dolt-data/. gateEnv
+// must scrub every Dolt-routing variable so the beads test-isolation safety net
+// (PreventTestDoltLeak) engages.
+func TestGateEnvScrubsDoltRouting(t *testing.T) {
+	t.Setenv("GT_DOLT_PORT", "3307")
+	t.Setenv("BEADS_DOLT_PORT", "3307")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("DOLT_ROOT_PATH", "/should/be/stripped")
+	// A non-Dolt variable that must survive untouched.
+	t.Setenv("BEADS_DIR", "/keep/me")
+
+	env := gateEnv(t.TempDir())
+
+	denied := []string{"GT_DOLT_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "DOLT_ROOT_PATH="}
+	var keptBeadsDir bool
+	for _, e := range env {
+		for _, bad := range denied {
+			if strings.HasPrefix(e, bad) {
+				t.Errorf("gate env leaked production Dolt-routing var: %q", e)
+			}
+		}
+		if e == "BEADS_DIR=/keep/me" {
+			keptBeadsDir = true
+		}
+	}
+	if !keptBeadsDir {
+		t.Error("gate env dropped non-Dolt var BEADS_DIR; scrubbing is too broad")
+	}
+}
+
+// TestStripGateDoltEnv exercises the pure filter directly, including the
+// defensive malformed-entry path.
+func TestStripGateDoltEnv(t *testing.T) {
+	in := []string{
+		"GT_DOLT_PORT=3307",
+		"BEADS_DOLT_SERVER_PORT=3307",
+		"DOLT_ROOT_PATH=/x",
+		"PATH=/usr/bin",
+		"GT_RIG=gastown_upstream", // GT_ but not GT_DOLT_ — must survive
+		"malformed-no-equals",     // defensive: kept verbatim
+		"=leadingequals",          // defensive: kept verbatim
+	}
+	got := stripGateDoltEnv(in)
+	want := map[string]bool{
+		"PATH=/usr/bin":           true,
+		"GT_RIG=gastown_upstream": true,
+		"malformed-no-equals":     true,
+		"=leadingequals":          true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("stripGateDoltEnv returned %d entries, want %d: %v", len(got), len(want), got)
+	}
+	for _, e := range got {
+		if !want[e] {
+			t.Errorf("unexpected entry survived/changed: %q", e)
+		}
+	}
+}
+
 func TestRunPreBuildInstall_SkipsWithoutSetupCommand(t *testing.T) {
 	// Core regression test for gu-pcm5: when merge_queue.setup_command is NOT
 	// set, runPreBuildInstall must be a no-op regardless of what lockfiles
