@@ -264,6 +264,103 @@ func HasExpectedPlugins(s *SettingsJSON, role string, expected map[string]bool) 
 	return true
 }
 
+// ExpectedMCPServers computes the authoritative mcpServers map for a target by
+// layering the town's on-disk mcpServers overrides in order of specificity.
+//
+// Like ExpectedPlugins, this ships NO server names in shared source: the names
+// builder-mcp/serena and their invocations are Amazon-/tool-specific and live
+// in ~/.gt/hooks-overrides/<target>.json, supplied by the on-disk override
+// layer. The shared binary therefore starts from an empty map and layers
+// override-supplied servers on top (later, more specific keys win per-server).
+//
+// A town with no mcpServers override resolves to an empty map, which
+// HasExpectedMCPServers treats as "nothing required" — so towns that do not
+// configure MCP servers see no behavior change (existing mcpServers blocks are
+// preserved verbatim through the settings roundtrip).
+//
+// This is the durable fix for gu-2nmnt: before it, the settings generator only
+// managed hooks/plugins/permissions, so mcpServers (builder-mcp) was never
+// emitted or restored and a `gt up --restore` that recreated a settings file
+// silently dropped Claude agents' tool access.
+func ExpectedMCPServers(target string) (map[string]json.RawMessage, error) {
+	result := map[string]json.RawMessage{}
+	for _, overrideKey := range GetApplicableOverrides(target) {
+		ov, err := LoadOverrideMCPServers(overrideKey)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("loading mcpServers override %q: %w", overrideKey, err)
+		}
+		for name, def := range ov {
+			result[name] = def
+		}
+	}
+	return result, nil
+}
+
+// ApplyExpectedMCPServers writes the resolved mcpServers map into the settings,
+// merging into any existing mcpServers block (override-supplied entries win).
+// It is additive: existing servers beyond the expected set are preserved. This
+// is the write-side counterpart to ExpectedMCPServers, mirroring
+// ApplyExpectedPlugins. A no-op when expected is empty.
+func ApplyExpectedMCPServers(s *SettingsJSON, expected map[string]json.RawMessage) {
+	if len(expected) == 0 {
+		return
+	}
+	if s.Extra == nil {
+		s.Extra = make(map[string]json.RawMessage)
+	}
+	current := map[string]json.RawMessage{}
+	if raw, ok := s.Extra["mcpServers"]; ok {
+		_ = json.Unmarshal(raw, &current)
+	}
+	for name, def := range expected {
+		current[name] = def
+	}
+	if raw, err := json.Marshal(current); err == nil {
+		s.Extra["mcpServers"] = raw
+	}
+}
+
+// HasExpectedMCPServers reports whether the settings already carry every entry
+// in the expected mcpServers map (matching definition). Extra servers beyond
+// the expected set do not count as drift (additive policy, matching
+// HasExpectedPlugins). An empty expected map is trivially satisfied.
+func HasExpectedMCPServers(s *SettingsJSON, expected map[string]json.RawMessage) bool {
+	if len(expected) == 0 {
+		return true
+	}
+	if s == nil {
+		return false
+	}
+	current := map[string]json.RawMessage{}
+	if raw, ok := s.Extra["mcpServers"]; !ok || json.Unmarshal(raw, &current) != nil {
+		return false
+	}
+	for name, want := range expected {
+		got, ok := current[name]
+		if !ok || !rawJSONEqual(got, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// CurrentMCPServers returns the mcpServers map currently present in the
+// settings, or nil if absent/unparseable. Used by the diff command to compute
+// which managed servers are missing.
+func CurrentMCPServers(s *SettingsJSON) map[string]json.RawMessage {
+	if s == nil {
+		return nil
+	}
+	current := map[string]json.RawMessage{}
+	if raw, ok := s.Extra["mcpServers"]; !ok || json.Unmarshal(raw, &current) != nil {
+		return nil
+	}
+	return current
+}
+
 // taskToolDenials are the Claude Code tools every unattended Gas Town agent
 // must deny. TodoWrite and the Task* family produce interactive/agent-spawning
 // behavior that has no place in autonomous patrol/work loops and has caused
@@ -449,6 +546,23 @@ func rawBoolEquals(raw map[string]json.RawMessage, key string, want bool) bool {
 		return false
 	}
 	return got == want
+}
+
+// rawJSONEqual reports whether two raw JSON messages are semantically equal,
+// ignoring key order and insignificant whitespace. Used to compare mcpServer
+// definitions so a re-serialized override (different key order) does not read
+// as drift.
+func rawJSONEqual(a, b json.RawMessage) bool {
+	var av, bv interface{}
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return false
+	}
+	ab, err1 := json.Marshal(av)
+	bb, err2 := json.Marshal(bv)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return string(ab) == string(bb)
 }
 
 func rawStringEquals(raw map[string]json.RawMessage, key, want string) bool {
@@ -1328,6 +1442,44 @@ func LoadOverridePlugins(target string) (map[string]bool, error) {
 			return map[string]bool{}, nil
 		}
 		return wrapper.EnabledPlugins, nil
+	}
+	return nil, os.ErrNotExist
+}
+
+// LoadOverrideMCPServers loads the mcpServers map carried by an override file
+// for the given target, using the same cascading directory search as
+// LoadOverride/LoadOverridePlugins. The map lives under a top-level
+// "mcpServers" key in the same ~/.gt/hooks-overrides/<target>.json file as the
+// hook overrides; the hooks loader (loadConfig) and the plugin reader both
+// ignore it, and this reader ignores the hooks and plugins. The first file
+// found across gtConfigDirs wins. Returns os.ErrNotExist if no override file
+// exists in any location; a file that exists but carries no mcpServers key
+// yields an empty (non-nil) map and no error.
+//
+// Each value is preserved as a raw JSON message so server definitions
+// (command, args, env, type, …) roundtrip verbatim — the shared binary never
+// needs to understand their schema.
+func LoadOverrideMCPServers(target string) (map[string]json.RawMessage, error) {
+	safe := strings.ReplaceAll(target, "/", "__")
+	for _, dir := range gtConfigDirs() {
+		path := filepath.Join(dir, "hooks-overrides", safe+".json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		var wrapper struct {
+			MCPServers map[string]json.RawMessage `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(data, &wrapper); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		if wrapper.MCPServers == nil {
+			return map[string]json.RawMessage{}, nil
+		}
+		return wrapper.MCPServers, nil
 	}
 	return nil, os.ErrNotExist
 }

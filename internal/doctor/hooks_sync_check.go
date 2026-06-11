@@ -79,12 +79,21 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		_, statErr := os.Stat(target.Path)
 		fileExists := statErr == nil
 
-		if !fileExists || !hooks.HooksEqual(expected, &current.Hooks) || !hooks.HasClaudePromptDefaults(current) {
+		expectedMCPServers, mcpErr := hooks.ExpectedMCPServers(target.Key)
+		if mcpErr != nil {
+			details = append(details, fmt.Sprintf("%s: error computing expected mcpServers: %v", target.DisplayKey(), mcpErr))
+			continue
+		}
+		mcpInSync := hooks.HasExpectedMCPServers(current, expectedMCPServers)
+
+		if !fileExists || !hooks.HooksEqual(expected, &current.Hooks) || !hooks.HasClaudePromptDefaults(current) || !mcpInSync {
 			c.outOfSync = append(c.outOfSync, target)
 			if !fileExists {
 				details = append(details, fmt.Sprintf("%s: missing", target.DisplayKey()))
 			} else if !hooks.HasClaudePromptDefaults(current) {
 				details = append(details, fmt.Sprintf("%s: missing Claude prompt defaults", target.DisplayKey()))
+			} else if !mcpInSync {
+				details = append(details, fmt.Sprintf("%s: missing managed MCP servers", target.DisplayKey()))
 			} else {
 				details = append(details, fmt.Sprintf("%s: out of sync", target.DisplayKey()))
 			}
@@ -229,6 +238,15 @@ func (c *HooksSyncCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 		hooks.ApplyExpectedPlugins(current, target.Role, expectedPlugins)
+
+		// Apply the town's MCP server policy (serena + builder-mcp) so the fix
+		// restores Claude agents' tool access, matching syncTarget (gu-2nmnt).
+		expectedMCPServers, err := hooks.ExpectedMCPServers(target.Key)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.DisplayKey(), err))
+			continue
+		}
+		hooks.ApplyExpectedMCPServers(current, expectedMCPServers)
 
 		claudeDir := filepath.Dir(target.Path)
 		if err := os.MkdirAll(claudeDir, 0755); err != nil {

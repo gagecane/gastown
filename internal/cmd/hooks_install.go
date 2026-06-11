@@ -326,6 +326,16 @@ func installHookTo(worktreePath string, hookDef HookDefinition, dryRun bool) err
 	}
 	hooks.ApplyExpectedPlugins(settings, role, expectedPlugins)
 
+	// Apply the town's MCP server policy (serena + builder-mcp) so installing a
+	// hook also restores Claude agents' tool access if it had drifted away
+	// (gu-2nmnt). Like plugins, the install path has no rig context, so it
+	// resolves the role-level override key only.
+	expectedMCPServers, err := hooks.ExpectedMCPServers(overrideKeyForRole(role))
+	if err != nil {
+		return fmt.Errorf("computing expected mcpServers: %w", err)
+	}
+	hooks.ApplyExpectedMCPServers(settings, expectedMCPServers)
+
 	// Pretty print relative path
 	relPath := worktreePath
 	if home, err := os.UserHomeDir(); err == nil {

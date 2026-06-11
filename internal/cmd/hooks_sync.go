@@ -300,6 +300,17 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 		return 0, fmt.Errorf("computing expected plugins: %w", err)
 	}
 
+	// Compute expected mcpServers for this target: the town's on-disk
+	// mcpServers overrides (e.g. serena + builder-mcp for Claude agents). Like
+	// plugins, server names ship in ~/.gt/hooks-overrides/<target>.json, not in
+	// shared source. Without this the generator never emitted/restored
+	// mcpServers, so a recreated settings file dropped builder-mcp and silently
+	// removed tool access from all Claude agents (gu-2nmnt).
+	expectedMCPServers, err := hooks.ExpectedMCPServers(target.Key)
+	if err != nil {
+		return 0, fmt.Errorf("computing expected mcpServers: %w", err)
+	}
+
 	// Load existing settings (returns zero-value if file doesn't exist)
 	current, err := hooks.LoadSettings(target.Path)
 	if err != nil {
@@ -315,7 +326,7 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	// Also check plugin defaults — without the town's plugin policy applied,
 	// agents inherit the user's global AIM plugins and OOM the host (see
 	// 2026-06-05 post-mortem).
-	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) && hooks.HasExpectedPlugins(current, target.Role, expectedPlugins) && hooks.HasPermissionDefaults(current, target.Role) {
+	if fileExists && hooks.HooksEqual(expected, &current.Hooks) && hooks.HasClaudePromptDefaults(current) && hooks.HasExpectedPlugins(current, target.Role, expectedPlugins) && hooks.HasExpectedMCPServers(current, expectedMCPServers) && hooks.HasPermissionDefaults(current, target.Role) {
 		return syncUnchanged, nil
 	}
 
@@ -333,6 +344,12 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	// plugin overrides (e.g. AIM disable-list to prevent MCP sidecar OOM, see
 	// 2026-06-05 post-mortem). Applies to fleet and interactive roles alike.
 	hooks.ApplyExpectedPlugins(current, target.Role, expectedPlugins)
+
+	// Apply mcpServers: restore the town's MCP server policy (e.g. serena +
+	// builder-mcp) so Claude agents keep their tool access across a sync or a
+	// settings-recreating restore (gu-2nmnt). Additive — operator-added servers
+	// are preserved.
+	hooks.ApplyExpectedMCPServers(current, expectedMCPServers)
 
 	// Ensure permission defaults: restore the role's safety-critical deny list
 	// (AskUserQuestion + Task tools) so it can no longer silently drift away

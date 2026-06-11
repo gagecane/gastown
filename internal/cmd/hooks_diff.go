@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -97,8 +98,17 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 		// plugin update) falsely reported "in sync" even though sync would
 		// restore the policy — the MCP-sprawl blind spot from gu-1r6wa.
 		pluginDrift := !hooks.HasExpectedPlugins(current, target.Role, expectedPlugins)
+		// mcpServers drift is likewise invisible to HooksEqual: the server map
+		// lives in the settings' top-level mcpServers block, not the hooks
+		// section. Surface it so a missing builder-mcp/serena no longer reports
+		// "in sync" (gu-2nmnt).
+		expectedMCPServers, err := hooks.ExpectedMCPServers(target.Key)
+		if err != nil {
+			return fmt.Errorf("computing expected mcpServers for %s: %w", target.DisplayKey(), err)
+		}
+		mcpDrift := !hooks.HasExpectedMCPServers(current, expectedMCPServers)
 
-		if hooksEqual && !permissionDrift && !pluginDrift {
+		if hooksEqual && !permissionDrift && !pluginDrift && !mcpDrift {
 			continue
 		}
 
@@ -117,6 +127,9 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 		}
 		if pluginDrift {
 			changes = append(changes, diffPlugins(current, expectedPlugins)...)
+		}
+		if mcpDrift {
+			changes = append(changes, diffMCPServers(current, expectedMCPServers)...)
 		}
 		if len(changes) == 0 {
 			continue
@@ -201,6 +214,34 @@ func sortedPluginKeys(m map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// diffMCPServers returns formatted diff lines for the settings' mcpServers
+// block: the managed servers that sync would add or restore to match the
+// town's MCP policy (gu-2nmnt). The mcpServers block is not part of the hooks
+// section, so HooksEqual / diffHooksConfigs cannot see it.
+func diffMCPServers(current *hooks.SettingsJSON, expected map[string]json.RawMessage) []string {
+	have := hooks.CurrentMCPServers(current)
+
+	var names []string
+	for name := range expected {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var lines []string
+	for _, name := range names {
+		if _, ok := have[name]; !ok {
+			lines = append(lines, fmt.Sprintf("  mcpServers: %s\n",
+				diffAdd.Render(fmt.Sprintf("+ %s", name))))
+		}
+	}
+	if len(lines) > 0 {
+		header := fmt.Sprintf("  mcpServers: %s\n",
+			diffAdd.Render("restore managed MCP servers"))
+		lines = append([]string{header}, lines...)
+	}
+	return lines
 }
 
 // diffHooksConfigs compares current and expected configs, returning formatted diff lines.
