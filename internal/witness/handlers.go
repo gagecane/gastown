@@ -2334,6 +2334,22 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	if doneIntent != nil && time.Since(doneIntent.Timestamp) > witCfg.DoneIntentStuckTimeoutD() {
 		age := time.Since(doneIntent.Timestamp).Round(time.Second)
 
+		// gu-0x2be: Gate-liveness guard. A polecat can legitimately spend longer
+		// than DoneIntentStuckTimeout inside `gt done` grinding a slow pre-merge
+		// gate (e.g. `brazil-build release`, a full `go test ./...`), which can
+		// take 10-15min. Restarting it discards the in-progress gate run AND the
+		// session context. Before treating done-intent age as "stuck", check
+		// whether one of the polecat's configured gate commands is ACTIVELY
+		// running under its pane's process tree. If so, it's grinding-not-stuck:
+		// leave it alone and let the gate finish (the documented "restart-on-
+		// slow-gate worsens churn" anti-pattern). The TOCTOU restart guards below
+		// still handle a session that exits on its own.
+		if gates := loadHookGates(bd, workDir, snapHook); len(gates) > 0 {
+			if procCmds, _ := t.SessionDescendantCommands(sessionName); gateProcessRunning(gates, procCmds) {
+				return ZombieResult{}, false
+			}
+		}
+
 		// gu-5npkm: Per-bead restart cap. Restarting a stuck-in-done polecat
 		// re-enters the SAME stalled gt-done flow (e.g. push/MR/dolt I/O blocked
 		// under host load), so it re-sticks and the witness re-flags it every

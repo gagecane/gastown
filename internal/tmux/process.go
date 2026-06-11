@@ -200,6 +200,43 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 	return nil
 }
 
+// SessionDescendantCommands returns the full command-line args of every
+// descendant process of the named session's pane (children, grandchildren,
+// etc.), excluding the pane process itself. It is used to detect whether a
+// long-running gate command (e.g. `go test ./...`, `brazil-build release`) is
+// actively executing under a polecat that looks stuck-in-done.
+//
+// Returns (nil, nil) when the session/pane can't be resolved or has no
+// descendants — callers treat an empty result as "no gate process detected"
+// and fall back to their existing behavior.
+func (t *Tmux) SessionDescendantCommands(session string) ([]string, error) {
+	pid, err := t.GetPanePID(session)
+	if err != nil || pid == "" {
+		return nil, err
+	}
+	descendants := getAllDescendants(pid)
+	if len(descendants) == 0 {
+		return nil, nil
+	}
+	cmds := make([]string, 0, len(descendants))
+	for _, dpid := range descendants {
+		if args := processArgs(dpid); args != "" {
+			cmds = append(cmds, args)
+		}
+	}
+	return cmds, nil
+}
+
+// processArgs returns the full command-line (argv) of a single PID via
+// `ps -o args=`. Returns empty string when the process is gone or unreadable.
+func processArgs(pid string) string {
+	out, err := exec.Command("ps", "-o", "args=", "-p", pid).Output() //nolint:gosec // G204: pid is numeric from process-tree walk
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // ServerPID returns the PID of the tmux server process.
 // Returns 0 if the server is not running or the PID cannot be determined.
 func (t *Tmux) ServerPID() int {
