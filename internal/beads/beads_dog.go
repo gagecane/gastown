@@ -13,8 +13,11 @@ import (
 func (b *Beads) CreateDogAgentBead(name, location string) (*Issue, error) {
 	title := fmt.Sprintf("Dog: %s", name)
 	beadID := DogBeadIDTown(name) // Use canonical ID: hq-dog-<name>
+	// gt:pinned protects the dog's persistent infra bead from the reaper's stale
+	// auto-close even if gt:agent is later lost (gu-8r6u6).
 	labels := []string{
-		"gt:agent",
+		LabelAgent,
+		LabelPinned,
 		"role_type:dog",
 		"rig:town",
 		"location:" + location,

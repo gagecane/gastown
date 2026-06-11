@@ -337,6 +337,68 @@ func TestAutoCloseExcludesAgentBeads(t *testing.T) {
 	}
 }
 
+// TestAutoCloseExcludesPinnedAndInfraRoles pins the gu-8r6u6 defense: AutoClose
+// must exclude beads carrying the gt:pinned protective label AND, independently
+// of any label, beads whose description carries a persistent-infra role_type
+// (refinery/witness/dog). The role_type guard is the belt-and-suspenders defense
+// that survives loss of the gt:agent / gt:pinned labels — the exact failure mode
+// that auto-closed cae2-sle and mrd-d6n.
+func TestAutoCloseExcludesPinnedAndInfraRoles(t *testing.T) {
+	sourcePath := "reaper.go"
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sourcePath, err)
+	}
+	source := string(data)
+
+	for _, fn := range []string{"func AutoClose(", "func Scan("} {
+		start := strings.Index(source, fn)
+		if start == -1 {
+			t.Fatalf("could not find %s in %s", fn, sourcePath)
+		}
+		end := strings.Index(source[start:], "\n}\n")
+		if end == -1 {
+			t.Fatalf("could not isolate %s body in %s", fn, sourcePath)
+		}
+		body := source[start : start+end]
+		if !strings.Contains(body, "'gt:pinned'") {
+			t.Errorf("expected %s label exclusion to include 'gt:pinned', body was:\n%s", fn, body)
+		}
+		if !strings.Contains(body, "staleInfraRoleExcludeSQL(\"i\")") {
+			t.Errorf("expected %s to wire staleInfraRoleExcludeSQL(\"i\"), body was:\n%s", fn, body)
+		}
+	}
+}
+
+// TestStaleInfraRoleExcludeSQL pins the label-independent infra guard shape:
+// one NOT LIKE clause per persistent-infra role, matching the `role_type: <role>`
+// line the agent-bead description writer emits.
+func TestStaleInfraRoleExcludeSQL(t *testing.T) {
+	got := staleInfraRoleExcludeSQL("i")
+	for _, role := range []string{"refinery", "witness", "dog"} {
+		want := "i.description NOT LIKE '%role_type: " + role + "%'"
+		if !strings.Contains(got, want) {
+			t.Errorf("staleInfraRoleExcludeSQL missing clause %q; got:\n%s", want, got)
+		}
+	}
+	// Must be AND-prefixed so it appends cleanly onto an existing WHERE.
+	if !strings.Contains(got, "AND i.description NOT LIKE") {
+		t.Errorf("clauses must be AND-prefixed; got:\n%s", got)
+	}
+	// The alias parameter must be honored (not hard-coded to "i").
+	if a := staleInfraRoleExcludeSQL("x"); !strings.Contains(a, "x.description NOT LIKE") {
+		t.Errorf("alias parameter not honored; got:\n%s", a)
+	}
+}
+
+// TestLabelPinnedConstant guards the duplicated label constant against drift
+// from beads.LabelPinned (both must equal "gt:pinned").
+func TestLabelPinnedConstant(t *testing.T) {
+	if LabelPinned != "gt:pinned" {
+		t.Fatalf("LabelPinned = %q, want gt:pinned", LabelPinned)
+	}
+}
+
 // TestLiveTrackedContextExcludeJoin pins the gu-ycihb sling-context guard: the
 // reaper must not age-reap a gt:sling-context wisp whose tracked work bead is
 // still open, which would otherwise produce the gu-i0oaq dispatch-close race.
