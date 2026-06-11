@@ -446,6 +446,22 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 
+	// Rig spawn preflight (gu-9uvl6). Validate that the rig is configured well
+	// enough to spawn a polecat worktree BEFORE the irreversible side effects
+	// below (burning stale molecules, creating the auto-convoy, hooking the
+	// bead). A missing config.json or a default_branch that doesn't exist in the
+	// bare repo previously surfaced only as a cryptic "exit status 1" deep in the
+	// worktree-creation path. Surfacing it here gives an actionable error with
+	// branch suggestions and stops a half-finished dispatch. Uses the same
+	// effective base branch the spawn step computes below (relay-aware).
+	if params.RigName != "" {
+		preflightBase := effectiveBaseBranch(params.BeadID, params.BaseBranch)
+		if err := preflightRigSpawn(townRoot, params.RigName, preflightBase); err != nil {
+			result.ErrMsg = err.Error()
+			return result, err
+		}
+	}
+
 	// Send LIFECYCLE:Shutdown to the witness when force-stealing a bead from a
 	// live polecat. Without this, the old polecat becomes a zombie — still running
 	// but unaware it lost its hook. Mirrors the same logic in runSling (sling.go).
