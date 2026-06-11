@@ -1670,6 +1670,7 @@ func loadConfig(path string) (*HooksConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
+	normalizeLegacyCommands(&cfg)
 	if err := validateUniqueMatchers(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
@@ -1719,4 +1720,59 @@ func gtCommand(command string) string {
 		return resolveGTBinary() + command[len("gt"):]
 	}
 	return command
+}
+
+// normalizeLegacyCommands rewrites the legacy `export PATH="..." && gt ...`
+// hook-command form (written by older gt versions into ~/.gt/hooks-base.json
+// and the per-target overrides) into the resolved-binary form the spawn-time
+// template installer emits ({{GT_BIN}} -> absolute gt path).
+//
+// Why this matters (gu-mcxmq / gu-7muvo): two writers manage the same on-disk
+// .claude/settings.json. `gt hooks sync` derives hooks from these JSON configs;
+// the daemon's spawn-time installer (InstallForRole) writes from embedded
+// templates. installer.needsUpgrade() treats the literal `export PATH=` string
+// as STALE and overwrites any file containing it — so every sync that emitted
+// the legacy form was immediately clobbered on the next spawn, and the next
+// sync wrote it back. The two paths could never converge ("sync won't
+// converge"), and `gt hooks diff` reported clean because it only compares
+// against the sync expectation, not the spawn-path staleness check.
+//
+// Normalizing at load makes ComputeExpected emit exactly the resolved-binary
+// command the template produces, so needsUpgrade() no longer fires on synced
+// files and the two writers agree byte-for-byte. It also removes the `export
+// PATH=` prefix that breaks Gemini CLI's hook runner (the original reason
+// needsUpgrade rejects it). Self-healing: no manual migration of on-disk
+// config is required; the next load rewrites the command in memory.
+func normalizeLegacyCommands(cfg *HooksConfig) {
+	if cfg == nil {
+		return
+	}
+	for _, eventType := range EventTypes {
+		for _, entry := range cfg.GetEntries(eventType) {
+			for i := range entry.Hooks {
+				entry.Hooks[i].Command = normalizeLegacyCommand(entry.Hooks[i].Command)
+			}
+		}
+	}
+}
+
+// normalizeLegacyCommand strips a legacy `export PATH=... && ` prefix from a
+// single hook command and resolves the resulting `gt ...` invocation to the
+// absolute binary path. The PATH value itself varied across gt versions, so we
+// match the `export PATH=` ... `&& ` shape rather than one exact string.
+// Commands without the prefix (and any command whose remainder is not a `gt`
+// invocation) are returned unchanged, so non-gt hooks are never touched.
+func normalizeLegacyCommand(command string) string {
+	if !strings.HasPrefix(command, "export PATH=") {
+		return command
+	}
+	sep := strings.Index(command, "&& ")
+	if sep < 0 {
+		return command
+	}
+	rest := command[sep+len("&& "):]
+	if rest != "gt" && !strings.HasPrefix(rest, "gt ") {
+		return command
+	}
+	return gtCommand(rest)
 }

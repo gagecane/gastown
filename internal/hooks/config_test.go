@@ -157,6 +157,97 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+// TestNormalizeLegacyCommand verifies the unit-level rewrite of the legacy
+// `export PATH=... && gt ...` hook-command form into the resolved-binary form
+// (gu-mcxmq / gu-7muvo: stops the sync<->spawn format civil war).
+func TestNormalizeLegacyCommand(t *testing.T) {
+	gtBin := resolveGTBinary()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "legacy prime hook is resolved to absolute binary",
+			in:   `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && gt prime --hook`,
+			want: gtBin + " prime --hook",
+		},
+		{
+			name: "legacy bare gt is resolved",
+			in:   `export PATH="$HOME/go/bin:$PATH" && gt`,
+			want: gtBin,
+		},
+		{
+			name: "already-resolved command is unchanged",
+			in:   gtBin + " prime --hook",
+			want: gtBin + " prime --hook",
+		},
+		{
+			name: "template placeholder is left for substitution",
+			in:   "{{GT_BIN}} prime --hook",
+			want: "{{GT_BIN}} prime --hook",
+		},
+		{
+			name: "non-gt command after export PATH is left untouched",
+			in:   `export PATH="/x:$PATH" && /opt/tool/run.sh`,
+			want: `export PATH="/x:$PATH" && /opt/tool/run.sh`,
+		},
+		{
+			name: "unrelated command is unchanged",
+			in:   "echo blocked && exit 2",
+			want: "echo blocked && exit 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeLegacyCommand(tt.in); got != tt.want {
+				t.Errorf("normalizeLegacyCommand(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadBaseNormalizesLegacyCommands proves that a legacy on-disk base config
+// (containing `export PATH=... && gt ...`) is normalized on load, so the synced
+// output no longer carries the `export PATH=` string that the spawn-time
+// installer's needsUpgrade() flags as stale — the root of gu-mcxmq/gu-7muvo
+// non-convergence.
+func TestLoadBaseNormalizesLegacyCommands(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	legacy := &HooksConfig{
+		SessionStart: []HookEntry{{
+			Matcher: "",
+			Hooks: []Hook{{
+				Type:    "command",
+				Command: `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && gt prime --hook`,
+			}},
+		}},
+	}
+	if err := SaveBase(legacy); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	loaded, err := LoadBase()
+	if err != nil {
+		t.Fatalf("LoadBase failed: %v", err)
+	}
+	if len(loaded.SessionStart) != 1 || len(loaded.SessionStart[0].Hooks) != 1 {
+		t.Fatalf("unexpected loaded shape: %+v", loaded.SessionStart)
+	}
+	got := loaded.SessionStart[0].Hooks[0].Command
+	if strings.Contains(got, "export PATH=") {
+		t.Errorf("loaded command still carries legacy export PATH prefix: %q", got)
+	}
+	want := resolveGTBinary() + " prime --hook"
+	if got != want {
+		t.Errorf("loaded command = %q, want %q", got, want)
+	}
+}
+
 func TestValidTarget(t *testing.T) {
 	tests := []struct {
 		target string
