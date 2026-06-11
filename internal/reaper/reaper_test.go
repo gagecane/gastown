@@ -70,6 +70,24 @@ func TestParentExcludeJoin(t *testing.T) {
 	if !contains(joinClause, "parent-child") {
 		t.Error("parentExcludeJoin should filter on parent-child type")
 	}
+
+	// Regression (gu-eedh0): post-v49 the parent-child target moved into
+	// depends_on_wisp_id (wisp parents) / depends_on_issue_id (issue parents) and
+	// the legacy depends_on_id column is empty. Joining the wisp parent on the
+	// empty column flagged every parent-child link as dangling (~240 town-wide,
+	// 31 verified on this rig — all stored in depends_on_wisp_id, 0 genuinely
+	// missing), driving a recurring false-positive escalation flood. Lock the
+	// post-v49 columns in and forbid the legacy empty column.
+	if !contains(joinClause, "depends_on_wisp_id") {
+		t.Error("parentExcludeJoin should join wisp parents on depends_on_wisp_id (v49 schema)")
+	}
+	if !contains(joinClause, "depends_on_issue_id") {
+		t.Error("parentExcludeJoin should join issue parents on depends_on_issue_id (v49 schema)")
+	}
+	if contains(joinClause, "wd.depends_on_id") {
+		t.Error("parentExcludeJoin must not use the legacy empty depends_on_id column (v49 skew)")
+	}
+
 	if !contains(joinClause, "'open', 'hooked', 'in_progress'") {
 		t.Error("parentExcludeJoin should check for open parent statuses")
 	}

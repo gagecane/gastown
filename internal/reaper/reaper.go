@@ -249,7 +249,7 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 	joinClause = `LEFT JOIN (
 		SELECT DISTINCT wd.issue_id
 		FROM wisp_dependencies wd
-		LEFT JOIN wisps pw ON pw.id = wd.depends_on_issue_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
+		LEFT JOIN wisps pw ON pw.id = wd.depends_on_wisp_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
 		WHERE wd.type = 'parent-child'
 		AND (pw.status IN ('open', 'hooked', 'in_progress') OR pi.status IN ('open', 'in_progress'))
 	) open_parent ON open_parent.issue_id = w.id`
@@ -429,9 +429,16 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	}
 
 	// Anomaly detection: dangling parent references.
+	// Post-v49 the parent-child target moved into depends_on_wisp_id (wisp
+	// parents) / depends_on_issue_id (issue parents); the legacy depends_on_id
+	// column is empty. Joining the wisp parent on depends_on_issue_id (empty for
+	// every parent-child row) flagged ALL parent-child links as dangling — a
+	// false-positive flood (~240 town-wide, 31 here; gu-eedh0) that the data did
+	// NOT support. Join each parent side on its real column so the anomaly only
+	// fires on a genuinely missing parent.
 	danglingQuery := `
 		SELECT COUNT(*) FROM wisp_dependencies wd
-		LEFT JOIN wisps pw ON pw.id = wd.depends_on_issue_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
+		LEFT JOIN wisps pw ON pw.id = wd.depends_on_wisp_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
 		WHERE wd.type = 'parent-child' AND pw.id IS NULL AND pi.id IS NULL`
 	var danglingCount int
 	if err := db.QueryRowContext(ctx, danglingQuery).Scan(&danglingCount); err == nil && danglingCount > 0 {
@@ -1072,8 +1079,11 @@ func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery, primaryTable stri
 		}
 
 		// Clean up reverse dependency references to prevent dangling parent refs.
-		// Non-fatal: primary delete below is what matters.
-		delReverse := fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_issue_id IN %s", inClause)
+		// Post-v49, parent-child links live in depends_on_wisp_id (the legacy
+		// depends_on_id column is empty), so target that column to actually remove
+		// refs pointing at the purged wisps. Non-fatal: primary delete below is
+		// what matters.
+		delReverse := fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN %s", inClause)
 		_, _ = db.ExecContext(ctx, delReverse, args...)
 
 		delPrimary := fmt.Sprintf("DELETE FROM `%s` WHERE id IN %s", primaryTable, inClause) //nolint:gosec // G201: primaryTable is internal
