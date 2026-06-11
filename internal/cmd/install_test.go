@@ -97,7 +97,7 @@ func TestEnsureBeadsConfigYAML_CreatesWhenMissing(t *testing.T) {
 	got := string(data)
 	// Upstream added export.auto: "false" to the default config so beads
 	// doesn't auto-export issue files into the worktree on every write.
-	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\ndolt.auto-commit: \"on\"\nexport.auto: \"false\"\n"
+	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\ndolt.auto-start: \"false\"\ndolt.auto-commit: \"on\"\nexport.auto: \"false\"\n"
 	if got != want {
 		t.Fatalf("config.yaml = %q, want %q", got, want)
 	}

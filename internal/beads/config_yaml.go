@@ -105,6 +105,14 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	wantIssuePrefix := "issue-prefix: " + prefix
 	// Gas Town rigs should disable idle-monitor to use centralized Dolt server
 	wantIdleTimeout := "dolt.idle-timeout: \"0\""
+	// Gas Town rigs MUST disable bd's Dolt auto-start. gt owns the centralized
+	// Dolt server lifecycle (port 3307). When that server is momentarily down,
+	// bd's default-ON auto-start spawns a rig-LOCAL embedded server that binds
+	// 3307 but only contains that rig's database — it then answers every other
+	// rig's query with "database not found", causing a town-wide bd outage.
+	// Forcing auto-start off makes bd fail safely+loudly instead of hijacking
+	// the shared port. See gu-hvw2a.
+	wantAutoStart := "dolt.auto-start: \"false\""
 	// Gas Town rigs default dolt.auto-commit=on so that ephemeral MR beads
 	// created by `gt done` (and other Dolt writes) are actually committed
 	// and visible to other sessions (refineries, witnesses). With
@@ -118,7 +126,7 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		// New config: include all Gas Town defaults
-		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantAutoCommit + "\n" + wantExportAuto + "\n"
+		content := wantPrefix + "\n" + wantIssuePrefix + "\n" + wantIdleTimeout + "\n" + wantAutoStart + "\n" + wantAutoCommit + "\n" + wantExportAuto + "\n"
 		return os.WriteFile(configPath, []byte(content), 0644)
 	}
 	if err != nil {
@@ -133,6 +141,7 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	foundPrefix := false
 	foundIssuePrefix := false
 	foundIdleTimeout := false
+	foundAutoStart := false
 	foundAutoCommit := false
 	foundExportAuto := false
 
@@ -151,6 +160,14 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 		if strings.HasPrefix(trimmed, "dolt.idle-timeout:") {
 			lines[i] = wantIdleTimeout
 			foundIdleTimeout = true
+			continue
+		}
+		// dolt.auto-start: force to "false". This is a town-safety key, not a
+		// user preference — a rig-local imposter on the shared port takes down
+		// every other rig's bd. Normalize any value to "false". See gu-hvw2a.
+		if strings.HasPrefix(trimmed, "dolt.auto-start:") {
+			lines[i] = wantAutoStart
+			foundAutoStart = true
 			continue
 		}
 		// dolt.auto-commit: "add if missing" semantics — respect any
@@ -174,6 +191,9 @@ func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
 	}
 	if !foundIdleTimeout {
 		lines = append(lines, wantIdleTimeout)
+	}
+	if !foundAutoStart {
+		lines = append(lines, wantAutoStart)
 	}
 	if !foundAutoCommit {
 		lines = append(lines, wantAutoCommit)

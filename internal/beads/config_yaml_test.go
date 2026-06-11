@@ -315,6 +315,111 @@ func TestEnsureConfigYAML_DisablesAutoExport(t *testing.T) {
 	}
 }
 
+func TestEnsureConfigYAML_IncludesDoltAutoStartFalseDefault(t *testing.T) {
+	beadsDir := t.TempDir()
+
+	if err := EnsureConfigYAML(beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "dolt.auto-start: \"false\"\n") {
+		t.Fatalf("config.yaml missing dolt.auto-start default: %q", string(data))
+	}
+}
+
+func TestEnsureConfigYAML_AddsDoltAutoStartWhenMissing(t *testing.T) {
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	original := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\n"
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	if err := EnsureConfigYAML(beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "dolt.auto-start: \"false\"\n") {
+		t.Fatalf("config.yaml missing dolt.auto-start default: %q", string(data))
+	}
+}
+
+func TestEnsureConfigYAML_ForcesDoltAutoStartTrueToFalse(t *testing.T) {
+	// dolt.auto-start is a town-safety key: a rig-local imposter on the shared
+	// port takes down every other rig's bd. Unlike auto-commit, a user-set
+	// "true" MUST be normalized to "false". See gu-hvw2a.
+	beadsDir := t.TempDir()
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	original := "prefix: hq\nissue-prefix: hq\ndolt.auto-start: \"true\"\n"
+	if err := os.WriteFile(configPath, []byte(original), 0644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	if err := EnsureConfigYAML(beadsDir, "hq"); err != nil {
+		t.Fatalf("EnsureConfigYAML: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "dolt.auto-start: \"false\"\n") {
+		t.Fatalf("config.yaml should force dolt.auto-start to false: %q", got)
+	}
+	if strings.Contains(got, "dolt.auto-start: \"true\"") {
+		t.Fatalf("config.yaml must not retain dolt.auto-start: \"true\": %q", got)
+	}
+	if strings.Count(got, "dolt.auto-start:") != 1 {
+		t.Fatalf("dolt.auto-start should appear exactly once: %q", got)
+	}
+}
+
+func TestConfigDisablesAutoStartHelper(t *testing.T) {
+	// Guards the doctor check's detector against quoting/comment variations.
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"double quoted false", "dolt.auto-start: \"false\"\n", true},
+		{"single quoted false", "dolt.auto-start: 'false'\n", true},
+		{"bare false", "dolt.auto-start: false\n", true},
+		{"true", "dolt.auto-start: \"true\"\n", false},
+		{"missing", "prefix: hq\n", false},
+		{"comment only", "# dolt.auto-start: false\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Mirror the doctor check's detector logic locally to keep this test
+			// in the beads package (where ensureConfigYAML lives).
+			got := false
+			for _, line := range strings.Split(strings.ReplaceAll(tt.content, "\r\n", "\n"), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if strings.HasPrefix(trimmed, "dolt.auto-start:") {
+					value := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "dolt.auto-start:")), `"'`)
+					got = strings.EqualFold(value, "false")
+					break
+				}
+			}
+			if got != tt.want {
+				t.Fatalf("detector(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConfigYAMLDisablesAutoExport(t *testing.T) {
 	tests := []struct {
 		name    string
