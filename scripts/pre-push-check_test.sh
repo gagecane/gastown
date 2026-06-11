@@ -813,6 +813,65 @@ EOF
   PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot" "$probed"
 }
 
+# Test (gu-40xsf): the slow gate's child must NOT leak the gate-slot fd to a
+# daemonizing grandchild. bash's `exec {fd}>file` is not close-on-exec, so a
+# test that backgrounds a long-lived process (historically a tmux server,
+# gt-test-sentinel) would inherit the slot fd and pin the flock after the
+# script exits — permanently exhausting the slot. This stubs `go` so its
+# "test" subcommand spawns a backgrounded child that sleeps well past the
+# script's lifetime, then asserts the slot is FREE once the script returns
+# (an external non-blocking flock must succeed). Before the fix the leaked
+# child held the fd and the flock would fail.
+test_gate_slot_cap_no_fd_leak_to_daemon_child() {
+  local stubdir tmprepo townroot
+  read -r stubdir tmprepo townroot < <(make_cap_fixture)
+  local slot="$townroot/.runtime/locks/gate-slots/slot-0.flock"
+  local childpid_file="$townroot/daemon.pid"
+
+  # `go test ...` stub: background a child that outlives the script and would
+  # inherit any non-cloexec fd. setsid + redirecting std fds to /dev/null
+  # daemonizes it like a real tmux server. Record its pid so we can reap it.
+  cat > "$stubdir/go" <<EOF
+#!/bin/bash
+if [[ "\$1" == "test" ]]; then
+  setsid bash -c 'sleep 30' </dev/null >/dev/null 2>&1 &
+  echo \$! > "$childpid_file"
+fi
+exit 0
+EOF
+  chmod +x "$stubdir/go"
+
+  local rc=0 out
+  out=$(
+    cd "$tmprepo" && \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    GT_TOWN_ROOT="$townroot" GT_GATE_CONCURRENCY=1 GT_GATE_SLOT_WAIT_SECONDS=2 \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+
+  # After the script exits, the slot MUST be free even though the daemon child
+  # is still alive — proving the child did not inherit the slot fd.
+  local lock_free=0
+  if ( exec 9>"$slot"; flock -n 9 ); then
+    lock_free=1
+  fi
+
+  # Reap the lingering daemon child.
+  local cpid; cpid=$(cat "$childpid_file" 2>/dev/null || echo "")
+  [[ -n "$cpid" ]] && kill "$cpid" 2>/dev/null
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo "FAIL: push should pass with a free slot (got rc=$rc)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
+  fi
+  if [[ "$lock_free" -ne 1 ]]; then
+    echo "FAIL: gate slot still held after script exit — daemon child leaked the slot fd (gu-40xsf)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"
+}
+
 # Test: with no town root known (no GT_TOWN_ROOT, no mayor/town.json), the cap
 # is a silent no-op and the push passes normally.
 test_gate_slot_cap_skips_without_town_root() {
@@ -1036,6 +1095,8 @@ if command -v git >/dev/null 2>&1; then
   test_gate_slot_cap_proceeds_when_full
   test_gate_slot_cap_acquires_when_free
   test_gate_slot_cap_skips_without_town_root
+  # gu-40xsf: slow-gate child must not leak the gate-slot fd to a daemon
+  test_gate_slot_cap_no_fd_leak_to_daemon_child
   # gu-zadrb: slow-gate hard wall-clock group timeout
   test_slow_gate_wall_clock_timeout_rejects
   test_slow_gate_under_wall_passes

@@ -513,13 +513,35 @@ fi
 #
 # Falls back to a plain run when `setsid` is unavailable (the group bound is
 # then absent, but go's own -timeout still applies — no worse than before).
+#
+# gu-40xsf: the slow gate's child (`go test ./...`) MUST NOT inherit the
+# gate-slot fd held in GATE_SLOT_FD. bash's `exec {fd}>file` does NOT set
+# close-on-exec, so any process the tests spawn inherits that fd — and a
+# test that daemonizes a tmux server (newIsolatedTmuxForTest /
+# gt-test-sentinel) leaves a daemon that outlives the test and pins the
+# flock indefinitely. flock releases only when EVERY fd referencing it
+# closes, so a single leaked daemon permanently exhausts a slot; two leaks
+# exhaust the GT_GATE_CONCURRENCY=2 pool and make every subsequent push
+# block up to GT_GATE_SLOT_WAIT_SECONDS (600s) — observed as a "push hang"
+# with no PUSH_OK/PUSH_FAILED marker. We close the slot fd for the test
+# child via `{GATE_SLOT_FD}>&-` so no descendant can inherit it. The parent
+# shell keeps its own copy of the fd, so the slot stays held for the
+# duration of the gate and is released normally on EXIT.
 run_with_group_timeout() {
   local wall=$1; shift
   if ! command -v setsid >/dev/null 2>&1; then
-    "$@"
+    if [[ -n "${GATE_SLOT_FD:-}" ]]; then
+      "$@" {GATE_SLOT_FD}>&-
+    else
+      "$@"
+    fi
     return $?
   fi
-  setsid "$@" &
+  if [[ -n "${GATE_SLOT_FD:-}" ]]; then
+    setsid "$@" {GATE_SLOT_FD}>&- &
+  else
+    setsid "$@" &
+  fi
   local leader=$!   # setsid makes the child a session+group leader: PGID == PID
   local waited=0
   while kill -0 "$leader" 2>/dev/null; do
