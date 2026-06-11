@@ -1227,3 +1227,119 @@ func TestConnectionCountWarning(t *testing.T) {
 		t.Errorf("at saturation, warning should report 100%%, got %q", got)
 	}
 }
+
+// ============================================================================
+// resolveDataDir tests (gu-3phku: data dir must never be inherited from cwd)
+// ============================================================================
+
+func TestResolveDataDir_AbsoluteConfigPathUnchanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	m := &DoltServerManager{
+		config:   &DoltServerConfig{DataDir: tmpDir},
+		townRoot: tmpDir,
+		logger:   func(string, ...interface{}) {},
+	}
+	got, err := m.resolveDataDir()
+	if err != nil {
+		t.Fatalf("resolveDataDir: %v", err)
+	}
+	if got != tmpDir {
+		t.Errorf("got %q, want %q", got, tmpDir)
+	}
+	if m.config.DataDir != tmpDir {
+		t.Errorf("config.DataDir = %q, want %q (should be written back)", m.config.DataDir, tmpDir)
+	}
+}
+
+func TestResolveDataDir_RelativeMadeAbsolute(t *testing.T) {
+	m := &DoltServerManager{
+		config:   &DoltServerConfig{DataDir: "relative/dolt"},
+		townRoot: t.TempDir(),
+		logger:   func(string, ...interface{}) {},
+	}
+	got, err := m.resolveDataDir()
+	if err != nil {
+		t.Fatalf("resolveDataDir: %v", err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Errorf("got %q, want an absolute path", got)
+	}
+	if m.config.DataDir != got {
+		t.Errorf("config.DataDir = %q, want %q", m.config.DataDir, got)
+	}
+}
+
+func TestResolveDataDir_EmptyFallsBackToState(t *testing.T) {
+	townRoot := t.TempDir()
+	stateDir := filepath.Join(townRoot, ".dolt-data")
+	// Write a dolt-state.json with the authoritative data_dir.
+	if err := doltserver.SaveState(townRoot, &doltserver.State{DataDir: stateDir}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	m := &DoltServerManager{
+		config:   &DoltServerConfig{DataDir: ""}, // empty: must NOT inherit cwd
+		townRoot: townRoot,
+		logger:   func(string, ...interface{}) {},
+	}
+	got, err := m.resolveDataDir()
+	if err != nil {
+		t.Fatalf("resolveDataDir: %v", err)
+	}
+	if got != stateDir {
+		t.Errorf("got %q, want %q (from dolt-state.json)", got, stateDir)
+	}
+}
+
+func TestResolveDataDir_EmptyNoStateFallsBackToDefault(t *testing.T) {
+	townRoot := t.TempDir()
+	m := &DoltServerManager{
+		config:   &DoltServerConfig{DataDir: ""},
+		townRoot: townRoot,
+		logger:   func(string, ...interface{}) {},
+	}
+	got, err := m.resolveDataDir()
+	if err != nil {
+		t.Fatalf("resolveDataDir: %v", err)
+	}
+	want := doltserver.DefaultConfig(townRoot).DataDir
+	if got != want {
+		t.Errorf("got %q, want default %q", got, want)
+	}
+	// Critically, it must be absolute and rooted in townRoot, never cwd.
+	if !filepath.IsAbs(got) {
+		t.Errorf("got %q, want an absolute path", got)
+	}
+}
+
+// ============================================================================
+// assertServedData tests (gu-3phku: detect empty/imposter store post-spawn)
+// ============================================================================
+
+func TestAssertServedData_UsesHook(t *testing.T) {
+	sentinel := fmt.Errorf("hook fired")
+	m := &DoltServerManager{
+		config:            &DoltServerConfig{},
+		logger:            func(string, ...interface{}) {},
+		servedDataCheckFn: func() error { return sentinel },
+	}
+	if err := m.assertServedData(); err != sentinel {
+		t.Errorf("got %v, want sentinel error", err)
+	}
+}
+
+func TestAssertServedData_NilHookIsDefault(t *testing.T) {
+	// With no hook and no live server, the real path runs buildDoltSQLCmd whose
+	// query fails — assertServedData treats a query failure as non-fatal (nil)
+	// to avoid failing closed on a transient/warming-up server.
+	m := &DoltServerManager{
+		config: &DoltServerConfig{
+			Host:    "127.0.0.1",
+			Port:    1, // nothing listening
+			DataDir: t.TempDir(),
+		},
+		logger: func(string, ...interface{}) {},
+	}
+	if err := m.assertServedData(); err != nil {
+		t.Errorf("expected nil (query failure is non-fatal), got %v", err)
+	}
+}

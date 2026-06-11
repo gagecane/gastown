@@ -150,6 +150,7 @@ type DoltServerManager struct {
 	healthCheckFn     func() error
 	writeProbeCheckFn func() error
 	identityCheckFn   func() error // nil = use real VerifyServerDataDir
+	servedDataCheckFn func() error // nil = use real assertServedData (hq issue_prefix present)
 	startFn           func() error
 	runningFn         func() (int, bool)
 	stopFn            func()
@@ -899,6 +900,41 @@ func (m *DoltServerManager) Start() error {
 	return m.startLocked()
 }
 
+// resolveDataDir pins the Dolt data directory to an authoritative, absolute
+// path before any sql-server spawn. The data dir MUST never be inherited from
+// cwd: a relative or empty DataDir makes cmd.Dir (and the config.yaml data_dir
+// field) resolve against the daemon's working directory, which under host OOM
+// recovery has been observed to be a rig's .beads/dolt store — a near-empty
+// imposter that serves 0 issues and no issue_prefix, causing a townwide write
+// outage (gu-3phku, incident gc-wakgb4).
+//
+// Resolution order:
+//  1. If config.DataDir is set, make it absolute and use it.
+//  2. Otherwise fall back to the data_dir recorded in daemon/dolt-state.json
+//     (written by the canonical gt dolt start path).
+//  3. Otherwise fall back to the doltserver package default (<townRoot>/.dolt-data).
+//
+// The resolved value is written back to config.DataDir so all downstream uses
+// (config.yaml data_dir, cmd.Dir, identity checks, alerts) agree.
+func (m *DoltServerManager) resolveDataDir() (string, error) {
+	dir := strings.TrimSpace(m.config.DataDir)
+	if dir == "" {
+		if state, err := doltserver.LoadState(m.townRoot); err == nil && strings.TrimSpace(state.DataDir) != "" {
+			dir = state.DataDir
+			m.logger("Dolt data dir unset in daemon config; using %s from dolt-state.json", dir)
+		} else {
+			dir = doltserver.DefaultConfig(m.townRoot).DataDir
+			m.logger("Dolt data dir unset; falling back to default %s", dir)
+		}
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolving Dolt data dir %q to absolute path: %w", dir, err)
+	}
+	m.config.DataDir = abs
+	return abs, nil
+}
+
 // startLocked starts the Dolt server. Must be called with m.mu held.
 func (m *DoltServerManager) startLocked() error {
 	if m.startFn != nil {
@@ -911,6 +947,13 @@ func (m *DoltServerManager) startLocked() error {
 	if _, running := m.isRunning(); running {
 		m.logger("Dolt server already running, skipping start")
 		return nil
+	}
+
+	// Pin the data dir to an authoritative absolute path BEFORE building the
+	// config or setting cmd.Dir. A cwd-derived data dir is what caused the
+	// townwide write outage in gu-3phku.
+	if _, err := m.resolveDataDir(); err != nil {
+		return err
 	}
 
 	// Ensure data directory exists
@@ -928,6 +971,15 @@ func (m *DoltServerManager) startLocked() error {
 	// silently override the config file but cannot set timeout fields, so we
 	// use --config instead. This prevents CLOSE_WAIT accumulation that occurs
 	// when Dolt uses its 8-hour default read/write timeouts. (gt-ch5)
+	//
+	// The data dir is pinned authoritatively two ways, neither of which relies
+	// on cwd (gu-3phku): (1) writeDaemonDoltConfig embeds the absolute
+	// m.config.DataDir as the config.yaml `data_dir:` field, and (2) cmd.Dir is
+	// set to that same absolute path below. We do NOT pass an explicit
+	// --data-dir flag: `dolt sql-server --config <file>` ignores ALL other
+	// command-line arguments (per `dolt sql-server --help`), so --data-dir
+	// would be silently dropped. The config-file data_dir is the only flag the
+	// server actually honors here.
 	configPath := filepath.Join(m.config.DataDir, "config.yaml")
 	if err := writeDaemonDoltConfig(m.config, configPath); err != nil {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)
@@ -992,6 +1044,65 @@ func (m *DoltServerManager) startLocked() error {
 		m.logger("Warning: Dolt server may not be healthy: %v", err)
 	}
 
+	// Post-spawn data assertion: a healthy TCP listener is NOT enough. Under OOM
+	// recovery an imposter server can bind :3307 while serving a near-empty store
+	// (no issues, no issue_prefix) — reads return empty and writes fail with
+	// "issue_prefix config is missing", taking the whole town's bd writes down
+	// (gu-3phku, incident gc-wakgb4). Assert the served hq database actually
+	// contains data; if it doesn't, kill the imposter and restart from the
+	// correct data dir.
+	if err := m.assertServedData(); err != nil {
+		m.logger("Dolt server passed health check but is serving empty/imposter data: %v; killing imposter and restarting", err)
+		if m.writeUnhealthySignal("imposter_detected", err.Error()) {
+			m.sendUnhealthyAlert(fmt.Errorf("post-spawn data assertion: %w", err))
+		} else {
+			m.logger("Dolt incident already active; suppressing duplicate imposter alert")
+		}
+		m.stopLocked()
+		if killErr := doltserver.KillImposters(m.townRoot); killErr != nil {
+			m.logger("Warning: failed to kill imposters: %v", killErr)
+		}
+		time.Sleep(500 * time.Millisecond)
+		return m.restartWithBackoff()
+	}
+
+	return nil
+}
+
+// assertServedData verifies the running Dolt server is serving real town data,
+// not a near-empty imposter store. The reliable discriminator is the hq
+// database's issue_prefix config row: a legitimate hq store always has it set
+// (gt install writes it), whereas a bd-embedded fallback store rooted at a
+// rig's .beads/dolt does not. Checking issue_prefix presence (rather than only
+// a nonzero issue count) avoids a false positive on a freshly-installed, quiet
+// town that legitimately has zero issues. Returns nil if the served data looks
+// legitimate or if it cannot be determined (best-effort, never fails closed on
+// a transient query error). Must be called with m.mu held.
+func (m *DoltServerManager) assertServedData() error {
+	if m.servedDataCheckFn != nil {
+		return m.servedDataCheckFn()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), doltCmdTimeout)
+	defer cancel()
+
+	// issue_prefix lives in the per-database `config` key/value table.
+	cmd := m.buildDoltSQLCmd(ctx, "-r", "csv",
+		"-q", "SELECT value FROM `hq`.`config` WHERE `key` = 'issue_prefix'")
+	output, err := cmd.Output()
+	if err != nil {
+		// Query failed (server still warming up, hq absent, transient error).
+		// Don't fail closed — the periodic identity check (every 5min) and the
+		// next health tick provide additional coverage.
+		m.logger("Warning: post-spawn data assertion query failed (non-fatal): %v", err)
+		return nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	// Expect a header line plus at least one value line.
+	if len(lines) < 2 || strings.TrimSpace(lines[len(lines)-1]) == "" {
+		return fmt.Errorf("served hq database has no issue_prefix config row — imposter or empty store on %s:%d", m.config.Host, m.config.Port)
+	}
 	return nil
 }
 
