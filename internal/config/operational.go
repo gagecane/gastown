@@ -199,6 +199,14 @@ const (
 	// 6h covers the typical "operator was off shift" window that produced
 	// the original 15h-blocked-MR incident.
 	DefaultWitnessRefineryPausedLookback = 6 * time.Hour
+	// DefaultWitnessPolecatDiedNotifyCooldown is the minimum interval between
+	// repeated POLECAT_DIED escalations for the same dead polecat in the same
+	// stuck state (gu-b4b39). Mirrors the STALE_RIG_AGENT cooldown rationale:
+	// 30m stops the per-cycle flood to mayor (4 mails in 17min observed) while
+	// still re-surfacing a genuinely stuck polecat periodically. The alarm
+	// re-fires sooner if the polecat's signature (classification or hook bead)
+	// changes.
+	DefaultWitnessPolecatDiedNotifyCooldown = 30 * time.Minute
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -999,4 +1007,14 @@ func (wt *WitnessThresholds) RefineryPausedLookbackD() time.Duration {
 		return ParseDurationOrDefault(wt.RefineryPausedLookback, DefaultWitnessRefineryPausedLookback)
 	}
 	return DefaultWitnessRefineryPausedLookback
+}
+
+// PolecatDiedNotifyCooldownD returns the configured or default cooldown between
+// repeated POLECAT_DIED escalations for the same dead polecat in the same stuck
+// state. (gu-b4b39) Set to 0 to disable suppression (re-notify every cycle).
+func (wt *WitnessThresholds) PolecatDiedNotifyCooldownD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.PolecatDiedNotifyCooldown, DefaultWitnessPolecatDiedNotifyCooldown)
+	}
+	return DefaultWitnessPolecatDiedNotifyCooldown
 }

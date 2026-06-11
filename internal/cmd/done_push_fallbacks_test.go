@@ -129,3 +129,47 @@ func TestPushBranchWithFallbacks_UnrecoverableReturnsError(t *testing.T) {
 		t.Fatalf("origin tip = %s, want unchanged %s (no clobber on unrecoverable failure)", tip, originTip)
 	}
 }
+
+// TestPushBranchWithFallbacks_AlreadyAtHeadSkipsPush verifies the gu-r96tr
+// fast-path: when origin/<branch> already points at local HEAD (the polecat
+// manually pushed before `gt done`), the function returns the HEAD SHA with no
+// error WITHOUT invoking the pre-push hook.
+//
+// Proving the hook is NOT invoked is the whole point: git fires pre-push even
+// on a no-op "Everything up-to-date" push, and the existing post-failure
+// orphan-recovery path (origin tip == HEAD) would mask a failed-but-fired hook
+// as success — so "no error returned" alone does not prove the hook was
+// skipped. We install a pre-push hook that touches a marker file and assert the
+// marker never appears.
+func TestPushBranchWithFallbacks_AlreadyAtHeadSkipsPush(t *testing.T) {
+	branch := "polecat/test/already-pushed--abc"
+	wt, head, _ := setupCleanFeatureBranch(t, branch)
+	g := git.NewGit(wt)
+
+	// Push the branch so origin/<branch> == HEAD, mirroring a polecat that
+	// pushed manually before invoking `gt done`.
+	runGitEnv(t, wt, "push", "origin", branch+":"+branch)
+
+	// Install a pre-push hook that records that it fired. The marker lives
+	// outside the worktree so the hook's CWD doesn't matter.
+	marker := filepath.Join(t.TempDir(), "prepush-fired")
+	hookDir := filepath.Join(wt, ".git", "hooks")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := "#!/bin/sh\ntouch " + marker + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hookDir, "pre-push"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sha, err := pushBranchWithFallbacks(g, emptyTownRoot(t), "rig", branch, "main")
+	if err != nil {
+		t.Fatalf("expected clean skip, got error: %v", err)
+	}
+	if sha != head {
+		t.Fatalf("returned SHA = %s, want HEAD %s", sha, head)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatalf("pre-push hook fired — push was NOT skipped (gu-r96tr regression)")
+	}
+}

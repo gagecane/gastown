@@ -599,6 +599,18 @@ type WitnessThresholds struct {
 	// up for hours surfaces as one rolled-up entry the witness can act on.
 	// Default "6h". Set to "0" to disable the scan. (gu-t3why)
 	RefineryPausedLookback string `json:"refinery_paused_lookback,omitempty"`
+
+	// PolecatDiedNotifyCooldown is the minimum interval between repeated
+	// POLECAT_DIED escalations for the SAME dead polecat in the SAME stuck state
+	// (same rig, polecat, classification + hook bead signature). Prevents the
+	// witness from re-mailing mayor every patrol cycle for an already-reported
+	// dead polecat — the flood documented on gu-b4b39 (4 mails in 17min for one
+	// stuck polecat). Within the cooldown the alarm still re-fires if the
+	// signature changes (different classification or hook bead). The cooldown
+	// notification rolls up how many cycles were suppressed. Default "30m". Set
+	// to "0" to disable suppression (re-notify every cycle, pre-gu-b4b39
+	// behavior). (gu-b4b39)
+	PolecatDiedNotifyCooldown string `json:"polecat_died_notify_cooldown,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

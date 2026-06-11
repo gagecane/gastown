@@ -370,13 +370,21 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
 
 	// Notify when zombies with active work are detected.
-	// Always notify the mayor for active-work zombies (dead polecats with hooked
+	// Notify the mayor for active-work zombies (dead polecats with hooked
 	// beads) — this is the primary mechanism for detecting failed work. (GH #3584)
 	// Use --notify=false to suppress (e.g., in dry-run/testing contexts).
+	//
+	// Per-polecat dedup (gu-b4b39): a polecat stuck in the same state was
+	// re-escalated every patrol cycle (4 POLECAT_DIED mails in 17min observed).
+	// FilterFreshPolecatDeaths suppresses the duplicate mail when the same
+	// (rig, polecat, classification+hook) signature was already reported inside
+	// the cooldown window; the returned notices roll up the suppressed count and
+	// flag any polecat whose restart loop is not clearing (one-shot diagnostic).
 	if zombieResult != nil {
-		activeZombies := countActiveWorkZombies(zombieResult)
-		if activeZombies > 0 {
-			sendZombieNotification(router, rigName, zombieResult, activeZombies)
+		polecatDiedCooldown := witnessCfg.PolecatDiedNotifyCooldownD()
+		notices := witness.FilterFreshPolecatDeaths(workDir, townRoot, rigName, zombieResult, polecatDiedCooldown, time.Now().UTC())
+		if len(notices) > 0 {
+			sendZombieNotification(router, rigName, notices)
 		}
 	}
 
@@ -397,20 +405,27 @@ func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
 	return count
 }
 
-func sendZombieNotification(router *mail.Router, rigName string, result *witness.DetectZombiePolecatsResult, activeCount int) {
+func sendZombieNotification(router *mail.Router, rigName string, notices []witness.PolecatDeathNotice) {
+	activeCount := len(notices)
 	var lines []string
 	lines = append(lines, fmt.Sprintf("Patrol scan detected %d zombie(s) with active work in rig %s:", activeCount, rigName))
 	lines = append(lines, "")
-	for _, z := range result.Zombies {
-		if !z.WasActive {
-			continue
-		}
+	for _, n := range notices {
+		z := n.Zombie
 		line := fmt.Sprintf("- %s: %s (hook=%s, action=%s)",
 			z.PolecatName, string(z.Classification), z.HookBead, z.Action)
 		if z.Error != nil {
 			line += fmt.Sprintf(" [error: %v]", z.Error)
 		}
 		lines = append(lines, line)
+		if n.RestartLoopNotClearing {
+			lines = append(lines, fmt.Sprintf(
+				"  ⚠ restart-loop-not-clearing: %s has been restarted repeatedly without recovering. %s",
+				z.PolecatName, n.RestartLoopDiagnostics))
+		}
+		if n.SuppressionNote != "" {
+			lines = append(lines, "  "+n.SuppressionNote)
+		}
 	}
 
 	body := strings.Join(lines, "\n")
