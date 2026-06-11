@@ -1302,7 +1302,8 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		targetRefs = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
 		input.ActiveMR = fields.ActiveMR
 		hookBead := agentHookBead(agentIssue, fields)
-		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
+		owner := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead, owner)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		if status.Issue == "" && sourceHint != "" {
@@ -1317,7 +1318,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		}
 		input.PushFailed = fields.PushFailed
 		input.MRFailed = fields.MRFailed
-		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+		assignee := owner
 		partialSpawn, diagnostic := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
 		if diagnostic != "" {
 			status.Diagnostics = append(status.Diagnostics, diagnostic)
@@ -1645,7 +1646,7 @@ func activeMRGitSafeForWorktree(worktreePath, baseBranch string) bool {
 	return pres.Preserved && pres.UnpreservedPatchCount == 0
 }
 
-func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, terminal bool, blocker string) {
+func hookBeadSafeForCleanup(bd issueShower, hookBead, owner string) (safe bool, terminal bool, blocker string) {
 	if hookBead == "" {
 		return true, false, ""
 	}
@@ -1659,10 +1660,19 @@ func hookBeadSafeForCleanup(bd issueShower, hookBead string) (safe bool, termina
 	if issue == nil {
 		return false, false, fmt.Sprintf("hook_bead=%s status=missing", hookBead)
 	}
-	if !beads.IssueStatus(issue.Status).IsTerminal() {
-		return false, false, fmt.Sprintf("hook_bead=%s status=%s", hookBead, issue.Status)
+	if beads.IssueStatus(issue.Status).IsTerminal() {
+		return true, true, ""
 	}
-	return true, true, ""
+	// gu-l4gl5: a non-terminal hook bead that has been REASSIGNED to a
+	// different owner is a stale worktree pointer, not work-at-risk — the work
+	// was already re-dispatched to another polecat. Direct git-state checks
+	// cover any actual local delta. Only block when the bead is still assigned
+	// to this owner, or has no assignee at all (cannot prove reassignment).
+	assignee := strings.TrimSpace(issue.Assignee)
+	if owner != "" && assignee != "" && assignee != owner {
+		return true, false, ""
+	}
+	return false, false, fmt.Sprintf("hook_bead=%s status=%s", hookBead, issue.Status)
 }
 
 type cleanupStatusUpdater interface {

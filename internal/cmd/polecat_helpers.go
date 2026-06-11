@@ -139,6 +139,7 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		}
 		sourceHint := agentSourceIssueHint(currentIssue, fields)
 		hookBead := agentHookBead(agentIssue, fields)
+		owner := fmt.Sprintf("%s/polecats/%s", target.rigName, target.polecatName)
 		var gitState *GitState
 		gitStateLoaded := false
 		loadGitState := func() {
@@ -176,7 +177,7 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 			if polecatInfo != nil {
 				gitSafe = activeMRGitSafeForWorktree(polecatInfo.ClonePath, target.r.DefaultBranch())
 			}
-			hookSafe, _, _ := hookBeadSafeForCleanup(bd, hookBead)
+			hookSafe, _, _ := hookBeadSafeForCleanup(bd, hookBead, owner)
 			activeMRSafe := !activeMRAssessment.Pending
 			if staleCleanupStatusCanBeIgnoredForRecovery(result.CleanupStatus, beadTerminal, hookSafe, activeMRSafe, gitSafe) {
 				// OK: stale self-report after terminal source and direct clean git.
@@ -202,7 +203,14 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 					// --force on every recovery, which both breaks the safety
 					// guard's intent and (until the nuke prompt was hardened)
 					// risked the interactive-prompt hang the mayor flagged.
-					if landed, _ := workIsLandedOnMain(target.r.Path, target.rigName, target.polecatName); landed {
+					landed, _ := workIsLandedOnMain(target.r.Path, target.rigName, target.polecatName)
+					// gu-l4gl5: a non-terminal hook bead reassigned to a
+					// different owner is a stale worktree pointer (work was
+					// re-dispatched), not work-at-risk. A bead with no assignee
+					// cannot prove reassignment, so it still blocks.
+					hookAssignee := strings.TrimSpace(hookedIssue.Assignee)
+					reassigned := hookAssignee != "" && hookAssignee != owner
+					if landed || reassigned {
 						result.HookStale = true
 					} else {
 						result.Reasons = append(result.Reasons, fmt.Sprintf("has work on hook (%s)", hookBead))
