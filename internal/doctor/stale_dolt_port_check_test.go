@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -103,6 +105,101 @@ listener:
 	}
 
 	t.Logf("Result: status=%v, message=%s, details=%v", result.Status, result.Message, result.Details)
+}
+
+// writeDoltDataConfig writes a minimal .dolt-data/config.yaml declaring the
+// shared server port, so getCorrectPort resolves to that port.
+func writeDoltDataConfig(t *testing.T, townRoot string, port int) {
+	t.Helper()
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configYaml := "log_level: warning\nlistener:\n  port: " + strconv.Itoa(port) + "\n"
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte(configYaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeEmbeddedDoltConfig writes a .beads/dolt/config.yaml under beadsParent
+// declaring the given listener port (pass 0 to omit the port directive).
+func writeEmbeddedDoltConfig(t *testing.T, beadsParent string, port int) {
+	t.Helper()
+	doltDir := filepath.Join(beadsParent, ".beads", "dolt")
+	if err := os.MkdirAll(doltDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := "log_level: warning\n"
+	if port > 0 {
+		content += "listener:\n  port: " + strconv.Itoa(port) + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(doltDir, "config.yaml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStaleDoltPortCheck_RigEmbeddedConfigHardcodesSharedPort reproduces gu-msz5t:
+// a rig-level .beads/dolt/config.yaml hardcoding the shared port (3307) is the
+// imposter launchpad. It must be flagged even though it matches the correct port.
+func TestStaleDoltPortCheck_RigEmbeddedConfigHardcodesSharedPort(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeDoltDataConfig(t, tmpDir, 3307)
+	writeRigsJSON(t, tmpDir, "talon_cdk")
+
+	// Rig embedded dolt config hardcoding the shared port — the exact hazard.
+	writeEmbeddedDoltConfig(t, filepath.Join(tmpDir, "talon_cdk"), 3307)
+
+	check := NewStaleDoltPortCheck()
+	result := check.Run(&CheckContext{TownRoot: tmpDir})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for rig embedded config on shared port, got %v: %s", result.Status, result.Message)
+	}
+	foundHazard := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "talon_cdk") && strings.Contains(d, "imposter hazard") {
+			foundHazard = true
+		}
+	}
+	if !foundHazard {
+		t.Errorf("expected imposter-hazard detail mentioning talon_cdk, got: %v", result.Details)
+	}
+}
+
+// TestStaleDoltPortCheck_NoEmbeddedConfig verifies a clean town (no .beads/dolt
+// config anywhere) passes.
+func TestStaleDoltPortCheck_NoEmbeddedConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeDoltDataConfig(t, tmpDir, 3307)
+	writeRigsJSON(t, tmpDir, "talon_cdk")
+
+	check := NewStaleDoltPortCheck()
+	result := check.Run(&CheckContext{TownRoot: tmpDir})
+
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK for town with no embedded dolt configs, got %v: %s", result.Status, result.Message)
+	}
+}
+
+// TestParseListenerPort verifies port parsing honors comments and inline comments.
+func TestParseListenerPort(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"active port", "listener:\n  port: 3307\n", 3307},
+		{"commented port", "listener:\n  # port: 3307\n", 0},
+		{"inline comment", "listener:\n  port: 44985 # default\n", 44985},
+		{"no port", "log_level: warning\n", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseListenerPort(tc.content); got != tc.want {
+				t.Errorf("parseListenerPort(%q) = %d, want %d", tc.content, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestStaleDoltPortCheck_FixUpdatesMetadata verifies that Fix() updates metadata.json with correct port.

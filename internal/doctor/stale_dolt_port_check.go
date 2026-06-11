@@ -98,11 +98,21 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Also check for stale dolt config directories with wrong ports
-	staleConfigs := c.findStaleDoltConfigs(ctx.TownRoot, correctPort)
+	// Also check for stale embedded dolt config directories. In a server-mode
+	// town, no .beads/dolt/ directory should carry its own sql-server config.yaml
+	// with a listener port — a stray `bd` invocation can launch an embedded
+	// server from it that hijacks the shared port. The most dangerous variant
+	// hardcodes the shared port itself (gu-msz5t): when the GT-managed server is
+	// momentarily down, the embedded server binds :<correctPort> and serves FRESH
+	// EMPTY databases, causing a town-wide bd outage.
+	staleConfigs := c.findStaleDoltConfigs(ctx.TownRoot)
 	for _, config := range staleConfigs {
-		relPath, _ := filepath.Rel(ctx.TownRoot, config)
-		details = append(details, fmt.Sprintf("Stale Dolt config directory: %s (contains wrong port configuration)", relPath))
+		relPath, _ := filepath.Rel(ctx.TownRoot, config.path)
+		if config.port == correctPort {
+			details = append(details, fmt.Sprintf("Embedded Dolt config %s hardcodes shared port %d — can hijack the GT-managed server when it is down (imposter hazard)", relPath, config.port))
+		} else {
+			details = append(details, fmt.Sprintf("Stale Dolt config directory: %s (binds port %d, should use shared server on %d)", relPath, config.port, correctPort))
+		}
 	}
 
 	if len(c.stalePorts) == 0 && len(c.staleMetadata) == 0 && len(staleConfigs) == 0 {
@@ -210,24 +220,81 @@ func (c *StaleDoltPortCheck) findPortFiles(townRoot string) []string {
 	return files
 }
 
-// findStaleDoltConfigs finds stale Dolt config directories with wrong ports.
-func (c *StaleDoltPortCheck) findStaleDoltConfigs(townRoot string, correctPort int) []string {
-	var staleConfigs []string
+// staleDoltConfig describes an embedded .beads/dolt/ directory that carries its
+// own sql-server config.yaml in a server-mode town. port is the listener port
+// parsed from that config (0 if none was found).
+type staleDoltConfig struct {
+	path string
+	port int
+}
 
-	// Check for .beads/dolt/ directory which shouldn't exist when using shared Dolt server
-	staleDir := filepath.Join(townRoot, ".beads", "dolt")
-	if _, err := os.Stat(staleDir); err == nil {
-		// Check if it has a config.yaml with wrong port
-		configPath := filepath.Join(staleDir, "config.yaml")
-		if data, err := os.ReadFile(configPath); err == nil {
-			// Check for any port that's not the correct port
-			if strings.Contains(string(data), "port:") && !strings.Contains(string(data), fmt.Sprintf("port: %d", correctPort)) {
-				staleConfigs = append(staleConfigs, staleDir)
+// findStaleDoltConfigs finds embedded Dolt config directories that should not
+// exist when the town uses the shared Dolt server. It scans the town root AND
+// every rig (the rig-level gap that let gu-msz5t through), and flags ANY
+// .beads/dolt/config.yaml that declares a listener port — including one that
+// hardcodes the shared port, which is the most dangerous imposter launchpad.
+func (c *StaleDoltPortCheck) findStaleDoltConfigs(townRoot string) []staleDoltConfig {
+	var staleConfigs []staleDoltConfig
+
+	beadsDirs := []string{filepath.Join(townRoot, ".beads")}
+
+	// Rig .beads directories (same discovery pattern as findPortFiles).
+	rigsConfig := filepath.Join(townRoot, "mayor", "rigs.json")
+	if data, err := os.ReadFile(rigsConfig); err == nil {
+		var rigs struct {
+			Rigs map[string]struct{} `json:"rigs"`
+		}
+		if json.Unmarshal(data, &rigs) == nil {
+			for rigName := range rigs.Rigs {
+				beadsDirs = append(beadsDirs,
+					filepath.Join(townRoot, rigName, ".beads"),
+					filepath.Join(townRoot, rigName, "mayor", "rig", ".beads"),
+				)
 			}
 		}
 	}
 
+	for _, beadsDir := range beadsDirs {
+		// Check for .beads/dolt/ directory which shouldn't exist when using shared Dolt server
+		staleDir := filepath.Join(beadsDir, "dolt")
+		configPath := filepath.Join(staleDir, "config.yaml")
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			continue
+		}
+		// Only an embedded sql-server config declares a listener port. A config
+		// without a port can't bind anything, so it's not an imposter hazard.
+		if port := parseListenerPort(string(data)); port > 0 {
+			staleConfigs = append(staleConfigs, staleDoltConfig{path: staleDir, port: port})
+		}
+	}
+
 	return staleConfigs
+}
+
+// parseListenerPort extracts the listener port from an embedded Dolt
+// sql-server config.yaml. It honors YAML comments (lines starting with '#' are
+// ignored) so a commented-out "# port: 3307" does not produce a false positive.
+// Returns 0 if no active port directive is found.
+func parseListenerPort(content string) int {
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "port:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "port:"))
+		// Strip any inline comment.
+		if idx := strings.Index(value, "#"); idx >= 0 {
+			value = strings.TrimSpace(value[:idx])
+		}
+		if port, err := strconv.Atoi(value); err == nil {
+			return port
+		}
+	}
+	return 0
 }
 
 // findMetadataFiles finds all metadata.json files that might contain Dolt port config.
