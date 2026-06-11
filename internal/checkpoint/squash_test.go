@@ -383,3 +383,82 @@ func TestBestCommitMessage_InvalidBaseRefErrors(t *testing.T) {
 		t.Errorf("expected error for unknown baseRef, got nil")
 	}
 }
+
+// --- gu-weo4x: OnlyWIPCommits (refinery all-WIP refusal) -------------------
+
+// TestOnlyWIPCommits_AllWIP: a branch whose only commits are WIP checkpoints
+// must report true so the refinery refuses the merge.
+func TestOnlyWIPCommits_AllWIP(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.txt", "1\n", "WIP: checkpoint (auto)")
+	addCommit(t, dir, "b.txt", "2\n", "WIP: checkpoint (auto)")
+
+	only, err := OnlyWIPCommits(dir, "feature", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !only {
+		t.Error("expected OnlyWIPCommits=true for an all-WIP branch")
+	}
+}
+
+// TestOnlyWIPCommits_RealCommitPlusWIPTip: a real commit with a WIP tip is NOT
+// all-WIP — it carries a deliverable and must still merge.
+func TestOnlyWIPCommits_RealCommitPlusWIPTip(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "feature.go", "package feature\n", "feat: add feature")
+	addCommit(t, dir, "scratch.txt", "churn\n", "WIP: checkpoint (auto)")
+
+	only, err := OnlyWIPCommits(dir, "feature", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if only {
+		t.Error("expected OnlyWIPCommits=false when a real commit exists under the WIP tip")
+	}
+}
+
+// TestOnlyWIPCommits_NoWIP: an ordinary branch with no WIP commits is not
+// all-WIP.
+func TestOnlyWIPCommits_NoWIP(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a\n", "feat: add A")
+
+	only, err := OnlyWIPCommits(dir, "feature", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if only {
+		t.Error("expected OnlyWIPCommits=false for a branch with no WIP commits")
+	}
+}
+
+// TestOnlyWIPCommits_EmptyRange: no diverged commits → false (not this gate's
+// concern; let empty-merge handling deal with it).
+func TestOnlyWIPCommits_EmptyRange(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+
+	only, err := OnlyWIPCommits(dir, "feature", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if only {
+		t.Error("expected OnlyWIPCommits=false for an empty commit range")
+	}
+}
+
+// TestOnlyWIPCommits_InvalidBaseRefErrors: an unknown baseRef returns an error
+// so the caller can fail safe (log + proceed) rather than silently refuse.
+func TestOnlyWIPCommits_InvalidBaseRefErrors(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.txt", "1\n", "WIP: checkpoint (auto)")
+
+	if _, err := OnlyWIPCommits(dir, "feature", "origin/does-not-exist"); err == nil {
+		t.Error("expected error for unknown baseRef, got nil")
+	}
+}

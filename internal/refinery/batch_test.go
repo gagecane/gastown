@@ -928,6 +928,62 @@ func TestProcessBatch_SingleMR_BranchNotFound(t *testing.T) {
 	}
 }
 
+// TestDoMerge_RefusesAllWIPBranch verifies the gu-weo4x criterion 1 gate:
+// when a branch's only commits are `WIP: checkpoint (auto)`, doMerge refuses
+// the merge with WIPOnly set and never lands anything on the target.
+func TestDoMerge_RefusesAllWIPBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	// Branch with only WIP checkpoint commits.
+	run(t, workDir, "git", "checkout", "-b", "all-wip", "main")
+	writeFile(t, workDir, "scratch.txt", "1\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "WIP: checkpoint (auto)")
+	run(t, workDir, "git", "checkout", "main")
+
+	mainBefore := run(t, workDir, "git", "rev-parse", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	res := e.doMerge(context.Background(), "all-wip", "main", "")
+
+	if res.Success {
+		t.Fatal("expected doMerge to refuse an all-WIP branch")
+	}
+	if !res.WIPOnly {
+		t.Errorf("expected WIPOnly=true, got %+v", res)
+	}
+	// main must not have moved.
+	if after := run(t, workDir, "git", "rev-parse", "main"); after != mainBefore {
+		t.Errorf("main advanced on a refused all-WIP merge: before=%s after=%s", mainBefore, after)
+	}
+}
+
+// TestDoMerge_AllowsRealCommitWithWIPTip verifies the reconciliation with
+// gu-zd2: a real commit under a WIP tip is NOT refused — it still merges.
+func TestDoMerge_AllowsRealCommitWithWIPTip(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	run(t, workDir, "git", "checkout", "-b", "real-plus-wip", "main")
+	writeFile(t, workDir, "feature.go", "package feature\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: add feature")
+	writeFile(t, workDir, "scratch.txt", "churn\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "WIP: checkpoint (auto)")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	res := e.doMerge(context.Background(), "real-plus-wip", "main", "")
+
+	// The merge may or may not fully succeed depending on push wiring in the
+	// test harness, but it must NOT be refused as WIP-only.
+	if res.WIPOnly {
+		t.Errorf("real commit under a WIP tip must not be refused as WIP-only; got %+v", res)
+	}
+}
+
 // --- Helpers ---
 
 func stackedIDs(mrs []*MRInfo) []string {

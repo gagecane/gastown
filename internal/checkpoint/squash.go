@@ -38,6 +38,47 @@ func CountWIPCommits(workDir, baseRef string) (int, error) {
 	return count, nil
 }
 
+// OnlyWIPCommits reports whether every commit in merge-base(baseRef, branch)..branch
+// is a `WIP: checkpoint (auto)` checkpoint commit (i.e. there is at least one
+// commit and NONE of them are real deliverables).
+//
+// gu-weo4x criterion 1: the refinery uses this to refuse merging a branch
+// whose only commits are auto-checkpoints. Such a branch carries no real work
+// — merging it would land a "WIP: checkpoint (auto)" squash commit on mainline
+// (the gu-zd2 pollution) or, worse, silently ship an empty deliverable. A
+// branch with a real commit plus a WIP tip is NOT all-WIP and still merges
+// (BestCommitMessage promotes the real message).
+//
+// Returns (false, nil) when the range is empty (nothing to merge — let the
+// existing empty-merge handling deal with it, not this gate). Any git error is
+// returned so the caller can fail safe.
+func OnlyWIPCommits(workDir, branch, baseRef string) (bool, error) {
+	mergeBase, err := gitOutput(workDir, "merge-base", baseRef, branch)
+	if err != nil {
+		return false, fmt.Errorf("finding merge-base: %w", err)
+	}
+
+	logOut, err := gitOutput(workDir, "log", "--format=%s", mergeBase+".."+branch)
+	if err != nil {
+		return false, fmt.Errorf("listing commits: %w", err)
+	}
+	if logOut == "" {
+		return false, nil // No commits in range — not this gate's concern.
+	}
+
+	sawCommit := false
+	for _, subj := range strings.Split(logOut, "\n") {
+		if strings.TrimSpace(subj) == "" {
+			continue
+		}
+		sawCommit = true
+		if !strings.HasPrefix(subj, WIPCommitPrefix) {
+			return false, nil // A real commit exists → not all-WIP.
+		}
+	}
+	return sawCommit, nil
+}
+
 // SquashWIPCommits collapses all commits from merge-base..HEAD into a single
 // commit, preserving non-WIP commit messages in the body. Returns the number
 // of WIP commits that were squashed.

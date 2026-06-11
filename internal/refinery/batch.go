@@ -332,6 +332,13 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 		// PR awaiting human approval — leave in queue for retry on next poll.
 		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: PR awaiting approval, will retry\n", mr.ID)
 		e.HandleMRInfoFailure(mr, processResult)
+	} else if processResult.WIPOnly {
+		// gu-weo4x: branch carries only WIP checkpoint commits — no real
+		// deliverable. Refuse to merge, preserve the branch + MR, and nudge the
+		// worker to add a real commit and resubmit. Do NOT call
+		// HandleMRInfoSuccess (nothing landed).
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: branch has only WIP checkpoints, refusing merge (preserved for resubmit)\n", mr.ID)
+		e.HandleMRInfoFailure(mr, processResult)
 	} else if processResult.PushFailed {
 		// gu-wj3f: push to origin/<target> failed (commonly non-ff rejection
 		// during convoy fan-out — sibling MR landed first). The local squash
