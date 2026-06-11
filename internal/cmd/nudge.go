@@ -305,6 +305,21 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			}})
 			return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 		}
+		// Only URGENT nudges get proactive idle-injection via watchAndDeliver.
+		// For NON-URGENT (normal) priority, leave the nudge queued for the
+		// UserPromptSubmit hook to drain at the next real turn boundary —
+		// matching the --mode=queue contract. (gu-f4q2k MODE 2)
+		//
+		// Why: watchAndDeliver polls for idle and tmux send-keys injects the
+		// instant idle is detected. Idle detection cannot distinguish 'turn
+		// fully complete' from an inter-tool-call gap during a multi-step
+		// batch, so proactive injection can abort an in-flight tool call —
+		// abandoning multi-step recovery half-done. Deferring non-urgent
+		// nudges to the turn boundary avoids that interruption while still
+		// surfacing urgent escalations promptly.
+		if nudgePriorityFlag != nudge.PriorityUrgent {
+			return nil
+		}
 		// Run watcher synchronously: polls for idle over a longer window.
 		// The UserPromptSubmit hook drains the queue on agent input, but an
 		// idle agent receives no input — so queued nudges are lost without
