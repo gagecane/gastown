@@ -1216,6 +1216,10 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         filepath.Join(townRoot, ".beads"),
+		// The capacity pipeline's OnSuccess closes this dispatch's own context
+		// (CloseSlingContext "dispatched"); reconciling here would race/double-close
+		// the very context being dispatched (gu-afpjj).
+		SkipContextReconcile: true,
 	}
 
 	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)

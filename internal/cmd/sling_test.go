@@ -554,6 +554,11 @@ func TestSlingRollsBackSpawnedPolecatOnInstantiateFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0755); err != nil {
 		t.Fatalf("mkdir rig dir: %v", err)
 	}
+	// A configured rig has config.json; the spawn preflight (gu-9uvl6) requires
+	// it before exercising the instantiate/rollback path under test.
+	if err := os.WriteFile(filepath.Join(townRoot, "gastown", "config.json"), []byte(`{"type":"rig","version":1,"name":"gastown"}`), 0644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
 
 	// Routes: gt-* resolves to gastown's rig beads dir.
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
