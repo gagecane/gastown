@@ -93,6 +93,54 @@ func TestIsRealAgentArgv(t *testing.T) {
 	}
 }
 
+func TestIsIDEClaudeArgv(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+		want bool
+	}{
+		// IDE-specific executable paths.
+		{"vscode-server", "/home/u/.vscode-server/bin/claude --model x", true},
+		{"vscode extensions", "node /root/.vscode/extensions/anthropic/claude", true},
+		{"cursor-server", "/home/u/.cursor-server/bin/claude", true},
+		{"cursor extensions", "/home/u/.cursor/extensions/foo/claude", true},
+
+		// Generic IDE detection: stream-json on both stdin and stdout.
+		{"stream-json both", "claude --output-format stream-json --input-format stream-json", true},
+
+		// Not IDE — plain terminal/agent invocations.
+		{"plain claude", "claude --dangerously-skip-permissions", false},
+		{"stream-json output only", "claude --output-format stream-json", false},
+		{"empty", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isIDEClaudeArgv(tt.args); got != tt.want {
+				t.Errorf("isIDEClaudeArgv(%q) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildArgvMap(t *testing.T) {
+	argv := buildArgvMap()
+	if len(argv) == 0 {
+		t.Fatal("buildArgvMap() returned empty map")
+	}
+
+	// Our own process must be present with a non-empty argv. The test binary's
+	// argv starts with its executable path, so the basename should be reachable.
+	self := os.Getpid()
+	got, ok := argv[self]
+	if !ok {
+		t.Fatalf("buildArgvMap() missing self PID %d", self)
+	}
+	if strings.TrimSpace(got) == "" {
+		t.Errorf("buildArgvMap()[self] = %q, want non-empty argv", got)
+	}
+}
+
 func TestFindOrphanedClaudeProcesses(t *testing.T) {
 	// Live test that checks for orphaned processes on the current system.
 	// Should not fail — just returns whatever orphans exist (likely none in CI).
