@@ -142,154 +142,44 @@ func ReapHookedMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (
 	// the ClosedEntries log. Must NOT match beads carrying a preserve label.
 	// The ConsumerAliveClause (gu-ub1l) additionally exempts beads that
 	// declare a still-open consumer via metadata.consumer_bead_id.
-	selectQuery := fmt.Sprintf(`
-		SELECT DISTINCT i.id, i.title, i.created_at FROM issues i
-		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
-		WHERE i.status = 'hooked'
-		AND i.issue_type != 'agent'
-		AND i.created_at < ?
-		AND mail_l.label = 'gt:message'
-		AND i.id NOT IN (
-			SELECT l2.issue_id FROM labels l2
-			WHERE l2.label IN (%s)
-		)
-		AND %s
-		LIMIT %d`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause, DefaultBatchSize)
+	selectQuery := issuesMailSelectQuery("i.status = 'hooked'", len(preserveLabels), ConsumerAliveClause)
 
 	args := []interface{}{cutoff}
 	for _, lbl := range preserveLabels {
 		args = append(args, lbl)
 	}
 
-	type candidate struct {
-		id        string
-		title     string
-		createdAt time.Time
-	}
-
-	now := time.Now().UTC()
-	totalClosed := 0
-
-	// Batch loop: select up to N candidates, close them, repeat until empty.
-	for {
-		rows, err := db.QueryContext(ctx, selectQuery, args...)
-		if err != nil {
-			if isTableNotFound(err) {
-				return result, nil // issues/labels not on this server
-			}
-			return nil, fmt.Errorf("select hooked mail batch: %w", err)
-		}
-
-		var batch []candidate
-		for rows.Next() {
-			var c candidate
-			if err := rows.Scan(&c.id, &c.title, &c.createdAt); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("scan hooked mail row: %w", err)
-			}
-			batch = append(batch, c)
-		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("close hooked mail rows: %w", err)
-		}
-
-		if len(batch) == 0 {
-			break
-		}
-
-		// Record entries (same in dry-run and live).
-		for _, c := range batch {
-			result.ClosedEntries = append(result.ClosedEntries, ClosedEntry{
-				ID:       c.id,
-				Title:    c.title,
-				AgeDays:  int(now.Sub(c.createdAt).Hours() / 24),
-				Database: dbName,
-			})
-		}
-
-		if dryRun {
-			totalClosed += len(batch)
-			// In dry-run, do not loop forever on the same rows.
-			break
-		}
-
-		// Live: batch UPDATE issues to status='closed' with ttl-expired reason.
-		placeholders := make([]string, len(batch))
-		updateArgs := make([]interface{}, 0, len(batch))
-		for i, c := range batch {
-			placeholders[i] = "?"
-			updateArgs = append(updateArgs, c.id)
-		}
-		inClause := strings.Join(placeholders, ",")
-
-		updateQuery := fmt.Sprintf(
-			"UPDATE issues SET status='closed', closed_at=NOW() WHERE id IN (%s)",
-			inClause)
-
-		if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-			return result, fmt.Errorf("disable autocommit: %w", err)
-		}
-
-		sqlResult, err := db.ExecContext(ctx, updateQuery, updateArgs...)
-		if err != nil {
-			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-			return result, fmt.Errorf("close hooked mail batch: %w", err)
-		}
-		affected, _ := sqlResult.RowsAffected()
-		totalClosed += int(affected)
-
-		// Commit the SQL transaction so DOLT_COMMIT sees the working-set diff.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-			return result, fmt.Errorf("sql commit: %w", err)
-		}
-		commitMsg := fmt.Sprintf("reaper: ttl-expired close %d hooked mail in %s", int(affected), dbName)
-		// Skip the commit when nothing landed in the working set (e.g. the only
-		// mutated tables are dolt-ignored), avoiding a server-side "nothing to
-		// commit" warning in dolt.log (gu-leuwr).
-		if hasWorkingSetChanges(ctx, db) {
-			if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
-				if !isNothingToCommit(err) {
-					result.Anomalies = append(result.Anomalies, Anomaly{
-						Type:    "dolt_commit_failed",
-						Message: fmt.Sprintf("dolt commit after hooked-mail reap failed: %v", err),
-					})
-				}
-			}
-		}
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-
-		// If the batch was smaller than the page size, we're done.
-		if len(batch) < DefaultBatchSize {
-			break
-		}
-	}
-
-	result.Closed = totalClosed
-
 	// Count remaining hooked mail for the report. Apply the same
 	// consumer-linkage and preserve-label exclusions as the select above so
 	// the reported "remain" number reflects beads actually subject to the
 	// TTL reaper (not beads we intentionally skipped).
-	remainQuery := fmt.Sprintf(`
-		SELECT COUNT(*) FROM issues i
-		INNER JOIN labels l ON i.id = l.issue_id
-		WHERE i.status = 'hooked'
-		AND i.issue_type != 'agent'
-		AND l.label = 'gt:message'
-		AND i.id NOT IN (
-			SELECT l2.issue_id FROM labels l2
-			WHERE l2.label IN (%s)
-		)
-		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
+	remainQuery := issuesMailRemainQuery("i.status = 'hooked'", len(preserveLabels), ConsumerAliveClause)
 	remainArgs := make([]interface{}, 0, len(preserveLabels))
 	for _, lbl := range preserveLabels {
 		remainArgs = append(remainArgs, lbl)
 	}
-	if err := db.QueryRowContext(ctx, remainQuery, remainArgs...).Scan(&result.HookedRemain); err != nil {
-		if !isTableNotFound(err) {
-			return result, fmt.Errorf("count hooked mail remain: %w", err)
-		}
+
+	out, err := runMailReapLoop(ctx, db, dbName, dryRun, mailReapConfig{
+		selectQuery:    selectQuery,
+		selectArgs:     args,
+		updateQueryFmt: "UPDATE issues SET status='closed', closed_at=NOW() WHERE id IN (%s)",
+		noun:           "hooked mail",
+		commitMsgFmt:   "reaper: ttl-expired close %d hooked mail in %s",
+		anomalyMsgFmt:  "dolt commit after hooked-mail reap failed: %v",
+		remainQuery:    remainQuery,
+		remainArgs:     remainArgs,
+	})
+	if out != nil {
+		result.Closed = out.Closed
+		result.ClosedEntries = out.Entries
+		result.Anomalies = out.Anomalies
+		result.HookedRemain = out.Remain
+	}
+	if err != nil {
+		return result, err
+	}
+	if out.TableMissing {
+		return result, nil // issues/labels not on this server
 	}
 
 	return result, nil
@@ -390,148 +280,47 @@ func ReapOpenMail(db *sql.DB, dbName string, ttl time.Duration, dryRun bool) (*O
 
 	preserveLabels := []string{"gt:standing-orders", "gt:keep", "gt:role", "gt:rig"}
 
-	selectQuery := fmt.Sprintf(`
-		SELECT DISTINCT i.id, i.title, i.created_at FROM issues i
-		INNER JOIN labels mail_l ON i.id = mail_l.issue_id
-		WHERE i.status IN ('open', 'in_progress')
-		AND i.issue_type != 'agent'
-		AND i.created_at < ?
-		AND mail_l.label = 'gt:message'
-		AND i.id NOT IN (
-			SELECT l2.issue_id FROM labels l2
-			WHERE l2.label IN (%s)
-		)
-		AND %s
-		LIMIT %d`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause, DefaultBatchSize)
+	// Sweep both 'open' and 'in_progress' (a mid-read bead past TTL must still
+	// be swept). Hooked beads are ReapHookedMail's responsibility.
+	const openStatusClause = "i.status IN ('open', 'in_progress')"
+	selectQuery := issuesMailSelectQuery(openStatusClause, len(preserveLabels), ConsumerAliveClause)
 
 	args := []interface{}{cutoff}
 	for _, lbl := range preserveLabels {
 		args = append(args, lbl)
 	}
 
-	type candidate struct {
-		id        string
-		title     string
-		createdAt time.Time
-	}
-
-	now := time.Now().UTC()
-	totalClosed := 0
-
-	for {
-		rows, err := db.QueryContext(ctx, selectQuery, args...)
-		if err != nil {
-			if isTableNotFound(err) {
-				return result, nil
-			}
-			return nil, fmt.Errorf("select open mail batch: %w", err)
-		}
-
-		var batch []candidate
-		for rows.Next() {
-			var c candidate
-			if err := rows.Scan(&c.id, &c.title, &c.createdAt); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("scan open mail row: %w", err)
-			}
-			batch = append(batch, c)
-		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("close open mail rows: %w", err)
-		}
-
-		if len(batch) == 0 {
-			break
-		}
-
-		for _, c := range batch {
-			result.ClosedEntries = append(result.ClosedEntries, ClosedEntry{
-				ID:       c.id,
-				Title:    c.title,
-				AgeDays:  int(now.Sub(c.createdAt).Hours() / 24),
-				Database: dbName,
-			})
-		}
-
-		if dryRun {
-			totalClosed += len(batch)
-			break
-		}
-
-		placeholders := make([]string, len(batch))
-		updateArgs := make([]interface{}, 0, len(batch))
-		for i, c := range batch {
-			placeholders[i] = "?"
-			updateArgs = append(updateArgs, c.id)
-		}
-		inClause := strings.Join(placeholders, ",")
-
-		updateQuery := fmt.Sprintf(
-			"UPDATE issues SET status='closed', closed_at=NOW() WHERE id IN (%s)",
-			inClause)
-
-		if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-			return result, fmt.Errorf("disable autocommit: %w", err)
-		}
-
-		sqlResult, err := db.ExecContext(ctx, updateQuery, updateArgs...)
-		if err != nil {
-			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-			return result, fmt.Errorf("close open mail batch: %w", err)
-		}
-		affected, _ := sqlResult.RowsAffected()
-		totalClosed += int(affected)
-
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-			_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-			return result, fmt.Errorf("sql commit: %w", err)
-		}
-		commitMsg := fmt.Sprintf("reaper: ttl-expired close %d open mail in %s", int(affected), dbName)
-		// Skip the commit when nothing landed in the working set (e.g. the only
-		// mutated tables are dolt-ignored), avoiding a server-side "nothing to
-		// commit" warning in dolt.log (gu-leuwr).
-		if hasWorkingSetChanges(ctx, db) {
-			if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe internal values
-				if !isNothingToCommit(err) {
-					result.Anomalies = append(result.Anomalies, Anomaly{
-						Type:    "dolt_commit_failed",
-						Message: fmt.Sprintf("dolt commit after open-mail reap failed: %v", err),
-					})
-				}
-			}
-		}
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-
-		if len(batch) < DefaultBatchSize {
-			break
-		}
-	}
-
-	result.Closed = totalClosed
-
 	// Count remaining open mail for the report. Apply the same
 	// consumer-linkage and preserve-label exclusions as the select above so
 	// the reported "remain" number reflects beads actually subject to the
 	// TTL reaper.
-	remainQuery := fmt.Sprintf(`
-		SELECT COUNT(*) FROM issues i
-		INNER JOIN labels l ON i.id = l.issue_id
-		WHERE i.status IN ('open', 'in_progress')
-		AND i.issue_type != 'agent'
-		AND l.label = 'gt:message'
-		AND i.id NOT IN (
-			SELECT l2.issue_id FROM labels l2
-			WHERE l2.label IN (%s)
-		)
-		AND %s`, sqlPlaceholders(len(preserveLabels)), ConsumerAliveClause)
+	remainQuery := issuesMailRemainQuery(openStatusClause, len(preserveLabels), ConsumerAliveClause)
 	remainArgs := make([]interface{}, 0, len(preserveLabels))
 	for _, lbl := range preserveLabels {
 		remainArgs = append(remainArgs, lbl)
 	}
-	if err := db.QueryRowContext(ctx, remainQuery, remainArgs...).Scan(&result.OpenRemain); err != nil {
-		if !isTableNotFound(err) {
-			return result, fmt.Errorf("count open mail remain: %w", err)
-		}
+
+	out, err := runMailReapLoop(ctx, db, dbName, dryRun, mailReapConfig{
+		selectQuery:    selectQuery,
+		selectArgs:     args,
+		updateQueryFmt: "UPDATE issues SET status='closed', closed_at=NOW() WHERE id IN (%s)",
+		noun:           "open mail",
+		commitMsgFmt:   "reaper: ttl-expired close %d open mail in %s",
+		anomalyMsgFmt:  "dolt commit after open-mail reap failed: %v",
+		remainQuery:    remainQuery,
+		remainArgs:     remainArgs,
+	})
+	if out != nil {
+		result.Closed = out.Closed
+		result.ClosedEntries = out.Entries
+		result.Anomalies = out.Anomalies
+		result.OpenRemain = out.Remain
+	}
+	if err != nil {
+		return result, err
+	}
+	if out.TableMissing {
+		return result, nil
 	}
 
 	return result, nil
