@@ -2115,7 +2115,25 @@ func (d *Daemon) checkDeaconHeartbeat() {
 		// Conservative: on store errors hasActiveWork returns true, so nudge fires.
 		// See also: runtime/runtime.go:99-101 — session-started nudge was removed
 		// for the same reason (it interrupted the deacon's await-signal backoff).
+		//
+		// Parked-at-idle-prompt exception (gu-8izpk): the "await-signal will fire
+		// naturally" assumption only holds when the Deacon is actually blocked in
+		// await-signal. When a bash heartbeat-write is interrupted (~2x/session),
+		// Claude Code drops the Deacon back to its idle prompt (❯) with no human to
+		// resume it — it is NOT in await-signal and will NEVER self-wake, so
+		// suppressing the nudge strands it until the 30m very-stale kill+restart.
+		// Discriminate via the pane: a Deacon blocked in await-signal is running a
+		// foreground bash command and shows the busy indicator (IsIdle=false); a
+		// parked Deacon sits at the prompt (IsIdle=true). When parked, send the
+		// keepalive nudge to auto-resume the patrol loop instead of suppressing.
 		if !d.hasActiveWork() {
+			if d.tmux.IsIdle(sessionName) {
+				d.logger.Printf("Deacon parked at idle prompt with stale heartbeat (%s) and no active work — nudging to auto-resume (gu-8izpk)", age.Round(time.Minute))
+				if err := d.tmux.NudgeSession(sessionName, "HEALTH_CHECK: heartbeat stale and session idle, resume patrol to confirm responsiveness"); err != nil {
+					d.logger.Printf("Error nudging parked Deacon: %v", err)
+				}
+				return
+			}
 			d.logger.Println("Deacon nudge skipped: no active work in flight, await-signal will fire naturally")
 			return
 		}

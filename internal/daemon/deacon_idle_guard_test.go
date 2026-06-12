@@ -63,6 +63,16 @@ if [[ "$cmd" == "list-sessions" ]]; then
   exit 0
 fi
 
+# capture-pane: emit TMUX_PANE_CONTENT when set so IsIdle can be exercised
+# (gu-8izpk parked-prompt discriminator). Empty by default → IsIdle=false,
+# preserving the original idle-guard suppression behavior.
+if [[ "$cmd" == "capture-pane" ]]; then
+  if [[ -n "${TMUX_PANE_CONTENT:-}" ]]; then
+    printf "%b\n" "${TMUX_PANE_CONTENT}"
+  fi
+  exit 0
+fi
+
 exit 0
 `
 	path := filepath.Join(dir, "tmux")
@@ -177,6 +187,95 @@ func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
 			d.checkDeaconHeartbeat()
 
 			logOutput := logBuf.String()
+
+			hasIdleGuardLog := strings.Contains(logOutput, "nudge skipped")
+			if hasIdleGuardLog != tc.wantIdleGuardLog {
+				t.Errorf("%s\nidle guard log present=%v, want=%v\nlog:\n%s",
+					tc.desc, hasIdleGuardLog, tc.wantIdleGuardLog, logOutput)
+			}
+
+			hasNudgeLog := strings.Contains(logOutput, "nudging session")
+			if hasNudgeLog != tc.wantNudgeLog {
+				t.Errorf("%s\nnudge log present=%v, want=%v\nlog:\n%s",
+					tc.desc, hasNudgeLog, tc.wantNudgeLog, logOutput)
+			}
+		})
+	}
+}
+
+// TestCheckDeaconHeartbeat_ParkedPromptResume verifies the gu-8izpk fix: a
+// Deacon parked at its idle prompt (interrupted bash heartbeat-write dropped it
+// back to ❯) with a stale heartbeat and NO active work must be nudged to
+// auto-resume — it is not in await-signal and will never self-wake. The
+// pre-fix idle guard would suppress the nudge and strand it until the 30m
+// very-stale kill+restart.
+func TestCheckDeaconHeartbeat_ParkedPromptResume(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows — fake tmux requires bash")
+	}
+
+	tests := []struct {
+		name             string
+		paneContent      string
+		wantNudgeLog     bool
+		wantIdleGuardLog bool
+		wantResumeLog    bool
+		desc             string
+	}{
+		{
+			name:             "parked at idle prompt — resume nudge fires",
+			paneContent:      "❯ ",
+			wantNudgeLog:     false, // parked path logs "nudging to auto-resume", not "nudging session"
+			wantIdleGuardLog: false,
+			wantResumeLog:    true,
+			desc:             "Parked Deacon (idle prompt visible) must be nudged to auto-resume despite no active work",
+		},
+		{
+			name:             "busy in await-signal — suppression preserved",
+			paneContent:      "⏵⏵ Running await-signal... esc to interrupt",
+			wantNudgeLog:     false,
+			wantIdleGuardLog: true,
+			wantResumeLog:    false,
+			desc:             "A Deacon blocked in await-signal shows the busy indicator; the idle guard must still suppress",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			fakeBinDir := t.TempDir()
+			tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+			if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
+				t.Fatalf("create tmux log: %v", err)
+			}
+
+			writeFakeTmuxWithSession(t, fakeBinDir)
+			t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("TMUX_LOG", tmuxLog)
+			t.Setenv("TMUX_PANE_CONTENT", tc.paneContent)
+
+			// Stale (not very stale) heartbeat reaches the idle-guard branch.
+			writeDeaconHeartbeat(t, townRoot, 20*time.Minute)
+
+			// No active work in flight — without the parked-prompt exception
+			// the idle guard suppresses the nudge unconditionally.
+			stores := map[string]beadsdk.Storage{
+				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{}},
+			}
+			d := newTestDaemonWithStores(t, townRoot, stores)
+
+			logBuf := &strings.Builder{}
+			d.logger = log.New(logBuf, "", 0)
+
+			d.checkDeaconHeartbeat()
+
+			logOutput := logBuf.String()
+
+			hasResumeLog := strings.Contains(logOutput, "parked at idle prompt")
+			if hasResumeLog != tc.wantResumeLog {
+				t.Errorf("%s\nresume log present=%v, want=%v\nlog:\n%s",
+					tc.desc, hasResumeLog, tc.wantResumeLog, logOutput)
+			}
 
 			hasIdleGuardLog := strings.Contains(logOutput, "nudge skipped")
 			if hasIdleGuardLog != tc.wantIdleGuardLog {
