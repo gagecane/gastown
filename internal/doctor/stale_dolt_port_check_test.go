@@ -108,7 +108,7 @@ listener:
 }
 
 // writeDoltDataConfig writes a minimal .dolt-data/config.yaml declaring the
-// shared server port, so getCorrectPort resolves to that port.
+// shared server port, so DefaultConfig resolves to that port.
 func writeDoltDataConfig(t *testing.T, townRoot string, port int) {
 	t.Helper()
 	doltDataDir := filepath.Join(townRoot, ".dolt-data")
@@ -199,6 +199,60 @@ func TestParseListenerPort(t *testing.T) {
 				t.Errorf("parseListenerPort(%q) = %d, want %d", tc.content, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestStaleDoltPortCheck_DaemonJSONPortNoConfigYAML reproduces gu-nid89.38:
+// a town whose real Dolt port comes from mayor/daemon.json (e.g. 3308) with NO
+// config.yaml port line. The old getCorrectPort read only config.yaml, returned
+// 0, and Run() fell back to 3307 — flagging every correct 3308 port/metadata as
+// stale (false positive) and, under --fix, corrupting them to 3307. The canonical
+// DefaultConfig resolver honors daemon.json, so the check must report StatusOK.
+func TestStaleDoltPortCheck_DaemonJSONPortNoConfigYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Clear GT_DOLT_PORT so the daemon.json fallback is exercised (env would
+	// otherwise take precedence and mask the resolution path under test).
+	t.Setenv("GT_DOLT_PORT", "")
+
+	// mayor/daemon.json declares GT_DOLT_PORT=3308 (no .dolt-data/config.yaml).
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	daemonJSON := map[string]interface{}{
+		"env": map[string]string{"GT_DOLT_PORT": "3308"},
+	}
+	daemonBytes, _ := json.MarshalIndent(daemonJSON, "", "  ")
+	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), daemonBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Port file and metadata.json both carry the CORRECT custom port 3308.
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("3308"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]interface{}{
+		"dolt_mode":        "server",
+		"dolt_server_host": "127.0.0.1",
+		"dolt_server_port": 3308,
+		"dolt_database":    "hq",
+	}
+	metadataBytes, _ := json.MarshalIndent(metadata, "", "  ")
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadataBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewStaleDoltPortCheck()
+	result := check.Run(&CheckContext{TownRoot: tmpDir})
+
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK (no false positive) for daemon.json port 3308, got %v: %s (details=%v)",
+			result.Status, result.Message, result.Details)
 	}
 }
 
