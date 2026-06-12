@@ -335,22 +335,24 @@ func parseEscalationClosedAt(issue *Issue) time.Time {
 // and records the current time in last_occurrence_at. If updatedReason is
 // non-empty, the reason field is replaced with the latest occurrence details.
 func (b *Beads) BumpOccurrenceCount(id, updatedReason string) error {
-	target := b.forIssueID(id)
-	issue, err := target.Show(id)
-	if err != nil {
-		return err
-	}
-	if !HasLabel(issue, "gt:escalation") {
-		return fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
-	}
-	fields := ParseEscalationFields(issue.Description)
-	fields.OccurrenceCount++
-	fields.LastOccurrenceAt = time.Now().Format(time.RFC3339)
-	if updatedReason != "" {
-		fields.Reason = updatedReason
-	}
-	description := FormatEscalationDescription(issue.Title, fields)
-	return target.Update(id, UpdateOptions{Description: &description})
+	return b.withBeadLock(id, func() error {
+		target := b.forIssueID(id)
+		issue, err := target.Show(id)
+		if err != nil {
+			return err
+		}
+		if !HasLabel(issue, "gt:escalation") {
+			return fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
+		}
+		fields := ParseEscalationFields(issue.Description)
+		fields.OccurrenceCount++
+		fields.LastOccurrenceAt = time.Now().Format(time.RFC3339)
+		if updatedReason != "" {
+			fields.Reason = updatedReason
+		}
+		description := FormatEscalationDescription(issue.Title, fields)
+		return target.Update(id, UpdateOptions{Description: &description})
+	})
 }
 
 // CreateEscalationBead creates an escalation bead for tracking escalations.
@@ -475,66 +477,70 @@ func isTransientWriteContention(err error) bool {
 // AckEscalation acknowledges an escalation bead.
 // Sets acked_by and acked_at fields, adds "acked" label.
 func (b *Beads) AckEscalation(id, ackedBy string) error {
-	target := b.forIssueID(id)
-	// First get current issue to preserve other fields
-	issue, err := target.Show(id)
-	if err != nil {
-		return err
-	}
+	return b.withBeadLock(id, func() error {
+		target := b.forIssueID(id)
+		// First get current issue to preserve other fields
+		issue, err := target.Show(id)
+		if err != nil {
+			return err
+		}
 
-	// Verify it's an escalation
-	if !HasLabel(issue, "gt:escalation") {
-		return fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
-	}
+		// Verify it's an escalation
+		if !HasLabel(issue, "gt:escalation") {
+			return fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
+		}
 
-	// Parse existing fields
-	fields := ParseEscalationFields(issue.Description)
-	fields.AckedBy = ackedBy
-	fields.AckedAt = time.Now().Format(time.RFC3339)
+		// Parse existing fields
+		fields := ParseEscalationFields(issue.Description)
+		fields.AckedBy = ackedBy
+		fields.AckedAt = time.Now().Format(time.RFC3339)
 
-	// Format new description
-	description := FormatEscalationDescription(issue.Title, fields)
+		// Format new description
+		description := FormatEscalationDescription(issue.Title, fields)
 
-	return target.Update(id, UpdateOptions{
-		Description: &description,
-		AddLabels:   []string{"acked"},
+		return target.Update(id, UpdateOptions{
+			Description: &description,
+			AddLabels:   []string{"acked"},
+		})
 	})
 }
 
 // CloseEscalation closes an escalation bead with a resolution reason.
 // Sets closed_by and closed_reason fields, closes the issue.
 func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
-	target := b.forIssueID(id)
-	// First get current issue to preserve other fields
-	issue, err := target.Show(id)
-	if err != nil {
+	return b.withBeadLock(id, func() error {
+		target := b.forIssueID(id)
+		// First get current issue to preserve other fields
+		issue, err := target.Show(id)
+		if err != nil {
+			return err
+		}
+
+		// Verify it's an escalation
+		if !HasLabel(issue, "gt:escalation") {
+			return fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
+		}
+
+		// Parse existing fields
+		fields := ParseEscalationFields(issue.Description)
+		fields.ClosedBy = closedBy
+		fields.ClosedReason = reason
+
+		// Format new description
+		description := FormatEscalationDescription(issue.Title, fields)
+
+		// Update description first
+		if err := target.Update(id, UpdateOptions{
+			Description: &description,
+			AddLabels:   []string{"resolved"},
+		}); err != nil {
+			return err
+		}
+
+		// Close the issue
+		_, err = target.run("close", id, "--reason="+reason)
 		return err
-	}
-
-	// Verify it's an escalation
-	if !HasLabel(issue, "gt:escalation") {
-		return fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
-	}
-
-	// Parse existing fields
-	fields := ParseEscalationFields(issue.Description)
-	fields.ClosedBy = closedBy
-	fields.ClosedReason = reason
-
-	// Format new description
-	description := FormatEscalationDescription(issue.Title, fields)
-
-	// Update description first
-	if err := target.Update(id, UpdateOptions{
-		Description: &description,
-		AddLabels:   []string{"resolved"},
-	}); err != nil {
-		return err
-	}
-
-	// Close the issue
-	_, err = target.run("close", id, "--reason="+reason)
-	return err
+	})
 }
 
 // GetEscalationBead retrieves an escalation bead by ID.
@@ -674,63 +680,70 @@ type ReescalationResult struct {
 // reescalatedBy should be the identity of the agent/process doing the reescalation.
 // maxReescalations limits how many times an escalation can be bumped (0 = unlimited).
 func (b *Beads) ReescalateEscalation(id, reescalatedBy string, maxReescalations int) (*ReescalationResult, error) {
-	// Get the escalation
-	issue, fields, err := b.GetEscalationBead(id)
+	var result *ReescalationResult
+	err := b.withBeadLock(id, func() error {
+		// Get the escalation
+		issue, fields, err := b.GetEscalationBead(id)
+		if err != nil {
+			return err
+		}
+		if issue == nil {
+			return fmt.Errorf("escalation not found: %s", id)
+		}
+
+		result = &ReescalationResult{
+			ID:          id,
+			Title:       issue.Title,
+			OldSeverity: fields.Severity,
+		}
+
+		// Check if already at max reescalations
+		if maxReescalations > 0 && fields.ReescalationCount >= maxReescalations {
+			result.Skipped = true
+			result.SkipReason = fmt.Sprintf("already at max reescalations (%d)", maxReescalations)
+			return nil
+		}
+
+		// Check if already at critical (can't bump further)
+		if fields.Severity == "critical" {
+			result.Skipped = true
+			result.SkipReason = "already at critical severity"
+			result.NewSeverity = "critical"
+			return nil
+		}
+
+		// Save original severity on first reescalation
+		if fields.OriginalSeverity == "" {
+			fields.OriginalSeverity = fields.Severity
+		}
+
+		// Bump severity
+		newSeverity := bumpSeverity(fields.Severity)
+		fields.Severity = newSeverity
+		fields.ReescalationCount++
+		fields.LastReescalatedAt = time.Now().Format(time.RFC3339)
+		fields.LastReescalatedBy = reescalatedBy
+
+		result.NewSeverity = newSeverity
+		result.ReescalationNum = fields.ReescalationCount
+
+		// Format new description
+		description := FormatEscalationDescription(issue.Title, fields)
+
+		// Update the bead with new description and severity label
+		if err := b.forIssueID(id).Update(id, UpdateOptions{
+			Description:  &description,
+			AddLabels:    []string{"reescalated", "severity:" + newSeverity},
+			RemoveLabels: []string{"severity:" + result.OldSeverity},
+		}); err != nil {
+			return fmt.Errorf("updating escalation: %w", err)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if issue == nil {
-		return nil, fmt.Errorf("escalation not found: %s", id)
-	}
-
-	result := &ReescalationResult{
-		ID:          id,
-		Title:       issue.Title,
-		OldSeverity: fields.Severity,
-	}
-
-	// Check if already at max reescalations
-	if maxReescalations > 0 && fields.ReescalationCount >= maxReescalations {
-		result.Skipped = true
-		result.SkipReason = fmt.Sprintf("already at max reescalations (%d)", maxReescalations)
-		return result, nil
-	}
-
-	// Check if already at critical (can't bump further)
-	if fields.Severity == "critical" {
-		result.Skipped = true
-		result.SkipReason = "already at critical severity"
-		result.NewSeverity = "critical"
-		return result, nil
-	}
-
-	// Save original severity on first reescalation
-	if fields.OriginalSeverity == "" {
-		fields.OriginalSeverity = fields.Severity
-	}
-
-	// Bump severity
-	newSeverity := bumpSeverity(fields.Severity)
-	fields.Severity = newSeverity
-	fields.ReescalationCount++
-	fields.LastReescalatedAt = time.Now().Format(time.RFC3339)
-	fields.LastReescalatedBy = reescalatedBy
-
-	result.NewSeverity = newSeverity
-	result.ReescalationNum = fields.ReescalationCount
-
-	// Format new description
-	description := FormatEscalationDescription(issue.Title, fields)
-
-	// Update the bead with new description and severity label
-	if err := b.forIssueID(id).Update(id, UpdateOptions{
-		Description:  &description,
-		AddLabels:    []string{"reescalated", "severity:" + newSeverity},
-		RemoveLabels: []string{"severity:" + result.OldSeverity},
-	}); err != nil {
-		return nil, fmt.Errorf("updating escalation: %w", err)
-	}
-
 	return result, nil
 }
 

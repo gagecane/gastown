@@ -1,6 +1,10 @@
 package beads
 
 import (
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	beadsdk "github.com/steveyegge/beads"
@@ -57,6 +61,65 @@ func TestCurrentTimestamp(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("timestamp missing T separator: %q", ts)
+	}
+}
+
+// TestWithBeadLockSerializes is a regression test for gu-tucci (lost-update RMW
+// races). The escalation/channel/queue mutators do Show -> mutate -> Update,
+// and Update rewrites the entire description, so two concurrent critical
+// sections on the same bead lose one another's writes. withBeadLock is the
+// shared primitive that must serialize them. This verifies the primitive itself
+// provides mutual exclusion: with real locking the max observed concurrency
+// inside the critical section is 1; the pre-fix unlocked code would observe >1.
+func TestWithBeadLockSerializes(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	// beadsDir set directly so lock files resolve to a known temp location and
+	// routing (forIssueID) is a no-op (no routes.jsonl present).
+	b := &Beads{workDir: tmpDir, beadsDir: beadsDir, isolated: true}
+
+	const id = "gt-lock-test"
+	var inside int32    // current goroutines inside the critical section
+	var maxInside int32 // high-water mark
+	var completed int32 // critical sections that ran
+
+	const workers = 16
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := b.withBeadLock(id, func() error {
+				n := atomic.AddInt32(&inside, 1)
+				for {
+					m := atomic.LoadInt32(&maxInside)
+					if n <= m || atomic.CompareAndSwapInt32(&maxInside, m, n) {
+						break
+					}
+				}
+				// Busy-spin briefly to widen the race window without sleeping.
+				for j := 0; j < 100000; j++ {
+					_ = j
+				}
+				atomic.AddInt32(&inside, -1)
+				atomic.AddInt32(&completed, 1)
+				return nil
+			})
+			if err != nil {
+				t.Errorf("withBeadLock: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&completed); got != workers {
+		t.Fatalf("completed = %d, want %d", got, workers)
+	}
+	if got := atomic.LoadInt32(&maxInside); got != 1 {
+		t.Fatalf("max concurrent critical sections = %d, want 1 (lock not serializing)", got)
 	}
 }
 
