@@ -337,6 +337,20 @@ func (d *Daemon) runMainBranchTests() {
 
 	var tested, failed int
 	var failures []string
+	var escalatedRigs []string
+
+	// gu-yl2av: snapshot each rig's attribution state at the START of the cycle,
+	// before the loop mutates it. recordFailureAndShouldEscalate persists each
+	// escalated rig's LastEscalatedSignature (and the streak/anchor the gs-3pe
+	// backoff keys off) BEFORE the single batched escalate below. If that batched
+	// escalate then fails (gt missing, Dolt degraded, timeout), none of the rigs
+	// actually paged — yet their this-cycle markers would dedup the failures out,
+	// and the backoff would skip re-running the suite, burying the red main
+	// forever. On escalate failure we restore the escalated rigs to this snapshot,
+	// undoing this cycle's bookkeeping so the next cycle re-runs and re-escalates.
+	// Same class as D5/D12 (gu-nid89.43, a9d4a6f4); structurally harder here
+	// because the marker is per-rig while the escalate is batched across rigs.
+	preCycleEntries := loadMainBranchTestState(d.config.TownRoot).Rigs
 
 	for _, rigName := range rigNames {
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
@@ -410,6 +424,7 @@ func (d *Daemon) runMainBranchTests() {
 		if shouldEscalate {
 			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d, signature=%s, timeout=%t) — escalating: %v", rigName, streak, sig, isTimeout, runErr)
 			failures = append(failures, formatRigFailureSection(rigName, currentSHA, d.config.TownRoot, runErr))
+			escalatedRigs = append(escalatedRigs, rigName)
 			failed++
 		} else {
 			d.logger.Printf("main_branch_test: %s: FAILED (streak=%d/%d, signature=%s, timeout=%t) — below flake watermark or already paged, not escalating: %v",
@@ -421,13 +436,16 @@ func (d *Daemon) runMainBranchTests() {
 	if len(failures) > 0 {
 		msg := fmt.Sprintf("main branch test failures:\n%s", strings.Join(failures, "\n"))
 		d.logger.Printf("main_branch_test: escalating %d failure(s)", len(failures))
-		// NOTE (gu-nid89.43 follow-up): the per-rig LastEscalatedSignature marker
-		// is set in recordFailureAndShouldEscalate BEFORE this batched escalation,
-		// so a failed escalate here still buries the failures (same class as D5/D12).
-		// Fixing that requires reverting the markers for the escalated rigs on
-		// failure — tracked separately; for now restore the prior log-on-failure.
+		// gu-yl2av: gate this cycle's per-rig handled-markers on escalate success.
+		// recordFailureAndShouldEscalate already persisted LastEscalatedSignature
+		// (and the streak/LastFailedSHA the gs-3pe backoff reads) for each escalated
+		// rig BEFORE this batched call. If the escalate fails, none of them actually
+		// paged, so roll the escalated rigs back to their start-of-cycle snapshot —
+		// otherwise the dedup marker would suppress the page forever AND the backoff
+		// would skip re-running the suite, burying a genuinely-red main.
 		if err := d.escalate("main_branch_test", msg); err != nil {
-			d.logger.Printf("main_branch_test: escalation failed: %v", err)
+			d.logger.Printf("main_branch_test: escalation failed: %v — reverting %d rig marker(s) so the next cycle retries", err, len(escalatedRigs))
+			revertEscalationMarkers(d.config.TownRoot, escalatedRigs, preCycleEntries)
 		}
 	}
 
