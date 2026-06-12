@@ -128,12 +128,14 @@ Companion to `prime`, emitted in the same invocation. Carries the full rendered 
 
 ### `prompt.send`
 
-Each `gt sendkeys` dispatch to an agent's tmux pane. Prompt content is **not** logged —
-only the length is recorded.
+Each `gt sendkeys` dispatch to an agent's tmux pane. Prompt content is opt-in:
+set `GT_LOG_PROMPT_KEYS=true` to include it (truncated to 256 bytes). Default off
+because prompts may contain secrets or PII.
 
 | Attribute | Type | Description |
 |---|---|---|
 | `session` | string | tmux pane name |
+| `keys` | string | prompt text (opt-in: `GT_LOG_PROMPT_KEYS=true`; truncated to 256 bytes) |
 | `keys_len` | int | prompt length in bytes |
 | `debounce_ms` | int | applied debounce delay |
 | `status` | string | `"ok"` · `"error"` |
@@ -198,16 +200,25 @@ in a shell.
 
 ### `mail`
 
-All operations on the Gastown mail system. Carries operation and result only;
-message payload attributes are not recorded.
+All operations on the Gastown mail system.
 
 | Attribute | Type | Description |
 |---|---|---|
 | `operation` | string | `"send"` · `"read"` · `"archive"` · `"list"` · `"delete"` · … |
+| `msg.id` | string | message identifier |
+| `msg.from` | string | sender address |
+| `msg.to` | string | recipient(s), comma-separated |
+| `msg.subject` | string | subject |
+| `msg.thread_id` | string | thread ID |
+| `msg.priority` | string | `"high"` · `"normal"` · `"low"` |
+| `msg.type` | string | message type (`"work"`, `"notify"`, `"queue"`, …) |
+| `msg.body` | string | message body (opt-in: `GT_LOG_MAIL_BODY=true`; truncated to 256 bytes) |
 | `status` | string | `"ok"` · `"error"` |
 | `error` | string | error message; empty when `"ok"` |
 
-Call `RecordMail(ctx, operation, err)` for all mail operations.
+Use `RecordMailMessage(ctx, operation, MailMessageInfo{…}, err)` for operations
+where the message is available (send, read). Use `RecordMail(ctx, operation, err)`
+for content-less operations (list, archive-by-id).
 
 ---
 
@@ -219,12 +230,12 @@ Emitted whenever an agent transitions to a new state (idle → working, etc.).
 |---|---|---|
 | `agent_id` | string | agent identifier |
 | `new_state` | string | new state (`"idle"`, `"working"`, `"done"`, …) |
-| `has_hook_bead` | bool | `true` when the agent has a non-empty bead on its hook |
+| `hook_bead` | string | bead ID the agent is currently processing; empty if none |
 | `status` | string | `"ok"` · `"error"` |
 | `error` | string | error message; empty when `"ok"` |
 
-> Note: the attribute is `has_hook_bead` (bool), not `hook_bead` (string).
-> The bead ID itself is not recorded in the state change event.
+> Note: the attribute is `hook_bead` (string) — the bead ID itself, or an empty
+> string when the agent has no bead on its hook.
 
 ---
 
@@ -335,6 +346,8 @@ operation, new_state, exit_type
 | `GT_OTEL_LOGS_URL` | daemon startup | OTLP logs endpoint URL |
 | `GT_OTEL_METRICS_URL` | daemon startup | OTLP metrics endpoint URL |
 | `GT_LOG_BD_OUTPUT` | operator | Set to `true` to include bd stdout/stderr in `bd.call` log records |
+| `GT_LOG_PROMPT_KEYS` | operator | Set to `true` to include prompt text (`keys`) in `prompt.send` records (truncated to 256 bytes) |
+| `GT_LOG_MAIL_BODY` | operator | Set to `true` to include the mail body (`msg.body`) in `mail` records (truncated to 256 bytes) |
 | `GT_LOG_AGENT_OUTPUT` | operator | **PR #2199** — set to `true` to enable agent conversation event streaming. Requires `GT_OTEL_LOGS_URL`. |
 | `GT_RUN` | tmux session / subprocess | **PR #2199** — run UUID; correlation key across all events |
 
@@ -400,42 +413,47 @@ Audited against `origin/main` @ `2d8d71ee35fafda3bbdf353683692bfcc9165476`
 | `bd.call` | `RecordBDCall` | `subcommand`, `args`, `duration_ms`, `status`, `error`, `stdout`/`stderr` (opt-in) | `recorder.go:187`, emit at `recorder.go:214` |
 | `session.start` | `RecordSessionStart` | `session_id`, `role`, `status`, `error` | `recorder.go:218`, emit at `recorder.go:227` |
 | `session.stop` | `RecordSessionStop` | `session_id`, `status`, `error` | `recorder.go:236`, emit at `recorder.go:242` |
-| `prompt.send` | `RecordPromptSend` | `session`, `keys_len`, `debounce_ms`, `status`, `error` | `recorder.go:250`, emit at `recorder.go:256` |
+| `prompt.send` | `RecordPromptSend` | `session`, `keys` (opt-in), `keys_len`, `debounce_ms`, `status`, `error` | `recorder.go:385`, emit at `recorder.go:401` |
 | `pane.read` | `RecordPaneRead` | `session`, `lines_requested`, `content_len`, `status`, `error` | `recorder.go:266`, emit at `recorder.go:272` |
 | `prime` | `RecordPrime` | `role`, `hook_mode`, `status`, `error` | `recorder.go:282`, emit at `recorder.go:292` |
 | `prime.context` | `RecordPrimeContext` | `role`, `hook_mode`, `formula` | `recorder.go:305`, emit at `recorder.go:310` |
-| `agent.state_change` | `RecordAgentStateChange` | `agent_id`, `new_state`, `has_hook_bead` (bool), `status`, `error` | `recorder.go:318`, emit at `recorder.go:328` |
+| `agent.state_change` | `RecordAgentStateChange` | `agent_id`, `new_state`, `hook_bead` (string), `status`, `error` | `recorder.go:527`, emit at `recorder.go:540` |
 | `polecat.spawn` | `RecordPolecatSpawn` | `name`, `status`, `error` | `recorder.go:338`, emit at `recorder.go:344` |
 | `polecat.remove` | `RecordPolecatRemove` | `name`, `status`, `error` | `recorder.go:352`, emit at `recorder.go:358` |
 | `sling` | `RecordSling` | `bead`, `target`, `status`, `error` | `recorder.go:366`, emit at `recorder.go:372` |
-| `mail` | `RecordMail` | `operation`, `status`, `error` | `recorder.go:381`, emit at `recorder.go:390` |
+| `mail` | `RecordMailMessage` | `operation`, `msg.*`, `msg.body` (opt-in), `status`, `error` | `recorder.go:464`, emit at `recorder.go:488` |
+| `mail` | `RecordMail` (content-less) | `operation`, `status`, `error` | `recorder.go:593`, emit at `recorder.go:602` |
 | `nudge` | `RecordNudge` | `target`, `status`, `error` | `recorder.go:398`, emit at `recorder.go:404` |
 | `done` | `RecordDone` | `exit_type`, `status`, `error` | `recorder.go:413`, emit at `recorder.go:422` |
 | `daemon.restart` | `RecordDaemonRestart` | `agent_type` | `recorder.go:431`, emit at `recorder.go:436` |
 | `formula.instantiate` | `RecordFormulaInstantiate` | `formula_name`, `bead_id`, `status`, `error` | `recorder.go:442`, emit at `recorder.go:451` |
 | `convoy.create` | `RecordConvoyCreate` | `bead_id`, `status`, `error` | `recorder.go:460`, emit at `recorder.go:466` |
 
-### `prompt.send`: `keys` attribute absent (confirmed)
+### `prompt.send`: `keys` attribute is opt-in
 
-`RecordPromptSend` passes `keys string` but only emits `keys_len` (`int64(len(keys))`). The prompt content is deliberately not logged. `recorder.go:256–263`.
+`RecordPromptSend` always emits `keys_len` (`int64(len(keys))`). When
+`GT_LOG_PROMPT_KEYS=true` it additionally emits the `keys` attribute, truncated
+to 256 bytes. Default off because prompts may contain secrets or PII.
+`recorder.go:385,398–399`.
 
-### `agent.state_change`: `has_hook_bead` is bool, not string
+### `agent.state_change`: `hook_bead` is the bead ID string
 
-`hookBead *string` pointer is converted to bool: `hasHookBead := hookBead != nil && *hookBead != ""`. Emitted as `has_hook_bead` bool at `recorder.go:321,328`.
+`RecordAgentStateChange` takes `hookBead *string` and emits `hook_bead` as a
+string — the bead ID itself (`hookBeadID := *hookBead`), or an empty string when
+the pointer is nil. Emitted as `hook_bead` string at `recorder.go:530–533,543`.
 
-### `mail`: no `msg.*` attributes
+### `mail`: `msg.*` attributes via `RecordMailMessage`
 
-`RecordMail(ctx, operation, err)` at `recorder.go:381` only emits `operation`, `status`, `error`. No `msg.id`, `msg.from`, `msg.to`, etc. No `RecordMailMessage` function exists — grep `recorder.go` for `RecordMailMessage` → zero matches.
+`RecordMailMessage(ctx, operation, MailMessageInfo{…}, err)` at `recorder.go:464`
+emits `operation`, `msg.id`, `msg.from`, `msg.to`, `msg.subject`, `msg.thread_id`,
+`msg.priority`, `msg.type`, `status`, `error`, plus `msg.body` when
+`GT_LOG_MAIL_BODY=true` (truncated to 256 bytes). The content-less
+`RecordMail(ctx, operation, err)` at `recorder.go:593` emits only `operation`,
+`status`, `error` for list/archive-by-id operations.
 
 ### GT_LOG_BD_OUTPUT
 
 `recorder.go:208` — `os.Getenv("GT_LOG_BD_OUTPUT") == "true"` gates `stdout`/`stderr` logging.
-
-### Still-absent events (confirmed by grep)
-
-| Claim | Verification |
-|-------|-------------|
-| `RecordMailMessage` — does not exist | `grep -r "RecordMailMessage\|MailMessageInfo" internal/ → zero matches` |
 
 ### PR #2199 additions (landed)
 
