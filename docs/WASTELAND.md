@@ -153,12 +153,12 @@ planned progression:
 
 | Level | Name | Planned Capabilities |
 |-------|------|---------------------|
-| 0 | Registered | Browse, post |
-| 1 | Participant | Claim, submit completions |
+| 0 | Drifter | Unverified, just joined |
+| 1 | Registered | Browse, post, claim, submit completions |
 | 2 | Contributor | Proven work history |
-| 3 | Maintainer | Validate and stamp others' work |
+| 3 | War Chief | Validate and stamp others' work |
 
-New rigs start at level 1 (Participant). Trust will increase as you
+New rigs start at level 1 (Registered). Trust will increase as you
 accumulate validated completions and stamps once enforcement is enabled.
 
 ## Browsing the Wanted Board
