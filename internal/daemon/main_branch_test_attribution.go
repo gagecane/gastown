@@ -297,6 +297,45 @@ func recordFailureAndShouldEscalate(townRoot, rigName, signature, currentSHA str
 	return escalate, streak
 }
 
+// revertEscalationMarkers restores the given rigs' attribution entries to a
+// pre-cycle snapshot (gu-yl2av). It is called when the single batched
+// main_branch_test escalation fails AFTER recordFailureAndShouldEscalate has
+// already persisted this cycle's per-rig markers (LastEscalatedSignature,
+// ConsecutiveFailures, LastFailedSHA, ...). Without this, a failed page would be
+// permanently buried: the dedup marker suppresses the re-page and the gs-3pe
+// backoff skips re-running the suite. Restoring the snapshot undoes this cycle's
+// bookkeeping for exactly the escalated rigs, so the next cycle re-runs and
+// re-escalates the still-red main.
+//
+// A rig absent from the snapshot (its first-ever failing cycle was this one)
+// is restored to a zero entry — equivalent to "no prior state", which is what
+// the next cycle would have seen had this cycle never run.
+//
+// Only the escalated rigs are touched: rigs that failed below the watermark
+// (no page attempted) keep their accumulating streak so they still reach the
+// watermark on schedule, and passing rigs keep their refreshed baseline.
+//
+// Best-effort persistence, mirroring the rest of this file: a write error is
+// logged, not fatal — the next cycle re-derives state from disk regardless.
+func revertEscalationMarkers(townRoot string, rigNames []string, preCycle map[string]rigAttributionEntry) {
+	if len(rigNames) == 0 {
+		return
+	}
+	stateFileMu.Lock()
+	defer stateFileMu.Unlock()
+
+	state := loadMainBranchTestState(townRoot)
+	for _, rigName := range rigNames {
+		// preCycle[rigName] is the zero rigAttributionEntry when the rig had no
+		// prior on-disk state, which is the correct "as if this cycle never ran"
+		// restore target.
+		state.Rigs[rigName] = preCycle[rigName]
+	}
+	if err := saveMainBranchTestState(townRoot, state); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: failed to revert escalation markers for %d rig(s): %v\n", len(rigNames), err)
+	}
+}
+
 // shouldBackOffOnRedMain reports whether main_branch_test should skip the
 // heavyweight gate suite for a rig because main is already confirmed red at
 // currentSHA (gs-3pe). The runner backs off once the failure streak has reached
