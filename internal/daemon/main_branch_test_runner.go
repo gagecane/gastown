@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/util"
@@ -482,6 +483,29 @@ func formatRigFailureSection(rigName, currentSHA, townRoot string, runErr error)
 	return body + "\n" + attribution
 }
 
+// resolveMainBranchTestBranch resolves which branch the main_branch_test patrol
+// fetches, worktrees, and runs gates against for a rig. Resolution order:
+//
+//  1. rig config default_branch (source of truth, set at rig creation)
+//  2. the bare repo's actual default branch (symbolic-ref HEAD) — bare repos
+//     have no refs/remotes/origin/HEAD, so DefaultBranch() (not
+//     RemoteDefaultBranch()) is the correct probe; clone --bare points HEAD at
+//     the remote's default branch.
+//  3. "main" as the final fallback when neither source answers.
+//
+// This mirrors resolveRigDefaultBranch in internal/cmd/done.go (gu-wcb37) so
+// the patrol and the merge path agree on the branch for "mainline"-default
+// rigs. See gu-ez4as.
+func resolveMainBranchTestBranch(rigPath, bareRepoPath string) string {
+	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
+		return rigCfg.DefaultBranch
+	}
+	if b := gitpkg.NewGitWithDir(bareRepoPath, "").DefaultBranch(); b != "" {
+		return b
+	}
+	return "main"
+}
+
 // testRigMainBranch tests a single rig's main branch. Returns the
 // origin/<default_branch> SHA the patrol ran against (empty when the SHA
 // could not be captured — typically because the bare repo or fetch step
@@ -501,12 +525,6 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 		return "", nil
 	}
 
-	// Determine default branch
-	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
-
 	// Create a temporary worktree for testing to avoid interfering with
 	// the refinery's working directory.
 	worktreePath := filepath.Join(rigPath, ".main-test-worktree")
@@ -516,6 +534,16 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	if _, err := os.Stat(bareRepoPath); os.IsNotExist(err) {
 		return "", fmt.Errorf("bare repo not found at %s", bareRepoPath)
 	}
+
+	// Determine the branch to test. The rig config's default_branch is the
+	// source of truth; when it is unreadable or empty, detect the bare repo's
+	// actual default branch (symbolic-ref HEAD) rather than hardcoding "main".
+	// A hardcoded "main" produced false-positive gate failures on rigs whose
+	// default_branch is "mainline" (gu-ez4as): the fetch/worktree-add targeted
+	// a branch that does not exist, so every cycle escalated a phantom red.
+	// "main" is kept only as the final fallback when neither source answers.
+	// Mirrors resolveRigDefaultBranch in internal/cmd/done.go (gu-wcb37).
+	defaultBranch := resolveMainBranchTestBranch(rigPath, bareRepoPath)
 
 	if err := cleanupStaleWorktree(bareRepoPath, worktreePath); err != nil {
 		return "", err
