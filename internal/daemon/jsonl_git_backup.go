@@ -182,7 +182,9 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// Post-scrub verification: re-scan output for any remaining pollution.
 	if remaining := d.verifyNoPollution(gitRepo, databases); remaining > 0 {
 		d.logger.Printf("jsonl_git_backup: WARNING: %d suspicious record(s) survived scrub+filter", remaining)
-		d.escalate("jsonl_git_backup", fmt.Sprintf("post-scrub verification found %d suspicious records — review JSONL exports", remaining))
+		if err := d.escalate("jsonl_git_backup", fmt.Sprintf("post-scrub verification found %d suspicious records — review JSONL exports", remaining)); err != nil {
+			d.logger.Printf("jsonl_git_backup: escalation failed: %v", err)
+		}
 	}
 
 	mol.closeStep("verify")
@@ -193,7 +195,9 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
 		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
-		d.escalate("jsonl_git_backup", report)
+		if err := d.escalate("jsonl_git_backup", report); err != nil {
+			d.logger.Printf("jsonl_git_backup: escalation failed: %v", err)
+		}
 		mol.failStep("push", "spike detected")
 		return // Do NOT commit — spike detected.
 	}
@@ -208,9 +212,14 @@ func (d *Daemon) syncJsonlGitBackup() {
 		d.jsonlPushFailures++
 		if d.jsonlPushFailures >= maxConsecutivePushFailures {
 			d.logger.Printf("jsonl_git_backup: ESCALATION: %d consecutive push failures", d.jsonlPushFailures)
-			d.escalate("jsonl_git_backup", fmt.Sprintf("git push failed %d consecutive times", d.jsonlPushFailures))
-			// Reset to avoid flooding escalations every tick.
-			d.jsonlPushFailures = 0
+			if err := d.escalate("jsonl_git_backup", fmt.Sprintf("git push failed %d consecutive times", d.jsonlPushFailures)); err != nil {
+				// Escalation itself failed — leave the counter intact so the next
+				// tick retries instead of silently swallowing the alert (gu-nid89.43).
+				d.logger.Printf("jsonl_git_backup: escalation failed, will retry: %v", err)
+			} else {
+				// Reset to avoid flooding escalations every tick.
+				d.jsonlPushFailures = 0
+			}
 		}
 	} else {
 		d.jsonlPushFailures = 0
@@ -518,7 +527,12 @@ func (d *Daemon) runGitCmd(dir string, timeout time.Duration, args ...string) er
 // Passes --dedup --signature=<source> so repeated patrol firings bump
 // occurrence_count on the existing bead instead of creating a new one,
 // keeping the HQ wisp table from growing unbounded between resolutions.
-func (d *Daemon) escalate(source, message string) {
+//
+// Returns an error when `gt escalate` fails (gt missing, Dolt degraded,
+// timeout). Callers that mark work handled after escalating MUST gate that
+// marker on a nil return — otherwise a failed escalation that is recorded as
+// handled silently buries the work it was meant to surface (gu-nid89.43).
+func (d *Daemon) escalate(source, message string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -553,8 +567,9 @@ func (d *Daemon) escalate(source, message string) {
 	}
 	util.SetDetachedProcessGroup(cmd)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		d.logger.Printf("jsonl_git_backup: escalation failed: %v (%s)", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("gt escalate: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
+	return nil
 }
 
 // spikeThreshold returns the configured spike threshold or the default (20%).

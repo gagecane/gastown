@@ -115,7 +115,14 @@ func (m *ConvoyManager) monitorFeedStorm(slingFailures int) {
 	path := feedStormStatePath(m.townRoot)
 	next, escalate := evaluateFeedStorm(loadFeedStormState(path), slingFailures, m.now().UTC().Format(time.RFC3339))
 	if escalate {
-		m.fireFeedStormEscalation(next, slingFailures)
+		if err := m.fireFeedStormEscalation(next, slingFailures); err != nil {
+			// Escalation failed — clear the Escalated marker so the next sustained
+			// scan retries instead of silently burying the storm (gu-nid89.43).
+			// The consecutive counter and FirstSeen are preserved so the episode
+			// keeps building toward the next escalation attempt.
+			m.logger("Convoy feed-storm escalation failed, will retry: %s", err)
+			next.Escalated = false
+		}
 	}
 	saveFeedStormState(path, next)
 }
@@ -124,7 +131,9 @@ func (m *ConvoyManager) monitorFeedStorm(slingFailures int) {
 // sustained convoy feed storm. The fingerprint lets gt escalate's close-aware
 // dedup suppress repeats within an open episode. A package-level var so tests can
 // stub it.
-var fireFeedStormEscalation = func(m *ConvoyManager, st feedStormState, slingFailures int) {
+// Returns an error when `gt escalate` fails so the caller can avoid marking the
+// storm handled and retry on the next sustained scan (gu-nid89.43).
+var fireFeedStormEscalation = func(m *ConvoyManager, st feedStormState, slingFailures int) error {
 	msg := fmt.Sprintf("Convoy feed storm: %d sling-failures this scan, sustained for %d consecutive scans (since %s, peak %d/scan). Likely terminal-fail beads being re-fed every cycle (tripwire/already-hooked/not-found) — the gu-q1wzq signature. Inspect: grep 'sling .* failed' daemon.log | sort | uniq -c.",
 		slingFailures, st.Consecutive, st.FirstSeen, st.PeakPerScan)
 	cmd := exec.CommandContext(m.ctx, m.gtPath, "escalate",
@@ -138,11 +147,12 @@ var fireFeedStormEscalation = func(m *ConvoyManager, st feedStormState, slingFai
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		m.logger("Convoy feed-storm escalation failed: %s", util.FirstLine(stderr.String()))
+		return fmt.Errorf("%s", util.FirstLine(stderr.String()))
 	}
+	return nil
 }
 
 // fireFeedStormEscalation calls the package-level hook (indirection for tests).
-func (m *ConvoyManager) fireFeedStormEscalation(st feedStormState, slingFailures int) {
-	fireFeedStormEscalation(m, st, slingFailures)
+func (m *ConvoyManager) fireFeedStormEscalation(st feedStormState, slingFailures int) error {
+	return fireFeedStormEscalation(m, st, slingFailures)
 }

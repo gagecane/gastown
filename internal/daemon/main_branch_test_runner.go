@@ -421,7 +421,14 @@ func (d *Daemon) runMainBranchTests() {
 	if len(failures) > 0 {
 		msg := fmt.Sprintf("main branch test failures:\n%s", strings.Join(failures, "\n"))
 		d.logger.Printf("main_branch_test: escalating %d failure(s)", len(failures))
-		d.escalate("main_branch_test", msg)
+		// NOTE (gu-nid89.43 follow-up): the per-rig LastEscalatedSignature marker
+		// is set in recordFailureAndShouldEscalate BEFORE this batched escalation,
+		// so a failed escalate here still buries the failures (same class as D5/D12).
+		// Fixing that requires reverting the markers for the escalated rigs on
+		// failure — tracked separately; for now restore the prior log-on-failure.
+		if err := d.escalate("main_branch_test", msg); err != nil {
+			d.logger.Printf("main_branch_test: escalation failed: %v", err)
+		}
 	}
 
 	d.logger.Printf("main_branch_test: patrol cycle complete (%d tested, %d failed)", tested, failed)

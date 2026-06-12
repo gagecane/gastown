@@ -191,7 +191,15 @@ func (d *Daemon) runSchedulerStuckDog() {
 
 	d.logger.Printf("scheduler_stuck: stall sustained %s (ready=%d working=%d free=%d) — escalating to agent",
 		age.Round(time.Second), snap.QueuedReady, snap.Capacity.Working, snap.Capacity.Free)
-	d.escalate(schedulerStuckSource, d.buildSchedulerStuckMessage(snap, age))
+	// Only mark the episode escalated if the escalation actually landed. If
+	// `gt escalate` fails, leave Escalated false so the next tick retries
+	// instead of silently burying the stall (gu-nid89.43). FirstDetectedAt is
+	// preserved so the age keeps accumulating across the retry.
+	if err := d.escalate(schedulerStuckSource, d.buildSchedulerStuckMessage(snap, age)); err != nil {
+		d.logger.Printf("scheduler_stuck: escalation failed, will retry next tick: %v", err)
+		_ = saveSchedulerStuckState(stateFile, state)
+		return
+	}
 
 	state.Escalated = true
 	if err := saveSchedulerStuckState(stateFile, state); err != nil {

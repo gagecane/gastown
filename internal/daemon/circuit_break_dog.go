@@ -147,7 +147,9 @@ func (d *Daemon) runCircuitBreakDog() {
 			b.WorkBeadID, b.Count, circuitBreakWindow)
 		// d.escalate dedups on signature, but the signature is per-source —
 		// include the bead ID so distinct beads escalate independently.
-		d.escalate(circuitBreakSource+":"+b.WorkBeadID, d.buildCircuitBreakMessage(b))
+		if err := d.escalate(circuitBreakSource+":"+b.WorkBeadID, d.buildCircuitBreakMessage(b)); err != nil {
+			d.logger.Printf("circuit_break: %s: escalation failed: %v", b.WorkBeadID, err)
+		}
 	}
 
 	if changed {

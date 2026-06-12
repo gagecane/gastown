@@ -3160,7 +3160,7 @@ func TestMonitorFeedStorm_EscalatesWhenSustained(t *testing.T) {
 
 	fired := 0
 	orig := fireFeedStormEscalation
-	fireFeedStormEscalation = func(_ *ConvoyManager, _ feedStormState, _ int) { fired++ }
+	fireFeedStormEscalation = func(_ *ConvoyManager, _ feedStormState, _ int) error { fired++; return nil }
 	defer func() { fireFeedStormEscalation = orig }()
 
 	// Below threshold: never fires.
@@ -3174,6 +3174,51 @@ func TestMonitorFeedStorm_EscalatesWhenSustained(t *testing.T) {
 	}
 	if fired != 1 {
 		t.Fatalf("expected exactly 1 escalation across sustained storm, got %d", fired)
+	}
+}
+
+// TestMonitorFeedStorm_RetriesAfterFailedEscalation verifies that when the
+// escalation itself fails, the storm is NOT marked handled — the next sustained
+// scan retries instead of silently burying it (gu-nid89.43).
+func TestMonitorFeedStorm_RetriesAfterFailedEscalation(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".runtime"), 0755); err != nil {
+		t.Fatalf("mkdir .runtime: %v", err)
+	}
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	attempts := 0
+	fail := true
+	orig := fireFeedStormEscalation
+	fireFeedStormEscalation = func(_ *ConvoyManager, _ feedStormState, _ int) error {
+		attempts++
+		if fail {
+			return fmt.Errorf("gt escalate failed")
+		}
+		return nil
+	}
+	defer func() { fireFeedStormEscalation = orig }()
+
+	// Drive the episode to the escalation threshold; the first attempt fails.
+	for i := 0; i < feedStormConsecutiveThreshold; i++ {
+		m.monitorFeedStorm(feedStormFailureThreshold + 1)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 escalation attempt at threshold, got %d", attempts)
+	}
+	// The failed escalation must not have stuck the Escalated marker.
+	if st := loadFeedStormState(feedStormStatePath(townRoot)); st.Escalated {
+		t.Fatal("Escalated must be false after a failed escalation so the next scan retries")
+	}
+
+	// Next sustained scan must retry (and this time succeed).
+	fail = false
+	m.monitorFeedStorm(feedStormFailureThreshold + 1)
+	if attempts != 2 {
+		t.Fatalf("expected a retry after the failed escalation, got %d attempts", attempts)
+	}
+	if st := loadFeedStormState(feedStormStatePath(townRoot)); !st.Escalated {
+		t.Fatal("Escalated should be true after a successful retry")
 	}
 }
 

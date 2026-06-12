@@ -195,7 +195,9 @@ func (d *Daemon) runCompactorDog() {
 		}
 		if compactErr != nil {
 			d.logger.Printf("compactor_dog: %s: compaction FAILED: %v", dbName, compactErr)
-			d.escalate("compactor_dog", fmt.Sprintf("Compaction failed for %s: %v", dbName, compactErr))
+			if err := d.escalate("compactor_dog", fmt.Sprintf("Compaction failed for %s: %v", dbName, compactErr)); err != nil {
+				d.logger.Printf("compactor_dog: %s: escalation failed: %v", dbName, err)
+			}
 			errors++
 		} else {
 			compacted++

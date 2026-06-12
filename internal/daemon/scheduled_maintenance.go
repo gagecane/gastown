@@ -211,7 +211,9 @@ func (d *Daemon) runScheduledMaintenance() {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		d.logger.Printf("scheduled_maintenance: gt maintain failed: %v\nOutput: %s", err, string(output))
-		d.escalate("scheduled_maintenance", fmt.Sprintf("gt maintain --force failed: %v", err))
+		if escErr := d.escalate("scheduled_maintenance", fmt.Sprintf("gt maintain --force failed: %v", err)); escErr != nil {
+			d.logger.Printf("scheduled_maintenance: escalation failed: %v", escErr)
+		}
 	} else {
 		d.logger.Printf("scheduled_maintenance: gt maintain completed successfully")
 		if len(output) > 0 {

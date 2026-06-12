@@ -126,7 +126,17 @@ func (d *Daemon) runRestartPendingDog() {
 		msg := d.buildRestartEscalationMessage(b, forwardCheck)
 		// d.escalate dedups on signature, so repeated ticks before the label
 		// lands won't spam; the label is the durable handled-marker.
-		d.escalate(restartPendingSource, msg)
+		//
+		// Only mark handled if the escalation actually landed. If `gt escalate`
+		// fails (gt missing, Dolt degraded-but-breaker-not-tripped, timeout),
+		// leave the bead UNLABELED so the next tick retries — otherwise we'd
+		// reintroduce the exact gu-muj66 failure this dog was built to prevent:
+		// a pending daemon-restart bead marked handled while the daemon keeps
+		// running stale code (gu-nid89.43).
+		if err := d.escalate(restartPendingSource, msg); err != nil {
+			d.logger.Printf("restart_pending: %s: escalation failed, leaving unlabeled for retry: %v", b.ID, err)
+			continue
+		}
 		if err := d.markRestartPendingEscalated(b.ID); err != nil {
 			d.logger.Printf("restart_pending: %s: escalated but failed to mark handled: %v", b.ID, err)
 		} else {
