@@ -136,6 +136,23 @@ Town-level targets:
 Settings are passed to Claude Code via `--settings <path>`, which loads them as
 a separate priority tier that merges additively with project settings.
 
+### Nested-worktree targets
+
+Some roles run their session from a git worktree *below* their shared
+`--settings` parent. Claude Code also loads that worktree's project-local
+`.claude/settings.json`, so a stale `enabledPlugins` block there silently
+re-enables plugins the parent target disabled. To prevent that drift, sync also
+reaches these nested locations (sharing the parent's override key):
+
+| Target | Path | Override Key |
+|--------|------|--------------|
+| Per-rig mayor | `<rig>/mayor/rig/.claude/settings.json` | `<rig>/mayor` |
+| Refinery worktree | `<rig>/refinery/rig/.claude/settings.json` | `<rig>/refinery` |
+| Crew member worktree* | `<rig>/crew/<name>/.claude/settings.json` | `<rig>/crew` |
+
+\* Crew member worktrees are managed only when they already carry a
+`settings.json` — sync does not seed files into every (transient) worktree.
+
 ## Commands
 
 ### `gt hooks sync`

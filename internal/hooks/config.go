@@ -957,6 +957,28 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 				Rig:  rigName,
 				Role: "crew",
 			})
+
+			// Per-member crew worktrees — crew sessions run from
+			// <rig>/crew/<name> (sessionWorkDir in handoff.go), so Claude
+			// loads that worktree's project-local .claude/settings.json in
+			// addition to the shared --settings parent above. A stale
+			// enabledPlugins block in a member worktree silently re-enables
+			// the plugins the shared target disabled (2026-06-11 OOM drift,
+			// gu-gbloq). We manage only worktrees that already carry a
+			// settings.json — we do not seed new files into every (transient)
+			// crew worktree, preserving the shared-settings model. The same
+			// crew policy applies, so the Key matches the shared target.
+			for _, wt := range DiscoverWorktrees(crewDir) {
+				memberSettings := filepath.Join(wt, ".claude", "settings.json")
+				if _, err := os.Stat(memberSettings); err == nil {
+					targets = append(targets, Target{
+						Path: memberSettings,
+						Key:  rigName + "/crew",
+						Rig:  rigName,
+						Role: "crew",
+					})
+				}
+			}
 		}
 
 		// Polecats — one shared settings file in the polecats parent directory.
@@ -991,6 +1013,25 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 				Rig:  rigName,
 				Role: "refinery",
 			})
+
+			// Refinery's nested rig/ worktree — the refinery session runs
+			// from <rig>/refinery/rig (sessionWorkDir in handoff.go), one
+			// level below the shared --settings parent above. Claude loads
+			// that worktree's project-local .claude/settings.json too, so a
+			// stale enabledPlugins block there silently re-enables the fat
+			// plugin list the parent disabled (2026-06-11 OOM drift,
+			// gu-gbloq). Mirrors the per-rig mayor/rig enumeration (gu-83d5);
+			// settings there are gitignored, so syncing creates no repo churn.
+			// Same refinery policy, so the Key matches the parent target.
+			refineryRigDir := filepath.Join(refineryDir, constants.DirRig)
+			if info, err := os.Stat(refineryRigDir); err == nil && info.IsDir() {
+				targets = append(targets, Target{
+					Path: filepath.Join(refineryRigDir, ".claude", "settings.json"),
+					Key:  rigName + "/refinery",
+					Rig:  rigName,
+					Role: "refinery",
+				})
+			}
 		}
 
 		// Per-rig mayor — <rig>/mayor/rig is the canonical rig checkout

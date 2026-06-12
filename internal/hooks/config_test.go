@@ -1118,6 +1118,107 @@ func TestDiscoverTargets_PerRigMayor(t *testing.T) {
 	}
 }
 
+func TestDiscoverTargets_RefineryRigWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
+	// rig1 has refinery/rig (the nested worktree the refinery session runs
+	// from); rig2 has refinery but no nested rig/ worktree.
+	os.MkdirAll(filepath.Join(tmpDir, "rig1", "refinery", "rig"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "rig2", "refinery"), 0755)
+
+	targets, err := DiscoverTargets(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverTargets failed: %v", err)
+	}
+
+	// Both the refinery parent target and the nested rig/ target share the
+	// "rig1/refinery" key, so collect every target carrying that path.
+	var parentFound, nestedFound bool
+	wantParent := filepath.Join(tmpDir, "rig1", "refinery", ".claude", "settings.json")
+	wantNested := filepath.Join(tmpDir, "rig1", "refinery", "rig", ".claude", "settings.json")
+	for _, tgt := range targets {
+		switch tgt.Path {
+		case wantParent:
+			parentFound = true
+		case wantNested:
+			nestedFound = true
+			if tgt.Key != "rig1/refinery" {
+				t.Errorf("nested refinery/rig Key = %q, want %q", tgt.Key, "rig1/refinery")
+			}
+			if tgt.Rig != "rig1" {
+				t.Errorf("nested refinery/rig Rig = %q, want %q", tgt.Rig, "rig1")
+			}
+			if tgt.Role != "refinery" {
+				t.Errorf("nested refinery/rig Role = %q, want %q", tgt.Role, "refinery")
+			}
+		}
+	}
+
+	if !parentFound {
+		t.Errorf("expected refinery parent target %q, not found", wantParent)
+	}
+	if !nestedFound {
+		t.Errorf("expected nested refinery/rig target %q, not found", wantNested)
+	}
+
+	// rig2 lacks refinery/rig/, so only the parent target should exist for it.
+	unwantedNested := filepath.Join(tmpDir, "rig2", "refinery", "rig", ".claude", "settings.json")
+	for _, tgt := range targets {
+		if tgt.Path == unwantedNested {
+			t.Errorf("unexpected nested target %q — rig2 has no refinery/rig directory", unwantedNested)
+		}
+	}
+}
+
+func TestDiscoverTargets_CrewMemberWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
+	// rig1 has two crew members. alice already carries a settings.json in
+	// her worktree (drift to manage); bob does not (must NOT be seeded).
+	aliceDir := filepath.Join(tmpDir, "rig1", "crew", "alice")
+	bobDir := filepath.Join(tmpDir, "rig1", "crew", "bob")
+	os.MkdirAll(filepath.Join(aliceDir, ".claude"), 0755)
+	os.MkdirAll(bobDir, 0755)
+	os.WriteFile(filepath.Join(aliceDir, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0644)
+
+	targets, err := DiscoverTargets(tmpDir)
+	if err != nil {
+		t.Fatalf("DiscoverTargets failed: %v", err)
+	}
+
+	var sharedFound, aliceFound bool
+	wantShared := filepath.Join(tmpDir, "rig1", "crew", ".claude", "settings.json")
+	wantAlice := filepath.Join(aliceDir, ".claude", "settings.json")
+	unwantedBob := filepath.Join(bobDir, ".claude", "settings.json")
+	for _, tgt := range targets {
+		switch tgt.Path {
+		case wantShared:
+			sharedFound = true
+		case wantAlice:
+			aliceFound = true
+			if tgt.Key != "rig1/crew" {
+				t.Errorf("alice crew worktree Key = %q, want %q", tgt.Key, "rig1/crew")
+			}
+			if tgt.Role != "crew" {
+				t.Errorf("alice crew worktree Role = %q, want %q", tgt.Role, "crew")
+			}
+		case unwantedBob:
+			t.Errorf("crew member bob has no existing settings.json and must not be seeded as a target")
+		}
+	}
+
+	if !sharedFound {
+		t.Errorf("expected shared crew target %q, not found", wantShared)
+	}
+	if !aliceFound {
+		t.Errorf("expected alice crew worktree target %q (carries existing settings), not found", wantAlice)
+	}
+}
+
 // keysOf returns the sorted keys of a map for stable test diagnostics.
 func keysOf(m map[string]Target) []string {
 	keys := make([]string, 0, len(m))
