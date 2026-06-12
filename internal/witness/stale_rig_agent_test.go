@@ -296,6 +296,101 @@ func TestDetectStaleRigAgentHeartbeats_CarriesAgentState(t *testing.T) {
 	}
 }
 
+// TestDetectStaleRigAgentHeartbeats_IdleWitnessCleanCycleSuppressed verifies the
+// gu-eke9u fix: an ALIVE witness whose stale heartbeat last self-reported a
+// clean-cycle idle-ready state (state=idle) is recorded "skip-idle-clean-cycle"
+// and does NOT escalate. This is the discrete-cycle idle-ready witness parked at
+// the prompt between deacon nudges — its heartbeat age tracks last-nudge-time,
+// not health. The expected-idle-window variant is exercised too.
+func TestDetectStaleRigAgentHeartbeats_IdleWitnessCleanCycleSuppressed(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	prefix := session.PrefixFor(rigName)
+	witSession := session.WitnessSessionName(prefix)
+
+	installFakeTmuxAlive(t, witSession)
+
+	// Witness heartbeat stale past threshold but last state idle; session alive.
+	writeRigAgentHeartbeatV3(t, townRoot, witSession, 6*time.Hour,
+		polecat.HeartbeatIdle, "", "standing ready", "")
+
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
+
+	witness := findStaleResult(res, "witness")
+	if witness == nil {
+		t.Fatalf("missing witness result")
+	}
+	if !witness.SessionAlive {
+		t.Fatalf("witness SessionAlive = false, want true (fake tmux should report it alive)")
+	}
+	if witness.Action != "skip-idle-clean-cycle" {
+		t.Errorf("witness Action = %q, want skip-idle-clean-cycle", witness.Action)
+	}
+	if witness.MailSent {
+		t.Errorf("witness MailSent = true, want false (idle clean-cycle must not escalate)")
+	}
+}
+
+// TestDetectStaleRigAgentHeartbeats_IdleWitnessGateSafetyCarveouts verifies the
+// gu-eke9u gate does NOT regress the gu-rh0g real-wedge signal:
+//   - working + alive + stale STILL escalates (real mid-op freeze)
+//   - idle + DEAD session STILL escalates (died right after reporting idle)
+//   - exiting + alive + stale STILL escalates (conservative: possible stuck-in-done)
+func TestDetectStaleRigAgentHeartbeats_IdleWitnessGateSafetyCarveouts(t *testing.T) {
+	rigName := "testrig"
+	prefix := session.PrefixFor(rigName)
+	witSession := session.WitnessSessionName(prefix)
+
+	t.Run("working alive stale escalates", func(t *testing.T) {
+		townRoot := t.TempDir()
+		installFakeTmuxAlive(t, witSession)
+		writeRigAgentHeartbeatV3(t, townRoot, witSession, 6*time.Hour,
+			polecat.HeartbeatWorking, "patrol-scan", "mid cycle", "")
+		res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
+		witness := findStaleResult(res, "witness")
+		if witness == nil {
+			t.Fatalf("missing witness result")
+		}
+		if witness.Action != "escalated" {
+			t.Errorf("witness Action = %q, want escalated (working mid-op must still escalate)", witness.Action)
+		}
+	})
+
+	t.Run("idle dead escalates", func(t *testing.T) {
+		townRoot := t.TempDir()
+		// Server down → session reported dead even though last state was idle.
+		installFakeTmuxNoServer(t)
+		writeRigAgentHeartbeatV3(t, townRoot, witSession, 6*time.Hour,
+			polecat.HeartbeatIdle, "", "standing ready", "")
+		res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
+		witness := findStaleResult(res, "witness")
+		if witness == nil {
+			t.Fatalf("missing witness result")
+		}
+		if witness.SessionAlive {
+			t.Fatalf("witness SessionAlive = true, want false (server down)")
+		}
+		if witness.Action != "escalated" {
+			t.Errorf("witness Action = %q, want escalated (dead session must escalate regardless of last state)", witness.Action)
+		}
+	})
+
+	t.Run("exiting alive stale escalates", func(t *testing.T) {
+		townRoot := t.TempDir()
+		installFakeTmuxAlive(t, witSession)
+		writeRigAgentHeartbeatV3(t, townRoot, witSession, 6*time.Hour,
+			polecat.HeartbeatExiting, "", "done", "")
+		res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
+		witness := findStaleResult(res, "witness")
+		if witness == nil {
+			t.Fatalf("missing witness result")
+		}
+		if witness.Action != "escalated" {
+			t.Errorf("witness Action = %q, want escalated (exiting is conservatively excluded from the idle gate)", witness.Action)
+		}
+	})
+}
+
 func TestStaleAgentDisposition(t *testing.T) {
 	cases := []struct {
 		name string
