@@ -311,7 +311,6 @@ These are set in tmux session environment when agents are spawned.
 | `GT_ROOT` | Town root directory | `/home/user/gt` |
 | `BD_ACTOR` | Agent identity for attribution | `gastown/polecats/toast` |
 | `GIT_AUTHOR_NAME` | Commit attribution (same as BD_ACTOR) | `gastown/polecats/toast` |
-| `BEADS_DIR` | Beads database location | `/home/user/gt/gastown/.beads` |
 
 ### Rig-Level Variables
 
@@ -326,9 +325,8 @@ These are set in tmux session environment when agents are spawned.
 
 | Variable | Purpose |
 |----------|---------|
-| `GIT_AUTHOR_EMAIL` | Workspace owner email (from git config) |
 | `GT_TOWN_ROOT` | Override town root detection (manual use) |
-| `CLAUDE_RUNTIME_CONFIG_DIR` | Custom Claude settings directory |
+| `CLAUDE_CONFIG_DIR` | Custom Claude settings directory |
 
 ### Environment by Role
 
@@ -485,7 +483,7 @@ gt config agent remove <name>     # Remove custom agent (built-ins protected)
 gt config default-agent [name]    # Get or set town default agent
 ```
 
-**Built-in agents**: `claude`, `gemini`, `codex`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`
+**Built-in agents**: `claude`, `gemini`, `codex`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`, `kiro`, `pi`, `omp`, `vibe`, `groq-compound`
 
 > **Note on GitHub Copilot**: The `copilot` preset uses executable lifecycle hooks in
 > `.github/hooks/gastown.json` (`sessionStart`, `userPromptSubmitted`, `preToolUse`,
@@ -623,7 +621,7 @@ gt mail send --human -s "..."    # To overseer
 gt escalate "topic"              # Default: MEDIUM severity
 gt escalate -s CRITICAL "msg"    # Urgent, immediate attention
 gt escalate -s HIGH "msg"        # Important blocker
-gt escalate -s MEDIUM "msg" -m "Details..."
+gt escalate -s MEDIUM "msg" -r "Details..."
 ```
 
 See [escalation.md](design/escalation.md) for full protocol.
@@ -631,8 +629,7 @@ See [escalation.md](design/escalation.md) for full protocol.
 ### Sessions
 
 ```bash
-gt handoff                   # Request cycle (context-aware)
-gt handoff --shutdown        # Terminate (polecats)
+gt handoff                   # Request cycle (context-aware; polecats defer via gt done)
 gt session stop <rig>/<agent>
 gt peek <agent>              # Check health
 gt nudge <agent> "message"   # Send message to agent
@@ -657,8 +654,11 @@ Never use raw `tmux send-keys` - it doesn't handle Claude's input correctly.
 ### Emergency
 
 ```bash
-gt stop --all                # Kill all sessions
-gt stop --rig <name>         # Kill rig sessions
+gt estop                     # Freeze all sessions (SIGTSTP); resume with gt thaw
+gt estop --rig <name>        # Freeze a single rig
+gt down                      # Reversible pause (stop infrastructure)
+gt shutdown                  # Stop agents + clean up polecat worktrees/branches
+gt rig stop <rig>...         # Stop one or more rigs
 ```
 
 ### Health Check
@@ -671,12 +671,12 @@ gt deacon health-state           # Show force-kill ledger + manual health-check 
 ### Merge Queue (MQ)
 
 ```bash
-gt mq list [rig]             # Show the merge queue
-gt mq next [rig]             # Show highest-priority merge request
+gt mq list <rig>             # Show the merge queue
+gt mq next <rig>             # Show highest-priority merge request
 gt mq submit                 # Submit current branch to merge queue
 gt mq status <id>            # Show detailed merge request status
-gt mq retry <id>             # Retry a failed merge request
-gt mq reject <id>            # Reject a merge request
+gt mq retry <rig> <mr-id>    # Retry a failed merge request
+gt mq reject <rig> <mr-id-or-branch>  # Reject a merge request
 ```
 
 #### Integration Branch Commands
