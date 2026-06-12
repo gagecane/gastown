@@ -30,6 +30,12 @@ func TestIsTransientPushError(t *testing.T) {
 		{"502", errors.New("error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502"), true},
 		{"503", errors.New("fatal: unable to access: The requested URL returned error: 503"), true},
 		{"could not resolve host", errors.New("fatal: unable to access: Could not resolve host: git.example.com"), true},
+		// gu-i592d: the git layer's timeout-kill now surfaces as "timed out"
+		// (via ctx.Err()), not the raw "signal: killed". This is the exact
+		// message format runWithTimeout/runWithEnvAndTimeout emit on a
+		// deadlock-kill, and it MUST classify as transient so pushForDone
+		// retries the killed push once the binary is healthy.
+		{"git layer timeout-kill", errors.New("git push timed out after 1m0s (remote may be unreachable)"), true},
 
 		// Deterministic rejections — must NOT be treated as transient.
 		{"non-fast-forward", errors.New("! [rejected] main -> main (non-fast-forward)"), false},

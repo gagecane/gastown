@@ -267,9 +267,9 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	}
 
 	var cmd *exec.Cmd
+	var ctx context.Context
 	var cancel context.CancelFunc
 	if timeout > 0 {
-		var ctx context.Context
 		ctx, cancel = context.WithTimeout(context.Background(), timeout)
 		cmd = exec.CommandContext(ctx, "git", args...)
 	} else {
@@ -308,11 +308,18 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		if timeout > 0 {
-			// Check if the context's deadline was exceeded
-			if errors.Is(err, context.DeadlineExceeded) {
-				return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
-			}
+		// Detect timeout via ctx.Err(), NOT errors.Is(err, DeadlineExceeded).
+		// The util.SetProcessGroup Cancel hook SIGKILLs the push process group on
+		// timeout (to end the gc-utizk7 reparented-child pipe deadlock), so
+		// cmd.Run() returns "signal: killed" — which is NOT a DeadlineExceeded
+		// error. errors.Is would miss it and wrap the cryptic "signal: killed",
+		// which gt done's isTransientPushError cannot classify, so pushForDone
+		// never retries the killed push and the work strands on preserved/*
+		// (gu-i592d). ctx.Err() reports DeadlineExceeded regardless of how the
+		// process died, matching runWithTimeout's detection so a timeout-kill
+		// surfaces as a retryable "timed out".
+		if timeout > 0 && ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
 		}
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
 	}

@@ -3,6 +3,7 @@ package git
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,4 +78,55 @@ func TestRunWithEnvAndTimeout_DoesNotDeadlockOnReparentedChild(t *testing.T) {
 		)
 		return err
 	})
+}
+
+// TestRunWithEnvAndTimeout_ReportsTimeoutNotSignalKilled is the gu-i592d
+// regression. The deadlock fix's util.SetProcessGroup Cancel hook SIGKILLs the
+// push process group on timeout, so cmd.Run() returns "signal: killed" — which
+// is NOT a context.DeadlineExceeded error. The old code detected the deadline
+// via errors.Is(err, context.DeadlineExceeded), missed the kill, and wrapped
+// the cryptic "signal: killed". gt done's isTransientPushError cannot classify
+// "signal: killed" as transient, so pushForDone never retried the killed
+// pre-verified push and the work stranded on preserved/*. The fix detects the
+// deadline via ctx.Err(), so a timeout-kill surfaces as a retryable "timed
+// out" — matching the runWithTimeout path used by the non-pre-verified push.
+func TestRunWithEnvAndTimeout_ReportsTimeoutNotSignalKilled(t *testing.T) {
+	writeGitShim(t)
+	g := NewGit(t.TempDir())
+	_, err := g.runWithEnvAndTimeout(
+		[]string{"push", "origin", "main"},
+		prePushSkipEnv,
+		500*time.Millisecond,
+	)
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "timed out") {
+		t.Errorf("timeout-kill should surface as a retryable %q error; got %q", "timed out", msg)
+	}
+	if strings.Contains(msg, "signal: killed") {
+		t.Errorf("timeout-kill leaked the raw %q error (gu-i592d): %q", "signal: killed", msg)
+	}
+}
+
+// TestRunWithTimeout_ReportsTimeoutNotSignalKilled is the runWithTimeout
+// counterpart — it already used ctx.Err() and so was correct, but this pins the
+// behavior so the two timeout helpers cannot drift apart again (the drift is
+// what caused gu-i592d: the env path checked errors.Is, the non-env path
+// checked ctx.Err()).
+func TestRunWithTimeout_ReportsTimeoutNotSignalKilled(t *testing.T) {
+	writeGitShim(t)
+	g := NewGit(t.TempDir())
+	_, err := g.runWithTimeout(500*time.Millisecond, "push", "origin", "main")
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "timed out") {
+		t.Errorf("timeout-kill should surface as a retryable %q error; got %q", "timed out", msg)
+	}
+	if strings.Contains(msg, "signal: killed") {
+		t.Errorf("timeout-kill leaked the raw %q error: %q", "signal: killed", msg)
+	}
 }
