@@ -220,82 +220,90 @@ func (b *Beads) GetChannelByID(id string) (*Issue, *ChannelFields, error) {
 
 // UpdateChannelSubscribers updates the subscribers list for a channel.
 func (b *Beads) UpdateChannelSubscribers(name string, subscribers []string) error {
-	issue, fields, err := b.GetChannelBead(name)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return fmt.Errorf("channel %q not found", name)
-	}
+	return b.withBeadLock(ChannelBeadID(name), func() error {
+		issue, fields, err := b.GetChannelBead(name)
+		if err != nil {
+			return err
+		}
+		if issue == nil {
+			return fmt.Errorf("channel %q not found", name)
+		}
 
-	fields.Subscribers = subscribers
-	description := FormatChannelDescription(issue.Title, fields)
+		fields.Subscribers = subscribers
+		description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+		return b.Update(issue.ID, UpdateOptions{Description: &description})
+	})
 }
 
 // SubscribeToChannel adds a subscriber to a channel if not already subscribed.
 func (b *Beads) SubscribeToChannel(name string, subscriber string) error {
-	issue, fields, err := b.GetChannelBead(name)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return fmt.Errorf("channel %q not found", name)
-	}
-
-	// Check if already subscribed
-	for _, s := range fields.Subscribers {
-		if s == subscriber {
-			return nil // Already subscribed
+	return b.withBeadLock(ChannelBeadID(name), func() error {
+		issue, fields, err := b.GetChannelBead(name)
+		if err != nil {
+			return err
 		}
-	}
+		if issue == nil {
+			return fmt.Errorf("channel %q not found", name)
+		}
 
-	fields.Subscribers = append(fields.Subscribers, subscriber)
-	description := FormatChannelDescription(issue.Title, fields)
+		// Check if already subscribed
+		for _, s := range fields.Subscribers {
+			if s == subscriber {
+				return nil // Already subscribed
+			}
+		}
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+		fields.Subscribers = append(fields.Subscribers, subscriber)
+		description := FormatChannelDescription(issue.Title, fields)
+
+		return b.Update(issue.ID, UpdateOptions{Description: &description})
+	})
 }
 
 // UnsubscribeFromChannel removes a subscriber from a channel.
 func (b *Beads) UnsubscribeFromChannel(name string, subscriber string) error {
-	issue, fields, err := b.GetChannelBead(name)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return fmt.Errorf("channel %q not found", name)
-	}
-
-	// Filter out the subscriber
-	var newSubscribers []string
-	for _, s := range fields.Subscribers {
-		if s != subscriber {
-			newSubscribers = append(newSubscribers, s)
+	return b.withBeadLock(ChannelBeadID(name), func() error {
+		issue, fields, err := b.GetChannelBead(name)
+		if err != nil {
+			return err
 		}
-	}
+		if issue == nil {
+			return fmt.Errorf("channel %q not found", name)
+		}
 
-	fields.Subscribers = newSubscribers
-	description := FormatChannelDescription(issue.Title, fields)
+		// Filter out the subscriber
+		var newSubscribers []string
+		for _, s := range fields.Subscribers {
+			if s != subscriber {
+				newSubscribers = append(newSubscribers, s)
+			}
+		}
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+		fields.Subscribers = newSubscribers
+		description := FormatChannelDescription(issue.Title, fields)
+
+		return b.Update(issue.ID, UpdateOptions{Description: &description})
+	})
 }
 
 // UpdateChannelRetention updates the retention policy for a channel.
 func (b *Beads) UpdateChannelRetention(name string, retentionCount, retentionHours int) error {
-	issue, fields, err := b.GetChannelBead(name)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return fmt.Errorf("channel %q not found", name)
-	}
+	return b.withBeadLock(ChannelBeadID(name), func() error {
+		issue, fields, err := b.GetChannelBead(name)
+		if err != nil {
+			return err
+		}
+		if issue == nil {
+			return fmt.Errorf("channel %q not found", name)
+		}
 
-	fields.RetentionCount = retentionCount
-	fields.RetentionHours = retentionHours
-	description := FormatChannelDescription(issue.Title, fields)
+		fields.RetentionCount = retentionCount
+		fields.RetentionHours = retentionHours
+		description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+		return b.Update(issue.ID, UpdateOptions{Description: &description})
+	})
 }
 
 // UpdateChannelStatus updates the status of a channel bead.
@@ -305,18 +313,20 @@ func (b *Beads) UpdateChannelStatus(name, status string) error {
 		return fmt.Errorf("invalid channel status %q: must be active or closed", status)
 	}
 
-	issue, fields, err := b.GetChannelBead(name)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return fmt.Errorf("channel %q not found", name)
-	}
+	return b.withBeadLock(ChannelBeadID(name), func() error {
+		issue, fields, err := b.GetChannelBead(name)
+		if err != nil {
+			return err
+		}
+		if issue == nil {
+			return fmt.Errorf("channel %q not found", name)
+		}
 
-	fields.Status = status
-	description := FormatChannelDescription(issue.Title, fields)
+		fields.Status = status
+		description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+		return b.Update(issue.ID, UpdateOptions{Description: &description})
+	})
 }
 
 // DeleteChannelBead permanently deletes a channel bead.

@@ -225,6 +225,27 @@ func (b *Beads) lockBead(beadID string) (func(), error) {
 	return lock.FlockAcquire(lockPath)
 }
 
+// withBeadLock runs fn while holding the per-bead advisory lock for beadID,
+// serializing read-modify-write sequences (Show -> mutate -> Update) against
+// concurrent callers in other processes. Without this, two callers that both
+// Show the same bead, mutate independently, and Update can each clobber the
+// other's change because Update rewrites the entire description (lost update).
+//
+// The lock is acquired in the beads directory that OWNS beadID (resolved via
+// routing), so the lock path is identical for every caller regardless of their
+// cwd or rig — matching where Show/Update actually read and write the data.
+//
+// NOTE: the lock is exclusive and NOT reentrant. fn must not call another
+// withBeadLock-wrapped method for the same beadID, or it will self-deadlock.
+func (b *Beads) withBeadLock(beadID string, fn func() error) error {
+	unlock, err := b.forIssueID(beadID).lockBead(beadID)
+	if err != nil {
+		return fmt.Errorf("acquiring bead lock: %w", err)
+	}
+	defer unlock()
+	return fn()
+}
+
 // AttachMolecule attaches a molecule to a pinned bead by updating its description.
 // The moleculeID is the root issue ID of the molecule to attach.
 // Uses advisory file locking to prevent concurrent read-modify-write races.
