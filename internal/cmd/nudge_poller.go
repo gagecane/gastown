@@ -141,14 +141,27 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 				continue // someone else drained it
 			}
 
-			formatted := nudge.FormatForInjection(drained)
-			if err := t.NudgeSessionWithOpts(sessionName, formatted, nudgeOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "nudge-poller: injection error for %s: %v\n", sessionName, err)
-			}
+			injectOrRequeue(townRoot, sessionName, drained, func(msg string) error {
+				return t.NudgeSessionWithOpts(sessionName, msg, nudgeOpts)
+			})
 		}
 	}
 }
 
 func shouldSkipDrainUntilIdle(hasPromptDetection bool, waitErr error) bool {
 	return hasPromptDetection && waitErr != nil
+}
+
+// injectOrRequeue delivers the drained nudges via inject. Drain permanently
+// removed these nudges from the queue, so the drained slice is the only copy.
+// If injection fails, the batch is requeued so it is not silently dropped on a
+// transient tmux/lock hiccup (mirrors internal/acp/propulsion.go).
+func injectOrRequeue(townRoot, sessionName string, drained []nudge.QueuedNudge, inject func(string) error) {
+	formatted := nudge.FormatForInjection(drained)
+	if err := inject(formatted); err != nil {
+		fmt.Fprintf(os.Stderr, "nudge-poller: injection error for %s: %v\n", sessionName, err)
+		if reqErr := nudge.Requeue(townRoot, sessionName, drained); reqErr != nil {
+			fmt.Fprintf(os.Stderr, "nudge-poller: requeue error for %s: %v\n", sessionName, reqErr)
+		}
+	}
 }
