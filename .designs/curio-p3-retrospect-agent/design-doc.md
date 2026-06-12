@@ -62,7 +62,7 @@ every later section elaborates one row.
 
 | P2 Layer | P2 implementation | P3 change | Net effect |
 |----------|-------------------|-----------|------------|
-| **L1 — Outcome Tracking** (`curio_ledger`) | daemon post-close hook populates ledger; `precision(rule)` computable | **UNCHANGED.** The agent READS the ledger (via a rendered digest or scoped read role). | Keep as designed. L1 is a prerequisite, not part of this epic. |
+| **L1 — Outcome Tracking** (`curio_ledger`) | daemon post-close hook populates ledger; `precision(rule)` computable | **NOT YET BUILT — must land in this epic (B0).** The `curio_ledger` table is DDL-provisioned (`store.go`), but nothing writes to it: Curio is candidates-only and files no beads (`curio_dog.go`), and no daemon post-close reconciler exists. P2 scoped population into builds 4-6, which P3 drops — so population is orphaned unless this epic builds it. The agent READS the ledger via the rendered digest. | **Build L1 population first (B0).** Without it the digest's precision table is empty and the lane has no signal to justify a tune. |
 | **L2 — LLM Hypothesizer** | `curio-proposer` builds 4/6 (in-proc LLM call + JSON validation) and 5/6 (patch gen) | **REPLACED.** A Claude polecat slung on a cadence reads the digest + ledger and produces the same three proposal kinds. `curio-proposer` becomes the read substrate that renders the digest. | The in-proc LLM client, prompt plumbing, structured-output validator, and `model` config are all DELETED from the plan. |
 | **L3 — Self-Mutation Pipeline** | `curio-apply` subcommand + human-gate beads + merge-queue entry (build 6/6) | **REPLACED in mechanism, preserved in spirit.** The "propose" step is literally the polecat opening a CR. The Refinery + human review IS the gate. No `gt curio apply` write path is built. | The staged gate (shadow-propose → human-approve OR precision-gate-pass → commit) maps onto branch → CR → merge queue. |
 
@@ -457,8 +457,12 @@ the embedded `curio-proposer` builds 4-6/6.**
 ## Child-bead breakdown (the next epic)
 
 The implementation epic is enumerated in the companion file
-[`child-beads.md`](./child-beads.md). Summary (7 beads, suggested order):
+[`child-beads.md`](./child-beads.md). Summary (9 beads, suggested order):
 
+0. **Layer-1 prerequisite: populate `curio_ledger`** — the table is
+   DDL-provisioned but nothing writes to it (Curio files no beads; no post-close
+   reconciler exists). Daemon-side filing-row insert + close-event reconciler.
+   Sling FIRST — B1-B7 reason over an empty ledger without it.
 1. **Substrate: `ReadOutcomeHistory` + `--emit-digest`** — read-only ledger
    query + deterministic digest renderer in `curio-proposer`. Tested;
    `TestImportGraph_NoWritePath` still passes.
@@ -473,10 +477,15 @@ The implementation epic is enumerated in the companion file
    `plugin.md`, kill-switch pre-check, single-instance + volume circuit-breaker
    guards (Q1, Q7).
 6. **Proposal taxonomy landing + dedup** — bead labels (`curio-proposal`,
-   `curio-hypothesis`), the CR-vs-bead routing, dedup query (Q3, Q7).
+   `curio-hypothesis`), the CR-vs-bead routing, cluster-key (`StateHash`) dedup
+   linkage, and the *built* proposal-target CI guard (Q3, Q5 layer 2, Q7).
 7. **Precision-gate auto-merge policy (default OFF)** — Refinery merge policy
-   for threshold-only CRs meeting the P2 conjunction; ships disabled, enabled
-   later after observation (Q4).
+   for threshold-only CRs meeting the P2 conjunction; names the gate-script /
+   label mechanism (Refinery has no conditional auto-merge engine today); ships
+   disabled, enabled later after observation (Q4).
+8. **Proposal expiry + breaker-reset** — auto-close stale proposals (feeding the
+   ledger) + alert on a persistently-tripped volume breaker, so the lane cannot
+   silently self-wedge (Q7).
 
 ## Sources
 
