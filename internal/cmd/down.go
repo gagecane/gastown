@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -338,7 +340,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		if downDryRun {
 			printDownStatus("Beads dolt dirs", true, fmt.Sprintf("%d would remove", len(beadsDoltDirs)))
 		} else {
-			removed := removeBeadsDoltDirs(beadsDoltDirs)
+			removed := removeBeadsDoltDirs(townRoot, beadsDoltDirs)
 			if removed > 0 {
 				printDownStatus("Beads dolt dirs", true, fmt.Sprintf("removed %d", removed))
 			}
@@ -967,15 +969,19 @@ func findBeadsDoltDirs(townRoot string) []string {
 }
 
 // removeBeadsDoltDirs removes legacy .beads/dolt directories that are safe to
-// delete. A directory is safe if it is empty or contains only Dolt metadata
-// (no .dolt subdirectory with actual database content). Directories with
-// unmigrated database data are skipped to avoid data loss.
-// Returns count removed.
-func removeBeadsDoltDirs(dirs []string) int {
+// delete. A directory is safe when its embedded databases hold no beads beyond
+// those already present in the canonical .dolt-data/ store: empty init
+// scaffolds, zero-bead stubs, and stale already-migrated copies all qualify.
+// Directories that still hold beads absent from .dolt-data/ are kept and
+// reported once with actionable migration instructions, so the message is
+// trustworthy rather than recurring noise. Returns count removed.
+func removeBeadsDoltDirs(townRoot string, dirs []string) int {
 	var removed int
+	canonical := &canonicalBeadIndex{townRoot: townRoot}
 	for _, dir := range dirs {
-		if !isSafeToRemoveBeadsDolt(dir) {
-			fmt.Fprintf(os.Stderr, "Warning: skipping %s — may contain unmigrated data\n", dir)
+		stranded := strandedBeadsDolt(dir, canonical)
+		if len(stranded) > 0 {
+			reportStrandedBeadsDolt(dir, stranded)
 			continue
 		}
 		if err := os.RemoveAll(dir); err == nil {
@@ -985,34 +991,198 @@ func removeBeadsDoltDirs(dirs []string) int {
 	return removed
 }
 
-// isSafeToRemoveBeadsDolt checks if a .beads/dolt directory can be safely
-// removed. Safe means: empty, or contains no actual database content
-// (no .dolt subdirectory with working data). Unmigrated databases have
-// a .dolt/ directory inside with noms/manifest files.
-func isSafeToRemoveBeadsDolt(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false // can't read it, don't remove it
-	}
-	if len(entries) == 0 {
-		return true // empty dir is safe
-	}
+// isSafeToRemoveBeadsDolt reports whether a legacy .beads/dolt directory can be
+// removed without losing data: true when every bead in its embedded databases
+// is already present in the canonical .dolt-data/ store (or there are no beads
+// at all). Genuinely unmigrated beads make it unsafe.
+func isSafeToRemoveBeadsDolt(dir string, canonical *canonicalBeadIndex) bool {
+	return len(strandedBeadsDolt(dir, canonical)) == 0
+}
 
-	// Check if any subdirectory contains a .dolt directory (unmigrated DB)
-	for _, entry := range entries {
-		if !entry.IsDir() {
+// beadsDoltStranded names an embedded legacy database that still holds beads
+// absent from the canonical .dolt-data/ store. A count of -1 means the database
+// could not be read to verify migration, so it is kept out of caution.
+type beadsDoltStranded struct {
+	db     string // legacy database directory holding the beads
+	count  int    // beads present here but missing from .dolt-data/ (-1 = unreadable)
+	sample string // one example bead id, for the actionable message
+}
+
+// strandedBeadsDolt inspects a legacy .beads/dolt directory and returns, per
+// embedded database, any beads not present in the canonical .dolt-data/ store.
+// An empty result means the directory is safe to remove (no embedded databases,
+// no user beads, or every bead already migrated).
+func strandedBeadsDolt(dir string, canonical *canonicalBeadIndex) []beadsDoltStranded {
+	var out []beadsDoltStranded
+	for _, dbDir := range embeddedBeadsDoltDBs(dir) {
+		ids, ok := queryBeadIDs(dbDir)
+		if !ok {
+			// Unreadable database — keep the dir rather than risk deleting
+			// data we could not inspect.
+			out = append(out, beadsDoltStranded{db: dbDir, count: -1})
 			continue
 		}
-		dotDolt := filepath.Join(dir, entry.Name(), ".dolt")
-		if _, err := os.Stat(dotDolt); err == nil {
-			return false // has unmigrated database data
+		var missing []string
+		for id := range ids {
+			if !canonical.has(id) {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			out = append(out, beadsDoltStranded{db: dbDir, count: len(missing), sample: missing[0]})
 		}
 	}
+	return out
+}
 
-	// Also check if .dolt exists directly in this dir
-	if _, err := os.Stat(filepath.Join(dir, ".dolt")); err == nil {
-		return false
+// reportStrandedBeadsDolt prints a single actionable message for a legacy
+// directory that still holds unmigrated beads, instead of a vague recurring
+// warning. The directory disappears (and the message with it) once the operator
+// migrates and re-runs gt down.
+func reportStrandedBeadsDolt(dir string, stranded []beadsDoltStranded) {
+	fmt.Fprintf(os.Stderr, "Note: keeping %s — embedded beads are not in .dolt-data/:\n", dir)
+	for _, s := range stranded {
+		if s.count < 0 {
+			fmt.Fprintf(os.Stderr, "  %s: could not read database to verify migration\n", s.db)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  %s: %d unmigrated bead(s), e.g. %s\n", s.db, s.count, s.sample)
 	}
+	fmt.Fprintf(os.Stderr, "  Migrate with 'gt dolt migrate', then re-run 'gt down' to remove.\n")
+}
 
-	return true
+// embeddedBeadsDoltDBs returns the Dolt database directories under a legacy
+// .beads/dolt dir. Both layouts are handled: a single database rooted directly
+// at the dir (.beads/dolt/.dolt) and the multi-database layout where each
+// immediate subdirectory is its own database (.beads/dolt/<rig>/.dolt).
+func embeddedBeadsDoltDBs(dir string) []string {
+	var dbs []string
+	if hasDotDolt(dir) {
+		dbs = append(dbs, dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return dbs
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == ".dolt" || e.Name() == ".doltcfg" {
+			continue
+		}
+		sub := filepath.Join(dir, e.Name())
+		if hasDotDolt(sub) {
+			dbs = append(dbs, sub)
+		}
+	}
+	return dbs
+}
+
+func hasDotDolt(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".dolt"))
+	return err == nil && info.IsDir()
+}
+
+// canonicalBeadIndex lazily collects the set of bead IDs present anywhere in the
+// canonical .dolt-data/ databases, so legacy copies can be checked for
+// genuinely unmigrated beads without re-querying canonical per directory.
+type canonicalBeadIndex struct {
+	townRoot string
+	ids      map[string]bool
+	loaded   bool
+}
+
+func (c *canonicalBeadIndex) has(id string) bool {
+	if !c.loaded {
+		c.ids = loadCanonicalBeadIDs(c.townRoot)
+		c.loaded = true
+	}
+	return c.ids[id]
+}
+
+// loadCanonicalBeadIDs reads every bead id from each database under
+// .dolt-data/. A bead missing from this set is genuinely unmigrated. If a
+// canonical database cannot be read its ids are simply absent, which biases
+// toward keeping legacy copies (the safe direction).
+func loadCanonicalBeadIDs(townRoot string) map[string]bool {
+	ids := map[string]bool{}
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return ids
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dbDir := filepath.Join(dataDir, e.Name())
+		if !hasDotDolt(dbDir) {
+			continue
+		}
+		if dbIDs, ok := queryBeadIDs(dbDir); ok {
+			for id := range dbIDs {
+				ids[id] = true
+			}
+		}
+	}
+	return ids
+}
+
+// queryBeadIDs returns the set of bead ids in the issues table of the Dolt
+// database rooted at dbDir, read offline via the embedded dolt CLI. The bool is
+// false only when the database could not be read at all (dolt missing or DB
+// unreadable); a missing issues table (fresh init scaffold) yields an empty set
+// with true.
+func queryBeadIDs(dbDir string) (map[string]bool, bool) {
+	out, ok := runEmbeddedBeadQuery(dbDir, "SELECT id FROM issues")
+	if !ok {
+		return nil, false
+	}
+	ids := map[string]bool{}
+	for i, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if i == 0 || line == "" { // skip csv header + blank lines
+			continue
+		}
+		ids[line] = true
+	}
+	return ids, true
+}
+
+// runEmbeddedBeadQuery runs a read-only query against the Dolt database rooted
+// at dbDir using the embedded (no-server) dolt CLI. It returns the CSV stdout
+// and whether the database was readable. A missing issues table is treated as
+// readable with empty output (a fresh init scaffold, not a failure).
+func runEmbeddedBeadQuery(dbDir, query string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "dolt", "sql", "-q", query, "-r", "csv")
+	cmd.Dir = dbDir
+	// Embedded reads of local database files need no auth. Strip any inherited
+	// DOLT_CLI_PASSWORD: dolt rejects a password without a matching --user.
+	cmd.Env = withoutEnv(os.Environ(), "DOLT_CLI_PASSWORD")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(stderr.String(), "table not found") ||
+			strings.Contains(stdout.String(), "table not found") {
+			return "", true // no issues table → no beads, safe
+		}
+		return "", false // genuinely unreadable
+	}
+	return stdout.String(), true
+}
+
+// withoutEnv returns env with any assignment of the named variable removed.
+func withoutEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, prefix) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

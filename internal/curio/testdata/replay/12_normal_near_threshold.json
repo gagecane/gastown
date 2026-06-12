@@ -1,10 +1,12 @@
 {
-  "name": "normal window near rate thresholds (held-out)",
+  "name": "normal window near calibrated rate thresholds (held-out, gc-e2uvyr.3)",
   "window_id": "2026-05-28/1d-normal-nearthresh",
   "EventCounts": [
-    {"Series": "sling", "Observed": 300, "FiledBy": "scheduler"},
-    {"Series": "done", "Observed": 400, "FiledBy": "refinery"},
-    {"Series": "mail", "Observed": 300, "FiledBy": "various"},
+    {"Series": "sling", "Observed": 310, "FiledBy": "scheduler"},
+    {"Series": "done", "Observed": 1183, "FiledBy": "refinery"},
+    {"Series": "mail", "Observed": 839, "FiledBy": "various"},
+    {"Series": "escalation", "Observed": 120, "FiledBy": "various"},
+    {"Series": "sched_fail", "Observed": 27, "FiledBy": "scheduler"},
     {"Series": "bead.open", "Observed": 150, "FiledBy": "various"},
     {"Series": "unknown.series", "Observed": 9999, "FiledBy": "various"}
   ]

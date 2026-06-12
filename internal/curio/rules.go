@@ -91,24 +91,61 @@ func (r killSignalNearDoltRule) Eval(in Input) []Candidate {
 
 // --- Rule (c): alarm/dispatch rate spike (content threshold rule) ---
 // gu-70rg 327-flood class. A CONTENT rate rule with fixed per-series
-// thresholds, NOT the L1 EWMA/MAD detector (out of scope). Rare-event series
-// (dispatch.stuck_agent, escalation, sched_fail) are threshold-0: any non-zero
-// count fires, matching the Phase 0 measured baselines.
+// thresholds, NOT the L1 EWMA/MAD detector. The fixed rule is the coarse
+// hard-ceiling backstop; the EWMA detector (detector.go, k=3.0) is the
+// statistical complement that catches subtler shifts. Both run side by side.
 
-// rateThresholds are the fixed per-series fire thresholds. A series fires when
-// Observed > threshold. Rare-event series use 0 (any non-zero fires). Values
-// from Phase 0 measured normal baselines (design doc Phase 0 Results).
+// rateThresholds are the calibrated per-series fire thresholds (gc-e2uvyr.3). A
+// series fires when Observed > threshold. Values are set to p95 + margin from
+// the gc-e2uvyr.2 live baseline (town .events.jsonl, each series' instrumented
+// era, full UTC days). They are deliberate ceilings above normal heavy
+// throughput so the rule only flags true floods — normal busy days stay quiet.
+//
+//	series       baseline min/med/p95/max   threshold   rationale
+//	sling        34/180/266/310             350         > observed max (310) + margin
+//	done         33/212/900/1183            1300        > observed max (1183); old 400 tripped on routine bursts
+//	mail         27/181/709/839             900         > observed max (839); old 300 tripped on any busy day
+//	escalation   2/60/120/120               150         > observed max (120); old 0 fired every active day
+//	sched_fail   0/6/27/27                  30          > observed max (27); old 0 fired on any dispatch failure
+//
+// The previously threshold-0 noisy series (escalation, sched_fail) move to a
+// ceiling here and lean on the EWMA detector for nuanced detection — both
+// series are in detectorSeries (detector.go), so a sustained anomaly below the
+// fixed ceiling is still caught statistically without the per-day false fires.
+//
+// dispatch.stuck_agent stays at 0 (any non-zero fires): it has NEVER been
+// emitted across the entire corpus, so this is a deliberate floor that pages on
+// the first-ever occurrence of a genuinely critical, never-before-seen event —
+// not an unbaselined accident.
+//
+// bead.open / bead.close keep their prior ceilings: they are sourced from bead
+// Dolt, not events.jsonl (see rateSeriesForEventType in collect_live.go), so the
+// live rate collector never feeds them and the gc-e2uvyr.2 events baseline does
+// not cover them. They are left unchanged to avoid an unbaselined retune.
+//
+// Defaults can be overridden per-series via daemon.json patrols.curio
+// rate_thresholds without a rebuild (see DefaultRulesWithThresholds).
 var rateThresholds = map[string]int{
 	"dispatch.stuck_agent": 0,
-	"escalation":           0,
-	"sched_fail":           0,
-	// Bursty/normal-traffic series carry a high ceiling so only true floods
-	// fire. sling/mail/bead normal maxima are ~120-235/day; done is burstier.
-	"sling":      300,
-	"done":       400,
-	"mail":       300,
-	"bead.open":  150,
-	"bead.close": 150,
+	"escalation":           150,
+	"sched_fail":           30,
+	"sling":                350,
+	"done":                 1300,
+	"mail":                 900,
+	"bead.open":            150,
+	"bead.close":           150,
+}
+
+// DefaultRateThresholds returns a copy of the calibrated per-series thresholds.
+// Callers (e.g. the daemon config layer) overlay operator overrides on top of
+// this so an absent or partial config still falls back to safe calibrated
+// defaults.
+func DefaultRateThresholds() map[string]int {
+	out := make(map[string]int, len(rateThresholds))
+	for k, v := range rateThresholds {
+		out[k] = v
+	}
+	return out
 }
 
 type rateSpikeRule struct {
@@ -190,12 +227,25 @@ func (r deadOwnerAdmissionRule) Eval(in Input) []Candidate {
 	return out
 }
 
-// DefaultRules returns the Phase 1 content-rule set in a stable order.
+// DefaultRules returns the Phase 1 content-rule set in a stable order, using the
+// calibrated default rate thresholds.
 func DefaultRules() []Rule {
+	return DefaultRulesWithThresholds(rateThresholds)
+}
+
+// DefaultRulesWithThresholds returns the Phase 1 content-rule set with the
+// rate-spike rule keyed on the supplied per-series thresholds. A nil or empty
+// map falls back to the calibrated defaults, so a missing daemon.json config
+// can never disable the rate ceiling. The caller owns the map; it is not
+// mutated here.
+func DefaultRulesWithThresholds(thresholds map[string]int) []Rule {
+	if len(thresholds) == 0 {
+		thresholds = rateThresholds
+	}
 	return []Rule{
 		mergedNotLandedRule{},
 		killSignalNearDoltRule{},
-		rateSpikeRule{thresholds: rateThresholds},
+		rateSpikeRule{thresholds: thresholds},
 		deadOwnerAdmissionRule{},
 	}
 }

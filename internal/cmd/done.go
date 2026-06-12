@@ -1149,6 +1149,14 @@ func teardownAfterDone(p teardownParams) {
 			}
 		}
 
+		// On customer-repo rigs, sweep this polecat's own landed branches off the
+		// customer's origin so their gastown-internal names (agent + bead) stop
+		// leaking (gs-7s52). Best-effort and non-fatal; only branches whose work
+		// has already landed are touched, so an open PR's head is never removed.
+		if p.cwdAvailable {
+			sweepCustomerRepoLeakedBranches(p)
+		}
+
 		fmt.Printf("%s Polecat IDLE — warm worktree preserved for reuse (next gt sling respawns a fresh session)\n", style.Bold.Render("✓"))
 	}
 
@@ -1184,6 +1192,97 @@ func teardownAfterDone(p teardownParams) {
 			}
 		}
 	}
+}
+
+// sweepCustomerRepoLeakedBranches deletes this polecat's own pushed
+// polecat/<name>/* branches from origin once their work has landed, but ONLY on
+// rigs flagged customer_repo=true. On such rigs origin IS the customer's real
+// remote, so every polecat branch pushed to open a PR (mol-lia-pr-work) leaves a
+// gastown-internal name — agent + bead ID — sitting in the customer's repo
+// (gs-7s52). gs-8p5r closed the preserved/* vector; this closes the
+// working-branch/PR-head vector.
+//
+// The branch must stay on origin while its PR is open (that is how the PR was
+// opened), so a branch is removed only when its work has demonstrably LANDED:
+// a merged PR reported by the VCS provider, or commits that are already
+// patch-equivalent to origin/<defaultBranch> AND have no open PR. That predicate
+// never matches the just-pushed branch this polecat is completing, nor any peer's
+// open-PR branch, so the PR flow is untouched.
+//
+// Best-effort and self-scoped: failures are non-fatal warnings, and only
+// polecat/<this-polecat>/* refs are considered — matching the proxy push-gate
+// that restricts a polecat to its own namespace (internal/proxy/git.go).
+func sweepCustomerRepoLeakedBranches(p teardownParams) {
+	r := &rig.Rig{Name: p.rigName, Path: filepath.Join(p.townRoot, p.rigName)}
+	if !r.GetBoolConfig("customer_repo") {
+		return
+	}
+
+	// Prune stale remote-tracking refs first so merged-and-already-deleted
+	// branches don't resurface as phantom candidates.
+	if err := p.g.FetchPrune("origin"); err != nil {
+		style.PrintWarning("customer-repo branch sweep: fetch --prune failed: %v (continuing)", err)
+	}
+
+	refs, err := p.g.ListPushRemoteRefsWithHashes("origin", "refs/heads/polecat/")
+	if err != nil {
+		style.PrintWarning("customer-repo branch sweep: could not list remote polecat branches: %v", err)
+		return
+	}
+
+	base := p.defaultBranch
+	ownDir := fmt.Sprintf("polecat/%s/", p.polecatName)  // polecat/<name>/<issue>--<ts>
+	ownFlat := fmt.Sprintf("polecat/%s-", p.polecatName) // polecat/<name>-<ts> (no issue)
+	swept := 0
+	for _, ref := range refs {
+		branch := strings.TrimPrefix(ref.Name, "refs/heads/")
+		// Self-scope: only this polecat's own branches.
+		if !strings.HasPrefix(branch, ownDir) && !strings.HasPrefix(branch, ownFlat) {
+			continue
+		}
+		// Never the branch we are completing right now (its PR is still open).
+		if branch == p.branch {
+			continue
+		}
+		if !customerRepoBranchLanded(p.g, branch, base, ref.Hash) {
+			continue
+		}
+		if err := p.g.DeleteRemoteBranchIfAt("origin", branch, ref.Hash); err != nil {
+			style.PrintWarning("customer-repo branch sweep: could not delete origin %s: %v", branch, err)
+			continue
+		}
+		fmt.Printf("%s Deleted landed branch from customer origin: %s (was leaking agent/bead name)\n", style.Bold.Render("✓"), branch)
+		swept++
+	}
+	if swept > 0 {
+		fmt.Printf("%s Swept %d landed polecat branch(es) off the customer remote (gs-7s52)\n", style.Bold.Render("✓"), swept)
+	}
+}
+
+// customerRepoBranchLanded reports whether a remote polecat branch's work has
+// already landed, so deleting it from the customer origin cannot orphan
+// in-flight work or close an open PR. Two independent landing signals:
+//
+//  1. The VCS provider reports a MERGED PR for the branch (squash-safe: this is
+//     GitHub's merge state, not a SHA comparison).
+//  2. The branch has NO open PR AND its commits are already patch-equivalent to
+//     origin/<base> (git cherry reports zero unmerged commits) — covers
+//     direct-merged work and squash/rebase landings.
+//
+// A freshly pushed branch whose PR is not yet open fails BOTH checks (it still
+// has unique commits), so it is left in place.
+func customerRepoBranchLanded(g *git.Git, branch, base, hash string) bool {
+	if merged, err := g.FindMergedPRCommit(branch); err == nil && merged != "" {
+		return true
+	}
+	if g.HasOpenPR(branch) {
+		return false
+	}
+	cherryOut, err := g.Cherry("origin/"+base, hash)
+	if err != nil {
+		return false
+	}
+	return git.CountCherryUnmergedCommits(cherryOut) == 0
 }
 
 // mrSubmitParams carries the runDone completion state that submitToMergeQueue

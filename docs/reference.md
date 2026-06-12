@@ -31,6 +31,25 @@ Debug routing: `BD_DEBUG_ROUTING=1 bd -C <owning-root> show <id>`
 shared-server database named `beads_global`; run `bd -C ~/gt ...` for
 town-level Gas Town beads.
 
+**Resolving a foreign-prefix bead from any directory**: bare `bd` operates on
+the `.beads` database for the *current* directory only — it does NOT consult
+`routes.jsonl`. So `bd show gc-abc` from inside a rig workspace (e.g. a `gu-`
+rig) fails with `no issue found matching gc-abc`, because the `gc-` bead lives
+in the town database, not the rig's. To look up a bead whose prefix differs
+from your current rig, use the `gt` wrappers — they read `routes.jsonl` and
+auto-route by prefix from any directory:
+
+```bash
+gt show gc-abc        # routes gc- to the town database automatically
+gt bead show gc-abc   # equivalent
+```
+
+This is why handoffs that name a foreign-prefix `NEXTBEAD` (e.g. a `gc-` bead)
+should be resolved with `gt show`/`gt bead show`, not bare `bd show`. The same
+prefix routing is applied internally by `gt mq submit` when it back-links the
+MR to its source issue, so a `gt mq submit --issue gc-...` link lands on the
+correct (town) database (gu-mh00k).
+
 ## Configuration
 
 ### Rig Config (`config.json`)
@@ -226,6 +245,16 @@ agent names and bead IDs) from leaking into the customer's repo (gs-8p5r).
 # Persistent (recommended for customer rigs):
 gt rig config set <rig> customer_repo true --global
 ```
+
+When `customer_repo: true`, polecat teardown (`gt done`) additionally sweeps the
+completing polecat's own `polecat/<agent>/<bead>` branches off `origin` once their
+work has **landed** — a merged PR reported by the VCS provider, or commits already
+patch-equivalent to `origin/<default_branch>`. A branch with an open PR or any
+unlanded work is left untouched, so the PR-based flow (`mol-lia-pr-work`, which
+needs the branch on `origin` to open the PR) is unaffected. This closes the
+working-branch / PR-head leak vector left open by gs-8p5r (gs-7s52). The sweep is
+self-scoped (a polecat only removes its own branches) and best-effort (failures
+are non-fatal warnings).
 
 Default is `false` (Gas Town's own repos preserve to origin for box-loss
 durability). On a customer rig the box-loss net is intentionally forgone in

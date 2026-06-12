@@ -68,7 +68,10 @@ type StaleRigAgentResult struct {
 	// refinery's heartbeat is stale but its session is alive and its merge
 	// queue is empty — a harmlessly-idle refinery, not a wedged one (gs-ecdg),
 	// "skip-parked"/"skip-docked" when the rig is intentionally parked/docked so
-	// its frozen heartbeat is expected, not a wedge (gu-qwe7q/gu-eke9u), etc.
+	// its frozen heartbeat is expected, not a wedge (gu-qwe7q/gu-eke9u),
+	// "skip-idle-clean-cycle" when an alive witness's stale heartbeat last
+	// self-reported clean-cycle idle-ready — the discrete-cycle idle between
+	// deacon nudges, not a wedge (gu-eke9u), etc.
 	Action string
 	// CorrelatedInto is the lead agent's "rig/session" key when Action is
 	// "skip-correlated" — the escalation thread this alarm folded into. Empty
@@ -306,6 +309,36 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 		if c.role == "refinery" && item.SessionAlive && mqProber != nil {
 			if pending, probeErr := mqProber.PendingMergeRequestCount(rigName); probeErr == nil && pending == 0 {
 				item.Action = "skip-idle-empty-mq"
+				result.Stale = append(result.Stale, item)
+				continue
+			}
+		}
+
+		// Idle witness clean-cycle suppression (gu-eke9u): witnesses no longer
+		// block on await-signal between cycles (removed ~06-06). The model is now
+		// DISCRETE CYCLES re-triggered by deacon nudges — a witness completes a
+		// cycle, writes a heartbeat, then sits IDLE-READY at the prompt (not
+		// beating) until the next nudge. On idle rigs the nudge cadence is loose, so
+		// a healthy idle witness legitimately goes hours between heartbeats; its age
+		// tracks last-nudge-time, NOT health. That produced the dominant
+		// STALE_RIG_AGENT noise volume. When the session is ALIVE and the witness's
+		// last heartbeat self-reported a clean-cycle idle-ready signal (state=idle,
+		// or an expected-idle window still in the future), the stale heartbeat is the
+		// expected discrete-cycle idle, not a wedge — suppress it. This mirrors the
+		// gs-ecdg SessionAlive-gated suppression: an alive session that last reported
+		// idle IS the idle-ready witness parked between nudges. SAFETY (preserve
+		// gu-rh0g): (a) state=working/stuck still escalates (real mid-op freeze —
+		// this gate only fires on idle); (b) a DEAD session still escalates
+		// regardless of last state (SessionAlive guards it — guards the "died right
+		// after reporting idle" case); (c) refinery is EXCLUDED — its idle is
+		// authoritatively governed by the merge-queue prober above (gs-ecdg), so
+		// state-overriding it would mask a real wedge; (d) "exiting" is EXCLUDED
+		// (conservative — exiting+alive+long-stale could be a stuck-in-done).
+		if c.role == "witness" && item.SessionAlive {
+			idleReady := item.LastState == polecat.HeartbeatIdle ||
+				(!item.ExpectedIdleUntil.IsZero() && item.ExpectedIdleUntil.After(now))
+			if idleReady {
+				item.Action = "skip-idle-clean-cycle"
 				result.Stale = append(result.Stale, item)
 				continue
 			}

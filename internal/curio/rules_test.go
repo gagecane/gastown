@@ -104,45 +104,71 @@ func TestKillSignal_DistinctLinesDistinctCandidates(t *testing.T) {
 
 // --- Rule (c): alarm_rate_spike ---
 
-func TestRateSpike_RareEventThresholdZero(t *testing.T) {
+func TestRateSpike_StuckAgentThresholdZero(t *testing.T) {
+	// dispatch.stuck_agent stays a deliberate floor at 0 (never emitted in the
+	// corpus): any non-zero count is a genuinely novel critical event and fires.
 	r := rateSpikeRule{thresholds: rateThresholds}
 	in := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
 		{Series: "dispatch.stuck_agent", Observed: 1, FiledBy: "deacon"},
 	}}
 	if len(r.Eval(in)) != 1 {
-		t.Error("rare-event series must fire on any non-zero count")
+		t.Error("dispatch.stuck_agent floor must fire on any non-zero count")
 	}
 }
 
-func TestRateSpike_RareEventZeroSilent(t *testing.T) {
+func TestRateSpike_StuckAgentZeroSilent(t *testing.T) {
 	r := rateSpikeRule{thresholds: rateThresholds}
 	in := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
-		{Series: "escalation", Observed: 0, FiledBy: "various"},
+		{Series: "dispatch.stuck_agent", Observed: 0, FiledBy: "deacon"},
 	}}
 	if len(r.Eval(in)) != 0 {
-		t.Error("rare-event series at zero must be silent")
+		t.Error("dispatch.stuck_agent at zero must be silent")
 	}
 }
 
-func TestRateSpike_NormalTrafficBelowThreshold(t *testing.T) {
+// calibratedBaselines pairs each calibrated series with the observed p95/max
+// from the gc-e2uvyr.2 live baseline. A count at the busy-day high water mark
+// must stay QUIET; a count above the calibrated ceiling must FIRE. This is the
+// core acceptance criterion: the rate rule no longer fires on normal throughput.
+func TestRateSpike_CalibratedThresholds_QuietAtBaseline_FireAboveCeiling(t *testing.T) {
 	r := rateSpikeRule{thresholds: rateThresholds}
-	in := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
-		{Series: "sling", Observed: 300, FiledBy: "scheduler"}, // == threshold, not >
-		{Series: "done", Observed: 400, FiledBy: "refinery"},
-	}}
-	if len(r.Eval(in)) != 0 {
-		t.Error("at-threshold traffic must not fire (strict >)")
+	cases := []struct {
+		series      string
+		observedMax int // observed historical max (busy day) — must stay quiet
+		threshold   int // calibrated ceiling
+	}{
+		{"sling", 310, 350},
+		{"done", 1183, 1300},
+		{"mail", 839, 900},
+		{"escalation", 120, 150},
+		{"sched_fail", 27, 30},
 	}
-}
-
-func TestRateSpike_FloodFires(t *testing.T) {
-	r := rateSpikeRule{thresholds: rateThresholds}
-	in := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
-		{Series: "sling", Observed: 301, FiledBy: "scheduler"},
-	}}
-	cands := r.Eval(in)
-	if len(cands) != 1 || cands[0].Observed != 301 {
-		t.Errorf("expected flood candidate with observed=301, got %+v", cands)
+	for _, c := range cases {
+		// At the observed busy-day maximum: must NOT fire.
+		quiet := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
+			{Series: c.series, Observed: c.observedMax, FiledBy: "gt"},
+		}}
+		if got := len(r.Eval(quiet)); got != 0 {
+			t.Errorf("%s: observed max %d must stay quiet under threshold %d, got %d candidates",
+				c.series, c.observedMax, c.threshold, got)
+		}
+		// At exactly the threshold: must NOT fire (strict >).
+		atThr := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
+			{Series: c.series, Observed: c.threshold, FiledBy: "gt"},
+		}}
+		if got := len(r.Eval(atThr)); got != 0 {
+			t.Errorf("%s: at-threshold %d must not fire (strict >), got %d candidates",
+				c.series, c.threshold, got)
+		}
+		// One above the threshold: must fire.
+		flood := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
+			{Series: c.series, Observed: c.threshold + 1, FiledBy: "gt"},
+		}}
+		cands := r.Eval(flood)
+		if len(cands) != 1 || cands[0].Observed != c.threshold+1 {
+			t.Errorf("%s: count %d above ceiling %d must fire once, got %+v",
+				c.series, c.threshold+1, c.threshold, cands)
+		}
 	}
 }
 
@@ -163,6 +189,70 @@ func TestRateSpike_LoopBreaker(t *testing.T) {
 	}}
 	if len(r.Eval(in)) != 0 {
 		t.Error("must exclude curio-filed event counts (loop-breaker)")
+	}
+}
+
+func TestDefaultRateThresholds_ReturnsCalibratedCopy(t *testing.T) {
+	got := DefaultRateThresholds()
+	want := map[string]int{
+		"dispatch.stuck_agent": 0,
+		"escalation":           150,
+		"sched_fail":           30,
+		"sling":                350,
+		"done":                 1300,
+		"mail":                 900,
+		"bead.open":            150,
+		"bead.close":           150,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("threshold count = %d, want %d", len(got), len(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("threshold %q = %d, want %d", k, got[k], v)
+		}
+	}
+	// Mutating the returned map must not corrupt the package defaults.
+	got["done"] = 1
+	if rateThresholds["done"] != 1300 {
+		t.Error("DefaultRateThresholds must return a copy, not the shared map")
+	}
+}
+
+// TestDefaultRulesWithThresholds_NilFallsBackToCalibratedDefaults proves the
+// config-absent fallback: a nil/empty override map yields the safe calibrated
+// ceilings, so a missing daemon.json can never silence or lower the rate rule.
+func TestDefaultRulesWithThresholds_NilFallsBackToCalibratedDefaults(t *testing.T) {
+	for name, thresholds := range map[string]map[string]int{
+		"nil":   nil,
+		"empty": {},
+	} {
+		rules := DefaultRulesWithThresholds(thresholds)
+		// done at 1300 (calibrated default) must stay quiet; 1301 must fire.
+		quiet := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
+			{Series: "done", Observed: 1300, FiledBy: "gt"},
+		}}
+		fire := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
+			{Series: "done", Observed: 1301, FiledBy: "gt"},
+		}}
+		if got := len(Evaluate(rules, quiet)); got != 0 {
+			t.Errorf("%s override: done=1300 must stay quiet under calibrated default, got %d", name, got)
+		}
+		if got := len(Evaluate(rules, fire)); got != 1 {
+			t.Errorf("%s override: done=1301 must fire on calibrated default, got %d", name, got)
+		}
+	}
+}
+
+// TestDefaultRulesWithThresholds_OverrideApplies proves an operator override is
+// honored: a lower ceiling on a single series fires where the default would not.
+func TestDefaultRulesWithThresholds_OverrideApplies(t *testing.T) {
+	rules := DefaultRulesWithThresholds(map[string]int{"done": 500})
+	in := Input{Window: Window{ID: "w"}, EventCounts: []SeriesCount{
+		{Series: "done", Observed: 600, FiledBy: "gt"}, // below default 1300, above override 500
+	}}
+	if got := len(Evaluate(rules, in)); got != 1 {
+		t.Errorf("override done=500 must fire on observed=600, got %d candidates", got)
 	}
 }
 

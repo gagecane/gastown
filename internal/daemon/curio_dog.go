@@ -46,6 +46,28 @@ type CurioConfig struct {
 	// daemon does not run the LLM lane (it is a standalone binary), so this knob
 	// is declarative here and consumed by cmd/curio-proposer.
 	LLM *CurioLLMConfig `json:"llm,omitempty"`
+
+	// RateThresholds overrides the alarm_rate_spike per-series fire thresholds
+	// (gc-e2uvyr.3) without a rebuild. Keys are rule series names (e.g. "done",
+	// "mail", "escalation"); a series fires when its observed count EXCEEDS the
+	// threshold. Only the listed series are overridden — unlisted series keep
+	// their calibrated code defaults (curio.DefaultRateThresholds), so a partial
+	// or absent config can never lower the ceiling on a series the operator did
+	// not touch. Calibrated defaults derive from the gc-e2uvyr.2 live baseline.
+	RateThresholds map[string]int `json:"rate_thresholds,omitempty"`
+}
+
+// curioRateThresholds returns the effective alarm_rate_spike thresholds: the
+// calibrated curio defaults with any daemon.json patrols.curio.rate_thresholds
+// overrides overlaid on top. An absent config or block yields the pure defaults.
+func curioRateThresholds(config *DaemonPatrolConfig) map[string]int {
+	thresholds := curio.DefaultRateThresholds()
+	if config != nil && config.Patrols != nil && config.Patrols.Curio != nil {
+		for series, v := range config.Patrols.Curio.RateThresholds {
+			thresholds[series] = v
+		}
+	}
+	return thresholds
 }
 
 // CurioLLMConfig holds the Retrospect/LLM lane kill switch.
@@ -121,7 +143,7 @@ func (d *Daemon) runCurio() {
 	}
 	d.curioDetector.Observe(in.EventCounts)
 
-	rules := append(curio.DefaultRules(), d.curioDetector)
+	rules := append(curio.DefaultRulesWithThresholds(curioRateThresholds(d.patrolConfig)), d.curioDetector)
 	cands := curio.Evaluate(rules, in)
 
 	// Call 1(C) reaction-count backstop: observe this cycle's candidates so a
