@@ -544,6 +544,13 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 	return convoyID, tracked, nil
 }
 
+// autoConvoyBeadInfoFn resolves a bead's dispatch-eligibility info for the
+// epic/container guard in createAutoConvoy. Injected via variable so unit tests
+// can stub it without a real `bd` subprocess. Returns the bead's info routed
+// from the given town root, or an error when the bead cannot be resolved (in
+// which case the guard fails open — see createAutoConvoy).
+var autoConvoyBeadInfoFn = getBeadInfoFromTownRoot
+
 // createAutoConvoy creates an auto-convoy for a single issue and tracks it.
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
 // mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
@@ -558,6 +565,27 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return "", fmt.Errorf("finding town root: %w", err)
+	}
+
+	// Epic/container guard (gu-ihix1, gt-3798 class). createAutoConvoy is the
+	// auto-convoy creation chokepoint reached by `gt sling`, the deferred
+	// scheduler, and batch sling. Every CURRENT caller already rejects epics
+	// upstream via isEpicLikeBeadInfo / isContainerBeadInfo (gu-smr1, gu-xymp6),
+	// but those guards live on the dispatch paths, not on creation. If an epic
+	// slips through any path — or a future caller forgets the upstream guard —
+	// an auto-convoy gets created tracking the EPIC itself as its sole tracked
+	// issue. That convoy can never dispatch: the epic is non-work, the convoy
+	// feed surfaces no ready issue, and the convoy strands forever (the gt-3798
+	// deferred/blocked-bead-vs-scheduler failure). Refuse to wrap an epic or
+	// other non-work container here so the invariant is enforced at the point
+	// the bad data is created, mirroring the layered guards on the dispatch
+	// paths. Fails OPEN when the bead cannot be resolved (stub/transient): a
+	// convoy-creation helper must not block dispatch on a read error.
+	if info, infoErr := autoConvoyBeadInfoFn(townRoot, beadID); infoErr == nil && info != nil {
+		if isEpicLikeBeadInfo(info) || isContainerBeadInfo(info) {
+			return "", fmt.Errorf("refusing to create auto-convoy for %s: %q is an epic / non-work container (issue_type=%q, labels=%v) — convoys track dispatchable work via children, not the epic itself. Sling the epic's children instead: gt sling %s",
+				beadID, info.Title, info.IssueType, info.Labels, beadID)
+		}
 	}
 
 	townBeads := filepath.Join(townRoot, ".beads")

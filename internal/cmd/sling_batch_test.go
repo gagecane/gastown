@@ -1054,6 +1054,102 @@ exit 0
 	}
 }
 
+// TestCreateAutoConvoy_RejectsEpic verifies the gu-ihix1 (gt-3798 class) guard:
+// createAutoConvoy refuses to wrap an epic (issue_type=epic) as a tracked issue.
+// An auto-convoy whose sole tracked issue is an epic can never dispatch — the
+// epic is non-work, the convoy feed surfaces no ready issue, and the convoy
+// strands forever. The guard belongs at the creation chokepoint so the bad
+// data is never created, even if an upstream dispatch guard is bypassed.
+func TestCreateAutoConvoy_RejectsEpic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	// Minimal bd stub: never reached for the create path because the guard
+	// fires first, but present so workspace resolution succeeds.
+	_, _ = setupTownWithBdStub(t, "#!/bin/sh\nexit 0\n")
+
+	prev := autoConvoyBeadInfoFn
+	autoConvoyBeadInfoFn = func(townRoot, beadID string) (*beadInfo, error) {
+		return &beadInfo{ID: beadID, Title: "Build the thing", IssueType: "epic"}, nil
+	}
+	t.Cleanup(func() { autoConvoyBeadInfoFn = prev })
+
+	// addTrackingRelationFn must NOT be called when the guard rejects the epic.
+	tracked := false
+	oldTrack := addTrackingRelationFn
+	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error {
+		tracked = true
+		return nil
+	}
+	t.Cleanup(func() { addTrackingRelationFn = oldTrack })
+
+	_, err := createAutoConvoy("gt-epic", "Build the thing", false, "mr", "")
+	if err == nil {
+		t.Fatal("expected error when auto-convoying an epic, got nil")
+	}
+	if !strings.Contains(err.Error(), "epic") && !strings.Contains(err.Error(), "non-work container") {
+		t.Errorf("error should mention epic / non-work container, got: %v", err)
+	}
+	if tracked {
+		t.Error("addTrackingRelationFn should not be called when the epic is rejected")
+	}
+}
+
+// TestCreateAutoConvoy_RejectsContainerLabel verifies the guard also fires on
+// the gt:epic label (issue_type may still read "task" on data-hygiene-gap beads).
+func TestCreateAutoConvoy_RejectsContainerLabel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	_, _ = setupTownWithBdStub(t, "#!/bin/sh\nexit 0\n")
+
+	prev := autoConvoyBeadInfoFn
+	autoConvoyBeadInfoFn = func(townRoot, beadID string) (*beadInfo, error) {
+		return &beadInfo{ID: beadID, Title: "Triage queue", IssueType: "task", Labels: []string{"gt:epic"}}, nil
+	}
+	t.Cleanup(func() { autoConvoyBeadInfoFn = prev })
+
+	_, err := createAutoConvoy("gt-cont", "Triage queue", false, "mr", "")
+	if err == nil {
+		t.Fatal("expected error when auto-convoying a gt:epic-labeled bead, got nil")
+	}
+}
+
+// TestCreateAutoConvoy_GuardFailsOpen verifies that when the bead info cannot be
+// resolved (transient/stub read error), the guard fails OPEN — a convoy-creation
+// helper must not block dispatch on a read error, so the convoy is still created.
+func TestCreateAutoConvoy_GuardFailsOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot, logPath := setupTownWithBdStub(t, "")
+	bdScript := "#!/bin/sh\necho \"CMD:$*\" >> \"" + logPath + "\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(townRoot, "bin", "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("rewrite bd stub: %v", err)
+	}
+
+	prev := autoConvoyBeadInfoFn
+	autoConvoyBeadInfoFn = func(townRoot, beadID string) (*beadInfo, error) {
+		return nil, fmt.Errorf("bead %q not found", beadID)
+	}
+	t.Cleanup(func() { autoConvoyBeadInfoFn = prev })
+
+	oldTrack := addTrackingRelationFn
+	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error { return nil }
+	t.Cleanup(func() { addTrackingRelationFn = oldTrack })
+
+	convoyID, err := createAutoConvoy("gt-aaa", "A real task", false, "mr", "")
+	if err != nil {
+		t.Fatalf("guard should fail open on unresolvable bead, got error: %v", err)
+	}
+	if convoyID == "" {
+		t.Fatal("expected non-empty convoy ID when guard fails open")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // convoyTracksBead tests
 // ---------------------------------------------------------------------------
