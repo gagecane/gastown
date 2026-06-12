@@ -248,6 +248,53 @@ func TestLoadBaseNormalizesLegacyCommands(t *testing.T) {
 	}
 }
 
+// TestSyncedSettingsDoNotTripSpawnUpgrade is the convergence guard for
+// gu-7muvo: a single `gt hooks sync` must produce settings that the spawn-time
+// installer does NOT consider stale. Before the loadConfig() normalization, a
+// legacy base wrote `export PATH=... && gt ...` into the synced settings, which
+// installer.needsUpgrade() flagged as stale — so the next daemon spawn clobbered
+// the file and the next sync wrote it back, never converging. This test marshals
+// the synced output for a target whose base config is the legacy form and asserts
+// needsUpgrade() returns false, proving the two writers now agree.
+func TestSyncedSettingsDoNotTripSpawnUpgrade(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	// Seed the on-disk base with the legacy export-PATH command form that older
+	// gt versions persisted and that needsUpgrade() rejects.
+	legacy := &HooksConfig{
+		SessionStart: []HookEntry{{
+			Matcher: "",
+			Hooks: []Hook{{
+				Type:    "command",
+				Command: `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && gt prime --hook`,
+			}},
+		}},
+	}
+	if err := SaveBase(legacy); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	// Compute the expected hooks for a representative target and marshal the
+	// settings exactly as syncTarget would write them to disk.
+	expected, err := ComputeExpected("crew")
+	if err != nil {
+		t.Fatalf("ComputeExpected failed: %v", err)
+	}
+	settings := &SettingsJSON{Hooks: *expected}
+	data, err := MarshalSettings(settings)
+	if err != nil {
+		t.Fatalf("MarshalSettings failed: %v", err)
+	}
+
+	if strings.Contains(string(data), "export PATH=") {
+		t.Errorf("synced settings still carry the legacy export PATH prefix:\n%s", data)
+	}
+	if needsUpgrade(data) {
+		t.Errorf("synced settings trip the spawn-time needsUpgrade() check (non-convergence); content:\n%s", data)
+	}
+}
+
 func TestValidTarget(t *testing.T) {
 	tests := []struct {
 		target string
