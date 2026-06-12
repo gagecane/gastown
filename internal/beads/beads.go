@@ -1007,6 +1007,13 @@ func (b *Beads) Init(prefix string) error {
 // Investigation: dc-1pq8 (forensic report 2026-05-02).
 const bdSubprocessTimeout = 60 * time.Second
 
+// bdWaitDelay bounds how long cmd.Run() may block AFTER the bd subprocess
+// context fires, before Go force-closes the command's I/O pipes. It is the
+// belt to the process-group-SIGKILL suspenders installed by
+// util.SetProcessGroup (see runWithStdin / runWithRouting for the deadlock
+// this prevents).
+const bdWaitDelay = 2 * time.Second
+
 // bdReadThrottleTimeout caps how long a caller will wait for the bd-list
 // read flock before failing. The flock serializes `bd list` invocations
 // across the whole town to prevent subprocess storms (see gt-rca-alias-
@@ -1088,7 +1095,20 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	// causing prefix mismatches. Use explicit beadsDir if set, otherwise
 	// resolve from working directory.
 	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-	util.SetDetachedProcessGroup(cmd)
+	// SetProcessGroup (not SetDetachedProcessGroup): on the subprocess timeout
+	// the Cancel hook SIGKILLs the WHOLE process group, not just the bd leader.
+	// When the Dolt data plane bounces (circuit breaker), bd wedges holding a
+	// stale pre-bounce connection; it forks/holds children that inherit the
+	// write end of the os.Pipe Go creates for our bytes.Buffer stdout/stderr.
+	// The default CommandContext kill SIGKILLs only the bd leader, so the
+	// reparented children keep the pipe write end open and cmd.Run() blocks
+	// FOREVER in futex_wait_queue — the gt-done wedge in gu-szlis (and the same
+	// os/exec inherited-pipe class fixed for the gates in 6d9cbc2b and git push
+	// in a0a7bdb9). Group SIGKILL kills reparented children (Setpgid survives
+	// reparenting), so the next bd call opens a FRESH subprocess that reconnects
+	// to the restarted server; WaitDelay bounds residual pipe I/O.
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = bdWaitDelay
 	cmd.Dir = b.workDir
 
 	cmd.Env = runEnv
@@ -1115,7 +1135,11 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 		stdout.Reset()
 		stderr.Reset()
 		cmd = exec.CommandContext(ctx, "bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-		util.SetDetachedProcessGroup(cmd)
+		// Same process-group SIGKILL + WaitDelay as the initial attempt above
+		// (gu-szlis): the retry reuses the same ctx and bytes.Buffer pipes, so
+		// it is subject to the identical inherited-pipe deadlock if bd wedges.
+		util.SetProcessGroup(cmd)
+		cmd.WaitDelay = bdWaitDelay
 		cmd.Dir = b.workDir
 		cmd.Env = runEnv
 		cmd.Env = append(cmd.Env, telemetry.OTELEnvForSubprocess()...)
@@ -1196,7 +1220,10 @@ func (b *Beads) runWithRouting(args ...string) (_ []byte, retErr error) { //noli
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-	util.SetDetachedProcessGroup(cmd)
+	// Process-group SIGKILL + WaitDelay on timeout (gu-szlis): identical
+	// inherited-pipe deadlock surface to runWithStdin — see the rationale there.
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = bdWaitDelay
 	cmd.Dir = b.workDir
 
 	cmd.Env = runEnv
