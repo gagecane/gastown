@@ -79,9 +79,12 @@ type DoltCircuitBreaker struct {
 	// to 0 on any success. The trip predicate is failures >= threshold.
 	failures int
 
-	// trippedAt is when the breaker last transitioned to Open. The
-	// breaker auto-promotes Open -> HalfOpen once
-	// trippedAt + DoltCircuitBreakerCooldown has passed.
+	// trippedAt anchors the current cooldown window. In Open it is when
+	// the breaker last tripped — the breaker auto-promotes Open ->
+	// HalfOpen once trippedAt + cooldown has passed. In HalfOpen it is
+	// when the single in-flight probe was admitted; a probe that never
+	// Records is presumed abandoned once trippedAt + cooldown passes and
+	// a fresh probe is admitted in its place.
 	trippedAt time.Time
 
 	// threshold is the consecutive-failure count that trips the breaker.
@@ -123,15 +126,25 @@ func NewDoltCircuitBreakerForTest(threshold int, cooldown time.Duration, nowFn f
 
 // Allow reports whether the caller may proceed with a bd subprocess
 // call. Returns false when the breaker is Open and the cooldown has not
-// yet elapsed; true in Closed state and in HalfOpen (the probe call).
+// yet elapsed, and in HalfOpen once a probe is already in flight; true
+// in Closed state and for the single HalfOpen probe.
 //
-// HalfOpen reentry: this method auto-promotes Open -> HalfOpen as soon
-// as the cooldown is past, so a Closed-state caller never observes a
-// stale Open. It does NOT, however, gate concurrent half-open probes —
-// in practice the daemon's patrol dogs run on a single heartbeat
-// goroutine, so the race window is degenerate. If a future caller
-// fires patrols concurrently, the worst-case cost is one extra bd
-// subprocess on the recovery boundary.
+// HalfOpen gating: HalfOpen admits exactly ONE probe per cooldown
+// window. The Allow that promotes Open -> HalfOpen returns true and
+// stamps trippedAt; every later Allow short-circuits (returns false)
+// until the probe reports via Record (which closes or re-opens the
+// breaker). This is what stops the breaker from silently becoming
+// admit-all: before this gate, HalfOpen returned true unconditionally,
+// so if the admitted probe early-returned without Record the breaker
+// stayed HalfOpen forever and re-amplified load on a recovering Dolt
+// (gu-nid89.41, the exact failure gu-8f20q exists to prevent).
+//
+// Abandoned-probe recovery: a probe that never Records (the dog hit an
+// early return before its Record call) must not wedge the breaker in
+// admit-none either. So once the admitted probe is older than one
+// cooldown it is presumed abandoned and a fresh probe is admitted in
+// its place. The net guarantee: HalfOpen can neither admit everyone nor
+// block everyone indefinitely.
 func (b *DoltCircuitBreaker) Allow() bool {
 	// Nil-safe: tests construct Daemon literals with no breaker, and
 	// any use of the breaker should fail open in that case (never
@@ -142,17 +155,32 @@ func (b *DoltCircuitBreaker) Allow() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.state == DoltBreakerOpen {
+	switch b.state {
+	case DoltBreakerOpen:
 		if b.nowFn().Sub(b.trippedAt) >= b.cooldown {
-			// Cooldown elapsed — promote to HalfOpen and admit the probe.
+			// Cooldown elapsed — promote to HalfOpen and admit the probe,
+			// stamping trippedAt so a later Allow can detect an abandoned
+			// probe and so concurrent callers short-circuit.
 			b.state = DoltBreakerHalfOpen
+			b.trippedAt = b.nowFn()
 			return true
 		}
 		return false
-	}
 
-	// Closed or HalfOpen — admit.
-	return true
+	case DoltBreakerHalfOpen:
+		// A probe is in flight. Admit a replacement only if the prior one
+		// is presumed abandoned (older than one cooldown); otherwise
+		// short-circuit so HalfOpen does not degrade into admit-all.
+		if b.nowFn().Sub(b.trippedAt) >= b.cooldown {
+			b.trippedAt = b.nowFn()
+			return true
+		}
+		return false
+
+	default:
+		// Closed — admit.
+		return true
+	}
 }
 
 // Record updates the breaker with the outcome of a bd subprocess call.

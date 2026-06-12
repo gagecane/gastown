@@ -170,6 +170,79 @@ func TestDoltCircuitBreaker_HalfOpenProbeFailureReopens(t *testing.T) {
 	}
 }
 
+// TestDoltCircuitBreaker_HalfOpenGatesToSingleProbe is the regression
+// test for gu-nid89.41: HalfOpen must admit exactly one probe and then
+// short-circuit, so an admitted probe that early-returns WITHOUT
+// recording cannot leave the breaker silently admitting every caller.
+func TestDoltCircuitBreaker_HalfOpenGatesToSingleProbe(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	clock := &mockClock{now: now}
+	b := NewDoltCircuitBreakerForTest(2, 10*time.Second, clock.Now)
+
+	// Trip, then let the cooldown elapse so the next Allow probes.
+	b.Record(errors.New("fail"))
+	b.Record(errors.New("fail"))
+	clock.advance(11 * time.Second)
+
+	// First Allow admits the single probe and enters HalfOpen.
+	if !b.Allow() {
+		t.Fatal("first Allow after cooldown: want true (probe admitted)")
+	}
+	if got := b.State(); got != DoltBreakerHalfOpen {
+		t.Fatalf("state=%d, want HalfOpen", got)
+	}
+
+	// The admitted probe early-returns without Record (the bug's trigger).
+	// Every subsequent Allow within the cooldown must short-circuit rather
+	// than admit-all.
+	for i := 0; i < 5; i++ {
+		if b.Allow() {
+			t.Fatalf("Allow #%d in HalfOpen admitted a second concurrent probe", i)
+		}
+	}
+}
+
+// TestDoltCircuitBreaker_HalfOpenAbandonedProbeRecovers ensures the
+// single-probe gate cannot wedge the breaker the other way: if the
+// admitted probe never Records (dog hit an early return), a fresh probe
+// is admitted once a cooldown has elapsed. Combined with the gating
+// test above, this proves HalfOpen can neither admit-all nor block-all
+// indefinitely — the acceptance criterion for gu-nid89.41.
+func TestDoltCircuitBreaker_HalfOpenAbandonedProbeRecovers(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	clock := &mockClock{now: now}
+	b := NewDoltCircuitBreakerForTest(2, 10*time.Second, clock.Now)
+
+	b.Record(errors.New("fail"))
+	b.Record(errors.New("fail"))
+	clock.advance(11 * time.Second)
+
+	// First probe admitted, then abandoned (no Record).
+	if !b.Allow() {
+		t.Fatal("first probe: want admitted")
+	}
+	if b.Allow() {
+		t.Fatal("second Allow before abandonment window: want short-circuit")
+	}
+
+	// Cooldown passes with no Record — prior probe is presumed abandoned.
+	clock.advance(10 * time.Second)
+	if !b.Allow() {
+		t.Fatal("after abandonment window: want a fresh probe admitted")
+	}
+	if got := b.State(); got != DoltBreakerHalfOpen {
+		t.Fatalf("state=%d, want HalfOpen", got)
+	}
+
+	// A successful Record on the fresh probe still closes the breaker.
+	b.Record(nil)
+	if got := b.State(); got != DoltBreakerClosed {
+		t.Fatalf("after successful probe: state=%d, want Closed", got)
+	}
+}
+
 // TestDoltCircuitBreaker_RecordWhileOpenIsNoop ensures that a stray
 // Record while Open (caller bypassed Allow) does not corrupt state.
 // In production this should not happen, but the guard keeps the
