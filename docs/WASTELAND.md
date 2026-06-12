@@ -153,12 +153,12 @@ planned progression:
 
 | Level | Name | Planned Capabilities |
 |-------|------|---------------------|
-| 0 | Registered | Browse, post |
-| 1 | Participant | Claim, submit completions |
-| 2 | Contributor | Proven work history |
-| 3 | Maintainer | Validate and stamp others' work |
+| 0 | Drifter | Unverified, just joined |
+| 1 | Registered | Completed DoltHub identity verification |
+| 2 | Contributor | Earned stamps through validated completions |
+| 3 | War Chief | Sustained high-quality contributions; can validate others |
 
-New rigs start at level 1 (Participant). Trust will increase as you
+New rigs start at level 1 (Registered). Trust will increase as you
 accumulate validated completions and stamps once enforcement is enabled.
 
 ## Browsing the Wanted Board
