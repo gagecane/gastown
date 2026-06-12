@@ -112,6 +112,7 @@ type recorderInstruments struct {
 	bdDurationHist                 metric.Float64Histogram
 	kiroWrapperIterationsHist      metric.Int64Histogram
 	kiroWrapperDurationSecondsHist metric.Float64Histogram
+	schedulerWaitMsHist            metric.Float64Histogram
 }
 
 var (
@@ -249,6 +250,20 @@ func initInstruments() {
 		inst.kiroWrapperDurationSecondsHist, _ = m.Float64Histogram("gastown.polecat.kiro_wrapper.recovery_duration_seconds",
 			metric.WithDescription("Polecat-kiro-wrapper total wall-clock duration from first kiro-cli spawn to terminal exit"),
 			metric.WithUnit("s"),
+		)
+
+		// Scheduler dispatch wait time (gu-y7p6j / KPI-3): elapsed time between a
+		// bead being enqueued (sling-context enqueued_at) and being dispatched to
+		// a polecat. The histogram _count series doubles as per-rig dispatch
+		// throughput. Explicit buckets span 0.5s → 1h because queue waits range
+		// from sub-second (idle town) to many minutes/hours (capacity-bound).
+		inst.schedulerWaitMsHist, _ = m.Float64Histogram("gastown.scheduler.dispatch.wait_ms",
+			metric.WithDescription("Wait time from sling-context enqueue to polecat dispatch, in milliseconds (gu-y7p6j KPI-3)"),
+			metric.WithUnit("ms"),
+			metric.WithExplicitBucketBoundaries(
+				500, 1000, 2500, 5000, 10000, 30000, 60000,
+				120000, 300000, 600000, 1800000, 3600000,
+			),
 		)
 	})
 }
@@ -685,6 +700,30 @@ func RecordConvoyCreate(ctx context.Context, beadID string, err error) {
 		otellog.String("bead_id", beadID),
 		otellog.String("status", status),
 		errKV(err),
+	)
+}
+
+// RecordSchedulerDispatch records the wait time of a single bead dispatched
+// from the capacity scheduler (gu-y7p6j / KPI-3). waitMs is the elapsed time
+// between the bead's sling-context enqueue and this dispatch, in milliseconds.
+// rig is the target rig the bead was dispatched to.
+//
+// Emits a gastown.scheduler.dispatch.wait_ms histogram (labeled by rig) plus a
+// scheduler.dispatch log event. The histogram's _count series gives per-rig
+// dispatch throughput; its _sum/_bucket series give p50/p95 wait latency.
+// A negative or zero waitMs (clock skew, unparseable enqueued_at) is clamped
+// to 0 so the histogram is never polluted with garbage values.
+func RecordSchedulerDispatch(ctx context.Context, rig string, waitMs float64) {
+	initInstruments()
+	if waitMs < 0 {
+		waitMs = 0
+	}
+	inst.schedulerWaitMsHist.Record(ctx, waitMs,
+		metric.WithAttributes(attribute.String("rig", rig)),
+	)
+	emit(ctx, "scheduler.dispatch", otellog.SeverityInfo,
+		otellog.String("rig", rig),
+		otellog.Float64("wait_ms", waitMs),
 	)
 }
 

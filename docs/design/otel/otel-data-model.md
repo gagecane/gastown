@@ -319,7 +319,18 @@ Per-child-bead event during molecule instantiation. No `RecordBeadCreate` functi
 | `gastown.daemon.agent_restarts.total` | Counter | `agent_type` | ✅ Main |
 | `gastown.formula.instantiations.total` | Counter | `status`, `formula` | ✅ Main |
 | `gastown.convoy.creates.total` | Counter | `status` | ✅ Main |
+| `gastown.scheduler.dispatch.wait_ms` | Histogram | `rig` | ✅ Main (gu-y7p6j) |
+| `gastown.hooked_beads.total` | Gauge | `db` | ✅ Main (queue-depth proxy) |
 | `gastown.agent.events.total` | Counter | `session`, `event_type`, `role` | 🔲 PR #2199 |
+
+`gastown.scheduler.dispatch.wait_ms` (KPI-3) records the elapsed time between a
+bead's sling-context `enqueued_at` and its dispatch to a polecat, labeled by
+target `rig`. The histogram `_count` series doubles as a per-rig dispatch
+throughput counter. Queue depth is read from the existing daemon
+`gastown.hooked_beads.total{db}` gauge rather than a separate scheduler gauge —
+each rig's `db` series is the live count of pending hooked work. See the
+"Scheduler dispatch wait-time + queue depth (KPI-3)" PromQL block in
+`otel-architecture.md`.
 
 ---
 
