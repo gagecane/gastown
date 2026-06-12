@@ -4316,7 +4316,10 @@ type DetectStaleInProgressBeadsResult struct {
 //     freshly slung and the deacon's responsibility, not stranded work).
 //   - Assignee parses as <rigName>/polecats/<name>.
 //   - Polecat tmux session is dead (HasSession == false).
-//   - Bead's updated_at is older than the configured stale threshold.
+//   - Bead's updated_at is older than the configured stale threshold, OR the
+//     polecat is crash-loop muted (gu-nhcpv). A muted polecat will never be
+//     auto-restarted by the zombie path, so its bead must be released promptly
+//     rather than waiting out the full (default 1h) staleness window.
 //   - Bead does NOT already carry the `stranded-assignee` label.
 //
 // Behavior (gu-mb1h):
@@ -4423,7 +4426,25 @@ func DetectStaleInProgressBeads(bd *BdCli, workDir, rigName string, router *mail
 			})
 			continue
 		}
-		if age < staleThreshold {
+		// Freshness gate. Normally a dead-polecat bead younger than the stale
+		// threshold (default 1h) is left alone — the alive→dead zombie path
+		// (DetectZombiePolecats) gets first crack at restarting the polecat and
+		// preserving its work, so we don't want to race it by releasing the bead
+		// out from under a restart that's about to succeed.
+		//
+		// Exception (gu-nhcpv): if the polecat is crash-loop muted, the zombie
+		// path's RestartPolecatWithBackoff will permanently skip it until an
+		// operator runs `gt witness clear-polecat-backoff`. There is no restart
+		// in flight to race — the bead would otherwise sit in_progress for the
+		// full hour before this scan released it, which is the ~30min-to-manual-
+		// release stall this bead was filed for. A muted polecat cannot make
+		// progress, so release its bead immediately for re-dispatch to a fresh
+		// polecat. All of resetAbandonedBead's safety gates (work-on-main close,
+		// respawn circuit breaker, per-rig rate limiter) still apply, and any
+		// committed-but-unpushed work was already preserved + resubmitted by the
+		// zombie path's unfiled-MR recovery (gu-j98v) earlier in this cycle.
+		crashLooped := IsPolecatInCrashLoop(workDir, rigName, polecatName)
+		if age < staleThreshold && !crashLooped {
 			result.Stranded = append(result.Stranded, StaleInProgressBeadResult{
 				BeadID:      b.ID,
 				Assignee:    b.Assignee,
@@ -4461,6 +4482,12 @@ func DetectStaleInProgressBeads(bd *BdCli, workDir, rigName string, router *mail
 
 		if resetAbandonedBead(bd, workDir, rigName, b.ID, polecatName, router) {
 			stranded.Action = "recovered"
+			if crashLooped {
+				// Surface that this recovery bypassed the freshness gate because
+				// the polecat is muted (gu-nhcpv), so operators can distinguish a
+				// fast crash-loop release from a normal aged-out release.
+				stranded.Action = "recovered-crashloop"
+			}
 			stranded.Recovered = true
 			// Best-effort audit label so operators can grep "why did this bead
 			// re-open?" Failures are non-fatal — the bead is already reset, the

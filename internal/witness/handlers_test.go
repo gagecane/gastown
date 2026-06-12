@@ -4928,6 +4928,126 @@ func TestDetectStaleInProgressBeads_AutoRecovers(t *testing.T) {
 	}
 }
 
+// TestDetectStaleInProgressBeads_CrashLoopBypassesFreshness verifies the
+// gu-nhcpv fix: a fresh (sub-threshold) in_progress bead whose assignee polecat
+// is crash-loop MUTED is released immediately rather than waiting out the full
+// staleness window. A muted polecat will never be auto-restarted, so its bead
+// would otherwise sit stranded for the default hour (the ~30min-to-manual-
+// release stall the bead was filed for).
+func TestDetectStaleInProgressBeads_CrashLoopBypassesFreshness(t *testing.T) {
+	installFakeTmuxNoServer(t)
+	defer withTightPolecatBackoff(t)()
+
+	// Force "not on main" so resetAbandonedBead takes the reset path rather than
+	// the work-already-on-main close.
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	resetRedispatchLimitersForTest()
+	t.Cleanup(resetRedispatchLimitersForTest)
+
+	rigName := "testrig"
+	// DetectStaleInProgressBeads and IsPolecatInCrashLoop both resolve the
+	// backoff state file relative to the same workDir (no town root in a
+	// tmpdir), so seeding the crash-loop state under workDir makes the detector
+	// observe the polecat as muted.
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, "witness"), 0o755); err != nil {
+		t.Fatalf("mkdir witness: %v", err)
+	}
+	// Trip the crash-loop mute for alpha.
+	for i := 0; i < polecatCrashLoopCount; i++ {
+		RecordPolecatStartFailure(workDir, rigName, "alpha")
+	}
+	if !IsPolecatInCrashLoop(workDir, rigName, "alpha") {
+		t.Fatal("precondition: expected alpha to be crash-loop muted")
+	}
+
+	// Bead updated 5 minutes ago — well under the 1h threshold. Normally
+	// skip-fresh; the crash-loop mute must override that.
+	fresh := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-fresh-muted", "assignee": rigName + "/polecats/alpha", "updated_at": fresh, "labels": []string{}},
+	)
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"status":"in_progress"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, workDir, rigName, nil, time.Hour)
+
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	s := result.Stranded[0]
+	if s.Action != "recovered-crashloop" {
+		t.Errorf("Action = %q, want recovered-crashloop", s.Action)
+	}
+	if !s.Recovered {
+		t.Errorf("Recovered = false, want true")
+	}
+
+	logStr := strings.Join(mock.calls, "\n")
+	if !strings.Contains(logStr, "update gt-fresh-muted --status=open --assignee=") {
+		t.Errorf("expected status=open + clear assignee, calls:\n%s", logStr)
+	}
+}
+
+// TestDetectStaleInProgressBeads_FreshNotMutedStillSkips verifies the negative
+// case: a fresh bead whose polecat is NOT crash-looping is still left alone
+// (the freshness gate only yields to the crash-loop mute, not to any dead
+// session). Guards against the gu-nhcpv fix over-firing.
+func TestDetectStaleInProgressBeads_FreshNotMutedStillSkips(t *testing.T) {
+	installFakeTmuxNoServer(t)
+	defer withTightPolecatBackoff(t)()
+
+	rigName := "testrig"
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, "witness"), 0o755); err != nil {
+		t.Fatalf("mkdir witness: %v", err)
+	}
+	// No failures recorded — alpha is not muted.
+	if IsPolecatInCrashLoop(workDir, rigName, "alpha") {
+		t.Fatal("precondition: alpha should not be crash-looping")
+	}
+
+	fresh := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
+	listResp := strandedBeadsListJSON(
+		map[string]any{"id": "gt-fresh-ok", "assignee": rigName + "/polecats/alpha", "updated_at": fresh, "labels": []string{}},
+	)
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "list" {
+				return listResp, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	result := DetectStaleInProgressBeads(bd, workDir, rigName, nil, time.Hour)
+
+	if len(result.Stranded) != 1 {
+		t.Fatalf("Stranded = %d, want 1", len(result.Stranded))
+	}
+	if result.Stranded[0].Action != "skip-fresh" {
+		t.Errorf("Action = %q, want skip-fresh", result.Stranded[0].Action)
+	}
+}
+
 // TestDetectStaleInProgressBeads_RecoveryBlockedFallsBackToEscalation verifies
 // that when resetAbandonedBead is a no-op (bead status check returns something
 // other than hooked/in_progress, e.g. closed by a sibling cycle), the function
