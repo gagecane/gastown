@@ -70,6 +70,27 @@ func TestPrePushHookMatchesYAML(t *testing.T) {
 				}
 			}
 			continue
+		case "test":
+			// gs-4s06 intentionally dropped the slow `go test` tier from the
+			// pre-push hook: the full suite always blew past the hook's 360s
+			// wall, so the only way to push was GT_SKIP_PREPUSH=1 (training the
+			// bypass habit). The Refinery merge queue re-runs the full suite on
+			// every merge, making a pre-push test tier redundant. The gate
+			// stays in gates.yaml (CI still runs it) but must NOT appear as a
+			// live command in the hook — comments explaining the omission are
+			// fine. Mirror the integration-tests check: scan only non-comment
+			// lines for the full-suite invocation.
+			for _, line := range strings.Split(hook, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if strings.Contains(trimmed, "go test ./...") {
+					t.Errorf("hook line %q runs the full go-test suite, but gs-4s06 dropped the slow test tier from pre-push", trimmed)
+					break
+				}
+			}
+			continue
 		}
 
 		// Other gates: the YAML command should appear as a substring of the
