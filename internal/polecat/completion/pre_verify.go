@@ -50,6 +50,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -242,6 +243,21 @@ func VerifyPreVerifiedAttestation(ctx context.Context, townRoot, rigName, workDi
 
 	fmt.Printf("%s Verifying --pre-verified attestation: running %d pre-merge gate(s)\n",
 		style.Bold.Render("→"), len(gates))
+
+	// gu-0x2be: keep the session heartbeat fresh while the gate runs. gt done
+	// wrote a one-shot state="exiting" heartbeat before entering this path; with
+	// nothing refreshing it the heartbeat goes stale after 3min
+	// (SessionHeartbeatStaleThreshold), yet a real pre-merge gate (e.g.
+	// `brazil-build release`) legitimately runs 10-15min. When the exiting
+	// heartbeat goes stale the witness falls through to its legacy
+	// done-intent-age path and RESTARTS the polecat mid-gate — discarding the
+	// in-progress gate run plus the whole session context. The keepalive ticker
+	// bumps the heartbeat on its cadence (preserving the exiting state via
+	// KeepaliveWithOp) so the witness's fresh-exiting guard keeps treating the
+	// polecat as healthily grinding, not stuck. If gt done actually dies the
+	// ticker stops and the heartbeat correctly goes stale. Mirrors the
+	// witness's own runRecoveryGates, which already wraps its gate run this way.
+	defer polecat.WithKeepalive(townRoot, os.Getenv("GT_SESSION"), "pre-verify-gate", polecat.DefaultKeepaliveInterval)()
 
 	// Cap concurrent full-suite gate runs host-wide (gu-0iyrn). Each gate run
 	// (`go test ./...`) burns 110-198% CPU; under bulk completion several fire

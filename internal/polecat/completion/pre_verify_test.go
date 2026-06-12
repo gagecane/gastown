@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // writePreVerifyRigSettings is a tiny helper that writes settings/config.json with the
@@ -168,6 +169,56 @@ func TestRunPreVerifyGates_NoGatesIsOK(t *testing.T) {
 	}
 	if called {
 		t.Errorf("runner should not be called when there are no gates")
+	}
+}
+
+// TestVerifyPreVerifiedAttestation_KeepsHeartbeatFresh is the gu-0x2be
+// regression guard: a slow pre-merge gate must keep the session heartbeat
+// fresh so the witness does not classify the polecat as stuck-in-done and
+// restart it mid-gate. We seed a stale state="exiting" heartbeat (as gt done
+// writes one-shot before this path), configure a gate slower than the stale
+// threshold would tolerate, and assert the heartbeat timestamp advances past
+// the seeded value while the exiting state is preserved.
+func TestVerifyPreVerifiedAttestation_KeepsHeartbeatFresh(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	sessionName := "polecat-shiny-test"
+	t.Setenv("GT_SESSION", sessionName)
+
+	// One real gate so VerifyPreVerifiedAttestation does not early-return.
+	writePreVerifyRigSettings(t, townRoot, rigName, &config.MergeQueueConfig{
+		Gates: map[string]*config.GateConfig{
+			"slow": {Cmd: "sleep 0.3", Phase: "pre-merge"},
+		},
+	})
+
+	// Seed a STALE exiting heartbeat, the way gt done writes one before the
+	// gate run. Backdate it so any keepalive bump is unambiguously newer.
+	polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatExiting, "gt done", "gu-0x2be")
+	seeded := polecat.ReadSessionHeartbeat(townRoot, sessionName)
+	if seeded == nil {
+		t.Fatal("failed to seed heartbeat")
+	}
+
+	keep := VerifyPreVerifiedAttestation(context.Background(), townRoot, rigName, t.TempDir())
+	if !keep {
+		t.Errorf("expected attestation to stay valid for a passing gate")
+	}
+
+	after := polecat.ReadSessionHeartbeat(townRoot, sessionName)
+	if after == nil {
+		t.Fatal("heartbeat missing after gate run")
+	}
+	// The keepalive ticker bumps immediately on start, so the timestamp must
+	// have advanced past the seeded value.
+	if !after.Timestamp.After(seeded.Timestamp) {
+		t.Errorf("heartbeat not refreshed during gate run: seeded=%v after=%v",
+			seeded.Timestamp, after.Timestamp)
+	}
+	// The exiting state must survive the keepalive bump — the witness's
+	// fresh-exiting guard depends on it.
+	if after.EffectiveState() != polecat.HeartbeatExiting {
+		t.Errorf("keepalive clobbered exiting state: got %q", after.EffectiveState())
 	}
 }
 
