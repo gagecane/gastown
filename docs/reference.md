@@ -227,6 +227,16 @@ agent names and bead IDs) from leaking into the customer's repo (gs-8p5r).
 gt rig config set <rig> customer_repo true --global
 ```
 
+When `customer_repo: true`, polecat teardown (`gt done`) additionally sweeps the
+completing polecat's own `polecat/<agent>/<bead>` branches off `origin` once their
+work has **landed** — a merged PR reported by the VCS provider, or commits already
+patch-equivalent to `origin/<default_branch>`. A branch with an open PR or any
+unlanded work is left untouched, so the PR-based flow (`mol-lia-pr-work`, which
+needs the branch on `origin` to open the PR) is unaffected. This closes the
+working-branch / PR-head leak vector left open by gs-8p5r (gs-7s52). The sweep is
+self-scoped (a polecat only removes its own branches) and best-effort (failures
+are non-fatal warnings).
+
 Default is `false` (Gas Town's own repos preserve to origin for box-loss
 durability). On a customer rig the box-loss net is intentionally forgone in
 favor of not leaking; work remains recoverable from the rig's bare repo
