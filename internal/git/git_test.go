@@ -4604,3 +4604,106 @@ func TestEffectiveHooksDir(t *testing.T) {
 		}
 	})
 }
+
+func TestSplitCurlHTTPStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		out        string
+		wantBody   string
+		wantStatus int
+		wantErr    bool
+	}{
+		{
+			name:       "2xx with json body",
+			out:        "{\"merge_commit\":{\"hash\":\"abc123\"}}\n200",
+			wantBody:   "{\"merge_commit\":{\"hash\":\"abc123\"}}",
+			wantStatus: 200,
+		},
+		{
+			name:       "403 branch restriction",
+			out:        "{\"type\":\"error\",\"error\":{\"message\":\"denied\"}}\n403",
+			wantBody:   "{\"type\":\"error\",\"error\":{\"message\":\"denied\"}}",
+			wantStatus: 403,
+		},
+		{
+			name:       "409 merge conflict with trailing newline",
+			out:        "{\"error\":\"conflict\"}\n409\n",
+			wantBody:   "{\"error\":\"conflict\"}",
+			wantStatus: 409,
+		},
+		{
+			name:       "multiline body",
+			out:        "line1\nline2\n201",
+			wantBody:   "line1\nline2",
+			wantStatus: 201,
+		},
+		{
+			name:       "empty body",
+			out:        "\n204",
+			wantBody:   "",
+			wantStatus: 204,
+		},
+		{
+			name:    "no status code",
+			out:     "just a body with no status",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, status, err := splitCurlHTTPStatus([]byte(tt.out))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got body=%q status=%d", body, status)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(body) != tt.wantBody {
+				t.Errorf("body = %q, want %q", string(body), tt.wantBody)
+			}
+			if status != tt.wantStatus {
+				t.Errorf("status = %d, want %d", status, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// stubCurl writes a fake `curl` executable that ignores its arguments and
+// prints the given output, then prepends it to PATH for the test. Used to
+// exercise BitbucketPRMerge's HTTP-status handling without real network I/O.
+func stubCurl(t *testing.T, output string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' " + shellSingleQuote(output) + "\n"
+	path := filepath.Join(dir, "curl")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake curl: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func TestBitbucketPRMergeRejectsNon2xx(t *testing.T) {
+	t.Setenv("BITBUCKET_TOKEN", "fake-token")
+	// curl -s exits 0 even on HTTP 403; the body is an error JSON with no
+	// merge_commit.hash. Before the fix this fabricated a SHA from local HEAD.
+	stubCurl(t, "{\"type\":\"error\",\"error\":{\"message\":\"branch restriction\"}}\n403")
+
+	g := NewGit(initTestRepo(t))
+	sha, err := g.BitbucketPRMerge("ws", "repo", 42, "merge_commit")
+	if err == nil {
+		t.Fatalf("expected error on HTTP 403, got sha=%q nil err", sha)
+	}
+	if sha != "" {
+		t.Errorf("expected empty SHA on rejected merge, got %q", sha)
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("error should mention HTTP status, got: %v", err)
+	}
+}

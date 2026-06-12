@@ -1927,7 +1927,13 @@ func (g *Git) BitbucketPRMerge(workspace, repoSlug string, prID int, strategy st
 	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests/%d/merge",
 		workspace, repoSlug, prID)
 	body := fmt.Sprintf(`{"merge_strategy":"%s","close_source_branch":true}`, strategy)
-	cmd := exec.Command("curl", "-s", "-X", "POST",
+	// -w "\n%{http_code}" appends the HTTP status on a trailing line. curl -s
+	// exits 0 even on HTTP 4xx/5xx (branch restriction, merge conflict, auth
+	// failure), so the process exit alone cannot distinguish a rejected merge
+	// from a successful one. Without this gate a rejected merge's error JSON
+	// has no merge_commit.hash and we would fabricate a SHA from local HEAD,
+	// reporting a merge that never landed (gu-nid89.35).
+	cmd := exec.Command("curl", "-s", "-w", "\n%{http_code}", "-X", "POST",
 		"-H", "Authorization: Bearer "+token,
 		"-H", "Content-Type: application/json",
 		"-d", body, url)
@@ -1937,12 +1943,25 @@ func (g *Git) BitbucketPRMerge(workspace, repoSlug string, prID int, strategy st
 		return "", fmt.Errorf("bitbucket merge failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
+	respBody, status, statusErr := splitCurlHTTPStatus(out)
+	if statusErr != nil {
+		return "", fmt.Errorf("bitbucket merge: %w", statusErr)
+	}
+	if status < 200 || status >= 300 {
+		return "", fmt.Errorf("bitbucket merge API returned HTTP %d: %s",
+			status, strings.TrimSpace(string(respBody)))
+	}
+
+	// HTTP 2xx confirms the remote merge succeeded. Only now is it safe to
+	// fall back to local HEAD when the response body lacks a merge_commit
+	// (e.g. a fast-forward merge creates no new commit) — the merge really
+	// landed, so this is a sync, not a fabrication.
 	var resp struct {
 		MergeCommit struct {
 			Hash string `json:"hash"`
 		} `json:"merge_commit"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(out), &resp); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(respBody), &resp); err != nil {
 		// Merge may have succeeded but response parsing failed — pull to get SHA.
 		if _, pullErr := g.run("pull", "origin"); pullErr == nil {
 			if sha, revErr := g.Rev("HEAD"); revErr == nil {
@@ -1961,6 +1980,24 @@ func (g *Git) BitbucketPRMerge(workspace, repoSlug string, prID int, strategy st
 	}
 	sha, _ := g.Rev("HEAD")
 	return sha, nil
+}
+
+// splitCurlHTTPStatus separates a curl response captured with -w "\n%{http_code}"
+// into the response body and the numeric HTTP status code. The status is always
+// the last whitespace-delimited token; everything before it is the body.
+func splitCurlHTTPStatus(out []byte) (body []byte, status int, err error) {
+	trimmed := bytes.TrimRight(out, "\r\n")
+	idx := bytes.LastIndexByte(trimmed, '\n')
+	statusField := trimmed
+	if idx >= 0 {
+		statusField = trimmed[idx+1:]
+		body = trimmed[:idx]
+	}
+	status, convErr := strconv.Atoi(strings.TrimSpace(string(statusField)))
+	if convErr != nil {
+		return nil, 0, fmt.Errorf("could not parse HTTP status from curl output: %q", string(out))
+	}
+	return body, status, nil
 }
 
 // FindCruxCRID scans recent commits on the given branch for a CRUX code review
