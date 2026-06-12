@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/templates/commands"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -344,8 +345,19 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 		style.PrintWarning("could not install runtime settings: %v", err)
 	}
 
-	// NOTE: Slash commands (.claude/commands/) are provisioned at town level by gt install.
-	// All agents inherit them via Claude's directory traversal - no per-workspace copies needed.
+	// Provision agent slash commands (/nextbead, /handoff, /done, /review) into
+	// the crew workspace's agent config dir, mirroring the polecat path
+	// (internal/rig/manager.go). Without this, crew workspaces lack the
+	// /nextbead helper and fall back to raw 'gt handoff'. Resolve the agent
+	// name the same way the rig manager does: town default_agent, else claude.
+	crewAgentName := string(config.AgentClaude)
+	if townSettings, tsErr := config.LoadOrCreateTownSettings(config.TownSettingsPath(addTownRoot)); tsErr == nil && townSettings.DefaultAgent != "" {
+		crewAgentName = townSettings.DefaultAgent
+	}
+	if err := commands.ProvisionFor(crewPath, crewAgentName); err != nil {
+		// Non-fatal: commands are convenience, not critical.
+		style.PrintWarning("could not provision crew commands: %v", err)
+	}
 
 	// NOTE: We intentionally do NOT write to CLAUDE.md here.
 	// Gas Town context is injected ephemerally via SessionStart hook (gt prime).

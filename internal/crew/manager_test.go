@@ -104,6 +104,48 @@ func TestManagerAddAndGet(t *testing.T) {
 	}
 }
 
+func TestManagerAddProvisionsCommands(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "crew-test-cmds-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	g := git.NewGit(rigPath)
+
+	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
+	if err := runCmd("git", "init", "--bare", bareRepoPath); err != nil {
+		t.Fatalf("failed to create bare repo: %v", err)
+	}
+
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: bareRepoPath,
+	}
+
+	mgr := NewManager(r, g)
+
+	if _, err := mgr.Add("dave", false); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	// Crew workspaces must receive the agent slash commands under .claude/commands/
+	// (mirrors the polecat provisioning path). Default agent in tests is claude.
+	commandsDir := filepath.Join(rigPath, "crew", "dave", ".claude", "commands")
+	for _, name := range []string{"nextbead", "handoff", "done", "review"} {
+		path := filepath.Join(commandsDir, name+".md")
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected command %q provisioned at %s: %v", name, path, err)
+		}
+	}
+}
+
 func TestManagerAddUsesLocalRepoReference(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "crew-test-local-*")
 	if err != nil {
