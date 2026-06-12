@@ -84,12 +84,25 @@ func TestMain(m *testing.M) {
 	// stop, but they exit asynchronously after Close() returns — so under load
 	// goleak.Find can observe them mid-teardown even though every store has been
 	// closed. The exit is a transient race, not an unreleased resource. (gs-wtce)
+	//
+	// Same teardown race applies to the go-sql-driver/mysql per-connection
+	// context watcher. Each physical connection the driver dials spawns a
+	// watcher goroutine in (*mysqlConn).startWatcher (an anonymous func, so
+	// goleak reports its top frame as startWatcher.func1). The goroutine blocks
+	// on the connection's closech and exits only when the driver runs
+	// (*mysqlConn).cleanup() on connection close. store.Close() tears the
+	// connection pool down, but the driver closes physical connections (and thus
+	// signals closech) asynchronously, so goleak.Find can observe a watcher
+	// mid-teardown after every store has been closed. Like the database/sql pool
+	// goroutines above, this is driver-owned with no gastown-side drain hook —
+	// a transient teardown race, not an unreleased resource. (gu-w0bk2)
 	leakOpts := []goleak.Option{
 		goleak.IgnoreTopFunction("github.com/testcontainers/testcontainers-go.(*Reaper).connect.func1"),
 		goleak.IgnoreTopFunction("github.com/dolthub/dolt/go/libraries/events.(*sendingThread).run"),
 		goleak.IgnoreTopFunction("github.com/dolthub/dolt/go/libraries/events.NewCollector.func1"),
 		goleak.IgnoreTopFunction("database/sql.(*DB).connectionOpener"),
 		goleak.IgnoreTopFunction("database/sql.(*DB).connectionCleaner"),
+		goleak.IgnoreTopFunction("github.com/go-sql-driver/mysql.(*mysqlConn).startWatcher.func1"),
 	}
 	if err := goleak.Find(leakOpts...); err != nil {
 		fmt.Fprintf(os.Stderr, "goleak: goroutine leak detected:\n%v\n", err)
