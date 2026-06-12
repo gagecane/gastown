@@ -795,6 +795,91 @@ func TestStoreReleaseWithReason(t *testing.T) {
 	}
 }
 
+func TestGetAssignedIssue(t *testing.T) {
+	const me = "rig/polecats/shiny"
+	const other = "rig/polecats/other"
+
+	// inject builds a mock store seeded with the given issues and returns a
+	// store-backed Beads. Each entry is (id, assignee, status).
+	inject := func(entries ...[3]string) *Beads {
+		store := newMockStorage()
+		for _, e := range entries {
+			id, assignee, status := e[0], e[1], e[2]
+			store.issues[id] = &beadsdk.Issue{
+				ID:       id,
+				Assignee: assignee,
+				Status:   beadsdk.Status(status),
+			}
+		}
+		return newTestBeads(store)
+	}
+
+	t.Run("no assigned work returns nil", func(t *testing.T) {
+		b := inject([3]string{"x-1", other, "open"})
+		issue, err := b.GetAssignedIssue(me)
+		if err != nil {
+			t.Fatalf("GetAssignedIssue: %v", err)
+		}
+		if issue != nil {
+			t.Fatalf("expected nil, got %v", issue)
+		}
+	})
+
+	t.Run("ignores closed and other-assignee work", func(t *testing.T) {
+		b := inject(
+			[3]string{"x-1", me, "closed"},
+			[3]string{"x-2", other, "open"},
+		)
+		issue, err := b.GetAssignedIssue(me)
+		if err != nil {
+			t.Fatalf("GetAssignedIssue: %v", err)
+		}
+		if issue != nil {
+			t.Fatalf("expected nil (only closed/other work), got %v", issue)
+		}
+	})
+
+	t.Run("returns hooked when it is the only active status", func(t *testing.T) {
+		b := inject([3]string{"x-1", me, StatusHooked})
+		issue, err := b.GetAssignedIssue(me)
+		if err != nil {
+			t.Fatalf("GetAssignedIssue: %v", err)
+		}
+		if issue == nil || issue.ID != "x-1" {
+			t.Fatalf("expected x-1, got %v", issue)
+		}
+	})
+
+	t.Run("prefers open over in_progress and hooked", func(t *testing.T) {
+		b := inject(
+			[3]string{"x-hooked", me, StatusHooked},
+			[3]string{"x-prog", me, "in_progress"},
+			[3]string{"x-open", me, "open"},
+		)
+		issue, err := b.GetAssignedIssue(me)
+		if err != nil {
+			t.Fatalf("GetAssignedIssue: %v", err)
+		}
+		if issue == nil || issue.Status != "open" {
+			t.Fatalf("expected open issue, got %v", issue)
+		}
+	})
+
+	t.Run("prefers in_progress over hooked", func(t *testing.T) {
+		b := inject(
+			[3]string{"x-hooked", me, StatusHooked},
+			[3]string{"x-prog", me, "in_progress"},
+		)
+		issue, err := b.GetAssignedIssue(me)
+		if err != nil {
+			t.Fatalf("GetAssignedIssue: %v", err)
+		}
+		if issue == nil || issue.Status != "in_progress" {
+			t.Fatalf("expected in_progress issue, got %v", issue)
+		}
+	})
+}
+
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
 }
