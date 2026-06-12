@@ -378,6 +378,34 @@ func SessionDeathPayload(session, agent, reason, caller string) map[string]inter
 	}
 }
 
+// SessionEndPayload creates a payload for clean session-end events.
+//
+// TypeSessionEnd is the clean-exit complement to TypeSessionDeath: it is
+// emitted when a session terminates intentionally (gt done, gt handoff) rather
+// than crashing or being killed. Pairing the two gives the crash-rate KPI a
+// clean denominator — rate(session_death) / rate(session_end) per rig — instead
+// of overloading session_death to mean both crashes and clean exits (audit
+// gu-nid89.14, fix D3). Mirrors SessionDeathPayload's keys so the two events
+// can be queried side by side.
+//
+// session: tmux session name that ended (GT_SESSION); empty when unknown
+// agent: Gas Town agent identity (e.g., "gastown_upstream/polecats/chrome")
+// rig: rig name for per-rig aggregation; omitted when empty (town-level roles)
+// reason: how the session ended (e.g., "gt done (exit=COMPLETED)", "gt handoff")
+// caller: what initiated the clean exit (e.g., "gt done", "gt handoff")
+func SessionEndPayload(session, agent, rig, reason, caller string) map[string]interface{} {
+	p := map[string]interface{}{
+		"session": session,
+		"agent":   agent,
+		"reason":  reason,
+		"caller":  caller,
+	}
+	if rig != "" {
+		p["rig"] = rig
+	}
+	return p
+}
+
 // MassDeathPayload creates a payload for mass death events.
 // count: number of sessions that died
 // window: time window in which deaths occurred (e.g., "5s")

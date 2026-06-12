@@ -314,6 +314,13 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
 		_ = LogHandoff(townRoot, agent, handoffSubject)
 		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(handoffSubject, true))
+		// Emit a clean session-end event (D3 / gu-dnkz4): a handoff respawn is a
+		// clean, intentional session termination, so it belongs in the crash-rate
+		// denominator alongside gt done. Audit-only — TypeHandoff already carries
+		// the feed line. Polecats never reach here (they redirect to gt done above).
+		_ = events.LogAudit(events.TypeSessionEnd, agent,
+			events.SessionEndPayload(currentSession, agent, beads.RigFromAssignee(agent),
+				"gt handoff", "gt handoff"))
 	}
 
 	// NOTE: reportAgentState("stopped") removed (gt-zecmc)
@@ -552,6 +559,11 @@ func runHandoffCycle() error {
 		}
 		_ = LogHandoff(townRoot, agent, subject)
 		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(subject, true))
+		// Emit a clean session-end event (D3 / gu-dnkz4): --cycle replaces the
+		// session with a fresh one, a clean intentional termination. Audit-only.
+		_ = events.LogAudit(events.TypeSessionEnd, agent,
+			events.SessionEndPayload(currentSession, agent, beads.RigFromAssignee(agent),
+				"gt handoff --cycle", "gt handoff"))
 	}
 
 	// Build restart command with --continue so the new session resumes

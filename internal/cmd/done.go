@@ -969,6 +969,16 @@ func teardownAfterDone(p teardownParams) {
 		style.PrintWarning("could not log feed event: %v", err)
 	}
 
+	// Emit a clean session-end event (D3 / gu-dnkz4). This is the clean-exit
+	// complement to TypeSessionDeath, giving the crash-rate KPI a clean
+	// denominator: rate(session_death) / rate(session_end) per rig. Audit-only
+	// — a routine completion is mechanical, and TypeDone already carries the
+	// feed-visible "completed work" line; session_end is for the events plane.
+	sessionName := os.Getenv("GT_SESSION")
+	_ = events.LogAudit(events.TypeSessionEnd, p.sender,
+		events.SessionEndPayload(sessionName, p.sender, p.rigName,
+			fmt.Sprintf("gt done (exit=%s)", p.exitType), "gt done"))
+
 	// Update agent bead state (ZFC: self-report completion).
 	// gu-rh0g: pass pushFailed/mrFailed through so the hooked-bead close
 	// path can refuse to false-close work that never reached origin/main.
