@@ -12,12 +12,13 @@ import (
 // a per-issue "is it merged on the target branch" answer, and a per-issue
 // "could git even verify" answer (to exercise the fail-closed path).
 type fakeGitOrphanBeads struct {
-	labeled  []*beads.Issue
-	issues   map[string]*beads.Issue
-	listErr  error
-	closeErr map[string]error
-	closed   map[string]string
-	removed  map[string][]string
+	labeled         []*beads.Issue
+	issues          map[string]*beads.Issue
+	listErr         error
+	showMultipleErr error
+	closeErr        map[string]error
+	closed          map[string]string
+	removed         map[string][]string
 
 	// proof controls ProveMerged per issue ID.
 	proven   map[string]bool
@@ -54,6 +55,20 @@ func (f *fakeGitOrphanBeads) Show(id string) (*beads.Issue, error) {
 		return issue, nil
 	}
 	return nil, beads.ErrNotFound
+}
+
+// showMultipleErr, when set, forces ShowMultiple to fail (batch-read failure).
+func (f *fakeGitOrphanBeads) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	if f.showMultipleErr != nil {
+		return nil, f.showMultipleErr
+	}
+	out := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		if issue, ok := f.issues[id]; ok {
+			out[id] = issue // missing IDs omitted, mirroring beads.ShowMultiple
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeGitOrphanBeads) ForceCloseWithReason(reason string, ids ...string) error {
@@ -219,6 +234,26 @@ func TestGitReconcile_TolerantOfCloseFailures(t *testing.T) {
 	}
 	if len(result.Anomalies) != 1 || result.Anomalies[0].Type != "orphan_git_source_close_failed" {
 		t.Fatalf("Anomalies = %v, want 1 orphan_git_source_close_failed", result.Anomalies)
+	}
+}
+
+func TestGitReconcile_BatchShowFailureRecordsAnomaly(t *testing.T) {
+	f := newFakeGitOrphanBeads()
+	f.addLabeled(labeledSource("src-merged", "hooked"), true, true)
+	f.showMultipleErr = errors.New("dolt batch read failed")
+
+	result, err := ReconcileMergedOrphansByGitEvidence(f, f, false)
+	if err != nil {
+		t.Fatalf("ReconcileMergedOrphansByGitEvidence: %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Fatalf("Reconciled = %d, want 0 (batch read failed)", result.Reconciled)
+	}
+	if len(result.Anomalies) != 1 || result.Anomalies[0].Type != "orphan_git_source_show_failed" {
+		t.Fatalf("Anomalies = %v, want 1 orphan_git_source_show_failed", result.Anomalies)
+	}
+	if len(f.closed) != 0 {
+		t.Fatalf("batch failure triggered a close: %v", f.closed)
 	}
 }
 

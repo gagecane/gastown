@@ -35,6 +35,46 @@ func (a *orphanGitReconcileAdapter) Show(id string) (*beads.Issue, error) {
 	return a.router.Show(id)
 }
 
+// ShowMultiple fetches fresh state for many bead IDs with one batched query per
+// owning rig DB instead of one Show per bead (the old reaper 1+N round-trips —
+// gu-nid89.21). Source issues live in per-rig databases, so the IDs are first
+// grouped by the rig DB they route to (via the same ResolveRoutingTarget the
+// per-ID Show uses), then each group is fetched in a single beads.ShowMultiple.
+// IDs that no longer exist (purged/reaped) are simply omitted from the result.
+func (a *orphanGitReconcileAdapter) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	result := make(map[string]*beads.Issue, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	townRoot := a.townRoot
+	fallbackDir := filepath.Join(a.townRoot, ".beads")
+
+	// Group IDs by the beads dir they route to so each rig DB is queried once.
+	byDir := map[string][]string{}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		dir := beads.ResolveRoutingTarget(townRoot, id, fallbackDir)
+		byDir[dir] = append(byDir[dir], id)
+	}
+
+	for dir, dirIDs := range byDir {
+		client := beads.NewWithBeadsDir(filepath.Dir(dir), dir)
+		issues, err := client.ShowMultiple(dirIDs)
+		if err != nil {
+			// Best-effort: an unreachable rig DB must not abort the whole batch.
+			// Skip its IDs (they fall through as terminal) and continue.
+			continue
+		}
+		for id, issue := range issues {
+			result[id] = issue
+		}
+	}
+	return result, nil
+}
+
 // ForceCloseWithReason routes by prefix to the owning rig DB.
 func (a *orphanGitReconcileAdapter) ForceCloseWithReason(reason string, ids ...string) error {
 	return a.router.ForceCloseWithReason(reason, ids...)

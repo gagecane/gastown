@@ -45,7 +45,6 @@
 package reaper
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -104,6 +103,10 @@ type OrphanGitReconcileBeads interface {
 	// ListIssuesWithLabel returns every issue carrying the given label, at any
 	// status, across all rig databases (source issues live in per-rig DBs).
 	ListIssuesWithLabel(label string) ([]*beads.Issue, error)
+	// ShowMultiple fetches fresh state for many issue IDs in one batched call
+	// (routed per owning rig DB), returning a map keyed by ID. IDs that no
+	// longer exist (purged/reaped) are simply omitted from the map.
+	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 	ForceCloseWithReason(reason string, ids ...string) error
 	Update(id string, opts beads.UpdateOptions) error
 }
@@ -136,28 +139,42 @@ func ReconcileMergedOrphansByGitEvidence(bd OrphanGitReconcileBeads, prover GitM
 	}
 
 	result := &GitReconcileOrphansResult{DryRun: dryRun}
+
+	// Re-read for a fresh status: the agent-bead reconcile (gu-7igu8) or the
+	// refinery itself may have closed a source issue earlier this cycle. Batch
+	// the fresh-state read into a single routed call instead of one Show per
+	// candidate (the old 1+N round-trips that spiked on a large awaiting-merge
+	// backlog — gu-nid89.21). A bead missing from the batch (purged/reaped) is
+	// treated as terminal — nothing to do.
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.ID == "" {
+			continue
+		}
+		ids = append(ids, candidate.ID)
+	}
+	freshByID, err := bd.ShowMultiple(ids)
+	if err != nil {
+		// A total batch failure usually means the beads layer is unreachable; a
+		// per-bead fallback would fail the same way. Record one anomaly and skip
+		// this cycle's reconcile rather than abort hard (mirrors the per-bead
+		// tolerance the old loop provided).
+		result.Anomalies = append(result.Anomalies, Anomaly{
+			Type:    "orphan_git_source_show_failed",
+			Message: fmt.Sprintf("batch show of %d candidates failed: %v", len(ids), err),
+		})
+		return result, nil
+	}
+
 	for _, candidate := range candidates {
 		if candidate == nil || candidate.ID == "" {
 			continue
 		}
 		result.Scanned++
 
-		// Re-read for a fresh status: the agent-bead reconcile (gu-7igu8) or the
-		// refinery itself may have closed the source issue earlier this cycle.
-		// A missing bead (purged/reaped) is treated as terminal — nothing to do.
-		fresh, err := bd.Show(candidate.ID)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				result.AlreadyTerminal++
-				continue
-			}
-			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type:    "orphan_git_source_show_failed",
-				Message: fmt.Sprintf("source_issue=%s: %v", candidate.ID, err),
-			})
-			continue
-		}
+		fresh := freshByID[candidate.ID]
 		if fresh == nil || beads.IssueStatus(fresh.Status).IsTerminal() {
+			// Missing from the batch (purged/reaped) or already closed — terminal.
 			result.AlreadyTerminal++
 			continue
 		}
