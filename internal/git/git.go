@@ -339,6 +339,59 @@ func (g *Git) guardUnsafeTownRootMutation(args []string) error {
 	return nil
 }
 
+// ErrUnsafeGitRef is returned by validateGitRef for a ref/branch/remote that
+// git could misinterpret as an option.
+var ErrUnsafeGitRef = errors.New("unsafe git ref")
+
+// validateGitRef rejects a caller-supplied ref/branch/remote string that git
+// could parse as an option rather than as a ref.
+//
+// exec.Command uses an argv array (no shell), so there is no classic
+// shell-injection risk here. The residual risk is git argument/flag injection:
+// git treats any positional argument beginning with "-" as an option, so a ref
+// literally named "--upload-pack=<cmd>" or "--output=<path>" changes a
+// command's behavior. The elevated concern (security audit gu-nid89.10,
+// finding #1) is that refs flowing in from internal/upstreamsync and the
+// GitHub/Bitbucket integrations originate from remote repositories outside the
+// operator's control. Every wrapper that accepts a ref/branch/remote from a
+// non-constant source validates it here before handing it to git.
+//
+// Validation (not a "--" end-of-options separator) is the primary guard
+// because "--" is unsafe across subcommands — `git checkout -- <ref>` treats
+// <ref> as a pathspec, not a ref — and the version-independent
+// "--end-of-options" token would have to be threaded per-subcommand. A pure-Go
+// reject is simpler and applies uniformly.
+//
+// Rejects: empty, a leading "-", and any control character (notably newline /
+// carriage return, which git-check-ref-format also forbids). It deliberately
+// does NOT re-implement git's full ref grammar — the goal is to close the
+// flag-injection boundary, not to validate ref well-formedness. (gu-n5dvk)
+func validateGitRef(ref string) error {
+	if ref == "" {
+		return fmt.Errorf("%w: empty", ErrUnsafeGitRef)
+	}
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("%w: %q must not begin with '-' (git would parse it as an option)", ErrUnsafeGitRef, ref)
+	}
+	for _, r := range ref {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: %q contains a control character", ErrUnsafeGitRef, ref)
+		}
+	}
+	return nil
+}
+
+// validateGitRefs validates each of refs, returning the first failure. Use for
+// wrappers that take several caller-supplied refs/branches/remotes.
+func validateGitRefs(refs ...string) error {
+	for _, ref := range refs {
+		if err := validateGitRef(ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func gitEffectiveWorkDir(args []string, workDir string) string {
 	effective := workDir
 	for i := 0; i < len(args); i++ {
@@ -1020,13 +1073,29 @@ func (g *Git) CloneBareWithReferenceAndBranch(url, dest, reference, branch strin
 
 // Checkout checks out the given ref.
 func (g *Git) Checkout(ref string) error {
+	if err := validateGitRef(ref); err != nil {
+		return err
+	}
 	_, err := g.run("checkout", ref)
+	return err
+}
+
+// DetachHead detaches HEAD at the current commit (git checkout --detach).
+// Separate from Checkout so Checkout can strictly reject any leading-"-" ref as
+// flag injection; "--detach" is a real flag, not a ref. Used by gt done when a
+// worktree cannot check out the default branch (held by another worktree) and
+// must detach so the old feature branch can be deleted.
+func (g *Git) DetachHead() error {
+	_, err := g.run("checkout", "--detach")
 	return err
 }
 
 // CheckoutNewBranch creates a new branch from startPoint and checks it out.
 // Equivalent to: git checkout -b <branch> <startPoint>
 func (g *Git) CheckoutNewBranch(branch, startPoint string) error {
+	if err := validateGitRefs(branch, startPoint); err != nil {
+		return err
+	}
 	_, err := g.run("checkout", "-b", branch, startPoint)
 	return err
 }
@@ -1036,12 +1105,18 @@ func (g *Git) CheckoutNewBranch(branch, startPoint string) error {
 // this does not fail when the branch already exists locally — useful when reusing
 // a worktree that previously had the same branch checked out.
 func (g *Git) CheckoutResetBranch(branch, startPoint string) error {
+	if err := validateGitRefs(branch, startPoint); err != nil {
+		return err
+	}
 	_, err := g.run("checkout", "-B", branch, startPoint)
 	return err
 }
 
 // Fetch fetches from the remote.
 func (g *Git) Fetch(remote string) error {
+	if err := validateGitRef(remote); err != nil {
+		return err
+	}
 	_, err := g.run("fetch", remote)
 	return err
 }
@@ -1049,12 +1124,18 @@ func (g *Git) Fetch(remote string) error {
 // FetchPrune fetches from the remote and prunes stale remote-tracking refs.
 // This removes remote-tracking branches for branches that no longer exist on the remote.
 func (g *Git) FetchPrune(remote string) error {
+	if err := validateGitRef(remote); err != nil {
+		return err
+	}
 	_, err := g.run("fetch", "--prune", remote)
 	return err
 }
 
 // FetchBranch fetches a specific branch from the remote.
 func (g *Git) FetchBranch(remote, branch string) error {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return err
+	}
 	_, err := g.run("fetch", remote, branch)
 	return err
 }
@@ -1063,6 +1144,9 @@ func (g *Git) FetchBranch(remote, branch string) error {
 // remote tracking ref (e.g. origin/<branch>). Use this on shallow single-branch
 // clones to add a branch that wasn't included in the initial clone.
 func (g *Git) FetchBranchShallow(remote, branch string) error {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return err
+	}
 	refspec := branch + ":refs/remotes/" + remote + "/" + branch
 	_, err := g.run("fetch", "--depth", "1", remote, refspec)
 	return err
@@ -1070,6 +1154,9 @@ func (g *Git) FetchBranchShallow(remote, branch string) error {
 
 // Pull pulls from the remote branch.
 func (g *Git) Pull(remote, branch string) error {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return err
+	}
 	_, err := g.run("pull", remote, branch)
 	return err
 }
@@ -1116,6 +1203,9 @@ func (g *Git) GetPushURL(remote string) (string, error) {
 // Push pushes to the remote branch with a timeout to prevent indefinite hangs
 // when the remote is unreachable.
 func (g *Git) Push(remote, branch string, force bool) error {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return err
+	}
 	args := []string{"push", remote, branch}
 	if force {
 		args = append(args, "--force")
@@ -1152,6 +1242,9 @@ var prePushSkipEnv = []string{
 // This function provides "pre-verified" as the reason; emergency / manual
 // skips should use PushWithEnv with a caller-supplied reason.
 func (g *Git) PushSkipPrePush(remote, branch string, force bool) error {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return err
+	}
 	args := []string{"push", remote, branch}
 	if force {
 		args = append(args, "--force")
@@ -1164,6 +1257,9 @@ func (g *Git) PushSkipPrePush(remote, branch string, force bool) error {
 // Used by gt mq integration land to set GT_INTEGRATION_LAND=1, which the
 // pre-push hook checks to allow integration branch content landing on main.
 func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return err
+	}
 	args := []string{"push", remote, branch}
 	if force {
 		args = append(args, "--force")
@@ -1200,6 +1296,9 @@ func (g *Git) pushSHAInternal(remote, sha, targetBranch string, force, skipPrePu
 	}
 	if targetBranch == "" {
 		return fmt.Errorf("PushSHA: empty targetBranch")
+	}
+	if err := validateGitRefs(remote, sha, targetBranch); err != nil {
+		return err
 	}
 	refspec := sha + ":refs/heads/" + targetBranch
 	args := []string{"push", remote, refspec}
@@ -1294,6 +1393,9 @@ func (g *Git) ShowFile(ref, path string) (string, error) {
 // CheckoutFileFromRef restores a file from a given ref (e.g., "origin/main").
 // Equivalent to: git checkout <ref> -- <path>
 func (g *Git) CheckoutFileFromRef(ref string, paths ...string) error {
+	if err := validateGitRef(ref); err != nil {
+		return err
+	}
 	args := append([]string{"checkout", ref, "--"}, paths...)
 	_, err := g.run(args...)
 	return err
@@ -1679,12 +1781,18 @@ func (g *Git) ConfigGet(key string) (string, error) {
 
 // Merge merges the given branch into the current branch.
 func (g *Git) Merge(branch string) error {
+	if err := validateGitRef(branch); err != nil {
+		return err
+	}
 	_, err := g.run("merge", branch)
 	return err
 }
 
 // MergeNoFF merges the given branch with --no-ff flag and a custom message.
 func (g *Git) MergeNoFF(branch, message string) error {
+	if err := validateGitRef(branch); err != nil {
+		return err
+	}
 	_, err := g.run("merge", "--no-ff", "-m", message, branch)
 	return err
 }
@@ -1693,6 +1801,9 @@ func (g *Git) MergeNoFF(branch, message string) error {
 // This ensures what you tested is exactly what lands — no merge commits are created.
 // Returns an error if the merge cannot be performed as a fast-forward.
 func (g *Git) MergeFFOnly(ref string) error {
+	if err := validateGitRef(ref); err != nil {
+		return err
+	}
 	_, err := g.run("merge", "--ff-only", ref)
 	return err
 }
@@ -1702,6 +1813,9 @@ func (g *Git) MergeFFOnly(ref string) error {
 // as a single commit with the given message. This eliminates redundant merge commits while
 // preserving the original commit message from the source branch.
 func (g *Git) MergeSquash(branch, message string) error {
+	if err := validateGitRef(branch); err != nil {
+		return err
+	}
 	// Stage all changes from the branch without committing
 	if _, err := g.run("merge", "--squash", branch); err != nil {
 		return err
@@ -2181,6 +2295,9 @@ func (g *Git) ListPushRemoteRefsWithHashes(remote, prefix string) ([]RemoteRef, 
 
 // Rebase rebases the current branch onto the given ref.
 func (g *Git) Rebase(onto string) error {
+	if err := validateGitRef(onto); err != nil {
+		return err
+	}
 	_, err := g.run("rebase", onto)
 	return err
 }
@@ -2358,6 +2475,9 @@ func (g *Git) IsEmpty() (bool, error) {
 // NOTE: For named remotes with a separate pushurl, this checks the fetch URL.
 // Use PushRemoteBranchExists to verify branches that were pushed.
 func (g *Git) RemoteBranchExists(remote, branch string) (bool, error) {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return false, err
+	}
 	out, err := g.run("ls-remote", "--heads", remote, branch)
 	if err != nil {
 		return false, err
@@ -2368,6 +2488,9 @@ func (g *Git) RemoteBranchExists(remote, branch string) (bool, error) {
 // RemoteBranchTip returns the SHA at refs/heads/<branch> on the remote.
 // An empty SHA with nil error means the branch is missing.
 func (g *Git) RemoteBranchTip(remote, branch string) (string, error) {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return "", err
+	}
 	out, err := g.run("ls-remote", "--heads", remote, branch)
 	if err != nil {
 		return "", err
@@ -2381,6 +2504,9 @@ func (g *Git) RemoteBranchTip(remote, branch string) (string, error) {
 // URL directly so verification matches where the branch was actually pushed.
 // Falls back to RemoteBranchExists when no custom push URL is configured.
 func (g *Git) PushRemoteBranchExists(remote, branch string) (bool, error) {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return false, err
+	}
 	fetchURL, fetchErr := g.RemoteURL(remote)
 	pushURL, pushErr := g.GetPushURL(remote)
 	if fetchErr != nil || pushErr != nil || pushURL == fetchURL {
@@ -2597,6 +2723,9 @@ func (g *Git) Cherry(upstream, head string) (string, error) {
 
 // MergeBase returns the best common ancestor between two refs.
 func (g *Git) MergeBase(ref1, ref2 string) (string, error) {
+	if err := validateGitRefs(ref1, ref2); err != nil {
+		return "", err
+	}
 	return g.run("merge-base", ref1, ref2)
 }
 
@@ -4033,6 +4162,9 @@ func (g *Git) submoduleURL(ref, submodulePath string) (string, error) {
 // The submodulePath is relative to the repo working directory.
 // The commit must exist in the submodule's object store (shared via .repo.git/modules/).
 func (g *Git) PushSubmoduleCommit(submodulePath, sha, remote string) error {
+	if err := validateGitRefs(sha, remote); err != nil {
+		return err
+	}
 	absPath := filepath.Join(g.workDir, submodulePath)
 	// Detect the remote's default branch (don't assume main)
 	defaultBranch, err := submoduleDefaultBranch(absPath, remote)

@@ -1942,7 +1942,7 @@ func teardownAfterDone(p teardownParams) {
 			if err := p.g.Checkout(p.defaultBranch); err != nil {
 				// Worktree can't checkout defaultBranch (likely held by rig-root).
 				// Detach HEAD so the old feature branch can be deleted cleanly.
-				if detachErr := p.g.Checkout("--detach"); detachErr != nil {
+				if detachErr := p.g.DetachHead(); detachErr != nil {
 					style.PrintWarning("could not checkout %s or detach: %v (worktree stays on feature branch)", p.defaultBranch, err)
 				} else {
 					fmt.Printf("%s Detached HEAD (worktree checkout of %s blocked by another worktree)\n", style.Bold.Render("✓"), p.defaultBranch)
