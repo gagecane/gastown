@@ -4043,6 +4043,38 @@ func TestRemoveDatabase_RefusesProtectedSharedServerDatabase(t *testing.T) {
 	}
 }
 
+// TestRemoveDatabase_RejectsInjectionNames verifies that dbName values containing
+// SQL metacharacters (quotes, backticks, semicolons, spaces) are rejected before
+// any SQL is built or the directory is touched. dbName comes from filesystem
+// directory names, so a maliciously-named dir must not reach the SQL interpolation
+// in DROP DATABASE / DELETE FROM dolt_branch_control. (gu-zl25s)
+func TestRemoveDatabase_RejectsInjectionNames(t *testing.T) {
+	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	badNames := []string{
+		"foo'; DROP DATABASE bar; --",
+		"foo`",
+		"foo bar",
+		"foo;bar",
+		"foo'bar",
+		"../escape",
+	}
+	for _, name := range badNames {
+		err := RemoveDatabase(townRoot, name, true)
+		if err == nil {
+			t.Errorf("RemoveDatabase(%q) = nil, want error", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid database name") {
+			t.Errorf("RemoveDatabase(%q) error = %v, want 'invalid database name'", name, err)
+		}
+	}
+}
+
 func TestListDatabases_OnlyIncludesDoltDirs(t *testing.T) {
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
