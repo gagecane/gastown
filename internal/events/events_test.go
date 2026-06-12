@@ -198,6 +198,36 @@ func TestSessionDeathPayload(t *testing.T) {
 	}
 }
 
+func TestSessionEndPayload_Full(t *testing.T) {
+	p := SessionEndPayload("gt-gastown-chrome", "gastown_upstream/polecats/chrome",
+		"gastown_upstream", "gt done (exit=COMPLETED)", "gt done")
+	if p["session"] != "gt-gastown-chrome" {
+		t.Errorf("session = %v", p["session"])
+	}
+	if p["agent"] != "gastown_upstream/polecats/chrome" {
+		t.Errorf("agent = %v", p["agent"])
+	}
+	if p["rig"] != "gastown_upstream" {
+		t.Errorf("rig = %v", p["rig"])
+	}
+	if p["reason"] != "gt done (exit=COMPLETED)" {
+		t.Errorf("reason = %v", p["reason"])
+	}
+	if p["caller"] != "gt done" {
+		t.Errorf("caller = %v", p["caller"])
+	}
+}
+
+func TestSessionEndPayload_NoRig(t *testing.T) {
+	p := SessionEndPayload("gt-deacon", "deacon", "", "gt handoff", "gt handoff")
+	if _, ok := p["rig"]; ok {
+		t.Error("expected no rig key when empty")
+	}
+	if p["agent"] != "deacon" {
+		t.Errorf("agent = %v", p["agent"])
+	}
+}
+
 func TestMassDeathPayload_WithCause(t *testing.T) {
 	sessions := []string{"s1", "s2"}
 	p := MassDeathPayload(2, "5s", sessions, "rate limit")
