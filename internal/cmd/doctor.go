@@ -216,6 +216,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewStaleDoltPortCheck())      // Check for stale Dolt port files
 	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
 	d.Register(doctor.NewStaleEmbeddeddoltCheck())  // Check for stale embeddeddolt/ directories
+	d.Register(doctor.NewDoltPortDataDirCheck())    // Check the live :port server serves .dolt-data (gs-2oij)
 	d.Register(doctor.NewPrefixMismatchCheck())
 	d.Register(doctor.NewDatabasePrefixCheck())
 	d.Register(doctor.NewIdleTimeoutCheck()) // Verify dolt.idle-timeout: "0" for all rigs
