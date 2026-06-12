@@ -197,6 +197,29 @@ flowchart TD
 
 New metrics: `scheduler.dispatch_cycle` (dispatched/failed/skipped counts), `scheduler.queue_depth` (histogram), `scheduler.capacity_usage` (gauge).
 
+**Implemented — dispatch wait-time + queue depth (KPI-3, gu-y7p6j).** The dispatch `Execute` callback in `internal/cmd/capacity_dispatch.go` now emits `gastown.scheduler.dispatch.wait_ms` (Float64 histogram, labeled by `rig`) on every successful dispatch, computed as `dispatch_ts − sling-context.enqueued_at`. Rather than add a parallel queue-depth gauge, queue depth is read from the existing daemon `gastown.hooked_beads.total{db}` gauge — each rig's `db` series is its live pending-work count. PromQL:
+
+```promql
+# p95 dispatch wait time per rig (last 1h) — the headline KPI-3 latency signal
+histogram_quantile(0.95,
+  sum by (rig, le) (rate(gastown_scheduler_dispatch_wait_ms_bucket[1h])))
+
+# median (p50) dispatch wait per rig
+histogram_quantile(0.50,
+  sum by (rig, le) (rate(gastown_scheduler_dispatch_wait_ms_bucket[1h])))
+
+# dispatch throughput per rig (dispatches/sec) — the histogram _count series
+sum by (rig) (rate(gastown_scheduler_dispatch_wait_ms_count[5m]))
+
+# live queue depth per rig (pending hooked work), via the existing daemon gauge
+gastown_hooked_beads_total
+
+# town-wide queue depth
+sum(gastown_hooked_beads_total)
+```
+
+Note the OTLP→VictoriaMetrics name mapping: the OTel instrument `gastown.scheduler.dispatch.wait_ms` becomes the Prometheus series `gastown_scheduler_dispatch_wait_ms` (dots → underscores), with the SDK-generated `_bucket`/`_sum`/`_count` suffixes.
+
 ---
 
 **`done` event enrichment**

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
 // crossRigEscalationDebounce is the minimum interval between cross-rig prefix
@@ -526,6 +528,13 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 			}
 			_ = events.LogFeed(events.TypeSchedulerDispatch, actor,
 				events.SchedulerDispatchPayload(b.WorkBeadID, b.TargetRig, polecatNames[b.ID]))
+			// KPI-3 (gu-y7p6j): record dispatch wait time (enqueue → dispatch) so
+			// the wait_ms histogram + per-rig throughput are queryable in
+			// VictoriaMetrics. Best-effort: a missing/unparseable enqueued_at
+			// simply skips the record.
+			if ms, ok := dispatchWaitMs(b, time.Now()); ok {
+				telemetry.RecordSchedulerDispatch(context.Background(), b.TargetRig, ms)
+			}
 			return nil
 		},
 		OnSuccess: func(b capacity.PendingBead) error {
@@ -1286,6 +1295,27 @@ func validatePendingBeadForDispatch(townRoot string, b capacity.PendingBead, esc
 		fireCrossRigEscalation(b.TargetRig, gotPrefix, b.WorkBeadID)
 	}
 	return capacity.ErrCrossRigPrefix
+}
+
+// dispatchWaitMs computes how long a bead waited between being enqueued onto
+// its sling context and being dispatched, in milliseconds (gu-y7p6j KPI-3).
+// now is the dispatch timestamp. Returns (ms, true) when the context carries a
+// parseable RFC3339 enqueued_at; (0, false) otherwise so the caller can skip
+// recording rather than emit a bogus value. Waits that compute negative (clock
+// skew) are clamped to 0 but still reported as valid.
+func dispatchWaitMs(b capacity.PendingBead, now time.Time) (float64, bool) {
+	if b.Context == nil || b.Context.EnqueuedAt == "" {
+		return 0, false
+	}
+	enqueued, err := time.Parse(time.RFC3339, b.Context.EnqueuedAt)
+	if err != nil {
+		return 0, false
+	}
+	ms := float64(now.Sub(enqueued).Milliseconds())
+	if ms < 0 {
+		ms = 0
+	}
+	return ms, true
 }
 
 // isDaemonDispatch returns true when dispatch is triggered by the daemon heartbeat.
