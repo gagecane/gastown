@@ -1336,12 +1336,22 @@ func (d *Daemon) ensureDoltServerRunning() {
 	// Update OTel gauges with the latest Dolt health snapshot.
 	if d.metrics != nil {
 		h := doltserver.GetHealthMetrics(d.config.TownRoot)
+		// orphan_databases (KPI-7): count unreferenced DBs on the shared server.
+		// On error, report 0 rather than blocking the health gauge update — the
+		// scan is best-effort observability, not control flow.
+		var orphanCount int64
+		if orphans, err := doltserver.FindOrphanedDatabases(d.config.TownRoot); err != nil {
+			d.logger.Printf("dolt_metrics: orphan database scan failed: %v", err)
+		} else {
+			orphanCount = int64(len(orphans))
+		}
 		d.metrics.updateDoltHealth(
 			int64(h.Connections),
 			int64(h.MaxConnections),
 			float64(h.QueryLatency.Milliseconds()),
 			h.DiskUsageBytes,
 			h.Healthy,
+			orphanCount,
 		)
 	}
 }
