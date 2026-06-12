@@ -476,6 +476,127 @@ exit 1
 	}
 }
 
+// TestSendToListClearsCCAfterFirstFanoutCopy verifies the fix for gu-nid89.33:
+// a CC recipient must receive exactly ONE copy of a list/group/channel fan-out
+// message, not one per recipient. Each fan-out copy shallow-copies the message,
+// so the CC slice (shared by reference) used to land a cc:<identity> label on
+// every copy — making a CC inbox query (which unions on cc:<identity> and dedups
+// by bead ID) match N distinct beads. The fix keeps CC on only the first copy.
+func TestSendToListClearsCCAfterFirstFanoutCopy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a bash bd stub")
+	}
+
+	tmpDir := t.TempDir()
+	townRoot := filepath.Join(tmpDir, "town")
+	configDir := filepath.Join(townRoot, "config")
+	mayorDir := filepath.Join(townRoot, "mayor")
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	for _, dir := range []string{configDir, mayorDir, townBeadsDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townBeadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("write beads.db: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	typesList := strings.Join(constants.BeadsCustomTypesList(), ",")
+	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(typesList+"\n"), 0644); err != nil {
+		t.Fatalf("write types sentinel: %v", err)
+	}
+
+	// A list with two well-known singleton recipients so validateRecipient
+	// passes without needing agent beads.
+	configContent := `{
+  "type": "messaging",
+  "version": 1,
+  "lists": {
+    "oncall": ["mayor/", "deacon/"]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(configDir, "messaging.json"), []byte(configContent), 0644); err != nil {
+		t.Fatalf("write messaging.json: %v", err)
+	}
+
+	// bd stub: on `create`, append the value following --labels to a log file
+	// (one line per created bead). All other subcommands are no-ops.
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	labelsLog := filepath.Join(tmpDir, "labels.log")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "create" ]]; then
+  i=1
+  labels=""
+  while [[ $i -le $# ]]; do
+    if [[ "${!i}" == "--labels" ]]; then
+      ((i++))
+      labels="${!i:-}"
+    fi
+    ((i++))
+  done
+  echo "$labels" >> "` + labelsLog + `"
+  echo "hq-testmail-1"
+  exit 0
+fi
+
+if [[ "${1:-}" == "list" ]]; then
+  echo "[]"
+  exit 0
+fi
+
+# config / init / mol wisp list / anything else: succeed quietly
+exit 0
+`
+	bdStub := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdStub, []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	r := NewRouterWithTownRoot(townRoot, townRoot)
+	msg := &Message{
+		From:           "mayor/",
+		To:             "list:oncall",
+		Subject:        "Broadcast",
+		Body:           "Hello list",
+		CC:             []string{"deacon/"},
+		SuppressNotify: true,
+	}
+
+	if err := r.Send(msg); err != nil {
+		t.Fatalf("Send to list failed: %v", err)
+	}
+
+	data, err := os.ReadFile(labelsLog)
+	if err != nil {
+		t.Fatalf("read labels log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 fan-out bead creations, got %d: %v", len(lines), lines)
+	}
+
+	ccLabel := "cc:" + AddressToIdentity("deacon/")
+	ccCount := 0
+	for _, line := range lines {
+		for _, label := range strings.Split(line, ",") {
+			if label == ccLabel {
+				ccCount++
+			}
+		}
+	}
+	if ccCount != 1 {
+		t.Errorf("expected exactly 1 fan-out copy carrying %q, got %d (labels per bead: %v)", ccLabel, ccCount, lines)
+	}
+}
+
 func TestNewRouterWithTownRoot(t *testing.T) {
 	r := NewRouterWithTownRoot("/work/rig", "/home/gt")
 	if filepath.ToSlash(r.workDir) != "/work/rig" {

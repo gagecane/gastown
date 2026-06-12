@@ -963,11 +963,17 @@ func (r *Router) sendToGroup(msg *Message) error {
 
 	// Fan-out: send a copy to each recipient
 	var errs []string
-	for _, recipient := range recipients {
+	for i, recipient := range recipients {
 		// Create a copy of the message for this recipient
 		msgCopy := *msg
 		msgCopy.To = recipient
 		msgCopy.ID = "" // Each fan-out copy gets its own ID from bd create
+		// CC labels must live on exactly one copy. Otherwise a CC recipient's
+		// inbox query (which unions on cc:<identity>) matches every fan-out
+		// bead and shows the message N times. Keep CC on the first copy only.
+		if i > 0 {
+			msgCopy.CC = nil
+		}
 
 		if err := r.sendToSingle(&msgCopy); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", recipient, err))
@@ -1294,11 +1300,17 @@ func (r *Router) sendToList(msg *Message) error {
 
 	// Fan-out: send a copy to each recipient, collecting all errors
 	var errs []string
-	for _, recipient := range recipients {
+	for i, recipient := range recipients {
 		// Create a copy of the message for this recipient
 		msgCopy := *msg
 		msgCopy.To = recipient
 		msgCopy.ID = "" // Each fan-out copy gets its own ID from bd create
+		// CC labels must live on exactly one copy. Otherwise a CC recipient's
+		// inbox query (which unions on cc:<identity>) matches every fan-out
+		// bead and shows the message N times. Keep CC on the first copy only.
+		if i > 0 {
+			msgCopy.CC = nil
+		}
 
 		if err := r.Send(&msgCopy); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", recipient, err))
@@ -1581,6 +1593,11 @@ func (r *Router) sendToChannel(msg *Message) error {
 			msgCopy.To = subscriber
 			msgCopy.ID = "" // Each fan-out copy gets its own ID from bd create
 			msgCopy.Subject = fmt.Sprintf("[channel:%s] %s", channelName, msg.Subject)
+			// The channel-origin bead (created above) already carries the
+			// cc:<identity> labels. Clear CC here so each subscriber fan-out
+			// copy doesn't also emit cc labels — otherwise a CC recipient's
+			// inbox query matches every fan-out bead and shows the message N times.
+			msgCopy.CC = nil
 
 			if err := r.sendToSingle(&msgCopy); err != nil {
 				errs = append(errs, fmt.Sprintf("%s: %v", subscriber, err))
