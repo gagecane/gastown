@@ -248,8 +248,13 @@ func TestSlotOpenCoalescer_ConcurrentAdds(t *testing.T) {
 		batches = append(batches, append([]slotOpenEvent{}, events...))
 	}
 
-	c := newSlotOpenCoalescer(40*time.Millisecond, dispatch)
-	done := c.flushNotifyCh()
+	// Use a window far larger than the test can run so the AfterFunc timer
+	// never fires mid-test. Coupling a real wall-clock timer to goroutine
+	// scheduling is flaky under load: if any Add goroutine is delayed past a
+	// short window, the timer flushes a partial batch or a late Add opens a
+	// second window (gu-9hstb). Instead we drive the flush deterministically
+	// with an explicit Flush() after all Adds complete.
+	c := newSlotOpenCoalescer(time.Hour, dispatch)
 
 	const workers = 20
 	var wg sync.WaitGroup
@@ -262,11 +267,9 @@ func TestSlotOpenCoalescer_ConcurrentAdds(t *testing.T) {
 	}
 	wg.Wait()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("coalescer did not flush within 2s")
-	}
+	// Flush is synchronous: it stops the timer and dispatches before returning,
+	// so no double-dispatch is possible and batches is fully populated here.
+	c.Flush()
 
 	mu.Lock()
 	defer mu.Unlock()
