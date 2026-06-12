@@ -1067,9 +1067,39 @@ func (e *Engineer) doMergePR(ctx context.Context, branch, target string) Process
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to pull %s after PR merge: %v\n", target, err)
 	}
 
+	// When the provider returns no synchronous merge commit, do NOT fabricate
+	// one from the post-pull HEAD. Doing so makes VerifyPushedCommit compare
+	// origin/<target> to that same just-pulled tip — passing trivially and
+	// declaring Success:true for a merge that never happened, which then drives
+	// the destructive post-merge close (bead-close + branch delete). Async
+	// providers (CRUX `cr --auto-merge`) mark the review merge-eligible and let
+	// the server merge later once approvals land, so there is no SHA at call
+	// time. Verify the merge actually landed before declaring success; otherwise
+	// defer as pending. (gu-nid89.34)
 	if mergeCommit == "" {
-		if sha, err := e.git.Rev("HEAD"); err == nil {
-			mergeCommit = sha
+		// Best effort: an optional mergedPRFinder can report the real merge
+		// commit for the branch. Verify it's an ancestor of origin/<target>
+		// before trusting it — fail-closed against phantom merges, mirroring
+		// the gs-4uz already-merged path above.
+		if finder, ok := e.prProvider.(mergedPRFinder); ok {
+			if sha, fErr := finder.FindMergedPRCommit(branch); fErr == nil && sha != "" {
+				if landed, ancErr := e.git.IsAncestor(sha, target); ancErr == nil && landed {
+					mergeCommit = sha
+				}
+			}
+		}
+		if mergeCommit == "" {
+			// The merge has not landed on origin/<target> yet — the normal
+			// async-merge case. Defer instead of fabricating a SHA: treat it
+			// like NeedsApproval so the MR stays in the queue and is retried on
+			// the next poll, without closing the source bead or deleting the
+			// branch CRUX has not yet merged.
+			_, _ = fmt.Fprintf(e.output, "[Engineer] PR #%d: provider returned no synchronous merge commit and the merge has not landed on %s — deferring (async merge pending)\n", prNumber, target)
+			return ProcessResult{
+				Success:       false,
+				NeedsApproval: true,
+				Error:         fmt.Sprintf("PR #%d merge pending: async provider has not landed the merge on origin/%s yet", prNumber, target),
+			}
 		}
 	}
 	if err := e.git.VerifyPushedCommit("origin", target, mergeCommit); err != nil {

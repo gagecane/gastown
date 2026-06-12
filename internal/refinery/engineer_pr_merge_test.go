@@ -195,6 +195,88 @@ func TestDoMergePR_NoOpenPR_NoMergedPR_StillFails(t *testing.T) {
 	}
 }
 
+// fakeAsyncPRProvider models an asynchronous provider (CRUX): it reports an
+// OPEN PR for the branch but MergePR returns no synchronous commit SHA because
+// the server merges later once approvals land. It optionally implements
+// mergedPRFinder to report a post-merge SHA.
+type fakeAsyncPRProvider struct {
+	prNumber     int
+	mergedCommit string // returned by FindMergedPRCommit; "" means not merged yet
+	withFinder   bool   // when false, does not implement mergedPRFinder semantics
+}
+
+func (f *fakeAsyncPRProvider) FindPRNumber(string) (int, error)    { return f.prNumber, nil }
+func (f *fakeAsyncPRProvider) IsPRApproved(int) (bool, error)      { return true, nil }
+func (f *fakeAsyncPRProvider) MergePR(int, string) (string, error) { return "", nil }
+
+// fakeAsyncPRProviderNoFinder is the same as fakeAsyncPRProvider but never
+// implements mergedPRFinder, so the refinery cannot confirm a landed commit.
+type fakeAsyncPRProviderNoFinder struct{ prNumber int }
+
+func (f *fakeAsyncPRProviderNoFinder) FindPRNumber(string) (int, error)    { return f.prNumber, nil }
+func (f *fakeAsyncPRProviderNoFinder) IsPRApproved(int) (bool, error)      { return true, nil }
+func (f *fakeAsyncPRProviderNoFinder) MergePR(int, string) (string, error) { return "", nil }
+
+func (f *fakeAsyncPRProvider) FindMergedPRCommit(string) (string, error) {
+	if !f.withFinder {
+		return "", nil
+	}
+	return f.mergedCommit, nil
+}
+
+func TestDoMergePR_AsyncNoSHA_NotLanded_DefersNotSuccess(t *testing.T) {
+	// gu-nid89.34: an async provider (CRUX) returns no synchronous merge commit.
+	// The merge has NOT landed on origin/main. doMergePR must NOT fabricate a SHA
+	// from post-pull HEAD and declare Success — that would drive a destructive
+	// bead-close + branch delete on work the server hasn't merged. Expect a
+	// deferral (NeedsApproval), not Success.
+	workDir, g, _ := testGitRepo(t)
+	e := newTestEngineer(t, workDir, g)
+	createFeatureBranch(t, workDir, "feat/async-pending", "test.txt", "hello")
+
+	e.prProvider = &fakeAsyncPRProviderNoFinder{prNumber: 42}
+
+	result := e.doMergePR(context.Background(), "feat/async-pending", "main")
+
+	if result.Success {
+		t.Fatal("expected non-Success when async provider has not landed the merge")
+	}
+	if !result.NeedsApproval {
+		t.Errorf("expected NeedsApproval=true (defer + stay in queue), got result: %+v", result)
+	}
+	if result.MergeCommit != "" {
+		t.Errorf("expected empty MergeCommit (nothing landed), got %s", result.MergeCommit)
+	}
+}
+
+func TestDoMergePR_AsyncNoSHA_FinderConfirmsLanded_Success(t *testing.T) {
+	// gu-nid89.34: an async provider returns no synchronous SHA, but the merge
+	// HAS landed and a mergedPRFinder reports the real commit. After verifying it
+	// is an ancestor of origin/main, doMergePR should treat it as a successful
+	// merge with the real SHA.
+	workDir, g, _ := testGitRepo(t)
+	e := newTestEngineer(t, workDir, g)
+
+	// Land the branch's work on origin/main, then delete the branch — the merge
+	// is real and on mainline, exactly what the finder would report.
+	createFeatureBranch(t, workDir, "feat/async-landed", "landed.txt", "landed")
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--no-ff", "feat/async-landed", "-m", "merge feat")
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "HEAD")
+
+	e.prProvider = &fakeAsyncPRProvider{prNumber: 7, mergedCommit: mergeCommit, withFinder: true}
+
+	result := e.doMergePR(context.Background(), "feat/async-landed", "main")
+
+	if !result.Success {
+		t.Fatalf("expected Success when finder confirms a landed merge, got: %+v", result)
+	}
+	if result.MergeCommit != mergeCommit {
+		t.Errorf("expected MergeCommit %s, got %s", mergeCommit, result.MergeCommit)
+	}
+}
+
 func TestProcessResult_NeedsApproval(t *testing.T) {
 	// Verify NeedsApproval field works on ProcessResult.
 	r := ProcessResult{
