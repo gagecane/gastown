@@ -92,15 +92,33 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
 
-	// Dedup: if --dedup and --signature are set, check for an existing open
-	// escalation with the same signature. Bump its occurrence count instead of
-	// creating a new bead, keeping the HQ wisp table from growing unbounded.
+	// Auto-coalesce Dolt connection-pool saturation escalations across senders.
+	// During one saturation event, many agents independently observe the
+	// climbing pool and each fire a fresh [CRITICAL]. The dedup path below is
+	// content-keyed and cross-sender, but free-form Dolt escalations never pass
+	// --signature, so each becomes a new bead (storm of 10-18/incident). When no
+	// explicit signature was given, derive a canonical incident key so the storm
+	// merges into one thread (occurrence_count bumps), per audit recommendation
+	// #3 in reports/audit-2026-06/logs-dolt-archive.md. (gu-s2l9t)
+	effectiveSignature := escalateSignature
+	effectiveDedup := escalateDedup
+	if effectiveSignature == "" {
+		if sig := doltSaturationSignature(description, escalateSource); sig != "" {
+			effectiveSignature = sig
+			effectiveDedup = true
+		}
+	}
+
+	// Dedup: if --dedup and --signature are set (or auto-derived above), check
+	// for an existing open escalation with the same signature. Bump its
+	// occurrence count instead of creating a new bead, keeping the HQ wisp table
+	// from growing unbounded.
 	//
 	// gu-ah40: also suppress re-fires when a matching escalation was closed
 	// within --dedup-window. Without that, the moment a deduped escalation
 	// closes the next plugin cycle creates a fresh bead, defeating the dedup.
-	if escalateDedup && escalateSignature != "" {
-		existing, existingFields, err := bd.FindRecentEscalationBySignature(escalateSignature, escalateDedupWindow)
+	if effectiveDedup && effectiveSignature != "" {
+		existing, existingFields, err := bd.FindRecentEscalationBySignature(effectiveSignature, escalateDedupWindow)
 		if err == nil && existing != nil {
 			if existing.Status == "closed" {
 				// Closed-within-window: suppress entirely. Do NOT bump the
@@ -109,7 +127,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 				if debugDedup() {
 					fmt.Fprintf(os.Stderr,
 						"gt escalate: suppressed by dedup signature %q (matched closed escalation %s, window=%s)\n",
-						escalateSignature, existing.ID, escalateDedupWindow)
+						effectiveSignature, existing.ID, escalateDedupWindow)
 				}
 				if escalateJSON {
 					out, _ := json.MarshalIndent(map[string]interface{}{
@@ -117,7 +135,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 						"deduped":    true,
 						"suppressed": true,
 						"reason":     "matching escalation closed within dedup-window",
-						"signature":  escalateSignature,
+						"signature":  effectiveSignature,
 						"window":     escalateDedupWindow.String(),
 					}, "", "  ")
 					fmt.Println(string(out))
@@ -136,7 +154,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 					"id":               existing.ID,
 					"deduped":          true,
 					"occurrence_count": newCount,
-					"signature":        escalateSignature,
+					"signature":        effectiveSignature,
 				}, "", "  ")
 				fmt.Println(string(out))
 			} else {
@@ -177,7 +195,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		Severity:    severity,
 		Reason:      escalateReason,
 		Source:      escalateSource,
-		Signature:   escalateSignature,
+		Signature:   effectiveSignature,
 		EscalatedBy: agentID,
 		EscalatedAt: time.Now().Format(time.RFC3339),
 		RelatedBead: escalateRelatedBead,
@@ -319,6 +337,39 @@ func debugDedup() bool {
 		return true
 	}
 	return false
+}
+
+// doltSaturationSignature returns a canonical, cross-sender dedup signature for
+// Dolt connection-pool saturation escalations, or "" if the escalation is not
+// of that class. During one saturation event many agents independently observe
+// the climbing pool and each fire a fresh [CRITICAL] (peak 18/hr in the
+// archive). Stamping all of them with the same signature lets the existing
+// dedup path coalesce them into one incident thread. (gu-s2l9t)
+//
+// The match is intentionally narrow: it requires both a Dolt signal AND a
+// saturation/connection-leak signal in the description or source, so generic
+// Dolt escalations (crash, imposter, read-only) are NOT swallowed into the
+// saturation incident — those have distinct remediation and should stay legible.
+func doltSaturationSignature(description, source string) string {
+	hay := strings.ToLower(description + " " + source)
+	if !strings.Contains(hay, "dolt") {
+		return ""
+	}
+	saturationSignals := []string{
+		"saturat",         // "pool saturation", "saturated"
+		"pool",            // "connection pool", "pool climbing"
+		"connection leak", // explicit leak phrasing
+		"conn leak",       // shorthand
+		"max_connections", // hitting the cap
+		"too many connections",
+		"/1000", // "935/1000" pool-usage phrasing from the archive
+	}
+	for _, sig := range saturationSignals {
+		if strings.Contains(hay, sig) {
+			return "dolt-incident:saturation"
+		}
+	}
+	return ""
 }
 
 func escalationFingerprintLabel(raw string) string {

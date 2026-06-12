@@ -474,6 +474,97 @@ func TestDeliveryStatusOmitsEmptyFields(t *testing.T) {
 	}
 }
 
+// TestDoltSaturationSignature verifies the cross-sender coalescing classifier:
+// Dolt pool-saturation escalations get a canonical signature so distinct
+// observers of one incident merge into a single thread, while non-saturation
+// Dolt escalations (and non-Dolt escalations) are left untouched. (gu-s2l9t)
+func TestDoltSaturationSignature(t *testing.T) {
+	const sat = "dolt-incident:saturation"
+	tests := []struct {
+		name        string
+		description string
+		source      string
+		want        string
+	}{
+		{
+			name:        "pool climb description coalesces",
+			description: "Dolt: connection pool climbing 935/1000",
+			want:        sat,
+		},
+		{
+			name:        "saturation wording coalesces",
+			description: "Dolt pool saturation detected",
+			want:        sat,
+		},
+		{
+			name:        "connection leak phrasing coalesces",
+			description: "Dolt connection leak — conns not returning to baseline",
+			want:        sat,
+		},
+		{
+			name:        "max_connections cap coalesces",
+			description: "Dolt hit max_connections",
+			want:        sat,
+		},
+		{
+			name:        "signal split across description and source",
+			description: "pool climbing toward cap",
+			source:      "patrol:dolt-health",
+			want:        sat,
+		},
+		{
+			name:        "case insensitive match",
+			description: "DOLT POOL SATURATED",
+			want:        sat,
+		},
+		{
+			name:        "dolt crash is not saturation",
+			description: "Dolt: server unreachable, crash-looping",
+			want:        "",
+		},
+		{
+			name:        "dolt read-only is not saturation",
+			description: "Dolt server is read-only",
+			want:        "",
+		},
+		{
+			name:        "non-dolt pool escalation is not matched",
+			description: "Lambda connection pool exhausted",
+			want:        "",
+		},
+		{
+			name:        "unrelated escalation",
+			description: "Build failing on main",
+			want:        "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := doltSaturationSignature(tt.description, tt.source)
+			if got != tt.want {
+				t.Errorf("doltSaturationSignature(%q, %q) = %q, want %q",
+					tt.description, tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDoltSaturationSignatureStableAcrossSenders confirms the derived signature
+// does not depend on the sender/source identity — the whole point is that
+// distinct agents observing the same incident produce the SAME key so the
+// dedup path coalesces them. (gu-s2l9t)
+func TestDoltSaturationSignatureStableAcrossSenders(t *testing.T) {
+	desc := "Dolt: connection pool climbing 771->935/1000"
+	a := doltSaturationSignature(desc, "patrol:witness")
+	b := doltSaturationSignature(desc, "patrol:refinery")
+	if a == "" {
+		t.Fatal("expected a saturation signature, got empty")
+	}
+	if a != b {
+		t.Errorf("signature differs across senders: %q vs %q", a, b)
+	}
+}
+
 // --- helpers ---
 
 // (captureStdout is defined in prime_test.go and reused here.)
