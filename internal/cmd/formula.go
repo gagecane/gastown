@@ -679,6 +679,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 
 	// Step 3: Create synthesis bead if defined
 	var synthesisBeadID string
+	var synthesisDepFailures []string
 	if f.Synthesis != nil {
 		synthesisBeadID = fmt.Sprintf("%s-syn-%s", rigPrefix, generateFormulaShortID())
 
@@ -732,12 +733,19 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 			// Track synthesis with convoy
 			_ = addTrackingRelationWithRetry(townRoot, convoyID, synthesisBeadID)
 
-			// Add dependencies: synthesis depends on all legs
+			// Add dependencies: synthesis is blocked by all legs. These edges are
+			// what make `bd blocked` (and therefore the dispatcher) hold the
+			// synthesis bead until every leg closes. A silently-dropped edge here
+			// leaves the synthesis bead with no blockers, so the scheduler hooks
+			// it prematurely and it runs with no leg inputs — fabricating a verdict
+			// from nothing (gu-lv5lt). Retry on read-after-write lag and refuse to
+			// claim the bead is blocked if any edge could not be wired.
 			for _, legBeadID := range legBeads {
-				_ = BdCmd("dep", "add", synthesisBeadID, legBeadID).
-					WithAutoCommit().
-					Dir(rigBeadsDir).
-					Run()
+				if err := addBlockingDepWithRetry(rigBeadsDir, synthesisBeadID, legBeadID); err != nil {
+					synthesisDepFailures = append(synthesisDepFailures, legBeadID)
+					fmt.Printf("%s Failed to block synthesis %s on leg %s: %v\n",
+						style.Warning.Render("⚠"), synthesisBeadID, legBeadID, err)
+				}
 			}
 
 			fmt.Printf("  %s Created synthesis: %s\n", style.Dim.Render("★"), synthesisBeadID)
@@ -786,7 +794,16 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 	fmt.Printf("  Convoy:  %s\n", convoyID)
 	fmt.Printf("  Legs:    %d dispatched\n", slingCount)
 	if synthesisBeadID != "" {
-		fmt.Printf("  Synthesis: %s (blocked until legs complete)\n", synthesisBeadID)
+		if len(synthesisDepFailures) > 0 {
+			// Be honest: the bead is NOT fully gated. Surface the missing edges
+			// loudly so an operator can wire them before the scheduler hooks the
+			// synthesis bead with incomplete inputs (gu-lv5lt).
+			fmt.Printf("  %s Synthesis: %s (NOT fully blocked — %d leg edge(s) failed to wire: %s)\n",
+				style.Warning.Render("⚠"), synthesisBeadID, len(synthesisDepFailures), strings.Join(synthesisDepFailures, ", "))
+			fmt.Printf("       Re-wire before it dispatches: bd dep add %s <leg-id> --type=blocks\n", synthesisBeadID)
+		} else {
+			fmt.Printf("  Synthesis: %s (blocked until legs complete)\n", synthesisBeadID)
+		}
 	}
 	fmt.Printf("\n  Track progress: gt convoy status %s\n", convoyID)
 

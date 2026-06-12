@@ -81,6 +81,45 @@ func addTrackingRelationWithRetry(townRoot, trackerID, issueID string) error {
 	return err
 }
 
+// addBlockingDepWithRetry wires a `blocks` dependency edge (issueID is blocked
+// by dependsOnID) via the bd CLI, retrying with exponential backoff while either
+// bead is not yet visible (Dolt read-after-write lag). The edge is created in
+// beadsDir.
+//
+// Unlike the fire-and-forget `_ = BdCmd("dep","add",...)` calls this replaces,
+// it returns the final error so callers can refuse to claim a bead is "blocked
+// until its deps complete" when the blocking edge was actually lost. A dropped
+// edge here is exactly what let the daemon dispatch a synthesis bead with no
+// inputs (gu-lv5lt): the bead had no blockers, so `bd blocked` reported nothing
+// and the scheduler correctly — but prematurely — hooked it.
+//
+// CombinedOutput is used (not Run) so the not-visible classification can inspect
+// bd's stderr text, which the bare exit-status error does not carry.
+func addBlockingDepWithRetry(beadsDir, issueID, dependsOnID string) error {
+	var err error
+	for attempt := 0; attempt < trackingRetryMaxAttempts; attempt++ {
+		var out []byte
+		out, err = BdCmd("dep", "add", issueID, dependsOnID, "--type=blocks").
+			WithAutoCommit().
+			Dir(beadsDir).
+			CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		// Wrap the error with bd's output so the not-visible classifier (which
+		// matches on "not found" / "does not exist") can see the CLI message.
+		combined := fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		if !isBeadNotVisibleErr(combined) {
+			return combined
+		}
+		err = combined
+		if attempt < trackingRetryMaxAttempts-1 && trackingRetryBaseDelay > 0 {
+			time.Sleep(trackingRetryBaseDelay << attempt)
+		}
+	}
+	return err
+}
+
 func removeTrackingRelation(townRoot, trackerID, issueID string) error {
 	townRoot = normalizeTownRoot(townRoot)
 	if err := mutateTrackingRelationViaStore(townRoot, trackerID, issueID, false); err != nil {
