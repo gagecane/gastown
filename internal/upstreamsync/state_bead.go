@@ -53,6 +53,19 @@ func EnsureStateBead(b *beads.Beads, rigPrefix, rigName string, cfg *config.Upst
 
 	beadID := StateBeadID(rigPrefix)
 
+	// Re-root the wrapper to the bead's owning database before any
+	// create/show/update. `gt upstream sync` builds its beads wrapper rooted
+	// at the town `.beads`, but the state bead's prefix (e.g. "gu-") routes to
+	// the rig database via routes.jsonl. Show/Update follow that prefix route,
+	// whereas CreateWithID (no Rig/Parent) lands the bead in the wrapper's
+	// fallback (town) directory. The result: create succeeds in the town DB,
+	// the immediate pin Update looks in the rig DB and fails with "issue not
+	// found", and every sync run orphans a bead in the town DB. ForIssueID
+	// resolves the prefix once so all three operations target the same DB.
+	// In isolated tests (no routes.jsonl) this is a no-op — the wrapper is
+	// returned unchanged.
+	b = b.ForIssueID(beadID)
+
 	// Check for existing bead.
 	existing, err := b.Show(beadID)
 	if err == nil {

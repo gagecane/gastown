@@ -75,16 +75,39 @@ func DetectConflicts(gitDir, head, upstream string) (ConflictReport, error) {
 		return ConflictReport{}, fmt.Errorf("DetectConflicts: empty ref(s) head=%q upstream=%q", head, upstream)
 	}
 
-	// Try modern flag first.
+	// Try modern flag first. `git merge-tree --write-tree` uses its exit
+	// code to signal the merge result, NOT command failure:
+	//   exit 0 → clean merge (output is just the tree OID)
+	//   exit 1 → merge conflicts (output lists conflicted files, then an
+	//            informational section)
+	//   other  → genuine error (e.g. old git: "unknown option --write-tree")
+	// Treating exit 1 as a failure (the old `if err == nil` guard) made every
+	// real conflict fall through to the legacy path below — which passed
+	// `head` as both base and one side, so it could never report a conflict
+	// and always returned "clean". That silently routed conflicted syncs into
+	// the inline-merge path instead of escalation.
 	out, err := exec.Command("git", "-C", gitDir,
 		"merge-tree", "--write-tree", "--name-only", head, upstream).CombinedOutput()
 	if err == nil {
+		// Clean merge: only the tree OID is emitted.
+		return parseMergeTreeOutput(string(out)), nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		// Conflicts: parse the conflicted-file list.
 		return parseMergeTreeOutput(string(out)), nil
 	}
 
-	// Fall back to the legacy merge-tree (no --write-tree).
+	// Any other exit status means the modern flag is unsupported (old git)
+	// or git itself errored. Fall back to the legacy merge-tree, which needs
+	// the true merge base as the first argument so the three-way diff can
+	// surface conflicts.
+	base, berr := mergeBase(gitDir, head, upstream)
+	if berr != nil {
+		return ConflictReport{}, fmt.Errorf("git merge-tree --write-tree failed (%v) and merge-base fallback failed: %w",
+			err, berr)
+	}
 	legacy, lerr := exec.Command("git", "-C", gitDir,
-		"merge-tree", head, upstream, head).CombinedOutput()
+		"merge-tree", base, head, upstream).CombinedOutput()
 	if lerr != nil {
 		return ConflictReport{}, fmt.Errorf("git merge-tree (legacy fallback) failed: %w: %s",
 			lerr, strings.TrimSpace(string(legacy)))
@@ -92,10 +115,33 @@ func DetectConflicts(gitDir, head, upstream string) (ConflictReport, error) {
 	return parseLegacyMergeTreeOutput(string(legacy)), nil
 }
 
+// mergeBase returns the common ancestor of two refs, used to seed the
+// legacy three-way `git merge-tree <base> <branch1> <branch2>` form.
+func mergeBase(gitDir, a, b string) (string, error) {
+	out, err := exec.Command("git", "-C", gitDir, "merge-base", a, b).Output()
+	if err != nil {
+		return "", fmt.Errorf("git merge-base %s %s: %w", a, b, err)
+	}
+	base := strings.TrimSpace(string(out))
+	if base == "" {
+		return "", fmt.Errorf("git merge-base %s %s: empty result", a, b)
+	}
+	return base, nil
+}
+
 // parseMergeTreeOutput parses the modern `git merge-tree --write-tree
-// --name-only` format. The first line is the resulting tree SHA; the
-// remaining lines are conflicted file names (one per line). When there
-// are no conflicts, only the SHA is emitted.
+// --name-only` format. The layout is:
+//
+//	<merged tree OID>
+//	<conflicted file>        (zero or more, one per line)
+//	...
+//	<blank line>             (separator — present only when conflicts exist)
+//	<informational messages> (e.g. "Auto-merging x", "CONFLICT (...)")
+//
+// When there are no conflicts, only the tree OID line is emitted. We read
+// the file list and STOP at the first blank line so the trailing
+// informational section ("Auto-merging …", "CONFLICT …") is not mistaken
+// for conflicted file paths.
 //
 // We don't get hunk counts from --name-only; HunkCount stays 0. Callers
 // that need a precise hunk count should call ParseConflictMarkers after
@@ -115,7 +161,10 @@ func parseMergeTreeOutput(s string) ConflictReport {
 			continue
 		}
 		if line == "" {
-			continue
+			// Blank line separates the file list from the trailing
+			// informational section. Everything after it is messages,
+			// not file paths.
+			break
 		}
 		report.Files = append(report.Files, line)
 	}
