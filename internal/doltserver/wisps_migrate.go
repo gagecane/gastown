@@ -261,8 +261,10 @@ func copyAuxiliaryData(workDir string, result *MigrateWispsResult) error {
 	// Copy labels
 	if err := bdSQL(workDir,
 		"INSERT IGNORE INTO wisp_labels (issue_id, label) SELECT l.issue_id, l.label FROM labels l INNER JOIN wisps w ON l.issue_id = w.id"); err != nil {
-		// Non-fatal if no matching labels
-		if !strings.Contains(err.Error(), "nothing") {
+		// Non-fatal only when DOLT_COMMIT found nothing to commit (INSERT matched
+		// 0 rows). Any other failure must propagate — a substring match on
+		// "nothing" would silently swallow real errors and drop data.
+		if !isNothingToCommit(err) {
 			return fmt.Errorf("copying labels: %w", err)
 		}
 	}
@@ -272,7 +274,7 @@ func copyAuxiliaryData(workDir string, result *MigrateWispsResult) error {
 	// Copy comments
 	if err := bdSQL(workDir,
 		"INSERT IGNORE INTO wisp_comments (issue_id, author, text, created_at) SELECT c.issue_id, c.author, c.text, c.created_at FROM comments c INNER JOIN wisps w ON c.issue_id = w.id"); err != nil {
-		if !strings.Contains(err.Error(), "nothing") {
+		if !isNothingToCommit(err) {
 			return fmt.Errorf("copying comments: %w", err)
 		}
 	}
@@ -282,7 +284,7 @@ func copyAuxiliaryData(workDir string, result *MigrateWispsResult) error {
 	// Copy events
 	if err := bdSQL(workDir,
 		"INSERT IGNORE INTO wisp_events (issue_id, event_type, actor, old_value, new_value, comment, created_at) SELECT e.issue_id, e.event_type, e.actor, e.old_value, e.new_value, e.comment, e.created_at FROM events e INNER JOIN wisps w ON e.issue_id = w.id"); err != nil {
-		if !strings.Contains(err.Error(), "nothing") {
+		if !isNothingToCommit(err) {
 			return fmt.Errorf("copying events: %w", err)
 		}
 	}
@@ -292,7 +294,7 @@ func copyAuxiliaryData(workDir string, result *MigrateWispsResult) error {
 	// Copy dependencies
 	if err := bdSQL(workDir,
 		"INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_issue_id, type, created_at, created_by, metadata, thread_id) SELECT d.issue_id, d.depends_on_issue_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id FROM dependencies d INNER JOIN wisps w ON d.issue_id = w.id"); err != nil {
-		if !strings.Contains(err.Error(), "nothing") {
+		if !isNothingToCommit(err) {
 			return fmt.Errorf("copying dependencies: %w", err)
 		}
 	}
@@ -505,8 +507,44 @@ var wispAuxTableDDLs = []wispAuxTableDDL{
 	},
 }
 
+// copyVerified reports whether enough agent beads were copied into wisps to
+// safely close the open originals. The copy must account for at least every
+// open original (wisps holds agent beads of any status, so the count is >=).
+func copyVerified(copiedAgents, openOriginals int) bool {
+	return copiedAgents >= openOriginals
+}
+
 // closeOriginalAgentBeads closes the original agent beads in the issues table.
+//
+// This is the irreversible step of the migration: once an original is closed it
+// is no longer the live record, so the copy into wisps MUST have succeeded first.
+// A surrounding DOLT_BEGIN/COMMIT transaction is not available here — each bd sql
+// call is a separate subprocess, so the copy (copyAgentBeadsToWisps) and this
+// close cannot share one transaction. Instead we gate the close on a verified
+// row-count match: every open agent bead about to be closed must already have a
+// counterpart in wisps. If the copy dropped rows, we abort and leave the
+// originals open rather than risk losing data.
 func closeOriginalAgentBeads(workDir string, result *MigrateWispsResult) error {
+	// Verification gate. We count rather than use a cross-table subquery because
+	// a subquery mixing regular and dolt_ignored tables can crash the Dolt server.
+	// copyAgentBeadsToWisps copies every agent bead (any status) into wisps, so
+	// the wisps agent count must be >= the open originals we are about to close.
+	openOriginals, err := bdSQLCount(workDir,
+		"SELECT COUNT(*) as cnt FROM issues WHERE issue_type = 'agent' AND status = 'open'")
+	if err != nil {
+		return fmt.Errorf("counting open agent originals: %w", err)
+	}
+	copiedAgents, err := bdSQLCount(workDir,
+		"SELECT COUNT(*) as cnt FROM wisps WHERE issue_type = 'agent'")
+	if err != nil {
+		return fmt.Errorf("counting copied agent wisps: %w", err)
+	}
+	if !copyVerified(copiedAgents, openOriginals) {
+		return fmt.Errorf(
+			"refusing to close originals: copy incomplete (%d agent wisps < %d open originals) — leaving originals open to avoid data loss",
+			copiedAgents, openOriginals)
+	}
+
 	// Close all open agent beads. We don't use a cross-table subquery because
 	// that can crash the Dolt server when mixing regular and dolt_ignored tables.
 	if err := bdSQL(workDir,
