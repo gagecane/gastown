@@ -552,3 +552,113 @@ func TestDispatchWaitMs(t *testing.T) {
 		})
 	}
 }
+
+// TestFingerprintLabelOf pins extraction of the classifier's "fingerprint:<hash>"
+// dedup label from a bead's label set (gu-42qcl).
+func TestFingerprintLabelOf(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"no labels", nil, ""},
+		{"no fingerprint label", []string{"bug", "do-not-dispatch"}, ""},
+		{"fingerprint label present", []string{"bug", "fingerprint:fc0b4887fb33"}, "fingerprint:fc0b4887fb33"},
+		{"fingerprint label first", []string{"fingerprint:abc123", "sentinel"}, "fingerprint:abc123"},
+		{"prefix-only is still matched", []string{"fingerprint:"}, "fingerprint:"},
+		{"substring must not false-match", []string{"x-fingerprint:nope"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fingerprintLabelOf(tt.labels); got != tt.want {
+				t.Errorf("fingerprintLabelOf(%v) = %q, want %q", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsSuppressionSentinelLabelSet pins which label sets count as an explicit
+// fingerprint-suppression authority (gu-42qcl). A bare closed sibling (no marker)
+// must NOT suppress — the failure_classifier legitimately re-files recurrences.
+func TestIsSuppressionSentinelLabelSet(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"sentinel label", []string{"sentinel"}, true},
+		{"do-not-dispatch label", []string{"do-not-dispatch"}, true},
+		{"pinned label", []string{"pinned"}, true},
+		{"sentinel + do-not-dispatch + fingerprint", []string{"sentinel", "do-not-dispatch", "fingerprint:abc"}, true},
+		{"bare fingerprint only — NOT a suppressor", []string{"fingerprint:abc"}, false},
+		{"unrelated labels — NOT a suppressor", []string{"bug", "p2"}, false},
+		{"no labels", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSuppressionSentinelLabelSet(tt.labels); got != tt.want {
+				t.Errorf("isSuppressionSentinelLabelSet(%v) = %v, want %v", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGetReadySlingContexts_FingerprintSuppression is the gu-42qcl regression
+// gate: a sibling work bead sharing a fingerprint with a closed+sentineled
+// canonical must be dropped from the dispatch candidate set; a sibling whose
+// fingerprint has no suppressor still dispatches; the canonical itself is never
+// treated as its own suppressor.
+func TestGetReadySlingContexts_FingerprintSuppression(t *testing.T) {
+	tests := []struct {
+		name         string
+		labels       []string
+		suppressor   string // value fingerprintSuppressorFn returns for this bead
+		wantFiltered bool
+	}{
+		{
+			name:         "sibling with suppressed fingerprint is dropped",
+			labels:       []string{"bug", "fingerprint:fc0b4887fb33"},
+			suppressor:   "cae2-ymt",
+			wantFiltered: true,
+		},
+		{
+			name:         "fingerprint with no suppressor still dispatches",
+			labels:       []string{"bug", "fingerprint:fc0b4887fb33"},
+			suppressor:   "",
+			wantFiltered: false,
+		},
+		{
+			name:         "bead with no fingerprint label is never suppressed",
+			labels:       []string{"bug"},
+			suppressor:   "should-not-be-consulted",
+			wantFiltered: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calledWithNoFP := false
+			prev := fingerprintSuppressorFn
+			fingerprintSuppressorFn = func(townRoot, workBeadID, fpLabel string) string {
+				if fpLabel == "" {
+					calledWithNoFP = true
+				}
+				return tt.suppressor
+			}
+			t.Cleanup(func() { fingerprintSuppressorFn = prev })
+
+			suppressed := false
+			if fpLabel := fingerprintLabelOf(tt.labels); fpLabel != "" {
+				if canonical := fingerprintSuppressorFn("/town", "wb-1", fpLabel); canonical != "" {
+					suppressed = true
+				}
+			}
+			if suppressed != tt.wantFiltered {
+				t.Errorf("suppressed = %v, want %v", suppressed, tt.wantFiltered)
+			}
+			if tt.name == "bead with no fingerprint label is never suppressed" && calledWithNoFP {
+				t.Error("suppressor consulted for a bead with no fingerprint label")
+			}
+		})
+	}
+}

@@ -132,6 +132,18 @@ For each ready issue, determine target rig from issue prefix:
 - bd-* issues → beads rig
 - etc.
 
+**Routing guard — do NOT dispatch code tasks into gitignored paths (gu-na4id):**
+Skip any CDK/Python (or other per-package) code task whose code target
+resolves to a path the target rig gitignores — most commonly a MetaRepo
+(`ti-*`) bead whose work lands under `workspaces/`. A MetaRepo rig gitignores
+`workspaces/` and its `pre-merge-check.sh` fails any MR tracking files under
+`workspaces/` (besides `.gitkeep`), so the polecat's commits can never merge and
+the bead loops on re-dispatch (root cause of the ticd-a3b incident). Route such
+work to the correct per-package merge rig (`ticd-*` / `tite-*`) whose checkout
+tracks that package's source instead; if none exists, leave the bead for
+human/mayor triage rather than dispatching it into a gitignored path. Likewise,
+never author a code task as a `ti-*` MetaRepo bead.
+
 **Exit criteria:** Dispatch plan created with issue→rig mappings."""
 
 [[steps]]

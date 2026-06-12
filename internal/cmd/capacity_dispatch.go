@@ -1115,6 +1115,25 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 			continue
 		}
 
+		// Fingerprint suppression (gu-42qcl). A candidate carrying a
+		// "fingerprint:<hash>" label is one of N siblings the failure_classifier
+		// filed for the same root cause. Once an operator/agent has CLOSED the
+		// canonical sibling with sentinel + do-not-dispatch labels, that decision
+		// must suppress the WHOLE fingerprint — but the per-bead tripwire guards
+		// above only see THIS bead's own labels, so an un-labeled sibling sailed
+		// through and got re-dispatched (the casc_e2e dedup loop: cae2-un9/adf/u1e
+		// re-dispatched after canonical cae2-ymt closed+sentineled). Mirror
+		// gu-526n8's stable-fingerprint suppression: if any non-self bead in the
+		// rig DB holds this fingerprint with a suppression marker (any status,
+		// incl. closed), skip the sibling and let the single canonical stand.
+		if fpLabel := fingerprintLabelOf(workLabels); fpLabel != "" {
+			if canonical := fingerprintSuppressorFn(townRoot, fields.WorkBeadID, fpLabel); canonical != "" {
+				fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=fingerprint_suppressed bead=%s fp=%q canonical=%s\n",
+					style.Dim.Render("○"), fields.WorkBeadID, fpLabel, canonical)
+				continue
+			}
+		}
+
 		result = append(result, capacity.PendingBead{
 			ID:              ctx.issue.ID,
 			WorkBeadID:      fields.WorkBeadID,
@@ -1767,6 +1786,82 @@ func isNonDispatchableIssue(issue *beads.Issue) bool {
 		return false
 	}
 	return isNonDispatchableLabelSet(issue.Type, issue.Labels)
+}
+
+// labelSentinel marks a bead as a standing suppression sentinel for a stable
+// fingerprint (gu-42qcl). A sentinel + do-not-dispatch bead carrying a
+// fingerprint label is the suppression authority: it holds the fingerprint open
+// so siblings sharing it are never re-dispatched, even after the canonical bead
+// is CLOSED.
+const labelSentinel = "sentinel"
+
+// fingerprintLabelPrefix is the prefix of the dedup label carried by beads the
+// failure_classifier files ("fingerprint:<12-hex>"). The dispatch path uses it
+// to find an existing canonical/sentinel for a candidate's fingerprint.
+const fingerprintLabelPrefix = "fingerprint:"
+
+// fingerprintLabelOf returns the "fingerprint:<hash>" label a bead carries, or
+// "" when it has none. The first such label wins (a well-formed classifier bead
+// carries exactly one).
+func fingerprintLabelOf(labels []string) string {
+	for _, l := range labels {
+		if strings.HasPrefix(l, fingerprintLabelPrefix) {
+			return l
+		}
+	}
+	return ""
+}
+
+// isSuppressionSentinelLabelSet reports whether a label set marks a bead as an
+// explicit suppression authority for its fingerprint: it carries the `sentinel`
+// label OR one of the permanent do-not-dispatch / pinned tripwire labels. A bare
+// closed bead sharing the fingerprint is NOT a suppressor — the failure_classifier
+// legitimately re-files a recurrence after a fix-bead closes, and treating every
+// closed sibling as a suppressor would break that. Only an explicit suppression
+// marker stops dispatch (mirrors gu-526n8's pipeline-monitor sentinel contract).
+func isSuppressionSentinelLabelSet(labels []string) bool {
+	return hasLabel(labels, labelSentinel) ||
+		hasLabel(labels, labelDoNotDispatch) ||
+		hasLabel(labels, labelPinned)
+}
+
+// fingerprintSuppressorFn is an injectable seam for the cross-bead fingerprint
+// suppression check (gu-42qcl). Tests drive it without a real `bd list`.
+var fingerprintSuppressorFn = fingerprintSuppressorViaCLI
+
+// fingerprintSuppressorViaCLI returns the ID of an existing suppression sentinel
+// (sentinel / do-not-dispatch / pinned) carrying fpLabel in workBeadID's rig DB,
+// or "" if none. It queries `--status=all` so a CLOSED canonical still suppresses
+// — the exact gap in gu-42qcl: a closed+sentineled canonical did NOT stop sibling
+// dispatch because the only fingerprint lookup (failure_classifier) checked
+// `--status=open`. The candidate work bead is excluded so it never suppresses
+// itself. On any query error we fail OPEN (return "") — a transient bd hiccup
+// must never strand the whole fleet; the per-bead tripwire guards remain the
+// primary defense.
+func fingerprintSuppressorViaCLI(townRoot, workBeadID, fpLabel string) string {
+	if fpLabel == "" || workBeadID == "" {
+		return ""
+	}
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	beadsDir := beads.ResolveBeadsDirForID(townBeadsDir, workBeadID)
+	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	out, err := b.Run("list", "--label="+fpLabel, "--status=all", "--json", "--limit=0")
+	if err != nil {
+		return ""
+	}
+	var issues []*beads.Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return ""
+	}
+	for _, issue := range issues {
+		if issue == nil || issue.ID == workBeadID {
+			continue
+		}
+		if isSuppressionSentinelLabelSet(issue.Labels) {
+			return issue.ID
+		}
+	}
+	return ""
 }
 
 // nowForDeferRelease is a clock seam that lets tests inject a deterministic

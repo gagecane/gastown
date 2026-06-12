@@ -126,6 +126,36 @@ func TestBuildCommand_Review_Claude(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_NextBead_Claude(t *testing.T) {
+	cmd := FindByName("nextbead")
+	if cmd == nil {
+		t.Fatal("nextbead command not found")
+	}
+	content, err := BuildCommand(*cmd, "claude")
+	if err != nil {
+		t.Fatalf("BuildCommand failed: %v", err)
+	}
+
+	// Check frontmatter
+	if !strings.Contains(content, "description: Note context, hook the next bead") {
+		t.Error("missing description")
+	}
+	if !strings.Contains(content, "allowed-tools: Bash(gt handoff:*)") {
+		t.Error("missing allowed-tools for Claude")
+	}
+	if !strings.Contains(content, "argument-hint: [bead-id] [note]") {
+		t.Error("missing argument-hint for Claude")
+	}
+
+	// Check body
+	if !strings.Contains(content, "$ARGUMENTS") {
+		t.Error("missing $ARGUMENTS in body")
+	}
+	if !strings.Contains(content, "gt handoff <bead-id> -y") {
+		t.Error("nextbead command should chain to gt handoff <bead-id> -y")
+	}
+}
+
 func TestNames(t *testing.T) {
 	names := Names()
 	if len(names) < 2 {
@@ -136,5 +166,8 @@ func TestNames(t *testing.T) {
 	}
 	if !slices.Contains(names, "review") {
 		t.Error("missing review command")
+	}
+	if !slices.Contains(names, "nextbead") {
+		t.Error("missing nextbead command")
 	}
 }
