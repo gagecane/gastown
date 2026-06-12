@@ -1159,6 +1159,21 @@ func (g *Git) FetchBranchShallow(remote, branch string) error {
 	return err
 }
 
+// FetchRemoteBranch fetches a single branch at full depth into its remote
+// tracking ref (e.g. refs/remotes/origin/<branch>). Unlike FetchBranchShallow it
+// does not pass --depth, so the full history is available for worktree creation
+// and builds. Use this to add a branch that the clone's configured refspec did
+// not include — e.g. a non-default convoy base branch present on the shared
+// remote but not yet fetched into a rig's bare repo (gu-6vg2a).
+func (g *Git) FetchRemoteBranch(remote, branch string) error {
+	if err := validateGitRefs(remote, branch); err != nil {
+		return err
+	}
+	refspec := branch + ":refs/remotes/" + remote + "/" + branch
+	_, err := g.run("fetch", remote, refspec)
+	return err
+}
+
 // Pull pulls from the remote branch.
 func (g *Git) Pull(remote, branch string) error {
 	if err := validateGitRefs(remote, branch); err != nil {

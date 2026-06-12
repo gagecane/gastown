@@ -21,7 +21,10 @@ import (
 //  1. Missing config.json — the rig has no root config.json, so default_branch
 //     and the beads prefix can't be resolved.
 //  2. Bad base branch — the configured/derived base branch does not exist as
-//     origin/<branch> in the shared bare repo, so `git worktree add` fails.
+//     origin/<branch> in the shared bare repo, so `git worktree add` fails. When
+//     the branch is simply not yet fetched into .repo.git (a sync gap on a
+//     non-default convoy base branch — gu-6vg2a), this self-heals by fetching it
+//     from origin; it only fails when the branch is genuinely absent on origin.
 //
 // baseBranch is the effective base branch already resolved by the caller (may be
 // empty, in which case the rig's configured/derived default branch is used). It
@@ -79,8 +82,21 @@ func preflightRigSpawn(townRoot, rigName, baseBranch string) error {
 		return nil
 	}
 
+	// Sync gap (gu-6vg2a): Gas Town topology has the crew workspace clone and the
+	// polecat bare repo (.repo.git) sharing one remote. A non-default convoy base
+	// branch is pushed to the shared remote by the crew, but .repo.git has not
+	// fetched it — so the local origin/<branch> ref is missing here even though
+	// the branch exists on origin. Attempt to fetch it into the tracking ref
+	// before failing; only error if the branch is genuinely absent on the remote.
+	if fetchErr := bareGit.FetchRemoteBranch("origin", branch); fetchErr == nil {
+		if exists, err := bareGit.RefExists(ref); err == nil && exists {
+			return nil
+		}
+	}
+
 	suggestion := suggestBaseBranches(bareGit)
-	msg := fmt.Sprintf("rig %q base branch %q does not exist as origin/%s in the bare repo (%s)\n"+
+	msg := fmt.Sprintf("rig %q base branch %q does not exist as origin/%s in the bare repo (%s), "+
+		"and could not be fetched from origin.\n"+
 		"Polecat worktree creation would fail with a cryptic git error.",
 		rigName, branch, branch, bareRepoPath)
 	if suggestion != "" {

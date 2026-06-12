@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // setupPreflightRig creates a town root with one rig directory containing an
@@ -57,6 +59,13 @@ func setupPreflightRig(t *testing.T, rigName string, writeConfig bool, defaultBr
 	}
 
 	return townRoot
+}
+
+// newPreflightBareGit opens the bare repo (.repo.git) of the given rig for ref
+// assertions in tests.
+func newPreflightBareGit(t *testing.T, townRoot, rigName string) *git.Git {
+	t.Helper()
+	return git.NewGitWithDir(filepath.Join(townRoot, rigName, ".repo.git"), "")
 }
 
 func runGitPF(t *testing.T, dir string, args ...string) string {
@@ -148,5 +157,93 @@ func TestPreflightRigSpawn_NoBareRepoSkipsBranchCheck(t *testing.T) {
 func TestPreflightRigSpawn_EmptyRigNameNoop(t *testing.T) {
 	if err := preflightRigSpawn(t.TempDir(), "", ""); err != nil {
 		t.Errorf("expected no-op for empty rig name, got: %v", err)
+	}
+}
+
+// setupPreflightRigWithOrigin creates a town root with one rig whose bare repo
+// (.repo.git) has a real "origin" remote pointing at a shared remote repo. The
+// shared remote contains every branch in originBranches; the bare repo's
+// remote-tracking refs are seeded only with fetchedBranches. This models the
+// gu-6vg2a sync gap: a branch present on the shared origin but not yet fetched
+// into .repo.git. Returns the town root.
+func setupPreflightRigWithOrigin(t *testing.T, rigName, defaultBranch string, originBranches, fetchedBranches []string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	cfg := `{"type":"rig","version":1,"name":"` + rigName + `"`
+	if defaultBranch != "" {
+		cfg += `,"default_branch":"` + defaultBranch + `"`
+	}
+	cfg += "}\n"
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	// Shared remote repo with a commit on each requested branch.
+	sharedRemote := filepath.Join(t.TempDir(), "shared.git")
+	runGitPF(t, "", "init", "--bare", sharedRemote)
+	work := t.TempDir()
+	runGitPF(t, work, "init")
+	runGitPF(t, work, "config", "user.email", "test@test.com")
+	runGitPF(t, work, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGitPF(t, work, "add", ".")
+	runGitPF(t, work, "commit", "-m", "init")
+	for _, b := range originBranches {
+		runGitPF(t, work, "push", sharedRemote, "HEAD:refs/heads/"+b)
+	}
+
+	// Bare repo with an origin remote pointing at the shared remote, but only the
+	// fetchedBranches present as remote-tracking refs.
+	bareRepoPath := filepath.Join(rigPath, ".repo.git")
+	runGitPF(t, "", "init", "--bare", bareRepoPath)
+	runGitPF(t, bareRepoPath, "remote", "add", "origin", sharedRemote)
+	for _, b := range fetchedBranches {
+		runGitPF(t, bareRepoPath, "fetch", "origin", b+":refs/remotes/origin/"+b)
+	}
+
+	return townRoot
+}
+
+func TestPreflightRigSpawn_FetchesMissingBaseBranchFromOrigin(t *testing.T) {
+	// The non-default base branch exists on the shared origin but has not been
+	// fetched into .repo.git (gu-6vg2a sync gap). Preflight should self-heal by
+	// fetching it, then succeed.
+	townRoot := setupPreflightRigWithOrigin(t, "myrig", "main",
+		[]string{"main", "design/sidebar"}, []string{"main"})
+
+	if err := preflightRigSpawn(townRoot, "myrig", "design/sidebar"); err != nil {
+		t.Errorf("expected preflight to fetch the missing base branch and succeed, got: %v", err)
+	}
+
+	// The tracking ref must now exist in the bare repo.
+	bareGit := newPreflightBareGit(t, townRoot, "myrig")
+	exists, err := bareGit.RefExists("refs/remotes/origin/design/sidebar")
+	if err != nil {
+		t.Fatalf("RefExists: %v", err)
+	}
+	if !exists {
+		t.Error("expected refs/remotes/origin/design/sidebar to exist after preflight fetch")
+	}
+}
+
+func TestPreflightRigSpawn_FetchAbsentBranchStillErrors(t *testing.T) {
+	// The base branch exists neither in .repo.git nor on the shared origin. The
+	// fetch attempt fails and preflight must still error.
+	townRoot := setupPreflightRigWithOrigin(t, "myrig", "main",
+		[]string{"main"}, []string{"main"})
+
+	err := preflightRigSpawn(townRoot, "myrig", "design/ghost")
+	if err == nil {
+		t.Fatal("expected error for a branch absent on origin, got nil")
+	}
+	if !strings.Contains(err.Error(), "design/ghost") {
+		t.Errorf("error should mention the missing branch, got: %v", err)
 	}
 }
