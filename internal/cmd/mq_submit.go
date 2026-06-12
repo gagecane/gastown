@@ -460,9 +460,16 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
 
 		// GH#2599: Back-link source issue to MR bead for discoverability.
+		// gu-mh00k: route the comment write to the source issue's owning
+		// database via ForIssueID. The local `bd` wrapper is bound to the rig's
+		// database (e.g. gu-), so a prefix-foreign source issue (gc-/hq-, which
+		// live in the town database per routes.jsonl) would otherwise resolve to
+		// the wrong DB and the back-link would silently not get written. Show()
+		// already routes by prefix, so the existence checks above succeed for
+		// gc- issues; this makes the write follow the same route.
 		if issueID != "" {
 			comment := fmt.Sprintf("MR created: %s", mrIssue.ID)
-			if _, err := bd.Run("comments", "add", issueID, comment); err != nil {
+			if _, err := bd.ForIssueID(issueID).Run("comments", "add", issueID, comment); err != nil {
 				style.PrintWarning("could not back-link source issue %s to MR %s: %v", issueID, mrIssue.ID, err)
 			}
 		}
