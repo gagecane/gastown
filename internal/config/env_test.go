@@ -1842,3 +1842,49 @@ func TestAgentEnv_StaleDaemonProcessEnvRegressionGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestExpandEnvRef(t *testing.T) {
+	// Not parallel — t.Setenv modifies process environment.
+	t.Setenv("GROQ_API_KEY", "gsk_live_secret_value")
+	t.Setenv("EMPTY_VAR", "")
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare reference resolves", "$GROQ_API_KEY", "gsk_live_secret_value"},
+		{"empty-but-set reference resolves to empty", "$EMPTY_VAR", ""},
+		{"unset reference left as sentinel", "$DEFINITELY_NOT_SET_XYZ", "$DEFINITELY_NOT_SET_XYZ"},
+		{"non-reference passthrough", "plain-value", "plain-value"},
+		{"substring reference not expanded", "prefix-$GROQ_API_KEY", "prefix-$GROQ_API_KEY"},
+		{"bare dollar passthrough", "$", "$"},
+		{"numeric not a var name", "$5", "$5"},
+		{"empty string", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExpandEnvRef(tt.in); got != tt.want {
+				t.Errorf("ExpandEnvRef(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExpandAgentEnvRefs(t *testing.T) {
+	// Not parallel — t.Setenv modifies process environment.
+	t.Setenv("GROQ_API_KEY", "gsk_live_secret_value")
+
+	env := map[string]string{
+		"ANTHROPIC_BASE_URL": "https://api.groq.com/openai/v1",
+		"ANTHROPIC_API_KEY":  "$GROQ_API_KEY",
+	}
+	ExpandAgentEnvRefs(env)
+
+	if env["ANTHROPIC_API_KEY"] != "gsk_live_secret_value" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want resolved secret", env["ANTHROPIC_API_KEY"])
+	}
+	if env["ANTHROPIC_BASE_URL"] != "https://api.groq.com/openai/v1" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want unchanged", env["ANTHROPIC_BASE_URL"])
+	}
+}

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"testing"
 )
 
@@ -254,9 +253,12 @@ func TestCostTierAgents(t *testing.T) {
 		if groq.Env["ANTHROPIC_MODEL"] != "compound-beta" {
 			t.Errorf("groq-compound ANTHROPIC_MODEL = %q, want compound-beta", groq.Env["ANTHROPIC_MODEL"])
 		}
-		// Verify the preset reads GROQ_API_KEY from the environment (not a hardcoded value)
-		if groq.Env["ANTHROPIC_API_KEY"] != os.Getenv("GROQ_API_KEY") {
-			t.Errorf("groq-compound ANTHROPIC_API_KEY = %q, want value of GROQ_API_KEY env var", groq.Env["ANTHROPIC_API_KEY"])
+		// The preset must store the literal "$GROQ_API_KEY" sentinel, NOT the
+		// resolved key value. Persisting the resolved secret to settings/config.json
+		// was a plaintext-secret leak on shared hosts (gu-hukrn). The sentinel is
+		// resolved at spawn time via ExpandEnvRef instead.
+		if groq.Env["ANTHROPIC_API_KEY"] != "$GROQ_API_KEY" {
+			t.Errorf("groq-compound ANTHROPIC_API_KEY = %q, want literal sentinel %q (secret must not be resolved at preset-creation time)", groq.Env["ANTHROPIC_API_KEY"], "$GROQ_API_KEY")
 		}
 	})
 }

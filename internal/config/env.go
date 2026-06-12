@@ -662,6 +662,56 @@ func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// ExpandEnvRef resolves a single "$NAME" env-reference sentinel against the
+// host environment. If v is exactly "$NAME" (a bare reference) and NAME is set
+// in the process environment, the resolved value is returned; otherwise v is
+// returned unchanged.
+//
+// This is deliberately narrow: it only expands a whole-value bare reference,
+// not arbitrary "$NAME" substrings inside a larger string. Agent preset Env
+// values such as ANTHROPIC_API_KEY=$GROQ_API_KEY use this so secrets stay as
+// a sentinel on disk and are resolved only at spawn time.
+func ExpandEnvRef(v string) string {
+	if len(v) > 1 && v[0] == '$' {
+		name := v[1:]
+		if isEnvVarName(name) {
+			if resolved, ok := os.LookupEnv(name); ok {
+				return resolved
+			}
+		}
+	}
+	return v
+}
+
+// ExpandAgentEnvRefs resolves "$NAME" sentinels in an agent's env map in place,
+// using ExpandEnvRef on each value. Call this only on the env map of an agent
+// about to be spawned — never before persisting config to disk.
+func ExpandAgentEnvRefs(env map[string]string) {
+	for k, v := range env {
+		env[k] = ExpandEnvRef(v)
+	}
+}
+
+// isEnvVarName reports whether s is a valid POSIX-ish environment variable name
+// ([A-Za-z_][A-Za-z0-9_]*). Used to avoid mistaking values like "$5" or "$ " for
+// env references.
+func isEnvVarName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, c := range s {
+		isAlpha := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 && !isAlpha {
+			return false
+		}
+		if i > 0 && !isAlpha && !isDigit {
+			return false
+		}
+	}
+	return true
+}
+
 // psQuote quotes a value for use in PowerShell $env: assignments.
 // Uses single quotes and doubles embedded single quotes.
 func psQuote(s string) string {

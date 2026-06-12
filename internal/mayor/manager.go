@@ -244,11 +244,13 @@ func (m *Manager) StartACP(ctx context.Context, agentOverride, rigName string) e
 	}
 	os.Setenv("GT_TOWN_ROOT", m.townRoot)
 
-	// Apply agent-specific environment variables from RuntimeConfig
-	// This ensures variables like ANTHROPIC_API_KEY reach the agent process
+	// Apply agent-specific environment variables from RuntimeConfig.
+	// This ensures variables like ANTHROPIC_API_KEY reach the agent process.
+	// Resolve "$NAME" sentinels (e.g. ANTHROPIC_API_KEY=$GROQ_API_KEY) against
+	// the host env at spawn time so secrets are never persisted to settings.
 	if rc.Env != nil {
 		for k, v := range rc.Env {
-			os.Setenv(k, v)
+			os.Setenv(k, config.ExpandEnvRef(v))
 		}
 	}
 

@@ -481,7 +481,10 @@ func SaveRigSettings(path string, settings *RigSettings) error {
 		return fmt.Errorf("encoding settings: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: settings files don't contain secrets
+	// 0600: settings/config.json can carry agent Env entries. Even though the
+	// Groq sentinel ($GROQ_API_KEY) is no longer persisted in plaintext,
+	// settings is owner-only on shared hosts as defense in depth (gu-hukrn).
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing settings: %w", err)
 	}
 
@@ -1133,7 +1136,10 @@ func SaveTownSettings(path string, settings *TownSettings) error {
 		return fmt.Errorf("encoding settings: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: settings files don't contain secrets
+	// 0600: settings/config.json can carry agent Env entries. Even though the
+	// Groq sentinel ($GROQ_API_KEY) is no longer persisted in plaintext,
+	// settings is owner-only on shared hosts as defense in depth (gu-hukrn).
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing settings: %w", err)
 	}
 
@@ -2388,9 +2394,11 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) stri
 	// Pass rc.Args so wrapper-unwrap can find the real binary.
 	processNames := ResolveProcessNames(rc.ResolvedAgent, rc.Command, rc.Args...)
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNames, ",")
-	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode)
+	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode).
+	// Resolve "$NAME" sentinels (e.g. ANTHROPIC_API_KEY=$GROQ_API_KEY) against
+	// the host env at spawn time so secrets are never persisted to settings.
 	for k, v := range rc.Env {
-		resolvedEnv[k] = v
+		resolvedEnv[k] = ExpandEnvRef(v)
 	}
 
 	SanitizeAgentEnv(resolvedEnv, envVars)
@@ -2660,9 +2668,11 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	// can find the real agent binary.
 	processNamesOverride := ResolveProcessNames(agentForProcess, rc.Command, rc.Args...)
 	resolvedEnv["GT_PROCESS_NAMES"] = strings.Join(processNamesOverride, ",")
-	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode)
+	// Merge agent-specific env vars (e.g., OPENCODE_PERMISSION for yolo mode).
+	// Resolve "$NAME" sentinels (e.g. ANTHROPIC_API_KEY=$GROQ_API_KEY) against
+	// the host env at spawn time so secrets are never persisted to settings.
 	for k, v := range rc.Env {
-		resolvedEnv[k] = v
+		resolvedEnv[k] = ExpandEnvRef(v)
 	}
 
 	SanitizeAgentEnv(resolvedEnv, envVars)

@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -257,19 +256,18 @@ func claudeHaikuPreset() *RuntimeConfig {
 //   - Full Claude SDK hooks / session tracking / tmux detection inherited
 //   - Claude Opus on mayor and crew via the default claude preset
 //
+// The preset stores the literal "$GROQ_API_KEY" sentinel rather than the
+// resolved key value. The secret is read from the host environment only at
+// agent spawn time (see ExpandEnvRef), so it is never persisted in plaintext
+// to settings/config.json.
+//
 // Prerequisite: export GROQ_API_KEY=gsk_... in your shell before starting gt.
 func groqCompoundPreset() *RuntimeConfig {
 	// Derive from the canonical AgentGroqCompound builtin so Command, Args,
-	// Env, and all normalisation logic stay in one place (agents.go).
-	rc := RuntimeConfigFromPreset(AgentGroqCompound)
-	// Resolve $GROQ_API_KEY at preset creation time so the settings file
-	// records the live key value rather than a shell-expansion sentinel.
-	if rc != nil && rc.Env != nil {
-		if v, ok := rc.Env["ANTHROPIC_API_KEY"]; ok && v == "$GROQ_API_KEY" {
-			rc.Env["ANTHROPIC_API_KEY"] = os.Getenv("GROQ_API_KEY")
-		}
-	}
-	return rc
+	// Env, and all normalisation logic stay in one place (agents.go). The
+	// ANTHROPIC_API_KEY=$GROQ_API_KEY sentinel is kept as-is — it is resolved
+	// at spawn time, never written to disk.
+	return RuntimeConfigFromPreset(AgentGroqCompound)
 }
 
 // ApplyCostTier writes the tier's agent and role_agents configuration to town settings.
