@@ -348,7 +348,9 @@ func (m *ConvoyManager) Start() error {
 	go m.runEventPoll()
 	go m.runStrandedScan()
 	// Run a one-shot sweep to catch convoys that completed during any previous
-	// outage or while the daemon was stopped.
+	// outage or while the daemon was stopped. Tracked in wg so Stop() waits
+	// for any in-flight scan() to finish instead of racing shutdown.
+	m.wg.Add(1)
 	go m.runStartupSweep()
 	return nil
 }
@@ -1508,9 +1510,10 @@ func (m *ConvoyManager) resetStableCandidates() {
 // runStartupSweep runs one convoy check pass after a brief delay to catch
 // convoys that completed while the daemon was stopped or Dolt was unavailable.
 // It waits 10 seconds so Dolt has time to stabilize before the first query.
-// This goroutine is not tracked in wg because it is short-lived (exits after
-// a single scan) and does not need to participate in the Stop() shutdown.
+// It is tracked in wg so Stop() blocks until any in-flight scan() completes,
+// preventing the sweep from spawning subprocesses during daemon shutdown.
 func (m *ConvoyManager) runStartupSweep() {
+	defer m.wg.Done()
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 	select {

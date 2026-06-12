@@ -2625,6 +2625,8 @@ func TestStartupSweep_RunsAfterDelay(t *testing.T) {
 		cancel()
 	}()
 
+	// runStartupSweep calls wg.Done() on exit, mirroring Start()'s wg.Add(1).
+	m.wg.Add(1)
 	m.runStartupSweep()
 	// Context was cancelled before 10s timer — sweep should not have run
 	if scanCount.Load() > 0 {
