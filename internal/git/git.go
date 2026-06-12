@@ -195,6 +195,12 @@ func (g *Git) runRaw(args ...string) (string, error) {
 // (e.g. GitLab) is unreachable or slow.
 const pushTimeout = 60 * time.Second
 
+// gitCmdWaitDelay bounds how long Wait() may block AFTER a timed git command's
+// context fires, before its I/O pipes are force-closed. It is the belt to the
+// process-group-SIGKILL suspenders installed by util.SetProcessGroup (see
+// runWithTimeout / runWithEnvAndTimeout below for the deadlock this prevents).
+const gitCmdWaitDelay = 2 * time.Second
+
 // runWithTimeout executes a git command with a deadline. If the command does
 // not finish within the timeout, the process is killed and an error is returned.
 func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _ error) { //nolint:unparam // string return kept for consistency with Run()
@@ -210,7 +216,20 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	util.SetDetachedProcessGroup(cmd)
+	// SetProcessGroup (not SetDetachedProcessGroup): on timeout the Cancel hook
+	// SIGKILLs the whole process group, not just the git leader. git push forks
+	// a transport child (ssh / git-remote-https) that inherits the write end of
+	// the os.Pipe Go creates for our bytes.Buffer stdout/stderr. The default
+	// CommandContext cancel signals only the leader; the transport child
+	// reparents to PID 1 (so `pgrep -P` shows zero children) yet keeps the pipe
+	// write end open, so the copy goroutine — and thus Wait() — blocks forever
+	// in futex_wait_queue reading a pipe with no (visible) writer. That is the
+	// exact gt-done deadlock signature in gc-utizk7. Group SIGKILL kills the
+	// reparented child (Setpgid survives reparenting); WaitDelay is the
+	// belt-and-suspenders bound on residual pipe I/O. Mirrors the gate_runner
+	// fix (gu-4mj2).
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = gitCmdWaitDelay
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}
@@ -259,7 +278,21 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	if cancel != nil {
 		defer cancel()
 	}
-	util.SetDetachedProcessGroup(cmd)
+	if timeout > 0 {
+		// Timed git commands (notably push, which forks an ssh /
+		// git-remote-https transport child) need the Cancel hook to SIGKILL the
+		// whole process group on timeout. Otherwise the transport child
+		// reparents to PID 1, keeps the inherited stdout/stderr pipe write end
+		// open, and Wait() blocks forever in futex_wait_queue — the gc-utizk7
+		// gt-done deadlock. SetDetachedProcessGroup installs no Cancel, so the
+		// default CommandContext kill hits only the git leader. See
+		// runWithTimeout for the full rationale and the gate_runner (gu-4mj2)
+		// precedent.
+		util.SetProcessGroup(cmd)
+		cmd.WaitDelay = gitCmdWaitDelay
+	} else {
+		util.SetDetachedProcessGroup(cmd)
+	}
 
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
