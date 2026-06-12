@@ -1,7 +1,7 @@
 +++
 name = "pipeline-monitor"
 description = "Check Amazon Pipeline health and file P1 beads for blockers, routed to the package-owning rig, with drift-resistant cross-rig dedupe"
-version = 9
+version = 10
 
 [gate]
 type = "cooldown"
@@ -20,6 +20,11 @@ severity = "high"
 # Pipeline Monitor
 
 Check pipeline health and file actionable beads in the rig that **owns the fix** (not necessarily the rig whose package appears on the failure line), so a polecat in that rig can push the change.
+
+**v10 — Stable-fingerprint suppression + pipeline-owner routing for no-code-fix failures.** Two fixes on top of v9, both targeting the infinite re-dispatch of a *stuck-infra* failure whose `deploy_id` / VSR event ID **rotates every cycle** while its stable fingerprint stays constant:
+
+- **Suppression is now anchored to the STABLE fingerprint, not the rotating Build/Deploy ID (Step 5.0 rotation guard + Step 5b authority).** Steps 5.0 and 5b-2 dedupe partly on the Build/Deploy ID label. That is the strongest signal *when the ID is stable* (the v5 cadk-* case: one failed deployment sits in the pipeline for days under a single Deploy ID). But for a stuck BATS infra event the pipeline mints a **fresh** `deploy_id` / VSR event ID every cycle for the *same* root cause, so the per-`deploy_id` sentinel filed last cycle never matches this cycle's ID — Step 5.0 misses, and the run re-files + re-dispatches indefinitely (observed: `cws-7lkb` / `cws-fsi2` cycles burned on the same fingerprint). v10 makes the **fingerprint-keyed sentinel lookup (Step 5b-1) the suppression authority that runs before the ID-keyed Step 5.0**: if any rig holds a `sentinel` + `do-not-dispatch` bead carrying `fingerprint:${FP_HASH}` (any status), the failure is suppressed regardless of how the Build/Deploy ID has rotated. Step 5.0 adds an explicit note that an ID *miss* is meaningless for a rotating-ID fingerprint and must never be read as "first time seen."
+- **No-code-fix / pipeline-infra fingerprints route to the PIPELINE OWNER, not a polecat (Step 4.6).** Some fingerprints are structurally un-fixable by a polecat in *any* code rig — the failure is stuck pipeline infrastructure (BATS/VSR-stuck events, environment/capacity, operator-only actions). Dispatching a polecat just burns a cycle that closes `no-changes` and re-fires next cycle under a rotated ID. Step 4.6 (a small, evidence-only fingerprint table, same discipline as Step 4.5) marks such fingerprints as `no-code-fix`: instead of filing a dispatchable P1, the plugin files a **`do-not-dispatch` sentinel in the pipeline-owner rig (`codegen_ws`)** and escalates **once** to the pipeline owner via `gt escalate`. The sentinel both records the owner hand-off and makes every future cycle suppress via Step 5b-1 — no polecat is ever hooked (the dispatch chokepoints already refuse to hook a `do-not-dispatch` bead; it stays OPEN as a live owner-action gate).
 
 **v9 — Close-reason-aware grace window (Step 5c).** One fix on top of v8:
 
@@ -371,6 +376,86 @@ Do **not** add rows speculatively. A wrong row creates a silent misroute that's 
 
 Remove a row when the underlying structural fix has shipped and the override is no longer needed. Two clean cycles with no override hit (audit bead shows zero `Routing-override hits` for the fingerprint) is the signal. If the override row is still held in place by a sentinel/grace-window match — i.e., the failure isn't actually firing anymore — the row is dead weight; remove it. Removal is reversible: the next misroute will reproduce the same audit-trail evidence that justified the row originally.
 
+## Step 4.6: No-Code-Fix Fingerprint → Pipeline-Owner Routing
+
+After Step 4.5, consult the **No-Code-Fix Fingerprint** table below. Some
+fingerprints describe failures that **no polecat in any code rig can fix**: the
+root cause is stuck pipeline infrastructure (a BATS/VSR-stuck event, an
+environment or capacity problem, a Bindle-auth/operator-only action). For these,
+the right owner is the **pipeline owner**, not a polecat — dispatching a code
+polecat only burns a cycle that closes `no-changes` and re-fires next cycle under
+a freshly-minted `deploy_id` / VSR event ID.
+
+If the current `FP_HASH` matches a `no-code-fix` row, **do not file a dispatchable
+P1 bead** in any code rig. Instead:
+
+1. **File (or reuse) a `do-not-dispatch` sentinel in the pipeline-owner rig
+   (`codegen_ws`)** carrying the stable fingerprint label, so every future cycle
+   suppresses via Step 5b-1 (which now runs before the rotating-ID Step 5.0). The
+   sentinel stays OPEN as a live owner-action gate — the dispatch chokepoints
+   already refuse to hook a `do-not-dispatch` bead, so no polecat is ever spawned
+   for it.
+2. **Escalate ONCE to the pipeline owner** via `gt escalate`. Do not re-escalate
+   every cooldown cycle — Step 5b-1 suppresses subsequent cycles, and the open
+   sentinel is the standing record that the owner owns the action.
+
+```bash
+# After Step 4.5 (override) and before Step 5 dedupe:
+case "$FP_HASH" in
+  # Evidence-only rows. Add a fingerprint here ONLY after a confirmed
+  # stuck-infra / no-code-fix failure has burned >=2 polecat cycles that
+  # each closed no-changes (the cws-7lkb/cws-fsi2 pattern).
+  # <hash>) NO_CODE_FIX=1 ; OWNER_NOTE="BATS/VSR-stuck infra event — operator action, no code fix" ;;
+  *) NO_CODE_FIX="" ;;
+esac
+
+if [ -n "$NO_CODE_FIX" ]; then
+  # 1. Look for an existing fingerprint-keyed sentinel anywhere (Step 5b-1 keys).
+  #    If one exists, this cycle is already suppressed — just append a note and
+  #    skip to Step 8. Do NOT escalate again.
+  # 2. If none exists, file a do-not-dispatch sentinel in codegen_ws:
+  cd "$HOME/gt/codegen_ws" && bd create \
+    "pipeline-owner action: <one-line failure summary> (no code fix)" \
+    -p P2 -t task \
+    -l "plugin:pipeline-monitor,sentinel,do-not-dispatch,fingerprint:${FP_HASH}${DEPLOY_ID:+,deploy_id:${DEPLOY_ID}}${BUILD_ID:+,build_id:${BUILD_ID}}" \
+    -d "Pipeline: <name>
+Failure type: <build|deploy|test>
+Package: <resolved owning package or _pipeline_>
+Fingerprint: ${FP_STRING}
+Fingerprint hash: ${FP_HASH}
+Disposition: no-code-fix (Step 4.6) — routed to PIPELINE OWNER, not a polecat.
+Reason: ${OWNER_NOTE}
+
+This bead is a do-not-dispatch sentinel. It stays OPEN as a live owner-action
+gate; the dispatch chokepoints refuse to hook a do-not-dispatch bead, so no
+polecat is spawned. Future pipeline-monitor cycles suppress this fingerprint via
+Step 5b-1 regardless of how the deploy_id / VSR event ID rotates."
+  # 3. Escalate ONCE to the pipeline owner.
+  gt escalate -s HIGH \
+    "pipeline-monitor: no-code-fix failure (${FP_HASH}) needs pipeline-owner action" \
+    -m "Fingerprint ${FP_HASH} is a stuck-infra / no-code-fix failure: ${OWNER_NOTE}.
+Filed do-not-dispatch sentinel in codegen_ws (see fingerprint:${FP_HASH}).
+No polecat can fix this in code — the pipeline owner must act (operator/infra).
+Future cycles are suppressed via the sentinel; this escalation fires once."
+  # 4. Record in the audit bead (Step 8) with disposition no-code-fix, then SKIP
+  #    Step 5 dedupe and Step 7 file-new entirely. Go to Step 8.
+fi
+```
+
+### When to add a No-Code-Fix row
+
+Same evidence discipline as Step 4.5: add a row only after a specific fingerprint
+has burned **≥2 polecat cycles that each closed `no-changes`** (no code to change),
+**or** a maintainer has confirmed the failure is operator/infra-only. Do not add
+rows speculatively — a wrong row silently parks a real, fixable failure in a
+do-not-dispatch sentinel that no polecat will ever pick up.
+
+### When to remove a No-Code-Fix row
+
+Remove a row once the pipeline owner has resolved the stuck infrastructure and the
+fingerprint has not re-fired for two clean cycles. Removal is reversible: the next
+occurrence re-burns the same evidence that justified the row.
+
 ## Step 5: Dedupe — Cross-Rig Search
 
 Search **every rig** for an existing bead that matches the failure. Steps run in
@@ -378,16 +463,41 @@ order; the **first** hit short-circuits the rest. The registry of rigs lives in
 `~/gt/rigs.json`; iterate through its keys plus the town root (`.`). Missing
 rigs are skipped.
 
-The order matters. Step 5.0 (Build/Deploy ID) and Step 5h (mainline-aware skip)
-flank the fingerprint-based steps because they are stronger dedupe signals than
-fingerprint matching:
+The order matters. A **fingerprint-keyed suppression sentinel (Step 5b-1) is the
+top authority and is checked first** (v10); Step 5.0 (Build/Deploy ID) and Step
+5h (mainline-aware skip) flank the remaining fingerprint-based steps:
 
-- **5.0 runs first** because Build/Deploy ID is a deterministic per-run key — if
-  any rig has a bead for *this* failed pipeline run, that bead is the right
-  answer regardless of whether fingerprints have drifted.
+- **5b-1 runs first (v10)** because an explicit `sentinel` + `do-not-dispatch`
+  bead carrying `fingerprint:${FP_HASH}` is a *human/plugin decision to stop
+  dispatching this failure*, and it must hold **even when the Build/Deploy ID
+  rotates every cycle**. A stuck BATS/VSR infra event mints a fresh `deploy_id` /
+  VSR event ID each cooldown for the same stable fingerprint, so an ID-keyed step
+  (5.0) can never re-find the prior sentinel. Anchoring suppression to the stable
+  fingerprint is the structural fix for the `cws-7lkb` / `cws-fsi2` infinite
+  re-dispatch loop. (5b-2's drift-resistant lookup still runs in its original
+  position for sentinels that lack the fingerprint label.)
+- **5.0 runs next** because Build/Deploy ID is a deterministic per-run key for a
+  *stable* ID — if any rig has a bead for *this* failed pipeline run, that bead is
+  the right answer regardless of whether fingerprints have drifted. **But a 5.0
+  ID miss is meaningless when the ID rotates** (see the rotation-guard note in 5.0)
+  — it must never be read as "first time seen" for a fingerprint that 5b-1 already
+  knows.
 - **5h runs last (before file-new)** because the mainline-aware check needs
   network access (`git fetch`) and is the slowest step; only pay that cost when
   no other dedupe step matched.
+
+### 5b-1 (authority): fingerprint-keyed suppression sentinel — checked first (v10)
+
+Before any ID-keyed step, run the **5b-1 keyed sentinel lookup** (defined in full
+under Step 5b below). If any rig holds a bead with `fingerprint:${FP_HASH}` AND a
+suppression label (`sentinel` / `do-not-dispatch` / `suppress:pipeline-monitor`),
+in **any** status, treat it as a dedupe hit immediately: append the suppression
+note, record `matched_via=fingerprint-label dedupe_via=5b-1` in the audit bead,
+and skip the rest of Step 5 and Step 7. This guarantees a stuck-infra fingerprint
+stays suppressed no matter how its Build/Deploy ID rotates between cycles.
+
+If 5b-1 does **not** match, fall through to Step 5.0 and the remaining steps in
+order.
 
 ### 5.0. Build/Deploy ID dedupe (deterministic per-run key)
 
@@ -434,6 +544,28 @@ drift-history note describing the new cycle (Step 6 path), and skip Steps
 **If no match → fall through to Step 5a.** The first time a Build/Deploy ID
 is observed, it has no bead yet; Steps 5a–5h decide whether to reuse a
 prior bead (different Build/Deploy ID, same root cause) or file new.
+
+#### Rotation guard (v10): an ID miss is NOT "first time seen" for a rotating-ID fingerprint
+
+Step 5.0 keys on `{rig, build_or_deploy_id}`. That is the strongest signal **only
+when the ID is stable across cycles** — the v5 cadk-* case, where one failed
+deployment sits in pipeline metadata for days under a single Deploy ID. For a
+**stuck BATS/VSR infra event the pipeline mints a fresh `deploy_id` / VSR event ID
+every cooldown cycle** for the *same* stable fingerprint. In that case:
+
+- The per-`deploy_id` sentinel filed last cycle carries last cycle's ID, so this
+  cycle's `ID_LABEL` never matches it. **Step 5.0 misses by design**, and a 5.0
+  miss here carries **no information** — it does not mean the failure is new.
+- The structural fix is the v10 ordering: the **fingerprint-keyed suppression
+  sentinel (Step 5b-1) is checked BEFORE Step 5.0** (see the Step 5 preamble), so
+  the rotating ID can never defeat suppression. By the time the run reaches 5.0,
+  any fingerprint-keyed sentinel has already short-circuited.
+- Therefore a 5.0 ID miss **must never be read as "first time seen"** and must
+  never on its own justify filing a fresh dispatchable bead. It only means "no
+  bead for *this specific* run-ID yet" — the fingerprint steps (5a/5b/5c) decide
+  reuse-vs-new. This is the loop that burned `cws-7lkb` / `cws-fsi2`: each cycle's
+  rotated ID missed 5.0 and the run re-filed + re-dispatched, even though a
+  fingerprint sentinel already existed.
 
 ### 5a. Primary lookup: fingerprint label (active beads)
 
@@ -496,6 +628,13 @@ suppression beads, and they match on different keys:
   failure-type description match (5b-2).
 
 Run **both** sub-lookups. The first hit in either short-circuits the rest.
+
+**v10 ordering note:** 5b-1 is the **suppression authority** and is run **first in
+Step 5**, ahead of the ID-keyed Step 5.0 (see the Step 5 preamble). The lookup
+below is unchanged; only its position moved, so a fingerprint-keyed sentinel
+suppresses a stuck-infra failure even when its Build/Deploy ID rotates each cycle.
+5b-2 still runs in its original position (after 5.0) for hand-rolled sentinels
+that lack the fingerprint label.
 
 #### 5b-1. Keyed sentinel lookup (fingerprint label)
 
@@ -1168,6 +1307,42 @@ documents the reference resolution.
   this is a re-fire, not a new failure. The v6 escalate-on-stale behavior is
   otherwise unchanged.
 
+### S19: Rotating Build/Deploy ID does not defeat fingerprint suppression (v10)
+
+- A stuck BATS infra event fails `CodegenAgentScheduler-development` every cooldown
+  cycle with the same stable fingerprint `FP-V`, but the pipeline mints a **fresh
+  `deploy_id` / VSR event ID each cycle** (`deploy_id:aaa1` cycle N,
+  `deploy_id:bbb2` cycle N+1, …).
+- A prior cycle (or Step 4.6) filed a `sentinel` + `do-not-dispatch` bead
+  `cws-stuck` carrying `fingerprint:FP-V` in `codegen_ws`.
+- Cycle N+1: Step 5.0 keyed on `deploy_id:bbb2` **misses** `cws-stuck` (it carries
+  `deploy_id:aaa1`) — by design, the ID rotated. Pre-v10 this miss was read as
+  "first time seen" and the run re-filed + re-dispatched (the `cws-7lkb` /
+  `cws-fsi2` loop).
+- v10: Step 5b-1 (keyed sentinel lookup) runs **first**, finds `cws-stuck` by
+  `fingerprint:FP-V` + suppression label regardless of ID, and short-circuits.
+  Append suppression note, `dedupe_via=5b-1`, no new bead, no dispatch.
+- This is the canonical v10 regression test: rotating ID + stable fingerprint +
+  existing fingerprint-keyed sentinel ⇒ suppressed.
+
+### S20: No-code-fix fingerprint routes to the pipeline owner, never a polecat (v10)
+
+- `CodegenAgentScheduler-development` fails with fingerprint `FP-W`, a confirmed
+  stuck-infra / operator-only failure (already burned ≥2 `no-changes` polecat
+  cycles), so `FP-W` has a row in the Step 4.6 No-Code-Fix table.
+- Step 4.6 fires: instead of filing a dispatchable P1 in a code rig, the plugin
+  files a `do-not-dispatch` sentinel in `codegen_ws` carrying `fingerprint:FP-W`
+  and escalates **once** to the pipeline owner.
+- The sentinel stays OPEN as a live owner-action gate. `gt sling` / `gt done`
+  refuse to hook a `do-not-dispatch` bead, so **no polecat is ever spawned** for
+  it.
+- Cycle N+1 (owner hasn't acted yet, ID rotated): Step 5b-1 finds the sentinel by
+  `fingerprint:FP-W`, suppresses, appends a note, and does **NOT** re-escalate.
+  The one-time escalation + open sentinel is the standing owner record.
+- Pre-v10 behavior: the failure routed to a code rig, a polecat closed
+  `no-changes`, and the next cycle re-filed under a rotated ID — an infinite
+  re-dispatch of an un-fixable failure.
+
 ## Rationale
 
 Filing pipeline-blocker beads in the rig that owns the code lets polecats in
@@ -1373,6 +1548,33 @@ companion fix: when the plugin *does* escalate a genuine stale re-fire, the
 overseer can see at a glance it's a re-fire of an already-triaged bead, not a
 fresh failure.
 
+**Why stable-fingerprint suppression + pipeline-owner routing (v10 change):**
+v5's Build/Deploy ID dedupe (Step 5.0) is the strongest signal *when the ID is
+stable* — one failed deployment sitting in pipeline metadata for days under a
+single Deploy ID (the cadk-* `f973e2a9` case). But it has a blind spot the v5
+design never anticipated: a **stuck BATS/VSR infra event mints a fresh `deploy_id`
+/ VSR event ID every cooldown cycle** for the *same* root cause. The per-`deploy_id`
+sentinel filed last cycle carries last cycle's ID, so this cycle's ID-keyed lookup
+never matches it; Step 5.0 misses, the run reads the miss as "first time seen,"
+and re-files + re-dispatches indefinitely. This burned `cws-7lkb` and `cws-fsi2`
+on the same fingerprint and is the symptom report behind this change. v10 fixes it
+structurally by **anchoring suppression to the stable fingerprint, not the
+rotating ID**: the fingerprint-keyed sentinel lookup (Step 5b-1) is promoted to
+run *first* in Step 5, ahead of the ID-keyed Step 5.0, and the 5.0 documentation
+now states explicitly that an ID miss carries no information for a rotating-ID
+fingerprint and must never justify a fresh dispatch on its own. The companion fix
+is Step 4.6: a stuck-infra failure is **un-fixable by any code polecat**, so
+routing it to a code rig only produces `no-changes` closes that re-fire next cycle.
+Step 4.6 marks such fingerprints `no-code-fix` (same evidence-only table discipline
+as the Step 4.5 route-override and the Step 3b FunctionName table — a row earns its
+place only after ≥2 confirmed `no-changes` cycles), files a `do-not-dispatch`
+sentinel in the pipeline-owner rig (`codegen_ws`) so Step 5b-1 suppresses every
+future cycle, and escalates **once** to the pipeline owner. Because the dispatch
+chokepoints already refuse to hook a `do-not-dispatch` bead (it stays OPEN as a
+live owner-action gate), no polecat is ever spawned for a failure no polecat can
+fix. Together the two changes convert an infinite, polecat-burning re-dispatch loop
+into a single owner escalation plus permanent fingerprint-anchored suppression.
+
 ## Migration Notes
 
 **Backfilling the Build/Deploy ID label on legacy beads:** Beads filed by v4 do
@@ -1451,3 +1653,18 @@ reused via cross-rig dedupe; no migration is required. The v7 change is
 therefore safer to land than v4's Step 3b (which changed routing for an
 entire taxonomy of failures) or v5's Step 5h (which can suppress real
 P1s if mainline metadata is wrong).
+
+**Landing v10 (stable-fingerprint suppression + Step 4.6):** The Step 5
+reordering is behavior-preserving for every prior scenario — 5b-1 already ran
+before any file-new decision; v10 only moves it ahead of the ID-keyed 5.0, so a
+fingerprint-keyed sentinel that *would* have matched at its old position still
+matches, just earlier. No existing bead needs migration. The Step 4.6 No-Code-Fix
+table ships **empty** (commented template only): a fingerprint earns a row only
+after a confirmed stuck-infra loop (≥2 `no-changes` polecat cycles, the
+`cws-7lkb`/`cws-fsi2` pattern), so v10 changes no routing until an operator adds a
+row with that evidence. **Rolling back a bad Step 4.6 row:** delete the row; the
+next cycle routes the fingerprint normally again. Any `do-not-dispatch` sentinel
+already filed in `codegen_ws` stays put — close it (`reason: no-code-fix row
+removed`) to let the fingerprint dispatch again, or leave it as a standing
+suppression. Blast radius is the listed fingerprint hash(es) only, same discipline
+as Step 4.5.
