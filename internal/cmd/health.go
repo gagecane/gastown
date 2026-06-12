@@ -34,6 +34,7 @@ type HealthReport struct {
 	Orphans   []OrphanDB        `json:"orphans,omitempty"`
 }
 
+// ServerHealth reports the Dolt server's runtime status, connections, and disk usage.
 type ServerHealth struct {
 	Running          bool    `json:"running"`
 	PID              int     `json:"pid,omitempty"`
@@ -47,6 +48,7 @@ type ServerHealth struct {
 	LastCommitDB     string  `json:"last_commit_db,omitempty"`
 }
 
+// DatabaseHealth reports per-database issue, wisp, and commit counts.
 type DatabaseHealth struct {
 	Name       string `json:"name"`
 	Issues     int    `json:"issues"`
@@ -56,6 +58,7 @@ type DatabaseHealth struct {
 	Commits    int    `json:"commits"`
 }
 
+// PollutionRecord identifies a test-pollution bead matched by a known pattern.
 type PollutionRecord struct {
 	Database string `json:"database"`
 	ID       string `json:"id"`
@@ -63,6 +66,7 @@ type PollutionRecord struct {
 	Pattern  string `json:"pattern"`
 }
 
+// BackupHealth reports the freshness and staleness of Dolt and JSONL backups.
 type BackupHealth struct {
 	DoltFreshness   string `json:"dolt_freshness,omitempty"`
 	DoltAgeSeconds  int    `json:"dolt_age_seconds,omitempty"`
@@ -72,11 +76,13 @@ type BackupHealth struct {
 	JSONLStale      bool   `json:"jsonl_stale"`
 }
 
+// ProcessHealth reports the count and PIDs of zombie processes.
 type ProcessHealth struct {
 	ZombieCount int   `json:"zombie_count"`
 	ZombiePIDs  []int `json:"zombie_pids,omitempty"`
 }
 
+// OrphanDB identifies an orphaned test database and its on-disk size.
 type OrphanDB struct {
 	Name string `json:"name"`
 	Size string `json:"size,omitempty"`

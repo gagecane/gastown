@@ -67,6 +67,7 @@ func (w *WLCommons) DBName() string {
 	return w.dbName
 }
 
+// EnsureDB creates the wl-commons database and schema if they do not exist.
 func (w *WLCommons) EnsureDB() error { return EnsureWLCommons(w.townRoot) }
 
 // DatabaseExists checks whether db exists. Tries the host filesystem first;
@@ -87,22 +88,36 @@ func (w *WLCommons) DatabaseExists(db string) bool {
 	}
 	return false
 }
+
+// InsertWanted inserts a new wanted item into the wl-commons board.
 func (w *WLCommons) InsertWanted(item *WantedItem) error { return InsertWanted(w.townRoot, item) }
+
+// ClaimWanted marks a wanted item as claimed by the given rig handle.
 func (w *WLCommons) ClaimWanted(wantedID, rigHandle string) error {
 	return ClaimWanted(w.townRoot, wantedID, rigHandle)
 }
+
+// SubmitCompletion records a completion for a wanted item claimed by the given rig.
 func (w *WLCommons) SubmitCompletion(completionID, wantedID, rigHandle, evidence string) error {
 	return SubmitCompletion(w.townRoot, completionID, wantedID, rigHandle, evidence)
 }
+
+// QueryWanted fetches the core fields of a wanted item by ID.
 func (w *WLCommons) QueryWanted(wantedID string) (*WantedItem, error) {
 	return QueryWanted(w.townRoot, wantedID)
 }
+
+// QueryWantedFull fetches all fields of a wanted item by ID.
 func (w *WLCommons) QueryWantedFull(wantedID string) (*WantedItem, error) {
 	return QueryWantedFull(w.townRoot, wantedID)
 }
+
+// InsertStamp records a passbook stamp in the wl-commons database.
 func (w *WLCommons) InsertStamp(stamp *StampRecord) error {
 	return InsertStamp(w.townRoot, stamp)
 }
+
+// QueryLastStampForSubject fetches the most recent stamp for the given subject rig.
 func (w *WLCommons) QueryLastStampForSubject(subject string) (*StampRecord, error) {
 	return QueryLastStampForSubject(w.townRoot, subject)
 }
