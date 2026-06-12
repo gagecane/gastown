@@ -4911,6 +4911,40 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 	}
 }
 
+// TestManagedStartPinsCanonicalDataDir is the part-(a) regression for gu-u7mcl:
+// the managed start path must ALWAYS root the server at the town's canonical
+// .dolt-data, never at the caller's cwd. DefaultConfig must derive
+// <townRoot>/.dolt-data, and writeServerConfig must embed that exact absolute
+// path as the config.yaml data_dir. Because `dolt sql-server --config <file>`
+// ignores all other CLI args, this config-file data_dir is the only thing the
+// server honors — so it is the sole guarantee that a managed start can never
+// auto-create a rogue empty store from a wrong directory (RCA hq:gc-o4yt68).
+func TestManagedStartPinsCanonicalDataDir(t *testing.T) {
+	townRoot := t.TempDir()
+	cfg := DefaultConfig(townRoot)
+
+	wantDataDir := filepath.Join(townRoot, ".dolt-data")
+	if cfg.DataDir != wantDataDir {
+		t.Fatalf("DefaultConfig.DataDir = %q, want canonical %q", cfg.DataDir, wantDataDir)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("DefaultConfig.DataDir = %q, want absolute path", cfg.DataDir)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := writeServerConfig(cfg, configPath); err != nil {
+		t.Fatalf("writeServerConfig: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	wantLine := "data_dir: \"" + filepath.ToSlash(wantDataDir) + "\""
+	if !strings.Contains(string(data), wantLine) {
+		t.Fatalf("managed config.yaml missing canonical %q\nfull content:\n%s", wantLine, data)
+	}
+}
+
 func TestWriteServerConfig_NoHost(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")

@@ -70,14 +70,14 @@ func StripBDTargetEnv(env []string) []string {
 func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	if beadsDir == "" {
-		return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), "")
+		return forceAutoStartOffWhenServerTargeted(PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), ""))
 	}
 	env = append(env, "BEADS_DIR="+beadsDir)
 	env = append(env, doltTargetEnvFromBeadsDir(env, beadsDir)...)
 	if dbEnv := DatabaseEnv(beadsDir); dbEnv != "" {
 		env = append(env, dbEnv)
 	}
-	return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), beadsDir)
+	return forceAutoStartOffWhenServerTargeted(PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), beadsDir))
 }
 
 // BuildRoutingBDEnv returns env for a bd subprocess that intentionally relies on
@@ -86,7 +86,45 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 func BuildRoutingBDEnv(base []string, fallbackBeadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	env = append(env, doltTargetEnvFromBeadsDir(env, fallbackBeadsDir)...)
-	return PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), fallbackBeadsDir)
+	return forceAutoStartOffWhenServerTargeted(PreventTestDoltLeak(addGTDerivedDoltTargetEnv(env), fallbackBeadsDir))
+}
+
+// forceAutoStartOffWhenServerTargeted forces BEADS_DOLT_AUTO_START=0 whenever the
+// resolved env points bd at a managed Dolt server (a host/port target is present).
+//
+// Gas Town owns the centralized Dolt sql-server lifecycle (gt dolt start/stop).
+// When that shared server is momentarily down, bd's default-ON auto-start would
+// otherwise spawn a rig-LOCAL embedded sql-server rooted at the subprocess CWD —
+// with NO --data-dir — which binds the freed shared port (3307) and auto-creates
+// EMPTY databases there. Every agent then reads the empty store (bd stats=0) and
+// writes fail with 'socket state is broken' while the real data sits intact in
+// ~/.dolt-data: a town-wide split-brain outage. The known trigger is a bd call
+// from an untracked rig dir (e.g. <rig>/.beads/dolt) whose config.yaml lacks the
+// dolt.auto-start: "false" guard, so the per-rig config defense never applies.
+//
+// Forcing the guard at this env chokepoint means that any gt-issued bd subprocess
+// targeting the managed server fails safely+loudly instead of hijacking the port.
+// When no server target is present (bare embedded/test fixtures handled by
+// PreventTestDoltLeak), auto-start is left untouched so legitimate embedded use
+// still works. See gu-u7mcl; RCA hq:gc-o4yt68.
+func forceAutoStartOffWhenServerTargeted(env []string) []string {
+	hasServerTarget := false
+	for _, key := range []string{
+		"GT_DOLT_PORT",
+		"BEADS_DOLT_PORT",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_HOST",
+	} {
+		if envValue(env, key) != "" {
+			hasServerTarget = true
+			break
+		}
+	}
+	if !hasServerTarget {
+		return env
+	}
+	env = stripEnvKey(env, "BEADS_DOLT_AUTO_START")
+	return append(env, "BEADS_DOLT_AUTO_START=0")
 }
 
 // BuildReadOnlyPinnedBDEnv returns env for a read-only bd subprocess pinned to
