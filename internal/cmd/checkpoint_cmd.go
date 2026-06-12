@@ -116,22 +116,15 @@ func runCheckpointWrite(cmd *cobra.Command, args []string) error {
 	}
 
 	// Try to detect molecule context if not overridden
+	var detMol, detStep, detTitle string
 	if checkpointMolecule == "" || checkpointStep == "" {
-		moleculeID, stepID, stepTitle := detectMoleculeContext(cwd, roleInfo)
-		if checkpointMolecule == "" {
-			checkpointMolecule = moleculeID
-		}
-		if checkpointStep == "" {
-			checkpointStep = stepID
-		}
-		if stepTitle != "" {
-			cp.WithMolecule(checkpointMolecule, checkpointStep, stepTitle)
-		}
+		detMol, detStep, detTitle = detectMoleculeContext(cwd, roleInfo)
 	}
 
 	// Add molecule context
-	if checkpointMolecule != "" {
-		cp.WithMolecule(checkpointMolecule, checkpointStep, "")
+	if mol, step, title := resolveCheckpointMolecule(
+		checkpointMolecule, checkpointStep, detMol, detStep, detTitle); mol != "" {
+		cp.WithMolecule(mol, step, title)
 	}
 
 	// Detect hooked bead
@@ -216,6 +209,22 @@ func runCheckpointClear(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Checkpoint cleared\n", style.Bold.Render("✓"))
 	return nil
+}
+
+// resolveCheckpointMolecule merges explicit --molecule/--step overrides with
+// auto-detected molecule context. An explicit override replaces only its
+// corresponding field; the detected step title is always carried through.
+// Returns the molecule ID, step ID, and step title to store.
+func resolveCheckpointMolecule(overrideMol, overrideStep, detMol, detStep, detTitle string) (mol, step, title string) {
+	mol = overrideMol
+	if mol == "" {
+		mol = detMol
+	}
+	step = overrideStep
+	if step == "" {
+		step = detStep
+	}
+	return mol, step, detTitle
 }
 
 // detectMoleculeContext tries to detect the current molecule and step from beads.
