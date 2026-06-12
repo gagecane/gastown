@@ -250,7 +250,7 @@ All carry `status` and `error` fields.
 |---|---|---|
 | `sling` | `bead`, `target`, `status`, `error` | `gastown.sling.dispatches.total` |
 | `nudge` | `target`, `status`, `error` | `gastown.nudge.total` |
-| `done` | `exit_type` (`COMPLETED` · `ESCALATED` · `DEFERRED`), `status`, `error` | `gastown.done.total` |
+| `done` | `exit_type` (`COMPLETED` · `ESCALATED` · `DEFERRED`), `status`, `rig`, `bead_id`, `time_to_complete_ms`, `error` | `gastown.done.total`, `gastown.done.duration_ms` |
 | `polecat.spawn` | `name`, `status`, `error` | `gastown.polecat.spawns.total` |
 | `polecat.remove` | `name`, `status`, `error` | `gastown.polecat.removes.total` |
 | `formula.instantiate` | `formula_name`, `bead_id`, `status`, `error` | `gastown.formula.instantiations.total` |
@@ -303,7 +303,8 @@ Per-child-bead event during molecule instantiation via `RecordBeadCreate`.
 | `gastown.pane.reads.total` | Counter | `status` | ✅ Main |
 | `gastown.nudge.total` | Counter | `status` | ✅ Main |
 | `gastown.sling.dispatches.total` | Counter | `status` | ✅ Main |
-| `gastown.done.total` | Counter | `status`, `exit_type` | ✅ Main |
+| `gastown.done.total` | Counter | `status`, `exit_type`, `rig` | ✅ Main |
+| `gastown.done.duration_ms` | Histogram | `exit_type`, `rig` | ✅ Main |
 | `gastown.polecat.spawns.total` | Counter | `status` | ✅ Main |
 | `gastown.polecat.removes.total` | Counter | `status` | ✅ Main |
 | `gastown.daemon.agent_restarts.total` | Counter | `agent_type` | ✅ Main |
@@ -410,7 +411,7 @@ Audited against `origin/main` @ `2d8d71ee35fafda3bbdf353683692bfcc9165476`
 | `sling` | `RecordSling` | `bead`, `target`, `status`, `error` | `recorder.go:366`, emit at `recorder.go:372` |
 | `mail` | `RecordMail` | `operation`, `status`, `error` | `recorder.go:381`, emit at `recorder.go:390` |
 | `nudge` | `RecordNudge` | `target`, `status`, `error` | `recorder.go:398`, emit at `recorder.go:404` |
-| `done` | `RecordDone` | `exit_type`, `status`, `error` | `recorder.go:413`, emit at `recorder.go:422` |
+| `done` | `RecordDone` | `exit_type`, `status`, `rig`, `bead_id`, `time_to_complete_ms` (omitted when unknown), `error` | `recorder.go`, see `RecordDone` |
 | `daemon.restart` | `RecordDaemonRestart` | `agent_type` | `recorder.go:431`, emit at `recorder.go:436` |
 | `formula.instantiate` | `RecordFormulaInstantiate` | `formula_name`, `bead_id`, `status`, `error` | `recorder.go:442`, emit at `recorder.go:451` |
 | `convoy.create` | `RecordConvoyCreate` | `bead_id`, `status`, `error` | `recorder.go:460`, emit at `recorder.go:466` |
