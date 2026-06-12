@@ -338,26 +338,12 @@ func TestScanExcludesAgentBeads(t *testing.T) {
 // Auto-closing them strips their heartbeat/idle/backoff state and makes
 // `gt agents resolve` return {}, since its bd-list query excludes closed beads.
 func TestAutoCloseExcludesAgentBeads(t *testing.T) {
-	sourcePath := "reaper.go"
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		t.Fatalf("read %s: %v", sourcePath, err)
+	clause := autoCloseWhereClause("db")
+	if !strings.Contains(clause, "i.issue_type != 'agent'") {
+		t.Fatalf("expected AutoClose where-clause to exclude legacy agent beads (issue_type='agent'), got:\n%s", clause)
 	}
-	source := string(data)
-	start := strings.Index(source, "func AutoClose(")
-	if start == -1 {
-		t.Fatalf("could not find func AutoClose( in %s", sourcePath)
-	}
-	end := strings.Index(source[start:], "\n}\n")
-	if end == -1 {
-		t.Fatalf("could not isolate AutoClose() body in %s", sourcePath)
-	}
-	body := source[start : start+end]
-	if !strings.Contains(body, "i.issue_type != 'agent'") {
-		t.Fatalf("expected AutoClose() to exclude legacy agent beads (issue_type='agent'), body was:\n%s", body)
-	}
-	if !strings.Contains(body, "'gt:agent'") {
-		t.Fatalf("expected AutoClose() label exclusion to include 'gt:agent', body was:\n%s", body)
+	if !strings.Contains(clause, "'gt:agent'") {
+		t.Fatalf("expected AutoClose label exclusion to include 'gt:agent', got:\n%s", clause)
 	}
 }
 
@@ -368,28 +354,79 @@ func TestAutoCloseExcludesAgentBeads(t *testing.T) {
 // that survives loss of the gt:agent / gt:pinned labels — the exact failure mode
 // that auto-closed cae2-sle and mrd-d6n.
 func TestAutoCloseExcludesPinnedAndInfraRoles(t *testing.T) {
+	// AutoClose path: assert against the real generated where-clause.
+	clause := autoCloseWhereClause("db")
+	if !strings.Contains(clause, "'gt:pinned'") {
+		t.Errorf("expected AutoClose where-clause label exclusion to include 'gt:pinned', got:\n%s", clause)
+	}
+	for _, role := range []string{"refinery", "witness", "dog"} {
+		want := "i.description NOT LIKE '%role_type: " + role + "%'"
+		if !strings.Contains(clause, want) {
+			t.Errorf("expected AutoClose where-clause to carry infra-role guard %q, got:\n%s", want, clause)
+		}
+	}
+
+	// Scan path: still source-scraped (its query is an inline literal).
 	sourcePath := "reaper.go"
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatalf("read %s: %v", sourcePath, err)
 	}
 	source := string(data)
+	start := strings.Index(source, "func Scan(")
+	if start == -1 {
+		t.Fatalf("could not find func Scan( in %s", sourcePath)
+	}
+	end := strings.Index(source[start:], "\n}\n")
+	if end == -1 {
+		t.Fatalf("could not isolate Scan() body in %s", sourcePath)
+	}
+	body := source[start : start+end]
+	if !strings.Contains(body, "'gt:pinned'") {
+		t.Errorf("expected Scan() label exclusion to include 'gt:pinned', body was:\n%s", body)
+	}
+	if !strings.Contains(body, "staleInfraRoleExcludeSQL(\"i\")") {
+		t.Errorf("expected Scan() to wire staleInfraRoleExcludeSQL(\"i\"), body was:\n%s", body)
+	}
+}
 
-	for _, fn := range []string{"func AutoClose(", "func Scan("} {
-		start := strings.Index(source, fn)
-		if start == -1 {
-			t.Fatalf("could not find %s in %s", fn, sourcePath)
+// TestAutoCloseWhereClauseNoFormatCorruption is the gu-pwkh3 regression guard.
+// The infra-role guard fragment contains literal SQL LIKE wildcards
+// (`LIKE '%role_type: refinery%'`). If that fragment is concatenated into the
+// fmt.Sprintf format string instead of passed as a %s argument, fmt re-scans the
+// '%r' in '%role_type' as a verb and corrupts the SQL to
+// `%!r(string=db)ole_type`, which Dolt rejects with INVALID_ARGUMENT on every DB.
+// Assert the generated clause carries no fmt error artifacts and renders the
+// role_type guard intact.
+func TestAutoCloseWhereClauseNoFormatCorruption(t *testing.T) {
+	clause := autoCloseWhereClause("db")
+
+	// No Go fmt "wrong verb" / "extra/missing arg" artifacts.
+	for _, artifact := range []string{"%!", "(string=", "MISSING", "EXTRA", "BADVERB"} {
+		if strings.Contains(clause, artifact) {
+			t.Fatalf("AutoClose where-clause contains fmt corruption artifact %q; got:\n%s", artifact, clause)
 		}
-		end := strings.Index(source[start:], "\n}\n")
-		if end == -1 {
-			t.Fatalf("could not isolate %s body in %s", fn, sourcePath)
-		}
-		body := source[start : start+end]
-		if !strings.Contains(body, "'gt:pinned'") {
-			t.Errorf("expected %s label exclusion to include 'gt:pinned', body was:\n%s", fn, body)
-		}
-		if !strings.Contains(body, "staleInfraRoleExcludeSQL(\"i\")") {
-			t.Errorf("expected %s to wire staleInfraRoleExcludeSQL(\"i\"), body was:\n%s", fn, body)
+	}
+
+	// The exact corruption seen in the field must not reappear.
+	if strings.Contains(clause, "ole_type") && !strings.Contains(clause, "role_type") {
+		t.Fatalf("role_type guard rendered corrupted; got:\n%s", clause)
+	}
+	if strings.Contains(clause, "%!r(string=db)") {
+		t.Fatalf("reproduced gu-pwkh3 corruption %%!r(string=db); got:\n%s", clause)
+	}
+
+	// The dbName must be interpolated into the backtick-quoted table refs, not
+	// consumed by a stray verb in the role guard.
+	if !strings.Contains(clause, "`db`.labels") || !strings.Contains(clause, "`db`.dependencies") {
+		t.Fatalf("dbName not interpolated into table references; got:\n%s", clause)
+	}
+
+	// Each infra role guard must survive intact.
+	for _, role := range []string{"refinery", "witness", "dog"} {
+		want := "i.description NOT LIKE '%role_type: " + role + "%'"
+		if !strings.Contains(clause, want) {
+			t.Fatalf("infra-role guard for %q missing/corrupted; got:\n%s", role, clause)
 		}
 	}
 }
