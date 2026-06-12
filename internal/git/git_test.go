@@ -2798,6 +2798,21 @@ func TestIsGasTownRuntimePath(t *testing.T) {
 		{".gitignore", false},
 		{"claude-stuff/foo", false},
 		{"src/coverage_report.go", false},
+		// Root-level built binaries are runtime artifacts (gu-ofi7q): reaper
+		// autosave must not sweep them into MRs.
+		{"curio-proposer", true},
+		{"gt", true},
+		{"gt-desktop", true},
+		{"gt-proxy-server", true},
+		{"gt-proxy-client", true},
+		// Transient push error log (gu-ofi7q): written anywhere a push fails.
+		{"push.err", true},
+		{"polecats/radrat/gastown/push.err", true},
+		// Source dirs for those binaries must stay real source, not artifacts.
+		{"cmd/gt/main.go", false},
+		{"cmd/curio-proposer/main.go", false},
+		// A non-root file that merely shares a binary's name is not an artifact.
+		{"scripts/gt", false},
 	}
 
 	for _, tt := range tests {
