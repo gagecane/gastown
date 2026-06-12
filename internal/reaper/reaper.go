@@ -904,6 +904,36 @@ func FlushWispWorkingSet(db *sql.DB, dbName string, dryRun bool) (*FlushWispResu
 	return result, nil
 }
 
+// autoCloseWhereClause builds the WHERE clause selecting stale, auto-closable
+// issues for dbName. The staleInfraRoleExcludeSQL() guard is passed as a %s
+// ARGUMENT (not embedded in the format string): its output contains literal
+// `%` characters (e.g. '%role_type: refinery%'), and folding those into the
+// format string makes fmt parse `%r` as an invalid verb — emitting
+// `%!r(string=...)` into the SQL and breaking auto-close townwide (gu-kvby4).
+func autoCloseWhereClause(dbName string) string {
+	return fmt.Sprintf(`
+		i.status IN ('open', 'in_progress')
+		AND i.updated_at < ?
+		AND i.priority > 1
+		AND i.issue_type != 'epic'
+		AND i.issue_type != 'agent'
+		AND i.issue_type != 'convoy'
+		AND i.id NOT IN (
+			SELECT DISTINCT l.issue_id FROM `+"`%s`"+`.labels l
+			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent', 'gt:pinned')
+		)%s
+		AND i.id NOT IN (
+			SELECT DISTINCT d.issue_id FROM `+"`%s`"+`.dependencies d
+			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_issue_id = dep.id
+			WHERE dep.status IN ('open', 'in_progress')
+		)
+		AND i.id NOT IN (
+			SELECT DISTINCT d.depends_on_issue_id FROM `+"`%s`"+`.dependencies d
+			INNER JOIN `+"`%s`"+`.issues blocker ON d.issue_id = blocker.id
+			WHERE blocker.status IN ('open', 'in_progress')
+		)`, dbName, staleInfraRoleExcludeSQL("i"), dbName, dbName, dbName, dbName)
+}
+
 // AutoClose closes issues that have been open with no updates past staleAge.
 // Excludes P0/P1 priority, epics, hooked/pinned issues, standing-order labels,
 // and issues with active dependencies.
@@ -926,27 +956,7 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 	// below do NOT protect a convoy with open tracked issues. Stale-closing a
 	// convoy while its tracked beads are open orphans them from dispatch
 	// tracking and causes duplicate dispatches (hq-qouv/hq-shb1 incident).
-	whereClause := fmt.Sprintf(`
-		i.status IN ('open', 'in_progress')
-		AND i.updated_at < ?
-		AND i.priority > 1
-		AND i.issue_type != 'epic'
-		AND i.issue_type != 'agent'
-		AND i.issue_type != 'convoy'
-		AND i.id NOT IN (
-			SELECT DISTINCT l.issue_id FROM `+"`%s`"+`.labels l
-			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent', 'gt:pinned')
-		)`+staleInfraRoleExcludeSQL("i")+`
-		AND i.id NOT IN (
-			SELECT DISTINCT d.issue_id FROM `+"`%s`"+`.dependencies d
-			INNER JOIN `+"`%s`"+`.issues dep ON d.depends_on_issue_id = dep.id
-			WHERE dep.status IN ('open', 'in_progress')
-		)
-		AND i.id NOT IN (
-			SELECT DISTINCT d.depends_on_issue_id FROM `+"`%s`"+`.dependencies d
-			INNER JOIN `+"`%s`"+`.issues blocker ON d.issue_id = blocker.id
-			WHERE blocker.status IN ('open', 'in_progress')
-		)`, dbName, dbName, dbName, dbName, dbName)
+	whereClause := autoCloseWhereClause(dbName)
 
 	// Two-step SELECT-then-UPDATE to avoid self-referencing subquery in UPDATE,
 	// which is not valid MySQL (Error 1093) and fragile in Dolt (dolthub/dolt#10600).

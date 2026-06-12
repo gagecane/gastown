@@ -344,13 +344,14 @@ func TestAutoCloseExcludesAgentBeads(t *testing.T) {
 		t.Fatalf("read %s: %v", sourcePath, err)
 	}
 	source := string(data)
-	start := strings.Index(source, "func AutoClose(")
+	// AutoClose's stale-issue WHERE clause is built by autoCloseWhereClause().
+	start := strings.Index(source, "func autoCloseWhereClause(")
 	if start == -1 {
-		t.Fatalf("could not find func AutoClose( in %s", sourcePath)
+		t.Fatalf("could not find func autoCloseWhereClause( in %s", sourcePath)
 	}
 	end := strings.Index(source[start:], "\n}\n")
 	if end == -1 {
-		t.Fatalf("could not isolate AutoClose() body in %s", sourcePath)
+		t.Fatalf("could not isolate autoCloseWhereClause() body in %s", sourcePath)
 	}
 	body := source[start : start+end]
 	if !strings.Contains(body, "i.issue_type != 'agent'") {
@@ -375,7 +376,9 @@ func TestAutoCloseExcludesPinnedAndInfraRoles(t *testing.T) {
 	}
 	source := string(data)
 
-	for _, fn := range []string{"func AutoClose(", "func Scan("} {
+	// AutoClose's stale-issue WHERE clause is built by autoCloseWhereClause();
+	// Scan() builds its own inline. Both must carry the pinned + infra guards.
+	for _, fn := range []string{"func autoCloseWhereClause(", "func Scan("} {
 		start := strings.Index(source, fn)
 		if start == -1 {
 			t.Fatalf("could not find %s in %s", fn, sourcePath)
@@ -412,6 +415,31 @@ func TestStaleInfraRoleExcludeSQL(t *testing.T) {
 	// The alias parameter must be honored (not hard-coded to "i").
 	if a := staleInfraRoleExcludeSQL("x"); !strings.Contains(a, "x.description NOT LIKE") {
 		t.Errorf("alias parameter not honored; got:\n%s", a)
+	}
+}
+
+// TestAutoCloseWhereClauseWellFormed pins the gu-kvby4 fix: the AutoClose WHERE
+// clause must not contain any fmt error artifacts. The bug was folding
+// staleInfraRoleExcludeSQL() — whose output carries literal '%' (e.g.
+// '%role_type: refinery%') — into the format string, so fmt parsed '%r' as an
+// invalid verb and emitted '%!r(string=...)' into the SQL, breaking auto-close
+// across every database.
+func TestAutoCloseWhereClauseWellFormed(t *testing.T) {
+	got := autoCloseWhereClause("beads_gt")
+
+	if strings.Contains(got, "%!") {
+		t.Fatalf("WHERE clause contains a fmt error verb artifact (%%!...); got:\n%s", got)
+	}
+	// The literal LIKE patterns from the infra-role guard must survive intact.
+	for _, role := range []string{"refinery", "witness", "dog"} {
+		want := "i.description NOT LIKE '%role_type: " + role + "%'"
+		if !strings.Contains(got, want) {
+			t.Errorf("WHERE clause missing intact infra-role guard %q; got:\n%s", want, got)
+		}
+	}
+	// The database name must be interpolated into the backtick-quoted refs.
+	if !strings.Contains(got, "`beads_gt`.labels") {
+		t.Errorf("WHERE clause missing dbName interpolation; got:\n%s", got)
 	}
 }
 
