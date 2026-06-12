@@ -1211,6 +1211,9 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 		cmd := exec.CommandContext(ctx, "sh", "-c", e.config.TestCommand) //nolint:gosec // G204: TestCommand is from trusted rig config
 		util.SetDetachedProcessGroup(cmd)
 		cmd.Dir = e.workDir
+		// Rig-scoped GOCACHE: prevent concurrent rig gates from evicting each
+		// other's build cache mid-link (gu-sav6u). nil leaves env inherited.
+		cmd.Env = e.gateBuildEnv()
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -1236,6 +1239,64 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 		TestsFailed: true,
 		Error:       fmt.Sprintf("tests failed after %d attempts: %v", maxRetries, lastErr),
 	}
+}
+
+// rigGoCache returns the rig-scoped GOCACHE directory for gate
+// subprocesses, or "" when scoping is unavailable or disabled.
+//
+// Why: concurrent rig merge gates (go build / go test) all default to
+// the shared ~/.cache/go-build. When one rig's build evicts or prunes
+// cache entries another rig is mid-link on, the linker fails with
+// "cannot open .../-d: no such file" — a spurious gate failure that
+// passes in isolation (gu-sav6u). Giving each rig its own GOCACHE
+// subtree removes the cross-rig contention at the source, mirroring the
+// per-rig TMPDIR isolation approach.
+//
+// The path is <base>/<rig-name>, where <base> is GT_GATE_GOCACHE_BASE
+// when set, else <UserCacheDir>/gt-gate-gocache. Returns "" if the rig
+// name is empty (tests / unconfigured) or the base cannot be resolved —
+// callers then leave GOCACHE inherited, preserving legacy behavior. Set
+// GT_GATE_GOCACHE=off to opt out entirely.
+func (e *Engineer) rigGoCache() string {
+	if os.Getenv("GT_GATE_GOCACHE") == "off" {
+		return ""
+	}
+	if e == nil || e.rig == nil || e.rig.Name == "" {
+		return ""
+	}
+	base := os.Getenv("GT_GATE_GOCACHE_BASE")
+	if base == "" {
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(cacheDir, "gt-gate-gocache")
+	}
+	return filepath.Join(base, e.rig.Name)
+}
+
+// gateBuildEnv returns the environment for a gate/test subprocess: the
+// parent env with GOCACHE overridden to the rig-scoped directory. Returns
+// nil (inherit parent env unchanged) when no rig-scoped cache applies.
+// The cache directory is created best-effort; if creation fails the
+// override is skipped so the gate still runs against the default cache.
+func (e *Engineer) gateBuildEnv() []string {
+	cache := e.rigGoCache()
+	if cache == "" {
+		return nil
+	}
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		return nil
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GOCACHE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GOCACHE="+cache)
 }
 
 // runGate executes a single quality gate command and returns the result.
@@ -1269,6 +1330,9 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 	cmd := exec.CommandContext(gateCtx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = e.workDir
+	// Rig-scoped GOCACHE: prevent concurrent rig gates from evicting each
+	// other's build cache mid-link (gu-sav6u). nil leaves env inherited.
+	cmd.Env = e.gateBuildEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
