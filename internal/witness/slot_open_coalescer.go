@@ -210,3 +210,22 @@ func getSlotOpenCoalescer() *slotOpenCoalescer {
 	})
 	return slotOpenCoalescerInst
 }
+
+// FlushSlotOpenNotifications synchronously delivers any SLOT_OPEN nudge/mail
+// events buffered in the package-level coalescer.
+//
+// notifyMayorSlotOpen routes nudge/mail through the coalescer, which schedules
+// delivery via a time.AfterFunc(SlotOpenCoalesceWindow) timer. That works in a
+// long-lived process, but `gt patrol scan` is short-lived: it discovers
+// completions, buffers their SLOT_OPEN notifications, and exits — almost
+// always well under the 5s window. The AfterFunc timer never fires, so the
+// nudge/mail fallback is dropped on every patrol cycle (gu-uukrs). Short-lived
+// callers must invoke this once, after completion discovery and before the
+// process returns, so the batched nudge/mail is actually delivered.
+//
+// Intra-cycle coalescing is preserved: all completions discovered in a single
+// cycle are buffered first, then flushed as one batched nudge — so a burst of
+// completions still collapses to a single Mayor nudge (gu-ltqk).
+func FlushSlotOpenNotifications() {
+	getSlotOpenCoalescer().Flush()
+}

@@ -388,6 +388,15 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// patrol scan is a short-lived process: completion discovery above buffers
+	// SLOT_OPEN nudge/mail in a coalescer whose 5s AfterFunc timer never fires
+	// before the process exits, so the Mayor nudge/mail fallback is dropped
+	// every cycle (gu-uukrs). Flush synchronously now — all detection passes
+	// that buffer events have completed, and there are no early returns between
+	// here and the output calls below. Intra-cycle bursts still collapse to a
+	// single batched nudge because every event was buffered first (gu-ltqk).
+	witness.FlushSlotOpenNotifications()
+
 	if patrolScanJSON {
 		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, refineryPausedResult, receipts)
 	}

@@ -181,6 +181,60 @@ func TestSlotOpenCoalescer_ExplicitFlush(t *testing.T) {
 	}
 }
 
+// TestSlotOpenCoalescer_ShortLivedProcessFlush is the regression test for
+// gu-uukrs: in a short-lived `gt patrol scan` process, the AfterFunc(window)
+// timer never fires before the process exits, so without an explicit Flush
+// the buffered SLOT_OPEN nudge/mail is dropped on every cycle. This models
+// that scenario with a window far longer than the (simulated) process
+// lifetime: a burst of completions is buffered, the timer is verified NOT to
+// have fired, and Flush — the call patrol_scan now makes before returning —
+// delivers exactly one batched nudge containing every event (intra-cycle
+// coalescing from gu-ltqk preserved).
+func TestSlotOpenCoalescer_ShortLivedProcessFlush(t *testing.T) {
+	t.Parallel()
+
+	var (
+		batches [][]slotOpenEvent
+		mu      sync.Mutex
+	)
+	dispatch := func(events []slotOpenEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		batches = append(batches, append([]slotOpenEvent{}, events...))
+	}
+
+	// Window far longer than the process would ever live — the timer must NOT
+	// be what triggers delivery. This is the real production window's behavior
+	// (5s) relative to a sub-second patrol_scan, amplified for test determinism.
+	c := newSlotOpenCoalescer(10*time.Minute, dispatch)
+
+	const burst = 3
+	for i := 0; i < burst; i++ {
+		c.Add("/w", "rig-a", polecatName(i), "COMPLETED")
+	}
+
+	// Before Flush: the timer has not fired, so nothing is dispatched. This is
+	// exactly the dropped-nudge bug when no Flush call exists.
+	mu.Lock()
+	if len(batches) != 0 {
+		mu.Unlock()
+		t.Fatalf("dispatches before flush = %d, want 0 (AfterFunc timer must not have fired yet)", len(batches))
+	}
+	mu.Unlock()
+
+	// patrol_scan's deferred FlushSlotOpenNotifications maps to this call.
+	c.Flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(batches) != 1 {
+		t.Fatalf("dispatches after flush = %d, want 1 (burst must collapse to one batched nudge)", len(batches))
+	}
+	if len(batches[0]) != burst {
+		t.Errorf("events in batch = %d, want %d (every buffered completion must be delivered)", len(batches[0]), burst)
+	}
+}
+
 // TestSlotOpenCoalescer_ConcurrentAdds checks that concurrent Add calls are
 // safe and all events land in the flushed batch.
 func TestSlotOpenCoalescer_ConcurrentAdds(t *testing.T) {
