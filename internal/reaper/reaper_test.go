@@ -73,6 +73,12 @@ func TestParentExcludeJoin(t *testing.T) {
 	if !contains(joinClause, "'open', 'hooked', 'in_progress'") {
 		t.Error("parentExcludeJoin should check for open parent statuses")
 	}
+	// Regression (gu-gvwqx): the issue-parent branch (pi.status) must include
+	// 'hooked'. A hooked issue is actively-assigned/non-terminal, so a wisp under
+	// a hooked parent issue must not be treated as an orphan and reaped.
+	if !contains(joinClause, "pi.status IN ('open', 'hooked', 'in_progress')") {
+		t.Errorf("parentExcludeJoin issue-parent branch must include 'hooked' status: %s", joinClause)
+	}
 
 	// WHERE condition should be an IS NULL anti-join filter.
 	if whereCondition == "" {
@@ -424,6 +430,13 @@ func TestLiveTrackedContextExcludeJoin(t *testing.T) {
 	// The work bead may live in either wisps or issues; both sides must be checked.
 	if !contains(joinClause, "wisps tw") || !contains(joinClause, "issues ti") {
 		t.Errorf("join must LEFT JOIN both wisps and issues for the tracked referent: %s", joinClause)
+	}
+	// Regression (gu-6reia): the issue-side branch (ti.status) must include
+	// 'hooked'. A slung/dispatched work bead is set status=hooked; if 'hooked' is
+	// omitted the guard is inert exactly when the work is live, and the reaper
+	// closes/purges the still-needed sling-context (gu-i0oaq double-dispatch).
+	if !contains(joinClause, "ti.status IN ('open', 'hooked', 'in_progress')") {
+		t.Errorf("tracked-context issue branch must include 'hooked' status: %s", joinClause)
 	}
 	if !contains(whereCondition, "IS NULL") {
 		t.Errorf("where condition must be an IS NULL anti-join: %s", whereCondition)
