@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -164,6 +165,14 @@ func Init(ctx context.Context, serviceName, serviceVersion string) (*Provider, e
 	otel.SetMeterProvider(mp)
 	p.shutdowns = append(p.shutdowns, mp.Shutdown)
 	initInstruments()
+
+	// Auto-emit Go runtime metrics (process.runtime.go.goroutines,
+	// gc.pause_ns, mem.heap_alloc_bytes, etc.) via the global meter provider
+	// set above. Like other init errors, a failure is returned for the caller
+	// to log and continue.
+	if err := runtime.Start(); err != nil {
+		return nil, fmt.Errorf("starting Go runtime instrumentation: %w", err)
+	}
 
 	// Logs → VictoriaLogs
 	logExp, err := otlploghttp.New(ctx,
