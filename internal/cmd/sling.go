@@ -884,6 +884,19 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			beadID, info.Title)
 	}
 
+	// Reference/tripwire guard (gu-nid89.32, follow-up to hq-9jeyo / gs-9ct).
+	// A bead labeled do-not-dispatch / pinned, or issue_type=reference, is a
+	// permanent live safety gate, never work. scheduleBead and executeSling
+	// already enforce this, but the direct `gt sling <id>` CLI path skipped
+	// from the awaiting-merge guard straight to the open-children guard,
+	// leaving the tripwire dispatchable here: a polecat hooks it, finds
+	// nothing to do, and closes it — taking down a gate meant to stay OPEN
+	// forever. Not bypassed by --force — it is a dispatcher invariant.
+	if isReferenceTripwireBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is a do-not-dispatch / pinned reference tripwire — it must stay OPEN as a live safety gate, never hooked to a polecat.\nRemove the labels/type first if that assessment is wrong: bd update %s --remove-label=do-not-dispatch --remove-label=pinned",
+			beadID, info.Title, beadID)
+	}
+
 	// Open-children guard (gu-fs88). A bead that is the parent of any
 	// non-closed child is a container, not a work item — the children
 	// track the actual work. Hooking such a bead to a polecat leaves the
