@@ -27,6 +27,7 @@ Subcommands:
   move    Move a bead from one repository to another
   show    Show details of a bead (routes by prefix)
   read    Alias for show`,
+	RunE: requireSubcommand,
 }
 
 var beadMoveCmd = &cobra.Command{
