@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -66,7 +67,8 @@ type StaleRigAgentResult struct {
 	// same town-wide root cause (gu-nejgh), "skip-idle-empty-mq" when a
 	// refinery's heartbeat is stale but its session is alive and its merge
 	// queue is empty — a harmlessly-idle refinery, not a wedged one (gs-ecdg),
-	// etc.
+	// "skip-parked"/"skip-docked" when the rig is intentionally parked/docked so
+	// its frozen heartbeat is expected, not a wedge (gu-qwe7q/gu-eke9u), etc.
 	Action string
 	// CorrelatedInto is the lead agent's "rig/session" key when Action is
 	// "skip-correlated" — the escalation thread this alarm folded into. Empty
@@ -184,6 +186,35 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 	prefix := session.PrefixFor(rigName)
 	t := tmux.NewTmux()
 	now := time.Now().UTC()
+
+	// Parked/docked rig skip (gu-qwe7q / gu-eke9u): a parked or docked rig has
+	// its agents intentionally stopped and its heartbeat frozen BY DESIGN. The
+	// stale heartbeat is the EXPECTED result of the park, not a wedge — escalating
+	// it produces a HIGH false positive that re-fires every patrol/daemon cycle as
+	// the frozen heartbeat's age only grows (the dominant noise source observed in
+	// the 2026-06-11/12 mayor session). Skip both agents before any session/
+	// heartbeat inspection. This is the witness-side fix; the same DetectStale...
+	// core also backs the daemon agent_heartbeat_dog, so both escalation paths are
+	// covered by this one guard. Error-swallowing variant: if parked state can't be
+	// determined (missing rig bead, Dolt unavailable), fall through and scan — a
+	// genuinely wedged active agent must still escalate.
+	if blocked, reason := rig.IsRigParkedOrDocked(townRoot, rigName); blocked {
+		for _, c := range []struct {
+			role        string
+			sessionName string
+		}{
+			{"refinery", session.RefinerySessionName(prefix)},
+			{"witness", session.WitnessSessionName(prefix)},
+		} {
+			result.Checked++
+			result.Stale = append(result.Stale, StaleRigAgentResult{
+				AgentRole:   c.role,
+				SessionName: c.sessionName,
+				Action:      "skip-" + reason,
+			})
+		}
+		return result
+	}
 
 	// Order matters only for deterministic test output; both checks are
 	// independent.

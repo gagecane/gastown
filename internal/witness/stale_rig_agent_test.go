@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 // writeRigAgentHeartbeat writes a heartbeat JSON file with a backdated
@@ -192,6 +194,45 @@ func TestDetectStaleRigAgentHeartbeats_SelfSkip(t *testing.T) {
 	// The other agent (refinery) still escalates normally.
 	if refinery.Action != "escalated" {
 		t.Errorf("refinery Action = %q, want escalated", refinery.Action)
+	}
+}
+
+// TestDetectStaleRigAgentHeartbeats_ParkedRigSkips verifies the gu-qwe7q/gu-eke9u
+// fix: a PARKED rig whose agents are intentionally stopped and whose heartbeats
+// are frozen must NOT escalate. The frozen heartbeat is the expected result of
+// the park, not a wedge — escalating it produced a HIGH false positive that
+// re-fired every cycle. Both candidates are recorded as "skip-parked" with no
+// escalation, even though both heartbeats are well past the threshold and the
+// session is reported alive.
+func TestDetectStaleRigAgentHeartbeats_ParkedRigSkips(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	prefix := session.PrefixFor(rigName)
+	refSession := session.RefinerySessionName(prefix)
+	witSession := session.WitnessSessionName(prefix)
+
+	// Sessions reported alive AND heartbeats stale: without the parked guard this
+	// is the gu-rh0g escalate-everything path. The park must override it.
+	installFakeTmuxAlive(t, refSession, witSession)
+	writeRigAgentHeartbeat(t, townRoot, refSession, 6*time.Hour)
+	writeRigAgentHeartbeat(t, townRoot, witSession, 6*time.Hour)
+
+	// Mark the rig parked via the wisp layer (the fast path "gt rig park" uses).
+	if err := wisp.NewConfig(townRoot, rigName).Set(rig.WispStatusKey, rig.WispStatusParked); err != nil {
+		t.Fatalf("set parked wisp status: %v", err)
+	}
+
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
+	if res.Checked != 2 {
+		t.Fatalf("Checked = %d, want 2 (refinery+witness)", res.Checked)
+	}
+	for _, s := range res.Stale {
+		if s.Action != "skip-parked" {
+			t.Errorf("%s Action = %q, want skip-parked", s.AgentRole, s.Action)
+		}
+		if s.MailSent {
+			t.Errorf("%s MailSent = true, want false (parked rig must not escalate)", s.AgentRole)
+		}
 	}
 }
 

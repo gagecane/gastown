@@ -58,17 +58,52 @@ log() {
   echo "[dolt-backup] $*"
 }
 
-# Heartbeat: resolve the town runtime dir for the durable completion signal.
-# Prefer GT_TOWN_ROOT (set by the daemon when invoking the plugin); fall back
-# to the parent of DOLT_DATA_DIR so a manual run still emits a heartbeat.
-heartbeat_path() {
-  local runtime_root
+# town_root resolves the town directory for locating town-relative state
+# (heartbeat, wisp config). Prefer GT_TOWN_ROOT (set by the daemon when invoking
+# the plugin); fall back to the parent of DOLT_DATA_DIR so a manual run still works.
+town_root() {
   if [[ -n "${GT_TOWN_ROOT:-}" ]]; then
-    runtime_root="$GT_TOWN_ROOT"
+    echo "$GT_TOWN_ROOT"
   else
-    runtime_root="$(dirname "$DOLT_DATA_DIR")"
+    dirname "$DOLT_DATA_DIR"
   fi
-  echo "$runtime_root/.runtime/dolt-backup-heartbeat.json"
+}
+
+# Heartbeat: resolve the town runtime dir for the durable completion signal.
+heartbeat_path() {
+  echo "$(town_root)/.runtime/dolt-backup-heartbeat.json"
+}
+
+# is_parked <db> reports (exit 0) whether the rig backing a database is PARKED.
+# A backup DB directory name equals its rig name, and "gt rig park" writes
+# status=parked into the wisp config at <town>/.beads-wisp/config/<rig>.json —
+# the same Layer-1 fast path internal/rig.IsRigParkedOrDocked checks first.
+#
+# Parked rigs have their agents stopped and may never have been given a backup
+# remote BY DESIGN, so a parked rig's "no remote" / sync failure is the expected
+# steady state, NOT a data-loss event (gu-qwe7q/gu-otphy). Skipping them before
+# provision/sync stops the per-cycle HIGH false-positive escalations. Docked
+# rigs (status=docked) are skipped too — same rationale.
+#
+# Wisp-only by design: this plugin runs in plain bash with no access to the
+# beads DB, so we cannot consult the persistent bead-label layer. The wisp layer
+# is what "gt rig park" writes and covers the observed parked rigs; a rig parked
+# only via bead label (wisp state lost) would not be skipped here and would fall
+# through to the existing no-remote SKIP, still a low-severity warning rather
+# than a HIGH failure.
+is_parked() {
+  local db="$1" wisp_file status
+  wisp_file="$(town_root)/.beads-wisp/config/${db}.json"
+  [[ -f "$wisp_file" ]] || return 1
+  status="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print((d.get('values') or {}).get('status', ''))
+except Exception:
+    pass
+" "$wisp_file" 2>/dev/null || true)"
+  [[ "$status" == "parked" || "$status" == "docked" ]]
 }
 
 # write_heartbeat <status> <synced> <skipped> <failed> <total> <retention_dirs> <retention_failed> <detail>
@@ -206,13 +241,27 @@ SYNCED=0
 SKIPPED=0
 FAILED=0
 NO_REMOTE=0
+PARKED=0
 FAILED_DBS=""
 NO_REMOTE_DBS=""
+PARKED_DBS=""
 
 for DB in "${PROD_DBS[@]}"; do
   DB_DIR="$DOLT_DATA_DIR/$DB"
   BACKUP_NAME="${DB}-backup"
   HASH_FILE="$BACKUP_DIR/${DB}/.last-backup-hash"
+
+  # Parked/docked rig skip (gu-qwe7q/gu-otphy): a parked rig's agents are
+  # stopped and it may have no backup remote BY DESIGN. Treat it as a benign
+  # skip BEFORE provisioning/syncing so it never counts as an exit-1 failure
+  # and never drives a HIGH escalation every cycle. Honors explicit --databases
+  # too: an operator naming a parked DB still gets the safe skip.
+  if is_parked "$DB"; then
+    log "  $DB: rig is parked/docked — skipping backup (expected, not a failure)"
+    PARKED=$((PARKED + 1))
+    PARKED_DBS="$PARKED_DBS $DB"
+    continue
+  fi
 
   # Check DB dir exists
   if [[ ! -d "$DB_DIR/.dolt" ]]; then
@@ -362,10 +411,13 @@ done
 
 # --- Step 4: Report results ---------------------------------------------------
 
-SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
+SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
 log "$SUMMARY"
 if [[ "$NO_REMOTE" -gt 0 ]]; then
   log "  no-remote DBs (enumerated but unconfigured — likely orphan/stray):$NO_REMOTE_DBS"
+fi
+if [[ "$PARKED" -gt 0 ]]; then
+  log "  parked DBs (rig parked/docked — skipped by design, not a failure):$PARKED_DBS"
 fi
 
 # --- Step 5: Heartbeat, record result, escalate if needed ---------------------
