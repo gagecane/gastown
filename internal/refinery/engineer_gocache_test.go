@@ -85,9 +85,40 @@ func TestGateBuildEnv_OverridesGocache(t *testing.T) {
 
 func TestGateBuildEnv_NilWhenUnscoped(t *testing.T) {
 	t.Setenv("GT_GATE_GOCACHE_BASE", t.TempDir())
+	// Disable the TMPDIR override too (gu-l4aue): with both overrides off and no
+	// rig, gateBuildEnv inherits the parent env unchanged.
+	t.Setenv("GT_GATE_TMPDIR", "off")
 
 	e := &Engineer{} // no rig → no scoping → inherit parent env
 	if env := e.gateBuildEnv(); env != nil {
 		t.Errorf("gateBuildEnv = %v, want nil for unscoped engineer", env)
+	}
+}
+
+// gu-l4aue: even an unscoped engineer (no rig → no GOCACHE scoping) still gets
+// TMPDIR/GOTMPDIR routed off tmpfs, so concurrent full-suite gate runs can't
+// fill a small /tmp and fail the linker with ENOSPC.
+func TestGateBuildEnv_TmpdirOverrideWhenUnscoped(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("GT_GATE_TMPDIR_BASE", base)
+
+	e := &Engineer{} // no rig
+	env := e.gateBuildEnv()
+	if env == nil {
+		t.Fatal("gateBuildEnv returned nil, want env with TMPDIR override")
+	}
+
+	wantDir := filepath.Join(base, "gt-gate-tmp")
+	var sawTmp, sawGoTmp bool
+	for _, kv := range env {
+		if kv == "TMPDIR="+wantDir {
+			sawTmp = true
+		}
+		if kv == "GOTMPDIR="+wantDir {
+			sawGoTmp = true
+		}
+	}
+	if !sawTmp || !sawGoTmp {
+		t.Errorf("gateBuildEnv missing TMPDIR/GOTMPDIR=%q (TMPDIR=%v GOTMPDIR=%v)", wantDir, sawTmp, sawGoTmp)
 	}
 }

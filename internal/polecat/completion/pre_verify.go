@@ -165,6 +165,10 @@ const defaultGateTimeout = 10 * time.Minute
 func execGate(ctx context.Context, workDir, cmd string) ([]byte, error) {
 	c := exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // G204: gates from trusted rig config
 	c.Dir = workDir
+	// Route TMPDIR/GOTMPDIR off any small /tmp tmpfs onto disk-backed storage so a
+	// gate's `go test ./...` link step can't fail with ENOSPC when concurrent
+	// full-suite gate runs fill /tmp (gu-l4aue). nil leaves env inherited.
+	c.Env = util.WithGateTmpEnv(os.Environ())
 	util.SetProcessGroup(c)
 	c.WaitDelay = gateWaitDelay
 	// Combine stdout+stderr into one buffer (preserving CombinedOutput's

@@ -212,6 +212,32 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
       GIT_PREFIX GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS \
       GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
+# --- Route gate TMPDIR off a small /tmp tmpfs (gu-l4aue) ------------------
+#
+# On hosts where /tmp is a small tmpfs (16G on the Gas Town build host) shared
+# by every rig gate, the heavy `go build`/`go vet`/`golangci-lint` runs below
+# write their go-build/go-link working dirs there. When several gate runs
+# execute concurrently their live dirs fill tmpfs and the linker dies mid-link
+# with "no space left on device" — a flaky, town-wide false gate failure
+# (matching the `go test ./...` ENOSPC the gt-done/refinery gates hit). The
+# stale-dir sweep (gu-vzkyh) can't help: these dirs are live by definition.
+#
+# Fix: point TMPDIR/GOTMPDIR at disk-backed storage (the root fs, ~850G free)
+# instead of the tmpfs, the same workaround the reporter applied by hand. Mirrors
+# internal/util.GateTmpDir so the Go gate paths and this shell gate agree on the
+# location. Honors the same knobs: GT_GATE_TMPDIR=off opts out; GT_GATE_TMPDIR_BASE
+# overrides the base (default: the user cache dir, e.g. $HOME/.cache).
+if [[ "${GT_GATE_TMPDIR:-}" != "off" ]]; then
+  _gate_tmp_base="${GT_GATE_TMPDIR_BASE:-${XDG_CACHE_HOME:-$HOME/.cache}}"
+  if [[ -n "$_gate_tmp_base" ]]; then
+    _gate_tmp_dir="$_gate_tmp_base/gt-gate-tmp"
+    if mkdir -p "$_gate_tmp_dir" 2>/dev/null; then
+      export TMPDIR="$_gate_tmp_dir"
+      export GOTMPDIR="$_gate_tmp_dir"
+    fi
+  fi
+fi
+
 # --- Host-wide concurrency cap on heavy go gate runs (gs-orsm) ------------
 #
 # The 2026-06-09 load-742 estop: many polecat/refinery worktrees ran this

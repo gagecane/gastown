@@ -885,7 +885,11 @@ func gateEnv(townRoot string) []string {
 		"/usr/local/bin",
 	}
 	enriched := strings.Join(append(dirs, os.Getenv("PATH")), string(os.PathListSeparator))
-	return append(stripGateDoltEnv(os.Environ()), "CI=true", "PATH="+enriched)
+	// Route TMPDIR/GOTMPDIR off any small /tmp tmpfs onto disk-backed storage so
+	// the gate's `go build`/`go test` link steps can't fail with ENOSPC when
+	// concurrent full-suite runs fill /tmp (gu-l4aue).
+	env := util.WithGateTmpEnv(stripGateDoltEnv(os.Environ()))
+	return append(env, "CI=true", "PATH="+enriched)
 }
 
 // failureOutputTailSize is the number of trailing output lines kept verbatim

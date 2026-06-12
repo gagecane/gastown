@@ -1291,28 +1291,35 @@ func (e *Engineer) rigGoCache() string {
 	return filepath.Join(base, e.rig.Name)
 }
 
-// gateBuildEnv returns the environment for a gate/test subprocess: the
-// parent env with GOCACHE overridden to the rig-scoped directory. Returns
-// nil (inherit parent env unchanged) when no rig-scoped cache applies.
-// The cache directory is created best-effort; if creation fails the
-// override is skipped so the gate still runs against the default cache.
+// gateBuildEnv returns the environment for a gate/test subprocess: the parent
+// env with GOCACHE overridden to the rig-scoped directory (gu-sav6u) and
+// TMPDIR/GOTMPDIR routed off any small /tmp tmpfs onto disk-backed storage
+// (gu-l4aue). Returns nil (inherit parent env unchanged) when neither override
+// applies. Each override is best-effort: if a directory cannot be created the
+// gate still runs against the inherited value.
 func (e *Engineer) gateBuildEnv() []string {
+	env := util.WithGateTmpEnv(os.Environ())
+
 	cache := e.rigGoCache()
-	if cache == "" {
-		return nil
-	}
-	if err := os.MkdirAll(cache, 0o755); err != nil {
-		return nil
-	}
-	env := os.Environ()
-	out := make([]string, 0, len(env)+1)
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "GOCACHE=") {
-			continue
+	if cache != "" {
+		if err := os.MkdirAll(cache, 0o755); err == nil {
+			out := make([]string, 0, len(env)+1)
+			for _, kv := range env {
+				if strings.HasPrefix(kv, "GOCACHE=") {
+					continue
+				}
+				out = append(out, kv)
+			}
+			env = append(out, "GOCACHE="+cache)
 		}
-		out = append(out, kv)
 	}
-	return append(out, "GOCACHE="+cache)
+
+	// If neither override applies, return nil to preserve the legacy
+	// "inherit parent env unchanged" contract callers rely on.
+	if cache == "" && util.GateTmpDir() == "" {
+		return nil
+	}
+	return env
 }
 
 // runGate executes a single quality gate command and returns the result.
