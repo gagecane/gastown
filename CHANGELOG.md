@@ -52,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Polecats authorized to perform fork-sync** (gu-6qcn6) — The auto-filed
+  `[fork-sync]` tracking bead (from `scripts/check-upstream-rebased.sh` when
+  origin/main falls behind upstream/main) carried an explicit "operator/mayor
+  lane — do NOT autonomously rebase the live source repo" instruction.
+  Dispatched polecats correctly refused and closed no-changes, so every
+  fork-sync bead bounced back unworked and re-surfaced as a recurring operator
+  escalation each time upstream advanced (gu-4sktl, gu-yl8nk). Per operator
+  decision, the bead body now authorizes a polecat to run the sync
+  autonomously via `gt upstream sync` — the verb that already fetches
+  upstream, merges (fast-forward or clean `--no-ff`), runs gates, and pushes
+  to origin, with conflict-complexity gating and a circuit breaker. This is
+  the one sanctioned case where the target branch updates directly rather than
+  through the feature-branch + MR flow.
+
 - **`gt status`: differentiate stopped-state glyphs** (gu-r9g1) — The single
   ○ glyph for "session not running" used to collapse three distinct
   conditions: a dead agent with active pinned work (emergency — work is

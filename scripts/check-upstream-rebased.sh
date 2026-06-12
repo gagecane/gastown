@@ -77,9 +77,16 @@ $UPSTREAM_REF. This bead's existence == the gate is red.
 
 DIVERGENCE: git rev-list --count $origin_ref..$UPSTREAM_REF = $behind
 
-ACTION: coordinated fork-sync (operator/mayor lane — do NOT autonomously
-rebase the live source repo). Related: gu-czolf (auto-prioritize fork-sync
-MRs to P0)."
+ACTION: run a coordinated fork-sync. A dispatched polecat MAY perform this
+autonomously via \`gt upstream sync\` — the verb fetches upstream, merges
+upstream/main into $ORIGIN_BRANCH (fast-forward or clean --no-ff), runs the
+gate suite, and pushes to origin. This is the one sanctioned case where the
+target branch is updated directly rather than through the normal
+feature-branch + MR flow. Conflicting merges are complexity-gated: a clean
+merge lands automatically, a conflicted one dispatches a resolver polecat or
+escalates, and repeated failures trip the circuit breaker (\`gt upstream
+resume\` to clear). Related: gu-czolf (auto-prioritize fork-sync MRs to P0),
+gu-6qcn6 (authorize polecats for fork-sync)."
 
   # Dedup: reuse an existing OPEN [fork-sync] tracking bead rather than filing a
   # duplicate every gate run. Match on the label we stamp below.
