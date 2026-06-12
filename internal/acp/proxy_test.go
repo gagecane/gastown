@@ -372,28 +372,6 @@ func TestProxy_InjectNotification_WithParams(t *testing.T) {
 	}
 }
 
-func TestProxy_AgentDone(t *testing.T) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "true")
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start command: %v", err)
-	}
-
-	p := &Proxy{cmd: cmd}
-
-	done := p.agentDone()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("command failed: %v", err)
-		}
-	case <-time.After(1 * time.Second):
-		t.Error("timeout waiting for command to complete")
-	}
-}
-
 func TestJSONRPCError(t *testing.T) {
 	rpcErr := &JSONRPCError{
 		Code:    -32600,

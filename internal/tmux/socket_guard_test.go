@@ -148,10 +148,6 @@ func TestNoBareTmuxExec(t *testing.T) {
 	// Phase 2: Process candidate files in parallel. Each worker reads a
 	// file, applies a cheap bytes.Contains prelim filter, and only falls
 	// through to regex scanning if the file could possibly match.
-	type violation struct {
-		msg string
-	}
-
 	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers < 1 {
 		numWorkers = 4

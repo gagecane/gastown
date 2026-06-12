@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,30 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
-)
-
-// Dog lifecycle defaults — now config-driven via operational.daemon thresholds.
-// These vars are still used as fallbacks and for tests; production code
-// should prefer d.daemonCfg() accessors loaded from TownSettings.
-var (
-	// dogIdleSessionTimeout is how long a dog can be idle with a live tmux
-	// session before the session is killed (default 1h).
-	// Configurable via operational.daemon.dog_idle_session_timeout.
-	dogIdleSessionTimeout = config.DefaultDogIdleSessionTimeout
-
-	// dogIdleRemoveTimeout is how long a dog can be idle before it is removed
-	// from the kennel entirely (only when pool is oversized, default 4h).
-	// Configurable via operational.daemon.dog_idle_remove_timeout.
-	dogIdleRemoveTimeout = config.DefaultDogIdleRemoveTimeout
-
-	// staleWorkingTimeout is how long a dog can be in state=working with no
-	// activity updates before it is considered stuck (default 2h).
-	// Configurable via operational.daemon.stale_working_timeout.
-	staleWorkingTimeout = config.DefaultStaleWorkingTimeout
-
-	// maxDogPoolSize is the target pool size (default 4).
-	// Configurable via operational.daemon.max_dog_pool_size.
-	maxDogPoolSize = config.DefaultMaxDogPoolSize
 )
 
 // handleDogs manages Dog lifecycle: cleanup stuck dogs, reap idle dogs, then dispatch plugins.
@@ -540,50 +515,10 @@ func dogDispatchGateConcurrency() int {
 }
 
 // findDispatchableDog returns the first dog in the kennel whose registry
-// state is idle AND whose tmux session is NOT currently running. Returns nil
-// when no dog satisfies both conditions.
-//
-// This exists because a dog can be marked idle (via gt dog done or the reaper)
-// before its tmux session fully terminates, producing a transient window where
-// sm.Start would fail with "session already running". Picking that dog every
-// dispatch tick infinite-loops the same failed dispatch instead of advancing
-// to another genuinely-free dog in the pack. See gt-o24.
-//
-// IsRunning errors are logged and treated as "not dispatchable" so a flaky
-// tmux check can't wedge the whole dispatch cycle.
-//
-// This is the free-function flavor with no daemon/backoff awareness — it is
-// kept for unit tests that construct a bare SessionManager. Production code
-// should call (*Daemon).findDispatchableDog so dogs in startup backoff are
-// also skipped (see gu-ro75).
-func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.Logger) *dog.Dog {
-	dogs, err := mgr.List()
-	if err != nil {
-		logger.Printf("Handler: failed to list dogs while picking dispatch target: %v", err)
-		return nil
-	}
-	for _, d := range dogs {
-		if d.State != dog.StateIdle {
-			continue
-		}
-		running, err := sm.IsRunning(d.Name)
-		if err != nil {
-			logger.Printf("Handler: IsRunning check failed for dog %s: %v; skipping", d.Name, err)
-			continue
-		}
-		if running {
-			continue
-		}
-		return d
-	}
-	return nil
-}
-
-// findDispatchableDog is the daemon-aware variant of the free function above.
-// In addition to the idle+not-running filter, it skips dogs whose startup is
-// currently in exponential backoff due to prior failures. Every dog whose
-// backoff is active gets a single-line log explaining why it was skipped so
-// the log trail makes the loop protection visible. See gu-ro75.
+// state is idle AND whose tmux session is NOT currently running. It skips dogs
+// whose startup is currently in exponential backoff due to prior failures.
+// Every dog whose backoff is active gets a single-line log explaining why it
+// was skipped so the log trail makes the loop protection visible. See gu-ro75.
 func (d *Daemon) findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager) *dog.Dog {
 	dogs, err := mgr.List()
 	if err != nil {

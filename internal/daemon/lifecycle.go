@@ -622,11 +622,6 @@ func (d *Daemon) applySessionTheme(sessionName string, parsed *ParsedIdentity) {
 	_ = d.tmux.ConfigureGasTownSession(sessionName, theme, rigName, worker, role)
 }
 
-// syncFailureEscalationThreshold is the default number of consecutive pull failures
-// before logging escalates from WARN to ERROR.
-// Configurable via operational.daemon.sync_failure_escalation_threshold.
-const syncFailureEscalationThreshold = 3
-
 // syncWorkspace syncs a git workspace before starting a new session.
 // This ensures agents with persistent clones (like refinery) start with current code.
 // Handles dirty working trees by auto-stashing before pull and restoring after.

@@ -173,12 +173,6 @@ func TestDetectStaleWorkingDogs_EmptyKennel(t *testing.T) {
 	d.detectStaleWorkingDogs(mgr, sm, &config.DaemonThresholds{})
 }
 
-func TestDetectStaleWorkingDogs_Constants(t *testing.T) {
-	if staleWorkingTimeout != 2*time.Hour {
-		t.Errorf("staleWorkingTimeout = %v, want 2h", staleWorkingTimeout)
-	}
-}
-
 // testWriteTownPlugin writes a town-level plugin.md with a cooldown gate and
 // optional execution timeout so pluginStuckThresholds can discover it.
 func testWriteTownPlugin(t *testing.T, townRoot, name, cooldown, execTimeout string) {
@@ -370,7 +364,7 @@ func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
 	sm := dog.NewSessionManager(tm, townRoot, mgr)
 
 	// Create 6 idle dogs: 4 recent, 2 long-idle.
-	// Pool is 6 > maxDogPoolSize(4), so long-idle dogs should be removed.
+	// Pool is 6 > pool max (4), so long-idle dogs should be removed.
 	for i := 0; i < 4; i++ {
 		name := "recent-" + string(rune('a'+i))
 		testSetupDogState(t, townRoot, name, dog.StateIdle, time.Now().Add(-10*time.Minute))
@@ -386,8 +380,8 @@ func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
 		t.Fatalf("List() error: %v", err)
 	}
 
-	if len(dogs) > maxDogPoolSize {
-		t.Errorf("expected pool trimmed to at most %d, got %d", maxDogPoolSize, len(dogs))
+	if len(dogs) > 4 {
+		t.Errorf("expected pool trimmed to at most %d, got %d", 4, len(dogs))
 	}
 
 	// Verify the old dogs were removed.
@@ -408,9 +402,9 @@ func TestReapIdleDogs_DoesNotRemoveWhenPoolAtMaxSize(t *testing.T) {
 	tm := tmux.NewTmux()
 	sm := dog.NewSessionManager(tm, townRoot, mgr)
 
-	// Create exactly maxDogPoolSize idle dogs, all long-idle.
+	// Create exactly the pool-max number of idle dogs, all long-idle.
 	// Pool is NOT oversized, so none should be removed.
-	for i := 0; i < maxDogPoolSize; i++ {
+	for i := 0; i < 4; i++ {
 		name := "idle-" + string(rune('a'+i))
 		testSetupDogState(t, townRoot, name, dog.StateIdle, time.Now().Add(-5*time.Hour))
 	}
@@ -421,8 +415,8 @@ func TestReapIdleDogs_DoesNotRemoveWhenPoolAtMaxSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
-	if len(dogs) != maxDogPoolSize {
-		t.Errorf("expected %d dogs (pool not oversized), got %d", maxDogPoolSize, len(dogs))
+	if len(dogs) != 4 {
+		t.Errorf("expected %d dogs (pool not oversized), got %d", 4, len(dogs))
 	}
 }
 
@@ -439,7 +433,7 @@ func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
 	sm := dog.NewSessionManager(tm, townRoot, mgr)
 
 	// Create 7 idle dogs, all long-idle.
-	// Should remove 3 to get down to maxDogPoolSize(4).
+	// Should remove 3 to get down to the pool max (4).
 	for i := 0; i < 7; i++ {
 		name := "dog-" + string(rune('a'+i))
 		testSetupDogState(t, townRoot, name, dog.StateIdle, time.Now().Add(-5*time.Hour))
@@ -451,8 +445,8 @@ func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
-	if len(dogs) > maxDogPoolSize {
-		t.Errorf("expected pool trimmed to %d, got %d", maxDogPoolSize, len(dogs))
+	if len(dogs) > 4 {
+		t.Errorf("expected pool trimmed to %d, got %d", 4, len(dogs))
 	}
 }
 
@@ -514,18 +508,6 @@ func TestReapIdleDogs_EmptyKennel(t *testing.T) {
 
 	// Should not panic or error with empty kennel.
 	d.reapIdleDogs(mgr, sm, &config.DaemonThresholds{})
-}
-
-func TestReapIdleDogs_Constants(t *testing.T) {
-	if dogIdleSessionTimeout != 1*time.Hour {
-		t.Errorf("dogIdleSessionTimeout = %v, want 1h", dogIdleSessionTimeout)
-	}
-	if dogIdleRemoveTimeout != 4*time.Hour {
-		t.Errorf("dogIdleRemoveTimeout = %v, want 4h", dogIdleRemoveTimeout)
-	}
-	if maxDogPoolSize != 4 {
-		t.Errorf("maxDogPoolSize = %d, want 4", maxDogPoolSize)
-	}
 }
 
 func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
@@ -600,25 +582,6 @@ func TestDispatchPlugins_SkipsCronGateEmptySchedule(t *testing.T) {
 	}
 	if dg.Work != "" {
 		t.Errorf("dog work = %q, want empty (cron gate with empty schedule must not dispatch)", dg.Work)
-	}
-}
-
-func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
-	townRoot := t.TempDir()
-	d := testHandlerDaemon(t, townRoot)
-
-	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
-	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
-
-	mgr := dog.NewManager(townRoot, nil)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
-
-	got := findDispatchableDog(mgr, sm, d.logger)
-	if got == nil {
-		t.Fatal("findDispatchableDog returned nil; expected an idle dog")
-	}
-	if got.Name != "alpha" && got.Name != "bravo" {
-		t.Errorf("findDispatchableDog = %q, want alpha or bravo", got.Name)
 	}
 }
 

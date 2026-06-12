@@ -242,6 +242,8 @@ func chargePushRecovery(rigName, polecatName, branch string) (within bool, attem
 }
 
 // resetPushRecoveryBudget clears budget state. Intended for tests only.
+//
+//nolint:unused // test reset hook
 func resetPushRecoveryBudget() {
 	pushRecoveryMu.Lock()
 	defer pushRecoveryMu.Unlock()

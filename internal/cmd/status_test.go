@@ -808,27 +808,6 @@ func TestCountRunningAgents(t *testing.T) {
 	}
 }
 
-func TestExtractBaseName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		cmdline string
-		want    string
-	}{
-		{"claude\x00--model\x00opus", "claude"},
-		{"/usr/bin/node\x00/path/pi", "node"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			got := extractBaseName(tt.cmdline)
-			if got != tt.want {
-				t.Errorf("extractBaseName(%q) = %q, want %q", tt.cmdline, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFormatMCPFootprint(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

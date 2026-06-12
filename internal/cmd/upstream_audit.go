@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -321,24 +320,5 @@ func countBySeverity(findings []upstreamsync.AuditFinding) map[string]int {
 	for _, f := range findings {
 		out[string(f.Severity)]++
 	}
-	return out
-}
-
-// auditCodeRegistry exposes known finding codes for help text and
-// (eventually) tab completion. Sorted at registration so help is
-// deterministic.
-var auditCodeRegistry = sortedAuditCodes([]string{
-	upstreamsync.AuditCodeResolutionAgentAuthored,
-	upstreamsync.AuditCodeResolutionRestrictedAdj,
-	upstreamsync.AuditCodeOutcomeNonSuccess,
-	upstreamsync.AuditCodeOutcomeGateFailure,
-	upstreamsync.AuditCodeRigCircuitBreakerTripped,
-	upstreamsync.AuditCodeRigStaleNoSuccess,
-	upstreamsync.AuditCodeRigAutoPaused,
-})
-
-func sortedAuditCodes(in []string) []string {
-	out := append([]string(nil), in...)
-	sort.Strings(out)
 	return out
 }

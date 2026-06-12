@@ -124,24 +124,6 @@ func TestKillExistingSession_NoSession(t *testing.T) {
 	t.Skip("requires tmux for integration testing")
 }
 
-func TestMapKeysSorted(t *testing.T) {
-	got := mapKeysSorted(map[string]string{
-		"GT_SESSION": "1",
-		"GT_ROLE":    "polecat",
-		"GT_RIG":     "alpha",
-	})
-
-	want := []string{"GT_RIG", "GT_ROLE", "GT_SESSION"}
-	if len(got) != len(want) {
-		t.Fatalf("mapKeysSorted() length = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("mapKeysSorted()[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
 func TestMergeRuntimeLivenessEnv_SetsResolvedAgentAndProcessNames(t *testing.T) {
 	env := map[string]string{
 		"GT_ROLE": "polecat",

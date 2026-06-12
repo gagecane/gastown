@@ -414,19 +414,6 @@ func (a *AgentSession) displayLabel() string {
 	return a.Name
 }
 
-// socketDisplayName returns a human-friendly label for a tmux socket.
-// The town socket is labeled "hq" to match the session prefix convention
-// (hq-deacon, hq-mayor). Other sockets use their name as-is.
-func socketDisplayName(socket string) string {
-	if socket == tmux.GetDefaultSocket() {
-		return "hq"
-	}
-	if strings.HasPrefix(socket, "gt-test-") {
-		return "testing"
-	}
-	return socket
-}
-
 // buildMenuAction returns a tmux command string for the display-menu action
 // that handles both same-socket and cross-socket session switching.
 //

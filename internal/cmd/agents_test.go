@@ -510,29 +510,6 @@ func TestDisplayLabel_TestSession(t *testing.T) {
 	}
 }
 
-func TestSocketDisplayName_TestSocket(t *testing.T) {
-	tests := []struct {
-		name   string
-		socket string
-		want   string
-	}{
-		{"test-tmux socket", "gt-test-tmux-12345", "testing"},
-		{"test-cmd socket", "gt-test-cmd-67890", "testing"},
-		{"test-config socket", "gt-test-config-111", "testing"},
-		{"non-test socket", "my-custom-socket", "my-custom-socket"},
-		{"default socket", "default", "default"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := socketDisplayName(tt.socket)
-			if got != tt.want {
-				t.Errorf("socketDisplayName(%q) = %q, want %q", tt.socket, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestBuildMenuAction_TestSocket(t *testing.T) {
 	action := buildMenuAction("gt-test-tmux-12345", "test-session")
 	if !strings.Contains(action, "-L gt-test-tmux-12345") {

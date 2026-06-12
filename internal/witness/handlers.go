@@ -435,11 +435,6 @@ func findCleanupWisp(bd *BdCli, workDir, polecatName string) (string, error) {
 	return "", nil
 }
 
-// agentBeadResponse is used to parse the bd show --json response for agent beads.
-type agentBeadResponse struct {
-	Description string `json:"description"`
-}
-
 // findMRBeadForBranch queries beads for an open merge-request bead whose
 // branch field matches the given branch name. Returns the bead ID if found,
 // or empty string if no matching MR bead exists.
@@ -3746,27 +3741,6 @@ func clearCompletionMetadata(bd *BdCli, workDir, agentBeadID string) error {
 	return bd.Run(workDir, "update", agentBeadID, "--description", newDesc)
 }
 
-// getAgentBeadState reads agent_state and hook_bead from an agent bead.
-// Returns the agent_state string and hook_bead ID.
-func getAgentBeadState(bd *BdCli, workDir, agentBeadID string) (agentState, hookBead string) {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return "", ""
-	}
-
-	// Parse JSON response — bd show --json returns an array
-	var issues []struct {
-		AgentState  string `json:"agent_state"`
-		HookBead    string `json:"hook_bead"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return "", ""
-	}
-
-	return beads.ResolveAgentState(issues[0].Description, issues[0].AgentState), issues[0].HookBead
-}
-
 // getBeadStatus returns the status of a bead (e.g., "open", "closed", "hooked").
 // Returns the status string and true if the lookup succeeded, or ("", false) if
 // the bead couldn't be queried (network error, cross-rig routing failure, etc.).
@@ -4708,23 +4682,6 @@ func extractDoneIntent(labels []string) *DoneIntent {
 	return nil
 }
 
-// getAgentBeadLabels reads the labels from an agent bead.
-func getAgentBeadLabels(bd *BdCli, workDir, agentBeadID string) []string {
-	output, err := bd.Exec(workDir, "show", agentBeadID, "--json")
-	if err != nil || output == "" {
-		return nil
-	}
-
-	var issues []struct {
-		Labels []string `json:"labels"`
-	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
-		return nil
-	}
-
-	return issues[0].Labels
-}
-
 // sessionRecreated checks whether a tmux session was (re)created after the
 // given timestamp. Returns true if the session exists and was created after
 // detectedAt, indicating a new session replaced the dead one (TOCTOU guard).
@@ -4866,47 +4823,6 @@ func hasPendingMRFromSnapshot(bd *BdCli, workDir, rigName, polecatName string, s
 		GitSafe:         activeMRGitSafe(workDir, rigName, polecatName),
 	})
 	return assessment.Pending
-}
-
-func activeMRBlockerFromCLI(bd *BdCli, workDir, activeMR string) string {
-	if activeMR == "" {
-		return ""
-	}
-	if bd == nil {
-		return fmt.Sprintf("active_mr=%s status=unverified", activeMR)
-	}
-	output, err := bd.Exec(workDir, "show", activeMR, "--json")
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "not found") {
-			return ""
-		}
-		return fmt.Sprintf("active_mr=%s status=lookup_error: %v", activeMR, err)
-	}
-	status := issueStatusFromShowJSON(output)
-	if status == "" || beads.IssueStatus(status).IsTerminal() {
-		return ""
-	}
-	return fmt.Sprintf("active_mr=%s status=%s", activeMR, status)
-}
-
-func issueStatusFromShowJSON(output string) string {
-	output = strings.TrimSpace(output)
-	if output == "" || output == "null" || output == "[]" {
-		return ""
-	}
-	var items []struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(output), &items); err == nil && len(items) > 0 {
-		return items[0].Status
-	}
-	var item struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(output), &item); err == nil {
-		return item.Status
-	}
-	return ""
 }
 
 func activeMRGitSafe(workDir, rigName, polecatName string) bool {

@@ -729,11 +729,6 @@ func hasComments(w *compactIssue) bool {
 	return w.CommentCount > 0
 }
 
-// isReferenced checks dependency counts.
-func isReferenced(w *compactIssue) bool {
-	return w.DependentCount > 0 || w.DependencyCount > 0
-}
-
 // hasKeepLabel checks for keep labels.
 func hasKeepLabel(w *compactIssue) bool {
 	for _, label := range w.Labels {

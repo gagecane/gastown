@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -113,12 +112,4 @@ func (d *Daemon) sleep(dur time.Duration) {
 	case <-d.ctx.Done():
 	case <-t.C:
 	}
-}
-
-// spawnGateStatus renders a one-line summary of the gate for diagnostics.
-func (d *Daemon) spawnGateStatus() string {
-	d.spawnGateMu.Lock()
-	defer d.spawnGateMu.Unlock()
-	return fmt.Sprintf("spawns_this_heartbeat=%d next_allowed=%s",
-		d.spawnsThisHeartbeat, d.nextSpawnAllowed.Format(time.RFC3339))
 }

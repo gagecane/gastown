@@ -131,17 +131,6 @@ func extractHookInfos(settings *hooks.SettingsJSON, path, agent string) []HookIn
 	return infos
 }
 
-// parseHooksFile parses a .claude/settings.json file and extracts hooks.
-func parseHooksFile(path, agent string) ([]HookInfo, error) {
-	settings, err := hooks.LoadSettings(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// LoadSettings returns zero-value for missing files; check if it was actually empty
-	return extractHookInfos(settings, path, agent), nil
-}
-
 func outputHooksJSON(townRoot string, hookInfos []HookInfo) error {
 	output := HooksOutput{
 		TownRoot: townRoot,

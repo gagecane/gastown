@@ -7,37 +7,6 @@ import (
 	"testing"
 )
 
-// TestBdReadOnlyEnv verifies that bdReadOnlyEnv returns an environment slice
-// containing exactly one BD_DOLT_AUTO_COMMIT=off entry, regardless of any
-// pre-existing BD_DOLT_AUTO_COMMIT in the parent process env.
-func TestBdReadOnlyEnv(t *testing.T) {
-	tests := []struct {
-		name    string
-		preset  string
-		setting bool
-	}{
-		{name: "unset parent", setting: false},
-		{name: "parent has off", preset: "off", setting: true},
-		{name: "parent has on", preset: "on", setting: true},
-		{name: "parent has stale value", preset: "batched", setting: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.setting {
-				t.Setenv("BD_DOLT_AUTO_COMMIT", tc.preset)
-			} else {
-				t.Setenv("BD_DOLT_AUTO_COMMIT", "")
-			}
-
-			env := bdReadOnlyEnv()
-
-			assertSingleEnvValue(t, env, "BD_DOLT_AUTO_COMMIT", "off")
-			assertSingleEnvValue(t, env, "BD_READONLY", "true")
-		})
-	}
-}
-
 func TestBdReadOnlyPinnedEnvUsesSelectedBeadsDir(t *testing.T) {
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {

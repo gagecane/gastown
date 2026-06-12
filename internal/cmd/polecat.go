@@ -506,26 +506,6 @@ func sessionLabel(item PolecatListItem) string {
 	return "session: dead"
 }
 
-type reuseMRShower interface {
-	Show(issueID string) (*beads.Issue, error)
-}
-
-func activeMRBlocksReuse(bd reuseMRShower, mrID, sourceHint string, requireGitSafe, gitSafe bool) bool {
-	assessment := polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: mrID, SourceIssueHint: sourceHint, RequireGitSafe: requireGitSafe, GitSafe: gitSafe})
-	return assessment.Pending
-}
-
-func polecatReuseStatus(state polecat.State, cleanupStatus, activeMR, branch string, activeMRBlocks, staleCleanupSafe bool) string {
-	input := polecat.WorkstateInput{State: state, CleanupStatus: polecat.CleanupStatus(cleanupStatus), ActiveMR: activeMR, Branch: branch}
-	if activeMRBlocks {
-		input.ActiveMRBlocker = "active_mr=" + activeMR + " status=open"
-	}
-	if staleCleanupSafe {
-		input.IgnoreCleanupStatus = true
-	}
-	return polecat.DecideWorkstate(input).ReuseStatus
-}
-
 // getPolecatManager creates a polecat manager for the given rig.
 func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 	_, r, err := getRig(rigName)
@@ -1866,12 +1846,6 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
-// mrFinder is the subset of *beads.Beads that applyMQCheck needs. It lets us
-// unit-test the verdict logic without a real bd binary.
-type mrFinder interface {
-	FindMRForBranchAny(branch string) (*beads.Issue, error)
-}
-
 // isAssignedBeadTerminal reports whether the polecat's assigned bead (if any)
 // is in a terminal status (closed/tombstone). Returns false on any lookup
 // failure — callers must only use this to *skip* further escalation, never to
@@ -1906,45 +1880,6 @@ func isMQNotRequiredSource(bd issueShower, issueID string) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
-}
-
-// applyMQCheck mutates status based on merge-queue state for the polecat's
-// branch. If beadTerminal is true, the assigned bead is already closed, so
-// there is nothing to submit and we leave the verdict as SAFE_TO_NUKE.
-//
-// This guard fixes the zombie-restart loop documented in bead aa-55d8:
-// a closed "no-op audit" bead (e.g. aa-xtee) used to report NEEDS_MQ_SUBMIT
-// forever, causing witness patrols to restart the polecat on every cycle.
-func applyMQCheck(status *RecoveryStatus, bd mrFinder, beadTerminal, hasSubmittableWork, mqNotRequired bool) {
-	if !hasSubmittableWork || mqNotRequired {
-		// No commits/content ahead of the integration branch means gt done had
-		// nothing to enqueue; treating that as missing MQ submission causes
-		// recovery loops on no-op/report-only assignments.
-		status.MQStatus = "not_required"
-		return
-	}
-	if beadTerminal {
-		// Work exists, but the bead is already terminal.
-		status.MQStatus = "submitted"
-		return
-	}
-	mr, mrErr := bd.FindMRForBranchAny(status.Branch)
-	if mrErr != nil {
-		// Can't verify MQ — fail closed until the queue state can be checked.
-		status.MQStatus = "unknown"
-		status.NeedsRecovery = true
-		status.Verdict = "NEEDS_RECOVERY"
-		status.Blockers = append(status.Blockers, fmt.Sprintf("mq_lookup_error: %v", mrErr))
-		return
-	}
-	if mr != nil {
-		status.MQStatus = "submitted"
-		return
-	}
-	// Work was pushed but never entered the merge queue
-	status.MQStatus = "not_submitted"
-	status.NeedsRecovery = true
-	status.Verdict = "NEEDS_MQ_SUBMIT"
 }
 
 func runPolecatGC(cmd *cobra.Command, args []string) error {
@@ -2179,7 +2114,11 @@ func dryRunNukeSummary(total, blocked int) string {
 	return fmt.Sprintf("Would nuke %d polecat(s).", total)
 }
 
-// nukePolecatFull performs the complete cleanup sequence for a single polecat:
+type nukePolecatOptions struct {
+	PurgeClosedEphemerals bool
+}
+
+// nukePolecatFullWithOptions performs the complete cleanup sequence for a single polecat:
 // 1. Kill tmux session
 // 2. Delete worktree (via RemoveWithOptions with nuclear=true)
 // 3. Delete git branch
@@ -2189,14 +2128,6 @@ func dryRunNukeSummary(total, blocked int) string {
 // When force is true, the best-effort push of the polecat's branch is skipped.
 // --force is the user's explicit "discard this work" signal — auto-pushing in
 // that mode would leak the regression we are trying to throw away (gu-e7r3).
-func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, force bool) error {
-	return nukePolecatFullWithOptions(polecatName, rigName, mgr, r, force, nukePolecatOptions{PurgeClosedEphemerals: true})
-}
-
-type nukePolecatOptions struct {
-	PurgeClosedEphemerals bool
-}
-
 func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, force bool, opts nukePolecatOptions) error {
 	t := tmux.NewTmux()
 

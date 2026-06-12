@@ -61,27 +61,6 @@ func TestMainBranchTestTimeout(t *testing.T) {
 	}
 }
 
-func TestMainBranchTestRigs(t *testing.T) {
-	// Nil config returns nil
-	if got := mainBranchTestRigs(nil); got != nil {
-		t.Errorf("expected nil, got %v", got)
-	}
-
-	// Configured rigs
-	config := &DaemonPatrolConfig{
-		Patrols: &PatrolsConfig{
-			MainBranchTest: &MainBranchTestConfig{
-				Enabled: true,
-				Rigs:    []string{"gastown", "beads"},
-			},
-		},
-	}
-	got := mainBranchTestRigs(config)
-	if len(got) != 2 || got[0] != "gastown" || got[1] != "beads" {
-		t.Errorf("expected [gastown beads], got %v", got)
-	}
-}
-
 func TestIsPatrolEnabledMainBranchTest(t *testing.T) {
 	// Nil config — disabled (opt-in)
 	if IsPatrolEnabled(nil, "main_branch_test") {

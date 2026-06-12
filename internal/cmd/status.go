@@ -397,18 +397,6 @@ func readCmdline(pid string) string {
 	return string(data)
 }
 
-// extractBaseName gets the base command name from a null-separated cmdline.
-func extractBaseName(cmdline string) string {
-	if cmdline == "" {
-		return ""
-	}
-	parts := strings.Split(cmdline, "\x00")
-	if len(parts) == 0 {
-		return ""
-	}
-	return filepath.Base(parts[0])
-}
-
 // isKnownAgent returns true if the command is a recognized agent runtime.
 func isKnownAgent(base string) bool {
 	return config.IsKnownPreset(base)

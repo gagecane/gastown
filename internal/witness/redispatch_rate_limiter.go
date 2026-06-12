@@ -174,6 +174,8 @@ func getRedispatchLimiter(rigName string, maxPerMinute int) *redispatchLimiter {
 
 // resetRedispatchLimitersForTest clears the package-level registry.
 // Intended for tests only — production code must never call this.
+//
+//nolint:unused // test reset hook
 func resetRedispatchLimitersForTest() {
 	redispatchLimiterMu.Lock()
 	defer redispatchLimiterMu.Unlock()

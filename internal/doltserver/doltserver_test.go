@@ -4241,26 +4241,6 @@ func TestSQLArgs(t *testing.T) {
 	}
 }
 
-func TestUserDSN(t *testing.T) {
-	tests := []struct {
-		user     string
-		password string
-		want     string
-	}{
-		{"root", "", "root"},
-		{"root", "secret", "root:secret"},
-		{"admin", "p@ss", "admin:p@ss"},
-	}
-	for _, tt := range tests {
-		c := &Config{User: tt.user, Password: tt.password}
-		got := c.userDSN()
-		if got != tt.want {
-			t.Errorf("Config{User:%q, Password:%q}.userDSN() = %q, want %q",
-				tt.user, tt.password, got, tt.want)
-		}
-	}
-}
-
 func TestHostPort(t *testing.T) {
 	tests := []struct {
 		host string

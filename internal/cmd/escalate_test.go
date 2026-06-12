@@ -369,54 +369,6 @@ func TestFormatReescalationMailBody(t *testing.T) {
 	}
 }
 
-func TestDetectSenderFallback(t *testing.T) {
-	// Save original env vars
-	origActor := os.Getenv("BD_ACTOR")
-	origRole := os.Getenv("GT_ROLE")
-	defer func() {
-		os.Setenv("BD_ACTOR", origActor)
-		os.Setenv("GT_ROLE", origRole)
-	}()
-
-	tests := []struct {
-		name  string
-		actor string
-		role  string
-		want  string
-	}{
-		{
-			name:  "BD_ACTOR takes priority",
-			actor: "gastown/polecats/alpha",
-			role:  "gastown/witness",
-			want:  "gastown/polecats/alpha",
-		},
-		{
-			name:  "GT_ROLE used when BD_ACTOR empty",
-			actor: "",
-			role:  "gastown/witness",
-			want:  "gastown/witness",
-		},
-		{
-			name:  "empty when both unset",
-			actor: "",
-			role:  "",
-			want:  "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("BD_ACTOR", tt.actor)
-			os.Setenv("GT_ROLE", tt.role)
-
-			got := detectSenderFallback()
-			if got != tt.want {
-				t.Errorf("detectSenderFallback() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestExecuteExternalActions(t *testing.T) {
 	// executeExternalActions prints warnings/info but doesn't return errors.
 	// We test that it doesn't panic with various configurations.

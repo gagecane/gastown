@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
@@ -105,17 +104,6 @@ func isInTmuxSession(targetSession string) bool {
 // as the current town. Used to decide between switch-client and attach-session.
 func isInSameTmuxSocket() bool {
 	return tmux.IsInSameSocket()
-}
-
-// isShellCommand checks if the command is a shell (meaning the runtime has exited).
-func isShellCommand(cmd string) bool {
-	shells := constants.SupportedShells
-	for _, shell := range shells {
-		if cmd == shell {
-			return true
-		}
-	}
-	return false
 }
 
 // ensureDefaultBranch checks if a git directory is on the default branch.

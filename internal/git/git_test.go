@@ -4148,7 +4148,7 @@ func initTestRepoWithRemoteOnBranch(t *testing.T, defaultBranch string) (string,
 		{"git", "commit", "-m", "initial"},
 		{"git", "remote", "add", "origin", remoteDir},
 		{"git", "push", "-u", "origin", defaultBranch},
-		// Set origin/HEAD so resolveRemoteBaseline can detect the default —
+		// Set origin/HEAD so baseline resolution can detect the default —
 		// a real `git clone` does this; our init+push does not.
 		{"git", "remote", "set-head", "origin", defaultBranch},
 	} {
@@ -4244,31 +4244,6 @@ func TestBranchPushedToRemote_MainlineDefault_WithLocalCommits(t *testing.T) {
 	}
 	if unpushed != 1 {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want 1 (not total HEAD count)", unpushed)
-	}
-}
-
-// TestResolveRemoteBaseline_Fallbacks verifies the probe-based fallbacks kick
-// in when origin/HEAD is missing. This mirrors CI-minted clones and repos
-// created without `remote set-head`.
-func TestResolveRemoteBaseline_Fallbacks(t *testing.T) {
-	localDir, _, defaultBranch := initTestRepoWithRemoteOnBranch(t, "main")
-	g := NewGit(localDir)
-
-	// Tier 1 works: origin/HEAD is set.
-	baseline := resolveRemoteBaseline(g, "origin")
-	if baseline != "origin/"+defaultBranch {
-		t.Errorf("baseline with origin/HEAD set = %q, want origin/%s", baseline, defaultBranch)
-	}
-
-	// Remove origin/HEAD and verify the probe fallback still finds origin/main.
-	cmd := exec.Command("git", "remote", "set-head", "--delete", "origin")
-	cmd.Dir = localDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("remote set-head --delete: %v", err)
-	}
-	baseline = resolveRemoteBaseline(g, "origin")
-	if baseline != "origin/main" {
-		t.Errorf("baseline after HEAD removal = %q, want origin/main (probe fallback)", baseline)
 	}
 }
 

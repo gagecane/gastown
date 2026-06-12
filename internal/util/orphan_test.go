@@ -184,60 +184,6 @@ func TestGetProcessCwd(t *testing.T) {
 	}
 }
 
-func TestIsInGasTownWorkspace(t *testing.T) {
-	// NOTE: This test uses os.Chdir on the process-global cwd.
-	// Do NOT add t.Parallel() here or to any test in this file—concurrent
-	// tests sharing the same process would race on the working directory.
-
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
-	// Create a temporary directory structure simulating a Gas Town workspace
-	tmpDir := t.TempDir()
-	mayorDir := filepath.Join(tmpDir, "mayor")
-	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	townJSON := filepath.Join(mayorDir, "town.json")
-	if err := os.WriteFile(townJSON, []byte(`{"name":"test-town"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Move to a non-workspace temp dir first, so the "not in workspace" check
-	// works even when tests are run from inside a real GT workspace.
-	nonWorkspaceDir := t.TempDir()
-	if err := os.Chdir(nonWorkspaceDir); err != nil {
-		t.Fatal(err)
-	}
-
-	// Our process is NOT in the temp workspace, so should return false
-	if isInGasTownWorkspace(os.Getpid()) {
-		t.Error("isInGasTownWorkspace(self) = true, want false (not in a GT workspace)")
-	}
-
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-	if !isInGasTownWorkspace(os.Getpid()) {
-		t.Error("isInGasTownWorkspace(self) = false, want true (in GT workspace root)")
-	}
-
-	// Test from a subdirectory of the workspace
-	subDir := filepath.Join(tmpDir, "polecats", "test-polecat")
-	if err := os.MkdirAll(subDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(subDir); err != nil {
-		t.Fatal(err)
-	}
-	if !isInGasTownWorkspace(os.Getpid()) {
-		t.Error("isInGasTownWorkspace(self) = false, want true (in GT workspace subdir)")
-	}
-}
-
 // hasTmux returns true if tmux is available on PATH.
 func hasTmux() bool {
 	_, err := exec.LookPath("tmux")

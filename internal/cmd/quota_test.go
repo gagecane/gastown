@@ -915,19 +915,6 @@ func TestRunQuotaClear(t *testing.T) {
 	})
 }
 
-// --- quotaLogger adapter ---
-
-func TestQuotaLogger(t *testing.T) {
-	// quotaLogger wraps style.PrintWarning which writes to stderr.
-	// This test just verifies the Warn call doesn't panic and handles args.
-	t.Run("Warn does not panic", func(t *testing.T) {
-		logger := quotaLogger{}
-		logger.Warn("simple")
-		logger.Warn("with format: %s", "value")
-		logger.Warn("multiple args: %s=%d", "key", 42)
-	})
-}
-
 // --- runQuotaRotate argument validation ---
 
 func TestRunQuotaRotate_ArgValidation(t *testing.T) {

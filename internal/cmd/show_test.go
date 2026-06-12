@@ -25,25 +25,3 @@ func TestExtractBeadIDFromArgs(t *testing.T) {
 		})
 	}
 }
-
-func TestStripEnvKey(t *testing.T) {
-	env := []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads", "HOME=/home/user", "BEADS_DIR=/other"}
-	got := stripEnvKey(env, "BEADS_DIR")
-
-	for _, e := range got {
-		if e == "BEADS_DIR=/town/.beads" || e == "BEADS_DIR=/other" {
-			t.Errorf("BEADS_DIR should be stripped, found: %s", e)
-		}
-	}
-	if len(got) != 2 {
-		t.Errorf("expected 2 entries after stripping, got %d", len(got))
-	}
-}
-
-func TestStripEnvKey_NoMatch(t *testing.T) {
-	env := []string{"PATH=/usr/bin", "HOME=/home/user"}
-	got := stripEnvKey(env, "BEADS_DIR")
-	if len(got) != 2 {
-		t.Errorf("expected 2 entries (no change), got %d", len(got))
-	}
-}

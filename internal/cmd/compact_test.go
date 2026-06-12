@@ -179,34 +179,6 @@ func TestHasComments(t *testing.T) {
 	}
 }
 
-func TestIsReferenced(t *testing.T) {
-	tests := []struct {
-		name    string
-		depCnt  int
-		deptCnt int
-		want    bool
-	}{
-		{"no refs", 0, 0, false},
-		{"has dependents", 0, 1, true},
-		{"has dependencies", 1, 0, true},
-		{"both", 2, 3, true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			w := &compactIssue{
-				Issue: beads.Issue{
-					DependencyCount: tc.depCnt,
-					DependentCount:  tc.deptCnt,
-				},
-			}
-			if got := isReferenced(w); got != tc.want {
-				t.Errorf("isReferenced = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestCompactTruncate(t *testing.T) {
 	tests := []struct {
 		name   string

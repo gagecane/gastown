@@ -21,13 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// quotaLogger adapts style.PrintWarning to the quota.Logger interface.
-type quotaLogger struct{}
-
-func (quotaLogger) Warn(format string, args ...interface{}) {
-	style.PrintWarning(format, args...)
-}
-
 // Quota command flags
 var (
 	quotaJSON bool

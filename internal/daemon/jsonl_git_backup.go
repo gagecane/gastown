@@ -994,14 +994,3 @@ func (d *Daemon) verifyNoPollution(gitRepo string, databases []string) int {
 	}
 	return total
 }
-
-// parseLineCount parses a line count from `wc -l` style output or plain integer.
-func parseLineCount(s string) (int, error) {
-	s = strings.TrimSpace(s)
-	// wc -l output format: "  42 filename" or just "42"
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return 0, fmt.Errorf("empty input")
-	}
-	return strconv.Atoi(fields[0])
-}

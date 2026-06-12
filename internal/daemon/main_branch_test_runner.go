@@ -137,14 +137,6 @@ func mainBranchTestFlakeThreshold(config *DaemonPatrolConfig) int {
 	return defaultMainBranchTestFlakeThreshold
 }
 
-// mainBranchTestRigs returns the configured rig filter, or nil (all rigs).
-func mainBranchTestRigs(config *DaemonPatrolConfig) []string {
-	if config != nil && config.Patrols != nil && config.Patrols.MainBranchTest != nil {
-		return config.Patrols.MainBranchTest.Rigs
-	}
-	return nil
-}
-
 // rigGate captures a single merge_queue gate's executable command, its
 // lifecycle phase, and its optional per-gate timeout. Phase mirrors
 // refinery's GatePhase ("pre-merge" or "post-squash"); empty string means

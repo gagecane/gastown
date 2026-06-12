@@ -18,7 +18,7 @@ import (
 //   - mayor's live trace at /tmp/bd-traces/ on the live town
 func TestPolecatCapacitySnapshot_CachedWithinTTL(t *testing.T) {
 	townRoot := t.TempDir()
-	t.Cleanup(func() { invalidatePolecatCapacityCache(townRoot) })
+	t.Cleanup(func() { dropCachedPolecatCapacitySnapshotForTest(townRoot) })
 
 	want := polecatCapacitySnapshot{Max: 8, Working: 3, Free: 5}
 	storeCachedPolecatCapacitySnapshot(townRoot, want, nil)
@@ -47,7 +47,7 @@ func TestPolecatCapacitySnapshot_CachedWithinTTL(t *testing.T) {
 // reintroduces the per-rig bd fan-out that motivated this cache.
 func TestPolecatCapacitySnapshot_CacheExpiresAfterTTL(t *testing.T) {
 	townRoot := t.TempDir()
-	t.Cleanup(func() { invalidatePolecatCapacityCache(townRoot) })
+	t.Cleanup(func() { dropCachedPolecatCapacitySnapshotForTest(townRoot) })
 
 	// Inject a snapshot artificially aged past the TTL.
 	polecatCapacityCacheMu.Lock()
@@ -67,29 +67,10 @@ func TestPolecatCapacitySnapshot_CacheExpiresAfterTTL(t *testing.T) {
 	}
 }
 
-// TestPolecatCapacitySnapshot_InvalidateDropsCachedEntry verifies that
-// invalidatePolecatCapacityCache drops the named townRoot's cached
-// entry without touching unrelated townRoot keys. Used by tests and by
-// any future code path that needs to force a fresh read after a known
-// state-changing operation.
-func TestPolecatCapacitySnapshot_InvalidateDropsCachedEntry(t *testing.T) {
-	a := t.TempDir()
-	b := t.TempDir()
-	t.Cleanup(func() {
-		invalidatePolecatCapacityCache(a)
-		invalidatePolecatCapacityCache(b)
-	})
-
-	storeCachedPolecatCapacitySnapshot(a, polecatCapacitySnapshot{Max: 1}, nil)
-	storeCachedPolecatCapacitySnapshot(b, polecatCapacitySnapshot{Max: 2}, nil)
-
-	invalidatePolecatCapacityCache(a)
-
-	if _, ok := loadCachedPolecatCapacitySnapshot(a); ok {
-		t.Errorf("invalidatePolecatCapacityCache(a) did not drop a's entry")
-	}
-	if _, ok := loadCachedPolecatCapacitySnapshot(b); !ok {
-		t.Errorf("invalidatePolecatCapacityCache(a) incorrectly dropped b's entry; " +
-			"invalidation must be scoped to the named townRoot only")
-	}
+// dropCachedPolecatCapacitySnapshotForTest removes the cached snapshot for
+// townRoot so tests do not leak entries across runs.
+func dropCachedPolecatCapacitySnapshotForTest(townRoot string) {
+	polecatCapacityCacheMu.Lock()
+	defer polecatCapacityCacheMu.Unlock()
+	delete(polecatCapacityCache, townRoot)
 }

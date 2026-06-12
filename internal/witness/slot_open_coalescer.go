@@ -156,6 +156,8 @@ func (c *slotOpenCoalescer) drainLocked() []slotOpenEvent {
 // coalescer flushes (either via timer or Flush). Tests use this to wait for
 // dispatch completion without sleeping. Only one waiter is supported per
 // flush; later calls replace the channel.
+//
+//nolint:unused // test flush sync
 func (c *slotOpenCoalescer) flushNotifyCh() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()

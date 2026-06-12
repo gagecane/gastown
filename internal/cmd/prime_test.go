@@ -819,50 +819,6 @@ func TestCheckHandoffMarkerParsesReason(t *testing.T) {
 	})
 }
 
-// TestOutputContinuationDirective tests that the continuation directive
-// outputs the expected content without the full autonomous mode block (GH#1965).
-func TestOutputContinuationDirective(t *testing.T) {
-	t.Run("basic_bead", func(t *testing.T) {
-		bead := &beads.Issue{
-			ID:    "gt-test123",
-			Title: "Test bead title",
-		}
-		output := captureStdout(t, func() {
-			outputContinuationDirective(bead, false)
-		})
-
-		// Should contain continuation directive
-		if !strings.Contains(output, "CONTINUE HOOKED WORK") {
-			t.Fatalf("expected 'CONTINUE HOOKED WORK' in output, got: %s", output)
-		}
-		if !strings.Contains(output, "gt-test123") {
-			t.Fatalf("expected bead ID in output, got: %s", output)
-		}
-
-		// Should NOT contain autonomous mode language
-		if strings.Contains(output, "AUTONOMOUS WORK MODE") {
-			t.Fatalf("continuation directive should NOT contain 'AUTONOMOUS WORK MODE', got: %s", output)
-		}
-		if strings.Contains(output, "Announce:") {
-			t.Fatalf("continuation directive should NOT contain 'Announce:', got: %s", output)
-		}
-	})
-
-	t.Run("bead_with_molecule", func(t *testing.T) {
-		bead := &beads.Issue{
-			ID:    "gt-mol456",
-			Title: "Molecule bead",
-		}
-		output := captureStdout(t, func() {
-			outputContinuationDirective(bead, true)
-		})
-
-		if !strings.Contains(output, "bd mol current") {
-			t.Fatalf("expected molecule hint in output, got: %s", output)
-		}
-	})
-}
-
 func TestCheckSlungWork_StandaloneFormulaUsesWorkflowOutput(t *testing.T) {
 	ctx := RoleContext{Role: RoleCrew}
 	hookedBead := &beads.Issue{

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/convoy"
 )
 
 // U-01: Simple 2-node cycle A→B→A
@@ -18,7 +20,7 @@ func TestDetectCycles_Simple2NodeCycle(t *testing.T) {
 		"a": {ID: "a", BlockedBy: []string{"b"}, Blocks: []string{"b"}},
 		"b": {ID: "b", BlockedBy: []string{"a"}, Blocks: []string{"a"}},
 	}}
-	cycle := detectCycles(dag)
+	cycle := convoy.DetectCycles(dag)
 	if cycle == nil {
 		t.Fatal("expected cycle, got nil")
 	}
@@ -35,7 +37,7 @@ func TestDetectCycles_NoCycleLinearChain(t *testing.T) {
 		"b": {ID: "b", BlockedBy: []string{"a"}, Blocks: []string{"c"}},
 		"c": {ID: "c", BlockedBy: []string{"b"}},
 	}}
-	cycle := detectCycles(dag)
+	cycle := convoy.DetectCycles(dag)
 	if cycle != nil {
 		t.Fatalf("expected no cycle, got: %v", cycle)
 	}
@@ -46,7 +48,7 @@ func TestDetectCycles_SelfLoop(t *testing.T) {
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
 		"a": {ID: "a", BlockedBy: []string{"a"}, Blocks: []string{"a"}},
 	}}
-	cycle := detectCycles(dag)
+	cycle := convoy.DetectCycles(dag)
 	if cycle == nil {
 		t.Fatal("expected cycle for self-loop, got nil")
 	}
@@ -60,7 +62,7 @@ func TestDetectCycles_DiamondNoCycle(t *testing.T) {
 		"c": {ID: "c", BlockedBy: []string{"a"}, Blocks: []string{"d"}},
 		"d": {ID: "d", BlockedBy: []string{"b", "c"}},
 	}}
-	cycle := detectCycles(dag)
+	cycle := convoy.DetectCycles(dag)
 	if cycle != nil {
 		t.Fatalf("expected no cycle in diamond, got: %v", cycle)
 	}
@@ -74,7 +76,7 @@ func TestDetectCycles_LongChainWithBackEdge(t *testing.T) {
 		"c": {ID: "c", BlockedBy: []string{"b"}, Blocks: []string{"d"}},
 		"d": {ID: "d", BlockedBy: []string{"c"}, Blocks: []string{"b"}},
 	}}
-	cycle := detectCycles(dag)
+	cycle := convoy.DetectCycles(dag)
 	if cycle == nil {
 		t.Fatal("expected cycle, got nil")
 	}

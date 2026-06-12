@@ -78,29 +78,3 @@ func TestInferRigFromCrewName(t *testing.T) {
 		})
 	}
 }
-
-func TestIsShellCommand(t *testing.T) {
-	tests := []struct {
-		cmd    string
-		expect bool
-	}{
-		{"bash", true},
-		{"zsh", true},
-		{"sh", true},
-		{"fish", true},
-		{"tcsh", true},
-		{"ksh", true},
-		{"claude", false},
-		{"node", false},
-		{"", false},
-		{"basher", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.cmd, func(t *testing.T) {
-			got := isShellCommand(tt.cmd)
-			if got != tt.expect {
-				t.Errorf("isShellCommand(%q) = %v, want %v", tt.cmd, got, tt.expect)
-			}
-		})
-	}
-}

@@ -112,6 +112,8 @@ func (s *Store) WithTTL(ttl time.Duration) *Store {
 }
 
 // withClock returns a copy of the Store with a custom clock. Test-only.
+//
+//nolint:unused // test clock injection
 func (s *Store) withClock(now func() time.Time) *Store {
 	cp := *s
 	cp.now = now

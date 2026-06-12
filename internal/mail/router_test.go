@@ -138,32 +138,6 @@ func TestDetectTownRoot_PrefersEnvVar(t *testing.T) {
 	})
 }
 
-func TestIsTownLevelAddress(t *testing.T) {
-	tests := []struct {
-		address string
-		want    bool
-	}{
-		{"mayor", true},
-		{"mayor/", true},
-		{"deacon", true},
-		{"deacon/", true},
-		{"overseer", true},
-		{"gastown/refinery", false},
-		{"gastown/polecats/Toast", false},
-		{"gastown/", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.address, func(t *testing.T) {
-			got := isTownLevelAddress(tt.address)
-			if got != tt.want {
-				t.Errorf("isTownLevelAddress(%q) = %v, want %v", tt.address, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestAddressToSessionIDs(t *testing.T) {
 	// Set up prefix registry for test
 	reg := session.NewPrefixRegistry()

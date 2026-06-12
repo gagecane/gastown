@@ -1687,22 +1687,6 @@ outer:
 	return env
 }
 
-// isStandardBeadHash checks if a string looks like a standard 5-char bead hash.
-// Regular bead IDs use a 5-character base32-encoded hash (e.g., "mawit", "z0ixd").
-// This distinguishes regular issues from agent beads (suffix like "witness")
-// and merge requests (10-char suffix).
-func isStandardBeadHash(s string) bool {
-	if len(s) != 5 {
-		return false
-	}
-	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-			return false
-		}
-	}
-	return true
-}
-
 // bdDatabaseExists checks if a beads directory has an initialized database
 // that is actually usable (not just tracked metadata from another workspace).
 //

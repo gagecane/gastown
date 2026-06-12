@@ -132,6 +132,8 @@ func NewProxy() *Proxy {
 }
 
 // setStreams sets the standard streams for the proxy.
+//
+//nolint:unused // test stream injection helper
 func (p *Proxy) setStreams(in io.Reader, out io.Writer) {
 	p.stdin = in
 	p.stdout = out
@@ -1114,15 +1116,6 @@ func (p *Proxy) markDone() {
 	p.doneOnce.Do(func() {
 		close(p.done)
 	})
-}
-
-func (p *Proxy) agentDone() <-chan error {
-	ch := make(chan error, 1)
-	go func() {
-		err := p.cmd.Wait()
-		ch <- err
-	}()
-	return ch
 }
 
 func truncateStr(s string, maxLen int) string {

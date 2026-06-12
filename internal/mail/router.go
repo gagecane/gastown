@@ -266,12 +266,6 @@ func appendMetadataArgs(args []string, msg *Message) []string {
 	return append(args, "--metadata", string(b))
 }
 
-// isTownLevelAddress returns true if the address is for a town-level agent or the overseer.
-func isTownLevelAddress(address string) bool {
-	addr := strings.TrimSuffix(address, "/")
-	return addr == constants.RoleMayor || addr == constants.RoleDeacon || addr == "overseer"
-}
-
 // isGroupAddress returns true if the address is a @group address.
 // Group addresses start with @ and resolve to multiple recipients.
 func isGroupAddress(address string) bool {

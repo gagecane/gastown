@@ -827,9 +827,6 @@ type Wave = convoy.Wave
 // GatedTask is an alias for the canonical convoy.GatedTask.
 type GatedTask = convoy.GatedTask
 
-// detectCycles delegates to convoy.DetectCycles.
-func detectCycles(dag *ConvoyDAG) []string { return convoy.DetectCycles(dag) }
-
 // isSlingableType delegates to the canonical convoy.IsSlingableType, which
 // handles empty types (legacy beads that default to "task").
 func isSlingableType(beadType string) bool {

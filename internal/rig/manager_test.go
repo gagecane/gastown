@@ -1397,34 +1397,6 @@ func TestDetectBeadsPrefixFromConfig_NoFallbackToJSONL(t *testing.T) {
 	}
 }
 
-func TestIsStandardBeadHash(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{"mawit", true},
-		{"abc12", true},
-		{"z0ixd", true},
-		{"00000", true},
-		{"abcde", true},
-		{"witness", false},    // too long (agent role)
-		{"abc", false},        // too short
-		{"ABC12", false},      // uppercase
-		{"abc-1", false},      // contains hyphen
-		{"", false},           // empty
-		{"abc1234567", false}, // 10 chars (MR hash)
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := isStandardBeadHash(tt.input)
-			if got != tt.want {
-				t.Errorf("isStandardBeadHash(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRegisterRig_RejectsReservedNames(t *testing.T) {
 	root, rigsConfig := setupTestTown(t)
 	manager := NewManager(root, rigsConfig, git.NewGit(root))

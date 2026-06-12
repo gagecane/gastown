@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -399,18 +398,6 @@ func StopSession(t *tmux.Tmux, sessionID string, graceful bool) error {
 	}
 
 	return nil
-}
-
-func mapKeysSorted(m map[string]string) []string {
-	if len(m) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // MergeRuntimeLivenessEnv ensures liveness-critical env vars are present in the

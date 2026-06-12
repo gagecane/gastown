@@ -527,29 +527,6 @@ func TestCountFileLines_Empty(t *testing.T) {
 	}
 }
 
-func TestParseLineCount(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int
-		wantErr  bool
-	}{
-		{"42", 42, false},
-		{"  42 filename.jsonl", 42, false},
-		{"  0", 0, false},
-		{"", 0, true},
-		{"abc", 0, true},
-	}
-	for _, tt := range tests {
-		got, err := parseLineCount(tt.input)
-		if (err != nil) != tt.wantErr {
-			t.Errorf("parseLineCount(%q): error = %v, wantErr %v", tt.input, err, tt.wantErr)
-		}
-		if got != tt.expected {
-			t.Errorf("parseLineCount(%q) = %d, want %d", tt.input, got, tt.expected)
-		}
-	}
-}
-
 // --- helpers ---
 
 func splitNonEmpty(s string) []string {

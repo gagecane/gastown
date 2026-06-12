@@ -13,7 +13,6 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -51,15 +50,6 @@ type cachedCapacitySnapshot struct {
 	snapshot polecatCapacitySnapshot
 	err      error
 	at       time.Time
-}
-
-// invalidatePolecatCapacityCache drops the cached snapshot for townRoot.
-// Used by tests and by code paths that explicitly need a fresh read after
-// a known state change (e.g., right after recording a dispatch).
-func invalidatePolecatCapacityCache(townRoot string) {
-	polecatCapacityCacheMu.Lock()
-	defer polecatCapacityCacheMu.Unlock()
-	delete(polecatCapacityCache, townRoot)
 }
 
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
@@ -527,25 +517,6 @@ func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigNa
 	}
 	if fields.CleanupStatus == "clean" || state == "nuked" {
 		snapshot.ReusableIdle++
-		return
-	}
-	snapshot.RecoveryBlocked++
-}
-
-func applyWorkstateDispositionToCapacitySnapshot(snapshot *polecatCapacitySnapshot, state polecat.State, disposition polecat.WorkstateDisposition) {
-	if disposition.ReuseStatus == "idle-pr-open" {
-		snapshot.PendingMR++
-		return
-	}
-	if disposition.Reusable {
-		snapshot.ReusableIdle++
-		return
-	}
-	if !disposition.CountsTowardCapacity {
-		return
-	}
-	if state == polecat.StateWorking || disposition.Verdict == polecat.WorkstateVerdictWorking {
-		snapshot.Working++
 		return
 	}
 	snapshot.RecoveryBlocked++

@@ -5,6 +5,8 @@ import (
 	"math/rand"
 	"sort"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/convoy"
 )
 
 // randomAcyclicDAG generates a random DAG guaranteed to be acyclic.
@@ -100,7 +102,7 @@ func randomDAGWithCycle(seed int64, nodes int) *ConvoyDAG {
 func TestRandomDAG_AcyclicIsAcyclic(t *testing.T) {
 	for seed := int64(0); seed < 50; seed++ {
 		dag := randomAcyclicDAG(seed, 20, 30)
-		cycle := detectCycles(dag)
+		cycle := convoy.DetectCycles(dag)
 		if cycle != nil {
 			t.Fatalf("seed %d: acyclic DAG has cycle: %v", seed, cycle)
 		}
@@ -111,7 +113,7 @@ func TestRandomDAG_AcyclicIsAcyclic(t *testing.T) {
 func TestRandomDAG_CyclicHasCycle(t *testing.T) {
 	for seed := int64(0); seed < 50; seed++ {
 		dag := randomDAGWithCycle(seed, 10)
-		cycle := detectCycles(dag)
+		cycle := convoy.DetectCycles(dag)
 		if cycle == nil {
 			t.Fatalf("seed %d: cyclic DAG has no cycle detected", seed)
 		}
@@ -164,7 +166,7 @@ func TestRandomDAG_SeedLoggedOnFailure(t *testing.T) {
 	// This test should always pass — it just verifies the pattern works
 	seed := int64(42)
 	dag := randomAcyclicDAG(seed, 5, 5)
-	cycle := detectCycles(dag)
+	cycle := convoy.DetectCycles(dag)
 	if cycle != nil {
 		t.Fatalf("REPRODUCE: seed=%d nodes=5 edges=5 — cycle: %v", seed, cycle)
 	}
@@ -300,7 +302,7 @@ func TestProperty_NoTaskBeforeBlocker(t *testing.T) {
 	}
 }
 
-// TestProperty_CycleAlwaysDetectedInCyclicDAGs (PT-04) verifies detectCycles
+// TestProperty_CycleAlwaysDetectedInCyclicDAGs (PT-04) verifies convoy.DetectCycles
 // always finds a cycle in cyclic DAGs, the cycle has >= 2 nodes, and each
 // consecutive pair has a Blocks edge.
 func TestProperty_CycleAlwaysDetectedInCyclicDAGs(t *testing.T) {
@@ -308,7 +310,7 @@ func TestProperty_CycleAlwaysDetectedInCyclicDAGs(t *testing.T) {
 		nodes := 5 + int(seed-400)%26 // 5-30 nodes
 		dag := randomDAGWithCycle(seed, nodes)
 
-		cycle := detectCycles(dag)
+		cycle := convoy.DetectCycles(dag)
 		if cycle == nil {
 			t.Fatalf("REPRODUCE: seed=%d nodes=%d — no cycle detected in cyclic DAG", seed, nodes)
 		}

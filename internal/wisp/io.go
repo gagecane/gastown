@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // EnsureDir ensures the .beads directory exists in the given root.
@@ -20,12 +18,4 @@ func EnsureDir(root string) (string, error) {
 // WispPath returns the full path to a file in the beads directory.
 func WispPath(root, filename string) string {
 	return filepath.Join(root, WispDir, filename)
-}
-
-// writeJSON is a helper to write JSON files atomically.
-func writeJSON(path string, v interface{}) error {
-	if err := atomicfile.WriteJSON(path, v); err != nil {
-		return fmt.Errorf("write json: %w", err)
-	}
-	return nil
 }

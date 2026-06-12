@@ -306,7 +306,7 @@ func getProcessCwd(pid int) string {
 	// Fails on hardened kernels (ptrace_scope>=1) for non-descendant processes.
 	if target, err := os.Readlink(filepath.Join("/proc", pidStr, "cwd")); err == nil {
 		// Linux appends " (deleted)" when the directory has been removed.
-		// Strip it so the walk-up in isInGasTownWorkspace can still match
+		// Strip it so the walk-up in resolveTownRoot can still match
 		// the workspace root (the process is definitely orphaned if its
 		// workspace was nuked).
 		return strings.TrimSuffix(target, " (deleted)")
@@ -355,12 +355,6 @@ func resolveTownRootFromDir(dir string) string {
 		}
 		current = parent
 	}
-}
-
-// isInGasTownWorkspace checks whether a process's working directory is inside
-// a Gas Town workspace (identified by the mayor/town.json marker).
-func isInGasTownWorkspace(pid int) bool {
-	return resolveTownRoot(pid) != ""
 }
 
 // isIDEClaudeArgv reports whether a process's full argv (the ps "args" field)

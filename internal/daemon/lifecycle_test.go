@@ -329,16 +329,6 @@ func TestSyncFailureTracking(t *testing.T) {
 	}
 }
 
-func TestSyncFailureEscalationThreshold(t *testing.T) {
-	// Verify the threshold constant is sensible
-	if syncFailureEscalationThreshold < 2 {
-		t.Errorf("syncFailureEscalationThreshold = %d, should be >= 2 to avoid premature escalation", syncFailureEscalationThreshold)
-	}
-	if syncFailureEscalationThreshold > 10 {
-		t.Errorf("syncFailureEscalationThreshold = %d, should be <= 10 to ensure timely escalation", syncFailureEscalationThreshold)
-	}
-}
-
 func TestIsWorkingTreeDirty(t *testing.T) {
 	d := testDaemon()
 
