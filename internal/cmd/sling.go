@@ -339,459 +339,14 @@ func parseSlingInvocation() (slingInvocation, error) {
 	return inv, nil
 }
 
-func runSling(cmd *cobra.Command, args []string) (retErr error) {
-	ctx := context.Background()
-	if cmd != nil {
-		ctx = cmd.Context()
-	}
-	defer func() {
-		bead, target := "", ""
-		if len(args) > 0 {
-			bead = args[0]
-		}
-		if len(args) > 1 {
-			target = args[1]
-		}
-		telemetry.RecordSling(ctx, bead, target, retErr)
-	}()
-	// Validate flags and resolve flag-derived state before any dispatch path.
-	inv, err := parseSlingInvocation()
-	if err != nil {
-		return err
-	}
-	parsedPriorityFloor := inv.priorityFloor
-
-	// Disable Dolt auto-commit for all bd commands run during sling (gt-u6n6a).
-	// Under concurrent load (batch slinging), auto-commits from individual bd writes
-	// cause manifest contention and 'database is read only' errors. The Dolt server
-	// handles commits — individual auto-commits are unnecessary.
-	prevAutoCommit := os.Getenv("BD_DOLT_AUTO_COMMIT")
-	os.Setenv("BD_DOLT_AUTO_COMMIT", "off")
-	defer func() {
-		if prevAutoCommit == "" {
-			os.Unsetenv("BD_DOLT_AUTO_COMMIT")
-		} else {
-			os.Setenv("BD_DOLT_AUTO_COMMIT", prevAutoCommit)
-		}
-	}()
-
-	// Handle --stdin: read message/args from stdin (avoids shell quoting issues)
-	if slingStdin {
-		if slingMessage != "" && slingArgs != "" {
-			return fmt.Errorf("cannot use --stdin when both --message and --args are already provided")
-		}
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("reading stdin: %w", err)
-		}
-		stdinContent := strings.TrimRight(string(data), "\n")
-		if slingArgs == "" {
-			// Default: stdin populates --args (the primary instruction channel)
-			slingArgs = stdinContent
-		} else {
-			// --args already set on CLI, stdin goes to --message
-			slingMessage = stdinContent
-		}
-	}
-
-	// Get town root early - needed for BEADS_DIR when running bd commands
-	// This ensures hq-* beads are accessible even when running from polecat worktree
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
-	}
-	townBeadsDir := filepath.Join(townRoot, ".beads")
-
-	// Normalize target arguments: trim trailing slashes from target to handle tab-completion
-	// artifacts like "gt sling sl-123 slingshot/" → "gt sling sl-123 slingshot"
-	// This makes sling more forgiving without breaking existing functionality.
-	// Note: Internal agent IDs like "mayor/" are outputs, not user inputs.
-	for i := range args {
-		args[i] = strings.TrimRight(args[i], "/")
-	}
-
-	// --all sweep mode: sling every ready, dispatchable bead in a rig.
-	// The rig comes from --rig or a single positional. Runs before the rest of
-	// the single-bead dispatch logic since there is no bead argument to parse.
-	if slingAll {
-		if slingAllRig == "" && len(args) == 1 {
-			slingAllRig = args[0]
-		}
-		return runSlingAll(townRoot, townBeadsDir)
-	}
-
-	// --crew flag: expand target from "<rig>" to "<rig>/crew/<name>"
-	// e.g., "gt sling gt-abc gastown --crew mel" → target becomes "gastown/crew/mel"
-	if slingCrew != "" {
-		if len(args) < 2 {
-			return fmt.Errorf("--crew requires a rig target argument (e.g., gt sling <bead> <rig> --crew %s)", slingCrew)
-		}
-		target := args[len(args)-1]
-		args[len(args)-1] = target + "/crew/" + slingCrew
-	}
-
-	// Validate target format early, before any dispatch path (bead, formula, batch)
-	// can trigger resolveTarget side-effects like polecat spawning.
-	if len(args) > 1 {
-		if err := sling.ValidateTarget(args[len(args)-1]); err != nil {
-			return err
-		}
-	}
-	if len(args) == 2 {
-		if redirected, err := applyWorkflowStepTargetOverride(args); err != nil {
-			return err
-		} else {
-			args = redirected
-		}
-	}
-
-	// Review-gate marker production (gs-bo1). When dispatching a bead as an
-	// adversarial review gate, stamp the structural markers the gs-aoz
-	// independence guard reads — the gt:review-gate label and a
-	// `reviews: <build-bead>` field — onto the gate bead so the guard (otherwise
-	// inert) activates and refuses to assign the gate to the agent that built the
-	// work under review. --reviews implies --review-gate. Done up front so every
-	// downstream dispatch path (deferred schedule, epic/convoy, rig, inline)
-	// inherits a marked bead. The dispatch flow's later description rewrites
-	// preserve the reviews: line (it is not an attachment-field key).
-	if slingReviews != "" || slingReviewGate {
-		gateBead := slingOnTarget
-		if gateBead == "" {
-			gateBead = args[0]
-		}
-		if slingDryRun {
-			if slingReviews != "" {
-				fmt.Printf("Would mark %s as review gate (reviews %s)\n", gateBead, slingReviews)
-			} else {
-				fmt.Printf("Would mark %s as review gate\n", gateBead)
-			}
-		} else {
-			if err := markReviewGate(townRoot, gateBead, slingReviews); err != nil {
-				return err
-			}
-			if slingReviews != "" {
-				fmt.Printf("%s Marked %s as review gate (reviews %s)\n", style.Bold.Render("✓"), gateBead, slingReviews)
-			} else {
-				fmt.Printf("%s Marked %s as review gate\n", style.Bold.Render("✓"), gateBead)
-			}
-		}
-	}
-
-	// Config-driven dispatch mode: check scheduler.max_polecats
-	deferred, deferErr := shouldDeferDispatch()
-	if deferErr != nil {
-		return deferErr
-	}
-
-	// Batch mode detection: multiple beads with optional rig target
-	// Pattern A (explicit rig):  gt sling gt-abc gt-def gt-ghi gastown
-	// Pattern B (auto-resolve):  gt sling gt-abc gt-def gt-ghi
-	// When len(args) > 2 and last arg is a rig, sling each bead to its own polecat.
-	// When all args look like bead IDs, auto-resolve the rig from their prefix.
-	if len(args) > 2 {
-		lastArg := args[len(args)-1]
-		if rigName, isRig := IsRigName(lastArg); isRig {
-			beadIDs := args[:len(args)-1]
-			if deferred {
-				// Reject epic/convoy IDs in batch — they must be dispatched individually
-				for _, id := range beadIDs {
-					idType, typeErr := detectSchedulerIDType(id)
-					if typeErr == nil && idType != "task" {
-						return fmt.Errorf("%s '%s' cannot be batch-scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)", idType, id, id)
-					}
-				}
-				return runBatchSchedule(beadIDs, rigName, townRoot)
-			}
-			// Explicit rig: print tip about auto-resolve
-			fmt.Printf("  %s the rig can be auto-resolved from bead prefixes. "+
-				"You can omit <%s>.\n",
-				style.Dim.Render("Tip:"), rigName)
-			return runBatchSling(beadIDs, rigName, townBeadsDir)
-		}
-		// No explicit rig -- try auto-resolving from bead prefixes
-		if allBeadIDs(args) {
-			rigName, err := resolveRigFromBeadIDs(args, filepath.Dir(townBeadsDir))
-			if err != nil {
-				return err
-			}
-			return runBatchSling(args, rigName, townBeadsDir)
-		}
-	}
-
-	// Deferred routing: formula-on-bead with rig target
-	// gt sling mol-review --on gt-abc gastown  (when max_polecats > 0)
-	if deferred && slingOnTarget != "" && len(args) >= 2 {
-		rigName, isRig := IsRigName(args[len(args)-1])
-		if isRig {
-			formulaName := args[0]
-			if slingHookRawBead {
-				formulaName = ""
-			}
-			beadID := slingOnTarget
-			return scheduleBead(beadID, rigName, ScheduleOptions{
-				Formula:       formulaName,
-				Args:          slingArgs,
-				Vars:          slingVars,
-				Merge:         slingMerge,
-				BaseBranch:    slingBaseBranch,
-				ResumeBranch:  slingResumeBranch,
-				NoConvoy:      slingNoConvoy,
-				Owned:         slingOwned,
-				DryRun:        slingDryRun,
-				Force:         slingForce,
-				NoMerge:       slingNoMerge,
-				ReviewOnly:    slingReviewOnly,
-				Account:       slingAccount,
-				Agent:         slingAgent,
-				HookRawBead:   slingHookRawBead,
-				Ralph:         slingRalph,
-				PriorityFloor: parsedPriorityFloor,
-			})
-		}
-	}
-
-	// Deferred routing: formula-on-bead without explicit rig (auto-resolve from bead prefix)
-	// gt sling mol-review --on gt-abc  (when max_polecats > 0, no explicit rig arg)
-	if deferred && slingOnTarget != "" {
-		if len(args) >= 2 {
-			// Non-rig last arg with --on in deferred mode — give clear error
-			return fmt.Errorf("'%s' is not a known rig\nUse: gt sling %s --on %s <rig>", args[len(args)-1], args[0], slingOnTarget)
-		}
-		// Auto-resolve rig from bead prefix
-		townRoot, twErr := workspace.FindFromCwdOrError()
-		if twErr != nil {
-			return twErr
-		}
-		rigName := resolveRigForBead(townRoot, slingOnTarget)
-		if rigName == "" {
-			return fmt.Errorf("cannot resolve rig for bead %s\nSpecify explicitly: gt sling %s --on %s <rig>", slingOnTarget, args[0], slingOnTarget)
-		}
-		formulaName := args[0]
-		if slingHookRawBead {
-			formulaName = ""
-		}
-		return scheduleBead(slingOnTarget, rigName, ScheduleOptions{
-			Formula:       formulaName,
-			Args:          slingArgs,
-			Vars:          slingVars,
-			Merge:         slingMerge,
-			BaseBranch:    slingBaseBranch,
-			ResumeBranch:  slingResumeBranch,
-			NoConvoy:      slingNoConvoy,
-			Owned:         slingOwned,
-			DryRun:        slingDryRun,
-			Force:         slingForce,
-			NoMerge:       slingNoMerge,
-			ReviewOnly:    slingReviewOnly,
-			Account:       slingAccount,
-			Agent:         slingAgent,
-			HookRawBead:   slingHookRawBead,
-			Ralph:         slingRalph,
-			PriorityFloor: parsedPriorityFloor,
-		})
-	}
-
-	// Single bead + rig (2 args): deferred check before resolveTarget side-effects
-	if deferred && len(args) == 2 {
-		rigName, isRig := IsRigName(args[1])
-		if isRig {
-			// Reject epic/convoy IDs — they must be dispatched without a rig
-			// (children auto-resolve their rigs)
-			idType, err := detectSchedulerIDType(args[0])
-			if err == nil && idType != "task" {
-				return fmt.Errorf("%s cannot be scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)",
-					idType, args[0])
-			}
-			if verifyBeadExists(args[0]) != nil {
-				if verifyFormulaExists(args[0], townRoot, rigName) == nil {
-					// Standalone formula slinging (cook+wisp+attach) is not bead-based
-					// dispatch and does not consume a scheduler slot — fall through to
-					// runSlingFormula, which handles polecat spawning via resolveTarget.
-					return runSlingFormula(ctx, args)
-				}
-			}
-			beadID := args[0]
-			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, rigName)
-			return scheduleBead(beadID, rigName, ScheduleOptions{
-				Formula:       formula,
-				Args:          slingArgs,
-				Vars:          slingVars,
-				Merge:         slingMerge,
-				BaseBranch:    slingBaseBranch,
-				ResumeBranch:  slingResumeBranch,
-				NoConvoy:      slingNoConvoy,
-				Owned:         slingOwned,
-				DryRun:        slingDryRun,
-				Force:         slingForce,
-				NoMerge:       slingNoMerge,
-				ReviewOnly:    slingReviewOnly,
-				Account:       slingAccount,
-				Agent:         slingAgent,
-				HookRawBead:   slingHookRawBead,
-				Ralph:         slingRalph,
-				PriorityFloor: parsedPriorityFloor,
-			})
-		}
-		// Capacity-neutral targets fall through to direct dispatch even when the
-		// scheduler is active: the cap (scheduler.max_polecats) governs only rig
-		// polecat slots. Dogs (the Deacon's self-managed pool, bead aa-4yf2) and
-		// standing singleton agents (mayor, deacon, rig witness/refinery, named
-		// crew, gu-odjz) do not occupy a polecat slot, so the cap does not apply
-		// to them. Without this, the daemon's workflow-step rewrite (rig -> role
-		// target, e.g. workflow_target: mayor) is dead-on-arrival under the
-		// scheduler and silently strands the convoy (gt-3798 deferred-dispatch
-		// follow-up).
-		if !isCapacityNeutralTarget(args[1]) {
-			// Non-rig, capacity-consuming target in deferred mode — reject so it
-			// cannot bypass capacity control.
-			return fmt.Errorf("deferred dispatch requires a rig or capacity-neutral target: gt sling %s <rig>\n"+
-				"'%s' is not a rig, dog, or standing agent (mayor, deacon, <rig>/witness, <rig>/refinery, <rig>/crew/<name>)",
-				args[0], args[1])
-		}
-		// else: fall through to direct dispatch path below (resolveTarget handles
-		// dogs and standing-agent role targets).
-	}
-
-	// Epic/convoy auto-detection (1 arg, no rig): works for both deferred and direct
-	if len(args) == 1 {
-		idType, err := detectSchedulerIDType(args[0])
-		if err == nil && idType != "task" {
-			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, "")
-
-			switch idType {
-			case "convoy":
-				if err := validateNoTaskOnlySchedulerFlags(cmd, "convoy"); err != nil {
-					return err
-				}
-				if deferred {
-					return runConvoyScheduleByID(args[0], convoyScheduleOpts{
-						Formula:     formula,
-						HookRawBead: slingHookRawBead,
-						Force:       slingForce,
-						DryRun:      slingDryRun,
-					})
-				}
-				return runConvoySlingByID(args[0], convoyScheduleOpts{
-					Formula:     formula,
-					HookRawBead: slingHookRawBead,
-					Force:       slingForce,
-					DryRun:      slingDryRun,
-					NoBoot:      slingNoBoot,
-				})
-			case "epic":
-				if err := validateNoTaskOnlySchedulerFlags(cmd, "epic"); err != nil {
-					return err
-				}
-				if deferred {
-					return runEpicScheduleByID(args[0], epicScheduleOpts{
-						Formula:     formula,
-						HookRawBead: slingHookRawBead,
-						Force:       slingForce,
-						DryRun:      slingDryRun,
-					})
-				}
-				return runEpicSlingByID(args[0], epicScheduleOpts{
-					Formula:     formula,
-					HookRawBead: slingHookRawBead,
-					Force:       slingForce,
-					DryRun:      slingDryRun,
-					NoBoot:      slingNoBoot,
-				})
-			}
-		}
-		// task bead with deferred + no rig: error — must specify a rig (or a
-		// capacity-neutral target: dog, mayor, deacon, <rig>/witness|refinery|crew).
-		// Wording kept in sync with the 2-arg deferred-reject path above (gu-z6cbq
-		// / #4035 updated that site + the tests but missed this one-arg path,
-		// reddening TestSchedulerDeferredTaskWithoutRig — gu-ii3my).
-		if deferred {
-			return fmt.Errorf("deferred dispatch requires a rig or capacity-neutral target: gt sling %s <rig>", args[0])
-		}
-	}
-
-	// 2-bead auto-resolve: gt sling gt-abc gt-def
-	if len(args) == 2 && allBeadIDs(args) {
-		if _, isRig := IsRigName(args[1]); !isRig {
-			rigName, err := resolveRigFromBeadIDs(args, filepath.Dir(townBeadsDir))
-			if err != nil {
-				return err
-			}
-			return runBatchSling(args, rigName, townBeadsDir)
-		}
-	}
-
-	// Determine mode based on flags and argument types
-	var beadID string
-	var formulaName string
-	attachedMoleculeID := ""
-
-	// Derive the target rig (if any) so rig-scoped formulas resolve via the
-	// rig-aware on-disk fallback in verifyFormulaExists (gu-sw6cx).
-	targetRig := ""
-	if len(args) > 1 {
-		targetRig = rigFromTarget(args[len(args)-1])
-	}
-
-	if slingOnTarget != "" {
-		// Formula-on-bead mode: gt sling <formula> --on <bead>
-		formulaName = args[0]
-		beadID = slingOnTarget
-		// Verify both exist
-		if err := verifyBeadExists(beadID); err != nil {
-			return err
-		}
-		if err := verifyFormulaExists(formulaName, townRoot, targetRig); err != nil {
-			return err
-		}
-	} else {
-		// Could be bead mode or standalone formula mode
-		firstArg := args[0]
-
-		// Try as bead first
-		if err := verifyBeadExists(firstArg); err == nil {
-			// It's a verified bead
-			beadID = firstArg
-		} else {
-			// Not a verified bead - try as standalone formula
-			if err := verifyFormulaExists(firstArg, townRoot, targetRig); err == nil {
-				// Standalone formula mode: gt sling <formula> [target]
-				// Deferred dispatch is handled above for the 2-arg rig case (gh#3917).
-				return runSlingFormula(ctx, args)
-			}
-			// Not a formula either - check if it looks like a bead ID (routing issue workaround).
-			// Accept it and let the actual bd update fail later if the bead doesn't exist.
-			// This fixes: gt sling bd-ka761 beads/crew/dave failing with 'not a valid bead or formula'
-			if looksLikeBeadID(firstArg) {
-				beadID = firstArg
-			} else {
-				// Neither bead nor formula
-				return fmt.Errorf("'%s' is not a valid bead or formula", firstArg)
-			}
-		}
-	}
-
-	// Serialize assignment writes per bead to prevent concurrent sling races from
-	// producing conflicting assignee/metadata updates.
-	releaseSlingLock, err := tryAcquireSlingBeadLock(townRoot, beadID)
-	if err != nil {
-		return err
-	}
-	slingLockReleased := false
-	releaseLockOnce := func() {
-		if !slingLockReleased {
-			slingLockReleased = true
-			releaseSlingLock()
-		}
-	}
-	defer releaseLockOnce()
-
-	// Check if bead is already assigned (guard against accidental re-sling).
-	// This must happen before resolveTarget(), since rig targets can spawn/hook a new polecat as a side-effect.
-	info, err := getBeadInfo(beadID)
-	if err != nil {
-		return fmt.Errorf("checking bead status: %w", err)
-	}
-
+// validateBeadDispatchable runs the wall of pre-dispatch guards against a
+// resolved bead: garbage/flag-like titles, closed/tombstone state, identity,
+// epic/container/molecule, mayor-only, human-only, awaiting-merge, reference
+// tripwire, open-children, sling-context wrapper, polecat/refinery ownership,
+// workflow-step IDs, and deferred beads. Each guard returns a descriptive
+// error; a nil return means the bead is dispatchable. Extracted from runSling
+// (gu-nid89.12.2) to keep the dispatch path at parse -> validate -> execute.
+func validateBeadDispatchable(beadID string, info *beadInfo) error {
 	// Guard against slinging beads with flag-like titles (gt-e0kx5).
 	// These are garbage beads created by flag-parsing bugs. Slinging them
 	// causes dispatch loops where polecats bounce the work.
@@ -960,6 +515,481 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if isDeferredBead(info) && !slingForce {
 		return fmt.Errorf("refusing to sling deferred bead %s: %q\nDeferred work should not consume polecat slots. Use --force to override", beadID, info.Title)
 	}
+	return nil
+}
+
+// routeEarlyDispatch handles the pre-validation dispatch-mode routing for
+// runSling: trailing-slash normalization, --all sweep, --crew expansion,
+// target-format validation, workflow-step override, review-gate marking, and
+// the batch / deferred-schedule / epic-convoy / 2-bead auto-resolve paths.
+// It returns the (possibly mutated) args, a handled flag indicating a terminal
+// dispatch path already ran (in which case err is that path's result), and any
+// error. When handled is false the caller continues to single-bead dispatch.
+// Extracted from runSling (gu-nid89.12.2) for parse -> route -> validate -> execute.
+func routeEarlyDispatch(ctx context.Context, cmd *cobra.Command, args []string, townRoot, townBeadsDir string, parsedPriorityFloor int) ([]string, bool, error) {
+	// Normalize target arguments: trim trailing slashes from target to handle tab-completion
+	// artifacts like "gt sling sl-123 slingshot/" → "gt sling sl-123 slingshot"
+	// This makes sling more forgiving without breaking existing functionality.
+	// Note: Internal agent IDs like "mayor/" are outputs, not user inputs.
+	for i := range args {
+		args[i] = strings.TrimRight(args[i], "/")
+	}
+
+	// --all sweep mode: sling every ready, dispatchable bead in a rig.
+	// The rig comes from --rig or a single positional. Runs before the rest of
+	// the single-bead dispatch logic since there is no bead argument to parse.
+	if slingAll {
+		if slingAllRig == "" && len(args) == 1 {
+			slingAllRig = args[0]
+		}
+		return args, true, runSlingAll(townRoot, townBeadsDir)
+	}
+
+	// --crew flag: expand target from "<rig>" to "<rig>/crew/<name>"
+	// e.g., "gt sling gt-abc gastown --crew mel" → target becomes "gastown/crew/mel"
+	if slingCrew != "" {
+		if len(args) < 2 {
+			return args, true, fmt.Errorf("--crew requires a rig target argument (e.g., gt sling <bead> <rig> --crew %s)", slingCrew)
+		}
+		target := args[len(args)-1]
+		args[len(args)-1] = target + "/crew/" + slingCrew
+	}
+
+	// Validate target format early, before any dispatch path (bead, formula, batch)
+	// can trigger resolveTarget side-effects like polecat spawning.
+	if len(args) > 1 {
+		if err := sling.ValidateTarget(args[len(args)-1]); err != nil {
+			return args, true, err
+		}
+	}
+	if len(args) == 2 {
+		if redirected, err := applyWorkflowStepTargetOverride(args); err != nil {
+			return args, true, err
+		} else {
+			args = redirected
+		}
+	}
+
+	// Review-gate marker production (gs-bo1). When dispatching a bead as an
+	// adversarial review gate, stamp the structural markers the gs-aoz
+	// independence guard reads — the gt:review-gate label and a
+	// `reviews: <build-bead>` field — onto the gate bead so the guard (otherwise
+	// inert) activates and refuses to assign the gate to the agent that built the
+	// work under review. --reviews implies --review-gate. Done up front so every
+	// downstream dispatch path (deferred schedule, epic/convoy, rig, inline)
+	// inherits a marked bead. The dispatch flow's later description rewrites
+	// preserve the reviews: line (it is not an attachment-field key).
+	if slingReviews != "" || slingReviewGate {
+		gateBead := slingOnTarget
+		if gateBead == "" {
+			gateBead = args[0]
+		}
+		if slingDryRun {
+			if slingReviews != "" {
+				fmt.Printf("Would mark %s as review gate (reviews %s)\n", gateBead, slingReviews)
+			} else {
+				fmt.Printf("Would mark %s as review gate\n", gateBead)
+			}
+		} else {
+			if err := markReviewGate(townRoot, gateBead, slingReviews); err != nil {
+				return args, true, err
+			}
+			if slingReviews != "" {
+				fmt.Printf("%s Marked %s as review gate (reviews %s)\n", style.Bold.Render("✓"), gateBead, slingReviews)
+			} else {
+				fmt.Printf("%s Marked %s as review gate\n", style.Bold.Render("✓"), gateBead)
+			}
+		}
+	}
+
+	// Config-driven dispatch mode: check scheduler.max_polecats
+	deferred, deferErr := shouldDeferDispatch()
+	if deferErr != nil {
+		return args, true, deferErr
+	}
+
+	// Batch mode detection: multiple beads with optional rig target
+	// Pattern A (explicit rig):  gt sling gt-abc gt-def gt-ghi gastown
+	// Pattern B (auto-resolve):  gt sling gt-abc gt-def gt-ghi
+	// When len(args) > 2 and last arg is a rig, sling each bead to its own polecat.
+	// When all args look like bead IDs, auto-resolve the rig from their prefix.
+	if len(args) > 2 {
+		lastArg := args[len(args)-1]
+		if rigName, isRig := IsRigName(lastArg); isRig {
+			beadIDs := args[:len(args)-1]
+			if deferred {
+				// Reject epic/convoy IDs in batch — they must be dispatched individually
+				for _, id := range beadIDs {
+					idType, typeErr := detectSchedulerIDType(id)
+					if typeErr == nil && idType != "task" {
+						return args, true, fmt.Errorf("%s '%s' cannot be batch-scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)", idType, id, id)
+					}
+				}
+				return args, true, runBatchSchedule(beadIDs, rigName, townRoot)
+			}
+			// Explicit rig: print tip about auto-resolve
+			fmt.Printf("  %s the rig can be auto-resolved from bead prefixes. "+
+				"You can omit <%s>.\n",
+				style.Dim.Render("Tip:"), rigName)
+			return args, true, runBatchSling(beadIDs, rigName, townBeadsDir)
+		}
+		// No explicit rig -- try auto-resolving from bead prefixes
+		if allBeadIDs(args) {
+			rigName, err := resolveRigFromBeadIDs(args, filepath.Dir(townBeadsDir))
+			if err != nil {
+				return args, true, err
+			}
+			return args, true, runBatchSling(args, rigName, townBeadsDir)
+		}
+	}
+
+	// Deferred routing: formula-on-bead with rig target
+	// gt sling mol-review --on gt-abc gastown  (when max_polecats > 0)
+	if deferred && slingOnTarget != "" && len(args) >= 2 {
+		rigName, isRig := IsRigName(args[len(args)-1])
+		if isRig {
+			formulaName := args[0]
+			if slingHookRawBead {
+				formulaName = ""
+			}
+			beadID := slingOnTarget
+			return args, true, scheduleBead(beadID, rigName, ScheduleOptions{
+				Formula:       formulaName,
+				Args:          slingArgs,
+				Vars:          slingVars,
+				Merge:         slingMerge,
+				BaseBranch:    slingBaseBranch,
+				ResumeBranch:  slingResumeBranch,
+				NoConvoy:      slingNoConvoy,
+				Owned:         slingOwned,
+				DryRun:        slingDryRun,
+				Force:         slingForce,
+				NoMerge:       slingNoMerge,
+				ReviewOnly:    slingReviewOnly,
+				Account:       slingAccount,
+				Agent:         slingAgent,
+				HookRawBead:   slingHookRawBead,
+				Ralph:         slingRalph,
+				PriorityFloor: parsedPriorityFloor,
+			})
+		}
+	}
+
+	// Deferred routing: formula-on-bead without explicit rig (auto-resolve from bead prefix)
+	// gt sling mol-review --on gt-abc  (when max_polecats > 0, no explicit rig arg)
+	if deferred && slingOnTarget != "" {
+		if len(args) >= 2 {
+			// Non-rig last arg with --on in deferred mode — give clear error
+			return args, true, fmt.Errorf("'%s' is not a known rig\nUse: gt sling %s --on %s <rig>", args[len(args)-1], args[0], slingOnTarget)
+		}
+		// Auto-resolve rig from bead prefix
+		townRoot, twErr := workspace.FindFromCwdOrError()
+		if twErr != nil {
+			return args, true, twErr
+		}
+		rigName := resolveRigForBead(townRoot, slingOnTarget)
+		if rigName == "" {
+			return args, true, fmt.Errorf("cannot resolve rig for bead %s\nSpecify explicitly: gt sling %s --on %s <rig>", slingOnTarget, args[0], slingOnTarget)
+		}
+		formulaName := args[0]
+		if slingHookRawBead {
+			formulaName = ""
+		}
+		return args, true, scheduleBead(slingOnTarget, rigName, ScheduleOptions{
+			Formula:       formulaName,
+			Args:          slingArgs,
+			Vars:          slingVars,
+			Merge:         slingMerge,
+			BaseBranch:    slingBaseBranch,
+			ResumeBranch:  slingResumeBranch,
+			NoConvoy:      slingNoConvoy,
+			Owned:         slingOwned,
+			DryRun:        slingDryRun,
+			Force:         slingForce,
+			NoMerge:       slingNoMerge,
+			ReviewOnly:    slingReviewOnly,
+			Account:       slingAccount,
+			Agent:         slingAgent,
+			HookRawBead:   slingHookRawBead,
+			Ralph:         slingRalph,
+			PriorityFloor: parsedPriorityFloor,
+		})
+	}
+
+	// Single bead + rig (2 args): deferred check before resolveTarget side-effects
+	if deferred && len(args) == 2 {
+		rigName, isRig := IsRigName(args[1])
+		if isRig {
+			// Reject epic/convoy IDs — they must be dispatched without a rig
+			// (children auto-resolve their rigs)
+			idType, err := detectSchedulerIDType(args[0])
+			if err == nil && idType != "task" {
+				return args, true, fmt.Errorf("%s cannot be scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)",
+					idType, args[0])
+			}
+			if verifyBeadExists(args[0]) != nil {
+				if verifyFormulaExists(args[0], townRoot, rigName) == nil {
+					// Standalone formula slinging (cook+wisp+attach) is not bead-based
+					// dispatch and does not consume a scheduler slot — fall through to
+					// runSlingFormula, which handles polecat spawning via resolveTarget.
+					return args, true, runSlingFormula(ctx, args)
+				}
+			}
+			beadID := args[0]
+			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, rigName)
+			return args, true, scheduleBead(beadID, rigName, ScheduleOptions{
+				Formula:       formula,
+				Args:          slingArgs,
+				Vars:          slingVars,
+				Merge:         slingMerge,
+				BaseBranch:    slingBaseBranch,
+				ResumeBranch:  slingResumeBranch,
+				NoConvoy:      slingNoConvoy,
+				Owned:         slingOwned,
+				DryRun:        slingDryRun,
+				Force:         slingForce,
+				NoMerge:       slingNoMerge,
+				ReviewOnly:    slingReviewOnly,
+				Account:       slingAccount,
+				Agent:         slingAgent,
+				HookRawBead:   slingHookRawBead,
+				Ralph:         slingRalph,
+				PriorityFloor: parsedPriorityFloor,
+			})
+		}
+		// Capacity-neutral targets fall through to direct dispatch even when the
+		// scheduler is active: the cap (scheduler.max_polecats) governs only rig
+		// polecat slots. Dogs (the Deacon's self-managed pool, bead aa-4yf2) and
+		// standing singleton agents (mayor, deacon, rig witness/refinery, named
+		// crew, gu-odjz) do not occupy a polecat slot, so the cap does not apply
+		// to them. Without this, the daemon's workflow-step rewrite (rig -> role
+		// target, e.g. workflow_target: mayor) is dead-on-arrival under the
+		// scheduler and silently strands the convoy (gt-3798 deferred-dispatch
+		// follow-up).
+		if !isCapacityNeutralTarget(args[1]) {
+			// Non-rig, capacity-consuming target in deferred mode — reject so it
+			// cannot bypass capacity control.
+			return args, true, fmt.Errorf("deferred dispatch requires a rig or capacity-neutral target: gt sling %s <rig>\n"+
+				"'%s' is not a rig, dog, or standing agent (mayor, deacon, <rig>/witness, <rig>/refinery, <rig>/crew/<name>)",
+				args[0], args[1])
+		}
+		// else: fall through to direct dispatch path below (resolveTarget handles
+		// dogs and standing-agent role targets).
+	}
+
+	// Epic/convoy auto-detection (1 arg, no rig): works for both deferred and direct
+	if len(args) == 1 {
+		idType, err := detectSchedulerIDType(args[0])
+		if err == nil && idType != "task" {
+			formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, "")
+
+			switch idType {
+			case "convoy":
+				if err := validateNoTaskOnlySchedulerFlags(cmd, "convoy"); err != nil {
+					return args, true, err
+				}
+				if deferred {
+					return args, true, runConvoyScheduleByID(args[0], convoyScheduleOpts{
+						Formula:     formula,
+						HookRawBead: slingHookRawBead,
+						Force:       slingForce,
+						DryRun:      slingDryRun,
+					})
+				}
+				return args, true, runConvoySlingByID(args[0], convoyScheduleOpts{
+					Formula:     formula,
+					HookRawBead: slingHookRawBead,
+					Force:       slingForce,
+					DryRun:      slingDryRun,
+					NoBoot:      slingNoBoot,
+				})
+			case "epic":
+				if err := validateNoTaskOnlySchedulerFlags(cmd, "epic"); err != nil {
+					return args, true, err
+				}
+				if deferred {
+					return args, true, runEpicScheduleByID(args[0], epicScheduleOpts{
+						Formula:     formula,
+						HookRawBead: slingHookRawBead,
+						Force:       slingForce,
+						DryRun:      slingDryRun,
+					})
+				}
+				return args, true, runEpicSlingByID(args[0], epicScheduleOpts{
+					Formula:     formula,
+					HookRawBead: slingHookRawBead,
+					Force:       slingForce,
+					DryRun:      slingDryRun,
+					NoBoot:      slingNoBoot,
+				})
+			}
+		}
+		// task bead with deferred + no rig: error — must specify a rig (or a
+		// capacity-neutral target: dog, mayor, deacon, <rig>/witness|refinery|crew).
+		// Wording kept in sync with the 2-arg deferred-reject path above (gu-z6cbq
+		// / #4035 updated that site + the tests but missed this one-arg path,
+		// reddening TestSchedulerDeferredTaskWithoutRig — gu-ii3my).
+		if deferred {
+			return args, true, fmt.Errorf("deferred dispatch requires a rig or capacity-neutral target: gt sling %s <rig>", args[0])
+		}
+	}
+
+	// 2-bead auto-resolve: gt sling gt-abc gt-def
+	if len(args) == 2 && allBeadIDs(args) {
+		if _, isRig := IsRigName(args[1]); !isRig {
+			rigName, err := resolveRigFromBeadIDs(args, filepath.Dir(townBeadsDir))
+			if err != nil {
+				return args, true, err
+			}
+			return args, true, runBatchSling(args, rigName, townBeadsDir)
+		}
+	}
+	return args, false, nil
+}
+
+func runSling(cmd *cobra.Command, args []string) (retErr error) {
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
+	}
+	defer func() {
+		bead, target := "", ""
+		if len(args) > 0 {
+			bead = args[0]
+		}
+		if len(args) > 1 {
+			target = args[1]
+		}
+		telemetry.RecordSling(ctx, bead, target, retErr)
+	}()
+	// Validate flags and resolve flag-derived state before any dispatch path.
+	inv, err := parseSlingInvocation()
+	if err != nil {
+		return err
+	}
+	parsedPriorityFloor := inv.priorityFloor
+
+	// Disable Dolt auto-commit for all bd commands run during sling (gt-u6n6a).
+	// Under concurrent load (batch slinging), auto-commits from individual bd writes
+	// cause manifest contention and 'database is read only' errors. The Dolt server
+	// handles commits — individual auto-commits are unnecessary.
+	prevAutoCommit := os.Getenv("BD_DOLT_AUTO_COMMIT")
+	os.Setenv("BD_DOLT_AUTO_COMMIT", "off")
+	defer func() {
+		if prevAutoCommit == "" {
+			os.Unsetenv("BD_DOLT_AUTO_COMMIT")
+		} else {
+			os.Setenv("BD_DOLT_AUTO_COMMIT", prevAutoCommit)
+		}
+	}()
+
+	// Handle --stdin: read message/args from stdin (avoids shell quoting issues)
+	if slingStdin {
+		if slingMessage != "" && slingArgs != "" {
+			return fmt.Errorf("cannot use --stdin when both --message and --args are already provided")
+		}
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("reading stdin: %w", err)
+		}
+		stdinContent := strings.TrimRight(string(data), "\n")
+		if slingArgs == "" {
+			// Default: stdin populates --args (the primary instruction channel)
+			slingArgs = stdinContent
+		} else {
+			// --args already set on CLI, stdin goes to --message
+			slingMessage = stdinContent
+		}
+	}
+
+	// Get town root early - needed for BEADS_DIR when running bd commands
+	// This ensures hq-* beads are accessible even when running from polecat worktree
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return fmt.Errorf("finding town root: %w", err)
+	}
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+
+	if routed, handled, err := routeEarlyDispatch(ctx, cmd, args, townRoot, townBeadsDir, parsedPriorityFloor); handled {
+		return err
+	} else {
+		args = routed
+	}
+
+	// Determine mode based on flags and argument types
+	var beadID string
+	var formulaName string
+
+	// Derive the target rig (if any) so rig-scoped formulas resolve via the
+	// rig-aware on-disk fallback in verifyFormulaExists (gu-sw6cx).
+	targetRig := ""
+	if len(args) > 1 {
+		targetRig = rigFromTarget(args[len(args)-1])
+	}
+
+	if slingOnTarget != "" {
+		// Formula-on-bead mode: gt sling <formula> --on <bead>
+		formulaName = args[0]
+		beadID = slingOnTarget
+		// Verify both exist
+		if err := verifyBeadExists(beadID); err != nil {
+			return err
+		}
+		if err := verifyFormulaExists(formulaName, townRoot, targetRig); err != nil {
+			return err
+		}
+	} else {
+		// Could be bead mode or standalone formula mode
+		firstArg := args[0]
+
+		// Try as bead first
+		if err := verifyBeadExists(firstArg); err == nil {
+			// It's a verified bead
+			beadID = firstArg
+		} else {
+			// Not a verified bead - try as standalone formula
+			if err := verifyFormulaExists(firstArg, townRoot, targetRig); err == nil {
+				// Standalone formula mode: gt sling <formula> [target]
+				// Deferred dispatch is handled above for the 2-arg rig case (gh#3917).
+				return runSlingFormula(ctx, args)
+			}
+			// Not a formula either - check if it looks like a bead ID (routing issue workaround).
+			// Accept it and let the actual bd update fail later if the bead doesn't exist.
+			// This fixes: gt sling bd-ka761 beads/crew/dave failing with 'not a valid bead or formula'
+			if looksLikeBeadID(firstArg) {
+				beadID = firstArg
+			} else {
+				// Neither bead nor formula
+				return fmt.Errorf("'%s' is not a valid bead or formula", firstArg)
+			}
+		}
+	}
+
+	// Serialize assignment writes per bead to prevent concurrent sling races from
+	// producing conflicting assignee/metadata updates.
+	releaseSlingLock, err := tryAcquireSlingBeadLock(townRoot, beadID)
+	if err != nil {
+		return err
+	}
+	slingLockReleased := false
+	releaseLockOnce := func() {
+		if !slingLockReleased {
+			slingLockReleased = true
+			releaseSlingLock()
+		}
+	}
+	defer releaseLockOnce()
+
+	// Check if bead is already assigned (guard against accidental re-sling).
+	// This must happen before resolveTarget(), since rig targets can spawn/hook a new polecat as a side-effect.
+	info, err := getBeadInfo(beadID)
+	if err != nil {
+		return fmt.Errorf("checking bead status: %w", err)
+	}
+
+	if err := validateBeadDispatchable(beadID, info); err != nil {
+		return err
+	}
 
 	originalStatus := info.Status
 	originalAssignee := info.Assignee
@@ -1018,6 +1048,18 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	return executeSlingDispatch(ctx, args, beadID, formulaName, info, townRoot, townBeadsDir, force, originalStatus, originalAssignee, releaseLockOnce)
+}
+
+// executeSlingDispatch performs the single-bead dispatch tail of runSling:
+// target resolution, polecat-admission reservation, cross-rig guard, auto-convoy,
+// formula auto-apply + instantiation, hook write, agent-bead update, field
+// storage, and session start/nudge. It owns the resolveTarget-side defers
+// (admission release, witness-notification drain, assignee unlock) and calls
+// releaseLockOnce before handing a rig target to runSlingToRig. Extracted from
+// runSling (gu-nid89.12.2) so runSling reads parse -> route -> validate -> execute.
+func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaName string, info *beadInfo, townRoot, townBeadsDir string, force bool, originalStatus, originalAssignee string, releaseLockOnce func()) error {
+	attachedMoleculeID := ""
 	// Resolve target agent using shared dispatch logic.
 	// Note: args[1] == args[len(args)-1] here because batch mode (len(args) > 2
 	// with rig last arg) exits at line 234. The only remaining case is len(args) <= 2.
