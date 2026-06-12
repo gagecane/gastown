@@ -101,10 +101,11 @@ func writeMQSubmitTestFile(t *testing.T, dir, name, content string) {
 
 func TestValidateMoleculePrereqs(t *testing.T) {
 	tests := []struct {
-		name      string
-		children  []*beads.Issue
-		wantErr   bool
-		wantInErr []string // Substrings expected in error message
+		name         string
+		children     []*beads.Issue
+		wantErr      bool
+		wantInErr    []string // Substrings expected in error message
+		wantNotInErr []string // Substrings that must NOT appear in error message
 	}{
 		{
 			name:     "nil children",
@@ -187,6 +188,42 @@ func TestValidateMoleculePrereqs(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			// gu-any3k: two 'submit'-titled steps (submit + resubmit-on-fail)
+			// in non-sorted order. The prerequisite boundary must be the
+			// LOWEST submit sequence (gt-mol.5), not the first one encountered
+			// in arbitrary children order (gt-mol.8). The dead `break` bug took
+			// the first match (gt-mol.8), making enforcement too strict by
+			// treating the real submit step (gt-mol.5) as a prerequisite.
+			name: "multiple submit steps unsorted — uses lowest submit seq as boundary",
+			children: []*beads.Issue{
+				{ID: "gt-mol.8", Title: "Resubmit MR on failure", Status: "open"},
+				{ID: "gt-mol.2", Title: "Set up branch", Status: "closed"},
+				{ID: "gt-mol.5", Title: "Submit MR", Status: "open"},
+				{ID: "gt-mol.3", Title: "Implement", Status: "open"},
+				{ID: "gt-mol.6", Title: "Wait for verdict", Status: "open"},
+			},
+			wantErr: true,
+			// gt-mol.3 (seq 3 < 5) is an incomplete prerequisite.
+			wantInErr: []string{"gt-mol.3"},
+			// gt-mol.5 IS the submit step (lowest submit seq) and gt-mol.6/.8
+			// are at-or-after it — none are prerequisites. The buggy break
+			// would have flagged gt-mol.5 as incomplete.
+			wantNotInErr: []string{"gt-mol.5", "gt-mol.6", "gt-mol.8"},
+		},
+		{
+			// All prereqs of the lowest submit step are closed; later submit
+			// step (resubmit) and post-submit steps remain open. Must pass.
+			name: "multiple submit steps unsorted — prereqs closed passes",
+			children: []*beads.Issue{
+				{ID: "gt-mol.8", Title: "Resubmit MR on failure", Status: "open"},
+				{ID: "gt-mol.5", Title: "Submit MR", Status: "open"},
+				{ID: "gt-mol.3", Title: "Implement", Status: "closed"},
+				{ID: "gt-mol.2", Title: "Set up branch", Status: "closed"},
+				{ID: "gt-mol.1", Title: "Load context", Status: "closed"},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -205,6 +242,11 @@ func TestValidateMoleculePrereqs(t *testing.T) {
 				for _, want := range tt.wantInErr {
 					if !strings.Contains(errMsg, want) {
 						t.Errorf("error message missing %q, got: %s", want, errMsg)
+					}
+				}
+				for _, notWant := range tt.wantNotInErr {
+					if strings.Contains(errMsg, notWant) {
+						t.Errorf("error message should not contain %q, got: %s", notWant, errMsg)
 					}
 				}
 			}

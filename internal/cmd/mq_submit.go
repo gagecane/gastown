@@ -603,7 +603,6 @@ func validateMoleculePrereqs(children []*beads.Issue) error {
 			if seq < submitSeq {
 				submitSeq = seq
 			}
-			break
 		}
 	}
 
