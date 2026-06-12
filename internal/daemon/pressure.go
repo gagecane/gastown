@@ -46,14 +46,36 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	cpuThreshold := cfg.PressureCPUThresholdV()
 	memThreshold := cfg.PressureMemThresholdGBV()
 	maxSessions := cfg.PressureMaxSessionsV()
+	memBudgetFraction := cfg.PressureMemBudgetFractionV()
 
-	// All checks disabled (default) — skip entirely, no subprocess calls.
-	if cpuThreshold <= 0 && memThreshold <= 0 && maxSessions <= 0 {
+	// All checks disabled — skip entirely, no subprocess calls. Note that
+	// memBudgetFraction defaults ON (gu-xrkoq), so this short-circuit only
+	// triggers when an operator has explicitly zeroed every knob.
+	if cpuThreshold <= 0 && memThreshold <= 0 && maxSessions <= 0 && memBudgetFraction <= 0 {
 		return PressureResult{OK: true}
 	}
 
 	var result PressureResult
 	result.OK = true
+
+	// Tier 0: Memory budget (ON by default) — the boot-storm OOM safety net.
+	// Defer spawns when available RAM drops below a fraction of total system
+	// memory. Machine-independent: a 256GB box and a 16GB box keep the same
+	// proportional headroom. Backstops systemd-oomd during the daemon's boot
+	// fan-out of MCP-heavy sessions (gu-xrkoq).
+	if memBudgetFraction > 0 {
+		total := totalMemoryGB()
+		avail := availableMemoryGB()
+		result.MemAvailableGB = avail
+		if total > 0 && avail > 0 {
+			minAvail := total * memBudgetFraction
+			if avail < minAvail {
+				result.OK = false
+				result.Reason = fmt.Sprintf("memory budget: %.1fGB available, need %.1fGB (%.0f%% of %.1fGB total)", avail, minAvail, memBudgetFraction*100, total)
+				return result
+			}
+		}
+	}
 
 	// Tier 1: CPU pressure (load average per core)
 	if cpuThreshold > 0 {

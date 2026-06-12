@@ -88,6 +88,28 @@ const (
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
 
+	// Boot-storm backpressure defaults — ON by default (gu-xrkoq). These bound
+	// how fast the daemon launches new agent sessions so a reboot does not fire
+	// dozens of MCP-heavy sessions at once and trip systemd-oomd.
+	//
+	// DefaultSpawnMaxPerHeartbeat caps the number of NEW agent sessions the
+	// daemon starts in a single heartbeat. Already-running sessions are never
+	// counted. Remaining rigs are picked up on the next heartbeat, so the fleet
+	// still converges — it just ramps instead of stampeding. 0 disables the cap.
+	DefaultSpawnMaxPerHeartbeat = 4
+	// DefaultSpawnStagger is the settle delay inserted after each new session
+	// start so its MCP servers (builder-mcp ~250MB, serena ~70MB) finish loading
+	// before the next session begins. Serializes starts town-wide. 0 disables
+	// staggering (starts proceed back-to-back, still serialized by the gate).
+	DefaultSpawnStagger = 8 * time.Second
+	// DefaultPressureMemBudgetFraction is the fraction of TOTAL system memory
+	// that must remain available for a new spawn to proceed. This is the
+	// machine-independent OOM safety net that backstops the boot-storm: when the
+	// user slice has eaten enough RAM that less than this fraction is free, new
+	// spawns defer regardless of the absolute pressure_mem_threshold_gb knob.
+	// 0.15 = require 15% headroom. Set to 0 to disable.
+	DefaultPressureMemBudgetFraction = 0.15
+
 	// DefaultPolecatSelfTerminate defaults polecats to self-terminating their
 	// session after `gt done` completes. See gu-ci0l: previously default false
 	// meant polecats waited on the witness for tmux-kill, exposing them to a
@@ -603,6 +625,34 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 		return *d.PressureMaxSessions
 	}
 	return DefaultPressureMaxSessions
+}
+
+// SpawnMaxPerHeartbeatV returns the configured or default per-heartbeat spawn
+// cap. 0 disables the cap (no limit on new sessions per heartbeat). See gu-xrkoq.
+func (d *DaemonThresholds) SpawnMaxPerHeartbeatV() int {
+	if d != nil && d.SpawnMaxPerHeartbeat != nil {
+		return *d.SpawnMaxPerHeartbeat
+	}
+	return DefaultSpawnMaxPerHeartbeat
+}
+
+// SpawnStaggerD returns the configured or default settle delay inserted after
+// each new agent session start. 0 disables staggering. See gu-xrkoq.
+func (d *DaemonThresholds) SpawnStaggerD() time.Duration {
+	if d != nil && d.SpawnStagger != "" {
+		return ParseDurationOrDefault(d.SpawnStagger, DefaultSpawnStagger)
+	}
+	return DefaultSpawnStagger
+}
+
+// PressureMemBudgetFractionV returns the configured or default minimum fraction
+// of total system memory that must remain available for a spawn to proceed.
+// 0 disables the budget check. See gu-xrkoq.
+func (d *DaemonThresholds) PressureMemBudgetFractionV() float64 {
+	if d != nil && d.PressureMemBudgetFraction != nil {
+		return *d.PressureMemBudgetFraction
+	}
+	return DefaultPressureMemBudgetFraction
 }
 
 // --- Deacon accessors ---

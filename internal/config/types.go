@@ -411,6 +411,21 @@ type DaemonThresholds struct {
 	// PressureMaxSessions is the maximum number of concurrent agent tmux
 	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
+
+	// SpawnMaxPerHeartbeat caps the number of NEW agent sessions the daemon
+	// starts in a single heartbeat, ramping the fleet up instead of stampeding
+	// (gu-xrkoq). Defaults to 4. 0 disables the cap.
+	SpawnMaxPerHeartbeat *int `json:"spawn_max_per_heartbeat,omitempty"`
+
+	// SpawnStagger is the settle delay inserted after each new agent session
+	// start so its MCP servers finish loading before the next start (gu-xrkoq).
+	// Defaults to "8s". "0" or empty disables staggering.
+	SpawnStagger string `json:"spawn_stagger,omitempty"`
+
+	// PressureMemBudgetFraction is the fraction of TOTAL system memory that must
+	// remain available for a new spawn to proceed — the machine-independent OOM
+	// safety net (gu-xrkoq). Defaults to 0.15 (15% headroom). 0 disables it.
+	PressureMemBudgetFraction *float64 `json:"pressure_mem_budget_fraction,omitempty"`
 }
 
 // DeaconThresholds configures deacon health-check and dispatch thresholds.

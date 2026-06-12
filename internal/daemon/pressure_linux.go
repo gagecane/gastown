@@ -31,3 +31,24 @@ func availableMemoryGB() float64 {
 	}
 	return 0
 }
+
+// totalMemoryGB returns total physical memory in GB on Linux.
+// Reads MemTotal from /proc/meminfo. Returns 0 if unavailable.
+func totalMemoryGB() float64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			var kb uint64
+			_, err := fmt.Sscanf(line, "MemTotal: %d kB", &kb)
+			if err != nil {
+				return 0
+			}
+			return float64(kb) / (1024 * 1024)
+		}
+	}
+	return 0
+}

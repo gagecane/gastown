@@ -64,6 +64,22 @@ func availableMemoryGB() float64 {
 	return float64(availBytes) / (1024 * 1024 * 1024)
 }
 
+// totalMemoryGB returns total physical memory in GB on macOS via hw.memsize.
+// Returns 0 if unavailable.
+func totalMemoryGB() float64 {
+	cmd := exec.Command("sysctl", "-n", "hw.memsize")
+	util.SetDetachedProcessGroup(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	bytes, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return float64(bytes) / (1024 * 1024 * 1024)
+}
+
 func parseVMStatValue(line string) uint64 {
 	parts := strings.SplitN(line, ":", 2)
 	if len(parts) < 2 {

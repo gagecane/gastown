@@ -143,6 +143,17 @@ type Daemon struct {
 	// per-rig context timeouts so one slow rig cannot block all others.
 	rigPool *RigWorkerPool
 
+	// Boot-storm backpressure (gu-xrkoq). The spawn gate bounds how fast NEW
+	// agent sessions start so a reboot does not fan out dozens of MCP-heavy
+	// sessions at once and trip systemd-oomd. spawnsThisHeartbeat counts new
+	// starts admitted in the current heartbeat (reset by resetSpawnGate);
+	// nextSpawnAllowed is the staggered time slot the next admitted start must
+	// wait for. Guarded by spawnGateMu because rig-pool workers admit
+	// concurrently. See spawn_gate.go.
+	spawnGateMu         sync.Mutex
+	spawnsThisHeartbeat int
+	nextSpawnAllowed    time.Time
+
 	// knownRigsCache memoizes the result of reading mayor/rigs.json for the
 	// duration of a single heartbeat tick. ~10 call sites per tick otherwise
 	// re-read and re-parse the same file. Invalidated at the start of each
@@ -1101,6 +1112,10 @@ func (d *Daemon) heartbeat(state *State) {
 	// a single read; invalidating here ensures we pick up rigs.json changes
 	// between ticks.
 	d.invalidateKnownRigsCache()
+
+	// Reset the per-heartbeat spawn budget so the boot-storm cap applies per
+	// cycle, not for the daemon's lifetime (gu-xrkoq).
+	d.resetSpawnGate()
 
 	// 0a. Reload prefix registry so new/changed rigs get correct session names.
 	// Without this, rigs added after daemon startup get the "gt" default prefix,
@@ -2298,6 +2313,17 @@ func (d *Daemon) ensureWitnessRunning(rigName string) {
 	// context (checks for active work before declaring something stuck).
 	// See: daemon.log "is hung (no activity for 30m0s), killing for restart"
 
+	// Boot-storm backpressure (gu-xrkoq): only gate when a NEW start is needed.
+	// A healthy running witness costs nothing and must never be deferred; the
+	// gate (cap + stagger + memory budget) applies only to fresh/zombie starts.
+	if running, _ := mgr.IsRunning(); running {
+		d.logger.Printf("Witness for %s already running, skipping spawn", rigName)
+		return
+	}
+	if !d.admitSpawn("witness", rigName) {
+		return
+	}
+
 	if err := mgr.Start(false, "", nil); err != nil {
 		if err == witness.ErrAlreadyRunning {
 			// Already running - this is the expected case
@@ -2428,6 +2454,17 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 	// The deacon's patrol health-scan step handles stuck detection with proper
 	// context (checks for active work before declaring something stuck).
 	// See: daemon.log "is hung (no activity for 30m0s), killing for restart"
+
+	// Boot-storm backpressure (gu-xrkoq): only gate when a NEW start is needed.
+	// A healthy running refinery costs nothing and must never be deferred; the
+	// gate (cap + stagger + memory budget) applies only to fresh/zombie starts.
+	if running, _ := mgr.IsRunning(); running {
+		d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
+		return
+	}
+	if !d.admitSpawn("refinery", rigName) {
+		return
+	}
 
 	if err := mgr.Start(false, ""); err != nil {
 		if err == refinery.ErrAlreadyRunning {

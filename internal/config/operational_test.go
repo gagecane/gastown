@@ -571,3 +571,70 @@ func TestPressureThresholds_JSON(t *testing.T) {
 		t.Errorf("JSON max sessions: got %v, want 8", raw.Daemon.PressureMaxSessionsV())
 	}
 }
+
+// gu-xrkoq: boot-storm backpressure knobs default ON.
+func TestSpawnBackpressure_Defaults(t *testing.T) {
+	t.Parallel()
+
+	var dt *DaemonThresholds
+	if got := dt.SpawnMaxPerHeartbeatV(); got != DefaultSpawnMaxPerHeartbeat {
+		t.Errorf("SpawnMaxPerHeartbeat: got %v, want %v", got, DefaultSpawnMaxPerHeartbeat)
+	}
+	if got := dt.SpawnStaggerD(); got != DefaultSpawnStagger {
+		t.Errorf("SpawnStagger: got %v, want %v", got, DefaultSpawnStagger)
+	}
+	if got := dt.PressureMemBudgetFractionV(); got != DefaultPressureMemBudgetFraction {
+		t.Errorf("PressureMemBudgetFraction: got %v, want %v", got, DefaultPressureMemBudgetFraction)
+	}
+
+	// Defaults must actually be ON so the OOM safety net engages without
+	// operator action (the boot-storm fix's core requirement).
+	if DefaultSpawnMaxPerHeartbeat <= 0 {
+		t.Error("DefaultSpawnMaxPerHeartbeat must be > 0 (cap ON by default)")
+	}
+	if DefaultPressureMemBudgetFraction <= 0 {
+		t.Error("DefaultPressureMemBudgetFraction must be > 0 (memory budget ON by default)")
+	}
+}
+
+func TestSpawnBackpressure_Overrides(t *testing.T) {
+	t.Parallel()
+
+	maxPer := 2
+	frac := 0.25
+	dt := &DaemonThresholds{
+		SpawnMaxPerHeartbeat:      &maxPer,
+		SpawnStagger:              "3s",
+		PressureMemBudgetFraction: &frac,
+	}
+	if got := dt.SpawnMaxPerHeartbeatV(); got != 2 {
+		t.Errorf("SpawnMaxPerHeartbeat override: got %v, want 2", got)
+	}
+	if got := dt.SpawnStaggerD(); got != 3*time.Second {
+		t.Errorf("SpawnStagger override: got %v, want 3s", got)
+	}
+	if got := dt.PressureMemBudgetFractionV(); got != 0.25 {
+		t.Errorf("PressureMemBudgetFraction override: got %v, want 0.25", got)
+	}
+}
+
+func TestSpawnBackpressure_DisableWithZero(t *testing.T) {
+	t.Parallel()
+
+	maxPer := 0
+	frac := 0.0
+	dt := &DaemonThresholds{
+		SpawnMaxPerHeartbeat:      &maxPer,
+		SpawnStagger:              "0s",
+		PressureMemBudgetFraction: &frac,
+	}
+	if dt.SpawnMaxPerHeartbeatV() != 0 {
+		t.Error("zero SpawnMaxPerHeartbeat should disable the cap")
+	}
+	if dt.SpawnStaggerD() != 0 {
+		t.Error("0s SpawnStagger should disable staggering")
+	}
+	if dt.PressureMemBudgetFractionV() != 0 {
+		t.Error("zero PressureMemBudgetFraction should disable the budget")
+	}
+}

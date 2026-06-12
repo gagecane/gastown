@@ -11,3 +11,8 @@ func loadAverage1Sysctl() float64 {
 func availableMemoryGB() float64 {
 	return 0
 }
+
+// totalMemoryGB is a no-op on unsupported platforms.
+func totalMemoryGB() float64 {
+	return 0
+}
