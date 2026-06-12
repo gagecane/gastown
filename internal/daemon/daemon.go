@@ -1344,6 +1344,18 @@ func (d *Daemon) ensureDoltServerRunning() {
 			h.Healthy,
 		)
 	}
+
+	// Leak-rate self-heal: detect a sustained connection climb and recycle the
+	// daemon's store pools before the pool saturates, instead of waiting for the
+	// after-the-fact escalation storm (gu-d1r8g). Use the lightweight
+	// connection-count probe (a single SELECT COUNT) rather than the full
+	// GetHealthMetrics — the monitor needs only the count, and GetHealthMetrics
+	// runs a write probe + disk scan we don't want on every heartbeat. A probe
+	// error means the count is unknown this sample; skip rather than feed a bogus
+	// return-to-baseline that would re-arm the monitor.
+	if count, err := doltserver.GetActiveConnectionCount(d.config.TownRoot); err == nil {
+		d.monitorConnLeak(count)
+	}
 }
 
 // pourDoctorMolecule creates a mol-dog-doctor molecule to track a health anomaly.
