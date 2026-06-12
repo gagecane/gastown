@@ -48,6 +48,34 @@ func buildChildMap() map[int][]int {
 	return children
 }
 
+// buildArgvMap forks `ps -eo pid,args` once and returns a pid→argv map.
+// This replaces the per-candidate `ps -p <pid> -o args=` forks that
+// isRealAgentProcess/isIDEClaudeProcess used to run (up to 2 per candidate).
+// On a saturated host with hundreds of orphan/zombie candidates that was a
+// fork storm (O(N) extra spawns) in routine cleanup paths; a single ps call
+// looked up in the scan loops makes it O(1). Ref: gu-nid89.20.
+func buildArgvMap() map[int]string {
+	argv := make(map[int]string)
+	out, err := exec.Command("ps", "-eo", "pid,args").Output()
+	if err != nil {
+		return argv
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		// argv may contain spaces, so split only on the first gap after pid.
+		trimmed := strings.TrimLeft(line, " \t")
+		sp := strings.IndexAny(trimmed, " \t")
+		if sp < 0 {
+			continue
+		}
+		pid, err := strconv.Atoi(trimmed[:sp])
+		if err != nil {
+			continue // header ("PID COMMAND") or malformed line
+		}
+		argv[pid] = strings.TrimSpace(trimmed[sp+1:])
+	}
+	return argv
+}
+
 // addDescendants adds all descendant PIDs of a process to the set using
 // a pre-built child map (no additional process spawns).
 func addDescendants(parentPID int, childMap map[int][]int, pids map[int]bool) {
@@ -335,15 +363,13 @@ func isInGasTownWorkspace(pid int) bool {
 	return resolveTownRoot(pid) != ""
 }
 
-// isIDEClaudeProcess checks if a Claude process was spawned by an IDE extension
-// (VS Code, Cursor, etc.). IDE-launched Claude processes run with TTY "?" but
-// are legitimate — they're controlled by the IDE, not orphaned from dead sessions.
-func isIDEClaudeProcess(pid int) bool {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
-	if err != nil {
-		return false
-	}
-	args := string(out)
+// isIDEClaudeArgv reports whether a process's full argv (the ps "args" field)
+// belongs to a Claude process spawned by an IDE extension (VS Code, Cursor,
+// etc.). IDE-launched Claude processes run with TTY "?" but are legitimate —
+// they're controlled by the IDE, not orphaned from dead sessions. The
+// orphan/zombie scans look the argv up in a pre-built map (buildArgvMap) rather
+// than forking ps per candidate.
+func isIDEClaudeArgv(args string) bool {
 	// Check for IDE-specific paths in the executable
 	if strings.Contains(args, "vscode-server") ||
 		strings.Contains(args, "vscode/extensions") ||
@@ -497,6 +523,11 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 
+	// Fork ps once for full argv of all processes, then look candidates up in
+	// the map instead of forking `ps -p <pid>` twice per candidate. Ref:
+	// gu-nid89.20 — avoids an O(N) fork storm on saturated hosts.
+	argvByPID := buildArgvMap()
+
 	var orphans []OrphanedProcess
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
@@ -525,11 +556,14 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 			continue
 		}
 
+		argv := argvByPID[pid]
+
 		// Validate against full argv before trusting the comm match.
 		// Bare comm matching collides with kernel threads ([kthreadd],
 		// [kworker/...]) and truncated/coincidental names (gu-40hy7); confirm
 		// the executable's argv basename is genuinely an agent binary.
-		if !isRealAgentProcess(pid) {
+		// A missing argv (PID exited since the main ps) fails safe → skipped.
+		if !isRealAgentArgv(argv) {
 			continue
 		}
 
@@ -542,7 +576,7 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 
 		// Skip IDE extension processes (VS Code, Cursor, etc.).
 		// These have TTY "?" but are legitimate — controlled by the IDE.
-		if isIDEClaudeProcess(pid) {
+		if isIDEClaudeArgv(argv) {
 			continue
 		}
 
@@ -626,6 +660,11 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 
+	// Fork ps once for full argv of all processes, then look candidates up in
+	// the map instead of forking `ps -p <pid>` twice per candidate. Ref:
+	// gu-nid89.20 — avoids an O(N) fork storm on saturated hosts.
+	argvByPID := buildArgvMap()
+
 	var zombies []ZombieProcess
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
@@ -647,11 +686,14 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 			continue
 		}
 
+		argv := argvByPID[pid]
+
 		// Validate against full argv before trusting the comm match.
 		// Bare comm matching collides with kernel threads ([kthreadd],
 		// [kworker/...]) and truncated/coincidental names (gu-40hy7); confirm
 		// the executable's argv basename is genuinely an agent binary.
-		if !isRealAgentProcess(pid) {
+		// A missing argv (PID exited since the main ps) fails safe → skipped.
+		if !isRealAgentArgv(argv) {
 			continue
 		}
 
@@ -669,7 +711,7 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 
 		// Skip IDE extension processes (VS Code, Cursor, etc.).
 		// These have TTY "?" but are legitimate — controlled by the IDE.
-		if isIDEClaudeProcess(pid) {
+		if isIDEClaudeArgv(argv) {
 			continue
 		}
 
