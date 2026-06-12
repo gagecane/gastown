@@ -480,15 +480,49 @@ func isAncestor(gitDir, target, upstream string) bool {
 	return err == nil
 }
 
+// checkoutTargetBranch checks out the target branch so an in-place merge
+// can advance it. It handles the detached-clone case (gu-my577): the
+// refinery's refinery/rig clone is in DETACHED HEAD with no local target
+// branch, only origin/<target> and upstream/<target> remote-tracking
+// refs. A bare `git checkout main` there fails with "matched multiple (2)
+// remote tracking branches", which blocked both the FF and clean non-FF
+// merge paths.
+//
+// If a local target branch already exists, it is checked out as-is so any
+// local commits are preserved (the merge advances them). If it does not,
+// the branch is created pointing at origin/<target> — the same base the
+// caller already evaluated the FF/merge decision against — so a detached
+// clone gets a sane, non-ambiguous local branch without clobbering
+// anything (there is nothing local to clobber).
+func checkoutTargetBranch(gitDir string, cfg *config.UpstreamSyncConfig) error {
+	target := cfg.GetTargetBranch()
+
+	// Local branch already present: plain checkout preserves its commits.
+	exists := exec.Command("git", "-C", gitDir, "rev-parse", "--verify",
+		"--quiet", "refs/heads/"+target).Run() == nil
+	if exists {
+		if out, err := exec.Command("git", "-C", gitDir, "checkout", target).CombinedOutput(); err != nil {
+			return fmt.Errorf("checkout %s: %w: %s", target, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+
+	// No local branch (detached clone): create it from origin/<target>.
+	origin := "origin/" + target
+	if out, err := exec.Command("git", "-C", gitDir, "checkout", "-b", target, origin).CombinedOutput(); err != nil {
+		return fmt.Errorf("checkout -b %s %s: %w: %s", target, origin, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // gitFastForward merges the upstream ref into the target branch with
 // fast-forward only. Bails if a real merge would be needed.
 func gitFastForward(gitDir string, cfg *config.UpstreamSyncConfig) error {
-	target := cfg.GetTargetBranch()
 	upstream := cfg.GetUpstreamRemote() + "/" + cfg.GetUpstreamBranch()
 
 	// Checkout target branch first so the merge updates it in place.
-	if out, err := exec.Command("git", "-C", gitDir, "checkout", target).CombinedOutput(); err != nil {
-		return fmt.Errorf("checkout %s: %w: %s", target, err, strings.TrimSpace(string(out)))
+	if err := checkoutTargetBranch(gitDir, cfg); err != nil {
+		return err
 	}
 	if out, err := exec.Command("git", "-C", gitDir, "merge", "--ff-only", upstream).CombinedOutput(); err != nil {
 		return fmt.Errorf("merge --ff-only %s: %w: %s", upstream, err, strings.TrimSpace(string(out)))
@@ -511,8 +545,8 @@ func gitMergeUpstream(gitDir string, cfg *config.UpstreamSyncConfig) error {
 	upstream := cfg.GetUpstreamRemote() + "/" + cfg.GetUpstreamBranch()
 
 	// Checkout target branch first so the merge updates it in place.
-	if out, err := exec.Command("git", "-C", gitDir, "checkout", target).CombinedOutput(); err != nil {
-		return fmt.Errorf("checkout %s: %w: %s", target, err, strings.TrimSpace(string(out)))
+	if err := checkoutTargetBranch(gitDir, cfg); err != nil {
+		return err
 	}
 	msg := fmt.Sprintf("Merge %s into %s (upstream sync)", upstream, target)
 	out, err := exec.Command("git", "-C", gitDir, "merge", "--no-ff", "--no-edit",

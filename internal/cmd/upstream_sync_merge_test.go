@@ -129,6 +129,111 @@ func TestGitMergeUpstream_Clean(t *testing.T) {
 	}
 }
 
+// detachAtOriginMain puts the working clone into the refinery's
+// detached-clone shape (gu-my577): HEAD detached at origin/<target> with
+// NO local target branch, so a bare `git checkout main` would fail with
+// "matched multiple remote tracking branches". Returns the resolved
+// origin/main SHA so callers can assert against it.
+func detachAtOriginMain(t *testing.T, work, target string) string {
+	t.Helper()
+	sha := syncMergeGit(t, work, "rev-parse", "origin/"+target)
+	syncMergeGit(t, work, "checkout", "--detach", sha)
+	syncMergeGit(t, work, "branch", "-D", target)
+	// Sanity: the local branch must be gone and we must be detached.
+	if err := exec.Command("git", "-C", work, "rev-parse", "--verify",
+		"--quiet", "refs/heads/"+target).Run(); err == nil {
+		t.Fatalf("local %s branch still present; detach fixture is wrong", target)
+	}
+	return sha
+}
+
+// TestGitMergeUpstream_DetachedClone covers gu-my577: the clean non-FF
+// merge must succeed in a detached clone with no local target branch.
+// Before the fix, the bare `git checkout main` failed with "matched
+// multiple (2) remote tracking branches" and the merge never ran.
+func TestGitMergeUpstream_DetachedClone(t *testing.T) {
+	work := makeForkScenario(t)
+	detachAtOriginMain(t, work, "main")
+
+	cfg := &config.UpstreamSyncConfig{Enabled: true}
+	if err := gitMergeUpstream(work, cfg); err != nil {
+		t.Fatalf("gitMergeUpstream returned error in detached clone: %v", err)
+	}
+
+	// We must now be on a real local main branch (not detached).
+	branch := syncMergeGit(t, work, "rev-parse", "--abbrev-ref", "HEAD")
+	if branch != "main" {
+		t.Errorf("expected HEAD on main after merge, got %q", branch)
+	}
+	// upstream/main must be in HEAD's ancestry (rebase-check gate green).
+	if err := exec.Command("git", "-C", work, "merge-base",
+		"--is-ancestor", "upstream/main", "HEAD").Run(); err != nil {
+		t.Fatalf("upstream/main is not an ancestor of HEAD after merge: %v", err)
+	}
+	// 2-parent merge commit, fork commit preserved.
+	parents := strings.Fields(syncMergeGit(t, work, "log", "-1", "--format=%P", "HEAD"))
+	if len(parents) != 2 {
+		t.Errorf("expected 2-parent merge commit, got %d: %v", len(parents), parents)
+	}
+}
+
+// TestGitFastForward_DetachedClone covers gu-my577 for the fast-forward
+// path: origin/main is an ancestor of upstream/main and there is no local
+// target branch. The FF must seed the local branch from origin/main and
+// advance it to upstream/main.
+func TestGitFastForward_DetachedClone(t *testing.T) {
+	tmp := t.TempDir()
+	upstreamBare := filepath.Join(tmp, "upstream.git")
+	originBare := filepath.Join(tmp, "origin.git")
+	seed := filepath.Join(tmp, "seed")
+	work := filepath.Join(tmp, "work")
+
+	syncMergeGit(t, tmp, "init", "--bare", "--initial-branch=main", upstreamBare)
+	syncMergeGit(t, tmp, "init", "--bare", "--initial-branch=main", originBare)
+	syncMergeGit(t, tmp, "init", "--initial-branch=main", seed)
+	syncMergeGit(t, seed, "config", "user.email", "test@test.com")
+	syncMergeGit(t, seed, "config", "user.name", "Test")
+	writeSyncMergeFile(t, seed, "README.md", "# base\n")
+	syncMergeGit(t, seed, "add", ".")
+	syncMergeGit(t, seed, "commit", "-m", "seed: shared base")
+	syncMergeGit(t, seed, "remote", "add", "upstream", upstreamBare)
+	syncMergeGit(t, seed, "remote", "add", "origin", originBare)
+	syncMergeGit(t, seed, "push", "upstream", "main")
+	syncMergeGit(t, seed, "push", "origin", "main")
+
+	// upstream advances; origin stays at the shared base → FF possible.
+	upstage := filepath.Join(tmp, "upstage")
+	syncMergeGit(t, tmp, "clone", upstreamBare, upstage)
+	syncMergeGit(t, upstage, "config", "user.email", "u@test.com")
+	syncMergeGit(t, upstage, "config", "user.name", "U")
+	writeSyncMergeFile(t, upstage, "upstream_only.md", "# upstream\n")
+	syncMergeGit(t, upstage, "add", ".")
+	syncMergeGit(t, upstage, "commit", "-m", "upstream: feature")
+	syncMergeGit(t, upstage, "push", "origin", "main")
+
+	syncMergeGit(t, tmp, "clone", originBare, work)
+	syncMergeGit(t, work, "config", "user.email", "f@test.com")
+	syncMergeGit(t, work, "config", "user.name", "F")
+	syncMergeGit(t, work, "remote", "add", "upstream", upstreamBare)
+	syncMergeGit(t, work, "fetch", "upstream")
+	detachAtOriginMain(t, work, "main")
+
+	cfg := &config.UpstreamSyncConfig{Enabled: true}
+	if err := gitFastForward(work, cfg); err != nil {
+		t.Fatalf("gitFastForward returned error in detached clone: %v", err)
+	}
+
+	branch := syncMergeGit(t, work, "rev-parse", "--abbrev-ref", "HEAD")
+	if branch != "main" {
+		t.Errorf("expected HEAD on main after FF, got %q", branch)
+	}
+	head := syncMergeGit(t, work, "rev-parse", "HEAD")
+	upstreamSHA := syncMergeGit(t, work, "rev-parse", "upstream/main")
+	if head != upstreamSHA {
+		t.Errorf("HEAD %s != upstream/main %s after fast-forward", head, upstreamSHA)
+	}
+}
+
 // TestGitMergeUpstream_AbortsOnConflict covers the safety net: if a
 // conflict surfaces despite the caller's earlier merge-tree probe
 // (clock skew, concurrent upstream push, attribute-driven merge driver,
