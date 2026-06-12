@@ -109,6 +109,7 @@ type recorderInstruments struct {
 
 	// Histograms
 	bdDurationHist                 metric.Float64Histogram
+	doneDurationHist               metric.Float64Histogram
 	kiroWrapperIterationsHist      metric.Int64Histogram
 	kiroWrapperDurationSecondsHist metric.Float64Histogram
 }
@@ -234,6 +235,10 @@ func initInstruments() {
 		// Histograms
 		inst.bdDurationHist, _ = m.Float64Histogram("gastown.bd.duration_ms",
 			metric.WithDescription("bd CLI call round-trip latency in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+		inst.doneDurationHist, _ = m.Float64Histogram("gastown.done.duration_ms",
+			metric.WithDescription("Polecat time-to-close: wall-clock from session start to gt done, in milliseconds"),
 			metric.WithUnit("ms"),
 		)
 		inst.kiroWrapperIterationsHist, _ = m.Int64Histogram("gastown.polecat.kiro_wrapper.iterations",
@@ -622,20 +627,45 @@ func RecordNudge(ctx context.Context, target string, err error) {
 
 // RecordDone records a gt done invocation — polecat work completion (metrics + log event).
 // exitType is one of COMPLETED, ESCALATED, DEFERRED.
-func RecordDone(ctx context.Context, exitType string, err error) {
+//
+// rig and beadID identify the originating rig and the work bead; both may be
+// empty when unavailable (e.g. a nuked worktree where resolution failed).
+// durationMs is the polecat time-to-close (session start → gt done) in
+// milliseconds; pass a value ≤ 0 when the session-start timestamp is unknown,
+// in which case the gastown.done.duration_ms histogram is not emitted and
+// time_to_complete_ms is omitted from the log event (KPI-1, gu-nniyx).
+func RecordDone(ctx context.Context, exitType, rig, beadID string, durationMs float64, err error) {
 	initInstruments()
 	status := statusStr(err)
 	inst.doneTotal.Add(ctx, 1,
 		metric.WithAttributes(
 			attribute.String("status", status),
 			attribute.String("exit_type", exitType),
+			attribute.String("rig", rig),
 		),
 	)
-	emit(ctx, "done", severity(err),
+	// Only record the duration histogram when we have a real measurement.
+	// bead_id is intentionally excluded from metric attributes (unbounded
+	// cardinality); it lives on the log event for per-bead correlation.
+	if durationMs > 0 {
+		inst.doneDurationHist.Record(ctx, durationMs,
+			metric.WithAttributes(
+				attribute.String("exit_type", exitType),
+				attribute.String("rig", rig),
+			),
+		)
+	}
+	logAttrs := []otellog.KeyValue{
 		otellog.String("exit_type", exitType),
 		otellog.String("status", status),
+		otellog.String("rig", rig),
+		otellog.String("bead_id", beadID),
 		errKV(err),
-	)
+	}
+	if durationMs > 0 {
+		logAttrs = append(logAttrs, otellog.Float64("time_to_complete_ms", durationMs))
+	}
+	emit(ctx, "done", severity(err), logAttrs...)
 }
 
 // RecordDaemonRestart records a daemon-initiated agent session restart (metrics + log event).

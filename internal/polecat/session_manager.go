@@ -555,6 +555,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	envVars["GT_POLECAT_PATH"] = workDir
 	envVars["GT_TOWN_ROOT"] = townRoot
 	envVars["GT_RUN"] = runID
+	// Stamp session-start time (Unix seconds) so gt done can compute the
+	// polecat time-to-close KPI (gu-nniyx, KPI-1: gastown.done.duration_ms).
+	envVars["GT_SESSION_START"] = strconv.FormatInt(time.Now().Unix(), 10)
 	envVars["POLECAT_SLOT"] = fmt.Sprintf("%d", m.polecatSlot(polecat))
 	envVars["GT_PROCESS_NAMES"] = strings.Join(config.ResolveProcessNames(runtimeConfig.ResolvedAgent, runtimeConfig.Command, runtimeConfig.Args...), ",")
 	if polecatGitBranch != "" {
