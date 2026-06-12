@@ -32,6 +32,13 @@ if [[ -z "${DOLT_BACKUP_DIR:-}" ]]; then
 fi
 BACKUP_DIR="$DOLT_BACKUP_DIR"
 BACKUP_TIMEOUT=60
+
+# Wisp config dir holding per-rig operational state (status=parked is set by
+# `gt rig park`). It lives beside .dolt-data under the town root, so derive it
+# from DOLT_DATA_DIR's parent — this matches both the GT_TOWN_ROOT-rooted and
+# the $HOME/gt fallback resolutions above. See internal/wisp/config.go
+# (WispConfigDir=".beads-wisp", ConfigSubdir="config").
+WISP_CONFIG_DIR="$(dirname "$DOLT_DATA_DIR")/.beads-wisp/config"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 BACKUP_SAFETY_FLOOR="${BACKUP_SAFETY_FLOOR:-3}"
 
@@ -56,6 +63,27 @@ done
 
 log() {
   echo "[dolt-backup] $*"
+}
+
+# is_rig_parked <db> — returns 0 (true) if the rig of the same name is PARKED.
+#
+# Parked rigs have their agents stopped BY DESIGN, so their backup archives go
+# stale/incomplete and `dolt backup sync` legitimately fails (e.g. "table file
+# not found" against a never-fully-synced remote). Treating that as a HIGH
+# data-loss FAILURE produced per-cycle false-positive escalations to the mayor
+# (gu-otphy / parent gu-qwe7q) — parked is the expected steady state, not a
+# data-loss event. We skip parked rigs the way `gt dolt sync` already skips
+# unconfigured DBs, and surface the count in a benign bucket.
+#
+# Source of truth is the wisp layer (status=parked, set by `gt rig park`),
+# read directly from WISP_CONFIG_DIR/<db>.json — no jq dependency. Mirrors
+# internal/rig.IsRigParked's wisp check (the persistent bead-label fallback is
+# not consulted here: a plugin shelling into beads per-DB every cycle would add
+# Dolt load, and park always writes the wisp layer).
+is_rig_parked() {
+  local db="$1" wisp_file="$WISP_CONFIG_DIR/$1.json"
+  [[ -f "$wisp_file" ]] || return 1
+  grep -Eq '"status"[[:space:]]*:[[:space:]]*"parked"' "$wisp_file"
 }
 
 # Heartbeat: resolve the town runtime dir for the durable completion signal.
@@ -206,13 +234,27 @@ SYNCED=0
 SKIPPED=0
 FAILED=0
 NO_REMOTE=0
+PARKED=0
 FAILED_DBS=""
 NO_REMOTE_DBS=""
+PARKED_DBS=""
 
 for DB in "${PROD_DBS[@]}"; do
   DB_DIR="$DOLT_DATA_DIR/$DB"
   BACKUP_NAME="${DB}-backup"
   HASH_FILE="$BACKUP_DIR/${DB}/.last-backup-hash"
+
+  # Skip PARKED rigs (gu-otphy). A parked rig's agents are stopped by design,
+  # so its backup archive goes stale and `dolt backup sync` legitimately fails
+  # — that is the expected steady state, not a data-loss failure. Skipping here
+  # (before provisioning/sync) keeps it out of the FAILED bucket so it no longer
+  # fires a per-cycle HIGH escalation; the count surfaces in a benign bucket.
+  if is_rig_parked "$DB"; then
+    log "  $DB: rig is PARKED, skipping (not a data-loss failure)"
+    PARKED=$((PARKED + 1))
+    PARKED_DBS="$PARKED_DBS $DB"
+    continue
+  fi
 
   # Check DB dir exists
   if [[ ! -d "$DB_DIR/.dolt" ]]; then
@@ -362,10 +404,13 @@ done
 
 # --- Step 4: Report results ---------------------------------------------------
 
-SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
+SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
 log "$SUMMARY"
 if [[ "$NO_REMOTE" -gt 0 ]]; then
   log "  no-remote DBs (enumerated but unconfigured — likely orphan/stray):$NO_REMOTE_DBS"
+fi
+if [[ "$PARKED" -gt 0 ]]; then
+  log "  parked DBs (rig parked by design — backup skip is expected, not a failure):$PARKED_DBS"
 fi
 
 # --- Step 5: Heartbeat, record result, escalate if needed ---------------------
