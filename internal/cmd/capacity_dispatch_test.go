@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 // TestDispatchScanConcurrency guards the semaphore bound for the per-rig
@@ -485,6 +486,68 @@ func TestStaleContextCloseReason(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("staleContextCloseReason(found=%v,status=%q,lookupFailed=%v,aged=%v) = %q, want %q",
 					tt.found, tt.status, tt.lookupFailed, tt.agedPastTTL, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDispatchWaitMs verifies the enqueue→dispatch wait computation used by the
+// KPI-3 wait_ms histogram (gu-y7p6j): parseable enqueued_at yields a wait,
+// negative skew clamps to 0, and missing/unparseable timestamps signal skip.
+func TestDispatchWaitMs(t *testing.T) {
+	now := time.Date(2026, 6, 12, 3, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name   string
+		ctx    *capacity.SlingContextFields
+		wantMs float64
+		wantOK bool
+	}{
+		{
+			name:   "normal wait",
+			ctx:    &capacity.SlingContextFields{EnqueuedAt: now.Add(-90 * time.Second).Format(time.RFC3339)},
+			wantMs: 90000,
+			wantOK: true,
+		},
+		{
+			name:   "zero wait",
+			ctx:    &capacity.SlingContextFields{EnqueuedAt: now.Format(time.RFC3339)},
+			wantMs: 0,
+			wantOK: true,
+		},
+		{
+			name:   "negative skew clamps to zero",
+			ctx:    &capacity.SlingContextFields{EnqueuedAt: now.Add(5 * time.Second).Format(time.RFC3339)},
+			wantMs: 0,
+			wantOK: true,
+		},
+		{
+			name:   "empty enqueued_at skips",
+			ctx:    &capacity.SlingContextFields{EnqueuedAt: ""},
+			wantMs: 0,
+			wantOK: false,
+		},
+		{
+			name:   "unparseable enqueued_at skips",
+			ctx:    &capacity.SlingContextFields{EnqueuedAt: "not-a-timestamp"},
+			wantMs: 0,
+			wantOK: false,
+		},
+		{
+			name:   "nil context skips",
+			ctx:    nil,
+			wantMs: 0,
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := capacity.PendingBead{Context: tt.ctx}
+			gotMs, gotOK := dispatchWaitMs(b, now)
+			if gotOK != tt.wantOK || gotMs != tt.wantMs {
+				t.Errorf("dispatchWaitMs() = (%v, %v), want (%v, %v)",
+					gotMs, gotOK, tt.wantMs, tt.wantOK)
 			}
 		})
 	}
