@@ -337,7 +337,6 @@ All carry `run.id`.
 | `formula.instantiate` | `formula_name`, `bead_id`, `status` (top-level formula-on-bead result) |
 | `convoy.create` | `bead_id`, `status` |
 | `daemon.restart` | `agent_type` |
-| `pane.output` | `session`, `content` (opt-in: `GT_LOG_PANE_OUTPUT=true`) |
 
 ---
 
@@ -360,7 +359,6 @@ event_type, msg.thread_id, msg.from, msg.to
 | `GT_LOG_AGENT_OUTPUT` | operator | opt-in: stream Claude JSONL conversation events (content truncated to 512 bytes by default) |
 | `GT_LOG_AGENT_CONTENT_LIMIT` | operator | override content truncation in `agent.event`; set `0` to disable (experts only) |
 | `GT_LOG_BD_OUTPUT` | operator | opt-in: include bd stdout/stderr in `bd.call` records |
-| `GT_LOG_PANE_OUTPUT` | operator | opt-in: stream raw tmux pane output |
 | `GT_LOG_MAIL_BODY` | operator | opt-in: include mail body in `mail` records (truncated to 256 bytes) |
 | `GT_LOG_PROMPT_KEYS` | operator | opt-in: include prompt text in `prompt.send` records (truncated to 256 bytes) |
 | `GT_LOG_PRIME_CONTEXT` | operator | opt-in: log full rendered formula in `prime.context` records |

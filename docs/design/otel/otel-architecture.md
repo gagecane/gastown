@@ -51,7 +51,7 @@ docker run -d -p 9428:9428 victoriametrics/victoria-logs
 | Feature | Status | Notes |
 |---------|--------|-------|
 | **Session lifecycle** | ✅ Main | `session.start`/`session.stop` events (tmux lifecycle) |
-| **Agent instantiation** | ❌ Roadmap | `agent.instantiate` event — no `RecordAgentInstantiate` function exists |
+| **Agent instantiation** | ✅ Main | `agent.instantiate` event via `RecordAgentInstantiate` (`recorder.go`) — landed PR #2199 |
 
 ### Workflow & Work Events (Main ✅)
 
@@ -62,7 +62,7 @@ docker run -d -p 9428:9428 victoriametrics/victoria-logs
 | Mail telemetry | ✅ Main | `mail` operations (operation + status only; no message payload) |
 | Sling/done telemetry | ✅ Main | `sling` and `done` events |
 | GT prime telemetry | ✅ Main | `prime` + `prime.context` events |
-| Work context in `prime` | 🔲 PR #2199 | `work_rig`, `work_bead`, `work_mol` on `prime` events |
+| Work context in `prime` | ✅ Main | `work_rig`, `work_bead`, `work_mol` on `prime` events (landed PR #2199) |
 
 ### Agent Lifecycle (Main ✅)
 
@@ -77,22 +77,22 @@ docker run -d -p 9428:9428 victoriametrics/victoria-logs
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Molecule lifecycle telemetry | ❌ Roadmap | `mol.cook`/`mol.wisp`/`mol.squash`/`mol.burn` — no `RecordMol*` functions exist |
-| Bead creation telemetry | ❌ Roadmap | `bead.create` — no `RecordBeadCreate` function exists |
+| Molecule lifecycle telemetry | ✅ Main | `mol.cook`/`mol.wisp`/`mol.squash`/`mol.burn` via `RecordMolCook/Wisp/Squash/Burn` (`recorder.go`) — landed PR #2199 |
+| Bead creation telemetry | ✅ Main | `bead.create` via `RecordBeadCreate` (`recorder.go`) — landed PR #2199 |
 | Formula instantiation telemetry | ✅ Main | `formula.instantiate` |
 | Convoy telemetry | ✅ Main | `convoy.create` events |
 
-### Agent Events (PR #2199)
+### Agent Events (landed PR #2199)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Agent conversation events** | 🔲 PR #2199 | `agent.event` per conversation turn (text/tool_use/tool_result/thinking) |
-| **Token usage tracking** | 🔲 PR #2199 | `agent.usage` per assistant turn (input/output/cache_read/cache_creation) |
-| **Cloud session correlation** | 🔲 PR #2199 | `native_session_id` linking Claude to GT telemetry |
-| **Agent logging daemon** | 🔲 PR #2199 | `gt agent-log` detached process for JSONL streaming |
-| **`run.id` on all events** | 🔲 PR #2199 | `WithRunID`/`RunIDFromCtx`; `addRunID()` injects `run.id` into every log record |
+| **Agent conversation events** | ✅ Main | `agent.event` per conversation turn (text/tool_use/tool_result/thinking) |
+| **Token usage tracking** | ✅ Main | `agent.usage` per assistant turn (input/output/cache_read/cache_creation) |
+| **Cloud session correlation** | ✅ Main | `native_session_id` linking Claude to GT telemetry |
+| **Agent logging daemon** | ✅ Main | `gt agent-log` detached process for JSONL streaming |
+| **`run.id` on all events** | ✅ Main | `WithRunID`/`RunIDFromCtx`; `addRunID()` injects `run.id` into every log record |
 
-**Activation (PR #2199)**: Requires `GT_LOG_AGENT_OUTPUT=true` AND `GT_OTEL_LOGS_URL` set.
+**Activation**: Requires `GT_LOG_AGENT_OUTPUT=true` AND `GT_OTEL_LOGS_URL` set.
 
 ---
 
@@ -441,18 +441,17 @@ See [OTel Data Model](otel-data-model.md) for the complete event schema, attribu
 | Convoy tracking | Full (auto-convoy creation) |
 | Daemon restarts | Full (witness/deacon-initiated) |
 | GT prime operations | Full (with formula context) |
-| Agent conversation events | 🔲 PR #2199 — requires `GT_LOG_AGENT_OUTPUT=true` |
-| Token usage | 🔲 PR #2199 — requires `GT_LOG_AGENT_OUTPUT=true` |
+| Agent instantiation | Full (`agent.instantiate` — landed PR #2199) |
+| Molecule lifecycle | Full (`mol.cook/wisp/squash/burn` — landed PR #2199) |
+| Bead creation | Full (`bead.create` — landed PR #2199) |
+| Agent conversation events | Full — requires `GT_LOG_AGENT_OUTPUT=true` (landed PR #2199) |
+| Token usage | Full — requires `GT_LOG_AGENT_OUTPUT=true` (landed PR #2199) |
 
 ### Not Currently Monitored ❌
 
 | Area | Notes | Operational Impact |
 |-------|-------|-------------------|
 | **Generic polecat work context** | **Critical gap** — see [Generic Polecat Work Context](#generic-polecat-work-context-️) below | No work attribution on any event between two `gt prime` calls; token costs unattributable |
-| **Agent instantiation** | No `agent.instantiate` event (roadmap) | Cannot anchor a run to a specific agent spawn |
-| **Molecule lifecycle** | No `mol.cook/wisp/squash/burn` events (roadmap) | Cannot observe formula-to-wisp pipeline |
-| **Bead creation** | No `bead.create` event (roadmap) | Cannot trace child bead graph during molecule instantiation |
-| Dolt server health | Handled by pre-spawn health checks, but not exposed to telemetry | Database issues only detected at spawn time; no real-time health monitoring |
 | Refinery merge queue | Internal operation, not surfaced via telemetry | Cannot monitor merge backlog or detect bottlenecks |
 | Scheduler dispatch logs | Capacity-controlled dispatch cycles not exposed to telemetry | Cannot track dispatch efficiency, queue depth, or capacity utilization |
 | Crew worktree operations | No explicit tracking of crew session cycles | Cannot track crew efficiency or session patterns |
@@ -646,23 +645,25 @@ Audited against `origin/main` @ `2d8d71ee35fafda3bbdf353683692bfcc9165476`
 | `RecordDone` / `done` event | `recorder.go:413` |
 | `RecordDaemonRestart` / `daemon.restart` event | `recorder.go:431` |
 | `RecordFormulaInstantiate` / `formula.instantiate` event | `recorder.go:442` |
-| `RecordConvoyCreate` / `convoy.create` event | `recorder.go:460` |
-| `RecordPaneOutput` / `pane.output` event | `recorder.go:477` |
+| `RecordConvoyCreate` / `convoy.create` event | `recorder.go` |
+| `RecordAgentInstantiate` / `agent.instantiate` event | `recorder.go` (landed PR #2199) |
+| `RecordMolCook/Wisp/Squash/Burn` / `mol.*` events | `recorder.go` (landed PR #2199) |
+| `RecordBeadCreate` / `bead.create` event | `recorder.go` (landed PR #2199) |
 
-### Absent functions and features (confirmed by grep on `origin/main`)
+### Agent-logging & run-correlation (landed PR #2199)
 
-| Claim | Verification |
-|-------|-------------|
-| `RecordAgentInstantiate` / `agent.instantiate` — does not exist | `grep -r "RecordAgentInstantiate\|agent\.instantiate" internal/ → zero matches` |
-| `RecordMolCook` / `mol.cook` etc. — do not exist | `grep -r "RecordMol\|mol\.cook\|mol\.wisp\|mol\.squash\|mol\.burn" internal/ → zero matches` |
-| `RecordBeadCreate` / `bead.create` — does not exist | `grep -r "RecordBeadCreate\|bead\.create" internal/ → zero matches` |
-| `WithRunID` / `RunIDFromCtx` — do not exist on main | `grep -r "WithRunID\|RunIDFromCtx" internal/telemetry/ → zero matches` |
-| `GT_RUN` — does not exist on main | `grep -r "GT_RUN" internal/ → zero matches` |
-| `GT_LOG_AGENT_OUTPUT` — does not exist on main | `grep -r "GT_LOG_AGENT_OUTPUT" . → zero matches` |
-| `gt.session` / `gt.run_id` in resource attrs — not in subprocess.go on main | confirmed: `subprocess.go` has only `gt.role`, `gt.rig`, `gt.actor`, `gt.agent` |
-| `agent_logging_unix.go` — does not exist on main | `find internal/session/ -name "agent_logging*" → zero results` |
-| `agent_log.go` — does not exist on main | `find internal/cmd/ -name "agent_log*" → zero results` |
-| `telemetry.IsActive()` — does not exist on main | `grep -r "IsActive" internal/telemetry/ → zero matches` |
+The following were previously listed here as absent on `origin/main`; they have
+since landed via PR #2199 and exist on the current branch:
+
+| Feature | Source |
+|---------|--------|
+| `WithRunID` / `RunIDFromCtx` / `addRunID` | `recorder.go` |
+| `GT_RUN` run-correlation env | `recorder.go`, `subprocess.go` |
+| `GT_LOG_AGENT_OUTPUT` gate | `internal/polecat/session_manager.go`, `recorder.go` |
+| `gt.session` / `gt.run_id` resource attrs | `subprocess.go` |
+| `agent_logging_unix.go` / `agent_logging_windows.go` | `internal/session/` |
+| `agent_log.go` (`gt agent-log` daemon) | `internal/cmd/` |
+| `telemetry.IsActive()` | `internal/telemetry/telemetry.go` |
 
 ### PromQL naming convention
 
@@ -676,19 +677,19 @@ OTel SDK uses dot notation; Prometheus-compatible backends export with underscor
 | `gastown.session.starts.total` | `gastown_session_starts_total` |
 | `gastown.done.total` | `gastown_done_total` |
 
-### PR #2199 additions (commit `8b88de15`, not yet on main)
+### PR #2199 additions (landed)
 
 | Claim | Source |
 |-------|--------|
-| `RecordAgentEvent` / `agent.event` | added in `8b88de15` |
-| `RecordAgentTokenUsage` / `agent.usage` | added in `8b88de15` |
-| `gastown.agent.events.total` Counter | added in `8b88de15` |
-| `WithRunID` / `RunIDFromCtx` / `addRunID` | added in `8b88de15` |
-| `gt.session`, `gt.run_id`, `gt.work_*` in resource attrs | `subprocess.go` updated in `8b88de15` |
-| `GT_RUN` propagation to subprocesses | `subprocess.go` updated in `8b88de15` |
-| `injectWorkContext` / `setTmuxWorkContext` in `prime.go` | added in `8b88de15` |
-| `internal/agentlog/` package | new in `8b88de15` |
-| `internal/cmd/agent_log.go` | new in `8b88de15` |
-| `internal/session/agent_logging_unix.go` | new in `8b88de15` |
-| `GT_LOG_AGENT_OUTPUT` env var | new in `8b88de15` |
-| `telemetry.IsActive()` | added in `8b88de15` |
+| `RecordAgentEvent` / `agent.event` | `recorder.go` |
+| `RecordAgentTokenUsage` / `agent.usage` | `recorder.go` |
+| `gastown.agent.events.total` Counter | `recorder.go` |
+| `WithRunID` / `RunIDFromCtx` / `addRunID` | `recorder.go` |
+| `gt.session`, `gt.run_id`, `gt.work_*` in resource attrs | `subprocess.go` |
+| `GT_RUN` propagation to subprocesses | `subprocess.go` |
+| `injectWorkContext` / `setTmuxWorkContext` in `prime.go` | `internal/cmd/prime.go` |
+| `internal/agentlog/` package | `internal/agentlog/` |
+| `internal/cmd/agent_log.go` | `internal/cmd/agent_log.go` |
+| `internal/session/agent_logging_unix.go` | `internal/session/agent_logging_unix.go` |
+| `GT_LOG_AGENT_OUTPUT` env var | `internal/polecat/session_manager.go`, `recorder.go` |
+| `telemetry.IsActive()` | `internal/telemetry/telemetry.go` |

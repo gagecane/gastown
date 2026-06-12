@@ -5,9 +5,9 @@ Complete schema of all telemetry events emitted by Gas Town. Each event consists
 1. **Log record** (→ any OTLP v1.x+ backend, defaults to VictoriaLogs) with full structured attributes
 2. **Metric counter** (→ any OTLP v1.x+ backend, defaults to VictoriaMetrics) for aggregation
 
-> **`run.id` correlation**: automatic `run.id` injection into all log records is implemented in
-> PR #2199 (`otel-p0-work-context`), not yet on main. On main, correlation is possible only via
-> resource attributes (`gt.role`, `gt.rig`, `gt.agent`, `gt.actor`).
+> **`run.id` correlation**: automatic `run.id` injection into all log records landed via
+> PR #2199 (`WithRunID`/`RunIDFromCtx`/`addRunID`). Resource attributes
+> (`gt.role`, `gt.rig`, `gt.agent`, `gt.actor`, `gt.session`, `gt.run_id`) also carry correlation context.
 
 ---
 
@@ -17,8 +17,8 @@ Complete schema of all telemetry events emitted by Gas Town. Each event consists
 |-------|----------|--------|
 | `session.start` | Session | ✅ Main |
 | `session.stop` | Session | ✅ Main |
-| `agent.event` | Agent | 🔲 PR #2199 |
-| `agent.usage` | Agent | 🔲 PR #2199 |
+| `agent.event` | Agent | ✅ Main (landed PR #2199) |
+| `agent.usage` | Agent | ✅ Main (landed PR #2199) |
 | `agent.state_change` | Agent | ✅ Main |
 | `bd.call` | Work | ✅ Main |
 | `mail` | Work | ✅ Main |
@@ -32,15 +32,14 @@ Complete schema of all telemetry events emitted by Gas Town. Each event consists
 | `polecat.remove` | Lifecycle | ✅ Main |
 | `daemon.restart` | Lifecycle | ✅ Main |
 | `pane.read` | Internal | ✅ Main |
-| `pane.output` | Internal | ✅ Main |
 | `formula.instantiate` | Molecule | ✅ Main |
 | `convoy.create` | Molecule | ✅ Main |
-| `agent.instantiate` | Session | ❌ Roadmap |
-| `mol.cook` | Molecule | ❌ Roadmap |
-| `mol.wisp` | Molecule | ❌ Roadmap |
-| `mol.squash` | Molecule | ❌ Roadmap |
-| `mol.burn` | Molecule | ❌ Roadmap |
-| `bead.create` | Molecule | ❌ Roadmap |
+| `agent.instantiate` | Session | ✅ Main (landed PR #2199) |
+| `mol.cook` | Molecule | ✅ Main (landed PR #2199) |
+| `mol.wisp` | Molecule | ✅ Main (landed PR #2199) |
+| `mol.squash` | Molecule | ✅ Main (landed PR #2199) |
+| `mol.burn` | Molecule | ✅ Main (landed PR #2199) |
+| `bead.create` | Molecule | ✅ Main (landed PR #2199) |
 
 ---
 
@@ -239,17 +238,6 @@ Each tmux `CapturePane` call to read agent output.
 
 ---
 
-### `pane.output`
-
-Raw pane output chunks emitted to VictoriaLogs (streaming tail of agent output).
-
-| Attribute | Type | Description |
-|---|---|---|
-| `session` | string | tmux pane name |
-| `content` | string | captured pane content chunk |
-
----
-
 ### Other events
 
 All carry `status` and `error` fields.
@@ -267,14 +255,13 @@ All carry `status` and `error` fields.
 
 ---
 
-## 3. Roadmap Events (not yet implemented)
+## 3. Molecule & Instantiation Events (landed PR #2199)
 
-The following events have no corresponding `Record*` function in `internal/telemetry/recorder.go`.
-They are listed here to document intended design.
+The following events have corresponding `Record*` functions in `internal/telemetry/recorder.go`.
 
-### `agent.instantiate` *(roadmap)*
+### `agent.instantiate`
 
-Intended to anchor all subsequent events for a run. One span per agent spawn.
+Anchors all subsequent events for a run. One record per agent spawn (`RecordAgentInstantiate`).
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -287,13 +274,13 @@ Intended to anchor all subsequent events for a run. One span per agent spawn.
 | `git_branch` | string | git branch of the working directory at spawn time |
 | `git_commit` | string | HEAD SHA of the working directory at spawn time |
 
-### `mol.cook` / `mol.wisp` / `mol.squash` / `mol.burn` *(roadmap)*
+### `mol.cook` / `mol.wisp` / `mol.squash` / `mol.burn`
 
-Molecule lifecycle events. No `RecordMol*` functions exist yet.
+Molecule lifecycle events via `RecordMolCook` / `RecordMolWisp` / `RecordMolSquash` / `RecordMolBurn`.
 
-### `bead.create` *(roadmap)*
+### `bead.create`
 
-Per-child-bead event during molecule instantiation. No `RecordBeadCreate` function exists yet.
+Per-child-bead event during molecule instantiation via `RecordBeadCreate`.
 
 ---
 
@@ -310,7 +297,6 @@ Per-child-bead event during molecule instantiation. No `RecordBeadCreate` functi
 | `gastown.prime.total` | Counter | `status`, `role`, `hook_mode` | ✅ Main |
 | `gastown.prompt.sends.total` | Counter | `status` | ✅ Main |
 | `gastown.pane.reads.total` | Counter | `status` | ✅ Main |
-| `gastown.pane.output.total` | Counter | `session` | ✅ Main |
 | `gastown.nudge.total` | Counter | `status` | ✅ Main |
 | `gastown.sling.dispatches.total` | Counter | `status` | ✅ Main |
 | `gastown.done.total` | Counter | `status`, `exit_type` | ✅ Main |
@@ -319,7 +305,7 @@ Per-child-bead event during molecule instantiation. No `RecordBeadCreate` functi
 | `gastown.daemon.agent_restarts.total` | Counter | `agent_type` | ✅ Main |
 | `gastown.formula.instantiations.total` | Counter | `status`, `formula` | ✅ Main |
 | `gastown.convoy.creates.total` | Counter | `status` | ✅ Main |
-| `gastown.agent.events.total` | Counter | `session`, `event_type`, `role` | 🔲 PR #2199 |
+| `gastown.agent.events.total` | Counter | `session`, `event_type`, `role` | ✅ Main (landed PR #2199) |
 
 ---
 
@@ -384,7 +370,6 @@ Audited against `origin/main` @ `2d8d71ee35fafda3bbdf353683692bfcc9165476`
 | `gastown.session.stops.total` Counter | `recorder.go:70` |
 | `gastown.prompt.sends.total` Counter | `recorder.go:73` |
 | `gastown.pane.reads.total` Counter | `recorder.go:76` |
-| `gastown.pane.output.total` Counter | `recorder.go:79` |
 | `gastown.prime.total` Counter | `recorder.go:82` |
 | `gastown.agent.state_changes.total` Counter | `recorder.go:85` |
 | `gastown.polecat.spawns.total` Counter | `recorder.go:88` |
@@ -419,7 +404,6 @@ Audited against `origin/main` @ `2d8d71ee35fafda3bbdf353683692bfcc9165476`
 | `daemon.restart` | `RecordDaemonRestart` | `agent_type` | `recorder.go:431`, emit at `recorder.go:436` |
 | `formula.instantiate` | `RecordFormulaInstantiate` | `formula_name`, `bead_id`, `status`, `error` | `recorder.go:442`, emit at `recorder.go:451` |
 | `convoy.create` | `RecordConvoyCreate` | `bead_id`, `status`, `error` | `recorder.go:460`, emit at `recorder.go:466` |
-| `pane.output` | `RecordPaneOutput` | `session`, `content` | `recorder.go:477`, emit at `recorder.go:482` |
 
 ### `prompt.send`: `keys` attribute absent (confirmed)
 
@@ -437,31 +421,28 @@ Audited against `origin/main` @ `2d8d71ee35fafda3bbdf353683692bfcc9165476`
 
 `recorder.go:208` — `os.Getenv("GT_LOG_BD_OUTPUT") == "true"` gates `stdout`/`stderr` logging.
 
-### Absent events (confirmed by grep)
+### Still-absent events (confirmed by grep)
 
 | Claim | Verification |
 |-------|-------------|
-| `agent.instantiate` — does not exist | `grep -r "agent.instantiate" internal/ → zero matches` |
-| `RecordAgentInstantiate` — does not exist | `grep -r "RecordAgentInstantiate" internal/ → zero matches` |
-| `mol.cook/wisp/squash/burn` — do not exist | `grep -r "mol\.cook\|mol\.wisp\|mol\.squash\|mol\.burn" internal/ → zero matches` |
-| `bead.create` — does not exist | `grep -r "bead\.create\|RecordBeadCreate" internal/ → zero matches` |
 | `RecordMailMessage` — does not exist | `grep -r "RecordMailMessage\|MailMessageInfo" internal/ → zero matches` |
-| `gastown.agent.instantiations.total` — not in `initInstruments()` | `grep -r "agent.instantiations" internal/ → zero matches` |
-| `gastown.mol.cooks.total` etc. — not in `initInstruments()` | `grep -r "mol\.cooks\|mol\.wisps\|mol\.squashes\|mol\.burns" internal/ → zero matches` |
-| `gastown.bead.creates.total` — not in `initInstruments()` | `grep -r "bead\.creates" internal/ → zero matches` |
 
-### PR #2199 additions (in `otel-p0-work-context`, not yet on main)
+### PR #2199 additions (landed)
 
-| Claim | Source (commit `8b88de15`) |
-|-------|---------------------------|
-| `RecordAgentEvent` / `agent.event` | `recorder.go` (added in `8b88de15`) |
-| `RecordAgentTokenUsage` / `agent.usage` | `recorder.go` (added in `8b88de15`) |
-| `gastown.agent.events.total` Counter | `recorder.go` (added in `8b88de15`) |
-| `WithRunID(ctx, runID)` / `RunIDFromCtx(ctx)` | `recorder.go` (added in `8b88de15`) |
-| `addRunID(ctx, *record)` — injects `run.id` into all emit calls | `recorder.go` (added in `8b88de15`) |
-| `gt.session` in `OTEL_RESOURCE_ATTRIBUTES` | `subprocess.go` (updated in `8b88de15`) |
-| `gt.run_id` in `OTEL_RESOURCE_ATTRIBUTES` | `subprocess.go` (updated in `8b88de15`) |
-| `gt.work_rig/bead/mol` in `OTEL_RESOURCE_ATTRIBUTES` | `subprocess.go` (updated in `8b88de15`) |
+The following landed via PR #2199 and now exist on the current branch:
+
+| Feature | Source |
+|---------|--------|
+| `RecordAgentInstantiate` / `agent.instantiate` | `recorder.go` |
+| `RecordMolCook/Wisp/Squash/Burn` / `mol.*` | `recorder.go` |
+| `RecordBeadCreate` / `bead.create` | `recorder.go` |
+| `gastown.agent.instantiations.total`, `gastown.mol.*.total`, `gastown.bead.creates.total` Counters | `recorder.go` |
+| `RecordAgentEvent` / `agent.event` | `recorder.go` |
+| `RecordAgentTokenUsage` / `agent.usage` | `recorder.go` |
+| `gastown.agent.events.total` Counter | `recorder.go` |
+| `WithRunID(ctx, runID)` / `RunIDFromCtx(ctx)` | `recorder.go` |
+| `addRunID(ctx, *record)` — injects `run.id` into all emit calls | `recorder.go` |
+| `gt.session` / `gt.run_id` / `gt.work_rig/bead/mol` in `OTEL_RESOURCE_ATTRIBUTES` | `subprocess.go` |
 | `GT_RUN` propagation to subprocesses | `subprocess.go` (updated in `8b88de15`) |
 | `work_rig`, `work_bead`, `work_mol` on `prime` event | `recorder.go` (updated in `8b88de15`) |
 | `internal/agentlog/` package | new package in `8b88de15` |

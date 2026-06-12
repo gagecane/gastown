@@ -41,7 +41,6 @@ const (
 	TypeDone    = "done"
 	TypeMail    = "mail"
 	TypeSpawn   = "spawn"
-	TypeKill    = "kill"
 	TypeNudge   = "nudge"
 	TypeBoot    = "boot"
 	TypeHalt    = "halt"
@@ -355,15 +354,6 @@ func EscalationPayload(rig, target, to, reason string) map[string]interface{} {
 func UnhookPayload(beadID string) map[string]interface{} {
 	return map[string]interface{}{
 		"bead": beadID,
-	}
-}
-
-// KillPayload creates a payload for kill events.
-func KillPayload(rig, target, reason string) map[string]interface{} {
-	return map[string]interface{}{
-		"rig":    rig,
-		"target": target,
-		"reason": reason,
 	}
 }
 

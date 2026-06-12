@@ -711,12 +711,12 @@ structured data; no need to scrape terminal
 **Code**:
 - `internal/telemetry/telemetry.go` — `Init()` (line ~104): OTel provider setup,
   VictoriaMetrics/VictoriaLogs endpoints, 30s export interval
-- `internal/telemetry/recorder.go` — 18 event types:
+- `internal/telemetry/recorder.go` — event types:
   `RecordSessionStart()`, `RecordSessionStop()`, `RecordPromptSend()`,
   `RecordPaneRead()`, `RecordPrime()`, `RecordAgentStateChange()`,
   `RecordPolecatSpawn()`, `RecordPolecatRemove()`, `RecordSling()`,
   `RecordMail()`, `RecordNudge()`, `RecordDone()`, `RecordDaemonRestart()`,
-  `RecordFormulaInstantiate()`, `RecordConvoyCreate()`, `RecordPaneOutput()`,
+  `RecordFormulaInstantiate()`, `RecordConvoyCreate()`,
   `RecordBDCall()`, `RecordPrimeContext()`
 - 17 OTel Int64Counter metrics (gastown.session.starts.total, etc.)
 - `internal/telemetry/subprocess.go` — `SetProcessOTELAttrs()`: propagates

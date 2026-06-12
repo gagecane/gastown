@@ -83,7 +83,6 @@ type recorderInstruments struct {
 	sessionTotal          metric.Int64Counter
 	sessionStopTotal      metric.Int64Counter
 	promptTotal           metric.Int64Counter
-	paneOutputTotal       metric.Int64Counter
 	agentEventTotal       metric.Int64Counter
 	agentInstantiateTotal metric.Int64Counter
 	primeTotal            metric.Int64Counter
@@ -125,14 +124,12 @@ var (
 	limitsOnce      sync.Once
 	agentContentLim int // GT_LOG_AGENT_CONTENT_LIMIT, default 512
 	bdContentLim    int // GT_LOG_BD_CONTENT_LIMIT, default 2048
-	paneContentLim  int // GT_LOG_PANE_CONTENT_LIMIT, default 8192
 )
 
 func initContentLimits() {
 	limitsOnce.Do(func() {
 		agentContentLim = envInt("GT_LOG_AGENT_CONTENT_LIMIT", 512)
 		bdContentLim = envInt("GT_LOG_BD_CONTENT_LIMIT", 2048)
-		paneContentLim = envInt("GT_LOG_PANE_CONTENT_LIMIT", 8192)
 	})
 }
 
@@ -165,9 +162,6 @@ func initInstruments() {
 		)
 		inst.promptTotal, _ = m.Int64Counter("gastown.prompt.sends.total",
 			metric.WithDescription("Total tmux SendKeys prompt dispatches"),
-		)
-		inst.paneOutputTotal, _ = m.Int64Counter("gastown.pane.output.total",
-			metric.WithDescription("Total pane output chunks emitted to VictoriaLogs"),
 		)
 		inst.agentEventTotal, _ = m.Int64Counter("gastown.agent.events.total",
 			metric.WithDescription("Total agent conversation events emitted to VictoriaLogs"),
@@ -800,21 +794,6 @@ func RecordBeadCreate(ctx context.Context, beadID, parentID, molSource string) {
 		otellog.String("bead_id", beadID),
 		otellog.String("parent_id", parentID),
 		otellog.String("mol_source", molSource),
-	)
-}
-
-// RecordPaneOutput emits a chunk of raw pane output (ANSI already stripped) to VictoriaLogs.
-// Opt-in: only called when GT_LOG_PANE_OUTPUT=true.
-// Content is truncated to GT_LOG_PANE_CONTENT_LIMIT bytes (default 8192).
-func RecordPaneOutput(ctx context.Context, sessionID, content string) {
-	initInstruments()
-	initContentLimits()
-	inst.paneOutputTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("session", sessionID),
-	))
-	emit(ctx, "pane.output", otellog.SeverityInfo,
-		otellog.String("session", sessionID),
-		otellog.String("content", truncateOutput(content, paneContentLim)),
 	)
 }
 
