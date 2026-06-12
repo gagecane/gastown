@@ -337,12 +337,18 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Add polecat clones
+	// Add polecat clones (handle both new and old structures)
+	// New structure: polecats/<name>/<rigname>/
+	// Old structure: polecats/<name>/
 	polecatDir := filepath.Join(rigPath, "polecats")
 	if entries, err := os.ReadDir(polecatDir); err == nil {
 		for _, entry := range entries {
 			if entry.IsDir() {
-				clonePaths = append(clonePaths, filepath.Join(polecatDir, entry.Name()))
+				polecatPath := filepath.Join(polecatDir, entry.Name(), ctx.RigName)
+				if _, err := os.Stat(filepath.Join(polecatPath, ".git")); os.IsNotExist(err) {
+					polecatPath = filepath.Join(polecatDir, entry.Name())
+				}
+				clonePaths = append(clonePaths, polecatPath)
 			}
 		}
 	}
