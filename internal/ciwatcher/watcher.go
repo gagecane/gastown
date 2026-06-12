@@ -194,16 +194,24 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 			w.cfg.Rig, coldCutoff.Format(time.RFC3339))
 	}
 
-	// Find the most recent passing run on the target branch. A failure that
-	// completed before this timestamp has been superseded: main went green
-	// again afterwards, so the break is resolved and re-escalating it would
-	// just flood the mayor with stale broke-main-ci (gs-218). In the merge-
-	// queue model main freezes on a break, so a later green run means the
-	// queue advanced past the failing commit. Unlike the cold-start cutoff,
-	// this guard applies on warm polls too — so a ledger rebuild or a wide
-	// fetch window that re-surfaces an old, already-resolved failure does not
-	// re-escalate it.
-	var latestSuccess time.Time
+	// Find the most recent passing run on the target branch, scoped PER
+	// WORKFLOW. A failure that completed before its own workflow's latest
+	// success has been superseded: that workflow went green again afterwards,
+	// so the break is resolved and re-escalating it would just flood the mayor
+	// with stale broke-main-ci (gs-218). In the merge-queue model main freezes
+	// on a break, so a later green run means the queue advanced past the
+	// failing commit. Unlike the cold-start cutoff, this guard applies on warm
+	// polls too — so a ledger rebuild or a wide fetch window that re-surfaces
+	// an old, already-resolved failure does not re-escalate it.
+	//
+	// Scoping is per-workflow because a branch carries multiple independent
+	// workflows (e.g. "CI" and "Windows CI"). A green "Windows CI" run must NOT
+	// supersede a red "CI" run on the same SHA — they validate different
+	// things. Using a branch-global latest-success let a passing workflow mask
+	// a persistently failing one, landing breakage silently (gu-t1z17). Runs
+	// with an empty Workflow name share a single bucket so non-GitHub hosts that
+	// don't report a workflow keep the legacy branch-global behavior.
+	latestSuccessByWorkflow := make(map[string]time.Time)
 	for _, run := range runs {
 		if run.Conclusion != ConclusionSuccess {
 			continue
@@ -211,8 +219,11 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 		if !strings.EqualFold(run.Branch, w.cfg.TargetBranch) {
 			continue
 		}
-		if !run.CompletedAt.IsZero() && run.CompletedAt.After(latestSuccess) {
-			latestSuccess = run.CompletedAt
+		if run.CompletedAt.IsZero() {
+			continue
+		}
+		if run.CompletedAt.After(latestSuccessByWorkflow[run.Workflow]) {
+			latestSuccessByWorkflow[run.Workflow] = run.CompletedAt
 		}
 	}
 
@@ -250,16 +261,19 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 		}
 
 		// Suppress a failed run whose break was already superseded by a later
-		// passing run on the target branch (gs-218). Record as seen but take
-		// no action: no reopen, no mail, no freeze. The current break — the
-		// newest failure, which by definition has no later success — is never
-		// suppressed, so a live regression still escalates promptly. Runs with
-		// no completion timestamp are processed normally (we'd rather act than
-		// silently drop a genuine break).
-		if run.Conclusion.IsFailureLike() && !run.CompletedAt.IsZero() &&
-			!latestSuccess.IsZero() && run.CompletedAt.Before(latestSuccess) {
-			w.logf("ciwatcher: superseded suppress run id=%s sha=%s completed=%s (later passing run at %s)",
-				run.ID, shortSHA(run.HeadSHA), run.CompletedAt.Format(time.RFC3339), latestSuccess.Format(time.RFC3339))
+		// passing run OF THE SAME WORKFLOW on the target branch (gs-218).
+		// Record as seen but take no action: no reopen, no mail, no freeze. The
+		// current break — the newest failure of its workflow, which by
+		// definition has no later success of that workflow — is never
+		// suppressed, so a live regression still escalates promptly. Scoping by
+		// workflow is what stops a green "Windows CI" from masking a red "CI"
+		// (gu-t1z17). Runs with no completion timestamp are processed normally
+		// (we'd rather act than silently drop a genuine break).
+		if latest, ok := latestSuccessByWorkflow[run.Workflow]; ok &&
+			run.Conclusion.IsFailureLike() && !run.CompletedAt.IsZero() &&
+			run.CompletedAt.Before(latest) {
+			w.logf("ciwatcher: superseded suppress run id=%s sha=%s workflow=%q completed=%s (later passing run at %s)",
+				run.ID, shortSHA(run.HeadSHA), run.Workflow, run.CompletedAt.Format(time.RFC3339), latest.Format(time.RFC3339))
 			res.SupersededSuppressed++
 			seen.Mark(run.ID, w.clock.Now())
 			continue
@@ -373,6 +387,7 @@ func (w *Watcher) handleFailure(run CIRun) error {
 		FrozenAt:  w.clock.Now(),
 		Reason:    reason,
 		BeadID:    beadID,
+		Workflow:  run.Workflow,
 		CommitSHA: run.HeadSHA,
 		RunID:     run.ID,
 		RunURL:    run.URL,
@@ -401,6 +416,18 @@ func (w *Watcher) handleSuccess(run CIRun) (bool, error) {
 		// Don't fail just because we couldn't decode the prior freeze;
 		// still clear it.
 		w.logf("ciwatcher: read prior freeze: %v", err)
+	}
+	// Scope the clear to the freeze's workflow (gu-t1z17). A freeze written for
+	// "CI" must NOT be cleared by a green "Windows CI" run — that workflow's
+	// failure is still unresolved. We only require a match when BOTH the freeze
+	// and the success run carry a workflow name; an empty name on either side
+	// falls back to legacy branch-global clearing (a green run of any workflow,
+	// or a freeze from a host that didn't record one, clears).
+	if prior != nil && prior.Workflow != "" && run.Workflow != "" &&
+		!strings.EqualFold(prior.Workflow, run.Workflow) {
+		w.logf("ciwatcher: success run id=%s workflow=%q does not match freeze workflow=%q — leaving freeze in place",
+			run.ID, run.Workflow, prior.Workflow)
+		return false, nil
 	}
 	if err := ClearFreeze(w.cfg.TownRoot, w.cfg.Rig); err != nil {
 		return false, fmt.Errorf("clear freeze: %w", err)

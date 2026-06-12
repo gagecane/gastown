@@ -54,6 +54,26 @@ func TestPrePushHookMatchesYAML(t *testing.T) {
 				t.Errorf("hook missing gofmt -l invocation declared in gates.yaml")
 			}
 			continue
+		case "test":
+			// pre-push-exempt by design (gs-4s06): b462f806 dropped the slow
+			// `go test ./...` tier from the hook because the full suite always
+			// blew past the hook's 360s wall, and the Refinery re-runs full
+			// gates on every merge — so a pre-push test tier was redundant.
+			// This gate is therefore refinery/CI-only at pre-push time, same
+			// as integration-tests. Assert it does NOT appear as a live
+			// command (the comment in the hook explaining the omission is
+			// fine; we only inspect non-comment lines).
+			for _, line := range strings.Split(hook, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if strings.Contains(trimmed, "go test ./...") {
+					t.Errorf("hook line %q runs go test ./... but gates.yaml's test gate is pre-push-exempt by design (gs-4s06); do not re-add the slow test tier to the hook", trimmed)
+					break
+				}
+			}
+			continue
 		case "integration-tests":
 			// ci-only — must NOT appear as a live command in pre-push (comments
 			// are fine; the existing hook explains *why* integration tests are
