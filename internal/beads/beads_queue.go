@@ -223,6 +223,17 @@ func (b *Beads) GetQueueBead(id string) (*Issue, *QueueFields, error) {
 
 // UpdateQueueFields updates the fields of a queue bead.
 func (b *Beads) UpdateQueueFields(id string, fields *QueueFields) error {
+	return b.withBeadLock(id, func() error {
+		return b.writeQueueFields(id, fields)
+	})
+}
+
+// writeQueueFields persists fields to the queue bead WITHOUT acquiring the
+// per-bead lock. Callers MUST already hold the lock via withBeadLock, so that
+// the read (GetQueueBead) and this write happen atomically. Calling the locked
+// UpdateQueueFields from another locked method would self-deadlock on the
+// non-reentrant flock.
+func (b *Beads) writeQueueFields(id string, fields *QueueFields) error {
 	issue, err := b.Show(id)
 	if err != nil {
 		return err
@@ -235,20 +246,22 @@ func (b *Beads) UpdateQueueFields(id string, fields *QueueFields) error {
 // UpdateQueueCounts updates the count fields of a queue bead.
 // This is a convenience method for incrementing/decrementing counts.
 func (b *Beads) UpdateQueueCounts(id string, available, processing, completed, failed int) error {
-	issue, currentFields, err := b.GetQueueBead(id)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return ErrNotFound
-	}
+	return b.withBeadLock(id, func() error {
+		issue, currentFields, err := b.GetQueueBead(id)
+		if err != nil {
+			return err
+		}
+		if issue == nil {
+			return ErrNotFound
+		}
 
-	currentFields.AvailableCount = available
-	currentFields.ProcessingCount = processing
-	currentFields.CompletedCount = completed
-	currentFields.FailedCount = failed
+		currentFields.AvailableCount = available
+		currentFields.ProcessingCount = processing
+		currentFields.CompletedCount = completed
+		currentFields.FailedCount = failed
 
-	return b.UpdateQueueFields(id, currentFields)
+		return b.writeQueueFields(id, currentFields)
+	})
 }
 
 // UpdateQueueStatus updates the status of a queue bead.
@@ -258,16 +271,18 @@ func (b *Beads) UpdateQueueStatus(id, status string) error {
 		return fmt.Errorf("invalid queue status %q: must be active, paused, or closed", status)
 	}
 
-	issue, currentFields, err := b.GetQueueBead(id)
-	if err != nil {
-		return err
-	}
-	if issue == nil {
-		return ErrNotFound
-	}
+	return b.withBeadLock(id, func() error {
+		issue, currentFields, err := b.GetQueueBead(id)
+		if err != nil {
+			return err
+		}
+		if issue == nil {
+			return ErrNotFound
+		}
 
-	currentFields.Status = status
-	return b.UpdateQueueFields(id, currentFields)
+		currentFields.Status = status
+		return b.writeQueueFields(id, currentFields)
+	})
 }
 
 // ListQueueBeads returns all queue beads.
