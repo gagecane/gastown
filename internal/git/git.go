@@ -3444,11 +3444,32 @@ func runtimeArtifactRoot(path string) (string, bool) {
 
 	base := filepath.Base(bare)
 	lower := strings.ToLower(base)
-	if base == "CLAUDE.local.md" || base == ".DS_Store" || strings.HasSuffix(lower, ".db") || strings.HasSuffix(lower, ".pyc") || strings.HasSuffix(lower, ".pyo") {
+	if base == "CLAUDE.local.md" || base == ".DS_Store" || base == "push.err" || strings.HasSuffix(lower, ".db") || strings.HasSuffix(lower, ".pyc") || strings.HasSuffix(lower, ".pyo") {
+		return bare, true
+	}
+
+	// Root-level compiled binaries (gu-ofi7q). `make build` / `go build` drops
+	// the gt binaries and curio-proposer at the repo root (Makefile BUILD_DIR=.).
+	// These are large build artifacts that must never be swept into reaper-autosave
+	// MRs — a binary-only MR gets rejected by the refinery and strands the slot.
+	// Match only root-level paths (no slash) so source dirs like cmd/gt are unaffected.
+	if !strings.Contains(bare, "/") && isBuiltBinaryName(base) {
 		return bare, true
 	}
 
 	return "", false
+}
+
+// isBuiltBinaryName reports whether name matches a compiled binary that the
+// build produces at the repository root. Kept in sync with the Makefile build
+// targets and the /.gitignore binaries block.
+func isBuiltBinaryName(name string) bool {
+	switch name {
+	case "gt", "gt-desktop", "gt-proxy-server", "gt-proxy-client", "curio-proposer":
+		return true
+	default:
+		return false
+	}
 }
 
 // isGasTownRuntimePath returns true if the path is a runtime artifact that should

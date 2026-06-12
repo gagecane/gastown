@@ -1,8 +1,13 @@
 # Binaries
 /gt
+/gt-desktop
 /gt-proxy-server
 /gt-proxy-client
+/curio-proposer
 *.exe
+
+# Transient git error log written by failed pushes (gu-ofi7q)
+push.err
 
 # Build
 /dist/
