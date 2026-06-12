@@ -95,6 +95,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "5m",
 			},
+			MergeQueueAge: &MergeQueueAgeConfig{
+				Enabled:     true,
+				IntervalStr: "5m",
+			},
 		},
 	}
 }
@@ -182,6 +186,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.AgentHeartbeat == nil {
 		p.AgentHeartbeat = d.AgentHeartbeat
+		changed = true
+	}
+	if p.MergeQueueAge == nil {
+		p.MergeQueueAge = d.MergeQueueAge
 		changed = true
 	}
 

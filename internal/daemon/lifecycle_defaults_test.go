@@ -173,6 +173,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			EventChannelGC:       &EventChannelGCConfig{Enabled: false},
 			CircuitBreakerGC:     &CircuitBreakerGCConfig{Enabled: false},
 			AgentHeartbeat:       &AgentHeartbeatConfig{Enabled: false},
+			MergeQueueAge:        &MergeQueueAgeConfig{Enabled: false},
 		},
 	}
 

@@ -149,6 +149,7 @@ type PatrolsConfig struct {
 	EventChannelGC       *EventChannelGCConfig       `json:"event_channel_gc,omitempty"`
 	BranchSync           *BranchSyncConfig           `json:"branch_sync,omitempty"`
 	AgentHeartbeat       *AgentHeartbeatConfig       `json:"agent_heartbeat,omitempty"`
+	MergeQueueAge        *MergeQueueAgeConfig        `json:"merge_queue_age,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -435,6 +436,17 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.AgentHeartbeat.Enabled
+	}
+
+	if patrol == "merge_queue_age" {
+		// Default-enabled (gu-78bbg): merge-queue observability that must run
+		// out of the box, including on towns whose daemon.json predates this
+		// addition. The dog only escalates (never auto-remediates), so it is
+		// safe to default on.
+		if config == nil || config.Patrols == nil || config.Patrols.MergeQueueAge == nil {
+			return true
+		}
+		return config.Patrols.MergeQueueAge.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

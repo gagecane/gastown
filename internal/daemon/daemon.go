@@ -1037,6 +1037,16 @@ func (d *Daemon) Run() (err error) {
 				d.runAgentHeartbeatDog()
 			}
 
+		case <-patrols.mergeQueueAge:
+			// Merge-queue-age dog — watches each rig's merge queue and escalates
+			// when MRs age past threshold without landing or the head stops
+			// advancing while a backlog waits (gu-78bbg). A parked/stuck refinery
+			// surfaces automatically instead of via a manual mayor health sweep.
+			// Escalate-only; never auto-remediates.
+			if !d.isShutdownInProgress() {
+				d.runMergeQueueAgeDog()
+			}
+
 		case <-timer.C:
 			d.heartbeat(state)
 

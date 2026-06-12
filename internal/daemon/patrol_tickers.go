@@ -30,6 +30,7 @@ type patrolTickers struct {
 	circuitBreakerGC     <-chan time.Time
 	branchSync           <-chan time.Time
 	agentHeartbeat       <-chan time.Time
+	mergeQueueAge        <-chan time.Time
 }
 
 // setupPatrolTickers creates a ticker for each active patrol and returns their
@@ -102,6 +103,7 @@ func (d *Daemon) setupPatrolTickers() (patrolTickers, func()) {
 	pt.circuitBreakerGC = add("circuit_breaker_gc", circuitBreakerGCInterval(d.patrolConfig), "Circuit-breaker GC")
 	pt.branchSync = add("branch_sync", branchSyncInterval(d.patrolConfig), "Branch sync")
 	pt.agentHeartbeat = add("agent_heartbeat", agentHeartbeatInterval(d.patrolConfig), "Agent heartbeat dog")
+	pt.mergeQueueAge = add("merge_queue_age", mergeQueueAgeInterval(d.patrolConfig), "Merge-queue-age dog")
 
 	stop := func() {
 		for _, t := range tickers {
