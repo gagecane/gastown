@@ -212,6 +212,17 @@ func TestRecordMail(t *testing.T) {
 	RecordMail(ctx, "read", errors.New("mail error"))
 }
 
+func TestRecordSchedulerDispatch(t *testing.T) {
+	resetInstruments(t)
+	ctx := context.Background()
+
+	// Normal wait, zero wait, and a negative value that must be clamped to 0.
+	RecordSchedulerDispatch(ctx, "furiosa", 1500)
+	RecordSchedulerDispatch(ctx, "nux", 0)
+	RecordSchedulerDispatch(ctx, "furiosa", -42)
+	RecordSchedulerDispatch(ctx, "", 90000)
+}
+
 func TestRecordNudge(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
