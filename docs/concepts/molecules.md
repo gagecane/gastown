@@ -97,7 +97,7 @@ through each step in order.
 2. gt prime               # Shows formula checklist inline
 3. Work through each step
 4. Persist findings: bd update <issue> --notes "..."
-5. gt done                # Submit, nuke sandbox, exit
+5. gt done                # Submit work, preserve sandbox for reuse, go idle
 ```
 
 ### Molecule Types
