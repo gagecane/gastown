@@ -28,6 +28,13 @@ type FreezeFile struct {
 	// could not be attributed to a bead.
 	BeadID string `json:"bead_id,omitempty"`
 
+	// Workflow is the CI workflow whose failure caused this freeze (e.g.
+	// "CI", "Windows CI"). The freeze-clear path is scoped to it: a green run
+	// of a *different* workflow must not clear a freeze written for this one
+	// (gu-t1z17). Empty means the host did not report a workflow name; such a
+	// freeze clears on any green run (legacy, branch-global behavior).
+	Workflow string `json:"workflow,omitempty"`
+
 	// CommitSHA is the SHA on main whose CI failed.
 	CommitSHA string `json:"commit_sha,omitempty"`
 

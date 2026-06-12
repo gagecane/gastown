@@ -686,6 +686,171 @@ func TestWatcherScheduledCronSuccessClearsFreeze(t *testing.T) {
 	}
 }
 
+// TestWatcherGreenWorkflowDoesNotMaskRedWorkflow is the gu-t1z17 regression,
+// mirroring the live case: interleaved [Windows CI=success, CI=failure] push
+// runs on the same branch. The branch-global supersession let the green
+// "Windows CI" run mask the red "CI" run, so main breakage landed with no
+// freeze and no broke-main-ci bead. Per-workflow scoping must freeze the queue
+// and reopen the bead for the persistently-red "CI" workflow.
+func TestWatcherGreenWorkflowDoesNotMaskRedWorkflow(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	now := time.Date(2026, 6, 12, 21, 0, 0, 0, time.UTC)
+	// Warm start so cold-start suppression is off.
+	seed, _ := LoadSeenRuns(town, "alpha")
+	seed.Mark("seed-run", now.Add(-24*time.Hour))
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// Newest-first, interleaved as observed live: each push has a green
+	// "Windows CI" and a red "CI" in the same fetch window.
+	runs := []CIRun{
+		{ID: "104", HeadSHA: "a3b29d49", HeadCommitSubject: "fix (gu-aaa)", Conclusion: ConclusionFailure, Branch: "main", Workflow: "CI", Event: "push", URL: "u104", CompletedAt: now.Add(-1 * time.Minute)},
+		{ID: "103", HeadSHA: "a3b29d49", Conclusion: ConclusionSuccess, Branch: "main", Workflow: "Windows CI", Event: "push", URL: "u103", CompletedAt: now.Add(-2 * time.Minute)},
+		{ID: "102", HeadSHA: "d6e33a42", HeadCommitSubject: "fix (gu-aaa)", Conclusion: ConclusionFailure, Branch: "main", Workflow: "CI", Event: "push", URL: "u102", CompletedAt: now.Add(-6 * time.Minute)},
+		{ID: "101", HeadSHA: "d6e33a42", Conclusion: ConclusionSuccess, Branch: "main", Workflow: "Windows CI", Event: "push", URL: "u101", CompletedAt: now.Add(-7 * time.Minute)},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	// The older "CI" failure (102) is superseded by the newer "CI" failure?
+	// No — supersession needs a later *success* of the same workflow. There
+	// is no "CI" success, so 102 is superseded by nothing; only the newest
+	// "CI" failure (104) drives the freeze. 102 still escalates because it is
+	// not superseded — but it does not matter for the freeze outcome.
+	if res.FailuresHandled < 1 {
+		t.Errorf("FailuresHandled = %d, want >= 1 (CI failure must escalate)", res.FailuresHandled)
+	}
+	if !res.FreezeWritten {
+		t.Errorf("FreezeWritten = false; the red CI workflow must freeze the queue")
+	}
+	if len(fb.reopens) < 1 || fb.reopens[len(fb.reopens)-1] != "gu-aaa" {
+		t.Errorf("reopens = %v, want gu-aaa reopened for the CI failure", fb.reopens)
+	}
+	frozen, _ := IsFrozen(town, "alpha")
+	if !frozen {
+		t.Errorf("queue must be frozen — green Windows CI must not mask red CI")
+	}
+	ff, _ := ReadFreeze(town, "alpha")
+	if ff == nil || ff.Workflow != "CI" {
+		t.Errorf("freeze should record Workflow=CI, got %+v", ff)
+	}
+}
+
+// TestWatcherCrossWorkflowSuccessDoesNotClearFreeze is the freeze-clear half of
+// gu-t1z17: a freeze written for "CI" must NOT be cleared by a green "Windows
+// CI" run. Only a green "CI" run resolves a "CI" freeze.
+func TestWatcherCrossWorkflowSuccessDoesNotClearFreeze(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	if err := WriteFreeze(town, FreezeFile{Rig: "alpha", BeadID: "gu-aaa", Workflow: "CI", Reason: "broke-main-ci: gu-aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		{ID: "210", HeadSHA: "greensha", Conclusion: ConclusionSuccess, Branch: "main", Workflow: "Windows CI", Event: "push", URL: "u210"},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FreezeCleared {
+		t.Errorf("FreezeCleared = true; a green Windows CI must not clear a CI freeze")
+	}
+	frozen, _ := IsFrozen(town, "alpha")
+	if !frozen {
+		t.Errorf("freeze should remain — the failing CI workflow is still red")
+	}
+	if len(fm.sent) != 0 {
+		t.Errorf("no CLEARED mail expected, got %v", fm.sent)
+	}
+}
+
+// TestWatcherMatchingWorkflowSuccessClearsFreeze verifies the complement: a
+// green run of the SAME workflow that froze the queue clears the freeze.
+func TestWatcherMatchingWorkflowSuccessClearsFreeze(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	if err := WriteFreeze(town, FreezeFile{Rig: "alpha", BeadID: "gu-aaa", Workflow: "CI", Reason: "broke-main-ci: gu-aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		{ID: "211", HeadSHA: "greensha", Conclusion: ConclusionSuccess, Branch: "main", Workflow: "CI", Event: "push", URL: "u211"},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.FreezeCleared {
+		t.Errorf("FreezeCleared = false; a green CI run must clear the CI freeze")
+	}
+	frozen, _ := IsFrozen(town, "alpha")
+	if frozen {
+		t.Errorf("freeze should be cleared by the matching-workflow success")
+	}
+}
+
+// TestWatcherEmptyWorkflowFreezeClearsOnAnySuccess verifies backward
+// compatibility: a freeze with no recorded workflow (legacy / non-GitHub host)
+// still clears on any green run regardless of that run's workflow.
+func TestWatcherEmptyWorkflowFreezeClearsOnAnySuccess(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-aaa")
+	fm := &fakeMailer{}
+	// Legacy freeze: no Workflow recorded.
+	if err := WriteFreeze(town, FreezeFile{Rig: "alpha", BeadID: "gu-aaa", Reason: "stale freeze"}); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		{ID: "212", HeadSHA: "greensha", Conclusion: ConclusionSuccess, Branch: "main", Workflow: "Windows CI", URL: "u212"},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.FreezeCleared {
+		t.Errorf("FreezeCleared = false; a legacy (no-workflow) freeze should clear on any success")
+	}
+}
+
+// TestWatcherSameWorkflowSupersessionStillResolves guards gs-218 under the new
+// per-workflow scoping: a fail-then-pass sequence WITHIN one workflow must
+// still resolve to "no freeze" (the green run supersedes the earlier red).
+func TestWatcherSameWorkflowSupersessionStillResolves(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-old")
+	fm := &fakeMailer{}
+	now := time.Date(2026, 6, 12, 21, 0, 0, 0, time.UTC)
+	seed, _ := LoadSeenRuns(town, "alpha")
+	seed.Mark("seed-run", now.Add(-24*time.Hour))
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		// Newest: same workflow ("CI") green — supersedes the earlier red.
+		{ID: "221", HeadSHA: "greensha", Conclusion: ConclusionSuccess, Branch: "main", Workflow: "CI", Event: "push", URL: "u221", CompletedAt: now.Add(-5 * time.Minute)},
+		{ID: "220", HeadSHA: "redsha", HeadCommitSubject: "fix (gu-old)", Conclusion: ConclusionFailure, Branch: "main", Workflow: "CI", Event: "push", URL: "u220", CompletedAt: now.Add(-30 * time.Minute)},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.SupersededSuppressed != 1 {
+		t.Errorf("SupersededSuppressed = %d, want 1 (same-workflow fail-then-pass)", res.SupersededSuppressed)
+	}
+	if res.FailuresHandled != 0 {
+		t.Errorf("FailuresHandled = %d, want 0 (break superseded within CI)", res.FailuresHandled)
+	}
+}
+
 func TestWatcherMailFailureKeepsRunUnseen(t *testing.T) {
 	town := t.TempDir()
 	fb := newFakeBeads("gu-aaa")
