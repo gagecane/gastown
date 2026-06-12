@@ -571,9 +571,6 @@ func TestCompactorConstants(t *testing.T) {
 	if compactorPushTimeout <= 0 {
 		t.Error("compactorPushTimeout must be positive")
 	}
-	if compactorBranchName == "" {
-		t.Error("compactorBranchName must be non-empty")
-	}
 	if surgicalMaxRetries < 0 {
 		t.Error("surgicalMaxRetries must be non-negative")
 	}

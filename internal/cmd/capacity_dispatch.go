@@ -56,6 +56,8 @@ func shouldFireCrossRigEscalation(rig, prefix string, now time.Time) bool {
 }
 
 // resetCrossRigEscalationStateForTest clears the debounce map. Test-only.
+//
+//nolint:unused // test reset hook; callers live in _test.go (lint runs tests:false)
 func resetCrossRigEscalationStateForTest() {
 	crossRigEscalationMu.Lock()
 	defer crossRigEscalationMu.Unlock()
@@ -217,6 +219,8 @@ func monitorCapacityExhaustion(townRoot string, snapshot polecatCapacitySnapshot
 
 // resetCapacityExhaustion clears the counter after a successful dispatch so a
 // later episode re-arms and re-escalates.
+//
+//nolint:unused // test reset hook; callers live in _test.go (lint runs tests:false)
 func resetCapacityExhaustion(townRoot string) {
 	saveCapacityExhaustionState(capacityExhaustionStatePath(townRoot), capacityExhaustionState{})
 }
@@ -1378,29 +1382,6 @@ func listAllSlingContexts(townRoot string) []*beads.Issue {
 	return all
 }
 
-// listAllScheduledBeadIDs returns the work bead IDs of all currently scheduled
-// (open) sling contexts, deduplicated. Used by listBlockedWorkBeadIDs to
-// scope its blocker scan instead of asking the beads layer for the entire
-// town's blocker state.
-func listAllScheduledBeadIDs(townRoot string) []string {
-	allContexts := listAllSlingContexts(townRoot)
-
-	var ids []string
-	seen := make(map[string]bool)
-	for _, ctx := range allContexts {
-		fields := beads.ParseSlingContextFields(ctx.Description)
-		if fields == nil {
-			continue
-		}
-		if !seen[fields.WorkBeadID] {
-			seen[fields.WorkBeadID] = true
-			ids = append(ids, fields.WorkBeadID)
-		}
-	}
-
-	return ids
-}
-
 // dispatchScanConcurrency bounds how many per-rig sling-context reads run
 // concurrently in listAllSlingContextRecords (gu-1h3ur). These reads bypass the
 // bd-list-read throttle (gu-pug66's lock-free dispatch path), so the semaphore
@@ -1590,16 +1571,6 @@ func listBlockedWorkBeadIDsWithError(townRoot string, workBeadIDs []string) (map
 		return nil, fmt.Errorf("all %d bd blocked queries failed (last: %w)", failCount, lastErr)
 	}
 	return blockedIDs, nil
-}
-
-// listBlockedWorkBeadIDs returns a set of work bead IDs that have active blockers.
-// Convenience wrapper that ignores errors (used by listScheduledBeads for display).
-func listBlockedWorkBeadIDs(townRoot string) map[string]bool {
-	ids, _ := listBlockedWorkBeadIDsWithError(townRoot, listAllScheduledBeadIDs(townRoot))
-	if ids == nil {
-		return make(map[string]bool)
-	}
-	return ids
 }
 
 // isBeadBlockedByOpenDeps reports whether a single bead has open blocking

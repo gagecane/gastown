@@ -458,10 +458,6 @@ func runBdJSON(dir string, args ...string) ([]byte, error) {
 	return runBdJSONWithOptions(dir, false, args...)
 }
 
-func runBdJSONAllowStale(dir string, args ...string) ([]byte, error) {
-	return runBdJSONWithOptions(dir, true, args...)
-}
-
 func runBdJSONWithOptions(dir string, allowStale bool, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	bdc := BdCmd(args...).Dir(dir).StripBeadsDir().Stderr(&stderr)

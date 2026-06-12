@@ -157,37 +157,6 @@ func TestShouldNotifyMayorSlotOpenRequiresSafeRecovery(t *testing.T) {
 	}
 }
 
-func TestActiveMRBlockerFromCLIUsesTerminalStatus(t *testing.T) {
-	tests := []struct {
-		name   string
-		output string
-		err    error
-		want   string
-	}{
-		{name: "empty active mr", want: ""},
-		{name: "open mr blocks", output: `[{"status":"open"}]`, want: "active_mr=gt-mr status=open"},
-		{name: "closed mr does not block", output: `[{"status":"closed"}]`, want: ""},
-		{name: "not found does not block", err: fmt.Errorf("issue not found"), want: ""},
-		{name: "lookup error blocks", err: fmt.Errorf("bd unavailable"), want: "active_mr=gt-mr status=lookup_error: bd unavailable"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			bd, _ := mockBd(
-				func(args []string) (string, error) { return tt.output, tt.err },
-				func(args []string) error { return nil },
-			)
-			mrID := "gt-mr"
-			if tt.name == "empty active mr" {
-				mrID = ""
-			}
-			if got := activeMRBlockerFromCLI(bd, t.TempDir(), mrID); got != tt.want {
-				t.Fatalf("activeMRBlockerFromCLI() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestHandlePolecatDoneFromBead_NilFields(t *testing.T) {
 	t.Parallel()
 	result := HandlePolecatDoneFromBead(DefaultBdCli(), "/tmp", "testrig", "nux", nil, nil)
@@ -359,20 +328,6 @@ func TestDetectZombiePolecats_EmptyPolecatsDir(t *testing.T) {
 
 	if result.Checked != 0 {
 		t.Errorf("Checked = %d, want 0 for empty polecats dir", result.Checked)
-	}
-}
-
-func TestGetAgentBeadState_EmptyOutput(t *testing.T) {
-	t.Parallel()
-	// getAgentBeadState with invalid bead ID should return empty strings
-	// (it calls bd which won't exist in test, so it returns empty)
-	state, hook := getAgentBeadState(DefaultBdCli(), "/nonexistent", "nonexistent-bead")
-
-	if state != "" {
-		t.Errorf("state = %q, want empty for missing bead", state)
-	}
-	if hook != "" {
-		t.Errorf("hook = %q, want empty for missing bead", hook)
 	}
 }
 
@@ -1154,15 +1109,6 @@ func TestDetectZombie_AgentDeadInLiveSession(t *testing.T) {
 	shouldSkip := sessionAlive && doneIntent == nil && agentAlive
 	if !shouldSkip {
 		t.Error("expected skip for live session with alive agent")
-	}
-}
-
-func TestGetAgentBeadLabels_NoBdAvailable(t *testing.T) {
-	t.Parallel()
-	// When bd is not available, should return nil without panicking
-	labels := getAgentBeadLabels(DefaultBdCli(), "/nonexistent", "nonexistent-bead")
-	if labels != nil {
-		t.Errorf("getAgentBeadLabels = %v, want nil when bd unavailable", labels)
 	}
 }
 

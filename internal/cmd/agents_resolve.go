@@ -164,9 +164,8 @@ func findAgentBeadCandidates(townRoot, rig, role string) []agentBeadCandidate {
 
 	// Build the list of beads dirs to search: town + rig (if specified and different).
 	type searchTarget struct {
-		dir      string
-		dbLabel  string // "town" or "rig"
-		fallback bool
+		dir     string
+		dbLabel string // "town" or "rig"
 	}
 	targets := []searchTarget{
 		{dir: townBeadsDir, dbLabel: "town"},

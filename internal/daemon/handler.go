@@ -25,20 +25,24 @@ var (
 	// dogIdleSessionTimeout is how long a dog can be idle with a live tmux
 	// session before the session is killed (default 1h).
 	// Configurable via operational.daemon.dog_idle_session_timeout.
+	//nolint:unused // default-value fallback asserted by handler_test.go (lint runs tests:false)
 	dogIdleSessionTimeout = config.DefaultDogIdleSessionTimeout
 
 	// dogIdleRemoveTimeout is how long a dog can be idle before it is removed
 	// from the kennel entirely (only when pool is oversized, default 4h).
 	// Configurable via operational.daemon.dog_idle_remove_timeout.
+	//nolint:unused // default-value fallback asserted by handler_test.go (lint runs tests:false)
 	dogIdleRemoveTimeout = config.DefaultDogIdleRemoveTimeout
 
 	// staleWorkingTimeout is how long a dog can be in state=working with no
 	// activity updates before it is considered stuck (default 2h).
 	// Configurable via operational.daemon.stale_working_timeout.
+	//nolint:unused // default-value fallback asserted by handler_test.go (lint runs tests:false)
 	staleWorkingTimeout = config.DefaultStaleWorkingTimeout
 
 	// maxDogPoolSize is the target pool size (default 4).
 	// Configurable via operational.daemon.max_dog_pool_size.
+	//nolint:unused // default-value fallback asserted by handler_test.go (lint runs tests:false)
 	maxDogPoolSize = config.DefaultMaxDogPoolSize
 )
 
@@ -556,6 +560,8 @@ func dogDispatchGateConcurrency() int {
 // kept for unit tests that construct a bare SessionManager. Production code
 // should call (*Daemon).findDispatchableDog so dogs in startup backoff are
 // also skipped (see gu-ro75).
+//
+//nolint:unused // test seam: exercised by handler_test.go (lint runs tests:false)
 func findDispatchableDog(mgr *dog.Manager, sm *dog.SessionManager, logger *log.Logger) *dog.Dog {
 	dogs, err := mgr.List()
 	if err != nil {

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
@@ -389,37 +388,3 @@ func runGitCmdEnv(workDir string, extraEnv []string, args ...string) (string, er
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// noNewTrackedChangesVsHEAD reports whether the worktree has zero
-// modifications to tracked files relative to HEAD. Untracked files are
-// intentionally ignored: the caller uses this to decide whether untracked
-// churn alone is worth a new WIP commit.
-//
-// Any git error is treated as "changes present" (fail open — default to
-// the existing checkpoint behavior rather than silently skipping).
-func noNewTrackedChangesVsHEAD(workDir string) bool {
-	// `git diff --quiet HEAD -- .` exits 0 when there are no tracked-file
-	// differences vs HEAD, 1 when differences exist. Any other exit code
-	// is a real git error, which we treat as "assume changes present."
-	cmd := exec.Command("git", "diff", "--quiet", "HEAD", "--", ".")
-	cmd.Dir = workDir
-	util.SetDetachedProcessGroup(cmd)
-	if err := cmd.Run(); err != nil {
-		// Exit 1 = differences; anything else = git error.
-		return false
-	}
-	return true
-}
-
-// headIsWIPCheckpoint reports whether the current HEAD commit message
-// is a `WIP: checkpoint (auto)` commit produced by checkpoint_dog.
-//
-// Any git error (no commits yet, detached HEAD with no commits, etc.)
-// is treated as "not a WIP" — the caller falls through to the normal
-// checkpoint path, which is the safer default.
-func headIsWIPCheckpoint(workDir string) bool {
-	subject, err := runGitCmd(workDir, "log", "-1", "--format=%s", "HEAD")
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(strings.TrimSpace(subject), checkpoint.WIPCommitPrefix)
-}

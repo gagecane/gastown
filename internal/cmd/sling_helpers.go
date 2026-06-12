@@ -78,7 +78,6 @@ type beadInfo = dispatch.BeadInfo
 // existing unit tests that still live in this package — keep working unchanged.
 var (
 	isDeferredBead              = dispatch.IsDeferredBead
-	isAgentBead                 = dispatch.IsAgentBead
 	isIdentityBeadInfo          = dispatch.IsIdentityBeadInfo
 	isEpicLikeBeadInfo          = dispatch.IsEpicLikeBeadInfo
 	isContainerBeadInfo         = dispatch.IsContainerBeadInfo
@@ -91,7 +90,6 @@ var (
 	isPolecatOwnedBeadInfo      = dispatch.IsPolecatOwnedBeadInfo
 	isRefineryOwnedBeadInfo     = dispatch.IsRefineryOwnedBeadInfo
 	isRefineryWorkflowStepID    = dispatch.IsRefineryWorkflowStepID
-	isEmptyAssignee             = dispatch.IsEmptyAssignee
 	collectExistingMolecules    = dispatch.CollectExistingMolecules
 
 	verifyBeadIDMatch                 = dispatch.VerifyBeadIDMatch
@@ -446,10 +444,6 @@ func bdShowBeadOutputFromTownRootAllowStale(townRoot, beadID string, allowStale 
 	return out, err
 }
 
-func bdShowBeadDirectCmd(beadID string) *bdCmd {
-	return bdShowBeadDirectCmdAllowStale(beadID, true)
-}
-
 func bdShowBeadDirectCmdAllowStale(beadID string, allowStale bool) *bdCmd {
 	bdc := BdCmd("show", beadID, "--json").
 		Dir(resolveBeadDir(beadID)).
@@ -460,10 +454,6 @@ func bdShowBeadDirectCmdAllowStale(beadID string, allowStale bool) *bdCmd {
 	return bdc
 }
 
-func bdShowBeadDirectCmdFromTownRoot(townRoot, beadID string) *bdCmd {
-	return bdShowBeadDirectCmdFromTownRootAllowStale(townRoot, beadID, true)
-}
-
 func bdShowBeadDirectCmdFromTownRootAllowStale(townRoot, beadID string, allowStale bool) *bdCmd {
 	bdc := BdCmd("show", beadID, "--json").
 		Dir(resolveBeadDirFromTownRoot(townRoot, beadID)).
@@ -472,10 +462,6 @@ func bdShowBeadDirectCmdFromTownRootAllowStale(townRoot, beadID string, allowSta
 		bdc = bdc.AllowStale()
 	}
 	return bdc
-}
-
-func bdShowBeadRoutedCmd(beadID string) *bdCmd {
-	return bdShowBeadRoutedCmdAllowStale(beadID, true)
 }
 
 func bdShowBeadRoutedCmdAllowStale(beadID string, allowStale bool) *bdCmd {

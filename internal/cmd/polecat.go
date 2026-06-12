@@ -2179,20 +2179,6 @@ func dryRunNukeSummary(total, blocked int) string {
 	return fmt.Sprintf("Would nuke %d polecat(s).", total)
 }
 
-// nukePolecatFull performs the complete cleanup sequence for a single polecat:
-// 1. Kill tmux session
-// 2. Delete worktree (via RemoveWithOptions with nuclear=true)
-// 3. Delete git branch
-// 4. Close agent bead
-// This is the canonical cleanup path used by both `polecat nuke` and `polecat stale --cleanup`.
-//
-// When force is true, the best-effort push of the polecat's branch is skipped.
-// --force is the user's explicit "discard this work" signal — auto-pushing in
-// that mode would leak the regression we are trying to throw away (gu-e7r3).
-func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, force bool) error {
-	return nukePolecatFullWithOptions(polecatName, rigName, mgr, r, force, nukePolecatOptions{PurgeClosedEphemerals: true})
-}
-
 type nukePolecatOptions struct {
 	PurgeClosedEphemerals bool
 }

@@ -4328,7 +4328,6 @@ func TestIsolatedWithPortOverridesInheritedDoltEnv(t *testing.T) {
 		got  []string
 	}{
 		{name: "run", got: b.buildRunEnv()},
-		{name: "routing", got: b.buildRoutingEnv()},
 	} {
 		if got := countEnvPrefix(env.got, "GT_DOLT_PORT="); got != 1 {
 			t.Fatalf("%s env GT_DOLT_PORT count = %d, want 1: %v", env.name, got, env.got)
@@ -4465,55 +4464,6 @@ func TestStripEnvPrefixes_PreservesOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// translateDoltPort tests
-// ---------------------------------------------------------------------------
-
-// TestTranslateDoltPort verifies GT_DOLT_PORT → BEADS_DOLT_PORT translation.
-// This is the core fix for hq-27t: gastown sets GT_DOLT_PORT but bd only reads
-// BEADS_DOLT_PORT. Without translation, bd falls back to metadata.json port 3307.
-func TestTranslateDoltPort(t *testing.T) {
-	tests := []struct {
-		name string
-		env  []string
-		want []string
-	}{
-		{
-			name: "translates GT to BEADS",
-			env:  []string{"GT_DOLT_PORT=12345", "PATH=/usr/bin"},
-			want: []string{"GT_DOLT_PORT=12345", "PATH=/usr/bin", "BEADS_DOLT_PORT=12345"},
-		},
-		{
-			name: "skips if BEADS_DOLT_PORT already set",
-			env:  []string{"GT_DOLT_PORT=12345", "BEADS_DOLT_PORT=99999"},
-			want: []string{"GT_DOLT_PORT=12345", "BEADS_DOLT_PORT=99999"},
-		},
-		{
-			name: "no-op without GT_DOLT_PORT",
-			env:  []string{"PATH=/usr/bin"},
-			want: []string{"PATH=/usr/bin"},
-		},
-		{
-			name: "empty env",
-			env:  []string{},
-			want: []string{},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := translateDoltPort(tt.env)
-			if len(got) != len(tt.want) {
-				t.Fatalf("translateDoltPort() = %v, want %v", got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Integration tests — verify env behavior with real os.Environ()
 // ---------------------------------------------------------------------------
 
@@ -4620,61 +4570,6 @@ func TestBuildRunEnv(t *testing.T) {
 	}
 }
 
-// TestBuildRoutingEnv verifies buildRoutingEnv() returns the correct environment
-// for each mode: default (strip BEADS_DIR only) and isolated (strip all beads vars).
-func TestBuildRoutingEnv(t *testing.T) {
-	tests := []struct {
-		name           string
-		isolated       bool
-		envVars        map[string]string
-		mustContain    []string
-		mustNotContain []string
-	}{
-		{
-			name:           "default strips BEADS_DIR only",
-			envVars:        map[string]string{"BEADS_DIR": "/tmp/beads", "PATH": "/usr/bin"},
-			mustContain:    []string{"PATH="},
-			mustNotContain: []string{"BEADS_DIR="},
-		},
-		{
-			name:           "isolated strips all beads vars",
-			isolated:       true,
-			envVars:        map[string]string{"BD_ACTOR": "test-actor", "BEADS_DIR": "/tmp/beads"},
-			mustNotContain: []string{"BD_ACTOR=", "BEADS_DIR="},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			for k, v := range tt.envVars {
-				t.Setenv(k, v)
-			}
-			b := &Beads{workDir: "/tmp", isolated: tt.isolated}
-			env := b.buildRoutingEnv()
-
-			for _, prefix := range tt.mustContain {
-				found := false
-				for _, e := range env {
-					if strings.HasPrefix(e, prefix) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("expected %s to be present", prefix)
-				}
-			}
-			for _, prefix := range tt.mustNotContain {
-				for _, e := range env {
-					if strings.HasPrefix(e, prefix) {
-						t.Errorf("expected %s to be absent, got %s", prefix, e)
-					}
-				}
-			}
-		})
-	}
-}
-
 func TestBuildRunEnv_OverridesStaleDoltPortFromBeadsDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -4688,34 +4583,6 @@ func TestBuildRunEnv_OverridesStaleDoltPortFromBeadsDir(t *testing.T) {
 	t.Setenv("BEADS_DOLT_PORT", "3307")
 
 	env := (&Beads{workDir: tmpDir}).buildRunEnv()
-
-	found := false
-	for _, e := range env {
-		switch e {
-		case "BEADS_DOLT_PORT=43113":
-			found = true
-		case "BEADS_DOLT_PORT=3307":
-			t.Fatalf("stale BEADS_DOLT_PORT preserved in env: %v", env)
-		}
-	}
-	if !found {
-		t.Fatalf("expected BEADS_DOLT_PORT=43113 in env, got %v", env)
-	}
-}
-
-func TestBuildRoutingEnv_OverridesStaleDoltPortFromBeadsDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("43113\n"), 0644); err != nil {
-		t.Fatalf("write dolt-server.port: %v", err)
-	}
-
-	t.Setenv("BEADS_DOLT_PORT", "3307")
-
-	env := (&Beads{workDir: tmpDir}).buildRoutingEnv()
 
 	found := false
 	for _, e := range env {
@@ -4828,29 +4695,6 @@ printf 'unknown\n'
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd subprocess env missing %q:\n%s", want, log)
 		}
-	}
-}
-
-func TestIsSubprocessCrash(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil error", nil, false},
-		{"normal error", fmt.Errorf("bd create: exit status 1"), false},
-		{"not found", fmt.Errorf("bd show: not found"), false},
-		{"signal segfault", fmt.Errorf("bd create: signal: segmentation fault"), true},
-		{"signal killed", fmt.Errorf("bd create: signal: killed"), true},
-		{"nil pointer in stderr", fmt.Errorf("bd create: nil pointer dereference"), true},
-		{"panic in stderr", fmt.Errorf("bd create: panic: runtime error"), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isSubprocessCrash(tt.err); got != tt.want {
-				t.Errorf("isSubprocessCrash(%v) = %v, want %v", tt.err, got, tt.want)
-			}
-		})
 	}
 }
 

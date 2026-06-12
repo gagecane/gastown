@@ -1,0 +1,29 @@
+package daemon
+
+import (
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+// gitRun is a test helper that runs git with deterministic author env.
+// Shared across checkpoint_dog_test.go and checkpoint_backup_test.go.
+func gitRun(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v (dir=%s) failed: %v\n%s", args, dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
