@@ -18,7 +18,7 @@ questions:
 ## Metrics
 
 All metrics have namespace `gastown.polecat.kiro_wrapper.*`. See
-[`../otel-data-model.md`](../otel-data-model.md#polecatkiro_wrapperterminal)
+[`otel-data-model.md`](../../otel-data-model.md#polecatkiro_wrapperterminal)
 for the canonical attribute/label list.
 
 | Metric | Type | Labels | Purpose |
@@ -149,7 +149,7 @@ baseline data.
 
 ## Related documentation
 
-- [`otel-data-model.md`](../otel-data-model.md) — event/metric schemas
+- [`otel-data-model.md`](../../otel-data-model.md) — event/metric schemas
 - [`otel-architecture.md`](./otel-architecture.md) — backend setup
 - gu-m3ne (CLOSED) — wrapper implementation
 - gu-ronb (DEFERRED) — the bug this wrapper mitigates
