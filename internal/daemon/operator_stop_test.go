@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -67,4 +69,38 @@ func TestClearOperatorStoppedLog_Safe(t *testing.T) {
 	if !d.operatorStoppedRefineryLogged["other-rig"] {
 		t.Error("expected unrelated entries to survive clear of a different rig")
 	}
+}
+
+// TestLogDedupMaps_ConcurrentAccess reproduces the daemon-crash class from
+// gu-nid89.39 / gu-nid89.40: the per-run/per-episode log-dedup maps were
+// lazily make()d and written without synchronization, but isRigOperational,
+// logOperatorStoppedSkip, and clearOperatorStoppedLog all run inside the
+// concurrent d.rigPool.runPerRig fan-out (up to 10 goroutines). Two
+// goroutines hitting the same map at once triggered Go's "fatal error:
+// concurrent map writes" and crashed the daemon.
+//
+// This test hammers logOperatorStoppedSkip/clearOperatorStoppedLog from many
+// goroutines on overlapping rig names. With the logDedupMu guard it is
+// race-detector clean (go test -race); without it, -race flags the write/write
+// race and the bare runtime aborts on concurrent map writes.
+func TestLogDedupMaps_ConcurrentAccess(t *testing.T) {
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	const goroutines = 16
+	const iterations = 200
+	rigs := []string{"casc_webapp", "casc_shared", "talontriage", "ralph"}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				rig := rigs[(g+i)%len(rigs)]
+				d.logOperatorStoppedSkip(rig)
+				d.clearOperatorStoppedLog(rig)
+			}
+		}(g)
+	}
+	wg.Wait()
 }

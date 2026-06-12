@@ -151,13 +151,25 @@ type Daemon struct {
 	knownRigsCache      []string
 	knownRigsCacheValid bool
 
+	// logDedupMu guards the three per-run / per-episode log-dedup maps below
+	// (missingRigBeadLogged, collisionRigBeadLogged,
+	// operatorStoppedRefineryLogged). These were originally documented as
+	// "only accessed from the heartbeat loop goroutine", but that invariant
+	// is false: the heartbeat fans per-rig work across up to 10 concurrent
+	// goroutines via d.rigPool.runPerRig (ensureWitnessesRunning,
+	// ensureRefineriesRunning, and the convoy isRigParked closure). When two+
+	// rigs hit the same lazy-make()/write/delete path in the same heartbeat,
+	// the concurrent map access triggers Go's "fatal error: concurrent map
+	// writes" and crashes the daemon. See gu-nid89.39 / gu-nid89.40.
+	logDedupMu sync.Mutex
+
 	// missingRigBeadLogged tracks which rig names have already had their
 	// "rig identity bead not found" warning emitted for this daemon run.
 	// Without this, isRigOperational logged the warning every heartbeat
 	// (~8/min × N rigs with no identity bead) producing thousands of
 	// duplicate log lines. We want the miss to be explicit (logged once)
 	// but not spammy. See gu-resv.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
+	// Guarded by logDedupMu (concurrent rigPool fan-out — see gu-nid89.39).
 	missingRigBeadLogged map[string]bool
 
 	// collisionRigBeadLogged tracks which rig names have already had their
@@ -168,7 +180,7 @@ type Daemon struct {
 	// flooding daemon.log (20K+ warnings observed across talontriage,
 	// ralphconfig, agentforge, ralph). We now treat collisions as operational
 	// and log once. See gu-feg02.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
+	// Guarded by logDedupMu (concurrent rigPool fan-out — see gu-nid89.39).
 	collisionRigBeadLogged map[string]bool
 
 	// operatorStoppedRefineryLogged tracks which rig names have already
@@ -178,7 +190,7 @@ type Daemon struct {
 	// once. Without this, the heartbeat would emit the skip line every
 	// ~3 min per stopped rig for as long as the operator leaves it
 	// stopped (hours to days for SSH cert recovery). See gu-8ug1.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
+	// Guarded by logDedupMu (concurrent rigPool fan-out — see gu-nid89.40).
 	operatorStoppedRefineryLogged map[string]bool
 
 	// rigStatusCache memoizes the last-known parked/docked state per rig so
@@ -2320,13 +2332,16 @@ func (d *Daemon) ensureRefineriesRunning() {
 // stop will re-emit the line. This matches the pattern of missingRigBeadLogged
 // and keeps daemon.log readable during long SSH-cert-expired periods.
 func (d *Daemon) logOperatorStoppedSkip(rigName string) {
+	d.logDedupMu.Lock()
 	if d.operatorStoppedRefineryLogged[rigName] {
+		d.logDedupMu.Unlock()
 		return
 	}
 	if d.operatorStoppedRefineryLogged == nil {
 		d.operatorStoppedRefineryLogged = make(map[string]bool)
 	}
 	d.operatorStoppedRefineryLogged[rigName] = true
+	d.logDedupMu.Unlock()
 	d.logger.Printf("Skipping refinery auto-start for %s: operator-stopped (run 'gt refinery start %s' to resume)",
 		rigName, rigName)
 }
@@ -2337,6 +2352,8 @@ func (d *Daemon) logOperatorStoppedSkip(rigName string) {
 // keeps the dedup tied to the stopped episode rather than the daemon
 // process lifetime.
 func (d *Daemon) clearOperatorStoppedLog(rigName string) {
+	d.logDedupMu.Lock()
+	defer d.logDedupMu.Unlock()
 	if d.operatorStoppedRefineryLogged == nil {
 		return
 	}
@@ -2853,11 +2870,16 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 		// checkParkedOrDocked) and log the miss ONCE so it's explicit
 		// without spamming daemon.log. See gu-resv.
 		if errors.Is(err, rig.ErrRigBeadNotFound) {
-			if !d.missingRigBeadLogged[rigName] {
+			d.logDedupMu.Lock()
+			firstMiss := !d.missingRigBeadLogged[rigName]
+			if firstMiss {
 				if d.missingRigBeadLogged == nil {
 					d.missingRigBeadLogged = make(map[string]bool)
 				}
 				d.missingRigBeadLogged[rigName] = true
+			}
+			d.logDedupMu.Unlock()
+			if firstMiss {
 				d.logger.Printf("Warning: rig %s has no identity bead — docked/parked state cannot be read (will treat as operational; run `gt rig up %s` or `gt doctor` to create the bead)", rigName, rigName)
 			}
 			// Fall through to auto_restart check below. Do NOT cache
@@ -2879,11 +2901,16 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 			// operational and log ONCE. Do NOT cache "not-blocked" — the
 			// underlying duplicate should be de-duplicated operationally, and
 			// we don't want a future outage to lock in stale state via cache.
-			if !d.collisionRigBeadLogged[rigName] {
+			d.logDedupMu.Lock()
+			firstCollision := !d.collisionRigBeadLogged[rigName]
+			if firstCollision {
 				if d.collisionRigBeadLogged == nil {
 					d.collisionRigBeadLogged = make(map[string]bool)
 				}
 				d.collisionRigBeadLogged[rigName] = true
+			}
+			d.logDedupMu.Unlock()
+			if firstCollision {
 				d.logger.Printf("Warning: rig %s identity bead ID collision (exists in both issues and wisps) — docked/parked state cannot be read (treating as operational; de-duplicate the rig bead to resolve)", rigName)
 			}
 			// Fall through to auto_restart check below.
