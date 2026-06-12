@@ -227,6 +227,15 @@ const DefaultGateLoadWaitTimeout = 5 * time.Minute
 // waiting for it to drop below the configured threshold.
 const gateLoadRecheckInterval = 15 * time.Second
 
+// gateCmdWaitDelay bounds how long cmd.Run() may block AFTER a refinery gate /
+// test command's context is canceled, as belt-and-suspenders behind the
+// process-group SIGKILL installed by util.SetProcessGroup. Without it (and the
+// Cancel hook), a `sh -c "go test ./..."` whose forked children reparent to
+// PID 1 keeps the inherited stdout/stderr pipe write end open and Run() blocks
+// forever — the refinery-side twin of the gc-utizk7 gt-done deadlock. See
+// runTests/runGate below and the gu-4mj2 / a0a7bdb9 precedents.
+const gateCmdWaitDelay = 2 * time.Second
+
 // DefaultMergeQueueConfig returns sensible defaults for merge queue configuration.
 func DefaultMergeQueueConfig() *MergeQueueConfig {
 	return &MergeQueueConfig{
@@ -1209,7 +1218,13 @@ func (e *Engineer) runTests(ctx context.Context) ProcessResult {
 		// long run (cv-p3fem Phase 2, root cause of gu-rh0g class).
 		stopKeepalive := polecat.WithKeepalive(refineryTownRoot(e), refinerySession(), "refinery-tests", polecat.DefaultKeepaliveInterval)
 		cmd := exec.CommandContext(ctx, "sh", "-c", e.config.TestCommand) //nolint:gosec // G204: TestCommand is from trusted rig config
-		util.SetDetachedProcessGroup(cmd)
+		// SetProcessGroup (not SetDetachedProcessGroup): the test command forks
+		// children (go test/compiler) that inherit the stdout/stderr pipe write
+		// end. On ctx cancel the Cancel hook SIGKILLs the whole process group so
+		// reparented children die and the pipe closes; otherwise Run() deadlocks
+		// in futex_wait_queue reading a pipe with no writer (gc-utizk7 class).
+		util.SetProcessGroup(cmd)
+		cmd.WaitDelay = gateCmdWaitDelay
 		cmd.Dir = e.workDir
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -1267,7 +1282,13 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 	defer stopKeepalive()
 
 	cmd := exec.CommandContext(gateCtx, "sh", "-c", gate.Cmd) //nolint:gosec // G204: Gate commands are from trusted rig config
-	util.SetDetachedProcessGroup(cmd)
+	// SetProcessGroup (not SetDetachedProcessGroup): a gate command forks
+	// children (go test/compiler) that inherit the stdout/stderr pipe write end.
+	// On the per-gate timeout the Cancel hook SIGKILLs the whole process group so
+	// reparented children die and the pipe closes; otherwise Run() deadlocks in
+	// futex_wait_queue reading a pipe with no writer (gc-utizk7 class).
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = gateCmdWaitDelay
 	cmd.Dir = e.workDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
