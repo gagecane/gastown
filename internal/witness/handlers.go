@@ -1451,6 +1451,7 @@ func _classifyPolecatMergeState(workDir, rigName, polecatName string) (MergeChec
 // polecatHasAutoSaveCommits checks if any commits between merge-base and HEAD
 // contain the gt-pvx auto-save marker in their commit message.
 func polecatHasAutoSaveCommits(g *git.Git, remotes []string, defaultBranch string) (bool, error) {
+	queried := false
 	for _, remote := range remotes {
 		upstream := remote + "/" + defaultBranch
 		// Get commit messages between upstream and HEAD
@@ -1458,14 +1459,17 @@ func polecatHasAutoSaveCommits(g *git.Git, remotes []string, defaultBranch strin
 		if err != nil {
 			continue
 		}
+		queried = true
 		for _, line := range strings.Split(messages, "\n") {
 			if strings.Contains(strings.ToLower(line), autoSaveMarker) {
 				return true, nil
 			}
 		}
-		return false, nil // checked successfully, no marker found
 	}
-	return false, fmt.Errorf("could not check commit messages against any remote")
+	if !queried {
+		return false, fmt.Errorf("could not check commit messages against any remote")
+	}
+	return false, nil // checked all remotes successfully, no marker found
 }
 
 // cherryHasUnmergedCommits returns true if `git cherry` output contains at least
