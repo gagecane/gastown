@@ -19,16 +19,21 @@ var mountainForce bool
 var mountainJSON bool
 
 var mountainCmd = &cobra.Command{
-	Use:         "mountain <epic-id>",
+	Use:         "mountain <epic-id | convoy-id>",
 	GroupID:     GroupWork,
 	Annotations: map[string]string{AnnotationPolecatSafe: "true"},
-	Short:       "Activate Mountain-Eater: stage, label, and launch an epic",
-	Long: `Activate the Mountain-Eater on an epic for autonomous grinding.
+	Short:       "Activate Mountain-Eater: stage, label, and launch an epic or convoy",
+	Long: `Activate the Mountain-Eater on an epic or convoy for autonomous grinding.
 
 A mountain is a convoy with the 'mountain' label. This command:
   1. Stages the convoy (validate DAG, compute waves)
   2. Adds the 'mountain' label (enables Deacon audit + Witness failure tracking)
   3. Launches the convoy (dispatches Wave 1)
+
+Given an epic, it stages a fresh convoy from the epic's bd-linked children.
+Given an existing convoy (e.g. a staged cross-rig convoy whose tracked beads
+live in separate rig databases and cannot be bd-linked to an HQ epic), it
+applies the mountain label and launches that convoy directly — no re-staging.
 
 Regular convoys (no mountain label) continue working as normal.
 The mountain label opts a convoy into enhanced stall detection,
@@ -42,6 +47,7 @@ Use subcommands to manage active mountains:
 
 Examples:
   gt mountain gt-epic-auth       Activate mountain on an epic
+  gt mountain hq-cv-abc          Activate mountain on a staged convoy
   gt mountain --force gt-epic-x  Launch even with staging warnings`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMountain,
@@ -110,13 +116,21 @@ func init() {
 func runMountain(cmd *cobra.Command, args []string) error {
 	epicID := args[0]
 
-	// Step 1: Validate the input is an epic.
+	// Step 1: Resolve the input. Mountains accept either an epic (stage a fresh
+	// convoy from its bd-linked children) or an existing convoy (label + launch
+	// it directly — used for cross-rig convoys whose tracked beads live in
+	// separate rig databases and cannot be bd-linked to an HQ epic).
 	result, err := bdShow(epicID)
 	if err != nil {
 		return fmt.Errorf("cannot resolve %s: %w", epicID, err)
 	}
+
+	if isConvoyIssue(result.IssueType, result.Labels) {
+		return runMountainOnConvoy(epicID, result)
+	}
+
 	if result.IssueType != "epic" {
-		return fmt.Errorf("%s is a %s, not an epic — mountains require an epic", epicID, result.IssueType)
+		return fmt.Errorf("%s is a %s, not an epic or convoy — mountains require an epic or convoy", epicID, result.IssueType)
 	}
 
 	fmt.Printf("Validating epic structure...\n")
@@ -238,6 +252,101 @@ func runMountain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nLaunching Wave 1 (%d tasks)...\n", len(results))
 
 	// Sort for deterministic output.
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].BeadID < results[j].BeadID
+	})
+
+	for _, r := range results {
+		nodeTitle := ""
+		if node := dag.Nodes[r.BeadID]; node != nil {
+			nodeTitle = node.Title
+		}
+		rig := r.Rig
+		if rig == "" {
+			rig = "auto"
+		}
+		if r.Success {
+			fmt.Printf("  Slung %s → %s", r.BeadID, rig)
+			if nodeTitle != "" {
+				fmt.Printf("  (%s)", nodeTitle)
+			}
+			fmt.Println()
+		} else {
+			fmt.Printf("  Failed %s → %s: %v\n", r.BeadID, rig, r.Error)
+		}
+	}
+
+	fmt.Printf("\nMountain active. ConvoyManager will feed subsequent waves.\n")
+	fmt.Printf("Deacon will audit progress every ~10 minutes.\n")
+	fmt.Printf("Check status: gt mountain status %s\n", convoyID)
+
+	return nil
+}
+
+// runMountainOnConvoy activates the Mountain-Eater on an existing convoy.
+//
+// Unlike the epic path, this does not stage a fresh convoy from bd-linked
+// children — it labels and launches the convoy as-is. This is the supported
+// path for cross-rig convoys whose tracked beads live in separate rig
+// databases and therefore cannot be bd-linked to a single HQ epic.
+func runMountainOnConvoy(convoyID string, result *bdShowResult) error {
+	fmt.Printf("Activating mountain on convoy...\n")
+	fmt.Printf("  Convoy: %s %q\n", convoyID, result.Title)
+
+	status := normalizeConvoyStatus(result.Status)
+	if status == convoyStatusClosed {
+		return fmt.Errorf("convoy %s is closed — cannot activate a mountain on it", convoyID)
+	}
+
+	// Step 1: Add the mountain label (idempotent — bd update tolerates re-adding).
+	if !hasLabel(result.Labels, "mountain") {
+		if err := bdAddLabelTown(convoyID, "mountain"); err != nil {
+			return fmt.Errorf("add mountain label: %w", err)
+		}
+	}
+	fmt.Printf("  Label: mountain\n")
+
+	// Step 2: If the convoy is already open, it is already launched — the
+	// ConvoyManager is feeding its waves. Just report the mountain is active.
+	if status == convoyStatusOpen {
+		fmt.Printf("\nConvoy already launched; mountain monitoring now active.\n")
+		fmt.Printf("Deacon will audit progress every ~10 minutes.\n")
+		fmt.Printf("Check status: gt mountain status %s\n", convoyID)
+		return nil
+	}
+
+	// Step 3: Convoy is staged — launch it (transition to open + dispatch Wave 1).
+	if err := transitionConvoyToOpen(convoyID, mountainForce); err != nil {
+		return fmt.Errorf("launch convoy: %w", err)
+	}
+
+	beadList, deps, err := collectConvoyBeads(convoyID)
+	if err != nil {
+		return fmt.Errorf("collect beads for dispatch: %w", err)
+	}
+
+	dag := buildConvoyDAG(beadList, deps)
+	waves, _, err := computeWaves(dag)
+	if err != nil {
+		return fmt.Errorf("compute waves for dispatch: %w", err)
+	}
+
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("resolve town root: %w", err)
+	}
+
+	if err := checkBlockedRigsForLaunch(dag, townRoot, mountainForce); err != nil {
+		return err
+	}
+
+	results, err := dispatchWave1(convoyID, dag, waves, townRoot)
+	if err != nil {
+		return fmt.Errorf("dispatch wave 1: %w", err)
+	}
+
+	fmt.Printf("\nLaunching Wave 1 (%d tasks)...\n", len(results))
+
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].BeadID < results[j].BeadID
 	})
