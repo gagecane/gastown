@@ -801,3 +801,82 @@ func TestExtractBaseName(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatMCPFootprint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		names []string
+		want  string
+	}{
+		{"empty", nil, ""},
+		{"single", []string{"serena"}, "1 MCP server: serena"},
+		{"multiple", []string{"builder-mcp", "serena"}, "2 MCP servers: builder-mcp, serena"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatMCPFootprint(tt.names); got != tt.want {
+				t.Errorf("formatMCPFootprint(%v) = %q, want %q", tt.names, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveMCPServers(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	rigName := "testrig"
+
+	// Polecat shared settings live under <rig>/polecats/.claude/settings.json.
+	polecatSettings := filepath.Join(townRoot, rigName, "polecats", ".claude")
+	if err := os.MkdirAll(polecatSettings, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"mcpServers":{"serena":{"command":"x"},"builder-mcp":{"command":"y"}}}`
+	if err := os.WriteFile(filepath.Join(polecatSettings, "settings.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mayor settings live under <town>/mayor/.claude/settings.json.
+	mayorSettings := filepath.Join(townRoot, "mayor", ".claude")
+	if err := os.MkdirAll(mayorSettings, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorSettings, "settings.json"), []byte(`{"mcpServers":{"serena":{}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("polecat sorted names", func(t *testing.T) {
+		got := resolveMCPServers(townRoot, rigName, "polecat")
+		want := []string{"builder-mcp", "serena"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("resolveMCPServers polecat = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("mayor town-level", func(t *testing.T) {
+		got := resolveMCPServers(townRoot, "", "mayor")
+		if strings.Join(got, ",") != "serena" {
+			t.Errorf("resolveMCPServers mayor = %v, want [serena]", got)
+		}
+	})
+
+	t.Run("missing settings returns nil", func(t *testing.T) {
+		if got := resolveMCPServers(townRoot, rigName, "witness"); got != nil {
+			t.Errorf("resolveMCPServers witness = %v, want nil", got)
+		}
+	})
+
+	t.Run("rig role without rig name returns nil", func(t *testing.T) {
+		if got := resolveMCPServers(townRoot, "", "polecat"); got != nil {
+			t.Errorf("resolveMCPServers polecat no-rig = %v, want nil", got)
+		}
+	})
+
+	t.Run("unknown role returns nil", func(t *testing.T) {
+		if got := resolveMCPServers(townRoot, rigName, "bogus"); got != nil {
+			t.Errorf("resolveMCPServers bogus = %v, want nil", got)
+		}
+	})
+}
