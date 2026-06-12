@@ -3529,6 +3529,15 @@ func CollectDatabaseOwners(townRoot string) map[string]string {
 // If the Dolt server is running, it will DROP the database first.
 // If force is false and the database has real user tables, it refuses to remove. (gt-q8f6n)
 func RemoveDatabase(townRoot, dbName string, force bool) error {
+	// Reject names with unsafe characters before they reach SQL string
+	// interpolation below (DROP DATABASE, DELETE FROM dolt_branch_control).
+	// dbName originates from os.ReadDir of the data dir, so a directory named
+	// with a quote or backtick would otherwise be a SQL injection vector
+	// executed with the Dolt server's privileges (gu-zl25s).
+	if !validSQLName(dbName) {
+		return fmt.Errorf("invalid database name %q: must match [a-zA-Z0-9_.-]+", dbName)
+	}
+
 	if isProtectedSharedServerDatabase(dbName) {
 		return fmt.Errorf("database %q is a protected shared-server database", dbName)
 	}
