@@ -251,7 +251,7 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 		FROM wisp_dependencies wd
 		LEFT JOIN wisps pw ON pw.id = wd.depends_on_wisp_id LEFT JOIN issues pi ON pi.id = wd.depends_on_issue_id
 		WHERE wd.type = 'parent-child'
-		AND (pw.status IN ('open', 'hooked', 'in_progress') OR pi.status IN ('open', 'in_progress'))
+		AND (pw.status IN ('open', 'hooked', 'in_progress') OR pi.status IN ('open', 'hooked', 'in_progress'))
 	) open_parent ON open_parent.issue_id = w.id`
 	whereCondition = "open_parent.issue_id IS NULL"
 	return
@@ -316,7 +316,7 @@ func liveTrackedContextExcludeJoin(dbName string) (joinClause, whereCondition st
 		INNER JOIN wisp_labels wl ON wl.issue_id = wd.issue_id AND wl.label = '` + LabelSlingContext + `'
 		LEFT JOIN wisps tw ON tw.id = wd.depends_on_issue_id LEFT JOIN issues ti ON ti.id = wd.depends_on_issue_id
 		WHERE wd.type = 'tracks'
-		AND (tw.status IN ('open', 'hooked', 'in_progress') OR ti.status IN ('open', 'in_progress'))
+		AND (tw.status IN ('open', 'hooked', 'in_progress') OR ti.status IN ('open', 'hooked', 'in_progress'))
 	) live_tracked ON live_tracked.issue_id = w.id`
 	whereCondition = "live_tracked.issue_id IS NULL"
 	return
