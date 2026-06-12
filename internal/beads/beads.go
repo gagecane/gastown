@@ -1738,19 +1738,30 @@ func (b *Beads) ListByAssignee(assignee string) ([]*Issue, error) {
 // Checks open, in_progress, and hooked statuses (hooked = work on agent's hook).
 // Returns nil if no matching issue is assigned.
 func (b *Beads) GetAssignedIssue(assignee string) (*Issue, error) {
-	// Check all active work statuses: open, in_progress, and hooked
-	// "hooked" status is set by gt sling when work is attached to an agent's hook
+	// Fetch all issues assigned to this agent in a single query, then filter to
+	// the active work statuses in Go. The previous implementation looped over
+	// {open, in_progress, hooked} calling List once per status — 3 query/fork
+	// round-trips per check. The underlying store filters status with a single
+	// "status = ?" clause and does not support multi-status (comma-separated)
+	// filtering, so one Status:"all" query + in-Go filtering is the fix.
+	// "hooked" status is set by gt sling when work is attached to an agent's hook.
+	issues, err := b.List(ListOptions{
+		Status:   "all",
+		Assignee: assignee,
+		Priority: -1,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Preserve the original status precedence: prefer open, then in_progress,
+	// then hooked. Within each status the first match wins (List returns issues
+	// sorted by priority, so the relative order is preserved across the set).
 	for _, status := range []string{"open", "in_progress", StatusHooked} {
-		issues, err := b.List(ListOptions{
-			Status:   status,
-			Assignee: assignee,
-			Priority: -1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(issues) > 0 {
-			return issues[0], nil
+		for _, issue := range issues {
+			if issue.Status == status {
+				return issue, nil
+			}
 		}
 	}
 
