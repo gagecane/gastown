@@ -1841,3 +1841,86 @@ func TestAcquireGlobalGateLock_ContextCancel(t *testing.T) {
 		t.Fatal("waiter did not return after context cancel")
 	}
 }
+
+// TestResolveMainBranchTestBranch verifies the patrol resolves the branch it
+// tests against from the rig config first, falls back to the bare repo's actual
+// default branch, and only then to "main" — so a "mainline"-default rig is not
+// fetched/worktreed against a nonexistent "main" (gu-ez4as).
+func TestResolveMainBranchTestBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in test environment")
+	}
+
+	mustRun := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s %v: %v (%s)", name, args, err, string(out))
+		}
+	}
+
+	// seedBareRepo creates a bare repo whose HEAD points at branchName.
+	seedBareRepo := func(t *testing.T, rigPath, branchName string) string {
+		t.Helper()
+		seed := filepath.Join(rigPath, "seed")
+		if err := os.MkdirAll(seed, 0o755); err != nil {
+			t.Fatalf("MkdirAll seed: %v", err)
+		}
+		mustRun(seed, "git", "init", "-q", "-b", branchName)
+		mustRun(seed, "git", "config", "user.email", "test@example.com")
+		mustRun(seed, "git", "config", "user.name", "Test")
+		if err := os.WriteFile(filepath.Join(seed, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write seed file: %v", err)
+		}
+		mustRun(seed, "git", "add", "f")
+		mustRun(seed, "git", "commit", "-q", "-m", "seed")
+		bareRepoPath := filepath.Join(rigPath, ".repo.git")
+		if out, err := exec.Command("git", "clone", "-q", "--bare", seed, bareRepoPath).CombinedOutput(); err != nil {
+			t.Fatalf("git clone --bare: %v (%s)", err, string(out))
+		}
+		return bareRepoPath
+	}
+
+	writeRigConfig := func(t *testing.T, rigPath, defaultBranch string) {
+		t.Helper()
+		cfg := map[string]any{"type": "rig", "name": "r"}
+		if defaultBranch != "" {
+			cfg["default_branch"] = defaultBranch
+		}
+		raw, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("marshal config: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, "config.json"), raw, 0o644); err != nil {
+			t.Fatalf("write config.json: %v", err)
+		}
+	}
+
+	t.Run("config default_branch wins", func(t *testing.T) {
+		rigPath := t.TempDir()
+		bareRepoPath := seedBareRepo(t, rigPath, "main")
+		writeRigConfig(t, rigPath, "mainline")
+		if got := resolveMainBranchTestBranch(rigPath, bareRepoPath); got != "mainline" {
+			t.Errorf("got %q, want %q", got, "mainline")
+		}
+	})
+
+	t.Run("falls back to bare repo HEAD when config has no default_branch", func(t *testing.T) {
+		rigPath := t.TempDir()
+		bareRepoPath := seedBareRepo(t, rigPath, "mainline")
+		writeRigConfig(t, rigPath, "") // no default_branch
+		if got := resolveMainBranchTestBranch(rigPath, bareRepoPath); got != "mainline" {
+			t.Errorf("got %q, want %q (bare repo HEAD)", got, "mainline")
+		}
+	})
+
+	t.Run("falls back to main when config and bare repo both unavailable", func(t *testing.T) {
+		rigPath := t.TempDir()
+		// No config.json, no bare repo.
+		bareRepoPath := filepath.Join(rigPath, ".repo.git")
+		if got := resolveMainBranchTestBranch(rigPath, bareRepoPath); got != "main" {
+			t.Errorf("got %q, want %q", got, "main")
+		}
+	})
+}
