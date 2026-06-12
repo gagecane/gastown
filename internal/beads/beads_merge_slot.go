@@ -66,6 +66,22 @@ func (b *Beads) getMergeSlotBead() (*Issue, error) {
 	return b.Show(issues[0].ID)
 }
 
+// getMergeSlotBeadID returns just the ID of the merge slot bead (label=
+// gt:merge-slot) without fetching its full Description. Callers that need to
+// take the per-bead lock before reading resolve the ID with this first, then
+// Show the bead inside the critical section. Returns ErrNotFound if no slot
+// bead exists.
+func (b *Beads) getMergeSlotBeadID() (string, error) {
+	issues, err := b.List(ListOptions{Label: "gt:merge-slot"})
+	if err != nil {
+		return "", fmt.Errorf("listing merge slot beads: %w", err)
+	}
+	if len(issues) == 0 {
+		return "", ErrNotFound
+	}
+	return issues[0].ID, nil
+}
+
 // MergeSlotCreate creates the merge slot bead for the current rig.
 // The slot is used for serialized conflict resolution in the merge queue.
 // Returns the slot ID if successful.
@@ -100,72 +116,103 @@ func (b *Beads) MergeSlotCheck() (*MergeSlotStatus, error) {
 // If addWaiter is true and the slot is held, the requester is added to the
 // waiters queue (informational; callers use retries for contention handling).
 // Returns the acquisition result.
+//
+// The merge slot is the serialization primitive for the Refinery merge queue,
+// so the read-modify-write (Show -> parse -> mutate -> Update) MUST be atomic
+// against concurrent acquirers. Without a lock, two processes that both observe
+// Holder=="" would each write their own holder and both believe they hold the
+// slot (second write wins, lost update). The whole sequence runs under
+// withBeadLock — the same per-bead advisory flock used by the channel/queue/
+// escalation RMW mutators (gu-tucci) — so only one acquirer can read-and-write
+// the slot at a time.
 func (b *Beads) MergeSlotAcquire(holder string, addWaiter bool) (*MergeSlotStatus, error) {
 	if holder == "" {
 		holder = b.getActor()
 	}
 
-	issue, err := b.getMergeSlotBead()
+	// Resolve the slot bead ID first (outside the lock) so we know which bead to
+	// lock. The authoritative read happens again inside the critical section.
+	slotID, err := b.getMergeSlotBeadID()
 	if err != nil {
 		return nil, fmt.Errorf("acquiring merge slot: %w", err)
 	}
 
-	data := parseMergeSlotData(issue)
+	var status *MergeSlotStatus
+	lockErr := b.withBeadLock(slotID, func() error {
+		issue, err := b.Show(slotID)
+		if err != nil {
+			return fmt.Errorf("acquiring merge slot: %w", err)
+		}
 
-	if data.Holder != "" && data.Holder != holder {
-		// Slot is held by someone else.
-		if addWaiter {
-			// Add to waiters list if not already present.
-			alreadyWaiting := false
-			for _, w := range data.Waiters {
-				if w == holder {
-					alreadyWaiting = true
-					break
+		data := parseMergeSlotData(issue)
+
+		if data.Holder != "" && data.Holder != holder {
+			// Slot is held by someone else.
+			if addWaiter {
+				// Add to waiters list if not already present.
+				alreadyWaiting := false
+				for _, w := range data.Waiters {
+					if w == holder {
+						alreadyWaiting = true
+						break
+					}
+				}
+				if !alreadyWaiting {
+					data.Waiters = append(data.Waiters, holder)
+					newDesc, _ := json.Marshal(data)
+					desc := string(newDesc)
+					_ = b.Update(issue.ID, UpdateOptions{Description: &desc})
 				}
 			}
-			if !alreadyWaiting {
-				data.Waiters = append(data.Waiters, holder)
-				newDesc, _ := json.Marshal(data)
-				desc := string(newDesc)
-				_ = b.Update(issue.ID, UpdateOptions{Description: &desc})
+			status = &MergeSlotStatus{
+				ID:      issue.ID,
+				Holder:  data.Holder,
+				Waiters: data.Waiters,
+			}
+			return nil
+		}
+
+		// Slot is available or we already hold it — acquire.
+		data.Holder = holder
+		// Remove from waiters if present.
+		filtered := data.Waiters[:0]
+		for _, w := range data.Waiters {
+			if w != holder {
+				filtered = append(filtered, w)
 			}
 		}
-		return &MergeSlotStatus{
-			ID:      issue.ID,
-			Holder:  data.Holder,
-			Waiters: data.Waiters,
-		}, nil
-	}
+		data.Waiters = filtered
 
-	// Slot is available or we already hold it — acquire.
-	data.Holder = holder
-	// Remove from waiters if present.
-	filtered := data.Waiters[:0]
-	for _, w := range data.Waiters {
-		if w != holder {
-			filtered = append(filtered, w)
+		newDesc, _ := json.Marshal(data)
+		desc := string(newDesc)
+		if err := b.Update(issue.ID, UpdateOptions{Description: &desc}); err != nil {
+			return fmt.Errorf("acquiring merge slot: %w", err)
 		}
-	}
-	data.Waiters = filtered
 
-	newDesc, _ := json.Marshal(data)
-	desc := string(newDesc)
-	if err := b.Update(issue.ID, UpdateOptions{Description: &desc}); err != nil {
-		return nil, fmt.Errorf("acquiring merge slot: %w", err)
+		status = &MergeSlotStatus{
+			ID:        issue.ID,
+			Available: false,
+			Holder:    holder,
+			Waiters:   data.Waiters,
+		}
+		return nil
+	})
+	if lockErr != nil {
+		return nil, lockErr
 	}
 
-	return &MergeSlotStatus{
-		ID:        issue.ID,
-		Available: false,
-		Holder:    holder,
-		Waiters:   data.Waiters,
-	}, nil
+	return status, nil
 }
 
 // MergeSlotRelease releases the merge slot after conflict resolution completes.
 // If holder is provided, it verifies the slot is held by that holder before releasing.
+//
+// Like MergeSlotAcquire, the read-modify-write runs under withBeadLock so a
+// release cannot race a concurrent acquire/release: an unlocked release could
+// promote Waiters[0] twice or drop a waiter when interleaved with another
+// mutator (lost update).
 func (b *Beads) MergeSlotRelease(holder string) error {
-	issue, err := b.getMergeSlotBead()
+	slotID, err := b.getMergeSlotBeadID()
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil // Nothing to release
@@ -173,32 +220,39 @@ func (b *Beads) MergeSlotRelease(holder string) error {
 		return fmt.Errorf("releasing merge slot: %w", err)
 	}
 
-	data := parseMergeSlotData(issue)
+	return b.withBeadLock(slotID, func() error {
+		issue, err := b.Show(slotID)
+		if err != nil {
+			return fmt.Errorf("releasing merge slot: %w", err)
+		}
 
-	if data.Holder == "" {
-		return nil // Already available
-	}
-	if holder != "" && data.Holder != holder {
-		return fmt.Errorf("slot release failed: held by %q, not %q", data.Holder, holder)
-	}
+		data := parseMergeSlotData(issue)
 
-	// Clear holder; promote first waiter if any.
-	var newHolder string
-	var remainingWaiters []string
-	if len(data.Waiters) > 0 {
-		newHolder = data.Waiters[0]
-		remainingWaiters = data.Waiters[1:]
-	}
+		if data.Holder == "" {
+			return nil // Already available
+		}
+		if holder != "" && data.Holder != holder {
+			return fmt.Errorf("slot release failed: held by %q, not %q", data.Holder, holder)
+		}
 
-	newData := mergeSlotData{Holder: newHolder, Waiters: remainingWaiters}
-	newDesc, _ := json.Marshal(newData)
-	desc := string(newDesc)
+		// Clear holder; promote first waiter if any.
+		var newHolder string
+		var remainingWaiters []string
+		if len(data.Waiters) > 0 {
+			newHolder = data.Waiters[0]
+			remainingWaiters = data.Waiters[1:]
+		}
 
-	if err := b.Update(issue.ID, UpdateOptions{Description: &desc}); err != nil {
-		return fmt.Errorf("releasing merge slot: %w", err)
-	}
+		newData := mergeSlotData{Holder: newHolder, Waiters: remainingWaiters}
+		newDesc, _ := json.Marshal(newData)
+		desc := string(newDesc)
 
-	return nil
+		if err := b.Update(issue.ID, UpdateOptions{Description: &desc}); err != nil {
+			return fmt.Errorf("releasing merge slot: %w", err)
+		}
+
+		return nil
+	})
 }
 
 // MergeSlotEnsureExists creates the merge slot if it doesn't exist.
