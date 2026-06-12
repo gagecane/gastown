@@ -61,6 +61,16 @@ var Commands = []Command{
 		},
 	},
 	{
+		Name:        "nextbead",
+		Description: "Note context, hook the next bead, hand off to a fresh session",
+		AgentFields: map[string][]Field{
+			"claude": {
+				{"allowed-tools", "Bash(gt handoff:*), Bash(gt hook:*), Bash(bd ready:*), Bash(bd update:*), Bash(bd show:*)"},
+				{"argument-hint", "[bead-id] [note]"},
+			},
+		},
+	},
+	{
 		Name:        "review",
 		Description: "Review code changes with structured grading (A-F)",
 		AgentFields: map[string][]Field{
