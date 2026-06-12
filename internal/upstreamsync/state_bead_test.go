@@ -3,6 +3,7 @@ package upstreamsync
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"os/exec"
 	"strconv"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 // internal/cmd/patrol_helpers_test.go's setupPatrolTestDB.
 func newProvisionTestBeads(t *testing.T) (*beads.Beads, string) {
 	t.Helper()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping test")
+	}
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(t.TempDir(), port)

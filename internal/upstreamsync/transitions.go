@@ -71,6 +71,13 @@ var validTransitions = map[SyncState]map[SyncState]struct{}{
 	StateFailed: {
 		StateIdle:   {},
 		StatePaused: {},
+		// A failed attempt may be retried directly: `gt upstream sync`
+		// accepts StateFailed as a valid starting point (a prior attempt
+		// failed or escalated), and begins the new attempt by transitioning
+		// to checking. Without this edge the rig would wedge in failed
+		// forever — fork-sync failures are expected and recurring, so
+		// retry-after-failure must be a first-class transition.
+		StateChecking: {},
 	},
 	StatePaused: {
 		StateIdle: {},

@@ -25,6 +25,7 @@ func TestIsValidTransition(t *testing.T) {
 		{"pushing→idle", StatePushing, StateIdle, true},
 		{"pushing→failed", StatePushing, StateFailed, true},
 		{"failed→idle", StateFailed, StateIdle, true},
+		{"failed→checking (retry)", StateFailed, StateChecking, true},
 		{"paused→idle", StatePaused, StateIdle, true},
 
 		// "* → paused" should be valid from any active state
