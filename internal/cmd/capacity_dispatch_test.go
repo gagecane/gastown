@@ -240,6 +240,41 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 	}
 }
 
+// TestIsScheduledWorkBeadReady_BlockedByOpenDeps is the regression gate for
+// gs-774q: the deferred-dispatch scheduler must HOLD a work bead that has open
+// blocking dependencies, exactly as it holds bd-deferred beads. The original
+// incident dispatched lb-1tee.10 to an empty polecat despite an open bd
+// dependency on lb-1tee.6, wasting a slot. The fix routes the work bead's
+// blocked-ness (computed by listBlockedWorkBeadIDsWithError via `bd blocked`)
+// into this readiness gate as the blockedWorkIDs set. Every other test passes
+// an empty map, so without this case the blocked branch has no named gate and
+// could silently regress. A blocked bead is NOT ready even when its status,
+// labels, and defer window are otherwise dispatchable.
+func TestIsScheduledWorkBeadReady_BlockedByOpenDeps(t *testing.T) {
+	openInfo := beadStatusInfo{Status: "open"}
+
+	tests := []struct {
+		name      string
+		workID    string
+		blocked   map[string]bool
+		wantReady bool
+	}{
+		{"blocked work bead held", "wb-1", map[string]bool{"wb-1": true}, false},
+		{"unblocked work bead ready", "wb-1", map[string]bool{}, true},
+		{"sibling blocked, this one ready", "wb-1", map[string]bool{"wb-2": true}, true},
+		{"blocked among several", "wb-1", map[string]bool{"wb-1": true, "wb-2": true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isScheduledWorkBeadReady(tt.workID, openInfo, true, tt.blocked)
+			if got != tt.wantReady {
+				t.Errorf("isScheduledWorkBeadReady(%q, blocked=%v) = %v, want %v",
+					tt.workID, tt.blocked, got, tt.wantReady)
+			}
+		})
+	}
+}
+
 // TestIsAgentBeadInfo is the regression gate for gc-wbk1b / gu-k5sul: the
 // dispatch readiness scan stopped fanning `bd ready` across every town dir and
 // now identifies agent state beads (which must NEVER be dispatched as work —
