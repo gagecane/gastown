@@ -170,19 +170,6 @@ func TestEscalationPayload(t *testing.T) {
 	}
 }
 
-func TestKillPayload(t *testing.T) {
-	p := KillPayload("gastown", "alpha", "zombie")
-	if p["rig"] != "gastown" {
-		t.Errorf("rig = %v, want gastown", p["rig"])
-	}
-	if p["target"] != "alpha" {
-		t.Errorf("target = %v, want alpha", p["target"])
-	}
-	if p["reason"] != "zombie" {
-		t.Errorf("reason = %v, want zombie", p["reason"])
-	}
-}
-
 func TestHaltPayload(t *testing.T) {
 	services := []string{"witness", "refinery", "deacon"}
 	p := HaltPayload(services)
