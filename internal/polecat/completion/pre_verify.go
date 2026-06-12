@@ -44,7 +44,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -269,7 +268,11 @@ func VerifyPreVerifiedAttestation(ctx context.Context, townRoot, rigName, workDi
 	// heartbeat. A cross-process counting semaphore bounds how many run at once.
 	// Acquiring the slot is best-effort: on timeout or error we proceed
 	// unthrottled rather than strand the polecat's submission.
-	if release := acquireGateSlot(townRoot); release != nil {
+	//
+	// The slot dir + concurrency knob are owned by internal/lock so this path,
+	// the bash pre-push hook, and the refinery merge gate all join the identical
+	// host-wide pool (gu-ym89r).
+	if release := lock.AcquireGateSlot(townRoot, lock.DefaultGateSlotWaitTimeout); release != nil {
 		defer release()
 	}
 
@@ -286,45 +289,4 @@ func VerifyPreVerifiedAttestation(ctx context.Context, townRoot, rigName, workDi
 	fmt.Fprintf(os.Stderr, "  The branch will still be submitted; the refinery will re-run gates normally.\n")
 	fmt.Fprintf(os.Stderr, "  If the failure is real, refinery will reject; fix the regression and resubmit.\n")
 	return false
-}
-
-const (
-	// defaultGateConcurrency caps host-wide concurrent full-suite gate runs.
-	// 2 keeps load avg sane while letting two batches drain in parallel.
-	defaultGateConcurrency = 2
-	// gateSlotWaitTimeout bounds how long we wait for a free slot before
-	// proceeding unthrottled. Generous: a full `go test ./...` can take
-	// minutes, and we'd rather queue than skip the cap under bulk load.
-	gateSlotWaitTimeout = 10 * time.Minute
-)
-
-// resolveGateConcurrency returns the host-wide cap on concurrent gate runs,
-// honoring GT_GATE_CONCURRENCY (positive integer) and falling back to the
-// default otherwise.
-func resolveGateConcurrency() int {
-	if v := os.Getenv("GT_GATE_CONCURRENCY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultGateConcurrency
-}
-
-// acquireGateSlot takes a slot from the host-wide gate-run semaphore (gu-0iyrn).
-// Returns a release func on success, or nil if no town root is known, the slot
-// could not be acquired within the timeout, or the semaphore dir is unusable.
-// Callers proceed unthrottled when nil is returned — the cap is an optimization,
-// not a correctness gate.
-func acquireGateSlot(townRoot string) func() {
-	if townRoot == "" {
-		return nil
-	}
-	slotDir := filepath.Join(townRoot, ".runtime", "locks", "gate-slots")
-	sem := lock.NewFlockSemaphore(slotDir, resolveGateConcurrency())
-	release, err := sem.Acquire(gateSlotWaitTimeout)
-	if err != nil {
-		// Timed out or dir error — don't strand the submission, just run.
-		return nil
-	}
-	return release
 }

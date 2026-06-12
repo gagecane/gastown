@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/docsonly"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -1505,6 +1506,21 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) Proces
 	// resource-starvation false-negatives (JVM/OOM/esbuild) under a co-located
 	// swarm. No-op unless GateMaxLoadPerCore is configured.
 	e.waitForGateLoad(ctx, phase)
+
+	// gu-ym89r: join the host-wide gate-run semaphore so the refinery's own
+	// full-suite `go test ./...` merge gate is counted against the SAME cap as
+	// the polecat `gt done --pre-verified` and pre-push gate runs. Before this,
+	// the refinery's heavy gate ran uncoordinated alongside the capped polecat
+	// runs against the shared host + Dolt server, and contention (Dolt conn
+	// timeouts, memory-budget assertions, config races) flaked merges on clean
+	// code (refinery escalation gc-56r2yy). Best-effort: AcquireGateSlot returns
+	// nil (proceed unthrottled) when no town root is known or the wait times
+	// out — the cap is an overload guard, never a reason to wedge the queue.
+	// waitForGateLoad runs first so we don't hold a scarce slot while merely
+	// waiting for load to drop.
+	if release := lock.AcquireGateSlot(refineryTownRoot(e), lock.DefaultGateSlotWaitTimeout); release != nil {
+		defer release()
+	}
 
 	// Sort gate names for deterministic ordering
 	names := make([]string, 0, len(gates))

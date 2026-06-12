@@ -257,6 +257,14 @@ fi
 # GT_GATE_SLOT_WAIT_SECONDS bounds the wait (default 600, matching the Go
 # side's 10m) and lets tests shrink it.
 #
+# SYNC INVARIANT (gu-ym89r): the slot dir ($GT_TOWN_ROOT/.runtime/locks/gate-slots),
+# the GT_GATE_CONCURRENCY env knob, and its default (2) are owned canonically by
+# internal/lock/gateslot.go (GateSlotDir / GateSlotEnvVar / DefaultGateConcurrency).
+# Every Go consumer — the polecat gt-done path AND the refinery merge gate — now
+# acquires through that one helper. This bash hook computes the same path/knob
+# inline so it joins the identical flock pool; if you change either side, change
+# both or they silently split into two unsynchronized caps.
+#
 # Best-effort: if flock is unavailable, no town root is known, or all slots
 # stay held past the wait, we proceed UNTHROTTLED rather than block a push. The
 # cap is an overload guard, not a correctness gate. The held slot is released

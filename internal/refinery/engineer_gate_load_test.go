@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -249,5 +250,58 @@ func TestRunGatesForPhase_RunsLoadDeferral(t *testing.T) {
 	}
 	if atomic.LoadInt32(&sampled) == 0 {
 		t.Fatal("expected runGatesForPhase to invoke load deferral")
+	}
+}
+
+// TestRunGatesForPhase_JoinsGateSlotPool verifies the refinery gate runner
+// acquires a slot from the host-wide gate-run semaphore (gu-ym89r). With the
+// cap set to a single slot and a slot held externally, the gate runner must
+// block until that slot frees — proving it joins the SAME pool as the polecat
+// gt-done and pre-push paths rather than running uncoordinated.
+func TestRunGatesForPhase_JoinsGateSlotPool(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("advisory flock is a no-op on Windows")
+	}
+	t.Setenv(lock.GateSlotEnvVar, "1") // single host-wide slot
+
+	e := newGateLoadEngineer(t)
+	// refineryTownRoot(e) == filepath.Dir(e.rig.Path); the semaphore dir is
+	// created under it on demand.
+	townRoot := refineryTownRoot(e)
+	if townRoot == "" {
+		t.Fatal("test setup: refineryTownRoot should be non-empty")
+	}
+	e.config.Gates = map[string]*GateConfig{
+		"pre-test": {Cmd: "true", Phase: GatePhasePreMerge},
+	}
+
+	// Hold the only slot from "another process".
+	held := lock.AcquireGateSlot(townRoot, time.Second)
+	if held == nil {
+		t.Fatal("test setup: failed to hold the only gate slot")
+	}
+
+	done := make(chan ProcessResult, 1)
+	go func() {
+		done <- e.runGatesForPhase(context.Background(), GatePhasePreMerge)
+	}()
+
+	// The gate runner must NOT complete while the only slot is held.
+	select {
+	case <-done:
+		t.Fatal("gate runner completed while the only host-wide slot was held — it did not join the pool")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: blocked on the semaphore.
+	}
+
+	// Release the slot; the gate runner should now proceed and pass.
+	held()
+	select {
+	case result := <-done:
+		if !result.Success {
+			t.Fatalf("gate should pass once the slot frees, got: %s", result.Error)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("gate runner did not proceed after the slot was released")
 	}
 }
