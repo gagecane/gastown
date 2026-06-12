@@ -37,6 +37,7 @@ package completion
 // failure mode.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -50,6 +51,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // preVerifyGate is a single pre-merge gate command resolved from rig settings.
@@ -129,12 +131,48 @@ func loadPreVerifyGates(townRoot, rigName string) []preVerifyGate {
 // tests inject a fake.
 type preVerifyGateRunner func(ctx context.Context, workDir, cmd string) ([]byte, error)
 
+// gateWaitDelay bounds how long Run() may block AFTER the gate's context is
+// canceled, as belt-and-suspenders behind the process-group SIGKILL installed
+// by util.SetProcessGroup. See execGate for the deadlock this prevents.
+const gateWaitDelay = 2 * time.Second
+
+// defaultGateTimeout caps a pre-merge gate that has no explicit timeout
+// configured in rig settings. Generous enough for a full `go test ./...`
+// (engineer.go gates run in the minutes), but finite so a wedged subprocess
+// can never hang gt done forever (gc-utizk7). Rigs that need longer should set
+// merge_queue.gates[].timeout explicitly.
+const defaultGateTimeout = 10 * time.Minute
+
 // execGate runs a shell command in workDir and returns combined stderr/stdout.
-// Mirrors how the refinery runs gates in engineer.runGate.
+//
+// Deadlock note (gc-utizk7): a gate command is `sh -c "go test ./..."` (etc.),
+// and the shell forks compiler/test children that inherit the stdout/stderr
+// pipe write end. The earlier implementation used exec.CommandContext +
+// CombinedOutput with no process-group kill: on the gate timeout,
+// CommandContext SIGKILLs ONLY the sh leader; the children reparent to PID 1
+// and keep the pipe write end open, so CombinedOutput's internal Wait() blocks
+// FOREVER in futex_wait_queue (the fd7/fd9 read-pipe-no-writer signature with
+// zero children). This is the same os/exec inherited-pipe class fixed for the
+// git push helpers in a0a7bdb9 (gu-4mj2 precedent) — on an uncovered call site.
+//
+// Fix: own the stdout/stderr buffers (so we control the pipe), use
+// util.SetProcessGroup so the Cancel hook SIGKILLs the WHOLE process group on
+// timeout (Setpgid survives reparenting, so the reparented children die and the
+// pipe write end closes), plus WaitDelay to bound any residual pipe I/O. We do
+// NOT mirror engineer.runGate here: that path still uses SetDetachedProcessGroup
+// (no Cancel hook) and is subject to the same bug.
 func execGate(ctx context.Context, workDir, cmd string) ([]byte, error) {
 	c := exec.CommandContext(ctx, "sh", "-c", cmd) //nolint:gosec // G204: gates from trusted rig config
 	c.Dir = workDir
-	return c.CombinedOutput()
+	util.SetProcessGroup(c)
+	c.WaitDelay = gateWaitDelay
+	// Combine stdout+stderr into one buffer (preserving CombinedOutput's
+	// contract) but with buffers we own so the timeout-kill above can unblock us.
+	var combined bytes.Buffer
+	c.Stdout = &combined
+	c.Stderr = &combined
+	err := c.Run()
+	return combined.Bytes(), err
 }
 
 // runPreVerifyGates executes each gate in order, stopping on first failure.
@@ -153,15 +191,17 @@ func runPreVerifyGates(ctx context.Context, workDir string, gates []preVerifyGat
 		run = execGate
 	}
 	for _, gate := range gates {
-		gateCtx := ctx
-		var cancel context.CancelFunc
-		if gate.timeout > 0 {
-			gateCtx, cancel = context.WithTimeout(ctx, gate.timeout)
+		// Always bound the gate: a gate with no configured timeout would
+		// otherwise inherit ctx (context.Background() from gt done) and could
+		// hang unbounded if its subprocess wedges — the second half of the
+		// gc-utizk7 deadlock. Fall back to defaultGateTimeout when unset.
+		timeout := gate.timeout
+		if timeout <= 0 {
+			timeout = defaultGateTimeout
 		}
+		gateCtx, cancel := context.WithTimeout(ctx, timeout)
 		out, err := run(gateCtx, workDir, gate.cmd)
-		if cancel != nil {
-			cancel()
-		}
+		cancel()
 		if err == nil {
 			continue
 		}
