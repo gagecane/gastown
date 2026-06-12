@@ -377,6 +377,28 @@ func shortSHA(sha string) string {
 	return sha
 }
 
+// sessionDurationMs returns the polecat time-to-close in milliseconds — the
+// wall-clock from session start to now. The session-start timestamp is stamped
+// into the GT_SESSION_START tmux env (Unix seconds) at spawn by the polecat
+// session manager (gu-nniyx, KPI-1). Returns 0 when GT_SESSION_START is
+// missing or unparseable (e.g. a session predating this change, or a manual
+// invocation), in which case callers omit the duration from telemetry.
+func sessionDurationMs() float64 {
+	raw := os.Getenv("GT_SESSION_START")
+	if raw == "" {
+		return 0
+	}
+	startUnix, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || startUnix <= 0 {
+		return 0
+	}
+	elapsed := time.Since(time.Unix(startUnix, 0))
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(elapsed.Milliseconds())
+}
+
 func init() {
 	doneCmd.Flags().StringVar(&doneIssue, "issue", "", "Source issue ID (default: parse from branch name)")
 	doneCmd.Flags().IntVarP(&donePriority, "priority", "p", -1, "Override priority (0-4, default: inherit from issue)")
@@ -395,7 +417,17 @@ func init() {
 }
 
 func runDone(cmd *cobra.Command, args []string) (retErr error) {
-	defer func() { telemetry.RecordDone(context.Background(), strings.ToUpper(doneStatus), retErr) }()
+	// Telemetry attributes for the done event (KPI-1, gu-nniyx). rig and bead
+	// are resolved during execution and captured into these closure variables;
+	// the deferred recorder reads their final values at exit. rig defaults to
+	// GT_RIG so a value is present even on early-return paths.
+	doneRig := os.Getenv("GT_RIG")
+	doneBeadID := ""
+	doneDurationMs := sessionDurationMs()
+	defer func() {
+		telemetry.RecordDone(context.Background(), strings.ToUpper(doneStatus),
+			doneRig, doneBeadID, doneDurationMs, retErr)
+	}()
 	// Guard: Only polecats should call gt done
 	// Crew, deacons, witnesses etc. don't use gt done - they persist across tasks.
 	// Polecat sessions end with gt done — the session is cleaned up, but the
@@ -448,6 +480,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	rigName, err := completion.ResolveRigName(townRoot, cwd, os.Getenv("GT_RIG"))
 	if err != nil {
 		return err
+	}
+	if rigName != "" {
+		doneRig = rigName // refine the telemetry rig now that it's resolved
 	}
 
 	// When gt is invoked via shell alias (cd ~/gt && gt), or when Claude Code
@@ -662,6 +697,7 @@ afterSafetyNet:
 			issueID = hookIssue
 		}
 	}
+	doneBeadID = issueID // capture for the deferred done telemetry (KPI-1)
 
 	// hq-9jeyo: refuse to complete/close a reference or gate tripwire. Beads
 	// labeled do-not-dispatch / pinned (or issue_type=reference) must stay OPEN
