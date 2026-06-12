@@ -643,7 +643,7 @@ Audited against `origin/main` @ `2d8d71ee35fafda3bbdf353683692bfcc9165476`
 | `RecordSling` / `sling` event | `recorder.go:366` |
 | `RecordMail` / `mail` event — `operation`, `status`, `error` only | `recorder.go:381` |
 | `RecordNudge` / `nudge` event | `recorder.go:398` |
-| `RecordDone` / `done` event | `recorder.go:413` |
+| `RecordDone` / `done` event — `rig`, `bead_id`, `time_to_complete_ms` + `gastown.done.duration_ms` histogram (gu-nniyx) | `recorder.go` |
 | `RecordDaemonRestart` / `daemon.restart` event | `recorder.go:431` |
 | `RecordFormulaInstantiate` / `formula.instantiate` event | `recorder.go:442` |
 | `RecordConvoyCreate` / `convoy.create` event | `recorder.go:460` |

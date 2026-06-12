@@ -224,9 +224,9 @@ func TestRecordDone(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
 
-	RecordDone(ctx, "COMPLETED", nil)
-	RecordDone(ctx, "ESCALATED", nil)
-	RecordDone(ctx, "DEFERRED", errors.New("done error"))
+	RecordDone(ctx, "COMPLETED", "gastown_upstream", "gu-nniyx", 12345, nil)
+	RecordDone(ctx, "ESCALATED", "casc_cdk", "cc-1234", 0, nil) // no duration → histogram skipped
+	RecordDone(ctx, "DEFERRED", "beads", "bd-9", 678, errors.New("done error"))
 }
 
 func TestRecordDaemonRestart(t *testing.T) {
