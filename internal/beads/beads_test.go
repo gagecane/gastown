@@ -1340,6 +1340,36 @@ exit 0
 	}
 }
 
+// isolateDoltServerEnvForTest clears inherited Dolt server-target env vars so an
+// embedded-Dolt test cannot be hijacked by a stray Dolt server left running by a
+// concurrent `go test ./...` sibling on a shared host. With these unset,
+// BuildPinnedBDEnv's PreventTestDoltLeak pins a per-test embedded data dir under
+// the fixture, so each test gets its own isolated database instead of connecting
+// to whatever server the leaked env points at.
+//
+// gu-c6qdn: TestResetAgentBeadForReuse_NukeRespawnCycle flaked with
+// "bd init: already initialized" when a sibling run leaked GT_DOLT_PORT/
+// BEADS_DOLT_* pointing at its stray server (e.g. 127.0.0.1:57428); bd init
+// connected to that live server, saw an initialized workspace, and aborted.
+//
+// Restores the original env via t.Cleanup. Must be called before t.Parallel.
+func isolateDoltServerEnvForTest(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GT_DOLT_PORT", "GT_DOLT_HOST",
+		"BEADS_DOLT_PORT", "BEADS_DOLT_HOST",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_DATA_DIR",
+		"BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_SERVER_MODE",
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_SHARED_SERVER_DIR",
+	} {
+		if orig, ok := os.LookupEnv(key); ok {
+			t.Cleanup(func() { _ = os.Setenv(key, orig) })
+			_ = os.Unsetenv(key)
+		}
+	}
+}
+
 func writeHangingAllowStaleBDStub(t *testing.T, dir, markerPath string) {
 	t.Helper()
 
@@ -3866,6 +3896,10 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd CLI not installed, skipping bd-backed lifecycle test")
 	}
+	// Force embedded isolation: clear any inherited Dolt server target leaked by a
+	// concurrent sibling `go test ./...` run so bd init creates a local embedded DB
+	// under tmpDir instead of connecting to a stray server (gu-c6qdn).
+	isolateDoltServerEnvForTest(t)
 	tmpDir := t.TempDir()
 	bd := NewIsolated(tmpDir)
 	if err := bd.Init("test"); err != nil {
@@ -4639,7 +4673,16 @@ func TestRunEnv_StripsPollutedDoltEnvAndUsesRigMetadata(t *testing.T) {
 		bdAllowStaleMu.Unlock()
 	})
 
+	// Resolve symlinks on the workdir so the logical path matches what the bd
+	// subprocess sees as $PWD. Run() sets cmd.Dir to workDir and BEADS_DIR to
+	// workDir/.beads (logical paths), but the shell stub's prefix check compares
+	// BEADS_DIR against $PWD/.beads — and the shell resolves $PWD to the physical
+	// path. When TMPDIR is a symlink (e.g. /home -> /local/home on shared hosts),
+	// the two diverge and the stub falls through to "unknown" (gu-c6qdn).
 	workDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(workDir); err == nil {
+		workDir = resolved
+	}
 	beadsDir := filepath.Join(workDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
