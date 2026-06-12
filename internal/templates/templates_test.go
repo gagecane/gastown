@@ -351,6 +351,68 @@ func TestRenderRole_Refinery_QueueScanLabelGuidance(t *testing.T) {
 	}
 }
 
+// TestRenderRole_Refinery_EscalatesWhenQueueBlocked verifies that the refinery
+// prompt teaches the agent to fire `gt escalate` when it parks on a
+// queue-blocking condition, instead of holding silently in-pane.
+//
+// Regression for gu-a522t (incident gc-onvm6d / gu-87thl deadlock): main went
+// RED, every MR's gate failed, and the refinery held in-pane for ~30 min
+// looping "push it / reject / hold" while 15 MRs stacked up — without ever
+// filing an escalation. The Anti-Latch Protocol correctly tells the refinery
+// to keep processing, but the prompt previously gave no guidance distinguishing
+// a routine single-MR reject (handle autonomously) from a queue-blocking
+// systemic park that MUST page a human within a bounded threshold.
+func TestRenderRole_Refinery_EscalatesWhenQueueBlocked(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:          "refinery",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/refinery/rig",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	output, err := tmpl.RenderRole("refinery", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	// Must wire escalation through the real `gt` command (templated via
+	// {{ cmd }}) — free-form prose won't make the agent act.
+	if !strings.Contains(output, "gt escalate") {
+		t.Error("refinery prompt missing `gt escalate` command; a parked refinery " +
+			"blocking the queue must page, not hold silently (gu-a522t)")
+	}
+	// Must distinguish HIGH (queue-blocking park) escalation severity.
+	if !strings.Contains(output, "-s HIGH") {
+		t.Error("refinery prompt missing `-s HIGH` escalation for queue-blocking parks (gu-a522t)")
+	}
+	// Must reference the motivating incident so future readers know WHY.
+	if !strings.Contains(output, "gu-a522t") {
+		t.Error("refinery prompt missing gu-a522t reference for the escalate-on-park guidance")
+	}
+	// Must teach the autonomous-vs-escalate distinction so the agent does not
+	// escalate routine single-MR rejects nor silently hold systemic blocks.
+	for _, want := range []string{"autonomous", "queue-blocking"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("refinery prompt missing %q — agent must distinguish routine "+
+				"single-MR rejects from queue-blocking systemic parks (gu-a522t)", want)
+		}
+	}
+	// The rendered escalation command must use the real binary name, not an
+	// unexpanded template variable.
+	if strings.Contains(output, "{{ cmd }} escalate") {
+		t.Error("refinery template contains unexpanded `{{ cmd }} escalate` — template variable did not render")
+	}
+}
+
 func TestRenderMessage_Spawn(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {
