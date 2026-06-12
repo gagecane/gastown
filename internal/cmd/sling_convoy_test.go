@@ -295,6 +295,68 @@ func TestResolveBasePrecedence(t *testing.T) {
 			t.Errorf("nil sources must be skipped: got %q", got)
 		}
 	})
+
+	t.Run("inherited polecat work branch is rejected, falls through (gu-uck1t)", func(t *testing.T) {
+		// A dead polecat's per-attempt branch leaked into the stamped base.
+		// It must be skipped so resolution falls through to the next source
+		// (here empty → rig default applied by the caller), not perpetuated.
+		got := resolveBasePrecedence("",
+			konst(""), // no current convoy base
+			konst("polecat/jasper/casw-1dc--mqbc48wj"), // stamped dead-polecat branch
+			konst(""))
+		if got != "" {
+			t.Errorf("polecat work branch must be rejected as inherited base: got %q", got)
+		}
+	})
+
+	t.Run("origin-qualified polecat branch is also rejected (gu-uck1t)", func(t *testing.T) {
+		got := resolveBasePrecedence("", konst("origin/polecat/nux/gt-xyz--abc123"))
+		if got != "" {
+			t.Errorf("origin/polecat/* must be rejected as inherited base: got %q", got)
+		}
+	})
+
+	t.Run("a real relay base after a rejected polecat branch still wins (gu-uck1t)", func(t *testing.T) {
+		got := resolveBasePrecedence("",
+			konst("polecat/nux/gt-xyz--abc123"), // bad convoy base — skipped
+			konst("relay/x"))                    // legit stamped relay base
+		if got != "relay/x" {
+			t.Errorf("resolution must continue past a polecat branch to a real base: got %q", got)
+		}
+	})
+
+	t.Run("explicit polecat branch is honored (operator authoritative, gu-uck1t)", func(t *testing.T) {
+		// The guard only filters INHERITED sources; an explicit --base-branch
+		// short-circuits before the polecat check.
+		got := resolveBasePrecedence("polecat/nux/gt-xyz--abc123", konst("main"))
+		if got != "polecat/nux/gt-xyz--abc123" {
+			t.Errorf("explicit base must win even if it is a polecat branch: got %q", got)
+		}
+	})
+}
+
+// TestIsPolecatWorkBranch covers the polecat work-branch matcher used to reject
+// ephemeral per-attempt branches from inherited base-branch resolution (gu-uck1t).
+func TestIsPolecatWorkBranch(t *testing.T) {
+	cases := []struct {
+		branch string
+		want   bool
+	}{
+		{"polecat/jasper/casw-1dc--mqbc48wj", true},
+		{"polecat/nux-abc123", true},
+		{"origin/polecat/nux/gt-xyz--abc123", true},
+		{"main", false},
+		{"mainline", false},
+		{"integration/epic", false},
+		{"relay/x", false},
+		{"", false},
+		{"feature/polecat-tooling", false}, // not a polecat/ prefix
+	}
+	for _, tc := range cases {
+		if got := isPolecatWorkBranch(tc.branch); got != tc.want {
+			t.Errorf("isPolecatWorkBranch(%q) = %v, want %v", tc.branch, got, tc.want)
+		}
+	}
 }
 
 // TestRigDefaultBranchForBead_Fallbacks verifies the rig-default resolver used

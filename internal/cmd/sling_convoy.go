@@ -251,6 +251,16 @@ func effectiveBaseBranch(beadID, explicit string) string {
 // The source callbacks are evaluated lazily (each only when the higher-priority
 // sources are empty) so cheaper sources short-circuit the bd/Dolt lookups the
 // later ones perform. A nil callback is skipped. Pure for testing.
+//
+// gu-uck1t: an INHERITED source (convoy / stamped / ancestor) that resolves to a
+// polecat work branch (polecat/<name>/<bead>--<ts>) is rejected and the walk
+// continues to the next source. A dead polecat's per-attempt branch can land in
+// the bead's stamped base_branch — then on RE-dispatch effectiveBaseBranch reads
+// it back, spawns the fresh polecat off the abandoned branch, and re-stamps it,
+// a self-perpetuating misroute off mainline. A polecat/* ref is never a valid
+// base to cut new work from, so dropping it lets resolution fall through to the
+// rig default (mainline). An explicit --base-branch still wins unconditionally:
+// the operator is authoritative.
 func resolveBasePrecedence(explicit string, sources ...func() string) string {
 	if explicit != "" {
 		return explicit
@@ -259,11 +269,21 @@ func resolveBasePrecedence(explicit string, sources ...func() string) string {
 		if src == nil {
 			continue
 		}
-		if bb := src(); bb != "" {
+		if bb := src(); bb != "" && !isPolecatWorkBranch(bb) {
 			return bb
 		}
 	}
 	return explicit
+}
+
+// isPolecatWorkBranch reports whether branch is an ephemeral per-attempt polecat
+// work branch (polecat/<name>/<bead>--<ts> or polecat/<name>-<ts>, built by
+// Manager.buildBranchName). Such a branch belongs to a single polecat attempt
+// and is never a valid base to dispatch new work from; see resolveBasePrecedence
+// (gu-uck1t). The "origin/" prefix is tolerated since inherited bases may carry
+// the remote qualifier.
+func isPolecatWorkBranch(branch string) bool {
+	return strings.HasPrefix(strings.TrimPrefix(branch, "origin/"), "polecat/")
 }
 
 // maxRelayInheritHops bounds the parent-epic walk in resolveRelayBaseFromAncestors
