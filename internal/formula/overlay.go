@@ -41,6 +41,9 @@ type FormulaOverlay struct {
 // If a rig-level overlay exists, it takes full precedence (not merged with town).
 // If neither file exists, returns nil with no error.
 func LoadFormulaOverlay(formulaName, townRoot, rigName string) (*FormulaOverlay, error) {
+	if err := validateFormulaName(formulaName); err != nil {
+		return nil, err
+	}
 	rigPath := filepath.Join(townRoot, rigName, "formula-overlays", formulaName+".toml")
 	townPath := filepath.Join(townRoot, "formula-overlays", formulaName+".toml")
 

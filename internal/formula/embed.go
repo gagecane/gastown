@@ -5,10 +5,36 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// ErrInvalidName is returned when a formula name is unsafe for path construction.
+var ErrInvalidName = errors.New("invalid formula name")
+
+// validateFormulaName rejects names that could escape the formulas directory
+// when joined into a filesystem path. Formula names are used to build paths
+// like filepath.Join(townRoot, rigName, ".beads", "formulas", name), so a name
+// containing ".." or a path separator could resolve outside that directory.
+// A leading '-' is rejected to avoid the name being interpreted as a flag.
+func validateFormulaName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: name cannot be empty", ErrInvalidName)
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return fmt.Errorf("%w: name %q cannot contain path separators", ErrInvalidName, name)
+	}
+	if name == "." || name == ".." || strings.Contains(name, "..") {
+		return fmt.Errorf("%w: name %q cannot contain path traversal", ErrInvalidName, name)
+	}
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("%w: name %q cannot start with '-'", ErrInvalidName, name)
+	}
+	return nil
+}
 
 // Formulas live in internal/formula/formulas/ (source of truth).
 // They are embedded into the binary and provisioned to .beads/formulas/ at install time.
@@ -53,6 +79,9 @@ type HealthReport struct {
 //
 // Either townRoot or rigName may be empty; those tiers are skipped.
 func ResolveFormulaContent(name, townRoot, rigName string) ([]byte, error) {
+	if err := validateFormulaName(name); err != nil {
+		return nil, err
+	}
 	filename := name
 	if !hasFormulaSuffix(filename) {
 		filename = filename + ".formula.toml"
@@ -82,6 +111,9 @@ func ResolveFormulaContent(name, townRoot, rigName string) ([]byte, error) {
 // The name can be with or without the .formula.toml suffix.
 // Returns the content bytes, or an error if the formula is not found.
 func GetEmbeddedFormulaContent(name string) ([]byte, error) {
+	if err := validateFormulaName(name); err != nil {
+		return nil, err
+	}
 	// Normalize: ensure the filename has the correct suffix
 	filename := name
 	if !hasFormulaSuffix(filename) {

@@ -635,6 +635,10 @@ func resolveChain(formula *Formula, searchPaths []string, chain []string) (*Form
 
 // loadFormulaByName loads a formula by name: embedded FS first, then searchPaths.
 func loadFormulaByName(name string, searchPaths []string) (*Formula, error) {
+	if err := validateFormulaName(name); err != nil {
+		return nil, err
+	}
+
 	// Try the embedded formula filesystem first.
 	data, err := GetEmbeddedFormulaContent(name)
 	if err == nil {
