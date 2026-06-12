@@ -97,6 +97,33 @@ func TestRenderAgentDetails_UsesRigPrefix(t *testing.T) {
 	}
 }
 
+// TestRenderAgentDetails_AgentInfoRoutedToWriter is the regression guard for
+// gu-h63md: the agent-runtime line used a bare fmt.Printf, so it escaped the
+// writer (corrupting --watch frames composed in a bytes.Buffer). Assert the
+// AgentInfo line lands in the provided writer, not stdout.
+func TestRenderAgentDetails_AgentInfoRoutedToWriter(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestRoutes(t, townRoot, []beads.Route{
+		{Prefix: "bd-", Path: "beads/mayor/rig"},
+	})
+
+	agent := AgentRuntime{
+		Name:      "witness",
+		Address:   "beads/witness",
+		Role:      "witness",
+		Running:   true,
+		AgentInfo: "claude-sonnet pid:12345",
+	}
+
+	var buf bytes.Buffer
+	renderAgentDetails(&buf, agent, "", nil, townRoot)
+	output := buf.String()
+
+	if !strings.Contains(output, "agent: claude-sonnet pid:12345") {
+		t.Fatalf("output %q does not contain the agent-runtime line; it likely escaped the writer", output)
+	}
+}
+
 func TestDiscoverRigAgents_ZombieSessionNotRunning(t *testing.T) {
 	// Verify that a session in allSessions with value=false (zombie: tmux alive,
 	// agent dead) results in agent.Running=false. This is the core fix for gt-bd6i3.

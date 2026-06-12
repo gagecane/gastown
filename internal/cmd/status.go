@@ -1442,7 +1442,7 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 
 	// Line 2: Agent runtime info
 	if agent.AgentInfo != "" {
-		fmt.Printf("%s  agent: %s\n", indent, agent.AgentInfo)
+		fmt.Fprintf(w, "%s  agent: %s\n", indent, agent.AgentInfo)
 	}
 
 	// Line 2b: Per-session MCP footprint (gu-yofdi). Makes the MCP server count
