@@ -134,9 +134,12 @@ func (c *IdleTimeoutCheck) Fix(ctx *CheckContext) error {
 		// The .beads directory is within the rig path
 		rigBeadsPath := filepath.Join(rigPath, ".beads")
 
-		// Use EnsureConfigYAML to add idle-timeout if missing
-		// This is idempotent - won't modify if already correct
-		if err := beads.EnsureConfigYAML(rigBeadsPath, ""); err != nil {
+		// Derive the rig's prefix from metadata so EnsureConfigYAML does not
+		// blank the existing prefix line (it rewrites "prefix:" to the value
+		// passed in). EnsureConfigYAML then forces dolt.idle-timeout: "0"
+		// idempotently.
+		prefix := beads.ConfigDefaultsFromMetadata(rigBeadsPath, "")
+		if err := beads.EnsureConfigYAML(rigBeadsPath, prefix); err != nil {
 			return fmt.Errorf("fixing %s: %w", rigName, err)
 		}
 	}

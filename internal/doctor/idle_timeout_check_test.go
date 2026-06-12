@@ -129,6 +129,11 @@ issue-prefix: gt
 	if err := os.WriteFile(filepath.Join(gastownBeads, "config.yaml"), []byte(gastownConfig), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// Include metadata so Fix derives and preserves the real prefix.
+	meta := `{"backend":"dolt","dolt_mode":"server","dolt_database":"gastown","issue_prefix":"gt"}`
+	if err := os.WriteFile(filepath.Join(gastownBeads, "metadata.json"), []byte(meta), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := &CheckContext{
 		TownRoot: townRoot,
@@ -148,5 +153,12 @@ issue-prefix: gt
 	content := string(data)
 	if !strings.Contains(content, `dolt.idle-timeout: "0"`) {
 		t.Errorf("config.yaml should contain dolt.idle-timeout: \"0\", got:\n%s", content)
+	}
+	// Fix must not blank the prefix/issue-prefix lines (gu-nid89.37).
+	if !strings.Contains(content, "prefix: gt\n") {
+		t.Errorf("Fix must preserve prefix, got:\n%s", content)
+	}
+	if !strings.Contains(content, "issue-prefix: gt\n") {
+		t.Errorf("Fix must preserve issue-prefix, got:\n%s", content)
 	}
 }
