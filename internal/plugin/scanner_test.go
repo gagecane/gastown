@@ -597,6 +597,76 @@ func TestParsePluginMD_PipelineMonitorBuildDeployDedupeAndMainlineSkip(t *testin
 	}
 }
 
+func TestParsePluginMD_PipelineMonitorStableFingerprintSuppression(t *testing.T) {
+	// Verify the pipeline-monitor plugin encodes the v10 stable-fingerprint
+	// suppression (Step 5b-1 promoted ahead of the ID-keyed Step 5.0) and the
+	// no-code-fix pipeline-owner routing (Step 4.6) design (gu-526n8).
+	//
+	// This test guards against regressions that would revert the plugin to
+	// suppressing on the rotating Build/Deploy ID, which let a stuck BATS infra
+	// event re-dispatch indefinitely (cws-7lkb/cws-fsi2) because a fresh
+	// deploy_id was minted every cycle while the stable fingerprint never
+	// changed.
+	content, err := os.ReadFile(filepath.Join("..", "..", "plugins", "pipeline-monitor", "plugin.md"))
+	if err != nil {
+		t.Skipf("pipeline-monitor plugin not found (expected in plugins/): %v", err)
+	}
+
+	plugin, err := parsePluginMD(content, "/test/pipeline-monitor", LocationRig, "gastown")
+	if err != nil {
+		t.Fatalf("parsePluginMD failed: %v", err)
+	}
+
+	if plugin.Version < 10 {
+		t.Errorf("expected version >= 10 (v10 introduced stable-fingerprint suppression + Step 4.6), got %d", plugin.Version)
+	}
+
+	// The v10 design contract: suppression anchored to the stable fingerprint,
+	// not the rotating Build/Deploy ID; and a no-code-fix → pipeline-owner route.
+	wantSubstrings := []string{
+		// Step 4.6: no-code-fix → pipeline-owner routing
+		"Step 4.6",
+		"No-Code-Fix",
+		"no-code-fix",
+		"pipeline owner",
+		"do-not-dispatch sentinel",
+		// Stable-fingerprint suppression authority (5b-1 promoted first)
+		"suppression authority",
+		"rotation guard",
+		// Anchor terms: the rotating-ID failure mode and the burned beads
+		"rotate",
+		"cws-7lkb",
+		"cws-fsi2",
+		// New self-check scenarios
+		"S19",
+		"S20",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(plugin.Instructions, want) {
+			t.Errorf("expected plugin instructions to contain %q; this is a required\n"+
+				"element of the v10 stable-fingerprint suppression + pipeline-owner "+
+				"routing design (gu-526n8). If you removed it, update the plugin or "+
+				"this test with justification.", want)
+		}
+	}
+
+	// The v10 ordering contract: the fingerprint-keyed sentinel lookup (5b-1)
+	// must be promoted ahead of the rotating-ID Step 5.0 in the Step 5 preamble.
+	// Verify the preamble (the prose before the "### 5.0." section header)
+	// names 5b-1 as running first, so a rotating deploy_id cannot defeat
+	// fingerprint suppression.
+	preambleEnd := strings.Index(plugin.Instructions, "### 5.0.")
+	if preambleEnd < 0 {
+		t.Fatalf("could not locate '### 5.0.' section header in instructions")
+	}
+	preamble := plugin.Instructions[:preambleEnd]
+	if !strings.Contains(preamble, "5b-1") {
+		t.Errorf("expected the Step 5 preamble (before the 5.0 section) to promote " +
+			"5b-1 as the first-checked suppression authority (v10); the rotating " +
+			"Build/Deploy ID must not be able to defeat fingerprint suppression.")
+	}
+}
+
 func TestParsePluginMD_WithRunScript(t *testing.T) {
 	// Use a temp dir with a fixture plugin.md and run.sh so the test
 	// doesn't depend on the local filesystem layout (fails in CI).
