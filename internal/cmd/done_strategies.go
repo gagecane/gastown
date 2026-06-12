@@ -221,6 +221,8 @@ func runConvoyDirectStrategy(sc strategyContext) (handled bool, pushFailed bool)
 		}
 	}
 	fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), sc.defaultBranch)
+	// Status was detected before push, so "unpushed"/"has_unpushed" is now stale.
+	doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
 	// gu-ftja: receipt for the direct-merge convoy push.
 	recordPushReceipt(sc.g, sc.townRoot, sc.rigName, sc.defaultBranch, directCommitSHA, pushlog.SourceDoneDirect, sc.worker, sc.issueID)
 
@@ -690,10 +692,9 @@ func pushBranchForMR(sc strategyContext, checkpoints map[DoneCheckpoint]string) 
 	// gu-ftja: durable push receipt for witness/deacon teardown decisions.
 	recordPushReceipt(sc.g, sc.townRoot, sc.rigName, sc.branch, pushedCommitSHA, pushlog.SourceDone, sc.worker, sc.issueID)
 
-	// Fix cleanup_status after successful push (gt-wcr): "unpushed" is now stale.
-	if doneCleanupStatus == "unpushed" {
-		doneCleanupStatus = "clean"
-	}
+	// Fix cleanup_status after successful push (gt-wcr): "unpushed"/"has_unpushed"
+	// is now stale.
+	doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
 
 	// Write push checkpoint for resume (gt-aufru).
 	if sc.agentBeadID != "" {

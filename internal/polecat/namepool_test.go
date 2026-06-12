@@ -229,6 +229,26 @@ func TestNamePool_Reconcile(t *testing.T) {
 	}
 }
 
+func TestNamePool_ReconcileAdvancesOverflowPastNumericPolecats(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	pool := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, 3)
+
+	pool.Reconcile([]string{"furiosa", "nux", "slit", "62", "65"})
+
+	name, err := pool.Allocate()
+	if err != nil {
+		t.Fatalf("Allocate error: %v", err)
+	}
+	if name != "66" {
+		t.Fatalf("expected next overflow name 66, got %s", name)
+	}
+}
+
 func TestNamePool_IsPoolName(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {

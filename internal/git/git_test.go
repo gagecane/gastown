@@ -597,6 +597,56 @@ func TestCheckout(t *testing.T) {
 	}
 }
 
+func TestCheckoutDetachAllowsBranchCheckedOutInAnotherWorktree(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	mainBranch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	mainSHA, err := g.Rev(mainBranch)
+	if err != nil {
+		t.Fatalf("Rev %s: %v", mainBranch, err)
+	}
+
+	worktreePath := filepath.Join(t.TempDir(), "worker")
+	runGit(t, dir, "worktree", "add", "-b", "polecat/test-detach", worktreePath, "HEAD")
+	workerGit := NewGit(worktreePath)
+
+	if err := os.WriteFile(filepath.Join(dir, "after-worker.txt"), []byte("new main commit\n"), 0644); err != nil {
+		t.Fatalf("write after-worker file: %v", err)
+	}
+	runGit(t, dir, "add", "after-worker.txt")
+	runGit(t, dir, "commit", "-m", "advance main")
+	mainSHA, err = g.Rev(mainBranch)
+	if err != nil {
+		t.Fatalf("Rev advanced %s: %v", mainBranch, err)
+	}
+
+	if err := workerGit.Checkout(mainBranch); err == nil {
+		t.Fatalf("Checkout(%s) succeeded, expected branch-in-use failure", mainBranch)
+	}
+	if err := workerGit.CheckoutDetach(mainBranch); err != nil {
+		t.Fatalf("CheckoutDetach(%s): %v", mainBranch, err)
+	}
+
+	branch, err := workerGit.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch after detach: %v", err)
+	}
+	if branch != "HEAD" {
+		t.Fatalf("branch after detach = %q, want HEAD", branch)
+	}
+	headSHA, err := workerGit.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev HEAD after detach: %v", err)
+	}
+	if headSHA != mainSHA {
+		t.Fatalf("detached HEAD = %q, want %q", headSHA, mainSHA)
+	}
+}
+
 func TestCheckoutNewBranch(t *testing.T) {
 	dir := initTestRepo(t)
 	g := NewGit(dir)

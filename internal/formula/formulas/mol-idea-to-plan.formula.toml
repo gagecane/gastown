@@ -122,8 +122,8 @@ Pour the mol-prd-review convoy to run 6 parallel PRD reviewers.
 **1. Pour the convoy:**
 ```bash
 gt formula run mol-prd-review \\
-  --problem="{{problem}}" \\
-  --context="See .prd-reviews/{{review_id}}/prd-draft.md. {{context}}"
+  --set problem="{{problem}}" \\
+  --set context="See .prd-reviews/{{review_id}}/prd-draft.md. {{context}}"
 ```
 
 This spawns 6 polecats in parallel:
@@ -215,8 +215,8 @@ Pour the design convoy to generate an implementation plan from the refined PRD.
 **1. Pour the design convoy:**
 ```bash
 gt formula run design \\
-  --problem="{{problem}}" \\
-  --context="PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. {{context}}"
+  --set problem="{{problem}}" \\
+  --set context="PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. {{context}}"
 ```
 
 This spawns 6 polecats in parallel, each exploring a different dimension:
@@ -236,7 +236,7 @@ ls .designs/   # find the design output directory
 
 **3. Read the design doc:**
 ```bash
-cat .designs/<design-id>/design-doc.md
+cat .designs/<design-review-id>/design-doc.md
 ```
 
 Pay attention to:
@@ -267,7 +267,7 @@ Polecat A — **requirements-coverage**:
 ```bash
 gt formula run mol-review-leg \
   --focus="requirements-coverage" \
-  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-review-id>/design-doc.md" \
   --prompt="Review an implementation plan for PRD alignment.
 
 Walk through every REQUIREMENT in the PRD (Problem Statement, Goals, Acceptance
@@ -286,7 +286,7 @@ Polecat B — **goals-alignment**:
 ```bash
 gt formula run mol-review-leg \
   --focus="goals-alignment" \
-  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-review-id>/design-doc.md" \
   --prompt="Review an implementation plan for PRD alignment.
 
 Walk through every GOAL in the PRD. For each, trace through the plan and verify
@@ -307,7 +307,7 @@ gt mail inbox  # wait for both polecats to report back
 
 **3. Apply fixes to the plan:**
 Read both reports. For each must-fix and should-fix finding:
-- Edit `.designs/<design-id>/design-doc.md` directly
+- Edit `.designs/<design-review-id>/design-doc.md` directly
 - Add missing tasks, expand partial coverage, fix misalignments
 - Log all changes in `.plan-reviews/{{review_id}}/prd-align-round-1.md`
 
@@ -326,7 +326,7 @@ Polecat A — **constraints-compliance**:
 ```bash
 gt formula run mol-review-leg \
   --focus="constraints-compliance" \
-  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-review-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md" \
   --prompt="Review an implementation plan for PRD alignment (round 2).
 
 Check every CONSTRAINT in the PRD (technical, business, timeline, resource).
@@ -345,7 +345,7 @@ Polecat B — **non-goals-enforcement**:
 ```bash
 gt formula run mol-review-leg \
   --focus="non-goals-enforcement" \
-  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-review-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md" \
   --prompt="Review an implementation plan for PRD alignment (round 2).
 
 Check the PRD's Non-Goals section. Verify the plan does NOT include work that
@@ -366,7 +366,7 @@ gt mail inbox
 ```
 
 **3. Apply fixes to the plan:**
-Read both reports. Apply must-fix and should-fix changes to `.designs/<design-id>/design-doc.md`.
+Read both reports. Apply must-fix and should-fix changes to `.designs/<design-review-id>/design-doc.md`.
 Cut scope-creep items. Add constraint-respecting guardrails. Log changes in
 `.plan-reviews/{{review_id}}/prd-align-round-2.md`.
 
@@ -385,7 +385,7 @@ Polecat A — **user-stories-coverage**:
 ```bash
 gt formula run mol-review-leg \
   --focus="user-stories-coverage" \
-  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-review-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md" \
   --prompt="Review an implementation plan for PRD alignment (round 3).
 
 Walk through every USER STORY and SCENARIO in the PRD. For each, trace the
@@ -404,7 +404,7 @@ Polecat B — **open-questions-resolution**:
 ```bash
 gt formula run mol-review-leg \
   --focus="open-questions-resolution" \
-  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md" \
+  --artifacts=".prd-reviews/{{review_id}}/prd-draft.md,.designs/<design-review-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md" \
   --prompt="Review an implementation plan for PRD alignment (round 3).
 
 Check every OPEN QUESTION from the PRD (both the original Open Questions section
@@ -427,7 +427,7 @@ gt mail inbox
 ```
 
 **3. Apply fixes to the plan:**
-Read both reports. Apply all fixes to `.designs/<design-id>/design-doc.md`.
+Read both reports. Apply all fixes to `.designs/<design-review-id>/design-doc.md`.
 Log changes in `.plan-reviews/{{review_id}}/prd-align-round-3.md`.
 
 **4. PRD alignment summary:**
@@ -465,7 +465,7 @@ Polecat A — **completeness**:
 ```bash
 gt formula run mol-review-leg \
   --focus="completeness" \
-  --artifacts=".designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md,.plan-reviews/{{review_id}}/prd-align-round-3.md" \
+  --artifacts=".designs/<design-review-id>/design-doc.md,.plan-reviews/{{review_id}}/prd-align-round-1.md,.plan-reviews/{{review_id}}/prd-align-round-2.md,.plan-reviews/{{review_id}}/prd-align-round-3.md" \
   --prompt="Review an implementation plan for completeness.
 
 Is the plan complete? Check for:
@@ -487,7 +487,7 @@ Polecat B — **sequencing**:
 ```bash
 gt formula run mol-review-leg \
   --focus="sequencing" \
-  --artifacts=".designs/<design-id>/design-doc.md" \
+  --artifacts=".designs/<design-review-id>/design-doc.md" \
   --prompt="Review an implementation plan for correct sequencing.
 
 Check the ordering and dependencies of all plan phases and tasks:
@@ -510,7 +510,7 @@ gt mail inbox
 
 **3. Apply fixes to the plan:**
 Read both reports. Apply all must-fix and should-fix changes to
-`.designs/<design-id>/design-doc.md`. Log in `.plan-reviews/{{review_id}}/review-round-1.md`.
+`.designs/<design-review-id>/design-doc.md`. Log in `.plan-reviews/{{review_id}}/review-round-1.md`.
 
 **Exit criteria:** Both reports received. All fixes applied."""
 
@@ -527,7 +527,7 @@ Polecat A — **risk**:
 ```bash
 gt formula run mol-review-leg \
   --focus="risk" \
-  --artifacts=".designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/review-round-1.md" \
+  --artifacts=".designs/<design-review-id>/design-doc.md,.plan-reviews/{{review_id}}/review-round-1.md" \
   --prompt="Review an implementation plan for risk.
 
 Identify risks in the plan:
@@ -549,7 +549,7 @@ Polecat B — **scope-creep**:
 ```bash
 gt formula run mol-review-leg \
   --focus="scope-creep" \
-  --artifacts=".designs/<design-id>/design-doc.md,.prd-reviews/{{review_id}}/prd-draft.md,.plan-reviews/{{review_id}}/review-round-1.md" \
+  --artifacts=".designs/<design-review-id>/design-doc.md,.prd-reviews/{{review_id}}/prd-draft.md,.plan-reviews/{{review_id}}/review-round-1.md" \
   --prompt="Review an implementation plan for scope creep.
 
 Look for unnecessary work in the plan:
@@ -573,7 +573,7 @@ gt mail inbox
 ```
 
 **3. Apply fixes to the plan:**
-Read both reports. Apply fixes to `.designs/<design-id>/design-doc.md`.
+Read both reports. Apply fixes to `.designs/<design-review-id>/design-doc.md`.
 Add risk mitigations, cut scope-creep items, add spikes for unknowns.
 Log in `.plan-reviews/{{review_id}}/review-round-2.md`.
 
@@ -592,7 +592,7 @@ Polecat A — **testability**:
 ```bash
 gt formula run mol-review-leg \
   --focus="testability" \
-  --artifacts=".designs/<design-id>/design-doc.md,.plan-reviews/{{review_id}}/review-round-1.md,.plan-reviews/{{review_id}}/review-round-2.md" \
+  --artifacts=".designs/<design-review-id>/design-doc.md,.plan-reviews/{{review_id}}/review-round-1.md,.plan-reviews/{{review_id}}/review-round-2.md" \
   --prompt="Review an implementation plan for testability.
 
 For each task/phase in the plan, check:
@@ -614,7 +614,7 @@ Polecat B — **coherence**:
 ```bash
 gt formula run mol-review-leg \
   --focus="coherence" \
-  --artifacts=".designs/<design-id>/design-doc.md,.prd-reviews/{{review_id}}/prd-draft.md,.plan-reviews/{{review_id}}/review-round-1.md,.plan-reviews/{{review_id}}/review-round-2.md" \
+  --artifacts=".designs/<design-review-id>/design-doc.md,.prd-reviews/{{review_id}}/prd-draft.md,.plan-reviews/{{review_id}}/review-round-1.md,.plan-reviews/{{review_id}}/review-round-2.md" \
   --prompt="Review an implementation plan for overall coherence.
 
 This is the final review pass. Check the plan holistically:
@@ -637,7 +637,7 @@ gt mail inbox
 ```
 
 **3. Apply fixes to the plan:**
-Read both reports. Apply final fixes to `.designs/<design-id>/design-doc.md`.
+Read both reports. Apply final fixes to `.designs/<design-review-id>/design-doc.md`.
 Log in `.plan-reviews/{{review_id}}/review-round-3.md`.
 
 **4. Iterative review summary — output in conversation:**
@@ -656,7 +656,7 @@ Log in `.plan-reviews/{{review_id}}/review-round-3.md`.
 - Round 5 (risk + scope-creep): <N> fixes
 - Round 6 (testability + coherence): <N> fixes
 
-**Final plan:** .designs/<design-id>/design-doc.md
+**Final plan:** .designs/<design-review-id>/design-doc.md
 **Review logs:** .plan-reviews/{{review_id}}/
 
 Proceeding to bead creation...
@@ -673,7 +673,7 @@ Convert the refined implementation plan into beads with dependencies.
 
 **1. Read the final plan:**
 ```bash
-cat .designs/<design-id>/design-doc.md
+cat .designs/<design-review-id>/design-doc.md
 ```
 
 **2. Identify work items from the Implementation Plan section:**
@@ -718,7 +718,7 @@ Implementation of: {{problem}}
 ## Planning Artifacts
 - PRD: .prd-reviews/<review-id>/prd-draft.md
 - PRD Review: .prd-reviews/<review-id>/prd-review.md
-- Design Doc: .designs/<design-id>/design-doc.md
+- Design Doc: .designs/<design-review-id>/design-doc.md
 - Review Logs: .plan-reviews/<review-id>/
 "
 ```
@@ -790,7 +790,7 @@ First pass: find gaps between the implementation plan and the beads just created
 
 **1. Read the implementation plan:**
 ```bash
-cat .designs/<design-id>/design-doc.md
+cat .designs/<design-review-id>/design-doc.md
 ```
 
 **2. List all beads just created:**

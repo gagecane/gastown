@@ -508,15 +508,26 @@ func collectLegOutputs(meta *ConvoyMeta, f *formula.Formula) ([]LegOutput, bool,
 }
 
 // expandOutputPath expands template variables in output paths.
-// Supports: {{review_id}}, {{leg.id}}
+// Supports Go template output syntax plus legacy bare placeholders.
 func expandOutputPath(directory, pattern, reviewID, legID string) string {
-	// Expand directory
-	dir := strings.ReplaceAll(directory, "{{review_id}}", reviewID)
-
-	// Expand pattern
-	file := strings.ReplaceAll(pattern, "{{leg.id}}", legID)
-
+	dir := expandOutputTemplate(directory, reviewID, legID)
+	file := expandOutputTemplate(pattern, reviewID, legID)
 	return filepath.Join(dir, file)
+}
+
+func expandOutputTemplate(tmplText, reviewID, legID string) string {
+	ctx := map[string]interface{}{
+		"review_id": reviewID,
+		"leg": map[string]interface{}{
+			"id": legID,
+		},
+	}
+	if rendered, err := renderTemplate(tmplText, ctx); err == nil {
+		return rendered
+	}
+
+	text := strings.ReplaceAll(tmplText, "{{review_id}}", reviewID)
+	return strings.ReplaceAll(text, "{{leg.id}}", legID)
 }
 
 // createSynthesisBead creates a bead for the synthesis step in the target rig's
@@ -536,10 +547,25 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 	desc.WriteString(fmt.Sprintf("review_id: %s\n", reviewID))
 	desc.WriteString("\n")
 
+	var outputDir, outputSynthesis string
+	if f != nil && f.Output != nil {
+		outputDir = expandOutputTemplate(f.Output.Directory, reviewID, "")
+		outputSynthesis = f.Output.Synthesis
+	}
+
 	// Add synthesis instructions from formula
 	if f != nil && f.Synthesis != nil && f.Synthesis.Description != "" {
+		formulaName := meta.Formula
+		if formulaName == "" {
+			formulaName = f.Name
+		}
+		synCtx := formulaTemplateContext(formulaName, meta.Title, reviewID, deriveDesignID(convoyID), 0, "", nil, nil, nil)
+		synCtx["problem"] = meta.Title
+		addOutputTemplateContext(synCtx, outputDir, outputSynthesis)
+		synDesc := renderTemplateOrDefault(f.Synthesis.Description, synCtx, f.Synthesis.Description)
+
 		desc.WriteString("## Instructions\n\n")
-		desc.WriteString(f.Synthesis.Description)
+		desc.WriteString(synDesc)
 		desc.WriteString("\n\n")
 	}
 
@@ -559,8 +585,7 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 
 	// Add output path if configured
 	if f != nil && f.Output != nil && f.Output.Synthesis != "" {
-		outputPath := strings.ReplaceAll(f.Output.Directory, "{{review_id}}", reviewID)
-		outputPath = filepath.Join(outputPath, f.Output.Synthesis)
+		outputPath := filepath.Join(outputDir, f.Output.Synthesis)
 		desc.WriteString(fmt.Sprintf("\n## Output\n\nWrite synthesis to: %s\n", outputPath))
 	}
 

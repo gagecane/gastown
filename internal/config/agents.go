@@ -185,9 +185,9 @@ type AgentPresetInfo struct {
 
 	// EscapeCancelsRequest indicates that sending an Escape keystroke to this
 	// agent cancels its in-flight generation. NudgeSession normally sends
-	// Escape (step 5) to exit vim INSERT mode — harmless for bash/Claude Code,
-	// but destructive for agents like Gemini CLI where Escape aborts the
-	// active request. When true, NudgeSessionWithOpts skips the Escape
+	// Escape (step 5) to exit vim INSERT mode — harmless for bash, but
+	// destructive for agents where Escape aborts the active request. When true,
+	// NudgeSessionWithOpts skips the Escape
 	// keystroke and the 600ms readline timeout that follows it.
 	EscapeCancelsRequest bool `json:"escape_cancels_request,omitempty"`
 

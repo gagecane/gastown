@@ -323,6 +323,10 @@ for DB in "${PROD_DBS[@]}"; do
   if [[ "$CURRENT_HASH" = "$LAST_HASH" ]] && [[ "$CURRENT_HASH" != "unknown" ]] && ! $JUST_PROVISIONED; then
     log "  $DB: unchanged ($CURRENT_HASH), skipping"
     SKIPPED=$((SKIPPED + 1))
+    # Signal liveness to the daemon's dir-mtime freshness check even when
+    # there is nothing to sync — otherwise checkBackupFreshness reports the
+    # backup patrol as stalled forever and pours doctor molecules.
+    touch "$BACKUP_DIR/$DB" 2>/dev/null || true
     continue
   fi
 
@@ -330,6 +334,19 @@ for DB in "${PROD_DBS[@]}"; do
     log "  $DB: DRY RUN would sync ($LAST_HASH -> $CURRENT_HASH)"
     SYNCED=$((SYNCED + 1))
     continue
+  fi
+
+  # Ensure the backup remote exists before syncing. Without this, towns
+  # that never ran `dolt backup add` fail every sync (historically masked
+  # by the SYNC_RC bug below).
+  if ! (cd "$DB_DIR" && dolt backup -v 2>/dev/null | awk '{print $1}' | grep -qx "$BACKUP_NAME"); then
+    log "  $DB: backup remote $BACKUP_NAME missing, adding -> file://$BACKUP_DIR/$DB/$BACKUP_NAME"
+    if ! (cd "$DB_DIR" && dolt backup add "$BACKUP_NAME" "file://$BACKUP_DIR/$DB/$BACKUP_NAME" 2>&1); then
+      FAILED=$((FAILED + 1))
+      FAILED_DBS="$FAILED_DBS $DB(add-remote)"
+      log "  $DB: FAILED to add backup remote"
+      continue
+    fi
   fi
 
   # Sync backup with timeout
@@ -351,6 +368,8 @@ for DB in "${PROD_DBS[@]}"; do
     # Record the hash we just backed up
     mkdir -p "$(dirname "$HASH_FILE")"
     echo "$CURRENT_HASH" > "$HASH_FILE"
+    # Bump dir mtime for the daemon's freshness check (see skip branch).
+    touch "$BACKUP_DIR/$DB" 2>/dev/null || true
 
     DB_SIZE=$(du -sh "$BACKUP_DIR/$DB" 2>/dev/null | cut -f1 || echo "?")
     SYNCED=$((SYNCED + 1))

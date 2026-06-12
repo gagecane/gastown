@@ -394,6 +394,9 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	// Must match AutoClose()'s eligibility exactly, including the gt:pinned label
 	// exclusion and the persistent-infra role_type guard (gu-8r6u6), otherwise scan
 	// can report candidates that AutoClose will never close.
+	//
+	// Convoys are also excluded to mirror AutoClose (hq-jnap): convoy lifecycle
+	// is tracked-bead-status driven, never staleness driven.
 	staleQuery := `
 		SELECT COUNT(*) FROM issues i
 		WHERE i.status IN ('open', 'in_progress')
@@ -401,6 +404,7 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		AND i.priority > 1
 		AND i.issue_type != 'epic'
 		AND i.issue_type != 'agent'
+		AND i.issue_type != 'convoy'
 		AND i.id NOT IN (
 			SELECT DISTINCT l.issue_id FROM labels l
 			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent', 'gt:pinned')
@@ -915,12 +919,20 @@ func AutoClose(db *sql.DB, dbName string, staleAge time.Duration, dryRun bool) (
 	// (refinery/witness/dog) from being auto-closed as stale. The role_type
 	// guard is label-independent, so an infra bead survives even if it loses its
 	// gt:agent / gt:pinned labels — the failure mode behind gu-8r6u6.
+	//
+	// Convoys are excluded from staleness auto-close (hq-jnap): their lifecycle
+	// is driven by tracked-bead status (`gt convoy check` / refinery post-merge),
+	// and the 'tracks' relation is non-blocking so the dependency exclusions
+	// below do NOT protect a convoy with open tracked issues. Stale-closing a
+	// convoy while its tracked beads are open orphans them from dispatch
+	// tracking and causes duplicate dispatches (hq-qouv/hq-shb1 incident).
 	whereClause := fmt.Sprintf(`
 		i.status IN ('open', 'in_progress')
 		AND i.updated_at < ?
 		AND i.priority > 1
 		AND i.issue_type != 'epic'
 		AND i.issue_type != 'agent'
+		AND i.issue_type != 'convoy'
 		AND i.id NOT IN (
 			SELECT DISTINCT l.issue_id FROM `+"`%s`"+`.labels l
 			WHERE l.label IN ('gt:standing-orders', 'gt:keep', 'gt:role', 'gt:rig', 'gt:agent', 'gt:pinned')

@@ -279,7 +279,11 @@ heartbeat_epoch() {
   fi
 
   # Fallback for malformed legacy files: use mtime rather than failing open.
-  stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null
+  # GNU stat (-c %Y) first: on GNU, 'stat -f' is filesystem mode and dumps a
+  # multi-line "File: ..." block to stdout BEFORE failing, polluting the
+  # command substitution and breaking downstream arithmetic (hq-wisp-0vrp).
+  # BSD/macOS stat (-f %m) is the fallback.
+  stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null
 }
 
 has_in_progress_work() {
@@ -488,6 +492,7 @@ log "=== Deacon Health ==="
 
 DEACON_SESSION="hq-deacon"
 DEACON_ISSUE=""
+DEACON_DIVERGENCE=""
 DEACON_PROCESS_ALIVE=0
 
 if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
@@ -793,6 +798,7 @@ fi
 
 SUMMARY="Agent health: ${#CRASHED[@]} crashed, ${#STUCK[@]} stuck, ${#STALLED[@]} stalled, ${#IDENTITY_HOOKED[@]} identity-hooked, $HEALTHY healthy"
 [ -n "$DEACON_ISSUE" ] && SUMMARY="$SUMMARY, deacon=$DEACON_ISSUE"
+[ -n "$DEACON_DIVERGENCE" ] && SUMMARY="$SUMMARY, deacon=$DEACON_DIVERGENCE (not escalated)"
 log ""
 log "=== $SUMMARY ==="
 

@@ -1097,6 +1097,14 @@ func (g *Git) DetachHead() error {
 	return err
 }
 
+// CheckoutDetach checks out the given ref without attaching to a local branch.
+// This is useful in shared-worktree repos where the branch may already be
+// checked out by another worktree, but this worktree only needs that commit.
+func (g *Git) CheckoutDetach(ref string) error {
+	_, err := g.run("checkout", "--detach", ref)
+	return err
+}
+
 // CheckoutNewBranch creates a new branch from startPoint and checks it out.
 // Equivalent to: git checkout -b <branch> <startPoint>
 func (g *Git) CheckoutNewBranch(branch, startPoint string) error {

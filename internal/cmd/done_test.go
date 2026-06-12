@@ -311,11 +311,22 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 		// hookAssignee, when non-empty, creates a bead and hooks it to this
 		// assignee. The created bead's ID then becomes the expected result.
 		hookAssignee string
+		// inProgressAssignee, when non-empty, creates a bead set to
+		// status=in_progress assigned to this agent. Covers hq-xa4z: polecats
+		// claim their assignment with `bd update --status=in_progress` when
+		// starting work, so a hooked-only lookup returned empty and blinded the
+		// stale-branch guard. The created bead's ID becomes the expected result.
+		inProgressAssignee string
 	}{
 		{
 			name:         "hooked bead assigned to agent returns issue ID",
 			agentID:      "testrig/polecats/furiosa",
 			hookAssignee: "testrig/polecats/furiosa",
+		},
+		{
+			name:               "in_progress bead assigned to agent returns issue ID",
+			agentID:            "testrig/polecats/toast",
+			inProgressAssignee: "testrig/polecats/toast",
 		},
 		{
 			name:    "no hooked beads returns empty",
@@ -349,10 +360,111 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 				}
 				wantIssueID = issue.ID
 			}
+			if tt.inProgressAssignee != "" {
+				issue, err := bd.Create(beads.CreateOptions{
+					Title:  "Claimed task",
+					Labels: []string{"gt:task"},
+				})
+				if err != nil {
+					t.Fatalf("create task bead: %v", err)
+				}
+				inProgress := "in_progress"
+				if err := bd.Update(issue.ID, beads.UpdateOptions{
+					Status:   &inProgress,
+					Assignee: &tt.inProgressAssignee,
+				}); err != nil {
+					t.Fatalf("update bead to in_progress: %v", err)
+				}
+				wantIssueID = issue.ID
+			}
 
 			got := findHookedBeadForAgent(bd, tt.agentID)
 			if got != wantIssueID {
 				t.Errorf("findHookedBeadForAgent(%q) = %q, want %q", tt.agentID, got, wantIssueID)
+			}
+		})
+	}
+}
+
+func TestSelectAssignedIssue(t *testing.T) {
+	tests := []struct {
+		name        string
+		branchIssue string
+		assigned    []string
+		wantIssue   string
+		wantAmbig   bool
+	}{
+		{
+			name:      "single assignment selected",
+			assigned:  []string{"gt-real"},
+			wantIssue: "gt-real",
+		},
+		{
+			name:        "stale branch overridden by single assignment",
+			branchIssue: "gt-old",
+			assigned:    []string{"gt-real"},
+			wantIssue:   "gt-real",
+		},
+		{
+			name:        "branch matching assignment needs no override",
+			branchIssue: "gt-real",
+			assigned:    []string{"gt-real"},
+		},
+		{
+			name:        "subtask branch matching assignment needs no override",
+			branchIssue: "gt-real.1",
+			assigned:    []string{"gt-real"},
+		},
+		{
+			name:        "branch matching one of multiple assignments needs no override",
+			branchIssue: "gt-real",
+			assigned:    []string{"gt-real", "gt-other"},
+		},
+		{
+			name:      "duplicate assignment ids collapse",
+			assigned:  []string{"gt-real", "gt-real"},
+			wantIssue: "gt-real",
+		},
+		{
+			name:      "multiple assignments are ambiguous",
+			assigned:  []string{"gt-b", "gt-a"},
+			wantAmbig: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIssue, gotAmbig := selectAssignedIssue(tt.branchIssue, tt.assigned)
+			if gotIssue != tt.wantIssue || gotAmbig != tt.wantAmbig {
+				t.Fatalf("selectAssignedIssue(%q, %v) = (%q, %v), want (%q, %v)",
+					tt.branchIssue, tt.assigned, gotIssue, gotAmbig, tt.wantIssue, tt.wantAmbig)
+			}
+		})
+	}
+}
+
+// TestIsStaleBranchIssue verifies the stale-branch guard (hq-l0fj): a
+// branch-derived issue id is overridden only when it conflicts with the
+// hooked bead and is not a subtask of it.
+func TestIsStaleBranchIssue(t *testing.T) {
+	tests := []struct {
+		name        string
+		branchIssue string
+		hookedIssue string
+		want        bool
+	}{
+		{"matching ids are not stale", "hq-oibv", "hq-oibv", false},
+		{"reused branch from closed bead is stale", "re-ofo", "hq-oibv", true},
+		{"subtask of hooked bead is not stale", "gt-abc.1", "gt-abc", false},
+		{"different bead with shared prefix is stale", "gt-abc1", "gt-abc", true},
+		{"no branch issue is not stale", "", "hq-oibv", false},
+		{"no hooked bead is not stale", "re-ofo", "", false},
+		{"both empty is not stale", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStaleBranchIssue(tt.branchIssue, tt.hookedIssue); got != tt.want {
+				t.Errorf("isStaleBranchIssue(%q, %q) = %v, want %v", tt.branchIssue, tt.hookedIssue, got, tt.want)
 			}
 		})
 	}
@@ -552,6 +664,60 @@ func TestShouldAwaitRefineryMerge(t *testing.T) {
 			if got := shouldAwaitRefineryMerge(tt.exitType, tt.pushFailed, tt.mrFailed, tt.mrID); got != tt.want {
 				t.Errorf("shouldAwaitRefineryMerge(%q, push=%v, mr=%v, %q) = %v, want %v",
 					tt.exitType, tt.pushFailed, tt.mrFailed, tt.mrID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldSyncIdlePolecatWorktree(t *testing.T) {
+	tests := []struct {
+		name          string
+		exitType      string
+		mergeStrategy string
+		pushFailed    bool
+		mrFailed      bool
+		syncSafe      bool
+		want          bool
+	}{
+		{"completed default strategy syncs", ExitCompleted, "", false, false, true, true},
+		{"completed direct strategy syncs", ExitCompleted, "direct", false, false, true, true},
+		{"completed mr strategy syncs", ExitCompleted, "mr", false, false, true, true},
+		{"local strategy keeps branch", ExitCompleted, "local", false, false, true, false},
+		{"deferred keeps branch", ExitDeferred, "", false, false, true, false},
+		{"escalated keeps branch", ExitEscalated, "", false, false, true, false},
+		{"push failure keeps branch", ExitCompleted, "", true, false, true, false},
+		{"mr failure keeps branch", ExitCompleted, "", false, true, true, false},
+		{"unsafe sync keeps branch", ExitCompleted, "", false, false, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldSyncIdlePolecatWorktree(tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed, tt.syncSafe)
+			if got != tt.want {
+				t.Errorf("shouldSyncIdlePolecatWorktree(%q, %q, %v, %v, %v) = %v, want %v",
+					tt.exitType, tt.mergeStrategy, tt.pushFailed, tt.mrFailed, tt.syncSafe, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCleanupStatusAfterSuccessfulPush(t *testing.T) {
+	tests := []struct {
+		status string
+		want   string
+	}{
+		{"unpushed", "clean"},
+		{"has_unpushed", "clean"},
+		{"clean", "clean"},
+		{"uncommitted", "uncommitted"},
+		{"stash", "stash"},
+		{"unknown", "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			if got := cleanupStatusAfterSuccessfulPush(tt.status); got != tt.want {
+				t.Errorf("cleanupStatusAfterSuccessfulPush(%q) = %q, want %q", tt.status, got, tt.want)
 			}
 		})
 	}

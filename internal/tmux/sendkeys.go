@@ -935,16 +935,6 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// 2. Sanitize control characters that corrupt delivery
 	sanitized := sanitizeNudgeMessage(message)
 
-	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
-	//    with 10ms inter-chunk delays to avoid argument length limits.
-	if err := t.sendMessageToTarget(target, sanitized); err != nil {
-		return err
-	}
-
-	// 4. Adaptive post-text delay: scales with message length to give tmux
-	// enough time to process all chunks under load. (GH#gt-0b5)
-	time.Sleep(adaptiveTextDelay(len(sanitized)))
-
 	if !opts.SkipEscape {
 		// Auto-skip Escape for agents where Escape cancels in-flight generation
 		// (Copilot CLI, kiro-cli) rather than harmlessly exiting vim INSERT mode.
@@ -955,7 +945,24 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 		}
 	}
 
-	if !opts.SkipEscape {
+	// Snapshot the busy-state BEFORE typing the nudge so the message text
+	// itself cannot look like the agent's busy indicator (#4242). When the
+	// pane shows "esc to interrupt" the agent is generating, and the Escape
+	// would interrupt its current turn instead of harmlessly exiting vim
+	// INSERT mode.
+	sendEscape := !opts.SkipEscape && t.shouldSendEscape(target)
+
+	// 3. Send text via send-keys -l. Messages > 512 bytes are chunked
+	//    with 10ms inter-chunk delays to avoid argument length limits.
+	if err := t.sendMessageToTarget(target, sanitized); err != nil {
+		return err
+	}
+
+	// 4. Adaptive post-text delay: scales with message length to give tmux
+	// enough time to process all chunks under load. (GH#gt-0b5)
+	time.Sleep(adaptiveTextDelay(len(sanitized)))
+
+	if sendEscape {
 		// 5. Send Escape to exit vim INSERT mode if enabled (harmless in normal mode)
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", target, "Escape")
@@ -1000,6 +1007,45 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// delivered nudge. Targeting the resolved pane wakes the correct window.
 	t.WakePaneIfDetached(target)
 	return nil
+}
+
+// shouldSendEscapeForLines reports whether the vim-mode Escape keystroke
+// (nudge delivery step 5) is safe to send, given a snapshot of pane lines.
+//
+// The Escape exists to exit a vim-mode composer's INSERT mode so the following
+// Enter submits the line (GH#307). But in Claude Code — and Codex/Gemini —
+// Escape also cancels in-flight generation; the status bar literally reads
+// "esc to interrupt" while the agent is working. Sending Escape in that state
+// would interrupt the agent's current turn (e.g. the Mayor). Returns false when
+// any line shows the busy indicator so the caller suppresses the Escape.
+//
+// FRAGILITY: this depends on the agent TUI rendering the literal substring
+// "esc to interrupt" while generating (via hasBusyIndicator — the same
+// assumption IsIdle/WaitForIdle already make). If that upstream status text
+// changes, the gate fails open and silently: the Escape is sent again and
+// nudges can resume interrupting the agent. Tracked in gastownhall/gastown#4240.
+func shouldSendEscapeForLines(lines []string) bool {
+	for _, line := range lines {
+		if hasBusyIndicator(line) {
+			return false
+		}
+	}
+	return true
+}
+
+// shouldSendEscape captures the target's pane and reports whether the vim-mode
+// Escape is safe to send right now (see shouldSendEscapeForLines). Callers
+// snapshot before writing nudge text so the message itself cannot masquerade as
+// the busy indicator. On capture failure it returns false: when we cannot
+// confirm the agent is idle, skipping the Escape is the safe default — it avoids
+// interrupting an active agent and is harmless for the common (non-vim) case
+// where Enter alone submits.
+func (t *Tmux) shouldSendEscape(target string) bool {
+	lines, err := t.CapturePaneLines(target, 5)
+	if err != nil {
+		return false
+	}
+	return shouldSendEscapeForLines(lines)
 }
 
 // NudgePane sends a message to a specific pane reliably.

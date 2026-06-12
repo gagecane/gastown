@@ -101,9 +101,9 @@ shift || true
 
 case "$cmd" in
   sql)
-    # bdDepListRawIDs up: SELECT issue_id FROM dependencies WHERE COALESCE(...) = '<beadID>' AND type = 'tracks'
+    # bdDepListRawIDs up: match beadID against typed dependency target columns.
     case "$*" in
-      *") = 'gt-bbb'"*)
+      *"depends_on_issue_id = 'gt-bbb'"*)
         echo '[{"issue_id":"hq-cv-existing"}]'
         ;;
       *)

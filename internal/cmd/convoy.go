@@ -594,28 +594,33 @@ func isTransientDepQueryErr(msg string) bool {
 }
 
 func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
-	// Determine query columns based on direction.
-	// "down": issueID depends on targets → SELECT <target> WHERE issue_id = ?
-	// "up":   issueID is depended on → SELECT issue_id WHERE <target> = ?
-	const targetAlias = "target"
-	var selectExpr, selectKey, whereExpr string
-	if direction == "up" {
-		selectExpr = "issue_id"
-		selectKey = "issue_id"
-		whereExpr = depTargetExpr
-	} else {
-		selectExpr = depTargetExpr + " AS " + targetAlias
-		selectKey = targetAlias
-		whereExpr = "issue_id"
-	}
-
-	// Build SQL query. Bead IDs are system-generated alphanumeric strings
-	// with hyphens and dots — validate to prevent injection.
+	// Bead IDs are system-generated alphanumeric strings with hyphens, dots,
+	// and underscores — validate to prevent injection before interpolating below.
 	if !isValidBeadID(issueID) {
 		return nil, fmt.Errorf("invalid bead ID: %q", issueID)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM dependencies WHERE %s = '%s'", selectExpr, whereExpr, issueID)
+	// The dependency target was historically a single depends_on_id column.
+	// The schema migration split it into typed columns
+	// (depends_on_issue_id / depends_on_wisp_id / depends_on_external), where
+	// cross-database refs live in depends_on_external as "external:<prefix>:<id>".
+	// "down": targets issueID depends on → COALESCE the three target columns.
+	// "up":   issues that depend on issueID → match issueID against all three.
+	const targetAlias = "target"
+	var selectExpr, whereClause, parseKey string
+	if direction == "up" {
+		selectExpr = "issue_id"
+		parseKey = "issue_id"
+		whereClause = fmt.Sprintf(
+			"(depends_on_issue_id = '%s' OR depends_on_wisp_id = '%s' OR %s)",
+			issueID, issueID, sqlExternalDepTargetClause(issueID))
+	} else {
+		selectExpr = depTargetExpr + " AS " + targetAlias
+		parseKey = targetAlias
+		whereClause = fmt.Sprintf("issue_id = '%s'", issueID)
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM dependencies WHERE %s", selectExpr, whereClause)
 	if depType != "" {
 		if !isValidBeadID(depType) {
 			return nil, fmt.Errorf("invalid dep type: %q", depType)
@@ -631,7 +636,7 @@ func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) 
 	seen := make(map[string]bool, len(rows))
 	var ids []string
 	for _, row := range rows {
-		rawID := row[selectKey]
+		rawID := row[parseKey]
 		id := beads.ExtractIssueID(rawID)
 		if id != "" && !seen[id] {
 			seen[id] = true
@@ -748,6 +753,12 @@ func getAllTrackedIssuesByConvoy(townBeads string, convoyIDs []string) (map[stri
 		result[convoyID] = append(result[convoyID], id)
 	}
 	return result, nil
+}
+
+func sqlExternalDepTargetClause(issueID string) string {
+	// Use an escape character that is not valid in bead IDs so underscores stay literal.
+	escapedID := strings.ReplaceAll(issueID, "_", "!_")
+	return fmt.Sprintf("depends_on_external LIKE '%%:%s' ESCAPE '!'", escapedID)
 }
 
 // isValidBeadID checks that a string is safe for SQL interpolation in dep queries.
