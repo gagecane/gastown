@@ -3,7 +3,14 @@
 All Gastown telemetry events are OTel log records exported via OTLP
 (`GT_OTEL_LOGS_URL`). Every record carries a `run.id` attribute — a UUID
 generated once per agent spawn — so all records from a single agent session
-can be retrieved and correlated.
+can be retrieved and correlated. `run.id` is injected automatically by
+`addRunID` in every `emit` call, sourced from the request context
+(`WithRunID`/`RunIDFromCtx`) or, as a fallback, the `GT_RUN` env var that
+`gt prime` sets on the session. This correlation landed via PR #2199.
+
+> The companion design doc [`design/otel/otel-data-model.md`](design/otel/otel-data-model.md)
+> describes the same schema from the design/architecture side and shares this
+> `run.id` model (`WithRunID`/`RunIDFromCtx`/`addRunID`).
 
 ---
 

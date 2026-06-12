@@ -72,8 +72,10 @@ Resource attributes set at process start via `OTEL_RESOURCE_ATTRIBUTES` (populat
 | `gt.work_bead` | string | `GT_WORK_BEAD` env var | hooked bead at last `gt prime` — **PR #2199** |
 | `gt.work_mol` | string | `GT_WORK_MOL` env var | molecule step at last `gt prime` — **PR #2199** |
 
-> Attributes marked **PR #2199** are only set after `otel-p0-work-context` merges.
-> On main, only `gt.role`, `gt.rig`, `gt.actor`, `gt.agent` are set.
+> Attributes marked **PR #2199** landed via that PR and are set on the current branch
+> (`gt.session`, `gt.run_id`, `gt.work_rig`, `gt.work_bead`, `gt.work_mol`). The
+> `gt.work_*` attributes are populated from the `GT_WORK_*` env vars that `gt prime`
+> injects into the tmux session, so they carry the most recent work context.
 
 ---
 
@@ -103,9 +105,11 @@ separately as `prime.context` (same attributes plus `formula`).
 | `hook_mode` | bool | true when invoked from a hook |
 | `status` | string | `"ok"` · `"error"` |
 | `error` | string | error message; empty when `"ok"` |
-| `work_rig` | string | ⚠️ **PR #2199** — rig whose bead is on the hook |
-| `work_bead` | string | ⚠️ **PR #2199** — bead ID currently hooked |
-| `work_mol` | string | ⚠️ **PR #2199** — molecule ID if the bead is a molecule step; empty otherwise |
+
+> Work context (`gt.work_rig`, `gt.work_bead`, `gt.work_mol`) is **not** emitted on the
+> `prime` event itself. `gt prime` injects `GT_WORK_RIG`/`GT_WORK_BEAD`/`GT_WORK_MOL` into
+> the tmux session env (PR #2199); these surface as **resource attributes** on every event
+> emitted until the next prime — see §1.2 Run.
 
 ---
 
@@ -139,7 +143,7 @@ only the length is recorded.
 
 ### `agent.event`
 
-> **Status: PR #2199 (`otel-p0-work-context`)** — not on main. Requires `GT_LOG_AGENT_OUTPUT=true` and `GT_OTEL_LOGS_URL`.
+> **Status: landed via PR #2199 (`otel-p0-work-context`).** Requires `GT_LOG_AGENT_OUTPUT=true` and `GT_OTEL_LOGS_URL`.
 
 One record per content block in the agent's conversation log. Full content, no truncation.
 
@@ -159,7 +163,7 @@ For `tool_result`: `content = <full tool output>`
 
 ### `agent.usage`
 
-> **Status: PR #2199 (`otel-p0-work-context`)** — not on main. Requires `GT_LOG_AGENT_OUTPUT=true`.
+> **Status: landed via PR #2199 (`otel-p0-work-context`).** Requires `GT_LOG_AGENT_OUTPUT=true`.
 
 One record per assistant turn (not per content block, to avoid
 double-counting).

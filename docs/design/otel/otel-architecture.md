@@ -298,9 +298,9 @@ The recorder provides type-safe functions for emitting all GT telemetry events. 
 1. **OTel metric counter** (→ VictoriaMetrics, aggregated)
 2. **OTel log record** (→ VictoriaLogs, full detail)
 
-> **`run.id` on log records**: On main, log records do not carry `run.id`. After PR #2199
-> merges, `addRunID(ctx, &r)` will be called on every log record, injecting `run.id` from
-> context (set via `WithRunID`) or from the `GT_RUN` env var.
+> **`run.id` on log records**: `addRunID(ctx, &r)` is called on every log record (via `emit`),
+> injecting `run.id` from context (set via `WithRunID`) or, as a fallback, from the `GT_RUN`
+> env var. Landed via PR #2199.
 
 #### Recording Pattern
 
@@ -350,25 +350,25 @@ Two mechanisms ensure subprocess telemetry is correlated:
   - `BD_OTEL_LOGS_URL` (mirrors `GT_OTEL_LOGS_URL`)
   - `GT_RUN` (run ID for correlation — **PR #2199**)
 
-#### Run ID Correlation (PR #2199)
+#### Run ID Correlation (landed PR #2199)
 
-On main, there is no run-level correlation key in log records. PR #2199 adds:
+Run-level correlation in log records (landed via PR #2199):
 
 - `GT_RUN` env var — UUID generated at polecat spawn
 - `gt.run_id` in `OTEL_RESOURCE_ATTRIBUTES` — carried by all subprocesses
 - `WithRunID(ctx, runID)` / `RunIDFromCtx(ctx)` — Go context carrier
 - `addRunID(ctx, &record)` — called in every emit, injects `run.id` into log record
 
-**Query example (after PR #2199):** Retrieve all events for a single session run
+**Query example:** Retrieve all events for a single session run
 ```logsql
 run.id:uuid-1234
 ```
 
 ---
 
-### 4. Agent Logging (PR #2199)
+### 4. Agent Logging (landed PR #2199)
 
-> **Status: PR #2199 (`otel-p0-work-context`)** — not on main. The files below are added in PR #2199 and do not exist at `origin/main`.
+> **Status: landed via PR #2199 (`otel-p0-work-context`).** The files below exist on the current branch.
 
 **Opt-in feature**: `GT_LOG_AGENT_OUTPUT=true` streams native AI agent JSONL to VictoriaLogs.
 
