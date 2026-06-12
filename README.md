@@ -122,7 +122,7 @@ Federated work coordination network linking Gas Towns through DoltHub. Rigs post
 
 ### Prerequisites
 
-- **Go 1.25+** - [go.dev/dl](https://go.dev/dl/)
+- **Go 1.26+** - [go.dev/dl](https://go.dev/dl/)
 - **Git 2.25+** - for worktree support
 - **Dolt 2.0.7+** - `brew install dolt` on macOS, or see [github.com/dolthub/dolt](https://github.com/dolthub/dolt)
 - **beads (bd) 0.55.4+** - installed by `brew install gastown`, or see [github.com/steveyegge/beads](https://github.com/steveyegge/beads)
@@ -357,7 +357,7 @@ gt convoy add hq-cv-abc gt-m3k9p gt-w5t2x
 gt sling gt-m3k9p myproject/my-agent
 
 # Check status
-gt convoy show
+gt convoy status
 ```
 
 ## Runtime Configuration
@@ -420,7 +420,7 @@ gt feed --problems          # Start in problems view (stuck agent detection)
 ```bash
 gt convoy create <name> [issues...]   # Create convoy with issues
 gt convoy list              # List all convoys
-gt convoy show [id]         # Show convoy details
+gt convoy status [id]       # Show convoy details
 gt convoy add <convoy-id> <issue-id...>  # Add issues to convoy
 ```
 
@@ -721,7 +721,7 @@ Check hooks are properly initialized:
 
 ```bash
 gt hooks list
-gt hooks repair
+gt hooks sync
 ```
 
 ### Convoy stuck
@@ -729,7 +729,7 @@ gt hooks repair
 Force refresh:
 
 ```bash
-gt convoy refresh <convoy-id>
+gt convoy check <convoy-id>
 ```
 
 ### Mayor not responding
@@ -737,8 +737,7 @@ gt convoy refresh <convoy-id>
 Restart Mayor session:
 
 ```bash
-gt mayor detach
-gt mayor attach
+gt mayor restart
 ```
 
 ## License
