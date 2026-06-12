@@ -25,9 +25,12 @@ Executed via `run.sh` — no AI interpretation.
 ## What it does
 
 1. For each production DB (hq, beads, gt): compare HEAD hash against last backup
-2. Skip unchanged databases
-3. Run `dolt backup sync` for changed databases
-4. Only escalate when actual backup operations fail (FAILED > 0)
+2. Skip databases whose rig is PARKED (agents stopped by design — a stale/absent
+   backup is the expected steady state, not a data-loss failure; counted in the
+   benign `parked` bucket, never escalated — gu-otphy)
+3. Skip unchanged databases
+4. Run `dolt backup sync` for changed databases
+5. Only escalate when actual backup operations fail (FAILED > 0)
 
 ## Usage
 
