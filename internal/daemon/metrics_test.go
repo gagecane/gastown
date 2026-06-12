@@ -22,7 +22,7 @@ func TestDaemonMetrics_NilReceiver(t *testing.T) {
 	// All methods must be nil-safe — no panic expected.
 	dm.recordHeartbeat(ctx)
 	dm.recordRestart(ctx, "deacon")
-	dm.updateDoltHealth(5, 100, 2.5, 1024, true)
+	dm.updateDoltHealth(5, 100, 2.5, 1024, true, 0)
 	dm.updateHookedBeads(map[string]int64{"hq": 1}, map[string]int64{"hq": 0})
 }
 
@@ -55,11 +55,14 @@ func TestDaemonMetrics_UpdateDoltHealth_Healthy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dm.updateDoltHealth(5, 100, 2.5, 1048576, true)
+	dm.updateDoltHealth(5, 100, 2.5, 1048576, true, 7)
 
 	dm.doltMu.RLock()
 	defer dm.doltMu.RUnlock()
 
+	if dm.doltOrphanDatabases != 7 {
+		t.Errorf("doltOrphanDatabases = %d, want 7", dm.doltOrphanDatabases)
+	}
 	if dm.doltConnections != 5 {
 		t.Errorf("doltConnections = %d, want 5", dm.doltConnections)
 	}
@@ -83,7 +86,7 @@ func TestDaemonMetrics_UpdateDoltHealth_Unhealthy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dm.updateDoltHealth(0, 0, 0, 0, false)
+	dm.updateDoltHealth(0, 0, 0, 0, false, 0)
 
 	dm.doltMu.RLock()
 	defer dm.doltMu.RUnlock()
@@ -99,12 +102,15 @@ func TestDaemonMetrics_UpdateDoltHealth_Idempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dm.updateDoltHealth(10, 200, 5.0, 2048, true)
-	dm.updateDoltHealth(3, 200, 1.0, 2048, false)
+	dm.updateDoltHealth(10, 200, 5.0, 2048, true, 2)
+	dm.updateDoltHealth(3, 200, 1.0, 2048, false, 5)
 
 	dm.doltMu.RLock()
 	defer dm.doltMu.RUnlock()
 
+	if dm.doltOrphanDatabases != 5 {
+		t.Errorf("doltOrphanDatabases = %d, want 5 (last write wins)", dm.doltOrphanDatabases)
+	}
 	if dm.doltConnections != 3 {
 		t.Errorf("doltConnections = %d, want 3 (last write wins)", dm.doltConnections)
 	}
