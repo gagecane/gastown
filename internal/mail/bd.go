@@ -69,42 +69,59 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 	// own injection. (GH#2746)
 	args = beads.InjectFlatForListJSON(args)
 
-	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
-	cmd.Dir = workDir
-	util.SetDetachedProcessGroup(cmd)
-
-	cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, isMailBdReadCommand(args), extraEnv)
+	readOnly := isMailBdReadCommand(args)
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
-	runErr := cmd.Run()
+	// runOnce builds and runs a single bd subprocess with the standard
+	// process-group/env/pipe wiring. Buffers are reset by the caller.
+	runOnce := func(cmdArgs []string) error {
+		cmd := exec.CommandContext(ctx, "bd", cmdArgs...) //nolint:gosec // G204: bd is a trusted internal tool
+		cmd.Dir = workDir
+		util.SetDetachedProcessGroup(cmd)
+		cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, readOnly, extraEnv)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		return cmd.Run()
+	}
 
-	// If bd doesn't support --flat (< v0.59), retry without it.
-	// Same fallback pattern as beads.Run. (GH#2746)
-	if runErr != nil && strings.Contains(stderr.String(), "unknown flag: --flat") {
-		retryArgs := make([]string, 0, len(args))
-		for _, a := range args {
-			if a != "--flat" {
-				retryArgs = append(retryArgs, a)
-			}
-		}
+	// runAttempt performs one full attempt: the initial run plus the --flat
+	// fallback for bd versions that don't support it (< v0.59, GH#2746).
+	runAttempt := func() error {
 		stdout.Reset()
 		stderr.Reset()
-		retryCmd := exec.CommandContext(ctx, "bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-		retryCmd.Dir = workDir
-		util.SetDetachedProcessGroup(retryCmd)
-		retryCmd.Env = cmd.Env
-		retryCmd.Stdout = &stdout
-		retryCmd.Stderr = &stderr
-		runErr = retryCmd.Run()
+		runErr := runOnce(args)
+		if runErr != nil && strings.Contains(stderr.String(), "unknown flag: --flat") {
+			retryArgs := make([]string, 0, len(args))
+			for _, a := range args {
+				if a != "--flat" {
+					retryArgs = append(retryArgs, a)
+				}
+			}
+			stdout.Reset()
+			stderr.Reset()
+			runErr = runOnce(retryArgs)
+		}
+		return runErr
+	}
+
+	// Retry transient Dolt connection-establishment failures (gu-vsts5): under
+	// concurrent load the shared gt Dolt server momentarily refuses/times out a
+	// TCP dial even though it is up; a flat retry clears it. Only dial-level
+	// failures are retried (the socket never opened, so no server-side work ran).
+	runErr := runAttempt()
+	for attempt := 1; runErr != nil && attempt < beads.DoltConnRetryAttempts && beads.IsTransientDoltDialError(stderr.String()); attempt++ {
+		time.Sleep(beads.DoltConnRetryBackoff * time.Duration(attempt))
+		runErr = runAttempt()
 	}
 
 	if runErr != nil {
+		// Rewrite bd's misleading "run 'bd dolt start'" advice into gt-aware
+		// guidance (gu-vsts5): gt owns one shared server; starting a second
+		// risks split-brain.
 		return nil, &bdError{
 			Err:    runErr,
-			Stderr: strings.TrimSpace(stderr.String()),
+			Stderr: beads.RewriteDoltUnreachableMessage(strings.TrimSpace(stderr.String())),
 		}
 	}
 

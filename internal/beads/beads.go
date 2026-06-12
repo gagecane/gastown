@@ -1091,10 +1091,10 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	ctx, cancel := context.WithTimeout(context.Background(), resolveBdSubprocessTimeout())
 	defer cancel()
 
-	// Always explicitly set BEADS_DIR to prevent inherited env vars from
-	// causing prefix mismatches. Use explicit beadsDir if set, otherwise
-	// resolve from working directory.
-	cmd := exec.CommandContext(ctx, "bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
+	// runOnce builds and runs a single bd subprocess with the standard
+	// process-group/env/pipe wiring and returns its exit error. Buffers are
+	// reset by the caller before each invocation.
+	//
 	// SetProcessGroup (not SetDetachedProcessGroup): on the subprocess timeout
 	// the Cancel hook SIGKILLs the WHOLE process group, not just the bd leader.
 	// When the Dolt data plane bounces (circuit breaker), bd wedges holding a
@@ -1107,37 +1107,8 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	// in a0a7bdb9). Group SIGKILL kills reparented children (Setpgid survives
 	// reparenting), so the next bd call opens a FRESH subprocess that reconnects
 	// to the restarted server; WaitDelay bounds residual pipe I/O.
-	util.SetProcessGroup(cmd)
-	cmd.WaitDelay = bdWaitDelay
-	cmd.Dir = b.workDir
-
-	cmd.Env = runEnv
-	cmd.Env = append(cmd.Env, telemetry.OTELEnvForSubprocess()...)
-
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if stdinData != nil {
-		cmd.Stdin = bytes.NewReader(stdinData)
-	}
-
-	err := cmd.Run()
-
-	// If bd doesn't support --flat, retry without it. The retry is done here
-	// (not in callers like List) so that InjectFlatForListJSON doesn't re-add
-	// --flat on the retry path.
-	if err != nil && strings.Contains(stderr.String(), "unknown flag: --flat") {
-		retryArgs := make([]string, 0, len(fullArgs))
-		for _, a := range fullArgs {
-			if a != "--flat" {
-				retryArgs = append(retryArgs, a)
-			}
-		}
-		stdout.Reset()
-		stderr.Reset()
-		cmd = exec.CommandContext(ctx, "bd", retryArgs...) //nolint:gosec // G204: bd is a trusted internal tool
-		// Same process-group SIGKILL + WaitDelay as the initial attempt above
-		// (gu-szlis): the retry reuses the same ctx and bytes.Buffer pipes, so
-		// it is subject to the identical inherited-pipe deadlock if bd wedges.
+	runOnce := func(cmdArgs []string) error {
+		cmd := exec.CommandContext(ctx, "bd", cmdArgs...) //nolint:gosec // G204: bd is a trusted internal tool
 		util.SetProcessGroup(cmd)
 		cmd.WaitDelay = bdWaitDelay
 		cmd.Dir = b.workDir
@@ -1148,7 +1119,45 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 		if stdinData != nil {
 			cmd.Stdin = bytes.NewReader(stdinData)
 		}
-		err = cmd.Run()
+		return cmd.Run()
+	}
+
+	// runAttempt performs one full attempt: the initial run plus the --flat
+	// fallback for bd versions that don't support it. Returns the exit error.
+	runAttempt := func() error {
+		stdout.Reset()
+		stderr.Reset()
+		err := runOnce(fullArgs)
+		// If bd doesn't support --flat, retry without it. The retry is done here
+		// (not in callers like List) so that InjectFlatForListJSON doesn't re-add
+		// --flat on the retry path.
+		if err != nil && strings.Contains(stderr.String(), "unknown flag: --flat") {
+			retryArgs := make([]string, 0, len(fullArgs))
+			for _, a := range fullArgs {
+				if a != "--flat" {
+					retryArgs = append(retryArgs, a)
+				}
+			}
+			stdout.Reset()
+			stderr.Reset()
+			err = runOnce(retryArgs)
+		}
+		return err
+	}
+
+	// Always explicitly set BEADS_DIR to prevent inherited env vars from
+	// causing prefix mismatches (handled above in runEnv).
+	//
+	// Retry transient Dolt connection-ESTABLISHMENT failures (gu-vsts5). A
+	// single shared gt Dolt server momentarily refuses/times out a TCP dial
+	// under heavy concurrent load even though it is up; a flat retry clears it.
+	// Only dial-level failures are retried (IsTransientDoltDialError) — the
+	// socket never opened, so no server-side work ran and the command is safe
+	// to re-issue. Mid-query failures are NOT retried here.
+	err := runAttempt()
+	for attempt := 1; err != nil && attempt < DoltConnRetryAttempts && IsTransientDoltDialError(stderr.String()); attempt++ {
+		time.Sleep(DoltConnRetryBackoff * time.Duration(attempt))
+		err = runAttempt()
 	}
 
 	if err != nil {
@@ -1236,7 +1245,13 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 		return ErrIDCollision
 	}
 
+	// Rewrite bd's misleading "server unreachable — run 'bd dolt start'" advice
+	// (gu-vsts5). gt owns a single shared Dolt server; telling the operator to
+	// start a second one risks split-brain. RewriteDoltUnreachableMessage probes
+	// the address and either says "transient blip, retry" (server up now) or
+	// points at the gt-managed lifecycle. Non-connection errors pass through.
 	if stderr != "" {
+		stderr = RewriteDoltUnreachableMessage(stderr)
 		return fmt.Errorf("bd %s: %s", strings.Join(args, " "), stderr)
 	}
 	return fmt.Errorf("bd %s: %w", strings.Join(args, " "), err)
