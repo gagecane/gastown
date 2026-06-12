@@ -133,20 +133,24 @@ type DispatchResult struct {
 // DispatchConflictResolution creates the work + sling-context beads
 // that hand a conflict to a polecat.
 //
-// rigBeads is the *Beads handle pointing at the rig's beads directory
-// (sling-contexts live in the target rig's beads dir — gu-c6ua / GH#3468).
-// townBeads is the town-level handle for the work bead itself.
+// rigBeads is the *Beads handle pointing at the TARGET RIG's beads
+// directory. BOTH the work bead and the sling-context are created here.
 //
-// Both handles can be the same when called from a context where the
-// rig and town beads dirs coincide; we accept two parameters so the
-// real call site (cmd/upstream_sync.go) can wire them correctly.
+// Why the work bead must live in the rig DB (gu-pinfi): `gt sling`'s
+// pre-dispatch check (cmd/sling_helpers.go) refuses to dispatch a bead
+// that is not present in the target rig's beads database. A work bead
+// created in the town/hq DB carries an hq-/gc- prefix that the rig DB
+// doesn't contain, so sling rejects it ("bead not present in target rig
+// beads database") and the fork-sync stalls. Creating the work bead in
+// the rig DB gives it the rig's prefix and keeps it co-located with the
+// sling-context that references it (so the tracks dep link resolves too).
 //
 // Returns the IDs of the created beads. Errors at any step abort the
 // dispatch — partial creation is acceptable because the work bead is
 // labeled and the sling-context references its ID, so a stranded work
 // bead is harmless (audit patrol will close it on the next pass).
-func DispatchConflictResolution(townBeads, rigBeads *beads.Beads, in DispatchInput) (DispatchResult, error) {
-	if townBeads == nil || rigBeads == nil {
+func DispatchConflictResolution(rigBeads *beads.Beads, in DispatchInput) (DispatchResult, error) {
+	if rigBeads == nil {
 		return DispatchResult{}, fmt.Errorf("DispatchConflictResolution: nil beads handle")
 	}
 	if in.Rig == "" || in.AttemptID == "" {
@@ -181,10 +185,12 @@ func DispatchConflictResolution(townBeads, rigBeads *beads.Beads, in DispatchInp
 		return DispatchResult{}, fmt.Errorf("marshaling dispatch payload: %w", err)
 	}
 
-	// 1. Create the work bead. P1 because conflict resolution blocks all
-	// future syncs for this rig — operators want it picked up first.
+	// 1. Create the work bead in the target rig's DB (gu-pinfi). It must
+	// share the rig's prefix so `gt sling`'s target-rig presence check
+	// passes. P1 because conflict resolution blocks all future syncs for
+	// this rig — operators want it picked up first.
 	workTitle := buildWorkBeadTitle(in)
-	workIssue, err := townBeads.Create(beads.CreateOptions{
+	workIssue, err := rigBeads.Create(beads.CreateOptions{
 		Title:       workTitle,
 		Description: buildWorkBeadDescription(payload, string(descRaw)),
 		Labels:      []string{"gt:task", DispatchLabel, "rig:" + in.Rig},

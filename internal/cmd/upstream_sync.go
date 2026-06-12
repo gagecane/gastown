@@ -43,6 +43,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/upstreamsync"
 )
 
@@ -698,12 +699,18 @@ func handleMergeConflict(
 		Strategy:        cfg.GetStrategy(),
 		Actor:           attempt.Actor,
 	}
-	// The rigBeads handle is the same as the town handle here because
-	// the per-rig beads dir resolves to the town path in the polecat
-	// worktree layout. A future refactor (deacon patrol integration)
-	// will pass distinct handles; for the manual `gt upstream sync`
-	// call site we use the same wrapper.
-	result, dispatchErr := upstreamsync.DispatchConflictResolution(bd, bd, in)
+	// The work bead + sling-context must be created in the TARGET RIG's
+	// beads DB, not the town/hq DB (gu-pinfi). `gt sling` refuses to
+	// dispatch a bead that isn't present in the target rig's database, so
+	// a town-DB bead (hq-/gc- prefix) would stall the fork-sync. Resolve
+	// the rig beads dir and hand the dispatcher a rig-scoped handle.
+	rigBeads := bd
+	if townRoot := bd.TownRoot(); townRoot != "" {
+		if rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, rigName); rigBeadsDir != "" {
+			rigBeads = beads.NewWithBeadsDir(townRoot, rigBeadsDir)
+		}
+	}
+	result, dispatchErr := upstreamsync.DispatchConflictResolution(rigBeads, in)
 	if dispatchErr != nil {
 		attempt.Outcome = "dispatch-error"
 		attempt.CompletedAt = time.Now().UTC().Format(time.RFC3339)

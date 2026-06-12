@@ -146,25 +146,71 @@ func TestSlingArgs_Roundtrip(t *testing.T) {
 }
 
 func TestDispatchConflictResolution_GuardClauses(t *testing.T) {
-	// nil handles
-	if _, err := DispatchConflictResolution(nil, nil, DispatchInput{}); err == nil {
+	// nil handle
+	if _, err := DispatchConflictResolution(nil, DispatchInput{}); err == nil {
 		t.Errorf("expected error for nil beads")
 	}
 	// missing required fields
 	tb := &beads.Beads{}
-	if _, err := DispatchConflictResolution(tb, tb, DispatchInput{}); err == nil {
+	if _, err := DispatchConflictResolution(tb, DispatchInput{}); err == nil {
 		t.Errorf("expected error for empty input")
 	}
 	// rig but no attempt id
-	if _, err := DispatchConflictResolution(tb, tb, DispatchInput{Rig: "gu"}); err == nil {
+	if _, err := DispatchConflictResolution(tb, DispatchInput{Rig: "gu"}); err == nil {
 		t.Errorf("expected error for missing attempt_id")
 	}
 	// no conflicts
-	if _, err := DispatchConflictResolution(tb, tb, DispatchInput{
+	if _, err := DispatchConflictResolution(tb, DispatchInput{
 		Rig:       "gu",
 		AttemptID: "att-1",
 	}); err == nil {
 		t.Errorf("expected error for empty conflict list")
+	}
+}
+
+// TestDispatchConflictResolution_WorkBeadInRigDB is the regression guard
+// for gu-pinfi: the work bead must be created in the target rig's beads
+// DB (so it carries the rig's prefix), not the town/hq DB. Before the fix
+// the work bead was created via a separate town handle, giving it an hq-/
+// gc- prefix that `gt sling` rejected ("bead not present in target rig
+// beads database"), stalling the fork-sync.
+func TestDispatchConflictResolution_WorkBeadInRigDB(t *testing.T) {
+	b, prefix := newProvisionTestBeads(t)
+
+	result, err := DispatchConflictResolution(b, DispatchInput{
+		Rig:             "gastown_upstream",
+		AttemptID:       "att-1",
+		UpstreamRemote:  "upstream",
+		UpstreamBranch:  "main",
+		UpstreamSHA:     "abc123",
+		TargetBranch:    "main",
+		TargetSHA:       "def456",
+		ConflictedFiles: []string{"internal/tmux/tmux.go"},
+		RestrictedPaths: []string{"go.mod"},
+		Strategy:        "merge",
+	})
+	if err != nil {
+		t.Fatalf("DispatchConflictResolution: %v", err)
+	}
+	if result.WorkBeadID == "" {
+		t.Fatal("expected a work bead ID")
+	}
+
+	// The work bead must carry the rig DB's prefix — proving it was
+	// created in the rig DB where `gt sling` looks for it.
+	wantPrefix := prefix + "-"
+	if !strings.HasPrefix(result.WorkBeadID, wantPrefix) {
+		t.Errorf("work bead %q does not carry rig prefix %q (would be rejected by gt sling)",
+			result.WorkBeadID, wantPrefix)
+	}
+
+	// And it must be loadable from the rig DB.
+	issue, err := b.Show(result.WorkBeadID)
+	if err != nil {
+		t.Fatalf("work bead not present in rig DB: %v", err)
+	}
+	if issue == nil || issue.ID != result.WorkBeadID {
+		t.Fatalf("rig DB returned unexpected bead: %+v", issue)
 	}
 }
 
