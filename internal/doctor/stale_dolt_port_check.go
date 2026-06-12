@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // StaleDoltPortCheck detects stale Dolt port files that point to wrong ports.
@@ -49,11 +51,12 @@ func (c *StaleDoltPortCheck) Run(ctx *CheckContext) *CheckResult {
 	c.stalePorts = nil
 	c.staleMetadata = nil
 
-	// Get the correct port from the main Dolt config
-	correctPort := c.getCorrectPort(ctx)
-	if correctPort == 0 {
-		correctPort = 3307 // default
-	}
+	// Resolve the correct port via the canonical resolver used everywhere else
+	// (config.yaml > GT_DOLT_PORT env > mayor/daemon.json > default). Reading the
+	// port directly from config.yaml here produced false positives — and
+	// destructive --fix — on towns whose real port comes from daemon.json/env
+	// without a config.yaml port line (gu-nid89.38).
+	correctPort := doltserver.DefaultConfig(ctx.TownRoot).Port
 
 	// Find all dolt-server.port files
 	portFiles := c.findPortFiles(ctx.TownRoot)
@@ -149,37 +152,6 @@ func (c *StaleDoltPortCheck) Fix(ctx *CheckContext) error {
 	}
 
 	return nil
-}
-
-// getCorrectPort returns the port from the main Dolt server config.
-func (c *StaleDoltPortCheck) getCorrectPort(ctx *CheckContext) int {
-	// Check the main Dolt server config
-	configPath := filepath.Join(ctx.TownRoot, ".dolt-data", "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return 0
-	}
-
-	// Parse port from config.yaml
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		if strings.TrimSpace(line) == "port:" && i+1 < len(lines) {
-			portStr := strings.TrimSpace(strings.TrimPrefix(lines[i+1], "port:"))
-			port, err := strconv.Atoi(portStr)
-			if err == nil {
-				return port
-			}
-		}
-		if strings.HasPrefix(line, "  port:") {
-			portStr := strings.TrimSpace(strings.TrimPrefix(line, "  port:"))
-			port, err := strconv.Atoi(portStr)
-			if err == nil {
-				return port
-			}
-		}
-	}
-
-	return 0
 }
 
 // findPortFiles finds all dolt-server.port files in known locations.
