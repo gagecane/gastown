@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -147,6 +148,13 @@ type AgentRuntime struct {
 	FirstSubject      string `json:"first_subject,omitempty"`      // Subject of first unread message
 	AgentAlias        string `json:"agent_alias,omitempty"`        // Configured agent name (e.g., "opus-46", "pi")
 	AgentInfo         string `json:"agent_info,omitempty"`         // Runtime summary (e.g., "claude/opus", "pi/kimi-k2p5")
+
+	// MCPServers lists the MCP server names configured in the settings.json that
+	// governs this agent's sessions (sorted). Populated by reading the managed
+	// .claude/settings.json mcpServers block at status time. Surfaces the
+	// per-session MCP footprint so OOM investigations no longer require manually
+	// inspecting the process tree with `ps -eo rss,args | grep builder-mcp`. See gu-yofdi.
+	MCPServers []string `json:"mcp_servers,omitempty"`
 }
 
 // RigStatus represents status of a single rig.
@@ -237,6 +245,65 @@ func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, rol
 		}
 	}
 	return alias, info
+}
+
+// resolveMCPServers returns the sorted names of MCP servers configured in the
+// managed .claude/settings.json that governs the given agent's sessions. It
+// mirrors the settings-path model used by DiscoverTargets/RoleSettingsDir: rig
+// roles (crew/witness/refinery/polecat) share one settings file in their parent
+// directory, while town-level mayor/deacon use their own working directory.
+//
+// Returns nil when the settings file is absent, unparseable, or carries no
+// mcpServers block — callers treat nil as "no MCP servers / unknown" and simply
+// omit the footprint annotation. This is read-only and best-effort: it never
+// errors out status rendering. See gu-yofdi.
+func resolveMCPServers(townRoot, rigName, role string) []string {
+	var settingsDir string
+	switch role {
+	case constants.RoleMayor, "coordinator":
+		settingsDir = filepath.Join(townRoot, "mayor")
+	case constants.RoleDeacon, "health-check":
+		settingsDir = filepath.Join(townRoot, "deacon")
+	case constants.RoleCrew, constants.RoleWitness, constants.RoleRefinery, constants.RolePolecat:
+		if rigName == "" {
+			return nil
+		}
+		settingsDir = config.RoleSettingsDir(role, filepath.Join(townRoot, rigName))
+	default:
+		return nil
+	}
+	if settingsDir == "" {
+		return nil
+	}
+
+	s, err := hooks.LoadSettings(filepath.Join(settingsDir, ".claude", "settings.json"))
+	if err != nil {
+		return nil
+	}
+	current := hooks.CurrentMCPServers(s)
+	if len(current) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(current))
+	for name := range current {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// formatMCPFootprint renders the MCP server count + names for display, e.g.
+// "2 MCP servers: builder-mcp, serena" or "1 MCP server: serena". Returns ""
+// for an empty list so callers can omit the annotation entirely. See gu-yofdi.
+func formatMCPFootprint(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	noun := "MCP servers"
+	if len(names) == 1 {
+		noun = "MCP server"
+	}
+	return fmt.Sprintf("%d %s: %s", len(names), noun, strings.Join(names, ", "))
 }
 
 // detectRuntimeFromSession inspects the actual process tree in a tmux session
@@ -1378,6 +1445,12 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 		fmt.Printf("%s  agent: %s\n", indent, agent.AgentInfo)
 	}
 
+	// Line 2b: Per-session MCP footprint (gu-yofdi). Makes the MCP server count
+	// visible for OOM investigations without inspecting the process tree.
+	if mcp := formatMCPFootprint(agent.MCPServers); mcp != "" {
+		fmt.Fprintf(w, "%s  mcp: %s\n", indent, mcp)
+	}
+
 	// Line 3: Hook bead (pinned work)
 	hookStr := style.Dim.Render("(none)")
 	hookBead := agent.HookBead
@@ -1515,8 +1588,14 @@ func renderAgentCompactWithSuffix(w io.Writer, agent AgentRuntime, indent string
 		agentSuffix = " " + style.Dim.Render("["+agent.AgentInfo+"]")
 	}
 
-	// Print single line: name + status + agent-info + hook + mail + suffix
-	fmt.Fprintf(w, "%s%-12s %s%s%s%s%s\n", indent, agent.Name, statusIndicator, agentSuffix, hookSuffix, mailSuffix, suffix)
+	// MCP footprint badge (gu-yofdi): compact count of configured MCP servers.
+	mcpSuffix := ""
+	if n := len(agent.MCPServers); n > 0 {
+		mcpSuffix = " " + style.Dim.Render(fmt.Sprintf("⚙%d", n))
+	}
+
+	// Print single line: name + status + agent-info + mcp + hook + mail + suffix
+	fmt.Fprintf(w, "%s%-12s %s%s%s%s%s%s\n", indent, agent.Name, statusIndicator, agentSuffix, mcpSuffix, hookSuffix, mailSuffix, suffix)
 }
 
 // renderAgentCompact renders a single-line agent status
@@ -1561,8 +1640,14 @@ func renderAgentCompact(w io.Writer, agent AgentRuntime, indent string, hooks []
 		agentSuffix = " " + style.Dim.Render("["+agent.AgentInfo+"]")
 	}
 
-	// Print single line: name + status + agent-info + hook + mail
-	fmt.Fprintf(w, "%s%-12s %s%s%s%s\n", indent, agent.Name, statusIndicator, agentSuffix, hookSuffix, mailSuffix)
+	// MCP footprint badge (gu-yofdi): compact count of configured MCP servers.
+	mcpSuffix := ""
+	if n := len(agent.MCPServers); n > 0 {
+		mcpSuffix = " " + style.Dim.Render(fmt.Sprintf("⚙%d", n))
+	}
+
+	// Print single line: name + status + agent-info + mcp + hook + mail
+	fmt.Fprintf(w, "%s%-12s %s%s%s%s%s\n", indent, agent.Name, statusIndicator, agentSuffix, mcpSuffix, hookSuffix, mailSuffix)
 }
 
 // AgentLifecycle is the observable lifecycle state of an agent, derived from
@@ -1796,6 +1881,10 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 				Role:    d.role,
 			}
 
+			// Per-session MCP footprint (gu-yofdi). Town-level agents resolve
+			// their settings.json by role under townRoot.
+			agent.MCPServers = resolveMCPServers(townRoot, "", d.role)
+
 			// Check tmux session from preloaded map (O(1))
 			agent.Running = allSessions[d.session]
 
@@ -1978,6 +2067,10 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 				Session: d.session,
 				Role:    d.role,
 			}
+
+			// Per-session MCP footprint (gu-yofdi). Rig roles share one
+			// settings.json in their parent directory under the rig.
+			agent.MCPServers = resolveMCPServers(townRoot, r.Name, d.role)
 
 			// Check tmux session from preloaded map (O(1))
 			agent.Running = allSessions[d.session]
