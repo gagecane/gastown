@@ -1,6 +1,11 @@
 package daemon
 
 import (
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +182,108 @@ func TestBuildRestartEscalationMessage_UnknownVerdictFallback(t *testing.T) {
 	}
 	if !strings.Contains(msg, "merge-base --is-ancestor") {
 		t.Errorf("expected manual fallback instructions; got:\n%s", msg)
+	}
+}
+
+// --- Auto-resolve lingering pending state (gu-ed9ba) ---
+
+// newRestartPendingTestDaemon wires a Daemon with a fake `bd` that records its
+// argv to a log file and emits the given stdout for `bd list`.
+func newRestartPendingTestDaemon(t *testing.T, listJSON string) (*Daemon, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks")
+	}
+	townRoot := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "bd.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
+		"case \"$1\" in\n" +
+		"  list) cat <<'EOF'\n" + listJSON + "\nEOF\n  ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		bdPath: bdPath,
+		logger: log.New(io.Discard, "", 0),
+	}
+	return d, logPath
+}
+
+func TestListOpenRestartPending_FlagsEscalated(t *testing.T) {
+	d, _ := newRestartPendingTestDaemon(t, `[
+		{"id":"gu-a","title":"pending a","description":"d","labels":["type:daemon-restart-pending"]},
+		{"id":"gu-b","title":"pending b","description":"d","labels":["type:daemon-restart-pending","restart-escalated"]}
+	]`)
+
+	beads, err := d.listOpenRestartPending()
+	if err != nil {
+		t.Fatalf("listOpenRestartPending: %v", err)
+	}
+	if len(beads) != 2 {
+		t.Fatalf("expected 2 beads, got %d", len(beads))
+	}
+	byID := map[string]restartPendingBead{}
+	for _, b := range beads {
+		byID[b.ID] = b
+	}
+	if byID["gu-a"].Escalated {
+		t.Error("gu-a should not be marked escalated")
+	}
+	if !byID["gu-b"].Escalated {
+		t.Error("gu-b should be marked escalated")
+	}
+}
+
+func TestCloseRestartPending_IssuesBdClose(t *testing.T) {
+	d, logPath := newRestartPendingTestDaemon(t, "[]")
+
+	if err := d.closeRestartPending("gu-x"); err != nil {
+		t.Fatalf("closeRestartPending: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	got := string(logData)
+	if !strings.Contains(got, "close gu-x") {
+		t.Errorf("expected bd close gu-x, got: %s", got)
+	}
+	if !strings.Contains(got, "--reason=") {
+		t.Errorf("expected a close reason, got: %s", got)
+	}
+}
+
+func TestResolveFreshRestartPending_ClosesAll(t *testing.T) {
+	d, logPath := newRestartPendingTestDaemon(t, "[]")
+
+	d.resolveFreshRestartPending([]restartPendingBead{
+		{ID: "gu-1"}, {ID: "gu-2"},
+	})
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	got := string(logData)
+	for _, want := range []string{"close gu-1", "close gu-2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in bd calls, got: %s", want, got)
+		}
+	}
+}
+
+func TestRestartForwardCheck_DaemonFreshDefaultsFalse(t *testing.T) {
+	// A freshly-constructed check (verdict not pre-computed) must not claim the
+	// daemon is fresh — otherwise the dog would wrongly auto-close pending beads.
+	var fc restartForwardCheck
+	if fc.DaemonFresh {
+		t.Error("zero-value restartForwardCheck must not report DaemonFresh")
 	}
 }
 

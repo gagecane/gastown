@@ -79,6 +79,9 @@ type restartPendingBead struct {
 	ID          string
 	Title       string
 	Description string
+	// Escalated is true when the bead already carries restartPendingEscalatedLabel,
+	// i.e. a prior tick surfaced it to an agent.
+	Escalated bool
 }
 
 // runRestartPendingDog is the main patrol function. It lists open
@@ -97,7 +100,7 @@ func (d *Daemon) runRestartPendingDog() {
 		return
 	}
 
-	pending, err := d.listUnescalatedRestartPending()
+	pending, err := d.listOpenRestartPending()
 	if d.doltBreaker != nil {
 		d.doltBreaker.Record(err)
 	}
@@ -110,8 +113,6 @@ func (d *Daemon) runRestartPendingDog() {
 		return
 	}
 
-	d.logger.Printf("restart_pending: %d un-escalated daemon-restart-pending bead(s)", len(pending))
-
 	// Pre-compute the forward-only ancestry verdict ONCE per tick (gu-8ni5o):
 	// the running daemon's commit vs the freshly-fetched repo tip. The friction
 	// was that the responder had to fetch the bare repo + run
@@ -122,7 +123,35 @@ func (d *Daemon) runRestartPendingDog() {
 	// and one repo, so the verdict is identical across them.
 	forwardCheck := d.computeRestartForwardCheck()
 
+	// Auto-resolve the lingering-state gap (gu-ed9ba): the operator decision
+	// (gu-muj66) is that the daemon does NOT self-restart, so pending beads are
+	// escalated to an agent. But once the daemon DOES restart — whether by the
+	// agent acting on the escalation, an external supervisor, or any manual
+	// `gt daemon stop && start` — the running daemon catches up to the repo tip
+	// and the pending restart is no longer needed. The escalated bead, however,
+	// stayed OPEN forever: nothing consumed the resolution, so it lingered as a
+	// false "DAEMON RESTART PENDING" signal long after the restart happened.
+	// When we can confirm the daemon is now fresh, close the open pending beads
+	// here so the state self-resolves within one patrol tick.
+	if forwardCheck.Computed && forwardCheck.DaemonFresh {
+		d.resolveFreshRestartPending(pending)
+		return
+	}
+
+	// Daemon still stale: surface un-escalated pending beads to an agent.
+	var unescalated []restartPendingBead
 	for _, b := range pending {
+		if !b.Escalated {
+			unescalated = append(unescalated, b)
+		}
+	}
+	if len(unescalated) == 0 {
+		return
+	}
+
+	d.logger.Printf("restart_pending: %d un-escalated daemon-restart-pending bead(s)", len(unescalated))
+
+	for _, b := range unescalated {
 		msg := d.buildRestartEscalationMessage(b, forwardCheck)
 		// d.escalate dedups on signature, so repeated ticks before the label
 		// lands won't spam; the label is the durable handled-marker.
@@ -181,6 +210,11 @@ type restartForwardCheck struct {
 	// no embedded commit, repo not locatable, fetch/ancestry error). The
 	// responder then falls back to the manual check.
 	Computed bool
+	// DaemonFresh is true when the running daemon's commit already equals the
+	// repo tip — i.e. the pending restart has ALREADY happened (the daemon
+	// caught up). Used to auto-resolve lingering pending beads (gu-ed9ba)
+	// instead of re-escalating a restart that is no longer needed.
+	DaemonFresh bool
 	// Forward is the verdict: true when the repo tip is a descendant of the
 	// running daemon's commit (or already equal — nothing to advance to).
 	Forward bool
@@ -265,8 +299,12 @@ func (d *Daemon) computeRestartForwardCheck() restartForwardCheck {
 	}
 	if !info.IsStale {
 		// Repo tip equals the running commit — there is nothing newer to advance
-		// to. Treat as forward (a no-op restart is always safe), and say so.
+		// to. The running daemon is already fresh: any pending restart has
+		// already happened. Treat as forward (a no-op restart is always safe),
+		// and flag DaemonFresh so lingering pending beads can be auto-resolved
+		// rather than re-escalated (gu-ed9ba).
 		fc.Forward = true
+		fc.DaemonFresh = true
 		if fc.Detail == "" {
 			fc.Detail = "running daemon is already at the repo tip (no newer commit to advance to)"
 		}
@@ -276,9 +314,25 @@ func (d *Daemon) computeRestartForwardCheck() restartForwardCheck {
 	return fc
 }
 
-// listUnescalatedRestartPending returns open daemon-restart-pending beads that
-// have not yet been marked escalated.
-func (d *Daemon) listUnescalatedRestartPending() ([]restartPendingBead, error) {
+// resolveFreshRestartPending closes open daemon-restart-pending beads once the
+// running daemon has caught up to the repo tip (gu-ed9ba). It is only called
+// when the forward check confirms DaemonFresh, so closing is safe: the restart
+// the bead asked for has already happened. Best-effort — a close failure is
+// logged and retried on the next tick (the bead stays open until it succeeds).
+func (d *Daemon) resolveFreshRestartPending(pending []restartPendingBead) {
+	d.logger.Printf("restart_pending: daemon is now fresh — auto-resolving %d lingering pending bead(s)", len(pending))
+	for _, b := range pending {
+		if err := d.closeRestartPending(b.ID); err != nil {
+			d.logger.Printf("restart_pending: %s: failed to auto-close resolved bead, will retry: %v", b.ID, err)
+			continue
+		}
+		d.logger.Printf("restart_pending: %s: daemon restarted and is fresh — auto-closed", b.ID)
+	}
+}
+
+// listOpenRestartPending returns all open daemon-restart-pending beads, each
+// flagged with whether it has already been escalated.
+func (d *Daemon) listOpenRestartPending() ([]restartPendingBead, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -310,13 +364,11 @@ func (d *Daemon) listUnescalatedRestartPending() ([]restartPendingBead, error) {
 
 	var result []restartPendingBead
 	for _, issue := range all {
-		if sliceContains(issue.Labels, restartPendingEscalatedLabel) {
-			continue
-		}
 		result = append(result, restartPendingBead{
 			ID:          issue.ID,
 			Title:       issue.Title,
 			Description: issue.Description,
+			Escalated:   sliceContains(issue.Labels, restartPendingEscalatedLabel),
 		})
 	}
 	return result, nil
@@ -338,6 +390,27 @@ func (d *Daemon) markRestartPendingEscalated(beadID string) error {
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("bd label add: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// closeRestartPending closes a daemon-restart-pending bead once the daemon has
+// restarted and is fresh again, so the resolved pending state does not linger
+// open as a false signal (gu-ed9ba).
+func (d *Daemon) closeRestartPending(beadID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, d.bdPath, //nolint:gosec // G204: args constructed internally
+		"close", beadID,
+		"--reason=daemon restarted and is now fresh (commit matches repo tip); pending restart resolved — auto-closed by restart_pending_dog",
+	)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = os.Environ()
+	setSysProcAttr(cmd)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("bd close: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
