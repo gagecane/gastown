@@ -353,7 +353,10 @@ func TestCollectInputWith_WiresAllSources(t *testing.T) {
 	// events.jsonl with one in-window mapped event
 	start := time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC)
 	end := start.Add(24 * time.Hour)
-	evLine := `{"ts":"2026-05-20T01:00:00Z","type":"escalation_sent","actor":"witness"}` + "\n"
+	// dispatch.stuck_agent keeps a threshold-0 floor post-calibration (gc-e2uvyr.3),
+	// so a single in-window event still fires the rate rule end-to-end. escalation
+	// now carries a calibrated ceiling and would not fire on one event.
+	evLine := `{"ts":"2026-05-20T01:00:00Z","type":"dispatch.stuck_agent","actor":"deacon"}` + "\n"
 	if err := os.WriteFile(filepath.Join(townRoot, ".events.jsonl"), []byte(evLine), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +383,7 @@ func TestCollectInputWith_WiresAllSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(in.EventCounts) != 1 || in.EventCounts[0].Series != "escalation" {
+	if len(in.EventCounts) != 1 || in.EventCounts[0].Series != "dispatch.stuck_agent" {
 		t.Errorf("event counts not wired: %+v", in.EventCounts)
 	}
 	if len(in.LogLines) != 1 || !in.LogLines[0].NearDoltPID {
