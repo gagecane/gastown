@@ -164,6 +164,13 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  launching dashboard at %s  •  api: %s/api/  •  listening on %s  •  ctrl+c to stop\n", url, url, listenAddr)
 
+	// Warn when binding to a non-loopback interface: the dashboard's API
+	// shells out to gt/bd/gh on the host, so exposing it off-localhost widens
+	// the attack surface. Only bind broadly on trusted networks.
+	if dashboardBind != "" && dashboardBind != "127.0.0.1" && dashboardBind != "localhost" && dashboardBind != "::1" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  warning: binding to %s exposes the dashboard off-localhost; only do this on a trusted network\n", dashboardBind)
+	}
+
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           handler,

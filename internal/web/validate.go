@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -99,6 +100,48 @@ func isValidGitURL(s string) bool {
 	atIdx := strings.Index(s, "@")
 	colonIdx := strings.Index(s, ":")
 	return atIdx > 0 && colonIdx > atIdx+1 && colonIdx < len(s)-1 && !strings.Contains(s[:colonIdx], "/")
+}
+
+// isAllowedPRHost reports whether rawURL is an https:// URL whose host is on
+// the GitHub allowlist: github.com (plus its api/gist subdomains) and, when the
+// gh CLI is pointed at a GitHub Enterprise instance via the GH_HOST environment
+// variable, that configured host as well.
+//
+// This guards handlePRShow against passing an attacker-controlled URL to
+// `gh pr view`: the dashboard can bind a non-loopback address, so without a
+// host check the endpoint is an SSRF-ish surface. The gh CLI only speaks
+// GitHub-shaped APIs (partial mitigation), but an explicit allowlist fails
+// closed instead of relying on that.
+func isAllowedPRHost(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return false
+	}
+	for _, allowed := range allowedPRHosts() {
+		if host == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// allowedPRHosts returns the lowercased set of hosts accepted by
+// isAllowedPRHost. github.com and its API/gist subdomains are always allowed;
+// a GitHub Enterprise host is added when GH_HOST is set (the same variable the
+// gh CLI uses to target an enterprise instance).
+func allowedPRHosts() []string {
+	hosts := []string{"github.com", "api.github.com", "gist.github.com"}
+	if ghe := strings.ToLower(strings.TrimSpace(os.Getenv("GH_HOST"))); ghe != "" {
+		hosts = append(hosts, ghe)
+	}
+	return hosts
 }
 
 // expandHomePath safely expands ~ prefix, cleans the result, and ensures

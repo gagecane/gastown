@@ -1628,11 +1628,13 @@ func (h *APIHandler) handlePRShow(w http.ResponseWriter, r *http.Request) {
 			h.sendError(w, "PR URL cannot contain null bytes or newlines", http.StatusBadRequest)
 			return
 		}
-		// Allow any https:// URL, not just github.com — supports GitHub Enterprise.
-		// gh CLI validates against the configured host and rejects non-GitHub API responses,
-		// limiting SSRF risk. Localhost-only deployment further reduces exposure.
-		if !strings.HasPrefix(prURL, "https://") {
-			h.sendError(w, "PR URL must start with https://", http.StatusBadRequest)
+		// Restrict to an https:// URL on the GitHub host allowlist (github.com +
+		// any GH_HOST-configured GitHub Enterprise host). The dashboard can bind a
+		// non-loopback address, so without a host check this is an SSRF-ish surface;
+		// the allowlist fails closed rather than relying on gh only speaking
+		// GitHub-shaped APIs.
+		if !isAllowedPRHost(prURL) {
+			h.sendError(w, "PR URL host not allowed (expected github.com or configured GitHub Enterprise host)", http.StatusBadRequest)
 			return
 		}
 	} else {

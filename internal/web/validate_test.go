@@ -165,6 +165,49 @@ func TestIsValidRepoRef(t *testing.T) {
 	}
 }
 
+func TestIsAllowedPRHost(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"github.com pull URL", "https://github.com/org/repo/pull/1", true},
+		{"github.com host only", "https://github.com", true},
+		{"api.github.com", "https://api.github.com/repos/org/repo/pulls/1", true},
+		{"gist.github.com", "https://gist.github.com/org/abc123", true},
+		{"host case-insensitive", "https://GitHub.com/org/repo/pull/1", true},
+		{"non-github host rejected", "https://evil.example/org/repo/pull/1", false},
+		{"link-local metadata rejected", "https://169.254.169.254/latest/meta-data", false},
+		{"github.com substring spoof rejected", "https://github.com.evil.example/x", false},
+		{"http scheme rejected", "http://github.com/org/repo/pull/1", false},
+		{"non-https scheme rejected", "file:///etc/passwd", false},
+		{"empty rejected", "", false},
+		{"flag-like rejected", "--evil", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAllowedPRHost(tt.input); got != tt.want {
+				t.Errorf("isAllowedPRHost(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsAllowedPRHost_EnterpriseHost(t *testing.T) {
+	t.Setenv("GH_HOST", "github.enterprise.example")
+
+	if !isAllowedPRHost("https://github.enterprise.example/org/repo/pull/1") {
+		t.Errorf("configured GH_HOST should be allowed")
+	}
+	if !isAllowedPRHost("https://github.com/org/repo/pull/1") {
+		t.Errorf("github.com should still be allowed alongside GH_HOST")
+	}
+	if isAllowedPRHost("https://other.example/org/repo/pull/1") {
+		t.Errorf("non-allowlisted host should still be rejected with GH_HOST set")
+	}
+}
+
 func TestIsValidGitURL(t *testing.T) {
 	tests := []struct {
 		name  string
