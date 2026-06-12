@@ -190,10 +190,64 @@ func (g *Git) runRaw(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// pushBaseNetworkTimeout is the floor on a git push's wall clock — enough to
+// cover a slow-but-reachable remote while still failing fast when the remote is
+// genuinely unreachable. Pushes that DON'T fire the repo's pre-push hook (the
+// hook is what can legitimately block for minutes, see pushTimeout) effectively
+// only need this much.
+const pushBaseNetworkTimeout = 60 * time.Second
+
+// prePushGateRunBudget is the slack added on top of the pre-push hook's
+// gate-slot wait to cover the gates' own runtime (go build/vet/gofmt/lint).
+// The fast gates complete in well under a minute on a quiet host, but under the
+// same contention that makes the slot wait long they also run slower, so we
+// budget generously.
+const prePushGateRunBudget = 120 * time.Second
+
+// defaultGateSlotWaitSeconds mirrors the GT_GATE_SLOT_WAIT_SECONDS default in
+// scripts/pre-push-check.sh (the host-wide gate-slot semaphore wait bound, gs-orsm).
+// Kept in sync so the push timeout always clears the hook's own worst-case wait.
+const defaultGateSlotWaitSeconds = 600
+
 // pushTimeout is the maximum time a git push is allowed to run before being
 // killed. This prevents gt done from hanging indefinitely when the remote
 // (e.g. GitLab) is unreachable or slow.
-const pushTimeout = 60 * time.Second
+//
+// gu-s6wye: a fixed 60s wall was the root cause of the recurring
+// "verified_push_failed: branch <b> missing after push" / aa-pushed-no-mr
+// strands. EVERY push fires scripts/pre-push-check.sh, which — under the
+// host-contention tracked in gu-ym89r — first BLOCKS up to GT_GATE_SLOT_WAIT_SECONDS
+// (default 600s) acquiring the host-wide gate-slot semaphore (gs-orsm), and only
+// THEN runs its gates and contacts origin. A 60s ctx deadline SIGKILLs that push
+// process group mid-gate-wait, before the branch ever reaches the remote, so the
+// later ls-remote verify finds nothing and reports the misleading "missing after
+// push". The same manual push completes cleanly once the host quiets — proof it
+// was a timeout race, not a gate failure or a push reject.
+//
+// Fix: the push wall must exceed the hook's OWN worst-case self-imposed duration
+// (slot wait + gate runtime). We track GT_GATE_SLOT_WAIT_SECONDS (the same knob
+// the hook reads) plus a gate-run budget. GT_PUSH_TIMEOUT_SECONDS overrides the
+// whole computation when an operator needs a hard cap (e.g. tests want it short).
+func pushTimeout() time.Duration {
+	if v := os.Getenv("GT_PUSH_TIMEOUT_SECONDS"); v != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+
+	slotWait := defaultGateSlotWaitSeconds
+	if v := os.Getenv("GT_GATE_SLOT_WAIT_SECONDS"); v != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs > 0 {
+			slotWait = secs
+		}
+	}
+
+	computed := time.Duration(slotWait)*time.Second + prePushGateRunBudget
+	if computed < pushBaseNetworkTimeout {
+		return pushBaseNetworkTimeout
+	}
+	return computed
+}
 
 // gitCmdWaitDelay bounds how long Wait() may block AFTER a timed git command's
 // context fires, before its I/O pipes are force-closed. It is the belt to the
@@ -1240,7 +1294,7 @@ func (g *Git) Push(remote, branch string, force bool) error {
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := g.runWithTimeout(pushTimeout, args...)
+	_, err := g.runWithTimeout(pushTimeout(), args...)
 	return err
 }
 
@@ -1279,7 +1333,7 @@ func (g *Git) PushSkipPrePush(remote, branch string, force bool) error {
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := g.runWithEnvAndTimeout(args, prePushSkipEnv, pushTimeout)
+	_, err := g.runWithEnvAndTimeout(args, prePushSkipEnv, pushTimeout())
 	return err
 }
 
@@ -1294,7 +1348,7 @@ func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := g.runWithEnvAndTimeout(args, env, pushTimeout)
+	_, err := g.runWithEnvAndTimeout(args, env, pushTimeout())
 	return err
 }
 
@@ -1336,10 +1390,10 @@ func (g *Git) pushSHAInternal(remote, sha, targetBranch string, force, skipPrePu
 		args = append(args, "--force")
 	}
 	if skipPrePush {
-		_, err := g.runWithEnvAndTimeout(args, prePushSkipEnv, pushTimeout)
+		_, err := g.runWithEnvAndTimeout(args, prePushSkipEnv, pushTimeout())
 		return err
 	}
-	_, err := g.runWithTimeout(pushTimeout, args...)
+	_, err := g.runWithTimeout(pushTimeout(), args...)
 	return err
 }
 
@@ -1904,14 +1958,14 @@ func (g *Git) ForEachRef(pattern, format string) (string, error) {
 
 // DeleteRemoteBranch deletes a branch on the remote.
 func (g *Git) DeleteRemoteBranch(remote, branch string) error {
-	_, err := g.runWithTimeout(pushTimeout, "push", remote, "--delete", branch)
+	_, err := g.runWithTimeout(pushTimeout(), "push", remote, "--delete", branch)
 	return err
 }
 
 // DeleteRemoteBranchIfAt deletes a remote branch only if it still points at expectedHash.
 func (g *Git) DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error {
 	ref := "refs/heads/" + branch
-	_, err := g.runWithTimeout(pushTimeout, "push", "--force-with-lease="+ref+":"+expectedHash, remote, ":"+ref)
+	_, err := g.runWithTimeout(pushTimeout(), "push", "--force-with-lease="+ref+":"+expectedHash, remote, ":"+ref)
 	return err
 }
 
@@ -4137,7 +4191,7 @@ func (g *Git) PushSubmoduleCommit(submodulePath, sha, remote string) error {
 	if err != nil {
 		return fmt.Errorf("detecting default branch for submodule %s: %w", submodulePath, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), pushTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), pushTimeout())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", absPath, "push", remote, sha+":refs/heads/"+defaultBranch)
 	util.SetDetachedProcessGroup(cmd)
@@ -4146,7 +4200,7 @@ func (g *Git) PushSubmoduleCommit(submodulePath, sha, remote string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("pushing submodule %s timed out after %v (remote may be unreachable)", submodulePath, pushTimeout)
+			return fmt.Errorf("pushing submodule %s timed out after %v (remote may be unreachable)", submodulePath, pushTimeout())
 		}
 		abbrev := sha
 		if len(abbrev) > 8 {
