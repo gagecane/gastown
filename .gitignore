@@ -45,6 +45,13 @@ config.toml
 !internal/hooks/templates/vibe/config.toml
 gt
 
+# Environment variables — credential-bearing (e.g. GROQ_API_KEY), never commit
+# (gu-xb6sf). docker-compose / Groq setup docs tell users to create a .env;
+# keep .env.example templates tracked.
+.env
+.env.*
+!.env.example
+
 # Runtime state (ignore contents, but allow setup-hooks to be tracked)
 state.json
 .runtime/*
