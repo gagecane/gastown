@@ -41,6 +41,37 @@ refreshed its session heartbeat while the file store aged past threshold).
   session limits, one very long patrol turn) leaves this label stale for
   hours even though the agent is healthy.
 
+## Liveness verdict and signal precedence
+
+Different commands answer "is this session alive?" by reading different signals.
+When they disagree, this is the precedence (gu-d5r8c):
+
+1. **PID-corroborated liveness verdict is authoritative.** The typed verdict
+   (`polecat.LivenessWithPID`) combines the session heartbeat with the live
+   tmux pane PID. A stale heartbeat whose PID is still alive resolves to
+   **ALIVE**, not MAYBE_DEAD — this is the intended behavior, not a bug. It
+   tolerates transient heartbeat-write lag (high town load, a daemon restart,
+   one long agent turn) without false positives. The daemon reaper
+   (`manager.isSessionProcessDead`), `gt polecat list` (PID-aware via
+   `CheckSessionHealth`), and `gt witness status` all consult the PID, so they
+   agree.
+
+2. **`MAYBE_DEAD` is informational, never destructive.** It means the heartbeat
+   aged past the stale threshold *and* no corroborating signal confirmed
+   liveness. Operators may investigate (log, notify) but supervision must not
+   kill or reap on MAYBE_DEAD alone — only **DEAD** (heartbeat stale *and* PID
+   provably gone) is actionable. A burst of MAYBE_DEAD rows during high load is
+   expected heartbeat lag, not a mass stall.
+
+3. **`gt peek` "session not found" is a point-in-time miss, not a liveness
+   verdict.** `peek` (and `gt session capture`) only checks `tmux has-session`
+   at the instant it runs; it does not read the heartbeat or PID. If `gt polecat
+   list` reports `session: alive` but `gt peek` returns "session not found", the
+   session was created or destroyed between the two calls (a TOCTOU race during
+   spawn/teardown churn). **Retry `gt peek`** — if `polecat list` still says
+   alive, the session exists. Treat the corroborated verdict, not a single
+   `peek`, as ground truth for recovery decisions.
+
 ## Rules of thumb
 
 - **Deacon sessions:** `gt deacon heartbeat` refreshes the Deacon file and

@@ -331,6 +331,13 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 // each monitored polecat in the rig. Best-effort: an unfindable town root
 // or unreadable heartbeat is silently skipped so the status command never
 // fails just because liveness cannot be computed.
+//
+// Verdicts are PID-corroborated (gu-d5r8c): a stale heartbeat whose tmux pane
+// PID is still alive resolves to ALIVE rather than MAYBE_DEAD. This matches
+// the daemon reaper (manager.isSessionProcessDead) and `gt polecat list`,
+// which both consult the live PID, so the witness no longer reports
+// MAYBE_DEAD false positives for actively-working agents whose keepalive
+// writes lag under high town load or a daemon restart.
 func collectLivenessRows(rigName string, polecats []string) []PolecatLivenessRow {
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
@@ -338,26 +345,40 @@ func collectLivenessRows(rigName string, polecats []string) []PolecatLivenessRow
 	}
 	prefix := session.PrefixFor(rigName)
 
+	// PID probe sourced from tmux: queried=false on any tmux error so the
+	// verdict falls back to heartbeat-only logic instead of false-negativing
+	// on a transient tmux failure (mirrors manager.isSessionProcessDead).
+	t := tmux.NewTmux()
+	pidProbe := polecat.PIDProbe(func(name string) (string, bool) {
+		pidStr, err := t.GetPanePID(name)
+		if err != nil {
+			return "", false
+		}
+		return pidStr, true
+	})
+
 	var rows []PolecatLivenessRow
 	// Witness self
 	witnessSession := session.WitnessSessionName(prefix)
-	rows = append(rows, livenessRowFor(townRoot, witnessSession, "witness", polecat.DefaultWitnessLivenessThresholds))
+	rows = append(rows, livenessRowFor(townRoot, witnessSession, "witness", polecat.DefaultWitnessLivenessThresholds, pidProbe))
 	// Refinery (if any)
 	refinerySession := session.RefinerySessionName(prefix)
 	if polecat.ReadSessionHeartbeat(townRoot, refinerySession) != nil {
-		rows = append(rows, livenessRowFor(townRoot, refinerySession, "refinery", polecat.DefaultRefineryLivenessThresholds))
+		rows = append(rows, livenessRowFor(townRoot, refinerySession, "refinery", polecat.DefaultRefineryLivenessThresholds, pidProbe))
 	}
 	// Monitored polecats
 	for _, p := range polecats {
 		sess := session.PolecatSessionName(prefix, p)
-		rows = append(rows, livenessRowFor(townRoot, sess, "polecat", polecat.DefaultLivenessThresholds))
+		rows = append(rows, livenessRowFor(townRoot, sess, "polecat", polecat.DefaultLivenessThresholds, pidProbe))
 	}
 	return rows
 }
 
 // livenessRowFor materializes a single liveness row. Used by witness status.
-func livenessRowFor(townRoot, sessionName, role string, thresholds polecat.LivenessThresholds) PolecatLivenessRow {
-	rep := polecat.Liveness(townRoot, sessionName, thresholds)
+// pidProbe corroborates a stale heartbeat against the live tmux pane PID; pass
+// nil to fall back to heartbeat-only signals.
+func livenessRowFor(townRoot, sessionName, role string, thresholds polecat.LivenessThresholds, pidProbe polecat.PIDLivenessFunc) PolecatLivenessRow {
+	rep := polecat.LivenessWithPID(townRoot, sessionName, thresholds, pidProbe)
 	return PolecatLivenessRow{
 		Session:       sessionName,
 		Role:          role,
