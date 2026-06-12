@@ -118,15 +118,33 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 
-	// Pre-flight: state bead must be provisioned.
+	// Pre-flight: load the state bead, self-provisioning it on first run.
+	// `gt upstream sync` is the documented first-touch provisioning path
+	// (see the `gt upstream pause` hint: "run gt upstream sync once"); the
+	// deacon patrol does not call EnsureStateBead, so without this an
+	// unprovisioned rig would deadlock — sync refuses because there is no
+	// state bead and nothing else ever creates one. EnsureStateBead is
+	// idempotent, so this is a no-op on every subsequent run. Dry-run
+	// promises "no state change", so it never provisions — it treats an
+	// unprovisioned rig as a clean idle state for reporting purposes.
 	state, err := upstreamsync.LoadSyncState(bd, rigPrefix)
 	if err != nil {
 		if errors.Is(err, upstreamsync.ErrStateBeadNotProvisioned) {
-			fmt.Fprintf(stderr, "gt upstream sync: state bead not provisioned for rig %s\n", rigName)
-			fmt.Fprintln(stderr, "  hint: the deacon will provision on the next patrol tick")
-			return NewSilentExit(3)
+			if upstreamSyncDryRun {
+				state = upstreamsync.DefaultSyncStateMetadata(
+					rigName, syncCfg.GetUpstreamRemote(), syncCfg.GetUpstreamBranch(), syncCfg.GetTargetBranch())
+				err = nil
+			} else {
+				if _, perr := upstreamsync.EnsureStateBead(bd, rigPrefix, rigName, syncCfg); perr != nil {
+					fmt.Fprintf(stderr, "gt upstream sync: cannot provision state bead for rig %s: %v\n", rigName, perr)
+					return NewSilentExit(3)
+				}
+				state, err = upstreamsync.LoadSyncState(bd, rigPrefix)
+			}
 		}
-		return fmt.Errorf("loading sync state: %w", err)
+		if err != nil {
+			return fmt.Errorf("loading sync state: %w", err)
+		}
 	}
 
 	// Refuse to run if currently paused — operators must resume first.

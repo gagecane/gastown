@@ -143,6 +143,7 @@ func runUpstreamHistory(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		if errors.Is(err, upstreamsync.ErrStateBeadNotProvisioned) {
 			fmt.Fprintf(stderr, "gt upstream history: state bead not provisioned for rig %s\n", rigName)
+			fmt.Fprintln(stderr, "  hint: run `gt upstream sync` once to provision the state bead")
 			return NewSilentExit(3)
 		}
 		return fmt.Errorf("loading sync state: %w", err)

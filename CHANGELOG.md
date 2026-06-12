@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`gt upstream sync` self-provisions its state bead** (gu-hlqu8) — Every
+  `gt upstream` verb refused to run on a never-synced rig with "state bead not
+  provisioned" and pointed at "the Deacon will provision on the next patrol
+  tick." But nothing ever called `upstreamsync.EnsureStateBead` — the
+  provisioning function had zero non-test callers, so the rig deadlocked: sync
+  refused because there was no state bead, and nothing else created one. This
+  blocked the operator-sanctioned fork-sync path (66c29d3e), so fork-sync beads
+  kept bouncing back unworked each time upstream advanced. `gt upstream sync`
+  now self-provisions on first run (the path the `gt upstream pause` hint
+  already documented — "run gt upstream sync once") via the idempotent
+  `EnsureStateBead`, and the status/audit/history hints point at it instead of
+  a Deacon tick that never provisions.
+
 ### Added
 
 - **`gt done --no-code` exit for verify/report-only beads** (gu-gc4ex) —

@@ -150,7 +150,7 @@ func runUpstreamAudit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		if errors.Is(err, upstreamsync.ErrStateBeadNotProvisioned) {
 			fmt.Fprintf(stderr, "gt upstream audit: state bead not provisioned for rig %s\n", rigName)
-			fmt.Fprintln(stderr, "  hint: the Deacon will provision the state bead on the next patrol tick")
+			fmt.Fprintln(stderr, "  hint: run `gt upstream sync` once to provision the state bead")
 			return NewSilentExit(3)
 		}
 		return fmt.Errorf("loading sync state: %w", err)

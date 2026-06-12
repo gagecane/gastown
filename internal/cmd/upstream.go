@@ -159,7 +159,7 @@ func runUpstreamStatus(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(stdout, "  State:   not-provisioned (enabled but state bead missing)")
 			fmt.Fprintf(stdout, "  Remote:  %s\n", syncCfg.GetUpstreamRemote())
 			fmt.Fprintf(stdout, "  Branch:  %s → %s\n", syncCfg.GetUpstreamBranch(), syncCfg.GetTargetBranch())
-			fmt.Fprintln(stdout, "  hint: the Deacon will provision the state bead on the next patrol tick")
+			fmt.Fprintln(stdout, "  hint: run `gt upstream sync` once to provision the state bead")
 			return nil
 		}
 		return fmt.Errorf("loading sync state: %w", err)
