@@ -404,6 +404,46 @@ func TestRunWeeklyRollupStopsBeforeMailWhenAuditCloseFails(t *testing.T) {
 	assertNoMailSent(t, mailLog)
 }
 
+// TestFindExistingWeeklyRollupFindsClosedBead is a regression test for gu-gxyc3:
+// the weekly rollup bead is created then immediately auto-closed, so the
+// idempotency check must query closed beads. The fake bd below mimics real bd
+// behavior (bd list defaults to open-only), returning the prior rollup ONLY when
+// --status=closed is passed. Without the flag the query finds nothing and the
+// weekly rollup re-fires every run, re-sending mail to mayor/.
+func TestFindExistingWeeklyRollupFindsClosedBead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	weekStart, weekEnd := "2026-06-01", "2026-06-08"
+	expectedTitle := "Weekly Compaction Rollup " + weekStart + " to " + weekEnd
+
+	binDir := t.TempDir()
+	// The fake bd returns the closed rollup only when the args contain
+	// --status=closed; otherwise it returns the open-only default (empty).
+	bdScript := `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--status=closed" ]; then
+    printf '[{"id":"hq-wk01","title":"` + expectedTitle + `"}]\n'
+    exit 0
+  fi
+done
+printf '[]\n'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got, err := findExistingWeeklyRollup(weekStart, weekEnd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "hq-wk01" {
+		t.Errorf("findExistingWeeklyRollup = %q, want %q (idempotency check must query closed beads)", got, "hq-wk01")
+	}
+}
+
 func resetCompactReportFlags(t *testing.T) {
 	oldDryRun := compactReportDryRun
 	oldWeekly := compactReportWeekly
