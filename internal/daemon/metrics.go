@@ -21,12 +21,13 @@ type daemonMetrics struct {
 	restartTotal metric.Int64Counter
 
 	// doltMu protects dolt gauge values written by the health check goroutine.
-	doltMu             sync.RWMutex
-	doltConnections    int64
-	doltMaxConnections int64
-	doltLatencyMs      float64
-	doltDiskBytes      int64
-	doltHealthy        int64 // 1 = healthy, 0 = unhealthy
+	doltMu              sync.RWMutex
+	doltConnections     int64
+	doltMaxConnections  int64
+	doltLatencyMs       float64
+	doltDiskBytes       int64
+	doltHealthy         int64 // 1 = healthy, 0 = unhealthy
+	doltOrphanDatabases int64 // count of unreferenced databases on the shared server (KPI-7)
 
 	// hookedMu protects hooked-beads gauge snapshots written by the scanner
 	// goroutine and read by the OTel callback.
@@ -97,6 +98,17 @@ func newDaemonMetrics() (*daemonMetrics, error) {
 		return nil, err
 	}
 
+	// orphan_databases tracks unreferenced databases on the shared Dolt server
+	// (testdb_*, beads_t*, doctest_*, etc.). These accumulate from test pollution
+	// and degrade server performance. The accumulation slope is the alert signal
+	// (see docs/design/otel/dolt-health-dashboard.md, KPI-7).
+	orphanGauge, err := m.Int64ObservableGauge("gastown.dolt.orphan_databases",
+		metric.WithDescription("Unreferenced (orphan) databases on the shared Dolt server"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	_, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		dm.doltMu.RLock()
 		defer dm.doltMu.RUnlock()
@@ -105,8 +117,9 @@ func newDaemonMetrics() (*daemonMetrics, error) {
 		o.ObserveFloat64(latencyGauge, dm.doltLatencyMs)
 		o.ObserveInt64(diskGauge, dm.doltDiskBytes)
 		o.ObserveInt64(healthyGauge, dm.doltHealthy)
+		o.ObserveInt64(orphanGauge, dm.doltOrphanDatabases)
 		return nil
-	}, connGauge, maxConnGauge, latencyGauge, diskGauge, healthyGauge)
+	}, connGauge, maxConnGauge, latencyGauge, diskGauge, healthyGauge, orphanGauge)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +186,7 @@ func (dm *daemonMetrics) recordRestart(ctx context.Context, agentType string) {
 }
 
 // updateDoltHealth stores the latest Dolt health snapshot for observable gauges.
-func (dm *daemonMetrics) updateDoltHealth(conns, maxConns int64, latencyMs float64, diskBytes int64, healthy bool) {
+func (dm *daemonMetrics) updateDoltHealth(conns, maxConns int64, latencyMs float64, diskBytes int64, healthy bool, orphanDatabases int64) {
 	if dm == nil {
 		return
 	}
@@ -188,6 +201,7 @@ func (dm *daemonMetrics) updateDoltHealth(conns, maxConns int64, latencyMs float
 	dm.doltLatencyMs = latencyMs
 	dm.doltDiskBytes = diskBytes
 	dm.doltHealthy = healthyInt
+	dm.doltOrphanDatabases = orphanDatabases
 }
 
 // updateHookedBeads replaces the snapshot of hooked-mail counts observed by

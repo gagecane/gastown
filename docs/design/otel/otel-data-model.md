@@ -306,6 +306,12 @@ Per-child-bead event during molecule instantiation via `RecordBeadCreate`.
 | `gastown.formula.instantiations.total` | Counter | `status`, `formula` | ✅ Main |
 | `gastown.convoy.creates.total` | Counter | `status` | ✅ Main |
 | `gastown.agent.events.total` | Counter | `session`, `event_type`, `role` | ✅ Main (landed PR #2199) |
+| `gastown.dolt.healthy` | Gauge | — | ✅ Main |
+| `gastown.dolt.query_latency_ms` | Gauge | — | ✅ Main |
+| `gastown.dolt.connections` | Gauge | — | ✅ Main |
+| `gastown.dolt.max_connections` | Gauge | — | ✅ Main |
+| `gastown.dolt.disk_usage_bytes` | Gauge | — | ✅ Main |
+| `gastown.dolt.orphan_databases` | Gauge | — | ✅ Main (gu-nate5, KPI-7) |
 
 ---
 
