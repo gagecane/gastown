@@ -53,6 +53,18 @@ func EnsureStateBead(b *beads.Beads, rigPrefix, rigName string, cfg *config.Upst
 
 	beadID := StateBeadID(rigPrefix)
 
+	// Re-root the wrapper at the bead's home database before any operation.
+	// The state bead ID (e.g. "gu-upstream-sync-state") carries a rig prefix,
+	// so Show/Update route it to the rig DB via routes.jsonl. CreateWithID,
+	// however, has no Rig/Parent hint and falls back to the wrapper's own DB
+	// — for a town-rooted wrapper that is the town DB, not the rig DB. The
+	// result was a split-brain provision: create landed in the town DB while
+	// the subsequent pin/load looked in the rig DB and failed with
+	// "pinning state bead: issue not found" (gu-erckc). ForIssueID resolves
+	// the wrapper to the bead's prefix-routed DB so create, pin, and load all
+	// target the same database. It is a no-op when already correctly rooted.
+	b = b.ForIssueID(beadID)
+
 	// Check for existing bead.
 	existing, err := b.Show(beadID)
 	if err == nil {
