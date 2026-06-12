@@ -177,9 +177,18 @@ func runRigSettingsSet(cmd *cobra.Command, args []string) error {
 	keyPath := args[1]
 	valueStr := args[2]
 
-	_, r, err := getRig(rigName)
+	townRoot, r, err := getRig(rigName)
 	if err != nil {
 		return err
+	}
+
+	// Validate a per-rig polecat cap against the town-wide ceiling
+	// (scheduler.global_max_polecats). A per-rig cap above the global ceiling
+	// can never be reached, so reject it with a clear message (gu-su334).
+	if keyPath == "polecat.max_concurrent" {
+		if err := validatePerRigPolecatCap(townRoot, rigName, valueStr); err != nil {
+			return err
+		}
 	}
 
 	settingsPath := filepath.Join(r.Path, "settings", "config.json")
@@ -245,6 +254,32 @@ func runRigSettingsUnset(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Unset %s from settings for rig %s\n",
 		style.Success.Render("✓"), keyPath, rigName)
+	return nil
+}
+
+// validatePerRigPolecatCap rejects a per-rig polecat.max_concurrent value that
+// exceeds the town-wide ceiling (scheduler.global_max_polecats). A per-rig cap
+// above the ceiling is unreachable — the global gate would refuse admission
+// first — so it almost certainly reflects operator confusion. We fail closed
+// with an actionable message rather than silently clamp (gu-su334). A
+// non-integer value is left for the normal set path to handle/store; an unset
+// or unbounded (0) ceiling imposes no constraint.
+func validatePerRigPolecatCap(townRoot, rigName, valueStr string) error {
+	n, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return nil // not an integer; defer to normal set handling
+	}
+	ceiling, err := configuredSchedulerGlobalMaxPolecats(townRoot)
+	if err != nil {
+		return fmt.Errorf("validating per-rig cap against global ceiling: %w", err)
+	}
+	if ceiling > 0 && n > ceiling {
+		return fmt.Errorf("per-rig polecat.max_concurrent %d for rig %s exceeds the "+
+			"town-wide ceiling scheduler.global_max_polecats %d — it could never be "+
+			"reached. Set N <= %d, or raise the ceiling first: "+
+			"gt config set scheduler.global_max_polecats %d",
+			n, rigName, ceiling, ceiling, n)
+	}
 	return nil
 }
 

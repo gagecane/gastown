@@ -21,6 +21,19 @@ type SchedulerConfig struct {
 	// N > 0 = deferred dispatch with capacity control.
 	MaxPolecats *int `json:"max_polecats,omitempty"`
 
+	// GlobalMaxPolecats is a hard town-wide ceiling on concurrent working
+	// polecats across ALL rigs, enforced at admission in EVERY dispatch mode —
+	// including direct dispatch (MaxPolecats <= 0), where MaxPolecats provides
+	// no global cap at all (it doubles as the direct/deferred switch). This key
+	// is orthogonal to that switch: it lets an operator say "never exceed N
+	// polecats town-wide" independent of how work is dispatched.
+	//
+	// nil/absent or <= 0 = unbounded (default — only the dispatch-mode cap and
+	// per-rig caps apply, preserving prior behavior). N > 0 = refuse admission
+	// once town-wide working polecats reach N. The effective per-rig limit is
+	// min(this ceiling, the rig's polecat.max_concurrent if set).
+	GlobalMaxPolecats *int `json:"global_max_polecats,omitempty"`
+
 	// BatchSize is the number of beads to dispatch per heartbeat tick.
 	// Limits spawn rate per 3-minute cycle.
 	// nil/absent = default (1). Explicit 0 is rejected by config setter.
@@ -57,6 +70,16 @@ func (c *SchedulerConfig) GetMaxPolecats() int {
 		return -1
 	}
 	return *c.MaxPolecats
+}
+
+// GetGlobalMaxPolecats returns the configured town-wide polecat ceiling, or 0
+// (unbounded) when unset or non-positive. When > 0, polecat admission is
+// refused in all dispatch modes once town-wide working polecats reach it.
+func (c *SchedulerConfig) GetGlobalMaxPolecats() int {
+	if c == nil || c.GlobalMaxPolecats == nil || *c.GlobalMaxPolecats <= 0 {
+		return 0
+	}
+	return *c.GlobalMaxPolecats
 }
 
 // GetBatchSize returns BatchSize or the default (1) if unset.

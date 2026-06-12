@@ -102,6 +102,65 @@ func configuredSchedulerMaxLoadPerCore(townRoot string) (float64, error) {
 	return schedulerCfg.GetMaxLoadPerCore(), nil
 }
 
+// configuredSchedulerGlobalMaxPolecats returns the configured town-wide polecat
+// ceiling (scheduler.global_max_polecats), or 0 (unbounded) when unset.
+func configuredSchedulerGlobalMaxPolecats(townRoot string) (int, error) {
+	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return 0, fmt.Errorf("loading town settings for polecat admission: %w", err)
+	}
+	schedulerCfg := settings.Scheduler
+	if schedulerCfg == nil {
+		schedulerCfg = capacity.DefaultSchedulerConfig()
+	}
+	return schedulerCfg.GetGlobalMaxPolecats(), nil
+}
+
+// countWorkingPolecatsTownWideFn is a test seam over countWorkingPolecatsTownWide.
+// Production wires it to the real tmux+beads-backed counter.
+var countWorkingPolecatsTownWideFn = countWorkingPolecatsTownWide
+
+// countWorkingPolecatsTownWide returns the total number of working polecats
+// across all rigs — the unit the global ceiling and the per-rig caps both
+// count in. It sums the per-rig working counts; on failure to determine hook
+// state via beads it falls back to the count of all active polecat sessions
+// (working + idle), which over-counts. Over-counting is the safe direction for
+// a ceiling: it can only refuse admission early, never overcommit.
+func countWorkingPolecatsTownWide() int {
+	counts, ok := countWorkingPolecatsByRig()
+	if !ok {
+		return countActivePolecats()
+	}
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	return total
+}
+
+// checkGlobalPolecatCeiling refuses admission when the configured town-wide
+// ceiling (scheduler.global_max_polecats) is reached, counting working polecats
+// across ALL rigs. Runs in every dispatch mode (gu-su334). Disabled (0) =
+// no-op. The returned error is retryable: the bead stays queued and the next
+// dispatch re-evaluates once a town-wide slot frees up.
+func checkGlobalPolecatCeiling(townRoot, rigName, beadID string) error {
+	ceiling, err := configuredSchedulerGlobalMaxPolecats(townRoot)
+	if err != nil {
+		return err
+	}
+	if ceiling <= 0 {
+		return nil
+	}
+	townActive := countWorkingPolecatsTownWideFn()
+	if townActive < ceiling {
+		return nil
+	}
+	return fmt.Errorf("polecat admission denied: %d/%d town-wide working polecats "+
+		"(scheduler.global_max_polecats ceiling reached; rig %s bead %s). "+
+		"Wait for a polecat to finish, or raise: gt config set scheduler.global_max_polecats %d",
+		townActive, ceiling, rigName, beadID, ceiling+1)
+}
+
 type polecatCapacitySnapshot struct {
 	Max             int `json:"max"`
 	Working         int `json:"working"`
@@ -178,6 +237,14 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	// let the host saturate in gu-5j7p4 — the capacity cap below only guards
 	// the deferred (max > 0) path.
 	if err := checkPolecatLoadThrottle(townRoot, rigName, beadID); err != nil {
+		return nil, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, err
+	}
+	// Global ceiling (scheduler.global_max_polecats) is a hard town-wide cap on
+	// working polecats enforced in ALL dispatch modes — unlike max_polecats,
+	// which doubles as the direct/deferred switch and provides no global cap on
+	// the direct path (gu-su334). Counts working polecats (same unit as per-rig
+	// caps), so the effective per-rig limit is min(ceiling, per-rig cap).
+	if err := checkGlobalPolecatCeiling(townRoot, rigName, beadID); err != nil {
 		return nil, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, err
 	}
 	if max <= 0 {

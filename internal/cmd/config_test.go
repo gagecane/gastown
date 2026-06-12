@@ -858,6 +858,53 @@ func TestConfigSetGet(t *testing.T) {
 		}
 	})
 
+	t.Run("set and get scheduler.global_max_polecats", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		settingsPath := config.TownSettingsPath(townRoot)
+
+		originalWd, _ := os.Getwd()
+		defer os.Chdir(originalWd)
+		if err := os.Chdir(townRoot); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+
+		cmd := &cobra.Command{}
+		if err := runConfigSet(cmd, []string{"scheduler.global_max_polecats", "8"}); err != nil {
+			t.Fatalf("runConfigSet failed: %v", err)
+		}
+
+		loaded, err := config.LoadOrCreateTownSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		if got := loaded.Scheduler.GetGlobalMaxPolecats(); got != 8 {
+			t.Errorf("global_max_polecats = %v, want 8", got)
+		}
+
+		if err := runConfigGet(cmd, []string{"scheduler.global_max_polecats"}); err != nil {
+			t.Fatalf("runConfigGet failed: %v", err)
+		}
+	})
+
+	t.Run("scheduler.global_max_polecats rejects negative", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+
+		originalWd, _ := os.Getwd()
+		defer os.Chdir(originalWd)
+		if err := os.Chdir(townRoot); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+
+		cmd := &cobra.Command{}
+		err := runConfigSet(cmd, []string{"scheduler.global_max_polecats", "-1"})
+		if err == nil {
+			t.Fatal("expected error for negative global_max_polecats")
+		}
+		if !strings.Contains(err.Error(), "invalid value") {
+			t.Errorf("error = %v, want 'invalid value'", err)
+		}
+	})
+
 	t.Run("set rejects unknown key", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 

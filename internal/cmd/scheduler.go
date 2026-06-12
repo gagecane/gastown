@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -190,6 +192,9 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading polecat capacity: %w", err)
 	}
 
+	globalCeiling, _ := configuredSchedulerGlobalMaxPolecats(townRoot)
+	effectiveCaps := effectivePerRigPolecatCaps(townRoot, globalCeiling)
+
 	if schedulerStatusJSON {
 		out := struct {
 			Paused         bool                    `json:"paused"`
@@ -198,6 +203,8 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			ScheduledReady int                     `json:"queued_ready"`
 			ActivePolecats int                     `json:"active_polecats"`
 			Capacity       polecatCapacitySnapshot `json:"capacity"`
+			GlobalCeiling  int                     `json:"global_max_polecats"`
+			PerRigCaps     map[string]rigCapInfo   `json:"per_rig_caps,omitempty"`
 			LastDispatchAt string                  `json:"last_dispatch_at,omitempty"`
 			Beads          []scheduledBeadInfo     `json:"beads"`
 			Stale          bool                    `json:"stale,omitempty"`
@@ -207,6 +214,8 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			ScheduledTotal: len(scheduled),
 			ActivePolecats: capacitySnapshot.ActiveSessions,
 			Capacity:       capacitySnapshot,
+			GlobalCeiling:  globalCeiling,
+			PerRigCaps:     effectiveCaps,
 			LastDispatchAt: state.LastDispatchAt,
 			Beads:          scheduled,
 			Stale:          !scanComplete,
@@ -254,11 +263,74 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("  Capacity:  direct dispatch (scheduler.max_polecats=%d)\n", capacitySnapshot.Max)
 	}
+	if globalCeiling > 0 {
+		fmt.Printf("  Global ceiling: %d working polecats town-wide (scheduler.global_max_polecats)\n", globalCeiling)
+	} else {
+		fmt.Printf("  Global ceiling: unbounded (scheduler.global_max_polecats=0)\n")
+	}
+	if len(effectiveCaps) > 0 {
+		fmt.Printf("  Per-rig caps:\n")
+		for _, rigName := range sortedRigNames(effectiveCaps) {
+			fmt.Printf("    %s: %s\n", rigName, effectiveCaps[rigName].Effective)
+		}
+	}
 	if state.LastDispatchAt != "" {
 		fmt.Printf("  Last dispatch: %s (%d beads)\n", state.LastDispatchAt, state.LastDispatchCount)
 	}
 
 	return nil
+}
+
+// rigCapInfo describes a rig's per-rig polecat cap and the resulting effective
+// limit once the town-wide ceiling is applied.
+type rigCapInfo struct {
+	// Configured is the rig's polecat.max_concurrent (0 = unset/unbounded).
+	Configured int `json:"configured"`
+	// Effective is a human-readable description of the effective cap.
+	Effective string `json:"effective"`
+}
+
+// effectivePerRigPolecatCaps builds a per-rig view of polecat caps, combining
+// each rig's configured polecat.max_concurrent with the town-wide ceiling. A
+// rig with no configured cap is reported as unbounded (subject only to the
+// global ceiling). Rigs that cannot be read are skipped. (gu-su334)
+func effectivePerRigPolecatCaps(townRoot string, globalCeiling int) map[string]rigCapInfo {
+	rigsConfig, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return nil
+	}
+	caps := make(map[string]rigCapInfo)
+	for rigName := range rigsConfig.Rigs {
+		rigPath := filepath.Join(townRoot, rigName)
+		if _, err := os.Stat(rigPath); err != nil {
+			continue
+		}
+		configured := loadRigPolecatMaxConcurrent(rigPath)
+		var effective string
+		switch {
+		case configured > 0 && globalCeiling > 0:
+			effective = fmt.Sprintf("%d (global %d)", configured, globalCeiling)
+		case configured > 0:
+			effective = fmt.Sprintf("%d", configured)
+		case globalCeiling > 0:
+			effective = fmt.Sprintf("unbounded (global %d)", globalCeiling)
+		default:
+			effective = "unbounded"
+		}
+		caps[rigName] = rigCapInfo{Configured: configured, Effective: effective}
+	}
+	return caps
+}
+
+// sortedRigNames returns the keys of a rigCapInfo map in sorted order for
+// deterministic display.
+func sortedRigNames(caps map[string]rigCapInfo) []string {
+	names := make([]string, 0, len(caps))
+	for name := range caps {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func runSchedulerList(cmd *cobra.Command, args []string) error {
