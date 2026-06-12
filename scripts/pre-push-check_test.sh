@@ -114,13 +114,13 @@ EOF
   fi
 }
 
-# --- Fast/slow gate split (gu-7f0v) --------------------------------------
+# --- Fast gates (gu-7f0v) ------------------------------------------------
 #
-# `gt done --pre-verified` sets GT_SKIP_PREPUSH=1 to avoid re-running tests
-# the polecat already ran. The script must still enforce FAST gates
-# (build/vet/gofmt) under that env, because they're cheap and catch landing
-# failures that pre-verification commonly misses (e.g. trailing-newline gofmt
-# regressions on 2026-05-29 — bffac8f7, ced30a88).
+# All gates are FAST (build/vet/gofmt/lint); there is no slow test tier
+# (gs-4s06). `gt done --pre-verified` still sets GT_SKIP_PREPUSH=1, which is
+# now a no-op — the fast gates run regardless because they're cheap and catch
+# landing failures pre-verification commonly misses (e.g. trailing-newline
+# gofmt regressions on 2026-05-29 — bffac8f7, ced30a88).
 #
 # These tests stub `go` and `gofmt` so we can observe which gates ran
 # without depending on a real Go toolchain or a buildable workspace.
@@ -128,14 +128,12 @@ EOF
 # Set up an isolated stub dir and a temp git repo, run the script, and
 # return its exit code + stdout/stderr in globals OUT and RC.
 #
-# When skip_slow=1, sets GT_SKIP_PREPUSH_REASON="pre-verified" alongside
-# GT_SKIP_PREPUSH=1 — the production hook now requires a reason (gu-zy57).
-# Tests that need to exercise the reason-missing reject path use
-# run_with_stubs_no_reason instead.
+# When skip_slow=1, sets GT_SKIP_PREPUSH=1 + GT_SKIP_PREPUSH_REASON to confirm
+# that env is now an inert no-op (the fast gates still run; gs-4s06).
 run_with_stubs() {
   local stub_go=$1   # path to go stub script body
   local stub_fmt=$2  # path to gofmt stub script body
-  local skip_slow=$3 # "1" to set GT_SKIP_PREPUSH=1 + REASON, else "0"
+  local skip_slow=$3 # "1" sets GT_SKIP_PREPUSH=1 + REASON (now a no-op), else "0"
 
   local stubdir tmprepo
   stubdir=$(mktemp -d)
@@ -223,14 +221,15 @@ test_fast_gates_run_under_skip() {
   cleanup_last_run
 }
 
-# Test: under GT_SKIP_PREPUSH=1, slow gate (go test) is skipped.
-test_slow_gate_skipped_under_skip() {
+# Test: the full test suite ('go test') is NEVER run by the pre-push gates
+# (gs-4s06 removed the slow tier). A default run must not invoke `go test`.
+test_test_suite_never_run() {
   run_with_stubs \
     'echo "go-called: $*" >&2; exit 0' \
     'exit 0' \
-    1
+    0
   if echo "$OUT" | grep -q "go-called: test"; then
-    echo "FAIL: GT_SKIP_PREPUSH=1 should NOT invoke 'go test' but did" >&2
+    echo "FAIL: pre-push must NOT invoke 'go test' (slow tier removed, gs-4s06)" >&2
     echo "$OUT" >&2
     FAIL=$((FAIL + 1))
     cleanup_last_run
@@ -280,188 +279,6 @@ test_build_blocks_under_skip() {
   fi
   PASS=$((PASS + 1))
   cleanup_last_run
-}
-
-# Test: without GT_SKIP_PREPUSH, slow gate runs.
-test_slow_gate_runs_by_default() {
-  run_with_stubs \
-    'echo "go-called: $*" >&2; exit 0' \
-    'exit 0' \
-    0
-  if [[ $RC -ne 0 ]]; then
-    echo "FAIL: default run should pass when all stubs pass (got rc=$RC)" >&2
-    echo "$OUT" >&2
-    FAIL=$((FAIL + 1))
-    cleanup_last_run
-    return
-  fi
-  if ! echo "$OUT" | grep -q "go-called: test"; then
-    echo "FAIL: default run did not invoke 'go test'" >&2
-    echo "$OUT" >&2
-    FAIL=$((FAIL + 1))
-    cleanup_last_run
-    return
-  fi
-  PASS=$((PASS + 1))
-  cleanup_last_run
-}
-
-# --- gu-zy57: REASON requirement + audit event ---------------------------
-#
-# When GT_SKIP_PREPUSH=1 is set without GT_SKIP_PREPUSH_REASON, the script
-# must reject the push outright (no fast gates, no audit line) — that's the
-# misconfiguration this guard exists to catch. When REASON is set, the
-# script must honour the skip AND append a JSON line to
-# .runtime/prepush-skips.jsonl recording who/why/what.
-
-# Test: GT_SKIP_PREPUSH=1 without REASON is rejected, and no audit line is
-# written. Run directly (not via run_with_stubs which sets a default REASON)
-# so we exercise the missing-reason path.
-test_skip_without_reason_rejected() {
-  local stubdir tmprepo
-  stubdir=$(mktemp -d)
-  tmprepo=$(mktemp -d)
-  cat > "$stubdir/go" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-  chmod +x "$stubdir/go"
-  cat > "$stubdir/gofmt" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-  chmod +x "$stubdir/gofmt"
-  ( cd "$tmprepo" && git init -q && \
-      git config user.email "test@example.com" && \
-      git config user.name "test" && \
-      git commit -q --allow-empty -m init ) >/dev/null 2>&1
-
-  local rc=0 out
-  out=$(
-    cd "$tmprepo" && \
-    PATH="$stubdir:$PATH" \
-    env GT_SKIP_PREPUSH=1 \
-    bash "$SCRIPT" 2>&1
-  ) || rc=$?
-  rc=${rc:-0}
-
-  if [[ $rc -eq 0 ]]; then
-    echo "FAIL: GT_SKIP_PREPUSH=1 without REASON should be rejected (got rc=0)" >&2
-    echo "$out" >&2
-    FAIL=$((FAIL + 1))
-    rm -rf "$stubdir" "$tmprepo"
-    return
-  fi
-  if ! echo "$out" | grep -q "GT_SKIP_PREPUSH_REASON"; then
-    echo "FAIL: rejection message should mention GT_SKIP_PREPUSH_REASON" >&2
-    echo "$out" >&2
-    FAIL=$((FAIL + 1))
-    rm -rf "$stubdir" "$tmprepo"
-    return
-  fi
-  if [[ -f "$tmprepo/.runtime/prepush-skips.jsonl" ]]; then
-    echo "FAIL: rejected skip should NOT write an audit event" >&2
-    cat "$tmprepo/.runtime/prepush-skips.jsonl" >&2
-    FAIL=$((FAIL + 1))
-    rm -rf "$stubdir" "$tmprepo"
-    return
-  fi
-  PASS=$((PASS + 1))
-  rm -rf "$stubdir" "$tmprepo"
-}
-
-# Test: GT_SKIP_PREPUSH=1 + REASON appends a JSON audit line and the line
-# contains the expected fields (ts, actor, reason, branch, sha).
-test_skip_with_reason_audited() {
-  run_with_stubs \
-    'exit 0' \
-    'exit 0' \
-    1
-
-  if [[ $RC -ne 0 ]]; then
-    echo "FAIL: skip with REASON should succeed when fast gates pass (rc=$RC)" >&2
-    echo "$OUT" >&2
-    FAIL=$((FAIL + 1))
-    cleanup_last_run
-    return
-  fi
-
-  local audit="$LAST_TMPREPO/.runtime/prepush-skips.jsonl"
-  if [[ ! -s "$audit" ]]; then
-    echo "FAIL: audit file $audit was not written" >&2
-    FAIL=$((FAIL + 1))
-    cleanup_last_run
-    return
-  fi
-  if ! grep -q '"reason":"pre-verified"' "$audit"; then
-    echo "FAIL: audit line missing reason=pre-verified:" >&2
-    cat "$audit" >&2
-    FAIL=$((FAIL + 1))
-    cleanup_last_run
-    return
-  fi
-  for field in '"ts":"' '"actor":"' '"branch":"' '"sha":"'; do
-    if ! grep -q "$field" "$audit"; then
-      echo "FAIL: audit line missing field $field:" >&2
-      cat "$audit" >&2
-      FAIL=$((FAIL + 1))
-      cleanup_last_run
-      return
-    fi
-  done
-  PASS=$((PASS + 1))
-  cleanup_last_run
-}
-
-# Test: a second honoured skip APPENDS rather than overwrites the audit file.
-test_skip_audit_appends() {
-  local stubdir tmprepo
-  stubdir=$(mktemp -d)
-  tmprepo=$(mktemp -d)
-  cat > "$stubdir/go" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-  chmod +x "$stubdir/go"
-  cat > "$stubdir/gofmt" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-  chmod +x "$stubdir/gofmt"
-  ( cd "$tmprepo" && git init -q && \
-      git config user.email "test@example.com" && \
-      git config user.name "test" && \
-      git commit -q --allow-empty -m init ) >/dev/null 2>&1
-
-  local r=0
-  ( cd "$tmprepo" && \
-    PATH="$stubdir:$PATH" \
-    env GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="first" \
-    bash "$SCRIPT" >/dev/null 2>&1 ) || r=$?
-  ( cd "$tmprepo" && \
-    PATH="$stubdir:$PATH" \
-    env GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="second" \
-    bash "$SCRIPT" >/dev/null 2>&1 ) || r=$?
-
-  local audit="$tmprepo/.runtime/prepush-skips.jsonl"
-  local lines
-  lines=$(wc -l < "$audit" 2>/dev/null || echo 0)
-  if [[ "$lines" -ne 2 ]]; then
-    echo "FAIL: audit should have 2 lines after 2 honoured skips, got $lines" >&2
-    cat "$audit" 2>/dev/null >&2
-    FAIL=$((FAIL + 1))
-    rm -rf "$stubdir" "$tmprepo"
-    return
-  fi
-  if ! grep -q '"reason":"first"' "$audit" || ! grep -q '"reason":"second"' "$audit"; then
-    echo "FAIL: both reasons should be present in audit log:" >&2
-    cat "$audit" >&2
-    FAIL=$((FAIL + 1))
-    rm -rf "$stubdir" "$tmprepo"
-    return
-  fi
-  PASS=$((PASS + 1))
-  rm -rf "$stubdir" "$tmprepo"
 }
 
 # gu-lint-fastgate: when golangci-lint is NOT on PATH, the script must
@@ -813,65 +630,6 @@ EOF
   PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot" "$probed"
 }
 
-# Test (gu-40xsf): the slow gate's child must NOT leak the gate-slot fd to a
-# daemonizing grandchild. bash's `exec {fd}>file` is not close-on-exec, so a
-# test that backgrounds a long-lived process (historically a tmux server,
-# gt-test-sentinel) would inherit the slot fd and pin the flock after the
-# script exits — permanently exhausting the slot. This stubs `go` so its
-# "test" subcommand spawns a backgrounded child that sleeps well past the
-# script's lifetime, then asserts the slot is FREE once the script returns
-# (an external non-blocking flock must succeed). Before the fix the leaked
-# child held the fd and the flock would fail.
-test_gate_slot_cap_no_fd_leak_to_daemon_child() {
-  local stubdir tmprepo townroot
-  read -r stubdir tmprepo townroot < <(make_cap_fixture)
-  local slot="$townroot/.runtime/locks/gate-slots/slot-0.flock"
-  local childpid_file="$townroot/daemon.pid"
-
-  # `go test ...` stub: background a child that outlives the script and would
-  # inherit any non-cloexec fd. setsid + redirecting std fds to /dev/null
-  # daemonizes it like a real tmux server. Record its pid so we can reap it.
-  cat > "$stubdir/go" <<EOF
-#!/bin/bash
-if [[ "\$1" == "test" ]]; then
-  setsid bash -c 'sleep 30' </dev/null >/dev/null 2>&1 &
-  echo \$! > "$childpid_file"
-fi
-exit 0
-EOF
-  chmod +x "$stubdir/go"
-
-  local rc=0 out
-  out=$(
-    cd "$tmprepo" && \
-    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
-    GT_TOWN_ROOT="$townroot" GT_GATE_CONCURRENCY=1 GT_GATE_SLOT_WAIT_SECONDS=2 \
-    bash "$SCRIPT" 2>&1
-  ) || rc=$?
-  rc=${rc:-0}
-
-  # After the script exits, the slot MUST be free even though the daemon child
-  # is still alive — proving the child did not inherit the slot fd.
-  local lock_free=0
-  if ( exec 9>"$slot"; flock -n 9 ); then
-    lock_free=1
-  fi
-
-  # Reap the lingering daemon child.
-  local cpid; cpid=$(cat "$childpid_file" 2>/dev/null || echo "")
-  [[ -n "$cpid" ]] && kill "$cpid" 2>/dev/null
-
-  if [[ "$rc" -ne 0 ]]; then
-    echo "FAIL: push should pass with a free slot (got rc=$rc)" >&2
-    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
-  fi
-  if [[ "$lock_free" -ne 1 ]]; then
-    echo "FAIL: gate slot still held after script exit — daemon child leaked the slot fd (gu-40xsf)" >&2
-    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
-  fi
-  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"
-}
-
 # Test: with no town root known (no GT_TOWN_ROOT, no mayor/town.json), the cap
 # is a silent no-op and the push passes normally.
 test_gate_slot_cap_skips_without_town_root() {
@@ -890,87 +648,9 @@ test_gate_slot_cap_skips_without_town_root() {
   PASS=$((PASS + 1)); cleanup_last_run
 }
 
-# --- gu-zadrb: slow-gate hard wall-clock group timeout -------------------
-#
-# The slow gate ('go test ./...') has been observed to hang PAST go's own
-# -timeout because a test spawned network children (git-remote-https) that
-# go's deadline doesn't reap. The orphaned tree pins the polecat worktree dir,
-# blocking post-merge nuke (STUCK_NUKE). The fix runs the slow gate in its own
-# process group under a wall-clock timeout and kills the WHOLE group on expiry.
-#
-# These tests stub `go` so the "test" subcommand hangs (and forks a child that
-# outlives its parent), then assert: (1) the push is rejected with the timeout
-# message, and (2) no forked child survives the group-kill.
-
-# Test: a hanging slow gate is killed by the wall-clock group timeout and the
-# push is rejected (rc != 0, timeout message printed).
-test_slow_gate_wall_clock_timeout_rejects() {
-  local stubdir tmprepo marker
-  stubdir=$(mktemp -d)
-  tmprepo=$(mktemp -d)
-  marker=$(mktemp -u)   # a path the forked grandchild creates then would keep alive
-  # `go`: pass build/vet fast, but the "test" subcommand spawns a long-lived
-  # child (writing its PID to $marker) and then hangs — simulating the
-  # hang-past-go-timeout failure mode.
-  cat > "$stubdir/go" <<EOF
-#!/bin/bash
-if [[ "\$1" == "test" ]]; then
-  # Spawn a child that outlives this process (the orphan-that-pins-worktree).
-  ( sleep 300 & echo "\$!" > "$marker"; sleep 300 ) &
-  # Hang forever — go's -timeout would normally fire, but we model the case
-  # where it does NOT (children keep the tree alive).
-  sleep 300
-  exit 0
-fi
-exit 0
-EOF
-  chmod +x "$stubdir/go"
-  printf '#!/bin/bash\nexit 0\n' > "$stubdir/gofmt"; chmod +x "$stubdir/gofmt"
-
-  ( cd "$tmprepo" && git init -q && \
-      git config user.email "test@example.com" && \
-      git config user.name "test" && \
-      git commit -q --allow-empty -m init ) >/dev/null 2>&1
-
-  local rc=0 out
-  out=$(
-    cd "$tmprepo" && \
-    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
-    GT_PREPUSH_TEST_WALL_SECONDS=2 \
-    bash "$SCRIPT" 2>&1
-  ) || rc=$?
-  rc=${rc:-0}
-
-  if [[ $rc -eq 0 ]]; then
-    echo "FAIL: a hanging slow gate should reject the push (got rc=0)" >&2
-    echo "$out" >&2
-    FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"; return
-  fi
-  if ! echo "$out" | grep -qi "wall-clock timeout"; then
-    echo "FAIL: rejection should mention the wall-clock timeout" >&2
-    echo "$out" >&2
-    FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"; return
-  fi
-
-  # The forked grandchild must NOT survive the group-kill. Give the kill a
-  # moment to land, then check the PID recorded in $marker is gone.
-  sleep 2
-  if [[ -f "$marker" ]]; then
-    local child_pid
-    child_pid=$(cat "$marker" 2>/dev/null)
-    if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
-      echo "FAIL: forked test child $child_pid survived the group-kill (orphan would pin worktree)" >&2
-      kill -KILL -- "-$child_pid" 2>/dev/null
-      kill -KILL "$child_pid" 2>/dev/null
-      FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"; return
-    fi
-  fi
-  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$marker"
-}
-
-# Test: a fast slow-gate (returns before the wall) is NOT killed and the push
-# passes — the wall-clock must not penalize healthy test runs.
-test_slow_gate_under_wall_passes() {
+# Test: a healthy default run passes all fast gates and reports completion.
+# (gs-4s06: there is no slow tier or wall-clock anymore; this is the happy path.)
+test_all_fast_gates_pass() {
   local stubdir tmprepo
   stubdir=$(mktemp -d)
   tmprepo=$(mktemp -d)
@@ -986,12 +666,11 @@ test_slow_gate_under_wall_passes() {
   out=$(
     cd "$tmprepo" && \
     env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
-    GT_PREPUSH_TEST_WALL_SECONDS=30 \
     bash "$SCRIPT" 2>&1
   ) || rc=$?
   rc=${rc:-0}
   if [[ $rc -ne 0 ]]; then
-    echo "FAIL: a fast slow-gate under the wall should pass (got rc=$rc)" >&2
+    echo "FAIL: a healthy run should pass all fast gates (got rc=$rc)" >&2
     echo "$out" >&2
     FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo"; return
   fi
@@ -1005,14 +684,13 @@ test_slow_gate_under_wall_passes() {
 
 # --- gu-enqh0: upfront banner before gates -------------------------------
 #
-# A backgrounded / non-tty push runs the gates for ~2 min before contacting
-# origin, with no output until the first gate prints — which reads as a hung
-# push and invites a spurious retry. The script must announce the gate run
-# (and, on the default path, the ~2 min cost + the skip hint) BEFORE the first
-# gate executes, so even a backgrounded push shows immediate progress.
+# A backgrounded / non-tty push runs the gates before contacting origin, with
+# no output until the first gate prints — which reads as a hung push and
+# invites a spurious retry. The script must announce the gate run BEFORE the
+# first gate executes, so even a backgrounded push shows immediate progress.
 
-# Test: default run prints the banner announcing gates + the skip hint, and it
-# appears BEFORE the first gate ('go build') output.
+# Test: a run prints the fast-gate banner BEFORE the first gate ('go build')
+# output.
 test_banner_printed_by_default() {
   run_with_stubs \
     'echo "go-called: $*" >&2; exit 0' \
@@ -1028,8 +706,8 @@ test_banner_printed_by_default() {
     echo "$OUT" >&2
     FAIL=$((FAIL + 1)); cleanup_last_run; return
   fi
-  if ! echo "$OUT" | grep -q "GT_SKIP_PREPUSH=1"; then
-    echo "FAIL: default banner should include the slow-tier skip hint" >&2
+  if ! echo "$OUT" | grep -qi "running fast gates"; then
+    echo "FAIL: banner should announce the fast-gate run" >&2
     echo "$OUT" >&2
     FAIL=$((FAIL + 1)); cleanup_last_run; return
   fi
@@ -1039,26 +717,6 @@ test_banner_printed_by_default() {
   build_line=$(echo "$OUT" | grep -n "go-called: build" | head -1 | cut -d: -f1)
   if [[ -z "$banner_line" || -z "$build_line" ]] || (( banner_line >= build_line )); then
     echo "FAIL: banner (line $banner_line) should precede 'go build' (line $build_line)" >&2
-    echo "$OUT" >&2
-    FAIL=$((FAIL + 1)); cleanup_last_run; return
-  fi
-  PASS=$((PASS + 1)); cleanup_last_run
-}
-
-# Test: under GT_SKIP_PREPUSH=1 the banner announces the fast-gate-only run
-# (and does NOT promise the ~2 min slow tier, which is skipped).
-test_banner_printed_under_skip() {
-  run_with_stubs \
-    'echo "go-called: $*" >&2; exit 0' \
-    'exit 0' \
-    1
-  if [[ $RC -ne 0 ]]; then
-    echo "FAIL: skip run should pass when fast gates pass (got rc=$RC)" >&2
-    echo "$OUT" >&2
-    FAIL=$((FAIL + 1)); cleanup_last_run; return
-  fi
-  if ! echo "$OUT" | grep -qi "running fast gates"; then
-    echo "FAIL: skip run should print a fast-gates-only banner before gates" >&2
     echo "$OUT" >&2
     FAIL=$((FAIL + 1)); cleanup_last_run; return
   fi
@@ -1075,14 +733,10 @@ fi
 # require a real toolchain — but they do require git.
 if command -v git >/dev/null 2>&1; then
   test_fast_gates_run_under_skip
-  test_slow_gate_skipped_under_skip
+  test_test_suite_never_run
   test_gofmt_blocks_under_skip
   test_build_blocks_under_skip
-  test_slow_gate_runs_by_default
-  # gu-zy57: REASON requirement + audit event
-  test_skip_without_reason_rejected
-  test_skip_with_reason_audited
-  test_skip_audit_appends
+  test_all_fast_gates_pass
   # gu-lint-fastgate: golangci-lint as a fast gate
   test_lint_gate_skipped_when_not_installed
   test_lint_gate_blocks_under_skip
@@ -1095,14 +749,8 @@ if command -v git >/dev/null 2>&1; then
   test_gate_slot_cap_proceeds_when_full
   test_gate_slot_cap_acquires_when_free
   test_gate_slot_cap_skips_without_town_root
-  # gu-40xsf: slow-gate child must not leak the gate-slot fd to a daemon
-  test_gate_slot_cap_no_fd_leak_to_daemon_child
-  # gu-zadrb: slow-gate hard wall-clock group timeout
-  test_slow_gate_wall_clock_timeout_rejects
-  test_slow_gate_under_wall_passes
   # gu-enqh0: upfront banner before gates
   test_banner_printed_by_default
-  test_banner_printed_under_skip
 fi
 
 echo ""

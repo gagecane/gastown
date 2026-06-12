@@ -206,16 +206,19 @@ test-makefile:
 	bash scripts/check-upstream-rebased_test.sh
 	bash scripts/git-push-verified_test.sh
 
-# verify: Run the same gates CI's "Test" job runs, locally, before pushing.
-# This is the last line of defense before changes reach origin/main. Identical
-# to what the .githooks/pre-push hook runs on every push. Env vars that could
-# mask test failures (GT_TOWN_ROOT, GT_ROOT) are unset so tests run with a
-# clean env matching CI. Does not run `-tags=integration` tests; use
+# verify: Run the FAST gates (build/vet/gofmt/lint) the .githooks/pre-push hook
+# runs on every push, locally. This is the last local line of defense before
+# changes reach origin/main. The full `go test ./...` suite is NOT a pre-push
+# gate (gs-4s06: it blew past the 360s hook wall and the Refinery re-runs full
+# gates on merge); run it on demand with `make test`. Env vars that could mask
+# failures (GT_TOWN_ROOT, GT_ROOT) are unset so gates run with a clean env
+# matching CI. Does not run `-tags=integration` tests; use
 # `make verify-integration` for those (requires Docker).
 #
 # Usage:
-#   make verify                # before pushing, or as a sanity check
-#   GT_SKIP_PREPUSH=1 git push # emergency escape if verify is broken
+#   make verify        # before pushing, or as a sanity check
+#   make test          # the full unit suite (no wall)
+#   git push --no-verify # emergency escape if verify is broken
 verify:
 	@bash scripts/pre-push-check.sh
 
