@@ -1343,3 +1343,87 @@ func TestAssertServedData_NilHookIsDefault(t *testing.T) {
 		t.Errorf("expected nil (query failure is non-fatal), got %v", err)
 	}
 }
+
+// ============================================================================
+// killImposters eviction before (re)start (gu-3uxt9: guard against a rogue
+// per-rig dolt sql-server hijacking the town port on the daemon restart path)
+// ============================================================================
+
+func TestKillImposters_UsesHook(t *testing.T) {
+	sentinel := fmt.Errorf("kill hook fired")
+	m := &DoltServerManager{
+		config:          &DoltServerConfig{},
+		logger:          func(string, ...interface{}) {},
+		killImpostersFn: func() error { return sentinel },
+	}
+	if err := m.killImposters(); err != sentinel {
+		t.Errorf("got %v, want sentinel error", err)
+	}
+}
+
+func TestStartLocked_EvictsImposterBeforeSpawn(t *testing.T) {
+	// startLocked must evict any port imposter BEFORE spawning a new server.
+	// We point DataDir at a path whose parent is a regular file so the
+	// post-eviction MkdirAll fails deterministically — this lets us assert the
+	// eviction fired without ever spawning a real dolt process.
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	var killed bool
+	m := &DoltServerManager{
+		townRoot: tmp,
+		config: &DoltServerConfig{
+			Host:    "127.0.0.1",
+			Port:    3307,
+			DataDir: filepath.Join(blocker, "sub"), // MkdirAll will fail here
+		},
+		logger:          func(string, ...interface{}) {},
+		runningFn:       func() (int, bool) { return 0, false },
+		killImpostersFn: func() error { killed = true; return nil },
+	}
+
+	err := m.startLocked()
+	if err == nil {
+		t.Fatal("expected startLocked to fail at MkdirAll, got nil")
+	}
+	if !killed {
+		t.Error("expected imposter eviction to run before spawn, but killImpostersFn was not called")
+	}
+}
+
+func TestStartLocked_KillImposterErrorIsNonFatal(t *testing.T) {
+	// A failure to evict an imposter must not abort the start sequence — it is
+	// logged and the start proceeds. We still fail later at MkdirAll, proving
+	// the kill error did not short-circuit before that point.
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	m := &DoltServerManager{
+		townRoot: tmp,
+		config: &DoltServerConfig{
+			Host:    "127.0.0.1",
+			Port:    3307,
+			DataDir: filepath.Join(blocker, "sub"),
+		},
+		logger:          func(string, ...interface{}) {},
+		runningFn:       func() (int, bool) { return 0, false },
+		killImpostersFn: func() error { return fmt.Errorf("kill failed") },
+	}
+
+	err := m.startLocked()
+	if err == nil {
+		t.Fatal("expected startLocked to fail at MkdirAll, got nil")
+	}
+	if strings.Contains(err.Error(), "kill failed") {
+		t.Errorf("kill error should be non-fatal/logged, not returned: %v", err)
+	}
+	if !strings.Contains(err.Error(), "creating data directory") {
+		t.Errorf("expected MkdirAll failure (proves start proceeded past eviction), got %v", err)
+	}
+}

@@ -151,6 +151,7 @@ type DoltServerManager struct {
 	writeProbeCheckFn func() error
 	identityCheckFn   func() error // nil = use real VerifyServerDataDir
 	servedDataCheckFn func() error // nil = use real assertServedData (hq issue_prefix present)
+	killImpostersFn   func() error // nil = use real doltserver.KillImposters
 	startFn           func() error
 	runningFn         func() (int, bool)
 	stopFn            func()
@@ -956,6 +957,26 @@ func (m *DoltServerManager) startLocked() error {
 		return err
 	}
 
+	// Evict any imposter holding the port BEFORE spawning. isRunning() returned
+	// false above, but the port can still be occupied by a non-managed dolt
+	// sql-server — e.g. a per-rig embedded server that a stray `bd` invocation
+	// spawned from .beads/dolt while the managed server was down. Such an
+	// imposter serves the WRONG store (no hq) and, left in place, takes the
+	// whole town's bd writes down (gu-3uxt9, gc-6lzjy2, gc-96zaij). If we spawn
+	// without evicting it first, the new server cannot bind the occupied port
+	// and exits, while the imposter keeps answering health checks on :3307 —
+	// the daemon then crash-loops the spawn forever and never reaches the
+	// running-branch identity check that would kill the imposter.
+	//
+	// The canonical `gt dolt start` path already evicts squatters before
+	// binding; this mirrors that guard for the daemon's auto-restart path.
+	// KillImposters is idempotent: it is a no-op when the port is free or held
+	// by this town's own server (verified by data-dir ownership), so it is safe
+	// to call unconditionally on every (re)start.
+	if err := m.killImposters(); err != nil {
+		m.logger("Warning: failed to evict imposter before Dolt start: %v", err)
+	}
+
 	// Ensure data directory exists
 	if err := os.MkdirAll(m.config.DataDir, 0755); err != nil {
 		return fmt.Errorf("creating data directory: %w", err)
@@ -1067,6 +1088,17 @@ func (m *DoltServerManager) startLocked() error {
 	}
 
 	return nil
+}
+
+// killImposters evicts any non-managed dolt sql-server holding the configured
+// port. It delegates to doltserver.KillImposters (idempotent: a no-op when the
+// port is free or held by this town's own server). The test hook lets unit
+// tests assert the eviction is invoked without shelling out to ps/kill.
+func (m *DoltServerManager) killImposters() error {
+	if m.killImpostersFn != nil {
+		return m.killImpostersFn()
+	}
+	return doltserver.KillImposters(m.townRoot)
 }
 
 // assertServedData verifies the running Dolt server is serving real town data,
