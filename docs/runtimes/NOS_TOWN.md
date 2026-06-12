@@ -58,11 +58,10 @@ export GROQ_API_KEY="your-api-key"
 nos install ~/nos --git
 cd ~/nos
 
-# Or use gt and configure Groq runtime manually
+# Or use gt and configure the Groq runtime per-rig
 gt install ~/nos --git
 cd ~/nos
-gt config set runtime.provider groq
-gt config set runtime.base_url https://api.groq.com/openai/v1
+# Set the runtime block in <rig>/settings/config.json (see step 3 below)
 ```
 
 ### 3. Configure Per-Rig Runtime

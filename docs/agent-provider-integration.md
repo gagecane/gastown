@@ -286,7 +286,7 @@ or Gemini CLI), Gas Town can install hooks automatically.
 | `PreToolUse` | Before tool execution | `gt tap guard pr-workflow` (guards PR creation) |
 | `Stop` | Session ends | `gt costs record` |
 
-Reference template: `internal/claude/config/settings-autonomous.json`
+Reference template: `internal/hooks/templates/claude/settings-autonomous.json`
 
 ```json
 {
@@ -703,8 +703,11 @@ Create `~/gt/settings/agents.json` (or add to existing):
 ### Step 2: Test basic launch (5 minutes)
 
 ```bash
-# Set your agent as default for a rig
-gt config set agent your-agent --rig <rigname>
+# Set your agent as the town-wide default
+gt config default-agent your-agent
+
+# Or set it for a single rig by adding "agent": "your-agent"
+# to ~/gt/<rigname>/settings/config.json
 
 # Or test with a one-off override
 gt crew start jack --agent your-agent
