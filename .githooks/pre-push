@@ -138,16 +138,18 @@ while read local_ref local_sha remote_ref remote_sha; do
   fi
 done
 
-# Branch/integration checks passed. Now run local CI gates (build + vet + test)
-# via scripts/pre-push-check.sh. These match CI's "Test" job and catch
-# breaking changes before they reach main — where they'd otherwise only
-# surface AFTER push, since crew pushes directly to main without a PR queue.
+# Branch/integration checks passed. Now run local CI FAST gates
+# (build + vet + gofmt + lint) via scripts/pre-push-check.sh. These match CI's
+# fast jobs and catch breaking changes before they reach main — where they'd
+# otherwise only surface AFTER push, since crew pushes directly to main without
+# a PR queue. The full `go test ./...` suite is intentionally NOT a pre-push
+# gate (gs-4s06); the Refinery re-runs full gates on merge.
 #
 # The script is skipped automatically if:
-#   - GT_SKIP_PREPUSH=1 is set (emergency escape)
 #   - scripts/pre-push-check.sh is missing (older checkouts)
 #   - 'go' is not on PATH (non-Go developer environments)
 #
+# To bypass ALL hooks in an emergency: git push --no-verify.
 # See scripts/pre-push-check.sh for gate details and env hygiene.
 
 # Skip the gate runner for preserved-only pushes (gu-p9b2v). refs/heads/preserved/*

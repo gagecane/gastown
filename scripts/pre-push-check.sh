@@ -1,84 +1,59 @@
 #!/bin/bash
-# pre-push-check.sh: run the same gates CI runs, locally, before a push reaches origin.
+# pre-push-check.sh: run the same FAST gates CI runs, locally, before a push
+# reaches origin.
 #
 # Purpose: this repo's CI Test + Integration Tests jobs are the trusted signal
 # that a change doesn't break main. But CI only runs AFTER push, which means
 # broken changes land on main before humans notice. Crew workers push directly
 # to main (no feature branches, no PR queue), so there is no merge-queue
-# backstop. This script closes that gap by running CI's gates locally.
+# backstop for them. This script closes that gap by running CI's FAST gates
+# locally:
 #
-# Gates are split into two tiers:
+#   1. go build ./...            — compiles (catches broken imports, type errs)
+#   2. go vet ./...              — static analysis (shadow, printf, unreachable)
+#   3. gofmt -l                  — formatting check (catches trailing newlines etc.)
+#   4. golangci-lint run         — misspell, errcheck, gosec, unconvert,
+#                                  unparam (catches lint failures that
+#                                  only CI's Lint job sees today). In a Go
+#                                  repo a missing golangci-lint fails the
+#                                  push CLOSED (gs-812); non-Go checkouts
+#                                  skip it. See gu-lint-fastgate.
 #
-#   FAST gates (always run, even under GT_SKIP_PREPUSH=1):
-#     1. go build ./...            — compiles (catches broken imports, type errs)
-#     2. go vet ./...              — static analysis (shadow, printf, unreachable)
-#     3. gofmt -l                  — formatting check (catches trailing newlines etc.)
-#     4. golangci-lint run         — misspell, errcheck, gosec, unconvert,
-#                                    unparam (catches lint failures that
-#                                    only CI's Lint job sees today). In a Go
-#                                    repo a missing golangci-lint fails the
-#                                    push CLOSED (gs-812); non-Go checkouts
-#                                    skip it. See gu-lint-fastgate.
+# These four gates all complete in well under a minute and catch the most
+# common landing failures.
 #
-#   SLOW gates (skipped when GT_SKIP_PREPUSH=1):
-#     5. go test ./... -count=1    — full unit test suite with clean env (~2min)
-#
-# Why split? `gt done --pre-verified` sets GT_SKIP_PREPUSH=1 to avoid re-running
-# the slow test suite that the polecat already ran during pre-verification. But
-# tests are the only slow gate — build/vet/gofmt are seconds and there's no
-# legitimate reason to skip them. A polecat that lies about pre-verification,
-# runs gates against a stale base, or simply forgets to gofmt can still land
-# broken code on origin. The fast tier closes that gap. See gu-7f0v.
+# No slow tier (gs-4s06):
+#   This script intentionally does NOT run the full `go test ./...` suite. On
+#   some hosts the suite needs >470s, which always blew past the pre-push hook's
+#   360s hard wall — the slow tier failed BY CONSTRUCTION and the only way to
+#   push was GT_SKIP_PREPUSH=1, training the bypass habit and burning ~6 min per
+#   push attempt. The Refinery merge queue re-runs the full gates on every merge,
+#   so a pre-push test tier was redundant defense. The full unit suite still runs
+#   locally on demand via `make test` (no wall) and in CI on every merge.
 #
 # Env hygiene:
-#   This script UNSETS GT_TOWN_ROOT and GT_ROOT before running tests. Some
-#   tests call workspace.FindFromCwdOrError which falls back to these env vars
-#   if CWD detection fails — a broken test can pass locally (your shell has
-#   them set) but fail in CI (clean env). Unsetting here matches CI and
-#   catches those tests before push. See commit 77c54398 for the canonical
-#   instance of this bug.
+#   This script UNSETS GT_TOWN_ROOT and GT_ROOT before running gates. Some
+#   gates (and any subprocess they spawn) call workspace.FindFromCwdOrError
+#   which falls back to these env vars if CWD detection fails — a check can
+#   pass locally (your shell has them set) but fail in CI (clean env).
+#   Unsetting here matches CI. See commit 77c54398 for the canonical bug.
 #
 # Integration tests:
-#   This script does NOT run `-tags=integration` tests by default — they
-#   require Docker + dolt container and take ~5 minutes. They run NIGHTLY in
-#   CI (nightly-integration.yml), not on every push (gu-d9m7o). To run
-#   locally: `make verify-integration`.
+#   This script does NOT run `-tags=integration` tests — they require Docker +
+#   dolt container and take ~5 minutes. They run NIGHTLY in CI
+#   (nightly-integration.yml). To run locally: `make verify-integration`.
 #
-# Escape hatches (use sparingly; if you're reaching regularly, file a bead):
-#   GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
-#                                    — skip SLOW gates (fast gates still run);
-#                                      REASON is required and audited (gu-zy57)
+# Escape hatch (use sparingly):
 #   git push --no-verify             — skip ALL hooks (standard git, NOT audited)
-#
-# Audit trail (gu-zy57):
-#   When GT_SKIP_PREPUSH=1 is honoured the script appends one JSON line to
-#   <repo>/.runtime/prepush-skips.jsonl recording who skipped the slow tier,
-#   why, and what was pushed. The empty-REASON case is rejected outright so
-#   a misconfigured caller can't silently bypass the slow tier without record.
 #
 # Why pre-push, not pre-commit:
 #   The existing pre-commit hook already runs go vet and a fast lint scoped
 #   to staged files — that's the right granularity for "don't commit obvious
-#   garbage." But the full test suite takes ~2min and polecats commit
-#   constantly; running it on every commit would be a tax they'd learn to
-#   --no-verify. Pre-push runs once per push instead of once per commit, so
-#   the cost is amortized and it's the last line of defense before CI.
+#   garbage." Pre-push runs these repo-wide gates once per push instead of
+#   once per commit, so the cost is amortized and it's the last local line of
+#   defense before CI.
 
 set -u
-
-# --- Tier selection -------------------------------------------------------
-#
-# GT_SKIP_PREPUSH=1 (set by `gt done --pre-verified`) means the caller already
-# ran the full gate suite on a rebased branch, so skip the SLOW gates (tests).
-# Fast gates (build, vet, gofmt) ALWAYS run — they're cheap and catch the
-# most common landing failures (gu-7f0v: trailing-newline gofmt landings under
-# --pre-verified that briefly broke main between push and CI catch).
-#
-# Audit (gu-zy57): a slow-tier skip MUST carry GT_SKIP_PREPUSH_REASON=<text>
-# and is recorded as one JSON line in <repo>/.runtime/prepush-skips.jsonl.
-# Without the reason the skip is rejected outright — misconfigured callers
-# that set the flag but not the reason fail closed instead of silently
-# bypassing tests.
 
 # json_escape <var> — escape a string for embedding inside a JSON value.
 # Handles backslashes, double quotes, and the control characters we expect
@@ -95,9 +70,11 @@ json_escape() {
 }
 
 # emit_skip_event — append one JSON line to .runtime/prepush-skips.jsonl
-# describing this slow-tier skip. Best-effort: failures here MUST NOT block
-# the push, because the only thing worse than an unaudited skip is a script
-# that refuses to push because audit logging broke.
+# describing a gate event that bypassed normal verification. Today this only
+# records fail-closed BLOCKS (a missing go/golangci-lint toolchain in a Go
+# repo, gs-812) so witness tooling can audit ungated pushes. Best-effort:
+# failures here MUST NOT block the push, because the only thing worse than an
+# unaudited block is a script that refuses to push because audit logging broke.
 emit_skip_event() {
   local reason=$1
   local repo_root
@@ -120,33 +97,6 @@ emit_skip_event() {
   printf '{"ts":"%s","actor":"%s","reason":"%s","branch":"%s","sha":"%s"}\n' \
     "$ts" "$a" "$r" "$b" "$sha" >> "$events_file" 2>/dev/null || true
 }
-
-SKIP_SLOW=0
-if [[ "${GT_SKIP_PREPUSH:-0}" == "1" ]]; then
-  if [[ -z "${GT_SKIP_PREPUSH_REASON:-}" ]]; then
-    cat >&2 <<'EOF'
-✗ Push rejected: GT_SKIP_PREPUSH=1 requires GT_SKIP_PREPUSH_REASON=<text>.
-
-Skipping the slow tier without recording why is what let unexplained
-test-suite bypasses through unaudited. Set a reason explaining the skip:
-
-  GT_SKIP_PREPUSH=1 \
-  GT_SKIP_PREPUSH_REASON="pre-verified: gates ran in formula step 7" \
-  git push
-
-Legitimate reasons include "pre-verified" (polecat already ran gates),
-"emergency: <bead>", or "cherry-pick: <context>". The reason is appended
-to .runtime/prepush-skips.jsonl so witness tooling can audit it.
-
-Note: fast gates (build/vet/gofmt) still run unconditionally — this only
-gates the SLOW tier (test suite). See gu-7f0v + gu-zy57.
-EOF
-    exit 1
-  fi
-  SKIP_SLOW=1
-  emit_skip_event "${GT_SKIP_PREPUSH_REASON}"
-  echo "pre-push: GT_SKIP_PREPUSH=1, skipping SLOW gates (tests; reason: ${GT_SKIP_PREPUSH_REASON}). Fast gates still run." >&2
-fi
 
 # --- Locate repo root -----------------------------------------------------
 
@@ -200,7 +150,7 @@ if ! command -v go >/dev/null 2>&1; then
 
 ✗ Push rejected: 'go' not found on PATH, but this is a Go repo (go.mod present).
 
-The pre-push gates (build/vet/gofmt/lint/test) are the only backstop between a
+The pre-push gates (build/vet/gofmt/lint) are the only backstop between a
 broken change and main — crew workers push directly, with no merge-queue. The
 old behavior skipped every gate when 'go' fell off PATH, landing ungated code
 silently. This gate now fails CLOSED, and the block is recorded in
@@ -237,11 +187,11 @@ if [[ -z "$GATE_SEM_TOWN_ROOT" ]]; then
   done
 fi
 
-# --- Clean env so tests don't inherit developer's GT_TOWN_ROOT ------------
+# --- Clean env so gates don't inherit developer's GT_TOWN_ROOT ------------
 #
-# Tests that need a workspace must create their own marker (mayor/town.json).
-# If they rely on GT_TOWN_ROOT/GT_ROOT from the developer's shell, they're
-# silently broken — CI has no such env.
+# Checks (and any subprocess they spawn) that need a workspace must create
+# their own marker (mayor/town.json). If they rely on GT_TOWN_ROOT/GT_ROOT
+# from the developer's shell, they're silently broken — CI has no such env.
 
 unset GT_TOWN_ROOT GT_ROOT GT_SESSION GT_RIG GT_POLECAT
 
@@ -250,18 +200,11 @@ unset GT_TOWN_ROOT GT_ROOT GT_SESSION GT_RIG GT_POLECAT
 # When git runs a hook (e.g. pre-push), it exports GIT_DIR, GIT_WORK_TREE,
 # GIT_INDEX_FILE, etc. pointing at the pushing repo (see githooks(5) and
 # git(1) "Discussion" on environment). Those vars are inherited by every
-# child process this script spawns — including `go test ./...`, whose tests
-# run `git` via os/exec. When a test creates its own bare repo in t.TempDir()
-# and runs `git push <fixture_remote> main`, git reads GIT_DIR from the
-# environment instead of the test's cmd.Dir and silently operates on the
-# REAL pushing repo. The test's push then lands on the real .repo.git, and
-# the subsequent outer `git push origin main` propagates the pollution all
-# the way to the remote.
-#
-# This is how gu-h2ru's test-fixture commits ("add dirty.txt" by user "Test")
-# reached https://github.com/gagecane/gastown main. See the bead for the
-# full forensic trail. Unsetting these vars here matches the environment
-# that `go test ./...` sees when invoked from a plain shell.
+# child process this script spawns. A subprocess that runs `git` via os/exec
+# and creates its own bare repo in a temp dir would otherwise read GIT_DIR
+# from the environment instead of its own cmd.Dir and silently operate on the
+# REAL pushing repo — how gu-h2ru's test-fixture commits reached the real
+# remote. Unsetting these vars here matches the environment a plain shell sees.
 
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
@@ -272,19 +215,19 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \
 # --- Host-wide concurrency cap on heavy go gate runs (gs-orsm) ------------
 #
 # The 2026-06-09 load-742 estop: many polecat/refinery worktrees ran this
-# script's heavy go build/vet/lint/test gates CONCURRENTLY across all rigs
-# with NO global cap. 25+ simultaneous Go linker processes exhausted swap and
-# risked OOM (deacon CRITICAL hq-tghws). The `gt done --pre-verified` path was
-# already capped by a cross-process counting semaphore (gu-0iyrn:
+# script's heavy go build/vet/lint gates CONCURRENTLY across all rigs with NO
+# global cap. 25+ simultaneous Go linker processes exhausted swap and risked
+# OOM (deacon CRITICAL hq-tghws). The `gt done --pre-verified` path was already
+# capped by a cross-process counting semaphore (gu-0iyrn:
 # internal/lock.FlockSemaphore over <townRoot>/.runtime/locks/gate-slots), but
 # this pre-push path was uncapped — the recurrence vector.
 #
 # Fix: acquire one slot from that SAME semaphore pool before running the heavy
 # gates, so pre-push and gt-done share a single host-wide bound on concurrent
-# full-suite go runs. We reimplement the slot scan with bash flock(1), which
-# takes the same flock(2) advisory lock as the Go side (syscall.Flock), so the
-# two implementations interoperate on the identical slot-N.flock files. Cap
-# size honors the same GT_GATE_CONCURRENCY knob the Go side reads (default 2);
+# go gate runs. We reimplement the slot scan with bash flock(1), which takes
+# the same flock(2) advisory lock as the Go side (syscall.Flock), so the two
+# implementations interoperate on the identical slot-N.flock files. Cap size
+# honors the same GT_GATE_CONCURRENCY knob the Go side reads (default 2);
 # GT_GATE_SLOT_WAIT_SECONDS bounds the wait (default 600, matching the Go
 # side's 10m) and lets tests shrink it.
 #
@@ -340,26 +283,19 @@ acquire_gate_slot() {
   done
 }
 
-# Take a slot before the heavy gates below. Held through the slow gate and
-# released on exit. Bounds concurrent build/vet/lint/test runs host-wide.
+# Take a slot before the heavy gates below. Held through the gates and released
+# on exit. Bounds concurrent build/vet/lint runs host-wide.
 acquire_gate_slot
 
 # --- Upfront banner (gu-enqh0) -------------------------------------------
 #
-# A push launched in a background / non-tty context runs these gates for up
-# to ~2 min before contacting origin, with no network activity and (until the
-# first gate prints) no visible output — so it reads as a hung push and invites
-# a spurious retry that just re-runs the same gates. Announce the work the
-# instant it begins, before the first gate, so even a backgrounded push shows
-# immediate progress and the caller knows the wait is expected and how to skip
-# the slow tier.
-if [[ "$SKIP_SLOW" == "1" ]]; then
-  echo "pre-push: running fast gates (build/vet/gofmt/lint) before contacting origin — expected, the push is not hung." >&2
-else
-  echo "pre-push: running gates (build/vet/gofmt/lint + full 'go test ./...', up to ~2 min) before contacting origin." >&2
-  echo "pre-push: this is EXPECTED — the push is not hung and has not yet reached origin. To skip the slow test tier:" >&2
-  echo "pre-push:   GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON=\"<why>\" git push" >&2
-fi
+# A push launched in a background / non-tty context runs these gates before
+# contacting origin, with no network activity and (until the first gate prints)
+# no visible output — so it reads as a hung push and invites a spurious retry
+# that just re-runs the same gates. Announce the work the instant it begins,
+# before the first gate, so even a backgrounded push shows immediate progress
+# and the caller knows the wait is expected.
+echo "pre-push: running fast gates (build/vet/gofmt/lint) before contacting origin — expected, the push is not hung." >&2
 
 # --- FAST GATE 1: go build ------------------------------------------------
 
@@ -372,7 +308,6 @@ if ! go build ./... 2>&1; then
 Fix compile errors before pushing. CI will reject the same build failures
 but with a ~5min round-trip cost.
 
-This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
 There is no escape hatch for build failures; fix the build.
 EOF
   exit 1
@@ -388,8 +323,6 @@ if ! go vet ./... 2>&1; then
 
 Vet catches real bugs (shadow, printf, unreachable). Fix them or use
 //nolint:vet on the specific line if the warning is a false positive.
-
-This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
 EOF
   exit 1
 fi
@@ -410,8 +343,6 @@ if [[ -n "$unformatted" ]]; then
 $unformatted
 
 Run \`gofmt -w <file>\` (or \`gofmt -w .\`) to fix formatting, then re-push.
-
-This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
 EOF
   exit 1
 fi
@@ -420,12 +351,11 @@ fi
 #
 # CI's Lint job (golangci-lint with .golangci.yml) catches misspell, errcheck,
 # gosec, unconvert, unparam findings that go vet does NOT. Same broken-main
-# window as gofmt: polecats pass build/vet/gofmt locally, push, and only THEN
+# window as gofmt: a push passes build/vet/gofmt locally, lands, and only THEN
 # does golangci-lint catch issues — by which point main is briefly broken.
 #
-# Mirroring the gofmt gate: runs as a fast gate so it fires even under
-# --pre-verified. The check is fast (~10-30s on this codebase) and catches
-# the failure modes that pre-verification often misses.
+# The check is fast (~10-30s on this codebase) and catches the failure modes
+# the other gates miss.
 #
 # If golangci-lint isn't installed locally, behavior splits on repo type
 # (gs-812): in a Go repo this gate fails CLOSED (block + audit), because a
@@ -445,7 +375,6 @@ if command -v golangci-lint >/dev/null 2>&1; then
 Fix the issues above (or add a .golangci.yml exclusion if the linter is
 mechanically wrong about an external API string), then re-push.
 
-This is a FAST gate — it runs even under --pre-verified / GT_SKIP_PREPUSH=1.
 The full lint suite is configured in .golangci.yml; the same gate runs in CI.
 EOF
     exit 1
@@ -482,112 +411,6 @@ EOF
   exit 1
 else
   echo "pre-push: [fast] golangci-lint not installed and no go.mod — non-Go checkout, skipping lint gate" >&2
-fi
-
-# --- SLOW GATE: go test ---------------------------------------------------
-#
-# Skipped under GT_SKIP_PREPUSH=1. The contract: callers setting that env
-# (e.g. `gt done --pre-verified`) already ran tests on a rebased branch.
-# Build/vet/gofmt above are not skippable because they're cheap and catch
-# the failure modes that pre-verification often misses.
-
-if [[ "$SKIP_SLOW" == "1" ]]; then
-  echo "pre-push: [slow] tests skipped (GT_SKIP_PREPUSH=1)" >&2
-  echo "pre-push: fast gates passed ✓" >&2
-  exit 0
-fi
-
-# run_with_group_timeout <wall_seconds> <cmd...> — run a command in its OWN
-# process group (via setsid) under a hard wall-clock timeout. On expiry, signal
-# the WHOLE group (kill -- -PGID), not just the leader, so forked children are
-# reaped too. Returns 124 on timeout, else the command's exit code.
-#
-# gu-zadrb: 'go test ./... -count=1 -timeout=5m' has been observed to hang PAST
-# go's own -timeout — the test binary's deadline fires but orphaned network
-# children (git-remote-https at 0% CPU) keep the process tree alive, pinning the
-# polecat worktree dir so post-merge nuke can't rmdir it (→ STUCK_NUKE). go's
-# -timeout only bounds the test binary; it does not reap children the test
-# spawned via os/exec. GNU `timeout` alone is insufficient here — it does not
-# signal the child's whole process group, so re-forking test workers survive it
-# (verified). A wall-clock that kills the GROUP is the only robust bound.
-#
-# Falls back to a plain run when `setsid` is unavailable (the group bound is
-# then absent, but go's own -timeout still applies — no worse than before).
-#
-# gu-40xsf: the slow gate's child (`go test ./...`) MUST NOT inherit the
-# gate-slot fd held in GATE_SLOT_FD. bash's `exec {fd}>file` does NOT set
-# close-on-exec, so any process the tests spawn inherits that fd — and a
-# test that daemonizes a tmux server (newIsolatedTmuxForTest /
-# gt-test-sentinel) leaves a daemon that outlives the test and pins the
-# flock indefinitely. flock releases only when EVERY fd referencing it
-# closes, so a single leaked daemon permanently exhausts a slot; two leaks
-# exhaust the GT_GATE_CONCURRENCY=2 pool and make every subsequent push
-# block up to GT_GATE_SLOT_WAIT_SECONDS (600s) — observed as a "push hang"
-# with no PUSH_OK/PUSH_FAILED marker. We close the slot fd for the test
-# child via `{GATE_SLOT_FD}>&-` so no descendant can inherit it. The parent
-# shell keeps its own copy of the fd, so the slot stays held for the
-# duration of the gate and is released normally on EXIT.
-run_with_group_timeout() {
-  local wall=$1; shift
-  if ! command -v setsid >/dev/null 2>&1; then
-    if [[ -n "${GATE_SLOT_FD:-}" ]]; then
-      "$@" {GATE_SLOT_FD}>&-
-    else
-      "$@"
-    fi
-    return $?
-  fi
-  if [[ -n "${GATE_SLOT_FD:-}" ]]; then
-    setsid "$@" {GATE_SLOT_FD}>&- &
-  else
-    setsid "$@" &
-  fi
-  local leader=$!   # setsid makes the child a session+group leader: PGID == PID
-  local waited=0
-  while kill -0 "$leader" 2>/dev/null; do
-    if (( waited >= wall )); then
-      echo "" >&2
-      echo "✗ pre-push: [slow] test gate exceeded hard wall-clock timeout (${wall}s)." >&2
-      echo "  Killing the whole test process group (PGID $leader) to avoid orphaned" >&2
-      echo "  children pinning this worktree (gu-zadrb). A hung test is a failed gate." >&2
-      kill -TERM -- "-$leader" 2>/dev/null
-      sleep 2
-      kill -KILL -- "-$leader" 2>/dev/null
-      wait "$leader" 2>/dev/null
-      return 124
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-  wait "$leader"
-  return $?
-}
-
-# Hard wall-clock for the slow gate's process GROUP. Set a margin above go's own
-# -timeout=5m (300s) so go can fire its own deadline + dump goroutines first;
-# the group-kill is the backstop for the hang-past-go-timeout case. Overridable
-# via GT_PREPUSH_TEST_WALL_SECONDS for testing.
-TEST_WALL_SECONDS="${GT_PREPUSH_TEST_WALL_SECONDS:-360}"
-
-echo "pre-push: [slow] go test ./... -count=1 (unit tests; hard wall ${TEST_WALL_SECONDS}s)" >&2
-if ! run_with_group_timeout "$TEST_WALL_SECONDS" go test ./... -count=1 -timeout=5m; then
-  cat >&2 <<'EOF'
-
-✗ Push rejected: unit tests failed.
-
-CI would reject the same failures with a ~5min round-trip cost. Fix or
-skip the failing tests before pushing.
-
-Tip: tests that relied on GT_TOWN_ROOT/GT_ROOT in the developer's shell
-might pass locally without this gate but fail in CI. This script unsets
-those vars to match CI — if a test unexpectedly fails here but passes
-with those set, the test is the bug, not your change.
-
-Emergency escape hatch (skips SLOW gates only — fast gates still run;
-REASON is required and recorded in .runtime/prepush-skips.jsonl):
-  GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON="<text>" git push
-EOF
-  exit 1
 fi
 
 echo "pre-push: all gates passed ✓" >&2
