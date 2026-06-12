@@ -1,3 +1,17 @@
+// Package acp implements the Gas Town side of the Agent Client Protocol (ACP):
+// a transparent JSON-RPC proxy that sits between an ACP client (an IDE or other
+// UI) and a spawned agent process.
+//
+// [Proxy] pumps JSON-RPC messages in both directions over the agent's stdio,
+// tracks the initialize/session-new handshake, injects a startup prompt once
+// the session is ready, and keeps the connection alive with periodic
+// heartbeats while the agent is idle. It also detects "propulsion" triggers in
+// agent output to switch into autonomous work mode (suppressing UI output) via
+// [Propeller], which drains the nudge queue and injects queued nudges into the
+// live session.
+//
+// Platform-specific process-group setup and termination live in the
+// proxy_unix.go and proxy_windows.go build-tagged files.
 package acp
 
 import (
@@ -17,6 +31,8 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 )
 
+// handshakeState tracks progress through the ACP initialize/session-new
+// handshake.
 type handshakeState int
 
 const (
@@ -26,6 +42,8 @@ const (
 	handshakeComplete
 )
 
+// Startup-prompt injection states, tracking the lifecycle of the one-shot
+// prompt injected after the handshake completes.
 const (
 	startupPromptStateIdle      = ""
 	startupPromptStatePending   = "pending"
@@ -34,6 +52,11 @@ const (
 	startupPromptStateFailed    = "failed"
 )
 
+// Proxy is a transparent ACP proxy between an ACP client and a spawned agent
+// process. It forwards JSON-RPC traffic over the agent's stdio, manages the
+// handshake and startup-prompt injection, sends idle heartbeats, and supports
+// propulsion (autonomous) mode. A Proxy is created with [NewProxy], started
+// with [Proxy.Start], and run with [Proxy.Forward].
 type Proxy struct {
 	cmd                *exec.Cmd
 	agentStdin         io.WriteCloser
@@ -81,10 +104,15 @@ func (p *Proxy) SetTownRoot(townRoot string) {
 	p.townRoot = townRoot
 }
 
+// SetPropelled sets whether the proxy is in propulsion (autonomous) mode, in
+// which agent output is suppressed from the UI.
 func (p *Proxy) SetPropelled(propelled bool) {
 	p.Propelled.Store(propelled)
 }
 
+// JSONRPCMessage is a unified JSON-RPC 2.0 message covering requests,
+// responses, and notifications. The proxy uses this single shape to forward
+// traffic in either direction without fully decoding it.
 type JSONRPCMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitempty"`
@@ -94,6 +122,7 @@ type JSONRPCMessage struct {
 	Error   *JSONRPCError   `json:"error,omitempty"`
 }
 
+// JSONRPCError is the error payload of a [JSONRPCMessage].
 type JSONRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -118,6 +147,8 @@ type SessionNewResult struct {
 	Modes     *SessionModeState `json:"modes,omitempty"`
 }
 
+// NewProxy creates a [Proxy] wired to os.Stdin and os.Stdout for client I/O,
+// in the initial handshake state.
 func NewProxy() *Proxy {
 	debugLog("", "[Proxy] Created new proxy, initial handshakeState=%d", handshakeInit)
 	p := &Proxy{
@@ -145,6 +176,8 @@ func (p *Proxy) SetPIDFilePath(path string) {
 	p.pidFilePath = path
 }
 
+// SetStartupPrompt sets the one-shot prompt to inject once the handshake
+// completes. An empty prompt clears any pending injection.
 func (p *Proxy) SetStartupPrompt(prompt string) {
 	p.startupPromptMux.Lock()
 	p.startupPrompt = prompt
@@ -174,6 +207,9 @@ func (p *Proxy) getStartupPromptState() string {
 	return p.startupPromptState
 }
 
+// Start spawns the agent process at agentPath with the given args and working
+// directory, wiring up its stdio pipes and beginning stderr capture. It does
+// not begin forwarding traffic; call [Proxy.Forward] for that.
 func (p *Proxy) Start(ctx context.Context, agentPath string, agentArgs []string, cwd string) error {
 	childCtx, cancel := context.WithCancel(ctx)
 	p.ctx = childCtx
@@ -296,6 +332,10 @@ func (p *Proxy) writeToAgent(msg any) error {
 	return nil
 }
 
+// Forward runs the proxy's main loop, pumping JSON-RPC messages between the
+// client and the agent until the agent exits, the client disconnects, or a
+// shutdown signal is received. It blocks until shutdown completes and returns
+// the agent's exit error, if any.
 func (p *Proxy) Forward() error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, signalsToHandle()...)
@@ -845,6 +885,9 @@ func (p *Proxy) extractSessionID(msg *JSONRPCMessage) {
 	}
 }
 
+// InjectNotificationToUI sends a JSON-RPC notification to the connected client
+// out of band, attaching the current session ID and merging in params. It is
+// used to surface Gas Town events (e.g. nudges) in the UI.
 func (p *Proxy) InjectNotificationToUI(method string, params any) error {
 	if p.isShuttingDown.Load() {
 		return fmt.Errorf("proxy is shutting down")
@@ -888,6 +931,9 @@ func (p *Proxy) InjectNotificationToUI(method string, params any) error {
 	return err
 }
 
+// InjectPrompt sends a session/prompt to the agent out of band. It requires an
+// established session and returns an error if the agent is busy processing
+// another prompt (after briefly waiting for startup-prompt readiness).
 func (p *Proxy) InjectPrompt(prompt string) error {
 	if p.isShuttingDown.Load() {
 		return fmt.Errorf("proxy is shutting down")
@@ -938,12 +984,16 @@ func (p *Proxy) InjectPrompt(prompt string) error {
 	return p.writeToAgent(&req)
 }
 
+// SessionID returns the current ACP session ID, or the empty string if the
+// handshake has not yet established a session.
 func (p *Proxy) SessionID() string {
 	p.sessionMux.RLock()
 	defer p.sessionMux.RUnlock()
 	return p.sessionID
 }
 
+// WaitForSessionID blocks until a session ID is available, the context is
+// canceled, or the proxy shuts down.
 func (p *Proxy) WaitForSessionID(ctx context.Context) error {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -967,6 +1017,9 @@ func (p *Proxy) WaitForSessionID(ctx context.Context) error {
 	}
 }
 
+// WaitForReady blocks until the agent has a session and is not busy (the
+// startup prompt has settled), the context is canceled, or the proxy shuts
+// down.
 func (p *Proxy) WaitForReady(ctx context.Context) error {
 	if err := p.WaitForSessionID(ctx); err != nil {
 		return err
@@ -999,12 +1052,15 @@ func (p *Proxy) WaitForReady(ctx context.Context) error {
 	}
 }
 
+// IsBusy reports whether the agent is currently processing a prompt.
 func (p *Proxy) IsBusy() bool {
 	p.promptMux.Lock()
 	defer p.promptMux.Unlock()
 	return p.activePromptID != ""
 }
 
+// SendCancelNotification sends a session/cancel notification to the agent for
+// the current session. It is a no-op if no session is established.
 func (p *Proxy) SendCancelNotification() error {
 	p.sessionMux.RLock()
 	sessionID := p.sessionID
@@ -1053,6 +1109,10 @@ func (p *Proxy) monitorPIDFile(ctx context.Context) {
 	}
 }
 
+// Shutdown gracefully tears down the proxy: it marks the proxy as shutting
+// down, closes the agent's stdio, cancels the context, and terminates the
+// agent process. It is safe to call more than once; only the first call has
+// effect.
 func (p *Proxy) Shutdown() {
 	p.shutdownOnce.Do(func() {
 		debugLog(p.townRoot, "[Proxy] Shutdown: initiating graceful shutdown")

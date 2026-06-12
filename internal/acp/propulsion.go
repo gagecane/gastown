@@ -117,6 +117,9 @@ func logEvent(townRoot, eventType, context string) {
 	debugLog(townRoot, "[%s] %s", eventType, context)
 }
 
+// Propeller drives event-driven propulsion for an ACP session: once the
+// handshake completes it watches the nudge queue and injects drained nudges
+// into the session via the [Proxy], requeuing them if delivery fails.
 type Propeller struct {
 	proxy       *Proxy
 	townRoot    string
@@ -127,6 +130,8 @@ type Propeller struct {
 	warnedNoSID bool
 }
 
+// NewPropeller creates a [Propeller] bound to the given proxy, town root, and
+// session name. Call [Propeller.Start] to begin delivering nudges.
 func NewPropeller(proxy *Proxy, townRoot, session string) *Propeller {
 	return &Propeller{
 		proxy:    proxy,
@@ -135,6 +140,9 @@ func NewPropeller(proxy *Proxy, townRoot, session string) *Propeller {
 	}
 }
 
+// Start launches the propeller's background loop, which waits for the session
+// handshake and then delivers nudges until ctx is canceled or [Propeller.Stop]
+// is called.
 func (p *Propeller) Start(ctx context.Context) {
 	debugLog(p.townRoot, "[Propeller] Starting for session %q in town %q", p.session, p.townRoot)
 	p.ctx, p.cancel = context.WithCancel(ctx)
@@ -285,6 +293,8 @@ func buildSessionUpdateMeta(nudges []nudge.QueuedNudge, session string) map[stri
 	return meta
 }
 
+// Stop cancels the propeller's loop, closes the debug log, and waits for the
+// background goroutine to exit.
 func (p *Propeller) Stop() {
 	debugLog(p.townRoot, "[Propeller] Stopping")
 	// Close the debug log file if it was opened

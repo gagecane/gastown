@@ -6,20 +6,25 @@ import (
 	"time"
 )
 
+// JSONRPCVersion is the JSON-RPC protocol version used by all ACP messages.
 const (
 	JSONRPCVersion = "2.0"
 )
 
+// Role identifies the author of a [Message].
 type Role string
 
+// Message roles.
 const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
 	RoleSystem    Role = "system"
 )
 
+// ContentType identifies the kind of a [ContentBlock].
 type ContentType string
 
+// Content block types.
 const (
 	ContentTypeText       ContentType = "text"
 	ContentTypeToolUse    ContentType = "tool_use"
@@ -27,12 +32,16 @@ const (
 	ContentTypeImage      ContentType = "image"
 )
 
+// ToolType identifies the kind of a tool.
 type ToolType string
 
+// Tool types.
 const (
 	ToolTypeFunction ToolType = "function"
 )
 
+// JSONRPCRequest is a JSON-RPC 2.0 request or notification. A nil ID denotes a
+// notification (see [IsNotification]).
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitempty"`
@@ -40,6 +49,8 @@ type JSONRPCRequest struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
+// JSONRPCResponse is a JSON-RPC 2.0 response. Exactly one of Result or Error
+// is set.
 type JSONRPCResponse struct {
 	JSONRPC string        `json:"jsonrpc"`
 	ID      any           `json:"id,omitempty"`
@@ -47,12 +58,16 @@ type JSONRPCResponse struct {
 	Error   *JSONRPCError `json:"error,omitempty"`
 }
 
+// JSONRPCError is the error payload of a [JSONRPCResponse].
 type JSONRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
 
+// ContentBlock is a single piece of message content. The Type field selects
+// which of the remaining fields are meaningful (text, tool use, tool result,
+// or image).
 type ContentBlock struct {
 	Type ContentType `json:"type"`
 
@@ -67,23 +82,30 @@ type ContentBlock struct {
 	Source  *ImageSource    `json:"source,omitempty"`
 }
 
+// ImageSource describes the encoded image data of an image [ContentBlock].
 type ImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
 }
 
+// Message is a single conversational message: a role and its ordered content
+// blocks.
 type Message struct {
 	Role    Role           `json:"role"`
 	Content []ContentBlock `json:"content"`
 }
 
+// Tool describes a callable tool: its name, human description, and input schema.
 type Tool struct {
 	Name        string       `json:"name"`
 	Description string       `json:"description,omitempty"`
 	InputSchema *InputSchema `json:"input_schema,omitempty"`
 }
 
+// InputSchema is a JSON Schema for a tool's arguments. Schema keywords beyond
+// the explicit fields are preserved in Additional and merged back during
+// marshaling.
 type InputSchema struct {
 	Type       string         `json:"type"`
 	Properties map[string]any `json:"properties,omitempty"`
@@ -91,6 +113,8 @@ type InputSchema struct {
 	Additional map[string]any `json:"-"`
 }
 
+// MarshalJSON marshals the schema, merging any [InputSchema.Additional]
+// keywords into the top-level object.
 func (s *InputSchema) MarshalJSON() ([]byte, error) {
 	type Alias InputSchema
 	aux := &struct {
@@ -115,6 +139,8 @@ func (s *InputSchema) MarshalJSON() ([]byte, error) {
 	return json.Marshal(merged)
 }
 
+// UnmarshalJSON unmarshals the schema, capturing any keywords beyond the
+// explicit fields into [InputSchema.Additional].
 func (s *InputSchema) UnmarshalJSON(data []byte) error {
 	type Alias InputSchema
 	aux := &struct {
@@ -138,6 +164,7 @@ func (s *InputSchema) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// InitializeParams are the parameters of an ACP "initialize" request.
 type InitializeParams struct {
 	ProtocolVersion string             `json:"protocol_version"`
 	Capabilities    ClientCapabilities `json:"capabilities"`
@@ -145,24 +172,31 @@ type InitializeParams struct {
 	Meta            map[string]any     `json:"_meta,omitempty"`
 }
 
+// ClientCapabilities advertises the features a client supports.
 type ClientCapabilities struct {
 	Tools     *ToolsCapability     `json:"tools,omitempty"`
 	Resources *ResourcesCapability `json:"resources,omitempty"`
 }
 
+// ToolsCapability advertises support for the tools feature and whether the
+// tool list may change at runtime.
 type ToolsCapability struct {
 	ListChanged bool `json:"listChanged,omitempty"`
 }
 
+// ResourcesCapability advertises support for the resources feature and whether
+// the resource list may change at runtime.
 type ResourcesCapability struct {
 	ListChanged bool `json:"listChanged,omitempty"`
 }
 
+// ClientInfo identifies the connecting client by name and version.
 type ClientInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 
+// InitializeResult is the result of an ACP "initialize" request.
 type InitializeResult struct {
 	ProtocolVersion string             `json:"protocol_version"`
 	Capabilities    ServerCapabilities `json:"capabilities"`
@@ -170,37 +204,49 @@ type InitializeResult struct {
 	Instructions    string             `json:"instructions,omitempty"`
 }
 
+// ServerCapabilities advertises the features a server supports.
 type ServerCapabilities struct {
 	Tools     *ToolsCapability     `json:"tools,omitempty"`
 	Resources *ResourcesCapability `json:"resources,omitempty"`
 }
 
+// ServerInfo identifies the server by name and version.
 type ServerInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 
+// ListToolsParams are the parameters of a "tools/list" request, including an
+// optional pagination cursor.
 type ListToolsParams struct {
 	Cursor string         `json:"cursor,omitempty"`
 	Meta   map[string]any `json:"_meta,omitempty"`
 }
 
+// ListToolsResult is the result of a "tools/list" request, with an optional
+// cursor for the next page.
 type ListToolsResult struct {
 	Tools      []Tool `json:"tools"`
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
+// CallToolParams are the parameters of a "tools/call" request: the tool name
+// and its arguments.
 type CallToolParams struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments,omitempty"`
 	Meta      map[string]any `json:"_meta,omitempty"`
 }
 
+// CallToolResult is the result of a "tools/call" request. IsError marks a
+// tool-level failure (distinct from a JSON-RPC protocol error).
 type CallToolResult struct {
 	Content []ContentBlock `json:"content"`
 	IsError bool           `json:"isError,omitempty"`
 }
 
+// CreateMessageParams are the parameters of a sampling request, asking the
+// client to generate a model completion.
 type CreateMessageParams struct {
 	Messages    []Message      `json:"messages"`
 	Model       string         `json:"model,omitempty"`
@@ -210,6 +256,7 @@ type CreateMessageParams struct {
 	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
+// CreateMessageResult is the generated message returned from a sampling request.
 type CreateMessageResult struct {
 	Role    Role           `json:"role"`
 	Content []ContentBlock `json:"content"`
@@ -217,17 +264,20 @@ type CreateMessageResult struct {
 	Usage   *Usage         `json:"usage,omitempty"`
 }
 
+// Usage reports token consumption for a sampling request.
 type Usage struct {
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
 	TotalTokens  int `json:"total_tokens,omitempty"`
 }
 
+// TextContent is the typed form of a text content block.
 type TextContent struct {
 	Type ContentType `json:"type"`
 	Text string      `json:"text"`
 }
 
+// NewTextContent returns a text [ContentBlock] carrying the given text.
 func NewTextContent(text string) ContentBlock {
 	return ContentBlock{
 		Type: ContentTypeText,
@@ -235,6 +285,7 @@ func NewTextContent(text string) ContentBlock {
 	}
 }
 
+// ToolUseContent is the typed form of a tool-use content block.
 type ToolUseContent struct {
 	Type  ContentType     `json:"type"`
 	ID    string          `json:"id"`
@@ -242,6 +293,8 @@ type ToolUseContent struct {
 	Input json.RawMessage `json:"input"`
 }
 
+// NewToolUseContent returns a tool-use [ContentBlock] for the named tool,
+// marshaling input to JSON. It returns an error if input cannot be marshaled.
 func NewToolUseContent(id, name string, input any) (ContentBlock, error) {
 	inputBytes, err := json.Marshal(input)
 	if err != nil {
@@ -254,6 +307,7 @@ func NewToolUseContent(id, name string, input any) (ContentBlock, error) {
 	}, nil
 }
 
+// ToolResultContent is the typed form of a tool-result content block.
 type ToolResultContent struct {
 	Type      ContentType `json:"type"`
 	ToolUseID string      `json:"tool_use_id"`
@@ -261,6 +315,8 @@ type ToolResultContent struct {
 	IsError   bool        `json:"is_error,omitempty"`
 }
 
+// NewToolResultContent returns a tool-result [ContentBlock] for the given
+// tool-use ID, content, and error flag.
 func NewToolResultContent(toolUseID string, content any, isError bool) ContentBlock {
 	return ContentBlock{
 		Type:      ContentTypeToolResult,
@@ -270,6 +326,7 @@ func NewToolResultContent(toolUseID string, content any, isError bool) ContentBl
 	}
 }
 
+// NewUserMessage returns a user [Message] with a single text content block.
 func NewUserMessage(text string) Message {
 	return Message{
 		Role:    RoleUser,
@@ -277,6 +334,7 @@ func NewUserMessage(text string) Message {
 	}
 }
 
+// NewUserMessageWithContent returns a user [Message] with the given content blocks.
 func NewUserMessageWithContent(blocks ...ContentBlock) Message {
 	return Message{
 		Role:    RoleUser,
@@ -284,6 +342,7 @@ func NewUserMessageWithContent(blocks ...ContentBlock) Message {
 	}
 }
 
+// NewAssistantMessage returns an assistant [Message] with a single text content block.
 func NewAssistantMessage(text string) Message {
 	return Message{
 		Role:    RoleAssistant,
@@ -291,6 +350,7 @@ func NewAssistantMessage(text string) Message {
 	}
 }
 
+// NewAssistantMessageWithContent returns an assistant [Message] with the given content blocks.
 func NewAssistantMessageWithContent(blocks ...ContentBlock) Message {
 	return Message{
 		Role:    RoleAssistant,
@@ -298,6 +358,7 @@ func NewAssistantMessageWithContent(blocks ...ContentBlock) Message {
 	}
 }
 
+// NewSystemMessage returns a system [Message] with a single text content block.
 func NewSystemMessage(text string) Message {
 	return Message{
 		Role:    RoleSystem,
@@ -305,6 +366,8 @@ func NewSystemMessage(text string) Message {
 	}
 }
 
+// SimpleMessage is a flat, mail-like message used by Gas Town for inter-agent
+// communication, convertible to and from an ACP [Message].
 type SimpleMessage struct {
 	ID        string    `json:"id,omitempty"`
 	From      string    `json:"from,omitempty"`
@@ -316,6 +379,8 @@ type SimpleMessage struct {
 	Type      string    `json:"type,omitempty"`
 }
 
+// TranslateSimpleMessage converts a [SimpleMessage] into an ACP user
+// [Message], combining its subject and body into text content.
 func TranslateSimpleMessage(sm SimpleMessage) Message {
 	var content []ContentBlock
 	if sm.Subject != "" && sm.Body != "" {
@@ -333,6 +398,9 @@ func TranslateSimpleMessage(sm SimpleMessage) Message {
 	}
 }
 
+// TranslateMessageToSimple converts an ACP [Message] into a [SimpleMessage],
+// concatenating its text content blocks into the body and stamping the current
+// time.
 func TranslateMessageToSimple(msg Message) SimpleMessage {
 	var body string
 	for _, block := range msg.Content {
@@ -349,6 +417,8 @@ func TranslateMessageToSimple(msg Message) SimpleMessage {
 	}
 }
 
+// ToolFromDefinition builds a [Tool] from a name, description, and a raw JSON
+// Schema map, extracting the "properties" and "required" keywords.
 func ToolFromDefinition(name, description string, schema map[string]any) Tool {
 	props, ok := schema["properties"].(map[string]any)
 	if !ok {
@@ -383,6 +453,8 @@ func getStringSlice(v any) []string {
 	return result
 }
 
+// NewInitializeRequest builds an ACP "initialize" request advertising the
+// given client name and version.
 func NewInitializeRequest(id any, clientName, clientVersion string) JSONRPCRequest {
 	params := InitializeParams{
 		ProtocolVersion: "2024-11-05",
@@ -403,6 +475,8 @@ func NewInitializeRequest(id any, clientName, clientVersion string) JSONRPCReque
 	}
 }
 
+// NewInitializeResponse builds the response to an "initialize" request,
+// advertising the given server name, version, and instructions.
 func NewInitializeResponse(id any, serverName, serverVersion, instructions string) JSONRPCResponse {
 	return JSONRPCResponse{
 		JSONRPC: JSONRPCVersion,
@@ -421,6 +495,7 @@ func NewInitializeResponse(id any, serverName, serverVersion, instructions strin
 	}
 }
 
+// NewListToolsRequest builds a "tools/list" request.
 func NewListToolsRequest(id any) JSONRPCRequest {
 	return JSONRPCRequest{
 		JSONRPC: JSONRPCVersion,
@@ -429,6 +504,8 @@ func NewListToolsRequest(id any) JSONRPCRequest {
 	}
 }
 
+// NewListToolsResponse builds the response to a "tools/list" request carrying
+// the given tools.
 func NewListToolsResponse(id any, tools []Tool) JSONRPCResponse {
 	return JSONRPCResponse{
 		JSONRPC: JSONRPCVersion,
@@ -439,6 +516,8 @@ func NewListToolsResponse(id any, tools []Tool) JSONRPCResponse {
 	}
 }
 
+// NewCallToolRequest builds a "tools/call" request for the named tool with the
+// given arguments.
 func NewCallToolRequest(id any, name string, args map[string]any) JSONRPCRequest {
 	paramsBytes, _ := json.Marshal(CallToolParams{
 		Name:      name,
@@ -452,6 +531,8 @@ func NewCallToolRequest(id any, name string, args map[string]any) JSONRPCRequest
 	}
 }
 
+// NewCallToolResponse builds the response to a "tools/call" request with the
+// given content and error flag.
 func NewCallToolResponse(id any, content []ContentBlock, isError bool) JSONRPCResponse {
 	return JSONRPCResponse{
 		JSONRPC: JSONRPCVersion,
@@ -463,6 +544,8 @@ func NewCallToolResponse(id any, content []ContentBlock, isError bool) JSONRPCRe
 	}
 }
 
+// NewErrorResponse builds a JSON-RPC error response with the given code,
+// message, and optional data.
 func NewErrorResponse(id any, code int, message string, data any) JSONRPCResponse {
 	return JSONRPCResponse{
 		JSONRPC: JSONRPCVersion,
@@ -475,6 +558,7 @@ func NewErrorResponse(id any, code int, message string, data any) JSONRPCRespons
 	}
 }
 
+// Standard JSON-RPC 2.0 error codes.
 const (
 	ParseError     = -32700
 	InvalidRequest = -32600
@@ -483,6 +567,8 @@ const (
 	InternalError  = -32603
 )
 
+// ParseRequest unmarshals and validates a JSON-RPC request, checking the
+// protocol version.
 func ParseRequest(data []byte) (*JSONRPCRequest, error) {
 	var req JSONRPCRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -494,6 +580,8 @@ func ParseRequest(data []byte) (*JSONRPCRequest, error) {
 	return &req, nil
 }
 
+// ParseResponse unmarshals and validates a JSON-RPC response, checking the
+// protocol version.
 func ParseResponse(data []byte) (*JSONRPCResponse, error) {
 	var resp JSONRPCResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -505,6 +593,8 @@ func ParseResponse(data []byte) (*JSONRPCResponse, error) {
 	return &resp, nil
 }
 
+// ParseParams unmarshals the request's params into v. It is a no-op when the
+// request carries no params.
 func (r *JSONRPCRequest) ParseParams(v any) error {
 	if len(r.Params) == 0 {
 		return nil
