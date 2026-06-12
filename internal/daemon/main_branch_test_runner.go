@@ -1158,6 +1158,16 @@ func isCleanupOnlyTimeout(output []byte) bool {
 // shared host daemon.
 const leakedActContainerAge = 2 * time.Hour
 
+// reapDockerTimeout bounds each docker subprocess reapLeakedActContainers
+// spawns. reapLeakedActContainers runs inline in the daemon main select loop
+// (runMainBranchTests → daemon.go), not in a goroutine, so an unresponsive
+// Docker daemon — exactly the host-overload condition this reaper exists to
+// mitigate (gs-rd8) — would otherwise hang a plain exec.Command indefinitely
+// and stall the whole daemon: no heartbeat, no Dolt health probe, no other
+// patrol. With a bounded context the worst case is one stalled cycle of up to
+// this budget, after which the reap bails (see reapLeakedActContainers).
+const reapDockerTimeout = 30 * time.Second
+
 // isActContainerName reports whether a Docker container name belongs to an
 // `act` CI run. act names every job container `act-<workflow>-<job>-<hash>`;
 // Docker reports names with a leading slash. Anchoring on the `act-` prefix
@@ -1188,12 +1198,22 @@ func shouldReapLeakedContainer(started, now time.Time) bool {
 // pre-existing leak persists one more cycle). A missing `docker` binary or
 // unreachable daemon makes this a silent no-op.
 func (d *Daemon) reapLeakedActContainers() {
-	out, err := exec.Command("docker", "ps", "-a",
-		"--no-trunc",
-		"--format", "{{.ID}}\t{{.Names}}",
-	).Output()
+	// Each docker call is bounded by reapDockerTimeout and derived from d.ctx
+	// so a wedged Docker daemon cannot stall the daemon main loop this runs in.
+	// runDocker reports whether the call hit its deadline (or d.ctx was
+	// canceled) separately from ordinary docker errors so the caller can bail
+	// on the first timeout: a hung daemon will hang every subsequent call too,
+	// so there is nothing to gain from continuing this cycle.
+	runDocker := func(args ...string) (out []byte, timedOut bool, err error) {
+		ctx, cancel := context.WithTimeout(d.ctx, reapDockerTimeout)
+		defer cancel()
+		out, err = exec.CommandContext(ctx, "docker", args...).Output()
+		return out, ctx.Err() != nil, err
+	}
+
+	out, _, err := runDocker("ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}")
 	if err != nil {
-		return // docker missing/unreachable — nothing to do
+		return // docker missing/unreachable/timed out — nothing to do
 	}
 	now := time.Now()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -1208,7 +1228,10 @@ func (d *Daemon) reapLeakedActContainers() {
 		if !isActContainerName(name) {
 			continue
 		}
-		ts, err := exec.Command("docker", "inspect", "-f", "{{.State.StartedAt}}", id).Output()
+		ts, timedOut, err := runDocker("inspect", "-f", "{{.State.StartedAt}}", id)
+		if timedOut {
+			return // docker daemon unresponsive — bail; retry next cycle
+		}
 		if err != nil {
 			continue
 		}
@@ -1219,7 +1242,9 @@ func (d *Daemon) reapLeakedActContainers() {
 		if shouldReapLeakedContainer(started, now) {
 			d.logger.Printf("main_branch_test: reaping leaked act container %s (%s, up %s)",
 				name, id[:min(12, len(id))], now.Sub(started).Round(time.Minute))
-			_ = exec.Command("docker", "rm", "-f", id).Run()
+			rmCtx, cancel := context.WithTimeout(d.ctx, reapDockerTimeout)
+			_ = exec.CommandContext(rmCtx, "docker", "rm", "-f", id).Run()
+			cancel()
 		}
 	}
 }
