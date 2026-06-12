@@ -2,7 +2,9 @@ package tmux
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,6 +174,91 @@ func TestDetachedKillSession_InvalidName(t *testing.T) {
 	err = tm.DetachedKillSessionWithProcesses("bad;name", 1*time.Second)
 	if err == nil {
 		t.Error("expected error for invalid session name with processes")
+	}
+}
+
+// TestDetachedKillScriptRetries guards the structural property that makes the
+// detached kill self-healing: it must poll has-session and reissue kill-session
+// in a loop, not fire the kill exactly once. A fire-once script silently
+// regresses to the flake this fix removed (gu-v4r86 and its three predecessors),
+// where a single dropped kill leaks the session forever. This test fails fast
+// and deterministically if the loop is ever refactored away.
+func TestDetachedKillScriptRetries(t *testing.T) {
+	script := detachedKillScript("my-sock", "sess", 1)
+	for _, want := range []string{"has-session", "kill-session", "for i in", "exit 0"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("detachedKillScript missing %q; got:\n%s", want, script)
+		}
+	}
+	// The kill must be guarded by a has-session check that exits early, so a
+	// kill that already landed does not keep looping.
+	if !strings.Contains(script, "has-session -t sess 2>/dev/null || exit 0") {
+		t.Errorf("expected has-session early-exit guard; got:\n%s", script)
+	}
+	// Empty socket name must not emit a -L flag.
+	if got := detachedKillScript("", "sess", 1); strings.Contains(got, "-L") {
+		t.Errorf("empty socket should omit -L flag; got:\n%s", got)
+	}
+}
+
+// TestDetachedKillRecoversFromDroppedKill proves the fix end-to-end: when the
+// first kill-session transiently fails (the documented under-load failure mode
+// — tmux momentarily unresponsive), the detached subprocess reissues the kill
+// and the session still disappears. A fake `tmux` on PATH drops the first
+// kill-session, then behaves normally. Before the retry loop this leaked the
+// session permanently; now it self-heals.
+func TestDetachedKillRecoversFromDroppedKill(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	realTmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skipf("cannot resolve real tmux: %v", err)
+	}
+
+	fakeDir := t.TempDir()
+	counter := filepath.Join(fakeDir, "kill.count")
+	// Fake tmux: for the FIRST kill-session call, record it and exit non-zero
+	// (simulate a dropped kill); for everything else, delegate to real tmux.
+	wrapper := "#!/bin/bash\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$a\" = kill-session ]; then\n" +
+		"    if [ ! -f " + counter + " ]; then\n" +
+		"      echo dropped > " + counter + "\n" +
+		"      exit 1\n" +
+		"    fi\n" +
+		"  fi\n" +
+		"done\n" +
+		"exec " + realTmux + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(fakeDir, "tmux"), []byte(wrapper), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	tm := NewTmux()
+	logPath := enableDetachedKillTrace(t)
+	sessionName := "gt-test-detach-kill-retry"
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	// No pre-cleanup KillSession here on purpose: the fake drops the FIRST
+	// kill-session it sees, and that drop must land on the detached
+	// subprocess's kill (the path under test), not a pre-cleanup call that
+	// would consume the drop and make this pass trivially.
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := tm.DetachedKillSession(sessionName, 1*time.Second); err != nil {
+		t.Fatalf("DetachedKillSession: %v", err)
+	}
+
+	if !waitForSessionGone(t, tm, sessionName, 30*time.Second) {
+		dumpDetachedKillLog(t, logPath)
+		t.Fatal("session should have been killed despite the first kill being dropped")
+	}
+	// Confirm the first kill really was dropped — otherwise the test proves
+	// nothing about retry behavior.
+	if _, err := os.Stat(counter); err != nil {
+		t.Errorf("expected a dropped first kill to be recorded: %v", err)
 	}
 }
 

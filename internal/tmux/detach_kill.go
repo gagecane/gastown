@@ -49,17 +49,7 @@ func (t *Tmux) DetachedKillSession(name string, delay time.Duration) error {
 		delaySec = 1
 	}
 
-	// Build the tmux kill-session command with socket flag if needed.
-	var tmuxKillCmd string
-	if t.socketName != "" {
-		tmuxKillCmd = fmt.Sprintf("tmux -L %s kill-session -t %s",
-			shellQuote(t.socketName), shellQuote(name))
-	} else {
-		tmuxKillCmd = fmt.Sprintf("tmux kill-session -t %s", shellQuote(name))
-	}
-
-	// Spawn: sleep <delay>; <tmux kill command>
-	script := fmt.Sprintf("sleep %d; %s", delaySec, tmuxKillCmd)
+	script := detachedKillScript(t.socketName, name, delaySec)
 	cmd := buildDetachedKillCmd(script)
 
 	// Detach the subprocess so it survives parent exit.
@@ -86,27 +76,58 @@ func (t *Tmux) DetachedKillSessionWithProcesses(name string, delay time.Duration
 		delaySec = 1
 	}
 
-	// Build the tmux kill-session command with socket flag if needed.
-	var tmuxKillCmd string
-	if t.socketName != "" {
-		tmuxKillCmd = fmt.Sprintf("tmux -L %s kill-session -t %s",
-			shellQuote(t.socketName), shellQuote(name))
-	} else {
-		tmuxKillCmd = fmt.Sprintf("tmux kill-session -t %s", shellQuote(name))
-	}
-
-	// Spawn: sleep <delay>; <tmux kill command>
 	// We use plain tmux kill-session here since the detached subprocess cannot
 	// easily call KillSessionWithProcesses (which is a Go method). The tmux
 	// kill-session sends SIGHUP to all processes in the session, which is
 	// sufficient when remain-on-exit is disabled (which the callers already do).
-	script := fmt.Sprintf("sleep %d; %s", delaySec, tmuxKillCmd)
+	script := detachedKillScript(t.socketName, name, delaySec)
 	cmd := buildDetachedKillCmd(script)
 
 	// Detach the subprocess so it survives parent exit.
 	detachCmd(cmd)
 
 	return cmd.Start()
+}
+
+// detachedKillScript builds the bash one-liner the detached subprocess runs:
+// wait for the delay, then kill the session and confirm it is gone, retrying
+// the kill until it sticks (or a hard cap of ~30s of retries elapses).
+//
+// Why retry rather than fire once: a single `tmux kill-session` is fire-and-
+// forget. Under heavy load the tmux server can be momentarily unresponsive (the
+// same hiccup probeServerHealth's 200ms dial timeout exists to absorb), so the
+// one kill can transiently fail and the session is then *never* reaped — no
+// caller-side polling deadline, however wide, can recover a kill that was
+// issued once and dropped. This was the recurring root cause behind the
+// TestDetachedKill* flakes (gu-4l21, gu-zyxl, gu-49zso, gu-v4r86), which were
+// each previously papered over by widening the test's poll deadline
+// (15s -> 60s -> 120s). Retrying until has-session reports the session absent
+// makes the detached kill self-healing: a dropped kill is simply reissued, so
+// the session reliably disappears under load instead of leaking.
+//
+// The loop checks has-session first so a kill that already succeeded exits
+// immediately; the happy path is unchanged (one kill, lands in ~1s). Each
+// retry sleeps 500ms; the 60-iteration cap bounds the subprocess lifetime so a
+// genuinely unkillable session (real regression) does not spin forever.
+func detachedKillScript(socketName, name string, delaySec int) string {
+	socketFlag := ""
+	if socketName != "" {
+		socketFlag = fmt.Sprintf("-L %s ", shellQuote(socketName))
+	}
+	target := shellQuote(name)
+	// has-session exits non-zero when the session is absent; that is our
+	// success condition. kill-session's own exit status is ignored — a failed
+	// kill is simply retried, and a kill that raced the session already being
+	// gone is harmless.
+	return fmt.Sprintf(
+		"sleep %d; "+
+			"for i in $(seq 1 60); do "+
+			"tmux %shas-session -t %s 2>/dev/null || exit 0; "+
+			"tmux %skill-session -t %s 2>/dev/null; "+
+			"sleep 0.5; "+
+			"done",
+		delaySec, socketFlag, target, socketFlag, target,
+	)
 }
 
 // buildDetachedKillCmd constructs the bash subprocess that runs the
