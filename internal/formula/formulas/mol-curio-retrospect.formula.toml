@@ -197,7 +197,41 @@ Produce exactly one Gas Town artifact per proposal, per the B6 landing table
 (docs/curio-proposals.md). Stamp the `cluster:<cluster_id>` dedup label on every
 bead so next night's run dedups it.
 
+## 🛟 File-first discipline — the bead IS the deliverable; create it FIRST
+
+A polecat session can die at any moment (environmental instability — Dolt
+conn-leak, dead-PID teardown). If the terminal `bd create` is the LAST thing you
+do, a late death silently drops the run's only output: a clean analysis with no
+filed proposal, while the dispatch receipt still reads success (bug gu-ac2bu).
+Defend against that by making the durable bead the FIRST action of each landing,
+not the last:
+
+1. **Decide → file → then annotate.** The instant you have settled a proposal's
+   taxonomy kind and its `cluster_id`, IMMEDIATELY create its bead with a
+   minimal-but-complete description and the `cluster:<cluster_id>` label — BEFORE
+   composing any long-form enrichment, editing config, or opening a CR. The
+   create is the commit point; everything after it is enrichment that a death can
+   safely lose.
+2. **`bd sync` after EACH create, not batched at the end.** Persist every bead
+   the moment it is created so a death between proposals cannot lose an
+   already-decided one. Do not defer all syncs to the finish step.
+3. **Process one proposal fully and durably before starting the next.** Complete
+   create → sync → (optional) enrich for proposal #1 before touching proposal #2.
+4. **Idempotent on retry.** If this run is a re-dispatch of a partially-completed
+   prior run, the dedup step already skipped any `cluster:<cluster_id>` an open
+   bead covers — so a re-filed cluster is impossible for beads you already
+   landed. If you are unsure whether a specific bead landed, re-query
+   `bd list --label "cluster:<cluster_id>" --json` before creating; never create a
+   second bead for a cluster that already has one.
+
 **Threshold tune → a config CR (human-approved):**
+- A threshold tune produces a CR, not a bead — so file-first protects it
+  differently: FIRST record a one-line `curio-hypothesis` bead stamped with the
+  `cluster:<cluster_id>` label capturing the decided tune (series, current →
+  proposed threshold, the precision evidence), THEN open the CR. The bead is the
+  durable record of the decision and the dedup anchor if the session dies before
+  the branch/CR lands; the next run skips the cluster and a human can finish the
+  CR from the bead. (Close that hypothesis bead when the CR merges.)
 - Edit `mayor/daemon.json` `patrols.curio.rate_thresholds` ONLY — adjust the one
   series' threshold. This is config-driven (since gc-e2uvyr.3): NO Go change, no
   rebuild. Add/update a replay fixture only if needed.
@@ -207,7 +241,6 @@ bead so next night's run dedups it.
 - Branch → CR → merge queue. Replay CI must grade A. It requires human approval
   (B7 auto-merge is default OFF). Do NOT add a `"curio.<series>"` key — the
   proposal-target guard (B6) will fail the CR, and it would violate the air-gap.
-- Threshold-tune dedup is the merge queue's job, not a bead label.
 
 **New-rule sketch → a proposal bead (always human, never auto-merged):**
 ```bash
@@ -217,6 +250,7 @@ bd create "Curio: <short cluster description>" \\
   --description "<rule description; the signal; anchor incidents from the digest;
 a suggested replay fixture>. Source cluster_id=<cluster_id>, rule=<rule_id>,
 series=<series>, occurrences=<n>."
+bd sync
 ```
 A human authors the Go rule from the sketch; the polecat does NOT write Go.
 
@@ -226,6 +260,7 @@ bd create "Curio: <hypothesis summary>" \\
   --type task --label curio-hypothesis --label "cluster:<cluster_id>" \\
   --description "<the cluster + the hypothesis + the evidence>. Source
 cluster_id=<cluster_id>, rule=<rule_id>, series=<series>."
+bd sync
 ```
 (Or add the hypothesis as a comment on the cluster's anchor bead if one exists.)
 
@@ -234,10 +269,9 @@ cluster_id=<cluster_id>, rule=<rule_id>, series=<series>."
 transformation, so the B6 query (`cluster:` prefix select) round-trips and the
 next run skips this cluster until the bead closes.
 
-**Sync:** `bd sync` after creating beads.
-
 **Exit criteria:** ≤`{{max_proposals}}` artifacts created, each via its single
-landing path, each bead stamped with its `cluster:<cluster_id>` label."""
+landing path, each bead created-then-synced as its first durable action and
+stamped with its `cluster:<cluster_id>` label."""
 
 [[steps]]
 id = "finish"
