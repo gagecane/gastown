@@ -3906,6 +3906,76 @@ func TestFeedFirstReady_ActivelyWorked_NoEscalate(t *testing.T) {
 	}
 }
 
+// TestFeedFirstReady_LiveOwnerRace_NoEscalate verifies gs-4n7i classes 1 & 7:
+// an ambiguous sling failure that would normally fall through to the one-shot
+// "will never progress" escalation is SUPPRESSED when a live precondition check
+// shows the bead is currently hooked/in_progress (a polecat raced in and owns
+// it). The bead is progressing, not wedged.
+func TestFeedFirstReady_LiveOwnerRace_NoEscalate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// An unclassified sling error → would normally hit the default escalation.
+	m, invokeLog := feedFirstReadyTestEnv(t, "no eligible polecat target for gt-race")
+	// Live precondition: by escalation time the bead is hooked to a live agent.
+	m.beadStatusFn = func(string) (string, bool) { return "hooked", true }
+
+	c := strandedConvoyInfo{ID: "hq-cv-race", Title: "Race", ReadyCount: 1, ReadyIssues: []string{"gt-race"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("live-owner race should NOT escalate, but escalate was invoked: %q", data)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-race"); ok {
+		t.Errorf("live-owner race should not record a sling error (it is progressing)")
+	}
+}
+
+// TestFeedFirstReady_GenuineWedge_Escalates verifies the gs-4n7i precondition
+// does NOT swallow real wedges: an ambiguous sling failure on a bead that is NOT
+// being worked (status open) still escalates once to the Mayor.
+func TestFeedFirstReady_GenuineWedge_Escalates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, invokeLog := feedFirstReadyTestEnv(t, "no eligible polecat target for gt-wedge")
+	m.beadStatusFn = func(string) (string, bool) { return "open", true }
+
+	c := strandedConvoyInfo{ID: "hq-cv-wedge", Title: "Wedge", ReadyCount: 1, ReadyIssues: []string{"gt-wedge"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if !strings.Contains(string(data), "escalate") {
+		t.Errorf("genuine wedge (open, not worked) should escalate, but no escalate was invoked: %q", data)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-wedge"); !ok {
+		t.Errorf("genuine wedge should record a sling error for one-shot dedup")
+	}
+}
+
+// TestIsProgressingBeadStatus pins the refutation predicate for gs-4n7i.
+func TestIsProgressingBeadStatus(t *testing.T) {
+	t.Parallel()
+	for status, want := range map[string]bool{
+		"hooked":      true,
+		"in_progress": true,
+		"IN_PROGRESS": true,
+		" hooked ":    true,
+		"open":        false,
+		"closed":      false,
+		"deferred":    false,
+		"blocked":     false,
+		"":            false,
+	} {
+		if got := isProgressingBeadStatus(status); got != want {
+			t.Errorf("isProgressingBeadStatus(%q) = %v, want %v", status, got, want)
+		}
+	}
+}
+
 // TestFeedFirstReady_Deferred_NoEscalateNoUntrack verifies the gt-3798 fix: when
 // sling refuses a DEFERRED bead (intentionally held off polecat slots), the
 // daemon suppresses the escalation (a deferred step is waiting, not wedged — it

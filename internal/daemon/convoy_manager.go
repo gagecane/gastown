@@ -240,6 +240,13 @@ type ConvoyManager struct {
 	// (existence check) and gu-3hi1f (ambiguous-vs-state separation).
 	checkBeadExistenceFn func(issueID string) beadExistence
 
+	// beadStatusFn returns the bead's CURRENT status (e.g. "hooked",
+	// "in_progress", "open") and whether the lookup succeeded. It re-checks live
+	// state at escalation time so the "will never progress" alarm is gated on the
+	// refutation recipe rather than a stale scan snapshot. Overridable for tests;
+	// defaults to a `bd show --json` subprocess. See gs-4n7i classes 1 & 7.
+	beadStatusFn func(issueID string) (string, bool)
+
 	// untrackMissingBeadFn untracks issueID from convoyID. Overridable for
 	// tests; defaults to a `bd dep remove` subprocess call. Returning a
 	// non-nil error leaves the strike counter in place so the next scan
@@ -345,6 +352,7 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 	}
 	m.checkBeadExistenceFn = m.checkBeadExistenceViaBd
 	m.untrackMissingBeadFn = m.untrackMissingBeadViaBd
+	m.beadStatusFn = m.beadStatusViaBd
 	return m
 }
 
@@ -1105,6 +1113,26 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 				m.logger("Convoy %s: %s is awaiting refinery merge — MR queued, suppressing escalation and backing off (gu-ea25u)", c.ID, issueID)
 				m.recordFeedChurn(issueID)
 			default:
+				// gs-4n7i classes 1 & 7: before escalating "will never progress",
+				// apply the refutation recipe as a live precondition. The stranded
+				// scan that fed this issue is a snapshot; by sling time a polecat may
+				// have hooked it and be actively working it (a normal race). sling's
+				// dead-agent detection FORCE-dispatches a bead hooked to a GONE
+				// session (gs-2dr), so a bead that is STILL hooked/in_progress after a
+				// refused sling has a LIVE owner — it is progressing, not wedged.
+				// Re-check the current status and suppress the escalation in that
+				// case (record churn, like the actively-worked branch), catching the
+				// race even when sling's error text wasn't classified above. Only a
+				// bead that is NOT being worked falls through to the one-shot
+				// escalation, so genuine wedges (unroutable target, mayor-only/
+				// no-polecat) still reach the Mayor.
+				if m.beadStatusFn != nil {
+					if status, ok := m.beadStatusFn(issueID); ok && isProgressingBeadStatus(status) {
+						m.logger("Convoy %s: %s is %s (live owner) at escalation time — race, not a wedge; suppressing escalation (gs-4n7i)", c.ID, issueID, status)
+						m.recordFeedChurn(issueID)
+						continue
+					}
+				}
 				if _, already := m.seenSlingErrors.LoadOrStore(issueID, true); !already {
 					// Genuinely-ambiguous persistent failure (e.g. an unroutable
 					// target under the capacity scheduler, mayor-only/no-polecat
@@ -1322,6 +1350,46 @@ func (m *ConvoyManager) checkBeadExistenceViaBd(issueID string) beadExistence {
 	}
 	// bd show succeeded — bead exists
 	return beadExists
+}
+
+// isProgressingBeadStatus reports whether a bead status means a live polecat
+// owns the work (so the convoy "will never progress" alarm is a false positive).
+// A hooked / in_progress bead has an owner; per the gs-2dr invariant sling
+// force-dispatches a bead hooked to a DEAD session, so a still-hooked bead after
+// a refused sling has a LIVE owner. See gs-4n7i classes 1 & 7.
+func isProgressingBeadStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "hooked", "in_progress":
+		return true
+	default:
+		return false
+	}
+}
+
+// beadStatusViaBd returns the bead's current status via `bd show --json`. The
+// second return is false on any lookup failure (Dolt degraded, timeout, missing
+// bead, parse error) — the caller then does NOT suppress (when state is unknown,
+// fall through to the existing one-shot escalation). See gs-4n7i classes 1 & 7.
+func (m *ConvoyManager) beadStatusViaBd(issueID string) (string, bool) {
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bd", "show", issueID, "--json")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", false
+	}
+	// `bd show --json` emits an array of issues; take the first.
+	var issues []struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil || len(issues) == 0 {
+		return "", false
+	}
+	return issues[0].Status, true
 }
 
 // closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.
