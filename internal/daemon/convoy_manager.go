@@ -1112,6 +1112,23 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 				// step is legitimate tracked work that will close on merge.
 				m.logger("Convoy %s: %s is awaiting refinery merge — MR queued, suppressing escalation and backing off (gu-ea25u)", c.ID, issueID)
 				m.recordFeedChurn(issueID)
+			case sling.IsCapacityAdmissionDeniedSlingError(stderrLine):
+				// The dispatch was refused by the polecat capacity scheduler:
+				// the town is at a configured ceiling (global_max_polecats /
+				// max_polecats) or under host-load backpressure. This is NORMAL
+				// queueing backpressure (gu-jaxdl), not a wedge — the global
+				// ceiling exists precisely to queue excess work, and the step
+				// dispatches the moment a town-wide slot frees. Escalating it as
+				// "cannot dispatch / will never progress" is wrong (it WILL
+				// progress) and previously re-fired every scan cycle for EVERY
+				// capacity-blocked step in EVERY convoy: a single multi-step
+				// convoy hitting the cap emitted dozens of duplicate HIGH
+				// escalations per tick, drowning the Mayor inbox. Treat it like a
+				// deferred / awaiting-merge bead: suppress the escalation and back
+				// off the re-feed (5m→1h), with NO untrack — the step is
+				// legitimate tracked work that dispatches once capacity frees.
+				m.logger("Convoy %s: %s waiting for capacity — admission denied, suppressing escalation and backing off (gu-jaxdl)", c.ID, issueID)
+				m.recordFeedChurn(issueID)
 			default:
 				// gs-4n7i classes 1 & 7: before escalating "will never progress",
 				// apply the refutation recipe as a live precondition. The stranded
