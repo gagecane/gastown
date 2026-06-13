@@ -32,6 +32,32 @@ on B3+B6 and ships LAST (default OFF). B8 (anti-wedge) follows B5+B6.
 
 ---
 
+## Bead status (live — 2026-06-13)
+
+Epic **gu-60sk4**. The breakdown below is the original plan; this table tracks
+each section against its created bead and current status so coordination edits
+don't re-read every child. Update it whenever a child bead changes state.
+
+| Plan | Bead | Status | Notes |
+|------|------|--------|-------|
+| B0a  | `gu-czx5e` | HOOKED   | Filing-row insert (producer half). Rescoped from B0; chain root. |
+| B0b  | `gu-wg7i5` | OPEN     | Post-close reconciler + outcome classifier (consumer half). Depends on B0a. |
+| B1   | `gu-7wv36` | OPEN     | `ReadOutcomeHistory` + `--emit-digest`. Depends on B0b. |
+| B2   | `gu-841rh` | OPEN     | Air-gap filter in the digest. Depends on B1. |
+| B3   | `gu-zx7e0` | ✅ CLOSED | Replay harness reads config overlay. Independent starting point. |
+| B4   | `gu-9lm9u` | OPEN     | Retrospect formula. Depends on B1+B2+B6. |
+| B5   | `gu-5d8os` | OPEN     | Dispatch plugin. Depends on B4+B3+B6. |
+| B6   | `gu-9tmry` | ✅ CLOSED | Proposal taxonomy + dedup key + CI guard. Independent starting point. |
+| B7   | `gu-27art` | ✅ CLOSED | Precision-gate auto-merge policy (default OFF). |
+| B8   | `gu-5zf4t` | ❄ DEFERRED | Proposal expiry + breaker-reset (anti-wedge). Lands after B5+B6. |
+
+**Critical path now:** B0a → B0b → B1 → B2 → B4 → B5 (B3, B6 already landed; B7
+landed disabled; B8 deferred until the lane is live). The remaining independent
+work above the chain is none — B3 and B6 (the parallel starting points) are both
+done, so progress is now gated on the B0a→B5 spine.
+
+---
+
 ## B0 — Layer-1 prerequisite: populate `curio_ledger`
 
 > **SPLIT during execution (2026-06-13).** Two polecat sessions (chrome, fury)
