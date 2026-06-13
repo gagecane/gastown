@@ -34,6 +34,15 @@ on B3+B6 and ships LAST (default OFF). B8 (anti-wedge) follows B5+B6.
 
 ## B0 — Layer-1 prerequisite: populate `curio_ledger`
 
+> **SPLIT during execution (2026-06-13).** Two polecat sessions (chrome, fury)
+> died mid-work on this combined bead with zero commits — it bundled three
+> workstreams (filing path + post-close reconciler + outcome classifier) into one
+> oversized session. Split into **B0a** (`gu-czx5e`, rescoped — filing-row insert
+> at file-time, the producer half, no deps) and **B0b** (`gu-wg7i5` — post-close
+> reconciler + the hardened outcome classifier, the consumer half, depends on
+> B0a). The chain root is now **B0a → B0b → B1**. The scope below is the union of
+> both; see the bead records for the per-bead division.
+
 **Type:** task · **Labels:** curio, retrospect, substrate, ledger
 **Depends on:** (none — the foundational starting point)
 
