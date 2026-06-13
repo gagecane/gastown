@@ -2253,6 +2253,60 @@ func TestEnqueueReplyReminder_SkipsEscalation(t *testing.T) {
 	}
 }
 
+// TestEnqueueReplyReminder_SkipsNoReplyExpected verifies that ACK / close-out /
+// FYI messages do not enqueue a reply-reminder. These close a conversation
+// rather than open one, so a reminder nags for an unnecessary reply and — when
+// the ACK arrives as a fresh inbound message — re-arms a stale reminder on an
+// already-resolved thread. See gu-fu7mg.
+func TestEnqueueReplyReminder_SkipsNoReplyExpected(t *testing.T) {
+	noReplySubjects := []string{
+		"ACK: gu-1234 received",
+		"Re: incident — confirmed stable",
+		"FYI: rebased onto main",
+		"closing thread, all good",
+		"gu-9 acknowledged",
+		"status update (NRN)",
+	}
+	for _, subject := range noReplySubjects {
+		t.Run(subject, func(t *testing.T) {
+			townRoot := t.TempDir()
+			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+			msg := &Message{
+				From:    "gastown/witness",
+				To:      "mayor/",
+				Subject: subject,
+				Type:    TypeNotification,
+			}
+			r.enqueueReplyReminder(msg, "gt-mayor")
+
+			pending, _ := nudge.Pending(townRoot, "gt-mayor")
+			if pending != 0 {
+				t.Errorf("subject %q should not enqueue a reminder, got %d", subject, pending)
+			}
+		})
+	}
+}
+
+// TestEnqueueReplyReminder_FiresOnGenuineMessage is the negative control for
+// the no-reply-expected suppression: a normal message that genuinely awaits a
+// reply must still enqueue a reminder. See gu-fu7mg.
+func TestEnqueueReplyReminder_FiresOnGenuineMessage(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+	msg := &Message{
+		From:    "gastown/witness",
+		To:      "mayor/",
+		Subject: "Need a decision on the stuck MR",
+		Type:    TypeNotification,
+	}
+	r.enqueueReplyReminder(msg, "gt-mayor")
+
+	pending, _ := nudge.Pending(townRoot, "gt-mayor")
+	if pending != 1 {
+		t.Errorf("genuine reply-needing message should enqueue 1 reminder, got %d", pending)
+	}
+}
+
 // TestEnqueueReplyReminder_NoTownRoot verifies that the function is a no-op
 // when no town root is set (nudge queue requires a town root).
 func TestEnqueueReplyReminder_NoTownRoot(t *testing.T) {
