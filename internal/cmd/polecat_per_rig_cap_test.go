@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -62,6 +63,63 @@ func TestLoadRigPolecatMaxConcurrent(t *testing.T) {
 		}
 		if got := loadRigPolecatMaxConcurrent(rigPath); got != 0 {
 			t.Errorf("loadRigPolecatMaxConcurrent(cap=0) = %d, want 0", got)
+		}
+	})
+}
+
+// TestCheckPerRigPolecatCap verifies the pre-flight/authoritative cap guard
+// (gu-4vjrw): no cap configured passes through, under-cap passes, at-or-over
+// cap returns the actionable error.
+func TestCheckPerRigPolecatCap(t *testing.T) {
+	// Not parallel: swaps the package-level countWorkingPolecatsInRigFn seam.
+	orig := countWorkingPolecatsInRigFn
+	t.Cleanup(func() { countWorkingPolecatsInRigFn = orig })
+
+	t.Run("no cap configured passes (count not consulted)", func(t *testing.T) {
+		rigPath := t.TempDir()
+		countWorkingPolecatsInRigFn = func(string) int {
+			t.Fatal("count must not be consulted when no cap is configured")
+			return 0
+		}
+		if err := checkPerRigPolecatCap("rigA", rigPath); err != nil {
+			t.Errorf("checkPerRigPolecatCap(no cap) = %v, want nil", err)
+		}
+	})
+
+	t.Run("under cap passes", func(t *testing.T) {
+		rigPath := t.TempDir()
+		three := 3
+		writeRigCapAtPath(t, rigPath, &three)
+		countWorkingPolecatsInRigFn = func(string) int { return 2 }
+		if err := checkPerRigPolecatCap("rigA", rigPath); err != nil {
+			t.Errorf("checkPerRigPolecatCap(2/3) = %v, want nil", err)
+		}
+	})
+
+	t.Run("at cap fails fast", func(t *testing.T) {
+		rigPath := t.TempDir()
+		three := 3
+		writeRigCapAtPath(t, rigPath, &three)
+		countWorkingPolecatsInRigFn = func(string) int { return 3 }
+		err := checkPerRigPolecatCap("rigA", rigPath)
+		if err == nil {
+			t.Fatal("checkPerRigPolecatCap(3/3) = nil, want cap error")
+		}
+		if !strings.Contains(err.Error(), "3/3 working polecats") {
+			t.Errorf("error missing count detail: %v", err)
+		}
+		if !strings.Contains(err.Error(), "polecat.max_concurrent 4") {
+			t.Errorf("error missing raise hint: %v", err)
+		}
+	})
+
+	t.Run("over cap fails", func(t *testing.T) {
+		rigPath := t.TempDir()
+		two := 2
+		writeRigCapAtPath(t, rigPath, &two)
+		countWorkingPolecatsInRigFn = func(string) int { return 5 }
+		if err := checkPerRigPolecatCap("rigA", rigPath); err == nil {
+			t.Error("checkPerRigPolecatCap(5/2) = nil, want cap error")
 		}
 	})
 }
@@ -180,14 +238,18 @@ func TestFilterByPerRigCapacityEmptyTargetRig(t *testing.T) {
 
 func writeRigCap(t *testing.T, townRoot, rigName string, cap *int) {
 	t.Helper()
-	rigPath := filepath.Join(townRoot, rigName)
+	writeRigCapAtPath(t, filepath.Join(townRoot, rigName), cap)
+}
+
+func writeRigCapAtPath(t *testing.T, rigPath string, cap *int) {
+	t.Helper()
 	settingsPath := filepath.Join(rigPath, "settings", "config.json")
 	settings := config.NewRigSettings()
 	if cap != nil {
 		settings.Polecat = &config.PolecatPoolConfig{MaxConcurrent: cap}
 	}
 	if err := config.SaveRigSettings(settingsPath, settings); err != nil {
-		t.Fatalf("save settings for %s: %v", rigName, err)
+		t.Fatalf("save settings at %s: %v", rigPath, err)
 	}
 }
 

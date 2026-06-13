@@ -97,6 +97,19 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		return nil, fmt.Errorf("rig '%s' not found", rigName)
 	}
 
+	// Pre-flight per-rig cap guard (gu-4vjrw): the rig's working-polecat count
+	// vs its configured cap is knowable from rig config + tmux/beads state
+	// without spawning anything. Check it FIRST — before the Dolt health probe,
+	// admission flock + town-wide capacity snapshot, polecat spawn, and
+	// startup-nudge retries below — so a saturated rig fails fast instead of
+	// paying for all that setup only to be rejected at the end. The same check
+	// is re-asserted after admission (the authoritative, lock-protected point)
+	// to close the race where a concurrent sling fills the last slot between
+	// this pre-flight read and the spawn.
+	if err := checkPerRigPolecatCap(rigName, r.Path); err != nil {
+		return nil, err
+	}
+
 	// Get polecat manager (with tmux for session-aware allocation)
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()
@@ -131,19 +144,12 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		defer admission.Release()
 	}
 
-	// Per-rig concurrency cap (gu-1lvs): configurable via
-	// `gt rig settings set <rig> polecat.max_concurrent N`. Nil/0 means
-	// no per-rig cap — only the town-wide cap applies. This is distinct from
-	// maxPolecatDirsPerRig below, which caps worktree directories (working +
-	// idle), not just working polecats.
-	if rigPolecatCap := loadRigPolecatMaxConcurrent(r.Path); rigPolecatCap > 0 {
-		rigWorkingCount := countWorkingPolecatsInRig(rigName)
-		if rigWorkingCount >= rigPolecatCap {
-			return nil, fmt.Errorf("rig %s has %d/%d working polecats (per-rig cap). "+
-				"Wait for one to finish, or raise: "+
-				"gt rig settings set %s polecat.max_concurrent %d",
-				rigName, rigWorkingCount, rigPolecatCap, rigName, rigPolecatCap+1)
-		}
+	// Per-rig concurrency cap (gu-1lvs): re-asserted here under the admission
+	// lock (gu-4vjrw). The pre-flight guard above fails fast on an already-full
+	// rig; this authoritative check catches the race where a concurrent sling
+	// claimed the last slot after the pre-flight read.
+	if err := checkPerRigPolecatCap(rigName, r.Path); err != nil {
+		return nil, err
 	}
 
 	// Refinery-backoff dispatch throttle (gu-5wn56): when opted in, refuse the
@@ -788,6 +794,35 @@ func verifyWorktreeExists(clonePath string) error {
 	}
 
 	return nil
+}
+
+// countWorkingPolecatsInRigFn is a test seam over countWorkingPolecatsInRig.
+// Production wires it to the real tmux+beads-backed counter.
+var countWorkingPolecatsInRigFn = countWorkingPolecatsInRig
+
+// checkPerRigPolecatCap enforces the rig's per-rig working-polecat cap
+// (gu-1lvs): configurable via `gt rig settings set <rig> polecat.max_concurrent
+// N`. Nil/0 means no per-rig cap — only the town-wide cap applies. Distinct
+// from maxPolecatDirsPerRig, which caps worktree directories (working + idle),
+// not just working polecats.
+//
+// Read-only and side-effect free, so it is safe to call as a pre-flight guard
+// at the top of the spawn path (before any Dolt/admission/spawn work) and again
+// under the admission lock as the authoritative check (gu-4vjrw). Returns nil
+// when no cap is configured or the rig is under cap; an error otherwise.
+func checkPerRigPolecatCap(rigName, rigPath string) error {
+	rigPolecatCap := loadRigPolecatMaxConcurrent(rigPath)
+	if rigPolecatCap <= 0 {
+		return nil
+	}
+	rigWorkingCount := countWorkingPolecatsInRigFn(rigName)
+	if rigWorkingCount < rigPolecatCap {
+		return nil
+	}
+	return fmt.Errorf("rig %s has %d/%d working polecats (per-rig cap). "+
+		"Wait for one to finish, or raise: "+
+		"gt rig settings set %s polecat.max_concurrent %d",
+		rigName, rigWorkingCount, rigPolecatCap, rigName, rigPolecatCap+1)
 }
 
 // loadRigPolecatMaxConcurrent reads settings/config.json from the given rig
