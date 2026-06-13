@@ -320,3 +320,53 @@ func TestBuildRestartEscalationMessage_FirstLineIsSingleLineTitle(t *testing.T) 
 		t.Error("first line must be single-line")
 	}
 }
+
+func TestDecideLiveBinary(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		probe         procExeProbe
+		determined    bool
+		matchesOnDisk bool
+	}{
+		{
+			name:       "readlink failed - undetermined",
+			probe:      procExeProbe{linkOK: false},
+			determined: false,
+		},
+		{
+			name:          "exe deleted - replaced on disk, stale",
+			probe:         procExeProbe{linkOK: true, link: "/usr/local/bin/gt (deleted)"},
+			determined:    true,
+			matchesOnDisk: false,
+		},
+		{
+			name:          "link path missing - stale",
+			probe:         procExeProbe{linkOK: true, link: "/usr/local/bin/gt", onDiskOK: false},
+			determined:    true,
+			matchesOnDisk: false,
+		},
+		{
+			name:          "inode matches - already fresh",
+			probe:         procExeProbe{linkOK: true, link: "/usr/local/bin/gt", runningDev: 1, runningIno: 42, onDiskOK: true, onDiskDev: 1, onDiskIno: 42},
+			determined:    true,
+			matchesOnDisk: true,
+		},
+		{
+			name:          "inode differs - swapped, stale",
+			probe:         procExeProbe{linkOK: true, link: "/usr/local/bin/gt", runningDev: 1, runningIno: 42, onDiskOK: true, onDiskDev: 1, onDiskIno: 99},
+			determined:    true,
+			matchesOnDisk: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := decideLiveBinary(tc.probe)
+			if got.determined != tc.determined || got.matchesOnDisk != tc.matchesOnDisk {
+				t.Errorf("decideLiveBinary(%+v) = {determined:%v matchesOnDisk:%v}, want {determined:%v matchesOnDisk:%v}",
+					tc.probe, got.determined, got.matchesOnDisk, tc.determined, tc.matchesOnDisk)
+			}
+		})
+	}
+}

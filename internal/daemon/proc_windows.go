@@ -19,6 +19,14 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	}
 }
 
+// liveDaemonBinaryVerdict is undetermined on Windows: there is no
+// /proc/<pid>/exe to compare the running image against the on-disk binary, so
+// the restart_pending dog falls back to the commit-based forward check
+// (gs-4n7i class 3).
+func liveDaemonBinaryVerdict() liveBinaryVerdict {
+	return liveBinaryVerdict{determined: false, detail: "no /proc on windows"}
+}
+
 // sendTermSignal sends a termination signal.
 // On Windows, there's no SIGTERM - we use Kill() directly.
 func sendTermSignal(p *os.Process) error {

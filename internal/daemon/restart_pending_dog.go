@@ -138,6 +138,22 @@ func (d *Daemon) runRestartPendingDog() {
 		return
 	}
 
+	// gs-4n7i class 3: the commit-based forward check above can be inconclusive
+	// (dev build with no embedded commit, repo not locatable) yet the restart it
+	// requested may have ALREADY taken effect. Read the live process binary
+	// directly — /proc/<pid>/exe — and compare it to the on-disk binary. If the
+	// running daemon IS already executing the current on-disk file, the upgrade
+	// that filed these beads is in effect, so escalating a restart that already
+	// happened is the false positive. Auto-resolve instead. This is the
+	// refutation recipe ("check live /proc/<pid>/exe vs on-disk before filing")
+	// encoded as the escalation precondition; an inode comparison reads the
+	// actual running binary rather than trusting a build-time ldflag.
+	if v := liveDaemonBinaryVerdict(); v.determined && v.matchesOnDisk {
+		d.logger.Printf("restart_pending: live daemon binary already matches on-disk (%s) — requested restart already in effect, auto-resolving", v.detail)
+		d.resolveFreshRestartPending(pending)
+		return
+	}
+
 	// Daemon still stale: surface un-escalated pending beads to an agent.
 	var unescalated []restartPendingBead
 	for _, b := range pending {
@@ -249,6 +265,64 @@ func (f restartForwardCheck) render() string {
 		fmt.Fprintf(&sb, "  note:     %s\n", f.Detail)
 	}
 	return sb.String()
+}
+
+// liveBinaryVerdict is the result of comparing the running daemon's binary
+// (/proc/<pid>/exe) to the file currently on disk at that path. See gs-4n7i
+// class 3.
+type liveBinaryVerdict struct {
+	// determined is false when the comparison could not be made (no procfs,
+	// readlink/stat error, non-Linux). The caller then ignores this signal and
+	// relies on the commit-based forward check.
+	determined bool
+	// matchesOnDisk is true when the running process is executing the SAME inode
+	// that is currently on disk — a restart would be a no-op (already fresh).
+	matchesOnDisk bool
+	detail        string
+}
+
+// procExeProbe carries the raw /proc/<pid>/exe observations needed to decide a
+// liveBinaryVerdict. Split out so the decision logic is unit-testable without a
+// live process or procfs.
+type procExeProbe struct {
+	// linkOK is false when the /proc/<pid>/exe readlink itself failed.
+	linkOK bool
+	// link is the raw readlink value. Linux appends " (deleted)" when the
+	// running binary's file has been replaced on disk (in-place upgrade).
+	link string
+	// runningDev/runningIno identify the inode the process is actually running
+	// (stat of /proc/<pid>/exe, which procfs resolves even for a deleted file).
+	runningDev, runningIno uint64
+	// onDiskOK is false when the link path could not be stat'd (the file is
+	// gone — replaced/removed).
+	onDiskOK bool
+	// onDiskDev/onDiskIno identify the inode currently at the link path.
+	onDiskDev, onDiskIno uint64
+}
+
+// decideLiveBinary turns a procExeProbe into a verdict. It is pure so it can be
+// tested across the replaced/swapped/matching cases.
+func decideLiveBinary(p procExeProbe) liveBinaryVerdict {
+	if !p.linkOK {
+		return liveBinaryVerdict{determined: false, detail: "could not read /proc/<pid>/exe"}
+	}
+	// Linux marks the exe link "<path> (deleted)" when the running binary's file
+	// was unlinked/replaced — the on-disk binary is NEW, the process still runs
+	// the OLD inode. Restart is genuinely pending.
+	if strings.HasSuffix(p.link, " (deleted)") {
+		return liveBinaryVerdict{determined: true, matchesOnDisk: false, detail: "running binary was replaced on disk (exe deleted)"}
+	}
+	// The link path is gone — treat as replaced/stale.
+	if !p.onDiskOK {
+		return liveBinaryVerdict{determined: true, matchesOnDisk: false, detail: "on-disk binary at exe path is missing"}
+	}
+	// Same device+inode → the process is running the current on-disk file. An
+	// atomic-rename upgrade gives the path a NEW inode, so a mismatch means the
+	// running binary is stale.
+	if p.runningDev == p.onDiskDev && p.runningIno == p.onDiskIno {
+		return liveBinaryVerdict{determined: true, matchesOnDisk: true, detail: "running inode equals on-disk inode"}
+	}
+	return liveBinaryVerdict{determined: true, matchesOnDisk: false, detail: "running inode differs from on-disk inode"}
 }
 
 // computeRestartForwardCheck fetches the gt source repo and pre-computes the
