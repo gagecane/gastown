@@ -146,6 +146,14 @@ type PollResult struct {
 	// strings still flow through the legacy path.
 	NonPushFailureSuppressed int
 
+	// AlreadyRedSuppressed counts failed runs that were still frozen on but NOT
+	// attributed to a culprit because main was ALREADY red before this commit —
+	// the immediately-preceding completed run of the same workflow on the target
+	// branch had also failed. The earlier commit broke main; blaming this one
+	// (reopen + broke-main-ci label + mayor mail) was the false positive. The
+	// freeze still applies; only the attribution is suppressed (gs-4n7i class 4).
+	AlreadyRedSuppressed int
+
 	// Skipped is true when the rig has no pollable Actions runs — the repo
 	// does not exist (e.g. origin points at a fork that was never created) or
 	// Actions is disabled. The watcher treats this as a benign no-op rather
@@ -303,7 +311,21 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 
 		switch {
 		case run.Conclusion.IsFailureLike():
-			if err := w.handleFailure(run); err != nil {
+			// gs-4n7i class 4: only blame this commit if it is the FIRST red —
+			// i.e. the immediately-preceding completed run of the SAME workflow
+			// on the target branch was green. If main was ALREADY red before
+			// this commit (the prior same-workflow run failed too), this commit
+			// did not break main; an earlier commit did. Freeze still applies
+			// (main IS red), but we must not reopen/label/mail-blame this commit's
+			// bead as the culprit. This encodes the refutation recipe "verify the
+			// first-failing commit before naming a culprit".
+			attributable := !w.mainAlreadyRed(run, runs, coldStart, coldCutoff)
+			if !attributable {
+				res.AlreadyRedSuppressed++
+				w.logf("ciwatcher: main already red before run id=%s sha=%s workflow=%q — freezing without attributing culprit",
+					run.ID, shortSHA(run.HeadSHA), run.Workflow)
+			}
+			if err := w.handleFailure(run, attributable); err != nil {
 				// Don't mark the run as seen if we failed to act — we
 				// want the next poll to retry. Return so the operator
 				// sees the failure.
@@ -335,11 +357,20 @@ func (w *Watcher) Process(ctx context.Context) (PollResult, error) {
 // handleFailure executes the reopen+mail+freeze sequence for a single failed
 // run. Each side effect is best-effort: a partial failure is reported to the
 // caller so the next poll can retry from a fresh state.
-func (w *Watcher) handleFailure(run CIRun) error {
+func (w *Watcher) handleFailure(run CIRun, attributable bool) error {
 	beadID := ExtractBeadID(run.HeadCommitSubject)
 	commitDesc := shortSHA(run.HeadSHA)
 	if run.HeadCommitSubject != "" {
 		commitDesc = fmt.Sprintf("%s (%s)", shortSHA(run.HeadSHA), run.HeadCommitSubject)
+	}
+
+	// gs-4n7i class 4: main was already red before this commit (an earlier
+	// same-workflow run failed). The freeze below still applies — main IS red —
+	// but this commit is NOT the culprit, so drop the attribution: no bead
+	// reopen, no broke-main-ci label, no "X broke main" blame. The mail still
+	// fires (main red is actionable) but names no culprit.
+	if !attributable {
+		beadID = ""
 	}
 
 	// Reopen the bead if we could attribute the commit. A missing bead
@@ -398,6 +429,57 @@ func (w *Watcher) handleFailure(run CIRun) error {
 
 	w.logf("ciwatcher: froze MQ for rig=%s bead=%s run=%s", w.cfg.Rig, beadID, run.ID)
 	return nil
+}
+
+// mainAlreadyRed reports whether main was already red BEFORE `run` — i.e. the
+// most recent completed run of the SAME workflow on the target branch that
+// finished strictly before `run` was itself failure-like. This is the gs-4n7i
+// class-4 refutation recipe: a commit only "broke main CI" if it is the first
+// red after a green; if the prior same-workflow run was already failing, an
+// earlier commit is the culprit and this one must not be blamed.
+//
+// Scoping is per-workflow (a branch carries independent workflows like "CI" and
+// "Windows CI") and per target branch, mirroring the superseded-suppression
+// guard above. When `run` has no completion timestamp, or no earlier
+// same-workflow run exists, we cannot establish a prior-red state, so we return
+// false (attribute the break — when in doubt, act).
+//
+// The verdict keys on the IMMEDIATELY-preceding same-workflow run (greatest
+// CompletedAt before `run`, ANY conclusion): if a green ran in between, that
+// green is the immediate predecessor and main was NOT continuously red. A stale
+// prior failure that was itself cold-start-suppressed (completed before
+// coldCutoff) is a DIFFERENT, already-resolved break episode — not evidence main
+// was red when `run` landed — so it is skipped, leaving `run` attributable.
+func (w *Watcher) mainAlreadyRed(run CIRun, runs []CIRun, coldStart bool, coldCutoff time.Time) bool {
+	if run.CompletedAt.IsZero() {
+		return false
+	}
+	var priorAt time.Time
+	var priorFailed bool
+	for _, other := range runs {
+		if other.ID == run.ID {
+			continue
+		}
+		if !strings.EqualFold(other.Workflow, run.Workflow) {
+			continue
+		}
+		if !strings.EqualFold(other.Branch, w.cfg.TargetBranch) {
+			continue
+		}
+		if other.CompletedAt.IsZero() || !other.CompletedAt.Before(run.CompletedAt) {
+			continue
+		}
+		// A cold-start-suppressed prior run is a stale, already-resolved episode;
+		// it does not establish that main was red when `run` landed.
+		if coldStart && other.CompletedAt.Before(coldCutoff) {
+			continue
+		}
+		if other.CompletedAt.After(priorAt) {
+			priorAt = other.CompletedAt
+			priorFailed = other.Conclusion.IsFailureLike()
+		}
+	}
+	return priorFailed
 }
 
 // handleSuccess clears an existing freeze when a successful run arrives on the

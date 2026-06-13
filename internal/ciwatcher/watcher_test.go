@@ -518,6 +518,45 @@ func TestWatcherCurrentBreakEscalatesDespiteEarlierSuccess(t *testing.T) {
 	}
 }
 
+// TestWatcherDoesNotBlameWhenMainAlreadyRed is the gs-4n7i class-4 regression:
+// when main was ALREADY red (an earlier same-workflow run on main failed), a
+// later red commit must still freeze but must NOT be blamed as the culprit —
+// no reopen, no broke-main-ci label on the innocent commit's bead. The first
+// red commit IS attributed.
+func TestWatcherDoesNotBlameWhenMainAlreadyRed(t *testing.T) {
+	town := t.TempDir()
+	fb := newFakeBeads("gu-first", "gu-second")
+	fm := &fakeMailer{}
+	now := time.Date(2026, 5, 29, 6, 0, 0, 0, time.UTC)
+	seed, _ := LoadSeenRuns(town, "alpha")
+	seed.Mark("seed-run", now.Add(-24*time.Hour))
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	runs := []CIRun{
+		// Newest red — main was ALREADY red (run 400 below), so this commit
+		// is NOT the culprit and must not be blamed.
+		{ID: "401", HeadSHA: "sha2", HeadCommitSubject: "feat (gu-second)", Conclusion: ConclusionFailure, Branch: "main", URL: "u401", Workflow: "CI", Event: "push", CompletedAt: now.Add(-5 * time.Minute)},
+		// The FIRST red — broke main; this one IS the culprit.
+		{ID: "400", HeadSHA: "sha1", HeadCommitSubject: "feat (gu-first)", Conclusion: ConclusionFailure, Branch: "main", URL: "u400", Workflow: "CI", Event: "push", CompletedAt: now.Add(-30 * time.Minute)},
+	}
+	w, _ := newWatcher(t, town, runs, nil, fb, fm)
+	res, err := w.Process(context.Background())
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.AlreadyRedSuppressed != 1 {
+		t.Errorf("AlreadyRedSuppressed = %d, want 1", res.AlreadyRedSuppressed)
+	}
+	// Only the first-failing commit's bead is reopened/blamed.
+	if len(fb.reopens) != 1 || fb.reopens[0] != "gu-first" {
+		t.Errorf("reopens = %v, want [gu-first] (innocent commit must not be blamed)", fb.reopens)
+	}
+	if !res.FreezeWritten {
+		t.Errorf("FreezeWritten = false; main is red and the queue must stay frozen")
+	}
+}
+
 // TestWatcherSuppressesScheduledCronFailure is the gu-y94l1 regression: a
 // failed scheduled-cron run on main (E2E, Nightly Integration) must NOT
 // freeze the queue — those workflows run on a timer against pre-existing
