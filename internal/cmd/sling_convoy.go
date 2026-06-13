@@ -204,24 +204,33 @@ func effectiveBaseBranch(beadID, explicit string) string {
 		return ""
 	}
 	// The base the bead records in its OWN attachment fields, stamped at the
-	// first dispatch (sling_dispatch.go). Fallback for RE-dispatch — the
-	// DEFERRED / convoy-feed re-sling path (gs-o5f family) — where the cross-rig
-	// dep resolution getConvoyInfoForIssue depends on can silently return "" and
-	// would otherwise drop the bead onto the rig default base instead of its
-	// relay base (gs-n6h).
+	// first dispatch (sling_dispatch.go). LAST-resort fallback for RE-dispatch —
+	// the DEFERRED / convoy-feed re-sling path (gs-o5f family) — where BOTH the
+	// cross-rig dep resolution getConvoyInfoForIssue and the ancestor walk can
+	// silently return "" and would otherwise drop the bead onto the rig default
+	// base instead of its relay base (gs-n6h). Ranked BELOW the ancestor base so
+	// a re-activated mountain's integration base overrides a child's stale
+	// stamped base on the daemon auto-dispatch path (gs-aymm).
 	stampedBase := func() string {
 		if rootErr != nil {
 			return ""
 		}
 		return beadStampedBaseBranch(beadID, townRoot)
 	}
-	// A relay-epic SLICE is created with base_branch=<rig default> (epic-slicing
-	// / mol-idea-to-plan stamps the rig default, not the epic's relay base —
-	// gs-w7k), and on its FIRST auto-dispatch it is not yet tracked by the relay
-	// convoy, so neither its own stamped base nor its own convoy yields the relay
-	// base. Walk up to the parent epic and inherit ITS relay base so the very
-	// FIRST dispatch cuts from the named branch instead of misrouting onto the
-	// rig default. No-op for non-relay beads (no ancestor carries a relay base).
+	// The bead's parent-epic/mountain relay base. Two cases reach it:
+	//   - gs-w7k: a relay-epic SLICE created with base_branch=<rig default>
+	//     (epic-slicing / mol-idea-to-plan stamps the rig default, not the epic's
+	//     relay base), on its FIRST auto-dispatch before it is tracked by the
+	//     relay convoy — neither its own stamped base nor its own convoy yields
+	//     the relay base.
+	//   - gs-aymm: a child RE-dispatched under a re-activated mountain via the
+	//     daemon auto-dispatch / capacity path. The child is not directly tracked
+	//     by the mountain's convoy (tier 2 misses), and its stamped base is the
+	//     STALE base from its original convoy. The mountain's integration base is
+	//     reachable only by walking to the parent epic.
+	// Walk up to the parent epic and inherit ITS relay base. Ranked ABOVE the
+	// stamped base so the live mountain target overrides a stale stamped base.
+	// No-op for non-relay beads (no ancestor carries a relay base).
 	ancestorBase := func() string {
 		if rootErr != nil {
 			return ""
@@ -230,7 +239,7 @@ func effectiveBaseBranch(beadID, explicit string) string {
 			return beadParentAndRelayBase(id, townRoot)
 		})
 	}
-	return resolveBasePrecedence(explicit, convoyBase, stampedBase, ancestorBase)
+	return resolveBasePrecedence(explicit, convoyBase, ancestorBase, stampedBase)
 }
 
 // resolveBasePrecedence picks the dispatch base branch from the candidate
@@ -242,11 +251,19 @@ func effectiveBaseBranch(beadID, explicit string) string {
 //     child stamped under its ORIGINAL convoy (gs-nfjm): clearing the stale
 //     sticky base is no longer required to re-route a child onto a new epic
 //     integration branch.
-//  3. stamped   — the base the bead stamped at its first dispatch. Recovers the
-//     relay base on RE-dispatch when the convoy lookup silently returns "" on
-//     cross-rig dep resolution (gs-n6h).
-//  4. ancestor  — a parent epic's relay base, for a relay slice's FIRST dispatch
-//     before it is tracked by the relay convoy (gs-w7k).
+//  3. ancestor  — the bead's parent-epic/mountain relay base. On the DAEMON
+//     auto-dispatch / capacity path (gs-aymm) the child is not directly tracked
+//     by the re-activated mountain's convoy, so tier 2 misses; the mountain's
+//     integration base is reachable only by walking to the parent epic. It must
+//     override the child's STALE stamped base (e.g. main, stuck from its
+//     original convoy) the same way tier 2 does on the mountain-tracked path —
+//     otherwise the child re-walls on the original base. Genuine relay legs
+//     (gs-9ct) are tracked by their convoy and resolve at tier 2, so this swap
+//     never demotes a live relay base. Also covers a relay slice's FIRST
+//     dispatch before it is tracked by the relay convoy (gs-w7k).
+//  4. stamped   — the base the bead stamped at its first dispatch. Last-resort
+//     recovery of the relay base on RE-dispatch when BOTH the convoy lookup and
+//     the ancestor walk silently return "" on cross-rig dep resolution (gs-n6h).
 //
 // The source callbacks are evaluated lazily (each only when the higher-priority
 // sources are empty) so cheaper sources short-circuit the bd/Dolt lookups the

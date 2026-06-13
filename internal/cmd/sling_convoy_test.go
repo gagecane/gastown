@@ -221,9 +221,13 @@ func TestEffectiveBaseBranch_ExplicitWins(t *testing.T) {
 }
 
 // TestResolveBasePrecedence covers the dispatch base-branch precedence order
-// (gs-nfjm). The source callbacks are injected so the decision is exercised
-// without bd/Dolt. Key case: the CURRENT tracking convoy base must override a
-// base stamped under the bead's ORIGINAL convoy on re-dispatch.
+// (gs-nfjm, gs-aymm). The source callbacks are injected so the decision is
+// exercised without bd/Dolt. effectiveBaseBranch passes the sources in tier
+// order: convoy, ancestor, stamped (see resolveBasePrecedence doc). Key cases:
+// the CURRENT tracking convoy base must override a base stamped under the bead's
+// ORIGINAL convoy on re-dispatch (gs-nfjm); and when the bead is NOT tracked by
+// the re-activated mountain's convoy, the ancestor mountain base must override
+// the child's STALE stamped base (gs-aymm).
 func TestResolveBasePrecedence(t *testing.T) {
 	konst := func(s string) func() string { return func() string { return s } }
 	// track which sources were evaluated, to assert lazy short-circuiting.
@@ -232,7 +236,7 @@ func TestResolveBasePrecedence(t *testing.T) {
 	}
 
 	t.Run("explicit always wins", func(t *testing.T) {
-		got := resolveBasePrecedence("feat/explicit", konst("conv"), konst("stamp"), konst("anc"))
+		got := resolveBasePrecedence("feat/explicit", konst("conv"), konst("anc"), konst("stamp"))
 		if got != "feat/explicit" {
 			t.Errorf("explicit must win: got %q", got)
 		}
@@ -240,30 +244,48 @@ func TestResolveBasePrecedence(t *testing.T) {
 
 	t.Run("convoy overrides stamped on re-dispatch (gs-nfjm)", func(t *testing.T) {
 		// Original convoy stamped main; re-activated mountain configures the
-		// epic integration branch. The current convoy base must win.
+		// epic integration branch. The current convoy base must win. Sources are
+		// (convoy, ancestor, stamped).
 		got := resolveBasePrecedence("",
 			konst("integration/epic"), // current tracking convoy (mountain B)
-			konst("main"),             // sticky base stamped under convoy A
-			konst(""))
+			konst(""),                 // no ancestor relay base
+			konst("main"))             // sticky base stamped under convoy A
 		if got != "integration/epic" {
 			t.Errorf("current convoy base must override stale stamped base: got %q", got)
 		}
 	})
 
-	t.Run("stamped is the fallback when convoy lookup returns empty (gs-n6h)", func(t *testing.T) {
+	t.Run("ancestor mountain base overrides stale stamped base on daemon auto-dispatch (gs-aymm)", func(t *testing.T) {
+		// Child RE-dispatched under a re-activated mountain via the daemon
+		// auto-dispatch path: it is NOT directly tracked by the mountain's convoy
+		// (convoy lookup empty), and its stamped base is the STALE base from its
+		// original convoy (main). The mountain's integration base — reachable
+		// only via the parent-epic ancestor walk — must win over the stale stamp.
 		got := resolveBasePrecedence("",
-			konst(""),        // cross-rig dep resolution silently returned ""
-			konst("relay/x"), // base recovered from the bead's own stamp
-			konst("ignored"))
-		if got != "relay/x" {
-			t.Errorf("stamped base must recover relay base when convoy is empty: got %q", got)
+			konst(""),                 // not tracked by the mountain convoy (tier 2 misses)
+			konst("integration/epic"), // ancestor: re-activated mountain base
+			konst("main"))             // stale stamped base from the original convoy
+		if got != "integration/epic" {
+			t.Errorf("ancestor mountain base must override stale stamped base: got %q", got)
 		}
 	})
 
-	t.Run("ancestor relay base is the last resort (gs-w7k)", func(t *testing.T) {
-		got := resolveBasePrecedence("", konst(""), konst(""), konst("epic/relay"))
+	t.Run("ancestor relay base is used on a relay slice's first dispatch (gs-w7k)", func(t *testing.T) {
+		got := resolveBasePrecedence("", konst(""), konst("epic/relay"), konst(""))
 		if got != "epic/relay" {
 			t.Errorf("ancestor relay base must be used when convoy+stamped empty: got %q", got)
+		}
+	})
+
+	t.Run("stamped is the last-resort fallback when convoy+ancestor empty (gs-n6h)", func(t *testing.T) {
+		// Cross-rig dep resolution silently returns "" for BOTH the convoy and
+		// the ancestor walk; the base is recovered from the bead's own stamp.
+		got := resolveBasePrecedence("",
+			konst(""),        // convoy lookup empty (cross-rig)
+			konst(""),        // ancestor walk empty (cross-rig parent)
+			konst("relay/x")) // base recovered from the bead's own stamp
+		if got != "relay/x" {
+			t.Errorf("stamped base must recover relay base when convoy+ancestor empty: got %q", got)
 		}
 	})
 
@@ -274,19 +296,19 @@ func TestResolveBasePrecedence(t *testing.T) {
 	})
 
 	t.Run("lower-priority sources are not evaluated when a higher one matches", func(t *testing.T) {
-		convoyCalls, stampedCalls, ancestorCalls := 0, 0, 0
+		convoyCalls, ancestorCalls, stampedCalls := 0, 0, 0
 		got := resolveBasePrecedence("",
 			tracked("integration/epic", &convoyCalls),
-			tracked("main", &stampedCalls),
-			tracked("epic/relay", &ancestorCalls))
+			tracked("epic/relay", &ancestorCalls),
+			tracked("main", &stampedCalls))
 		if got != "integration/epic" {
 			t.Fatalf("convoy base must win: got %q", got)
 		}
 		if convoyCalls != 1 {
 			t.Errorf("convoy source must be evaluated once: got %d", convoyCalls)
 		}
-		if stampedCalls != 0 || ancestorCalls != 0 {
-			t.Errorf("lower-priority sources must not be evaluated: stamped=%d ancestor=%d", stampedCalls, ancestorCalls)
+		if ancestorCalls != 0 || stampedCalls != 0 {
+			t.Errorf("lower-priority sources must not be evaluated: ancestor=%d stamped=%d", ancestorCalls, stampedCalls)
 		}
 	})
 
