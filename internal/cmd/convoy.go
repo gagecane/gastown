@@ -3546,6 +3546,7 @@ type issueDetailsJSON struct {
 	IssueType      string            `json:"issue_type"`
 	Assignee       string            `json:"assignee"`
 	Description    string            `json:"description"`
+	Notes          string            `json:"notes"`
 	Labels         []string          `json:"labels"`
 	BlockedBy      []string          `json:"blocked_by"`
 	BlockedByCount int               `json:"blocked_by_count"`
@@ -3562,6 +3563,7 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 		IssueType:      issue.IssueType,
 		Assignee:       issue.Assignee,
 		Description:    issue.Description,
+		Notes:          issue.Notes,
 		Labels:         issue.Labels,
 		BlockedBy:      issue.BlockedBy,
 		BlockedByCount: issue.BlockedByCount,
@@ -3579,6 +3581,7 @@ type issueDetails struct {
 	IssueType      string
 	Assignee       string
 	Description    string
+	Notes          string
 	Labels         []string
 	BlockedBy      []string
 	BlockedByCount int

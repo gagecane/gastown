@@ -587,6 +587,7 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 					"focus":       leg.Focus,
 					"description": leg.Description,
 				}
+				legCtx["leg_bead_id"] = legBeadID
 
 				// Compute output path for this leg
 				if f.Output != nil {
@@ -605,6 +606,27 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 				}
 				legDesc = fmt.Sprintf("%s\n\n---\nBase Prompt:\n%s", leg.Description, renderedPrompt)
 			}
+		}
+
+		// Append a uniform output-persistence directive to every convoy leg whose
+		// convoy has a synthesis consumer. Convoy legs land their analysis in
+		// DIFFERENT physical locations depending on completion path: a review-only
+		// leg that exits via `gt done --status DEFERRED` writes to the shared
+		// rig/crew dir, while a leg that lands an MR commits to mainline. The
+		// synthesis bead reads from only one location, so it silently misses any
+		// dimension that took the other path (gu-drftd). The leg bead's notes live
+		// in one rig DB regardless of cwd/worktree, so persisting the full report
+		// there makes it reliably synthesis-readable no matter how the leg
+		// completed.
+		if f.Synthesis != nil {
+			legDesc += fmt.Sprintf("\n\n---\n## Output Persistence (REQUIRED)\n\n"+
+				"Regardless of whether you write an output file or land a commit, you "+
+				"MUST persist your FULL analysis to this leg bead's notes before you "+
+				"finish:\n\n```bash\nbd update %s --notes \"$(cat <<'EOF'\n"+
+				"<your full report here>\nEOF\n)\"\n```\n\n"+
+				"The synthesis step reads these notes as the canonical source of your "+
+				"findings, so a short summary is not enough — include the complete "+
+				"report.", legBeadID)
 		}
 
 		legArgs := []string{

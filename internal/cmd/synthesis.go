@@ -462,6 +462,18 @@ func collectLegOutputs(meta *ConvoyMeta, f *formula.Formula) ([]LegOutput, bool,
 			if details != nil {
 				output.Title = details.Title
 				output.Status = details.Status
+				// Use the leg bead's persisted notes as the report content. The
+				// bead lives in one rig DB regardless of which dir/worktree the
+				// leg polecat ran in, so notes are the location-independent source
+				// of truth — a review leg that completed via gt done --status
+				// DEFERRED (shared rig dir) and one that landed an MR (mainline)
+				// both persist their report here, so synthesis no longer misses
+				// dimensions that took the other completion path (gu-drftd). The
+				// output-file scan below still augments synthesis for formulas
+				// whose legs write committed artifacts.
+				if details.Notes != "" {
+					output.Content = details.Notes
+				}
 			}
 			if output.Status != "closed" {
 				allComplete = false
