@@ -334,6 +334,26 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 		t.Fatalf("write rig redirect: %v", err)
 	}
 
+	// --- testrig/config.json ---
+	// dispatchScheduledWork runs preflightRigSpawn (gu-9uvl6), which fails the
+	// dispatch when townRoot/<rig>/config.json is absent. Write a minimal rig
+	// config so default_branch resolves; .repo.git is absent in tests, so the
+	// preflight skips base-branch validation. (gu-4rxu9)
+	rigConfig := map[string]any{
+		"type":           "rig",
+		"version":        1,
+		"name":           "testrig",
+		"git_url":        "file:///dev/null",
+		"default_branch": "main",
+	}
+	rigConfigData, err := json.Marshal(rigConfig)
+	if err != nil {
+		t.Fatalf("marshal testrig config.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hqPath, "testrig", "config.json"), rigConfigData, 0644); err != nil {
+		t.Fatalf("write testrig config.json: %v", err)
+	}
+
 	// --- Environment ---
 	env = cleanSchedulerTestEnv(tmpDir)
 

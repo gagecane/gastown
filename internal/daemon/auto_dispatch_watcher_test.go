@@ -572,7 +572,10 @@ func TestClassifyNoDispatchable_EmptyKennelReportsNoIdle(t *testing.T) {
 // path is deferring to the cooldown fallback (gu-ro75).
 func TestClassifyNoDispatchable_DogInBackoffReportsBackoff(t *testing.T) {
 	townRoot := t.TempDir()
-	d, tracker := testDaemonWithTracker(t)
+	// Long backoff: this test records a failure then immediately classifies,
+	// expecting the dog to still be in backoff. A short window can expire on a
+	// slow runner before classify runs (gu-4rxu9).
+	d, tracker := testDaemonWithBackoff(t, time.Minute)
 	// Rewire the daemon at the same townRoot so state files land where we
 	// created the dog directory.
 	d.config = &Config{TownRoot: townRoot}
@@ -651,7 +654,11 @@ func TestFormatRigScopedAutoDispatchBody_SkipAndContinueGuidance(t *testing.T) {
 // (the dispatch test below) where tmux can actually be observed.
 func TestClassifyNoDispatchable_MixedNoRunningFallsThroughToBackoff(t *testing.T) {
 	townRoot := t.TempDir()
-	d, _ := testDaemonWithTracker(t)
+	// Long backoff: records failures then immediately classifies, expecting the
+	// dogs to still be in backoff. A short window can expire on a slow runner
+	// before classify runs, yielding "unknown" instead of "dog_in_backoff"
+	// (gu-4rxu9).
+	d, _ := testDaemonWithBackoff(t, time.Minute)
 	d.config = &Config{TownRoot: townRoot}
 
 	// Two idle dogs; both in backoff — should still classify as dog_in_backoff.

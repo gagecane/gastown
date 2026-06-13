@@ -60,7 +60,15 @@ var agentAllowlist = map[string][]string{
 
 	// Crew workers are user-managed worktrees for human developers.
 	// Uses rig.EnsureLocalExcludePatterns (writes to .git/info/exclude, never committed).
-	"crew": {},
+	"crew": {
+		// crew add provisions slash commands (/nextbead, /handoff, /done,
+		// /review) into .claude/commands/ (internal/crew/manager.go, d6e33a422).
+		// The git exclude uses ".claude/*" + "!.claude/commands/" (gu-w1bge), so
+		// the provisioned commands are intentionally NOT ignored and surface as
+		// untracked — same as mayor's bd-init .claude/. Expected artifact;
+		// .gitignore is the defense-in-depth against accidental commit. (gu-4rxu9)
+		"?? .claude/",
+	},
 
 	// Polecats are ephemeral worktrees for autonomous agents.
 	// Uses rig.EnsureLocalExcludePatterns (writes to .git/info/exclude, never committed).

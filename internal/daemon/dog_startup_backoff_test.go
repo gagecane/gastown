@@ -10,7 +10,21 @@ import (
 // testDaemonWithTracker returns a minimal Daemon wired with a real
 // RestartTracker rooted at a temporary directory and a tight backoff
 // schedule so unit tests can observe state transitions without sleeping.
+//
+// The 100ms InitialBackoff is deliberately short: TestDogBackoff_AfterFailureSkipsUntilExpires
+// relies on the window expiring within a sub-second sleep. Tests that instead
+// need the backoff to STAY active across a record→observe step (with no sleep)
+// must use testDaemonWithBackoff with a long window — otherwise a slow runner
+// lets the 100ms window expire mid-test and the dog reads as not-in-backoff
+// (gu-4rxu9).
 func testDaemonWithTracker(t *testing.T) (*Daemon, *RestartTracker) {
+	t.Helper()
+	return testDaemonWithBackoff(t, 100*time.Millisecond)
+}
+
+// testDaemonWithBackoff is testDaemonWithTracker with a caller-chosen
+// InitialBackoff. MaxBackoff tracks the initial value so it is never smaller.
+func testDaemonWithBackoff(t *testing.T, initialBackoff time.Duration) (*Daemon, *RestartTracker) {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -18,9 +32,13 @@ func testDaemonWithTracker(t *testing.T) (*Daemon, *RestartTracker) {
 		t.Fatalf("mkdir daemon dir: %v", err)
 	}
 
+	maxBackoff := 1 * time.Second
+	if initialBackoff > maxBackoff {
+		maxBackoff = initialBackoff
+	}
 	tracker := NewRestartTracker(tmp, RestartTrackerConfig{
-		InitialBackoff:    100 * time.Millisecond,
-		MaxBackoff:        1 * time.Second,
+		InitialBackoff:    initialBackoff,
+		MaxBackoff:        maxBackoff,
 		BackoffMultiplier: 2.0,
 		CrashLoopWindow:   1 * time.Second,
 		CrashLoopCount:    3,
