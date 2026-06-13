@@ -4062,6 +4062,36 @@ func TestIsAwaitingRefineryMergeSlingError(t *testing.T) {
 	}
 }
 
+// TestIsCapacityAdmissionSlingError covers the stderr shapes the capacity/
+// backpressure admission gates emit (gs-asme) — and the shapes that must NOT
+// match so they route to their own handlers / still escalate.
+func TestIsCapacityAdmissionSlingError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"global ceiling", "polecat admission denied: 3/3 town-wide working polecats (scheduler.global_max_polecats ceiling reached; rig gastown bead gs-x). Wait for a polecat to finish", true},
+		{"max capacity full", "polecat admission denied: configured scheduler.max_polecats capacity is full (max=4 occupied=4 working=4 ...)", true},
+		{"host load", "polecat admission denied: host load/core 8.50 exceeds scheduler.max_load_per_core 4.00 (rig gastown bead gs-x)", true},
+		{"case insensitive", "POLECAT ADMISSION DENIED: ceiling reached", true},
+		// Must NOT match — distinct handler paths / genuinely-ambiguous wedges.
+		{"deferred", `refusing to sling deferred bead gt-x: "held"`, false},
+		{"actively worked", "bead gt-x is already hooked to gastown/polecats/x", false},
+		{"awaiting merge", "bead gt-x is awaiting refinery merge (label awaiting_refinery_merge)", false},
+		{"mayor-only", `"x" is labeled mayor-only / no-polecat`, false},
+		{"no target", "no eligible polecat target for gt-x", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sling.IsCapacityAdmissionSlingError(tc.in); got != tc.want {
+				t.Errorf("IsCapacityAdmissionSlingError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFeedFirstReady_AwaitingMerge_NoEscalateNoUntrack verifies the gt-3798
 // escalation-storm fix: when sling refuses a bead awaiting refinery merge (MR
 // submitted, sitting in the merge queue), the daemon suppresses the escalation (a
@@ -4114,6 +4144,64 @@ func TestFeedFirstReady_AwaitingMerge_RecordsChurn(t *testing.T) {
 	m.lastFeedAttempt.Delete("gt-merge")
 	m.feedFirstReady(c)
 	if got := m.effectiveFeedCooldown("gt-merge"); got <= feedDispatchCooldown {
+		t.Errorf("after 2 churns, cooldown = %v, want > base %v (escalating backoff)", got, feedDispatchCooldown)
+	}
+}
+
+// TestFeedFirstReady_CapacityAdmission_NoEscalateNoUntrack verifies the gs-asme
+// fix: when sling refuses a bead at a capacity/backpressure admission gate (the
+// town-wide polecat ceiling, max_polecats capacity, or host-load throttle), the
+// daemon suppresses the escalation (a transient capacity condition — the queue is
+// draining and the bead dispatches when a slot frees, NOT a "will never progress"
+// wedge), does NOT untrack it (legitimate tracked work), and does NOT record a
+// sling error (so it never escalates as "cannot dispatch / will never progress").
+func TestFeedFirstReady_CapacityAdmission_NoEscalateNoUntrack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	stderr := `polecat admission denied: 3/3 town-wide working polecats (scheduler.global_max_polecats ceiling reached; rig gastown bead gt-cap). Wait for a polecat to finish`
+	m, invokeLog := feedFirstReadyTestEnv(t, stderr)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error { untrackCalls++; return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-cap", Title: "Capacity Step", ReadyCount: 1, ReadyIssues: []string{"gt-cap"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("capacity-admission bead should NOT escalate, but escalate was invoked: %q", data)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("capacity-admission bead should not untrack (real tracked work), got %d", untrackCalls)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-cap"); ok {
+		t.Errorf("capacity-admission bead should not record a sling error")
+	}
+}
+
+// TestFeedFirstReady_CapacityAdmission_RecordsChurn verifies a capacity-denied
+// bead advances its feed-churn streak on each failed re-feed, so the effective
+// cooldown escalates (5m→…) instead of re-attempting (and re-escalating) every
+// scan while the town is at the ceiling and draining (gs-asme).
+func TestFeedFirstReady_CapacityAdmission_RecordsChurn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, _ := feedFirstReadyTestEnv(t, `polecat admission denied: host load/core 8.50 exceeds scheduler.max_load_per_core 4.00 (rig gastown bead gt-cap)`)
+	m.untrackMissingBeadFn = func(string, string) error { return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-cap", Title: "Capacity Step", ReadyCount: 1, ReadyIssues: []string{"gt-cap"}}
+
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-cap"); got != feedDispatchCooldown {
+		t.Fatalf("after 1 churn, cooldown = %v, want base %v", got, feedDispatchCooldown)
+	}
+
+	m.lastFeedAttempt.Delete("gt-cap")
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-cap"); got <= feedDispatchCooldown {
 		t.Errorf("after 2 churns, cooldown = %v, want > base %v (escalating backoff)", got, feedDispatchCooldown)
 	}
 }

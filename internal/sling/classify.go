@@ -191,6 +191,35 @@ func IsAwaitingRefineryMergeSlingError(stderrLine string) bool {
 		strings.Contains(s, "awaiting_refinery_merge")
 }
 
+// IsCapacityAdmissionSlingError reports whether a sling stderr line indicates the
+// target bead was refused by a capacity/backpressure admission gate — the
+// town-wide polecat ceiling (scheduler.global_max_polecats), the per-rig/global
+// max_polecats capacity, or the host load/core throttle. sling refuses by design
+// so queued work doesn't overcommit the host; the bead stays queued and the next
+// dispatch re-evaluates the moment a slot frees (or host load eases).
+//
+// Matched rejection shapes (internal/cmd/polecat_capacity.go) — all carry the
+// "polecat admission denied" prefix:
+//   - global ceiling: "polecat admission denied: N/N town-wide working polecats (scheduler.global_max_polecats ceiling reached; ...)"
+//   - capacity full:  "polecat admission denied: configured scheduler.max_polecats capacity is full (...)"
+//   - host load:      "polecat admission denied: host load/core X exceeds scheduler.max_load_per_core Y (...)"
+//
+// This is a TRANSIENT capacity condition, NOT a structural wedge: the queue is
+// draining (a working polecat will free a slot) and the bead dispatches then.
+// Escalating it as "cannot dispatch / will never progress" is a false alarm —
+// observed firing HIGH for EVERY queued bead EVERY scan cycle while the town was
+// healthy and draining (hq-mpebc / gs-asme). The correct disposition is the same
+// as a deferred / actively-worked / awaiting-merge bead: suppress the escalation
+// and back off the re-feed interval, with NO untrack (the step is legitimate
+// tracked work that dispatches when capacity frees). "Will never progress" is
+// reserved for structural blocks (unmet deps, dead convoy, no eligible target).
+func IsCapacityAdmissionSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(stderrLine), "polecat admission denied")
+}
+
 // SlingFailureClass categorizes a sling stderr line into a single terminal-vs-
 // transient disposition so producers can switch on one value instead of chaining
 // predicates (and risk ordering bugs). Ordering matters: closed and not-found are
@@ -224,6 +253,12 @@ const (
 	// escalation and back off; the refinery clears the label on merge. NOT terminal
 	// — must not be untracked (gu-ea25u, gt-3798).
 	SlingFailureAwaitingMerge
+	// SlingFailureCapacity: the bead was refused by a capacity/backpressure
+	// admission gate (global ceiling, max_polecats capacity, or host-load
+	// throttle). A transient condition — the queue is draining and the bead
+	// dispatches once a slot frees. Suppress escalation and back off; NOT terminal
+	// — must not be untracked (hq-mpebc, gs-asme).
+	SlingFailureCapacity
 )
 
 // ClassifySlingFailure maps a sling stderr line to its SlingFailureClass.
@@ -244,6 +279,8 @@ func ClassifySlingFailure(stderrLine string) SlingFailureClass {
 		return SlingFailureDeferred
 	case IsAwaitingRefineryMergeSlingError(stderrLine):
 		return SlingFailureAwaitingMerge
+	case IsCapacityAdmissionSlingError(stderrLine):
+		return SlingFailureCapacity
 	default:
 		return SlingFailureUnknown
 	}

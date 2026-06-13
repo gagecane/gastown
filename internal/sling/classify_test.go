@@ -25,6 +25,9 @@ func TestClassifySlingFailure(t *testing.T) {
 		{"awaiting merge (sling.go)", `refusing to sling bead gt-x: "fix thing" is awaiting refinery merge (label awaiting_refinery_merge) — its MR is submitted and in the merge queue; the refinery will close it on merge`, SlingFailureAwaitingMerge},
 		{"awaiting merge (schedule)", `bead gt-x is awaiting refinery merge (label awaiting_refinery_merge): "fix thing" — refusing to schedule`, SlingFailureAwaitingMerge},
 		{"awaiting merge case-insensitive", "BEAD gt-x is Awaiting Refinery Merge", SlingFailureAwaitingMerge},
+		{"capacity global ceiling", "polecat admission denied: 3/3 town-wide working polecats (scheduler.global_max_polecats ceiling reached; rig gastown bead gs-x). Wait for a polecat to finish", SlingFailureCapacity},
+		{"capacity max full", "polecat admission denied: configured scheduler.max_polecats capacity is full (max=4 occupied=4 working=4 ...)", SlingFailureCapacity},
+		{"capacity host load", "polecat admission denied: host load/core 8.50 exceeds scheduler.max_load_per_core 4.00 (rig gastown bead gs-x)", SlingFailureCapacity},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,7 +61,7 @@ func TestIsTerminalSlingFailure(t *testing.T) {
 			t.Errorf("IsTerminalSlingFailure(%v) = false, want true", c)
 		}
 	}
-	nonTerminal := []SlingFailureClass{SlingFailureUnknown, SlingFailureActivelyWorked, SlingFailureDeferred, SlingFailureAwaitingMerge}
+	nonTerminal := []SlingFailureClass{SlingFailureUnknown, SlingFailureActivelyWorked, SlingFailureDeferred, SlingFailureAwaitingMerge, SlingFailureCapacity}
 	for _, c := range nonTerminal {
 		if IsTerminalSlingFailure(c) {
 			t.Errorf("IsTerminalSlingFailure(%v) = true, want false", c)

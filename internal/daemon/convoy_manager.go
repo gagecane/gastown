@@ -1112,6 +1112,22 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) int {
 				// step is legitimate tracked work that will close on merge.
 				m.logger("Convoy %s: %s is awaiting refinery merge — MR queued, suppressing escalation and backing off (gu-ea25u)", c.ID, issueID)
 				m.recordFeedChurn(issueID)
+			case sling.IsCapacityAdmissionSlingError(stderrLine):
+				// The bead was refused by a capacity/backpressure admission gate
+				// (global polecat ceiling, max_polecats capacity, or host-load
+				// throttle) (hq-mpebc / gs-asme). This is a TRANSIENT capacity
+				// condition, NOT a structural wedge: the queue is draining and the
+				// bead dispatches the moment a working polecat frees a slot (or host
+				// load eases). Escalating it as "cannot dispatch / will never
+				// progress" is a false alarm — the daemon previously fell through to
+				// the default branch and fired HIGH for EVERY queued bead EVERY scan
+				// cycle while the town was healthy at the ceiling and draining (5+
+				// HIGH escalations observed, 2026-06-13). Treat it like a deferred /
+				// actively-worked / awaiting-merge bead: suppress the escalation and
+				// back off the re-feed interval (5m→1h), with NO untrack — the step
+				// is legitimate tracked work that dispatches when capacity frees.
+				m.logger("Convoy %s: %s denied by capacity admission gate — transient (queue draining), suppressing escalation and backing off (gs-asme)", c.ID, issueID)
+				m.recordFeedChurn(issueID)
 			default:
 				// gs-4n7i classes 1 & 7: before escalating "will never progress",
 				// apply the refutation recipe as a live precondition. The stranded
