@@ -383,6 +383,19 @@ func (d *Daemon) runMainBranchTests() {
 			continue
 		}
 
+		// gs-wf0p class 6: an external image-registry outage (Docker Hub 5xx /
+		// pull rate-limit) is NOT a regression — the gate never got to run the
+		// code under test. Skip without escalating and without touching the
+		// attribution baseline, exactly like the host-kill skip above; a later
+		// cycle records the real pass/fail once the registry recovers. Uses the
+		// substring-aware classifier so it also catches the gates-path error,
+		// which flattens the sentinel chain into a plain string.
+		if runErr != nil && isInfraFlakeFailure(runErr) {
+			d.logger.Printf("main_branch_test: %s: SKIPPED — transient external registry/Docker Hub outage, not a regression: %v", rigName, runErr)
+			tested++
+			continue
+		}
+
 		// Persist outcome BEFORE escalation emission so a crash between the
 		// gate suite and the bd-call still advances the per-rig baseline.
 		// State updates are best-effort: a write failure does not stall the
@@ -923,6 +936,15 @@ var errMainRedBackoff = errors.New("main confirmed red at current SHA, backing o
 // sustained timeout still escalates as a real hang.
 var errGateTimeout = errors.New("gate exceeded deadline (timeout, not an assertion failure)")
 
+// errGateInfraFlake marks a gate that failed because an EXTERNAL image
+// registry (Docker Hub) was unavailable — a 5xx gateway error or a pull
+// rate-limit while act/Docker pulled a CI image. Like errGateHostKilled this
+// is a TRANSIENT environment condition, not a regression: the code under test
+// never ran, so callers must NOT escalate it as a main-branch failure. A later
+// cycle (once the registry recovers) records the real pass/fail. See gs-wf0p
+// class 6 — main_branch_test was paging the overseer on Docker Hub 504s.
+var errGateInfraFlake = errors.New("gate failed on external registry/Docker Hub outage (transient, not a regression)")
+
 // gateHostKillRetries is how many extra times a host-killed gate is re-run
 // before giving up and reporting it transient. A short backoff between attempts
 // lets a load/swap spike subside.
@@ -974,6 +996,54 @@ func isTimeoutFailure(err error) bool {
 		return false
 	}
 	return errors.Is(err, errGateTimeout) || strings.Contains(err.Error(), errGateTimeout.Error())
+}
+
+// infraFlakeMarkers are substrings emitted by the Docker daemon / containerd /
+// act when an image PULL fails because the external registry (Docker Hub) was
+// unavailable, rather than because a test or build asserted a failure (gs-wf0p
+// class 6). They are deliberately registry-specific:
+//
+//   - "received unexpected HTTP status: 50" is the Docker pull error wrapping a
+//     registry 5xx (502/503/504) — e.g. "received unexpected HTTP status: 504
+//     Gateway Time-out". The Docker daemon only emits this shape for registry
+//     responses, so it cannot be produced by an app-level test that happens to
+//     log a 504.
+//   - "toomanyrequests" / "you have reached your pull rate limit" is Docker
+//     Hub's 429 anonymous-pull throttle — an external quota, not a regression.
+//
+// We do NOT match a bare "504" or the registry hostname alone: a genuine bad
+// image tag surfaces as "manifest ... not found" and MUST keep failing the
+// gate. This mirrors the narrow-signature discipline of
+// isRegistryUnreachableErr in internal/testutil/doltserver.go.
+var infraFlakeMarkers = []string{
+	"received unexpected http status: 50",
+	"toomanyrequests",
+	"you have reached your pull rate limit",
+}
+
+// isInfraFlake reports whether gate output shows an external image-registry
+// outage (Docker Hub 5xx or pull rate-limit). Case-insensitive.
+func isInfraFlake(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range infraFlakeMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// isInfraFlakeFailure reports whether a gate failure is an external
+// registry/Docker Hub outage (errGateInfraFlake). Like isTimeoutFailure it
+// matches BOTH the wrapped sentinel (legacy test_command path preserves the
+// chain) AND the flattened string form (the gates path joins per-gate errors
+// with fmt.Sprintf %v, dropping the chain), so the classification survives both
+// runner paths. See gs-wf0p class 6.
+func isInfraFlakeFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, errGateInfraFlake) || strings.Contains(err.Error(), errGateInfraFlake.Error())
 }
 
 // runCommandOnWorktree runs a single shell command in the given worktree
@@ -1037,6 +1107,20 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 		d.logger.Printf("main_branch_test: %s: %s: still SIGKILLed after %d attempts — host load, marking transient (NOT a regression)",
 			rigName, label, gateHostKillRetries+1)
 		return fmt.Errorf("%w: %s (%v)", errGateHostKilled, label, err)
+	}
+
+	// gs-wf0p class 6: the gate exited non-zero because an EXTERNAL image
+	// registry (Docker Hub) was unavailable — a 5xx gateway error or pull
+	// rate-limit while act/Docker pulled a CI image. The code under test never
+	// ran, so this is a transient environment flake, not a regression. Mark it
+	// so the patrol skips it without escalating (like a host kill), instead of
+	// paging the overseer on a Docker Hub 504. Checked after the host-kill /
+	// cleanup-only branches above so a genuine assertion FAIL still falls
+	// through to the deterministic-failure path below.
+	if isInfraFlake(string(output)) {
+		d.logger.Printf("main_branch_test: %s: %s: external registry/Docker Hub outage during image pull — marking transient (NOT a regression)",
+			rigName, label)
+		return fmt.Errorf("%w: %s (%v)\n%s", errGateInfraFlake, label, err, formatFailureOutput(string(output), failureOutputTailSize))
 	}
 
 	// gs-iz2: our own deadline fired (not a host kill, not a cleanup-only
