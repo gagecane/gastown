@@ -686,6 +686,12 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 				style.Dim.Render("Warning:"), err)
 		}
 
+		// Persist the synthesized document to the synthesis bead's notes so it
+		// is readable regardless of which worktree the synthesis polecat runs
+		// in (gu-drftd). Mirrors the leg-side Output Persistence directive: a
+		// cwd-relative output file can land in the wrong worktree and be lost.
+		synDesc += synthesisOutputPersistenceDirective(synthesisBeadID)
+
 		synArgs := []string{
 			"create",
 			"--type=task",

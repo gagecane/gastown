@@ -601,6 +601,12 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 		desc.WriteString(fmt.Sprintf("\n## Output\n\nWrite synthesis to: %s\n", outputPath))
 	}
 
+	// Persist the synthesized document to the synthesis bead's notes so it is
+	// readable regardless of which worktree the synthesis polecat runs in
+	// (gu-drftd, symmetric to the leg-side directive). The bead ID is not known
+	// until after `bd create` here, so the directive self-references the bead.
+	desc.WriteString(synthesisOutputPersistenceDirective(""))
+
 	// Guard against flag-like synthesis titles (gt-e0kx5)
 	if beads.IsFlagLikeTitle(title) {
 		return "", fmt.Errorf("refusing to create synthesis bead: title %q looks like a CLI flag", title)
@@ -662,6 +668,36 @@ func createSynthesisBead(convoyID string, meta *ConvoyMeta, f *formula.Formula,
 	_ = addTrackingRelationFn(townRoot, convoyID, result.ID) // Non-fatal if this fails
 
 	return result.ID, nil
+}
+
+// synthesisOutputPersistenceDirective returns a uniform directive instructing
+// the synthesis polecat to persist its full synthesized document to the
+// synthesis bead's notes, mirroring the leg-side directive (gu-drftd).
+//
+// The synthesis polecat writes its deliverable (e.g. design-doc.md) to a
+// cwd-relative output path. When that polecat runs in a nested or sibling
+// worktree (e.g. a Brazil workspace under crew/) the file lands where no
+// downstream consumer looks, so the synthesized document is silently lost —
+// the symmetric output-side version of the leg-input split nitro fixed. The
+// bead's notes live in one rig DB regardless of cwd/worktree, so persisting
+// the full synthesized document there makes it reliably readable no matter
+// where the synthesis polecat ran. beadID may be empty when the caller does
+// not yet know the synthesis bead ID (the manual/trigger path parses it from
+// `bd create` output); in that case the directive self-references the bead.
+func synthesisOutputPersistenceDirective(beadID string) string {
+	cmd := "bd update <this-bead-id>"
+	if beadID != "" {
+		cmd = "bd update " + beadID
+	}
+	return fmt.Sprintf("\n\n---\n## Output Persistence (REQUIRED)\n\n"+
+		"In addition to writing any output file, you MUST persist your FULL "+
+		"synthesized document to this synthesis bead's notes before you "+
+		"finish:\n\n"+
+		"```bash\n%s --notes \"$(cat <<'EOF'\n"+
+		"<your full synthesized document here>\nEOF\n)\"\n```\n\n"+
+		"A cwd-relative output file can land in the wrong worktree and be lost; "+
+		"the bead notes are the location-independent canonical copy, so a short "+
+		"summary is not enough — include the complete document.", cmd)
 }
 
 // slingSynthesis slings the synthesis bead to a rig.
