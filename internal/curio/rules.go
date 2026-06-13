@@ -36,6 +36,17 @@ func (in Input) suppressed(filedBy string, p causalProvenance) bool {
 	return isCurio(filedBy) || in.isCurioReaction(p)
 }
 
+// isCurioSeries reports whether a series name is one Curio itself emits (the
+// CurioSeriesPrefix air-gap). It is the SINGLE definition of that predicate:
+// the live rate rule (rateSpikeRule.Eval), the EWMA detector, and the
+// Retrospect digest filter (selfReferential) all call this, so the air-gap is
+// single-sourced (design-doc Q5: "reuses the EXACT predicates ... not
+// re-implemented"). Do not inline strings.HasPrefix(s, CurioSeriesPrefix)
+// anywhere — route every check through here.
+func isCurioSeries(series string) bool {
+	return strings.HasPrefix(series, CurioSeriesPrefix)
+}
+
 // --- Rule (a): bead closed "merged" but commit not in main ancestry ---
 // gu-kc3lo class. No rate/latency signature; a pure correctness fact.
 
@@ -162,7 +173,7 @@ func (r rateSpikeRule) Eval(in Input) []Candidate {
 		}
 		// Call 1(A) air-gap: never rate-detect Curio's own telemetry series,
 		// regardless of which actor the events were attributed to.
-		if strings.HasPrefix(c.Series, CurioSeriesPrefix) {
+		if isCurioSeries(c.Series) {
 			continue
 		}
 		threshold, known := r.thresholds[c.Series]

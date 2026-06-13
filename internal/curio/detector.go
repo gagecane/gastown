@@ -3,7 +3,6 @@ package curio
 import (
 	"fmt"
 	"math"
-	"strings"
 )
 
 // L1 statistical anomaly detector (Phase 1b, gu-fcwx8.3).
@@ -177,7 +176,7 @@ func (d *EWMADetector) Eval(in Input) []Candidate {
 			continue
 		}
 		// Call 1(A) air-gap: never detect Curio's own telemetry series.
-		if strings.HasPrefix(c.Series, CurioSeriesPrefix) {
+		if isCurioSeries(c.Series) {
 			continue
 		}
 

@@ -116,6 +116,11 @@ func run(townRoot string, doltPort int, dbName, digestPath string, now time.Time
 		if err != nil {
 			return fmt.Errorf("reading outcome history: %w", err)
 		}
+		// Q5 layer 1 air-gap: drop self-referential candidates BEFORE rendering,
+		// so the self-referential data never reaches the digest (and thus never
+		// reaches the write-capable agent that consumes it). The predicate is
+		// single-sourced with the live suppressed()/isCurioSeries path.
+		cands = curio.ExcludeSelfReferential(cands)
 		digest := curio.RenderDigest(cutoff, cands, outcomes)
 		if err := os.WriteFile(digestPath, []byte(digest), 0o600); err != nil {
 			return fmt.Errorf("writing digest to %s: %w", digestPath, err)

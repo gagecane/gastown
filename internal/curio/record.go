@@ -37,6 +37,13 @@ const CurioActor = "curio"
 // event is attributed to the emitting subsystem rather than to "curio").
 const CurioSeriesPrefix = "curio."
 
+// ProposedRulePrefix marks rule IDs Curio assigns to its OWN proposal-derived
+// candidates. The Retrospect digest air-gap (design-doc Q5 layer 1) drops these
+// so the lane never reasons about its own pending/prior proposals — a
+// proposal-about-proposals loop. No live rule emits this prefix yet; it is the
+// forward self-reference signal the digest filter keys on (see selfReferential).
+const ProposedRulePrefix = "proposed_"
+
 // Causal provenance (Call 1(A) air-gap). Records carry the chain that produced
 // them so the loop-breaker can drop not just Curio's OWN records (FiledBy ==
 // CurioActor) but also any record that is a REACTION to a Curio-filed bead

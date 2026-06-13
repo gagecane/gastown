@@ -57,6 +57,43 @@ type digestCluster struct {
 	Omitted     int      `json:"omitted"`
 }
 
+// ExcludeSelfReferential drops self-referential candidates from a closed-window
+// set before it is rendered into a digest — the mechanical, primary layer of the
+// Q5 self-reference air-gap (design-doc Q5 layer 1). It is applied by the
+// --emit-digest caller to the ReadCandidatesBefore result so the self-referential
+// data NEVER reaches the digest (and therefore never reaches the write-capable
+// agent that consumes it). RenderDigest itself stays a pure formatter and renders
+// whatever it is handed.
+//
+// The exclusion predicates are SINGLE-SOURCED, not re-implemented: the series
+// check routes through isCurioSeries — the exact predicate the live rateSpikeRule
+// and EWMA detector use. A stored Candidate carries no causal provenance (the
+// curio_candidate schema has no FiledBy/CausalRoot columns), so the third Q5
+// predicate — causal root ∈ Input.CurioBeads — is enforced UPSTREAM at Eval time
+// by Input.suppressed(): a Curio-reaction record is dropped before a candidate is
+// ever emitted, so no such candidate exists to reach this filter. This stage
+// re-checks the two predicates a stored candidate actually carries.
+func ExcludeSelfReferential(candidates []Candidate) []Candidate {
+	out := make([]Candidate, 0, len(candidates))
+	for _, c := range candidates {
+		if selfReferential(c) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// selfReferential reports whether a stored candidate is self-referential and so
+// must be air-gapped out of the digest (design-doc Q5 layer 1). It is true when
+// the candidate is a prior/pending Curio proposal (rule_id prefixed
+// ProposedRulePrefix) or describes Curio's own telemetry (series with
+// CurioSeriesPrefix, via the single-sourced isCurioSeries). The causal-root
+// predicate is enforced upstream at Eval time (see ExcludeSelfReferential).
+func selfReferential(c Candidate) bool {
+	return strings.HasPrefix(c.RuleID, ProposedRulePrefix) || isCurioSeries(c.Series)
+}
+
 // RenderDigest renders the deterministic Markdown+JSON Retrospect digest for the
 // closed window ending at cutoff. It is a PURE function of its inputs (no I/O, no
 // clock, no DB) so it is byte-stable and golden-testable. candidates is the
