@@ -3,11 +3,13 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
@@ -142,18 +144,35 @@ func verifyFormulaExists(formulaName, townRoot, rigName string) error {
 	return fmt.Errorf("formula '%s' not found (check 'bd formula list')", formulaName)
 }
 
+// singletonThrottleRetries bounds how many times findHookedFormulaSingleton
+// re-issues the hooked-formula `bd list` after a transient read-throttle
+// timeout. The throttle is a town-wide flock contended by concurrent `bd list`
+// bursts during polecat spawn (the sling itself fans out list calls); the burst
+// drains in well under a second, so a few backed-off retries clear it without
+// failing the sling. See gu-dawnk.
+const singletonThrottleRetries = 4
+
 // findHookedFormulaSingleton returns the existing hooked bead for an assignee
 // when that bead already carries the same attached_formula metadata.
+//
+// The hooked-formula `bd list` runs on the sling critical path during polecat
+// spawn, exactly when the town-wide bd-list-read throttle is most contended. A
+// transient throttle timeout (beads.ErrReadThrottleTimeout) there is not a Dolt
+// outage and must not fail the whole sling, so we retry it with backoff; all
+// other errors propagate unchanged on the first occurrence.
 func findHookedFormulaSingleton(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
 	if workDir == "" || targetAgent == "" || formulaName == "" {
 		return nil, nil
 	}
 
 	b := beads.New(workDir)
-	hookedBeads, err := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: targetAgent,
-		Priority: -1,
+
+	hookedBeads, err := listWithThrottleRetry(func() ([]*beads.Issue, error) {
+		return b.List(beads.ListOptions{
+			Status:   beads.StatusHooked,
+			Assignee: targetAgent,
+			Priority: -1,
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -170,6 +189,29 @@ func findHookedFormulaSingleton(workDir, targetAgent, formulaName string) (*bead
 }
 
 var findHookedFormulaSingletonFn = findHookedFormulaSingleton
+
+// throttleRetrySleep is the backoff sleep used between read-throttle retries.
+// Overridable in tests so they don't pay real backoff latency.
+var throttleRetrySleep = time.Sleep
+
+// listWithThrottleRetry runs list and retries it with backoff while it fails
+// with a transient bd read-throttle timeout (beads.ErrReadThrottleTimeout),
+// up to singletonThrottleRetries times. Any non-throttle error returns
+// immediately, preserving fail-fast behavior for real failures.
+func listWithThrottleRetry(list func() ([]*beads.Issue, error)) ([]*beads.Issue, error) {
+	var beadsList []*beads.Issue
+	var err error
+	for attempt := 1; ; attempt++ {
+		beadsList, err = list()
+		if err == nil || !errors.Is(err, beads.ErrReadThrottleTimeout) || attempt > singletonThrottleRetries {
+			return beadsList, err
+		}
+		backoff := slingBackoff(attempt, 500*time.Millisecond, 30*time.Second)
+		fmt.Printf("%s Hooked-formula check hit bd read-throttle (attempt %d/%d), retrying in %v...\n",
+			style.Warning.Render("⚠"), attempt, singletonThrottleRetries, backoff)
+		throttleRetrySleep(backoff)
+	}
+}
 
 // rigFromTarget extracts the rig name from a sling target argument so the
 // formula-resolution tiers (rig > town > embedded) can find a rig-level

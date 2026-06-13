@@ -38,6 +38,14 @@ var (
 	// an ambiguous lookup says nothing about the bead's status labels, so it
 	// must not be read as "parked/not operational". See gu-feg02.
 	ErrIDCollision = errors.New("bead ID exists in both issues and wisps")
+	// ErrReadThrottleTimeout is returned when a `bd list` caller waits longer
+	// than the read-throttle timeout for the town-wide bd-list-read flock. It is
+	// a TRANSIENT local-contention signal — the flock was held by other
+	// concurrent `bd list` bursts (e.g. a sling/patrol storm during polecat
+	// spawn) — NOT a Dolt outage; `gt dolt status` is typically healthy
+	// immediately after. Latency-tolerant callers may classify this with
+	// errors.Is and retry with backoff once the burst drains. See gu-dawnk.
+	ErrReadThrottleTimeout = errors.New("timed out waiting for bd list read throttle")
 )
 
 // bdAllowStale caches whether the installed bd supports --allow-stale.
@@ -1205,7 +1213,7 @@ func (b *Beads) acquireBDReadThrottle(timeout time.Duration) (func(), error) {
 			return unlock, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for bd list read throttle")
+			return nil, ErrReadThrottleTimeout
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

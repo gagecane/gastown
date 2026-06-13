@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -4825,6 +4826,42 @@ func TestResolveBdReadThrottleTimeout(t *testing.T) {
 				t.Errorf("resolveBdReadThrottleTimeout() = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// TestAcquireBDReadThrottleTimeoutReturnsSentinel verifies that when the
+// town-wide bd-list-read flock is already held, a second acquirer that exceeds
+// its wait timeout fails with the ErrReadThrottleTimeout sentinel (gu-dawnk).
+// Sling callers classify this with errors.Is to retry with backoff rather than
+// failing the whole sling on a transient contention spike.
+func TestAcquireBDReadThrottleTimeoutReturnsSentinel(t *testing.T) {
+	townRoot := t.TempDir()
+	// FindTownRoot identifies a town by mayor/town.json.
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	b := New(townRoot)
+
+	// Hold the flock so the next acquirer must wait and time out.
+	unlock, err := b.acquireBDReadThrottle(5 * time.Second)
+	if err != nil {
+		t.Fatalf("first acquire failed: %v", err)
+	}
+	if unlock == nil {
+		t.Fatal("expected a non-nil unlock from first acquire")
+	}
+	defer unlock()
+
+	// A separate Beads instance contending for the same town flock with a tiny
+	// timeout must surface the sentinel.
+	b2 := New(townRoot)
+	_, err = b2.acquireBDReadThrottle(50 * time.Millisecond)
+	if !errors.Is(err, ErrReadThrottleTimeout) {
+		t.Fatalf("expected ErrReadThrottleTimeout, got %v", err)
 	}
 }
 
