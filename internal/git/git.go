@@ -2040,6 +2040,36 @@ func (g *Git) FindMergedPRCommit(branch string) (string, error) {
 	return strings.TrimSpace(prs[0].MergeCommit.OID), nil
 }
 
+// FindMergedPRBaseRef returns the base branch (baseRefName) of the most recent
+// MERGED PR whose head was the given branch, or "" if no merged PR exists.
+// mol-lia-dev-work convoys merge dev-work into an INTEGRATION branch, not main,
+// but the MR bead may still carry the rig default as its target (base resolution
+// falls back to main). The post-merge guard reads this actual base ref so it
+// verifies the merge landed where the PR truly targeted instead of false-
+// positiving on origin/main (hq-fq1on).
+func (g *Git) FindMergedPRBaseRef(branch string) (string, error) {
+	cmd := exec.Command("gh", "pr", "list", "--head", branch, "--state", "merged", "--json", "baseRefName", "--limit", "1")
+	cmd.Dir = g.workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list (merged base ref) failed: %w", err)
+	}
+	out = bytes.TrimSpace(out)
+	if len(out) <= 2 {
+		return "", nil // No merged PR
+	}
+	var prs []struct {
+		BaseRefName string `json:"baseRefName"`
+	}
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return "", fmt.Errorf("failed to parse gh pr list (merged base ref) output: %w", err)
+	}
+	if len(prs) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(prs[0].BaseRefName), nil
+}
+
 // PRCheckRun is a single CI check/status reported on a pull request, as
 // returned by `gh pr checks <pr> --json name,state,bucket`.
 type PRCheckRun struct {

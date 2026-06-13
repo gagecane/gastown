@@ -639,6 +639,77 @@ func TestResolveVerifyTarget(t *testing.T) {
 	}
 }
 
+// fakeBaseRefFinder is a test double for mergedPRBaseRefFinder.
+type fakeBaseRefFinder struct {
+	base   string
+	err    error
+	branch string // captured arg
+}
+
+func (f *fakeBaseRefFinder) FindMergedPRBaseRef(branch string) (string, error) {
+	f.branch = branch
+	return f.base, f.err
+}
+
+// TestResolvePostMergeVerifyTarget covers hq-fq1on: the post-merge guard must
+// verify against the merged PR's ACTUAL base ref (integration branch) when one
+// exists, but fall back to the resolved MR target for non-PR rigs / lookup
+// failures so the silent-merge-loss guard (gu-ilf86) is never weakened.
+func TestResolvePostMergeVerifyTarget(t *testing.T) {
+	tests := []struct {
+		name       string
+		mrTarget   string
+		rigDefault string
+		finder     mergedPRBaseRefFinder
+		want       string
+	}{
+		{
+			name:       "merged PR base ref overrides stale main target",
+			mrTarget:   "main",
+			rigDefault: "main",
+			finder:     &fakeBaseRefFinder{base: "task/LIA-1872-parallel"},
+			want:       "task/LIA-1872-parallel",
+		},
+		{
+			name:       "no merged PR → resolved MR target",
+			mrTarget:   "main",
+			rigDefault: "mainline",
+			finder:     &fakeBaseRefFinder{base: ""},
+			want:       "mainline",
+		},
+		{
+			name:       "lookup error → resolved MR target (fail safe)",
+			mrTarget:   "main",
+			rigDefault: "main",
+			finder:     &fakeBaseRefFinder{err: errors.New("gh not available")},
+			want:       "main",
+		},
+		{
+			name:       "nil finder → resolved MR target",
+			mrTarget:   "main",
+			rigDefault: "develop",
+			finder:     nil,
+			want:       "develop",
+		},
+		{
+			name:       "whitespace base ref ignored → resolved MR target",
+			mrTarget:   "main",
+			rigDefault: "main",
+			finder:     &fakeBaseRefFinder{base: "  "},
+			want:       "main",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolvePostMergeVerifyTarget(tt.mrTarget, tt.rigDefault, "polecat/x/gs-1", tt.finder)
+			if got != tt.want {
+				t.Errorf("resolvePostMergeVerifyTarget(%q, %q) = %q, want %q",
+					tt.mrTarget, tt.rigDefault, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestManager_PostMerge_RefusesCloseWhenMergeNotLanded is the integration-level
 // regression test for gu-ilf86: PostMerge must NOT close the MR or source bead
 // when the merge commit never landed on origin/<target>.

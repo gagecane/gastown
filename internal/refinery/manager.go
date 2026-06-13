@@ -844,16 +844,41 @@ func (m *Manager) defaultVerifyMergeLanded(mr *MergeRequest) error {
 	}
 	g := git.NewGit(gitDir)
 
-	// Target Resolution Rule (gu-eakas): resolve the MR's target branch using
-	// the same rule the merge step uses. Polecat MRs submitted before gu-wcb37
-	// carry target="main" even when the rig's actual default branch is
-	// "mainline" (no origin/main exists). Without resolution the fetch fails
-	// and verification rejects every target=main MR as unlanded. Resolve:
-	// if target is a common default-branch alias ("main", "master") and the
-	// rig's configured default branch differs, use the rig's default instead.
-	target := resolveVerifyTarget(mr.TargetBranch, m.rig.DefaultBranch())
+	// Resolve the branch the merge actually landed on (gu-eakas + hq-fq1on).
+	target := resolvePostMergeVerifyTarget(mr.TargetBranch, m.rig.DefaultBranch(), mr.Branch, g)
 
 	return verifyMergeCommitLanded(g, mr.MergeCommit, target)
+}
+
+// mergedPRBaseRefFinder resolves the base branch a branch's MERGED PR targeted.
+// Implemented by *git.Git; injected as an interface so resolvePostMergeVerifyTarget
+// stays unit-testable without a real repo.
+type mergedPRBaseRefFinder interface {
+	FindMergedPRBaseRef(branch string) (string, error)
+}
+
+// resolvePostMergeVerifyTarget picks the branch the post-merge guard verifies the
+// merge commit landed on. It starts from the MR's recorded target (resolved
+// through resolveVerifyTarget for generic default-branch aliases) but prefers the
+// merged PR's ACTUAL base ref when one is available: mol-lia-dev-work convoys
+// merge dev-work into an integration branch while the MR bead may still carry the
+// rig default as its target (base resolution falls back to main), so trusting the
+// recorded target false-positives the silent-merge-loss guard on origin/main
+// (hq-fq1on). A lookup error or an empty/absent base ref leaves the resolved
+// target unchanged — non-PR rigs have no merged PR to read, and we must not
+// weaken the guard for them.
+func resolvePostMergeVerifyTarget(mrTarget, rigDefault, branch string, finder mergedPRBaseRefFinder) string {
+	target := resolveVerifyTarget(mrTarget, rigDefault)
+	if finder == nil {
+		return target
+	}
+	base, err := finder.FindMergedPRBaseRef(branch)
+	if err == nil {
+		if base = strings.TrimSpace(base); base != "" {
+			return base
+		}
+	}
+	return target
 }
 
 // resolveVerifyTarget applies the Target Resolution Rule for post-merge
