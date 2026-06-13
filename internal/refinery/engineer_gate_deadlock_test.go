@@ -57,7 +57,7 @@ func TestRunGate_DoesNotDeadlockOnReparentedChild(t *testing.T) {
 	gate := &GateConfig{Cmd: gateShimCmd, Timeout: 500 * time.Millisecond}
 
 	runsBefore(t, 10*time.Second, "runGate", func() {
-		res := e.runGate(context.Background(), "deadlock-gate", gate)
+		res := e.runGate(context.Background(), "deadlock-gate", gate, "")
 		if res.Success {
 			t.Errorf("expected gate to fail on timeout, got success")
 		}

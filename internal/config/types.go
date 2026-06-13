@@ -2055,6 +2055,17 @@ type GateConfig struct {
 	// source branch. Post-squash gates run after the squash merge on the
 	// combined result, before pushing.
 	Phase string `json:"phase,omitempty"`
+
+	// Type selects the gate implementation: "" or "command" (default) runs Cmd
+	// as a shell command; "github-checks" polls the PR's GitHub check-run/status
+	// state and passes on green checks instead of running CI locally (gs-vlyt).
+	// Only valid when merge_strategy=pr and vcs_provider=github.
+	Type string `json:"type,omitempty"`
+
+	// RequiredOnly, for github-checks gates, restricts the poll to the checks
+	// GitHub branch protection marks as required. Default false considers all
+	// reported checks.
+	RequiredOnly bool `json:"required_only,omitempty"`
 }
 
 // OnConflict strategy constants.

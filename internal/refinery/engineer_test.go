@@ -782,13 +782,13 @@ func TestRunGatesForPhase_FiltersCorrectly(t *testing.T) {
 	}
 
 	// Pre-merge phase should only run pre-lint and pre-test
-	preResult := e.runGatesForPhase(context.Background(), GatePhasePreMerge)
+	preResult := e.runGatesForPhase(context.Background(), GatePhasePreMerge, "")
 	if !preResult.Success {
 		t.Errorf("pre-merge gates failed: %s", preResult.Error)
 	}
 
 	// Post-squash phase should only run post-build
-	postResult := e.runGatesForPhase(context.Background(), GatePhasePostSquash)
+	postResult := e.runGatesForPhase(context.Background(), GatePhasePostSquash, "")
 	if !postResult.Success {
 		t.Errorf("post-squash gates failed: %s", postResult.Error)
 	}
@@ -801,7 +801,7 @@ func TestRunGate_Success(t *testing.T) {
 
 	result := e.runGate(context.Background(), "echo-test", &GateConfig{
 		Cmd: "echo hello",
-	})
+	}, "")
 
 	if !result.Success {
 		t.Errorf("expected success, got error: %s", result.Error)
@@ -818,7 +818,7 @@ func TestRunGate_Failure(t *testing.T) {
 
 	result := e.runGate(context.Background(), "fail-test", &GateConfig{
 		Cmd: "exit 1",
-	})
+	}, "")
 
 	if result.Success {
 		t.Error("expected failure")
@@ -835,7 +835,7 @@ func TestRunGate_EmptyCmd(t *testing.T) {
 
 	result := e.runGate(context.Background(), "empty", &GateConfig{
 		Cmd: "",
-	})
+	}, "")
 
 	if result.Success {
 		t.Error("expected failure for empty cmd")
@@ -850,7 +850,7 @@ func TestRunGate_Timeout(t *testing.T) {
 	result := e.runGate(context.Background(), "slow", &GateConfig{
 		Cmd:     "sleep 10",
 		Timeout: 100 * time.Millisecond,
-	})
+	}, "")
 
 	if result.Success {
 		t.Error("expected timeout failure")
@@ -872,7 +872,7 @@ func TestRunGates_Sequential_AllPass(t *testing.T) {
 	}
 	e.config.GatesParallel = false
 
-	result := e.runGates(context.Background())
+	result := e.runGates(context.Background(), "")
 	if !result.Success {
 		t.Errorf("expected success, got error: %s", result.Error)
 	}
@@ -896,7 +896,7 @@ func TestRunGates_Sequential_StopsOnFirstFailure(t *testing.T) {
 	}
 	e.config.GatesParallel = false
 
-	result := e.runGates(context.Background())
+	result := e.runGates(context.Background(), "")
 	if result.Success {
 		t.Error("expected failure")
 	}
@@ -923,7 +923,7 @@ func TestRunGates_Parallel_AllPass(t *testing.T) {
 	}
 	e.config.GatesParallel = true
 
-	result := e.runGates(context.Background())
+	result := e.runGates(context.Background(), "")
 	if !result.Success {
 		t.Errorf("expected success, got error: %s", result.Error)
 	}
@@ -941,7 +941,7 @@ func TestRunGates_Parallel_AnyFailure(t *testing.T) {
 	}
 	e.config.GatesParallel = true
 
-	result := e.runGates(context.Background())
+	result := e.runGates(context.Background(), "")
 	if result.Success {
 		t.Error("expected failure when any gate fails")
 	}
@@ -960,7 +960,7 @@ func TestRunGates_Empty(t *testing.T) {
 	e.output = io.Discard
 	e.config.Gates = nil
 
-	result := e.runGates(context.Background())
+	result := e.runGates(context.Background(), "")
 	if !result.Success {
 		t.Error("expected success with no gates configured")
 	}

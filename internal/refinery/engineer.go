@@ -94,11 +94,13 @@ const (
 )
 
 type GateConfig struct {
-	// Cmd is the shell command to execute.
+	// Cmd is the shell command to execute. Ignored for github-checks gates.
 	Cmd string `json:"cmd"`
 
 	// Timeout is the maximum time the gate command may run.
-	// Zero means no timeout (inherits context deadline).
+	// Zero means no timeout (inherits context deadline). For github-checks
+	// gates it bounds how long the refinery polls for checks to conclude
+	// (default defaultGitHubChecksTimeout when zero).
 	Timeout time.Duration `json:"timeout"`
 
 	// Phase controls when this gate runs: "pre-merge" (default) or "post-squash".
@@ -106,7 +108,22 @@ type GateConfig struct {
 	// Post-squash gates run after the squash merge on the combined result,
 	// before pushing. On post-squash failure, the merge is reset.
 	Phase GatePhase `json:"phase"`
+
+	// Type selects the gate implementation. "" or "command" (default) runs Cmd
+	// as a shell command. "github-checks" polls the PR's GitHub check-run/status
+	// state and passes when the checks are green, instead of executing CI
+	// locally (gs-vlyt). Only valid when merge_strategy=pr and vcs_provider=github.
+	Type string `json:"type"`
+
+	// RequiredOnly, for github-checks gates, restricts the poll to the checks
+	// GitHub branch protection marks as required (gh pr checks --required).
+	// When false (default) every reported check must conclude successfully.
+	RequiredOnly bool `json:"required_only"`
 }
+
+// gateTypeGitHubChecks is the GateConfig.Type that polls GitHub PR checks
+// instead of running a shell command (gs-vlyt).
+const gateTypeGitHubChecks = "github-checks"
 
 // GateResult holds the outcome of a single gate execution.
 type GateResult struct {
@@ -243,6 +260,16 @@ const gateLoadRecheckInterval = 15 * time.Second
 // runTests/runGate below and the gu-4mj2 / a0a7bdb9 precedents.
 const gateCmdWaitDelay = 2 * time.Second
 
+// defaultGitHubChecksTimeout bounds how long a github-checks gate (gs-vlyt)
+// polls for a PR's checks to conclude when the gate sets no explicit timeout.
+// Matches the local ci_workflow act timeout it replaces so a slow CI run is
+// not cut short.
+const defaultGitHubChecksTimeout = 30 * time.Minute
+
+// defaultGitHubChecksPollInterval is how often a github-checks gate re-queries
+// PR check state while checks are still pending.
+const defaultGitHubChecksPollInterval = 15 * time.Second
+
 // DefaultMergeQueueConfig returns sensible defaults for merge queue configuration.
 func DefaultMergeQueueConfig() *MergeQueueConfig {
 	return &MergeQueueConfig{
@@ -342,6 +369,11 @@ type Engineer struct {
 	// host load. Zero uses gateLoadRecheckInterval. Tests shrink this to keep
 	// the suite fast; production leaves it zero.
 	gateLoadRecheck time.Duration
+
+	// prChecksPollInterval, when > 0, overrides how often a github-checks gate
+	// re-queries PR check state (gs-vlyt). Zero uses
+	// defaultGitHubChecksPollInterval. Tests shrink this to keep the suite fast.
+	prChecksPollInterval time.Duration
 
 	// revalidateBeforePush re-reads the MR bead immediately before the push to
 	// catch a retraction (bead closed) or human-review-only re-classification
@@ -526,6 +558,15 @@ func (e *Engineer) LoadConfig() error {
 			default:
 				return fmt.Errorf("gate %q has invalid phase %q: must be \"pre-merge\" or \"post-squash\"", name, raw.Phase)
 			}
+			switch raw.Type {
+			case "", "command":
+				// Default: shell command gate (gc.Type stays "").
+			case gateTypeGitHubChecks:
+				gc.Type = gateTypeGitHubChecks
+				gc.RequiredOnly = raw.RequiredOnly
+			default:
+				return fmt.Errorf("gate %q has invalid type %q: must be \"command\" or %q", name, raw.Type, gateTypeGitHubChecks)
+			}
 			e.config.Gates[name] = gc
 		}
 	}
@@ -565,6 +606,20 @@ func (e *Engineer) LoadConfig() error {
 			return fmt.Errorf("curio_auto_merge.normal_bound must be non-negative, got %d", mqRaw.CurioAutoMerge.NormalBound)
 		}
 		e.config.CurioAutoMerge = mqRaw.CurioAutoMerge
+	}
+
+	// github-checks gates only make sense for GitHub PR-strategy rigs: they
+	// poll the PR's check state instead of running CI locally (gs-vlyt).
+	for name, gc := range e.config.Gates {
+		if gc.Type != gateTypeGitHubChecks {
+			continue
+		}
+		if e.config.MergeStrategy != "pr" {
+			return fmt.Errorf("gate %q type %q requires merge_strategy=pr", name, gateTypeGitHubChecks)
+		}
+		if v := e.config.VCSProvider; v != "" && v != "github" {
+			return fmt.Errorf("gate %q type %q requires vcs_provider=github, got %q", name, gateTypeGitHubChecks, v)
+		}
 	}
 
 	// Initialize the PR provider when merge_strategy=pr.
@@ -647,9 +702,11 @@ func (e *Engineer) initPRProvider() error {
 // gateConfigRaw is the JSON-friendly representation of a gate config
 // with timeout as a string duration.
 type gateConfigRaw struct {
-	Cmd     string `json:"cmd"`
-	Timeout string `json:"timeout"`
-	Phase   string `json:"phase"`
+	Cmd          string `json:"cmd"`
+	Timeout      string `json:"timeout"`
+	Phase        string `json:"phase"`
+	Type         string `json:"type"`
+	RequiredOnly bool   `json:"required_only"`
 }
 
 // Config returns the current merge queue configuration.
@@ -830,7 +887,7 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		_, _ = fmt.Fprintln(e.output, "[Engineer] Skipping gates (pre-verified by polecat)")
 	} else if len(e.config.Gates) > 0 {
 		// New gates system: run configured quality gates
-		gateResult := e.runGates(ctx)
+		gateResult := e.runGates(ctx, branch)
 		if !gateResult.Success {
 			return gateResult
 		}
@@ -930,7 +987,7 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 	// These validate the actual combined code before it goes anywhere.
 	// On failure, reset the merge to undo the local squash commit.
 	if !shouldSkipGates {
-		postResult := e.runGatesForPhase(ctx, GatePhasePostSquash)
+		postResult := e.runGatesForPhase(ctx, GatePhasePostSquash, branch)
 		if !postResult.Success {
 			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after post-squash gate failure: %v\n", target, resetErr)
@@ -1397,8 +1454,12 @@ func (e *Engineer) gateBuildEnv() []string {
 }
 
 // runGate executes a single quality gate command and returns the result.
-func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) GateResult {
+func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig, branch string) GateResult {
 	start := time.Now()
+
+	if gate.Type == gateTypeGitHubChecks {
+		return e.runGitHubChecksGate(ctx, name, gate, branch)
+	}
 
 	if strings.TrimSpace(gate.Cmd) == "" {
 		return GateResult{
@@ -1471,9 +1532,145 @@ func (e *Engineer) runGate(ctx context.Context, name string, gate *GateConfig) G
 	}
 }
 
+// gateStartDesc returns the human-readable description logged when a gate
+// starts. Command gates show their shell command; github-checks gates show
+// their type since they have no command.
+func gateStartDesc(gate *GateConfig) string {
+	if gate.Type == gateTypeGitHubChecks {
+		if gate.RequiredOnly {
+			return "poll GitHub PR checks (required only)"
+		}
+		return "poll GitHub PR checks"
+	}
+	return gate.Cmd
+}
+
+// PRCheck is a single CI check/status reported on a pull request.
+type PRCheck struct {
+	Name   string
+	State  string
+	Bucket string // pass | fail | pending | skipping | cancel
+}
+
+// prChecksProvider is an optional capability for PRProviders that can report
+// the CI check-run/status state of a PR (gs-vlyt). The github-checks gate uses
+// it to pass when the PR's checks are green instead of running CI locally.
+type prChecksProvider interface {
+	// GetPRChecks returns the checks reported on the PR. When requiredOnly is
+	// true, only branch-protection-required checks are returned. An empty slice
+	// means no checks have been reported yet (still pending).
+	GetPRChecks(prNumber int, requiredOnly bool) ([]PRCheck, error)
+}
+
+// checksVerdict summarizes the aggregate state of a PR's checks.
+type checksVerdict int
+
+const (
+	checksPending checksVerdict = iota
+	checksPassed
+	checksFailed
+)
+
+// summarizeChecks reduces a set of PR checks to a single verdict. A failing or
+// canceled check fails the gate; any still-pending check keeps it waiting;
+// only when every check has concluded in a passing/skipping bucket does it
+// pass. An empty set is treated as pending (CI has not reported yet). detail
+// is a short human-readable summary for logs/errors.
+func summarizeChecks(checks []PRCheck) (checksVerdict, string) {
+	if len(checks) == 0 {
+		return checksPending, "no checks reported yet"
+	}
+	var failed, pending []string
+	for _, c := range checks {
+		switch strings.ToLower(c.Bucket) {
+		case "fail", "cancel":
+			failed = append(failed, c.Name)
+		case "pending":
+			pending = append(pending, c.Name)
+		}
+	}
+	if len(failed) > 0 {
+		return checksFailed, fmt.Sprintf("failing: %s", strings.Join(failed, ", "))
+	}
+	if len(pending) > 0 {
+		return checksPending, fmt.Sprintf("pending: %s", strings.Join(pending, ", "))
+	}
+	return checksPassed, fmt.Sprintf("%d check(s) passed", len(checks))
+}
+
+// runGitHubChecksGate polls the GitHub PR's check-run/status state for branch
+// and passes once the checks are green, instead of running CI locally (gs-vlyt).
+// It removes the heaviest, flakiest load from the shared host for PR-strategy
+// rigs whose real GitHub CI already runs on every PR.
+func (e *Engineer) runGitHubChecksGate(ctx context.Context, name string, gate *GateConfig, branch string) GateResult {
+	start := time.Now()
+	fail := func(format string, args ...any) GateResult {
+		return GateResult{Name: name, Success: false, Error: fmt.Sprintf(format, args...), Elapsed: time.Since(start)}
+	}
+
+	if branch == "" {
+		return fail("github-checks gate requires a branch context")
+	}
+	provider, ok := e.prProvider.(prChecksProvider)
+	if !ok {
+		return fail("github-checks gate requires merge_strategy=pr with a GitHub PR provider")
+	}
+
+	timeout := gate.Timeout
+	if timeout <= 0 {
+		timeout = defaultGitHubChecksTimeout
+	}
+	gateCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	pollInterval := e.prChecksPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultGitHubChecksPollInterval
+	}
+
+	// Keep the heartbeat fresh: polling CI can take many minutes, the same as a
+	// long local gate run, and the witness/dog must not flag it as stale.
+	stopKeepalive := polecat.WithKeepalive(refineryTownRoot(e), refinerySession(), "refinery-gate:"+name, polecat.DefaultKeepaliveInterval)
+	defer stopKeepalive()
+
+	prNumber, err := e.prProvider.FindPRNumber(branch)
+	if err != nil {
+		return fail("could not find PR for branch %s: %v", branch, err)
+	}
+	if prNumber == 0 {
+		return fail("no open PR found for branch %s", branch)
+	}
+
+	var lastDetail string
+	for {
+		checks, err := provider.GetPRChecks(prNumber, gate.RequiredOnly)
+		if err != nil {
+			return fail("querying PR #%d checks: %v", prNumber, err)
+		}
+		verdict, detail := summarizeChecks(checks)
+		lastDetail = detail
+		switch verdict {
+		case checksPassed:
+			return GateResult{Name: name, Success: true, Elapsed: time.Since(start)}
+		case checksFailed:
+			return fail("PR #%d checks failed (%s)", prNumber, detail)
+		case checksPending:
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: PR #%d checks pending (%s), re-polling in %v\n", name, prNumber, detail, pollInterval)
+		}
+
+		select {
+		case <-gateCtx.Done():
+			return fail("timed out after %v waiting for PR #%d checks (%s)", timeout, prNumber, lastDetail)
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 // runGates executes all pre-merge gates (backward-compatible entry point).
-func (e *Engineer) runGates(ctx context.Context) ProcessResult {
-	return e.runGatesForPhase(ctx, GatePhasePreMerge)
+// branch is the MR source branch, used by github-checks gates to resolve the
+// PR; it may be empty for command-only gates (e.g. batch mode).
+func (e *Engineer) runGates(ctx context.Context, branch string) ProcessResult {
+	return e.runGatesForPhase(ctx, GatePhasePreMerge, branch)
 }
 
 // gateLoadWaitTimeout returns the configured wait bound, falling back to
@@ -1559,7 +1756,7 @@ func (e *Engineer) waitForGateLoad(ctx context.Context, phase GatePhase) {
 // runGatesForPhase executes gates matching the given phase.
 // Gates run in parallel if GatesParallel is true; otherwise sequentially.
 // Any single gate failure means overall failure.
-func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) ProcessResult {
+func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase, branch string) ProcessResult {
 	// Filter gates for this phase. Empty phase is treated as pre-merge (default).
 	gates := make(map[string]*GateConfig)
 	for name, gc := range e.config.Gates {
@@ -1614,15 +1811,15 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase) Proces
 			wg.Add(1)
 			go func(idx int, gateName string) {
 				defer wg.Done()
-				_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: starting (%s)\n", gateName, gates[gateName].Cmd)
-				results[idx] = e.runGate(ctx, gateName, gates[gateName])
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: starting (%s)\n", gateName, gateStartDesc(gates[gateName]))
+				results[idx] = e.runGate(ctx, gateName, gates[gateName], branch)
 			}(i, name)
 		}
 		wg.Wait()
 	} else {
 		for _, name := range names {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: starting (%s)\n", name, gates[name].Cmd)
-			result := e.runGate(ctx, name, gates[name])
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Gate %q: starting (%s)\n", name, gateStartDesc(gates[name]))
+			result := e.runGate(ctx, name, gates[name], branch)
 			results = append(results, result)
 			if !result.Success {
 				// Sequential mode: stop on first failure

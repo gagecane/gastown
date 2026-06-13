@@ -2040,6 +2040,52 @@ func (g *Git) FindMergedPRCommit(branch string) (string, error) {
 	return strings.TrimSpace(prs[0].MergeCommit.OID), nil
 }
 
+// PRCheckRun is a single CI check/status reported on a pull request, as
+// returned by `gh pr checks <pr> --json name,state,bucket`.
+type PRCheckRun struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`
+	Bucket string `json:"bucket"` // pass | fail | pending | skipping | cancel
+}
+
+// GetPRChecks returns the CI checks reported on the given PR (gs-vlyt). When
+// requiredOnly is true, only branch-protection-required checks are returned.
+//
+// `gh pr checks` exits non-zero when checks are pending (8) or failing, but
+// still prints the JSON array to stdout, so the JSON is parsed regardless of
+// exit code. A genuinely check-less PR (gh prints "no checks reported" to
+// stderr with no stdout) returns (nil, nil) — the caller treats that as
+// still-pending and keeps polling until its timeout.
+func (g *Git) GetPRChecks(prNumber int, requiredOnly bool) ([]PRCheckRun, error) {
+	args := []string{"pr", "checks", fmt.Sprintf("%d", prNumber), "--json", "name,state,bucket"}
+	if requiredOnly {
+		args = append(args, "--required")
+	}
+	cmd := exec.Command("gh", args...)
+	cmd.Dir = g.workDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	out := bytes.TrimSpace(stdout.Bytes())
+	if len(out) > 0 && out[0] == '[' {
+		var checks []PRCheckRun
+		if jerr := json.Unmarshal(out, &checks); jerr != nil {
+			return nil, fmt.Errorf("failed to parse gh pr checks output: %w", jerr)
+		}
+		return checks, nil
+	}
+
+	// No JSON on stdout: distinguish "no checks reported yet" (not an error)
+	// from a real gh failure (auth, no PR, network).
+	stderrStr := strings.TrimSpace(stderr.String())
+	if err == nil || strings.Contains(strings.ToLower(stderrStr), "no checks reported") {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("gh pr checks failed: %s: %w", stderrStr, err)
+}
+
 // IsPRApproved checks whether a GitHub PR has at least one approving review.
 // Returns true if approved, false if not (or on error).
 func (g *Git) IsPRApproved(prNumber int) (bool, error) {

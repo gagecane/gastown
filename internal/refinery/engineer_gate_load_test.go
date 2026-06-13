@@ -244,7 +244,7 @@ func TestRunGatesForPhase_RunsLoadDeferral(t *testing.T) {
 		"pre-test": {Cmd: "true", Phase: GatePhasePreMerge},
 	}
 
-	result := e.runGatesForPhase(context.Background(), GatePhasePreMerge)
+	result := e.runGatesForPhase(context.Background(), GatePhasePreMerge, "")
 	if !result.Success {
 		t.Fatalf("gate should pass after load wait, got: %s", result.Error)
 	}
@@ -283,7 +283,7 @@ func TestRunGatesForPhase_JoinsGateSlotPool(t *testing.T) {
 
 	done := make(chan ProcessResult, 1)
 	go func() {
-		done <- e.runGatesForPhase(context.Background(), GatePhasePreMerge)
+		done <- e.runGatesForPhase(context.Background(), GatePhasePreMerge, "")
 	}()
 
 	// The gate runner must NOT complete while the only slot is held.

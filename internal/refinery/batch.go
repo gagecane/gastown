@@ -366,7 +366,10 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 // runBatchGates runs quality gates (or legacy tests) on the current working tree.
 func (e *Engineer) runBatchGates(ctx context.Context) ProcessResult {
 	if len(e.config.Gates) > 0 {
-		return e.runGates(ctx)
+		// Batch mode merges multiple MRs onto one working tree, so there is no
+		// single PR branch; github-checks gates (gs-vlyt) are unsupported here
+		// and a "" branch makes them fail fast with a clear error.
+		return e.runGates(ctx, "")
 	}
 	if e.config.RunTests && e.config.TestCommand != "" {
 		result := e.runTests(ctx)
