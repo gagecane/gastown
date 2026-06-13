@@ -121,11 +121,18 @@ func checkUnreadMail(townRoot, address string) string {
 		return ""
 	}
 
-	// Filter out handoff mail from self (avoid infinite loops where
-	// the agent's own handoff mail keeps blocking it)
+	// Filter out mail the hook must not block on:
+	//   - handoff mail from self (avoid infinite loops where the agent's own
+	//     handoff mail keeps blocking it)
+	//   - routine pure-FYI notices (e.g. convoy-complete) that carry no action
+	//     and would otherwise gate idling on every landed convoy (gu-0vehk)
+	// These messages stay in the inbox as a feed; they just don't block.
 	var relevant []*mail.Message
 	for _, msg := range unread {
 		if isSelfHandoff(msg, address) {
+			continue
+		}
+		if isRoutineFYI(msg) {
 			continue
 		}
 		relevant = append(relevant, msg)
@@ -151,6 +158,41 @@ func checkUnreadMail(townRoot, address string) string {
 func isSelfHandoff(msg *mail.Message, address string) bool {
 	if msg.From == address && strings.Contains(msg.Subject, "HANDOFF") {
 		return true
+	}
+	return false
+}
+
+// routineFYISubjects lists subject markers for pure-FYI notices that the stop
+// hook must not block on. These are informational feed items (no action
+// required), so gating the agent's idle on them just churns attention and
+// forces a read+mark-read round-trip to go quiet (gu-0vehk). Convoy-completion
+// mail is sent by runConvoyComplete in two forms: "🚚 Convoy landed: …" to
+// notification watchers and "Convoy complete: …" to the mayor.
+var routineFYISubjects = []string{
+	"Convoy complete",
+	"Convoy landed",
+}
+
+// isRoutineFYI reports whether a message is a routine, no-action FYI notice
+// that should not block the stop hook. It only suppresses blocking for
+// notification-type mail at normal-or-lower priority, so an escalation or an
+// explicitly elevated (high/urgent) message that happens to share the subject
+// still blocks as usual.
+func isRoutineFYI(msg *mail.Message) bool {
+	if msg == nil {
+		return false
+	}
+	// Never suppress elevated or actionable mail.
+	if msg.Priority == mail.PriorityHigh || msg.Priority == mail.PriorityUrgent {
+		return false
+	}
+	if msg.Type != "" && msg.Type != mail.TypeNotification {
+		return false
+	}
+	for _, marker := range routineFYISubjects {
+		if strings.Contains(msg.Subject, marker) {
+			return true
+		}
 	}
 	return false
 }

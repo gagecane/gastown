@@ -64,6 +64,100 @@ func TestIsSelfHandoff(t *testing.T) {
 	}
 }
 
+func TestIsRoutineFYI(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *mail.Message
+		want bool
+	}{
+		{
+			name: "nil message",
+			msg:  nil,
+			want: false,
+		},
+		{
+			name: "convoy complete to mayor (normal notification)",
+			msg: &mail.Message{
+				Subject:  "Convoy complete: Fix the auth bug",
+				Priority: mail.PriorityNormal,
+				Type:     mail.TypeNotification,
+			},
+			want: true,
+		},
+		{
+			name: "convoy landed to watcher",
+			msg: &mail.Message{
+				Subject:  "🚚 Convoy landed: Fix the auth bug",
+				Priority: mail.PriorityNormal,
+				Type:     mail.TypeNotification,
+			},
+			want: true,
+		},
+		{
+			name: "convoy complete with empty type still routine",
+			msg: &mail.Message{
+				Subject:  "Convoy complete: Fix the auth bug",
+				Priority: mail.PriorityNormal,
+			},
+			want: true,
+		},
+		{
+			name: "high priority convoy notice still blocks",
+			msg: &mail.Message{
+				Subject:  "Convoy complete: Fix the auth bug",
+				Priority: mail.PriorityHigh,
+				Type:     mail.TypeNotification,
+			},
+			want: false,
+		},
+		{
+			name: "urgent convoy notice still blocks",
+			msg: &mail.Message{
+				Subject:  "Convoy landed: Fix the auth bug",
+				Priority: mail.PriorityUrgent,
+				Type:     mail.TypeNotification,
+			},
+			want: false,
+		},
+		{
+			name: "escalation type with convoy subject still blocks",
+			msg: &mail.Message{
+				Subject:  "Convoy complete: something broke",
+				Priority: mail.PriorityNormal,
+				Type:     mail.TypeEscalation,
+			},
+			want: false,
+		},
+		{
+			name: "task type with convoy subject still blocks",
+			msg: &mail.Message{
+				Subject:  "Convoy complete: please review",
+				Priority: mail.PriorityNormal,
+				Type:     mail.TypeTask,
+			},
+			want: false,
+		},
+		{
+			name: "unrelated notification does not match",
+			msg: &mail.Message{
+				Subject:  "Question about the merge queue",
+				Priority: mail.PriorityNormal,
+				Type:     mail.TypeNotification,
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRoutineFYI(tt.msg)
+			if got != tt.want {
+				t.Errorf("isRoutineFYI() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsSelfHandoffBead(t *testing.T) {
 	tests := []struct {
 		name string
