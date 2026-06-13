@@ -206,6 +206,7 @@ test-makefile:
 	bash scripts/check-upstream-rebased_test.sh
 	bash scripts/git-push-verified_test.sh
 	bash scripts/guards/curio-proposal-target-guard_test.sh
+	bash plugins/curio-proposal-expiry/run_test.sh
 
 # verify: Run the FAST gates (build/vet/gofmt/lint) the .githooks/pre-push hook
 # runs on every push, locally. This is the last local line of defense before
