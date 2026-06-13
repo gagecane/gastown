@@ -697,3 +697,92 @@ func TestGetReadySlingContexts_FingerprintSuppression(t *testing.T) {
 		})
 	}
 }
+
+// TestIsActiveFingerprintSiblingStatus locks the status classification for the
+// in-flight fingerprint dedup (gu-n3xz9): a sibling that is in_progress, hooked,
+// or deferred suppresses a fresh dispatch; open/blocked/closed/unknown do not.
+func TestIsActiveFingerprintSiblingStatus(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{"in_progress", true},
+		{"hooked", true},
+		{"deferred", true},
+		{"open", false},    // the candidate's own pre-dispatch state — must not self-suppress
+		{"blocked", false}, // not being acted on
+		{"closed", false},  // handled by the sentinel suppressor, not here
+		{"tombstone", false},
+		{"", false},
+		{"bogus", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			if got := isActiveFingerprintSiblingStatus(tt.status); got != tt.want {
+				t.Errorf("isActiveFingerprintSiblingStatus(%q) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestActiveFingerprintSibling_DispatchDecision exercises the dispatch-time skip
+// logic the gu-n3xz9 fix adds to getReadySlingContexts: a candidate is dropped
+// when a non-self sibling sharing its fingerprint is already in flight, but
+// dispatches when none is, and the in-flight lookup is never consulted for a
+// bead with no fingerprint label.
+func TestActiveFingerprintSibling_DispatchDecision(t *testing.T) {
+	tests := []struct {
+		name         string
+		labels       []string
+		sibling      string // value activeFingerprintSiblingFn returns for this bead
+		wantFiltered bool
+		wantConsult  bool
+	}{
+		{
+			name:         "in-flight sibling drops the candidate",
+			labels:       []string{"bug", "fingerprint:fc0b4887fb33"},
+			sibling:      "cadk-gxmm",
+			wantFiltered: true,
+			wantConsult:  true,
+		},
+		{
+			name:         "no in-flight sibling still dispatches",
+			labels:       []string{"bug", "fingerprint:fc0b4887fb33"},
+			sibling:      "",
+			wantFiltered: false,
+			wantConsult:  true,
+		},
+		{
+			name:         "no fingerprint label skips the lookup entirely",
+			labels:       []string{"bug"},
+			sibling:      "should-not-be-consulted",
+			wantFiltered: false,
+			wantConsult:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			consulted := false
+			prev := activeFingerprintSiblingFn
+			activeFingerprintSiblingFn = func(townRoot, workBeadID, fpLabel string) string {
+				consulted = true
+				return tt.sibling
+			}
+			t.Cleanup(func() { activeFingerprintSiblingFn = prev })
+
+			filtered := false
+			if fpLabel := fingerprintLabelOf(tt.labels); fpLabel != "" {
+				if inflight := activeFingerprintSiblingFn("/town", "wb-1", fpLabel); inflight != "" {
+					filtered = true
+				}
+			}
+			if filtered != tt.wantFiltered {
+				t.Errorf("filtered = %v, want %v", filtered, tt.wantFiltered)
+			}
+			if consulted != tt.wantConsult {
+				t.Errorf("consulted = %v, want %v", consulted, tt.wantConsult)
+			}
+		})
+	}
+}

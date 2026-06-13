@@ -1042,6 +1042,13 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 	})
 
 	seenWork := make(map[string]bool)
+	// seenFP collapses multiple ready siblings that share one fingerprint to a
+	// single dispatch within this cycle (gu-n3xz9). allContexts is sorted by
+	// EnqueuedAt above, so the oldest-enqueued sibling claims the fingerprint and
+	// the rest are skipped — preventing a recurring/multi-stage alarm from
+	// spawning N polecats for the same root cause in one tick. Value is the
+	// winning work bead ID, for an observable skip log.
+	seenFP := make(map[string]string)
 	var result []capacity.PendingBead
 	for _, ctx := range allContexts {
 		fields := beads.ParseSlingContextFields(ctx.issue.Description)
@@ -1132,6 +1139,32 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 					style.Dim.Render("○"), fields.WorkBeadID, fpLabel, canonical)
 				continue
 			}
+
+			// Within-cycle dedup (gu-n3xz9): a recurring/multi-stage alarm files
+			// sibling work beads across convoys/stages that can all be ready in the
+			// same tick. The sorted scan means the oldest-enqueued sibling reaches
+			// here first and claims the fingerprint; later siblings are skipped so
+			// only one polecat is dispatched for the shared root cause this cycle.
+			if winner, claimed := seenFP[fpLabel]; claimed {
+				fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=fingerprint_dup_this_cycle bead=%s fp=%q winner=%s\n",
+					style.Dim.Render("○"), fields.WorkBeadID, fpLabel, winner)
+				continue
+			}
+
+			// Cross-cycle in-flight dedup (gu-n3xz9): a sibling sharing this
+			// fingerprint is already being handled (in_progress/hooked) or is
+			// deferred for later — dispatching a second polecat duplicates the
+			// identical investigation (the casc_cdk nux/rictus dup). Attach to the
+			// existing effort by skipping rather than spawning a fresh worker.
+			// Fail-open on any query error: the per-bead tripwires above remain the
+			// primary defense, and a transient bd hiccup must never strand the fleet.
+			if inflight := activeFingerprintSiblingFn(townRoot, fields.WorkBeadID, fpLabel); inflight != "" {
+				fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=fingerprint_inflight bead=%s fp=%q sibling=%s\n",
+					style.Dim.Render("○"), fields.WorkBeadID, fpLabel, inflight)
+				continue
+			}
+
+			seenFP[fpLabel] = fields.WorkBeadID
 		}
 
 		result = append(result, capacity.PendingBead{
@@ -1858,6 +1891,61 @@ func fingerprintSuppressorViaCLI(townRoot, workBeadID, fpLabel string) string {
 			continue
 		}
 		if isSuppressionSentinelLabelSet(issue.Labels) {
+			return issue.ID
+		}
+	}
+	return ""
+}
+
+// activeFingerprintSiblingFn is an injectable seam for the cross-bead in-flight
+// fingerprint dedup check (gu-n3xz9). Tests drive it without a real `bd list`.
+var activeFingerprintSiblingFn = activeFingerprintSiblingViaCLI
+
+// isActiveFingerprintSiblingStatus reports whether a sibling bead sharing a
+// fingerprint should suppress dispatch of a fresh candidate. A sibling that is
+// already in_progress/hooked (a polecat is working it) or deferred (an agent
+// triaged it as not-now / not-actionable) means the shared root cause is already
+// owned — dispatching again duplicates the investigation. open/blocked siblings
+// do NOT suppress: open is the candidate's own pre-dispatch state and would make
+// a fingerprint self-suppress, and blocked work is not being acted on. Closed
+// siblings are handled by the separate sentinel suppressor, not here.
+func isActiveFingerprintSiblingStatus(status string) bool {
+	switch beads.IssueStatus(status) {
+	case beads.StatusInProgress, beads.IssueStatusHooked:
+		return true
+	}
+	return status == "deferred"
+}
+
+// activeFingerprintSiblingViaCLI returns the ID of a non-self bead carrying
+// fpLabel in workBeadID's rig DB that is already being handled (in_progress /
+// hooked / deferred), or "" if none. It is the dispatch-time half of the
+// escalation fingerprint dedup the bug (gu-n3xz9) calls for: before slinging a
+// fresh polecat for a recurring/multi-stage alarm, confirm no sibling for the
+// same fingerprint is already in flight. The candidate work bead is excluded so
+// it never suppresses itself. On any query/parse error we fail OPEN (return "")
+// — a transient bd hiccup must never strand the fleet; the per-bead tripwires
+// and within-cycle dedup remain in force.
+func activeFingerprintSiblingViaCLI(townRoot, workBeadID, fpLabel string) string {
+	if fpLabel == "" || workBeadID == "" {
+		return ""
+	}
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	beadsDir := beads.ResolveBeadsDirForID(townBeadsDir, workBeadID)
+	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	out, err := b.Run("list", "--label="+fpLabel, "--status=all", "--json", "--limit=0")
+	if err != nil {
+		return ""
+	}
+	var issues []*beads.Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return ""
+	}
+	for _, issue := range issues {
+		if issue == nil || issue.ID == workBeadID {
+			continue
+		}
+		if isActiveFingerprintSiblingStatus(issue.Status) {
 			return issue.ID
 		}
 	}
