@@ -31,7 +31,22 @@ const (
 	// genuine breaks at merge time; this patrol is a slower backstop, so trading
 	// one extra cycle of latency for silence on single flakes is the right call.
 	defaultMainBranchTestFlakeThreshold = 2
+
+	// defaultMainBranchTestDeferLoadPerCore is the host 1-minute load average
+	// per logical core above which a main_branch_test cycle is DEFERRED rather
+	// than started (hq-5em9k). The patrol's gate suite is heavy (act/Docker CI,
+	// 20-40min); starting one on an already-saturated host deepens the load
+	// spiral that SIGKILLs co-tenant gates (the load-174/load-742 estops). 4.0
+	// per core is deliberately extreme — ~4x more runnable threads than cores —
+	// so a healthy-but-busy host still runs the patrol; only a genuine storm
+	// skips a cycle. The next ticker fire re-runs it once load recovers.
+	defaultMainBranchTestDeferLoadPerCore = 4.0
 )
+
+// mainBranchTestLoadSampler samples the host's normalized 1-minute load average
+// for the load-aware deferral check. It is a package var so tests can inject a
+// deterministic value; production uses the real host metric.
+var mainBranchTestLoadSampler = util.LoadPerCore
 
 // gateLockPollInterval is how often acquireGlobalGateLock retries the
 // non-blocking flock while another rig's gate suite holds it. A few seconds is
@@ -99,6 +114,13 @@ type MainBranchTestConfig struct {
 	// (defaultMainBranchTestFlakeThreshold). Set to 1 to restore the legacy
 	// "page on every failure" behavior.
 	FlakeThreshold int `json:"flake_threshold,omitempty"`
+
+	// DeferLoadPerCore is the host 1-minute load average per logical core above
+	// which a cycle is SKIPPED rather than started, to avoid piling a heavy gate
+	// suite onto a saturated host (hq-5em9k). nil/absent uses the default
+	// (defaultMainBranchTestDeferLoadPerCore); a value <= 0 disables deferral so
+	// the patrol always runs regardless of load.
+	DeferLoadPerCore *float64 `json:"defer_load_per_core,omitempty"`
 }
 
 // mainBranchTestInterval returns the configured interval, or the default (30m).
@@ -135,6 +157,18 @@ func mainBranchTestFlakeThreshold(config *DaemonPatrolConfig) int {
 		}
 	}
 	return defaultMainBranchTestFlakeThreshold
+}
+
+// mainBranchTestDeferLoadPerCore returns the per-core load threshold above
+// which a cycle is deferred. A configured value (including <= 0, which disables
+// deferral) is honored; nil/absent falls back to the default.
+func mainBranchTestDeferLoadPerCore(config *DaemonPatrolConfig) float64 {
+	if config != nil && config.Patrols != nil && config.Patrols.MainBranchTest != nil {
+		if v := config.Patrols.MainBranchTest.DeferLoadPerCore; v != nil {
+			return *v
+		}
+	}
+	return defaultMainBranchTestDeferLoadPerCore
 }
 
 // rigGate captures a single merge_queue gate's executable command, its
@@ -309,6 +343,20 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 func (d *Daemon) runMainBranchTests() {
 	if !d.isPatrolActive("main_branch_test") {
 		return
+	}
+
+	// hq-5em9k: under extreme host load, DEFER this cycle rather than starting a
+	// heavy (act/Docker, 20-40min) gate suite on an already-saturated host and
+	// deepening the load spiral that SIGKILLs co-tenant gates (the load-174/742
+	// estops). The ticker fires again next interval, so a transient spike costs
+	// at most one skipped cycle, and the merge-queue gates + main_ci_break_dog
+	// still catch genuine breaks at merge time. Load unavailable (0, e.g.
+	// Windows) is treated as "not extreme" so we never skip on an unknown metric.
+	if threshold := mainBranchTestDeferLoadPerCore(d.patrolConfig); threshold > 0 {
+		if load := mainBranchTestLoadSampler(); load > threshold {
+			d.logger.Printf("main_branch_test: DEFERRED this cycle — host load/core %.2f exceeds %.2f (avoiding load spiral, hq-5em9k)", load, threshold)
+			return
+		}
 	}
 
 	d.logger.Printf("main_branch_test: starting patrol cycle")
@@ -1055,7 +1103,13 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, workDir, lab
 	var err error
 	var output []byte
 	for attempt := 0; ; attempt++ {
-		cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command is from trusted rig config
+		// hq-5em9k: run the heavy gate/test command at lowered CPU/I/O priority
+		// (best-effort nice+ionice, only when on PATH) so the main_branch_test
+		// patrol yields to co-tenant bursts instead of piling onto a saturated
+		// host. The prefix is empty when neither tool exists, leaving the argv
+		// unchanged.
+		argv := util.WrapNiceIonice([]string{"sh", "-c", command})
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: command is from trusted rig config
 		cmd.Dir = workDir
 		cmd.Env = gateEnv(d.config.TownRoot)
 		// gs-lfr: use the process-group variant that ALSO installs a cancel hook

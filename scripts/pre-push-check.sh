@@ -339,6 +339,35 @@ acquire_gate_slot() {
 # on exit. Bounds concurrent build/vet/lint runs host-wide.
 acquire_gate_slot
 
+# --- Yield CPU/I/O under host saturation (hq-5em9k) -----------------------
+#
+# Best-effort: run the heavy go build/vet/lint gates at lowered scheduling
+# priority so a pre-push run yields CPU and I/O to co-tenant bursts instead of
+# deepening a load spiral that SIGKILLs other gates (the load-174/load-742
+# estops). nice (CPU) and ionice (idle I/O class) are inherited across the
+# fork/exec into the Go toolchain, so the whole compile/link tree runs niced.
+# Each tool is added only if present on PATH; on a host with neither, NICE is
+# empty and run_niced runs the gate unmodified. Mirrors internal/util.NiceIonicePrefix
+# so the shell and Go gate paths agree on the policy.
+NICE=()
+if command -v nice >/dev/null 2>&1; then
+  NICE+=(nice -n 10)
+fi
+if command -v ionice >/dev/null 2>&1; then
+  NICE+=(ionice -c 3)
+fi
+
+# run_niced runs "$@" under the NICE prefix when available, else runs it as-is.
+# A function (not a bare "${NICE[@]}" expansion) keeps this safe under set -u
+# with an empty array across bash versions.
+run_niced() {
+  if (( ${#NICE[@]} )); then
+    "${NICE[@]}" "$@"
+  else
+    "$@"
+  fi
+}
+
 # --- Upfront banner (gu-enqh0) -------------------------------------------
 #
 # A push launched in a background / non-tty context runs these gates before
@@ -352,7 +381,7 @@ echo "pre-push: running fast gates (build/vet/gofmt/lint) before contacting orig
 # --- FAST GATE 1: go build ------------------------------------------------
 
 echo "pre-push: [fast] go build ./... (compile check)" >&2
-if ! go build ./... 2>&1; then
+if ! run_niced go build ./... 2>&1; then
   cat >&2 <<'EOF'
 
 ✗ Push rejected: 'go build ./...' failed.
@@ -368,7 +397,7 @@ fi
 # --- FAST GATE 2: go vet --------------------------------------------------
 
 echo "pre-push: [fast] go vet ./... (static analysis)" >&2
-if ! go vet ./... 2>&1; then
+if ! run_niced go vet ./... 2>&1; then
   cat >&2 <<'EOF'
 
 ✗ Push rejected: 'go vet ./...' reported issues.
@@ -419,7 +448,7 @@ fi
 
 if command -v golangci-lint >/dev/null 2>&1; then
   echo "pre-push: [fast] golangci-lint run (static analysis)" >&2
-  if ! golangci-lint run --timeout=5m 2>&1; then
+  if ! run_niced golangci-lint run --timeout=5m 2>&1; then
     cat >&2 <<EOF
 
 ✗ Push rejected: golangci-lint found findings.
