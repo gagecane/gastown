@@ -353,6 +353,23 @@ func verifyWorkExistsForCompletion(sc strategyContext, cwdAvailable bool) (origi
 	return originDefault, aheadCount, isNoMergeTask, nil
 }
 
+// integrationBranchRebaseParkReason decides whether a rebase-onto-base abort
+// should PARK the polecat (return a non-empty reason) rather than hard-fail
+// (return ""). It fires only when the contamination base is an INTEGRATION
+// branch — origin/<base> where <base> is not the rig default. An abort onto the
+// rig default is the polecat's own conflict to resolve, so it returns "" and the
+// caller surfaces the hard error. contaminationBase carries the "origin/" prefix
+// (doneContaminationBaseRef); rebaseErr is the underlying AbortRebase cause,
+// woven into the human-readable park reason. gs-nva3.
+func integrationBranchRebaseParkReason(contaminationBase, defaultBranch string, rebaseErr error) string {
+	if strings.TrimPrefix(contaminationBase, "origin/") == defaultBranch {
+		return ""
+	}
+	return fmt.Sprintf(
+		"auto-rebase onto integration branch %s aborted (%v); parking — PR awaits human review/merge, slot released",
+		contaminationBase, rebaseErr)
+}
+
 // runContaminationPreflight runs the pre-push preflight of the COMPLETED path
 // (gu-nid89.12.1 extraction from runDone): the GH#2220 branch-contamination
 // check + gh#3400 auto-rebase, and the gu-xp5f --pre-verified attestation
@@ -366,10 +383,15 @@ func verifyWorkExistsForCompletion(sc strategyContext, cwdAvailable bool) (origi
 // of trusting the stale claim.
 //
 // alreadyPushed is checkpoints[CheckpointPushed]==branch. Returns
-// (preVerifiedAttestationValid, err): a non-nil err is a hard failure runDone
-// returns directly (severe contamination, or a rebase error). Mirrors the lines
-// previously inlined in the COMPLETED block.
-func runContaminationPreflight(sc strategyContext, cwdAvailable, alreadyPushed bool) (preVerifiedAttestationValid bool, err error) {
+// (preVerifiedAttestationValid, parkReason, err):
+//   - a non-nil err is a hard failure runDone returns directly (severe
+//     contamination, or a rebase error onto the rig default).
+//   - a non-empty parkReason (gs-nva3) means the rebase aborted onto an
+//     INTEGRATION branch (base != rig default); runDone should PARK the polecat
+//     into clean idle (deferred) rather than hard-fail, so the slot is released.
+//
+// Mirrors the lines previously inlined in the COMPLETED block.
+func runContaminationPreflight(sc strategyContext, cwdAvailable, alreadyPushed bool) (preVerifiedAttestationValid bool, parkReason string, err error) {
 	preVerifiedAttestationValid = donePreVerified
 
 	// gs-xbo: rebase onto the bead's RELAY base, not just --target / rig default.
@@ -382,7 +404,7 @@ func runContaminationPreflight(sc strategyContext, cwdAvailable, alreadyPushed b
 		const warnThreshold = 50
 		const blockThreshold = 200
 		if contam.Behind >= blockThreshold {
-			return preVerifiedAttestationValid, fmt.Errorf("branch contamination: %d commits behind %s (threshold: %d)\n"+
+			return preVerifiedAttestationValid, "", fmt.Errorf("branch contamination: %d commits behind %s (threshold: %d)\n"+
 				"The branch is severely stale and will include unrelated changes in the PR.\n"+
 				"Fix: git fetch origin && git rebase %s",
 				contam.Behind, contaminationBase, blockThreshold, contaminationBase)
@@ -393,7 +415,20 @@ func runContaminationPreflight(sc strategyContext, cwdAvailable, alreadyPushed b
 		// gh#3400: Auto-rebase the polecat branch onto the latest target before push.
 		rebased, skipReason, rebaseErr := completion.AutoRebaseOnTarget(sc.g, contaminationBase, contam.Behind, donePreVerified, alreadyPushed)
 		if rebaseErr != nil {
-			return preVerifiedAttestationValid, rebaseErr
+			// gs-nva3: a rebase-onto-base abort on an INTEGRATION branch (base is
+			// not the rig default — e.g. gagecane/gt, which carries modules that
+			// exist only on the integration branch) is not a conflict the polecat
+			// can resolve: the work targets a PR awaiting human review/merge, not
+			// the merge queue. Hard-failing here leaves the bead IN_PROGRESS on the
+			// hook, holding the rig slot until the PR merges, so the daemon
+			// re-dispatches it every cycle (lb-fa28 / lb-0rs3.14 / lb-1tee). Signal
+			// runDone to PARK the polecat into clean idle (deferred) so the slot is
+			// released. A rebase abort onto the rig default still hard-fails — that
+			// IS the polecat's conflict to resolve before resubmitting.
+			if reason := integrationBranchRebaseParkReason(contaminationBase, sc.defaultBranch, rebaseErr); reason != "" {
+				return preVerifiedAttestationValid, reason, nil
+			}
+			return preVerifiedAttestationValid, "", rebaseErr
 		}
 		if rebased {
 			fmt.Printf("%s Branch rebased onto %s\n", style.Bold.Render("✓"), contaminationBase)
@@ -422,7 +457,7 @@ func runContaminationPreflight(sc strategyContext, cwdAvailable, alreadyPushed b
 		}
 	}
 
-	return preVerifiedAttestationValid, nil
+	return preVerifiedAttestationValid, "", nil
 }
 
 // resolveMRTarget determines the target branch for the merge-request bead

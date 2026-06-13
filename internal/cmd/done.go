@@ -772,9 +772,23 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// attestation re-verification. Returns whether the polecat's
 		// --pre-verified claim still holds (false → refinery re-runs gates).
 		alreadyPushed := checkpoints[CheckpointPushed] == branch
-		preVerifiedAttestationValid, err := runContaminationPreflight(sc, cwdAvailable, alreadyPushed)
+		preVerifiedAttestationValid, parkReason, err := runContaminationPreflight(sc, cwdAvailable, alreadyPushed)
 		if err != nil {
 			return err
+		}
+		// gs-nva3: integration-branch rebase abort — PARK the polecat into clean
+		// idle instead of leaving the bead IN_PROGRESS on the hook. Reroute to the
+		// DEFERRED teardown: updateAgentStateOnDone idles the agent and applies the
+		// defer cooldown, which releases the slot and hides the bead from bd ready
+		// for the cooldown window (the PR awaits human review/merge). Without this,
+		// the daemon re-dispatches the same bead every cycle (lb-fa28/0rs3.14/1tee).
+		if parkReason != "" {
+			style.PrintWarning("%s", parkReason)
+			exitType = ExitDeferred
+			if strings.TrimSpace(doneReason) == "" {
+				doneReason = parkReason
+			}
+			goto notifyWitness
 		}
 
 		// Strip Gas Town overlay from CLAUDE.md / CLAUDE.local.md (gt-p35).
