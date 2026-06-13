@@ -268,26 +268,30 @@ func TestFormatRelativeTime(t *testing.T) {
 
 func TestFormatEscalationMailBody(t *testing.T) {
 	tests := []struct {
-		name     string
-		beadID   string
-		severity string
-		reason   string
-		from     string
-		related  string
-		wantIn   []string
-		notIn    []string
+		name        string
+		beadID      string
+		severity    string
+		description string
+		reason      string
+		from        string
+		related     string
+		wantIn      []string
+		notIn       []string
 	}{
 		{
-			name:     "basic escalation",
-			beadID:   "hq-abc123",
-			severity: "high",
-			reason:   "Build failing",
-			from:     "gastown/witness",
-			related:  "",
+			name:        "basic escalation",
+			beadID:      "hq-abc123",
+			severity:    "high",
+			description: "CI red on main",
+			reason:      "Build failing",
+			from:        "gastown/witness",
+			related:     "",
 			wantIn: []string{
 				"Escalation ID: hq-abc123",
 				"Severity: high",
 				"From: gastown/witness",
+				"Issue:",
+				"CI red on main",
 				"Reason:",
 				"Build failing",
 				"gt escalate ack hq-abc123",
@@ -296,12 +300,13 @@ func TestFormatEscalationMailBody(t *testing.T) {
 			notIn: []string{"Related:"},
 		},
 		{
-			name:     "with related bead",
-			beadID:   "hq-xyz789",
-			severity: "critical",
-			reason:   "Agent stuck",
-			from:     "gastown/deacon",
-			related:  "gt-stuck42",
+			name:        "with related bead",
+			beadID:      "hq-xyz789",
+			severity:    "critical",
+			description: "Polecat wedged",
+			reason:      "Agent stuck",
+			from:        "gastown/deacon",
+			related:     "gt-stuck42",
 			wantIn: []string{
 				"Escalation ID: hq-xyz789",
 				"Severity: critical",
@@ -309,16 +314,23 @@ func TestFormatEscalationMailBody(t *testing.T) {
 			},
 		},
 		{
-			name:     "no reason",
-			beadID:   "hq-nnn",
-			severity: "low",
-			reason:   "",
-			from:     "system",
-			related:  "",
+			// The bug this fixes (gu-sges0): escalations fired without --reason
+			// must still carry the diagnosis in the body via the description, so
+			// 'gt mail read' is self-contained and the reader doesn't have to
+			// reconstruct the issue from the subject or a separate nudge.
+			name:        "no reason still carries description in body",
+			beadID:      "hq-nnn",
+			severity:    "low",
+			description: "Dolt divergence detected on casc_cdk",
+			reason:      "",
+			from:        "system",
+			related:     "",
 			wantIn: []string{
 				"Escalation ID: hq-nnn",
 				"Severity: low",
 				"From: system",
+				"Issue:",
+				"Dolt divergence detected on casc_cdk",
 			},
 			notIn: []string{"Reason:"},
 		},
@@ -326,7 +338,7 @@ func TestFormatEscalationMailBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatEscalationMailBody(tt.beadID, tt.severity, tt.reason, tt.from, tt.related)
+			got := formatEscalationMailBody(tt.beadID, tt.severity, tt.description, tt.reason, tt.from, tt.related)
 			for _, s := range tt.wantIn {
 				if !strings.Contains(got, s) {
 					t.Errorf("missing %q in output:\n%s", s, got)
@@ -536,11 +548,13 @@ func TestRunEscalateValidation(t *testing.T) {
 }
 
 func TestFormatEscalationMailBodyNeutralSubjectStillCarriesStructuredBody(t *testing.T) {
-	body := formatEscalationMailBody("hq-abc123", "high", "Database drift", "deacon/", "gt-xyz")
+	body := formatEscalationMailBody("hq-abc123", "high", "Replica fell behind", "Database drift", "deacon/", "gt-xyz")
 	for _, want := range []string{
 		"Escalation ID: hq-abc123",
 		"Severity: high",
 		"From: deacon/",
+		"Issue:",
+		"Replica fell behind",
 		"Related: gt-xyz",
 	} {
 		if !strings.Contains(body, want) {

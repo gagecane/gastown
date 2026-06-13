@@ -221,7 +221,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 			From:     agentID,
 			To:       target,
 			Subject:  fmt.Sprintf("[%s] %s", strings.ToUpper(severity), description),
-			Body:     formatEscalationMailBody(issue.ID, severity, escalateReason, agentID, escalateRelatedBead),
+			Body:     formatEscalationMailBody(issue.ID, severity, description, escalateReason, agentID, escalateRelatedBead),
 			Type:     mail.TypeEscalation,
 			ThreadID: issue.ID,
 		}
@@ -1010,11 +1010,22 @@ func writeEscalationLog(townRoot, beadID, severity, description string) error {
 	return err
 }
 
-func formatEscalationMailBody(beadID, severity, reason, from, related string) string {
+func formatEscalationMailBody(beadID, severity, description, reason, from, related string) string {
 	var lines []string
 	lines = append(lines, fmt.Sprintf("Escalation ID: %s", beadID))
 	lines = append(lines, fmt.Sprintf("Severity: %s", severity))
 	lines = append(lines, fmt.Sprintf("From: %s", from))
+	// Always carry the diagnostic content in the body so 'gt mail read' is
+	// self-contained: the subject summarizes, the body carries the issue.
+	// Many escalations (esp. HIGH ones from deacon/refinery) are fired without
+	// --reason, packing the diagnosis into the description. Without this the
+	// body was just ID/severity/footer and the reader had to reconstruct the
+	// issue from an overloaded subject or a separate nudge. (gu-sges0)
+	if description != "" {
+		lines = append(lines, "")
+		lines = append(lines, "Issue:")
+		lines = append(lines, description)
+	}
 	if reason != "" {
 		lines = append(lines, "")
 		lines = append(lines, "Reason:")
