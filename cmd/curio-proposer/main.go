@@ -52,9 +52,10 @@ func closedWindowCursor(now time.Time) time.Time {
 
 func main() {
 	var (
-		townRoot = flag.String("town-root", "", "Gas Town root directory (default: $GT_TOWN_ROOT, then $GT_TOWN)")
-		doltPort = flag.Int("dolt-port", defaultDoltPort(), "gt Dolt server port")
-		dbName   = flag.String("db", "hq", "HQ Dolt database name")
+		townRoot   = flag.String("town-root", "", "Gas Town root directory (default: $GT_TOWN_ROOT, then $GT_TOWN)")
+		doltPort   = flag.Int("dolt-port", defaultDoltPort(), "gt Dolt server port")
+		dbName     = flag.String("db", "hq", "HQ Dolt database name")
+		emitDigest = flag.String("emit-digest", "", "render the deterministic closed-window digest to this path (read-only; no LLM, no filing)")
 	)
 	flag.Parse()
 
@@ -64,7 +65,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(root, *doltPort, *dbName, time.Now().UTC()); err != nil {
+	if err := run(root, *doltPort, *dbName, *emitDigest, time.Now().UTC()); err != nil {
 		fmt.Fprintf(os.Stderr, "curio-proposer: %v\n", err)
 		os.Exit(1)
 	}
@@ -76,7 +77,7 @@ func main() {
 // Flow: load kill switch -> if LLM lane is off, exit cleanly (no read, no
 // touch) -> else open a READ-ONLY candidate view and read the closed window.
 // There is NO write path anywhere in this flow: no filing, no LLM, no mutation.
-func run(townRoot string, doltPort int, dbName string, now time.Time) error {
+func run(townRoot string, doltPort int, dbName, digestPath string, now time.Time) error {
 	cfg, err := loadProposerConfig(townRoot)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -84,7 +85,10 @@ func run(townRoot string, doltPort int, dbName string, now time.Time) error {
 
 	// Kill-switch isolation: gate on curio.llm.enabled ONLY. The live Patrol's
 	// curio.enabled is deliberately not consulted — disabling the LLM lane must
-	// not disable Patrol, and enabling Patrol must not enable this lane.
+	// not disable Patrol, and enabling Patrol must not enable this lane. This
+	// gate applies to --emit-digest too: a disabled lane emits NOTHING (no file
+	// written) and exits 0, matching the design's "llm.enabled=false → exit
+	// without emitting" contract.
 	if !cfg.llmEnabled() {
 		fmt.Println("curio-proposer: curio.llm.enabled=false — Retrospect lane disabled, exiting (live Patrol untouched)")
 		return nil
@@ -101,6 +105,24 @@ func run(townRoot string, doltPort int, dbName string, now time.Time) error {
 	cands, err := reader.ReadCandidatesBefore(cutoff)
 	if err != nil {
 		return fmt.Errorf("reading closed-window candidates: %w", err)
+	}
+
+	// --emit-digest: read outcome history, render the deterministic Markdown+JSON
+	// digest, and write it to the path. Still read-only by construction — the
+	// Reader exposes no write method and this binary's import graph excludes the
+	// mutation packages (TestImportGraph_NoWritePath).
+	if digestPath != "" {
+		outcomes, err := reader.ReadOutcomeHistory()
+		if err != nil {
+			return fmt.Errorf("reading outcome history: %w", err)
+		}
+		digest := curio.RenderDigest(cutoff, cands, outcomes)
+		if err := os.WriteFile(digestPath, []byte(digest), 0o600); err != nil {
+			return fmt.Errorf("writing digest to %s: %w", digestPath, err)
+		}
+		fmt.Printf("curio-proposer: wrote digest (cutoff=%s, %d candidate(s), %d rule(s)) to %s\n",
+			cutoff.Format(time.RFC3339), len(cands), len(outcomes), digestPath)
+		return nil
 	}
 
 	// Skeleton: report what the closed window holds. Hypothesizing (LLM) and

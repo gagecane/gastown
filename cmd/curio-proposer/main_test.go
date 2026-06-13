@@ -142,6 +142,25 @@ func TestImportGraph_NoWritePath(t *testing.T) {
 	}
 }
 
+// TestEmitDigest_KillSwitchOffEmitsNothing is the acceptance criterion: with
+// curio.llm.enabled=false, --emit-digest writes NO file and exits 0 (the
+// Retrospect lane is disabled, so it does not even open the reader). This is the
+// kill-switch contract extended to the digest mode.
+func TestEmitDigest_KillSwitchOffEmitsNothing(t *testing.T) {
+	root := t.TempDir()
+	// llm absent -> lane off (default posture).
+	writeDaemonJSON(t, root, `{"patrols":{"curio":{"enabled":true}}}`)
+
+	digestPath := filepath.Join(t.TempDir(), "digest.md")
+	// dolt-port is irrelevant: the kill switch short-circuits before any DB open.
+	if err := run(root, 3307, "hq", digestPath, time.Now().UTC()); err != nil {
+		t.Fatalf("run with lane off should exit cleanly, got: %v", err)
+	}
+	if _, err := os.Stat(digestPath); !os.IsNotExist(err) {
+		t.Fatalf("lane off must not write a digest file; stat err = %v", err)
+	}
+}
+
 func writeDaemonJSON(t *testing.T, townRoot, body string) {
 	t.Helper()
 	dir := filepath.Join(townRoot, "mayor")
