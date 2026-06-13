@@ -1367,26 +1367,38 @@ func (m *Mailbox) ListByThread(threadID string) ([]*Message, error) {
 }
 
 func (m *Mailbox) listByThreadBeads(threadID string) ([]*Message, error) {
-	args := []string{"message", "thread", threadID, "--json"}
+	// Messages are beads tagged with a "thread:<id>" label. There is no
+	// `bd message thread` subcommand (gu-flbpz: it was never part of the bd
+	// command surface), so query the thread label directly across both the
+	// issues and wisps tables, mirroring the inbox listing. --all includes
+	// read (closed) messages so the full conversation is shown.
+	threadLabel := "thread:" + threadID
 
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, args, m.workDir, m.beadsDir, "BD_IDENTITY="+m.identity)
+	issueArgs := []string{"list",
+		"--label", threadLabel,
+		"--all",
+		"--json",
+		"--limit", "0",
+	}
+	issueMsgs, err := m.runIssuesListQuery(m.beadsDir, issueArgs)
 	if err != nil {
 		return nil, err
 	}
 
-	if !isJSON(stdout) {
-		return nil, nil
-	}
-	var beadsMsgs []BeadsMessage
-	if err := json.Unmarshal(stdout, &beadsMsgs); err != nil {
-		return nil, err
-	}
+	wispMsgs := m.queryWispMessagesByThread(m.beadsDir, threadID)
 
+	// Deduplicate across the two tables (issues win when an ID overlaps).
+	seen := make(map[string]bool)
 	var messages []*Message
-	for _, bm := range beadsMsgs {
-		messages = append(messages, bm.ToMessage())
+	for _, src := range [][]BeadsMessage{issueMsgs, wispMsgs} {
+		for i := range src {
+			bm := &src[i]
+			if seen[bm.ID] {
+				continue
+			}
+			seen[bm.ID] = true
+			messages = append(messages, bm.ToMessage())
+		}
 	}
 
 	// Sort by timestamp (oldest first for thread view)
@@ -1395,6 +1407,23 @@ func (m *Mailbox) listByThreadBeads(threadID string) ([]*Message, error) {
 	})
 
 	return messages, nil
+}
+
+// queryWispMessagesByThread queries the wisps table for messages carrying the
+// given thread label, across all statuses (a thread view should include read
+// and closed messages, unlike the open-only inbox queries).
+func (m *Mailbox) queryWispMessagesByThread(beadsDir, threadID string) []BeadsMessage {
+	threadLabel := "thread:" + threadID
+	query := fmt.Sprintf(
+		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, "+
+			"GROUP_CONCAT(al.label) as labels_csv "+
+			"FROM wisps w "+
+			"JOIN wisp_labels l ON w.id = l.issue_id "+
+			"JOIN wisp_labels al ON w.id = al.issue_id "+
+			"WHERE l.label = '%s' "+
+			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at",
+		escapeSQLString(threadLabel))
+	return m.runWispSQL(beadsDir, query)
 }
 
 func (m *Mailbox) listByThreadLegacy(threadID string) ([]*Message, error) {

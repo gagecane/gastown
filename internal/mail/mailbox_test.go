@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -352,6 +353,89 @@ func TestMailboxLegacyListByThread(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Errorf("Non-existent thread has %d messages, want 0", len(empty))
+	}
+}
+
+// TestMailboxBeadsListByThread verifies the beads-mode thread view queries the
+// current bd command surface (bd list --label thread:<id>) rather than the
+// removed `bd message thread` subcommand (gu-flbpz). It uses a bash bd stub
+// that fails loudly on any unexpected subcommand.
+func TestMailboxBeadsListByThread(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a bash bd stub")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir beads: %v", err)
+	}
+
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// The stub returns two messages for `list --label thread:t-1` and rejects
+	// the obsolete `message` subcommand so a regression would fail the test.
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "message" ]]; then
+  echo "unknown command \"message\" for \"bd\"" >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "list" ]]; then
+  has_thread=false
+  for a in "$@"; do
+    if [[ "$a" == "thread:t-1" ]]; then has_thread=true; fi
+  done
+  if [[ "$has_thread" == "true" ]]; then
+    echo '[{"id":"hq-m2","title":"second","description":"body2","status":"closed","assignee":"mayor/","created_at":"2026-06-13T02:00:00Z","labels":["gt:message","from:witness/","thread:t-1"]},{"id":"hq-m1","title":"first","description":"body1","status":"open","assignee":"mayor/","created_at":"2026-06-13T01:00:00Z","labels":["gt:message","from:mayor/","thread:t-1"]}]'
+  else
+    echo "[]"
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "sql" ]]; then
+  echo "[]"
+  exit 0
+fi
+
+echo "unsupported bd args: $*" >&2
+exit 1
+`
+	bdStub := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdStub, []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	m := NewMailboxWithBeadsDir("mayor", tmpDir, beadsDir)
+
+	thread, err := m.ListByThread("t-1")
+	if err != nil {
+		t.Fatalf("ListByThread error: %v", err)
+	}
+	if len(thread) != 2 {
+		t.Fatalf("thread t-1 has %d messages, want 2", len(thread))
+	}
+	// Oldest first: hq-m1 (01:00) before hq-m2 (02:00).
+	if thread[0].ID != "hq-m1" {
+		t.Errorf("first thread message = %q, want hq-m1 (oldest)", thread[0].ID)
+	}
+	if thread[1].ID != "hq-m2" {
+		t.Errorf("second thread message = %q, want hq-m2", thread[1].ID)
+	}
+
+	// A thread with no messages returns empty without error.
+	empty, err := m.ListByThread("t-nonexistent")
+	if err != nil {
+		t.Fatalf("ListByThread(empty) error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("non-existent thread has %d messages, want 0", len(empty))
 	}
 }
 

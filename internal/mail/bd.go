@@ -53,9 +53,8 @@ func (e *bdError) ContainsError(substr string) bool {
 // ctx controls the deadline/timeout for the subprocess.
 // workDir is the directory to run the command in.
 // beadsDir is the BEADS_DIR environment variable value.
-// extraEnv contains additional environment variables to set (e.g., "BD_IDENTITY=...").
 // Returns stdout bytes on success, or a *bdError on failure.
-func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, extraEnv ...string) (_ []byte, retErr error) {
+func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string) (_ []byte, retErr error) {
 	defer func() { telemetry.RecordMail(ctx, "bd."+firstArg(args), retErr) }()
 
 	// Remove stale dolt-server.pid before spawning bd. A stale PID file causes
@@ -79,7 +78,7 @@ func runBdCommand(ctx context.Context, args []string, workDir, beadsDir string, 
 		cmd := exec.CommandContext(ctx, "bd", cmdArgs...) //nolint:gosec // G204: bd is a trusted internal tool
 		cmd.Dir = workDir
 		util.SetDetachedProcessGroup(cmd)
-		cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, readOnly, extraEnv)
+		cmd.Env = bdSubprocessEnv(cmd.Environ(), beadsDir, readOnly, nil)
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 		return cmd.Run()
@@ -161,8 +160,6 @@ func isMailBdReadCommand(args []string) bool {
 	switch args[0] {
 	case "list", "show", "search":
 		return true
-	case "message":
-		return len(args) >= 2 && args[1] == "thread"
 	case "mol":
 		return len(args) >= 3 && args[1] == "wisp" && args[2] == "list"
 	case "sql":
