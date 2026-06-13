@@ -256,6 +256,21 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	// silently skipping — a skipped idle keepalive lets the heartbeat age
 	// into false-stale across the whole 5–15m backoff window.
 	if sessionName, _ := resolveHeartbeatSession(); sessionName != "" {
+		// Stamp last_state=idle before parking (gs-8gcj / hq-al67w). await-signal
+		// IS the idle-wait: the agent finished its cycle and is blocked waiting
+		// for the next signal. The keepalive below refreshes the timestamp but
+		// PRESERVES the agent-reported state (keepalives never change it), so
+		// without this stamp the heartbeat would keep reporting "working" — the
+		// state left by the last gt command of the prior patrol cycle. When an
+		// idle witness then goes quiet between deacon nudges and its heartbeat
+		// ages past the STALE_RIG_AGENT threshold (~1h), last_state=working fails
+		// the detector's idle-clean-cycle suppression (stale_rig_agent.go), so it
+		// escalates a healthy parked witness to mayor every cycle — persistent
+		// HIGH false-positive spam. Stamping idle here makes the witness's
+		// last-recorded state correctly read "idle" once it goes quiet, so the
+		// suppression recognizes it as parked, not wedged. Refinery detection is
+		// unaffected (it is mq-gated and excluded from idle-clean-cycle).
+		polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatIdle, "await-signal", "")
 		stopKeepalive := polecat.WithKeepalive(townRoot, sessionName, "await-signal", polecat.DefaultKeepaliveInterval)
 		defer stopKeepalive()
 	}

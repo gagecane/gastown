@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 func TestCalculateEffectiveTimeout(t *testing.T) {
@@ -305,5 +308,54 @@ func TestBackoffWindowResumption(t *testing.T) {
 				t.Errorf("timeout = %v, want ~%v (diff: %v)", timeout, tt.wantApproxTime, diff)
 			}
 		})
+	}
+}
+
+// TestRunMoleculeAwaitSignal_StampsIdleState is the gs-8gcj / hq-al67w
+// regression: parking in await-signal must leave the session heartbeat
+// reporting state=idle (not the "working" left by the prior patrol cycle), so
+// that when an idle witness goes quiet between deacon nudges and its heartbeat
+// ages out, the STALE_RIG_AGENT idle-clean-cycle suppression recognizes it as
+// parked rather than escalating a healthy witness to mayor every cycle.
+func TestRunMoleculeAwaitSignal_StampsIdleState(t *testing.T) {
+	townRoot := setupTestTownForDeacon(t)
+
+	// Minimal beads dir so findLocalBeadsDir resolves without an agent bead.
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	sessionName := "gu-gastown-witness"
+	t.Setenv("GT_SESSION", sessionName)
+
+	// Seed the heartbeat as "working" — the state the last gt command of a
+	// patrol cycle leaves behind. The fix must overwrite it with idle on park.
+	polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, polecat.HeartbeatWorking, "patrol", "")
+
+	// Simple short-timeout mode: park briefly, then time out and return.
+	saveTimeout, saveBase, saveBead, saveQuiet, saveJSON :=
+		awaitSignalTimeout, awaitSignalBackoffBase, awaitSignalAgentBead, awaitSignalQuiet, moleculeJSON
+	t.Cleanup(func() {
+		awaitSignalTimeout, awaitSignalBackoffBase, awaitSignalAgentBead, awaitSignalQuiet, moleculeJSON =
+			saveTimeout, saveBase, saveBead, saveQuiet, saveJSON
+	})
+	awaitSignalTimeout = "150ms"
+	awaitSignalBackoffBase = ""
+	awaitSignalAgentBead = ""
+	awaitSignalQuiet = true
+	moleculeJSON = false
+
+	if err := runMoleculeAwaitSignal(&cobra.Command{}, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitSignal: %v", err)
+	}
+
+	hb, ok := readSessionHeartbeatRaw(t, townRoot, sessionName)
+	if !ok {
+		t.Fatalf("heartbeat not written for %q", sessionName)
+	}
+	if hb.State != polecat.HeartbeatIdle {
+		t.Errorf("hb.State = %q, want %q (await-signal park must stamp idle)", hb.State, polecat.HeartbeatIdle)
 	}
 }
