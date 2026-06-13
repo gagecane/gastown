@@ -718,13 +718,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	var mrFailed bool
 	var convoyInfo *ConvoyInfo // Populated if issue is tracked by a convoy
 	if exitType == ExitCompleted {
-		if branch == defaultBranch || branch == "master" {
-			return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
-		}
-
 		// Bundle the completion-path state shared by the extracted COMPLETED
-		// phases (completeNoMR, the convoy strategies, runNoMergeStrategy). Built
-		// once here; all fields are already resolved in the preamble above.
+		// phases (completeNoMR, completeTownLocal, the convoy strategies,
+		// runNoMergeStrategy). Built once here; all fields are already resolved in
+		// the preamble above.
 		sc := strategyContext{
 			g:             g,
 			cwd:           cwd,
@@ -736,6 +733,26 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			issueID:       issueID,
 			worker:        worker,
 			agentBeadID:   agentBeadID,
+		}
+
+		// No-remote / town-tier routing (gs-7kjh / hq-ux3c3). The town
+		// source-of-truth repo has no origin to push an MR against; town-tier
+		// formula work (mol-lia-*, patrols) is committed directly to the local
+		// default branch. Detect the absence of any remote BEFORE the
+		// default-branch guard below (town polecats work on `main` itself) and
+		// close the bead without a doomed push/MR — which would otherwise strand
+		// it ESCALATED and re-dispatch every edit. completeTownLocal also enforces
+		// commit (rejects --no-code, refuses uncommitted work) to close the
+		// durability gap where formula edits were dropped uncommitted.
+		if repoHasNoRemote(g) {
+			if townErr := completeTownLocal(sc); townErr != nil {
+				return townErr
+			}
+			goto notifyWitness
+		}
+
+		if branch == defaultBranch || branch == "master" {
+			return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
 		}
 
 		// CRITICAL: Verify work exists before completing (hq-xthqf). The

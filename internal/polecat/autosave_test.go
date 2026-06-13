@@ -22,6 +22,18 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// addTestRemote gives a test repo an `origin` remote. The protected-default-branch
+// autosave guard fires only for repos that have a remote (gs-7kjh): a no-remote
+// repo is the town source-of-truth, where committing to the default branch is the
+// intended durability path. These guard tests must therefore have a remote to
+// exercise the refusal.
+func addTestRemote(t *testing.T, dir string) {
+	t.Helper()
+	bare := t.TempDir()
+	testRunGit(t, bare, "init", "--bare")
+	testRunGit(t, dir, "remote", "add", "origin", bare)
+}
+
 // setupTestRepo creates a git repo with an initial commit.
 func setupTestRepo(t *testing.T) string {
 	t.Helper()
@@ -275,8 +287,33 @@ func TestAutoSaveAbandonedWIP_DetachedHEAD(t *testing.T) {
 	}
 }
 
+// TestAutoSaveAbandonedWIP_DefaultBranch_NoRemoteSaves verifies the gs-7kjh
+// durability fix: on a no-remote repo (the town source-of-truth) the autosave
+// guard does NOT refuse a default-branch commit — there is no merge queue to
+// bypass, so committing the deliverable to main is the intended path that closes
+// the hq-ux3c3 durability gap.
+func TestAutoSaveAbandonedWIP_DefaultBranch_NoRemoteSaves(t *testing.T) {
+	dir := setupTestRepo(t) // no remote added
+
+	if err := os.WriteFile(filepath.Join(dir, "formula.toml"), []byte("name = \"mol-lia-pr-work\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	saved, sha, err := AutoSaveAbandonedWIP(dir, "main", "town-tier-test")
+	if err != nil {
+		t.Fatalf("expected no error on no-remote default branch, got: %v", err)
+	}
+	if !saved {
+		t.Fatal("expected work to be saved on no-remote default branch")
+	}
+	if sha == "" {
+		t.Error("expected a commit SHA for the saved work")
+	}
+}
+
 func TestAutoSaveAbandonedWIP_DefaultBranch_Main(t *testing.T) {
 	dir := setupTestRepo(t)
+	addTestRemote(t, dir) // guard fires only for repos with a remote (gs-7kjh)
 
 	// Stay on main and add uncommitted changes
 	if err := os.WriteFile(filepath.Join(dir, "dangerous.go"), []byte("package main\n"), 0644); err != nil {
@@ -305,6 +342,7 @@ func TestAutoSaveAbandonedWIP_DefaultBranch_Master(t *testing.T) {
 	}
 	testRunGit(t, dir, "add", "README.md")
 	testRunGit(t, dir, "commit", "-m", "initial")
+	addTestRemote(t, dir) // guard fires only for repos with a remote (gs-7kjh)
 
 	if err := os.WriteFile(filepath.Join(dir, "dangerous.go"), []byte("package main\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -332,6 +370,7 @@ func TestAutoSaveAbandonedWIP_DefaultBranch_Mainline(t *testing.T) {
 	}
 	testRunGit(t, dir, "add", "README.md")
 	testRunGit(t, dir, "commit", "-m", "initial")
+	addTestRemote(t, dir) // guard fires only for repos with a remote (gs-7kjh)
 
 	if err := os.WriteFile(filepath.Join(dir, "dangerous.go"), []byte("package main\n"), 0644); err != nil {
 		t.Fatal(err)

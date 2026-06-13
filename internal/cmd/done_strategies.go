@@ -253,7 +253,13 @@ func runAutoCommitSafetyNet(g *git.Git, cwd, branch, defaultBranchEarly string, 
 		return nil
 	}
 
-	if isDefaultBranchName(branch, defaultBranchEarly) {
+	// gs-7kjh: a no-remote repo is the town source-of-truth, where the default
+	// branch IS the deliverable target — there is no remote / merge queue to
+	// bypass, so committing town-tier formula edits to the default branch is the
+	// intended town-repo-work path, not a violation. Auto-committing here closes
+	// the durability gap where formula edits sat uncommitted (hq-ux3c3). The
+	// protected-default-branch refusal applies only to repos with a remote.
+	if isDefaultBranchName(branch, defaultBranchEarly) && !repoHasNoRemote(g) {
 		style.PrintWarning("auto-commit safety net refused: current branch %q is a protected default branch", branch)
 		fmt.Fprintf(os.Stderr, "  Uncommitted changes will NOT be auto-saved — committing to %q would bypass the merge queue.\n", branch)
 		fmt.Fprintf(os.Stderr, "  This usually means gt done was invoked from the rig root or a stale worktree.\n")
@@ -879,6 +885,97 @@ func completeNoMR(sc strategyContext, originDefault string, isNoMergeTask bool) 
 	// forceCloseWithRetry with the merged path (gu-z93z).
 	if closeErr := forceCloseWithRetry(bd, sc.issueID, closeReason); closeErr == nil {
 		fmt.Printf("%s Issue %s closed (no MR needed)\n", style.Bold.Render("✓"), sc.issueID)
+	} else {
+		style.PrintWarning("could not close issue %s after 3 attempts: %v (issue may be left HOOKED)", sc.issueID, closeErr)
+	}
+	return nil
+}
+
+// repoHasNoRemote reports whether the repo has no git remote configured. This
+// is the signature of the town source-of-truth repo (gs-7kjh / hq-ux3c3): it is
+// local-only, with no origin to push a branch or MR against. Town-tier formula
+// beads (mol-lia-*, patrols) auto-dispatch merge=mr, but a doomed push there
+// strands the bead ESCALATED and the daemon re-dispatches it every cycle. A
+// transient `git remote` error returns false (assume a remote exists) so rig
+// work is never mis-routed to the local-only path on a hiccup.
+func repoHasNoRemote(g *git.Git) bool {
+	remotes, err := g.Remotes()
+	if err != nil {
+		return false
+	}
+	return len(remotes) == 0
+}
+
+// completeTownLocal closes a COMPLETED bead whose work lives in a no-remote repo
+// — the town source-of-truth (gs-7kjh / hq-ux3c3). There is no origin to push an
+// MR against, so the deliverable is committed directly to the local default
+// branch; this path closes the bead WITHOUT push, MR, or escalation, breaking
+// the per-edit re-dispatch loop the merge=mr strategy caused.
+//
+// Durability enforcement (the hq-ux3c3 durability gap, where 13 formula edits
+// sat uncommitted after polecats closed --no-code): town-tier deliverables MUST
+// reach git. --no-code is rejected here, and a working tree still carrying
+// uncommitted deliverable changes is a hard failure (the auto-commit safety net
+// commits them first on a no-remote repo), so a formula edit can never be
+// silently dropped.
+//
+// Mirrors completeNoMR's acceptance-criteria gate and molecule-wisp close. On a
+// nil return the bead was closed (or close was deliberately skipped) and the
+// caller routes to notifyWitness.
+func completeTownLocal(sc strategyContext) error {
+	if doneNoCode {
+		return fmt.Errorf("cannot close town-tier work with --no-code: the deliverable must be committed to the town repo, not dropped (gs-7kjh)\n"+
+			"Commit your changes on %s, then re-run gt done.\n"+
+			"If there is genuinely nothing to do: bd close %s --reason=\"no-changes: <why>\"",
+			sc.branch, sc.issueID)
+	}
+
+	// Uncommitted deliverable changes would be lost on close — refuse (the
+	// durability gap). Runtime artifacts (.claude/.beads/etc.) are excluded.
+	workStatus, wsErr := sc.g.CheckUncommittedWork()
+	if wsErr != nil {
+		return fmt.Errorf("checking git status: %w", wsErr)
+	}
+	if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
+		return fmt.Errorf("cannot complete: uncommitted changes in the town repo would be lost\n"+
+			"Town-tier deliverables must land in git — commit them on %s first, or use gt done --status ESCALATED if you are blocked.\n"+
+			"Uncommitted: %s",
+			sc.branch, workStatus.String())
+	}
+
+	commitSHA, _ := sc.g.Rev("HEAD")
+	fmt.Printf("%s Town-tier work: no remote — committed to local %s, closing without MR (gs-7kjh)\n", style.Bold.Render("→"), sc.branch)
+	if commitSHA != "" {
+		fmt.Printf("  Commit: %s\n", commitSHA)
+	}
+
+	if sc.issueID == "" {
+		return nil
+	}
+	bd := beads.New(sc.cwd)
+
+	// Acceptance-criteria gate (mirrors completeNoMR): leave the bead open for
+	// witness/mayor when criteria are still unchecked rather than false-close.
+	if issue, showErr := bd.Show(sc.issueID); showErr == nil {
+		if unchecked := beads.HasUncheckedCriteria(issue); unchecked > 0 {
+			skipReason := fmt.Sprintf("issue %s has %d unchecked acceptance criteria — skipping close", sc.issueID, unchecked)
+			style.PrintWarning("%s", skipReason)
+			fmt.Printf("  The bead will remain open for witness/mayor review.\n")
+			notifyDoneCloseSkipped(sc.townRoot, sc.rigName, sc.sender, sc.issueID, skipReason)
+			return nil
+		}
+	}
+
+	// Close the attached molecule wisp before the bead (gu-irou): a stale open
+	// wisp re-blocks the bead if it is later reopened.
+	closeAttachedWispNoMR(bd, sc.issueID)
+
+	closeReason := fmt.Sprintf("Completed — town-tier formula work committed to local %s (no remote / no MR; gs-7kjh)", sc.branch)
+	if commitSHA != "" {
+		closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, sc.branch, commitSHA)
+	}
+	if closeErr := forceCloseWithRetry(bd, sc.issueID, closeReason); closeErr == nil {
+		fmt.Printf("%s Issue %s closed (town-local, no MR)\n", style.Bold.Render("✓"), sc.issueID)
 	} else {
 		style.PrintWarning("could not close issue %s after 3 attempts: %v (issue may be left HOOKED)", sc.issueID, closeErr)
 	}

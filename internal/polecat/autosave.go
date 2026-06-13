@@ -68,8 +68,18 @@ func AutoSaveAbandonedWIP(worktreePath, branch, reason string) (saved bool, sha 
 	// GUARD: Default branch (gu-cfb)
 	// Auto-committing on main/master/mainline would bypass the merge queue and
 	// potentially land unrelated artifacts directly on origin/main.
+	//
+	// gs-7kjh exception: a no-remote repo is the town source-of-truth — there is
+	// no origin or merge queue to bypass, so the default branch IS the deliverable
+	// target. Committing town-tier WIP there is the intended durability path (it
+	// closes the hq-ux3c3 gap where formula edits sat uncommitted), not a
+	// violation. The refusal applies only to repos that have a remote. A
+	// `git remote` error keeps the conservative refuse-on-default behavior.
 	if isDefaultBranchForAutosave(branch) {
-		return false, "", fmt.Errorf("autosave refused: branch %q is a protected default branch", branch)
+		remotes, remErr := g.Remotes()
+		if remErr != nil || len(remotes) > 0 {
+			return false, "", fmt.Errorf("autosave refused: branch %q is a protected default branch", branch)
+		}
 	}
 
 	// GUARD: Unmerged conflicts
