@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/townlog"
@@ -208,6 +209,14 @@ func (p *Propeller) deliverNudges() {
 		debugLog(p.townRoot, "[Propeller] deliverNudges: Drain error: %v", err)
 		return
 	}
+	if len(nudges) == 0 {
+		return
+	}
+
+	// Delivery-time ground-truth gate: drop reply-reminders for threads the
+	// recipient already replied to, so they don't fire mid-task. Mirrors the
+	// prompt-boundary gate in `gt mail check --inject`. See gu-fu7mg.
+	nudges = mail.FilterDeliverableReplyRemindersForSession(p.townRoot, p.session, nudges)
 	if len(nudges) == 0 {
 		return
 	}

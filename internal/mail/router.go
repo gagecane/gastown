@@ -2214,6 +2214,62 @@ func (r *Router) FilterDeliverableReplyReminders(recipientAddress string, nudges
 	return out
 }
 
+// sessionNameToCanonicalAddress converts a tmux session name to the canonical
+// mail address used by the nudge queue's reply-reminders. Returns ("", false)
+// if the session name cannot be parsed or maps to no mail address.
+//
+// Mirrors cmd.sessionNameToAddress; duplicated here (rather than imported) to
+// keep the mail package free of an internal/cmd dependency.
+func sessionNameToCanonicalAddress(sessionName string) (string, bool) {
+	identity, err := session.ParseSessionName(sessionName)
+	if err != nil {
+		return "", false
+	}
+	switch identity.Role {
+	case session.RoleMayor:
+		return constants.RoleMayor, true
+	case session.RoleDeacon:
+		return constants.RoleDeacon, true
+	case session.RoleWitness:
+		return fmt.Sprintf("%s/witness", identity.Rig), true
+	case session.RoleRefinery:
+		return fmt.Sprintf("%s/refinery", identity.Rig), true
+	case session.RoleCrew:
+		return fmt.Sprintf("%s/crew/%s", identity.Rig, identity.Name), true
+	case session.RolePolecat:
+		return fmt.Sprintf("%s/%s", identity.Rig, identity.Name), true
+	default:
+		return "", false
+	}
+}
+
+// FilterDeliverableReplyRemindersForSession is the session-keyed entry point to
+// the delivery-time stale-reminder gate. It resolves the session's canonical
+// mail address, then drops any reply-reminder whose thread the recipient has
+// already replied to (see FilterDeliverableReplyReminders).
+//
+// This is the SHARED chokepoint every nudge drain-and-inject path must call
+// before injection. The gate first shipped wired into only the prompt-boundary
+// path (`gt mail check --inject`); the mid-task injection paths — the ACP
+// propeller, the non-Claude nudge-poller, and the idle watcher — bypassed it,
+// so stale reminders kept firing mid-task. Routing every site through this
+// helper closes that gap. See gu-fu7mg.
+//
+// Fails OPEN: if townRoot is empty or the session name cannot be resolved to an
+// address, the nudges pass through unchanged rather than being silently
+// dropped.
+func FilterDeliverableReplyRemindersForSession(townRoot, sessionName string, nudges []nudge.QueuedNudge) []nudge.QueuedNudge {
+	if len(nudges) == 0 || townRoot == "" {
+		return nudges
+	}
+	address, ok := sessionNameToCanonicalAddress(sessionName)
+	if !ok {
+		return nudges // unresolved session — fail open
+	}
+	r := NewRouterWithTownRoot(townRoot, townRoot)
+	return r.FilterDeliverableReplyReminders(address, nudges)
+}
+
 // IsRecipientMuted checks if a mail recipient has DND/muted notifications enabled.
 // Returns true if the recipient is muted and should not receive tmux nudges.
 // Fails open (returns false) if the agent bead cannot be found or the town root is not set.

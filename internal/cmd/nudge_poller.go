@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -139,6 +140,15 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 			}
 			if len(drained) == 0 {
 				continue // someone else drained it
+			}
+
+			// Delivery-time ground-truth gate: drop reply-reminders for
+			// threads this recipient already replied to. Mirrors the
+			// prompt-boundary gate in `gt mail check --inject` so mid-task
+			// injection paths don't fire stale reminders. See gu-fu7mg.
+			drained = mail.FilterDeliverableReplyRemindersForSession(townRoot, sessionName, drained)
+			if len(drained) == 0 {
+				continue
 			}
 
 			injectOrRequeue(townRoot, sessionName, drained, func(msg string) error {

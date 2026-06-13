@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
@@ -378,6 +379,12 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 			// If another process raced and drained first, we get an
 			// empty slice and skip delivery to avoid duplicates.
 			drained, _ := nudge.Drain(townRoot, sessionName)
+			if len(drained) == 0 {
+				return
+			}
+			// Delivery-time ground-truth gate: drop stale reply-reminders
+			// for threads the recipient already replied to. See gu-fu7mg.
+			drained = mail.FilterDeliverableReplyRemindersForSession(townRoot, sessionName, drained)
 			if len(drained) == 0 {
 				return
 			}

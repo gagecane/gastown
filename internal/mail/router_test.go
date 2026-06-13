@@ -2616,6 +2616,74 @@ func TestFilterDeliverableReplyReminders_EmptyInput(t *testing.T) {
 	}
 }
 
+// TestSessionNameToCanonicalAddress verifies the session-name → mail-address
+// mapping used by the shared delivery-time gate (gu-fu7mg). It must mirror
+// cmd.sessionNameToAddress so reminders queued under a canonical address are
+// found when draining a session by name.
+func TestSessionNameToCanonicalAddress(t *testing.T) {
+	setupTestRegistryForAddressTest(t)
+
+	cases := []struct {
+		name        string
+		sessionName string
+		wantAddr    string
+		wantOK      bool
+	}{
+		{"mayor", "hq-mayor", "mayor", true},
+		{"deacon", "hq-deacon", "deacon", true},
+		{"witness", "gt-witness", "gastown/witness", true},
+		{"refinery", "gt-refinery", "gastown/refinery", true},
+		{"crew", "gt-crew-max", "gastown/crew/max", true},
+		{"polecat", "gt-alpha", "gastown/alpha", true},
+		{"unparseable", "not a session", "", false},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			gotAddr, gotOK := sessionNameToCanonicalAddress(tc.sessionName)
+			if gotOK != tc.wantOK || gotAddr != tc.wantAddr {
+				t.Errorf("sessionNameToCanonicalAddress(%q) = (%q, %v), want (%q, %v)",
+					tc.sessionName, gotAddr, gotOK, tc.wantAddr, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestFilterDeliverableReplyRemindersForSession_FailsOpen verifies the
+// session-keyed wrapper never drops nudges when it cannot resolve the session
+// or town root — the gate must fail open so a lookup miss can't silence a
+// genuine reminder. See gu-fu7mg.
+func TestFilterDeliverableReplyRemindersForSession_FailsOpen(t *testing.T) {
+	setupTestRegistryForAddressTest(t)
+
+	in := []nudge.QueuedNudge{
+		{Kind: "reply-reminder", ThreadID: "t1", Message: "remember to reply"},
+		{Kind: "mail", ThreadID: "t2", Message: "you have mail"},
+	}
+
+	t.Run("empty town root passes through", func(t *testing.T) {
+		out := FilterDeliverableReplyRemindersForSession("", "hq-mayor", in)
+		if len(out) != len(in) {
+			t.Fatalf("expected all %d nudges, got %d", len(in), len(out))
+		}
+	})
+
+	t.Run("unresolvable session passes through", func(t *testing.T) {
+		out := FilterDeliverableReplyRemindersForSession(t.TempDir(), "not a session", in)
+		if len(out) != len(in) {
+			t.Fatalf("expected all %d nudges, got %d", len(in), len(out))
+		}
+	})
+
+	t.Run("empty input returns input", func(t *testing.T) {
+		out := FilterDeliverableReplyRemindersForSession(t.TempDir(), "hq-mayor", nil)
+		if out != nil {
+			t.Fatalf("expected nil for nil input, got %v", out)
+		}
+	})
+}
+
 // TestIsPluginDispatchSubject table-tests the helper that identifies
 // plugin-dispatch subjects. Mirrors the check used in cmd/dog.go (see
 // gt-swirk). Subjects must have the exact prefix "Plugin: " (with a trailing
