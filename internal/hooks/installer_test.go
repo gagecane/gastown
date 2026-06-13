@@ -41,11 +41,19 @@ func TestInstallForRole_RoleAware(t *testing.T) {
 				t.Fatal("settings.json not created")
 			}
 
-			// Verify content matches resolved template (with {{GT_BIN}} substituted)
+			// Verify content matches the resolved template (with {{GT_BIN}}
+			// substituted) plus the role's expected hook overlay — the same
+			// transform writeTemplate applies (gs-bply). HOME is isolated, so the
+			// mcpServers overlay is a no-op and only the hook overlay differs from
+			// the bare template.
 			got, _ := os.ReadFile(path)
 			want, err := resolveAndSubstitute("claude", tt.wantFile, tt.role)
 			if err != nil {
 				t.Fatalf("resolveAndSubstitute: %v", err)
+			}
+			want, err = applyHookOverrides(want, tt.role)
+			if err != nil {
+				t.Fatalf("applyHookOverrides: %v", err)
 			}
 			if string(got) != string(want) {
 				t.Errorf("content mismatch: got %d bytes, want %d bytes (from %s)", len(got), len(want), tt.wantFile)
@@ -136,6 +144,73 @@ func TestInstallForRole_AutonomousDeniesAskUserQuestion(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("autonomous settings permissions.deny = %v; must include AskUserQuestion (gs-wbj)", settings.Permissions.Deny)
+	}
+}
+
+// TestInstallForRole_AppliesHookOverrides guards gs-bply: the spawn-time
+// provisioning path must write the role's expected hook set (ComputeExpected:
+// base + DefaultOverrides), not the bare embedded template. Before the fix the
+// embedded template's role-agnostic hooks shipped verbatim, so a freshly
+// dispatched polecat got the generic `gt costs record &` Stop hook instead of
+// `gt tap polecat-stop-check`, and boot kept a UserPromptSubmit entry the
+// override removes. `gt doctor hooks-sync` then flip-flopped between in-sync and
+// out-of-sync as the daemon reverted what --fix wrote.
+func TestInstallForRole_AppliesHookOverrides(t *testing.T) {
+	// Isolate HOME so only built-in DefaultOverrides apply (no on-disk overrides).
+	setTestHome(t, t.TempDir())
+
+	stopCommands := func(t *testing.T, role string) []string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := InstallForRole("claude", dir, dir, role, ".claude", "settings.json", true); err != nil {
+			t.Fatalf("InstallForRole(%s): %v", role, err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatalf("read settings: %v", err)
+		}
+		settings, err := UnmarshalSettings(data)
+		if err != nil {
+			t.Fatalf("unmarshal settings: %v", err)
+		}
+		var cmds []string
+		for _, entry := range settings.Hooks.Stop {
+			for _, h := range entry.Hooks {
+				cmds = append(cmds, h.Command)
+			}
+		}
+		return cmds
+	}
+
+	// Polecat: the Stop hook must include polecat-stop-check (the idle-polecat
+	// catcher) — the exact pattern the doctor's checkSettings demands.
+	polecatStop := strings.Join(stopCommands(t, "polecat"), "\n")
+	if !strings.Contains(polecatStop, "polecat-stop-check") {
+		t.Errorf("polecat Stop hook missing polecat-stop-check; got %q", polecatStop)
+	}
+
+	// A role with no Stop override still gets the base `gt costs record` Stop hook.
+	witnessStop := strings.Join(stopCommands(t, "witness"), "\n")
+	if !strings.Contains(witnessStop, "costs record") {
+		t.Errorf("witness Stop hook missing costs record; got %q", witnessStop)
+	}
+
+	// Boot: the override removes the UserPromptSubmit entry entirely (boot does
+	// not process mail), so provisioning must emit no UserPromptSubmit hooks.
+	dir := t.TempDir()
+	if err := InstallForRole("claude", dir, dir, "boot", ".claude", "settings.json", true); err != nil {
+		t.Fatalf("InstallForRole(boot): %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read boot settings: %v", err)
+	}
+	bootSettings, err := UnmarshalSettings(data)
+	if err != nil {
+		t.Fatalf("unmarshal boot settings: %v", err)
+	}
+	if len(bootSettings.Hooks.UserPromptSubmit) != 0 {
+		t.Errorf("boot UserPromptSubmit should be removed by override; got %+v", bootSettings.Hooks.UserPromptSubmit)
 	}
 }
 
@@ -1132,13 +1207,19 @@ func TestInstallForRole_NoMCPOverrideStaysBare(t *testing.T) {
 		t.Fatalf("read settings: %v", err)
 	}
 
-	// Byte-identical to the rendered template (no override overlay applied).
+	// Byte-identical to the rendered template plus the hook overlay (gs-bply):
+	// the hook overlay always fires, but with no mcpServers override no MCP block
+	// is injected.
 	want, err := resolveAndSubstitute("claude", "settings-autonomous.json", "polecat")
 	if err != nil {
 		t.Fatalf("resolveAndSubstitute: %v", err)
 	}
+	want, err = applyHookOverrides(want, "polecat")
+	if err != nil {
+		t.Fatalf("applyHookOverrides: %v", err)
+	}
 	if string(data) != string(want) {
-		t.Errorf("bare provisioning diverged from template: got %d bytes, want %d bytes", len(data), len(want))
+		t.Errorf("bare provisioning diverged from template+hook overlay: got %d bytes, want %d bytes", len(data), len(want))
 	}
 	if strings.Contains(string(data), "mcpServers") {
 		t.Error("bare provisioning unexpectedly injected an mcpServers block")

@@ -466,6 +466,44 @@ func applyClaudeOverrides(content []byte, role string) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
+// applyHookOverrides overlays the role's expected hook set onto a
+// freshly-rendered Claude settings template, returning the re-marshaled bytes.
+// The expected set is ComputeExpected(key): the base hooks plus the built-in
+// DefaultOverrides plus any on-disk overrides — the same value syncTarget
+// installs via `current.Hooks = *expected`.
+//
+// The embedded templates carry a single role-agnostic hooks block (Stop hook
+// `gt costs record &`, a case-guarded UserPromptSubmit mail check). The doctor's
+// expectation, however, comes from ComputeExpected, which layers DefaultOverrides
+// on top — e.g. polecats gain the `gt tap polecat-stop-check` Stop hook and boot
+// drops UserPromptSubmit entirely. Without this overlay the provisioning path
+// (InstallForRole at dispatch/spawn time) wrote the bare template hooks, so
+// `gt doctor hooks-sync` flip-flopped: --fix wrote the override-merged shape, the
+// next polecat dispatch or boot-dog cycle reverted it, and polecats spawned in
+// between ran without the Stop-hook safety check (gs-bply). Applying
+// ComputeExpected here makes the two writers converge byte-for-byte.
+func applyHookOverrides(content []byte, role string) ([]byte, error) {
+	expected, err := ComputeExpected(overrideKeyForRole(role))
+	if err != nil {
+		return nil, fmt.Errorf("computing expected hooks: %w", err)
+	}
+
+	settings, err := UnmarshalSettings(content)
+	if err != nil {
+		// Don't fail provisioning on a malformed template — fall back to the
+		// raw bytes (matches applyClaudeOverrides' best-effort behavior).
+		return content, nil //nolint:nilerr // best-effort overlay; template wins
+	}
+
+	settings.Hooks = *expected
+
+	data, err := MarshalSettings(settings)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling settings with hook overrides: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
 // writeTemplate resolves a template, substitutes placeholders, and writes it to targetPath.
 func writeTemplate(provider, role, hooksFile, targetPath string) error {
 	content, err := resolveAndSubstitute(provider, hooksFile, role)
@@ -473,11 +511,18 @@ func writeTemplate(provider, role, hooksFile, targetPath string) error {
 		return err
 	}
 
-	// For Claude settings files, overlay the host-local mcpServers (and plugin)
-	// policy so a freshly-provisioned worktree is born with builder-mcp rather
-	// than drifting bare until the next `gt hooks sync` (gu-oyz0i). No-op when
-	// the host has not configured an mcpServers override.
+	// For Claude settings files, overlay the role's expected hook set and the
+	// host-local mcpServers (and plugin) policy so a freshly-provisioned worktree
+	// is born matching the doctor's expectation rather than drifting until the
+	// next `gt hooks sync` (gs-bply for hooks, gu-oyz0i for mcpServers). The hook
+	// overlay always fires; the mcpServers overlay is a no-op when the host has
+	// not configured an mcpServers override.
 	if provider == "claude" && isSettingsFile(hooksFile) {
+		if overlaid, oerr := applyHookOverrides(content, role); oerr == nil {
+			content = overlaid
+		} else {
+			return oerr
+		}
 		if overlaid, oerr := applyClaudeOverrides(content, role); oerr == nil {
 			content = overlaid
 		} else {

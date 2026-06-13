@@ -86,10 +86,15 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 		t.Fatalf("settings.json is not valid JSON after concurrent writes: %v\n--- file contents (%d bytes) ---\n%s", err, len(data), string(data))
 	}
 
-	// And it must match the resolved template byte-for-byte.
+	// And it must match the provisioning output byte-for-byte: the resolved
+	// template with the role's expected hook set overlaid (gs-bply).
 	want, err := resolveAndSubstitute("claude", "settings-autonomous.json", "polecat")
 	if err != nil {
 		t.Fatalf("resolveAndSubstitute: %v", err)
+	}
+	want, err = applyHookOverrides(want, "polecat")
+	if err != nil {
+		t.Fatalf("applyHookOverrides: %v", err)
 	}
 	if string(data) != string(want) {
 		t.Errorf("settings.json content mismatch after concurrent writes: got %d bytes, want %d bytes", len(data), len(want))
