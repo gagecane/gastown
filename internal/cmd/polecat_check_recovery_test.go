@@ -865,3 +865,31 @@ func runCmd(t *testing.T, dir, name string, args ...string) {
 		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
 	}
 }
+
+func TestIsTransientGitExecError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"fork/exec ENOMEM", errors.New("fork/exec /usr/bin/git: cannot allocate memory"), true},
+		{"fork/exec EAGAIN", errors.New("fork/exec /usr/bin/git: resource temporarily unavailable"), true},
+		{"fork/exec no child", errors.New("fork/exec /usr/bin/git: no child processes"), true},
+		{"fork/exec too many files", errors.New("fork/exec /usr/bin/git: too many open files"), true},
+		// A genuine git fault (non-zero exit, corrupt repo) must NOT be transient.
+		{"corrupt repo", errors.New("fatal: not a git repository"), false},
+		{"bad object", errors.New("fatal: bad object HEAD"), false},
+		// ENOMEM without a fork/exec context is not a spawn failure we retry.
+		{"oom in output only", errors.New("cannot allocate memory while writing index"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isTransientGitExecError(tc.err); got != tc.want {
+				t.Errorf("isTransientGitExecError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

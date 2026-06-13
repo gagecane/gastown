@@ -1088,6 +1088,63 @@ func getGitState(worktreePath string) (*GitState, error) {
 	return getGitStateWithTargets(worktreePath, nil)
 }
 
+// gitExecRetries is the number of extra attempts checkUncommittedWorkWithRetry
+// makes when `git status` fails with a TRANSIENT fork/exec error.
+const gitExecRetries = 2
+
+// gitExecRetryBackoff is the pause between transient-error retries. Short — a
+// load-induced fork/exec failure clears as soon as the host sheds the spike.
+var gitExecRetryBackoff = 200 * time.Millisecond
+
+// isTransientGitExecError reports whether a git command failure is a transient
+// host-load fork/exec failure (ENOMEM / EAGAIN), not a real repository fault.
+//
+// gs-4n7i class 5: on a loaded host, `git status` can fail to even start —
+// `fork/exec /usr/bin/git: cannot allocate memory` or `resource temporarily
+// unavailable` — when the OS cannot spawn the child. The recovery check treated
+// this as GitCheckFailed → NEEDS_RECOVERY, paging the Mayor for a transient load
+// spike with no work actually at risk. A fork/exec failure is evidence about the
+// HOST, not the worktree, so it must be retried (like the gateHostKillRetries in
+// main_branch_test_runner.go), not escalated.
+func isTransientGitExecError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Only treat it as transient if it's a process-spawn failure. A normal
+	// non-zero `git status` exit (corrupt repo, bad object) does NOT contain
+	// these fork/exec markers, so a real fault still flags NEEDS_RECOVERY.
+	if !strings.Contains(msg, "fork/exec") && !strings.Contains(msg, "exec format") {
+		return false
+	}
+	for _, marker := range []string{
+		"cannot allocate memory",
+		"resource temporarily unavailable",
+		"no child processes",
+		"too many open files",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkUncommittedWorkWithRetry runs git status, retrying only TRANSIENT
+// fork/exec failures (host load) so they don't masquerade as NEEDS_RECOVERY.
+// A deterministic git fault is returned on the first attempt. See gs-4n7i.
+func checkUncommittedWorkWithRetry(g *git.Git) (*git.UncommittedWorkStatus, error) {
+	var status *git.UncommittedWorkStatus
+	var err error
+	for attempt := 0; ; attempt++ {
+		status, err = g.CheckUncommittedWork()
+		if err == nil || !isTransientGitExecError(err) || attempt >= gitExecRetries {
+			return status, err
+		}
+		time.Sleep(gitExecRetryBackoff)
+	}
+}
+
 func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, error) {
 	state := &GitState{
 		Clean:            true,
@@ -1095,7 +1152,7 @@ func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, e
 	}
 
 	worktreeGit := git.NewGit(worktreePath)
-	workStatus, err := worktreeGit.CheckUncommittedWork()
+	workStatus, err := checkUncommittedWorkWithRetry(worktreeGit)
 	if err != nil {
 		return nil, fmt.Errorf("git status: %w", err)
 	}
