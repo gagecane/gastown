@@ -11,6 +11,7 @@ package dispatch
 
 import (
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -47,6 +48,12 @@ type BeadInfo struct {
 	Labels       []string         `json:"labels,omitempty"`
 	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
 	IssueType    string           `json:"issue_type,omitempty"`
+	// DeferUntil is the RFC3339 defer window. `bd update --defer <date>` sets
+	// this WITHOUT flipping status off "open"; the bead is hidden from `bd ready`
+	// until defer_until <= now(). The dispatch guards consult it via
+	// IsDeferredBead so a future-deferred open bead is refused at the sling
+	// chokepoint (gu-fyey5).
+	DeferUntil string `json:"defer_until,omitempty"`
 }
 
 // hasLabel reports whether target is present in labels.
@@ -60,10 +67,30 @@ func hasLabel(labels []string, target string) bool {
 }
 
 // IsDeferredBead checks whether a bead should be rejected from slinging because
-// it has been deferred. Returns true if the bead has status "deferred" or if its
-// description contains deferral keywords like "deferred to post-launch".
+// it has been deferred. Returns true if the bead has status "deferred", if it
+// carries a future defer_until window (status stays "open" but the bead is held
+// until the date elapses), or if its description contains deferral keywords like
+// "deferred to post-launch".
 func IsDeferredBead(info *BeadInfo) bool {
+	return isDeferredBeadAt(info, time.Now())
+}
+
+// isDeferredBeadAt is the time-injectable core of IsDeferredBead. The exported
+// wrapper passes time.Now(); tests pass a fixed clock so the future-defer_until
+// branch is deterministic.
+func isDeferredBeadAt(info *BeadInfo, now time.Time) bool {
 	if info.Status == "deferred" {
+		return true
+	}
+	// Future defer_until (gu-fyey5). `bd update --defer <date>` sets defer_until
+	// WITHOUT flipping status off "open", so the status check above misses it.
+	// `bd ready`, the capacity scheduler (isScheduledWorkBeadReady, gs-o5f), and
+	// the convoy stranded scan (isReadyIssue, gu-w7mgd) all hide such beads, but
+	// the sling dispatch chokepoint did not — letting a future-deferred open bead
+	// be slung to a polecat before its window elapsed. Mirror the `bd ready`
+	// filter: defer_until > now → deferred. On an unparseable value fall through
+	// (treat as not-deferred) rather than stranding the bead.
+	if expired, err := deferUntilExpired(info.DeferUntil, now); err == nil && info.DeferUntil != "" && !expired {
 		return true
 	}
 	desc := strings.ToLower(info.Description)
@@ -73,6 +100,25 @@ func IsDeferredBead(info *BeadInfo) bool {
 		return true
 	}
 	return false
+}
+
+// deferUntilExpired reports whether a defer_until string is non-empty and its
+// timestamp is at or before now. Empty → (false, nil). Unparseable → (false,
+// error) so callers can choose to fall through rather than strand the bead.
+// Mirrors capacity_dispatch.go's isDeferUntilExpired (kept local so this package
+// does not depend on internal/cmd).
+func deferUntilExpired(deferUntil string, now time.Time) (bool, error) {
+	if deferUntil == "" {
+		return false, nil
+	}
+	t, err := time.Parse(time.RFC3339, deferUntil)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, deferUntil)
+		if err != nil {
+			return false, err
+		}
+	}
+	return !t.After(now), nil
 }
 
 // IsAgentBead reports whether the bead info describes an agent bead

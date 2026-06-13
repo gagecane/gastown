@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -28,6 +29,63 @@ func TestIsDeferredBead(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsDeferredBead(tt.info); got != tt.want {
 				t.Errorf("IsDeferredBead(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsDeferredBeadDeferUntil exercises the future-defer_until branch (gu-fyey5)
+// with a fixed clock so the result is deterministic. `bd update --defer` keeps
+// status="open" while hiding the bead from `bd ready`; the sling dispatch guard
+// must treat a future defer_until as deferred.
+func TestIsDeferredBeadDeferUntil(t *testing.T) {
+	now := time.Date(2026, 6, 13, 1, 4, 51, 0, time.UTC)
+	tests := []struct {
+		name string
+		info *BeadInfo
+		want bool
+	}{
+		{
+			"open bead with future defer_until is deferred",
+			&BeadInfo{Status: "open", DeferUntil: now.Add(24 * time.Hour).Format(time.RFC3339)},
+			true,
+		},
+		{
+			"open bead with far-future defer_until is deferred (gu-27art repro)",
+			&BeadInfo{Status: "open", DeferUntil: "2026-09-11T00:00:00Z"},
+			true,
+		},
+		{
+			"open bead with expired defer_until is dispatchable",
+			&BeadInfo{Status: "open", DeferUntil: now.Add(-time.Hour).Format(time.RFC3339)},
+			false,
+		},
+		{
+			"open bead with defer_until exactly now is dispatchable",
+			&BeadInfo{Status: "open", DeferUntil: now.Format(time.RFC3339)},
+			false,
+		},
+		{
+			"empty defer_until is not deferred",
+			&BeadInfo{Status: "open", DeferUntil: ""},
+			false,
+		},
+		{
+			"unparseable defer_until falls through to not-deferred",
+			&BeadInfo{Status: "open", DeferUntil: "not-a-timestamp"},
+			false,
+		},
+		{
+			"deferred status still wins regardless of defer_until",
+			&BeadInfo{Status: "deferred", DeferUntil: now.Add(-time.Hour).Format(time.RFC3339)},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDeferredBeadAt(tt.info, now); got != tt.want {
+				t.Errorf("isDeferredBeadAt(%+v) = %v, want %v", tt.info, got, tt.want)
 			}
 		})
 	}
