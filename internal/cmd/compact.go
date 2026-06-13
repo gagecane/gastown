@@ -416,8 +416,7 @@ func runCompact(cmd *cobra.Command, args []string) error {
 	// compaction cycles these accumulate as dangling refs. We sweep them here.
 	if !compactDryRun {
 		progress.setStep("cleaning orphaned wisp_deps")
-		dbName := beads.DatabaseNameFromMetadata(beads.ResolveBeadsDir(workDir))
-		cleanOrphanedWispDeps(townRoot, dbName, result)
+		cleanOrphanedWispDeps(townRoot, resolveCompactDB(bd, workDir), result)
 	}
 
 	progress.setStep("done")
@@ -510,6 +509,23 @@ func runCompactLoop(
 	}
 	progress.setCurrentWisp("")
 	return nil
+}
+
+// resolveCompactDB determines which Dolt database the orphaned-wisp_deps sweep
+// should target. It asks the bd client (the same wrapper listWisps queries)
+// for its resolved database via SELECT DATABASE(), so the sweep always hits the
+// database the compaction just processed — even when the job runs from a
+// worktree whose .beads has no metadata.json and no redirect (e.g. the deacon
+// worktree the daily digest runs from). bd resolves the database by walking up
+// the directory tree, which the metadata-only read does not (gu-5ha6a).
+//
+// Falls back to metadata-only resolution if the bd query fails, preserving the
+// previous behavior rather than regressing in environments where bd cannot run.
+func resolveCompactDB(bd *beads.Beads, workDir string) string {
+	if db, err := bd.CurrentDatabase(); err == nil && db != "" {
+		return db
+	}
+	return beads.DatabaseNameFromMetadata(beads.ResolveBeadsDir(workDir))
 }
 
 // cleanOrphanedWispDeps removes wisp_dependencies rows where either side no

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -266,6 +267,34 @@ func TestCleanOrphanedWispDepsEmptyDB(t *testing.T) {
 	}
 	if !strings.Contains(result.Errors[0], "no Dolt database resolved") {
 		t.Errorf("error = %q, want it to mention the unresolved database", result.Errors[0])
+	}
+}
+
+func TestResolveCompactDBFallsBackToMetadata(t *testing.T) {
+	// When the bd client cannot resolve a database (here: an isolated wrapper
+	// pinned to a dead Dolt port, so SELECT DATABASE() errors), resolveCompactDB
+	// must fall back to .beads/metadata.json rather than returning empty. This
+	// preserves the pre-fix behavior in environments where bd cannot run.
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd CLI not installed, skipping bd-backed resolution test")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	meta := `{"dolt_database":"testdb_compact_fallback","dolt_mode":"server"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	// Dead port: bd's SELECT DATABASE() fails fast (connection refused), so
+	// CurrentDatabase returns an error and resolveCompactDB falls back.
+	bd := beads.NewIsolatedWithPort(tmpDir, 59999)
+
+	if got := resolveCompactDB(bd, tmpDir); got != "testdb_compact_fallback" {
+		t.Errorf("resolveCompactDB = %q, want %q (metadata fallback)", got, "testdb_compact_fallback")
 	}
 }
 

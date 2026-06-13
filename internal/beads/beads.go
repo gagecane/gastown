@@ -2307,6 +2307,35 @@ func (b *Beads) Stats() (string, error) {
 	return string(out), nil
 }
 
+// CurrentDatabase returns the name of the Dolt database this wrapper resolves
+// to, as reported by the bd client itself via SELECT DATABASE(). This is the
+// authoritative resolution: it matches whichever database bd's own routing
+// (cwd walk-up + BEADS_DIR + env) selects, so it agrees with the database the
+// List/wisp queries on this wrapper actually read from.
+//
+// Prefer this over DatabaseNameFromMetadata when an operation must target the
+// SAME database the wrapper queries. Metadata-only resolution reads
+// .beads/metadata.json at the resolved beads dir and returns empty when that
+// file is absent (e.g. a worktree whose .beads has no metadata.json and no
+// redirect, such as the deacon worktree the daily compaction digest runs
+// from), even though bd itself resolves a valid database by walking up.
+func (b *Beads) CurrentDatabase() (string, error) {
+	out, err := b.run("sql", "--json", "SELECT DATABASE() AS db")
+	if err != nil {
+		return "", err
+	}
+	var rows []struct {
+		DB string `json:"db"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return "", fmt.Errorf("parsing current database: %w", err)
+	}
+	if len(rows) == 0 {
+		return "", nil
+	}
+	return rows[0].DB, nil
+}
+
 // IsBeadsRepo checks if the working directory is a beads repository.
 // ZFC: Check file existence directly instead of parsing bd errors.
 func (b *Beads) IsBeadsRepo() bool {
