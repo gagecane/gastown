@@ -601,6 +601,99 @@ esac
 	}
 }
 
+// TestFindStrandedConvoys_SkipsShipUnverified asserts that convoys carrying the
+// convoy:ship-unverified label are filtered out BEFORE the tracked-deps walk, so
+// their (closed) beads never enter the batched dep query. This is the gs-oben
+// fix: at ~236 open convoys where 223 were ship-unverified, walking them blew
+// the 5m dispatchQueuedWork deadline and caused a town-wide dispatch outage.
+func TestFindStrandedConvoys_SkipsShipUnverified(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell-script mock test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"),
+		[]byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// Mock bd records every tracked-deps SQL query so the test can assert the
+	// ship-unverified convoy (hq-c2) was never referenced.
+	sqlLogPath := filepath.Join(binDir, "tracked-deps-sql-log")
+
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+SQLLOG="` + sqlLogPath + `"
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+
+case "$pos0" in
+  list)
+    case "$*" in
+      *--label=gt:sling-context*)
+        echo '[]'
+        exit 0
+        ;;
+    esac
+    # hq-c1: normal dispatchable convoy. hq-c2: ship-unverified (must be skipped).
+    echo '[{"id":"hq-c1","title":"Convoy 1","labels":[]},{"id":"hq-c2","title":"Convoy 2","labels":["convoy:ship-unverified"]}]'
+    exit 0
+    ;;
+  sql)
+    case "$*" in
+      *"FROM dependencies"*"type = 'tracks'"*)
+        echo "$*" >> "$SQLLOG"
+        echo '[{"issue_id":"hq-c1","target":"gt-r1"}]'
+        exit 0
+        ;;
+    esac
+    echo '[]'
+    exit 0
+    ;;
+  show)
+    echo '[{"id":"gt-r1","title":"R1","status":"open","issue_type":"task","assignee":"","blocked_by":[],"blocked_by_count":0,"dependencies":[]}]'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stranded, err := findStrandedConvoys(townRoot)
+	if err != nil {
+		t.Fatalf("findStrandedConvoys() error: %v", err)
+	}
+
+	for _, s := range stranded {
+		if s.ID == "hq-c2" {
+			t.Errorf("ship-unverified convoy hq-c2 should be skipped, but appeared in stranded result")
+		}
+	}
+
+	// The ship-unverified convoy must never reach the tracked-deps query.
+	if data, err := os.ReadFile(sqlLogPath); err == nil {
+		if strings.Contains(string(data), "hq-c2") {
+			t.Errorf("ship-unverified convoy hq-c2 was referenced in a tracked-deps SQL query; "+
+				"it must be filtered out before the walk (gs-oben). Query log:\n%s", string(data))
+		}
+	}
+}
+
 // TestGetAllTrackedIssuesByConvoy_Equivalence verifies that the batched
 // helper returns the same per-convoy ID lists that bdDepListRawIDs would
 // return for each convoy individually. Acceptance criterion for gu-6m38.

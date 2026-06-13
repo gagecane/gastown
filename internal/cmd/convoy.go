@@ -2062,6 +2062,32 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		return nil, fmt.Errorf("listing convoys: %w", err)
 	}
 
+	// Skip convoys marked convoy:ship-unverified (gs-oben, mirrors
+	// checkAndCloseCompletedConvoys per gu-4cxuv). These are all-tracked-closed
+	// but ship-unverifiable (gu-j7u5): they can NEVER yield a dispatchable ready
+	// bead, so walking them in the stranded scan is pure waste. At a live-town
+	// scale of ~236 open convoys where 223 were ship-unverified, including them
+	// here pulled all their tracked (closed) beads into the Phase 1 batched dep
+	// query AND the Phase 2 town-wide bd show fan-out, blowing the 5m
+	// dispatchQueuedWork deadline and causing a town-wide dispatch outage. The
+	// label is their terminal-but-reversible state (removeShipUnverifiedLabel
+	// clears it once a citing commit lands or a bead reopens), so dropping them
+	// here loses no dispatchable work.
+	skippedUnverified := 0
+	filtered := convoys[:0]
+	for _, c := range convoys {
+		if hasLabel(c.Labels, convoyShipUnverifiedLabel) {
+			skippedUnverified++
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	convoys = filtered
+	if skippedUnverified > 0 {
+		fmt.Fprintf(os.Stderr, "%s Skipped %d convoy(s) marked %s (run `bd list --label=%s` to review)\n",
+			style.Dim.Render("○"), skippedUnverified, convoyShipUnverifiedLabel, convoyShipUnverifiedLabel)
+	}
+
 	// Hoist the town-wide scheduled-set computation out of the per-convoy
 	// loop. listAllSlingContexts() is invariant for the duration of one scan
 	// (a sling-context closing mid-scan can yield at-most one cycle of
