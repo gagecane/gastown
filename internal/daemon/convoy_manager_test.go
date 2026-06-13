@@ -4118,6 +4118,63 @@ func TestFeedFirstReady_AwaitingMerge_RecordsChurn(t *testing.T) {
 	}
 }
 
+// TestFeedFirstReady_CapacityAdmissionDenied_NoEscalateNoUntrack verifies the
+// gu-jaxdl fix: when sling refuses a step because the town is at its polecat
+// capacity ceiling (admission denied), the daemon suppresses the escalation
+// (normal queueing backpressure — the step dispatches when a slot frees, it is
+// NOT wedged), does NOT untrack it (legitimate tracked work), and does NOT record
+// a sling error (so it never escalates as "cannot dispatch / will never progress").
+func TestFeedFirstReady_CapacityAdmissionDenied_NoEscalateNoUntrack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	stderr := `polecat admission denied: 8/8 town-wide working polecats (scheduler.global_max_polecats ceiling reached; rig fce bead gt-cap). Wait for a polecat to finish`
+	m, invokeLog := feedFirstReadyTestEnv(t, stderr)
+	var untrackCalls int
+	m.untrackMissingBeadFn = func(string, string) error { untrackCalls++; return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-cap", Title: "Capacity-Blocked Step", ReadyCount: 1, ReadyIssues: []string{"gt-cap"}}
+	m.feedFirstReady(c)
+
+	data, _ := os.ReadFile(invokeLog)
+	if strings.Contains(string(data), "escalate") {
+		t.Errorf("capacity-blocked bead should NOT escalate, but escalate was invoked: %q", data)
+	}
+	if untrackCalls != 0 {
+		t.Errorf("capacity-blocked bead should not untrack (real tracked work), got %d", untrackCalls)
+	}
+	if _, ok := m.seenSlingErrors.Load("gt-cap"); ok {
+		t.Errorf("capacity-blocked bead should not record a sling error")
+	}
+}
+
+// TestFeedFirstReady_CapacityAdmissionDenied_RecordsChurn verifies a
+// capacity-blocked bead advances its feed-churn streak on each failed re-feed, so
+// the effective cooldown escalates (5m→…) instead of re-attempting an
+// admission-denied dispatch every scan (gu-jaxdl).
+func TestFeedFirstReady_CapacityAdmissionDenied_RecordsChurn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	m, _ := feedFirstReadyTestEnv(t, `polecat admission denied: host load/core 12.50 exceeds scheduler.max_load_per_core 8.00 (rig fce bead gt-cap)`)
+	m.untrackMissingBeadFn = func(string, string) error { return nil }
+
+	c := strandedConvoyInfo{ID: "hq-cv-cap", Title: "Capacity-Blocked Step", ReadyCount: 1, ReadyIssues: []string{"gt-cap"}}
+
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-cap"); got != feedDispatchCooldown {
+		t.Fatalf("after 1 churn, cooldown = %v, want base %v", got, feedDispatchCooldown)
+	}
+
+	m.lastFeedAttempt.Delete("gt-cap")
+	m.feedFirstReady(c)
+	if got := m.effectiveFeedCooldown("gt-cap"); got <= feedDispatchCooldown {
+		t.Errorf("after 2 churns, cooldown = %v, want > base %v (escalating backoff)", got, feedDispatchCooldown)
+	}
+}
+
 // TestFeedFirstReady_DoNotDispatch_UntracksNoEscalate verifies the gu-q1wzq fix:
 // a do-not-dispatch / pinned reference tripwire is auto-untracked on first
 // failure (like a structural non-work bead) and does NOT escalate — it can never

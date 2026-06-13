@@ -191,6 +191,29 @@ func IsAwaitingRefineryMergeSlingError(stderrLine string) bool {
 		strings.Contains(s, "awaiting_refinery_merge")
 }
 
+// IsCapacityAdmissionDeniedSlingError reports whether a sling stderr line
+// indicates the dispatch was refused by the polecat capacity scheduler — the
+// town is at a configured ceiling (scheduler.global_max_polecats or
+// scheduler.max_polecats) or under host-load backpressure
+// (scheduler.max_load_per_core). All such refusals carry the phrase "polecat
+// admission denied" (internal/cmd/polecat_capacity.go).
+//
+// This is NORMAL backpressure, not a wedge: the global ceiling exists precisely
+// to queue excess work, and the bead becomes dispatchable the moment a
+// town-wide slot frees. Escalating it as "cannot dispatch / will never progress"
+// is both wrong (it WILL progress) and re-fired every scan cycle for EVERY
+// capacity-blocked step in EVERY convoy — a single multi-step convoy hitting the
+// cap generated dozens of duplicate HIGH escalations per tick, drowning the Mayor
+// inbox (gu-jaxdl). The correct disposition is the same as a deferred /
+// awaiting-merge bead: suppress the escalation and back off the re-feed, WITHOUT
+// untracking (the step is legitimate tracked work that dispatches on a free slot).
+func IsCapacityAdmissionDeniedSlingError(stderrLine string) bool {
+	if stderrLine == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(stderrLine), "polecat admission denied")
+}
+
 // SlingFailureClass categorizes a sling stderr line into a single terminal-vs-
 // transient disposition so producers can switch on one value instead of chaining
 // predicates (and risk ordering bugs). Ordering matters: closed and not-found are
@@ -224,6 +247,12 @@ const (
 	// escalation and back off; the refinery clears the label on merge. NOT terminal
 	// — must not be untracked (gu-ea25u, gt-3798).
 	SlingFailureAwaitingMerge
+	// SlingFailureCapacityAdmissionDenied: the dispatch was refused by the polecat
+	// capacity scheduler (global/per-rig ceiling reached or host-load backpressure).
+	// Normal queueing backpressure — the step dispatches once a town-wide slot
+	// frees. Suppress escalation and back off; NOT terminal — must not be untracked
+	// (gu-jaxdl).
+	SlingFailureCapacityAdmissionDenied
 )
 
 // ClassifySlingFailure maps a sling stderr line to its SlingFailureClass.
@@ -244,6 +273,8 @@ func ClassifySlingFailure(stderrLine string) SlingFailureClass {
 		return SlingFailureDeferred
 	case IsAwaitingRefineryMergeSlingError(stderrLine):
 		return SlingFailureAwaitingMerge
+	case IsCapacityAdmissionDeniedSlingError(stderrLine):
+		return SlingFailureCapacityAdmissionDenied
 	default:
 		return SlingFailureUnknown
 	}
