@@ -336,6 +336,14 @@ type Engineer struct {
 	// host load. Zero uses gateLoadRecheckInterval. Tests shrink this to keep
 	// the suite fast; production leaves it zero.
 	gateLoadRecheck time.Duration
+
+	// revalidateBeforePush re-reads the MR bead immediately before the push to
+	// catch a retraction (bead closed) or human-review-only re-classification
+	// (merge_strategy=local / no_merge) that raced a long/stalled gate (gu-tw7fa).
+	// Returns a non-empty abort reason when the push must be refused. Injectable
+	// for testing; defaults to e.revalidateMRBeforePush. Tests that don't set it
+	// fall through to the default, which fail-opens when beads are unreachable.
+	revalidateBeforePush func(branch, sourceIssue string) string
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -371,6 +379,15 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		mergeSlotMaxRetries:   10,
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
 	}
+}
+
+// resolveRevalidateBeforePush returns the configured pre-push re-validation hook,
+// defaulting to e.revalidateMRBeforePush when none was injected.
+func (e *Engineer) resolveRevalidateBeforePush() func(branch, sourceIssue string) string {
+	if e.revalidateBeforePush != nil {
+		return e.revalidateBeforePush
+	}
+	return e.revalidateMRBeforePush
 }
 
 // SetOutput sets the output writer for user-facing messages.
@@ -653,6 +670,17 @@ type ProcessResult struct {
 	// MUST NOT run any post-merge cleanup (close beads, delete branch, send
 	// MERGED) when this is set — the commit never reached origin/<target>.
 	PushFailed bool
+
+	// Retracted indicates the MR bead was re-validated immediately before the
+	// push and found to be no longer auto-mergeable — the bead was closed
+	// (retracted/rejected) during a long/stalled gate, or it carries a
+	// human-review-only strategy (merge_strategy=local / no_merge). The local
+	// squash commit is rolled back and NOTHING is pushed. Not a build/test
+	// failure: there is no worker fix to make. Callers MUST NOT run post-merge
+	// cleanup and MUST NOT nudge the polecat to resubmit. See gu-tw7fa (the
+	// talon_cdk mis-merge gc-wisp-ifnp: a retracted, merge=local MR auto-landed
+	// after its gate stalled ~20min on a stale flock).
+	Retracted bool
 }
 
 // doMerge performs the actual git merge operation.
@@ -892,6 +920,26 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		return ProcessResult{
 			Success: false,
 			Error:   fmt.Sprintf("failed to get merge commit SHA: %v", err),
+		}
+	}
+
+	// Step 6.5: Re-validate the MR bead immediately before the push (gu-tw7fa).
+	// Gates can stall for many minutes (stale flock, host-load deferral); during
+	// that window the MR may have been retracted (bead closed) or re-classified
+	// human-review-only (merge_strategy=local / no_merge). The readiness checks
+	// ran BEFORE the stall, so this is the only point that catches a retraction
+	// that raced the gate. On abort, roll back the local squash commit (the
+	// target branch is checked out, so ResetHard is required) and return
+	// Retracted — nothing reaches origin/<target>.
+	if abortReason := e.resolveRevalidateBeforePush()(branch, sourceIssue); abortReason != "" {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Aborting push: %s\n", abortReason)
+		if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after pre-push re-validation abort: %v\n", target, resetErr)
+		}
+		return ProcessResult{
+			Success:   false,
+			Retracted: true,
+			Error:     abortReason,
 		}
 	}
 
@@ -1806,6 +1854,16 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 		return
 	}
 
+	// gu-tw7fa: the MR was retracted (bead closed) or re-classified
+	// human-review-only (merge_strategy=local / no_merge) during a long/stalled
+	// gate, and the pre-push re-validation caught it. Not a failure — nothing
+	// landed and there is no worker fix to make. Dequeue silently; no polecat or
+	// mayor nudge. The local squash commit was already rolled back in doMerge.
+	if result.Retracted {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: retracted/human-review-only at push time (%s), dequeued\n", mr.ID, result.Error)
+		return
+	}
+
 	// NeedsApproval: PR exists but lacks required approving review (merge_strategy=pr).
 	// Not a failure — the MR stays in queue and will be retried on the next poll.
 	// No polecat notification needed; the PR just needs a human review on GitHub.
@@ -2183,6 +2241,69 @@ func (e *Engineer) IsBeadOpen(beadID string) (bool, error) {
 	}
 	// "closed" status means the bead is done
 	return issue.Status != "closed", nil
+}
+
+// revalidateMRBeforePush re-reads the MR bead immediately before the refinery
+// pushes a squash merge to the protected target branch. It is the last line of
+// defense against landing work that became un-mergeable WHILE a gate was
+// running. A gate can stall for many minutes (stale flock, host-load deferral),
+// and during that window an owner can retract the MR (close/reject the bead) or
+// the work can be re-classified human-review-only (merge_strategy=local /
+// no_merge). The pre-push checks in ListReadyMRs/doMerge ran BEFORE the stall,
+// so without this re-read the refinery would push a retracted, human-review-only
+// MR onto mainline (gu-tw7fa, the talon_cdk mis-merge gc-wisp-ifnp).
+//
+// Returns a non-nil reason string when the push MUST be aborted; empty string
+// means proceed. Fail-OPEN on lookup errors: a transient beads read failure must
+// not wedge the queue, and the downstream verified-push still guards correctness.
+func (e *Engineer) revalidateMRBeforePush(branch, sourceIssue string) string {
+	// Find the MR bead for this branch. The branch is the stable key the
+	// refinery merges on; the MR bead carries status + merge strategy.
+	mrBead, err := e.beads.FindMRForBranchAny(branch)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pre-push MR re-validation lookup failed for %s: %v (proceeding)\n", branch, err)
+		return ""
+	}
+	if mrBead == nil {
+		// No MR bead found. Don't invent an abort: the merge may have been
+		// initiated by a hand-merge path that doesn't register an MR bead.
+		return ""
+	}
+
+	// Retraction: the MR bead was closed (rejected/retracted) during the gate.
+	// A closed MR must never auto-land regardless of gate outcome.
+	if mrBead.Status == "closed" {
+		return fmt.Sprintf("MR %s was retracted (bead closed) during the gate — refusing to push", mrBead.ID)
+	}
+
+	// Human-review-only strategy on the MR bead. merge_strategy=local means the
+	// refinery merges locally but never auto-pushes; it must not land here even
+	// if the gate passed.
+	if af := beads.ParseAttachmentFields(mrBead); af != nil {
+		if af.MergeStrategy == "local" {
+			return fmt.Sprintf("MR %s is merge_strategy=local (human-review-only) — refusing to auto-push", mrBead.ID)
+		}
+		if af.NoMerge {
+			return fmt.Sprintf("MR %s carries no_merge=true — refusing to auto-push", mrBead.ID)
+		}
+	}
+
+	// Re-check the source issue too: an owner can flip no_merge / merge=local on
+	// the source issue (not the MR bead) during the stall.
+	if sourceIssue != "" {
+		if si, siErr := e.beads.Show(sourceIssue); siErr == nil && si != nil {
+			if af := beads.ParseAttachmentFields(si); af != nil {
+				if af.NoMerge {
+					return fmt.Sprintf("source issue %s set no_merge=true during the gate — refusing to push", sourceIssue)
+				}
+				if af.MergeStrategy == "local" {
+					return fmt.Sprintf("source issue %s set merge_strategy=local during the gate — refusing to push", sourceIssue)
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // issueToMRInfo converts a beads issue (with parsed MR fields) into an MRInfo.

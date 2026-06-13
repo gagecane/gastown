@@ -349,6 +349,14 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 		// branch) — the commit never reached origin.
 		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: push to origin/%s failed, MR preserved for rebase+retry\n", mr.ID, target)
 		e.HandleMRInfoFailure(mr, processResult)
+	} else if processResult.Retracted {
+		// gu-tw7fa: the MR was re-validated immediately before the push and found
+		// retracted (bead closed) or human-review-only (merge_strategy=local /
+		// no_merge). The local squash commit was already rolled back in doMerge.
+		// Dequeue silently — there is nothing for a worker to fix and nothing
+		// landed. Do NOT call HandleMRInfoSuccess (nothing reached origin).
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: retracted/human-review-only at push time, dequeuing (nothing landed)\n", mr.ID)
+		e.HandleMRInfoFailure(mr, processResult)
 	} else {
 		result.Error = fmt.Errorf("merge failed: %s", processResult.Error)
 	}
