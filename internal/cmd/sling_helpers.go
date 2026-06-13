@@ -1549,6 +1549,33 @@ func loadRigCommandVars(townRoot, rig string) []string {
 	return vars
 }
 
+// loadRigMergeQueueConfig loads the effective merge-queue config for a rig,
+// merging repo-committed defaults (floor) with rig-local overrides (operator
+// tuning) using the same precedence loadRigCommandVars relies on. Returns nil
+// when neither source defines a merge-queue config.
+func loadRigMergeQueueConfig(townRoot, rig string) *config.MergeQueueConfig {
+	if townRoot == "" || rig == "" {
+		return nil
+	}
+
+	// Load repo-sourced settings (floor — committed to git, always present after clone)
+	var repoMQ *config.MergeQueueConfig
+	repoRoot := filepath.Join(townRoot, rig, "mayor", "rig")
+	if repoSettings, _ := config.LoadRepoSettings(repoRoot); repoSettings != nil {
+		repoMQ = repoSettings.MergeQueue
+	}
+
+	// Load rig-local settings (override — operator tuning)
+	var localMQ *config.MergeQueueConfig
+	settingsPath := filepath.Join(townRoot, rig, "settings", "config.json")
+	if localSettings, err := config.LoadRigSettings(settingsPath); err == nil && localSettings != nil {
+		localMQ = localSettings.MergeQueue
+	}
+
+	// Merge: repo defaults + local overrides
+	return config.MergeSettingsCommand(repoMQ, localMQ)
+}
+
 // shouldAcceptPermissionWarning checks if the agent emits a bypass-permissions
 // warning on startup that needs to be acknowledged via tmux.
 func shouldAcceptPermissionWarning(agentName string) bool {

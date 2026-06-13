@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 )
 
@@ -1519,6 +1521,89 @@ func TestRelayBaseForLocalMerge(t *testing.T) {
 			if gotBase != tt.wantBase || gotRelay != tt.wantRelay {
 				t.Errorf("relayBaseForLocalMerge() = (%q, %v), want (%q, %v)",
 					gotBase, gotRelay, tt.wantBase, tt.wantRelay)
+			}
+		})
+	}
+}
+
+// writeRigMergeQueueSettings writes a rig-local settings/config.json carrying
+// the given merge-queue config and returns the town root. Used to exercise the
+// disk-backed loadRigMergeQueueConfig lookup.
+func writeRigMergeQueueSettings(t *testing.T, rigName string, mq *config.MergeQueueConfig) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	settingsDir := filepath.Join(townRoot, rigName, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	data, err := json.Marshal(&config.RigSettings{MergeQueue: mq})
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), data, 0644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	return townRoot
+}
+
+// TestLocalMergeWouldStrandReviewedCodeBead covers the gs-ydv9 guard: a
+// non-relay merge=local bead on a PR-review rig must be detected as a work-loss
+// strand (so gt done reroutes it through the merge queue), while relay legs,
+// no_merge/review_only tasks, and non-PR rigs must NOT trip the guard.
+func TestLocalMergeWouldStrandReviewedCodeBead(t *testing.T) {
+	truePtr := true
+	prMQ := &config.MergeQueueConfig{MergeStrategy: "pr"}
+	reviewMQ := &config.MergeQueueConfig{RequireReview: &truePtr}
+	directMQ := &config.MergeQueueConfig{MergeStrategy: "direct"}
+
+	tests := []struct {
+		name       string
+		mq         *config.MergeQueueConfig
+		convoyInfo *ConvoyInfo
+		isNoMerge  bool
+		want       bool
+	}{
+		{
+			name:       "non-relay local on pr rig → strand risk",
+			mq:         prMQ,
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local"},
+			want:       true,
+		},
+		{
+			name:       "non-relay local on require_review rig → strand risk",
+			mq:         reviewMQ,
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local"},
+			want:       true,
+		},
+		{
+			name:       "relay leg (base branch set) → not a strand",
+			mq:         prMQ,
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local", BaseBranch: "proto/v3-build"},
+			want:       false,
+		},
+		{
+			name:       "no_merge/review_only task → not a strand",
+			mq:         prMQ,
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local"},
+			isNoMerge:  true,
+			want:       false,
+		},
+		{
+			name:       "non-pr rig (merge_strategy=direct, no review) → not a strand",
+			mq:         directMQ,
+			convoyInfo: &ConvoyInfo{MergeStrategy: "local"},
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rigName := "testrig"
+			townRoot := writeRigMergeQueueSettings(t, rigName, tt.mq)
+			sc := strategyContext{townRoot: townRoot, rigName: rigName, defaultBranch: "main"}
+			got := localMergeWouldStrandReviewedCodeBead(sc, tt.convoyInfo, tt.isNoMerge)
+			if got != tt.want {
+				t.Errorf("localMergeWouldStrandReviewedCodeBead() = %v, want %v", got, tt.want)
 			}
 		})
 	}

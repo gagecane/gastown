@@ -136,6 +136,37 @@ func relayBaseForLocalMerge(convoyInfo *ConvoyInfo, defaultBranch string) (strin
 	return base, true
 }
 
+// localMergeWouldStrandReviewedCodeBead reports whether a merge=local bead
+// arriving at `gt done` would SILENTLY strand reviewable work on a PR-review
+// rig (gs-ydv9). During auto/deferred dispatch the rig-default formula can stage
+// merge_strategy=local, overwriting the bead's intended PR workflow; the
+// keep-local path then closes the bead COMPLETED while the commits stay on the
+// local feature branch — never pushed, never reviewed, invisible (on a customer
+// repo, effectively lost). It fires only when ALL hold:
+//   - the convoy's merge=local is NOT a relay leg (relay legs carry a base branch
+//     and legitimately FF-push, gs-d26);
+//   - the bead is NOT a no_merge / review_only task (their local-stay is
+//     intentional and handled by their own paths);
+//   - the rig routes work through PR review (merge_strategy=pr or
+//     require_review=true).
+//
+// At that exact combination there is no legitimate keep-local behavior to
+// preserve, so the caller routes the bead through the normal merge-queue path
+// instead of stranding it.
+func localMergeWouldStrandReviewedCodeBead(sc strategyContext, convoyInfo *ConvoyInfo, isNoMergeTask bool) bool {
+	if isNoMergeTask {
+		return false
+	}
+	if _, isRelay := relayBaseForLocalMerge(convoyInfo, sc.defaultBranch); isRelay {
+		return false
+	}
+	mq := loadRigMergeQueueConfig(sc.townRoot, sc.rigName)
+	if mq == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(mq.MergeStrategy), "pr") || mq.IsRequireReviewEnabled()
+}
+
 // mrRelayTargetOverride resolves the relay base branch an MR should target when
 // no higher-priority source already chose one. It fires only when no explicit
 // --target was given AND the running target is still the rig default — so the
@@ -775,6 +806,19 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Handle "local" strategy: skip push and MR entirely (or FF-push a relay
 		// leg). A merge=local convoy is always fully handled here.
+		//
+		// gs-ydv9 guard: a non-relay merge=local on a PR-review rig was stamped by
+		// a rig-default formula during auto/deferred dispatch, overriding the
+		// bead's intended PR workflow. Taking the keep-local path would close the
+		// bead COMPLETED while the commits never reach origin or review (work loss
+		// on a customer repo). Rewrite to "mr" so it falls through to the normal
+		// merge-queue path instead of stranding.
+		if convoyInfo != nil && convoyInfo.MergeStrategy == "local" &&
+			localMergeWouldStrandReviewedCodeBead(sc, convoyInfo, isNoMergeTask) {
+			fmt.Fprintf(os.Stderr, "%s merge=local with no relay base on a PR-review rig — routing through the merge queue instead of stranding (gs-ydv9)\n", style.Bold.Render("→"))
+			convoyInfo.MergeStrategy = "mr"
+		}
+
 		if convoyInfo != nil && convoyInfo.MergeStrategy == "local" {
 			pushFailed = runConvoyLocalStrategy(sc, convoyInfo)
 			goto notifyWitness
