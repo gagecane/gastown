@@ -444,6 +444,21 @@ func runContaminationPreflight(sc strategyContext, cwdAvailable, alreadyPushed b
 		}
 	}
 
+	// gu-ph24z: auto-format Go files before the branch is pushed. gofmt is a
+	// REQUIRED refinery gate + pre-push-hook fast gate, so an unformatted branch
+	// cannot land — but before this the rejection surfaced AFTER submit, by which
+	// point the polecat is gone and the trivial fix has to bounce through a fresh
+	// dispatch (gu-mxupc rejected twice for the same struct-alignment failure).
+	// Auto-fixing here mirrors the hook's `gofmt -l .` and commits the result so
+	// formatting can no longer reach the merge queue. gofmt is whitespace-only, so
+	// the build/vet/test gates the polecat ran stay valid across the fixup commit;
+	// a gofmt tooling error never strands submission (hook + refinery still gate).
+	if cwdAvailable {
+		if _, fmtErr := completion.AutoFormatGoFiles(sc.g, nil); fmtErr != nil {
+			style.PrintWarning("pre-submit gofmt auto-format failed: %v (pre-push hook / refinery gate will still catch formatting)", fmtErr)
+		}
+	}
+
 	// gu-xp5f: re-run the rig's pre-merge gates to verify the --pre-verified
 	// attestation against reality. On gate failure we DROP the attestation rather
 	// than fail submission. Skipped when already invalidated by auto-rebase.
