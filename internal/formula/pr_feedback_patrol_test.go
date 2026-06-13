@@ -106,3 +106,39 @@ func TestPRFeedbackPatrolDispatchStepPreservesGenericPath(t *testing.T) {
 		}
 	}
 }
+
+// TestPRFeedbackPatrolDispatchStepContainsLearningLoop verifies that the
+// review-feedback bead body instructs the handling polecat to distill
+// recurring feedback into a claude-md-convention proposal bead (hq-fsyy7 /
+// gs-agwi). The judgment lives with the polecat that reads the comments —
+// the patrol only sees reviewDecision.
+func TestPRFeedbackPatrolDispatchStepContainsLearningLoop(t *testing.T) {
+	f, err := ParseFile("formulas/mol-pr-feedback-patrol.formula.toml")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	var dispatchStep *Step
+	for i := range f.Steps {
+		if f.Steps[i].ID == "dispatch-work" {
+			dispatchStep = &f.Steps[i]
+			break
+		}
+	}
+	if dispatchStep == nil {
+		t.Fatal("dispatch-work step not found")
+	}
+
+	learningChecks := []string{
+		"Learning Loop",
+		"generalizable rule",
+		"claude-md-convention",
+		"PROPOSE",
+		"Conventions",
+	}
+	for _, want := range learningChecks {
+		if !strings.Contains(dispatchStep.Description, want) {
+			t.Errorf("dispatch-work description missing learning-loop keyword %q", want)
+		}
+	}
+}

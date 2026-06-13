@@ -284,6 +284,25 @@ Type: Review feedback (CHANGES_REQUESTED)
 A reviewer has requested changes on this PR. Address the feedback and push
 an update, or respond to resolve the conversation.
 
+## Learning Loop — Distill Recurring Feedback (hq-fsyy7)
+
+After you have addressed the comments, before you finish, ask:
+**is any of this feedback a generalizable rule?** A rule is generalizable when
+the same correction would apply to future PRs — a team style the reviewer wants,
+a pattern to avoid, or a landmine you just discovered. One-off, PR-specific
+notes are NOT generalizable; skip them.
+
+If — and only if — the feedback is recurring/generalizable, file a one-line
+distill bead proposing a rig CLAUDE.md Conventions entry. Single-quote the args
+and substitute concrete values (run this as a plain command, not a fenced block):
+
+    bd create --title 'Convention candidate: <one-line rule> (from PR #N)' --type task --priority 3 --label claude-md-convention --label pr-num-N --description 'Proposed CLAUDE.md Conventions line: <one concrete imperative rule>. Source: <pr-url> review feedback. Apply to: <which rig CLAUDE.md — e.g. lia_bac/lia_iac/lia_web>.'
+
+Guard: rig CLAUDE.md files are gastown-side (NOT the customer repo). You only
+PROPOSE via this bead; a human or crew member reviews and APPLIES the one-line
+edit, and prunes stale entries quarterly. Keep the proposed rule one line and
+concrete. Do not edit any CLAUDE.md yourself.
+
 Dispatched by mol-pr-feedback-patrol."
   elif [ "$TYPE" = "ci-failure" ]; then
     TITLE="Fix CI failure on PR #${PR_NUM}: ${PR_TITLE}"
