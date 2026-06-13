@@ -648,6 +648,61 @@ test_gate_slot_cap_skips_without_town_root() {
   PASS=$((PASS + 1)); cleanup_last_run
 }
 
+# Test (gu-428u3): this hook is a polecat PRE-SUBMIT run, so it must only take
+# SHARED slots and never touch the slot reserved for the refinery merge gate.
+# With GT_GATE_CONCURRENCY=2 and GT_GATE_REFINERY_RESERVE=1 the shared pool is
+# just slot-0; if a holder occupies slot-0, the hook must proceed unthrottled
+# (its wait expires) rather than steal the reserved slot-1. We verify the hook
+# proceeds unthrottled AND that slot-1 is still free afterward.
+test_gate_slot_polecat_never_takes_reserved() {
+  local stubdir tmprepo townroot
+  read -r stubdir tmprepo townroot < <(make_cap_fixture)
+  local shared="$townroot/.runtime/locks/gate-slots/slot-0.flock"
+  local reserved="$townroot/.runtime/locks/gate-slots/slot-1.flock"
+  local ready; ready=$(mktemp -u)
+
+  # Hold the only SHARED slot (slot-0). The reserved slot-1 stays free.
+  ( exec 9>"$shared"; flock 9; : > "$ready"; sleep 30 ) &
+  local holder=$!
+  local tries=0
+  while [[ ! -f "$ready" && $tries -lt 50 ]]; do sleep 0.1; tries=$((tries + 1)); done
+
+  local rc=0 out
+  out=$(
+    cd "$tmprepo" && \
+    env PATH="$stubdir:/usr/bin:/bin" GT_PREPUSH_PROBE_DIRS="$stubdir" \
+    GT_TOWN_ROOT="$townroot" GT_GATE_CONCURRENCY=2 GT_GATE_REFINERY_RESERVE=1 \
+    GT_GATE_SLOT_WAIT_SECONDS=2 \
+    GT_SKIP_PREPUSH=1 GT_SKIP_PREPUSH_REASON=pre-verified \
+    bash "$SCRIPT" 2>&1
+  ) || rc=$?
+  rc=${rc:-0}
+
+  # Probe slot-1 WHILE deciding: it must never have been taken by the hook.
+  # (The hook has already exited by here; a free reserved slot proves it was
+  # never scanned.)
+  local reserved_free=0
+  if ( exec 8>"$reserved"; flock -n 8 ); then reserved_free=1; fi
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  rm -f "$ready"
+
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL: polecat hook should proceed unthrottled when only the reserved slot is free (got rc=$rc)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
+  fi
+  if ! echo "$out" | grep -qi "proceeding without the host-wide concurrency cap"; then
+    echo "FAIL: with only the reserved slot free, the polecat hook must proceed unthrottled (not steal it)" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
+  fi
+  if [[ "$reserved_free" -ne 1 ]]; then
+    echo "FAIL: reserved slot-1 should remain free — the polecat hook must not scan it" >&2
+    echo "$out" >&2; FAIL=$((FAIL + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"; return
+  fi
+  PASS=$((PASS + 1)); rm -rf "$stubdir" "$tmprepo" "$townroot"
+}
+
 # Test: a healthy default run passes all fast gates and reports completion.
 # (gs-4s06: there is no slow tier or wall-clock anymore; this is the happy path.)
 test_all_fast_gates_pass() {
@@ -749,6 +804,8 @@ if command -v git >/dev/null 2>&1; then
   test_gate_slot_cap_proceeds_when_full
   test_gate_slot_cap_acquires_when_free
   test_gate_slot_cap_skips_without_town_root
+  # gu-428u3: polecat pre-submit gates never take the refinery's reserved slot
+  test_gate_slot_polecat_never_takes_reserved
   # gu-enqh0: upfront banner before gates
   test_banner_printed_by_default
 fi

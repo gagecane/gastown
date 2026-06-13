@@ -1783,12 +1783,20 @@ func (e *Engineer) runGatesForPhase(ctx context.Context, phase GatePhase, branch
 	// the refinery's heavy gate ran uncoordinated alongside the capped polecat
 	// runs against the shared host + Dolt server, and contention (Dolt conn
 	// timeouts, memory-budget assertions, config races) flaked merges on clean
-	// code (refinery escalation gc-56r2yy). Best-effort: AcquireGateSlot returns
-	// nil (proceed unthrottled) when no town root is known or the wait times
-	// out — the cap is an overload guard, never a reason to wedge the queue.
-	// waitForGateLoad runs first so we don't hold a scarce slot while merely
-	// waiting for load to drop.
-	if release := lock.AcquireGateSlot(refineryTownRoot(e), lock.DefaultGateSlotWaitTimeout); release != nil {
+	// code (refinery escalation gc-56r2yy). Best-effort: AcquireGateSlotPriority
+	// returns nil (proceed unthrottled) when no town root is known or the wait
+	// times out — the cap is an overload guard, never a reason to wedge the
+	// queue. waitForGateLoad runs first so we don't hold a scarce slot while
+	// merely waiting for load to drop.
+	//
+	// gu-428u3: use the PRIORITY acquire so the merge gate scans slots reserved
+	// for the refinery (which polecat pre-submit runs cannot take) before the
+	// shared slots. Without the reservation, a polecat swarm saturated the whole
+	// pool and perpetually starved the refinery — the merge queue backed up (7+
+	// deep) while every MR sat 'ready' but unmergeable. The reservation bounds
+	// total host concurrency identically (same on-disk slot files) while
+	// guaranteeing the merge gate always has a slot to make progress.
+	if release := lock.AcquireGateSlotPriority(refineryTownRoot(e), lock.DefaultGateSlotWaitTimeout); release != nil {
 		defer release()
 	}
 

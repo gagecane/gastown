@@ -53,6 +53,29 @@ var semaphoreRetryInterval = 250 * time.Millisecond
 // On timeout it returns a non-nil error and a nil cleanup func; callers that
 // want to proceed unthrottled on timeout should treat the error as advisory.
 func (s *FlockSemaphore) Acquire(timeout time.Duration) (func(), error) {
+	order := make([]int, s.n)
+	for i := range order {
+		order[i] = i
+	}
+	return s.AcquireSlots(order, timeout)
+}
+
+// AcquireSlots takes one of the slots whose indices appear in `order`, trying
+// them in the given order on each scan and retrying until one frees up or the
+// timeout elapses. A non-positive timeout means wait indefinitely.
+//
+// Slot files are named slot-<i>.flock under the semaphore dir, so a slot's
+// identity is its index, not its position in `order` — callers that pass
+// overlapping index sets (e.g. a high-priority caller that scans a reserved
+// tail first, then shared slots as overflow) contend on the same on-disk
+// files and so share one host-wide cap. This is the primitive that lets the
+// refinery merge gate reserve slots a polecat pre-submit run can never take
+// (gu-428u3): the polecat passes only the shared indices, the refinery passes
+// the reserved indices first followed by the shared ones.
+//
+// On timeout it returns a non-nil error and a nil cleanup func; callers that
+// want to proceed unthrottled on timeout should treat the error as advisory.
+func (s *FlockSemaphore) AcquireSlots(order []int, timeout time.Duration) (func(), error) {
 	if err := os.MkdirAll(s.dir, 0755); err != nil {
 		return nil, fmt.Errorf("creating semaphore dir: %w", err)
 	}
@@ -63,7 +86,7 @@ func (s *FlockSemaphore) Acquire(timeout time.Duration) (func(), error) {
 	}
 
 	for {
-		for i := 0; i < s.n; i++ {
+		for _, i := range order {
 			slotPath := filepath.Join(s.dir, fmt.Sprintf("slot-%d.flock", i))
 			release, locked, err := FlockTryAcquire(slotPath)
 			if err != nil {
@@ -73,9 +96,9 @@ func (s *FlockSemaphore) Acquire(timeout time.Duration) (func(), error) {
 				return release, nil
 			}
 		}
-		// All slots held. Bail if we're past the deadline.
+		// All requested slots held. Bail if we're past the deadline.
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for a free semaphore slot in %s (all %d held)", s.dir, s.n)
+			return nil, fmt.Errorf("timed out waiting for a free semaphore slot in %s (%d slot(s) tried, all held)", s.dir, len(order))
 		}
 		time.Sleep(semaphoreRetryInterval)
 	}

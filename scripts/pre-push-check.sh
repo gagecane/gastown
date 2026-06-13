@@ -257,13 +257,18 @@ fi
 # GT_GATE_SLOT_WAIT_SECONDS bounds the wait (default 600, matching the Go
 # side's 10m) and lets tests shrink it.
 #
-# SYNC INVARIANT (gu-ym89r): the slot dir ($GT_TOWN_ROOT/.runtime/locks/gate-slots),
-# the GT_GATE_CONCURRENCY env knob, and its default (2) are owned canonically by
-# internal/lock/gateslot.go (GateSlotDir / GateSlotEnvVar / DefaultGateConcurrency).
-# Every Go consumer — the polecat gt-done path AND the refinery merge gate — now
-# acquires through that one helper. This bash hook computes the same path/knob
-# inline so it joins the identical flock pool; if you change either side, change
-# both or they silently split into two unsynchronized caps.
+# SYNC INVARIANT (gu-ym89r, gu-428u3): the slot dir
+# ($GT_TOWN_ROOT/.runtime/locks/gate-slots), the GT_GATE_CONCURRENCY knob and its
+# default (2), and the GT_GATE_REFINERY_RESERVE knob and its default (1) are owned
+# canonically by internal/lock/gateslot.go (GateSlotDir / GateSlotEnvVar /
+# DefaultGateConcurrency / GateReserveEnvVar / DefaultGateRefineryReserve). Every
+# Go consumer acquires through that package: the polecat gt-done path via
+# AcquireGateSlot (shared slots only) and the refinery merge gate via
+# AcquireGateSlotPriority (reserved tail first). This bash hook is a polecat
+# pre-submit run, so it computes the same path/knobs inline and scans only the
+# SHARED slots [0, n-reserve) — joining the identical flock pool while leaving the
+# reserved tail for the refinery. If you change either side, change both or they
+# silently split into two unsynchronized caps.
 #
 # Best-effort: if flock is unavailable, no town root is known, or all slots
 # stay held past the wait, we proceed UNTHROTTLED rather than block a push. The
@@ -292,10 +297,23 @@ acquire_gate_slot() {
   local n="${GT_GATE_CONCURRENCY:-2}"
   [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || n=2
 
+  # gu-428u3: this is a polecat PRE-SUBMIT gate run, so it may only take SHARED
+  # slots — the reserved tail [n-reserve, n) is held back for the refinery merge
+  # gate (Go side: lock.AcquireGateSlotPriority). Scanning only the first
+  # n-reserve slots is what guarantees a polecat swarm can never saturate the
+  # pool and starve merges. Reserve honors GT_GATE_REFINERY_RESERVE (default 1,
+  # canonically lock.DefaultGateRefineryReserve) and is clamped to [0, n-1] so at
+  # least one shared slot always remains for this hook.
+  local reserve="${GT_GATE_REFINERY_RESERVE:-1}"
+  [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=1
+  (( reserve > n - 1 )) && reserve=$(( n - 1 ))
+  (( reserve < 0 )) && reserve=0
+  local shared=$(( n - reserve ))
+
   local wait_s="${GT_GATE_SLOT_WAIT_SECONDS:-600}"
   local waited=0 i fd
   while :; do
-    for (( i=0; i<n; i++ )); do
+    for (( i=0; i<shared; i++ )); do
       # Group-scope the stderr redirect — a bare `exec {fd}>file 2>/dev/null`
       # would redirect THIS shell's stderr to /dev/null for the rest of the
       # run (the `2>/dev/null` applies to the current shell via exec), silently
@@ -309,7 +327,7 @@ acquire_gate_slot() {
       fi
     done
     if (( waited >= wait_s )); then
-      echo "pre-push: all $n gate slots held for ${wait_s}s — proceeding without the host-wide concurrency cap (gs-orsm)." >&2
+      echo "pre-push: all $shared shared gate slots ($n total, $reserve reserved for refinery) held for ${wait_s}s — proceeding without the host-wide concurrency cap (gs-orsm)." >&2
       return 0
     fi
     sleep 2
