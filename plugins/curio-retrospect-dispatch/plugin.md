@@ -156,7 +156,9 @@ gt plugin run curio-retrospect-dispatch --force      # Bypass cron gate
 - `curio-proposer --emit-digest` (B1, `gu-7wv36`); air-gap filter (B2)
 - B3 replay overlay (`gu-zx7e0`); B6 proposal taxonomy + dedup + CI guard
   (`gu-9tmry`)
-- B8 (`gu-5zf4t`) — proposal expiry + breaker-reset (anti-wedge), follows this
+- `curio-proposal-expiry` (B8, `gu-5zf4t`) — proposal expiry + breaker-reset
+  (anti-wedge); runs 30m before this plugin so a sweep can free the volume
+  breaker for the same night's dispatch
 - `casc-patrol-dispatch` / `wiki-patrol-dispatch` — precedent plugins
 - `gu-fc8h` / `gu-ono8h` — `gt sling` API drift lessons
 - Design: `.designs/curio-p3-retrospect-agent/{design-doc.md,child-beads.md}`
