@@ -2,8 +2,12 @@ package daemon
 
 import (
 	"database/sql"
+	"io"
+	"log"
 	"testing"
 	"time"
+
+	beadsdk "github.com/steveyegge/beads"
 )
 
 // sampleAt advances the state machine by one sample at a given wall-clock time.
@@ -213,4 +217,83 @@ func TestRecyclePoolDB_NilPoolNoPanic(t *testing.T) {
 	if got := recyclePoolDB(nil, 15*time.Second); got != 0 {
 		t.Errorf("recyclePoolDB(nil) = %d, want 0", got)
 	}
+}
+
+// poolAccessorStore is a minimal beadsdk.Storage that also exposes a raw *sql.DB
+// pool via the daemon's beadsDBAccessor interface. The embedded nil Storage
+// panics if any Storage method is called, which is fine — recycleStorePools
+// only ever calls DB().
+type poolAccessorStore struct {
+	beadsdk.Storage
+	db *sql.DB
+}
+
+func (p *poolAccessorStore) DB() *sql.DB { return p.db }
+
+func newPoolAccessorStore(t *testing.T) *poolAccessorStore {
+	t.Helper()
+	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:3307)/hq")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	return &poolAccessorStore{db: db}
+}
+
+// TestRecycleStorePools_IncludesConvoyManagerPools is the gu-mxupc regression
+// guard. When Dolt is not ready at boot, openBeadsStores() returns nil so
+// d.beadsStores stays nil, and the convoy manager lazily opens its OWN pools.
+// The self-heal must recycle those convoy-manager pools — otherwise it ranges
+// an empty d.beadsStores and recycles nothing in exactly the post-restart
+// window where the leak recurs.
+func TestRecycleStorePools_IncludesConvoyManagerPools(t *testing.T) {
+	cmStore := newPoolAccessorStore(t)
+
+	d := &Daemon{
+		config:    &Config{TownRoot: t.TempDir()},
+		logger:    log.New(io.Discard, "", 0),
+		beadsStores: nil, // Dolt-not-ready-at-boot: daemon holds no stores
+		convoyManager: &ConvoyManager{
+			stores: map[string]beadsdk.Storage{"hq": cmStore},
+		},
+	}
+
+	if got := d.recycleStorePools(); got != 1 {
+		t.Errorf("recycleStorePools recycled %d pool(s), want 1 — "+
+			"self-heal did not recycle the convoy manager's live pools (gu-mxupc)", got)
+	}
+}
+
+// TestRecycleStorePools_DedupsSharedPool verifies that when d.beadsStores and
+// the convoy manager share the same underlying *sql.DB (the Dolt-ready-at-boot
+// path), the shared pool is recycled exactly once rather than collapsed twice.
+func TestRecycleStorePools_DedupsSharedPool(t *testing.T) {
+	shared := newPoolAccessorStore(t)
+
+	d := &Daemon{
+		config:      &Config{TownRoot: t.TempDir()},
+		logger:      log.New(io.Discard, "", 0),
+		beadsStores: map[string]beadsdk.Storage{"hq": shared},
+		convoyManager: &ConvoyManager{
+			stores: map[string]beadsdk.Storage{"hq": shared},
+		},
+	}
+
+	if got := d.recycleStorePools(); got != 1 {
+		t.Errorf("recycleStorePools recycled %d pool(s), want 1 (shared pool deduped)", got)
+	}
+}
+
+// TestRecycleStorePools_NilConvoyManagerNoPanic verifies the self-heal is safe
+// when the convoy manager has not been constructed yet (early boot).
+func TestRecycleStorePools_NilConvoyManagerNoPanic(t *testing.T) {
+	d := &Daemon{
+		config:        &Config{TownRoot: t.TempDir()},
+		logger:        log.New(io.Discard, "", 0),
+		beadsStores:   nil,
+		convoyManager: nil,
+	}
+	d.recycleStorePools() // must not panic
 }

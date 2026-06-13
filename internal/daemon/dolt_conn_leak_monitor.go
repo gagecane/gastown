@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	beadsdk "github.com/steveyegge/beads"
 )
 
 // Dolt connection-leak rate monitor (gu-d1r8g). Follow-up to the convoy
@@ -225,20 +227,51 @@ func (d *Daemon) monitorConnLeak(count int) {
 // or disturbing in-flight queries (database/sql closes only idle connections when
 // MaxIdleConns is lowered). Best-effort: stores without a raw-pool accessor are
 // skipped.
-func (d *Daemon) recycleStorePools() {
+//
+// It recycles BOTH d.beadsStores AND the convoy manager's live store pools
+// (deduped by underlying *sql.DB). This matters because the convoy event poll —
+// the documented leaker (gu-g7q6z) — queries every store every 5s, and those
+// pools are NOT always d.beadsStores: when Dolt is not ready at boot,
+// openBeadsStores() returns nil (d.beadsStores stays nil) and the convoy manager
+// lazily opens its OWN pools into m.stores via the storeOpener callback.
+// d.beadsStores is never reassigned afterward, so ranging it alone recycled zero
+// pools in exactly the post-restart recovery window where the leak recurs —
+// making the self-heal a silent no-op. Recycling the convoy manager's live pools
+// closes that gap (gu-mxupc).
+// Returns the number of distinct pools recycled (for logging/tests).
+func (d *Daemon) recycleStorePools() int {
 	idleTimeout := daemonStoreIdleTimeout(d.config.TownRoot)
+
+	// Dedup by underlying *sql.DB: when d.beadsStores and the convoy manager
+	// share the same pools (Dolt-ready-at-boot path) we must not collapse the
+	// same pool's idle cap twice.
+	seen := make(map[*sql.DB]bool)
 	recycled := 0
-	for _, store := range d.beadsStores {
+	recycle := func(store beadsdk.Storage) {
 		accessor, ok := store.(beadsDBAccessor)
-		if !ok || accessor.DB() == nil {
-			continue
+		if !ok {
+			return
 		}
-		recyclePoolDB(accessor.DB(), idleTimeout)
+		db := accessor.DB()
+		if db == nil || seen[db] {
+			return
+		}
+		seen[db] = true
+		recyclePoolDB(db, idleTimeout)
 		recycled++
 	}
+
+	for _, store := range d.beadsStores {
+		recycle(store)
+	}
+	for _, store := range d.convoyManager.storesSnapshot() {
+		recycle(store)
+	}
+
 	if recycled > 0 {
 		d.logger.Printf("Dolt conn-leak: recycled %d store pool(s) (closed idle connections, restored symmetric pool)", recycled)
 	}
+	return recycled
 }
 
 // recyclePoolDB drops every idle connection a pool is holding and restores the
