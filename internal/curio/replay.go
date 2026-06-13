@@ -103,6 +103,68 @@ type GradeReport struct {
 	WorstNormalWindow string
 }
 
+// GradeA reports whether this report earns an A: every anchor fired all its
+// expected rules (recall intact) and worst-case normal-window candidate volume
+// stayed within normalBound (the precision proxy held). A threshold-tune CR is
+// merge-eligible only at grade A — design-doc Q6, invariant 4 ("replay-graded
+// mutations"). An empty corpus is never an A.
+func (r GradeReport) GradeA(normalBound int) bool {
+	if len(r.AnchorsHit) == 0 {
+		return false
+	}
+	for _, hit := range r.AnchorsHit {
+		if !hit {
+			return false
+		}
+	}
+	return r.NormalCandidates <= normalBound
+}
+
+// GradeWithThresholds grades the default rule set with a rate_thresholds overlay
+// applied, so a config-only threshold CR (daemon.json patrols.curio.rate_thresholds,
+// config-driven since gc-e2uvyr.3) is gradeable without a rebuild. Today's harness
+// grades only the compiled defaults and would miss a config-only regression.
+//
+// The overlay is PARTIAL: it overrides only the listed series and is layered on
+// top of the calibrated defaults, exactly mirroring the live daemon's
+// curioRateThresholds — so the replay grades the SAME effective thresholds the
+// daemon will run with. A nil/empty overlay grades the pure calibrated defaults.
+// The caller's overlay map is not mutated.
+func GradeWithThresholds(overlay map[string]int, fixtures []Fixture) GradeReport {
+	thresholds := DefaultRateThresholds()
+	for series, v := range overlay {
+		thresholds[series] = v
+	}
+	return Grade(DefaultRulesWithThresholds(thresholds), fixtures)
+}
+
+// LoadRateThresholdOverlay reads patrols.curio.rate_thresholds from a daemon.json
+// file so a CR touching only that config block is gradeable in CI. A missing file
+// or absent block yields a nil overlay (grade the calibrated defaults), not an
+// error — an unconfigured town tunes nothing. The projection is hand-rolled to
+// keep this read-only helper free of the internal/daemon package (and its write
+// capability), preserving the curio-proposer air-gap.
+func LoadRateThresholdOverlay(path string) (map[string]int, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: caller-supplied config path
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading daemon config %s: %w", path, err)
+	}
+	var cfg struct {
+		Patrols struct {
+			Curio struct {
+				RateThresholds map[string]int `json:"rate_thresholds"`
+			} `json:"curio"`
+		} `json:"patrols"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing daemon config %s: %w", path, err)
+	}
+	return cfg.Patrols.Curio.RateThresholds, nil
+}
+
 // Grade runs the rules over every fixture and grades recall (anchors fire) and
 // the precision proxy (candidate volume on normal windows).
 func Grade(rules []Rule, fixtures []Fixture) GradeReport {
