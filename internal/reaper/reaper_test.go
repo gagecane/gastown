@@ -713,3 +713,89 @@ func TestWispFlushForcesAddNotPlainAdd(t *testing.T) {
 		t.Errorf("FlushWispWorkingSet must not use DOLT_COMMIT('-Am') — it skips dolt_ignored tables and risks sweeping unrelated changes")
 	}
 }
+
+// TestActionableOpenWispsQuery verifies the past-TTL count query (gu-9ks4i):
+// it must restrict to open/hooked/in_progress non-agent wisps, apply each
+// configured type's TTL as a created_at cutoff, route empty/unknown types to
+// the default TTL, and skip types whose TTL is <= 0 (never expires).
+func TestActionableOpenWispsQuery(t *testing.T) {
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	ttls := map[string]time.Duration{
+		"heartbeat": 6 * time.Hour,
+		"patrol":    24 * time.Hour,
+		"keepme":    0, // never expires — must be skipped
+		"default":   24 * time.Hour,
+	}
+
+	query, args := actionableOpenWispsQuery(ttls, now)
+
+	// Status + agent guard must be present so the count matches what compaction acts on.
+	for _, want := range []string{
+		"w.status IN ('open', 'hooked', 'in_progress')",
+		"w.issue_type != 'agent'",
+	} {
+		if !strings.Contains(query, want) {
+			t.Errorf("query missing %q\n  got: %s", want, query)
+		}
+	}
+
+	// A zero-TTL type must never appear as a per-type branch.
+	if strings.Contains(query, "keepme") {
+		// keepme can only appear in the default-branch NOT IN list, never as its
+		// own cutoff clause. It is excluded from knownTypes entirely (TTL <= 0),
+		// so it should not appear at all.
+		t.Errorf("zero-TTL type 'keepme' must be skipped entirely; got: %s", query)
+	}
+
+	// Known types (heartbeat, patrol) each contribute a cutoff arg; the default
+	// branch lists them in NOT IN and contributes its own cutoff.
+	// args layout: [heartbeat, cutoff, patrol, cutoff, <NOT IN: heartbeat, patrol>, default-cutoff]
+	wantCutoffs := map[string]time.Time{
+		"heartbeat": now.Add(-6 * time.Hour),
+		"patrol":    now.Add(-24 * time.Hour),
+	}
+	for typ, cutoff := range wantCutoffs {
+		found := false
+		for i := 0; i+1 < len(args); i++ {
+			if s, ok := args[i].(string); ok && s == typ {
+				if ct, ok := args[i+1].(time.Time); ok && ct.Equal(cutoff) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("expected cutoff %v for type %q in args %v", cutoff, typ, args)
+		}
+	}
+}
+
+// TestActionableOpenWispsQueryAllNeverExpire confirms that when every TTL is
+// <= 0 the builder returns a constant-zero query (nothing is ever actionable).
+func TestActionableOpenWispsQueryAllNeverExpire(t *testing.T) {
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	ttls := map[string]time.Duration{"heartbeat": 0, "default": 0}
+	query, args := actionableOpenWispsQuery(ttls, now)
+	if query != "SELECT 0" {
+		t.Errorf("all-never-expire should yield 'SELECT 0'; got: %s", query)
+	}
+	if len(args) != 0 {
+		t.Errorf("all-never-expire should yield no args; got: %v", args)
+	}
+}
+
+// TestActionableOpenWispsQueryDefaultOnly confirms the catch-all branch fires
+// when only the default TTL is configured (no per-type entries).
+func TestActionableOpenWispsQueryDefaultOnly(t *testing.T) {
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	ttls := map[string]time.Duration{"default": 24 * time.Hour}
+	query, args := actionableOpenWispsQuery(ttls, now)
+	if strings.Contains(query, "NOT IN") {
+		t.Errorf("default-only query should not contain a NOT IN list; got: %s", query)
+	}
+	if len(args) != 1 {
+		t.Fatalf("default-only query should bind exactly one cutoff; got: %v", args)
+	}
+	if ct, ok := args[0].(time.Time); !ok || !ct.Equal(now.Add(-24*time.Hour)) {
+		t.Errorf("default cutoff = %v, want %v", args[0], now.Add(-24*time.Hour))
+	}
+}

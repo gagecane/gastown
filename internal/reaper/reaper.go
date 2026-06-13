@@ -475,6 +475,101 @@ func CountOpenWisps(db *sql.DB) (int, error) {
 	return open, nil
 }
 
+// DefaultWispTTLKey is the map key whose TTL applies to wisps with an empty or
+// unknown wisp_type. It mirrors compaction's getTTL fallback so the open-wisp
+// alert's "actionable" count uses the same per-type policy compaction acts on.
+const DefaultWispTTLKey = "default"
+
+// actionableOpenWispsQuery builds the COUNT(*) query (and its bound args) for
+// open/hooked/in_progress wisps that are PAST their per-type TTL — i.e. the
+// subset compaction would actually act on (promote or delete). It is the
+// reconciliation between the raw open-wisp count (CountOpenWisps) and
+// compaction's TTL-eligible scope flagged in gu-9ks4i: the escalation should
+// fire on what compaction can act on, not on within-TTL accumulation that
+// drains naturally.
+//
+// Semantics match compaction's getTTL: a wisp whose wisp_type has a configured
+// TTL is past-TTL when created_at < now-ttl; wisps with an empty or unknown
+// wisp_type fall back to the "default" TTL. Cutoffs are computed in Go and
+// bound as parameters to match the existing `created_at < ?` pattern (avoids
+// SQL interval/timezone arithmetic). A type whose TTL is <= 0 is treated as
+// "never expires" and is skipped, matching wisp.isPastTTL.
+//
+// It is a pure function (no I/O) so the query shape is unit-testable, mirroring
+// the established pattern for the other reaper SQL builders.
+func actionableOpenWispsQuery(ttls map[string]time.Duration, now time.Time) (string, []interface{}) {
+	now = now.UTC()
+	defaultTTL := ttls[DefaultWispTTLKey]
+
+	// Stable order so the generated SQL and args are deterministic (testable).
+	knownTypes := make([]string, 0, len(ttls))
+	for t := range ttls {
+		if t == DefaultWispTTLKey {
+			continue
+		}
+		knownTypes = append(knownTypes, t)
+	}
+	sort.Strings(knownTypes)
+
+	var ors []string
+	var args []interface{}
+
+	for _, t := range knownTypes {
+		ttl := ttls[t]
+		if ttl <= 0 {
+			continue // never expires
+		}
+		ors = append(ors, "(COALESCE(w.wisp_type, '') = ? AND w.created_at < ?)")
+		args = append(args, t, now.Add(-ttl))
+	}
+
+	// Catch-all for empty/unknown wisp_type → default TTL (skipped if <= 0).
+	if defaultTTL > 0 {
+		if len(knownTypes) == 0 {
+			ors = append(ors, "(w.created_at < ?)")
+			args = append(args, now.Add(-defaultTTL))
+		} else {
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(knownTypes)), ",")
+			ors = append(ors, fmt.Sprintf("(COALESCE(w.wisp_type, '') NOT IN (%s) AND w.created_at < ?)", placeholders))
+			for _, t := range knownTypes {
+				args = append(args, t)
+			}
+			args = append(args, now.Add(-defaultTTL))
+		}
+	}
+
+	if len(ors) == 0 {
+		// Every configured TTL is "never expires": nothing is ever actionable.
+		return "SELECT 0", nil
+	}
+
+	query := fmt.Sprintf(
+		"SELECT COUNT(*) FROM wisps w WHERE w.status IN ('open', 'hooked', 'in_progress') "+
+			"AND w.issue_type != 'agent' AND (%s)",
+		strings.Join(ors, " OR "))
+	return query, args
+}
+
+// CountActionableOpenWisps returns the number of open/hooked/in_progress wisps
+// that are past their per-type TTL — the subset compaction would act on. This
+// is the actionable count the open-wisp escalation gates on, reconciling the
+// reaper's raw count with compaction's TTL-eligible scope (gu-9ks4i).
+// Databases without the reaper schema return 0.
+func CountActionableOpenWisps(db *sql.DB, ttls map[string]time.Duration) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	query, args := actionableOpenWispsQuery(ttls, time.Now())
+	var n int
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		if isTableNotFound(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("count actionable open wisps: %w", err)
+	}
+	return n, nil
+}
+
 // Reap closes stale wisps in a database whose parent molecule is already closed.
 // UPDATEs are batched to avoid holding a write lock for extended periods on large tables.
 func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapResult, error) {

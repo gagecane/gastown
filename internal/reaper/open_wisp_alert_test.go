@@ -124,7 +124,7 @@ func TestOpenWispAlertSignatureStableAcrossDrift(t *testing.T) {
 
 func TestEscalateArgsNilWhenNotFiring(t *testing.T) {
 	a := EvaluateOpenWispAlert(700, 800)
-	if got := a.EscalateArgs(700, 800); got != nil {
+	if got := a.EscalateArgs(700, 1500, 800); got != nil {
 		t.Fatalf("EscalateArgs on non-firing alert = %v, want nil", got)
 	}
 }
@@ -135,7 +135,7 @@ func TestEscalateArgsNilWhenNotFiring(t *testing.T) {
 // what stops the every-cycle re-fire described in gu-ka8aj.
 func TestEscalateArgsCarriesDedupMetadata(t *testing.T) {
 	a := EvaluateOpenWispAlert(812, 800) // band 1, medium, 4h
-	args := a.EscalateArgs(812, 800)
+	args := a.EscalateArgs(812, 1600, 800)
 	joined := strings.Join(args, " ")
 
 	wantSubstrings := []string{
@@ -166,7 +166,7 @@ func TestEscalateArgsCarriesDedupMetadata(t *testing.T) {
 
 func TestEscalateArgsHighBandUsesShortCooldown(t *testing.T) {
 	a := EvaluateOpenWispAlert(1700, 800) // band 2, high, 1h
-	joined := strings.Join(a.EscalateArgs(1700, 800), " ")
+	joined := strings.Join(a.EscalateArgs(1700, 3000, 800), " ")
 	if !strings.Contains(joined, "-s high") {
 		t.Errorf("band 2 should escalate at high severity; got: %s", joined)
 	}

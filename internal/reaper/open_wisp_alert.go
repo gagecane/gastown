@@ -57,13 +57,21 @@ type OpenWispAlert struct {
 // if so, returns its stable dedup metadata. It makes no I/O and is the single
 // source of truth used by the `gt reaper alert-open-wisps` command.
 //
+// The alert gates on `actionable` — the count of open wisps PAST their per-type
+// TTL, i.e. the subset compaction would actually act on (see
+// CountActionableOpenWisps). It does NOT gate on the raw open count, because
+// within-TTL accumulation under high session activity drains naturally and is
+// not something an operator can act on (gu-9ks4i). The raw count is still
+// carried through EscalateArgs for the human-readable reason so accumulation
+// stays visible without driving the dedup/fire decision.
+//
 // threshold <= 0 is treated as "alerting disabled" (never fire) so an operator
 // can opt out via config without a special case at every call site.
-func EvaluateOpenWispAlert(open, threshold int) OpenWispAlert {
-	if threshold <= 0 || open <= threshold {
+func EvaluateOpenWispAlert(actionable, threshold int) OpenWispAlert {
+	if threshold <= 0 || actionable <= threshold {
 		return OpenWispAlert{Fire: false}
 	}
-	bucket := open / threshold // >= 1 since open > threshold > 0
+	bucket := actionable / threshold // >= 1 since actionable > threshold > 0
 	severity := "medium"
 	cooldown := openWispMediumCooldown
 	if bucket >= 2 {
@@ -91,17 +99,24 @@ const openWispAlertSource = "reaper:open-wisp-count"
 //
 // Callers MUST check Fire before invoking; calling on a non-firing alert
 // returns nil.
-func (a OpenWispAlert) EscalateArgs(open, threshold int) []string {
+//
+// `actionable` is the past-TTL count the alert fired on (the value compared to
+// the threshold); `rawOpen` is the total open-wisp count, reported alongside it
+// so the escalation surfaces both the actionable subset and the overall
+// accumulation (gu-9ks4i).
+func (a OpenWispAlert) EscalateArgs(actionable, rawOpen, threshold int) []string {
 	if !a.Fire {
 		return nil
 	}
-	title := fmt.Sprintf("%d open wisps exceed alert threshold (%d)", open, threshold)
+	title := fmt.Sprintf("%d actionable (past-TTL) open wisps exceed alert threshold (%d)", actionable, threshold)
 	reason := fmt.Sprintf(
-		"Open wisp count %d is %dx the alert threshold of %d (breach band %d). "+
-			"Investigate wisp lifecycle — this escalation deduplicates on the "+
-			"breach band, so it will not re-fire for normal count drift within "+
-			"the same band until the cooldown (%s) elapses.",
-		open, a.Bucket, threshold, a.Bucket, a.Cooldown)
+		"Actionable (past-TTL) open wisp count %d is %dx the alert threshold of %d "+
+			"(breach band %d); total open wisps: %d. These are wisps compaction "+
+			"would act on (promote/delete) — investigate wisp lifecycle. Within-TTL "+
+			"accumulation is excluded because it drains naturally. This escalation "+
+			"deduplicates on the breach band, so it will not re-fire for normal count "+
+			"drift within the same band until the cooldown (%s) elapses.",
+		actionable, a.Bucket, threshold, a.Bucket, rawOpen, a.Cooldown)
 	return []string{
 		"escalate",
 		"-s", a.Severity,
