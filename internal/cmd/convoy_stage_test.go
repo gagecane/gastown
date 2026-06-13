@@ -340,6 +340,72 @@ func TestComputeWaves_ClosedDecisionDoesNotBlock(t *testing.T) {
 	}
 }
 
+// gu-bvl8u: a deferred slingable task occupies no wave slot. Deferring the
+// only task in a wave drops that wave from the recomputed plan.
+func TestComputeWaves_DeferredTaskExcluded(t *testing.T) {
+	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
+		"task-1": {ID: "task-1", Type: "task", Status: "open"},
+		"task-2": {ID: "task-2", Type: "task", Status: "deferred"},
+	}}
+	waves, _, err := computeWaves(dag)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(waves) != 1 {
+		t.Fatalf("expected 1 wave (deferred task-2 excluded), got %d", len(waves))
+	}
+	if len(waves[0].Tasks) != 1 || waves[0].Tasks[0] != "task-1" {
+		t.Errorf("wave 1: got %v, want [task-1]", waves[0].Tasks)
+	}
+}
+
+// gu-bvl8u: deferring a downstream task removes its dedicated wave, reducing
+// the total wave count (the friction reported in the bug: re-staging after a
+// defer did not reduce waves).
+func TestComputeWaves_DeferReducesWaveCount(t *testing.T) {
+	mkDAG := func(t2Status string) *ConvoyDAG {
+		return &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
+			"task-1": {ID: "task-1", Type: "task", Status: "open", Blocks: []string{"task-2"}},
+			"task-2": {ID: "task-2", Type: "task", Status: t2Status, BlockedBy: []string{"task-1"}},
+		}}
+	}
+
+	before, _, err := computeWaves(mkDAG("open"))
+	if err != nil {
+		t.Fatalf("unexpected error (before): %v", err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("expected 2 waves before defer, got %d", len(before))
+	}
+
+	after, _, err := computeWaves(mkDAG("deferred"))
+	if err != nil {
+		t.Fatalf("unexpected error (after): %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("expected 1 wave after deferring task-2, got %d", len(after))
+	}
+	if len(after[0].Tasks) != 1 || after[0].Tasks[0] != "task-1" {
+		t.Errorf("wave 1 after defer: got %v, want [task-1]", after[0].Tasks)
+	}
+}
+
+// gu-bvl8u: closed slingable tasks are likewise excluded from waves.
+func TestComputeWaves_ClosedTaskExcluded(t *testing.T) {
+	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
+		"task-1": {ID: "task-1", Type: "task", Status: "open"},
+		"task-2": {ID: "task-2", Type: "task", Status: "closed"},
+	}}
+	waves, _, err := computeWaves(dag)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	all := allWaveTaskIDs(waves)
+	if len(all) != 1 || all[0] != "task-1" {
+		t.Errorf("expected only [task-1] in waves, got %v", all)
+	}
+}
+
 // U-13: parent-child deps don't create execution edges
 func TestComputeWaves_ParentChildNotExecution(t *testing.T) {
 	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
@@ -2173,6 +2239,62 @@ func TestRestageConvoy_DetectionLogic(t *testing.T) {
 	}
 	if input.Kind != StageInputConvoy {
 		t.Errorf("expected StageInputConvoy, got %v", input.Kind)
+	}
+}
+
+// gu-bvl8u: staging from a plain (non-staged) tracking convoy must find a
+// previously-staged convoy that already covers the same beads instead of
+// orphaning it. findOverlappingConvoys must exclude the source convoy so it
+// does not match itself, and surface the prior staged convoy for auto re-stage.
+func TestStageFromConvoy_FindsPriorStagedAndExcludesSelf(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows — shell stubs")
+	}
+
+	// Source convoy (open tracking convoy the user re-stages from) and a prior
+	// staged convoy — both track the same two tasks.
+	testDAG := newTestDAG(t).
+		Convoy("hq-cv-src", "Source Convoy").WithStatus("open").
+		Convoy("hq-cv-prior", "Prior Staged").WithStatus("staged_ready").
+		Task("gt-o1", "Task O1", withRig("gastown")).TrackedBy("hq-cv-src").TrackedBy("hq-cv-prior").
+		Task("gt-o2", "Task O2", withRig("gastown")).TrackedBy("hq-cv-src").TrackedBy("hq-cv-prior")
+
+	testDAG.Setup(t)
+
+	slingableIDs := []string{"gt-o1", "gt-o2"}
+
+	// Without excluding the source, the open source convoy would match itself
+	// and force an "open convoy already tracks these beads" error.
+	overlaps, err := findOverlappingConvoys(slingableIDs, "hq-cv-src")
+	if err != nil {
+		t.Fatalf("findOverlappingConvoys: %v", err)
+	}
+
+	// The source convoy must NOT appear; the prior staged convoy must.
+	var ids []string
+	for _, o := range overlaps {
+		ids = append(ids, o.ID)
+		if o.ID == "hq-cv-src" {
+			t.Errorf("source convoy hq-cv-src should be excluded, but appeared in overlaps")
+		}
+	}
+	foundPrior := false
+	for _, o := range overlaps {
+		if o.ID == "hq-cv-prior" {
+			foundPrior = true
+		}
+	}
+	if !foundPrior {
+		t.Fatalf("expected prior staged convoy hq-cv-prior in overlaps, got %v", ids)
+	}
+
+	// handleOverlappingConvoys should auto re-stage the single staged overlap.
+	autoRestage, convoyID, err := handleOverlappingConvoys(overlaps)
+	if err != nil {
+		t.Fatalf("handleOverlappingConvoys: %v", err)
+	}
+	if !autoRestage || convoyID != "hq-cv-prior" {
+		t.Errorf("expected auto re-stage of hq-cv-prior, got (restage=%v, id=%q)", autoRestage, convoyID)
 	}
 }
 

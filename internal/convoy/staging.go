@@ -132,6 +132,21 @@ type GatedTask struct {
 	GatedBy []string // IDs of non-slingable open blockers (direct gates only)
 }
 
+// isInactiveStatus reports whether a bead status removes the bead from active
+// wave scheduling. Closed and tombstone beads are already done; deferred beads
+// are intentionally held (the dispatch path refuses them and the scheduler
+// auto-releases them when the defer window expires). A slingable bead in any
+// of these statuses occupies no wave slot, so deferring (or closing) a tracked
+// bead reduces the recomputed wave count (gu-bvl8u).
+func isInactiveStatus(status string) bool {
+	switch status {
+	case "closed", "tombstone", "deferred":
+		return true
+	default:
+		return false
+	}
+}
+
 // ComputeWaves assigns each slingable task to an execution wave using Kahn's
 // algorithm. Wave 1 = tasks with no unsatisfied blocking deps within the
 // staged set. Wave N+1 = tasks whose blockers are ALL in wave N or earlier.
@@ -142,10 +157,15 @@ type GatedTask struct {
 // lists tasks blocked by open non-slingable nodes that cannot be placed in any
 // wave.
 func ComputeWaves(dag *ConvoyDAG) ([]Wave, []GatedTask, error) {
-	// Step 1: Filter to slingable types only.
+	// Step 1: Filter to slingable types in an active status.
+	// Inactive beads (closed, tombstone, deferred) are excluded from wave
+	// slots: closed/tombstone are already done, and deferred work is
+	// intentionally held. Excluding them here means deferring a tracked bead
+	// is reflected in the recomputed waves — a deferred bead that was alone
+	// in its wave drops that wave entirely (gu-bvl8u).
 	slingable := make(map[string]*ConvoyDAGNode)
 	for id, node := range dag.Nodes {
-		if IsSlingableType(node.Type) {
+		if IsSlingableType(node.Type) && !isInactiveStatus(node.Status) {
 			slingable[id] = node
 		}
 	}

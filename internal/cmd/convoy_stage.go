@@ -265,12 +265,21 @@ func runConvoyStage(cmd *cobra.Command, args []string) error {
 	// Step 5: Build the DAG.
 	dag := buildConvoyDAG(beads, deps)
 
-	// Step 5b: Detect overlapping convoys (epic or task-list input only).
-	// When the user stages from an epic (or task list), check if an existing
-	// convoy already tracks these beads. This prevents duplicate convoys.
-	if !isRestage && input.Kind != StageInputConvoy {
+	// Step 5b: Detect overlapping convoys to avoid orphaning a prior staged
+	// convoy. When staging from an epic or task list, an existing convoy may
+	// already track these beads. When staging from a convoy ID that is itself
+	// a plain tracking convoy (not yet staged), a previously-staged convoy may
+	// already cover these beads — so we run detection there too, excluding the
+	// source convoy so it does not match itself (gu-bvl8u). Without this, each
+	// `gt convoy stage <convoy-id>` created a fresh staged convoy and left the
+	// prior one behind as an orphan.
+	if !isRestage {
+		excludeID := ""
+		if input.Kind == StageInputConvoy {
+			excludeID = input.IDs[0]
+		}
 		slingableIDs := dagSlingableIDs(dag)
-		overlaps, err := findOverlappingConvoys(slingableIDs)
+		overlaps, err := findOverlappingConvoys(slingableIDs, excludeID)
 		if err != nil {
 			return fmt.Errorf("checking for overlapping convoys: %w", err)
 		}
@@ -526,7 +535,10 @@ func convoyTrackedBeadIDs(townBeads, convoyID string) (map[string]bool, error) {
 // findOverlappingConvoys lists all staged and open convoys and checks which
 // ones track beads that overlap with the given slingable IDs.
 // Only staged_* and open convoys are considered; closed convoys are skipped.
-func findOverlappingConvoys(slingableIDs []string) ([]overlappingConvoy, error) {
+// excludeID, when non-empty, is omitted from the candidate set — used to skip
+// the source convoy when re-staging from a convoy ID so it does not match
+// itself (gu-bvl8u).
+func findOverlappingConvoys(slingableIDs []string, excludeID string) ([]overlappingConvoy, error) {
 	townBeads, err := getTownBeadsDir()
 	if err != nil {
 		return nil, err
@@ -545,6 +557,9 @@ func findOverlappingConvoys(slingableIDs []string) ([]overlappingConvoy, error) 
 
 	var overlaps []overlappingConvoy
 	for _, c := range convoys {
+		if excludeID != "" && c.ID == excludeID {
+			continue
+		}
 		status := normalizeConvoyStatus(c.Status)
 		// Only consider staged and open convoys.
 		if !isStagedStatus(status) && status != convoyStatusOpen {
