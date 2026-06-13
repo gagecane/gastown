@@ -250,13 +250,28 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 			activeMRSafe: true,
 			gitSafe:      true,
 		},
+		// gu-dw2uh: a MISSING stamp does NOT require workTerminal — it is the
+		// absence of a self-report, not a claim of committed work, so gitSafe alone
+		// proves the worktree holds nothing unpreserved. A non-terminal-but-clean
+		// dead slot must be ignorable so check-recovery doesn't wedge it as the sole
+		// cleanup_status=<missing> blocker (recurring on casc_cdk).
 		{
-			name:         "empty cleanup still blocks with non-terminal work",
+			name:         "empty cleanup with non-terminal work is ignorable when git+hook+mr safe (gu-dw2uh)",
 			status:       "",
 			workTerminal: false,
 			hookSafe:     true,
 			activeMRSafe: true,
 			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "unknown cleanup with non-terminal work is ignorable when git+hook+mr safe (gu-dw2uh)",
+			status:       polecat.CleanupUnknown,
+			workTerminal: false,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
 		},
 		{
 			name:         "empty cleanup still blocks with pending MR",
@@ -264,6 +279,26 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 			workTerminal: true,
 			hookSafe:     true,
 			activeMRSafe: false,
+			gitSafe:      true,
+		},
+		// gu-dw2uh scope guard: workTerminal is dropped ONLY for the missing/unknown
+		// class. A POSITIVE has_unpushed report with non-terminal work must STILL
+		// block — the gu-7nrd divergent-reproduction trap requires a terminal work
+		// ref to distinguish landed work from independent divergent commits.
+		{
+			name:         "has_unpushed with non-terminal work still blocks (gu-7nrd guard)",
+			status:       polecat.CleanupUnpushed,
+			workTerminal: false,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+		},
+		{
+			name:         "has_uncommitted with non-terminal work still blocks (gu-7nrd guard)",
+			status:       polecat.CleanupUncommitted,
+			workTerminal: false,
+			hookSafe:     true,
+			activeMRSafe: true,
 			gitSafe:      true,
 		},
 		// gs-048: a has_uncommitted self-report over benign runtime/.beads churn is

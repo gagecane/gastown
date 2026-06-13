@@ -1333,7 +1333,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			gitSafe := activeMRGitSafeForWorktree(p.ClonePath, r.DefaultBranch())
 			if staleCleanupStatusCanBeIgnoredForRecovery(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafe) {
 				input.IgnoreCleanupStatus = true
-				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=safe work_ref=terminal", input.CleanupStatus))
+				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=safe work_terminal=%t", input.CleanupStatus, workTerminal))
 			}
 		}
 		loadGitState()
@@ -1547,26 +1547,56 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 //     .claude, node_modules, …) as not-work-at-risk — the same policy gt done
 //     uses. So gitSafe==true means the worktree carries NO real source dirt; a
 //     stale has_uncommitted report over benign churn is then safe to ignore.
-//   - missing/unknown (gs-9wz): a polecat that DIED before gt done ever recorded
-//     a cleanup_status — the stalled-debris signature. Such polecats ALWAYS
-//     carry an empty cleanup_status (gt done writes cleanup and flips to idle
-//     together, so a working-state polecat never has cleanup=clean). Without
+//   - missing/unknown (gs-9wz, gu-dw2uh): a polecat that DIED before gt done ever
+//     recorded a cleanup_status — the stalled-debris signature. Such polecats
+//     ALWAYS carry an empty cleanup_status (gt done writes cleanup and flips to
+//     idle together, so a working-state polecat never has cleanup=clean). Without
 //     trusting gitSafe here, `gt polecat nuke` (no --force) refused them
 //     forever and they accumulated as recovery_blocked under auto-dispatch
-//     load — the exact starvation gs-9wz tracks.
+//     load — the exact starvation gs-9wz tracks. Unlike the positive-dirt
+//     reports above, this class does NOT require workTerminal: a missing stamp is
+//     the ABSENCE of a self-report, not a claim of committed work, so there is no
+//     divergent-reproduction commit (gu-7nrd) for a non-terminal work ref to
+//     guard against. gitSafe alone proves the worktree holds nothing unpreserved.
+//     Requiring workTerminal wedged non-terminal-but-clean dead slots:
+//     check-recovery returned NEEDS_RECOVERY with the SOLE blocker
+//     cleanup_status=<missing>, which also blocked RESTART_POLECAT + re-dispatch
+//     (recurring on casc_cdk, gu-dw2uh). The downstream MQ-submit check still
+//     independently catches pushed-but-unsubmitted work.
 //
 // gitSafe is the authoritative live git check (worktree clean excluding runtime
 // artifacts, no stash, 0 patch-unique unpushed commits, branch pushed/preserved
 // to origin) — the same proof for every class above, so each is no weaker than
-// the next. workTerminal/hookSafe/activeMRSafe ensure the assigned work bead,
-// hook, and MR carry no unfinished work either. has_stash remains NON-overridable
-// — a stash is durable work that survives worktree deletion, and a stash
-// self-report is too strong a signal to discard on a live check that might miss
-// it.
+// the next. hookSafe/activeMRSafe ensure the hook and MR carry no unfinished
+// work either; workTerminal additionally guards the positive-dirt classes. has_stash
+// remains NON-overridable — a stash is durable work that survives worktree
+// deletion, and a stash self-report is too strong a signal to discard on a live
+// check that might miss it.
 func staleCleanupStatusCanBeIgnoredForRecovery(status polecat.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
 	switch status {
-	case polecat.CleanupUnpushed, polecat.CleanupUncommitted, polecat.CleanupUnknown, "":
+	case polecat.CleanupUnpushed, polecat.CleanupUncommitted:
+		// A POSITIVE self-report of committed/uncommitted dirt. Requires
+		// workTerminal in addition to gitSafe because an independent local commit
+		// whose patch coincidentally matches the base (gu-7nrd's
+		// divergent-reproduction trap) is git-indistinguishable from
+		// squash-merge-redundant debris — only a terminal work ref proves the
+		// commit is the landed work and not divergent reproduction.
 		return workTerminal && hookSafe && activeMRSafe && gitSafe
+	case polecat.CleanupUnknown, "":
+		// gu-dw2uh: a MISSING/unknown stamp is the ABSENCE of a self-report — the
+		// polecat died before gt done ever recorded one — NOT a positive claim of
+		// dirt. gitSafe is the authoritative live proof that the worktree holds
+		// nothing not already preserved on the base branch (clean excluding
+		// runtime, no stash, all commits patch-preserved). With hookSafe and
+		// activeMRSafe also true, a nuke discards nothing at risk regardless of
+		// whether the assigned bead is terminal. Requiring workTerminal here
+		// wedged every non-terminal-but-clean dead slot: check-recovery returned
+		// NEEDS_RECOVERY with the SOLE blocker cleanup_status=<missing>, which
+		// also blocked RESTART_POLECAT + re-dispatch (recurring on casc_cdk). The
+		// downstream MQ-submit check still independently catches any
+		// pushed-but-unsubmitted work, so dropping workTerminal here cannot orphan
+		// a branch.
+		return hookSafe && activeMRSafe && gitSafe
 	default:
 		return false
 	}
