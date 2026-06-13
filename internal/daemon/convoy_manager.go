@@ -395,6 +395,27 @@ func (m *ConvoyManager) Stop() {
 	}
 }
 
+// storesSnapshot returns a copy of the convoy manager's live store map under
+// the stores lock. These are the pools the 5s event poll actually queries —
+// they may be lazily opened into m.stores (Dolt-not-ready-at-boot path) and
+// therefore distinct from the daemon's d.beadsStores. The conn-leak self-heal
+// (recycleStorePools) needs them so it can recycle the pools that actually leak.
+func (m *ConvoyManager) storesSnapshot() map[string]beadsdk.Storage {
+	if m == nil {
+		return nil
+	}
+	m.storesMu.Lock()
+	defer m.storesMu.Unlock()
+	if len(m.stores) == 0 {
+		return nil
+	}
+	snapshot := make(map[string]beadsdk.Storage, len(m.stores))
+	for k, v := range m.stores {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
 // runEventPoll polls GetAllEventsSince every 5s and processes close events.
 // If stores aren't available at startup (e.g., Dolt not ready), retries
 // lazily via the openStores callback until stores become available.
