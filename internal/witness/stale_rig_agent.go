@@ -314,28 +314,47 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 			}
 		}
 
-		// Idle witness clean-cycle suppression (gu-eke9u): witnesses no longer
-		// block on await-signal between cycles (removed ~06-06). The model is now
-		// DISCRETE CYCLES re-triggered by deacon nudges — a witness completes a
-		// cycle, writes a heartbeat, then sits IDLE-READY at the prompt (not
-		// beating) until the next nudge. On idle rigs the nudge cadence is loose, so
-		// a healthy idle witness legitimately goes hours between heartbeats; its age
-		// tracks last-nudge-time, NOT health. That produced the dominant
-		// STALE_RIG_AGENT noise volume. When the session is ALIVE and the witness's
-		// last heartbeat self-reported a clean-cycle idle-ready signal (state=idle,
-		// or an expected-idle window still in the future), the stale heartbeat is the
-		// expected discrete-cycle idle, not a wedge — suppress it. This mirrors the
-		// gs-ecdg SessionAlive-gated suppression: an alive session that last reported
-		// idle IS the idle-ready witness parked between nudges. SAFETY (preserve
-		// gu-rh0g): (a) state=working/stuck still escalates (real mid-op freeze —
-		// this gate only fires on idle); (b) a DEAD session still escalates
-		// regardless of last state (SessionAlive guards it — guards the "died right
-		// after reporting idle" case); (c) refinery is EXCLUDED — its idle is
-		// authoritatively governed by the merge-queue prober above (gs-ecdg), so
-		// state-overriding it would mask a real wedge; (d) "exiting" is EXCLUDED
-		// (conservative — exiting+alive+long-stale could be a stuck-in-done).
+		// Idle witness clean-cycle suppression (gu-eke9u, broadened gu-jntgt):
+		// witnesses no longer block on await-signal between cycles (removed
+		// ~06-06). The model is now DISCRETE CYCLES re-triggered by deacon nudges
+		// — a witness completes a cycle, writes a heartbeat, then EXITS TO THE
+		// PROMPT (not parked in await-signal, so nothing refreshes the heartbeat)
+		// until the next nudge. On idle rigs the nudge cadence is loose, so a
+		// healthy idle witness legitimately goes hours-to-days between heartbeats;
+		// its age tracks last-nudge-time, NOT health.
+		//
+		// gu-eke9u tried to suppress this by recognizing state=idle, and gs-8gcj
+		// added a TouchSessionHeartbeatWithState(idle) stamp on the await-signal
+		// park. But that stamp only fires if the witness is actually blocked in
+		// await-signal — and the live evidence (gu-jntgt: ~40 FPs across 9 rigs in
+		// one session, plus directly-observed heartbeats like cait-witness/
+		// caco-witness alive but hours-to-days stale) shows idle witnesses sit at
+		// the PROMPT with a frozen state=working heartbeat, never reaching the
+		// idle stamp. If they were parked in await-signal the gu-vqmmp keepalive
+		// ticker would refresh every 30s and the heartbeat would never go stale at
+		// all. So in practice state=working IS the idle-parked default for an
+		// alive witness — it no longer discriminates "idle between nudges" from
+		// "wedged mid-op", and escalating on it is ~100% false-positive (every one
+		// of the ~40 observed had session_alive=true; the single real death this
+		// session had session_alive=FALSE).
+		//
+		// Therefore, for an ALIVE witness, suppress on the clean-cycle idle-ready
+		// signals AND on state=working — the now-indistinguishable parked default.
+		// SAFETY (preserve the gu-rh0g real-wedge signal):
+		//   (a) state=stuck still escalates — that is the witness's explicit
+		//       self-report of being wedged, the actionable mid-op signal.
+		//   (b) a DEAD session (SessionAlive=false) still escalates regardless of
+		//       last state — this is the reliable death discriminator the mayor
+		//       confirmed (real deaths show session_alive=false), and it guards
+		//       the "died right after reporting working/idle" case.
+		//   (c) refinery is EXCLUDED — its idle is authoritatively governed by the
+		//       merge-queue prober above (gs-ecdg); state-overriding it would mask
+		//       a real wedge with a non-draining queue.
+		//   (d) "exiting" is EXCLUDED (conservative — exiting+alive+long-stale
+		//       could be a stuck-in-done worth surfacing).
 		if c.role == "witness" && item.SessionAlive {
 			idleReady := item.LastState == polecat.HeartbeatIdle ||
+				item.LastState == polecat.HeartbeatWorking ||
 				(!item.ExpectedIdleUntil.IsZero() && item.ExpectedIdleUntil.After(now))
 			if idleReady {
 				item.Action = "skip-idle-clean-cycle"

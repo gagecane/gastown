@@ -332,27 +332,33 @@ func TestDetectStaleRigAgentHeartbeats_IdleWitnessCleanCycleSuppressed(t *testin
 }
 
 // TestDetectStaleRigAgentHeartbeats_IdleWitnessGateSafetyCarveouts verifies the
-// gu-eke9u gate does NOT regress the gu-rh0g real-wedge signal:
-//   - working + alive + stale STILL escalates (real mid-op freeze)
-//   - idle + DEAD session STILL escalates (died right after reporting idle)
+// broadened gu-jntgt gate does NOT regress the actionable real-wedge signal:
+//   - stuck + alive + stale STILL escalates (explicit self-reported wedge)
+//   - idle  + DEAD session STILL escalates (died right after reporting idle)
 //   - exiting + alive + stale STILL escalates (conservative: possible stuck-in-done)
+//
+// Note: working + alive is now SUPPRESSED (see
+// TestDetectStaleRigAgentHeartbeats_WorkingAliveWitnessSuppressed) because, in
+// the discrete-cycle model, an idle witness parked at the prompt freezes its
+// heartbeat at the leftover state=working — it no longer discriminates idle
+// from wedged. The actionable mid-op signal is now state=stuck or a dead session.
 func TestDetectStaleRigAgentHeartbeats_IdleWitnessGateSafetyCarveouts(t *testing.T) {
 	rigName := "testrig"
 	prefix := session.PrefixFor(rigName)
 	witSession := session.WitnessSessionName(prefix)
 
-	t.Run("working alive stale escalates", func(t *testing.T) {
+	t.Run("stuck alive stale escalates", func(t *testing.T) {
 		townRoot := t.TempDir()
 		installFakeTmuxAlive(t, witSession)
 		writeRigAgentHeartbeatV3(t, townRoot, witSession, 6*time.Hour,
-			polecat.HeartbeatWorking, "patrol-scan", "mid cycle", "")
+			polecat.HeartbeatStuck, "patrol-scan", "mid cycle", "")
 		res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
 		witness := findStaleResult(res, "witness")
 		if witness == nil {
 			t.Fatalf("missing witness result")
 		}
 		if witness.Action != "escalated" {
-			t.Errorf("witness Action = %q, want escalated (working mid-op must still escalate)", witness.Action)
+			t.Errorf("witness Action = %q, want escalated (stuck self-report must still escalate)", witness.Action)
 		}
 	})
 
@@ -389,6 +395,48 @@ func TestDetectStaleRigAgentHeartbeats_IdleWitnessGateSafetyCarveouts(t *testing
 			t.Errorf("witness Action = %q, want escalated (exiting is conservatively excluded from the idle gate)", witness.Action)
 		}
 	})
+}
+
+// TestDetectStaleRigAgentHeartbeats_WorkingAliveWitnessSuppressed verifies the
+// gu-jntgt broadening: an ALIVE witness whose stale heartbeat last reported
+// state=working is recorded "skip-idle-clean-cycle" and does NOT escalate.
+//
+// In the discrete-cycle model an idle witness exits to the prompt after its
+// patrol cycle (it does NOT park in await-signal, where a keepalive would
+// refresh the heartbeat), leaving its last heartbeat frozen at the default
+// state=working. Live evidence (gu-jntgt) showed ~40 such false positives in
+// one session — alive witnesses hours-to-days stale, all session_alive=true.
+// state=working therefore no longer discriminates idle-parked from mid-op
+// wedged; for an alive witness it must be suppressed. The reliable death
+// discriminator is session_alive=false (covered by the carveouts test).
+func TestDetectStaleRigAgentHeartbeats_WorkingAliveWitnessSuppressed(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	prefix := session.PrefixFor(rigName)
+	witSession := session.WitnessSessionName(prefix)
+
+	installFakeTmuxAlive(t, witSession)
+
+	// Witness heartbeat stale well past threshold, last state=working (the
+	// frozen idle-at-prompt default), session alive.
+	writeRigAgentHeartbeatV3(t, townRoot, witSession, 6*time.Hour,
+		polecat.HeartbeatWorking, "patrol-scan", "between nudges", "")
+
+	res := DetectStaleRigAgentHeartbeats(townRoot, rigName, nil, time.Hour, "", 0, 0, nil)
+
+	witness := findStaleResult(res, "witness")
+	if witness == nil {
+		t.Fatalf("missing witness result")
+	}
+	if !witness.SessionAlive {
+		t.Fatalf("witness SessionAlive = false, want true (fake tmux should report it alive)")
+	}
+	if witness.Action != "skip-idle-clean-cycle" {
+		t.Errorf("witness Action = %q, want skip-idle-clean-cycle (working+alive is the frozen idle default)", witness.Action)
+	}
+	if witness.MailSent {
+		t.Errorf("witness MailSent = true, want false (working+alive witness must not escalate)")
+	}
 }
 
 func TestStaleAgentDisposition(t *testing.T) {
