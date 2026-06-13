@@ -339,41 +339,191 @@ fi
 
 ## Step 2: Run Workspace Build
 
+Run the workspace-wide build with `--continue` so a single package failure does
+not mask others, and capture the full log + the list of packages that failed.
+`--continue` is essential: without it the run stops at the first failure and we
+cannot tell whether the rest of the workspace is healthy.
+
 ```bash
 cd /workplace/canewiw/CodegenAgentScheduler
-brazil-recursive-cmd --allPackages brazil-build
+BUILD_LOG=/tmp/verify-build.$$.log
+brazil-recursive-cmd --allPackages --continue brazil-build > "$BUILD_LOG" 2>&1
+BUILD_RC=$?
+
+# Identify which packages actually failed. brazil-recursive-cmd prints a
+# per-package failure banner; capture the package names from it. Fall back to
+# the generic "in package <name>" / "Command failed" markers if the banner
+# format differs across brazil versions.
+FAILED_PKGS=$(grep -oE 'Recursive command failed in [^ ]+|failed in package [^ ]+|^FAILED: [^ ]+' "$BUILD_LOG" \
+  | sed -E 's/.* (in package |in |FAILED: )//' \
+  | sed -E 's/-[0-9].*$//' \
+  | sort -u)
+
+echo "=== Step 2 summary ==="
+echo "  exit code: $BUILD_RC"
+echo "  failed packages: ${FAILED_PKGS:-none}"
 ```
 
-If the build succeeds → go to Step 4.
-If the build fails → go to Step 3.
+If `BUILD_RC` is 0 → build is green → go to **Step 4** (record success).
+If `BUILD_RC` is non-zero → **DO NOT file a P1 yet.** Go to **Step 2.5** to
+disambiguate a real source defect from a `--allPackages` concurrency-harness
+race (shared `/tmp`, concurrent `cdk synth` writing `cdk.out`, resource
+exhaustion). This is the gu-s57lj fix: per-flake P1 dispatch on a harness race
+burns a full polecat+refinery cycle and finds no source defect.
 
-## Step 3: File Failure Bead
+## Step 2.5: Standalone Re-Verification (Flake vs. Real Defect)
 
-On build failure, file a P1 bead in codegen_ws:
+The `--allPackages` harness builds every package concurrently. The recurring
+false failures (cws-87im reserved-build-path, cws-xqvr resource-exhaustion
+race, cws-m4jr cdk.out assets.json ENOENT) all share one signature: the package
+**builds green when built alone**. A real source defect fails both ways.
+
+So before filing anything, rebuild each failed package **standalone**, in its
+own process, after pre-cleaning its `cdk.out` (the concurrency hot-spot). A
+package that passes standalone is a harness flake — record a low-noise digest,
+do NOT file a P1, do NOT dispatch a polecat. Only packages that ALSO fail
+standalone are real defects worth a P1.
 
 ```bash
-cd ~/gt/codegen_ws && bd create "Workspace build failed" \
-  -p P1 \
-  -l build-failed,plugin:verify-build \
-  -d "brazil-recursive-cmd --allPackages brazil-build failed.
-Exit code: <code>
-Last 30 lines of output:
-<tail of build log>"
+cd /workplace/canewiw/CodegenAgentScheduler
+
+REAL_DEFECTS=()      # failed --allPackages AND failed standalone → real
+HARNESS_FLAKES=()    # failed --allPackages but PASSED standalone → flake
+
+for pkg_name in $FAILED_PKGS; do
+  pkg_dir="src/$pkg_name"
+  [ -d "$pkg_dir" ] || { echo "[SKIP] $pkg_name: no src dir"; continue; }
+
+  # Pre-clean this package's cdk.out so a stale/locked artifact from the
+  # concurrent run can't poison the standalone retry (same race as cws-m4jr).
+  cdk_out="$pkg_dir/build/cdk.out"
+  if [ -d "$cdk_out" ]; then
+    trash="${cdk_out}.retry.$$"
+    if mv "$cdk_out" "$trash" 2>/dev/null; then
+      rm -rf "$trash" &
+    else
+      rm -rf "$cdk_out" 2>/dev/null || true
+    fi
+  fi
+  wait
+
+  STANDALONE_LOG="/tmp/verify-build-standalone.$pkg_name.$$.log"
+  ( cd "$pkg_dir" && brazil-build ) > "$STANDALONE_LOG" 2>&1
+  standalone_rc=$?
+
+  if [ "$standalone_rc" -eq 0 ]; then
+    echo "[FLAKE] $pkg_name: failed under --allPackages but builds GREEN standalone"
+    HARNESS_FLAKES+=("$pkg_name")
+  else
+    echo "[DEFECT] $pkg_name: fails standalone too (rc=$standalone_rc) — real source defect"
+    REAL_DEFECTS+=("$pkg_name")
+  fi
+done
+
+echo ""
+echo "=== Step 2.5 summary ==="
+echo "  real defects (file P1):     ${REAL_DEFECTS[*]:-none}"
+echo "  harness flakes (no P1):     ${HARNESS_FLAKES[*]:-none}"
 ```
 
-**Dedup:** Before creating, check for existing open build-failed beads:
+- If `REAL_DEFECTS` is non-empty → go to **Step 3** (file a P1 for the real
+  defects only).
+- If `REAL_DEFECTS` is empty and `HARNESS_FLAKES` is non-empty → the
+  `--allPackages` build failed purely on harness races. **Skip Step 3.** Record
+  a deduped flake digest (Step 3.5) and finish at Step 4. No P1, no polecat.
+- If both are empty (build failed but no package name parsed) → treat as a
+  harness/infra failure: record the flake digest (Step 3.5) with the raw log
+  tail; do not file a P1.
+
+## Step 3: File Failure Bead — Real Defects Only
+
+Only reached when Step 2.5 confirmed at least one package fails **standalone**.
+File a P1 bead in codegen_ws scoped to the real defect(s), and include the
+standalone failure tail (not the concurrent log — the standalone log is the
+clean reproduction).
 
 ```bash
-cd ~/gt/codegen_ws && bd list -l build-failed --status open
+defect_list=$(printf '%s\n' "${REAL_DEFECTS[@]}")
+standalone_tail=$(for p in "${REAL_DEFECTS[@]}"; do
+  echo "--- $p (standalone) ---"; tail -n 30 "/tmp/verify-build-standalone.$p.$$.log"
+done)
+
+# Dedup: reuse an existing open build-failed bead if present.
+existing=$(cd ~/gt/codegen_ws && bd list -l build-failed,plugin:verify-build --status open --json 2>/dev/null \
+  | jq -r '.[0].id // empty' 2>/dev/null)
+
+if [ -n "$existing" ]; then
+  cd ~/gt/codegen_ws && bd update "$existing" --comment "Reconfirmed real defect $(date -u +%FT%TZ) — fails standalone:
+$defect_list
+
+$standalone_tail"
+else
+  cd ~/gt/codegen_ws && bd create "Workspace build failed (confirmed standalone)" \
+    -p P1 \
+    -l build-failed,plugin:verify-build \
+    -d "These packages failed under brazil-recursive-cmd --allPackages AND fail
+when built standalone — a real source defect, not a harness race:
+
+$defect_list
+
+Standalone build output (clean reproduction):
+$standalone_tail"
+fi
 ```
 
-If one exists, add a comment instead of creating a duplicate.
+## Step 3.5: Record Harness-Flake Digest (No P1, No Dispatch)
+
+Reached when the `--allPackages` build failed but every failed package builds
+green standalone (or no package could be isolated). This is the gu-s57lj
+class: a concurrency-harness race, NOT a source defect. We must NOT file a P1
+(it would dispatch a polecat that finds nothing to fix). Instead append to a
+single low-priority, deduped digest so the pattern stays observable for whoever
+owns the harness concurrency fix — without burning a refinery cycle per flake.
+
+```bash
+flake_list=$(printf '%s\n' "${HARNESS_FLAKES[@]:-<unparsed>}")
+concurrent_tail=$(tail -n 30 "$BUILD_LOG")
+
+existing=$(cd ~/gt/codegen_ws && bd list -l harness-flake,plugin:verify-build --status open --json 2>/dev/null \
+  | jq -r '.[0].id // empty' 2>/dev/null)
+
+if [ -n "$existing" ]; then
+  cd ~/gt/codegen_ws && bd update "$existing" --comment "verify-build --allPackages harness flake $(date -u +%FT%TZ):
+packages green standalone, failed only under concurrent build:
+$flake_list
+
+Concurrent log tail:
+$concurrent_tail"
+else
+  cd ~/gt/codegen_ws && bd create "verify-build: --allPackages concurrency-harness flakes (no source defect)" \
+    -p P3 \
+    -t bug \
+    -l harness-flake,plugin:verify-build \
+    -d "The brazil-recursive-cmd --allPackages verify-build harness failed, but
+the failed package(s) build GREEN standalone — a concurrency race (shared /tmp,
+concurrent cdk synth on cdk.out, resource exhaustion), not a source defect.
+
+This bead is the deduped digest for these flakes; it intentionally does NOT
+dispatch a polecat per occurrence (see gu-s57lj). The durable fix lives in the
+harness: per-package isolated cdk.out paths, a concurrency throttle, or
+retry-on-known-flake.
+
+Packages seen flaking standalone-green:
+$flake_list
+
+Most recent concurrent log tail:
+$concurrent_tail"
+fi
+```
 
 ## Step 4: Record Result
 
 ```bash
+# result = success | failure (real defect) | flake (harness race, no P1)
 cd ~/gt/codegen_ws && bd create "verify-build: <result>" \
   -t chore --ephemeral \
-  -l type:plugin-run,plugin:verify-build,result:<success|failure> \
+  -l type:plugin-run,plugin:verify-build,result:<success|failure|flake> \
   --silent
+
+rm -f "$BUILD_LOG" /tmp/verify-build-standalone.*.$$.log 2>/dev/null || true
 ```
