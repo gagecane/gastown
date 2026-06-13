@@ -507,7 +507,7 @@ type overlappingConvoy struct {
 func dagSlingableIDs(dag *ConvoyDAG) []string {
 	var ids []string
 	for _, node := range dag.Nodes {
-		if isSlingableType(node.Type) {
+		if node.IsSchedulable() {
 			ids = append(ids, node.ID)
 		}
 	}
@@ -700,7 +700,7 @@ func createStagedConvoy(dag *ConvoyDAG, waves []Wave, status string, title strin
 	rigSet := make(map[string]bool)
 	var slingableIDs []string
 	for _, node := range dag.Nodes {
-		if isSlingableType(node.Type) {
+		if node.IsSchedulable() {
 			taskCount++
 			slingableIDs = append(slingableIDs, node.ID)
 			if node.Rig != "" {
@@ -868,7 +868,7 @@ func appendValidationWave(dag *ConvoyDAG, waves []Wave, epicID string) ([]Wave, 
 	// Collect all slingable bead IDs (these will block the validation bead).
 	var slingableIDs []string
 	for _, node := range dag.Nodes {
-		if isSlingableType(node.Type) {
+		if node.IsSchedulable() {
 			slingableIDs = append(slingableIDs, node.ID)
 		}
 	}
@@ -1395,7 +1395,80 @@ func collectEpicBeads(epicID string) ([]BeadInfo, []DepInfo, error) {
 		}
 	}
 
+	// Pull in blocking deps that point OUTSIDE the epic tree as external gate
+	// nodes so wave computation respects cross-epic blockers (gu-3p598).
+	allBeads = appendExternalBlockers(allBeads, allDeps)
+
 	return allBeads, allDeps, nil
+}
+
+// externalBlockingDepTypes are the dependency types whose target must be
+// resolved before the dependent task is dispatchable. Mirrors the convoy
+// staging execution edges in BuildConvoyDAG (parent-child is excluded — a
+// child is dispatchable while its parent epic is open).
+var externalBlockingDepTypes = map[string]bool{
+	"blocks":             true,
+	"conditional-blocks": true,
+	"waits-for":          true,
+	"merge-blocks":       true,
+}
+
+// appendExternalBlockers scans deps for blocking edges whose blocker bead is
+// NOT already in the collected set, and appends each such blocker as an
+// External BeadInfo. Without this, BuildConvoyDAG silently drops edges whose
+// endpoint is missing, so a task blocked only by out-of-epic work would be
+// computed as Wave-1-ready and dispatched before its real prerequisites close
+// (gu-3p598). External nodes carry the blocker's real status (so a
+// closed/tombstone blocker does not gate) and are flagged External so they are
+// never tracked, dispatched, or warned about as convoy work.
+//
+// Resolution is best-effort: a blocker that cannot be fetched (e.g. an
+// unresolvable cross-rig prefix) is added as an open external node, which
+// conservatively gates the dependent task rather than risk dispatching blocked
+// work.
+func appendExternalBlockers(beads []BeadInfo, deps []DepInfo) []BeadInfo {
+	for _, id := range externalBlockerIDs(beads, deps) {
+		info := BeadInfo{ID: id, External: true}
+		if res, err := bdShow(id); err == nil && res != nil {
+			info.Title = res.Title
+			info.Type = res.IssueType
+			info.Status = res.Status
+		} else {
+			// Could not resolve — gate conservatively (assume open/blocking).
+			info.Status = "open"
+			fmt.Printf("  Warning: could not resolve external blocker %s; treating as open gate: %v\n", id, err)
+		}
+		beads = append(beads, info)
+	}
+
+	return beads
+}
+
+// externalBlockerIDs returns the distinct, sorted set of bead IDs that block a
+// collected bead via an execution edge but are NOT themselves in the collected
+// set. These are the out-of-convoy blockers that BuildConvoyDAG would
+// otherwise drop. Pure (no I/O) so the dep-scan logic is unit-testable apart
+// from bd resolution.
+func externalBlockerIDs(beads []BeadInfo, deps []DepInfo) []string {
+	present := make(map[string]bool, len(beads))
+	for _, b := range beads {
+		present[b.ID] = true
+	}
+
+	seen := make(map[string]bool)
+	var externalIDs []string
+	for _, d := range deps {
+		if !externalBlockingDepTypes[d.Type] {
+			continue
+		}
+		if d.DependsOnID == "" || present[d.DependsOnID] || seen[d.DependsOnID] {
+			continue
+		}
+		seen[d.DependsOnID] = true
+		externalIDs = append(externalIDs, d.DependsOnID)
+	}
+	sort.Strings(externalIDs)
+	return externalIDs
 }
 
 // collectTaskListBeads validates and fetches info for explicit task IDs.
@@ -1431,6 +1504,10 @@ func collectTaskListBeads(taskIDs []string) ([]BeadInfo, []DepInfo, error) {
 			})
 		}
 	}
+
+	// Pull in blocking deps that point outside the staged set as external gate
+	// nodes so wave computation respects them (gu-3p598).
+	allBeads = appendExternalBlockers(allBeads, allDeps)
 
 	return allBeads, allDeps, nil
 }
@@ -1652,7 +1729,7 @@ func detectOrphans(dag *ConvoyDAG, input *StageInput) []StagingFinding {
 	// Build slingable set.
 	slingable := make(map[string]*ConvoyDAGNode)
 	for id, node := range dag.Nodes {
-		if isSlingableType(node.Type) {
+		if node.IsSchedulable() {
 			slingable[id] = node
 		}
 	}
@@ -1712,7 +1789,7 @@ func detectBlockedRigs(dag *ConvoyDAG) []StagingFinding {
 	}
 	blockedRigs := make(map[string]*blockedInfo)
 	for _, node := range dag.Nodes {
-		if !isSlingableType(node.Type) {
+		if !node.IsSchedulable() {
 			continue
 		}
 		if node.Rig == "" {
@@ -1759,7 +1836,7 @@ func detectCrossRig(dag *ConvoyDAG) []StagingFinding {
 	// Count rigs among slingable nodes.
 	rigCount := make(map[string]int)
 	for _, node := range dag.Nodes {
-		if !isSlingableType(node.Type) {
+		if !node.IsSchedulable() {
 			continue
 		}
 		if node.Rig == "" {
@@ -1784,7 +1861,7 @@ func detectCrossRig(dag *ConvoyDAG) []StagingFinding {
 
 	var findings []StagingFinding
 	for _, node := range dag.Nodes {
-		if !isSlingableType(node.Type) {
+		if !node.IsSchedulable() {
 			continue
 		}
 		if node.Rig == "" || node.Rig == primaryRig {

@@ -107,7 +107,7 @@ func bdUpdateStatus(beadID, status string) error {
 func collectBlockedRigsInDAG(dag *ConvoyDAG, townRoot string) map[string][]string {
 	blockedRigBeads := make(map[string][]string)
 	for _, node := range dag.Nodes {
-		if !isSlingableType(node.Type) {
+		if !node.IsSchedulable() {
 			continue
 		}
 		if node.Rig == "" {

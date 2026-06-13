@@ -31,6 +31,21 @@ type ConvoyDAGNode struct {
 	Blocks    []string // IDs of beads this one blocks
 	Children  []string // parent-child children (hierarchy only, not execution)
 	Parent    string   // parent-child parent
+	// External marks a blocker bead pulled into the DAG that lives OUTSIDE the
+	// staged epic/convoy (a cross-epic/out-of-convoy blocking dep). External
+	// nodes exist only so wave computation can respect their blocking edges as
+	// gates; they are never slingable, tracked, dispatched, or warned about as
+	// convoy work (gu-3p598).
+	External bool
+}
+
+// IsSchedulable reports whether a node represents a task this convoy can place
+// into a wave and dispatch: a slingable type that is not an external (out-of-
+// convoy) blocker node. Prefer this over a bare IsSlingableType(node.Type)
+// check at any site that tracks, dispatches, validates, or warns about convoy
+// work, so external gate nodes are never mistaken for schedulable tasks.
+func (n *ConvoyDAGNode) IsSchedulable() bool {
+	return IsSlingableType(n.Type) && !n.External
 }
 
 // DetectCycles checks the DAG for cycles in execution edges (blocks/conditional-blocks/waits-for).
@@ -165,7 +180,12 @@ func ComputeWaves(dag *ConvoyDAG) ([]Wave, []GatedTask, error) {
 	// in its wave drops that wave entirely (gu-bvl8u).
 	slingable := make(map[string]*ConvoyDAGNode)
 	for id, node := range dag.Nodes {
-		if IsSlingableType(node.Type) && !isInactiveStatus(node.Status) {
+		// External blocker nodes (out-of-convoy deps) are never scheduled —
+		// they exist only as gates, so they stay out of the slingable set and
+		// fall into the gate branch of the in-degree calculation below
+		// (gu-3p598). An open external blocker that happens to be a task type
+		// must NOT be mistaken for a wave task.
+		if node.IsSchedulable() && !isInactiveStatus(node.Status) {
 			slingable[id] = node
 		}
 	}
@@ -263,6 +283,10 @@ type BeadInfo struct {
 	Type   string // "epic", "task", "bug", etc.
 	Status string
 	Rig    string // resolved rig name
+	// External marks a bead pulled in only because it blocks a staged task but
+	// lives outside the staged epic/convoy. It seeds an external gate node so
+	// wave computation respects the cross-epic blocking edge (gu-3p598).
+	External bool
 }
 
 // DepInfo represents a raw dependency from bd dep list output.
@@ -283,11 +307,12 @@ func BuildConvoyDAG(beads []BeadInfo, deps []DepInfo) *ConvoyDAG {
 	// Create nodes from beads.
 	for _, b := range beads {
 		dag.Nodes[b.ID] = &ConvoyDAGNode{
-			ID:     b.ID,
-			Title:  b.Title,
-			Type:   b.Type,
-			Status: b.Status,
-			Rig:    b.Rig,
+			ID:       b.ID,
+			Title:    b.Title,
+			Type:     b.Type,
+			Status:   b.Status,
+			Rig:      b.Rig,
+			External: b.External,
 		}
 	}
 
@@ -357,8 +382,8 @@ func DetectErrors(dag *ConvoyDAG) []StagingFinding {
 
 	// Check for beads with no valid rig
 	for _, node := range dag.Nodes {
-		if !IsSlingableType(node.Type) {
-			continue // epics don't need rigs
+		if !node.IsSchedulable() {
+			continue // epics + external gate nodes don't need rigs (gu-3p598)
 		}
 		if node.Rig == "" {
 			findings = append(findings, StagingFinding{

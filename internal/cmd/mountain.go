@@ -176,7 +176,7 @@ func runMountain(cmd *cobra.Command, args []string) error {
 	slingable := 0
 	epicCount := 0
 	for _, node := range dag.Nodes {
-		if isSlingableType(node.Type) {
+		if node.IsSchedulable() {
 			slingable++
 		}
 		if node.Type == "epic" {
@@ -459,7 +459,7 @@ func showAllMountainStatus(townBeads string) error {
 		total := 0
 		closed := 0
 		for _, b := range trackedBeads {
-			if isSlingableType(b.Type) {
+			if isSlingableType(b.Type) && !b.External {
 				total++
 				if b.Status == "closed" {
 					closed++
@@ -532,7 +532,7 @@ func showMountainDetail(townBeads, inputID string) error {
 	var blocked []string
 
 	for _, b := range trackedBeads {
-		if !isSlingableType(b.Type) {
+		if !isSlingableType(b.Type) || b.External {
 			continue
 		}
 		switch {

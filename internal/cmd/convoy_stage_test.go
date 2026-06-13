@@ -587,6 +587,142 @@ func TestComputeWaves_AllGated(t *testing.T) {
 	}
 }
 
+// gu-3p598: an external (out-of-convoy) blocker that is a task type and OPEN
+// must gate the dependent — not be scheduled itself, and not let the dependent
+// land in a wave. This is the regression for `gt mountain` dispatching Wave-1
+// work that a plain `bd ready` would withhold.
+func TestComputeWaves_ExternalBlockerGatesTask(t *testing.T) {
+	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
+		// External open blocker that happens to be a slingable type.
+		"ext-1":  {ID: "ext-1", Type: "task", Status: "open", External: true, Blocks: []string{"task-1"}},
+		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"ext-1"}},
+		"task-2": {ID: "task-2", Type: "task", Status: "open"},
+	}}
+	waves, gated, err := computeWaves(dag)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// task-2 schedulable; task-1 gated by the external blocker; ext-1 itself
+	// never appears in any wave.
+	if len(waves) != 1 || len(waves[0].Tasks) != 1 || waves[0].Tasks[0] != "task-2" {
+		t.Errorf("expected wave 1 = [task-2], got %+v", waves)
+	}
+	if len(gated) != 1 || gated[0].TaskID != "task-1" {
+		t.Fatalf("expected gated = [task-1], got %+v", gated)
+	}
+	if len(gated[0].GatedBy) != 1 || gated[0].GatedBy[0] != "ext-1" {
+		t.Errorf("expected task-1 gated by ext-1, got %v", gated[0].GatedBy)
+	}
+	for _, w := range waves {
+		for _, id := range w.Tasks {
+			if id == "ext-1" {
+				t.Errorf("external blocker ext-1 must never be scheduled, found in wave %d", w.Number)
+			}
+		}
+	}
+}
+
+// gu-3p598: a CLOSED external blocker does not gate — the dependent is ready.
+func TestComputeWaves_ClosedExternalBlockerDoesNotGate(t *testing.T) {
+	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
+		"ext-1":  {ID: "ext-1", Type: "task", Status: "closed", External: true, Blocks: []string{"task-1"}},
+		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"ext-1"}},
+	}}
+	waves, gated, err := computeWaves(dag)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gated) != 0 {
+		t.Errorf("expected no gated tasks (external blocker closed), got %+v", gated)
+	}
+	if len(waves) != 1 || len(waves[0].Tasks) != 1 || waves[0].Tasks[0] != "task-1" {
+		t.Errorf("expected wave 1 = [task-1], got %+v", waves)
+	}
+}
+
+// gu-3p598: an external open blocker that is the ONLY thing gating the entry
+// task yields zero waves — mountain must NOT dispatch it (the bug: it slung
+// the bead in Wave 1).
+func TestComputeWaves_ExternalBlockerAllGated(t *testing.T) {
+	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
+		"ext-1":  {ID: "ext-1", Type: "task", Status: "open", External: true, Blocks: []string{"task-1"}},
+		"task-1": {ID: "task-1", Type: "task", Status: "open", BlockedBy: []string{"ext-1"}},
+	}}
+	waves, gated, err := computeWaves(dag)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(waves) != 0 {
+		t.Errorf("expected 0 waves (entry task gated by external blocker), got %d: %+v", len(waves), waves)
+	}
+	if len(gated) != 1 || gated[0].TaskID != "task-1" {
+		t.Errorf("expected gated = [task-1], got %+v", gated)
+	}
+}
+
+// gu-3p598: external gate nodes have no rig but must NOT trip the no-rig
+// staging error (they are never dispatched).
+func TestDetectErrors_ExternalBlockerNoRigOK(t *testing.T) {
+	dag := &ConvoyDAG{Nodes: map[string]*ConvoyDAGNode{
+		"ext-1":  {ID: "ext-1", Type: "task", Status: "open", External: true, Rig: "", Blocks: []string{"task-1"}},
+		"task-1": {ID: "task-1", Type: "task", Status: "open", Rig: "somerig", BlockedBy: []string{"ext-1"}},
+	}}
+	findings := convoy.DetectErrors(dag)
+	for _, f := range findings {
+		if f.Category == "no-rig" {
+			t.Errorf("external blocker must not trigger a no-rig error, got: %+v", f)
+		}
+	}
+}
+
+// gu-3p598: externalBlockerIDs collects only out-of-set blocking-edge targets,
+// deduped and sorted; parent-child and in-set deps are ignored.
+func TestExternalBlockerIDs(t *testing.T) {
+	beads := []BeadInfo{
+		{ID: "a", Type: "task", Status: "open"},
+		{ID: "b", Type: "task", Status: "open"},
+	}
+	deps := []DepInfo{
+		{IssueID: "a", DependsOnID: "ext-z", Type: "blocks"},            // external
+		{IssueID: "b", DependsOnID: "ext-a", Type: "waits-for"},         // external
+		{IssueID: "a", DependsOnID: "ext-z", Type: "blocks"},            // dup external
+		{IssueID: "a", DependsOnID: "b", Type: "blocks"},                // in-set, ignored
+		{IssueID: "a", DependsOnID: "ext-parent", Type: "parent-child"}, // non-blocking, ignored
+	}
+	got := externalBlockerIDs(beads, deps)
+	want := []string{"ext-a", "ext-z"}
+	if len(got) != len(want) {
+		t.Fatalf("externalBlockerIDs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("externalBlockerIDs[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// gu-3p598: BuildConvoyDAG propagates the External flag onto the node.
+func TestBuildConvoyDAG_ExternalFlagPropagated(t *testing.T) {
+	beads := []BeadInfo{
+		{ID: "task-1", Type: "task", Status: "open"},
+		{ID: "ext-1", Type: "task", Status: "open", External: true},
+	}
+	deps := []DepInfo{
+		{IssueID: "task-1", DependsOnID: "ext-1", Type: "blocks"},
+	}
+	dag := buildConvoyDAG(beads, deps)
+	if node := dag.Nodes["ext-1"]; node == nil {
+		t.Fatal("ext-1 not in DAG")
+	} else if !node.External {
+		t.Error("ext-1 node should have External=true")
+	} else if node.IsSchedulable() {
+		t.Error("external node must not be schedulable")
+	}
+	if node := dag.Nodes["task-1"]; node == nil || node.External {
+		t.Errorf("task-1 should be a normal (non-external) node, got %+v", node)
+	}
+}
+
 // merge-blocks creates execution edge in DAG.
 func TestBuildConvoyDAG_MergeBlocks(t *testing.T) {
 	beads := []BeadInfo{
