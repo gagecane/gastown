@@ -107,7 +107,15 @@ func runMailCheck(cmd *cobra.Command, args []string) error {
 			if drainErr != nil {
 				fmt.Fprintf(os.Stderr, "gt mail check: nudge queue drain error: %v\n", drainErr)
 			} else if len(queuedNudges) > 0 {
-				fmt.Print(nudge.FormatForInjection(queuedNudges))
+				// Delivery-time ground-truth gate: drop reply-reminders for
+				// threads this recipient has already replied to. Send-time
+				// clearing misses replies sent without --reply-to/"Re:" and
+				// reminders re-armed by later inbound mail, so they fire
+				// staleley mid-task. See gu-fu7mg.
+				queuedNudges = router.FilterDeliverableReplyReminders(address, queuedNudges)
+				if len(queuedNudges) > 0 {
+					fmt.Print(nudge.FormatForInjection(queuedNudges))
+				}
 			}
 		}
 

@@ -2115,6 +2115,105 @@ func (r *Router) ClearReplyRemindersBySubject(sender, recipient, subject string)
 	return firstErr
 }
 
+// replyReminderSatisfied reports whether a reply-reminder for the given
+// recipient is already satisfied by the thread's message history: the
+// recipient has spoken on the thread at or after the reminder was armed.
+//
+// This is the ground-truth check that the send-time clearing paths
+// (ClearReplyReminders / ClearReplyRemindersBySubject) cannot guarantee — those
+// only fire when a reply is recognized as a reply (carries --reply-to or a
+// "Re:" subject). A reply sent with a fresh subject, or a reminder re-armed by a
+// later inbound message on an already-resolved thread, slips past them and
+// fires staleley. Checking the actual thread at delivery time catches all of
+// those. See gu-fu7mg (recurs from gt-zoo3u, gt-xgf6h).
+//
+// recipient is the address the reminder is queued for (the agent who was asked
+// to reply). threadMsgs is the full thread, oldest-first. armedAt is when the
+// reminder was created; a recipient message at or after that time means they
+// have already engaged since the reminder was armed.
+//
+// Pure function (no I/O) so it is straightforward to unit test.
+func replyReminderSatisfied(threadMsgs []*Message, recipient string, armedAt time.Time) bool {
+	recip := normalizeAddress(recipient)
+	for _, m := range threadMsgs {
+		if m == nil {
+			continue
+		}
+		if normalizeAddress(m.From) != recip {
+			continue
+		}
+		// A message from the recipient that is no older than the reminder
+		// means they have spoken on this thread since it was armed — the
+		// reminder is stale and should not fire.
+		if !m.Timestamp.Before(armedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+// FilterDeliverableReplyReminders drops reply-reminder nudges whose thread the
+// recipient has already replied to, returning only the nudges that should still
+// be delivered. Non-reply-reminder nudges always pass through untouched.
+//
+// This is the delivery-time ground-truth gate for the dominant stale-reminder
+// symptom: reminders firing on threads the recipient already resolved. It is
+// called from the nudge drain path (e.g. `gt mail check --inject`) just before
+// injection, after Drain has claimed the nudges. recipientAddress is the agent
+// whose queue was drained.
+//
+// Fails OPEN: if the thread cannot be loaded (Dolt hiccup, etc.) the reminder is
+// kept rather than silently dropped, preserving the reminder's purpose. A
+// reminder with no ThreadID also passes through (nothing to check against).
+// See gu-fu7mg.
+func (r *Router) FilterDeliverableReplyReminders(recipientAddress string, nudges []nudge.QueuedNudge) []nudge.QueuedNudge {
+	if len(nudges) == 0 {
+		return nudges
+	}
+
+	// Cache thread lookups so multiple reminders on the same thread cost one
+	// query. Value is the message slice; presence in the map means "looked up".
+	threadCache := make(map[string][]*Message)
+	var mailbox *Mailbox
+
+	out := nudges[:0:len(nudges)] // reuse backing array; result is <= input
+	for _, n := range nudges {
+		if n.Kind != "reply-reminder" || n.ThreadID == "" {
+			out = append(out, n)
+			continue
+		}
+
+		msgs, looked := threadCache[n.ThreadID]
+		if !looked {
+			if mailbox == nil {
+				mb, err := r.GetMailbox(recipientAddress)
+				if err != nil {
+					// Cannot resolve mailbox — fail open for all reminders.
+					out = append(out, n)
+					continue
+				}
+				mailbox = mb
+			}
+			loaded, err := mailbox.ListByThread(n.ThreadID)
+			if err != nil {
+				// Thread load failed — fail open, keep the reminder.
+				out = append(out, n)
+				continue
+			}
+			msgs = loaded
+			threadCache[n.ThreadID] = msgs
+		}
+
+		// Arm time: prefer the reminder's own timestamp (when it was enqueued).
+		armedAt := n.Timestamp
+		if replyReminderSatisfied(msgs, recipientAddress, armedAt) {
+			continue // recipient already replied — drop the stale reminder
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 // IsRecipientMuted checks if a mail recipient has DND/muted notifications enabled.
 // Returns true if the recipient is muted and should not receive tmux nudges.
 // Fails open (returns false) if the agent bead cannot be found or the town root is not set.

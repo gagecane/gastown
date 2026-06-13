@@ -2492,6 +2492,130 @@ func TestIsSystemNotificationSubject(t *testing.T) {
 	}
 }
 
+// TestReplyReminderSatisfied exercises the pure ground-truth check that decides
+// whether a queued reply-reminder is already satisfied by the thread history.
+// See gu-fu7mg.
+func TestReplyReminderSatisfied(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	armed := base.Add(1 * time.Minute) // reminder armed one minute after the inbound
+
+	msg := func(from string, at time.Time) *Message {
+		return &Message{From: from, Timestamp: at}
+	}
+
+	cases := []struct {
+		name      string
+		recipient string
+		thread    []*Message
+		armedAt   time.Time
+		want      bool
+	}{
+		{
+			name:      "recipient replied after reminder armed",
+			recipient: "mayor/",
+			thread: []*Message{
+				msg("gastown/witness", base),
+				msg("mayor/", armed.Add(30*time.Second)),
+			},
+			armedAt: armed,
+			want:    true,
+		},
+		{
+			name:      "recipient reply exactly at arm time counts as satisfied",
+			recipient: "mayor/",
+			thread:    []*Message{msg("mayor/", armed)},
+			armedAt:   armed,
+			want:      true,
+		},
+		{
+			name:      "recipient address in non-canonical form still matches",
+			recipient: "mayor",
+			thread:    []*Message{msg("gastown/mayor", armed.Add(10*time.Second))},
+			armedAt:   armed,
+			want:      true,
+		},
+		{
+			name:      "polecats long-form recipient matches canonical reply",
+			recipient: "gastown/polecats/toast",
+			thread:    []*Message{msg("gastown/toast", armed.Add(5*time.Second))},
+			armedAt:   armed,
+			want:      true,
+		},
+		{
+			name:      "no recipient reply — reminder stands",
+			recipient: "mayor/",
+			thread: []*Message{
+				msg("gastown/witness", base),
+				msg("gastown/witness", armed.Add(2*time.Minute)),
+			},
+			armedAt: armed,
+			want:    false,
+		},
+		{
+			name:      "recipient only spoke before reminder armed — still needs reminder",
+			recipient: "mayor/",
+			thread: []*Message{
+				msg("mayor/", base), // earlier message in thread
+				msg("gastown/witness", armed.Add(-1*time.Second)), // the inbound that armed it
+			},
+			armedAt: armed,
+			want:    false,
+		},
+		{
+			name:      "empty thread",
+			recipient: "mayor/",
+			thread:    nil,
+			armedAt:   armed,
+			want:      false,
+		},
+		{
+			name:      "nil message entries are skipped",
+			recipient: "mayor/",
+			thread:    []*Message{nil, msg("mayor/", armed.Add(time.Second))},
+			armedAt:   armed,
+			want:      true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := replyReminderSatisfied(tc.thread, tc.recipient, tc.armedAt)
+			if got != tc.want {
+				t.Errorf("replyReminderSatisfied(%q) = %v, want %v", tc.recipient, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFilterDeliverableReplyReminders_PassThrough verifies that non-reply-reminder
+// nudges and reply-reminders without a thread ID are never dropped, and that the
+// filter is a no-op when no town root / mailbox is resolvable (fails open). See
+// gu-fu7mg.
+func TestFilterDeliverableReplyReminders_PassThrough(t *testing.T) {
+	// Empty town root => GetMailbox cannot resolve a beads dir cleanly, but the
+	// filter must still never drop nudges it cannot verify.
+	r := &Router{workDir: t.TempDir(), townRoot: ""}
+
+	in := []nudge.QueuedNudge{
+		{Kind: "mail", ThreadID: "t1", Message: "you have mail"},
+		{Kind: "reply-reminder", ThreadID: "", Message: "no thread — keep"},
+		{Kind: "escalation", Message: "escalation nudge"},
+	}
+	out := r.FilterDeliverableReplyReminders("mayor/", in)
+	if len(out) != len(in) {
+		t.Fatalf("expected all %d nudges to pass through, got %d", len(in), len(out))
+	}
+}
+
+// TestFilterDeliverableReplyReminders_EmptyInput verifies the trivial case.
+func TestFilterDeliverableReplyReminders_EmptyInput(t *testing.T) {
+	r := &Router{workDir: t.TempDir(), townRoot: t.TempDir()}
+	if out := r.FilterDeliverableReplyReminders("mayor/", nil); out != nil {
+		t.Errorf("expected nil for nil input, got %v", out)
+	}
+}
+
 // TestIsPluginDispatchSubject table-tests the helper that identifies
 // plugin-dispatch subjects. Mirrors the check used in cmd/dog.go (see
 // gt-swirk). Subjects must have the exact prefix "Plugin: " (with a trailing
