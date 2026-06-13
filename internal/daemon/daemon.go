@@ -754,6 +754,10 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.gtPath, 0, d.beadsStores, storeOpener, isRigParked)
+	// Curio B0b (gu-wg7i5): reconcile the curio_ledger row of any closing bead.
+	// Rides the convoy manager's existing canonical close-event stream rather
+	// than standing up a second poller. No-ops fast for non-Curio beads.
+	d.convoyManager.onBeadClose = d.onCurioBeadClose
 	if err := d.convoyManager.Start(); err != nil {
 		d.logger.Printf("Warning: failed to start convoy manager: %v", err)
 	} else {

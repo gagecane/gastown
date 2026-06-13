@@ -452,6 +452,7 @@ type Issue struct {
 	CreatedBy   string   `json:"created_by,omitempty"`
 	UpdatedAt   string   `json:"updated_at"`
 	ClosedAt    string   `json:"closed_at,omitempty"`
+	CloseReason string   `json:"close_reason,omitempty"` // Reason provided when the bead was closed
 	Parent      string   `json:"parent,omitempty"`
 	Assignee    string   `json:"assignee,omitempty"`
 	Children    []string `json:"children,omitempty"`

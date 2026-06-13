@@ -148,6 +148,17 @@ type ConvoyManager struct {
 	// Parked rigs are skipped during event polling. May be nil (never parked).
 	isRigParked func(string) bool
 
+	// onBeadClose, if set, is invoked once per genuine bead close detected by
+	// the event poll — AFTER the per-cycle + cross-cycle dedup, so it fires at
+	// most once per close epoch for an issue (the same guarantee the convoy
+	// check gets). This is the extension point the Curio B0b post-close
+	// reconciler (gu-wg7i5) rides: it reuses this single canonical close-event
+	// stream rather than standing up its own. nil disables it (the prior
+	// behavior). Called synchronously inside the poll loop, so the callback must
+	// be cheap or self-bounded (the Curio reconciler gates on its own circuit
+	// breaker and no-ops fast for non-Curio beads).
+	onBeadClose func(issueID string)
+
 	gtPath string
 
 	// started guards against double-call of Start() which would spawn duplicate goroutines.
@@ -601,6 +612,13 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		resolver := convoy.NewStoreResolver(m.townRoot, stores)
 		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.isRigParked, resolver)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
+
+		// Fan the close out to any registered close-event consumer (the Curio
+		// B0b ledger reconciler). Same dedup guarantees as the convoy check
+		// above — fires at most once per close epoch for this issueID.
+		if m.onBeadClose != nil {
+			m.onBeadClose(issueID)
+		}
 	}
 	return nil
 }

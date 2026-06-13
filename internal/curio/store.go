@@ -299,6 +299,55 @@ func (s *Store) InsertLedgerRow(beadID, fingerprint, ruleID string) error {
 	return nil
 }
 
+// LedgerHasBead reports whether a curio_ledger row exists for beadID. It is the
+// CONSUMER-side membership check the post-close reconciler (B0b) runs on every
+// bead close: a close for a bead NOT in the ledger is a no-op, so the reconciler
+// only does work for beads Curio actually filed. Keyed on the bead_id primary
+// key, so it is a single indexed lookup.
+func (s *Store) LedgerHasBead(beadID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var dummy int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT 1 FROM "+ledgerTable+" WHERE bead_id = ? LIMIT 1", beadID).Scan(&dummy)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SetLedgerOutcome reconciles a closed bead's ledger row: it sets outcome and
+// stamps resolved_at = CURRENT_TIMESTAMP for the given bead_id. This is the
+// post-close write the B0b reconciler makes after classifying the close reason.
+//
+// It is a no-op for a bead absent from the ledger — the UPDATE simply matches no
+// rows, so closing a non-Curio bead never errors and never inserts. Returns
+// whether a row was actually updated, letting the caller log "reconciled" vs
+// "not in ledger" precisely. The reconciler gates on LedgerHasBead first
+// (skipping the open/classify cost for non-Curio beads); this UPDATE is the
+// durable write and the membership guard's backstop in one.
+func (s *Store) SetLedgerOutcome(beadID, outcome string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE "+ledgerTable+
+			" SET outcome = ?, resolved_at = CURRENT_TIMESTAMP WHERE bead_id = ?",
+		outcome, beadID)
+	if err != nil {
+		return false, fmt.Errorf("setting ledger outcome for %s: %w", beadID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected for %s: %w", beadID, err)
+	}
+	return n > 0, nil
+}
+
 // InsertCandidates writes candidates, deduping by fingerprint (INSERT IGNORE).
 // Returns the number of NEW rows inserted (already-seen fingerprints are
 // silently skipped — cross-cycle dedup). Phase 1 only writes candidates; it

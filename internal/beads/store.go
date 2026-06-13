@@ -111,6 +111,7 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 	if si.ClosedAt != nil {
 		issue.ClosedAt = si.ClosedAt.Format(time.RFC3339)
 	}
+	issue.CloseReason = si.CloseReason
 
 	// Populate dependency-derived fields from the SDK issue's Dependencies.
 	// The SDK issue may have Dependencies populated (from show) or not (from list).
