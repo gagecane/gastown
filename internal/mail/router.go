@@ -1939,6 +1939,46 @@ func isSystemNotificationSubject(subject string) bool {
 	return false
 }
 
+// noReplyExpectedMarkers lists case-insensitive subject markers for agent-to-agent
+// messages that close a conversation rather than open one: acknowledgements,
+// thread close-outs, and pure FYI notices. A reply-reminder on these nags the
+// recipient to "reply" to a message that needs no reply — and worse, when the
+// ACK/close-out arrives as a fresh inbound message it re-arms a reminder on a
+// thread the recipient already resolved (the dominant stale-reminder symptom).
+//
+// Matched as a substring against the subject so common phrasings are covered
+// whether or not they carry a "Re:" prefix. Adding a new close-out phrasing?
+// Add its marker here. See gu-fu7mg (recurs from gt-zoo3u, gt-xgf6h).
+var noReplyExpectedMarkers = []string{
+	"ack:",
+	"acked",
+	"acknowledged",
+	"fyi:",
+	"closing thread",
+	"closing this thread",
+	"thread closed",
+	"closing out",
+	"confirmed stable",
+	"no reply needed",
+	"no response needed",
+	"nrn",
+}
+
+// isNoReplyExpectedSubject reports whether the subject marks an
+// acknowledgement, thread close-out, or FYI notice — a message that closes a
+// conversation rather than awaiting a mayor decision/reply. Reply-reminders are
+// suppressed for these so they neither nag for an unnecessary reply nor re-arm
+// a stale reminder on an already-resolved thread. See gu-fu7mg.
+func isNoReplyExpectedSubject(subject string) bool {
+	lower := strings.ToLower(subject)
+	for _, marker := range noReplyExpectedMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func prioritySeverityLabel(priority Priority) string {
 	switch priority {
 	case PriorityUrgent:
@@ -1978,6 +2018,9 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	}
 	if isSystemNotificationSubject(msg.Subject) {
 		return // System notifications carry no reply expectation. See gs-md9.
+	}
+	if isNoReplyExpectedSubject(msg.Subject) {
+		return // ACK/close-out/FYI — closes a thread, needs no reply. See gu-fu7mg.
 	}
 	delay := config.LoadOperationalConfig(r.townRoot).GetMailConfig().ReplyReminderDelayD()
 	if delay <= 0 {
