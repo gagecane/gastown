@@ -1147,13 +1147,67 @@ const completionSweepMaxConvoys = 50
 // latency. Convoys not reached this tick are picked up next tick.
 const completionSweepTimeBox = 30 * time.Second
 
+// convoyBdWriteMaxAttempts and convoyBdWriteBaseBackoff control the retry
+// policy for the convoy lifecycle's bd write operations (ship-unverified label
+// add/remove, convoy close). A single bd write runs under BdCommandTimeout
+// (30s); under Dolt write contention it can exceed that, get SIGKILLed by the
+// context deadline ("timed out after 30s: signal: killed"), and be abandoned.
+// When that write is the one that clears convoy:ship-unverified or closes a
+// completed convoy, abandoning it leaves the convoy OPEN forever — the
+// completion scan SKIPS ship-unverified convoys so they never drain (hq-jpnhp:
+// 223 completed convoys stuck on the label because the clearing bd update kept
+// timing out at 30s). Retrying with backoff lets the write land once
+// contention eases instead of giving up after the first SIGKILL.
+const convoyBdWriteMaxAttempts = 3
+const convoyBdWriteBaseBackoff = 500 * time.Millisecond
+
+// runConvoyBdWrite runs a bd write (update/close) against the town beads DB with
+// retry+backoff on transient Dolt-contention failures, including the
+// BdCommandTimeout SIGKILL. Returns nil on success, or the last error after
+// exhausting attempts. Non-retryable errors (e.g. bad args, missing bead) fail
+// fast without burning the retry budget. (hq-jpnhp)
+func runConvoyBdWrite(townBeads string, args ...string) error {
+	var lastErr error
+	for attempt := 0; attempt < convoyBdWriteMaxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(convoyBdWriteBaseBackoff * time.Duration(attempt))
+		}
+		err := BdCmd(args...).Dir(townBeads).WithAutoCommit().Run()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryableBdWriteErr(err.Error()) {
+			return err
+		}
+	}
+	return lastErr
+}
+
+// isRetryableBdWriteErr reports whether a bd write error is worth retrying:
+// either a transient Dolt-contention condition (shared with the dep-query
+// classifier) or the BdCommandTimeout SIGKILL, which wrapCommandError renders
+// as "... timed out after <d>: signal: killed". A genuinely overloaded Dolt
+// server can blow the 30s timeout on the first attempt and succeed once load
+// eases, so the timeout must be treated as retryable rather than terminal.
+func isRetryableBdWriteErr(msg string) bool {
+	if isTransientDepQueryErr(msg) {
+		return true
+	}
+	for _, marker := range []string{"timed out after", "signal: killed"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // markConvoyShipUnverified labels a convoy convoy:ship-unverified (idempotent;
 // bd --add-label is a no-op if already present). Best-effort: a label failure
 // only means the convoy gets re-scanned next tick (the pre-gu-4cxuv behavior),
 // so we log and continue rather than fail the whole completion pass.
 func markConvoyShipUnverified(townBeads, convoyID string) {
-	if err := BdCmd("update", convoyID, "--add-label="+convoyShipUnverifiedLabel).
-		Dir(townBeads).WithAutoCommit().Run(); err != nil {
+	if err := runConvoyBdWrite(townBeads, "update", convoyID, "--add-label="+convoyShipUnverifiedLabel); err != nil {
 		fmt.Fprintf(os.Stderr, "%s convoy %s: could not set %s label (will re-scan): %v\n",
 			style.Dim.Render("○"), convoyID, convoyShipUnverifiedLabel, err)
 	}
@@ -1164,8 +1218,7 @@ func markConvoyShipUnverified(townBeads, convoyID string) {
 // unverified convoy should be re-evaluated (e.g. a citing commit has since
 // landed). Best-effort.
 func removeShipUnverifiedLabel(townBeads, convoyID string) {
-	if err := BdCmd("update", convoyID, "--remove-label="+convoyShipUnverifiedLabel).
-		Dir(townBeads).WithAutoCommit().Run(); err != nil {
+	if err := runConvoyBdWrite(townBeads, "update", convoyID, "--remove-label="+convoyShipUnverifiedLabel); err != nil {
 		fmt.Fprintf(os.Stderr, "%s convoy %s: could not clear %s label: %v\n",
 			style.Dim.Render("○"), convoyID, convoyShipUnverifiedLabel, err)
 	}
@@ -1251,8 +1304,7 @@ func closeConvoyIfComplete(townBeads, convoyID, title string, tracked []trackedI
 	}
 
 	reason := "All tracked issues completed"
-	closeArgs := []string{"close", convoyID, "-r", reason}
-	if err := BdCmd(closeArgs...).Dir(townBeads).WithAutoCommit().Run(); err != nil {
+	if err := runConvoyBdWrite(townBeads, "close", convoyID, "-r", reason); err != nil {
 		return false, fmt.Errorf("closing convoy: %w", err)
 	}
 
