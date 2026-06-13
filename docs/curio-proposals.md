@@ -163,8 +163,62 @@ gt rig settings set <rig> \
   '{"cmd":"scripts/guards/curio-proposal-target-guard.sh","phase":"pre-merge","timeout":"1m"}'
 ```
 
+## Precision-gate auto-merge policy (Curio P3 B7) — default OFF
+
+A threshold-tune CR is normally a config CR that lands through the merge queue
+**with human approval** (the taxonomy table above). B7 adds a narrow, opt-in path
+for that one proposal kind to auto-merge (no human approval) when the P2
+conjunction (design-doc Q4) holds:
+
+1. The CR touches **only** `daemon.json` `patrols.curio.rate_thresholds` keys.
+2. The CR body **asserts measured precision < 0.80** for the tuned series.
+3. The replay harness **grades A** with the tuned overlay applied (B3's
+   `GradeWithThresholds`).
+
+### Mechanism: a re-verified label (never trusted)
+
+The Retrospect polecat stamps the label **`curio-auto-eligible`** on its
+threshold-tune proposal when it believes the conjunction holds. **The label only
+makes the CR _subject_ to the policy — it is never trusted as authorization.**
+The Refinery policy (`internal/refinery/curio_automerge.go`,
+`EvaluateAutoMerge`) **independently re-derives** conjuncts 1 and 3 from git and
+the replay harness:
+
+- **Diff scope (conjunct 1)** is recomputed from `git diff --name-only` (only
+  `mayor/daemon.json` may change) *and* a structural JSON compare that confirms
+  the change is confined to the `rate_thresholds` block — any source change or
+  fixture deletion fails, even if it rides in the same file.
+- **Replay grade (conjunct 3)** is re-run by the gate over the checked-in
+  corpus (`internal/curio/testdata/replay`) with the branch's overlay; the
+  proposer's claimed grade is ignored.
+- **Precision assertion (conjunct 2)** is the one human-authored input read from
+  the CR body — a *necessary* condition the gate cannot itself measure (it has
+  no ledger), not a merge authorization.
+
+This is mechanism (b) from the B7 scope; the diff-scope and replay-A checks are
+re-verified by the gate, not asserted by the proposer (B7 invariant 4).
+
+### Default OFF
+
+The policy ships **disabled** (`merge_queue.curio_auto_merge` absent / `enabled:
+false`). With it off, a `curio-auto-eligible` CR is **held for human review**
+(the Refinery defers it like a PR awaiting approval and emits a
+`refinery_paused` event with reason `curio_needs_approval`); an unlabeled CR is
+untouched and follows the normal merge path. Turn the policy on only after
+observing several cycles of human-reviewed tunes the human would have approved
+anyway (the Phase-2 shadow→live discipline). Enable it per rig:
+
+```bash
+gt rig settings set <rig> merge_queue.curio_auto_merge '{"enabled": true}'
+```
+
+With the policy ON, a CR passing all three conjuncts auto-merges after gates;
+**any disqualifier routes to human review** — a source change, a fixture
+deletion, a daemon.json edit beyond `rate_thresholds`, a missing/`>= 0.80`
+precision assertion, or a replay grade below A.
+
 ## Sources
 
-- [.designs/curio-p3-retrospect-agent/design-doc.md](../.designs/curio-p3-retrospect-agent/design-doc.md) — Q3 (taxonomy), Q5 (air-gap) — accessed 2026-06-13
-- [.designs/curio-p3-retrospect-agent/child-beads.md](../.designs/curio-p3-retrospect-agent/child-beads.md) — §B6 scope — accessed 2026-06-13
-- `internal/curio/candidate.go` (`StateHash`), `internal/curio/rules.go` (`DefaultRateThresholds`), `internal/curio/record.go` (`CurioSeriesPrefix`), `internal/daemon/curio_dog.go` (`curioRateThresholds`) — accessed 2026-06-13
+- [.designs/curio-p3-retrospect-agent/design-doc.md](../.designs/curio-p3-retrospect-agent/design-doc.md) — Q3 (taxonomy), Q4 (precision gate), Q5 (air-gap) — accessed 2026-06-13
+- [.designs/curio-p3-retrospect-agent/child-beads.md](../.designs/curio-p3-retrospect-agent/child-beads.md) — §B6, §B7 scope — accessed 2026-06-13
+- `internal/curio/candidate.go` (`StateHash`), `internal/curio/rules.go` (`DefaultRateThresholds`), `internal/curio/record.go` (`CurioSeriesPrefix`), `internal/curio/replay.go` (`GradeWithThresholds`, `GradeA`), `internal/daemon/curio_dog.go` (`curioRateThresholds`), `internal/refinery/curio_automerge.go` (the B7 policy) — accessed 2026-06-13

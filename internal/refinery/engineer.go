@@ -216,6 +216,12 @@ type MergeQueueConfig struct {
 	// a safety bound: a permanently busy host must not wedge the merge queue
 	// forever. Only meaningful when GateMaxLoadPerCore > 0.
 	GateLoadWaitTimeout time.Duration `json:"gate_load_wait_timeout"`
+
+	// CurioAutoMerge configures the Curio P3 B7 precision-gate auto-merge
+	// policy. Nil (the default) means the policy is OFF: a curio-auto-eligible
+	// CR is held for human review and every other CR is untouched. See
+	// curio_automerge.go.
+	CurioAutoMerge *AutoMergeConfig `json:"curio_auto_merge,omitempty"`
 }
 
 // DefaultGateLoadWaitTimeout is the fallback wait bound applied when
@@ -450,6 +456,7 @@ func (e *Engineer) LoadConfig() error {
 		RequireReview        *bool                     `json:"require_review"`
 		GateMaxLoadPerCore   *float64                  `json:"gate_max_load_per_core"`
 		GateLoadWaitTimeout  *string                   `json:"gate_load_wait_timeout"`
+		CurioAutoMerge       *AutoMergeConfig          `json:"curio_auto_merge"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -552,6 +559,12 @@ func (e *Engineer) LoadConfig() error {
 			return fmt.Errorf("gate_load_wait_timeout must be positive, got %v", dur)
 		}
 		e.config.GateLoadWaitTimeout = dur
+	}
+	if mqRaw.CurioAutoMerge != nil {
+		if mqRaw.CurioAutoMerge.NormalBound < 0 {
+			return fmt.Errorf("curio_auto_merge.normal_bound must be non-negative, got %d", mqRaw.CurioAutoMerge.NormalBound)
+		}
+		e.config.CurioAutoMerge = mqRaw.CurioAutoMerge
 	}
 
 	// Initialize the PR provider when merge_strategy=pr.
@@ -727,6 +740,18 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 	if err := e.git.Pull("origin", target); err != nil {
 		// Pull might fail if nothing to pull, that's ok
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
+	}
+
+	// Curio P3 B7: precision-gate auto-merge policy. A CR the Curio Retrospect
+	// lane stamped `curio-auto-eligible` is subject to the policy. Default OFF:
+	// such a CR is HELD for human review; with the policy ON it auto-merges only
+	// when all three conjuncts re-verify (daemon.json rate_thresholds-only diff,
+	// precision<0.80 asserted, replay grades A). Unlabeled CRs are untouched.
+	// Evaluated here — after the target is current so the diff/base config are
+	// accurate — before conflict/gate work, since the human-review decision is
+	// orthogonal to them.
+	if held := e.checkCurioAutoMerge(branch, target, sourceIssue); held != nil {
+		return *held
 	}
 
 	// Step 3: Check for merge conflicts (using local branch)
