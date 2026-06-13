@@ -144,6 +144,28 @@ func TestExtractCascadeFlag(t *testing.T) {
 	}
 }
 
+func TestHasForceFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"no force", []string{"gt-abc", "--reason", "Done"}, false},
+		{"long force", []string{"gt-abc", "--force"}, true},
+		{"short force", []string{"-f", "gt-abc"}, true},
+		{"force among others", []string{"--reason", "Done", "gt-abc", "--force"}, true},
+		{"force-like substring is not force", []string{"gt-abc", "--force-merge"}, false},
+		{"empty", []string{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasForceFlag(tt.args); got != tt.want {
+				t.Errorf("hasForceFlag(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestChildBeadUnmarshal(t *testing.T) {
 	jsonData := `[{"id":"gt-abc","status":"open"},{"id":"gt-def","status":"closed"}]`
 	var children []childBead

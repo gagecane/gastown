@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 
@@ -73,6 +75,26 @@ func runClose(cmd *cobra.Command, args []string) error {
 			if err := closeChildren(id, visited, 0); err != nil {
 				return fmt.Errorf("cascade close failed for children of %s: %w", id, err)
 			}
+		}
+	}
+
+	// Close each bead's OWN attached molecule wisp before delegating to bd
+	// close. A bead dispatched via formula-on-bead (gt sling) carries an
+	// attached_molecule (mol-polecat-work wisp) that registers as a `blocks`
+	// dependency on the base bead. bd close counts that self-attached wisp as
+	// an open blocker and refuses to close without --force — even though the
+	// wisp is the bead's own work-lifecycle scaffold, not a genuine external
+	// dependency. This forces operators to reflexively --force every
+	// dedup/supersede close, which is a blunt instrument that bypasses ALL
+	// safety checks. By detaching the self-molecule here (mirroring gt done's
+	// wisp-close-before-bead-close ordering), a plain gt close succeeds while
+	// genuine EXTERNAL blockers still correctly require --force. (gu-qrpk2)
+	//
+	// Skipped when --force is set (bd close already bypasses the block check)
+	// or under --cascade (children, including any wisp, are handled above).
+	if !cascade && !hasForceFlag(filteredArgs) {
+		for _, id := range extractBeadIDs(filteredArgs) {
+			closeSelfAttachedMolecule(id)
 		}
 	}
 
@@ -251,6 +273,53 @@ func extractBeadIDs(args []string) []string {
 		ids = append(ids, arg)
 	}
 	return ids
+}
+
+// hasForceFlag reports whether the raw close args contain --force or -f.
+// Because closeCmd disables flag parsing, the flag must be detected manually.
+func hasForceFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--force" || arg == "-f" {
+			return true
+		}
+	}
+	return false
+}
+
+// closeSelfAttachedMolecule closes the molecule wisp a bead carries as its
+// OWN attached_molecule (and the wisp's step descendants) before the bead is
+// closed. This removes the false self-dependency that otherwise makes bd close
+// demand --force for any dispatched bead. Mirrors the wisp-close-before-bead
+// ordering gt done already uses (see done.go updateAgentStateOnDone). (gu-qrpk2)
+//
+// Best-effort: failures are non-fatal. If the wisp can't be closed the
+// subsequent bd close simply reports the bead as still blocked, leaving the
+// operator exactly where they were before this helper existed (free to
+// --force). Never closes anything but the bead's own attached molecule, so
+// genuine external blockers continue to gate the close.
+func closeSelfAttachedMolecule(beadID string) {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return
+	}
+	bd := beads.New(townRoot)
+
+	issue, err := bd.Show(beadID)
+	if err != nil || issue == nil {
+		return
+	}
+	attachment := beads.ParseAttachmentFields(issue)
+	if attachment == nil || attachment.AttachedMolecule == "" {
+		return
+	}
+
+	// Close molecule step descendants first; bd close does not cascade, so
+	// open steps would otherwise survive and keep blocking the wisp root.
+	closeDescendants(bd, attachment.AttachedMolecule)
+
+	if closeErr := bd.ForceCloseWithReason("closing parent bead "+beadID, attachment.AttachedMolecule); closeErr != nil && !errors.Is(closeErr, beads.ErrNotFound) {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s for %s: %v\n", attachment.AttachedMolecule, beadID, closeErr)
+	}
 }
 
 // checkConvoyCompletion checks if any closed issues are tracked by convoys
