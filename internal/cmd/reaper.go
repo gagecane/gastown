@@ -1474,8 +1474,20 @@ that would be raised without raising it.`,
 			return nil
 		}
 
+		// The escalation gates on the ACTIONABLE count — open wisps past their
+		// per-type TTL, i.e. the subset compaction would act on — not the raw
+		// open count, which includes within-TTL accumulation that drains
+		// naturally and is non-actionable (gu-9ks4i). Resolve the same TTL
+		// policy compaction uses so the two counts share one definition.
+		workDir, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getting working dir: %w", err)
+		}
+		townRoot := beads.FindTownRoot(workDir)
+		ttls := loadTTLConfig(townRoot, os.Getenv("GT_RIG"))
+
 		databases := reaperDatabaseNames()
-		var totalOpen int
+		var totalOpen, totalActionable int
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(i); err != nil {
 				return err
@@ -1490,24 +1502,32 @@ that would be raised without raising it.`,
 				continue
 			}
 			open, err := reaper.CountOpenWisps(db)
-			db.Close()
 			if err != nil {
+				db.Close()
 				fmt.Fprintf(os.Stderr, "%s: count error: %v\n", dbName, err)
 				continue
 			}
+			actionable, err := reaper.CountActionableOpenWisps(db, ttls)
+			db.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: actionable count error: %v\n", dbName, err)
+				continue
+			}
 			totalOpen += open
+			totalActionable += actionable
 		}
 
-		alert := reaper.EvaluateOpenWispAlert(totalOpen, threshold)
+		alert := reaper.EvaluateOpenWispAlert(totalActionable, threshold)
 		if !alert.Fire {
-			fmt.Printf("open wisps within threshold: %d <= %d (no escalation)\n", totalOpen, threshold)
+			fmt.Printf("actionable (past-TTL) open wisps within threshold: %d <= %d (total open: %d; no escalation)\n",
+				totalActionable, threshold, totalOpen)
 			return nil
 		}
 
-		escalateArgs := alert.EscalateArgs(totalOpen, threshold)
+		escalateArgs := alert.EscalateArgs(totalActionable, totalOpen, threshold)
 		if reaperDryRun {
-			fmt.Printf("[DRY RUN] would escalate (%s, band %d, cooldown %s): %d open wisps exceed %d\n",
-				alert.Severity, alert.Bucket, alert.Cooldown, totalOpen, threshold)
+			fmt.Printf("[DRY RUN] would escalate (%s, band %d, cooldown %s): %d actionable (past-TTL) open wisps exceed %d (total open: %d)\n",
+				alert.Severity, alert.Bucket, alert.Cooldown, totalActionable, threshold, totalOpen)
 			fmt.Printf("[DRY RUN] gt %s\n", strings.Join(escalateArgs, " "))
 			return nil
 		}
