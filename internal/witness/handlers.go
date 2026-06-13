@@ -2766,6 +2766,30 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		return ZombieResult{}, false
 	}
 
+	// gs-535: an idle-clean polecat with a dead session is a NORMAL reusable
+	// dispatch slot (a warm-pool husk waiting for the next sling), not a zombie.
+	// The live-session patrol already skips idle-clean polecats entirely
+	// (gt-s8bq, the Idle Polecat Heresy fix); the dead-session path must apply
+	// the same refutation recipe, otherwise every idle-clean session:dead slot
+	// re-detects as ZombieSessionDeadActive each cycle and floods the mayor /
+	// triggers a needless restart. Only a DIRTY idle sandbox is reportable (and
+	// then as data, not a restart) — its uncommitted/unpushed work could be
+	// lost. Mirrors the live-session branch above.
+	switch classifyIdleDeadSession(typedState, snap.cleanupStatus()) {
+	case idleDeadReusableSlot:
+		// Idle-clean dead session — reusable dispatch slot, not a zombie.
+		return ZombieResult{}, false
+	case idleDeadDirtyReportable:
+		return ZombieResult{
+			PolecatName:    polecatName,
+			AgentState:     snapState,
+			Classification: ZombieIdleDirtySandbox,
+			CleanupStatus:  snap.cleanupStatus(),
+			WasActive:      false,
+			Action:         "detected-dirty-idle-polecat",
+		}, true
+	}
+
 	// GH#2036: Spawning polecats have hook_bead assigned but no tmux session yet.
 	// This is expected during worktree creation and session startup. Skip zombie
 	// detection if the polecat has been spawning for less than SpawnGracePeriod.
@@ -2824,6 +2848,36 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	cleanupStatus := snap.cleanupStatus()
 	handleZombieRestart(bd, workDir, rigName, polecatName, snapHook, cleanupStatus, &zombie)
 	return zombie, true
+}
+
+// idleDeadVerdict encodes the gs-535 refutation recipe for a dead-session
+// polecat in the idle state.
+type idleDeadVerdict int
+
+const (
+	// idleDeadNotIdle: the polecat is not idle — the caller continues with
+	// standard zombie detection.
+	idleDeadNotIdle idleDeadVerdict = iota
+	// idleDeadReusableSlot: idle-clean session:dead — a normal reusable
+	// dispatch slot (warm-pool husk), NOT a zombie.
+	idleDeadReusableSlot
+	// idleDeadDirtyReportable: idle but the sandbox has uncommitted/unpushed
+	// work — reportable data (not a restart target).
+	idleDeadDirtyReportable
+)
+
+// classifyIdleDeadSession applies the gs-535 refutation recipe: an idle-clean
+// session:dead state is a reusable dispatch slot, not a zombie. Only a DIRTY
+// idle sandbox is reportable. Empty cleanupStatus is treated as clean (matches
+// the live-session branch in DetectZombiePolecats).
+func classifyIdleDeadSession(state beads.AgentState, cleanupStatus string) idleDeadVerdict {
+	if state != AgentStateIdle {
+		return idleDeadNotIdle
+	}
+	if cleanupStatus != "" && cleanupStatus != "clean" {
+		return idleDeadDirtyReportable
+	}
+	return idleDeadReusableSlot
 }
 
 // isZombieState returns true if the agent state or hook bead indicates a zombie.

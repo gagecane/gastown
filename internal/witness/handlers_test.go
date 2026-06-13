@@ -1112,6 +1112,34 @@ func TestDetectZombie_AgentDeadInLiveSession(t *testing.T) {
 	}
 }
 
+func TestClassifyIdleDeadSession(t *testing.T) {
+	t.Parallel()
+	// gs-535: an idle-clean session:dead state is a NORMAL reusable dispatch
+	// slot, not a zombie. Only a dirty idle sandbox is reportable. Non-idle
+	// states fall through to standard detection.
+	cases := []struct {
+		name    string
+		state   beads.AgentState
+		cleanup string
+		want    idleDeadVerdict
+	}{
+		{"idle clean", AgentStateIdle, "clean", idleDeadReusableSlot},
+		{"idle empty cleanup", AgentStateIdle, "", idleDeadReusableSlot},
+		{"idle uncommitted", AgentStateIdle, "has_uncommitted", idleDeadDirtyReportable},
+		{"idle unpushed", AgentStateIdle, "has_unpushed", idleDeadDirtyReportable},
+		{"working not idle", beads.AgentStateWorking, "clean", idleDeadNotIdle},
+		{"done not idle", beads.AgentStateDone, "clean", idleDeadNotIdle},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := classifyIdleDeadSession(tc.state, tc.cleanup); got != tc.want {
+				t.Errorf("classifyIdleDeadSession(%q, %q) = %v, want %v", tc.state, tc.cleanup, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- extractPolecatFromJSON tests (issue #1228: panic-safe JSON parsing) ---
 
 func TestExtractPolecatFromJSON_ValidOutput(t *testing.T) {
