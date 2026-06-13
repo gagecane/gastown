@@ -1696,7 +1696,16 @@ func verifyRemovalComplete(polecatDir, clonePath string) error {
 }
 
 // forceRemoveDir attempts aggressive removal of a directory.
-// It handles permission issues by making files writable before removal.
+// It handles permission issues by making files writable before removal, and as
+// a last resort escalates removal of root-owned residue.
+//
+// gs-72ym: the act CI gate runs pytest as root inside Docker, writing
+// root:root tests/__pycache__/*.pyc into the polecat worktree. A non-root
+// process cannot unlink files inside a root-owned directory (unlink needs
+// write on the parent dir), so os.RemoveAll fails EPERM and the worktree is
+// pinned — the leak recurs on every polecat that ran the act gate. chmod can't
+// fix it either (chmod needs ownership), so the only recovery is privilege
+// escalation, scoped strictly to the polecat sandbox.
 func forceRemoveDir(dir string) error {
 	// First try normal removal
 	if err := os.RemoveAll(dir); err == nil {
@@ -1720,7 +1729,87 @@ func forceRemoveDir(dir string) error {
 	})
 
 	// Try removal again after fixing permissions
+	if err := os.RemoveAll(dir); err == nil {
+		return nil
+	}
+
+	// Last resort: the residue is owned by root (containerized gate
+	// artifacts). Escalate, guarded to the polecat sandbox.
+	return removeRootOwnedResidue(dir)
+}
+
+// removeRootOwnedResidue is the last-resort removal path for a polecat
+// directory that survived os.RemoveAll because it contains root-owned files
+// left by a containerized gate (gs-72ym). It chowns the tree back to the
+// current user via passwordless sudo and retries removal in-process; if chown
+// is denied it falls back to an escalated rm. Best-effort: when sudo is not
+// configured, `sudo -n` fails fast (never blocking a headless nuke on a
+// password prompt) and the residual error is returned to the caller, which
+// already degrades to a warning.
+//
+// HARD SAFETY GUARD: this only ever runs against a path inside a polecats/
+// sandbox. It refuses the bare repo (.repo.git), any Dolt data (.dolt), and
+// the polecats/ directory itself — operating on those with elevated privileges
+// could cause irrecoverable data loss.
+func removeRootOwnedResidue(dir string) error {
+	if err := guardPolecatSandboxPath(dir); err != nil {
+		return err
+	}
+	uidgid := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	// -n (non-interactive): a missing sudoers entry fails immediately rather
+	// than prompting for a password and hanging the headless teardown.
+	if out, err := exec.Command("sudo", "-n", "chown", "-R", uidgid, "--", dir).CombinedOutput(); err != nil {
+		// chown may be denied while rm is permitted — try a scoped escalated rm.
+		if rmOut, rmErr := exec.Command("sudo", "-n", "rm", "-rf", "--", dir).CombinedOutput(); rmErr != nil {
+			return fmt.Errorf("escalated removal of %q failed (chown: %v: %s; rm: %v: %s)",
+				dir, err, strings.TrimSpace(string(out)), rmErr, strings.TrimSpace(string(rmOut)))
+		}
+		return nil
+	}
+	// We now own the tree; an ordinary in-process removal completes the job.
 	return os.RemoveAll(dir)
+}
+
+// guardPolecatSandboxPath is the safety boundary for privilege-escalated
+// removal. It returns an error for any path that is not unambiguously a child
+// of a polecats/ sandbox, or that names a protected git/Dolt location.
+func guardPolecatSandboxPath(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("cannot resolve path for escalated removal: %w", err)
+	}
+	clean := filepath.Clean(abs)
+
+	sep := string(filepath.Separator)
+	segs := strings.Split(clean, sep)
+
+	// Must be a child of a polecats/ directory: there has to be a "polecats"
+	// segment with at least one real segment after it. This both requires the
+	// sandbox prefix and ensures we never target the polecats/ directory itself.
+	childOfPolecats := false
+	for i, seg := range segs {
+		if seg == "polecats" && i+1 < len(segs) && segs[i+1] != "" {
+			childOfPolecats = true
+			break
+		}
+	}
+	if !childOfPolecats {
+		return fmt.Errorf("refusing escalated removal of %q: not inside a polecats/ sandbox", clean)
+	}
+
+	// Never a protected git/Dolt location, even if nested under polecats/.
+	for _, seg := range segs {
+		switch seg {
+		case ".repo.git", ".dolt", ".git":
+			return fmt.Errorf("refusing escalated removal of %q: contains protected segment %q", clean, seg)
+		}
+	}
+
+	// Guard against absurdly shallow paths (e.g. "/", "/polecats").
+	if strings.Count(clean, sep) < 3 {
+		return fmt.Errorf("refusing escalated removal of suspicious path %q", clean)
+	}
+	return nil
 }
 
 // AllocateName allocates a name from the name pool.
