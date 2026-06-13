@@ -254,6 +254,51 @@ func (s *Store) tableExists(ctx context.Context, table string) (bool, error) {
 	return true, nil
 }
 
+// FingerprintFiled reports whether a curio_ledger row already exists for the
+// given fingerprint. The ledger doubles as the file-once dedup record: once a
+// candidate has been filed (a row written at file-time), its fingerprint is in
+// the ledger forever, so the filer never re-files the same finding — even after
+// the bead is closed (the row persists with its outcome). An absent row means
+// the finding has not been filed yet.
+func (s *Store) FingerprintFiled(fingerprint string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var dummy int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT 1 FROM "+ledgerTable+" WHERE fingerprint = ? LIMIT 1", fingerprint).Scan(&dummy)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// InsertLedgerRow writes the file-time precision-ledger row for a freshly filed
+// bead: (bead_id, fingerprint, rule_id) with outcome=” and filed_at defaulting
+// to CURRENT_TIMESTAMP per the DDL. outcome + resolved_at stay empty until the
+// post-close reconciler (B0b) fills them. INSERT IGNORE keeps the call
+// idempotent on the bead_id primary key — a duplicate file-time insert for the
+// same bead is a no-op, never an error.
+//
+// This is the PRODUCER half of curio_ledger population (B0a). It does not change
+// the curio-proposer import graph: the write lives in the daemon-opened HQ
+// store, on the write side of the read/write air-gap from cmd/curio-proposer.
+func (s *Store) InsertLedgerRow(beadID, fingerprint, ruleID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT IGNORE INTO "+ledgerTable+
+			" (bead_id, fingerprint, rule_id) VALUES (?, ?, ?)",
+		beadID, fingerprint, ruleID); err != nil {
+		return fmt.Errorf("inserting ledger row for %s: %w", beadID, err)
+	}
+	return nil
+}
+
 // InsertCandidates writes candidates, deduping by fingerprint (INSERT IGNORE).
 // Returns the number of NEW rows inserted (already-seen fingerprints are
 // silently skipped — cross-cycle dedup). Phase 1 only writes candidates; it

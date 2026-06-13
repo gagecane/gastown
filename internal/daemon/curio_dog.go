@@ -30,6 +30,23 @@ type CurioConfig struct {
 	// IntervalStr is how often to run, as a string (e.g., "15m").
 	IntervalStr string `json:"interval,omitempty"`
 
+	// FileTunedRules is the B0a (gu-czx5e) candidate→bead filing gate for the
+	// tuned rules (alarm_rate_spike). When false (the MANDATORY default), the
+	// Patrol stays candidates-only exactly as before: it evaluates rules and
+	// writes the curio_candidate sidecar but files NO beads. Flipping this to
+	// true is the DELIBERATE enablement that lets Curio file a bead for a
+	// tuned-rule candidate AND, at file-time, write the curio_ledger row
+	// (bead_id, fingerprint, rule_id, outcome='') that the P3 precision lane
+	// reasons over. Mirrors the PageForReal SHADOW→LIVE discipline: the
+	// capability ships dormant and earns its way on per operator decision.
+	//
+	// Posture note (resolves the design's "Patrol UNCHANGED" claim): rule
+	// EVALUATION is unchanged — the same rules produce the same candidates. What
+	// this knob ADDS is an opt-in filing path for the tuned rules so the L1
+	// ledger stops being permanently empty. Off by default, the Patrol is
+	// byte-for-byte the prior candidates-only behavior.
+	FileTunedRules bool `json:"file_tuned_rules,omitempty"`
+
 	// PageForReal is the Call 2 (gu-2coqj) SHADOW→LIVE safety gate. When false
 	// (the MANDATORY default), the lane-ceiling paging engine runs and records
 	// what it WOULD page to the shadow ledger + daemon log, but sends NO Overseer
@@ -186,6 +203,18 @@ func (d *Daemon) runCurio() {
 		return
 	}
 
-	d.logger.Printf("curio: cycle complete — found=%d new=%d paged=%d (candidates only, no beads filed)",
-		len(cands), inserted, len(actions))
+	// B0a (gu-czx5e): when the filing gate is open, file a bead for each fresh
+	// tuned-rule candidate and write its file-time curio_ledger row. Gated OFF
+	// by default — the Patrol stays candidates-only and this block is a no-op.
+	filed := 0
+	if d.curioFileTunedRules() {
+		filed, err = fileTunedCandidates(cands, daemonCandidateFiler{d: d}, store, d.logger.Printf)
+		d.doltBreaker.Record(err)
+		if err != nil {
+			d.logger.Printf("curio: filing encountered error(s) (best-effort, cycle continues): %v", err)
+		}
+	}
+
+	d.logger.Printf("curio: cycle complete — found=%d new=%d paged=%d filed=%d",
+		len(cands), inserted, len(actions), filed)
 }
