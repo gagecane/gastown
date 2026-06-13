@@ -20,8 +20,6 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-const polecatAdmissionReservationTTL = 30 * time.Minute
-
 // polecatCapacitySnapshotCacheTTL is the maximum staleness allowed for a
 // cached town-wide polecat capacity snapshot. Computing a fresh snapshot
 // requires one `bd list --label=gt:agent` subprocess per rig, which serialize
@@ -257,7 +255,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	}
 	defer func() { _ = lock.Unlock() }()
 
-	if err := cleanupStalePolecatAdmissionReservations(townRoot, time.Now()); err != nil {
+	if err := cleanupStalePolecatAdmissionReservations(townRoot); err != nil {
 		return nil, polecatCapacitySnapshot{}, err
 	}
 
@@ -318,7 +316,7 @@ func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, e
 		return polecatCapacitySnapshot{}, err
 	}
 	if max > 0 {
-		if err := cleanupStalePolecatAdmissionReservationsWithLock(townRoot, time.Now()); err != nil {
+		if err := cleanupStalePolecatAdmissionReservationsWithLock(townRoot); err != nil {
 			return polecatCapacitySnapshot{}, err
 		}
 	}
@@ -674,7 +672,7 @@ func readPolecatAdmissionReservations(townRoot string) ([]polecatAdmissionReserv
 	return reservations, nil
 }
 
-func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) error {
+func cleanupStalePolecatAdmissionReservations(townRoot string) error {
 	dir := polecatAdmissionDir(townRoot)
 	reservations, err := readPolecatAdmissionReservations(townRoot)
 	if err != nil {
@@ -684,11 +682,19 @@ func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) er
 		if reservation.PID <= 0 {
 			continue
 		}
-		age := now.Sub(reservation.CreatedAt)
+		// A reservation is held only for the acquire→spawn window via the
+		// dispatcher's deferred Release(); the file persists past that window
+		// only when the owning process died ungracefully (crash/kill) before
+		// the defer ran. Once the owner PID is dead the reservation can never
+		// be released by its owner, so it must be reaped immediately — holding
+		// it for an age grace period leaks admission capacity for up to that
+		// grace window per dead dispatcher, which accumulated town-wide and
+		// eroded usable capacity across rigs (gu-3jizl). processAlive is
+		// conservative (a process we lack permission to signal counts as
+		// alive), so an immediate dead-PID reap cannot remove a live owner's
+		// reservation. This matches the doctor's OrphanedAdmissionRecordsCheck,
+		// which already treats any dead-PID record as orphaned with no age gate.
 		if processAlive(reservation.PID) {
-			continue
-		}
-		if age < polecatAdmissionReservationTTL {
 			continue
 		}
 		_ = os.Remove(filepath.Join(dir, reservation.ID+".json"))
@@ -696,7 +702,7 @@ func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) er
 	return nil
 }
 
-func cleanupStalePolecatAdmissionReservationsWithLock(townRoot string, now time.Time) error {
+func cleanupStalePolecatAdmissionReservationsWithLock(townRoot string) error {
 	lock, err := acquirePolecatAdmissionLock(townRoot)
 	if err != nil {
 		if strings.Contains(err.Error(), "admission is busy") {
@@ -705,7 +711,7 @@ func cleanupStalePolecatAdmissionReservationsWithLock(townRoot string, now time.
 		return err
 	}
 	defer func() { _ = lock.Unlock() }()
-	return cleanupStalePolecatAdmissionReservations(townRoot, now)
+	return cleanupStalePolecatAdmissionReservations(townRoot)
 }
 
 // processAlive is defined in platform-specific files:

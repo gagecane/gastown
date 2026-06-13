@@ -65,7 +65,7 @@ func TestCapacitySnapshotCleansStaleReservations(t *testing.T) {
 		Rig:       "gastown",
 		Bead:      "gt-stale",
 		Operation: "test",
-		CreatedAt: time.Now().Add(-2 * polecatAdmissionReservationTTL),
+		CreatedAt: time.Now().Add(-time.Hour),
 	}
 	data, err := json.Marshal(stale)
 	if err != nil {
@@ -157,7 +157,7 @@ func TestCapacitySnapshotKeepsOldLiveReservation(t *testing.T) {
 		Rig:       "gastown",
 		Bead:      "gt-live",
 		Operation: "test",
-		CreatedAt: time.Now().Add(-2 * polecatAdmissionReservationTTL),
+		CreatedAt: time.Now().Add(-time.Hour),
 	}
 	data, err := json.Marshal(reservation)
 	if err != nil {
@@ -177,6 +177,48 @@ func TestCapacitySnapshotKeepsOldLiveReservation(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("live reservation should remain: %v", err)
+	}
+}
+
+// TestCapacitySnapshotReapsYoungDeadReservation pins the gu-3jizl fix: a
+// dead-PID reservation is reaped immediately, with no age grace period. A
+// dispatcher that died ungracefully (crash/kill) before its deferred
+// Release() ran leaves a reservation file behind; holding it for any grace
+// window leaks admission capacity. Previously a 30-minute TTL gate kept these
+// dead-owner reservations counted as occupied capacity town-wide, eroding
+// usable capacity across rigs.
+func TestCapacitySnapshotReapsYoungDeadReservation(t *testing.T) {
+	townRoot := setupPolecatCapacityTestTown(t, 1)
+	dir := polecatAdmissionDir(townRoot)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir reservations: %v", err)
+	}
+	deadYoung := polecatAdmissionReservation{
+		ID:        "dead-young",
+		PID:       99999999,
+		Rig:       "gastown",
+		Bead:      "gt-dead-young",
+		Operation: "test",
+		CreatedAt: time.Now(),
+	}
+	data, err := json.Marshal(deadYoung)
+	if err != nil {
+		t.Fatalf("marshal dead-young reservation: %v", err)
+	}
+	path := filepath.Join(dir, "dead-young.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write dead-young reservation: %v", err)
+	}
+
+	snapshot, err := polecatCapacitySnapshotForTown(townRoot)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if snapshot.Reservations != 0 || snapshot.Free != 1 {
+		t.Fatalf("snapshot after young dead-PID cleanup = %+v, want reservations=0 free=1", snapshot)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("young dead-PID reservation still exists: %v", err)
 	}
 }
 
