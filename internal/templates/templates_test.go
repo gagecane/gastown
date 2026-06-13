@@ -351,6 +351,52 @@ func TestRenderRole_Refinery_QueueScanLabelGuidance(t *testing.T) {
 	}
 }
 
+// TestRenderRole_Refinery_EscalationGuidance verifies that the refinery prompt
+// tells the agent to ESCALATE (not silently hold in-pane) when it hits a
+// queue-blocking block it cannot resolve autonomously. Regression for gu-a522t:
+// gastown_upstream main went red (gate-drift), every MR's gate failed, and the
+// refinery parked looping a `push it / reject / hold` decision for ~30min while
+// 15 MRs stacked up — without ever firing an escalation. A queue-blocking park
+// must page someone within a bounded threshold, so we lock the escalation
+// guidance + bounds into the rendered prompt.
+func TestRenderRole_Refinery_EscalationGuidance(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:          "refinery",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/refinery/rig",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	output, err := tmpl.RenderRole("refinery", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	// Must give the refinery the escalation command for a queue-blocking block.
+	if !strings.Contains(output, "gt escalate -s HIGH") {
+		t.Error("refinery prompt must tell the agent to `gt escalate -s HIGH` when blocked on a queue-blocking condition (gu-a522t)")
+	}
+	// Must distinguish routine single-MR rejects from systemic queue-blocking
+	// situations so the agent doesn't escalate on every branch failure.
+	if !strings.Contains(output, "Routine") || !strings.Contains(output, "Systemic") {
+		t.Error("refinery prompt must distinguish Routine (handle autonomously) vs Systemic (escalate) blocks (gu-a522t)")
+	}
+	// Must give bounded thresholds so a park can never wedge the queue silently
+	// and indefinitely.
+	if !strings.Contains(output, "> 3 MRs") || !strings.Contains(output, "15 min") {
+		t.Error("refinery prompt must give bounded escalation thresholds (queue depth > 3 MRs OR > 15 min no progress) so a block never holds indefinitely (gu-a522t)")
+	}
+}
+
 func TestRenderMessage_Spawn(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {

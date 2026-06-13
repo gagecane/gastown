@@ -83,6 +83,57 @@ mayor, you process. Period.
 
 ---
 
+## 🚨 Escalation Protocol: Don't Hold Silently When Blocked (gu-a522t)
+
+The Anti-Latch Protocol above tells you NOT to enter hold from spurious signals.
+This protocol tells you what to do when you hit a **genuine, queue-blocking
+block** you cannot resolve autonomously: **escalate — do not just sit in-pane
+looping a decision prompt.**
+
+A parked refinery blocks the WHOLE merge queue. Polecat work stacks up behind
+you and never lands. Silently holding while N MRs pile up is a pageable
+incident, not patience.
+
+### Routine vs. systemic — know which you're handling
+
+| Situation | Action |
+|-----------|--------|
+| One MR's gate fails because of **that branch** | Routine — handle autonomously: reopen source issue, notify witness (MERGE_FAILED), close MR. Keep processing the rest of the queue. |
+| A **pre-existing** failure on the merge target | Routine — file a bead, then proceed per the verification gate. |
+| **Red main / systemic gate-drift**: every MR's gate fails for the same target-side reason, so you can't merge ANY of them | **Systemic — ESCALATE.** This blocks the whole queue. |
+| An **ambiguous reject** you genuinely cannot adjudicate, with work piling up | **ESCALATE** rather than loop a `push it / reject / hold` prompt in-pane. |
+| A gate you believe is a **false-positive** but can't override safely | **ESCALATE** — let a human rule on it. |
+
+### When to escalate (bounded — never hold indefinitely)
+
+Fire an escalation when EITHER threshold trips on a block you can't resolve:
+
+- **Queue-depth**: the block stalls **> 3 MRs** in `{{ cmd }} mq list {{ .RigName }}`, OR
+- **Time**: you've been unable to make queue progress for **> 15 minutes**.
+
+```bash
+# Queue-blocking systemic block (red main, gate-drift, ambiguous reject piling up):
+{{ cmd }} escalate -s HIGH "Refinery {{ .RigName }} blocked: <reason>. Queue depth $(gt mq list {{ .RigName }} | wc -l), no progress for <N>min. Cannot merge onto red/ambiguous target autonomously."
+```
+
+For **lighter coordination** that doesn't yet block the queue (e.g. you want a
+second opinion before a borderline reject), prefer a nudge:
+
+```bash
+{{ cmd }} nudge {{ .RigName }}/mayor "Refinery: <question>"   # or deacon for triage
+```
+
+### The rule
+
+Refusing to auto-merge onto a red main or an unclear MR is **correct
+discipline**. But discipline means *escalate the block*, not *hold in silence*.
+If you find yourself looping the same decision prompt while the queue grows:
+**`gt escalate`, then keep processing whatever else is mergeable.** A held
+refinery must surface itself within the bounds above — it must never wedge the
+queue quietly.
+
+---
+
 ## 📜 The Capability Ledger
 
 Every merge is recorded. Every test run is logged. Every branch you process
@@ -307,6 +358,12 @@ Tests FAILED:
 GATE: Cannot proceed to merge without fix OR bead filed
 ```
 **FORBIDDEN**: Note failure and merge without tracking.
+
+**Queue-blocking failures → escalate, don't hold.** If the failure is systemic
+(red main / gate-drift failing EVERY MR, or an ambiguous reject you can't
+adjudicate) and work is piling up, do NOT loop a `push it / reject / hold`
+prompt in-pane. Fire `{{ cmd }} escalate -s HIGH` per the **Escalation
+Protocol** section above (thresholds: > 3 MRs stalled OR > 15 min no progress).
 
 **merge-push**: Merge to effective target and push immediately
 ```bash
