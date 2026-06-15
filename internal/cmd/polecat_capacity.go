@@ -179,6 +179,20 @@ func (s polecatCapacitySnapshot) occupied() int {
 	return s.Working + s.RecoveryBlocked + s.Reservations
 }
 
+// effectiveTownCap returns the binding town-wide polecat cap: max_polecats,
+// further bounded by global_max_polecats when the latter is set (> 0) and
+// strictly lower. Both are town-wide scheduler settings counting town-wide
+// occupancy, so the smaller is the real concurrency ceiling. Capacity planning
+// must use this or it over-reports free slots and plans dispatches the
+// global-ceiling admission gate then refuses (gs-vber). globalMax <= 0 means
+// "unbounded" and leaves max_polecats unchanged.
+func effectiveTownCap(maxPolecats, globalMax int) int {
+	if globalMax > 0 && globalMax < maxPolecats {
+		return globalMax
+	}
+	return maxPolecats
+}
+
 type polecatAdmissionReservation struct {
 	ID        string    `json:"id"`
 	PID       int       `json:"pid"`
@@ -591,7 +605,20 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		}
 	}
 	if max > 0 {
-		snapshot.Free = max - snapshot.occupied()
+		// Bound free capacity by the town-wide global ceiling, not just
+		// max_polecats. global_max_polecats is enforced separately at admission
+		// (checkGlobalPolecatCeiling) but was NOT reflected in Free, so when it is
+		// lower than max_polecats the snapshot over-reported capacity: the planner
+		// saw spare slots, dispatched a bead the ceiling then refused, and the leg
+		// re-queued onto a reused idle polecat instead of a fresh one — a convoy
+		// running ~global_max-wide despite an apparently higher max_polecats cap
+		// (gs-vber: 6 legs on 3 polecats with max_polecats=4, global_max_polecats=3).
+		// Using effectiveTownCap makes planning consistent with admission: no
+		// plan-then-refuse churn, and `gt scheduler status` reports the real
+		// binding limit. global_max read is best-effort — on error fall back to
+		// max_polecats (settings already loaded successfully above for max).
+		globalMax, _ := configuredSchedulerGlobalMaxPolecats(townRoot)
+		snapshot.Free = effectiveTownCap(max, globalMax) - snapshot.occupied()
 		if snapshot.Free < 0 {
 			snapshot.Free = 0
 		}

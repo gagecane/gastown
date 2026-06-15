@@ -819,3 +819,25 @@ func TestStandaloneFormulaExistingPolecatNoopDoesNotRequireCapacity(t *testing.T
 		t.Fatalf("runSlingFormula: %v", err)
 	}
 }
+
+func TestEffectiveTownCap(t *testing.T) {
+	tests := []struct {
+		name      string
+		maxP      int
+		globalMax int
+		want      int
+	}{
+		{"global unset leaves max", 4, 0, 4},
+		{"global negative leaves max", 4, -1, 4},
+		{"global lower binds (gs-vber)", 4, 3, 3},
+		{"global equal leaves max", 4, 4, 4},
+		{"global higher leaves max", 4, 8, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveTownCap(tt.maxP, tt.globalMax); got != tt.want {
+				t.Fatalf("effectiveTownCap(%d, %d) = %d, want %d", tt.maxP, tt.globalMax, got, tt.want)
+			}
+		})
+	}
+}
