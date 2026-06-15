@@ -28,9 +28,10 @@ import (
 // admissionReservationFile mirrors the on-disk reservation written by
 // internal/cmd/polecat_capacity.go. Only the fields the rule needs are read.
 type admissionReservationFile struct {
-	ID  string `json:"id"`
-	PID int    `json:"pid"`
-	Rig string `json:"rig,omitempty"`
+	ID        string    `json:"id"`
+	PID       int       `json:"pid"`
+	Rig       string    `json:"rig,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // CollectAdmissions reads the polecat-admission reservation dir under townRoot
@@ -67,6 +68,7 @@ func CollectAdmissions(townRoot string) ([]AdmissionRecord, error) {
 			ID:         r.ID,
 			PID:        r.PID,
 			Rig:        r.Rig,
+			CreatedAt:  r.CreatedAt,
 			OwnerAlive: liveness.PIDAlive(r.PID),
 			// Reservations are written by the scheduler, never by curio; the
 			// loop-breaker check is a no-op here but kept explicit for safety.

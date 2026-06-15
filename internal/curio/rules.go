@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/fingerprint"
 	"github.com/steveyegge/gastown/internal/liveness"
@@ -195,6 +196,20 @@ func (r rateSpikeRule) Eval(in Input) []Candidate {
 // Discovered in the wild (design addendum, gu-t6jqq class). A reservation whose
 // owning PID is dead leaks capacity. No rate/latency signature.
 
+// deadOwnerReapHorizon is the minimum age a dead-PID reservation must reach
+// before the dead-owner rule treats it as a genuine stuck leak. The scheduler
+// reaps dead-PID reservations IMMEDIATELY, with no age grace, at the start of
+// every capacity computation — both admission acquire and every ≤5s capacity
+// snapshot (gu-3jizl). So a freshly-dead reservation is, in the normal case,
+// already in flight to that demand-driven reap: surfacing it is alarming on a
+// self-healing path (the dead_owner_admission rule fired 25x cross-rig with
+// precision n/a — gu-lldp6). Only a reservation that has OUTLIVED a full main
+// curio patrol interval (15m) has demonstrably survived both that reaping and a
+// prior detection cycle, which is the real stuck-capacity condition the rule
+// must catch (the gu-r0pkt 2h dispatch stall was hours old). Aligning the
+// horizon with the patrol cadence keeps the gate self-evidently safe.
+const deadOwnerReapHorizon = 15 * time.Minute
+
 type deadOwnerAdmissionRule struct{}
 
 func (deadOwnerAdmissionRule) ID() string { return "dead_owner_admission" }
@@ -206,6 +221,17 @@ func (r deadOwnerAdmissionRule) Eval(in Input) []Candidate {
 			continue
 		}
 		if a.OwnerAlive {
+			continue
+		}
+		// Age gate: suppress a dead-PID reservation that is still within the
+		// scheduler's demand-driven reaping horizon — it is presumed in-flight to
+		// the immediate reap, not a stuck leak. The gate is CONSERVATIVE: it
+		// suppresses ONLY when both timestamps are known AND the reservation is
+		// positively younger than the horizon. An unknown age (CreatedAt zero) or
+		// unknown window end (replay fixtures omit times) falls through to firing,
+		// so recall and every checked-in fixture are preserved.
+		if !a.CreatedAt.IsZero() && !in.Window.End.IsZero() &&
+			in.Window.End.Sub(a.CreatedAt) < deadOwnerReapHorizon {
 			continue
 		}
 		summary := fmt.Sprintf("admission reservation %s owned by dead PID %d leaking capacity (rig %s)",

@@ -133,6 +133,12 @@ type AdmissionRecord struct {
 	// OwnerAlive is the resolved probe result: false means the owning PID is
 	// dead and the reservation is leaking capacity.
 	OwnerAlive bool
+	// CreatedAt is the reservation's write time (from the on-disk record). Zero
+	// when the source omitted it (older records, fixtures). The dead-owner rule
+	// uses it as an age gate: a freshly-dead reservation is presumed in-flight to
+	// the scheduler's immediate demand-driven reap (gu-3jizl), so only a
+	// reservation that has OUTLIVED that reaping horizon is a genuine stuck leak.
+	CreatedAt time.Time
 	// FiledBy is the provenance actor (loop-breaker input).
 	FiledBy string
 	// causalProvenance carries the Call 1(A) air-gap chain. Empty in build 2a.

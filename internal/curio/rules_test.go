@@ -1,6 +1,9 @@
 package curio
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // fired returns the set of rule IDs that produced at least one candidate.
 func fired(cands []Candidate) map[string]bool {
@@ -283,6 +286,45 @@ func TestDeadOwner_LoopBreaker(t *testing.T) {
 	}}
 	if len(deadOwnerAdmissionRule{}.Eval(in)) != 0 {
 		t.Error("must exclude curio-filed admissions (loop-breaker)")
+	}
+}
+
+// Age gate (gu-lldp6): a freshly-dead reservation is presumed in-flight to the
+// scheduler's immediate demand-driven reap, so the rule must NOT fire on it.
+func TestDeadOwner_SuppressesFreshlyDeadWithinReapHorizon(t *testing.T) {
+	end := time.Date(2026, 6, 15, 4, 0, 0, 0, time.UTC)
+	in := Input{Window: Window{ID: "w", End: end}, Admissions: []AdmissionRecord{
+		{ID: "a1", PID: 1, Rig: "r", OwnerAlive: false, FiledBy: "scheduler",
+			CreatedAt: end.Add(-(deadOwnerReapHorizon - time.Minute))},
+	}}
+	if got := len(deadOwnerAdmissionRule{}.Eval(in)); got != 0 {
+		t.Errorf("must not fire on a reservation younger than the reap horizon, got %d candidates", got)
+	}
+}
+
+// A dead reservation that has OUTLIVED the reaping horizon is a genuine stuck
+// leak (the scheduler's immediate reap is demonstrably not freeing it) and MUST
+// still fire.
+func TestDeadOwner_FiresOnStuckLeakPastReapHorizon(t *testing.T) {
+	end := time.Date(2026, 6, 15, 4, 0, 0, 0, time.UTC)
+	in := Input{Window: Window{ID: "w", End: end}, Admissions: []AdmissionRecord{
+		{ID: "a1", PID: 1, Rig: "r", OwnerAlive: false, FiledBy: "scheduler",
+			CreatedAt: end.Add(-(deadOwnerReapHorizon + time.Minute))},
+	}}
+	if got := len(deadOwnerAdmissionRule{}.Eval(in)); got != 1 {
+		t.Errorf("must fire on a stuck leak older than the reap horizon, got %d candidates", got)
+	}
+}
+
+// Replay safety: a fixture omits Window.End and CreatedAt (both zero), so the
+// age gate must fall through to firing — preserving recall on checked-in
+// fixtures and the live judgment lane when an age is unknown.
+func TestDeadOwner_FiresWhenAgeUnknown(t *testing.T) {
+	in := Input{Window: Window{ID: "w"}, Admissions: []AdmissionRecord{
+		{ID: "a1", PID: 1, Rig: "r", OwnerAlive: false, FiledBy: "scheduler"},
+	}}
+	if got := len(deadOwnerAdmissionRule{}.Eval(in)); got != 1 {
+		t.Errorf("must fire when age is unknown (zero timestamps), got %d candidates", got)
 	}
 }
 
