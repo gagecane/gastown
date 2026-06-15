@@ -60,6 +60,17 @@ type SlingSpawnOptions struct {
 	BaseBranch    string // Override base branch for polecat worktree (e.g., "develop", "release/v2")
 	ResumeBranch  string // Resume an existing branch (e.g. PR head) instead of creating polecat/<name>/<bead>@<ts>
 	SkipAdmission bool   // Caller already holds a polecat admission reservation
+
+	// AutoRespawnRetry lets the daemon scheduler bypass ONLY the soft respawn
+	// block (gu-i34ey), without taking on the broad blast radius of Force
+	// (stealing live hooks, burning molecules, bypassing deferred/blocked-deps
+	// guards). The PERMANENT respawn block still hard-fails — it is the real
+	// chronic-failure circuit breaker and remains non-bypassable. This mirrors
+	// the deacon's --force redispatch path's "bypass soft, respect permanent"
+	// contract, but scoped to just the respawn gate so the scheduler can
+	// autonomously recover work that merely lost its polecats to infra flakiness
+	// instead of stranding it pending a manual nudge / respawn-reset.
+	AutoRespawnRetry bool
 }
 
 func effectivePolecatDirCap(configured int) int {
@@ -67,6 +78,59 @@ func effectivePolecatDirCap(configured int) int {
 		return minPolecatDirsPerRig
 	}
 	return configured
+}
+
+// respawnGateError implements the per-bead respawn circuit breaker
+// (clown show #22 + gu-iqji) for a dispatch attempt. It returns a non-nil error
+// when the bead must NOT be (re-)dispatched, or nil when dispatch may proceed.
+// The caller is responsible for RecordBeadRespawn after a nil return.
+//
+// Two tiers:
+//
+//   - Permanent block — bead's lifetime cumulative attempts have crossed
+//     PermanentBlockMultiplier × MaxBeadRespawns. Hard fail regardless of
+//     force/autoRespawnRetry; only `gt sling respawn-reset` clears it. This is
+//     the real chronic-failure circuit breaker.
+//
+//   - Soft block — bead has hit MaxBeadRespawns within the live decay window.
+//     Bypassable by force (operator --force) OR autoRespawnRetry (the daemon
+//     scheduler's narrow gu-i34ey bypass). Without either, the soft block
+//     hard-fails so the witness escalates instead of hot-looping.
+//
+// autoRespawnRetry exists so the daemon scheduler can autonomously re-dispatch
+// a bead whose prior polecats died to infra flakiness — work that previously
+// stranded in scheduler_dispatch_failed limbo until a deacon/human intervened.
+// It bypasses ONLY the soft block; the permanent block still bounds it.
+func respawnGateError(townRoot, hookBead, rigName string, force, autoRespawnRetry bool) error {
+	// Permanent block: hard fail regardless of force / autoRespawnRetry.
+	if witness.ShouldPermanentlyBlockRespawn(townRoot, hookBead) {
+		maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
+		limit := witness.PermanentBlockMultiplier * maxRespawns
+		return fmt.Errorf("PERMANENT respawn block for %s (cumulative attempts ≥ %d).\n"+
+			"This bead has failed across multiple decay windows and is no longer auto-dispatchable.\n"+
+			"--force does NOT override a permanent block — investigate the root cause first.\n"+
+			"Reset: gt sling respawn-reset %s",
+			hookBead, limit, hookBead)
+	}
+	// Soft block: --force lets operators retry after transient failures (load
+	// storms, infra blips). The witness/deacon redispatch path always carries
+	// --force, so they bypass this gate by design — the permanent block above is
+	// what stops their feedback loop. AutoRespawnRetry (gu-i34ey) grants the
+	// daemon scheduler the same soft-block bypass without the rest of Force's
+	// blast radius, so a bead that merely lost its polecats to infra flakiness
+	// auto-recovers on the next dispatch cycle.
+	if !force && !autoRespawnRetry {
+		if witness.ShouldBlockRespawn(townRoot, hookBead) {
+			maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
+			return fmt.Errorf("respawn limit reached for %s (%d attempts). "+
+				"This bead keeps failing — investigate before re-dispatching.\n"+
+				"Override: gt sling %s %s --force\n"+
+				"Reset:    gt sling respawn-reset %s",
+				hookBead, maxRespawns,
+				hookBead, rigName, hookBead)
+		}
+	}
+	return nil
 }
 
 // SpawnPolecatForSling creates a fresh polecat and optionally starts its session.
@@ -201,30 +265,8 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// entirely, so the deacon's auto-redispatch loop never tripped the
 	// circuit breaker no matter how many times it ran.)
 	if opts.HookBead != "" {
-		// Permanent block: hard fail regardless of --force.
-		if witness.ShouldPermanentlyBlockRespawn(townRoot, opts.HookBead) {
-			maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
-			limit := witness.PermanentBlockMultiplier * maxRespawns
-			return nil, fmt.Errorf("PERMANENT respawn block for %s (cumulative attempts ≥ %d).\n"+
-				"This bead has failed across multiple decay windows and is no longer auto-dispatchable.\n"+
-				"--force does NOT override a permanent block — investigate the root cause first.\n"+
-				"Reset: gt sling respawn-reset %s",
-				opts.HookBead, limit, opts.HookBead)
-		}
-		// Soft block: --force lets operators retry after transient failures
-		// (load storms, infra blips). The witness/deacon redispatch path
-		// always carries --force, so they bypass this gate by design — the
-		// permanent block above is what stops their feedback loop.
-		if !opts.Force {
-			if witness.ShouldBlockRespawn(townRoot, opts.HookBead) {
-				maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
-				return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
-					"This bead keeps failing — investigate before re-dispatching.\n"+
-					"Override: gt sling %s %s --force\n"+
-					"Reset:    gt sling respawn-reset %s",
-					opts.HookBead, maxRespawns,
-					opts.HookBead, rigName, opts.HookBead)
-			}
+		if err := respawnGateError(townRoot, opts.HookBead, rigName, opts.Force, opts.AutoRespawnRetry); err != nil {
+			return nil, err
 		}
 		witness.RecordBeadRespawn(townRoot, opts.HookBead)
 	}

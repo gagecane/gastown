@@ -1296,6 +1296,12 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         filepath.Join(townRoot, ".beads"),
+		// gu-i34ey: the daemon scheduler can autonomously bypass the SOFT respawn
+		// block so a bead that lost its polecats to infra flakiness re-dispatches
+		// on the next cycle instead of stranding until a deacon/human nudge or
+		// respawn-reset. Bounded by the PERMANENT block (2× MaxBeadRespawns),
+		// which RecordBeadRespawn still trips and which --force cannot bypass.
+		AutoRespawnRetry: true,
 		// The capacity pipeline's OnSuccess closes this dispatch's own context
 		// (CloseSlingContext "dispatched"); reconciling here would race/double-close
 		// the very context being dispatched (gu-afpjj).

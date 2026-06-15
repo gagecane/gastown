@@ -49,6 +49,13 @@ type SlingParams struct {
 	TownRoot         string
 	BeadsDir         string
 
+	// AutoRespawnRetry lets the daemon scheduler bypass ONLY the soft respawn
+	// block (gu-i34ey) when re-dispatching a bead whose prior polecats died,
+	// without Force's broader side effects. Threaded into SlingSpawnOptions; the
+	// permanent respawn block still hard-fails. Set true only on the
+	// scheduler-dispatch path (dispatchSingleBead).
+	AutoRespawnRetry bool
+
 	// SkipContextReconcile suppresses the post-dispatch close of stale open
 	// sling-contexts for this work bead (gu-afpjj). The scheduler-dispatch path
 	// owns the lifecycle of its own context via the capacity pipeline's
@@ -584,13 +591,14 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		fmt.Printf("  %s Inherited relay base branch %s from convoy\n", style.Dim.Render("→"), baseBranch)
 	}
 	spawnOpts := SlingSpawnOptions{
-		TownRoot:     townRoot,
-		Force:        params.Force,
-		Account:      params.Account,
-		HookBead:     params.BeadID,
-		Agent:        params.Agent,
-		BaseBranch:   baseBranch,
-		ResumeBranch: params.ResumeBranch,
+		TownRoot:         townRoot,
+		Force:            params.Force,
+		AutoRespawnRetry: params.AutoRespawnRetry,
+		Account:          params.Account,
+		HookBead:         params.BeadID,
+		Agent:            params.Agent,
+		BaseBranch:       baseBranch,
+		ResumeBranch:     params.ResumeBranch,
 		// Create is always true for rig targets: executeSling only handles
 		// rig-targeted dispatch (batch sling + queue dispatch), where a fresh
 		// polecat must be spawned. The single-sling path (runSling) handles
