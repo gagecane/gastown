@@ -362,9 +362,14 @@ func TestClaudeCodeWatch_ChannelClosesOnCtxCancel_NoFile(t *testing.T) {
 // TestKiroWatch_ChannelClosesOnCtxCancel verifies that the Kiro Watch()
 // goroutine closes its output channel when the context is canceled.
 func TestKiroWatch_ChannelClosesOnCtxCancel(t *testing.T) {
-	// We can't easily override the sessions dir path used by KiroAdapter.Watch()
-	// since it derives from $HOME. Instead, create the directory structure at
-	// the actual kiro sessions location.
+	// KiroAdapter.Watch derives the sessions dir from $HOME. Redirect HOME to a
+	// private temp dir so this test gets an isolated, empty sessions directory.
+	// Using the real ~/.kiro/sessions/cli made the test flaky under full-suite
+	// load: on busy agent hosts that dir holds thousands of JSONL files, and
+	// because since==zero every 500ms poll re-stats and re-reads every sibling
+	// metadata file, so the channel-close could exceed the 3s deadline. It also
+	// races against any concurrent real Kiro session writing there.
+	t.Setenv("HOME", t.TempDir())
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("getting home dir: %v", err)
@@ -419,6 +424,11 @@ func TestKiroWatch_ChannelClosesOnCtxCancel(t *testing.T) {
 // TestKiroWatch_ChannelClosesOnCtxCancel_NoFile verifies that the Kiro Watch()
 // goroutine exits cleanly when canceled while waiting for a JSONL file.
 func TestKiroWatch_ChannelClosesOnCtxCancel_NoFile(t *testing.T) {
+	// Redirect HOME to a private temp dir so Watch resolves an isolated, empty
+	// sessions directory (see TestKiroWatch_ChannelClosesOnCtxCancel for why the
+	// real ~/.kiro/sessions/cli made these tests flaky under full-suite load).
+	t.Setenv("HOME", t.TempDir())
+
 	// Use a unique workDir that won't match any existing Kiro sessions.
 	workDir := t.TempDir()
 
