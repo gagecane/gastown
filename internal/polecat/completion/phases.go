@@ -52,7 +52,15 @@ func DetectCleanupStatus(g *git.Git, branch string, cwdAvailable bool) string {
 		return ""
 	}
 	switch {
-	case workStatus.HasUncommittedChanges:
+	case len(workStatus.NonRuntimePaths()) > 0:
+		// gs-b9d6: only REAL uncommitted work blocks. A worktree dirty solely
+		// with untracked runtime artifacts (.beads/, .runtime/, .claude/, …)
+		// must not self-report "uncommitted" — those paths accumulate on every
+		// polecat that touched bd and are not work product. Reporting them as
+		// uncommitted trips the has_uncommitted recovery predicate and forces
+		// manual `nuke --force` round-trips, holding dispatch slots. The runtime
+		// exclusion policy (NonRuntimePaths) is the same one getGitState and
+		// gt done already use, so detection stays consistent across subsystems.
 		return "uncommitted"
 	case workStatus.StashCount > 0:
 		return "stash"

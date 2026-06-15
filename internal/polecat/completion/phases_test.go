@@ -106,6 +106,63 @@ func TestDetectCleanupStatus_Uncommitted(t *testing.T) {
 	}
 }
 
+// TestDetectCleanupStatus_RuntimeArtifactsOnly verifies that a worktree dirty
+// ONLY with untracked runtime artifacts (.beads/, .runtime/) reports "clean",
+// not "uncommitted" (gs-b9d6). These paths accumulate on every polecat that
+// touched bd and are not work product; reporting them as uncommitted tripped
+// the has_uncommitted recovery predicate and forced manual `nuke --force`
+// round-trips that held dispatch slots.
+func TestDetectCleanupStatus_RuntimeArtifactsOnly(t *testing.T) {
+	wt, branch := initRepoForPhases(t)
+	g := git.NewGit(wt)
+
+	// Push branch so the only non-clean signal is the runtime dirt below.
+	c := exec.Command("git", "push", "origin", branch)
+	c.Dir = wt
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+
+	// Untracked runtime state — the exact accumulation the bug describes.
+	for _, p := range []string{".beads/config.yaml", ".runtime/session.json"} {
+		full := filepath.Join(wt, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("runtime\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := DetectCleanupStatus(g, branch, true)
+	if got != "clean" {
+		t.Errorf("DetectCleanupStatus(runtime-only dirt) = %q, want %q", got, "clean")
+	}
+}
+
+// TestDetectCleanupStatus_RealWorkAmongRuntime verifies that real uncommitted
+// work still reports "uncommitted" even when mixed with runtime artifacts
+// (gs-b9d6) — the runtime exclusion must not mask actual source changes.
+func TestDetectCleanupStatus_RealWorkAmongRuntime(t *testing.T) {
+	wt, branch := initRepoForPhases(t)
+	g := git.NewGit(wt)
+
+	for _, p := range []string{".beads/config.yaml", "src.go"} {
+		full := filepath.Join(wt, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := DetectCleanupStatus(g, branch, true)
+	if got != "uncommitted" {
+		t.Errorf("DetectCleanupStatus(real work + runtime) = %q, want %q", got, "uncommitted")
+	}
+}
+
 // TestDetectCleanupStatus_Unpushed verifies that a clean branch with commits
 // not yet on origin reports "unpushed" — the signal that gt done must push
 // before notifying witness.
