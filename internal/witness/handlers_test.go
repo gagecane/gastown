@@ -1367,6 +1367,109 @@ func TestResetAbandonedBead_ResetsWhenWorkNotOnMain(t *testing.T) {
 	}
 }
 
+// TestResetAbandonedBead_PreservesWhenMRPending covers gu-oeew4: a polecat that
+// ran `gt done` (pushed + submitted an MR now sitting in the refinery queue)
+// then had its worktree torn down. verifyCommitOnMain can't fire on this
+// worktree-gone path (the dir is gone), so the reader-only active_mr guard must
+// preserve the bead instead of resetting it — otherwise the bead is re-slung and
+// lands twice when the queued MR merges.
+func TestResetAbandonedBead_PreservesWhenMRPending(t *testing.T) {
+	// Not parallel: overrides package-level verifyCommitOnMain.
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, fmt.Errorf("worktree gone") // dir torn down → always errors
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) < 2 || args[0] != "show" {
+				return "", nil
+			}
+			switch {
+			case args[1] == "gt-work123":
+				return `[{"status":"hooked"}]`, nil
+			case strings.Contains(args[1], "polecat"):
+				// Agent bead carries the active_mr set by gt done.
+				return `[{"active_mr":"gt-mr-1","hook_bead":"gt-work123"}]`, nil
+			case args[1] == "gt-mr-1":
+				// MR still live in the refinery queue (non-terminal).
+				return `[{"id":"gt-mr-1","status":"open","description":"source_issue: gt-work123"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	tmpDir := t.TempDir()
+	result := resetAbandonedBead(bd, tmpDir, "testrig", "gt-work123", "alpha", nil)
+	if result {
+		t.Error("resetAbandonedBead should return false when an MR is pending (bead preserved, not re-dispatched)")
+	}
+
+	for _, call := range mock.calls {
+		if strings.Contains(call, "update") && strings.Contains(call, "--status=open") {
+			t.Errorf("bd update --status=open should NOT be called when MR is pending, got calls: %v", mock.calls)
+		}
+		if strings.Contains(call, "close gt-work123") {
+			t.Errorf("bead should NOT be closed when MR is still pending, got calls: %v", mock.calls)
+		}
+	}
+}
+
+// TestResetAbandonedBead_ClosesWhenMRMerged covers gu-oeew4: a polecat's MR
+// already merged (proven by close_reason=merged) but the source bead was left
+// non-terminal and the worktree is gone. The reader-only active_mr guard should
+// close the bead as merged — the worktree-free analog of verifyCommitOnMain.
+func TestResetAbandonedBead_ClosesWhenMRMerged(t *testing.T) {
+	// Not parallel: overrides package-level verifyCommitOnMain.
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, fmt.Errorf("worktree gone")
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) < 2 || args[0] != "show" {
+				return "", nil
+			}
+			switch {
+			case args[1] == "gt-work123":
+				return `[{"status":"hooked"}]`, nil
+			case strings.Contains(args[1], "polecat"):
+				return `[{"active_mr":"gt-mr-1","hook_bead":"gt-work123"}]`, nil
+			case args[1] == "gt-mr-1":
+				return `[{"id":"gt-mr-1","status":"closed","description":"source_issue: gt-work123\nclose_reason: merged"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	tmpDir := t.TempDir()
+	result := resetAbandonedBead(bd, tmpDir, "testrig", "gt-work123", "alpha", nil)
+	if result {
+		t.Error("resetAbandonedBead should return false when MR is merged (bead closed, not re-dispatched)")
+	}
+
+	var foundClose, foundUpdate bool
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close gt-work123") {
+			foundClose = true
+		}
+		if strings.Contains(call, "update") && strings.Contains(call, "--status=open") {
+			foundUpdate = true
+		}
+	}
+	if !foundClose {
+		t.Errorf("expected bd close on merged MR, got calls: %v", mock.calls)
+	}
+	if foundUpdate {
+		t.Error("bd update --status=open should NOT be called when MR is merged")
+	}
+}
+
 // TestResetAbandonedBead_MassDeathRateLimited covers the gu-pq2q acceptance
 // criterion: fire 10 simultaneous dead-session events and verify only N are
 // dispatched within the 1-minute window (N = MaxRedispatchesPerMinute cap).

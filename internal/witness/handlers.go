@@ -3896,6 +3896,47 @@ func resetAbandonedBead(bd *BdCli, workDir, rigName, hookBead, polecatName strin
 		return false
 	}
 
+	// Guard (gu-oeew4): pending/merged MR check that does NOT touch the worktree.
+	// This is the worktree-gone analog of verifyCommitOnMain. On the orphan
+	// path, the polecat dir is already torn down, so verifyCommitOnMain opens a
+	// deleted worktree and always errors — its close-as-done guard never fires.
+	// A polecat that ran `gt done`, pushed, and submitted an MR (now sitting in
+	// the refinery queue) before its worktree was reaped would otherwise have
+	// its source bead reset and re-slung, then land twice when the MR merges.
+	// The live-session zombie path already guards via hasPendingMRFromSnapshot;
+	// mirror that here using the reader-only polecat.AssessActiveMR classifier.
+	prefix := beads.GetPrefixForRig(trRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	activeMR, sourceHint := getAgentMRContext(bd, workDir, agentBeadID)
+	if sourceHint == "" {
+		sourceHint = hookBead
+	}
+	if activeMR != "" {
+		assessment := polecat.AssessActiveMR(beadCLIShower{bd: bd, workDir: workDir}, polecat.ActiveMRInput{
+			ActiveMR:        activeMR,
+			SourceIssueHint: sourceHint,
+		})
+		switch {
+		case assessment.Stale && assessment.MRMerged:
+			// MR is proven-merged: the work landed on the target branch even
+			// though the worktree is gone. Close the bead as done instead of
+			// re-dispatching, matching the verifyCommitOnMain branch above.
+			reason := fmt.Sprintf("Work merged via %s (verified by witness, polecat %s)", assessment.ActiveMR, polecatName)
+			if err := bd.Run(workDir, "close", hookBead, "-r", reason); err != nil {
+				fmt.Fprintf(os.Stderr, "witness: failed to close bead %s (MR merged): %v\n", hookBead, err)
+			}
+			return false
+		case assessment.Pending:
+			// MR is still live in the refinery queue (or its terminal state is
+			// not yet provable). Resetting now would re-dispatch the bead and
+			// cause a duplicate landing once the queued MR merges. Preserve the
+			// bead's hooked/in_progress state; the refinery closes it on merge.
+			fmt.Fprintf(os.Stderr, "witness: preserving bead %s (pending MR %s, polecat %s): %s\n",
+				hookBead, assessment.ActiveMR, polecatName, assessment.Reason)
+			return false
+		}
+	}
+
 	// Circuit breaker (clown show #22): if this bead has already been
 	// respawned too many times, escalate to mayor instead of re-dispatching.
 	// This prevents the witness→deacon→spawn feedback loop from creating
