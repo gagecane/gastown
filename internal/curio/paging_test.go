@@ -305,3 +305,64 @@ func TestJudgmentLane_OldOccurrencesPruned(t *testing.T) {
 		t.Errorf("pruned-out old occurrence should not push us over the ceiling, got %+v", got)
 	}
 }
+
+// --- End-to-end re-fire suppression (gc-e2uvyr.4) ---
+
+// TestJudgmentLane_StableDedupKeyAcrossManyBumps is the L1 (engine) half of the
+// end-to-end re-fire suppression proof. It extends TestJudgmentLane_Latches
+// ClosedAndBumps from 2 cycles to a sustained re-fire: the SAME judgment cluster
+// set re-firing every cycle must produce exactly ONE trip followed by bumps that
+// ALL carry the identical DedupKey. That stable key is the contract L3 relies on
+// — `gt escalate --dedup --signature=<key>` only collapses re-fires into one
+// bead when the key never changes. A key that drifted per cycle would still look
+// like a valid page each cycle but would defeat dedup downstream, re-paging the
+// Overseer every cycle — the precise failure the NO-GO note feared.
+func TestJudgmentLane_StableDedupKeyAcrossManyBumps(t *testing.T) {
+	e := NewPagingEngine()
+	now := time.Now()
+	// A fixed cluster set (2 distinct clusters) that re-fires identically each
+	// cycle. 2 < burst ceiling (3) per cycle, so we seed the trip with a 3-burst
+	// first cycle, then hold steady at the recurring set.
+	tripSet := []Candidate{judgmentCand("ca"), judgmentCand("cb"), judgmentCand("cc")}
+	steady := []Candidate{judgmentCand("ca"), judgmentCand("cb")}
+
+	trip := e.Decide(tripSet, now)
+	if len(trip) != 1 || trip[0].Kind != ActionJudgmentTrip {
+		t.Fatalf("cycle 0 should trip exactly once, got %+v", trip)
+	}
+	key := trip[0].DedupKey
+	if key == "" {
+		t.Fatal("trip DedupKey must be non-empty")
+	}
+
+	const cycles = 12
+	trips, bumps := 1, 0
+	for i := 1; i <= cycles; i++ {
+		acts := e.Decide(steady, now.Add(time.Duration(i)*time.Minute))
+		if len(acts) != 1 {
+			t.Fatalf("cycle %d: steady re-fire should emit exactly one judgment action, got %+v", i, acts)
+		}
+		a := acts[0]
+		switch a.Kind {
+		case ActionJudgmentTrip:
+			trips++
+		case ActionJudgmentBump:
+			bumps++
+		default:
+			t.Fatalf("cycle %d: unexpected action kind %v", i, a.Kind)
+		}
+		if a.DedupKey != key {
+			t.Errorf("cycle %d: DedupKey drifted: %q != %q — would split into multiple beads", i, a.DedupKey, key)
+		}
+	}
+
+	if trips != 1 {
+		t.Errorf("a stable re-firing cluster set must trip EXACTLY ONCE, got %d trips", trips)
+	}
+	if bumps != cycles {
+		t.Errorf("every post-trip cycle should bump (not re-trip), got %d bumps over %d cycles", bumps, cycles)
+	}
+	if e.State() != BreakerClosed {
+		t.Errorf("breaker should remain latched Closed across all re-fires, got %v", e.State())
+	}
+}
