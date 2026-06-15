@@ -273,6 +273,21 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, "awaiting_refinery_merge", info.Title)
 	}
 
+	// Notification-bead guard (gu-4xf0w). scheduleBead is the last stop before a
+	// sling context is created and a polecat is selected. A bead carrying
+	// gt:message / gt:escalation / gt:handoff / gt:merge-request / msg-type:* /
+	// type:daemon-restart-pending (or a "HANDOFF" title) is inter-agent
+	// communication or an operational signal, never work — creating a sling
+	// context for it spawns a polecat that can only close no-changes. The
+	// convoy-feed filter dropped only the messaging subset; escalations,
+	// mail-typed beads, and daemon-restart-pending markers slipped through any
+	// path reaching scheduleBead directly. Shares dispatch.IsNotificationBeadInfo
+	// with `gt ready`; not bypassed by --force.
+	if isNotificationBeadInfo(info) {
+		return fmt.Errorf("bead %s is a notification / operational-signal bead (gt:message / gt:escalation / gt:handoff / msg-type:* / type:daemon-restart-pending): %q — refusing to schedule. Inter-agent notifications are not dispatchable work",
+			beadID, info.Title)
+	}
+
 	// Reference/tripwire guard (hq-9jeyo). A bead labeled do-not-dispatch /
 	// pinned, or issue_type=reference, is a permanent live safety gate, never
 	// work. Refusing here prevents the sling-context AND the auto-convoy from

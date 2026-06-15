@@ -444,6 +444,21 @@ func validateBeadDispatchable(beadID string, info *beadInfo) error {
 			beadID, info.Title)
 	}
 
+	// Notification-bead guard (gu-4xf0w). A bead carrying gt:message /
+	// gt:escalation / gt:handoff / gt:merge-request / msg-type:* /
+	// type:daemon-restart-pending (or a "HANDOFF" title) is inter-agent
+	// communication or an operational signal, never work. These carry no
+	// convoy_id so the convoy-walking auto-dispatcher does not sling them, but
+	// they are gt-ready-eligible — so `gt sling --all` would route a notification
+	// to a polecat. The convoy-feed filter dropped only the messaging subset
+	// (gt:message/gt:handoff/gt:merge-request) and never covered escalations,
+	// mail-typed beads, or daemon-restart-pending markers. Shares
+	// dispatch.IsNotificationBeadInfo with `gt ready`; not bypassed by --force.
+	if isNotificationBeadInfo(info) {
+		return fmt.Errorf("refusing to sling bead %s: %q is a notification / operational-signal bead (gt:message / gt:escalation / gt:handoff / msg-type:* / type:daemon-restart-pending) — inter-agent notifications are not dispatchable work",
+			beadID, info.Title)
+	}
+
 	// Reference/tripwire guard (gu-nid89.32, follow-up to hq-9jeyo / gs-9ct).
 	// A bead labeled do-not-dispatch / pinned, or issue_type=reference, is a
 	// permanent live safety gate, never work. scheduleBead and executeSling

@@ -541,6 +541,23 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 			continue
 		}
 
+		// Filter inter-agent notification / operational-signal beads (gu-4xf0w).
+		// Mail (gt:message), escalations (gt:escalation), session handoffs
+		// (gt:handoff / "🤝 HANDOFF" title), merge-request notices
+		// (gt:merge-request), any mail-typed bead (msg-type:*), and daemon
+		// restart-pending markers (type:daemon-restart-pending) are notifications,
+		// never work. They carry no convoy_id so the convoy-walking auto-dispatcher
+		// does not sling them today, but they are gt-ready-eligible — so
+		// `gt sling --all` (and any future dispatch-path change) would route a
+		// notification bead to a polecat as work. Observed live 2026-06-08: 5 such
+		// beads sat in `gt ready` continuously. Sharing dispatch.IsNotificationBeadInfo
+		// with the sling guards keeps the readiness filter and the dispatch guards
+		// aligned — the same single-predicate approach the identity/container/
+		// awaiting-merge exclusions use.
+		if dispatch.IsNotificationBeadInfo(info) {
+			continue
+		}
+
 		filtered = append(filtered, issue)
 	}
 	return filtered

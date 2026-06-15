@@ -399,6 +399,47 @@ func TestFilterIdentityBeads(t *testing.T) {
 			input:    &beads.Issue{ID: "gu-closed", Title: "Already done", Type: "task", Status: "closed"},
 			filtered: true,
 		},
+
+		// gu-4xf0w: inter-agent notification / operational-signal beads
+		// (gt:message / gt:escalation / gt:handoff / msg-type:* /
+		// type:daemon-restart-pending) are gt-ready-eligible but never work —
+		// filterIdentityBeads now drops them via dispatch.IsNotificationBeadInfo.
+		{
+			name:     "gt:message mail bead filtered",
+			input:    &beads.Issue{ID: "gc-siq4xd", Title: "handoff memo", Type: "task", Labels: []string{"gt:message"}},
+			filtered: true,
+		},
+		{
+			name:     "gt:escalation bead filtered",
+			input:    &beads.Issue{ID: "gc-xqdy0n", Title: "[HIGH] Convoy cannot be dispatched", Type: "task", Labels: []string{"gt:message", "gt:escalation"}},
+			filtered: true,
+		},
+		{
+			name:     "msg-type:task notification filtered",
+			input:    &beads.Issue{ID: "gc-nf2x3t", Title: "notify delta", Type: "task", Labels: []string{"gt:message", "msg-type:task"}},
+			filtered: true,
+		},
+		{
+			name:     "type:daemon-restart-pending filtered",
+			input:    &beads.Issue{ID: "gc-4cj1ds", Title: "rebuild-gt", Type: "task", Labels: []string{"type:daemon-restart-pending"}},
+			filtered: true,
+		},
+		{
+			name:     "gt:handoff label filtered",
+			input:    &beads.Issue{ID: "gu-handoff", Title: "session continuity", Type: "task", Labels: []string{"gt:handoff"}},
+			filtered: true,
+		},
+		{
+			name:     "HANDOFF title without label filtered",
+			input:    &beads.Issue{ID: "gu-handoff2", Title: "🤝 HANDOFF: refinery → witness", Type: "task"},
+			filtered: true,
+		},
+		// Near-miss: a plain task mentioning "message" must NOT be filtered.
+		{
+			name:     "message in title does NOT filter",
+			input:    &beads.Issue{ID: "gu-msgwork", Title: "Fix message parser bug", Type: "task"},
+			filtered: false,
+		},
 	}
 
 	for _, tt := range tests {

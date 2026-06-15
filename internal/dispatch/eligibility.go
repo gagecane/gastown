@@ -345,6 +345,61 @@ func IsHumanOnlyBeadInfo(info *BeadInfo) bool {
 	return beads.IsHumanOnlyTitle(info.Title)
 }
 
+// Notification-bead label markers. A notification bead is inter-agent
+// communication or an operational signal — mail (gt:message), escalations
+// (gt:escalation), session handoffs (gt:handoff), merge-request notices
+// (gt:merge-request), any mail-typed bead (msg-type:<type>), or a daemon
+// restart-pending marker (type:daemon-restart-pending). None are dispatchable
+// work. Kept local so this package does not depend on internal/cmd.
+const (
+	labelEscalation           = "gt:escalation"
+	labelDaemonRestartPending = "type:daemon-restart-pending"
+	// labelMsgTypePrefix is the prefix the mail router stamps on every mail
+	// bead ("msg-type:<type>", e.g. msg-type:task, msg-type:escalation —
+	// internal/mail/router.go). Any bead carrying it is mail, never work.
+	labelMsgTypePrefix = "msg-type:"
+)
+
+// IsNotificationBeadInfo reports whether a bead is an inter-agent notification
+// or operational-signal bead rather than dispatchable work: mail (gt:message),
+// escalations (gt:escalation), session handoffs (gt:handoff or a "🤝 HANDOFF"
+// title), merge-request notices (gt:merge-request), any mail-typed bead
+// (msg-type:*), or a daemon restart-pending marker (type:daemon-restart-pending).
+//
+// gu-4xf0w: these beads are gt-ready-eligible (no convoy_id, so the
+// convoy-walking auto-dispatcher does not sling them today, but `gt sling --all
+// <rig>` or any future dispatch-path change would). The convoy-feed candidate
+// filter already drops gt:message/gt:handoff/gt:merge-request via
+// capacity.IsMessagingBead, but `gt ready` and the sling chokepoints had no
+// notification guard — and that filter never covered gt:escalation, msg-type:*,
+// or type:daemon-restart-pending. Live observation 2026-06-08: 5 such beads
+// (gc-xqdy0n, gc-xr56i3, gc-siq4xd, gc-nf2x3t escalation/message/handoff, plus a
+// daemon-restart-pending bead) sat in `gt ready` continuously as the town ran.
+//
+// This consolidates the full notification set into one predicate wired into both
+// `gt ready` and every sling/schedule guard — the same single-predicate, no-drift
+// approach the identity (gu-7h278), container (gu-9j93s/gu-xymp6), and
+// awaiting-merge (gu-ea25u) exclusions use. Reuses capacity.IsMessagingBead /
+// capacity.IsHandoffTitle for the message/handoff/merge-request legs so the
+// convoy-feed filter and this predicate cannot drift on those labels.
+func IsNotificationBeadInfo(info *BeadInfo) bool {
+	if info == nil {
+		return false
+	}
+	if capacity.IsMessagingBead(info.Labels) || capacity.IsHandoffTitle(info.Title) {
+		return true
+	}
+	for _, l := range info.Labels {
+		if l == labelEscalation || l == labelDaemonRestartPending {
+			return true
+		}
+		if strings.HasPrefix(l, labelMsgTypePrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsReferenceTripwireBeadInfo reports whether a bead is a permanent reference
 // or gate tripwire — do-not-dispatch / pinned labels, or issue_type=reference
 // (hq-9jeyo). Such beads stay OPEN forever as live safety gates and must never

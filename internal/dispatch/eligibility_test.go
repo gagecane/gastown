@@ -700,6 +700,50 @@ func TestIsAwaitingMergeBeadInfo(t *testing.T) {
 	}
 }
 
+// TestIsNotificationBeadInfo verifies the gu-4xf0w guard that keeps inter-agent
+// notification / operational-signal beads out of gt ready and every sling path.
+func TestIsNotificationBeadInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *BeadInfo
+		want bool
+	}{
+		{"nil", nil, false},
+		{"empty", &BeadInfo{}, false},
+
+		// Positive: each notification label class.
+		{"mail message", &BeadInfo{Title: "Re: status", Labels: []string{"gt:message"}}, true},
+		{"escalation", &BeadInfo{Title: "[HIGH] Convoy cannot be dispatched", Labels: []string{"gt:message", "gt:escalation"}}, true},
+		{"handoff label", &BeadInfo{Title: "session handoff", Labels: []string{"gt:handoff"}}, true},
+		{"merge-request", &BeadInfo{Title: "MR for gu-x", Labels: []string{"gt:merge-request"}}, true},
+		{"msg-type task", &BeadInfo{Title: "notify", Labels: []string{"msg-type:task"}}, true},
+		{"msg-type escalation", &BeadInfo{Title: "notify", Labels: []string{"msg-type:escalation"}}, true},
+		{"daemon-restart-pending", &BeadInfo{Title: "restart pending", Labels: []string{"type:daemon-restart-pending"}}, true},
+		// Unlabeled handoff memo caught by title (gu-a76gk family).
+		{"handoff title no label", &BeadInfo{Title: "🤝 HANDOFF: refinery → witness", IssueType: "task"}, true},
+		// Label mixed among others.
+		{"escalation among others", &BeadInfo{Title: "x", Labels: []string{"bug", "gt:escalation", "p2"}}, true},
+
+		// Negative: ordinary work beads and near-miss labels.
+		{"plain task", &BeadInfo{Title: "Fix bug", Status: "open", IssueType: "task", Labels: []string{"bug"}}, false},
+		{"no labels", &BeadInfo{Title: "Fix bug", Status: "open"}, false},
+		{"sling-context not a notification", &BeadInfo{Labels: []string{"gt:sling-context"}}, false},
+		{"convoy not a notification", &BeadInfo{Labels: []string{"gt:convoy"}}, false},
+		// "message" substring without the gt: prefix must not match.
+		{"bare message label", &BeadInfo{Labels: []string{"message"}}, false},
+		// msg-type as a substring elsewhere must not match (prefix-anchored).
+		{"label containing msg-type mid-string", &BeadInfo{Labels: []string{"x-msg-type:task"}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsNotificationBeadInfo(tt.info); got != tt.want {
+				t.Errorf("IsNotificationBeadInfo(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsSlingContextBeadInfo verifies the gu-hfr3 guard that prevents a
 // sling-context wrapper from being re-scheduled (which would nest wrappers).
 func TestIsSlingContextBeadInfo(t *testing.T) {

@@ -1106,6 +1106,19 @@ func getReadySlingContexts(townRoot string) ([]capacity.PendingBead, error) {
 			continue
 		}
 
+		// Notification-bead filter (gu-4xf0w). The two checks above cover the
+		// gt:message/gt:handoff/gt:merge-request messaging subset; this catches the
+		// remaining notification classes — escalations (gt:escalation), mail-typed
+		// beads (msg-type:*), and daemon restart-pending markers
+		// (type:daemon-restart-pending) — that are also pure notifications, never
+		// work. Shares dispatch.IsNotificationBeadInfo with `gt ready` and the
+		// sling guards so the convoy-feed filter cannot drift from them.
+		if isNotificationBeadInfo(&beadInfo{Title: info.Title, Labels: workLabels}) {
+			fmt.Fprintf(os.Stderr, "%s dispatch_skip reason=notification_label bead=%s labels=%v\n",
+				style.Dim.Render("○"), fields.WorkBeadID, workLabels)
+			continue
+		}
+
 		// Container filter (gu-r8b0q): a work bead with open children is an
 		// epic/container, not dispatchable work — the children track the real
 		// work. executeSling rejects these at dispatch time, but the rejection

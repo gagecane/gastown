@@ -104,6 +104,7 @@ var (
 	isMayorOnlyBeadInfo         = dispatch.IsMayorOnlyBeadInfo
 	isHumanOnlyBeadInfo         = dispatch.IsHumanOnlyBeadInfo
 	isAwaitingMergeBeadInfo     = dispatch.IsAwaitingMergeBeadInfo
+	isNotificationBeadInfo      = dispatch.IsNotificationBeadInfo
 	isReferenceTripwireBeadInfo = dispatch.IsReferenceTripwireBeadInfo
 	isSlingContextBeadInfo      = dispatch.IsSlingContextBeadInfo
 	isWrongRigBeadForTarget     = dispatch.IsWrongRigBeadForTarget

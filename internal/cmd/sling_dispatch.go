@@ -283,6 +283,21 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, info.Title, params.BeadID)
 	}
 
+	// Notification-bead guard (gu-4xf0w). A bead carrying gt:message /
+	// gt:escalation / gt:handoff / gt:merge-request / msg-type:* /
+	// type:daemon-restart-pending (or a "HANDOFF" title) is inter-agent
+	// communication or an operational signal, never work. The convoy-feed
+	// candidate filter drops the messaging subset via capacity.IsMessagingBead,
+	// but executeSling is reached by `gt sling --all` and the deferred/batch
+	// paths, which had no notification guard; and that filter never covered
+	// escalations, mail-typed beads, or daemon-restart-pending markers. Shares
+	// dispatch.IsNotificationBeadInfo with `gt ready`; not bypassed by --force.
+	if isNotificationBeadInfo(info) {
+		result.ErrMsg = "notification bead"
+		return result, fmt.Errorf("bead %s is a notification / operational-signal bead (gt:message / gt:escalation / gt:handoff / msg-type:* / type:daemon-restart-pending): %q — inter-agent notifications are not dispatchable work",
+			params.BeadID, info.Title)
+	}
+
 	// Awaiting-refinery-merge guard (gu-ea25u). Batch sling and the deferred
 	// scheduler funnel through executeSling; without this, a source bead that
 	// already submitted an MR (label awaiting_refinery_merge, kept open until
