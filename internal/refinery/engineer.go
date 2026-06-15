@@ -2053,6 +2053,18 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 	// (batch + single-MR) fails to find the real bug bead when an older binary
 	// wrote a convoy/timestamp-suffixed ID into source_issue, leaving the child
 	// bead OPEN/HOOKED after its MR merged.
+	//
+	// sourceClosed tracks whether the source issue reached a terminal state. It
+	// gates the irreversible cleanup below (active_mr clear + branch delete).
+	// On a terminal-close FAILURE (source still non-terminal) we must NOT clear
+	// active_mr or delete the branch (gu-xner6): active_mr is the only handle the
+	// reaper's ReconcileMergedOrphans (gu-7igu8) uses to complete an interrupted
+	// post-merge reconcile, and the MR bead stays closed-as-merged so the reaper
+	// can prove the work landed. Clearing active_mr here on a swallowed close
+	// failure would blind the reaper and strand the source bead HOOKED with a
+	// leaked awaiting_refinery_merge label. A missing source_issue or one that is
+	// already terminal both count as closed — no recovery is needed.
+	sourceClosed := true
 	if sourceIssue := stripMRIssueTimestampSuffix(mr.SourceIssue); sourceIssue != "" {
 		closeReason := fmt.Sprintf("Merged in %s", mr.ID)
 		if result.MergeCommit != "" {
@@ -2063,6 +2075,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 			if issue, showErr := e.beads.Show(sourceIssue); showErr == nil && beads.IssueStatus(issue.Status).IsTerminal() {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Source issue already closed: %s\n", sourceIssue)
 			} else {
+				sourceClosed = false
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close source issue %s: %v\n", sourceIssue, err)
 			}
 		} else {
@@ -2074,6 +2087,19 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 	// Conflict beads otherwise outlive the successful re-land of their content
 	// and rot as open issues (re-dlcs/re-4i3b/re-gcii pattern).
 	e.closeSupersededConflictArtifacts(mr)
+
+	// gu-xner6: If the source issue did not reach a terminal state, STOP before
+	// the irreversible cleanup. Leave active_mr intact (so the reaper's
+	// ReconcileMergedOrphans can finish closing the source on its next cycle) and
+	// preserve the branch (so the work is not orphaned off a deleted ref while the
+	// source bead is still OPEN/HOOKED). The MR bead is already closed-as-merged,
+	// which is exactly the signature the reaper keys on. Return early; the mayor
+	// nudge below is for clean completions only and would otherwise imply the
+	// reconcile finished.
+	if !sourceClosed {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ⚠ Source issue close failed for %s — preserving active_mr + branch for reaper reconcile (gu-xner6)\n", mr.ID)
+		return
+	}
 
 	// 1.5. Clear agent bead's active_mr reference (traceability cleanup)
 	if mr.AgentBead != "" {
