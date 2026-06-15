@@ -53,6 +53,12 @@ func TestSetupPatrolTickers_DefaultEnabledPatrolsGetChannels(t *testing.T) {
 	if pt.restartPending == nil {
 		t.Error("restart_pending is default-enabled and should have a live channel")
 	}
+	// escalate_stale is default-enabled (gu-2sepi) so the stale-escalation
+	// re-routing mechanism is actually driven without a human. A nil channel
+	// here would mean the patrol is never wired into the main loop's select.
+	if pt.escalateStale == nil {
+		t.Error("escalate_stale is default-enabled and should have a live channel")
+	}
 }
 
 func TestSetupPatrolTickers_ExplicitlyEnabledPatrolGetsChannel(t *testing.T) {

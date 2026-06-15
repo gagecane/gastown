@@ -1067,6 +1067,17 @@ func (d *Daemon) Run() (err error) {
 				d.runMergeQueueAgeDog()
 			}
 
+		case <-patrols.escalateStale:
+			// Escalate-stale dog — invokes `gt escalate stale` on a cadence so
+			// the stale-escalation re-routing mechanism (severity bump +
+			// re-route of unacked escalations) actually runs without a human
+			// (gu-2sepi). Previously runEscalateStale was reachable only from
+			// the CLI, leaving an unacked escalation stuck at its original
+			// severity forever if the Mayor was offline/crashed/missed mail.
+			if !d.isShutdownInProgress() {
+				d.runEscalateStaleDog()
+			}
+
 		case <-timer.C:
 			d.heartbeat(state)
 
