@@ -71,9 +71,14 @@ See: {{.prd_review}}
 ## Output Requirements
 Write your review to: **{{.output_path}}**
 
+Before you start, run `git rev-parse HEAD` and record the SHA — the synthesis step
+uses it to detect when HEAD has moved past your basis and re-check your findings.
+
 Structure your output as follows:
 ```markdown
 # {{.leg.title}}
+
+> Grounded against HEAD `<short-sha>` (run `git rev-parse HEAD` at leg start).
 
 ## Verdict
 PASS / PASS WITH NOTES / FAIL — one sentence rationale
@@ -246,8 +251,13 @@ All leg reviews from: {{.output.directory}}/
 1. Read all leg reviews
 2. Aggregate verdicts (PASS / PASS WITH NOTES / FAIL per leg)
 3. Consolidate must-fix items (deduplicate, flag cross-leg findings)
-4. Determine overall go/no-go
-5. Write the synthesized review
+4. **Re-verify every must-fix / blocking item against current HEAD (mandatory final pass — do this LAST, after consolidation, before determining go/no-go).** The legs ran in parallel over hours or days against whatever branch each polecat had; landed commits may have already resolved must-fix items the legs raised. Do NOT pass a stale blocker to the human.
+   - Run `git rev-parse HEAD` to capture the commit you are grounding against.
+   - For each must-fix / blocking item, re-read the cited files at HEAD (targeted `grep`/read of the symbols, functions, or files the finding references).
+   - Mark each with one of: **resolved-in-code** | **open** | **in-flight**, each with a concrete `file:line` citation.
+   - Actively correct stale framing: any "risk concentrated on the un-built half" / "this isn't built yet"-class statement must be re-checked against HEAD and rewritten if the code has since landed (check `git log`/`git merge-base` — a referenced commit may already be an ancestor of HEAD). A go/no-go built on already-resolved blockers is wrong.
+5. Determine overall go/no-go (against HEAD, not against the legs' stale basis)
+6. Write the synthesized review (with the re-verification banner + per-item stamps below)
 
 **Output file:** {{.output.directory}}/{{.output.synthesis}}
 
@@ -255,8 +265,21 @@ All leg reviews from: {{.output.directory}}/
 ```markdown
 # Plan Review: {{.problem}}
 
+> ## ⚠️ Re-verified against HEAD — read before acting on the verdict
+>
+> **Verified against `<short-sha>` on <date>.** This synthesis re-grounds every
+> must-fix item against current HEAD; legs ran earlier against branches that may
+> predate landed work. The go/no-go below reflects HEAD, not the legs' stale basis.
+>
+> | # | Must-fix item | Status @ `<short-sha>` | Citation |
+> |---|---|---|---|
+> | 1 | <item> | ✅ resolved-in-code / 🟡 in-flight / 🔴 open | `path/to/file.ext:LINE` |
+> | ... | ... | ... | ... |
+
 ## Overall Verdict
-**GO / GO WITH FIXES / NO-GO** — one paragraph rationale
+**GO / GO WITH FIXES / NO-GO** — one paragraph rationale.
+(Base this on HEAD-verified blockers only. If a leg's must-fix has since landed,
+it does not count against go/no-go — note it as resolved-in-code in the banner.)
 
 ## Leg Verdicts
 | Dimension | Verdict | Key Finding |
@@ -271,6 +294,7 @@ All leg reviews from: {{.output.directory}}/
 (Blocking issues — plan needs revision before proceeding)
 
 ### [Issue Title]
+- **Status** (verified against `<short-sha>` on <date>): resolved-in-code | open | in-flight — `file:line` citation
 - **Found by**: <which legs>
 - **Problem**: <what's wrong>
 - **Required fix**: <what needs to change in the plan>
@@ -286,7 +310,8 @@ All leg reviews from: {{.output.directory}}/
 - ...
 
 ## Next Steps
-- [ ] Address must-fix items in plan (if any)
+- [x] Re-verified must-fix items against current HEAD (`<short-sha>`, <date>) before issuing the verdict
+- [ ] Address only the still-live (OPEN / IN-FLIGHT) must-fix items in plan — skip the resolved-in-code ones
 - [ ] Re-review if NO-GO
 - [ ] Pour `shiny` or `mol-polecat-work` per plan bead if GO
 ```

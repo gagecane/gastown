@@ -64,9 +64,14 @@ You are a specialized analyst participating in a parallel PRD review convoy.
 ## Output Requirements
 Write your analysis to: **{{.output_path}}**
 
+Before you start, run `git rev-parse HEAD` and record the SHA — the synthesis step
+uses it to detect when HEAD has moved past your basis and re-check your findings.
+
 Structure your output as follows:
 ```markdown
 # {{.leg.title}}
+
+> Grounded against HEAD `<short-sha>` (run `git rev-parse HEAD` at leg start).
 
 ## Summary
 (1-2 paragraph overview of what you found)
@@ -271,8 +276,13 @@ All leg analyses from: {{.output.directory}}/
 2. Identify overlapping findings across legs (these are higher-confidence gaps)
 3. Deduplicate and prioritize
 4. Group into must-answer-before-build vs important-but-not-blocking
-5. Write the synthesized review
-6. Mail the human overseer with the questions
+5. **Re-verify every critical/blocking finding against current HEAD (mandatory final pass — do this LAST, after dedup, before writing).** The legs ran in parallel over hours or days against whatever branch each polecat had; landed commits may have already resolved findings the legs raised. Do NOT pass a stale finding to the human.
+   - Run `git rev-parse HEAD` to capture the commit you are grounding against.
+   - For each critical/blocking question, re-read the cited files at HEAD (targeted `grep`/read of the symbols, functions, or files the finding references).
+   - Mark each finding with one of: **resolved-in-code** | **open** | **in-flight**, each with a concrete `file:line` citation.
+   - Actively correct stale framing: any "risk concentrated on the un-built half" / "this isn't built yet"-class statement must be re-checked against HEAD and rewritten if the code has since landed (check `git log`/`git merge-base` — a referenced commit may already be an ancestor of HEAD).
+6. Write the synthesized review (with the re-verification banner + per-question stamps below)
+7. Mail the human overseer with the questions — flag which are still OPEN / IN-FLIGHT and which are already RESOLVED-IN-CODE so they don't answer already-closed questions
 
 **Output file:** {{.output.directory}}/{{.output.synthesis}}
 
@@ -280,14 +290,28 @@ All leg analyses from: {{.output.directory}}/
 ```markdown
 # PRD Review: {{.problem}}
 
+> ## ⚠️ Re-verified against HEAD — read before answering anything
+>
+> **Verified against `<short-sha>` on <date>.** This synthesis re-grounds every
+> critical question against current HEAD; legs ran earlier against branches that may
+> predate landed work. Answer only the OPEN / IN-FLIGHT questions below.
+>
+> | Q | Topic | Status @ `<short-sha>` | Citation |
+> |---|---|---|---|
+> | Q1 | <topic> | ✅ resolved-in-code / 🟡 in-flight / 🔴 open | `path/to/file.ext:LINE` |
+> | ... | ... | ... | ... |
+
 ## Executive Summary
-(2-3 sentences: overall PRD health, biggest risks, confidence in current state)
+(2-3 sentences: overall PRD health, biggest risks, confidence in current state.
+If any leg framed risk around "un-built" work that has since landed, correct that
+framing here and point to the re-verification banner.)
 
 ## Before You Build: Critical Questions
 (Must be answered before implementation starts)
 
 ### [Category: e.g. Requirements / Scope / Feasibility]
 **Q: <specific question>**
+- *Status (verified against `<short-sha>` on <date>):* resolved-in-code | open | in-flight — `file:line` citation
 - Why this matters: <impact if unknown>
 - Found by: <which legs flagged this>
 - Suggested answer options: <if applicable>
@@ -312,7 +336,8 @@ All leg analyses from: {{.output.directory}}/
 | Overall readiness | H/M/L | |
 
 ## Next Steps
-- [ ] Human answers critical questions above
+- [x] Re-verified findings against current HEAD (`<short-sha>`, <date>) before asking the human
+- [ ] Human answers only the still-live (OPEN / IN-FLIGHT) questions above — skip the resolved-in-code ones
 - [ ] Updated PRD bead with answers
 - [ ] Pour `design` convoy to generate implementation plan
 ```
