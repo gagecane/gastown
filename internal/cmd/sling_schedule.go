@@ -173,6 +173,15 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	// wasted on the wrong worktree.
 	titleMismatchWarner(townRoot, rigName, beadID, info.Title)
 
+	// Soft work-dedup warning (gu-reqfe). Distinct from the cross-rig title
+	// warning above: here both prefix and rig agree, but another bead already
+	// hooked / in_progress in the SAME rig has a near-identical title — a sign
+	// the two describe the same fix and will be built in parallel (the
+	// gu-jaxdl / gs-asme incident, where the refinery rejected the loser as
+	// SUPERSEDED after a full polecat cycle was wasted). Advisory only; the
+	// coordinator decides whether to close one before it dispatches.
+	workOverlapWarner(townRoot, rigName, beadID, info.Title)
+
 	// Guard against scheduling closed/tombstone beads (defense-in-depth, hq-ki2).
 	// Mirrors the closed-bead guards in runSling (sling.go) and executeSling
 	// (sling_dispatch.go). The daemon's stranded scan can route closed cross-prefix
