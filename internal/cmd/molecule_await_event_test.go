@@ -653,6 +653,34 @@ func TestFinalizeAwaitEventResultQueueReady(t *testing.T) {
 	}
 }
 
+func TestFinalizeAwaitEventResultQueueReadyCleanup(t *testing.T) {
+	// gu-5n9ts: a continuously-busy refinery always short-circuits on the
+	// startup queue probe (reason "queue-ready") and never reaches the normal
+	// event-file read path, so its own wake events accumulated on the shared
+	// channel forever. The queue-ready path now collects this rig's matching
+	// events into result.Events, and finalize must delete them under --cleanup.
+	prevCleanup := awaitEventCleanup
+	t.Cleanup(func() { awaitEventCleanup = prevCleanup })
+	awaitEventCleanup = true
+
+	dir := t.TempDir()
+	ourPath := filepath.Join(dir, "ours.event")
+	if err := os.WriteFile(ourPath, []byte(`{"type":"MQ_SUBMIT"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := &AwaitEventResult{
+		Reason:   "queue-ready",
+		ReadyMRs: 2,
+		Events:   []EventFile{{Path: ourPath, Content: json.RawMessage(`{"type":"MQ_SUBMIT"}`)}},
+	}
+	finalizeAwaitEventResult(result, 0 /* idleCycles */, false, "")
+
+	if _, statErr := os.Stat(ourPath); !os.IsNotExist(statErr) {
+		t.Errorf("queue-ready --cleanup must delete this rig's drained event, but file still exists (err=%v)", statErr)
+	}
+}
+
 func TestProbeReadyMRsForRigEmptyRig(t *testing.T) {
 	// An empty rig name (no --filter-rig) must not probe — it returns ok=false
 	// so the caller falls through to the normal event-file wait.
