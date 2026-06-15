@@ -386,44 +386,39 @@ for DB in "${PROD_DBS[@]}"; do
 done
 
 # --- Step 3: Retention — prune old .darc files --------------------------------
-# Read each DB's configured backup URL from repo_state.json. Only file:// remotes
-# are pruned (remote/cloud remotes manage their own retention).
+# Prune ONLY this plugin's own backup directory ($BACKUP_DIR/$DB, the target of
+# the "${DB}-backup" remote synced in Step 2). We must NOT read the backup URL
+# from repo_state.json and prune whatever comes first: a served DB also carries
+# a "backup_export" remote owned by the beads `bd` tool, pointing at
+# <rig>/mayor/rig/.beads/backup. Its manifest is rewritten only by `bd backup
+# sync`, not by this plugin. JSON map order in repo_state.json is unstable, so
+# `list(backups.values())[0]` was nondeterministically selecting backup_export
+# and rm -f'ing its .darc files WITHOUT rewriting that dir's manifest — leaving
+# the live SQL server, which holds backup_export registered, unable to open the
+# referenced table files. That flooded "error opening table file: table file not
+# found" on every query, exhausting the conn pool and crashing Dolt townwide
+# (gc-itl3us). Targeting $BACKUP_DIR/$DB directly prunes only what we own and own
+# the manifest for.
 
 RETENTION_CLEANED=0
 RETENTION_FAILED=0
 for DB in "${PROD_DBS[@]}"; do
-  DB_DIR="$DOLT_DATA_DIR/$DB"
-  REPO_STATE="$DB_DIR/.dolt/repo_state.json"
-  [[ -f "$REPO_STATE" ]] || continue
+  BACKUP_PATH="$BACKUP_DIR/$DB"
+  [[ -d "$BACKUP_PATH" ]] || continue
 
-  # Extract first backup URL (python3 is available on all Gas Town nodes)
-  BACKUP_URL=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    bk = d.get('backups', {})
-    if bk:
-        print(list(bk.values())[0]['url'])
-except Exception:
-    pass
-" "$REPO_STATE" 2>/dev/null || true)
-
-  if [[ "$BACKUP_URL" == file://* ]]; then
-    BACKUP_PATH="${BACKUP_URL#file://}"
-    if $DRY_RUN; then
-      DARC_COUNT=$(ls "$BACKUP_PATH"/*.darc 2>/dev/null | wc -l | tr -d ' ')
-      log "  $DB: DRY RUN retention — $DARC_COUNT .darc in $BACKUP_PATH"
+  if $DRY_RUN; then
+    DARC_COUNT=$(ls "$BACKUP_PATH"/*.darc 2>/dev/null | wc -l | tr -d ' ')
+    log "  $DB: DRY RUN retention — $DARC_COUNT .darc in $BACKUP_PATH"
+  else
+    # Retention is best-effort maintenance, NOT a backup-sync operation: a
+    # failure here must never be reported as data-loss (gu-t9xgf/gu-8xvpw).
+    # retention_cleanup is internally non-fatal; guard the call anyway so a
+    # future change can't let it abort the run under set -e.
+    if retention_cleanup "$BACKUP_PATH"; then
+      RETENTION_CLEANED=$(( RETENTION_CLEANED + 1 ))
     else
-      # Retention is best-effort maintenance, NOT a backup-sync operation: a
-      # failure here must never be reported as data-loss (gu-t9xgf/gu-8xvpw).
-      # retention_cleanup is internally non-fatal; guard the call anyway so a
-      # future change can't let it abort the run under set -e.
-      if retention_cleanup "$BACKUP_PATH"; then
-        RETENTION_CLEANED=$(( RETENTION_CLEANED + 1 ))
-      else
-        RETENTION_FAILED=$(( RETENTION_FAILED + 1 ))
-        log "  $DB: retention cleanup reported an error (non-fatal) — continuing"
-      fi
+      RETENTION_FAILED=$(( RETENTION_FAILED + 1 ))
+      log "  $DB: retention cleanup reported an error (non-fatal) — continuing"
     fi
   fi
 done
