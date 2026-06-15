@@ -35,6 +35,15 @@ BACKUP_TIMEOUT=60
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 BACKUP_SAFETY_FLOOR="${BACKUP_SAFETY_FLOOR:-3}"
 
+# Store-lock: serialize `dolt backup sync` against Dolt server restarts so a
+# restart never rewrites/prunes live table files mid-sync and corrupts the
+# backup dest (gu-p02zy). The Go restart paths (internal/doltserver.WithStoreLock,
+# internal/daemon stopLocked/startLocked) take the SAME advisory flock. The path
+# MUST match internal/doltserver.StoreLockPath: <town>/daemon/dolt-store.lock for
+# the canonical port 3307, else dolt-store.lock.<port>.
+DOLT_PORT="${DOLT_PORT:-3307}"
+STORE_LOCK_WAIT="${STORE_LOCK_WAIT:-90}"   # ≥ BACKUP_TIMEOUT so a restart waits out one DB
+
 # --- Argument parsing ---------------------------------------------------------
 
 DRY_RUN=false
@@ -72,6 +81,17 @@ town_root() {
 # Heartbeat: resolve the town runtime dir for the durable completion signal.
 heartbeat_path() {
   echo "$(town_root)/.runtime/dolt-backup-heartbeat.json"
+}
+
+# store_lock_path resolves the advisory store-lock file shared with the Go
+# restart paths. MUST mirror internal/doltserver.StoreLockPath: bare name for the
+# canonical port 3307, suffixed otherwise.
+store_lock_path() {
+  if [[ "$DOLT_PORT" == "3307" ]]; then
+    echo "$(town_root)/daemon/dolt-store.lock"
+  else
+    echo "$(town_root)/daemon/dolt-store.lock.$DOLT_PORT"
+  fi
 }
 
 # is_parked <db> reports (exit 0) whether the rig backing a database is PARKED.
@@ -242,9 +262,31 @@ SKIPPED=0
 FAILED=0
 NO_REMOTE=0
 PARKED=0
+DEFERRED=0
 FAILED_DBS=""
 NO_REMOTE_DBS=""
 PARKED_DBS=""
+DEFERRED_DBS=""
+
+# Open the shared store-lock fd once for the whole run (each per-DB sync grabs it
+# briefly via `flock -w`). Best-effort: if the lock file/dir can't be opened we
+# proceed unlocked rather than abort the backup — the Go restart side is the
+# other half of the mutual exclusion, and a backup that can't lock is no worse
+# than today's behavior. flock(1) is required for the guard; if absent, we warn
+# once and run unguarded.
+STORE_LOCK_FILE="$(store_lock_path)"
+HAVE_FLOCK=true
+if ! command -v flock >/dev/null 2>&1; then
+  HAVE_FLOCK=false
+  log "WARNING: flock(1) not found — running WITHOUT restart guard (gu-p02zy protection disabled)"
+fi
+if $HAVE_FLOCK; then
+  mkdir -p "$(dirname "$STORE_LOCK_FILE")" 2>/dev/null || true
+  if ! exec 9>"$STORE_LOCK_FILE" 2>/dev/null; then
+    HAVE_FLOCK=false
+    log "WARNING: could not open store lock $STORE_LOCK_FILE — running WITHOUT restart guard"
+  fi
+fi
 
 for DB in "${PROD_DBS[@]}"; do
   DB_DIR="$DOLT_DATA_DIR/$DB"
@@ -349,6 +391,22 @@ for DB in "${PROD_DBS[@]}"; do
     fi
   fi
 
+  # Acquire the shared store lock so this sync cannot run concurrently with a
+  # Dolt restart (which rewrites/prunes the live table files this sync copies →
+  # corrupt dest, gu-p02zy). Wait up to STORE_LOCK_WAIT; if a restart holds it
+  # longer, DEFER this DB (neither success nor failure) and let the next 15-min
+  # tick retry. We deliberately record NOTHING in the cooldown ledger for a
+  # deferred cycle — a result:skipped record would satisfy the full cooldown and
+  # suppress that retry. Mirrors the is_parked skip pattern above.
+  if $HAVE_FLOCK; then
+    if ! flock -w "$STORE_LOCK_WAIT" 9; then
+      log "  $DB: deferred — Dolt restart holds the store lock (>${STORE_LOCK_WAIT}s); retry next cycle"
+      DEFERRED=$((DEFERRED + 1))
+      DEFERRED_DBS="$DEFERRED_DBS $DB"
+      continue
+    fi
+  fi
+
   # Sync backup with timeout
   log "  $DB: syncing ($LAST_HASH -> $CURRENT_HASH)..."
   SYNC_START=$(date +%s)
@@ -362,6 +420,9 @@ for DB in "${PROD_DBS[@]}"; do
   SYNC_OUTPUT=$(cd "$DB_DIR" && timeout "$BACKUP_TIMEOUT" dolt backup sync "$BACKUP_NAME" 2>&1)
   SYNC_RC=$?
   set -e
+  # Release the store lock immediately after the sync (before retention/reporting)
+  # so a waiting restart proceeds with minimal delay.
+  $HAVE_FLOCK && flock -u 9 || true
   SYNC_ELAPSED=$(( $(date +%s) - SYNC_START ))
 
   if [[ $SYNC_RC -eq 0 ]]; then
@@ -425,13 +486,18 @@ done
 
 # --- Step 4: Report results ---------------------------------------------------
 
-SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
+SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked, $DEFERRED deferred (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
 log "$SUMMARY"
 if [[ "$NO_REMOTE" -gt 0 ]]; then
   log "  no-remote DBs (enumerated but unconfigured — likely orphan/stray):$NO_REMOTE_DBS"
 fi
 if [[ "$PARKED" -gt 0 ]]; then
   log "  parked DBs (rig parked/docked — skipped by design, not a failure):$PARKED_DBS"
+fi
+if [[ "$DEFERRED" -gt 0 ]]; then
+  # Deferred = a Dolt restart held the store lock; NOT a failure, retried next
+  # cycle. Surfaced for observability; must never drive exit-1 / HIGH escalation.
+  log "  deferred DBs (Dolt restart held store lock — retry next cycle, not a failure):$DEFERRED_DBS"
 fi
 
 # --- Step 5: Heartbeat, record result, escalate if needed ---------------------
@@ -479,8 +545,15 @@ else
     -l type:plugin-run,plugin:dolt-backup,result:failure \
     -d "$FAIL_MSG" --silent 2>/dev/null || true
 
+  # Dedup the HIGH escalation by a stable signature (the failing DB set) so a
+  # recurring backup-dest issue bumps ONE open escalation instead of filing a
+  # fresh bead every ~8-min cycle (gu-p02zy escalation churn). --related ties it
+  # to the tracking bug. --dedup-window suppresses re-fires for 2h after the
+  # signature is closed.
   gt escalate "dolt-backup FAILED: $FAIL_MSG" \
     --severity high \
+    --signature "dolt-backup-tablefile:${FAILED_DBS// /,}" --dedup --dedup-window 2h \
+    --related gu-p02zy \
     --reason "$FAIL_MSG" 2>/dev/null || true
 
   exit 1

@@ -1854,6 +1854,17 @@ func readLockHolder(lockFile string) int {
 
 // Start starts the Dolt SQL server.
 func Start(townRoot string) error {
+	// Hold the store lock across the start: server startup runs NomsBlockStore
+	// GC that rewrites/prunes live table files, which corrupts an in-flight
+	// `dolt backup sync` dest (gu-p02zy). Fail-open so a start is never blocked.
+	cfg := DefaultConfig(townRoot)
+	return WithStoreLock(townRoot, cfg.Port, DefaultStoreLockWait, nil, func() error {
+		return startUnlocked(townRoot)
+	})
+}
+
+// startUnlocked is Start's body, run while holding the store lock.
+func startUnlocked(townRoot string) error {
 	config := DefaultConfig(townRoot)
 
 	// Ensure daemon directory exists
@@ -2328,6 +2339,18 @@ func drainConnectionsBeforeStop(config *Config) {
 // Stop stops the Dolt SQL server.
 // Works for both servers started via gt dolt start AND externally-started servers.
 func Stop(townRoot string) error {
+	// Hold the store lock across the stop: SIGTERM during NomsBlockStore.Close
+	// can rewrite/truncate live table files an in-flight `dolt backup sync` is
+	// copying, corrupting the backup dest (gu-p02zy). Fail-open so a stop is
+	// never blocked (the connection drain inside runs while the lock is held).
+	cfg := DefaultConfig(townRoot)
+	return WithStoreLock(townRoot, cfg.Port, DefaultStoreLockWait, nil, func() error {
+		return stopUnlocked(townRoot)
+	})
+}
+
+// stopUnlocked is Stop's body, run while holding the store lock.
+func stopUnlocked(townRoot string) error {
 	config := DefaultConfig(townRoot)
 
 	running, pid, err := IsRunning(townRoot)

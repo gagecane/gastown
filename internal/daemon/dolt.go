@@ -1032,37 +1032,53 @@ func (m *DoltServerManager) startLocked() error {
 	// Detach from this process group so it survives daemon restart
 	setSysProcAttr(cmd)
 
-	if err := cmd.Start(); err != nil {
+	// Hold the store lock across the spawn AND the server-initialization settle:
+	// a starting Dolt server runs NomsBlockStore GC that rewrites/prunes live
+	// table files, which corrupts an in-flight `dolt backup sync` dest (gu-p02zy).
+	// The lock excludes the backup subprocess (which takes the same flock per-DB).
+	// Released BEFORE the assertServedData→restartWithBackoff tail below so the
+	// recursive restart path never re-enters the (non-reentrant) flock. Fail-open
+	// so a start is never blocked.
+	var startErr error
+	// The wrapped fn always returns nil (the real spawn error is captured in
+	// startErr and handled below); WithStoreLock's return is therefore always nil.
+	_ = doltserver.WithStoreLock(m.townRoot, m.config.Port, doltserver.DefaultStoreLockWait, m.logger, func() error {
+		if startErr = cmd.Start(); startErr != nil {
+			return nil
+		}
+
+		// Don't wait for it - it's a long-running server
+		go func() {
+			_ = cmd.Wait()
+			if closeErr := logFile.Close(); closeErr != nil {
+				m.logger("Warning: failed to close dolt log file: %v", closeErr)
+			}
+		}()
+
+		m.process = cmd.Process
+		m.startedAt = time.Now()
+
+		// Write PID file with nonce for ownership verification
+		if _, err := writePIDFile(m.pidFile(), cmd.Process.Pid); err != nil {
+			m.logger("Warning: failed to write PID file: %v", err)
+		}
+
+		m.logger("Started Dolt SQL server (PID %d) on %s:%d", cmd.Process.Pid, m.config.Host, m.config.Port)
+
+		// Wait a moment for server to initialize (the GC-on-start window).
+		time.Sleep(500 * time.Millisecond)
+
+		// Verify it started successfully
+		if err := m.checkHealthLocked(); err != nil {
+			m.logger("Warning: Dolt server may not be healthy: %v", err)
+		}
+		return nil
+	})
+	if startErr != nil {
 		if closeErr := logFile.Close(); closeErr != nil {
 			m.logger("Warning: failed to close dolt log file: %v", closeErr)
 		}
-		return fmt.Errorf("starting dolt sql-server: %w", err)
-	}
-
-	// Don't wait for it - it's a long-running server
-	go func() {
-		_ = cmd.Wait()
-		if closeErr := logFile.Close(); closeErr != nil {
-			m.logger("Warning: failed to close dolt log file: %v", closeErr)
-		}
-	}()
-
-	m.process = cmd.Process
-	m.startedAt = time.Now()
-
-	// Write PID file with nonce for ownership verification
-	if _, err := writePIDFile(m.pidFile(), cmd.Process.Pid); err != nil {
-		m.logger("Warning: failed to write PID file: %v", err)
-	}
-
-	m.logger("Started Dolt SQL server (PID %d) on %s:%d", cmd.Process.Pid, m.config.Host, m.config.Port)
-
-	// Wait a moment for server to initialize
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify it started successfully
-	if err := m.checkHealthLocked(); err != nil {
-		m.logger("Warning: Dolt server may not be healthy: %v", err)
+		return fmt.Errorf("starting dolt sql-server: %w", startErr)
 	}
 
 	// Post-spawn data assertion: a healthy TCP listener is NOT enough. Under OOM
@@ -1172,29 +1188,39 @@ func (m *DoltServerManager) stopLocked() {
 		return // Already gone
 	}
 
-	// Send termination signal for graceful shutdown
-	if err := sendTermSignal(process); err != nil {
-		m.logger("Warning: failed to send termination signal: %v", err)
-	}
-
-	// Poll until the process exits or the timeout fires.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for isProcessAlive(process) {
-			time.Sleep(100 * time.Millisecond)
+	// Hold the store lock across the termination: SIGTERM during
+	// NomsBlockStore.Close can rewrite/truncate live table files that an
+	// in-flight `dolt backup sync` is copying, corrupting the backup dest
+	// (gu-p02zy). The lock excludes the backup subprocess (same flock per-DB).
+	// Fail-open so a stop is never blocked. The wrapped fn always returns nil, so
+	// WithStoreLock's return is always nil.
+	_ = doltserver.WithStoreLock(m.townRoot, m.config.Port, doltserver.DefaultStoreLockWait, m.logger, func() error {
+		// Send termination signal for graceful shutdown
+		if err := sendTermSignal(process); err != nil {
+			m.logger("Warning: failed to send termination signal: %v", err)
 		}
-	}()
 
-	select {
-	case <-done:
-		m.logger("Dolt SQL server stopped gracefully")
-	case <-time.After(30 * time.Second):
-		// Force kill — 30s allows Dolt to flush its append-only journal under load.
-		// A SIGKILL mid-journal-write causes corruption requiring dolt fsck to recover.
-		m.logger("Dolt SQL server did not stop gracefully after 30s, forcing termination")
-		_ = sendKillSignal(process)
-	}
+		// Poll until the process exits or the timeout fires.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for isProcessAlive(process) {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}()
+
+		select {
+		case <-done:
+			m.logger("Dolt SQL server stopped gracefully")
+		case <-time.After(30 * time.Second):
+			// Force kill — 30s allows Dolt to flush its append-only journal under
+			// load. A SIGKILL mid-journal-write causes corruption requiring dolt
+			// fsck to recover.
+			m.logger("Dolt SQL server did not stop gracefully after 30s, forcing termination")
+			_ = sendKillSignal(process)
+		}
+		return nil
+	})
 
 	// Clean up
 	_ = os.Remove(m.pidFile())
