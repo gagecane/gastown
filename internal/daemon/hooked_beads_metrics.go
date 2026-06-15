@@ -50,7 +50,14 @@ func (d *Daemon) scanHookedBeads() (total, deadLetter map[string]int64) {
 
 	host := d.doltServerHost()
 	port := d.doltServerPort()
-	databases := reaper.DiscoverDatabases(host, port)
+	databases, err := reaper.DiscoverDatabases(host, port)
+	if err != nil {
+		// Server unreachable — skip this scan rather than emitting metrics for a
+		// phantom single-DB fallback that would zero out every real rig's gauge
+		// (gu-7c2if). The next cycle retries once the server is reachable.
+		d.logger.Printf("hooked_beads_metrics: discover databases failed: %v", err)
+		return total, deadLetter
+	}
 	if len(databases) == 0 {
 		return total, deadLetter
 	}

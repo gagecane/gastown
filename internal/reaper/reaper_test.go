@@ -50,6 +50,27 @@ func TestDefaultDatabases(t *testing.T) {
 	}
 }
 
+// TestDiscoverDatabasesUnreachable verifies that when the Dolt server cannot be
+// reached, DiscoverDatabases returns an error and a nil database list — it must
+// NOT silently collapse to DefaultDatabases, which would make "connection
+// refused" indistinguishable from "this town only has hq" and cause the reaper
+// to skip every real rig (gu-7c2if).
+func TestDiscoverDatabasesUnreachable(t *testing.T) {
+	// Port 1 has no listener, so SHOW DATABASES fails with a connection error.
+	dbs, err := DiscoverDatabases("127.0.0.1", 1)
+	if err == nil {
+		t.Fatal("expected error for unreachable server, got nil")
+	}
+	if dbs != nil {
+		t.Errorf("expected nil databases on unreachable server, got %v", dbs)
+	}
+	// Guard against the silent-degradation regression: the unreachable path must
+	// not return the fallback list.
+	if reflect.DeepEqual(dbs, DefaultDatabases) {
+		t.Errorf("unreachable server must not fall back to DefaultDatabases, got %v", dbs)
+	}
+}
+
 func TestFormatJSON(t *testing.T) {
 	result := FormatJSON(map[string]int{"count": 42})
 	if result == "" {
