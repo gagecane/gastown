@@ -28,6 +28,19 @@ const (
 	// second as the previous high-water mark are still visible next cycle.
 	eventPollLookback = 1 * time.Second
 
+	// eventPollQueryTimeout bounds each per-store GetAllEventsSince query. The
+	// poll fans across every store every 5s; without a bound it uses the
+	// daemon-lifetime context, so a Dolt latency spike leaves the query (and its
+	// checked-out connection) blocked indefinitely while the next tick fires more.
+	// Those checked-out connections cannot be released by the pool-idle tuning
+	// (gu-g7q6z) or the idle-recycle monitor (gu-d1r8g) — both touch only IDLE
+	// connections — so when Dolt reaps them server-side at wait_timeout (30s) they
+	// pile into CLOSE-WAIT on the daemon and climb toward the 1000 cap (gc-pbkune).
+	// Bounding the query frees the connection so the pool reclaims it. 10s is above
+	// normal poll latency (~0s) but well under the 30s server reap, matching the
+	// other timeout-wrapped DB calls in this file.
+	eventPollQueryTimeout = 10 * time.Second
+
 	// convoyGracePeriod is how long after creation a convoy is immune from
 	// auto-close. This prevents a race where the daemon's stranded scan
 	// fires before the sling's bd dep add is visible in Dolt. See GH#2303.
@@ -504,7 +517,9 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		}
 	}
 
-	events, err := store.GetAllEventsSince(m.ctx, querySince)
+	pollCtx, cancel := context.WithTimeout(m.ctx, eventPollQueryTimeout)
+	events, err := store.GetAllEventsSince(pollCtx, querySince)
+	cancel()
 	if err != nil {
 		if isInfNaNError(err) {
 			// A corrupted row in the events table has +Inf/-Inf/NaN stored in a

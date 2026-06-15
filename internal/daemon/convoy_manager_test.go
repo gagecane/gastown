@@ -1368,6 +1368,54 @@ func TestPollEvents_GetAllEventsSinceError(t *testing.T) {
 	}
 }
 
+// deadlineCapturingStore records the context deadline GetAllEventsSince is
+// called with, so a test can assert the event poll bounds the query rather than
+// passing the unbounded daemon-lifetime context. Embeds beadsdk.Storage so
+// unused methods panic if accidentally called.
+type deadlineCapturingStore struct {
+	beadsdk.Storage
+	hasDeadline bool
+	timeout     time.Duration
+}
+
+func (s *deadlineCapturingStore) GetAllEventsSince(ctx context.Context, _ time.Time) ([]*beadsdk.Event, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		s.hasDeadline = true
+		s.timeout = time.Until(dl)
+	}
+	return nil, nil
+}
+
+// TestPollStore_BoundsQueryWithTimeout is the gc-pbkune regression guard: the
+// high-cadence event-poll query MUST run under a bounded context, not the
+// daemon-lifetime m.ctx. An unbounded query lets a Dolt latency spike pin its
+// checked-out connection indefinitely; when Dolt reaps it server-side at
+// wait_timeout those sockets pile into CLOSE-WAIT on the daemon and climb toward
+// the 1000-connection cap — a leak the pool-idle tuning (gu-g7q6z) and idle
+// recycle monitor (gu-d1r8g) cannot release because both touch only IDLE conns.
+func TestPollStore_BoundsQueryWithTimeout(t *testing.T) {
+	store := &deadlineCapturingStore{}
+	townRoot := t.TempDir()
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt",
+		10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+
+	// Mark seeded so the first poll processes rather than warm-up-returns.
+	m.seeded.Store(true)
+
+	if err := m.pollStore("hq", store, m.stores, map[string]bool{}); err != nil {
+		t.Fatalf("pollStore returned error: %v", err)
+	}
+
+	if !store.hasDeadline {
+		t.Fatal("GetAllEventsSince was called with an unbounded context (no deadline) — event poll must bound the query (gc-pbkune)")
+	}
+	// Deadline should reflect eventPollQueryTimeout, not the 10-minute scan
+	// interval or an unbounded context.
+	if store.timeout > eventPollQueryTimeout+time.Second {
+		t.Errorf("query deadline %s exceeds eventPollQueryTimeout %s", store.timeout, eventPollQueryTimeout)
+	}
+}
+
 func TestFeedFirstReady_UnknownRig_Skips(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
