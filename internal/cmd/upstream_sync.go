@@ -190,6 +190,17 @@ func runUpstreamSync(cmd *cobra.Command, args []string) error {
 
 	if behind == 0 {
 		fmt.Fprintln(stdout, "✓ already in sync — nothing to do")
+		// Reaching 0-behind IS a successful sync outcome. Self-heal any
+		// stale circuit-breaker bookkeeping left by earlier failed
+		// attempts so a stuck `failed` flag doesn't mask a future real
+		// failure (gu-jngrh). Dry-run promises no state change, so skip.
+		if !upstreamSyncDryRun {
+			if cleared, cerr := upstreamsync.ClearStaleFailureState(bd, rigPrefix); cerr != nil {
+				fmt.Fprintf(stderr, "  warning: could not clear stale failure state: %v\n", cerr)
+			} else if cleared {
+				fmt.Fprintln(stdout, "  (cleared stale failure state — reset consecutive-failure counter)")
+			}
+		}
 		return nil
 	}
 

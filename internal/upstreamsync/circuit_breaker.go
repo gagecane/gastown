@@ -101,6 +101,78 @@ func TripIfNeeded(b *beads.Beads, rigPrefix string, cfg *config.UpstreamSyncConf
 	return true, nil
 }
 
+// ClearStaleFailureState self-heals the circuit-breaker bookkeeping when
+// a rig is observed to be in-sync (0 commits behind upstream). Reaching
+// 0-behind IS a successful sync outcome, so a stale `failed` flag and a
+// non-zero ConsecutiveFailures counter — left over from earlier failed
+// attempts (e.g. a transient push-block outage) — must not persist:
+//
+//   - A stuck `failed` flag masks a future REAL sync failure (the alarm
+//     is already "on") and can confuse auto-redispatch.
+//   - `gt upstream resume` only un-pauses; it is a no-op on a rig that is
+//     failed-but-not-paused, so without this there is no path to clear it.
+//   - `gt upstream sync` short-circuits on the in-sync path before
+//     recording an attempt, so a successful no-op cycle never resets the
+//     counter via appendAttemptAndTransition.
+//
+// This is the fix for that gap (gu-jngrh, option 1): the in-sync no-op
+// path calls this to reset the counter and, if the rig is wedged in
+// StateFailed, transition it back to StateIdle.
+//
+// Returns:
+//   - cleared: true if any state change was written
+//   - err: any error from loading state or performing the transition
+//
+// Idempotent: a no-op (cleared=false) when the rig is already idle with a
+// zero failure counter. Paused rigs are left untouched — a pause (operator
+// or circuit breaker) must be cleared explicitly via `gt upstream resume`,
+// and `gt upstream sync` already refuses to run when paused, so the paused
+// branch here is defensive.
+func ClearStaleFailureState(b *beads.Beads, rigPrefix string) (cleared bool, err error) {
+	state, err := LoadSyncState(b, rigPrefix)
+	if err != nil {
+		return false, fmt.Errorf("loading state for stale-failure clear: %w", err)
+	}
+
+	// Don't disturb a paused rig — resume is the explicit clear path.
+	if state.State == StatePaused {
+		return false, nil
+	}
+
+	// Nothing stale to clear: already idle with no accumulated failures.
+	if state.State == StateIdle && state.ConsecutiveFailures == 0 {
+		return false, nil
+	}
+
+	// Wedged in Failed: transition Failed → Idle and reset the counter.
+	if state.State == StateFailed {
+		err = TransitionTo(b, rigPrefix, StateIdle, func(s *SyncStateMetadata) error {
+			s.State = StateIdle
+			s.ConsecutiveFailures = 0
+			// Defense in depth — Failed already nilled it, but we don't
+			// trust the previous writer (mirrors TripIfNeeded).
+			s.CurrentAttempt = nil
+			return nil
+		})
+		if err != nil {
+			return false, fmt.Errorf("clearing stale failed state: %w", err)
+		}
+		return true, nil
+	}
+
+	// Idle but with a non-zero counter (defensive edge): reset the counter
+	// in place without a state transition (idle → idle is not a valid
+	// TransitionTo edge, so use MutateSyncState directly).
+	err = MutateSyncState(b, rigPrefix, func(s *SyncStateMetadata) error {
+		s.ConsecutiveFailures = 0
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("resetting stale failure counter: %w", err)
+	}
+	return true, nil
+}
+
 // CircuitBreakerEvent is the structured record returned by
 // `gt upstream history` when the breaker has tripped. It is not
 // persisted as a separate bead — the audit trail lives in the state
