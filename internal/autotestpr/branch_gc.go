@@ -273,8 +273,9 @@ func (r *BranchGCRunner) hasOpenMRBead(beadID string) bool {
 	}
 
 	issues, err := r.Beads.List(beads.ListOptions{
-		Label:  r.Config.AutoTestLabel,
-		Status: "open",
+		Label:    r.Config.AutoTestLabel,
+		Status:   "open",
+		Priority: -1, // -1 = no priority filter; zero-value 0 silently filters to P0-only.
 	})
 	if err != nil {
 		return false // fail-open: if we can't query, don't skip
@@ -422,8 +423,9 @@ func (r *AttachmentRetentionRunner) Run() (*AttachmentRetentionResult, error) {
 
 	// List all open attachment beads
 	issues, err := r.Beads.List(beads.ListOptions{
-		Label:  r.Config.AttachmentLabel,
-		Status: "open",
+		Label:    r.Config.AttachmentLabel,
+		Status:   "open",
+		Priority: -1, // -1 = no priority filter; zero-value 0 silently filters to P0-only.
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing attachment beads: %w", err)

@@ -258,7 +258,14 @@ func initGit(t *testing.T, dir string) {
 
 func initBeadsDB(t *testing.T, dir, prefix string) {
 	t.Helper()
-	cmd := exec.Command("bd", "init", "--prefix="+prefix)
+	args := []string{"init", "--prefix=" + prefix}
+	// Forward GT_DOLT_PORT (set by TestMain's EnsureDoltContainerForTestMain)
+	// so bd targets the ephemeral test container instead of auto-detecting the
+	// shared production Dolt server on :3307 (gu-ke9l2 / gu-4str3).
+	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+		args = append(args, "--server", "--server-port", p)
+	}
+	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init: %v\n%s", err, out)
