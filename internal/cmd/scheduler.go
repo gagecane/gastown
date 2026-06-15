@@ -635,8 +635,8 @@ func countActivePolecats() int {
 // Fallback tiers when the town occupancy is unavailable (e.g. the town cap is
 // disabled in direct-dispatch mode, max_polecats<=0, where the snapshot skips
 // the directory scan):
-//  1. the hook-filtered live-session count (countWorkingPolecatsByRig) — the
-//     pre-gu-ccycc behavior, precise for live polecats; and
+//  1. the work-bead-filtered live-session count (countWorkingPolecatsByRig) —
+//     the pre-gu-ccycc behavior, precise for live polecats; and
 //  2. a best-effort all-sessions count (countActivePolecatsInRig) when beads is
 //     unreachable. Over-counting is the safe direction for a cap: it can only
 //     refuse admission early, never overcommit.
@@ -647,8 +647,8 @@ func countWorkingPolecatsInRig(rigName string) int {
 		}
 	}
 	// Town occupancy unavailable (town cap disabled, or its scan was skipped).
-	// Fall back to the hook-filtered live-session counter — same as before this
-	// fix — so direct-dispatch per-rig caps keep their precise live count.
+	// Fall back to the work-bead-filtered live-session counter so direct-dispatch
+	// per-rig caps keep their precise live count.
 	if counts, ok := countWorkingPolecatsByRig(); ok {
 		return counts[rigName]
 	}
@@ -660,10 +660,19 @@ func countWorkingPolecatsInRig(rigName string) int {
 }
 
 // countWorkingPolecatsByRig returns a per-rig map of working polecat counts.
-// The second return value is false when the underlying tmux listing failed,
-// in which case the map is empty and callers should fall back.
-// "Working" matches countWorkingPolecats — a polecat whose agent bead has a
-// non-empty hook_bead. Idle polecats are excluded.
+// The second return value is false when the underlying tmux listing or a rig's
+// bead query failed, in which case callers should fall back (over-counting is
+// the safe direction for a cap).
+//
+// "Working" is derived from the WORK bead — a bead with status=hooked assigned
+// to the polecat — the same authoritative signal `gt polecat list`
+// (loadFromBeads) and the capacity snapshot use. It is NOT the deprecated
+// agent-bead hook_bead field: commit fa9dc2879 (hq-l6mm5) made the work bead
+// canonical and turned hook_bead writes into a no-op, so a polecat that picks
+// up work by REUSING an idle slot never gets hook_bead written. Reading
+// hook_bead here under-counted those reuse polecats; `gt sling` sets the work
+// bead to status=hooked on every dispatch (fresh-spawn AND reuse), so the
+// work-bead signal counts both. Idle polecats are excluded.
 func countWorkingPolecatsByRig() (map[string]int, bool) {
 	counts := make(map[string]int)
 	townRoot, err := workspace.FindFromCwd()
@@ -677,17 +686,8 @@ func countWorkingPolecatsByRig() (map[string]int, bool) {
 		return counts, false
 	}
 
-	// Collect polecat identities and their agent bead IDs in one pass, then
-	// batch-fetch all agent beads in a single bd show call instead of one
-	// subprocess per polecat session (gu-adbef). With ~8 polecats the serial
-	// approach was ~6.4s (8×0.8s); the batch is <1s.
-	type polecatEntry struct {
-		rig         string
-		agentBeadID string
-	}
-	var entries []polecatEntry
-	var agentBeadIDs []string
-
+	// Collect live polecat names grouped by rig in one pass.
+	rigPolecats := make(map[string][]string)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -696,55 +696,41 @@ func countWorkingPolecatsByRig() (map[string]int, bool) {
 		if err != nil || identity.Role != session.RolePolecat {
 			continue
 		}
-
-		prefix := identity.Prefix
-		if prefix == "" {
-			prefix = session.PrefixFor(identity.Rig)
-		}
-		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, identity.Rig, identity.Name)
-		entries = append(entries, polecatEntry{rig: identity.Rig, agentBeadID: agentBeadID})
-		agentBeadIDs = append(agentBeadIDs, agentBeadID)
+		rigPolecats[identity.Rig] = append(rigPolecats[identity.Rig], identity.Name)
 	}
 
-	if len(agentBeadIDs) == 0 {
+	if len(rigPolecats) == 0 {
 		return counts, true
 	}
 
-	// Batch show all agent beads at once. The bd show command accepts multiple
-	// IDs and returns them as a JSON array.
-	bd := beads.New(townRoot)
-	showArgs := append([]string{"show", "--json"}, agentBeadIDs...)
-	showOut, err := bd.Run(showArgs...)
-	if err != nil {
-		// Dolt down or all lookups failed — fall back to empty (safe: over-
-		// counts zero, so no dispatch is blocked; under-count only means
-		// per-rig cap isn't enforced this cycle).
-		return counts, false
-	}
-
-	var issues []*beads.Issue
-	if err := json.Unmarshal(showOut, &issues); err != nil {
-		return counts, false
-	}
-
-	// Index fetched issues by ID for O(1) lookup.
-	issueByID := make(map[string]*beads.Issue, len(issues))
-	for _, issue := range issues {
-		if issue != nil {
-			issueByID[issue.ID] = issue
+	// For each rig with live polecats, query that rig's beads DB ONCE for hooked
+	// work beads, then intersect their assignees with the live-session set. The
+	// assignee filter is exact-match only (no wildcard), so a single
+	// status=hooked list bucketed by assignee is cheaper than one
+	// assignee-filtered query per polecat.
+	for rigName, names := range rigPolecats {
+		rigPath := filepath.Join(townRoot, rigName)
+		hookedBeads, err := beads.New(rigPath).List(beads.ListOptions{
+			Status:   beads.StatusHooked,
+			Priority: -1,
+		})
+		if err != nil {
+			// Dolt down or the list failed for this rig — signal fallback so the
+			// caller over-counts (safe) rather than silently under-counting.
+			return counts, false
 		}
-	}
-
-	for _, entry := range entries {
-		issue := issueByID[entry.agentBeadID]
-		if issue == nil {
-			continue
+		hookedAssignees := make(map[string]bool, len(hookedBeads))
+		for _, b := range hookedBeads {
+			if b != nil && b.Assignee != "" {
+				hookedAssignees[b.Assignee] = true
+			}
 		}
-		fields := beads.ParseAgentFields(issue.Description)
-		if fields.HookBead == "" {
-			continue // Idle — don't count toward cap
+		for _, name := range names {
+			assignee := fmt.Sprintf("%s/polecats/%s", rigName, name)
+			if hookedAssignees[assignee] {
+				counts[rigName]++
+			}
 		}
-		counts[entry.rig]++
 	}
 	return counts, true
 }

@@ -446,12 +446,13 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	// Phase 1 (serial, filesystem-only): gather the per-rig work items. Cheap —
 	// os.Stat + readdir, no bd subprocess.
 	type rigCapacityWork struct {
-		rigName      string
-		rigPath      string
-		prefix       string
-		polecatNames []string
-		agents       map[string]*beads.Issue // filled by the parallel phase
-		readOK       bool                    // true once ListAgentBeads succeeded
+		rigName         string
+		rigPath         string
+		prefix          string
+		polecatNames    []string
+		agents          map[string]*beads.Issue // filled by the parallel phase
+		hookedAssignees map[string]bool         // assignees of this rig's status=hooked work beads
+		readOK          bool                    // true once ListAgentBeads succeeded
 	}
 	var work []*rigCapacityWork
 	for rigName := range rigsConfig.Rigs {
@@ -484,6 +485,13 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	// throttle under scheduler-dispatch.lock re-opens that dispatch-starvation
 	// deadlock) — the semaphore, not the throttle, bounds Dolt load here.
 	//
+	// In the SAME phase we also fetch the rig's status=hooked work beads (one
+	// extra list per rig) so the working classification can read the canonical
+	// work-bead signal instead of the deprecated agent-bead hook_bead field
+	// (gu-c94lq / hq-l6mm5). The added cost is one query per rig per snapshot,
+	// absorbed by the 5s capacity-snapshot cache — negligible next to the
+	// agent-bead read already happening here.
+	//
 	// Per-rig read errors degrade gracefully: that rig contributes no capacity
 	// rather than failing the whole snapshot (a transient Dolt blip on one rig
 	// must not stall town-wide dispatch).
@@ -495,13 +503,30 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			agents, err := beads.New(w.rigPath).WithoutReadThrottle().ListAgentBeads()
+			rigBeads := beads.New(w.rigPath).WithoutReadThrottle()
+			agents, err := rigBeads.ListAgentBeads()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s capacity_skip reason=agent_list_failed rig=%s: %v\n",
 					style.Dim.Render("○"), w.rigName, err)
 				return // graceful degrade: readOK stays false
 			}
+			hookedBeads, err := rigBeads.List(beads.ListOptions{
+				Status:   beads.StatusHooked,
+				Priority: -1,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s capacity_skip reason=hooked_list_failed rig=%s: %v\n",
+					style.Dim.Render("○"), w.rigName, err)
+				return // graceful degrade: readOK stays false
+			}
+			hookedAssignees := make(map[string]bool, len(hookedBeads))
+			for _, b := range hookedBeads {
+				if b != nil && b.Assignee != "" {
+					hookedAssignees[b.Assignee] = true
+				}
+			}
 			w.agents = agents
+			w.hookedAssignees = hookedAssignees
 			w.readOK = true
 		}(w)
 	}
@@ -535,8 +560,13 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 				fields = beads.ParseAgentFields(issue.Description)
 				fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
 			}
-			applyAgentFieldsToCapacitySnapshot(&snapshot, w.rigName, name, fields, liveSessions)
-			applyAgentFieldsToCapacitySnapshot(&rigSnapshot, w.rigName, name, fields, liveSessions)
+			// Canonical "working" signal: a status=hooked work bead assigned to
+			// this polecat (gu-c94lq). Feed the SAME value into both the town and
+			// per-rig sub-snapshots so they cannot drift (gu-ccycc invariant).
+			assignee := fmt.Sprintf("%s/polecats/%s", w.rigName, name)
+			hasHookedWorkBead := w.hookedAssignees[assignee]
+			applyAgentFieldsToCapacitySnapshot(&snapshot, w.rigName, name, fields, liveSessions, hasHookedWorkBead)
+			applyAgentFieldsToCapacitySnapshot(&rigSnapshot, w.rigName, name, fields, liveSessions, hasHookedWorkBead)
 		}
 		perRigOccupied[w.rigName] = rigSnapshot.occupied()
 	}
@@ -619,7 +649,16 @@ func liveSessionSet(tmuxClient *tmux.Tmux) map[string]bool {
 	return set
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, liveSessions map[string]bool) {
+// applyAgentFieldsToCapacitySnapshot classifies one polecat into the capacity
+// snapshot. The "is this polecat working" decision reads hasHookedWorkBead —
+// whether a work bead with status=hooked is assigned to this polecat — NOT the
+// agent-bead hook_bead field. hq-l6mm5 made the work bead canonical and turned
+// hook_bead writes into a no-op; a polecat that reuses an idle slot is hooked
+// via the work bead but never gets hook_bead set, so reading hook_bead here
+// under-counted reuse polecats (gu-c94lq). The remaining branches still read
+// agent-bead fields that hq-l6mm5 left maintained (ActiveMR, PushFailed/
+// MRFailed, CleanupStatus, nuked).
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, liveSessions map[string]bool, hasHookedWorkBead bool) {
 	running := liveSessions[session.PolecatSessionName(session.PrefixFor(rigName), polecatName)]
 	if fields == nil {
 		// No agent bead exists for this polecat directory. Two distinct cases:
@@ -647,7 +686,7 @@ func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigNa
 	}
 
 	state := strings.TrimSpace(fields.AgentState)
-	if fields.HookBead != "" || state == "working" || state == "spawning" {
+	if hasHookedWorkBead {
 		if running {
 			snapshot.Working++
 		} else {

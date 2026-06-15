@@ -420,11 +420,64 @@ func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			snapshot := polecatCapacitySnapshot{}
-			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, nil)
+			applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "synth", tt.fields, nil, false)
 			if snapshot.Working != tt.want.Working || snapshot.RecoveryBlocked != tt.want.RecoveryBlocked || snapshot.ReusableIdle != tt.want.ReusableIdle || snapshot.PendingMR != tt.want.PendingMR {
 				t.Fatalf("snapshot = %+v, want %+v", snapshot, tt.want)
 			}
 		})
+	}
+}
+
+// TestApplyAgentFieldsToCapacitySnapshot_WorkBeadIsCanonical is the gu-c94lq
+// regression guard. The working classification must read the canonical
+// work-bead signal (hasHookedWorkBead) — a status=hooked bead assigned to the
+// polecat — NOT the deprecated agent-bead hook_bead field. hq-l6mm5 made the
+// work bead authoritative and turned hook_bead writes into a no-op, so a
+// polecat that picks up work by REUSING an idle slot is hooked via the work
+// bead but has an EMPTY hook_bead. Reading hook_bead under-counted those
+// polecats; reading the work-bead signal counts them correctly. Conversely a
+// stale non-empty hook_bead on a polecat with NO hooked work bead (the
+// live-evidence closed-bead case) must NOT be counted.
+func TestApplyAgentFieldsToCapacitySnapshot_WorkBeadIsCanonical(t *testing.T) {
+	rig := "gastown"
+	name := "reuse"
+	// Live session so a "working" classification lands in Working (not
+	// RecoveryBlocked).
+	live := map[string]bool{
+		session.PolecatSessionName(session.PrefixFor(rig), name): true,
+	}
+
+	// THE BUG: reuse-hooked polecat. Work bead status=hooked + assignee set, but
+	// hook_bead is EMPTY (reuse path never writes it). Old code read hook_bead=""
+	// and skipped it; the work-bead signal must count it as Working.
+	reuseFields := &beads.AgentFields{AgentState: string(beads.AgentStateIdle), HookBead: ""}
+	reuse := polecatCapacitySnapshot{}
+	applyAgentFieldsToCapacitySnapshot(&reuse, rig, name, reuseFields, live, true)
+	if reuse.Working != 1 {
+		t.Fatalf("reuse-hooked polecat (work bead hooked, hook_bead empty) must count as Working, got %+v", reuse)
+	}
+
+	// Spawn-hooked polecat: both the work bead AND a stale hook_bead are set. Must
+	// STILL be Working — no regression for the fresh-spawn path.
+	spawnFields := &beads.AgentFields{AgentState: "working", HookBead: "gu-work"}
+	spawn := polecatCapacitySnapshot{}
+	applyAgentFieldsToCapacitySnapshot(&spawn, rig, name, spawnFields, live, true)
+	if spawn.Working != 1 {
+		t.Fatalf("spawn-hooked polecat (both signals set) must count as Working, got %+v", spawn)
+	}
+
+	// THE LIVE-EVIDENCE CASE: closed work bead (no hooked bead → hasHookedWorkBead
+	// false) but a STALE non-empty hook_bead lingers on the agent bead. The old
+	// code counted this as Working off hook_bead; the work-bead signal must NOT.
+	// With a clean cleanup status it falls through to ReusableIdle.
+	staleFields := &beads.AgentFields{AgentState: string(beads.AgentStateIdle), HookBead: "gu-closed", CleanupStatus: "clean"}
+	stale := polecatCapacitySnapshot{}
+	applyAgentFieldsToCapacitySnapshot(&stale, rig, name, staleFields, live, false)
+	if stale.Working != 0 {
+		t.Fatalf("stale hook_bead with no hooked work bead must NOT count as Working, got %+v", stale)
+	}
+	if stale.ReusableIdle != 1 {
+		t.Fatalf("stale hook_bead + clean cleanup + no hooked work bead must be ReusableIdle, got %+v", stale)
 	}
 }
 
@@ -444,7 +497,7 @@ func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 func TestApplyAgentFieldsToCapacitySnapshot_NilFieldsDeadSessionIsReusable(t *testing.T) {
 	snapshot := polecatCapacitySnapshot{}
 	// fields=nil, tmuxClient=nil => running=false => orphan warm-pool slot.
-	applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "orphan", nil, nil)
+	applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "orphan", nil, nil, false)
 	if snapshot.ReusableIdle != 1 {
 		t.Fatalf("expected ReusableIdle=1 for nil-fields dead-session warm-pool slot (gu-o086), snapshot=%+v", snapshot)
 	}
@@ -473,14 +526,14 @@ func TestApplyAgentFieldsToCapacitySnapshot_LiveSessionSetLookup(t *testing.T) {
 
 	// In-set + nil fields => live session, missing bead => Working (gu-o086).
 	alive := polecatCapacitySnapshot{}
-	applyAgentFieldsToCapacitySnapshot(&alive, rig, aliveName, nil, live)
+	applyAgentFieldsToCapacitySnapshot(&alive, rig, aliveName, nil, live, false)
 	if alive.Working != 1 || alive.ReusableIdle != 0 {
 		t.Fatalf("in-set polecat must count as Working, got %+v", alive)
 	}
 
 	// Not-in-set + nil fields => dead session, missing bead => ReusableIdle.
 	dead := polecatCapacitySnapshot{}
-	applyAgentFieldsToCapacitySnapshot(&dead, rig, deadName, nil, live)
+	applyAgentFieldsToCapacitySnapshot(&dead, rig, deadName, nil, live, false)
 	if dead.ReusableIdle != 1 || dead.Working != 0 {
 		t.Fatalf("not-in-set polecat must count as ReusableIdle, got %+v", dead)
 	}
@@ -504,13 +557,15 @@ func TestPerRigOccupancyCountsDeadSessionHookedPolecat(t *testing.T) {
 	// Live session set is empty => every polecat's session is "dead".
 	deadSessions := map[string]bool{}
 
-	// Hooked + dead session: the exact gu-ccycc case.
-	hookedDead := &beads.AgentFields{AgentState: "working", HookBead: "gu-work"}
+	// Hooked + dead session: the exact gu-ccycc case. "Hooked" is now the
+	// canonical work-bead signal (hasHookedWorkBead=true), NOT the deprecated
+	// agent-bead hook_bead field (gu-c94lq).
+	hookedDead := &beads.AgentFields{AgentState: "working"}
 
 	// The per-rig sub-snapshot (built the same way polecatCapacitySnapshotFor-
 	// TownNoCleanup builds it) must count this polecat as occupied.
 	rigSnapshot := polecatCapacitySnapshot{}
-	applyAgentFieldsToCapacitySnapshot(&rigSnapshot, rig, "stalled", hookedDead, deadSessions)
+	applyAgentFieldsToCapacitySnapshot(&rigSnapshot, rig, "stalled", hookedDead, deadSessions, true)
 	if rigSnapshot.RecoveryBlocked != 1 {
 		t.Fatalf("hooked dead-session polecat must classify RecoveryBlocked, got %+v", rigSnapshot)
 	}
@@ -522,7 +577,7 @@ func TestPerRigOccupancyCountsDeadSessionHookedPolecat(t *testing.T) {
 	// And the town snapshot, folding the SAME polecat through the SAME
 	// classifier, must reach the identical occupied count — the two gates agree.
 	townSnapshot := polecatCapacitySnapshot{}
-	applyAgentFieldsToCapacitySnapshot(&townSnapshot, rig, "stalled", hookedDead, deadSessions)
+	applyAgentFieldsToCapacitySnapshot(&townSnapshot, rig, "stalled", hookedDead, deadSessions, true)
 	if townSnapshot.occupied() != rigSnapshot.occupied() {
 		t.Fatalf("per-rig occupied=%d disagrees with town occupied=%d for the same polecat",
 			rigSnapshot.occupied(), townSnapshot.occupied())
