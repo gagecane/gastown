@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -95,6 +96,20 @@ func runAssign(_ *cobra.Command, args []string) error {
 
 	agentID := rigName + "/crew/" + crewName
 
+	// Resolve the rig's database so both the create and the hook update land in
+	// the rig the assignee owns, not the cwd (hq) database. bd picks its target
+	// database from cwd/BEADS_DIR — the assignee is just a label — so pinning to
+	// townRoot would orphan a rig-scoped bead in hq, invisible to the rig's
+	// agents (the same failure mode gt bead create fixes). A rig without a
+	// routes.jsonl entry falls through to bd's cwd routing with a warning.
+	rigBeadsDir := filepath.Join(townRoot, rigName, ".beads")
+	beadsDir, resolved := resolveAssignBeadsDir(townRoot, rigName)
+	if !resolved {
+		fmt.Fprintf(os.Stderr,
+			"%s gt assign: rig %q has no routes.jsonl entry; using town (hq) database\n",
+			style.Warning.Render("⚠"), rigName)
+	}
+
 	if assignDryRun {
 		fmt.Printf("Would create bead: %q (type=%s, priority=%s)\n", title, assignType, assignPriority)
 		fmt.Printf("Would hook to: %s\n", agentID)
@@ -123,6 +138,7 @@ func runAssign(_ *cobra.Command, args []string) error {
 
 	out, err := BdCmd(createArgs...).
 		Dir(townRoot).
+		WithBeadsDir(beadsDir).
 		WithAutoCommit().
 		Output()
 	if err != nil {
@@ -146,6 +162,7 @@ func runAssign(_ *cobra.Command, args []string) error {
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if err := BdCmd("update", beadID, "--status=hooked", "--assignee="+agentID).
 			Dir(townRoot).
+			WithBeadsDir(beadsDir).
 			WithAutoCommit().
 			Run(); err != nil {
 			lastErr = err
@@ -162,7 +179,6 @@ func runAssign(_ *cobra.Command, args []string) error {
 
 	// Step 3: Update agent hook_bead field (currently a no-op but maintains contract)
 	townBeadsDir := filepath.Join(townRoot, ".beads")
-	rigBeadsDir := filepath.Join(townRoot, rigName, ".beads")
 	updateAgentHookBead(agentID, beadID, rigBeadsDir, townBeadsDir)
 
 	// Step 4: Log event
@@ -189,4 +205,17 @@ func runAssign(_ *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolveAssignBeadsDir resolves the .beads database that a 'gt assign' bead
+// should be written to. It routes to the rig the assignee owns via the rig's
+// routes.jsonl entry, independent of cwd. When the rig has no resolvable route
+// entry it returns the town (hq) .beads directory and false, so callers can
+// warn and fall through to bd's cwd-based routing. Splitting this out keeps the
+// routing decision unit-testable without execing bd.
+func resolveAssignBeadsDir(townRoot, rigName string) (string, bool) {
+	if dir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName); ok {
+		return dir, true
+	}
+	return filepath.Join(townRoot, ".beads"), false
 }
