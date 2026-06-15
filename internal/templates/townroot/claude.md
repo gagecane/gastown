@@ -75,6 +75,20 @@ production server and degrade performance. This is a recurring problem.
 {{cmd}} dolt cleanup             # Remove orphan test databases
 ```
 
+### Querying across databases
+
+The single Dolt server (port 3307) hosts every database, but each is a separate
+namespace. To query across them (status sweeps, dedup, audits), use `bd sql` with
+a database-qualified table name — NOT `dolt sql-client` or `dolt sql --host/--port`,
+which are not the supported path here:
+
+```bash
+bd sql --csv "SELECT id, title FROM \`<db>\`.issues WHERE status = 'open'"
+```
+
+Sweep multiple databases by running the query once per database name. Use `--csv`
+(or `--json`) for machine-parseable output.
+
 ### Communication hygiene
 
 Every `{{cmd}} mail send` creates a permanent bead + Dolt commit. Every `{{cmd}} nudge`
