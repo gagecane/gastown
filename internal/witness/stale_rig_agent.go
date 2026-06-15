@@ -71,7 +71,11 @@ type StaleRigAgentResult struct {
 	// its frozen heartbeat is expected, not a wedge (gu-qwe7q/gu-eke9u),
 	// "skip-idle-clean-cycle" when an alive witness's stale heartbeat last
 	// self-reported clean-cycle idle-ready — the discrete-cycle idle between
-	// deacon nudges, not a wedge (gu-eke9u), etc.
+	// deacon nudges, not a wedge (gu-eke9u), "skip-pre-binary-bump" when an
+	// alive session has no heartbeat file at all but was created before the
+	// running binary — a benign pre-bump session on an old image that never
+	// wrote heartbeats, fixed by a one-time `gt rig boot`, not a wedge
+	// (gu-2j7n1), etc.
 	Action string
 	// CorrelatedInto is the lead agent's "rig/session" key when Action is
 	// "skip-correlated" — the escalation thread this alarm folded into. Empty
@@ -270,9 +274,31 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 				result.Stale = append(result.Stale, item)
 				continue
 			}
-			// Session is alive but no heartbeat at all. This is the
-			// pre-gu-0nmw case where refinery/witness sessions never wrote
-			// a heartbeat. Treat as stale so we surface the gap.
+			// Session is alive but no heartbeat file at all. Post-gu-0nmw,
+			// every refinery/witness writes a heartbeat at session start
+			// (manager.Start → TouchSessionHeartbeat), so any session on the
+			// CURRENT binary always has one. A totally-absent heartbeat for an
+			// alive session therefore means the session predates the running
+			// binary: it was started before the last binary bump and is still
+			// executing an old pre-gu-0nmw image that never touched heartbeats.
+			//
+			// That is a BENIGN, self-resolving condition (gu-2j7n1): the agent
+			// is healthy and polling fine — only the heartbeat file is absent
+			// because of the stale in-memory image. The fix is a one-time
+			// `gt rig boot <rig>`, NOT a wedge response. Firing a HIGH
+			// STALE_RIG_AGENT escalation for it produced the FP wave (10+ rigs
+			// after the Jun13 daemon bump). Suppress it.
+			//
+			// Discriminate by session creation time vs the running binary's mod
+			// time: created BEFORE the binary = pre-bump FP (suppress); created
+			// AFTER it, or either timestamp unresolvable = a current-binary
+			// session that genuinely never wrote its first heartbeat
+			// (crash-before-first-write) — still escalate, conservatively.
+			if sessionPredatesBinary(t, c.sessionName) {
+				item.Action = "skip-pre-binary-bump"
+				result.Stale = append(result.Stale, item)
+				continue
+			}
 			escalateStaleRigAgent(&item, router, t, townRoot, rigName, staleThreshold, notifyCooldown, correlationWindow, now, 1, true)
 			result.Stale = append(result.Stale, item)
 			continue
@@ -377,6 +403,45 @@ func DetectStaleRigAgentHeartbeats(workDir, rigName string, router *mail.Router,
 	return result
 }
 
+// sessionPredatesBinary reports whether the tmux session was created before the
+// currently-running gt binary was built (its on-disk mod time). It is the
+// discriminator for the gu-2j7n1 false positive: a session with no heartbeat
+// file at all, but alive, is the benign "pre-binary-bump session running an old
+// image that never wrote heartbeats" case ONLY if it started before the current
+// binary. A session created after the binary that still has no heartbeat is a
+// genuine anomaly (crashed before its first heartbeat write) and must escalate.
+//
+// Conservative on uncertainty: if either the session creation time or the binary
+// mod time cannot be resolved, return false (do NOT suppress) so a real
+// never-heartbeated agent still surfaces. Suppression requires positive proof
+// that the session is older than the binary.
+func sessionPredatesBinary(t *tmux.Tmux, sessionName string) bool {
+	created, err := t.GetSessionCreatedTime(sessionName)
+	if err != nil || created.IsZero() {
+		return false
+	}
+	binTime, err := selfBinaryModTime()
+	if err != nil || binTime.IsZero() {
+		return false
+	}
+	return created.Before(binTime)
+}
+
+// selfBinaryModTime returns the mod time of the running gt executable, the
+// proxy for "when this binary was built/deployed". Used to tell a pre-bump
+// session (created before the binary) from a current-binary one (gu-2j7n1).
+func selfBinaryModTime() (time.Time, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return time.Time{}, err
+	}
+	info, err := os.Stat(exePath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
+}
+
 // escalateStaleRigAgent applies the gu-z8qzq dedup/cooldown gate and the
 // gu-nejgh cross-rig correlation gate, then either sends the STALE_RIG_AGENT
 // mail (recording the new notify state) or records a "skip-*" no-op. It mutates
@@ -473,7 +538,9 @@ This usually means one of:
 Recovery:
   - gt session status %s/%s --json
   - gt %s status --json %s   (if applicable)
-  - gt session restart %s/%s
+  - gt rig boot %s   (rig-level refinery/witness: 'gt session restart' does
+    NOT work for them — it errors 'polecat not found'; rig boot starts a fresh
+    session on the current binary, which writes the heartbeat and clears this)
 
 Dedup (gu-z8qzq): this alarm is suppressed on subsequent patrol cycles while
 the condition is unchanged. It re-fires only if the staleness worsens
@@ -482,7 +549,7 @@ materially or after the notify-cooldown window elapses.`,
 			item.SessionAlive, threshold,
 			rigName, item.AgentRole,
 			item.AgentRole, rigName,
-			rigName, item.AgentRole)
+			rigName)
 	} else {
 		subject = fmt.Sprintf("STALE_RIG_AGENT %s/%s (heartbeat age=%s, session_alive=%v, last_state=%s)",
 			rigName, item.AgentRole, item.HeartbeatAge.Round(time.Second), item.SessionAlive, item.LastState)
@@ -500,7 +567,9 @@ If the session is dead, the daemon supervisor missed a restart cycle.
 Recovery:
   - gt session status %s/%s --json
   - gt %s status --json %s
-  - gt session restart %s/%s
+  - gt rig boot %s   (rig-level refinery/witness: 'gt session restart' does NOT
+    work for them — it errors 'polecat not found'; use rig boot to cycle onto a
+    fresh session)
 
 Dedup (gu-z8qzq): this alarm is suppressed on subsequent patrol cycles while
 the condition is unchanged. It re-fires only if the staleness worsens
@@ -511,7 +580,7 @@ window elapses.`,
 			staleAgentTriageContext(item),
 			rigName, item.AgentRole,
 			item.AgentRole, rigName,
-			rigName, item.AgentRole)
+			rigName)
 	}
 
 	msg := &mail.Message{
