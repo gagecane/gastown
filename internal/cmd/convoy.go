@@ -2703,14 +2703,23 @@ func computeTownWideScheduledSet(townRoot string) map[string]bool {
 	out := make(map[string]bool, len(contexts))
 	now := time.Now()
 	for _, ctx := range contexts {
-		if ctx.CreatedAt != "" {
-			if created, err := time.Parse(time.RFC3339, ctx.CreatedAt); err == nil {
-				if now.Sub(created) > slingContextTTL {
-					continue
-				}
-			}
-		}
 		fields := beads.ParseSlingContextFields(ctx.Description)
+		// A context that recorded a transient dispatch failure
+		// (dispatch_failures>0) or has aged past the TTL is NOT a healthy
+		// in-flight dispatch — treat it as unscheduled so the convoy is
+		// flagged ready-stranded and the next dispatch cycle recycles and
+		// re-dispatches it (gu-y5ajc). Previously this scan filtered ONLY by
+		// TTL, so a failed-but-young context (e.g. a transient per-rig cap
+		// hit) was counted as "scheduled" and the daemon never retried —
+		// parking the convoy step until TTL expiry or a manual re-sling. Reuse
+		// sling.IsStaleOrFailedContext so the autonomous scan and the manual
+		// `gt sling` recovery path share ONE definition of "stale or failed".
+		// Open contexts only ever carry dispatch_failures in [1,
+		// maxDispatchFailures); recordDispatchFailure closes the context once
+		// the circuit breaker trips, so reusing the predicate cannot bypass it.
+		if sling.IsStaleOrFailedContext(ctx, fields, now) {
+			continue
+		}
 		if fields != nil {
 			out[fields.WorkBeadID] = true
 		}
