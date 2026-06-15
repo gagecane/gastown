@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -106,6 +107,15 @@ type Daemon struct {
 	// PATCH-006: Resolved binary paths to avoid PATH issues in subprocesses.
 	gtPath string
 	bdPath string
+
+	// dispatchInFlight guards dispatchQueuedWork against goroutine pileup. The
+	// dispatch shells out to `gt scheduler run` on its own goroutine so a slow
+	// or stuck scheduler cannot block the heartbeat loop (gu-qwn0n). This flag
+	// ensures only one dispatch runs at a time: if a prior dispatch is still
+	// draining when the next heartbeat fires, the new tick skips dispatch
+	// rather than stacking goroutines (the scheduler also self-serializes via
+	// scheduler-dispatch.lock, but this avoids the redundant subprocess spawn).
+	dispatchInFlight atomic.Bool
 
 	// Boot spawn cooldown: prevents Boot from spawning on every heartbeat tick.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
@@ -4592,7 +4602,23 @@ func (d *Daemon) pruneStaleBranches() {
 
 // dispatchQueuedWork shells out to `gt scheduler run` to dispatch scheduled beads.
 // This avoids circular import between the daemon and cmd packages.
-// Uses a 5m timeout to allow multi-bead dispatch with formula cooking and hook retries.
+//
+// The subprocess runs on its own goroutine so a slow or stuck scheduler cannot
+// stall the heartbeat loop (gu-qwn0n). Previously this blocked synchronously on
+// cmd.CombinedOutput() inside heartbeat phase 14 with a 5m timeout — longer than
+// the 3m heartbeat interval — so a single slow dispatch froze all remaining
+// phases and delayed the next tick by up to 5 minutes. Running async lets the
+// heartbeat finish its other phases and fire the next tick while dispatch drains.
+//
+// A non-blocking in-flight guard (dispatchInFlight) ensures only one dispatch
+// runs at a time: if a prior dispatch is still running when the next heartbeat
+// fires, this tick skips dispatch rather than stacking goroutines. The scheduler
+// also self-serializes via scheduler-dispatch.lock, so skipping is safe and
+// avoids a redundant subprocess spawn.
+//
+// The context is parented to d.ctx so daemon shutdown cancels an in-flight
+// dispatch. A 5m timeout still bounds the subprocess to allow multi-bead
+// dispatch with formula cooking and hook retries.
 //
 // Timeout safety: if the timeout fires mid-dispatch, a bead may be left with
 // metadata written but label not yet swapped (or vice versa). The dispatch flock
@@ -4600,27 +4626,38 @@ func (d *Daemon) pruneStaleBranches() {
 // prevents double-dispatch on the next cycle. The batch_size config (default: 1)
 // limits how many beads are in-flight per heartbeat, reducing the timeout window.
 func (d *Daemon) dispatchQueuedWork() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")
-	setSysProcAttr(cmd)
-	cmd.Dir = d.config.TownRoot
-	// Set GT_ROLE=daemon so detectActor() reports a traceable origin instead
-	// of "unknown" when the dispatcher writes dispatched_by on hooked beads
-	// (gu-pi35l acceptance: "Log the actual caller for dispatched_by — replace
-	// 'unknown' with traceable origin"). The daemon is the canonical
-	// dispatch caller from the heartbeat path; without GT_ROLE the subprocess
-	// has no rig/cwd that GetRole can use to identify itself, so every
-	// dispatched_by ended up as "unknown" (cacr-r8ne / cacr-wfs-xegy2 / cacr-4ujm).
-	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1", "GT_ROLE=daemon")
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		d.logger.Printf("Scheduler dispatch timed out after 5m")
-	} else if err != nil {
-		d.logger.Printf("Scheduler dispatch failed: %v (output: %s)", err, string(out))
-	} else if len(out) > 0 {
-		d.logger.Printf("Scheduler dispatch: %s", string(out))
+	// Skip if a prior dispatch goroutine is still draining. CompareAndSwap is
+	// non-blocking, so the heartbeat phase returns immediately either way.
+	if !d.dispatchInFlight.CompareAndSwap(false, true) {
+		d.logger.Printf("Scheduler dispatch still in flight, skipping this tick")
+		return
 	}
+
+	go func() {
+		defer d.dispatchInFlight.Store(false)
+
+		ctx, cancel := context.WithTimeout(d.ctx, 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "gt", "scheduler", "run")
+		setSysProcAttr(cmd)
+		cmd.Dir = d.config.TownRoot
+		// Set GT_ROLE=daemon so detectActor() reports a traceable origin instead
+		// of "unknown" when the dispatcher writes dispatched_by on hooked beads
+		// (gu-pi35l acceptance: "Log the actual caller for dispatched_by — replace
+		// 'unknown' with traceable origin"). The daemon is the canonical
+		// dispatch caller from the heartbeat path; without GT_ROLE the subprocess
+		// has no rig/cwd that GetRole can use to identify itself, so every
+		// dispatched_by ended up as "unknown" (cacr-r8ne / cacr-wfs-xegy2 / cacr-4ujm).
+		cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1", "GT_ROLE=daemon")
+		out, err := cmd.CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			d.logger.Printf("Scheduler dispatch timed out after 5m")
+		} else if err != nil {
+			d.logger.Printf("Scheduler dispatch failed: %v (output: %s)", err, string(out))
+		} else if len(out) > 0 {
+			d.logger.Printf("Scheduler dispatch: %s", string(out))
+		}
+	}()
 }
 
 // shouldDispatchOnStartup reports whether the daemon may fire an immediate
