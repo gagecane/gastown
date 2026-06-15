@@ -761,3 +761,44 @@ func TestSetConvoyFieldsPreservesWatchers(t *testing.T) {
 		t.Errorf("lost prose, got:\n%s", got)
 	}
 }
+
+func TestWorkflowDriverIssue(t *testing.T) {
+	tests := []struct {
+		name string
+		desc string
+		want string
+	}{
+		{
+			name: "field present at head",
+			desc: "driver_issue: ticd-5te\nWorkflow: mol-review-leg\n\nSteps: 3\nRig: talon_cdk",
+			want: "ticd-5te",
+		},
+		{
+			name: "field present mid-description",
+			desc: "Workflow: mol-review-leg\ndriver_issue: gu-abc12\nRig: gastown",
+			want: "gu-abc12",
+		},
+		{
+			name: "case-insensitive key",
+			desc: "Driver_Issue: gu-xyz",
+			want: "gu-xyz",
+		},
+		{
+			name: "no field (legacy chain)",
+			desc: "Workflow: mol-review-leg\n\nSteps: 3\nRig: talon_cdk",
+			want: "",
+		},
+		{
+			name: "empty description",
+			desc: "",
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := WorkflowDriverIssue(tt.desc); got != tt.want {
+				t.Errorf("WorkflowDriverIssue(%q) = %q, want %q", tt.desc, got, tt.want)
+			}
+		})
+	}
+}

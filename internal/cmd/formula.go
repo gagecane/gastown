@@ -823,6 +823,8 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 		}
 	}
 
+	setVars := parseSetVars(formulaRunSet)
+
 	// Step 1: Create workflow root bead
 	workflowID := fmt.Sprintf("hq-wf-%s", generateFormulaShortID())
 	workflowTitle := fmt.Sprintf("%s: %s (%d steps)", formulaName,
@@ -830,6 +832,23 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 
 	description := fmt.Sprintf("Workflow: %s\n\nSteps: %d\nRig: %s",
 		formulaName, len(f.Steps), targetRig)
+
+	// Record the driving assignment bead (the `issue` var) so the chain can be
+	// torn down when its driver closes (gu-guwpn). Orchestrators (e.g.
+	// mol-review-leg) dispatch a wfs chain against an assignment bead passed as
+	// --set issue=<id>; previously that linkage existed only in step PROSE, so
+	// when the orchestrator completed the leg out-of-band and closed the
+	// assignment, nothing closed the chain — its first step stranded in
+	// `gt ready` forever. Persisting it as a structured `driver_issue:` field on
+	// the workflow root lets the daemon reaper (reapDriverClosedWorkflows) find a
+	// closed driver and force-close the orphaned chain. A field (not a tracks
+	// edge) avoids polluting the root's tracked-set — completion must not wait on
+	// the driver — and sidesteps a town-root→rig-bead cross-DB dep edge.
+	if driverIssue, ok := setVars["issue"].(string); ok {
+		if driverIssue = strings.TrimSpace(driverIssue); driverIssue != "" {
+			description = fmt.Sprintf("%s: %s\n%s", beads.WorkflowDriverIssueField, driverIssue, description)
+		}
+	}
 
 	if beads.IsFlagLikeTitle(workflowTitle) {
 		return fmt.Errorf("refusing to create workflow: title %q looks like a CLI flag", workflowTitle)
@@ -859,7 +878,6 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 
 	// Step 2: Create step beads and wire dependencies
 	stepBeads := make(map[string]string) // step.ID -> bead ID
-	setVars := parseSetVars(formulaRunSet)
 
 	for _, step := range f.Steps {
 		// Render {{var}} placeholders in step fields before they reach the

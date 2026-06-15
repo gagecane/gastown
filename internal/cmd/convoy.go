@@ -74,28 +74,29 @@ func looksLikeIssueID(s string) bool {
 
 // Convoy command flags
 var (
-	convoyMolecule     string
-	convoyNotify       string
-	convoyOwner        string
-	convoyOwned        bool
-	convoyMerge        string
-	convoyBaseBranch   string
-	convoyStatusJSON   bool
-	convoyListJSON     bool
-	convoyListStatus   string
-	convoyListAll      bool
-	convoyListTree     bool
-	convoyListRig      string
-	convoyInteractive  bool
-	convoyStrandedJSON bool
-	convoyCloseReason  string
-	convoyCloseNotify  string
-	convoyCloseForce   bool
-	convoyCheckDryRun  bool
-	convoyLandForce    bool
-	convoyLandKeep     bool
-	convoyLandDryRun   bool
-	convoyFromEpic     string
+	convoyMolecule          string
+	convoyNotify            string
+	convoyOwner             string
+	convoyOwned             bool
+	convoyMerge             string
+	convoyBaseBranch        string
+	convoyStatusJSON        bool
+	convoyListJSON          bool
+	convoyListStatus        string
+	convoyListAll           bool
+	convoyListTree          bool
+	convoyListRig           string
+	convoyInteractive       bool
+	convoyStrandedJSON      bool
+	convoyCloseReason       string
+	convoyCloseNotify       string
+	convoyCloseForce        bool
+	convoyCheckDryRun       bool
+	convoyReapOrphansDryRun bool
+	convoyLandForce         bool
+	convoyLandKeep          bool
+	convoyLandDryRun        bool
+	convoyFromEpic          string
 )
 
 const (
@@ -315,6 +316,29 @@ Examples:
 	RunE:         runConvoyCheck,
 }
 
+var convoyReapOrphansCmd = &cobra.Command{
+	Use:   "reap-orphans",
+	Short: "Close workflow chains whose driving assignment bead has closed",
+	Long: `Find open workflow roots (hq-wf-*) whose driver_issue bead is closed and
+force-close the root and its tracked workflow-step (*-wfs-*) beads.
+
+When an orchestrator completes a review leg out-of-band and closes the
+assignment bead, the wfs chain it dispatched is NOT canceled — its first step
+strands in 'gt ready' forever, inviting re-dispatch of work that already
+shipped (gu-guwpn). This reaper tears down such orphaned chains by reading the
+driver_issue field the chain was created with.
+
+Run by the daemon every scan (before the stranded-feed pass, so orphans are
+closed before they can be re-dispatched) and available manually.
+
+Examples:
+  gt convoy reap-orphans            # Close all driver-closed workflow chains
+  gt convoy reap-orphans --dry-run  # Preview what would close without acting`,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE:         runConvoyReapOrphans,
+}
+
 var convoyStrandedCmd = &cobra.Command{
 	Use:   "stranded",
 	Short: "Find stranded convoys (ready work, stuck, or empty) needing attention",
@@ -430,6 +454,8 @@ func init() {
 	convoyCmd.AddCommand(convoyListCmd)
 	convoyCmd.AddCommand(convoyAddCmd)
 	convoyCmd.AddCommand(convoyCheckCmd)
+	convoyReapOrphansCmd.Flags().BoolVar(&convoyReapOrphansDryRun, "dry-run", false, "Preview what would close without acting")
+	convoyCmd.AddCommand(convoyReapOrphansCmd)
 	convoyCmd.AddCommand(convoyStrandedCmd)
 	convoyCmd.AddCommand(convoyCloseCmd)
 	convoyCmd.AddCommand(convoyLandCmd)
@@ -1118,6 +1144,143 @@ func runConvoyCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runConvoyReapOrphans(cmd *cobra.Command, args []string) error {
+	townBeads, err := getTownBeadsDir()
+	if err != nil {
+		return err
+	}
+	reaped, err := reapDriverClosedWorkflows(townBeads, convoyReapOrphansDryRun)
+	if err != nil {
+		return err
+	}
+	if len(reaped) == 0 {
+		fmt.Println("No driver-closed workflow chains to reap.")
+		return nil
+	}
+	if convoyReapOrphansDryRun {
+		fmt.Printf("%s Would reap %d orphaned workflow chain(s):\n", style.Warning.Render("⚠"), len(reaped))
+	} else {
+		fmt.Printf("%s Reaped %d orphaned workflow chain(s):\n", style.Bold.Render("✓"), len(reaped))
+	}
+	for _, r := range reaped {
+		fmt.Printf("  🧹 %s (driver %s closed): closed %d step(s)\n", r.WorkflowID, r.DriverIssue, r.StepsClosed)
+	}
+	return nil
+}
+
+// reapedWorkflow records one orphaned workflow chain torn down by the reaper.
+type reapedWorkflow struct {
+	WorkflowID  string
+	DriverIssue string
+	StepsClosed int
+}
+
+// reapDriverClosedWorkflows finds open workflow roots (hq-wf-* carrying
+// gt:workflow) whose driver_issue bead has closed and force-closes the root and
+// its tracked workflow-step (*-wfs-*) beads (gu-guwpn).
+//
+// A workflow chain is dispatched against an assignment/driver bead, but the only
+// historical link was step PROSE — so when an orchestrator completed the leg
+// out-of-band and closed the assignment, nothing closed the chain and its first
+// step stranded in `gt ready`. The driver_issue field written at chain creation
+// (executeWorkflowFormula) makes the link traversable; this reaper consults it.
+//
+// Conservative by construction: a chain is reaped ONLY when its driver is
+// definitively closed/tombstone. A missing field, an unresolvable driver, or a
+// driver whose status can't be read leaves the chain untouched (it will be
+// re-evaluated next scan) — the reaper never closes a chain whose driver is
+// still open or merely unreachable.
+func reapDriverClosedWorkflows(townBeads string, dryRun bool) ([]reapedWorkflow, error) {
+	roots, err := listConvoyIssues(townBeads, "open", false, "gt:workflow")
+	if err != nil {
+		return nil, fmt.Errorf("listing workflow roots: %w", err)
+	}
+
+	// Collect each open root's driver and batch the driver-status lookup so the
+	// bd show fan-out is one town-wide call (cross-rig routed) rather than one
+	// per root.
+	driverByRoot, driverIDs := workflowDriversByRoot(roots)
+	if len(driverIDs) == 0 {
+		return nil, nil
+	}
+	driverDetails := getIssueDetailsBatch(driverIDs)
+	driverStatus := make(map[string]string, len(driverDetails))
+	for id, d := range driverDetails {
+		if d != nil {
+			driverStatus[id] = d.Status
+		}
+	}
+
+	var reaped []reapedWorkflow
+	for _, root := range roots {
+		driver, ok := driverByRoot[root.ID]
+		if !ok {
+			continue
+		}
+		if !shouldReapWorkflow(driver, driverStatus) {
+			continue
+		}
+
+		// Driver is closed/tombstone — tear down the orphaned chain.
+		steps, _ := getTrackedIssueIDs(townBeads, root.ID)
+		stepsClosed := 0
+		reason := fmt.Sprintf("driver %s closed (gu-guwpn orphan reap)", driver)
+		if dryRun {
+			reaped = append(reaped, reapedWorkflow{WorkflowID: root.ID, DriverIssue: driver, StepsClosed: len(steps)})
+			continue
+		}
+		for _, step := range steps {
+			if err := runConvoyBdWrite(townBeads, "close", step, "--force", "-r", reason); err != nil {
+				style.PrintWarning("reap %s: couldn't close step %s: %v", root.ID, step, err)
+				continue
+			}
+			stepsClosed++
+		}
+		if err := runConvoyBdWrite(townBeads, "close", root.ID, "--force", "-r", reason); err != nil {
+			style.PrintWarning("reap %s: couldn't close workflow root: %v", root.ID, err)
+			continue
+		}
+		reaped = append(reaped, reapedWorkflow{WorkflowID: root.ID, DriverIssue: driver, StepsClosed: stepsClosed})
+	}
+	return reaped, nil
+}
+
+// workflowDriversByRoot extracts the driver_issue for each workflow root that
+// records one, returning a root-ID→driver map and the deduplicated list of
+// driver IDs to look up. Roots with no driver_issue field (legacy chains
+// created before gu-guwpn) are omitted — they cannot be safely reaped.
+func workflowDriversByRoot(roots []convoyListIssue) (map[string]string, []string) {
+	driverByRoot := make(map[string]string)
+	driverIDs := make([]string, 0, len(roots))
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		driver := beads.WorkflowDriverIssue(root.Description)
+		if driver == "" {
+			continue
+		}
+		driverByRoot[root.ID] = driver
+		if !seen[driver] {
+			seen[driver] = true
+			driverIDs = append(driverIDs, driver)
+		}
+	}
+	return driverByRoot, driverIDs
+}
+
+// shouldReapWorkflow reports whether a workflow chain whose driver is `driver`
+// should be torn down, given a map of driver ID → status. It returns true ONLY
+// when the driver's status is known AND terminal (closed/tombstone). A driver
+// absent from the map (unresolvable / not-yet-visible) or in a non-terminal
+// status is left alone — the reaper never acts on ambiguity, so it can never
+// close a chain whose driver is still live or merely unreachable.
+func shouldReapWorkflow(driver string, driverStatus map[string]string) bool {
+	status, ok := driverStatus[driver]
+	if !ok {
+		return false
+	}
+	return beads.IssueStatus(status).IsTerminal()
 }
 
 // convoyShipUnverifiedLabel marks an all-tracked-closed convoy whose tracked

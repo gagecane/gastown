@@ -326,6 +326,28 @@ func ParseConvoyFields(issue *Issue) *ConvoyFields {
 	return fields
 }
 
+// WorkflowDriverIssueField is the description metadata key on a workflow root
+// bead (hq-wf-*) that names the assignment/driver bead a wfs chain was
+// dispatched against (the formula's `issue` var). It lets the daemon tear down
+// an orphaned chain when its driver closes out-of-band (gu-guwpn).
+const WorkflowDriverIssueField = "driver_issue"
+
+// WorkflowDriverIssue extracts the driver_issue value from a workflow root
+// bead's description. Returns "" when no such metadata line is present.
+func WorkflowDriverIssue(description string) string {
+	for _, line := range strings.Split(description, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(key), WorkflowDriverIssueField) {
+			continue
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
 // NotificationAddresses returns deduplicated mail notification addresses from convoy fields.
 // Includes Owner, Notify, and all Watchers addresses.
 func (f *ConvoyFields) NotificationAddresses() []string {

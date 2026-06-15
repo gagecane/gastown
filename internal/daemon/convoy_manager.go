@@ -736,6 +736,14 @@ func (m *ConvoyManager) scan() {
 	// Successful scan: clear recovery mode so the ticker returns to normal interval.
 	m.recoveryMode.Store(false)
 
+	// Reap orphaned workflow chains BEFORE feeding (gu-guwpn): a chain whose
+	// driving assignment closed out-of-band still has a ready first step, so the
+	// feed pass below would re-dispatch already-shipped work every scan. Closing
+	// it here first stops the phantom re-dispatch. Gated behind a successful
+	// findStranded so it never fires during a Dolt outage (when bd reads are
+	// unreliable and a transient "driver not found" must not be read as closed).
+	m.reapOrphanedWorkflows()
+
 	// Count "tracked but 0 ready" convoys — the completion-check candidates.
 	// Previously each was handled by a separate `gt convoy check <id>`
 	// subprocess inside this loop; with N convoys that serial fan-out (full gt
@@ -841,6 +849,25 @@ func (m *ConvoyManager) checkAllConvoyCompletion() {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		m.logger("Convoy: batched completion check failed: %s", util.FirstLine(stderr.String()))
+	}
+}
+
+// reapOrphanedWorkflows force-closes workflow chains whose driving assignment
+// bead has closed out-of-band (gu-guwpn). It runs at the TOP of each scan,
+// before the stranded-feed pass: an orphaned chain still has a ready first step,
+// so feedFirstReady would otherwise re-dispatch it every scan. Closing it first
+// stops the phantom re-dispatch at the source. Mirrors checkAllConvoyCompletion:
+// one bounded `gt convoy reap-orphans` subprocess with mutation routing so the
+// cross-rig step closes land in the right rig databases.
+func (m *ConvoyManager) reapOrphanedWorkflows() {
+	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "reap-orphans")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdMutationRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		m.logger("Convoy: orphan-workflow reap failed: %s", util.FirstLine(stderr.String()))
 	}
 }
 
