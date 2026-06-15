@@ -98,9 +98,22 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 	// Also handle wisp format (go-wisp-xxx) by using the step's Parent field
 	moleculeID := extractMoleculeIDFromStep(stepID)
 	if moleculeID == "" {
-		// Fallback: use the step's Parent field (for wisps)
+		// Fallback 1: use the step's Parent field (for wisps)
 		if step.Parent != "" {
 			moleculeID = step.Parent
+		} else if isSynthesisStepID(stepID) {
+			// Fallback 2: convoy synthesis steps (<prefix>-syn-<id>) carry
+			// neither a dotted step suffix nor a Parent — they are linked to
+			// their molecule (the convoy) via a "tracks" dependency, not
+			// parent-child. Resolve the molecule root by looking up the convoy
+			// that tracks this synthesis bead so synthesis steps auto-advance
+			// like any other step (gs-1d12). Without this, 'gt mol step done
+			// <syn>' errors out and the prd-review / idea-to-plan molecule
+			// strands permanently post-synthesis.
+			moleculeID = isTrackedByConvoy(stepID)
+			if moleculeID == "" {
+				return fmt.Errorf("cannot resolve molecule for synthesis step %s (no tracking convoy found)", stepID)
+			}
 		} else {
 			return fmt.Errorf("cannot extract molecule ID from step %s (expected format: prefix.N or wisp with parent)", stepID)
 		}
@@ -202,6 +215,17 @@ func extractMoleculeIDFromStep(stepID string) string {
 	}
 
 	return stepID[:lastDot]
+}
+
+// isSynthesisStepID reports whether stepID is a convoy synthesis bead ID, which
+// has the form <prefix>-syn-<shortid> (e.g. lw-syn-k3a6u, gs-syn-3bnhg). These
+// are real molecule steps but encode neither a dotted step suffix nor a Parent,
+// so both extractMoleculeIDFromStep and the Parent fallback miss them; the
+// caller resolves their molecule via the tracking convoy instead. The "-syn-"
+// marker mirrors the convoy-synthesis carve-out used elsewhere (gs-guid) and
+// the "-wfs-" workflow-step convention.
+func isSynthesisStepID(stepID string) bool {
+	return strings.Contains(stepID, "-syn-")
 }
 
 // findAllReadySteps finds all ready steps in a molecule.

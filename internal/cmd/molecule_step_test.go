@@ -85,6 +85,33 @@ func TestExtractMoleculeIDFromStep(t *testing.T) {
 	}
 }
 
+func TestIsSynthesisStepID(t *testing.T) {
+	tests := []struct {
+		name     string
+		stepID   string
+		expected bool
+	}{
+		{name: "convoy synthesis", stepID: "gs-syn-3bnhg", expected: true},
+		{name: "lia_web synthesis", stepID: "lw-syn-k3a6u", expected: true},
+		{name: "lia_bac synthesis", stepID: "lb-syn-abc12", expected: true},
+		{name: "hq convoy synthesis", stepID: "gu-syn-4jbgs", expected: true},
+		{name: "dotted step is not synthesis", stepID: "gt-abc.1", expected: false},
+		{name: "wisp is not synthesis", stepID: "go-wisp-75l", expected: false},
+		{name: "workflow step is not synthesis", stepID: "lb-wfs-ef6cs", expected: false},
+		{name: "leg is not synthesis", stepID: "gs-leg-v7foa", expected: false},
+		{name: "plain id is not synthesis", stepID: "gt-5gq8r", expected: false},
+		{name: "empty string", stepID: "", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSynthesisStepID(tt.stepID); got != tt.expected {
+				t.Errorf("isSynthesisStepID(%q) = %v, want %v", tt.stepID, got, tt.expected)
+			}
+		})
+	}
+}
+
 // mockBeadsForStep extends mockBeads with parent filtering for step tests.
 // It simulates the real bd behavior where:
 // - List() returns issues with DependsOn empty (bd list doesn't return deps)
