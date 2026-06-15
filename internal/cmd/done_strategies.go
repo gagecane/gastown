@@ -1037,19 +1037,30 @@ func runNoMergeStrategy(sc strategyContext, bd *beads.Beads, sourceIssue *beads.
 		prBodyBuilder.WriteString("---\n")
 		prBodyBuilder.WriteString(fmt.Sprintf("*Polecat: %s | Issue: %s*\n", sc.worker, sc.issueID))
 		prBody := prBodyBuilder.String()
-		ghCmd := exec.CommandContext(context.Background(), "gh", "pr", "create",
+		// Open upstream PRs as drafts by default so a human flips them
+		// ready-for-review; opt out with the formula var ready_for_review=true.
+		prArgs := []string{"pr", "create",
 			"--base", sc.defaultBranch,
 			"--head", sc.branch,
 			"--title", prTitle,
 			"--body", prBody,
-		)
+		}
+		draft := !attachmentFields.ReadyForReview()
+		if draft {
+			prArgs = append(prArgs, "--draft")
+		}
+		ghCmd := exec.CommandContext(context.Background(), "gh", prArgs...)
 		ghCmd.Dir = sc.cwd
 		prOutput, prErr := ghCmd.Output()
 		if prErr != nil {
 			style.PrintWarning("could not create GitHub PR: %v", prErr)
 		} else {
 			prURL = strings.TrimSpace(string(prOutput))
-			fmt.Printf("%s GitHub PR created: %s\n", style.Bold.Render("✓"), prURL)
+			draftLabel := ""
+			if draft {
+				draftLabel = " (draft)"
+			}
+			fmt.Printf("%s GitHub PR created%s: %s\n", style.Bold.Render("✓"), draftLabel, prURL)
 		}
 	} else {
 		fmt.Printf("%s\n", style.Dim.Render("Work stays on feature branch for human review."))

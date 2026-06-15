@@ -106,6 +106,27 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 	return fields
 }
 
+// ReadyForReview reports whether the formula var ready_for_review=true was set.
+// gt done opens upstream PRs as drafts by default; this flag is the opt-out that
+// makes the PR ready-for-review instead. The var is read from where gt sling
+// --var ready_for_review=true lands it: the attached_vars list and formula_vars.
+func (f *AttachmentFields) ReadyForReview() bool {
+	if f == nil {
+		return false
+	}
+	for _, v := range f.AttachedVars {
+		if strings.EqualFold(strings.TrimSpace(v), "ready_for_review=true") {
+			return true
+		}
+	}
+	for _, line := range strings.Split(f.FormulaVars, "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), "ready_for_review=true") {
+			return true
+		}
+	}
+	return false
+}
+
 // FormatAttachmentFields formats AttachmentFields as a string suitable for an issue description.
 // Only non-empty fields are included.
 func FormatAttachmentFields(fields *AttachmentFields) string {

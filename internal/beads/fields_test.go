@@ -34,6 +34,32 @@ func TestParseIntField(t *testing.T) {
 	}
 }
 
+// --- AttachmentFields ReadyForReview ---
+
+func TestReadyForReview(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields *AttachmentFields
+		want   bool
+	}{
+		{"nil", nil, false},
+		{"empty", &AttachmentFields{}, false},
+		{"attached_vars true", &AttachmentFields{AttachedVars: []string{"issue=gs-t3gy", "ready_for_review=true"}}, true},
+		{"attached_vars whitespace", &AttachmentFields{AttachedVars: []string{" ready_for_review=true "}}, true},
+		{"attached_vars false", &AttachmentFields{AttachedVars: []string{"ready_for_review=false"}}, false},
+		{"formula_vars true", &AttachmentFields{FormulaVars: "issue=gs-t3gy\nready_for_review=true"}, true},
+		{"formula_vars absent", &AttachmentFields{FormulaVars: "issue=gs-t3gy"}, false},
+		{"case-insensitive", &AttachmentFields{AttachedVars: []string{"Ready_For_Review=TRUE"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.fields.ReadyForReview(); got != tt.want {
+				t.Errorf("ReadyForReview() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- AttachmentFields Mode round-trip ---
 
 func TestAttachmentFieldsModeRoundTrip(t *testing.T) {

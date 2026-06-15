@@ -261,6 +261,16 @@ durability). On a customer rig the box-loss net is intentionally forgone in
 favor of not leaking; work remains recoverable from the rig's bare repo
 (`git -C <rig>/.repo.git log refs/preserved/...`).
 
+#### Upstream PRs (`merge_strategy: pr`)
+
+On a no-merge rig configured with `merge_queue.merge_strategy = "pr"`, `gt done`
+opens a GitHub PR for human review instead of enqueuing to the Refinery. **These
+PRs are created as drafts by default** so a human explicitly flips them
+ready-for-review rather than the PR landing in reviewers' queues the instant a
+polecat finishes. Opt out per-dispatch with the formula var
+`ready_for_review=true` (e.g. `gt sling <bead> <rig> --var ready_for_review=true`),
+which opens the PR ready-for-review.
+
 ## Formula Format
 
 ```toml
