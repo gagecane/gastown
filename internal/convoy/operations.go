@@ -431,13 +431,23 @@ func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, 
 	return false
 }
 
-// feedNextReadyIssue finds the next ready issue in a convoy and dispatches it
-// via gt sling. A ready issue is one that is open, with no assignee, and not
-// blocked by unclosed dependencies. This provides reactive (event-driven)
+// feedNextReadyIssue finds every ready issue in a convoy and dispatches each
+// one via gt sling. A ready issue is one that is open, with no assignee, and
+// not blocked by unclosed dependencies. This provides reactive (event-driven)
 // convoy feeding instead of waiting for polling-based patrol cycles.
 //
-// Only one issue is dispatched per call. When that issue completes, the
-// next close event triggers another feed cycle.
+// ALL ready issues are dispatched per call, not just the first (gu-fd91z). A
+// single close event can unblock MULTIPLE ready siblings at once — mountain
+// convoy waves are parallel, so when the last Wave-1 leg closes, every Wave-N
+// leg (and ultimately the synthesis step) becomes ready simultaneously. The
+// prior one-dispatch-per-close behavior fed only one of them and stranded the
+// rest until the 60s stranded scan, which under town-wide convoy contention
+// left Ready legs undispatched for ~30 min with idle capacity (the gu-v6zcx
+// "second distinct dispatch gap"). Feeding the whole ready wave here is safe:
+// gt sling is capacity-gated (deferred dispatch enqueues a context the
+// scheduler drains within the pool ceiling; direct dispatch refuses gracefully
+// at the global ceiling), and is idempotent for already-scheduled beads, so a
+// later close event re-feeding a sibling already in flight is a clean no-op.
 // gtPath is the resolved path to the gt binary.
 func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, convoyID, caller string, logger func(format string, args ...interface{}), gtPath string, isRigParked func(string) bool, resolver *StoreResolver) {
 	tracked := getConvoyTrackedIssues(ctx, store, convoyID, townRoot, resolver)
@@ -461,7 +471,10 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		return tracked[i].ID < tracked[j].ID
 	})
 
-	// Find the first ready issue (open, no assignee, not blocked).
+	// Dispatch every ready issue (open, no assignee, not blocked). A single
+	// close event can unblock multiple parallel-wave siblings at once, so we
+	// feed them all rather than just the first (gu-fd91z).
+	dispatched := 0
 	for _, issue := range tracked {
 		if issue.Status != "open" || issue.Assignee != "" {
 			continue
@@ -525,10 +538,16 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			logger("%s: convoy %s: dispatch %s failed: %s", caller, convoyID, issue.ID, util.FirstLine(err.Error()))
 			continue // Try next issue on dispatch failure
 		}
-		return // Successfully dispatched one issue
+		dispatched++
+		// Keep feeding: a parallel wave can have several ready siblings that
+		// this single close event unblocked together (gu-fd91z).
 	}
 
-	logger("%s: convoy %s: no ready issues to feed", caller, convoyID)
+	if dispatched == 0 {
+		logger("%s: convoy %s: no ready issues to feed", caller, convoyID)
+	} else {
+		logger("%s: convoy %s: fed %d ready issue(s)", caller, convoyID, dispatched)
+	}
 }
 
 // getConvoyTrackedIssues returns issues tracked by a convoy with fresh status.

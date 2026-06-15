@@ -1014,6 +1014,87 @@ func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
 	}
 }
 
+// TestFeedNextReadyIssue_DispatchesAllReadyWave proves the gu-fd91z fix: a
+// single close event that unblocks MULTIPLE ready siblings (a parallel convoy
+// wave) feeds them ALL, not just the first. Before the fix the event-driven
+// feed returned after one dispatch and stranded the rest until the 60s
+// stranded scan.
+func TestFeedNextReadyIssue_DispatchesAllReadyWave(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	store := useSharedStore(t)
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	convoy := &beadsdk.Issue{
+		ID:        "test-waveconvoy",
+		Title:     "Parallel Wave Convoy",
+		Status:    beadsdk.StatusOpen,
+		Priority:  2,
+		IssueType: beadsdk.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Three parallel-wave legs all ready at once (open, unassigned, unblocked).
+	leg1 := &beadsdk.Issue{
+		ID: "test-wave1", Title: "Wave leg 1", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	leg2 := &beadsdk.Issue{
+		ID: "test-wave2", Title: "Wave leg 2", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	leg3 := &beadsdk.Issue{
+		ID: "test-wave3", Title: "Wave leg 3", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+
+	for _, iss := range []*beadsdk.Issue{convoy, leg1, leg2, leg3} {
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+		}
+	}
+
+	for _, trackedID := range []string{leg1.ID, leg2.ID, leg3.ID} {
+		dep := &beadsdk.Dependency{
+			IssueID:     convoy.ID,
+			DependsOnID: trackedID,
+			Type:        beadsdk.DependencyType("tracks"),
+			CreatedAt:   now,
+			CreatedBy:   "test",
+		}
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency %s: %v", trackedID, err)
+		}
+	}
+
+	townRoot := setupTownRoot(t)
+	gtPath, logPath := makeGTStub(t, 0)
+	logger, _ := makeLogger()
+
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("gt stub was not called (no log file): %v", err)
+	}
+	logStr := strings.TrimSpace(string(logData))
+
+	// All three ready legs must have been dispatched in this one call.
+	for _, id := range []string{leg1.ID, leg2.ID, leg3.ID} {
+		if !strings.Contains(logStr, "sling "+id+" testrig --no-boot") {
+			t.Errorf("expected dispatch of ready wave leg %s, got: %q", id, logStr)
+		}
+	}
+	lines := strings.Split(logStr, "\n")
+	if len(lines) != 3 {
+		t.Errorf("expected exactly 3 sling calls (whole wave), got %d: %v", len(lines), lines)
+	}
+}
+
 func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
