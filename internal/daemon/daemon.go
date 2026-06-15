@@ -114,6 +114,12 @@ type Daemon struct {
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
 
+	// pluginRecorderFactory builds the recorder used by dispatchPlugins. Nil in
+	// production (the real *plugin.Recorder is used); tests set it to inject a
+	// stub that simulates RecordRun failures so the fail-closed cron/cooldown
+	// dispatch path can be verified without a live beads store. See gu-bpm6p.
+	pluginRecorderFactory func() pluginRecorder
+
 	// telemetry exports metrics and logs to VictoriaMetrics / VictoriaLogs.
 	// Nil when telemetry is disabled (GT_OTEL_METRICS_URL / GT_OTEL_LOGS_URL not set).
 	otelProvider *telemetry.Provider

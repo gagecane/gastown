@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,8 +13,31 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
+	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+// stubRecorder implements the daemon's pluginRecorder seam so dispatch tests can
+// drive gate eligibility and simulate a RecordRun failure (Dolt write pressure)
+// without a live beads store. See gu-bpm6p.
+type stubRecorder struct {
+	recordRunErr   error // returned from RecordRun when non-nil
+	recordRunCalls int
+	cronDue        bool
+	cooldownSat    bool
+}
+
+func (s *stubRecorder) RecordRun(plugin.PluginRunRecord) (string, error) {
+	s.recordRunCalls++
+	if s.recordRunErr != nil {
+		return "", s.recordRunErr
+	}
+	return "gc-stub-record", nil
+}
+
+func (s *stubRecorder) CronDue(_, _, _ string) (bool, error) { return s.cronDue, nil }
+
+func (s *stubRecorder) CooldownSatisfied(_, _, _ string) (bool, error) { return s.cooldownSat, nil }
 
 // testHandlerDaemon creates a minimal Daemon with a logger for handler tests.
 func testHandlerDaemon(t *testing.T, townRoot string) *Daemon {
@@ -541,6 +565,77 @@ func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
 	}
 	if dg.Work != "" {
 		t.Errorf("dog work = %q, want empty (manual-gate plugin must not auto-dispatch)", dg.Work)
+	}
+}
+
+// TestDispatchPlugins_FailClosedOnRecordFailure is the regression guard for
+// gu-bpm6p: the inflight suppressor record is written BEFORE the session starts
+// and the dispatch fails CLOSED if that write fails. A cooldown gate with an
+// empty duration is unconditionally eligible (no read query), so dispatch runs
+// straight to RecordRun — which the stub recorder forces to fail, simulating
+// Dolt write pressure. The dog must be rolled back to idle and the irreversible
+// session start must never be reached (proven by the restart tracker recording
+// no startup failure — the pre-fix code reached sm.Start, which fails without a
+// real agent and would bump the backoff counter).
+func TestDispatchPlugins_FailClosedOnRecordFailure(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "daemon"), 0o755); err != nil {
+		t.Fatalf("mkdir daemon dir: %v", err)
+	}
+	d := testHandlerDaemon(t, townRoot)
+	d.restartTracker = NewRestartTracker(townRoot, RestartTrackerConfig{
+		InitialBackoff:    5 * time.Second,
+		MaxBackoff:        10 * time.Second,
+		BackoffMultiplier: 2.0,
+		CrashLoopWindow:   1 * time.Minute,
+		CrashLoopCount:    5,
+		StabilityPeriod:   30 * time.Second,
+	})
+
+	stub := &stubRecorder{recordRunErr: errors.New("simulated Dolt i/o timeout")}
+	d.pluginRecorderFactory = func() pluginRecorder { return stub }
+
+	// A cooldown gate with empty duration is always eligible without any read
+	// query, so dispatch proceeds directly to the RecordRun write.
+	pluginDir := filepath.Join(townRoot, "plugins", "test-cooldown")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	pluginMD := "+++\nname = \"test-cooldown\"\ndescription = \"cooldown gate, always eligible\"\n\n[gate]\ntype = \"cooldown\"\n+++\n\n# Instructions\n"
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.md"), []byte(pluginMD), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	testSetupDogState(t, townRoot, "idle-dog", dog.StateIdle, time.Now().Add(-10*time.Minute))
+
+	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
+	mgr := dog.NewManager(townRoot, rigsConfig)
+	tm := tmux.NewTmux()
+	sm := dog.NewSessionManager(tm, townRoot, mgr)
+
+	d.dispatchPlugins(mgr, sm, rigsConfig)
+
+	if stub.recordRunCalls != 1 {
+		t.Errorf("RecordRun calls = %d, want 1 (dispatch must attempt the suppressor write)", stub.recordRunCalls)
+	}
+
+	// Dispatch must fail closed: dog rolled back to idle with no work.
+	dg, err := mgr.Get("idle-dog")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if dg.State != dog.StateIdle {
+		t.Errorf("dog state = %q, want idle (failed suppressor write must roll back the dispatch)", dg.State)
+	}
+	if dg.Work != "" {
+		t.Errorf("dog work = %q, want empty (failed suppressor write must roll back the dispatch)", dg.Work)
+	}
+
+	// The session start must never have been reached — if it had, sm.Start would
+	// have failed (no real agent) and recordDogStartFailure would have bumped the
+	// backoff counter for this dog.
+	if rem := d.restartTracker.GetBackoffRemaining(dogBackoffAgentID("idle-dog")); rem != 0 {
+		t.Errorf("backoff remaining = %s, want 0 (session start must not be reached when the suppressor write fails)", rem)
 	}
 }
 

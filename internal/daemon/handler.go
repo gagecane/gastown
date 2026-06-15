@@ -17,6 +17,27 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+// pluginRecorder is the subset of *plugin.Recorder that dispatchPlugins and
+// filterDispatchablePlugins depend on. Defining it as an interface lets tests
+// inject a stub that simulates a RecordRun failure (Dolt write pressure) so the
+// fail-closed dispatch path can be verified without a live beads store — see
+// gu-bpm6p.
+type pluginRecorder interface {
+	RecordRun(record plugin.PluginRunRecord) (string, error)
+	CronDue(pluginName, schedule, grace string) (bool, error)
+	CooldownSatisfied(pluginName, cooldown, grace string) (bool, error)
+}
+
+// newPluginRecorder returns the recorder dispatchPlugins uses. It is a field so
+// tests can override it with a stub; production code leaves it nil and falls
+// back to the real *plugin.Recorder.
+func (d *Daemon) newPluginRecorder() pluginRecorder {
+	if d.pluginRecorderFactory != nil {
+		return d.pluginRecorderFactory()
+	}
+	return plugin.NewRecorder(d.config.TownRoot)
+}
+
 // handleDogs manages Dog lifecycle: cleanup stuck dogs, reap idle dogs, then dispatch plugins.
 // This is the main entry point called from heartbeat.
 func (d *Daemon) handleDogs() {
@@ -280,7 +301,7 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		return
 	}
 
-	recorder := plugin.NewRecorder(d.config.TownRoot)
+	recorder := d.newPluginRecorder()
 	router := mail.NewRouterWithTownRoot(d.config.TownRoot, d.config.TownRoot)
 
 	// Pre-pass (bounded-parallel): evaluate each plugin's cooldown/cron gate. The
@@ -320,6 +341,42 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		workDesc := fmt.Sprintf("plugin:%s", p.Name)
 		if err := mgr.AssignWork(idleDog.Name, workDesc); err != nil {
 			d.logger.Printf("Handler: failed to assign work to dog %s: %v", idleDog.Name, err)
+			continue
+		}
+
+		// Record the dispatch's suppressing gate record BEFORE the session
+		// starts — and fail CLOSED if the write fails. The inflight record is
+		// what stops the next heartbeat from re-dispatching a freshly-fired
+		// plugin (cooldown grace window) or re-firing today's cron fire (CronDue
+		// treats any record at-or-after prevFire as serviced). It used to be
+		// written best-effort AFTER sm.Start, so under Dolt write pressure the
+		// dispatch happened but its suppressor was lost: CronDue /
+		// CooldownSatisfied then saw no record and re-dispatched every heartbeat
+		// until a write finally landed — a daily cron plugin fired 5+ times in a
+		// morning (gu-bpm6p). Writing the suppressor first and aborting the
+		// dispatch on failure makes the write path fail-closed, matching the read
+		// path (CronDue's query-error branch already skips, below). The tradeoff
+		// is symmetric and correct: a transient Dolt blip skips this fire
+		// (self-corrects at the next heartbeat / scheduled fire) instead of
+		// storming — the same accepted cost as a dog that dies after dispatch
+		// (gu-jifj5). This is a ResultInflight record, NOT ResultSuccess: it only
+		// satisfies the gate within the in-flight grace window. If the dog dies
+		// before running, the cooldown gate re-opens after grace instead of
+		// re-arming the full cooldown on false pretenses — which had let backups
+		// drift unbounded (gu-50nbo). The dog's own run.sh records the terminal
+		// ResultSuccess on real completion, which then satisfies the full
+		// cooldown.
+		if _, err := recorder.RecordRun(plugin.PluginRunRecord{
+			PluginName: p.Name,
+			Result:     plugin.ResultInflight,
+			Body:       fmt.Sprintf("Dispatched to dog %s", idleDog.Name),
+		}); err != nil {
+			d.logger.Printf("Handler: failed to record dispatch for plugin %s, aborting dispatch (fail-closed): %v", p.Name, err)
+			// Roll back assignment — without a persisted suppressor record the
+			// next heartbeat would re-dispatch, so do NOT start the session.
+			if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
+				d.logger.Printf("Handler: failed to clear work after record failure for dog %s: %v", idleDog.Name, clearErr)
+			}
 			continue
 		}
 
@@ -386,24 +443,6 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 		d.recordDogStartSuccess(idleDog.Name)
 
 		d.logger.Printf("Handler: dispatched plugin %s to dog %s", p.Name, idleDog.Name)
-
-		// Record the dispatch so the cooldown gate suppresses immediate
-		// re-dispatch (the daemon heartbeat would otherwise storm a
-		// freshly-dispatched plugin — dogs don't reliably write the
-		// gate's completion label; see 055747cd). This is a ResultInflight
-		// record, NOT ResultSuccess: it only satisfies the gate within the
-		// in-flight grace window. If the dog dies before running, the gate
-		// re-opens after grace instead of re-arming the full cooldown on false
-		// pretenses — which had let backups drift unbounded (gu-50nbo). The
-		// dog's own run.sh records the terminal ResultSuccess on real
-		// completion, which then satisfies the full cooldown.
-		if _, err := recorder.RecordRun(plugin.PluginRunRecord{
-			PluginName: p.Name,
-			Result:     plugin.ResultInflight,
-			Body:       fmt.Sprintf("Dispatched to dog %s", idleDog.Name),
-		}); err != nil {
-			d.logger.Printf("Handler: failed to record dispatch for plugin %s: %v", p.Name, err)
-		}
 	}
 }
 
@@ -417,7 +456,7 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 //
 // A plugin whose gate check errors is conservatively skipped (logged), matching
 // the prior serial behavior.
-func (d *Daemon) filterDispatchablePlugins(plugins []*plugin.Plugin, recorder *plugin.Recorder) []*plugin.Plugin {
+func (d *Daemon) filterDispatchablePlugins(plugins []*plugin.Plugin, recorder pluginRecorder) []*plugin.Plugin {
 	// candidates keeps only auto-dispatchable cooldown/cron plugins, preserving
 	// the discovery order so dispatch remains deterministic.
 	candidates := make([]*plugin.Plugin, 0, len(plugins))
