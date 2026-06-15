@@ -24,6 +24,7 @@ This is infrastructure cleanup work:
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
 | processed_mail_ttl | config | Max processed (read/acked) message/escalation age before close (default 1h) |
+| stale_escalation_ttl | config | Max unacked escalation age before terminal-state close (default 72h) |
 | alert_threshold | config | Open wisp count that triggers escalation (default 500) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
@@ -49,7 +50,7 @@ NOT anomalies (do NOT escalate these):
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 3
+version = 4
 
 [squash]
 trigger = "on_complete"
@@ -353,9 +354,50 @@ gt reaper reap-processed-mail --db=<name> --port={{dolt_port}} \\
 **Exit criteria:** Processed message/escalation beads closed with reason processed."""
 
 [[steps]]
+id = "reap-stale-escalations"
+title = "Reap unacked stale escalation beads (gu-tn0xp)"
+needs = ["reap-processed-mail"]
+description = """
+Close gt:escalation beads that were never acknowledged and are older than the
+TTL, with a terminal close_reason. This is the age-based terminal-state backstop
+that guarantees an escalation always reaches a closed state.
+
+Context: every escalation is created as an open gt:escalation bead routed to the
+Mayor. The processed-mail sweep (above) only closes an escalation once it has
+been acked/read; `gt escalate stale` only BUMPS an unacked escalation's severity
+(low→medium→high→critical) and never closes it. So an escalation from an
+automated source whose condition self-heals but which nobody ever acks walks up
+to critical and then sits open forever — polluting `bd ready` / `bd list` /
+reaper scans, with a human `gt escalate close` as the only exit.
+
+**1. For each database:**
+```bash
+gt reaper reap-stale-escalations --db=<name> --port={{dolt_port}} \\
+  --ttl={{stale_escalation_ttl}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+This closes both the issues-table copy and the dolt-ignored wisps-table copy
+(the one the open-wisp alert counts).
+
+**2. Inspect results:**
+- The TTL is long (default 72h) by design — far past the full re-escalation
+  severity walk — so anything closed here is an escalation the system has
+  effectively abandoned.
+- A large closed count on the first cycle is expected (backlog drain).
+
+**Exclusions (do NOT escalate if these remain open):**
+- Escalations newer than the TTL (still within the re-escalation window)
+- Agent heartbeat beads (issue_type='agent')
+- Beads labeled gt:standing-orders, gt:keep, gt:role, gt:rig
+- Beads with a live consumer_bead_id (per ConsumerAliveClause, gu-ub1l)
+
+**Exit criteria:** Unacked stale escalation beads closed with a terminal reason."""
+
+[[steps]]
 id = "scrub-active-mr"
 title = "Scrub stale active_mr refs on agent beads (gu-dhqm)"
-needs = ["reap-processed-mail"]
+needs = ["reap-stale-escalations"]
 description = """
 Re-evaluate every agent bead's `active_mr` field and clear it when the
 referenced MR and source issue are both terminal.
@@ -490,6 +532,10 @@ default = "24h"
 [vars.processed_mail_ttl]
 description = "Max processed (read/acked) message/escalation age before close (gu-ctspx; default 1h)"
 default = "1h"
+
+[vars.stale_escalation_ttl]
+description = "Max unacked escalation age before terminal-state close (gu-tn0xp; default 72h)"
+default = "72h"
 
 [vars.alert_threshold]
 description = "Open wisp count that triggers escalation warning"

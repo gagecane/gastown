@@ -691,6 +691,104 @@ Use --dry-run to preview closures without applying them.`,
 	},
 }
 
+var reaperStaleEscalationTTL string
+
+var reaperReapStaleEscalationsCmd = &cobra.Command{
+	Use:   "reap-stale-escalations",
+	Short: "Close unacked escalation beads past the terminal-state TTL",
+	Long: `Close open gt:escalation beads that were never acknowledged and are
+older than the TTL, with a terminal close_reason (gu-tn0xp).
+
+Every escalation is created as an open gt:escalation bead and routed to the
+Mayor. The processed-mail sweep only closes escalations once they are acked
+(read/delivery:acked/acked), and 'gt escalate stale' only bumps an unacked
+escalation's severity (low→medium→high→critical) without ever closing it. So
+an escalation from an automated source whose condition self-heals but which
+nobody ever acks sits open forever — polluting 'bd ready' / 'bd list' / reaper
+scans, with a human 'gt escalate close' as the only exit.
+
+This command is the age-based terminal backstop: it guarantees an escalation
+always reaches a closed state. The TTL is deliberately long (default 72h) — far
+past both the processed audit window and the full re-escalation severity walk —
+so a genuinely important escalation is re-escalated and surfaced for days before
+this retires it.
+
+Closes both the issues-table copy and the dolt-ignored wisps-table copy (the
+one the open-wisp alert counts).
+
+Excludes:
+  - Escalations newer than the TTL (still within the re-escalation window)
+  - Agent heartbeat beads (issue_type='agent')
+  - Hooked, pinned, or closed beads (filtered by the WHERE clause)
+  - Beads labeled gt:standing-orders, gt:keep, gt:role, or gt:rig
+  - Beads with a live consumer_bead_id (per ConsumerAliveClause, gu-ub1l)
+
+When --db is provided, operates on a single database. When omitted,
+auto-discovers all databases on the Dolt server.
+
+Use --dry-run to preview closures without applying them.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ttl, err := time.ParseDuration(reaperStaleEscalationTTL)
+		if err != nil {
+			return fmt.Errorf("invalid --ttl: %w", err)
+		}
+
+		results, _ := reaperPerDBResults("reap-stale-escalations", 10*time.Second, false,
+			func(db *sql.DB, dbName string) (*reaper.StaleEscalationResult, error) {
+				result, err := reaper.ReapStaleEscalations(db, dbName, ttl, reaperDryRun)
+				if err != nil {
+					return nil, err
+				}
+				// Also drain the dolt-ignored wisps copies: the same escalation
+				// beads accumulate there and are what the open-wisp alert counts.
+				wispResult, werr := reaper.ReapStaleWispEscalations(db, dbName, ttl, reaperDryRun)
+				if werr != nil {
+					fmt.Fprintf(os.Stderr, "%s: reap-stale-wisp-escalations error: %v\n", dbName, werr)
+				} else {
+					result.Closed += wispResult.Closed
+					result.Remain += wispResult.Remain
+					result.ClosedEntries = append(result.ClosedEntries, wispResult.ClosedEntries...)
+					result.Anomalies = append(result.Anomalies, wispResult.Anomalies...)
+				}
+				return result, nil
+			})
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(results))
+		} else {
+			var totalClosed, totalRemain int
+			for _, r := range results {
+				prefix := ""
+				verb := "closed"
+				if r.DryRun {
+					prefix = "[DRY RUN] would "
+					verb = "close"
+				}
+				for _, entry := range r.ClosedEntries {
+					fmt.Printf("  %s %s (%dd unacked, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				fmt.Printf("%s: %s%s %d stale escalation bead(s), %d remain open\n",
+					r.Database, prefix, verb, r.Closed, r.Remain)
+				for _, a := range r.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+				totalClosed += r.Closed
+				totalRemain += r.Remain
+			}
+			if len(results) > 1 {
+				prefix := ""
+				if reaperDryRun {
+					prefix = "[DRY RUN] "
+				}
+				fmt.Printf("\n%sReap-stale-escalations summary (%d databases): closed %d, %d remain open\n",
+					prefix, len(results), totalClosed, totalRemain)
+			}
+		}
+		return nil
+	},
+}
+
 var reaperPluginReceiptAge string
 
 var reaperClosePluginReceiptsCmd = &cobra.Command{
@@ -1178,10 +1276,16 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			return fmt.Errorf("invalid --processed-mail-ttl: %w", err)
 		}
 
+		staleEscalationTTL, err := time.ParseDuration(reaperStaleEscalationTTL)
+		if err != nil {
+			return fmt.Errorf("invalid --stale-escalation-ttl: %w", err)
+		}
+
 		var totalReaped, totalMoleculeSteps, totalPurged, totalMailPurged, totalClosed, totalOpen int
 		var totalHookedMailClosed int
 		var totalOpenMailClosed int
 		var totalProcessedMailClosed int
+		var totalStaleEscClosed int
 		var totalWispFlushed int
 
 		for i, dbName := range databases {
@@ -1331,6 +1435,39 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 				}
 			}
 
+			// Reap stale escalations (gu-tn0xp: terminal-state backstop). An
+			// escalation that was never acked and whose source condition
+			// self-healed walks up to critical via re-escalation but never
+			// closes. This closes such beads past a long TTL, in both the issues
+			// and dolt-ignored wisps tables, so an escalation always reaches a
+			// terminal state.
+			staleEscResult, err := reaper.ReapStaleEscalations(db, dbName, staleEscalationTTL, reaperDryRun)
+			if err != nil {
+				fmt.Printf("%s: reap-stale-escalations error: %v\n", dbName, err)
+			} else {
+				for _, entry := range staleEscResult.ClosedEntries {
+					fmt.Printf("  %s %s (%dd unacked escalation, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				totalStaleEscClosed += staleEscResult.Closed
+				for _, a := range staleEscResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+			staleWispEscResult, err := reaper.ReapStaleWispEscalations(db, dbName, staleEscalationTTL, reaperDryRun)
+			if err != nil {
+				fmt.Printf("%s: reap-stale-wisp-escalations error: %v\n", dbName, err)
+			} else {
+				for _, entry := range staleWispEscResult.ClosedEntries {
+					fmt.Printf("  %s %s (%dd unacked wisp escalation, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
+				totalStaleEscClosed += staleWispEscResult.Closed
+				for _, a := range staleWispEscResult.Anomalies {
+					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				}
+			}
+
 			db.Close()
 		}
 
@@ -1464,6 +1601,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		fmt.Printf("  Hooked-mail TTL:  %d ttl-expired\n", totalHookedMailClosed)
 		fmt.Printf("  Open-mail TTL:    %d ttl-expired\n", totalOpenMailClosed)
 		fmt.Printf("  Processed-mail:   %d closed\n", totalProcessedMailClosed)
+		fmt.Printf("  Stale-escalation: %d closed\n", totalStaleEscClosed)
 		fmt.Printf("  orphan reconcile: scanned=%d reconciled=%d preserved_wip=%d\n",
 			totalReconScanned, totalReconReconciled, totalReconPreservedWIP)
 		fmt.Printf("  active_mr scrub:  scanned=%d cleared=%d preserved_wip=%d still_pending=%d\n",
@@ -1602,7 +1740,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperFlushWispsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd, reaperAlertOpenWispsCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperReapStaleEscalationsCmd, reaperClosePluginReceiptsCmd, reaperFlushWispsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd, reaperAlertOpenWispsCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -1617,7 +1755,7 @@ func init() {
 		"Open-wisp count above which to escalate")
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperClosePluginReceiptsCmd, reaperFlushWispsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd, reaperReapHookedMailCmd, reaperReapOpenMailCmd, reaperReapProcessedMailCmd, reaperReapStaleEscalationsCmd, reaperClosePluginReceiptsCmd, reaperFlushWispsCmd, reaperScrubActiveMRCmd, reaperReconcileOrphansCmd, reaperReconcileOrphansGitCmd, reaperScrubDanglingFKCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -1647,6 +1785,10 @@ func init() {
 	reaperReapProcessedMailCmd.Flags().StringVar(&reaperProcessedMailTTL, "ttl", reaper.DefaultProcessedMailTTL.String(), "Max processed (read/acked) mail age before closing")
 	reaperRunCmd.Flags().StringVar(&reaperProcessedMailTTL, "processed-mail-ttl", reaper.DefaultProcessedMailTTL.String(), "Max processed (read/acked) mail age before closing")
 
+	// Stale-escalation TTL flag (gu-tn0xp). Default aligns with DefaultStaleEscalationTTL.
+	reaperReapStaleEscalationsCmd.Flags().StringVar(&reaperStaleEscalationTTL, "ttl", reaper.DefaultStaleEscalationTTL.String(), "Max unacked-escalation age before terminal-state close")
+	reaperRunCmd.Flags().StringVar(&reaperStaleEscalationTTL, "stale-escalation-ttl", reaper.DefaultStaleEscalationTTL.String(), "Max unacked-escalation age before terminal-state close")
+
 	reaperCmd.AddCommand(reaperDatabasesCmd)
 	reaperCmd.AddCommand(reaperScanCmd)
 	reaperCmd.AddCommand(reaperReapCmd)
@@ -1655,6 +1797,7 @@ func init() {
 	reaperCmd.AddCommand(reaperReapHookedMailCmd)
 	reaperCmd.AddCommand(reaperReapOpenMailCmd)
 	reaperCmd.AddCommand(reaperReapProcessedMailCmd)
+	reaperCmd.AddCommand(reaperReapStaleEscalationsCmd)
 	reaperCmd.AddCommand(reaperClosePluginReceiptsCmd)
 	reaperCmd.AddCommand(reaperFlushWispsCmd)
 	reaperCmd.AddCommand(reaperScrubActiveMRCmd)
