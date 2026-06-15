@@ -836,7 +836,7 @@ type gitAncestryOps interface {
 
 // defaultVerifyMergeLanded is the production implementation of
 // Manager.verifyMergeLanded. It opens the refinery's git worktree and delegates
-// to verifyMergeCommitLanded.
+// to the shared verifyMergeLandedOnTarget helper.
 func (m *Manager) defaultVerifyMergeLanded(mr *MergeRequest) error {
 	gitDir := filepath.Join(m.rig.Path, "refinery", "rig")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
@@ -844,10 +844,28 @@ func (m *Manager) defaultVerifyMergeLanded(mr *MergeRequest) error {
 	}
 	g := git.NewGit(gitDir)
 
-	// Resolve the branch the merge actually landed on (gu-eakas + hq-fq1on).
-	target := resolvePostMergeVerifyTarget(mr.TargetBranch, m.rig.DefaultBranch(), mr.Branch, g)
+	return verifyMergeLandedOnTarget(g, mr.MergeCommit, mr.TargetBranch, mr.Branch, m.rig.DefaultBranch())
+}
 
-	return verifyMergeCommitLanded(g, mr.MergeCommit, target)
+// gitMergeVerifyOps is the full git surface needed to verify a merge actually
+// landed: merged-PR base resolution (FindMergedPRBaseRef), remote refresh
+// (FetchBranch), and ancestry (IsAncestor). *git.Git satisfies it; tests inject
+// a fake. It composes the two narrower interfaces the underlying helpers use.
+type gitMergeVerifyOps interface {
+	gitAncestryOps
+	mergedPRBaseRefFinder
+}
+
+// verifyMergeLandedOnTarget resolves the branch the merge truly landed on
+// (gu-eakas + hq-fq1on), then fails closed unless mergeCommit is an ancestor of
+// origin/<target>. It is the single shared close-time safety contract for both
+// reconcile entry points: the hand-merge/recovery path (Manager.PostMerge via
+// defaultVerifyMergeLanded) and the primary automated path
+// (Engineer.HandleMRInfoSuccess). Keeping one helper guarantees the two paths
+// can't drift apart on what "the merge landed" means (gu-mpgy8 / gu-ilf86).
+func verifyMergeLandedOnTarget(g gitMergeVerifyOps, mergeCommit, mrTarget, branch, rigDefault string) error {
+	target := resolvePostMergeVerifyTarget(mrTarget, rigDefault, branch, g)
+	return verifyMergeCommitLanded(g, mergeCommit, target)
 }
 
 // mergedPRBaseRefFinder resolves the base branch a branch's MERGED PR targeted.

@@ -382,6 +382,14 @@ type Engineer struct {
 	// for testing; defaults to e.revalidateMRBeforePush. Tests that don't set it
 	// fall through to the default, which fail-opens when beads are unreachable.
 	revalidateBeforePush func(branch, sourceIssue string) string
+
+	// verifyMergeLanded confirms an MR's merge commit is actually an ancestor of
+	// origin/<target> before HandleMRInfoSuccess closes beads and deletes the
+	// branch. It mirrors the identical close-time guard on the recovery path
+	// (Manager.PostMerge) so the two reconcile entry points share one fail-closed
+	// safety contract (gu-mpgy8 / gu-ilf86). Injectable for testing; defaults to
+	// e.defaultVerifyMergeLanded.
+	verifyMergeLanded func(mr *MRInfo, mergeCommit string) error
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -397,7 +405,7 @@ func NewEngineer(r *rig.Rig) *Engineer {
 	}
 	beadsClient := beads.New(r.Path)
 
-	return &Engineer{
+	e := &Engineer{
 		rig:     r,
 		beads:   beadsClient,
 		git:     git.NewGit(gitDir),
@@ -417,6 +425,17 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		mergeSlotMaxRetries:   10,
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
 	}
+	e.verifyMergeLanded = e.defaultVerifyMergeLanded
+	return e
+}
+
+// defaultVerifyMergeLanded is the production implementation of
+// Engineer.verifyMergeLanded. It uses the engineer's own git worktree and the
+// shared verifyMergeLandedOnTarget helper, so the primary merge path enforces
+// the identical fail-closed ancestry contract as the recovery path
+// (Manager.PostMerge).
+func (e *Engineer) defaultVerifyMergeLanded(mr *MRInfo, mergeCommit string) error {
+	return verifyMergeLandedOnTarget(e.git, mergeCommit, mr.Target, mr.Branch, e.rig.DefaultBranch())
 }
 
 // resolveRevalidateBeforePush returns the configured pre-push re-validation hook,
@@ -1968,6 +1987,31 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Note: merge slot release: %v\n", err)
 	} else {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Released merge slot\n")
+	}
+
+	// Fail-closed merge-landed re-check (gu-mpgy8 / gu-ilf86). doMerge's
+	// VerifyPushedCommit confirms our commit is the origin/<target> TIP right
+	// after the push, but the recovery path (Manager.PostMerge) carries a
+	// distinct close-time guard: refuse to close beads + delete the branch
+	// unless the merge commit is genuinely an ancestor of origin/<target>. This
+	// path previously trusted result.Success alone, so the two reconcile entry
+	// points disagreed on the close-time safety contract. Re-verify here through
+	// the SAME shared helper before any irreversible cleanup. An open MR is
+	// recoverable by retry; a closed bead with a deleted branch off mainline is
+	// not — so on verification failure we skip cleanup and escalate to the mayor.
+	if e.verifyMergeLanded != nil {
+		if err := e.verifyMergeLanded(mr, result.MergeCommit); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] ✗ Refusing post-merge cleanup for %s: %v\n", mr.ID, err)
+			mayorMsg := fmt.Sprintf("MERGE_UNVERIFIED: MR %s branch=%s issue=%s worker=%s commit=%s — merge reported success but commit is not on origin/%s; beads left OPEN and branch preserved to avoid silent merge-loss. Investigate before re-dispatch.",
+				mr.ID, mr.Branch, mr.SourceIssue, mr.Worker, result.MergeCommit, mr.Target)
+			mayorCmd := exec.Command("gt", "nudge", "mayor/", mayorMsg)
+			util.SetDetachedProcessGroup(mayorCmd)
+			mayorCmd.Dir = e.workDir
+			if nudgeErr := mayorCmd.Run(); nudgeErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge mayor about unverified merge: %v\n", nudgeErr)
+			}
+			return
+		}
 	}
 
 	// Update and close the MR bead
