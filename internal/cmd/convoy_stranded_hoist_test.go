@@ -448,6 +448,98 @@ esac
 	}
 }
 
+// TestFindStrandedConvoys_FailedYoungSlingContextIgnored is the gu-y5ajc
+// regression: a sling-context that recorded a transient dispatch failure
+// (dispatch_failures>0) but is still YOUNG (created < slingContextTTL ago)
+// must NOT be counted as a healthy in-flight dispatch. Before the fix,
+// computeTownWideScheduledSet filtered contexts only by age, so a
+// failed-but-young context (e.g. a per-rig polecat cap hit) was treated as
+// "scheduled" and the daemon never re-dispatched — parking the convoy step
+// until TTL expiry or a manual re-sling. The fix reuses
+// sling.IsStaleOrFailedContext (the same predicate the manual `gt sling`
+// recovery path uses), so the work bead must be reported ready and the convoy
+// flagged stranded.
+func TestFindStrandedConvoys_FailedYoungSlingContextIgnored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping shell-script mock test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"),
+		[]byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	// Young context (created now, well within slingContextTTL) that recorded a
+	// transient per-rig cap dispatch failure. Without the gu-y5ajc fix this
+	// would be counted as scheduled and gt-orphan1 would NOT be reported ready.
+	young := time.Now().UTC().Format(time.RFC3339)
+	slingCtx := fmt.Sprintf(
+		`{"id":"hq-cv-ctx-failed","status":"open","created_at":"%s","description":"{\"work_bead_id\":\"gt-orphan1\",\"target_rig\":\"gastown\",\"dispatch_failures\":1,\"last_failure\":\"sling failed: per-rig cap\"}","labels":["gt:sling-context"]}`,
+		young,
+	)
+
+	bdPath := filepath.Join(binDir, "bd")
+	script := `#!/bin/sh
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+
+case "$pos0" in
+  list)
+    case "$*" in
+      *--label=gt:sling-context*)
+        echo '[` + slingCtx + `]'
+        exit 0
+        ;;
+    esac
+    echo '[{"id":"hq-cfailed","title":"Failed-context convoy"}]'
+    exit 0
+    ;;
+  sql)
+    echo '[{"target":"gt-orphan1"}]'
+    exit 0
+    ;;
+  show)
+    echo '[{"id":"gt-orphan1","title":"Orphan","status":"open","issue_type":"task","assignee":"","blocked_by":[],"blocked_by_count":0,"dependencies":[]}]'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stranded, err := findStrandedConvoys(townRoot)
+	if err != nil {
+		t.Fatalf("findStrandedConvoys() error: %v", err)
+	}
+	if len(stranded) != 1 {
+		t.Fatalf("expected 1 stranded convoy, got %d", len(stranded))
+	}
+	s := stranded[0]
+	// gt-orphan1's failed-but-young context must be ignored — still ready.
+	if s.ReadyCount != 1 {
+		t.Errorf("ReadyCount = %d, want 1 (failed-but-young sling context should be ignored, gt-orphan1 should still be ready)", s.ReadyCount)
+	}
+	if len(s.ReadyIssues) != 1 || s.ReadyIssues[0] != "gt-orphan1" {
+		t.Errorf("ReadyIssues = %v, want [gt-orphan1]", s.ReadyIssues)
+	}
+}
+
 // TestComputeTownWideScheduledSet_FailClosedNilOnNoTownRoot verifies that
 // computeTownWideScheduledSet returns nil when invoked from a directory
 // outside any Gas Town workspace. Callers in findStrandedConvoys treat this
