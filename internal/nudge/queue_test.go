@@ -146,6 +146,13 @@ func TestFormatForInjection_Normal(t *testing.T) {
 	if strings.Contains(output, "URGENT") {
 		t.Error("normal nudges should not contain URGENT")
 	}
+	// Provenance framing keeps the user/agent trust boundary (gu-duko3).
+	if !strings.Contains(output, "PROVENANCE") {
+		t.Error("nudges should carry a provenance note")
+	}
+	if !strings.Contains(output, "NOT an operator/user instruction") {
+		t.Error("provenance note should mark nudges as non-operator instructions")
+	}
 }
 
 func TestFormatForInjection_Urgent(t *testing.T) {
@@ -163,6 +170,9 @@ func TestFormatForInjection_Urgent(t *testing.T) {
 	}
 	if !strings.Contains(output, "non-urgent") {
 		t.Error("should mention non-urgent nudges")
+	}
+	if !strings.Contains(output, "PROVENANCE") {
+		t.Error("urgent nudges should also carry a provenance note")
 	}
 }
 
