@@ -82,14 +82,31 @@ func TestResolveWorktreeCwd(t *testing.T) {
 			want:         filepath.Join(town, rig, "crew", "scribe"),
 		},
 		{
-			name:         "non-worktree with no matching clone returns cwd unchanged",
+			// gu-bdtva: polecat worktree deleted under a live session. We know we
+			// are a polecat (GT_POLECAT set) but neither clone exists on disk, and
+			// cwd was reset to a shared dir (town root / mayor-rig). Signal
+			// worktree-gone with "" so the caller never runs git ops against a
+			// shared worktree — must NOT hand back the shared cwd.
+			name:         "polecat worktree deleted returns empty (worktree-gone signal)",
 			cwd:          town,
 			cwdAvailable: true,
 			envPolecat:   "rust",
 			exists:       map[string]bool{},
-			want:         town,
+			want:         "",
 		},
 		{
+			// gu-bdtva: same for a deleted crew worktree.
+			name:         "crew worktree deleted returns empty (worktree-gone signal)",
+			cwd:          town,
+			cwdAvailable: true,
+			envCrew:      "scribe",
+			exists:       map[string]bool{},
+			want:         "",
+		},
+		{
+			// No env identity at all: we cannot prove we are a polecat/crew whose
+			// worktree vanished, so the historical behavior (return cwd unchanged)
+			// is preserved — there is nothing safer to do.
 			name:         "non-worktree with no env vars returns cwd unchanged",
 			cwd:          town,
 			cwdAvailable: true,

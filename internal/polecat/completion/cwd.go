@@ -33,6 +33,14 @@ var statExists = func(path string) bool {
 // filesystem stats and is unit-testable in isolation. When cwd is unavailable
 // (deleted worktree) it is returned unchanged.
 //
+// gu-bdtva: when we know our identity (GT_POLECAT or GT_CREW set) but NONE of
+// our own clones exist on disk while cwd points outside the polecats area, the
+// worktree was deleted under this live session and the shell CWD was reset to a
+// shared dir (e.g. mayor/rig or the town root). In that case ResolveWorktreeCwd
+// returns "" — a "worktree gone" signal — rather than the shared cwd, so the
+// caller routes into its deleted-worktree path instead of running git ops
+// (including the autosave safety-net commit) against a shared worktree.
+//
 // Mirrors the lines previously inlined at done.go:461–498.
 func ResolveWorktreeCwd(cwd string, cwdAvailable bool, townRoot, rigName, envPolecat, envCrew string) string {
 	if !cwdAvailable {
@@ -51,11 +59,23 @@ func ResolveWorktreeCwd(cwd string, cwdAvailable bool, townRoot, rigName, envPol
 			if statExists(filepath.Join(polecatClone, ".git")) {
 				return polecatClone
 			}
+			// gu-bdtva: we ARE a polecat (GT_POLECAT set) but neither clone exists
+			// on disk — the worktree was deleted under this live session and the
+			// shell CWD was reset to a shared dir (e.g. mayor/rig or the town root).
+			// Returning that shared cwd would make gt done run git ops — including
+			// the autosave safety-net commit — against a shared worktree, landing
+			// stray files on e.g. mayor/rig's mainline and risking clobbering mayor
+			// WIP. Signal "worktree gone" (empty) so the caller routes into the
+			// deleted-worktree path, which never autosaves.
+			return ""
 		} else if envCrew != "" && rigName != "" {
 			crewClone := filepath.Join(townRoot, rigName, "crew", envCrew)
 			if statExists(crewClone) {
 				return crewClone
 			}
+			// gu-bdtva: same deleted-worktree signal for crew — never hand back a
+			// shared worktree when our own clone is gone.
+			return ""
 		}
 		return cwd
 	}

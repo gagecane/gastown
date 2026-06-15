@@ -522,6 +522,19 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// are read here and passed in so the resolver stays pure modulo os.Stat.
 	cwd = completion.ResolveWorktreeCwd(cwd, cwdAvailable, townRoot, rigName, os.Getenv("GT_POLECAT"), os.Getenv("GT_CREW"))
 
+	// gu-bdtva: ResolveWorktreeCwd returns "" when we are a polecat/crew whose own
+	// worktree was deleted under this live session (the shell CWD was reset to a
+	// shared dir like mayor/rig). Treat that exactly like an unavailable cwd so the
+	// git-ops fallback and the autosave safety-net guard below never write into a
+	// shared worktree and clobber another agent's WIP. Mirror the original
+	// deleted-worktree handling above: prefer GT_POLECAT_PATH as a stable
+	// identifier for the (now-gone) worktree rather than leaving cwd empty.
+	if cwd == "" {
+		cwdAvailable = false
+		cwd = os.Getenv("GT_POLECAT_PATH")
+		style.PrintWarning("polecat worktree deleted under live session — using fallback paths (will not autosave to a shared worktree)")
+	}
+
 	// Initialize git - use cwd if available, otherwise use rig's mayor clone
 	var g *git.Git
 	if cwdAvailable {
