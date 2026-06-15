@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -792,6 +793,89 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 	return name, p, nil
 }
 
+// attachResumeBranchWorktree attaches a worktree at clonePath for a
+// ResumeBranch. Two cases (gu-u36eo):
+//
+//  1. Existing branch — the original gh#3602 case: ResumeBranch is a PR head
+//     that already exists on origin (or locally). We fetch its latest tip and
+//     attach directly. WorktreeAddExistingForce tolerates the branch being
+//     checked out in a stale worktree elsewhere.
+//
+//  2. Net-new branch — upstream-sync conflict dispatch sets ResumeBranch to a
+//     resolution branch (upstream-sync/<rig>/<attempt>) that exists nowhere:
+//     the polecat's own instructions have it CREATE and push that branch. The
+//     fetch is a best-effort no-op and the branch resolves to no ref, so we
+//     create it from the base branch instead of failing the spawn with
+//     "git worktree: fatal: invalid reference".
+func (m *Manager) attachResumeBranchWorktree(repoGit *git.Git, clonePath, resumeBranch, baseBranch string) error {
+	// Best-effort fetch so an existing remote branch's latest tip and
+	// remote-tracking ref are present before we decide which case applies.
+	if err := repoGit.FetchBranch("origin", resumeBranch); err != nil {
+		style.PrintWarning("could not fetch resume branch %s: %v", resumeBranch, err)
+	}
+
+	exists, err := m.resumeBranchExists(repoGit, resumeBranch)
+	if err != nil {
+		return fmt.Errorf("checking resume branch %s: %w", resumeBranch, err)
+	}
+	if exists {
+		return repoGit.WorktreeAddExistingForce(clonePath, resumeBranch)
+	}
+
+	// Net-new resolution branch: create it from the base branch.
+	startPoint, err := m.resumeBranchStartPoint(repoGit, baseBranch)
+	if err != nil {
+		return err
+	}
+	return repoGit.WorktreeAddFromRef(clonePath, resumeBranch, startPoint)
+}
+
+// resumeBranchExists reports whether resumeBranch resolves to a real ref —
+// either a local branch or a remote-tracking ref (origin/<branch>) populated by
+// the preceding fetch. A net-new upstream-sync resolution branch matches
+// neither.
+func (m *Manager) resumeBranchExists(repoGit *git.Git, branch string) (bool, error) {
+	if local, err := repoGit.BranchExists(branch); err != nil {
+		return false, err
+	} else if local {
+		return true, nil
+	}
+	return repoGit.RemoteTrackingBranchExists("origin", branch)
+}
+
+// resumeBranchStartPoint resolves the start point for a net-new resume branch.
+// Candidates, in order: the caller-supplied base branch as-is, its origin/
+// form, and finally origin/<default-branch>. The dispatcher passes the target
+// branch (e.g. "main") without an origin/ prefix, so the origin/ fallback is
+// what actually resolves in the bare repo.
+func (m *Manager) resumeBranchStartPoint(repoGit *git.Git, baseBranch string) (string, error) {
+	var candidates []string
+	if baseBranch != "" {
+		candidates = append(candidates, baseBranch)
+		if !strings.HasPrefix(baseBranch, "origin/") {
+			candidates = append(candidates, "origin/"+baseBranch)
+		}
+	}
+	defaultBranch := "main"
+	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
+	if def := "origin/" + defaultBranch; !slices.Contains(candidates, def) {
+		candidates = append(candidates, def)
+	}
+
+	for _, c := range candidates {
+		exists, err := repoGit.RefExists(c)
+		if err != nil {
+			return "", fmt.Errorf("checking start point %s: %w", c, err)
+		}
+		if exists {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no start point found for resume branch (tried %s)", strings.Join(candidates, ", "))
+}
+
 // addWithOptionsLocked performs the expensive parts of polecat creation
 // (worktree, beads, settings) after the directory has been created.
 // Caller MUST hold the polecat lock and have already created polecatDir.
@@ -838,15 +922,12 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	}
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch (gh#3602). Make sure we have the latest tip
-		// for the named branch, then attach the worktree directly. WorktreeAddExistingForce
-		// handles the case where another worktree previously had this branch checked out.
-		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
-			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
-		}
-		if err := repoGit.WorktreeAddExistingForce(clonePath, opts.ResumeBranch); err != nil {
+		// Resume a branch: attach to it if it already exists (gh#3602 PR head)
+		// or create it net-new from the base branch (gu-u36eo upstream-sync
+		// resolution branch). attachResumeBranchWorktree handles both.
+		if err := m.attachResumeBranchWorktree(repoGit, clonePath, opts.ResumeBranch, opts.BaseBranch); err != nil {
 			cleanupOnError()
-			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
+			return nil, fmt.Errorf("creating worktree on resume branch %s: %w", opts.ResumeBranch, err)
 		}
 		worktreeCreated = true
 	} else {
@@ -1047,16 +1128,12 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	}
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch (gh#3602): attach the worktree directly to the
-		// named branch. WorktreeAddExistingForce tolerates the branch being checked
-		// out elsewhere (stale worktree), and the explicit fetch ensures we have
-		// the latest tip before checkout.
-		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
-			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
-		}
-		if err := repoGit.WorktreeAddExistingForce(clonePath, opts.ResumeBranch); err != nil {
+		// Resume a branch: attach to it if it already exists (gh#3602 PR head)
+		// or create it net-new from the base branch (gu-u36eo upstream-sync
+		// resolution branch). attachResumeBranchWorktree handles both.
+		if err := m.attachResumeBranchWorktree(repoGit, clonePath, opts.ResumeBranch, opts.BaseBranch); err != nil {
 			cleanupOnError()
-			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
+			return nil, fmt.Errorf("creating worktree on resume branch %s: %w", opts.ResumeBranch, err)
 		}
 		worktreeCreated = true
 	} else {
@@ -1954,13 +2031,11 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	_ = os.RemoveAll(tmpClonePath) // clean up any leftover temp dir
 
 	if opts.ResumeBranch != "" {
-		// Resume an existing branch: fetch and attach the temp worktree directly
-		// to the named branch instead of creating a fresh polecat/<name>/<bead>@<ts>.
-		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
-			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
-		}
-		if err := repoGit.WorktreeAddExistingForce(tmpClonePath, opts.ResumeBranch); err != nil {
-			return nil, fmt.Errorf("creating fresh worktree on existing branch %s: %w", opts.ResumeBranch, err)
+		// Resume a branch: attach to it if it already exists (gh#3602 PR head)
+		// or create it net-new from the base branch (gu-u36eo upstream-sync
+		// resolution branch). attachResumeBranchWorktree handles both.
+		if err := m.attachResumeBranchWorktree(repoGit, tmpClonePath, opts.ResumeBranch, opts.BaseBranch); err != nil {
+			return nil, fmt.Errorf("creating fresh worktree on resume branch %s: %w", opts.ResumeBranch, err)
 		}
 	} else {
 		// Determine the start point for the new worktree

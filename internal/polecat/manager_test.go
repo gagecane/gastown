@@ -1438,6 +1438,56 @@ func TestAddWithOptions_ResumeBranch(t *testing.T) {
 	}
 }
 
+// TestAddWithOptions_ResumeBranch_NetNew verifies gu-u36eo: when ResumeBranch
+// names a branch that does not exist anywhere (the upstream-sync conflict
+// resolution branch the polecat is supposed to CREATE and push), spawn creates
+// it net-new from the base branch instead of failing with
+// "git worktree: fatal: invalid reference".
+func TestAddWithOptions_ResumeBranch_NetNew(t *testing.T) {
+	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
+
+	// Capture the main tip so we can prove the net-new branch starts from it.
+	mayorGit := git.NewGit(mayorRig)
+	mainSHA, err := mayorGit.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("resolve main HEAD: %v", err)
+	}
+
+	// A resolution branch matching the upstream-sync convention. It exists
+	// nowhere — not locally, not on origin.
+	resolutionBranch := "upstream-sync/rig/gu-sync-att-1234567890"
+
+	polecat, err := mgr.AddWithOptions("toast", AddOptions{
+		ResumeBranch: resolutionBranch,
+		BaseBranch:   "main",
+	})
+	if err != nil {
+		t.Fatalf("AddWithOptions with net-new ResumeBranch: %v", err)
+	}
+
+	if polecat.Branch != resolutionBranch {
+		t.Fatalf("polecat.Branch = %q, want %q", polecat.Branch, resolutionBranch)
+	}
+
+	worktreeGit := git.NewGit(polecat.ClonePath)
+	current, err := worktreeGit.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if current != resolutionBranch {
+		t.Fatalf("worktree HEAD on branch %q, want %q", current, resolutionBranch)
+	}
+
+	// The net-new branch must start from main's tip.
+	head, err := worktreeGit.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("resolve worktree HEAD: %v", err)
+	}
+	if head != mainSHA {
+		t.Fatalf("net-new resume branch HEAD = %s, want main tip %s", head, mainSHA)
+	}
+}
+
 func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 	// This test verifies the invariant that polecat creation does NOT add any
 	// TRACKED files to the repo's directory structure. The user's code should stay pure.
