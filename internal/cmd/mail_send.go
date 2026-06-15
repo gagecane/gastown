@@ -235,16 +235,20 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 			style.PrintWarning("could not clear satisfied reply reminders: %v", err)
 		}
 	}
-	// Subject-based fallback: an agent who replies as an ad-hoc
-	// `gt mail send <addr> -s "Re: <subject>"` (no --reply-to) generates a
-	// fresh thread ID, so ThreadID-based clearing won't find the queued
-	// reminder. Clear by (recipient, normalized subject) for every successful
-	// "Re:" send. See gu-1hsu.
-	if isReplySubject(mailSubject) {
-		for _, addr := range recipientAddrs {
-			if err := router.ClearReplyRemindersBySubject(from, addr, mailSubject); err != nil {
-				style.PrintWarning("could not clear satisfied reply reminders: %v", err)
-			}
+	// Subject-based clearing: an agent who replies as a plain
+	// `gt mail send <addr>` (no --reply-to, subject not prefixed "Re:")
+	// generates a fresh thread ID, so ThreadID-based clearing won't find the
+	// queued reminder and the delivery-time thread gate — which inspects the
+	// inbound thread — can't see the outbound reply either. The reminder then
+	// keeps firing for a reply already sent. Clear by (recipient, normalized
+	// subject) on EVERY successful send: NormalizeReplySubject strips any "Re:"
+	// prefix on both sides, so a plain send to <addr> about subject S clears a
+	// pending reminder armed by an inbound message from <addr> about S. The
+	// match is recipient+subject keyed, so unrelated threads are untouched.
+	// See gu-1hsu (Re: case) and gu-lgzfc (plain-send case).
+	for _, addr := range recipientAddrs {
+		if err := router.ClearReplyRemindersBySubject(from, addr, mailSubject); err != nil {
+			style.PrintWarning("could not clear satisfied reply reminders: %v", err)
 		}
 	}
 
@@ -267,16 +271,6 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-// isReplySubject reports whether subject begins with a "Re:" prefix
-// (case-insensitive, after trimming leading whitespace).
-func isReplySubject(subject string) bool {
-	s := strings.TrimSpace(subject)
-	if len(s) < 3 {
-		return false
-	}
-	return strings.EqualFold(s[:3], "Re:")
 }
 
 // generateThreadID creates a random thread ID for new message threads.

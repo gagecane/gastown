@@ -880,6 +880,36 @@ func TestRemoveKindByOriginal_MatchesAcrossThreadIDs(t *testing.T) {
 	}
 }
 
+// TestRemoveKindByOriginal_PlainSubjectClears proves the gu-lgzfc fix: a plain
+// `gt mail send <addr>` reply (no --reply-to, subject NOT prefixed "Re:") clears
+// the queued reminder. NormalizeReplySubject strips any "Re:" on the armed
+// reminder's OriginalSubject, so a plain send subject matches an inbound message
+// whether or not the inbound carried a "Re:" prefix.
+func TestRemoveKindByOriginal_PlainSubjectClears(t *testing.T) {
+	townRoot := t.TempDir()
+	session := "gt-test-remove-plain-subject"
+
+	reminder := QueuedNudge{
+		Sender: "system", Message: "Remember to reply to refinery/ ...",
+		Kind: "reply-reminder", ThreadID: "thread-inbound",
+		OriginalFrom: "gastown_upstream/refinery", OriginalSubject: "gu-wisp-ltl rejected",
+	}
+	if err := Enqueue(townRoot, session, reminder); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Agent replies via a plain `gt mail send gastown_upstream/refinery
+	// -s "gu-wisp-ltl rejected"` (no "Re:" prefix). This must still clear.
+	removed, err := RemoveKindByOriginal(townRoot, session, "reply-reminder",
+		"gastown_upstream/refinery", "gu-wisp-ltl rejected")
+	if err != nil {
+		t.Fatalf("RemoveKindByOriginal: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1 (plain-subject send should clear the reminder)", removed)
+	}
+}
+
 // TestRemoveKindByOriginal_GuardsEmptyArgs verifies the safety guards.
 func TestRemoveKindByOriginal_GuardsEmptyArgs(t *testing.T) {
 	townRoot := t.TempDir()
