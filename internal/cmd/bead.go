@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -180,10 +179,16 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 		createArgs = append(createArgs, "--label", label)
 	}
 
-	// Create the new bead
-	createCmd := exec.Command("bd", createArgs...)
-	createCmd.Stderr = os.Stderr
-	newIDBytes, err := createCmd.Output()
+	// Create the new bead in the TARGET rig's database. bd no longer routes
+	// cross-rig (removed in beads v0.62), so --prefix alone would create the
+	// bead in the current (cwd) database. Pin the working directory to the rig
+	// that owns targetPrefix and strip inherited BEADS_DIR so bd discovers the
+	// correct database from the directory (gu-sycrn).
+	targetDir := resolveBeadDirForPrefix(targetPrefix)
+	newIDBytes, err := BdCmd(createArgs...).
+		Dir(targetDir).
+		StripBeadsDir().
+		Output()
 	if err != nil {
 		return fmt.Errorf("creating new bead: %w", err)
 	}
@@ -191,21 +196,29 @@ func runBeadMove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Created %s\n", style.Bold.Render("✓"), newID)
 
-	// Close the source bead with reference
+	// Close the source bead with reference. Route to the source bead's owning
+	// rig via prefix resolution — exactly as the bd show call above does — so
+	// the close runs against the right database (gu-sycrn).
 	closeReason := fmt.Sprintf("Moved to %s", newID)
-	closeCmd := exec.Command("bd", "close", sourceID, "--reason", closeReason)
-	closeCmd.Stderr = os.Stderr
-	if err := closeCmd.Run(); err != nil {
-		// Clean up the new bead since we couldn't close the source
-		fmt.Fprintf(os.Stderr, "Warning: failed to close source bead: %v\n", err)
-		cleanupCmd := exec.Command("bd", "close", newID, "--reason", "Cleanup: source bead close failed during move")
-		if cleanupErr := cleanupCmd.Run(); cleanupErr != nil {
+	closeErr := BdCmd("close", sourceID, "--reason", closeReason).
+		Dir(resolveBeadDir(sourceID)).
+		StripBeadsDir().
+		Run()
+	if closeErr != nil {
+		// Clean up the new bead since we couldn't close the source. Route the
+		// cleanup close to the target rig where the new bead was created.
+		fmt.Fprintf(os.Stderr, "Warning: failed to close source bead: %v\n", closeErr)
+		cleanupErr := BdCmd("close", newID, "--reason", "Cleanup: source bead close failed during move").
+			Dir(targetDir).
+			StripBeadsDir().
+			Run()
+		if cleanupErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: also failed to clean up new bead %s: %v\n", newID, cleanupErr)
 			fmt.Fprintf(os.Stderr, "Both %s and %s remain open - manual cleanup needed\n", sourceID, newID)
 		} else {
 			fmt.Fprintf(os.Stderr, "Cleaned up new bead %s\n", newID)
 		}
-		return err
+		return closeErr
 	}
 
 	fmt.Printf("%s Closed %s (moved to %s)\n", style.Bold.Render("✓"), sourceID, newID)

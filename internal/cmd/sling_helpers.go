@@ -66,6 +66,26 @@ func resolveBeadDirFromTownRoot(townRoot, beadID string) string {
 	return filepath.Dir(resolved)
 }
 
+// resolveBeadDirForPrefix returns the directory to run bd commands for a target
+// bead prefix (e.g., "bd-"). It mirrors resolveBeadDir but routes by prefix
+// rather than by a concrete bead ID — used when creating a bead in a rig
+// database selected purely by its prefix (e.g., `gt bead move <id> <prefix>`).
+//
+// Like resolveBeadDir, this exists because beads v0.62 removed bd's built-in
+// cross-rig routing: --prefix alone only sets the prefix in the local (cwd)
+// database, so the working directory must be pinned to the target rig.
+func resolveBeadDirForPrefix(prefix string) string {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil || townRoot == "" {
+		return "."
+	}
+	rigPath := beads.GetRigPathForPrefix(townRoot, prefix)
+	if rigPath == "" {
+		return "."
+	}
+	return rigPath
+}
+
 // beadInfo holds status and assignee for a bead. The type and the pure
 // dispatch-eligibility predicates below now live in internal/dispatch; this
 // alias keeps the bd-show parser and all in-package call sites unchanged
