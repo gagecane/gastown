@@ -744,6 +744,14 @@ func (m *ConvoyManager) scan() {
 	// unreliable and a transient "driver not found" must not be read as closed).
 	m.reapOrphanedWorkflows()
 
+	// Complete interrupted mountain launches (gu-eqv21): a convoy stuck in a
+	// staged_* status is invisible to the feed below (it skips staged convoys),
+	// the completion scan (open-only), and the orphan reaper (gt:workflow-only).
+	// Re-opening it here, before the feed pass, lets the same feed dispatch its
+	// ready work this scan. Like reapOrphanedWorkflows, gated behind a
+	// successful findStranded so it never fires during a Dolt outage.
+	m.reapStaleStagedConvoys()
+
 	// Count "tracked but 0 ready" convoys — the completion-check candidates.
 	// Previously each was handled by a separate `gt convoy check <id>`
 	// subprocess inside this loop; with N convoys that serial fan-out (full gt
@@ -868,6 +876,26 @@ func (m *ConvoyManager) reapOrphanedWorkflows() {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		m.logger("Convoy: orphan-workflow reap failed: %s", util.FirstLine(stderr.String()))
+	}
+}
+
+// reapStaleStagedConvoys completes interrupted mountain launches (gu-eqv21):
+// mountain convoys stuck in a staged_* status (process death between
+// createStagedConvoy and transitionConvoyToOpen) are re-opened so the feed pass
+// can dispatch their ready work. Runs near the TOP of each scan, before the
+// stranded-feed pass, so a freshly re-opened convoy is fed this scan rather than
+// next. Mirrors reapOrphanedWorkflows: one bounded `gt convoy reap-staged`
+// subprocess with mutation routing so the convoy status update lands in the HQ
+// store.
+func (m *ConvoyManager) reapStaleStagedConvoys() {
+	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "reap-staged")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdMutationRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		m.logger("Convoy: stale-staged reap failed: %s", util.FirstLine(stderr.String()))
 	}
 }
 

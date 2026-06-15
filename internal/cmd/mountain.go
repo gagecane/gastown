@@ -12,6 +12,15 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
+// mountainTitlePrefix is the convoy-title lead-in written by createStagedConvoy
+// for mountains (runMountain, mountain.go). It is set atomically as part of the
+// bd create call, BEFORE the 'mountain' label add and the staged->open
+// transition — so it reliably tags a convoy across the entire interrupted-launch
+// window the staged-convoy reaper targets (gu-eqv21). gt convoy stage uses
+// "Convoy:"/"Staged:" titles instead, so the staleness reaper never touches a
+// deliberately-staged convoy.
+const mountainTitlePrefix = "Mountain: "
+
 // mountainForce controls whether to launch a mountain with warnings.
 var mountainForce bool
 
@@ -214,7 +223,7 @@ func runMountain(cmd *cobra.Command, args []string) error {
 	}
 
 	// Step 3: Create the staged convoy.
-	title := "Mountain: " + result.Title
+	title := mountainTitlePrefix + result.Title
 	convoyID, err := createStagedConvoy(dag, waves, status, title)
 	if err != nil {
 		return fmt.Errorf("create convoy: %w", err)

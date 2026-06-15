@@ -93,6 +93,7 @@ var (
 	convoyCloseForce        bool
 	convoyCheckDryRun       bool
 	convoyReapOrphansDryRun bool
+	convoyReapStagedDryRun  bool
 	convoyLandForce         bool
 	convoyLandKeep          bool
 	convoyLandDryRun        bool
@@ -339,6 +340,34 @@ Examples:
 	RunE:         runConvoyReapOrphans,
 }
 
+var convoyReapStagedCmd = &cobra.Command{
+	Use:   "reap-staged",
+	Short: "Complete interrupted mountain launches stuck in a staged status",
+	Long: `Find mountain convoys stuck in a staged_* status past the staleness window
+and complete their interrupted launch by transitioning them to open.
+
+gt mountain creates a staged convoy and immediately transitions it to open. If
+the process dies in that window, the convoy and its tracking edges exist but it
+is never launched: the daemon feed skips staged convoys, the completion scan
+lists only open convoys, and the orphan reaper handles only gt:workflow roots —
+so the mountain's work strands with no dispatch, no rollup, and no reaper
+(gu-eqv21). This reaper re-opens such convoys so the daemon feed dispatches
+their ready work.
+
+Only mountain convoys (title prefix "Mountain: ") are touched — deliberately
+staged convoys from 'gt convoy stage' wait for a manual launch and are left
+alone.
+
+Run by the daemon every scan (alongside reap-orphans) and available manually.
+
+Examples:
+  gt convoy reap-staged            # Launch all stale staged mountain convoys
+  gt convoy reap-staged --dry-run  # Preview what would launch without acting`,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE:         runConvoyReapStaged,
+}
+
 var convoyStrandedCmd = &cobra.Command{
 	Use:   "stranded",
 	Short: "Find stranded convoys (ready work, stuck, or empty) needing attention",
@@ -456,6 +485,8 @@ func init() {
 	convoyCmd.AddCommand(convoyCheckCmd)
 	convoyReapOrphansCmd.Flags().BoolVar(&convoyReapOrphansDryRun, "dry-run", false, "Preview what would close without acting")
 	convoyCmd.AddCommand(convoyReapOrphansCmd)
+	convoyReapStagedCmd.Flags().BoolVar(&convoyReapStagedDryRun, "dry-run", false, "Preview what would launch without acting")
+	convoyCmd.AddCommand(convoyReapStagedCmd)
 	convoyCmd.AddCommand(convoyStrandedCmd)
 	convoyCmd.AddCommand(convoyCloseCmd)
 	convoyCmd.AddCommand(convoyLandCmd)
@@ -1170,6 +1201,30 @@ func runConvoyReapOrphans(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runConvoyReapStaged(cmd *cobra.Command, args []string) error {
+	townBeads, err := getTownBeadsDir()
+	if err != nil {
+		return err
+	}
+	reaped, err := reapStaleStagedConvoys(townBeads, convoyReapStagedDryRun)
+	if err != nil {
+		return err
+	}
+	if len(reaped) == 0 {
+		fmt.Println("No stale staged mountain convoys to launch.")
+		return nil
+	}
+	if convoyReapStagedDryRun {
+		fmt.Printf("%s Would launch %d stale staged convoy(s):\n", style.Warning.Render("⚠"), len(reaped))
+	} else {
+		fmt.Printf("%s Launched %d stale staged convoy(s):\n", style.Bold.Render("✓"), len(reaped))
+	}
+	for _, r := range reaped {
+		fmt.Printf("  🚚 %s (staged %s): transitioned to open\n", r.ConvoyID, r.Age.Round(time.Second))
+	}
+	return nil
+}
+
 // reapedWorkflow records one orphaned workflow chain torn down by the reaper.
 type reapedWorkflow struct {
 	WorkflowID  string
@@ -1281,6 +1336,99 @@ func shouldReapWorkflow(driver string, driverStatus map[string]string) bool {
 		return false
 	}
 	return beads.IssueStatus(status).IsTerminal()
+}
+
+// stagedConvoyStaleness is how long a mountain convoy may sit in a staged_*
+// status before the reaper completes its interrupted launch (gu-eqv21).
+//
+// gt mountain creates a staged convoy and transitions it to open within
+// milliseconds (createStagedConvoy -> transitionConvoyToOpen, mountain.go). If
+// the process dies in that window, the convoy + its tracking edges exist but it
+// is never launched: the daemon feed skips staged convoys (isConvoyStaged), the
+// completion scan lists only open convoys, and the orphan reaper only handles
+// gt:workflow roots — so the mountain's work strands with no dispatch, no
+// rollup, and no reaper. The threshold is far longer than a real launch takes,
+// so a convoy mid-launch is never disturbed.
+const stagedConvoyStaleness = 15 * time.Minute
+
+// reapedStagedConvoy records one stale staged convoy whose interrupted launch
+// the reaper completed by transitioning it to open.
+type reapedStagedConvoy struct {
+	ConvoyID string
+	Age      time.Duration
+}
+
+// shouldReapStagedConvoy reports whether a convoy should have its interrupted
+// launch completed, given its status, title, and age. It returns true ONLY for
+// a mountain convoy (title carries mountainTitlePrefix — written atomically by
+// createStagedConvoy before the label add and the staged->open transition, so
+// it tags the convoy across the entire interrupted-launch window) that is in a
+// staged_* status and older than stagedConvoyStaleness.
+//
+// The title check is the safety discriminator: gt convoy stage produces
+// deliberately-staged convoys (titled "Convoy:"/"Staged:") that wait for a
+// manual launch and must never be auto-launched. Only mountains always intend
+// to transition staged->open immediately, so only they are safe to reap.
+func shouldReapStagedConvoy(status, title string, age time.Duration) bool {
+	if !isStagedStatus(normalizeConvoyStatus(status)) {
+		return false
+	}
+	if !strings.HasPrefix(title, mountainTitlePrefix) {
+		return false
+	}
+	return age >= stagedConvoyStaleness
+}
+
+// reapStaleStagedConvoys finds mountain convoys stuck in a staged_* status past
+// stagedConvoyStaleness — the signature of an interrupted gt mountain launch
+// (process death between createStagedConvoy and transitionConvoyToOpen) — and
+// completes the launch by transitioning them to open. The existing daemon feed
+// then dispatches their ready work (the bead notes the post-transition window
+// self-heals via the feed), so the reaper only needs to re-open them, not
+// re-dispatch.
+//
+// Transitioning (rather than closing) is deliberate: the tracked beads are real
+// mountain work, so closing the convoy would orphan them; re-opening lets the
+// normal lifecycle resume. Conservative by construction — a convoy is touched
+// ONLY when it is staged_*, carries the mountain title prefix, AND is older than
+// the staleness window, so a convoy mid-launch or a deliberately-staged convoy
+// (gt convoy stage) is never disturbed.
+func reapStaleStagedConvoys(townBeads string, dryRun bool) ([]reapedStagedConvoy, error) {
+	var staged []convoyListIssue
+	for _, status := range []string{convoyStatusStagedReady, convoyStatusStagedWarnings} {
+		convoys, err := listConvoyIssues(townBeads, status, false)
+		if err != nil {
+			return nil, fmt.Errorf("listing %s convoys: %w", status, err)
+		}
+		staged = append(staged, convoys...)
+	}
+
+	now := time.Now()
+	var reaped []reapedStagedConvoy
+	for _, c := range staged {
+		created, err := time.Parse(time.RFC3339, c.CreatedAt)
+		if err != nil {
+			// Unparseable created_at — can't establish staleness, leave it alone.
+			continue
+		}
+		age := now.Sub(created)
+		if !shouldReapStagedConvoy(c.Status, c.Title, age) {
+			continue
+		}
+		if dryRun {
+			reaped = append(reaped, reapedStagedConvoy{ConvoyID: c.ID, Age: age})
+			continue
+		}
+		// Complete the interrupted launch. force=true mirrors the mountain
+		// launch path (mountain.go), which transitions staged_warnings convoys
+		// unconditionally.
+		if err := transitionConvoyToOpen(c.ID, true); err != nil {
+			style.PrintWarning("reap-staged %s: couldn't transition to open: %v", c.ID, err)
+			continue
+		}
+		reaped = append(reaped, reapedStagedConvoy{ConvoyID: c.ID, Age: age})
+	}
+	return reaped, nil
 }
 
 // convoyShipUnverifiedLabel marks an all-tracked-closed convoy whose tracked
