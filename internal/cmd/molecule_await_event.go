@@ -266,6 +266,20 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 				ReadyMRs: ready,
 				Elapsed:  time.Since(startTime),
 			}
+			// Drain this rig's own pending wake events (gu-5n9ts). The queue
+			// probe found a live backlog, so any MQ_SUBMIT/MERGE_READY files
+			// tagged for THIS rig have served their purpose — the refinery is
+			// awake and about to process the queue they would have woken it for.
+			// Without this, a continuously-busy refinery always short-circuits
+			// here and never reaches the event-file read path that cleans up,
+			// so its own wake events accumulate on the town-global channel
+			// indefinitely (observed: 64 self-tagged events undrained over 17h).
+			// Only matching events are collected, so foreign rigs' events are
+			// left intact for their own consumers (gu-5qpfi).
+			if awaitEventCleanup {
+				pending := readPendingEventsBounded(context.Background(), eventDir, 500*time.Millisecond)
+				result.Events = filterEventsByRig(pending, awaitEventFilterRig)
+			}
 			finalizeAwaitEventResult(result, idleCycles, agentBeadUsable, beadsDir)
 			return outputAwaitEventResult(result)
 		}
@@ -337,8 +351,11 @@ func finalizeAwaitEventResult(result *AwaitEventResult, idleCycles int, agentBea
 		_ = clearAgentBackoffUntil(awaitEventAgentBead, beadsDir)
 	}
 
-	// Cleanup event files if requested
-	if awaitEventCleanup && result.Reason == "event" {
+	// Cleanup event files if requested. Both the normal "event" wake and the
+	// "queue-ready" short-circuit (gu-5n9ts) populate result.Events with only
+	// this rig's matching files, so deleting them here never touches another
+	// rig's events.
+	if awaitEventCleanup && (result.Reason == "event" || result.Reason == "queue-ready") {
 		for _, ef := range result.Events {
 			_ = os.Remove(ef.Path)
 		}
