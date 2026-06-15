@@ -4620,6 +4620,44 @@ func TestStrandedSentinel_NoStore_ReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestCacheFresh_MaxAgeExpiry is the gu-e5psy regression guard: the stranded
+// cache sentinel keys only on the hq-store convoy rows, so it is blind to a
+// tracked work-bead churning hook→reset→ready (that bead lives in a rig DB and
+// its updated_at bump never moves a convoy's). Without a max-age bound the stale
+// "0 ready — completion candidate" entry is served every scan forever and the
+// now-ready bead never dispatches. cacheFresh must expire the cache after
+// strandedCacheMaxAge so findStranded re-forks and recomputes live readiness.
+func TestCacheFresh_MaxAgeExpiry(t *testing.T) {
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+
+	base := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	// No cache → never fresh (forces a subprocess).
+	m.now = func() time.Time { return base }
+	if m.cacheFresh() {
+		t.Fatal("cacheFresh must be false when no cache is present")
+	}
+
+	// Cache just computed → fresh (sentinel path may serve a hit).
+	m.strandedCache = &strandedCacheEntry{computedAt: base}
+	if !m.cacheFresh() {
+		t.Fatal("cacheFresh must be true immediately after the cache is computed")
+	}
+
+	// Just under the max age → still fresh.
+	m.now = func() time.Time { return base.Add(strandedCacheMaxAge - time.Second) }
+	if !m.cacheFresh() {
+		t.Fatalf("cacheFresh must be true just under strandedCacheMaxAge (%s)", strandedCacheMaxAge)
+	}
+
+	// At/after the max age → expired, forcing a fresh subprocess so the feed
+	// re-evaluates readiness against live bead state (the gu-e5psy fix).
+	m.now = func() time.Time { return base.Add(strandedCacheMaxAge) }
+	if m.cacheFresh() {
+		t.Fatalf("cacheFresh must be false at strandedCacheMaxAge (%s) — stale work-bead readiness would be served forever", strandedCacheMaxAge)
+	}
+}
+
 // TestFeedFirstReady_SkipLogsAreThrottled verifies that a single-child convoy
 // whose only child stays in feed cooldown across many scans does NOT emit the
 // "in feed cooldown" / "no dispatchable issues" lines every scan, but instead

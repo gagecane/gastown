@@ -101,6 +101,20 @@ const (
 	// At 60s scan interval, 10 scans = ~10 minutes.
 	completionBackstopInterval = 10
 
+	// strandedCacheMaxAge bounds how long a findStranded() result may be served
+	// from cache (gu-e5psy). The cache sentinel (gu-rd9ph) keys only on the open
+	// convoy-issue count + MAX(updated_at) in the hq store, but a convoy's
+	// readiness depends on its TRACKED work-beads, which live in rig databases.
+	// When a tracked bead churns hook→reset→ready, that bead's updated_at bumps
+	// but no convoy's does — the sentinel is blind to it, so the stale
+	// "ready_count: 0" entry is served every scan and the now-ready bead never
+	// dispatches ("0 ready — completion candidate" forever). A max-age guard
+	// forces the subprocess to recompute readiness from live bead state at least
+	// this often, bounding the worst-case detection latency while still skipping
+	// the fork on the common idle scan. Sized to the feed-dispatch cooldown so it
+	// adds no latency beyond the existing re-feed floor.
+	strandedCacheMaxAge = 5 * time.Minute
+
 	// feedLogThrottleInterval throttles the repeating per-scan feeder "skip"
 	// log lines (in-feed-cooldown and no-dispatchable-issues). The line is
 	// emitted on the first occurrence and then every Nth repeat, so a
@@ -330,9 +344,10 @@ type stableCandidate struct {
 // sentinel is unchanged on the next scan, the cached result is reused without
 // forking the expensive `gt convoy stranded --json` subprocess. See gu-rd9ph.
 type strandedCacheEntry struct {
-	openCount int       // COUNT(*) of open convoy-type issues
-	maxUpdate time.Time // MAX(updated_at) of open convoy-type issues
-	result    []strandedConvoyInfo
+	openCount  int       // COUNT(*) of open convoy-type issues
+	maxUpdate  time.Time // MAX(updated_at) of open convoy-type issues
+	computedAt time.Time // when the underlying subprocess result was computed (gu-e5psy)
+	result     []strandedConvoyInfo
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -899,6 +914,25 @@ func (m *ConvoyManager) reapStaleStagedConvoys() {
 	}
 }
 
+// cacheFresh reports whether the stranded cache is eligible to serve a hit:
+// it exists and was computed within strandedCacheMaxAge. The max-age guard
+// (gu-e5psy) bounds how long a sentinel-blind change can hide. The cache
+// sentinel keys only on open convoy-issue count + MAX(updated_at) in the hq
+// store, but a convoy's readiness depends on its TRACKED work-beads, which live
+// in rig databases. When a tracked bead churns hook→reset→ready, that bead's
+// updated_at bumps but no convoy's does, so the sentinel stays equal and the
+// stale "ready_count: 0" entry would be served every scan forever ("0 ready —
+// completion candidate"), never dispatching the now-ready bead. Expiring the
+// cache forces findStranded to recompute readiness from live bead state at
+// least this often. Returns false (forces a fresh subprocess) when no cache is
+// present.
+func (m *ConvoyManager) cacheFresh() bool {
+	if m.strandedCache == nil {
+		return false
+	}
+	return m.now().Sub(m.strandedCache.computedAt) < strandedCacheMaxAge
+}
+
 // findStranded runs `gt convoy stranded --json` and parses the output.
 // Before forking the subprocess, it queries a lightweight sentinel (open convoy
 // count + max updated_at) from the hq store. If unchanged since the last scan,
@@ -906,7 +940,7 @@ func (m *ConvoyManager) reapStaleStagedConvoys() {
 func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
 	// Check sentinel before forking. Skip the sentinel on recovery mode (need
 	// a fresh scan to clear stale state) or when stores aren't available.
-	if !m.recoveryMode.Load() && m.strandedCache != nil {
+	if !m.recoveryMode.Load() && m.cacheFresh() {
 		if count, maxUpd, ok := m.strandedSentinel(); ok {
 			if count == m.strandedCache.openCount && maxUpd.Equal(m.strandedCache.maxUpdate) {
 				return m.strandedCache.result, nil
@@ -936,9 +970,10 @@ func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
 	// Update the cache with fresh sentinel values.
 	if count, maxUpd, ok := m.strandedSentinel(); ok {
 		m.strandedCache = &strandedCacheEntry{
-			openCount: count,
-			maxUpdate: maxUpd,
-			result:    stranded,
+			openCount:  count,
+			maxUpdate:  maxUpd,
+			computedAt: m.now(),
+			result:     stranded,
 		}
 	}
 
