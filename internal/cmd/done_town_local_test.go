@@ -70,8 +70,12 @@ func TestRunAutoCommitSafetyNet_CommitsToDefaultBranchWhenNoRemote(t *testing.T)
 	doneCleanupStatus = "uncommitted"
 	defer func() { doneCleanupStatus = prevStatus }()
 
-	if err := runAutoCommitSafetyNet(g, local, "main", "main", true); err != nil {
+	salvagedSHA, err := runAutoCommitSafetyNet(g, local, "main", "main", true)
+	if err != nil {
 		t.Fatalf("runAutoCommitSafetyNet returned error: %v", err)
+	}
+	if salvagedSHA == "" {
+		t.Fatalf("expected salvage SHA when safety net auto-committed, got empty")
 	}
 
 	// The change must now be committed (no remote → committing to main is the

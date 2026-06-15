@@ -248,9 +248,14 @@ func runConvoyDirectStrategy(sc strategyContext) (handled bool, pushFailed bool)
 // returns directly). A detached-HEAD guard refusal returns nil — the inline
 // version jumped to afterSafetyNet, which is equivalent to falling through.
 // No-op unless cwdAvailable and status=="uncommitted". Mirrors done.go:538–578.
-func runAutoCommitSafetyNet(g *git.Git, cwd, branch, defaultBranchEarly string, cwdAvailable bool) error {
+//
+// The first return value is the SHA of the salvage commit when the safety net
+// auto-committed abandoned WIP, or "" when nothing was salvaged. The caller uses
+// it to mark the source bead so a convoy/orchestrator can tell a salvaged leg
+// apart from a cleanly-committed one (gs-e3nm).
+func runAutoCommitSafetyNet(g *git.Git, cwd, branch, defaultBranchEarly string, cwdAvailable bool) (salvagedSHA string, err error) {
 	if !cwdAvailable || doneCleanupStatus != "uncommitted" {
-		return nil
+		return "", nil
 	}
 
 	// gs-7kjh: a no-remote repo is the town source-of-truth, where the default
@@ -266,7 +271,7 @@ func runAutoCommitSafetyNet(g *git.Git, cwd, branch, defaultBranchEarly string, 
 		fmt.Fprintf(os.Stderr, "  Manually stash or commit your changes from the correct polecat worktree before re-running.\n\n")
 		// Leave doneCleanupStatus == "uncommitted" so downstream paths still
 		// refuse to submit. The agent sees the warning and can recover.
-		return nil
+		return "", nil
 	}
 
 	// gu-fo82: Delegate to polecat.AutoSaveAbandonedWIP for the core logic.
@@ -276,7 +281,7 @@ func runAutoCommitSafetyNet(g *git.Git, cwd, branch, defaultBranchEarly string, 
 		fmt.Printf("  Files: %s\n\n", workStatus.String())
 	}
 
-	saved, _, saveErr := polecat.AutoSaveAbandonedWIP(cwd, branch, "gt-done")
+	saved, sha, saveErr := polecat.AutoSaveAbandonedWIP(cwd, branch, "gt-done")
 	if saveErr != nil {
 		errMsg := saveErr.Error()
 		if strings.Contains(errMsg, "detached") {
@@ -284,9 +289,9 @@ func runAutoCommitSafetyNet(g *git.Git, cwd, branch, defaultBranchEarly string, 
 			fmt.Fprintf(os.Stderr, "  A commit here would orphan the work (no branch ref to advance).\n")
 			fmt.Fprintf(os.Stderr, "  Recover manually: git branch %s HEAD && git checkout %s && git commit ...\n", branch, branch)
 			fmt.Fprintf(os.Stderr, "  Then re-run gt done.\n\n")
-			return nil
+			return "", nil
 		} else if strings.Contains(errMsg, "unmerged") {
-			return fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", errMsg)
+			return "", fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", errMsg)
 		}
 		// Real failure — warn but continue.
 		style.PrintWarning("auto-commit: %v — uncommitted work may be at risk", saveErr)
@@ -295,8 +300,9 @@ func runAutoCommitSafetyNet(g *git.Git, cwd, branch, defaultBranchEarly string, 
 		fmt.Printf("  The agent should have committed before running gt done.\n")
 		fmt.Printf("  This auto-save prevents work loss.\n\n")
 		doneCleanupStatus = "unpushed" // Update status — changes are now committed but not pushed
+		return sha, nil
 	}
-	return nil
+	return "", nil
 }
 
 // verifyWorkExistsForCompletion runs the hq-xthqf "work exists" preflight of

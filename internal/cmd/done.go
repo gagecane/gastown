@@ -614,7 +614,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// merge queue and racing with refinery merges. Losing an unfinished
 	// auto-save is strictly better than poisoning mainline: the polecat can
 	// recover its work from the worktree; refinery cannot un-push bad commits.
-	if err := runAutoCommitSafetyNet(g, cwd, branch, defaultBranchEarly, cwdAvailable); err != nil {
+	salvagedSHA, err := runAutoCommitSafetyNet(g, cwd, branch, defaultBranchEarly, cwdAvailable)
+	if err != nil {
 		return err
 	}
 
@@ -698,6 +699,22 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 	doneBeadID = issueID // capture for the deferred done telemetry (KPI-1)
+
+	// gs-e3nm: when the auto-commit safety net salvaged abandoned WIP, mark the
+	// source bead so a convoy/orchestrator can tell this leg landed via salvage
+	// rather than a clean PR/MR. Without this marker the leg closes ✓ and a
+	// reconciliation-by-PR-count silently absorbs the direct commit. Mirrors the
+	// daemon reaper's wip-recovered:<sha> convention (it labels the agent bead;
+	// here we label the work bead, which is what the convoy reconciles against).
+	// Best-effort: a failed label never blocks completion.
+	if salvagedSHA != "" && issueID != "" && cwdAvailable {
+		labelBd := beads.NewWithBeadsDir(cwd, beads.ResolveBeadsDir(cwd))
+		if labelErr := labelBd.Update(issueID, beads.UpdateOptions{
+			AddLabels: []string{"wip-autosaved:" + salvagedSHA},
+		}); labelErr != nil {
+			style.PrintWarning("could not mark %s as wip-autosaved: %v", issueID, labelErr)
+		}
+	}
 
 	// hq-9jeyo: refuse to complete/close a reference or gate tripwire. Extracted
 	// to releaseIfReferenceBead (gu-nid89.12.1): when the hooked bead is a
