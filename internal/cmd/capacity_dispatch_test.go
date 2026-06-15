@@ -233,6 +233,11 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 		// reply. The poller mails the mayor and leaves the bead for manual sling.
 		{"needs-human-triage label", beadStatusInfo{Status: "open", Labels: []string{"needs-human-triage"}}, false},
 		{"needs-human-triage among others", beadStatusInfo{Status: "open", Labels: []string{"pr-review-comment", "needs-human-triage"}}, false},
+		// gs-d9z0: read-only digest beads (type=digest) have nothing to implement
+		// and must not auto-dispatch — the daemon was burning a dev-work slot per
+		// regenerated digest across all lia rigs.
+		{"digest type", beadStatusInfo{Status: "open", Type: "digest"}, false},
+		{"digest type with unrelated label", beadStatusInfo{Status: "open", Type: "digest", Labels: []string{"gt:rig"}}, false},
 		{"normal work with unrelated label still ready", beadStatusInfo{Status: "open", Labels: []string{"gt:rig"}}, true},
 	}
 	for _, tt := range tests {

@@ -1764,6 +1764,17 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if hasLabel(info.Labels, labelNeedsHumanTriage) {
 		return false
 	}
+	// Skip read-only digest beads (gs-d9z0). A type:digest bead (lia-codegen
+	// digest, owner=dog) is a record whose deliverable is its own description —
+	// there is nothing to implement. The daemon was attaching the full
+	// dev-lifecycle formula and dispatching them to polecats, which self-closed
+	// no-changes; but digests regenerate every cycle across all lia rigs, so the
+	// wasted slot recurred. Mirror the needs-human-triage guard: block the
+	// automatic scheduler path only, leaving manual `gt sling` and `gt done`
+	// intact so the bead simply sits as a read-only record.
+	if strings.EqualFold(info.Type, issueTypeDigest) {
+		return false
+	}
 	// Skip beads deferred to a future time (gs-o5f). `gt done --status DEFERRED`
 	// sets defer_until WITHOUT flipping status off "open", so the status check
 	// alone lets a future-deferred bead through and the scheduler re-dispatches
@@ -1811,6 +1822,14 @@ const (
 	// code change and must NOT be auto-dispatched (gs-t307). Like no-auto-dispatch
 	// it only blocks the automatic scheduler path; manual `gt sling` still works.
 	labelNeedsHumanTriage = "needs-human-triage"
+	// issueTypeDigest marks a read-only digest bead (e.g. lia-codegen-digest):
+	// the deliverable IS the bead description, there is nothing to implement
+	// (gs-d9z0). The daemon was attaching the full dev-lifecycle formula to these
+	// and burning a dispatch slot per cycle — polecats correctly self-closed
+	// no-changes, but digests regenerate every cycle across all lia rigs, so the
+	// waste recurred. Like needs-human-triage it only blocks the automatic
+	// scheduler path; manual `gt sling` still works.
+	issueTypeDigest = "digest"
 	// labelAwaitingRefineryMerge marks a source bead whose polecat already
 	// submitted an MR that the refinery has not yet merged to origin/main
 	// (completion.MarkAwaitingRefineryMerge, gu-treq). The bead stays open for
