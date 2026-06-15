@@ -42,8 +42,9 @@ case "$*" in
     echo '[]'
     ;;
   *"sql"*"parent-child"*"--json"*)
-    # bd sql --json returns rows as a JSON array of {col: val} maps
-    echo '[{"target":"ha-c1"},{"target":"ha-c2"}]'
+    # bd sql --json returns rows as a JSON array of {col: val} maps.
+    # The "up" direction selects issue_id (the child) where depends_on=parent.
+    echo '[{"issue_id":"ha-c1"},{"issue_id":"ha-c2"}]'
     ;;
   "show ha-c1 --json")
     echo '[{"id":"ha-c1","title":"Child one","status":"open","issue_type":"task"}]'

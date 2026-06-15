@@ -905,10 +905,12 @@ func appendValidationWave(dag *ConvoyDAG, waves []Wave, epicID string) ([]Wave, 
 	}
 
 	// Set the validation bead as a child of the epic.
-	if out, err := BdCmd("dep", "add", epicID, validationID, "--type=parent-child").
+	// bd stores parent-child as issue_id=CHILD, depends_on_id=PARENT, so the
+	// child (validation bead) must come first and the parent (epic) second.
+	if out, err := BdCmd("dep", "add", validationID, epicID, "--type=parent-child").
 		Dir(townBeads).WithAutoCommit().StripBeadsDir().
 		CombinedOutput(); err != nil {
-		return waves, "", fmt.Errorf("bd dep add parent-child %s %s: %w\noutput: %s", epicID, validationID, err, out)
+		return waves, "", fmt.Errorf("bd dep add parent-child %s %s: %w\noutput: %s", validationID, epicID, err, out)
 	}
 
 	// Add blocking edges: every slingable bead blocks the validation bead.
@@ -1242,10 +1244,11 @@ func bdListChildrenViaDeps(parentID string) ([]bdShowResult, error) {
 		return nil, nil
 	}
 
-	// Production data stores parent-child as (issue_id=parent, depends_on_id=child).
-	// "down" returns depends_on_id rows where issue_id = parentID — i.e., the
-	// epic's children. See `bd dep list <epic>` in the bug report.
-	childIDs, err := bdDepListRawIDs(beadsDir, parentID, "down", "parent-child")
+	// bd stores parent-child as (issue_id=child, depends_on_id=parent), so a
+	// child row has depends_on_id = parentID. "up" selects issue_id where
+	// depends_on = parentID — i.e., the epic's children. ("down" would return
+	// the epic's own parent.) See `bd dep list <epic>` in the bug report.
+	childIDs, err := bdDepListRawIDs(beadsDir, parentID, "up", "parent-child")
 	if err != nil {
 		return nil, nil // best-effort — caller still gets the empty primary result
 	}

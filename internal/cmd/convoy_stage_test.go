@@ -3129,7 +3129,9 @@ func TestAppendValidationWave_CreatesCapstoneWave(t *testing.T) {
 	if !strings.Contains(logContent, "mol-validate-prd") {
 		t.Errorf("bd.log should contain 'mol-validate-prd' in description")
 	}
-	if !strings.Contains(logContent, "dep add epic-1 "+validationID+" --type=parent-child") {
+	// bd stores parent-child as issue_id=CHILD, depends_on_id=PARENT, so the
+	// validation bead (child) comes first and the epic (parent) second.
+	if !strings.Contains(logContent, "dep add "+validationID+" epic-1 --type=parent-child") {
 		t.Errorf("bd.log should contain parent-child dep add, got:\n%s", logContent)
 	}
 	for _, beadID := range []string{"gt-a", "gt-b"} {
