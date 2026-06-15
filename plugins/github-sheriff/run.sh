@@ -1,202 +1,222 @@
 #!/usr/bin/env bash
-# github-sheriff/run.sh — Monitor GitHub CI checks on open PRs and create beads for failures.
+# github-sheriff/run.sh — Monitor GitHub CI checks on open PRs across ALL
+# GitHub-backed rigs and file ci-failure beads for failing required checks.
 #
-# Polls GitHub for open pull requests, categorizes them by readiness (easy wins vs needs review),
-# and creates ci-failure beads for new CI check failures.
+# Previously this plugin inspected only the gt SOURCE repo (resolved from the
+# `gastown` git remote), so a failing CI check on a customer-repo PR
+# (lia-health-backend / -web / -iac) was never turned into a fix-CI bead — a
+# monitoring blind spot across all lia rigs (gs-xtyg). It now iterates every
+# rig with a github.com remote (the same per-rig pattern ci-watcher-poll and
+# pr-watcher-poll use via $GT_TOWN_ROOT/mayor/rigs.json) and files ci-failure
+# beads routed to the owning rig.
 #
-# Requires: gh CLI installed and authenticated
+# Behavior:
+#   1. Discover rigs from $GT_TOWN_ROOT/mayor/rigs.json.
+#   2. Filter to rigs whose git_url is on github.com (the only host `gh` can
+#      query). Resolve the repo (owner/name) from the rig's git_url.
+#   3. For each such rig, list open NON-DRAFT PRs and collect failing required
+#      checks from statusCheckRollup. Draft PRs are excluded — they are not yet
+#      asking for review/merge.
+#   4. File ci-failure beads routed to that rig (bd is run from townRoot/<rig>,
+#      mirroring the ciwatcher BeadsAdapter, so prefix routing reaches the
+#      rig's database). Dedup against open ci-failure beads already in the rig.
+#   5. Per-rig failure isolation: one rig's failure does NOT abort the rest.
+#      The 2m execution budget covers a fast `gh pr list` per rig plus bd calls.
 #
-# Usage: ./run.sh
+# require_review parking posture: this plugin only FILES work beads — it never
+# merges or slings the PR. A PR that is parked awaiting human review stays
+# parked; the ci-failure bead is the standing work item to fix the red check,
+# after which the PR resumes its normal review path. Filing a bead does not
+# disturb the parking posture.
+#
+# Idempotency: dedup by bead title against open ci-failure beads in each rig,
+# so re-invoking every cooldown cycle is safe.
+#
+# Requires: gh CLI installed and authenticated, jq.
 
-set -euo pipefail
+set -uo pipefail
+# NOTE: not `set -e` — a single rig's failure must not abort the rest.
 
-# --- Configuration -----------------------------------------------------------
+log() { echo "[github-sheriff] $*" >&2; }
 
-REPO_ROOT="${GT_RIG_ROOT:-.}"
-SKIP_REASON=""
+# --- Step 0: Detect gh CLI and authenticate ---------------------------------
 
-# --- Helpers -----------------------------------------------------------------
-
-log() {
-  echo "[github-sheriff] $*"
-}
-
-# --- Step 0: Detect gh CLI and authenticate --------------------------------
-
-if ! gh auth status 2>/dev/null; then
-  SKIP_REASON="gh CLI not authenticated"
-  log "SKIP: $SKIP_REASON"
+if ! gh auth status >/dev/null 2>&1; then
+  log "SKIP: gh CLI not authenticated"
   bd create "github-sheriff: skipped (no auth)" -t chore --ephemeral \
     -l type:plugin-run,plugin:github-sheriff,result:skipped \
-    -d "$SKIP_REASON" --silent 2>/dev/null || true
+    -d "gh CLI not authenticated" --silent 2>/dev/null || true
   exit 0
 fi
 
-# --- Step 1: Detect repository from git remote ----------------------------
-
-# For Gas Town monorepo setups, the git remote is typically at the parent level
-# Try multiple locations: rig, parent, or origin (fallback)
-REPO=""
-
-# Try direct parent first (most common in monorepo)
-REPO=$(git -C "$REPO_ROOT/.." remote get-url gastown 2>/dev/null \
-  | sed -E 's|.*github\.com[:/]||; s|\.git$||') || REPO=""
-
-# Try current rig if parent didn't work
-if [ -z "$REPO" ]; then
-  REPO=$(git -C "$REPO_ROOT" remote get-url gastown 2>/dev/null \
-    | sed -E 's|.*github\.com[:/]||; s|\.git$||') || REPO=""
+if ! command -v jq >/dev/null 2>&1; then
+  log "ERROR: jq is required"
+  bd create "github-sheriff: FAILED (no jq)" -t chore --ephemeral \
+    -l type:plugin-run,plugin:github-sheriff,result:failure \
+    -d "jq is required but not installed" --silent 2>/dev/null || true
+  exit 1
 fi
 
-# Try origin as last resort (single-repo setups)
-if [ -z "$REPO" ]; then
-  REPO=$(git -C "$REPO_ROOT/.." remote get-url origin 2>/dev/null \
-    | sed -E 's|.*github\.com[:/]||; s|\.git$||') || REPO=""
+# --- Discover rigs ----------------------------------------------------------
+
+TOWN_ROOT="${GT_TOWN_ROOT:-$HOME/gt}"
+RIGS_JSON="${TOWN_ROOT}/mayor/rigs.json"
+
+if [[ ! -f "$RIGS_JSON" ]]; then
+  log "ERROR: rigs.json not found at $RIGS_JSON"
+  bd create "github-sheriff: FAILED (no rigs.json)" -t chore --ephemeral \
+    -l type:plugin-run,plugin:github-sheriff,result:failure \
+    -d "rigs.json not found at $RIGS_JSON" --silent 2>/dev/null || true
+  exit 1
 fi
 
-if [ -z "$REPO" ]; then
-  SKIP_REASON="could not detect GitHub repo from git remotes"
-  log "SKIP: $SKIP_REASON"
-  bd create "github-sheriff: skipped (no repo)" -t chore --ephemeral \
-    -l type:plugin-run,plugin:github-sheriff,result:skipped \
-    -d "$SKIP_REASON" --silent 2>/dev/null || true
+# Emit "<rig>\t<git_url>" per line so we can filter to GitHub-hosted rigs.
+mapfile -t RIG_LINES < <(jq -r '.rigs | to_entries[] | "\(.key)\t\(.value.git_url // "")"' "$RIGS_JSON")
+
+if [[ ${#RIG_LINES[@]} -eq 0 ]]; then
+  log "No rigs registered. Nothing to poll."
   exit 0
 fi
 
-log "Monitoring PRs for $REPO"
+# --- Per-rig poll -----------------------------------------------------------
 
-# --- Step 2: Fetch open PRs with full details ----------------------------
+# process_rig polls one rig's repo and files ci-failure beads. Echoes a single
+# summary line to stdout; logs detail to stderr. Returns 0 on success.
+process_rig() {
+  local rig="$1" repo="$2" rig_dir="$3"
 
-PRS=$(gh pr list --repo "$REPO" --state open \
-  --json number,title,author,additions,deletions,mergeable,statusCheckRollup,url \
-  --limit 100 2>/dev/null || echo "[]")
+  local prs pr_count
+  prs=$(gh pr list --repo "$repo" --state open \
+    --json number,title,author,isDraft,statusCheckRollup,url \
+    --limit 100 2>/dev/null || echo "[]")
+  pr_count=$(echo "$prs" | jq 'length')
 
-PR_COUNT=$(echo "$PRS" | jq length)
-if [ "$PR_COUNT" -eq 0 ]; then
-  log "No open PRs found for $REPO"
-  bd create "github-sheriff: $REPO (0 PRs)" -t chore --ephemeral \
-    -l type:plugin-run,plugin:github-sheriff,result:success \
-    -d "No open PRs found" --silent 2>/dev/null || true
-  exit 0
-fi
-
-log "Found $PR_COUNT open PR(s)"
-
-# --- Step 3: Categorize each PR and collect failures ----------------------
-
-EASY_WINS=()
-NEEDS_REVIEW=()
-FAILURES=()
-
-while IFS= read -r PR_JSON; do
-  [ -z "$PR_JSON" ] && continue
-
-  PR_NUM=$(echo "$PR_JSON" | jq -r '.number')
-  PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
-  AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
-  ADDITIONS=$(echo "$PR_JSON" | jq -r '.additions // 0')
-  DELETIONS=$(echo "$PR_JSON" | jq -r '.deletions // 0')
-  MERGEABLE=$(echo "$PR_JSON" | jq -r '.mergeable')
-  TOTAL_CHANGES=$((ADDITIONS + DELETIONS))
-
-  # Determine CI status from statusCheckRollup
-  TOTAL_CHECKS=$(echo "$PR_JSON" | jq '.statusCheckRollup | length')
-  PASSING_CHECKS=$(echo "$PR_JSON" | jq '[.statusCheckRollup[] | select(
-    .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or
-    .conclusion == "SKIPPED" or .state == "SUCCESS"
-  )] | length')
-
-  if [ "$TOTAL_CHECKS" -gt 0 ] && [ "$TOTAL_CHECKS" -eq "$PASSING_CHECKS" ]; then
-    CI_PASS=true
-  else
-    CI_PASS=false
+  if [[ "$pr_count" -eq 0 ]]; then
+    echo "$repo: 0 PRs, 0 failure(s), 0 bead(s), 0 already tracked"
+    return 0
   fi
 
-  # Collect individual check failures for bead creation
-  while IFS= read -r CHECK; do
-    [ -z "$CHECK" ] && continue
-    CHECK_NAME=$(echo "$CHECK" | jq -r '.name')
-    CHECK_URL=$(echo "$CHECK" | jq -r '.detailsUrl // .targetUrl // empty')
-    FAILURES+=("$PR_NUM|$PR_TITLE|$CHECK_NAME|$CHECK_URL")
-  done < <(echo "$PR_JSON" | jq -c '.statusCheckRollup[] | select(
-    .conclusion == "FAILURE" or .conclusion == "CANCELLED" or
-    .conclusion == "TIMED_OUT" or .state == "FAILURE" or .state == "ERROR"
-  )')
+  # Collect failing required checks across non-draft PRs.
+  # Required-check handling: keep a check when it is failing AND
+  # (isRequired == true OR isRequired is absent/null). This honors required
+  # status when gh exposes it and falls back to all failing checks otherwise,
+  # so a genuinely red PR is never silently ignored.
+  local failures
+  mapfile -t failures < <(echo "$prs" | jq -r '
+    .[] | select(.isDraft != true) as $pr
+    | $pr.statusCheckRollup[]?
+    | select(
+        (.conclusion == "FAILURE" or .conclusion == "CANCELLED" or
+         .conclusion == "TIMED_OUT" or .state == "FAILURE" or .state == "ERROR")
+        and (.isRequired == true or (has("isRequired") | not) or .isRequired == null)
+      )
+    | "\($pr.number)|\($pr.title)|\(.name // .context // "check")|\(.detailsUrl // .targetUrl // "")"
+  ')
 
-  # Categorize PR
-  if [ "$MERGEABLE" = "MERGEABLE" ] && [ "$CI_PASS" = true ] && [ "$TOTAL_CHANGES" -lt 200 ]; then
-    EASY_WINS+=("PR #$PR_NUM: $PR_TITLE (by $AUTHOR, +$ADDITIONS/-$DELETIONS)")
-  else
-    REASONS=""
-    [ "$MERGEABLE" != "MERGEABLE" ] && REASONS+="conflicts "
-    [ "$CI_PASS" != true ] && REASONS+="ci-failing "
-    [ "$TOTAL_CHANGES" -ge 200 ] && REASONS+="large(${TOTAL_CHANGES}loc) "
-    NEEDS_REVIEW+=("PR #$PR_NUM: $PR_TITLE (by $AUTHOR, ${REASONS% })")
+  local failure_count=${#failures[@]}
+  local created=0 skipped=0
+
+  if [[ "$failure_count" -gt 0 ]]; then
+    local existing
+    existing=$( (cd "$rig_dir" && bd list --label ci-failure --status open --json) 2>/dev/null || echo "[]")
+
+    local f pr_num pr_title check_name check_url bead_title description bead_id
+    for f in "${failures[@]}"; do
+      IFS='|' read -r pr_num pr_title check_name check_url <<< "$f"
+      bead_title="CI failure: $check_name on PR #$pr_num"
+
+      if echo "$existing" | jq -e --arg t "$bead_title" '.[] | select(.title == $t)' >/dev/null 2>&1; then
+        skipped=$((skipped + 1))
+        continue
+      fi
+
+      description="CI check \`$check_name\` failed on PR #$pr_num ($pr_title)
+
+Repo: $repo
+PR: https://github.com/$repo/pull/$pr_num"
+      [[ -n "$check_url" ]] && description="$description
+Check: $check_url"
+
+      bead_id=$( (cd "$rig_dir" && bd create "$bead_title" -t task -p 2 \
+        -d "$description" -l ci-failure --json) 2>/dev/null | jq -r '.id // empty')
+
+      if [[ -n "$bead_id" ]]; then
+        created=$((created + 1))
+        log "rig=$rig created $bead_id for: $check_name on PR #$pr_num"
+        gt activity emit github_check_failed \
+          --message "CI check $check_name failed on PR #$pr_num ($repo), bead $bead_id" \
+          2>/dev/null || true
+      fi
+    done
   fi
-done < <(echo "$PRS" | jq -c '.[]')
 
-# Report categorized PRs
-if [ ${#EASY_WINS[@]} -gt 0 ]; then
-  log "Easy wins (${#EASY_WINS[@]}):"
-  printf '[github-sheriff]   %s\n' "${EASY_WINS[@]}"
-fi
-if [ ${#NEEDS_REVIEW[@]} -gt 0 ]; then
-  log "Needs review (${#NEEDS_REVIEW[@]}):"
-  printf '[github-sheriff]   %s\n' "${NEEDS_REVIEW[@]}"
-fi
+  echo "$repo: $pr_count PRs, $failure_count failure(s), $created bead(s), $skipped already tracked"
+  return 0
+}
 
-# --- Step 4: Deduplicate CI failures and create beads --------------------
+total_polled=0
+total_skipped=0
+total_failed=0
+total_created=0
+declare -a RIG_REPORTS
 
-CREATED=0
-SKIPPED=0
+for line in "${RIG_LINES[@]}"; do
+  rig="${line%%$'\t'*}"
+  url="${line#*$'\t'}"
 
-# Only create CI failure beads for repos we own — skip upstream noise
-REPO_OWNER=$(echo "$REPO" | cut -d'/' -f1)
-if [ "$REPO_OWNER" != "athosmartins" ]; then
-  log "Skipping CI failure beads for upstream repo $REPO (not athosmartins)"
-  SKIPPED=${#FAILURES[@]}
-else
-  EXISTING=$(bd list --label ci-failure --status open --json 2>/dev/null || echo "[]")
-
-  for F in "${FAILURES[@]}"; do
-    IFS='|' read -r PR_NUM PR_TITLE CHECK_NAME CHECK_URL <<< "$F"
-    BEAD_TITLE="CI failure: $CHECK_NAME on PR #$PR_NUM"
-
-    # Check for duplicate (use jq --arg for safe string comparison)
-    if echo "$EXISTING" | jq -e --arg t "$BEAD_TITLE" '.[] | select(.title == $t)' > /dev/null 2>&1; then
-      SKIPPED=$((SKIPPED + 1))
+  # Filter: only GitHub-hosted rigs. gh cannot query other hosts.
+  case "$url" in
+    *github.com*) ;;
+    *)
+      total_skipped=$((total_skipped + 1))
+      RIG_REPORTS+=("$rig: skipped (non-github remote)")
       continue
-    fi
+      ;;
+  esac
 
-    DESCRIPTION="CI check \`$CHECK_NAME\` failed on PR #$PR_NUM ($PR_TITLE)
+  repo=$(echo "$url" | sed -E 's|.*github\.com[:/]||; s|\.git$||')
+  if [[ -z "$repo" ]]; then
+    total_skipped=$((total_skipped + 1))
+    RIG_REPORTS+=("$rig: skipped (could not resolve repo from $url)")
+    continue
+  fi
 
-PR: https://github.com/$REPO/pull/$PR_NUM"
-    [ -n "$CHECK_URL" ] && DESCRIPTION="$DESCRIPTION
-Check: $CHECK_URL"
+  rig_dir="${TOWN_ROOT}/${rig}"
+  if [[ ! -d "$rig_dir" ]]; then
+    total_skipped=$((total_skipped + 1))
+    RIG_REPORTS+=("$rig: skipped (no dir at $rig_dir)")
+    continue
+  fi
 
-    BEAD_ID=$(bd create "$BEAD_TITLE" -t task -p 2 \
-      -d "$DESCRIPTION" \
-      -l ci-failure \
-      --json 2>/dev/null | jq -r '.id // empty')
+  if report=$(process_rig "$rig" "$repo" "$rig_dir"); then
+    total_polled=$((total_polled + 1))
+    created=$(echo "$report" | sed -E 's|.* ([0-9]+) bead\(s\).*|\1|')
+    [[ "$created" =~ ^[0-9]+$ ]] && total_created=$((total_created + created))
+    RIG_REPORTS+=("$report")
+  else
+    total_failed=$((total_failed + 1))
+    RIG_REPORTS+=("$rig: poll failed")
+  fi
+done
 
-    if [ -n "$BEAD_ID" ]; then
-      CREATED=$((CREATED + 1))
-      log "Created bead $BEAD_ID for check failure: $CHECK_NAME"
+# --- Report -----------------------------------------------------------------
 
-      gt activity emit github_check_failed \
-        --message "CI check $CHECK_NAME failed on PR #$PR_NUM ($REPO), bead $BEAD_ID" \
-        2>/dev/null || true
-    fi
-  done
+SUMMARY="github-sheriff: polled=$total_polled skipped=$total_skipped failed=$total_failed beads_created=$total_created"
+
+log ""
+log "=== Done ==="
+log "$SUMMARY"
+for r in "${RIG_REPORTS[@]}"; do
+  log "  $r"
+done
+
+RESULT="success"
+if [[ $total_polled -eq 0 && $total_failed -gt 0 ]]; then
+  RESULT="failure"
 fi
 
-# --- Step 5: Record result --------------------------------------------------
-
-SUMMARY="$REPO: $PR_COUNT PRs — ${#EASY_WINS[@]} easy win(s), ${#NEEDS_REVIEW[@]} need review, ${#FAILURES[@]} failure(s), $CREATED bead(s) created, $SKIPPED already tracked"
-log "$SUMMARY"
-
-bd create "github-sheriff: $SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:github-sheriff,result:success \
+bd create "$SUMMARY" -t chore --ephemeral \
+  -l "type:plugin-run,plugin:github-sheriff,result:${RESULT}" \
   -d "$SUMMARY" --silent 2>/dev/null || true
 
-log "Done."
+exit 0
