@@ -24,6 +24,41 @@ func TestPluginRunRecord(t *testing.T) {
 	}
 }
 
+func TestRecordRunArgs_EphemeralByDefault(t *testing.T) {
+	args := recordRunArgs(PluginRunRecord{
+		PluginName: "lia-codegen-digest",
+		Result:     ResultInflight,
+	})
+	if !containsArg(args, "--ephemeral") {
+		t.Errorf("default (non-durable) receipt must be --ephemeral; got %v", args)
+	}
+}
+
+func TestRecordRunArgs_DurableOmitsEphemeral(t *testing.T) {
+	args := recordRunArgs(PluginRunRecord{
+		PluginName: "lia-codegen-digest",
+		Result:     ResultInflight,
+		Durable:    true,
+	})
+	if containsArg(args, "--ephemeral") {
+		t.Errorf("durable cron suppressor must NOT be --ephemeral (gs-k67g); got %v", args)
+	}
+	// Durability only changes the purge horizon — the receipt is still a normal
+	// plugin-run bead, so its identifying labels must be intact.
+	if !containsArg(args, "type:plugin-run") || !containsArg(args, "plugin:lia-codegen-digest") {
+		t.Errorf("durable receipt lost its plugin-run labels; got %v", args)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRunResultConstants(t *testing.T) {
 	if ResultSuccess != "success" {
 		t.Errorf("expected ResultSuccess to be 'success', got %q", ResultSuccess)

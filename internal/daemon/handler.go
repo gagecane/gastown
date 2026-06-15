@@ -370,6 +370,13 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			PluginName: p.Name,
 			Result:     plugin.ResultInflight,
 			Body:       fmt.Sprintf("Dispatched to dog %s", idleDog.Name),
+			// Cron suppression must hold until the next scheduled fire, but every
+			// cron interval (daily/weekly) outlives the 1h ephemeral purge. Write
+			// the suppressor durably so CronDue still sees it across the window
+			// instead of re-dispatching every heartbeat (gs-k67g / hq-opjq5).
+			// Cooldown suppressors stay ephemeral — their grace-reopen semantics
+			// (gu-50nbo) don't depend on surviving a purge horizon.
+			Durable: p.Gate != nil && p.Gate.Type == plugin.GateCron,
 		}); err != nil {
 			d.logger.Printf("Handler: failed to record dispatch for plugin %s, aborting dispatch (fail-closed): %v", p.Name, err)
 			// Roll back assignment — without a persisted suppressor record the

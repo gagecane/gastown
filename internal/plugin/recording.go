@@ -42,6 +42,20 @@ type PluginRunRecord struct {
 	RigName    string
 	Result     RunResult
 	Body       string
+
+	// Durable, when true, writes the receipt as a NON-ephemeral wisp so the
+	// reaper holds it for the standard purge age (168h) instead of the short
+	// EphemeralPurgeAge (1h). Cron-gate suppression depends on this: CronDue
+	// suppresses re-dispatch only while a dispatch record at-or-after the most
+	// recent scheduled fire survives, and EVERY cron interval (daily=24h,
+	// weekly=168h) exceeds the 1h ephemeral purge. With an ephemeral receipt the
+	// suppressor vanished after 1h and the daemon re-dispatched the dog every
+	// heartbeat for the rest of the window (gs-k67g; dog-dispatch churn hq-opjq5).
+	// A daily/weekly cron's record purges at 168h, comfortably outliving its
+	// window — and CronDue ignores records before the current prevFire, so a
+	// lingering record never wrongly suppresses the next fire. Cooldown/manual
+	// receipts stay ephemeral (their gate semantics don't span a purge horizon).
+	Durable bool
 }
 
 // PluginRunBead represents a recorded plugin run from the ledger.
@@ -63,34 +77,12 @@ func NewRecorder(townRoot string) *Recorder {
 	return &Recorder{townRoot: townRoot}
 }
 
-// RecordRun creates an ephemeral bead for a plugin run.
+// RecordRun creates a closed bead recording a plugin run. The receipt is
+// ephemeral by default (purged at EphemeralPurgeAge); set record.Durable to
+// keep it for the standard purge age when the gate must outlive that horizon.
 // This is pure data writing - the caller decides what result to record.
 func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
-	title := fmt.Sprintf("Plugin run: %s", record.PluginName)
-
-	// Build labels
-	labels := []string{
-		"type:plugin-run",
-		fmt.Sprintf("plugin:%s", record.PluginName),
-		fmt.Sprintf("result:%s", record.Result),
-	}
-	if record.RigName != "" {
-		labels = append(labels, fmt.Sprintf("rig:%s", record.RigName))
-	}
-
-	// Build bd create command
-	args := []string{
-		"create",
-		"--ephemeral",
-		"--json",
-		"--title=" + title,
-	}
-	for _, label := range labels {
-		args = append(args, "-l", label)
-	}
-	if record.Body != "" {
-		args = append(args, "--description="+record.Body)
-	}
+	args := recordRunArgs(record)
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()
@@ -123,6 +115,36 @@ func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
 	_ = closeCmd.Run() // Best-effort — reaper will catch it if this fails
 
 	return result.ID, nil
+}
+
+// recordRunArgs builds the `bd create` arguments for a plugin-run receipt.
+// Split out from RecordRun so the flag shape (notably whether --ephemeral is
+// emitted for Durable records) is unit-testable without a live beads store.
+func recordRunArgs(record PluginRunRecord) []string {
+	title := fmt.Sprintf("Plugin run: %s", record.PluginName)
+
+	labels := []string{
+		"type:plugin-run",
+		fmt.Sprintf("plugin:%s", record.PluginName),
+		fmt.Sprintf("result:%s", record.Result),
+	}
+	if record.RigName != "" {
+		labels = append(labels, fmt.Sprintf("rig:%s", record.RigName))
+	}
+
+	args := []string{"create", "--json", "--title=" + title}
+	// Durable receipts (cron-gate suppressors) omit --ephemeral so they survive
+	// past the 1h EphemeralPurgeAge — see PluginRunRecord.Durable.
+	if !record.Durable {
+		args = append(args, "--ephemeral")
+	}
+	for _, label := range labels {
+		args = append(args, "-l", label)
+	}
+	if record.Body != "" {
+		args = append(args, "--description="+record.Body)
+	}
+	return args
 }
 
 // GetLastRun returns the most recent run for a plugin.
