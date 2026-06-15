@@ -117,6 +117,19 @@ type Daemon struct {
 	// scheduler-dispatch.lock, but this avoids the redundant subprocess spawn).
 	dispatchInFlight atomic.Bool
 
+	// mainBranchTestInFlight guards runMainBranchTests against blocking the
+	// select loop. The main_branch_test patrol runs each rig's full quality-gate
+	// suite (act/Docker, described in code as 20-40min runs) inline; previously
+	// the patrols.mainBranchTest case called runMainBranchTests() directly on the
+	// select goroutine, so the entire loop — heartbeat, signal handling, every
+	// other patrol — was blocked for up to ~an hour across rigs (gu-23xve). The
+	// tick now launches the suite on its own goroutine and returns immediately.
+	// This flag ensures only one suite runs at a time: if a prior run is still
+	// draining when the next tick fires, the new tick skips rather than stacking
+	// goroutines (the suite also self-serializes via acquireGlobalGateLock, but
+	// this avoids the redundant launch).
+	mainBranchTestInFlight atomic.Bool
+
 	// Boot spawn cooldown: prevents Boot from spawning on every heartbeat tick.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	bootLastSpawned time.Time
@@ -954,8 +967,11 @@ func (d *Daemon) Run() (err error) {
 		case <-patrols.mainBranchTest:
 			// Main branch test runner — periodically runs quality gates on each
 			// rig's main branch to catch regressions from merges or direct pushes.
+			// Launched off the select loop (gu-23xve): the suite runs each rig's
+			// full act/Docker gate (20-40min) and must not block heartbeat,
+			// signal handling, or dispatch.
 			if !d.isShutdownInProgress() {
-				d.runMainBranchTests()
+				d.launchMainBranchTests()
 			}
 
 		case <-patrols.quotaDog:

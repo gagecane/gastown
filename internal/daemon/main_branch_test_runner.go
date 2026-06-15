@@ -331,6 +331,30 @@ func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
 	return cfg, nil
 }
 
+// launchMainBranchTests starts runMainBranchTests on its own goroutine so the
+// heavy per-rig gate suite (act/Docker, 20-40min runs) never blocks the daemon
+// select loop (gu-23xve). The select case previously called runMainBranchTests
+// directly, freezing heartbeat, signal handling, and dispatch for up to ~an
+// hour across rigs.
+//
+// A non-blocking in-flight guard (mainBranchTestInFlight) ensures only one
+// suite runs at a time: if a prior run is still draining when the next tick
+// fires, this tick skips rather than stacking goroutines. The suite also
+// self-serializes its per-rig gate runs behind acquireGlobalGateLock, so
+// skipping the redundant launch is safe. CompareAndSwap is non-blocking, so the
+// select case returns immediately either way.
+func (d *Daemon) launchMainBranchTests() {
+	if !d.mainBranchTestInFlight.CompareAndSwap(false, true) {
+		d.logger.Printf("main_branch_test: prior cycle still in flight, skipping this tick")
+		return
+	}
+
+	go func() {
+		defer d.mainBranchTestInFlight.Store(false)
+		d.runMainBranchTests()
+	}()
+}
+
 // runMainBranchTests runs quality gates on each rig's main branch.
 // It fetches the latest main, runs configured gates/tests, and escalates failures.
 //
