@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -93,7 +94,57 @@ func runBeadCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// No explicit --repo and no rig-resolvable --assignee: bd would route purely
+	// by cwd. From a rig working directory whose root .beads is an orphaned
+	// embedded database (e.g. gastown/.beads → embedded hq), that silently lands
+	// the bead in the wrong database and makes it un-slingable (gs-kdg7). Pin the
+	// cwd's rig canonical server database so a bare create from any rig dir is
+	// immediately slingable.
+	if beadsDir == "" {
+		if cwd, err := filepath.Abs("."); err == nil {
+			if dir, rigName, ok := resolveBareCreateBeadsDir(townRoot, cwd, repo, assignee); ok {
+				beadsDir = dir
+				targetRig = rigName
+				routedVia = "cwd"
+			}
+		}
+	}
+
 	return execBdCreate(args, beadsDir, routedVia, targetRig)
+}
+
+// resolveBareCreateBeadsDir returns the canonical rig beads directory to pin
+// when a bare `gt bead create` (no --repo, no --assignee) is run from inside a
+// rig working tree. Without this, bd routes purely by cwd, and a rig root whose
+// .beads is an orphaned embedded database (e.g. gastown/.beads → embedded hq)
+// silently captures the bead, making it un-slingable (gs-kdg7).
+//
+// It returns ok=false — leaving bd's native cwd routing untouched — when an
+// explicit --repo or --assignee was given (those already drive routing, and an
+// explicit town-level assignee intentionally targets the town database), when
+// cwd is not inside a rig, or when the rig has no resolvable canonical beads
+// directory.
+func resolveBareCreateBeadsDir(townRoot, cwd, repo, assignee string) (beadsDir, rig string, ok bool) {
+	if repo != "" || strings.TrimSpace(assignee) != "" {
+		return "", "", false
+	}
+	rel, err := filepath.Rel(townRoot, cwd)
+	if err != nil {
+		return "", "", false
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", "", false
+	}
+	rigName := strings.SplitN(rel, "/", 2)[0]
+	if rigName == "" || rigName == "." {
+		return "", "", false
+	}
+	dir, found := beads.ResolveRepoAliasBeadsDir(townRoot, rigName)
+	if !found {
+		return "", "", false
+	}
+	return dir, rigName, true
 }
 
 // stripFlagFromArgs removes a single value-taking flag and its value from a
