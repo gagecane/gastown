@@ -190,7 +190,16 @@ func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
 func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge time.Duration, mol *dogMol) {
 	databases := config.Databases
 	if len(databases) == 0 {
-		databases = reaper.DiscoverDatabases(d.doltServerHost(), d.doltServerPort())
+		discovered, err := reaper.DiscoverDatabases(d.doltServerHost(), d.doltServerPort())
+		if err != nil {
+			// Server unreachable — do NOT fall back to a phantom single-DB list,
+			// which would silently skip every real rig (gu-7c2if). Fail the cycle
+			// loudly so the failure is visible rather than degrading silently.
+			d.logger.Printf("wisp_reaper: discover databases failed: %v", err)
+			mol.failStep("scan", fmt.Sprintf("discover databases: %v", err))
+			return
+		}
+		databases = discovered
 	}
 	if len(databases) == 0 {
 		d.logger.Printf("wisp_reaper: no databases to reap")

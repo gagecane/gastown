@@ -70,12 +70,22 @@ func isTableNotFound(err error) bool {
 
 // DiscoverDatabases queries SHOW DATABASES on the Dolt server and returns
 // all production databases, filtering out system databases and test pollution.
-// Falls back to DefaultDatabases on any error.
-func DiscoverDatabases(host string, port int) []string {
+//
+// The returned error distinguishes "unreachable" from "reachable but empty":
+//   - sql.Open / SHOW DATABASES / row-iteration failure → ([]string(nil), error).
+//     The server could not be queried, so the caller must NOT assume the town
+//     only has the fallback databases — that would silently skip every real rig
+//     (gu-7c2if). Callers should log the error and skip the cycle.
+//   - query succeeded but returned zero production databases → (DefaultDatabases,
+//     nil). This is the only path that falls back to DefaultDatabases, because
+//     the server is genuinely reachable and reports an empty (or system-only)
+//     database list.
+//   - query succeeded with production databases → (databases, nil).
+func DiscoverDatabases(host string, port int) ([]string, error) {
 	dsn := fmt.Sprintf("root@tcp(%s:%d)/?parseTime=true&timeout=5s", host, port)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return DefaultDatabases
+		return nil, fmt.Errorf("open dolt connection %s:%d: %w", host, port, err)
 	}
 	defer func() { _ = db.Close() }()
 
@@ -84,7 +94,7 @@ func DiscoverDatabases(host string, port int) []string {
 
 	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
 	if err != nil {
-		return DefaultDatabases
+		return nil, fmt.Errorf("show databases on %s:%d: %w", host, port, err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -110,11 +120,15 @@ func DiscoverDatabases(host string, port int) []string {
 		}
 		databases = append(databases, name)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate databases on %s:%d: %w", host, port, err)
+	}
 
 	if len(databases) == 0 {
-		return DefaultDatabases
+		// Reachable but empty: fall back to the static known-DB list.
+		return DefaultDatabases, nil
 	}
-	return databases
+	return databases, nil
 }
 
 // ScanResult holds the results of scanning a database for reaper candidates.

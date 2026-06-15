@@ -29,7 +29,7 @@ var (
 	reaperJSON     bool
 )
 
-func reaperDatabaseNames() []string {
+func reaperDatabaseNames() ([]string, error) {
 	if reaperDB == "" {
 		return reaper.DiscoverDatabases(reaperHost, reaperPort)
 	}
@@ -41,7 +41,7 @@ func reaperDatabaseNames() []string {
 			databases = append(databases, name)
 		}
 	}
-	return databases
+	return databases, nil
 }
 
 func waitBeforeReaperDatabase(index int) error {
@@ -152,7 +152,10 @@ func runMailReapCommand[T any](ttlStr, label, entryWord, noun, remainWord, summa
 // Collects and returns every non-error result. op errors are logged to stderr
 // and that database is skipped, matching the prior per-command behavior.
 func reaperPerDBResults[T any](label string, connTimeout time.Duration, paced bool, op func(db *sql.DB, dbName string) (T, error)) ([]T, error) {
-	databases := reaperDatabaseNames()
+	databases, err := reaperDatabaseNames()
+	if err != nil {
+		return nil, fmt.Errorf("discover databases: %w", err)
+	}
 
 	var results []T
 	for i, dbName := range databases {
@@ -215,7 +218,10 @@ var reaperDatabasesCmd = &cobra.Command{
 	Use:   "databases",
 	Short: "List databases available for reaping",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbs := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		dbs, err := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		if err != nil {
+			return fmt.Errorf("discover databases: %w", err)
+		}
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(dbs))
 		} else {
@@ -255,7 +261,10 @@ The Dog uses this to understand the state before deciding what to reap.`,
 			return fmt.Errorf("invalid --stale-age: %w", err)
 		}
 
-		databases := reaperDatabaseNames()
+		databases, err := reaperDatabaseNames()
+		if err != nil {
+			return fmt.Errorf("discover databases: %w", err)
+		}
 
 		var results []*reaper.ScanResult
 		for i, dbName := range databases {
@@ -708,9 +717,9 @@ Use --dry-run to preview closures without applying them.`,
 			return fmt.Errorf("invalid --max-age: %w", err)
 		}
 
-		databases := reaper.DiscoverDatabases(reaperHost, reaperPort)
-		if reaperDB != "" {
-			databases = strings.Split(reaperDB, ",")
+		databases, err := reaperDatabaseNames()
+		if err != nil {
+			return fmt.Errorf("discover databases: %w", err)
 		}
 
 		var results []*reaper.ClosePluginReceiptResult
@@ -802,9 +811,9 @@ auto-discovers all databases on the Dolt server.
 
 Use --dry-run to preview what would be flushed without committing.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		databases := reaper.DiscoverDatabases(reaperHost, reaperPort)
-		if reaperDB != "" {
-			databases = strings.Split(reaperDB, ",")
+		databases, err := reaperDatabaseNames()
+		if err != nil {
+			return fmt.Errorf("discover databases: %w", err)
 		}
 
 		var results []*reaper.FlushWispResult
@@ -1135,7 +1144,10 @@ var reaperRunCmd = &cobra.Command{
 This is the inline fallback for when Dog dispatch is unavailable.
 Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		databases := reaperDatabaseNames()
+		databases, err := reaperDatabaseNames()
+		if err != nil {
+			return fmt.Errorf("discover databases: %w", err)
+		}
 
 		maxAge, err := time.ParseDuration(reaperMaxAge)
 		if err != nil {
@@ -1507,7 +1519,10 @@ that would be raised without raising it.`,
 		townRoot := beads.FindTownRoot(workDir)
 		ttls := loadTTLConfig(townRoot, os.Getenv("GT_RIG"))
 
-		databases := reaperDatabaseNames()
+		databases, err := reaperDatabaseNames()
+		if err != nil {
+			return fmt.Errorf("discover databases: %w", err)
+		}
 		var totalOpen, totalActionable int
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(i); err != nil {

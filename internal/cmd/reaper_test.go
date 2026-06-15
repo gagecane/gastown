@@ -10,7 +10,10 @@ func TestReaperDatabaseNamesTrimsConfiguredList(t *testing.T) {
 	t.Cleanup(func() { reaperDB = oldDB })
 
 	reaperDB = " hq, gastown ,, beads "
-	got := reaperDatabaseNames()
+	got, err := reaperDatabaseNames()
+	if err != nil {
+		t.Fatalf("reaperDatabaseNames() returned error: %v", err)
+	}
 	want := []string{"hq", "gastown", "beads"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("reaperDatabaseNames() = %#v, want %#v", got, want)
