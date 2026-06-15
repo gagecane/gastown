@@ -3321,6 +3321,37 @@ func (m *Manager) loadFromBeads(name string) (*Polecat, error) {
 		}, nil
 	}
 
+	// Mid-molecule-workflow source: a pinned work bead assigned to this polecat.
+	// `gt mol step done` pins the current step (status=pinned + assignee) while
+	// the polecat works it, only unpinning when the molecule completes. An
+	// orchestrator polecat running a workflow molecule (e.g. mol-idea-to-plan)
+	// holds a pinned step the entire time it is awaiting a dispatched convoy's
+	// synthesis — its tmux session looks idle, but it is NOT reusable: pouring a
+	// second molecule onto it tangles two concurrent runs under one identity
+	// (gs-7bft / hq-su4gz). GetAssignedIssue below only recognizes
+	// open/in_progress/hooked, so without this check a pinned-step orchestrator
+	// falls through to StateIdle. Treat awaiting-synthesis (any pinned step) as
+	// working — or stalled if the session has died, so recovery handles it.
+	pinnedBeads, pinnedErr := m.beads.List(beads.ListOptions{
+		Status:   beads.StatusPinned,
+		Assignee: assignee,
+		Priority: -1,
+	})
+	if pinnedErr == nil && len(pinnedBeads) > 0 {
+		state := StateWorking
+		if sessionDead {
+			state = StateStalled
+		}
+		return &Polecat{
+			Name:      name,
+			Rig:       m.rig.Name,
+			State:     state,
+			ClonePath: clonePath,
+			Branch:    branchName,
+			Issue:     pinnedBeads[0].ID,
+		}, nil
+	}
+
 	// Compatibility fallback: if legacy hook_bead is still set, only trust it when
 	// it resolves to a currently hooked bead for this assignee. This avoids stale
 	// issue reporting when hook_bead diverges from the work bead state.

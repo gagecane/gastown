@@ -152,6 +152,98 @@ func TestManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) {
 	}
 }
 
+// TestManagerTreatsPinnedMoleculeStepAsWorking verifies that a polecat holding a
+// pinned work bead (an in-progress molecule step — e.g. an orchestrator awaiting
+// a dispatched convoy's synthesis) is classified working and excluded from the
+// idle/reusable pool. Regression for gs-7bft / hq-su4gz: such a polecat looked
+// idle (no hooked/in_progress/open assigned bead) and was wrongly reused, tangling
+// two concurrent idea-to-plan runs under one identity.
+func TestManagerTreatsPinnedMoleculeStepAsWorking(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not installed, skipping integration test")
+	}
+	testutil.RequireDoltContainer(t)
+
+	n := polecatManagerIntegrationCounter.Add(1)
+	prefix := fmt.Sprintf("pm%d", n)
+
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+
+	if err := os.MkdirAll(mayorRigPath, 0755); err != nil {
+		t.Fatalf("mkdir mayor rig path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "toast"), 0755); err != nil {
+		t.Fatalf("mkdir polecat dir: %v", err)
+	}
+
+	rigBeadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir rig .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write rig redirect: %v", err)
+	}
+
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir town .beads: %v", err)
+	}
+	routes := []beads.Route{
+		{Prefix: "hq-", Path: "."},
+		{Prefix: prefix + "-", Path: filepath.Join(rigName, "mayor", "rig")},
+	}
+	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	initBeadsDBWithPrefix(t, mayorRigPath, prefix)
+
+	r := &rig.Rig{Name: rigName, Path: rigPath}
+	// nil tmux: session liveness is unknown, so the polecat is not treated as
+	// session-dead and a pinned step classifies as working (not stalled).
+	mgr := NewManager(r, git.NewGit(rigPath), nil)
+
+	step, err := mgr.beads.Create(beads.CreateOptions{
+		Title:    "awaiting prd-review convoy synthesis",
+		Type:     "task",
+		Priority: 2,
+	})
+	if err != nil {
+		t.Fatalf("create molecule step: %v", err)
+	}
+
+	assignee := mgr.assigneeID("toast")
+	pinned := beads.StatusPinned
+	if err := mgr.beads.Update(step.ID, beads.UpdateOptions{
+		Status:   &pinned,
+		Assignee: &assignee,
+	}); err != nil {
+		t.Fatalf("pin molecule step: %v", err)
+	}
+
+	p, err := mgr.Get("toast")
+	if err != nil {
+		t.Fatalf("mgr.Get(toast): %v", err)
+	}
+	if p.State != StateWorking {
+		t.Fatalf("polecat state = %q, want %q while holding a pinned molecule step", p.State, StateWorking)
+	}
+	if p.Issue != step.ID {
+		t.Fatalf("polecat issue = %q, want pinned step %q", p.Issue, step.ID)
+	}
+
+	idle, err := mgr.FindIdlePolecat()
+	if err != nil {
+		t.Fatalf("mgr.FindIdlePolecat(): %v", err)
+	}
+	if idle != nil {
+		t.Fatalf("FindIdlePolecat() = %q, want nil while orchestrator awaits synthesis", idle.Name)
+	}
+}
+
 func TestManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping integration test")
