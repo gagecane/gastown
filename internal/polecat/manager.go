@@ -914,6 +914,9 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	if err := rig.RunSetupHooks(m.rig.Path, clonePath); err != nil {
 		style.PrintWarning("could not run setup hooks: %v", err)
 	}
+	if err := rig.RunGuardsInstall(m.rig.Path, clonePath); err != nil {
+		style.PrintWarning("could not install rig guards: %v", err)
+	}
 	if err := m.runSetupCommand(clonePath); err != nil {
 		cleanupOnError()
 		return nil, err
@@ -1145,6 +1148,10 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	if err := rig.RunSetupHooks(m.rig.Path, clonePath); err != nil {
 		// Non-fatal - log warning but continue
 		style.PrintWarning("could not run setup hooks: %v", err)
+	}
+	if err := rig.RunGuardsInstall(m.rig.Path, clonePath); err != nil {
+		// Non-fatal - log warning but continue
+		style.PrintWarning("could not install rig guards: %v", err)
 	}
 	if err := m.runSetupCommand(clonePath); err != nil {
 		cleanupOnError()

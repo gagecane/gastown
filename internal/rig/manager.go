@@ -579,6 +579,13 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	}
 	fmt.Printf("   ✓ Created mayor clone\n")
 
+	// Install the rig's internal-ref pre-push guard into the mayor clone (if the
+	// rig ships rig-guards/) so it enforces from the first push. No-op when the
+	// rig has no guards.
+	if err := RunGuardsInstall(rigPath, mayorRigPath); err != nil {
+		fmt.Printf("  Warning: Could not install rig guards on mayor clone: %v\n", err)
+	}
+
 	// Check if source repo has tracked .beads/ directory.
 	// If so, we need to initialize the database (it doesn't exist after clone since DB files are gitignored).
 	sourceBeadsDir := filepath.Join(mayorRigPath, ".beads")
@@ -814,6 +821,12 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return nil, fmt.Errorf("configuring hooks for refinery: %w", err)
 	}
 	fmt.Printf("   ✓ Created refinery worktree\n")
+	// Install the rig's internal-ref pre-push guard into the shared bare-repo
+	// hooks dir (via the refinery worktree) so every worktree of this rig
+	// enforces it from the first push. No-op when the rig has no guards.
+	if err := RunGuardsInstall(rigPath, refineryRigPath); err != nil {
+		fmt.Printf("  Warning: Could not install rig guards on refinery worktree: %v\n", err)
+	}
 	// Set up beads redirect for refinery (points to rig-level .beads)
 	if err := beads.SetupRedirect(m.townRoot, refineryRigPath); err != nil {
 		fmt.Printf("  Warning: Could not set up refinery beads redirect: %v\n", err)

@@ -325,6 +325,10 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 		// Non-fatal - log warning but continue
 		style.PrintWarning("could not run setup hooks: %v", err)
 	}
+	if err := rig.RunGuardsInstall(m.rig.Path, crewPath); err != nil {
+		// Non-fatal - log warning but continue
+		style.PrintWarning("could not install rig guards: %v", err)
+	}
 
 	// Ensure worktree-local git exclude has required Gas Town patterns.
 	// Writing to .git/info/exclude keeps Gas Town ignore rules out of the
