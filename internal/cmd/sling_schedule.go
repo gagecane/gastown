@@ -550,12 +550,18 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	if !opts.NoConvoy {
 		existingConvoy := isTrackedByConvoy(beadID)
 		if existingConvoy == "" {
-			convoyID, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch)
+			convoyID, created, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch)
 			if err != nil {
 				fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {
-				fmt.Printf("%s Created convoy %s\n", style.Bold.Render("→"), convoyID)
-				// Update the context bead fields with convoy ID
+				if created {
+					fmt.Printf("%s Created convoy %s\n", style.Bold.Render("→"), convoyID)
+				} else {
+					// Create-chokepoint dedup found a pre-existing convoy (gu-xig8y).
+					fmt.Printf("%s Already tracked by convoy %s\n", style.Dim.Render("○"), convoyID)
+				}
+				// Stamp the tracking convoy (new or pre-existing) onto the context
+				// bead so downstream dispatch resolves the same convoy.
 				fields.Convoy = convoyID
 				if updateErr := rigBeads.UpdateSlingContextFields(ctxBead.ID, fields); updateErr != nil {
 					fmt.Printf("%s Could not update context with convoy: %v\n", style.Dim.Render("Warning:"), updateErr)

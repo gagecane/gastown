@@ -1249,10 +1249,17 @@ func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaNam
 				}
 			} else {
 				var err error
-				convoyID, err = createAutoConvoy(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch)
+				var created bool
+				convoyID, created, err = createAutoConvoy(beadID, info.Title, slingOwned, slingMerge, slingBaseBranch)
 				if err != nil {
 					// Log warning but don't fail - convoy is optional
 					fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
+				} else if !created {
+					// Dedup at the create chokepoint found a pre-existing open
+					// convoy (gu-xig8y). Clear convoyID so rollback never closes
+					// a convoy we don't own.
+					fmt.Printf("%s Already tracked by convoy %s\n", style.Dim.Render("○"), convoyID)
+					convoyID = ""
 				} else {
 					fmt.Printf("%s Created convoy 🚚 %s\n", style.Bold.Render("→"), convoyID)
 					fmt.Printf("  Tracking: %s\n", beadID)

@@ -13,6 +13,16 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
+// stubAutoConvoyTrackedBy overrides the createAutoConvoy dedup hook to return the
+// given convoy ID (gu-xig8y), restoring the production function on cleanup. Pass
+// "" to assert no pre-existing convoy so createAutoConvoy proceeds to create one.
+func stubAutoConvoyTrackedBy(t *testing.T, existing string) {
+	t.Helper()
+	prev := autoConvoyTrackedByFn
+	autoConvoyTrackedByFn = func(beadID string) string { return existing }
+	t.Cleanup(func() { autoConvoyTrackedByFn = prev })
+}
+
 // TestBatchSling_ConvoyIDStoredInBeadFieldUpdates verifies that the batch convoy ID
 // is stored in each bead's fieldUpdates.ConvoyID. This was a bug where ConvoyID and
 // MergeStrategy were never persisted in batch mode.
@@ -522,12 +532,16 @@ exit 0
 		return nil
 	}
 	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
+	stubAutoConvoyTrackedBy(t, "")
 
-	convoyID, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "")
+	convoyID, created, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
 
+	if !created {
+		t.Errorf("expected created=true for a fresh convoy, got false (id %q)", convoyID)
+	}
 	if !strings.HasPrefix(convoyID, "hq-cv-") {
 		t.Errorf("convoy ID %q should have hq-cv- prefix", convoyID)
 	}
@@ -554,10 +568,60 @@ exit 0
 	}
 }
 
+// TestCreateAutoConvoy_DedupsExistingConvoy verifies the gu-xig8y create-chokepoint
+// dedup: when an open convoy already tracks the bead, createAutoConvoy no-ops onto
+// it — returning that convoy's ID with created=false and creating nothing (no bd
+// create, no tracking relation).
+func TestCreateAutoConvoy_DedupsExistingConvoy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot, logPath := setupTownWithBdStub(t, "")
+	bdScript := "#!/bin/sh\necho \"CMD:$*\" >> \"" + logPath + "\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(townRoot, "bin", "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("rewrite bd stub: %v", err)
+	}
+
+	stubAutoConvoyTrackedBy(t, "hq-cv-existing")
+
+	tracked := false
+	oldTrack := addTrackingRelationFn
+	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error {
+		tracked = true
+		return nil
+	}
+	t.Cleanup(func() { addTrackingRelationFn = oldTrack })
+
+	convoyID, created, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "")
+	if err != nil {
+		t.Fatalf("createAutoConvoy() error: %v", err)
+	}
+	if created {
+		t.Error("expected created=false when an open convoy already tracks the bead")
+	}
+	if convoyID != "hq-cv-existing" {
+		t.Errorf("convoyID = %q, want the pre-existing %q", convoyID, "hq-cv-existing")
+	}
+	if tracked {
+		t.Error("addTrackingRelationFn must not be called when deduping onto an existing convoy")
+	}
+
+	// No new convoy should have been created (no bd create call). A missing log
+	// file means bd was never invoked at all, which equally satisfies this.
+	if logBytes, err := os.ReadFile(logPath); err == nil {
+		if strings.Contains(string(logBytes), "CMD:create") {
+			t.Errorf("dedup should not invoke bd create:\n%s", string(logBytes))
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read bd log: %v", err)
+	}
+}
+
 // TestCreateAutoConvoy_FlagLikeTitleReturnsError verifies that a title starting
 // with "--" is rejected.
 func TestCreateAutoConvoy_FlagLikeTitleReturnsError(t *testing.T) {
-	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "")
+	_, _, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "")
 	if err == nil {
 		t.Fatal("expected error for flag-like title, got nil")
 	}
@@ -584,7 +648,8 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	_, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "")
+	stubAutoConvoyTrackedBy(t, "")
+	_, _, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
@@ -632,12 +697,16 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "")
+	stubAutoConvoyTrackedBy(t, "")
+	convoyID, created, err := createAutoConvoy("gt-aaa", "My task", false, "", "")
 	if err != nil {
 		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
 	}
 	if convoyID == "" {
 		t.Fatal("expected non-empty convoy ID")
+	}
+	if !created {
+		t.Fatal("expected created=true (convoy was minted despite dep failure)")
 	}
 
 	// Verify create was called but close was NOT called (convoy is not orphaned)
@@ -683,8 +752,9 @@ func TestCreateAutoConvoy_RejectsEpic(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { addTrackingRelationFn = oldTrack })
+	stubAutoConvoyTrackedBy(t, "")
 
-	_, err := createAutoConvoy("gt-epic", "Build the thing", false, "mr", "")
+	_, _, err := createAutoConvoy("gt-epic", "Build the thing", false, "mr", "")
 	if err == nil {
 		t.Fatal("expected error when auto-convoying an epic, got nil")
 	}
@@ -710,8 +780,9 @@ func TestCreateAutoConvoy_RejectsContainerLabel(t *testing.T) {
 		return &beadInfo{ID: beadID, Title: "Triage queue", IssueType: "task", Labels: []string{"gt:epic"}}, nil
 	}
 	t.Cleanup(func() { autoConvoyBeadInfoFn = prev })
+	stubAutoConvoyTrackedBy(t, "")
 
-	_, err := createAutoConvoy("gt-cont", "Triage queue", false, "mr", "")
+	_, _, err := createAutoConvoy("gt-cont", "Triage queue", false, "mr", "")
 	if err == nil {
 		t.Fatal("expected error when auto-convoying a gt:epic-labeled bead, got nil")
 	}
@@ -740,13 +811,17 @@ func TestCreateAutoConvoy_GuardFailsOpen(t *testing.T) {
 	oldTrack := addTrackingRelationFn
 	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error { return nil }
 	t.Cleanup(func() { addTrackingRelationFn = oldTrack })
+	stubAutoConvoyTrackedBy(t, "")
 
-	convoyID, err := createAutoConvoy("gt-aaa", "A real task", false, "mr", "")
+	convoyID, created, err := createAutoConvoy("gt-aaa", "A real task", false, "mr", "")
 	if err != nil {
 		t.Fatalf("guard should fail open on unresolvable bead, got error: %v", err)
 	}
 	if convoyID == "" {
 		t.Fatal("expected non-empty convoy ID when guard fails open")
+	}
+	if !created {
+		t.Fatal("expected created=true when guard fails open and convoy is minted")
 	}
 }
 

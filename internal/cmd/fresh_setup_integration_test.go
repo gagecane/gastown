@@ -95,9 +95,12 @@ func TestFreshInstallRigPolecatHookIntegration(t *testing.T) {
 	}
 
 	withWorkingDir(t, hqPath, func() {
-		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main")
+		convoyID, created, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main")
 		if err != nil {
 			t.Fatalf("create auto convoy: %v", err)
+		}
+		if !created {
+			t.Fatalf("expected createAutoConvoy to create a new convoy, got created=false (id %q)", convoyID)
 		}
 		if !strings.HasPrefix(convoyID, "hq-cv-") {
 			t.Fatalf("convoy ID %q does not use hq-cv- prefix", convoyID)

@@ -464,20 +464,50 @@ func convoyInfoFromAttachment(attachment *beads.AttachmentFields) *ConvoyInfo {
 // which case the guard fails open — see createAutoConvoy).
 var autoConvoyBeadInfoFn = getBeadInfoFromTownRoot
 
+// autoConvoyTrackedByFn resolves the open convoy already tracking a bead for the
+// dedup guard in createAutoConvoy. Injected via variable so unit tests can stub
+// it without a real `bd` subprocess; production uses isTrackedByConvoy, which
+// returns "" on any lookup error (never blocks creation).
+var autoConvoyTrackedByFn = isTrackedByConvoy
+
 // createAutoConvoy creates an auto-convoy for a single issue and tracks it.
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
 // mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
-// Returns the created convoy ID.
-func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string) (_ string, retErr error) {
+//
+// Returns the convoy ID and whether it was freshly created. When an open convoy
+// already tracks beadID, createAutoConvoy no-ops onto it: it returns that
+// convoy's ID with created=false and creates nothing. created=false signals the
+// caller that the convoy is pre-existing (possibly shared) and must NOT be torn
+// down on sling rollback — only a freshly-created (created=true) convoy is
+// rollback-owned.
+func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string) (_ string, created bool, retErr error) {
 	defer func() { telemetry.RecordConvoyCreate(context.Background(), beadID, retErr) }()
 	// Guard against flag-like titles propagating into convoy names (gt-e0kx5)
 	if beads.IsFlagLikeTitle(beadTitle) {
-		return "", fmt.Errorf("refusing to create convoy: bead title %q looks like a CLI flag", beadTitle)
+		return "", false, fmt.Errorf("refusing to create convoy: bead title %q looks like a CLI flag", beadTitle)
+	}
+
+	// Dedup guard (gu-xig8y). createAutoConvoy is the auto-convoy creation
+	// chokepoint reached by `gt sling`, the deferred scheduler, and batch sling.
+	// Every CURRENT caller already checks isTrackedByConvoy upstream and skips
+	// creation when a convoy exists — but, like the epic guard below, that check
+	// lives on the dispatch paths, not on creation. Two gaps slip through it:
+	//   - a TOCTOU race: a concurrent dispatcher creates the convoy between the
+	//     caller's upstream check and this call;
+	//   - a re-filed finding (patrol re-files an already-open bug across runs) or
+	//     a future caller that forgets the upstream check.
+	// Either way a SECOND convoy gets minted for a bead an open convoy already
+	// tracks — N redundant convoys for one bead, pure tracking clutter. Re-check
+	// at the chokepoint so the invariant (one open convoy per tracked bead) is
+	// enforced at the point the duplicate would be created. No-op onto the
+	// existing convoy instead, mirroring the bead-level dedup sling already does.
+	if existing := autoConvoyTrackedByFn(beadID); existing != "" {
+		return existing, false, nil
 	}
 
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
-		return "", fmt.Errorf("finding town root: %w", err)
+		return "", false, fmt.Errorf("finding town root: %w", err)
 	}
 
 	// Epic/container guard (gu-ihix1, gt-3798 class). createAutoConvoy is the
@@ -496,7 +526,7 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	// convoy-creation helper must not block dispatch on a read error.
 	if info, infoErr := autoConvoyBeadInfoFn(townRoot, beadID); infoErr == nil && info != nil {
 		if isEpicLikeBeadInfo(info) || isContainerBeadInfo(info) {
-			return "", fmt.Errorf("refusing to create auto-convoy for %s: %q is an epic / non-work container (issue_type=%q, labels=%v) — convoys track dispatchable work via children, not the epic itself. Sling the epic's children instead: gt sling %s",
+			return "", false, fmt.Errorf("refusing to create auto-convoy for %s: %q is an epic / non-work container (issue_type=%q, labels=%v) — convoys track dispatchable work via children, not the epic itself. Sling the epic's children instead: gt sling %s",
 				beadID, info.Title, info.IssueType, info.Labels, beadID)
 		}
 	}
@@ -530,7 +560,7 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	// Use BdCmd with WithAutoCommit to ensure convoy is persisted even when
 	// gt sling has set BD_DOLT_AUTO_COMMIT=off globally (gt-9xum2 root cause fix).
 	if out, err := BdCmd(createArgs...).Dir(townBeads).WithAutoCommit().CombinedOutput(); err != nil {
-		return "", fmt.Errorf("creating convoy: %w\noutput: %s", err, out)
+		return "", false, fmt.Errorf("creating convoy: %w\noutput: %s", err, out)
 	}
 
 	// Add tracking relation: convoy tracks the issue.
@@ -538,5 +568,5 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 		fmt.Printf("Warning: Could not create auto-convoy tracking: %v\n", err)
 	}
 
-	return convoyID, nil
+	return convoyID, true, nil
 }

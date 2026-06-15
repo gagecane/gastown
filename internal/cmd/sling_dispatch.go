@@ -606,13 +606,21 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		existingConvoy := isTrackedByConvoy(params.BeadID)
 		if existingConvoy == "" {
 			var err error
-			convoyID, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge, params.BaseBranch)
+			var created bool
+			var newConvoyID string
+			newConvoyID, created, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge, params.BaseBranch)
 			if err != nil {
 				fmt.Printf("  %s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
+			} else if created {
+				fmt.Printf("  %s Created convoy %s\n", style.Bold.Render("→"), newConvoyID)
+				// Only a freshly-created convoy is rollback-owned (convoyID); a
+				// pre-existing one found by the create-chokepoint dedup (gu-xig8y)
+				// is shared and must not be torn down on rollback.
+				convoyID = newConvoyID
 			} else {
-				fmt.Printf("  %s Created convoy %s\n", style.Bold.Render("→"), convoyID)
+				fmt.Printf("  %s Already tracked by convoy %s\n", style.Dim.Render("○"), newConvoyID)
 			}
-			trackingConvoyID = convoyID
+			trackingConvoyID = newConvoyID
 		} else {
 			fmt.Printf("  %s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
 			trackingConvoyID = existingConvoy
