@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,16 +284,21 @@ func runFormulaRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("parsing formula: %w", err)
 	}
 
-	// Handle dry-run mode
-	if formulaRunDryRun {
-		return dryRunFormula(f, formulaName, targetRig)
-	}
-
 	// Refuse to dispatch when a formula declares required vars that the caller
 	// has not provided. Without this, formulas like shiny / shiny-tdd silently
 	// dispatched beads titled "Design {{feature}}" — see gu-uiax.
+	//
+	// Validated BEFORE the dry-run branch (gu-fxyuz) so `--dry-run` catches a
+	// missing required var (e.g. mol-review-leg's `issue`) instead of printing
+	// a plan that a real run would reject — the dry-run is supposed to preview
+	// exactly what a real run does.
 	if err := validateRequiredFormulaVars(f, parseSetVars(formulaRunSet)); err != nil {
 		return err
+	}
+
+	// Handle dry-run mode
+	if formulaRunDryRun {
+		return dryRunFormula(f, formulaName, targetRig)
 	}
 
 	switch f.Type {
@@ -897,6 +903,17 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 			"--title=" + rendered.Title,
 			"--body-file=-",
 		}
+		// Pool-step carve-out label (gu-fxyuz). A non-interactive step whose
+		// resolved target is the rig polecat pool is legitimate fan-out polecat
+		// work (e.g. mol-review-leg's load-assignment/write-report/notify-close).
+		// Stamp gt:workflow-pool-step so the `-wfs-` dispatch guards
+		// (IsDispatchableWorkflowStep) let the engine — and the autonomous convoy
+		// feed / capacity scan for steps 2..N — dispatch it. Role/agent-targeted
+		// steps (e.g. mol-refinery-patrol's role-owned merge step, the gu-pi35l
+		// incident) are NOT labeled and stay blocked from the polecat lane.
+		if workflowStepIsPoolBound(rendered, targetRig, IsRigName) {
+			stepArgs = append(stepArgs, "--labels="+labelWorkflowPoolStep)
+		}
 		if beads.NeedsForceForID(stepBeadID) {
 			stepArgs = append(stepArgs, "--force")
 		}
@@ -1014,15 +1031,30 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 
 		slingCmd := exec.Command("gt", slingArgs...)
 		slingCmd.Stdout = os.Stdout
-		slingCmd.Stderr = os.Stderr
+		// Tee the child's stderr so the operator sees the real dispatch error
+		// live AND we can fold its first line into a hard-fail error below
+		// (gu-fxyuz). Previously the child stderr surfaced but the engine
+		// reported only "%v" = "exit status 1", losing the descriptive guard
+		// message, and then swallowed the failure into a dim warning + a
+		// falsely-cheerful "✓ Workflow dispatched!" summary.
+		var stepStderr bytes.Buffer
+		slingCmd.Stderr = io.MultiWriter(os.Stderr, &stepStderr)
 
 		if err := slingCmd.Run(); err != nil {
-			fmt.Printf("%s Failed to sling step %s: %v\n",
-				style.Dim.Render("Warning:"), step.ID, err)
-			_ = BdCmd("comments", "add", stepBeadID, fmt.Sprintf("Failed to sling: %v", err)).
+			realErr := strings.TrimSpace(util.FirstLine(stepStderr.String()))
+			if realErr == "" {
+				realErr = err.Error()
+			}
+			_ = BdCmd("comments", "add", stepBeadID, fmt.Sprintf("Failed to sling: %s", realErr)).
 				Dir(townBeads).
 				Run()
-			continue
+			// A ready step (no unmet deps) that fails to dispatch means the
+			// workflow did NOT start: every later step depends on this one, so
+			// nothing will run. Hard-fail with the real error rather than
+			// printing "✓ Workflow dispatched!" over a dead chain (gu-fxyuz).
+			return fmt.Errorf("failed to dispatch workflow step %s (%s): %s\n"+
+				"The workflow was created (%s) but its first step could not be slung, so no steps will run.",
+				step.ID, stepBeadID, realErr, workflowID)
 		}
 
 		slingCount++
@@ -1074,6 +1106,21 @@ func workflowStepTarget(step formula.Step, targetRig string) string {
 		return targetRig
 	}
 	return target
+}
+
+// workflowStepIsPoolBound reports whether a workflow step should be stamped with
+// the gt:workflow-pool-step carve-out label (gu-fxyuz): true only for a
+// non-interactive step whose resolved target is a rig polecat pool. Interactive
+// steps run in the orchestrator session, and role/agent-targeted steps (the
+// gu-pi35l incident shape) must stay blocked from the polecat lane — neither is
+// pool-bound. isRig is injected (IsRigName in production) so the decision is
+// unit-testable without rig config on disk.
+func workflowStepIsPoolBound(step formula.Step, targetRig string, isRig func(string) (string, bool)) bool {
+	if step.Interactive {
+		return false
+	}
+	_, ok := isRig(workflowStepTarget(step, targetRig))
+	return ok
 }
 
 // truncate shortens a string to maxLen, appending "..." if truncated.

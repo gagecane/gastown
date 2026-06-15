@@ -478,6 +478,39 @@ func IsRefineryWorkflowStepID(beadID string) bool {
 	return strings.Contains(beadID, "-wfs-")
 }
 
+// LabelWorkflowPoolStep marks a `-wfs-` workflow step that the formula engine
+// has DELIBERATELY routed to a rig's polecat pool (gu-fxyuz). It is the
+// engine-owned carve-out signal for the `-wfs-` dispatch guards: a step bead
+// carrying this label IS legitimate polecat work and must be allowed through.
+//
+// Background: every `-wfs-` bead is minted by executeWorkflowFormula
+// (internal/cmd/formula.go) — there is no other producer. The `-wfs-` guards
+// (gu-pi35l) exist to stop POLECATS from grabbing role-owned state-machine
+// steps (e.g. mol-refinery-patrol's "Merge and push" step, which targets the
+// refinery ROLE, not the pool). But a workflow whose steps resolve to the rig
+// pool (e.g. mol-review-leg's load-assignment → write-report → notify-close) is
+// genuine fan-out polecat work; the blunt `-wfs-` substring guard wrongly
+// blocked the engine's own dispatch of those steps, so `gt formula run
+// mol-review-leg` created the chain but dispatched 0 steps (gu-fxyuz).
+//
+// The engine stamps this label ONLY on non-interactive steps whose resolved
+// target is the rig pool — NOT on role/agent-targeted steps. So the original
+// gu-pi35l protection is preserved: a role-owned step (the incident case) never
+// carries the label and stays blocked. A label (not a transient sling flag) is
+// required because steps 2..N dispatch autonomously via the convoy feed /
+// capacity scan after their dependency closes, with no engine flag in that
+// loop — only a persistent bead label survives to those paths.
+const LabelWorkflowPoolStep = "gt:workflow-pool-step"
+
+// IsDispatchableWorkflowStep reports whether a `-wfs-` bead is an engine-routed
+// pool step that the `-wfs-` guards should allow through. True only when the
+// bead both matches the workflow-step ID convention AND carries
+// LabelWorkflowPoolStep. Callers use this to carve the engine's legitimate
+// pool-bound steps out of the otherwise-blanket `-wfs-` refusal (gu-fxyuz).
+func IsDispatchableWorkflowStep(beadID string, labels []string) bool {
+	return IsRefineryWorkflowStepID(beadID) && hasLabel(labels, LabelWorkflowPoolStep)
+}
+
 // IsRefineryOwnedBeadInfo reports whether the bead's owner address identifies
 // a refinery agent (`<rig>/refinery`). Refinery-owned beads track the rig's
 // merge-queue / patrol state machine; they are not work items a polecat can

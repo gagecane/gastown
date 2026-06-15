@@ -2636,7 +2636,13 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	// lifecycle. Without this guard the convoy stranded scan re-feeds
 	// them every cycle, the polecat closes no-changes, and the workflow
 	// engine's view of the step diverges from reality.
-	if strings.Contains(t.ID, "-wfs-") {
+	//
+	// Carve-out (gu-fxyuz): a step the formula engine deliberately routed to
+	// the rig pool carries gt:workflow-pool-step and IS legitimate polecat
+	// work — let the convoy feed dispatch it (this is how steps 2..N advance
+	// once their dependency closes). Role/agent-targeted steps (the gu-pi35l
+	// incident case) never carry the label and stay blocked.
+	if strings.Contains(t.ID, "-wfs-") && !isDispatchableWorkflowStep(t.ID, t.Labels) {
 		return false
 	}
 

@@ -510,7 +510,12 @@ func validateBeadDispatchable(beadID string, info *beadInfo) error {
 	// managed by the workflow engine, not by polecats. Mirrors the same
 	// `-wfs-` substring `gt done` uses to recognize workflow steps.
 	// Not bypassed by --force — workflow steps are never polecat work.
-	if isRefineryWorkflowStepID(beadID) {
+	//
+	// Carve-out (gu-fxyuz): a step the formula engine deliberately routed to
+	// the rig pool carries gt:workflow-pool-step and IS legitimate polecat
+	// work — allow it. Role/agent-targeted steps (the gu-pi35l incident case)
+	// never carry the label and stay blocked.
+	if isRefineryWorkflowStepID(beadID) && !isDispatchableWorkflowStep(beadID, info.Labels) {
 		return fmt.Errorf("refusing to sling bead %s: id matches *-wfs-* (refinery workflow step): %q.\nWorkflow steps are managed by the workflow engine, not by polecats", beadID, info.Title)
 	}
 

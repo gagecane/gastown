@@ -365,7 +365,12 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	// mol-refinery-patrol). Same `-wfs-` substring `gt done` uses to recognize
 	// workflow steps. Not bypassed by --force — workflow steps are never
 	// polecat work.
-	if isRefineryWorkflowStepID(params.BeadID) {
+	//
+	// Carve-out (gu-fxyuz): a step the formula engine deliberately routed to
+	// the rig pool carries gt:workflow-pool-step and IS legitimate polecat
+	// work — allow it. Role/agent-targeted steps (the gu-pi35l incident case)
+	// never carry the label and stay blocked.
+	if isRefineryWorkflowStepID(params.BeadID) && !isDispatchableWorkflowStep(params.BeadID, info.Labels) {
 		result.ErrMsg = "refinery-workflow-step"
 		return result, fmt.Errorf("bead %s is a refinery workflow step (id matches *-wfs-*): %q — workflow steps are managed by the workflow engine, not by polecats", params.BeadID, info.Title)
 	}

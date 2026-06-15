@@ -13,12 +13,15 @@ or per-worktree scratch files.
 
 ## Usage
 
-Dispatched from orchestrator formulas (e.g., mol-idea-to-plan) via:
+Dispatched from orchestrator formulas (e.g., mol-idea-to-plan) via `--set key=value`
+(the only input flag `gt formula run` accepts — there is no `--focus`/`--prompt`/
+`--artifacts` flag). `issue` is REQUIRED and must name a pre-created assignment bead:
 ```bash
-gt formula run mol-review-leg \
-  --focus="requirements-coverage" \
-  --prompt="Walk through every requirement..." \
-  --artifacts=".prd-reviews/slug/prd-draft.md,.designs/slug/design-doc.md"
+gt formula run mol-review-leg --rig=<rig> \
+  --set issue=<assignment-bead-id> \
+  --set focus="requirements-coverage" \
+  --set prompt="Walk through every requirement..." \
+  --set artifacts=".prd-reviews/slug/prd-draft.md,.designs/slug/design-doc.md"
 ```
 
 ## Execution Model
@@ -33,7 +36,7 @@ version = 1
 
 [vars]
 [vars.issue]
-description = "The review task bead assigned to this worker (auto-populated by dispatch)"
+description = "The review task bead assigned to this worker. Pass it explicitly: --set issue=<bead-id> (it is NOT auto-populated on a manual `gt formula run`)."
 required = true
 
 [vars.focus]

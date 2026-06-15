@@ -52,6 +52,22 @@ func TestValidateBeadDispatchable(t *testing.T) {
 			info:    &beadInfo{Title: "Workflow step", Status: "open", IssueType: "task"},
 			wantErr: "workflow step",
 		},
+		{
+			// gu-fxyuz: a direct AGENT sling of an unlabeled -wfs- bead is still
+			// refused (the gu-pi35l protection must hold for role-owned steps).
+			name:    "unlabeled workflow-step id still rejected",
+			beadID:  "cacr-wfs-xegy2",
+			info:    &beadInfo{Title: "Merge and push", Status: "open", IssueType: "task"},
+			wantErr: "workflow step",
+		},
+		{
+			// gu-fxyuz: an engine-routed pool step (carrying the carve-out label)
+			// IS legitimate polecat work and passes the guard wall.
+			name:    "pool-labeled workflow step passes",
+			beadID:  "gu-wfs-abc",
+			info:    &beadInfo{Title: "Read the review assignment", Status: "open", IssueType: "task", Labels: []string{labelWorkflowPoolStep}},
+			wantErr: "",
+		},
 	}
 
 	for _, tc := range cases {

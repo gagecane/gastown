@@ -325,7 +325,12 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	// same `-wfs-` substring is what `gt done` uses to recognize workflow
 	// steps (internal/cmd/done.go); mirroring it here keeps the conventions
 	// in sync. Not bypassed by --force — workflow steps are never polecat work.
-	if isRefineryWorkflowStepID(beadID) {
+	//
+	// Carve-out (gu-fxyuz): a step the formula engine deliberately routed to
+	// the rig pool carries gt:workflow-pool-step and IS legitimate polecat
+	// work — allow it into the scheduler queue. Role/agent-targeted steps (the
+	// gu-pi35l incident case) never carry the label and stay blocked.
+	if isRefineryWorkflowStepID(beadID) && !isDispatchableWorkflowStep(beadID, info.Labels) {
 		return fmt.Errorf("bead %s is a refinery workflow step (id matches *-wfs-*): %q — refusing to schedule. Workflow steps are managed by the workflow engine, not by polecats",
 			beadID, info.Title)
 	}

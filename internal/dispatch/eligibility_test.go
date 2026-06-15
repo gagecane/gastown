@@ -1053,6 +1053,40 @@ func TestIsRefineryWorkflowStepID(t *testing.T) {
 	}
 }
 
+// TestIsDispatchableWorkflowStep verifies the gu-fxyuz carve-out: a `-wfs-`
+// step the formula engine routed to the rig pool (carrying
+// LabelWorkflowPoolStep) IS dispatchable, while a role-owned `-wfs-` step (the
+// gu-pi35l incident shape, no label) is NOT. Non-`-wfs-` beads are never
+// affected by the carve-out regardless of label.
+func TestIsDispatchableWorkflowStep(t *testing.T) {
+	tests := []struct {
+		name   string
+		id     string
+		labels []string
+		want   bool
+	}{
+		// Pool-routed workflow step (mol-review-leg): labeled → dispatchable.
+		{"wfs step with pool label", "gu-wfs-abc123", []string{LabelWorkflowPoolStep}, true},
+		{"wfs step with pool label among others", "gu-wfs-abc123", []string{"gt:review-only", LabelWorkflowPoolStep}, true},
+
+		// Role-owned workflow step (gu-pi35l incident): no label → still blocked.
+		{"wfs step without label", "cacr-wfs-xegy2", nil, false},
+		{"wfs step with unrelated labels", "cacr-wfs-xegy2", []string{"gt:convoy"}, false},
+
+		// Non-wfs beads: carve-out never applies (the substring guard wouldn't
+		// have fired anyway), so the predicate is false even if mislabeled.
+		{"non-wfs bead with pool label", "gu-pi35l", []string{LabelWorkflowPoolStep}, false},
+		{"non-wfs bead no label", "cacr-r8ne", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsDispatchableWorkflowStep(tt.id, tt.labels); got != tt.want {
+				t.Errorf("IsDispatchableWorkflowStep(%q, %v) = %v, want %v", tt.id, tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsRefineryOwnedBeadInfo verifies the gu-pi35l guard: beads owned by a
 // `<rig>/refinery` address track merge-queue / patrol state and must not be
 // dispatched to a polecat.

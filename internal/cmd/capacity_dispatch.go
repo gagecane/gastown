@@ -1696,7 +1696,13 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	// created, but existing contexts still need to be filtered out of the
 	// dispatch candidate set). `-wfs-` is the same substring `gt done` and
 	// the convoy stranded scan use to recognize workflow steps.
-	if strings.Contains(workBeadID, "-wfs-") {
+	//
+	// Carve-out (gu-fxyuz): a step the formula engine deliberately routed to
+	// the rig pool carries gt:workflow-pool-step and IS legitimate polecat
+	// work — keep it in the candidate set so the daemon dispatches the queued
+	// step. Role/agent-targeted steps (the gu-pi35l incident case) never carry
+	// the label and stay filtered.
+	if strings.Contains(workBeadID, "-wfs-") && !isDispatchableWorkflowStep(workBeadID, info.Labels) {
 		return false
 	}
 	// Never dispatch a bead marked as not-work (hq-9jeyo). Reference/gate

@@ -272,6 +272,45 @@ func TestWorkflowStepTarget(t *testing.T) {
 	}
 }
 
+// TestWorkflowStepIsPoolBound verifies the gu-fxyuz carve-out decision: the
+// engine stamps gt:workflow-pool-step ONLY on non-interactive steps that
+// resolve to a rig pool (mol-review-leg's steps), NOT on interactive steps or
+// role/agent-targeted steps (mol-refinery-patrol's role-owned steps, the
+// gu-pi35l incident shape).
+func TestWorkflowStepIsPoolBound(t *testing.T) {
+	t.Parallel()
+
+	// Stub isRig: only "gastown" is a rig; everything else (mayor, refinery
+	// role, crew path) is not.
+	isRig := func(target string) (string, bool) {
+		if target == "gastown" {
+			return "gastown", true
+		}
+		return "", false
+	}
+
+	tests := []struct {
+		name string
+		step formula.Step
+		want bool
+	}{
+		{name: "default rig (mol-review-leg load-assignment)", step: formula.Step{}, want: true},
+		{name: "explicit rig alias", step: formula.Step{Target: "rig"}, want: true},
+		{name: "interactive step never pool-bound", step: formula.Step{Interactive: true}, want: false},
+		{name: "role target (refinery) not pool-bound", step: formula.Step{Target: "mayor"}, want: false},
+		{name: "crew path not pool-bound", step: formula.Step{Target: "gastown/crew/alex"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := workflowStepIsPoolBound(tt.step, "gastown", isRig); got != tt.want {
+				t.Fatalf("workflowStepIsPoolBound(%+v) = %v, want %v", tt.step, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkflowStepDescriptionAddsTargetMetadata(t *testing.T) {
 	t.Parallel()
 

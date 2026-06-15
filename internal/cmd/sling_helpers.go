@@ -90,6 +90,8 @@ var (
 	isPolecatOwnedBeadInfo      = dispatch.IsPolecatOwnedBeadInfo
 	isRefineryOwnedBeadInfo     = dispatch.IsRefineryOwnedBeadInfo
 	isRefineryWorkflowStepID    = dispatch.IsRefineryWorkflowStepID
+	isDispatchableWorkflowStep  = dispatch.IsDispatchableWorkflowStep
+	labelWorkflowPoolStep       = dispatch.LabelWorkflowPoolStep
 	collectExistingMolecules    = dispatch.CollectExistingMolecules
 
 	verifyBeadIDMatch                 = dispatch.VerifyBeadIDMatch
