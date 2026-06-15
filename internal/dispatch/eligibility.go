@@ -416,6 +416,53 @@ func IsWrongRigBeadForTarget(info *BeadInfo, targetRig string) bool {
 	return beads.HasWrongRigLabelFor(info.Labels, targetRig)
 }
 
+// gastownToolingMarkers are substrings whose presence in a bead's title or
+// description signal that the deliverable is gastown's OWN source / internal
+// tooling — code and config that live in the gastown repo (gt-source), not in
+// any customer application tree. The markers are deliberately gastown-unique
+// terms ("gastown-level", "gt-source", "rig-guards") so a customer-repo bug
+// about the customer's own code does not match. All comparisons are
+// lower-cased.
+var gastownToolingMarkers = []string{
+	"gastown-level",
+	"gastown level",
+	"gastown-internal",
+	"gastown internal",
+	"gastown-tooling",
+	"gastown tooling",
+	"gastown source",
+	"gt-source",
+	"rig-guards",
+}
+
+// IsGastownToolingBead reports whether the bead's deliverable is gastown's own
+// source / internal tooling rather than a change to a customer application.
+//
+// gs-ilbt: gt-source / gastown-tooling beads were repeatedly mis-filed in a
+// customer rig (lb- prefix, base=main/merge=pr) and auto-dispatched to a
+// customer-repo polecat that has NO delivery path for a gastown Go change. Each
+// instance burned a customer dispatch slot + polecat investigation + manual
+// mayor re-home (lb-ax1v→gs-t3gy, lb-x3qn→gs-194x). Callers couple this text
+// signal with a customer-repo target check (a customer rig receiving a
+// gastown-tooling bead is the misroute) and refuse dispatch before it spawns a
+// polecat — so the work can be re-homed to gastown without wasting a session.
+//
+// The detection is pure-text against gastown-unique markers so it never matches
+// a customer-repo bead about the customer's own code; gastown-targeted beads
+// (the correct home) are excluded by the caller's customer-repo gate, not here.
+func IsGastownToolingBead(info *BeadInfo) bool {
+	if info == nil {
+		return false
+	}
+	haystack := strings.ToLower(info.Title + "\n" + info.Description)
+	for _, m := range gastownToolingMarkers {
+		if strings.Contains(haystack, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsPolecatOwnedBeadInfo reports whether the bead's owner address identifies
 // a polecat ("<rig>/polecats/<name>"). Polecats are not allowed to dispatch
 // work — their job is to execute a slung task and return — so a bead they

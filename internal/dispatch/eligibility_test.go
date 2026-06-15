@@ -1150,3 +1150,49 @@ func TestIsRefineryOwnedBeadInfo(t *testing.T) {
 		})
 	}
 }
+
+func TestIsGastownToolingBead(t *testing.T) {
+	tests := []struct {
+		name string
+		info *BeadInfo
+		want bool
+	}{
+		// Positive: real misroute incidents (gs-ilbt) — gastown-unique markers.
+		{"gastown-level provisioning (lb-x3qn)", &BeadInfo{
+			Title:       "Wire rig-guards/install.sh into provisioning",
+			Description: "This is gastown-level rig/worktree provisioning; rig-guards/ is internal/never-committed-to-customer-tree.",
+		}, true},
+		{"gt-source done.go change (lb-ax1v)", &BeadInfo{
+			Title:       "gt done: default upstream PRs to --draft",
+			Description: "the only PR-open site is gastown internal/cmd/done.go which targets gt-source, NOT the customer tree.",
+		}, true},
+		{"marker only in title", &BeadInfo{
+			Title:       "gastown-tooling: fix scheduler",
+			Description: "details here",
+		}, true},
+		{"gastown internal phrase", &BeadInfo{
+			Description: "change the gastown internal dispatch logic",
+		}, true},
+		{"case insensitive", &BeadInfo{
+			Description: "This is GASTOWN-LEVEL work",
+		}, true},
+
+		// Negative: genuine customer work and unrelated beads must not match.
+		{"customer app bug", &BeadInfo{
+			Title:       "Fix 500 on /checkout",
+			Description: "The payment handler returns 500 when the cart is empty.",
+		}, false},
+		{"plain mention of gastown without tooling marker", &BeadInfo{
+			Description: "deployed via gastown but the bug is in our API layer",
+		}, false},
+		{"empty", &BeadInfo{}, false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsGastownToolingBead(tt.info); got != tt.want {
+				t.Errorf("IsGastownToolingBead(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}

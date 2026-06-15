@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -391,6 +392,26 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			params.BeadID, beads.WrongRigLabelPrefix, params.RigName)
 	}
 
+	// Gastown-tooling-into-customer-rig guard (gs-ilbt). A bead whose deliverable
+	// is gastown's own source / internal tooling (gt-source) was mis-filed in a
+	// customer rig (lb- prefix, base=main/merge=pr) and is about to be slung to a
+	// customer-repo polecat that has NO delivery path for a gastown Go change.
+	// Each prior instance burned a customer dispatch slot + polecat investigation
+	// + manual mayor re-home (lb-ax1v→gs-t3gy, lb-x3qn→gs-194x). Catch it
+	// pre-dispatch: refuse here so the bead is re-homed to gastown without
+	// spawning a doomed customer-repo session. The text signal is coupled with a
+	// customer-repo target check so gastown-targeted beads (the correct home) and
+	// genuine customer work are unaffected. Not bypassed by --force — a customer
+	// polecat cannot deliver gastown source regardless of dispatch intent; the
+	// fix is to re-home, not to force.
+	if params.RigName != "" && isCustomerRepoRigFn(townRoot, params.RigName) && isGastownToolingBead(info) {
+		result.ErrMsg = "gastown-tooling-in-customer-rig"
+		return result, fmt.Errorf("bead %s targets customer-repo rig %q but its deliverable is gastown source / internal tooling: %q\n"+
+			"A customer-repo polecat has no delivery path for a gastown change — re-home the bead to the gastown rig instead of dispatching it here.\n"+
+			"Re-file in gastown (or ask the mayor to), then close this one as misrouted.",
+			params.BeadID, params.RigName, info.Title)
+	}
+
 	// Direct-dispatch blocked-deps guard (gu-gzng2). In direct-dispatch mode
 	// (scheduler.max_polecats <= 0) there is no persistent pending queue: a bead
 	// slung while blocked by open dependencies cannot be held and re-dispatched
@@ -751,6 +772,26 @@ func reconcileStaleSlingContexts(townRoot, rigName, workBeadID string) {
 		fmt.Printf("  %s Closed %d stale sling-context(s) as superseded: %s\n",
 			style.Dim.Render("○"), len(closed), strings.Join(closed, ", "))
 	}
+}
+
+// isCustomerRepoRigFn is an injectable seam for the gastown-tooling dispatch
+// guard in executeSling (gs-ilbt). Injected as a variable so unit tests can
+// drive the customer-repo branch without writing a real rig config layer.
+var isCustomerRepoRigFn = isCustomerRepoRig
+
+// isCustomerRepoRig reports whether the named rig is flagged customer_repo=true
+// in its config — i.e. origin is the customer's real remote and the rig's
+// polecats can only deliver changes to the customer application tree, never to
+// gastown source (gs-8p5r). Used by the gastown-tooling dispatch guard (gs-ilbt)
+// to recognize when a gastown-internal bead is about to be misrouted to a rig
+// that cannot deliver it. Defaults to false on any lookup failure so the guard
+// fails open (a misconfigured rig never blocks dispatch).
+func isCustomerRepoRig(townRoot, rigName string) bool {
+	if townRoot == "" || rigName == "" {
+		return false
+	}
+	r := &rig.Rig{Name: rigName, Path: filepath.Join(townRoot, rigName)}
+	return r.GetBoolConfig("customer_repo")
 }
 
 // findTownRoot is defined in hook.go

@@ -87,6 +87,7 @@ var (
 	isReferenceTripwireBeadInfo = dispatch.IsReferenceTripwireBeadInfo
 	isSlingContextBeadInfo      = dispatch.IsSlingContextBeadInfo
 	isWrongRigBeadForTarget     = dispatch.IsWrongRigBeadForTarget
+	isGastownToolingBead        = dispatch.IsGastownToolingBead
 	isPolecatOwnedBeadInfo      = dispatch.IsPolecatOwnedBeadInfo
 	isRefineryOwnedBeadInfo     = dispatch.IsRefineryOwnedBeadInfo
 	isRefineryWorkflowStepID    = dispatch.IsRefineryWorkflowStepID
