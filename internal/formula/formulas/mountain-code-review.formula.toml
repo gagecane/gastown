@@ -1,0 +1,546 @@
+# Mountain Code Review — Multi-Axis Source Review Convoy
+#
+# A convoy-type formula that fans out a comprehensive, multi-axis code-quality
+# review across the gastown source tree. Each axis is one parallel leg; a final
+# synthesis leg rolls every axis up into a single dashboard and files
+# severity-gated, deduplicated findings as child beads.
+#
+# A "mountain" is a convoy with the `mountain` label (see
+# docs/design/convoy/mountain-eater.md). This formula produces a normal convoy;
+# wrap it as a mountain so the Deacon audits progress and the Witness tracks
+# per-leg failures:
+#
+#   # 1. Stage + launch the convoy from this formula
+#   gt formula run mountain-code-review --rig=gastown_upstream --preset=full
+#
+#   # 2. Promote the resulting convoy to a mountain (enables audit + rollup)
+#   gt mountain <hq-cv-id>
+#
+#   # Re-runnable / scoped variants:
+#   gt formula run mountain-code-review --preset=quick
+#   gt formula run mountain-code-review --set scope=changed --branch=my-branch
+#
+# Re-runnability: each run writes to a run-scoped directory
+# (.reviews/mountain/{{.design_id}}) and the synthesis step dedups findings
+# against the most recent prior run's summary.json before filing beads, so
+# re-running does not flood `bd list` with duplicates.
+
+# ----------------------------------------------------------------------------
+# Top-level metadata
+# ----------------------------------------------------------------------------
+
+# review_only: every axis leg is analysis-only — it produces a findings report,
+# never a code change. Only the synthesis step commits (the report files + the
+# severity-gated finding beads). This keeps axis legs off the merge queue.
+review_only = true
+
+description = """
+Multi-axis code-quality review of the gastown source tree via a parallel
+convoy. Each leg is one review dimension; the synthesis leg rolls all axes up
+into a single dashboard and files severity-gated, deduplicated finding beads.
+
+Promote the resulting convoy to a mountain (`gt mountain <convoy-id>`) so the
+Deacon audits progress and the Witness tracks per-leg failures.
+
+## Axes (parallel legs)
+
+- **performance**     — hot paths, allocations, N+1 / per-iteration DB calls,
+                        goroutine / connection-lifecycle leaks, blocking I/O on
+                        the daemon main loop.
+- **test-coverage**   — untested packages, weak / flaky tests, missing
+                        edge-case + failure-path coverage, table-test gaps.
+- **integration**     — cross-component contracts (daemon<->dolt,
+                        sling<->scheduler, refinery<->merge-queue), API/CLI
+                        boundary correctness, config-schema drift.
+- **e2e**             — full-loop scenarios (sling -> polecat -> done ->
+                        merge-queue -> land; escalate -> ack -> close;
+                        mountain fan-out -> rollup) against real / harnessed runs.
+- **duplication**     — copy-paste / near-duplicate logic across packages;
+                        candidates for shared helpers.
+- **dead-code**       — unreferenced symbols, unreachable branches, orphaned
+                        files, stale flags / config keys.
+
+## Presets (scope control)
+
+- **quick**    — performance, dead-code, duplication (static, fast)
+- **standard** — quick + test-coverage, integration
+- **full**     — all six axes (adds e2e)
+
+## Output
+
+`.reviews/mountain/<design_id>/`:
+  <axis>.md          per-axis markdown findings
+  dashboard.md       synthesized roll-up dashboard (human-readable)
+  summary.json       machine-readable roll-up (for dedup + trending)
+"""
+formula = "mountain-code-review"
+type = "convoy"
+version = 1
+
+# Cap fan-out so a full review (6 legs) does not starve normal feature dispatch.
+# Forward-compatible hint read by convoy dispatch (mirrors code-quality).
+max_parallelism = 3
+
+# ----------------------------------------------------------------------------
+# Inputs
+# ----------------------------------------------------------------------------
+
+[inputs]
+
+[inputs.rig]
+description = "Rig whose source tree to review (default: rig that owns this run)"
+type = "string"
+required = false
+
+[inputs.preset]
+description = "Scope preset: quick | standard | full"
+type = "string"
+default = "full"
+
+[inputs.scope]
+description = "Review scope: full (whole tree) | changed (diff vs base branch only)"
+type = "string"
+default = "full"
+
+[inputs.branch]
+description = "Branch to diff against base for scope=changed (default: current branch)"
+type = "string"
+required = false
+
+# ----------------------------------------------------------------------------
+# Prompt template (injected into every axis leg prompt)
+# Convoy prompts use Go text/template syntax ({{.var}}).
+# ----------------------------------------------------------------------------
+
+[prompts]
+base = """
+# Multi-Axis Code Review — Axis Assignment
+
+You are a specialized reviewer on one axis of a multi-axis review convoy over
+the gastown source tree. You own exactly one review dimension.
+
+## Context
+- **Formula**: {{.formula_name}}
+- **Your axis**: {{.leg.focus}}
+- **Axis ID**: {{.leg.id}}
+- **Scope**: {{.target_description}}
+
+## Scope rules
+- If the run is scoped to changed paths only (scope=changed), restrict your
+  analysis to files in `git diff --name-only <base>...HEAD` plus their direct
+  callers/callees. Otherwise review the whole tree.
+- Focus on `internal/` and `cmd/` (the gastown daemon, CLI, scheduler,
+  refinery, witness, convoy, and dolt layers). Skip vendored and generated code.
+
+## Your task
+{{.leg.description}}
+
+## This is an audit — do NOT modify source
+Your deliverable is a findings report, not a code change. Do not edit source
+files. Persist your FULL report to this leg bead's notes (the synthesis step
+reads bead notes as the canonical source) AND, if a writable worktree exists,
+write the same content to: **{{.output_path}}**
+
+## Report format
+Write your findings as:
+
+```markdown
+# {{.leg.title}}
+
+## Summary
+(1-2 paragraphs: state of this axis, top theme)
+
+## Score
+A single number in [0.0, 1.0] — confidence this axis is in good shape
+(1.0 = excellent, 0.0 = critical debt). Emit it on its own line exactly as:
+score: 0.NN
+
+## Critical Findings (P0 — file as beads, fix urgently)
+For each:
+- **Title**: short imperative summary
+- **Location**: file:line (or path) reference
+- **Impact**: why this matters
+- **Suggested fix**: actionable next step
+- **Fingerprint**: a stable one-line key `axis:<id>|<file>|<symbol-or-rule>`
+  (used to dedup this finding against prior runs — keep it deterministic)
+
+## Major Findings (P1 — track, do not auto-bead)
+- ... (include a Fingerprint line for each)
+
+## Minor Findings (P2 — informational)
+- ...
+
+## Counts
+On a single line, in this exact form (synthesis parses it):
+
+  counts: critical=N major=N minor=N
+```
+
+Be specific (file:line), be actionable, prioritize impact. The synthesis step
+deduplicates findings reported by multiple axes and against prior runs.
+"""
+
+# ----------------------------------------------------------------------------
+# Output configuration
+# Run-scoped directory keyed on the convoy's deterministic design_id makes
+# every run land in its own dir (re-runnable, no clobber).
+# ----------------------------------------------------------------------------
+
+[output]
+directory = ".reviews/mountain/{{.design_id}}"
+leg_pattern = "{{.leg.id}}.md"
+synthesis = "dashboard.md"
+
+# ----------------------------------------------------------------------------
+# Axis legs (each spawns a parallel polecat)
+# ----------------------------------------------------------------------------
+
+[[legs]]
+id = "performance"
+title = "Performance Axis"
+focus = "Hot paths, allocations, N+1 DB calls, conn/goroutine leaks, blocking I/O"
+review_only = true
+description = """
+Review the source for performance and resource-lifecycle problems, with special
+attention to the patterns that have actually bitten gastown.
+
+**Look for:**
+- N+1 / per-iteration DB calls — a `bd`/dolt query inside a per-rig or per-bead
+  loop (cf. the per-rig fan-out hot paths in the scheduler dispatch path).
+- Unbounded or leaked connections — a query/poll loop that opens a dolt
+  connection per iteration without closing it (cf. the convoy event-poll
+  connection leak).
+- Goroutine leaks — goroutines started without a stop/exit path; missing
+  context cancellation; `await`/event loops that never re-arm.
+- Blocking I/O on the daemon main loop / heartbeat path — synchronous exec,
+  network, or full-suite test runs that can stall dispatch.
+- Allocations in hot paths — per-iteration slice/map/string building inside
+  tight loops; repeated JSON (un)marshal of the same data.
+- Serial fan-out that should be bounded-parallel (per-rig scans), and
+  conversely unbounded parallelism that spikes host load (gate-run storms).
+
+**Prioritization:**
+- Critical: connection/goroutine leak on a daemon loop; N+1 on a dispatch hot path.
+- Major: serial per-rig fan-out; blocking I/O on heartbeat; hot-path allocations.
+- Minor: localized inefficiencies off the hot path.
+
+**Questions to answer:**
+- What grows unbounded under sustained load (conns, goroutines, memory)?
+- What runs on the daemon main loop that should be off it?
+"""
+
+[[legs]]
+id = "test-coverage"
+title = "Test Coverage & Quality Axis"
+focus = "Untested packages, weak/flaky tests, missing edge/failure-path coverage, table-test gaps"
+review_only = true
+description = """
+Coverage numbers lag and lie. Audit whether tests actually verify behavior, and
+where critical packages have no safety net.
+
+**Look for:**
+- Packages / critical files with no test file at all (especially scheduler,
+  refinery, convoy, dolt, done, sling, witness paths).
+- Weak assertions — only `!= nil` / `err == nil` without checking the value;
+  `assert.True(t, true)`-style no-ops.
+- Tests so heavily mocked they cannot fail on a real regression.
+- Missing negative / boundary / failure-path coverage on critical logic.
+- Flaky-test indicators — `time.Sleep`, wall-clock dependence, retry-on-fail
+  loops, reliance on a live Dolt server / shared port (cf. test-pollution
+  incidents where `bd init` collides with the production server).
+- Table-test gaps — a table test that omits the obvious failure rows.
+- Skipped / `t.Skip` tests with no tracking bead.
+
+**Prioritization:**
+- Critical: critical-path package (dispatch/merge/recovery) with no failure-path tests.
+- Major: persistently skipped tests; weak assertions in core logic; flaky patterns.
+- Minor: table-test row gaps; style-level test smell.
+
+**Questions to answer:**
+- If a real regression shipped today, which tests would catch it — and which packages would silently pass?
+- Which tests are theatre — green, but verify nothing?
+"""
+
+[[legs]]
+id = "integration"
+title = "Integration Contracts Axis"
+focus = "Cross-component contracts, API/CLI boundary correctness, config-schema drift"
+review_only = true
+description = """
+Audit the contracts between gastown components — where one component's
+assumptions about another can silently diverge.
+
+**Look for:**
+- Cross-component contract drift on these seams specifically:
+  - daemon <-> dolt (query shape, connection lifecycle, error handling)
+  - sling <-> scheduler (dispatch args, capacity accounting, admission records)
+  - refinery <-> merge-queue (MR state transitions, post-merge reconcile,
+    merge_commit recording)
+  - convoy <-> mountain (tracking edges, rollup label semantics)
+- Config-schema drift — a config key written under one name and read under
+  another (cf. the `config_key` vs `key` mismatch class); a struct's TOML/JSON
+  tag not matching what producers emit; defaults that disagree across components.
+- API/CLI boundary correctness — flag parsing that mishandles flag-like values;
+  prefix/ID routing that can hit the wrong database (hq- vs rig- prefix);
+  commands that mutate state the caller did not expect.
+- Serialization round-trips — a value written by one component and read by
+  another via a format that loses or mistypes fields (cf. non-string
+  schema_version breaking kv reads).
+
+**Prioritization:**
+- Critical: contract mismatch that silently routes/writes to the wrong place
+  (wrong DB, dropped edge, lost merge_commit).
+- Major: config-key drift; boundary handling that breaks on edge inputs.
+- Minor: cosmetic inconsistency with no behavioral impact.
+
+**Questions to answer:**
+- Where do two components encode the same fact differently?
+- Which boundary breaks silently (wrong result) rather than loudly (error)?
+"""
+
+[[legs]]
+id = "e2e"
+title = "End-to-End Flow Axis"
+focus = "Full-loop scenarios validated against real or harnessed runs"
+review_only = true
+description = """
+Audit the end-to-end loops as whole journeys, not as isolated functions. Where
+possible, trace the code path for each loop and identify the steps that can
+strand, double-fire, or silently drop work.
+
+**Loops to trace:**
+- Work loop: `gt sling` -> polecat spawn -> implement -> `gt done` ->
+  merge-queue submit -> refinery gate -> land on main -> source-issue unhook /
+  close. Where can a step strand (e.g. done-push gate loop; post-merge unhook
+  skipped leaving a bead hooked)?
+- Escalation loop: `gt escalate` -> Mayor receives -> ack -> close. Does every
+  escalation have a terminal state?
+- Mountain loop: `gt mountain` -> stage -> wave dispatch -> ConvoyManager feeds
+  -> Witness failure-tracking / skip -> Deacon audit -> rollup -> completion
+  notification. Does fan-out reliably roll up?
+
+**Look for:**
+- Steps with no terminal/closeout (orphaned MRs, hooked-but-dead beads, convoys
+  that never close).
+- Idempotency gaps — re-running a step double-creates or double-counts
+  (admission records, tracking edges, finding beads).
+- Recovery predicate gaps — states the recovery scan misclassifies
+  (COMPLETED+open-MR, detached-HEAD stale-main false "unpushed").
+- Whether an automated e2e/integration harness exists for these loops, and
+  which loops have NO end-to-end test at all.
+
+**Prioritization:**
+- Critical: a loop step that can permanently strand work with no auto-recovery.
+- Major: idempotency gap that double-fires on re-run; loop with no e2e harness.
+- Minor: cosmetic/log-only gaps in an otherwise complete loop.
+
+**Questions to answer:**
+- For each loop, what is the failure mode that leaves it half-done forever?
+- Which loops are exercised end-to-end by a test, and which only by production?
+"""
+
+[[legs]]
+id = "duplication"
+title = "Duplication Axis"
+focus = "Copy-paste / near-duplicate logic across packages; shared-helper candidates"
+review_only = true
+description = """
+Identify copy-paste and near-duplicate logic that should be consolidated into
+shared helpers. Prefer a tool if available (e.g. `dupl`), then read to confirm.
+
+**Look for:**
+- Identical or near-identical blocks (>= ~15 lines) repeated across files /
+  packages — especially around bead create/update, prefix/route resolution,
+  git/worktree operations, and template rendering.
+- Repeated ad-hoc parsing of the same string format in multiple places.
+- Parallel switch/case ladders that re-encode the same mapping.
+- Copy-pasted retry / backoff / poll loops that should share one helper.
+- Repeated "build args slice + exec" patterns that drifted apart over time.
+
+**Distinguish** genuine duplication (one change must be made in N places, risk
+of drift) from coincidental similarity (similar shape, independent reasons).
+Only the former is actionable.
+
+**Prioritization:**
+- Critical: duplicated logic where the copies have ALREADY drifted (a bug fixed
+  in one copy but not the others).
+- Major: 3+ copies of a non-trivial block; high drift risk.
+- Minor: 2 small copies; low risk.
+
+**Questions to answer:**
+- Where would a single bug fix have to be applied in multiple places today?
+- What shared helper would remove the most duplication for the least coupling?
+"""
+
+[[legs]]
+id = "dead-code"
+title = "Dead Code Axis"
+focus = "Unreferenced symbols, unreachable branches, orphaned files, stale flags/config keys"
+review_only = true
+description = """
+Identify code that is no longer used and could be safely removed. Prefer a tool
+if available (e.g. `deadcode`, `staticcheck -unused`), then read to confirm —
+reflection, build tags, and embed can make a symbol look dead when it is not.
+
+**Look for:**
+- Functions, types, constants, methods with no callers in-tree.
+- Exported symbols not imported by any in-tree consumer (and not part of a
+  published API surface).
+- Unreachable branches (`if false`, dead `default`/`case`, conditions that are
+  always true/false).
+- Orphan files / modules referenced only by themselves.
+- Stale feature flags / config keys whose code paths are never enabled, and
+  flags that are read but never set (or set but never read).
+- Test helpers used by no test; build targets with no consumers.
+- Commented-out code blocks (>= 5 lines).
+
+**Verify before flagging:** check for reflection, `//go:embed`, build-tagged
+files, and interface-satisfaction uses that static callers miss.
+
+**Prioritization:**
+- Critical: large dead modules (>200 lines) or dead exported APIs consumers
+  might think are supported; stale config keys that mislead operators.
+- Major: mid-size internal dead code (functions, files, flags).
+- Minor: single-line cruft, commented blocks.
+
+**Questions to answer:**
+- What can be deleted in one PR with zero behavior change?
+- What looks live but is actually unreferenced?
+"""
+
+# ----------------------------------------------------------------------------
+# Presets — scope control
+# ----------------------------------------------------------------------------
+
+[presets]
+
+[presets.quick]
+description = "Fast static pass (~5 min) — three tool-assisted axes"
+legs = ["performance", "dead-code", "duplication"]
+
+[presets.standard]
+description = "Default (~12 min) — adds test and integration axes"
+legs = ["performance", "dead-code", "duplication", "test-coverage", "integration"]
+
+[presets.full]
+description = "Comprehensive (~20 min) — all six axes, including e2e flow tracing"
+legs = ["performance", "test-coverage", "integration", "e2e", "duplication", "dead-code"]
+
+# ----------------------------------------------------------------------------
+# Synthesis — roll all axes up into one dashboard + machine-readable summary
+# ----------------------------------------------------------------------------
+
+[synthesis]
+title = "Mountain Review Dashboard Synthesis"
+description = """
+Roll every axis up into a single dashboard, dedup findings (across axes AND
+against the prior run), and file severity-gated finding beads.
+
+## Inputs
+- All axis findings under: `{{.output.directory}}/` AND in each axis leg bead's
+  notes (the bead notes are canonical — read them; a leg may not have written a
+  file if it ran review-only).
+- Optional prior run: the most recent earlier
+  `.reviews/mountain/*/summary.json` (lexicographically before this run's dir).
+  Use it to dedup findings and compute deltas. If none, deltas are null.
+
+## Dedup rules (re-runnability — REQUIRED)
+- Each finding carries a `Fingerprint` (`axis:<id>|<file>|<symbol-or-rule>`).
+- Dedup WITHIN this run: collapse identical fingerprints reported by multiple
+  axes into one row (note all axes that found it).
+- Dedup AGAINST prior run: if a fingerprint already exists in the prior
+  summary.json AND a bead was filed for it that is still open, do NOT file a new
+  bead — reference the existing bead ID instead. Only file a bead for a
+  fingerprint that is genuinely new (or whose prior bead was closed and the
+  finding has recurred).
+
+## Outputs
+
+### 1. `{{.output.directory}}/{{.output.synthesis}}` (dashboard.md)
+
+```markdown
+# Mountain Code Review — <rig> — <run-id>
+
+## Dashboard
+- Overall score: 0.NN (delta vs last: ±0.NN)
+- Findings: C critical / M major / m minor (delta: ±)
+- Top theme: <one sentence>
+- Recommendation: <none | track | act now>
+
+## Per-Axis Scores
+| Axis | Score | Critical | Major | Minor | Delta |
+|---|---|---|---|---|---|
+| performance | 0.NN | 0 | 0 | 0 | ±0.NN |
+| test-coverage | ... | ... | ... | ... | ... |
+| integration | ... | ... | ... | ... | ... |
+| e2e | ... | ... | ... | ... | ... |
+| duplication | ... | ... | ... | ... | ... |
+| dead-code | ... | ... | ... | ... | ... |
+
+## Critical Findings (P0) — DEDUPLICATED
+For each:
+- **Title** — `<file>:<line>` _(axes: a, b)_ — fingerprint `...`
+  - Impact:
+  - Suggested fix:
+  - Bead: `<id>` (newly filed | existing | "—" if filing failed)
+
+## Major Findings (P1)
+Grouped by axis. One bullet each (with fingerprint).
+
+## Minor Findings (P2)
+Brief list, grouped by axis.
+
+## Trend Notes
+- Better since last run / worse / new themes.
+
+## Recommendations
+Actionable next steps (max 5).
+```
+
+### 2. `{{.output.directory}}/summary.json`
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "<this synthesis bead id>",
+  "rig": "<rig>",
+  "preset": "<preset>",
+  "scope": "<full|changed>",
+  "commit": "<HEAD sha>",
+  "overall_score": 0.78,
+  "axes": {
+    "performance": {
+      "score": 0.85,
+      "findings": { "critical": 0, "major": 1, "minor": 3 }
+    }
+  },
+  "totals": { "critical": 0, "major": 5, "minor": 12 },
+  "fingerprints": {
+    "<fingerprint>": { "severity": "critical", "bead": "<id-or-null>" }
+  },
+  "delta_since_last": { "overall_score": 0.03, "critical": 0, "major": -1, "minor": 2 }
+}
+```
+
+`overall_score` is the unweighted mean of the axis scores actually run.
+`fingerprints` is the dedup ledger the next run reads.
+
+## Bead-filing rules (severity gate — anti-flood)
+- File a bead ONLY for each NEW Critical (P0) finding (per dedup rules above).
+- Do NOT file beads for major or minor findings — the dashboard is the record.
+- Bead labels MUST include: `mountain-review`, `review-critical`,
+  `rig:<rig>`, `axis:<axis-id>`.
+- Bead title: short imperative — "<axis>: <title>".
+- Bead body: location, impact, suggested fix, fingerprint, link to the axis
+  findings file / leg bead.
+
+## Constraints
+- Do NOT modify source code.
+- The only writes you perform:
+  1. Create `{{.output.directory}}/{{.output.synthesis}}` (dashboard.md).
+  2. Create `{{.output.directory}}/summary.json`.
+  3. File beads for NEW critical findings only.
+  4. Stage and commit `.reviews/mountain/` as one commit:
+     `chore(review): mountain code review dashboard (<rig>)`.
+"""
+depends_on = ["performance", "test-coverage", "integration", "e2e", "duplication", "dead-code"]
