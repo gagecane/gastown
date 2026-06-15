@@ -71,17 +71,40 @@ func (r *Reader) Close() error { return r.db.Close() }
 // as cutoff is what enforces the closed-window invariant: in-flight candidates
 // written inside the margin are never read, so Retrospect can never live-tail
 // the live Patrol's current cycle.
+//
+// It has NO lower bound: every candidate ever written older than cutoff is
+// returned. The digest path uses ReadCandidatesBetween instead so the window has
+// a START — without one, the un-pruned curio_candidate table re-surfaces
+// conditions resolved long ago on every run (gu-1whne). ReadCandidatesBefore is
+// retained for the skeleton/diagnostic read that only reports a count.
 func (r *Reader) ReadCandidatesBefore(cutoff time.Time) ([]Candidate, error) {
+	return r.ReadCandidatesBetween(time.Time{}, cutoff)
+}
+
+// ReadCandidatesBetween returns candidates whose created_at is in [start, cutoff)
+// — start INCLUSIVE, cutoff EXCLUSIVE — newest first. The exclusive upper bound
+// preserves the closed-window invariant (the cursor is strictly behind now); the
+// inclusive lower bound trims the tail so already-resolved, long-past candidates
+// in the un-pruned sidecar are never re-read (gu-1whne lever A).
+//
+// A zero start (start.IsZero()) means "no lower bound" — every candidate older
+// than cutoff — which is exactly ReadCandidatesBefore's original semantics.
+func (r *Reader) ReadCandidatesBetween(start, cutoff time.Time) ([]Candidate, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	rows, err := r.db.QueryContext(ctx,
-		"SELECT fingerprint, window_id, series, observed, ewma, deviation,"+
-			" hypothesis, rule_id, target, rig, summary"+
-			" FROM "+candidateTable+
-			" WHERE created_at < ?"+
-			" ORDER BY created_at DESC",
-		cutoff.UTC())
+	query := "SELECT fingerprint, window_id, series, observed, ewma, deviation," +
+		" hypothesis, rule_id, target, rig, summary" +
+		" FROM " + candidateTable +
+		" WHERE created_at < ?"
+	args := []any{cutoff.UTC()}
+	if !start.IsZero() {
+		query += " AND created_at >= ?"
+		args = append(args, start.UTC())
+	}
+	query += " ORDER BY created_at DESC"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("reading candidates before %s: %w", cutoff.UTC().Format(time.RFC3339), err)
 	}
@@ -122,9 +145,10 @@ func (r *Reader) ReadOutcomeHistory() ([]RuleOutcome, error) {
 	// classifier emits minus 'unknown' (and minus the empty unreconciled state),
 	// matching the design's "precision EXCLUDES unknown" rule.
 	aggRows, err := r.db.QueryContext(ctx,
+		//nolint:gosec // G202: the IN-list and outcome literal come from package constants (judgedOutcomes / OutcomeFalsePositive), never user input.
 		"SELECT rule_id,"+
-			" SUM(CASE WHEN outcome IN ('fixed','false_positive','duplicate','deferred') THEN 1 ELSE 0 END) AS resolved,"+
-			" SUM(CASE WHEN outcome = 'false_positive' THEN 1 ELSE 0 END) AS fps"+
+			" SUM(CASE WHEN outcome IN ("+judgedOutcomeInList()+") THEN 1 ELSE 0 END) AS resolved,"+
+			" SUM(CASE WHEN outcome = '"+OutcomeFalsePositive+"' THEN 1 ELSE 0 END) AS fps"+
 			" FROM "+ledgerTable+
 			" GROUP BY rule_id")
 	if err != nil {
@@ -205,4 +229,40 @@ func (r *Reader) ReadOutcomeHistory() ([]RuleOutcome, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RuleID < out[j].RuleID })
 	return out, nil
+}
+
+// ReadJudgedFingerprints returns the set of candidate fingerprints that already
+// have a JUDGED ledger outcome (fixed/false_positive/duplicate/deferred). It is a
+// pure read (one SELECT, no DDL/writes) used by the digest path to drop
+// already-dispositioned candidates from the unresolved-cluster set (gu-1whne
+// lever B) — the precise analog of the precision table's judged exclusion.
+//
+// 'unknown' and unreconciled (empty-outcome) rows are NOT judged: their
+// candidates remain genuinely unresolved and must still surface. The judged set
+// is single-sourced with the precision aggregate via judgedOutcomes.
+func (r *Reader) ReadJudgedFingerprints() (map[string]struct{}, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rows, err := r.db.QueryContext(ctx,
+		//nolint:gosec // G202: the IN-list comes from package constants (judgedOutcomes), never user input.
+		"SELECT DISTINCT fingerprint FROM "+ledgerTable+
+			" WHERE outcome IN ("+judgedOutcomeInList()+") AND fingerprint <> ''")
+	if err != nil {
+		return nil, fmt.Errorf("reading judged fingerprints: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	judged := make(map[string]struct{})
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			return nil, fmt.Errorf("scanning judged fingerprint row: %w", err)
+		}
+		judged[fp] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating judged fingerprint rows: %w", err)
+	}
+	return judged, nil
 }

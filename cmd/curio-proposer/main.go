@@ -42,6 +42,14 @@ import (
 // Retrospect runs is never half-observed.
 const closedWindowMargin = 30 * time.Minute
 
+// defaultLookback bounds the START of the closed window: the digest reads only
+// candidates created within this trailing span (cutoff-lookback .. cutoff).
+// Without a lower bound the un-pruned curio_candidate sidecar re-surfaces
+// conditions resolved long ago on every run (gu-1whne). 72h covers the nightly
+// cadence plus several days of post-incident slack so a genuinely-unresolved
+// finding still has multiple nights to be acted on before it ages out.
+const defaultLookback = 72 * time.Hour
+
 // closedWindowCursor returns the read cutoff: the newest created_at Retrospect
 // is allowed to observe. It is now minus closedWindowMargin, so the cursor is
 // STRICTLY behind now by at least the margin — the closed-window invariant,
@@ -50,12 +58,24 @@ func closedWindowCursor(now time.Time) time.Time {
 	return now.Add(-closedWindowMargin)
 }
 
+// windowStart returns the INCLUSIVE lower bound of the closed window: the cutoff
+// minus the lookback. A non-positive lookback disables the lower bound (zero
+// time → "no start", the legacy unbounded behavior), so an operator can opt back
+// into a full-history read explicitly.
+func windowStart(cutoff time.Time, lookback time.Duration) time.Time {
+	if lookback <= 0 {
+		return time.Time{}
+	}
+	return cutoff.Add(-lookback)
+}
+
 func main() {
 	var (
 		townRoot   = flag.String("town-root", "", "Gas Town root directory (default: $GT_TOWN_ROOT, then $GT_TOWN)")
 		doltPort   = flag.Int("dolt-port", defaultDoltPort(), "gt Dolt server port")
 		dbName     = flag.String("db", "hq", "HQ Dolt database name")
 		emitDigest = flag.String("emit-digest", "", "render the deterministic closed-window digest to this path (read-only; no LLM, no filing)")
+		lookback   = flag.Duration("lookback", defaultLookback, "how far back the closed window reaches from the cutoff (e.g. 72h); 0 disables the lower bound (legacy unbounded read)")
 	)
 	flag.Parse()
 
@@ -65,7 +85,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(root, *doltPort, *dbName, *emitDigest, time.Now().UTC()); err != nil {
+	if err := run(root, *doltPort, *dbName, *emitDigest, *lookback, time.Now().UTC()); err != nil {
 		fmt.Fprintf(os.Stderr, "curio-proposer: %v\n", err)
 		os.Exit(1)
 	}
@@ -77,7 +97,7 @@ func main() {
 // Flow: load kill switch -> if LLM lane is off, exit cleanly (no read, no
 // touch) -> else open a READ-ONLY candidate view and read the closed window.
 // There is NO write path anywhere in this flow: no filing, no LLM, no mutation.
-func run(townRoot string, doltPort int, dbName, digestPath string, now time.Time) error {
+func run(townRoot string, doltPort int, dbName, digestPath string, lookback time.Duration, now time.Time) error {
 	cfg, err := loadProposerConfig(townRoot)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -95,6 +115,7 @@ func run(townRoot string, doltPort int, dbName, digestPath string, now time.Time
 	}
 
 	cutoff := closedWindowCursor(now)
+	start := windowStart(cutoff, lookback)
 
 	reader, err := curio.OpenReader("127.0.0.1", doltPort, dbName)
 	if err != nil {
@@ -102,7 +123,11 @@ func run(townRoot string, doltPort int, dbName, digestPath string, now time.Time
 	}
 	defer func() { _ = reader.Close() }()
 
-	cands, err := reader.ReadCandidatesBefore(cutoff)
+	// Lever A (gu-1whne): bound the window's START. ReadCandidatesBetween trims
+	// the tail to [start, cutoff) so already-resolved, long-past candidates in the
+	// un-pruned sidecar are never re-read. A zero start (lookback<=0) reproduces
+	// the legacy unbounded read.
+	cands, err := reader.ReadCandidatesBetween(start, cutoff)
 	if err != nil {
 		return fmt.Errorf("reading closed-window candidates: %w", err)
 	}
@@ -121,6 +146,16 @@ func run(townRoot string, doltPort int, dbName, digestPath string, now time.Time
 		// reaches the write-capable agent that consumes it). The predicate is
 		// single-sourced with the live suppressed()/isCurioSeries path.
 		cands = curio.ExcludeSelfReferential(cands)
+		// Lever B (gu-1whne): drop candidates already JUDGED in the ledger
+		// (fixed/false_positive/duplicate/deferred) so a resolved-long-ago
+		// condition does not re-surface as an "unresolved" cluster — even within
+		// the lookback window. The judged set is single-sourced with the precision
+		// table's exclusion.
+		judged, err := reader.ReadJudgedFingerprints()
+		if err != nil {
+			return fmt.Errorf("reading judged fingerprints: %w", err)
+		}
+		cands = curio.ExcludeJudged(cands, judged)
 		digest := curio.RenderDigest(cutoff, cands, outcomes)
 		if err := os.WriteFile(digestPath, []byte(digest), 0o600); err != nil {
 			return fmt.Errorf("writing digest to %s: %w", digestPath, err)

@@ -142,3 +142,154 @@ func TestDigest_B0ToB1Seam(t *testing.T) {
 		t.Fatal("precision table is empty — the B0→B1 seam produced no rule rows")
 	}
 }
+
+// TestReadJudgedFingerprints_OnlyJudged is the gu-1whne lever-B read invariant
+// against a real Dolt server: ReadJudgedFingerprints returns ONLY fingerprints
+// whose ledger row has a judged outcome (fixed/false_positive/duplicate/
+// deferred) — never an 'unknown' or unreconciled (empty-outcome) row.
+func TestReadJudgedFingerprints_OnlyJudged(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("bad container port %q: %v", port, err)
+	}
+	const db = "gt_test"
+
+	store, err := OpenStore("127.0.0.1", p, db)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	type filed struct {
+		beadID, ruleID, target, outcome string
+	}
+	filings := []filed{
+		{"b-1", "alarm_rate_spike", "sling", OutcomeFixed},           // judged
+		{"b-2", "alarm_rate_spike", "done", OutcomeFalsePositive},    // judged
+		{"b-3", "kill_signal_near_dolt", "deacon#0", OutcomeUnknown}, // NOT judged
+		{"b-4", "dead_owner_admission", "res#9", ""},                 // unreconciled, NOT judged
+	}
+	wantJudged := map[string]struct{}{}
+	for _, f := range filings {
+		fp := fingerprint.Of(f.ruleID, f.target)
+		if err := store.InsertLedgerRow(f.beadID, fp, f.ruleID); err != nil {
+			t.Fatalf("InsertLedgerRow %s: %v", f.beadID, err)
+		}
+		if f.outcome != "" {
+			if _, err := store.SetLedgerOutcome(f.beadID, f.outcome); err != nil {
+				t.Fatalf("SetLedgerOutcome %s: %v", f.beadID, err)
+			}
+		}
+		if f.outcome == OutcomeFixed || f.outcome == OutcomeFalsePositive ||
+			f.outcome == OutcomeDuplicate || f.outcome == OutcomeDeferred {
+			wantJudged[fp] = struct{}{}
+		}
+	}
+
+	reader, err := OpenReader("127.0.0.1", p, db)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	got, err := reader.ReadJudgedFingerprints()
+	if err != nil {
+		t.Fatalf("ReadJudgedFingerprints: %v", err)
+	}
+	if len(got) != len(wantJudged) {
+		t.Fatalf("judged fingerprints = %d, want %d\ngot: %v\nwant: %v", len(got), len(wantJudged), got, wantJudged)
+	}
+	for fp := range wantJudged {
+		if _, ok := got[fp]; !ok {
+			t.Errorf("expected judged fingerprint %q missing from result", fp)
+		}
+	}
+	// The unknown/unreconciled fingerprints must be ABSENT.
+	for _, f := range []filed{{ruleID: "kill_signal_near_dolt", target: "deacon#0"}, {ruleID: "dead_owner_admission", target: "res#9"}} {
+		if _, ok := got[fingerprint.Of(f.ruleID, f.target)]; ok {
+			t.Errorf("non-judged fingerprint for (%s,%s) must not be returned", f.ruleID, f.target)
+		}
+	}
+}
+
+// TestReadCandidatesBetween_BoundsWindow is the gu-1whne lever-A read invariant
+// against a real Dolt server: ReadCandidatesBetween returns only rows in
+// [start, cutoff), excluding both too-old (before start) and in-flight (>=cutoff)
+// candidates, while ReadCandidatesBefore (zero start) still returns the full tail.
+func TestReadCandidatesBetween_BoundsWindow(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("bad container port %q: %v", port, err)
+	}
+	const db = "gt_test"
+
+	store, err := OpenStore("127.0.0.1", p, db)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Insert three candidates, then back-date their created_at to control the
+	// window membership deterministically (created_at defaults to now on INSERT).
+	cands := []Candidate{
+		newCandidate("w-old", "alarm_rate_spike", "old", "", "old", 1, "TOO-OLD"),
+		newCandidate("w-mid", "alarm_rate_spike", "mid", "", "mid", 2, "IN-WINDOW"),
+		newCandidate("w-new", "alarm_rate_spike", "new", "", "new", 3, "IN-FLIGHT"),
+	}
+	if _, err := store.InsertCandidates(cands); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+
+	base := time.Date(2026, 6, 15, 7, 0, 0, 0, time.UTC)
+	// old: 10 days before base; mid: 1 day before base; new: 1 hour after base.
+	stamps := map[string]time.Time{
+		fingerprint.Of("alarm_rate_spike", "old"): base.Add(-10 * 24 * time.Hour),
+		fingerprint.Of("alarm_rate_spike", "mid"): base.Add(-24 * time.Hour),
+		fingerprint.Of("alarm_rate_spike", "new"): base.Add(time.Hour),
+	}
+	for fp, ts := range stamps {
+		if err := backdateCandidate(t, store, fp, ts); err != nil {
+			t.Fatalf("backdate %s: %v", fp, err)
+		}
+	}
+
+	reader, err := OpenReader("127.0.0.1", p, db)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	// cutoff at base, lookback 72h → window [base-72h, base): only "mid" qualifies.
+	cutoff := base
+	start := cutoff.Add(-72 * time.Hour)
+	got, err := reader.ReadCandidatesBetween(start, cutoff)
+	if err != nil {
+		t.Fatalf("ReadCandidatesBetween: %v", err)
+	}
+	if len(got) != 1 || got[0].Summary != "IN-WINDOW" {
+		t.Fatalf("bounded window = %+v, want exactly the IN-WINDOW candidate", got)
+	}
+
+	// Zero start (ReadCandidatesBefore) keeps the legacy unbounded tail: old + mid
+	// (both before cutoff), but still excludes the in-flight "new" (>= cutoff).
+	unbounded, err := reader.ReadCandidatesBefore(cutoff)
+	if err != nil {
+		t.Fatalf("ReadCandidatesBefore: %v", err)
+	}
+	if len(unbounded) != 2 {
+		t.Fatalf("unbounded read = %d candidates, want 2 (old+mid, in-flight excluded)\ngot: %+v", len(unbounded), unbounded)
+	}
+}
+
+// backdateCandidate sets a candidate row's created_at directly. It is a
+// TEST-ONLY write through the write-capable Store's connection (the production
+// Reader has no such method), used to make window-membership deterministic.
+func backdateCandidate(t *testing.T, store *Store, fingerprint string, ts time.Time) error {
+	t.Helper()
+	_, err := store.db.Exec(
+		"UPDATE "+candidateTable+" SET created_at = ? WHERE fingerprint = ?",
+		ts.UTC(), fingerprint)
+	return err
+}

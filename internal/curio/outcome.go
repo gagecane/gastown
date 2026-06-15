@@ -25,6 +25,26 @@ const (
 	OutcomeUnknown = "unknown"
 )
 
+// judgedOutcomes is the set of ledger outcomes that count a candidate as
+// DISPOSITIONED — the finding was fixed, ruled a false positive, deduped, or
+// deferred. It deliberately EXCLUDES OutcomeUnknown (ambiguous close) and the
+// empty unreconciled state, matching the precision formula's "judged" set. It is
+// single-sourced here so the precision aggregate (ReadOutcomeHistory) and the
+// stale-candidate exclusion (ReadJudgedFingerprints) cannot drift apart.
+var judgedOutcomes = []string{OutcomeFixed, OutcomeFalsePositive, OutcomeDuplicate, OutcomeDeferred}
+
+// judgedOutcomeInList renders judgedOutcomes as a SQL IN-list literal, e.g.
+// "'fixed','false_positive','duplicate','deferred'". The values are package
+// constants (never user input), so a literal is safe; building it from the
+// single judgedOutcomes slice keeps the two read queries that use it in lockstep.
+func judgedOutcomeInList() string {
+	quoted := make([]string, len(judgedOutcomes))
+	for i, o := range judgedOutcomes {
+		quoted[i] = "'" + o + "'"
+	}
+	return strings.Join(quoted, ",")
+}
+
 // outcomeLabelPrefix is the structured close-label the reconciler trusts first:
 // a closer stamps `curio-outcome:<fixed|fp|dup|deferred>` to record the
 // resolution explicitly, sidestepping the lossy free-text heuristic. Short

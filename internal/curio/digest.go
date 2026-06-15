@@ -84,6 +84,30 @@ func ExcludeSelfReferential(candidates []Candidate) []Candidate {
 	return out
 }
 
+// ExcludeJudged drops candidates whose fingerprint already has a JUDGED ledger
+// outcome (fixed/false_positive/duplicate/deferred) from a closed-window set
+// before it is rendered into a digest — the cluster-digest analog of the
+// precision table's judged exclusion (gu-1whne lever B). Without it, the
+// un-pruned curio_candidate sidecar keeps re-surfacing a candidate as
+// "unresolved" forever, regardless of its ledger outcome, so a fixed condition
+// re-proposes indefinitely once its proposal bead closes.
+//
+// judged is the set ReadJudgedFingerprints returns. A candidate whose fingerprint
+// is NOT in the set (no ledger row, or only an 'unknown'/unreconciled row)
+// survives — it is genuinely unresolved. Like ExcludeSelfReferential, this is a
+// pure filter the --emit-digest caller applies before RenderDigest; RenderDigest
+// itself stays a pure formatter.
+func ExcludeJudged(candidates []Candidate, judged map[string]struct{}) []Candidate {
+	out := make([]Candidate, 0, len(candidates))
+	for _, c := range candidates {
+		if _, ok := judged[c.Fingerprint]; ok {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // selfReferential reports whether a stored candidate is self-referential and so
 // must be air-gapped out of the digest (design-doc Q5 layer 1). It is true when
 // the candidate is a prior/pending Curio proposal (rule_id prefixed

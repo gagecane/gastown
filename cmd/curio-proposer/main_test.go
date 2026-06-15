@@ -41,6 +41,35 @@ func TestClosedWindowCursor_StrictlyBehindAcrossClocks(t *testing.T) {
 	}
 }
 
+// TestWindowStart asserts gu-1whne lever A: the closed window has an INCLUSIVE
+// lower bound at cutoff-lookback, and a non-positive lookback disables the bound
+// (zero time → legacy unbounded read).
+func TestWindowStart(t *testing.T) {
+	cutoff := time.Date(2026, 6, 15, 7, 0, 0, 0, time.UTC)
+
+	t.Run("positive lookback bounds the start", func(t *testing.T) {
+		start := windowStart(cutoff, 72*time.Hour)
+		if want := cutoff.Add(-72 * time.Hour); !start.Equal(want) {
+			t.Fatalf("windowStart = %s, want %s", start, want)
+		}
+		if !start.Before(cutoff) {
+			t.Fatalf("start %s is not before cutoff %s", start, cutoff)
+		}
+	})
+
+	t.Run("zero lookback disables the bound", func(t *testing.T) {
+		if start := windowStart(cutoff, 0); !start.IsZero() {
+			t.Fatalf("windowStart with 0 lookback = %s, want zero time", start)
+		}
+	})
+
+	t.Run("negative lookback disables the bound", func(t *testing.T) {
+		if start := windowStart(cutoff, -time.Hour); !start.IsZero() {
+			t.Fatalf("windowStart with negative lookback = %s, want zero time", start)
+		}
+	})
+}
+
 // TestKillSwitchIsolation asserts that curio.llm.enabled is read INDEPENDENTLY
 // of curio.enabled. Toggling the live Patrol switch must not move the
 // Retrospect lane switch, and vice-versa — the kill-switch isolation invariant.
@@ -153,7 +182,7 @@ func TestEmitDigest_KillSwitchOffEmitsNothing(t *testing.T) {
 
 	digestPath := filepath.Join(t.TempDir(), "digest.md")
 	// dolt-port is irrelevant: the kill switch short-circuits before any DB open.
-	if err := run(root, 3307, "hq", digestPath, time.Now().UTC()); err != nil {
+	if err := run(root, 3307, "hq", digestPath, defaultLookback, time.Now().UTC()); err != nil {
 		t.Fatalf("run with lane off should exit cleanly, got: %v", err)
 	}
 	if _, err := os.Stat(digestPath); !os.IsNotExist(err) {
