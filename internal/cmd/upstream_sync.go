@@ -71,6 +71,12 @@ Three merge cases are handled automatically:
   3. Non-FF with conflicts — dispatches a polecat for autonomous
      resolution when the conflict is resolvable, escalates otherwise.
 
+Circuit breaker: after 3 consecutive failed sync attempts (the default
+threshold) the rig auto-pauses BY DESIGN — semantic conflicts needing
+hand-resolution typically trip it. The pause is indefinite. Recovery:
+resolve the underlying conflict, then run 'gt upstream resume' to clear
+the failure counter and re-enable automatic syncs.
+
 Examples:
 
   gt upstream sync                      # Run a full cycle for the current rig
