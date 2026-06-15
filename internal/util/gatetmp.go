@@ -39,6 +39,55 @@ func GateTmpDir() string {
 	return filepath.Join(base, "gt-gate-tmp")
 }
 
+// gateDoltEnvDenyPrefixes lists env-var name prefixes scrubbed from a gate
+// subprocess environment so that `go test ./...` does NOT inherit a daemon's
+// production Dolt-routing variables (gu-5ja0e, gs-bc08).
+//
+// A long-running daemon (main_branch_test patrol, refinery) runs with
+// GT_DOLT_PORT/BEADS_DOLT_PORT pinned to the shared production Dolt server
+// (3307). Passing those through to a gate's `go test` defeats the beads
+// test-isolation safety net: PreventTestDoltLeak (internal/beads/database.go)
+// only pins a test fixture to an isolated embedded data dir when NO Dolt-routing
+// var is set — when it sees an inherited GT_DOLT_PORT/BEADS_DOLT_PORT it assumes
+// a legitimate test container and bails, so any beads-backed test then connects
+// to production :3307 and leaks orphan databases. Container-backed integration
+// tests are unaffected: they start their own container and set GT_DOLT_PORT
+// process-wide from inside the test (testutil.StartIsolatedDoltContainer /
+// RequireDoltContainer), so scrubbing the inherited value cannot route them to
+// production.
+var gateDoltEnvDenyPrefixes = []string{
+	"GT_DOLT_",    // GT_DOLT_PORT, GT_DOLT_HOST
+	"BEADS_DOLT_", // BEADS_DOLT_PORT, BEADS_DOLT_SERVER_HOST, BEADS_DOLT_SERVER_PORT
+	"DOLT_",       // raw dolt client overrides
+}
+
+// StripDoltRoutingEnv returns a copy of env with Dolt-routing variables removed
+// per gateDoltEnvDenyPrefixes. It is the single source of truth for which env
+// vars a gate `go test` run must NOT inherit from a daemon connected to the
+// production Dolt server. Pure function for unit-testing the filter.
+func StripDoltRoutingEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			out = append(out, kv)
+			continue
+		}
+		key := kv[:eq]
+		denied := false
+		for _, p := range gateDoltEnvDenyPrefixes {
+			if strings.HasPrefix(key, p) {
+				denied = true
+				break
+			}
+		}
+		if !denied {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // WithGateTmpEnv returns env with TMPDIR and GOTMPDIR overridden to a
 // disk-backed gate temp directory (see GateTmpDir), so Go gate subprocesses
 // don't fill a small /tmp tmpfs and fail their link step with ENOSPC

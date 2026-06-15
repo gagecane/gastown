@@ -83,15 +83,26 @@ func TestGateBuildEnv_OverridesGocache(t *testing.T) {
 	}
 }
 
-func TestGateBuildEnv_NilWhenUnscoped(t *testing.T) {
+// gs-bc08: even an unscoped engineer (no rig → no GOCACHE scoping, TMPDIR
+// override disabled) must still scrub the refinery's production Dolt-routing
+// vars, so a gate `go test ./...` can't inherit GT_DOLT_PORT/BEADS_DOLT_PORT and
+// leak orphan databases onto the shared production Dolt server. gateBuildEnv
+// therefore never returns nil — it always returns a scrubbed env.
+func TestGateBuildEnv_StripsDoltEnvWhenUnscoped(t *testing.T) {
 	t.Setenv("GT_GATE_GOCACHE_BASE", t.TempDir())
-	// Disable the TMPDIR override too (gu-l4aue): with both overrides off and no
-	// rig, gateBuildEnv inherits the parent env unchanged.
 	t.Setenv("GT_GATE_TMPDIR", "off")
+	t.Setenv("BEADS_DOLT_PORT", "3307")
+	t.Setenv("GT_DOLT_PORT", "3307")
 
-	e := &Engineer{} // no rig → no scoping → inherit parent env
-	if env := e.gateBuildEnv(); env != nil {
-		t.Errorf("gateBuildEnv = %v, want nil for unscoped engineer", env)
+	e := &Engineer{} // no rig → no scoping
+	env := e.gateBuildEnv()
+	if env == nil {
+		t.Fatal("gateBuildEnv returned nil, want scrubbed env")
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "BEADS_DOLT_") || strings.HasPrefix(kv, "GT_DOLT_") {
+			t.Errorf("gateBuildEnv leaked Dolt-routing var %q to gate subprocess", kv)
+		}
 	}
 }
 

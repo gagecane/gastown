@@ -111,3 +111,34 @@ func TestWithGateTmpEnv_UnchangedWhenDisabled(t *testing.T) {
 		}
 	}
 }
+
+// StripDoltRoutingEnv removes a daemon's production Dolt-routing vars so a gate
+// `go test ./...` can't inherit them and leak orphan databases onto the shared
+// production Dolt server (gu-5ja0e, gs-bc08).
+
+func TestStripDoltRoutingEnv(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"GT_DOLT_PORT=3307",
+		"GT_DOLT_HOST=127.0.0.1",
+		"BEADS_DOLT_PORT=3307",
+		"BEADS_DOLT_SERVER_HOST=127.0.0.1",
+		"DOLT_ROOT_PATH=/x",
+		"CI=true",
+		// A var that merely contains "DOLT" mid-name must be kept — only the
+		// listed name PREFIXES are scrubbed.
+		"MY_DOLT_BACKUP=keep",
+		// Malformed entry (no '=') is passed through untouched.
+		"WEIRD",
+	}
+	got := StripDoltRoutingEnv(in)
+	want := []string{"PATH=/usr/bin", "CI=true", "MY_DOLT_BACKUP=keep", "WEIRD"}
+	if len(got) != len(want) {
+		t.Fatalf("StripDoltRoutingEnv returned %d entries, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

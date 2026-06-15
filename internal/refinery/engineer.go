@@ -1462,13 +1462,19 @@ func (e *Engineer) rigGoCache() string {
 }
 
 // gateBuildEnv returns the environment for a gate/test subprocess: the parent
-// env with GOCACHE overridden to the rig-scoped directory (gu-sav6u) and
-// TMPDIR/GOTMPDIR routed off any small /tmp tmpfs onto disk-backed storage
-// (gu-l4aue). Returns nil (inherit parent env unchanged) when neither override
-// applies. Each override is best-effort: if a directory cannot be created the
-// gate still runs against the inherited value.
+// env with the refinery's production Dolt-routing variables scrubbed (gs-bc08),
+// GOCACHE overridden to the rig-scoped directory (gu-sav6u), and TMPDIR/GOTMPDIR
+// routed off any small /tmp tmpfs onto disk-backed storage (gu-l4aue).
+//
+// The Dolt scrub always applies and is why this never returns nil: the refinery
+// runs with GT_DOLT_PORT/BEADS_DOLT_PORT pinned to the shared production Dolt
+// server, and a gate `go test ./...` that inherits them defeats the beads
+// test-isolation net (PreventTestDoltLeak), leaking orphan databases onto :3307
+// every merge. Mirrors the main_branch_test patrol's stripGateDoltEnv. The
+// GOCACHE/TMPDIR overrides remain best-effort: if a directory cannot be created
+// the gate still runs against the inherited value.
 func (e *Engineer) gateBuildEnv() []string {
-	env := util.WithGateTmpEnv(os.Environ())
+	env := util.StripDoltRoutingEnv(util.WithGateTmpEnv(os.Environ()))
 
 	cache := e.rigGoCache()
 	if cache != "" {
@@ -1484,11 +1490,6 @@ func (e *Engineer) gateBuildEnv() []string {
 		}
 	}
 
-	// If neither override applies, return nil to preserve the legacy
-	// "inherit parent env unchanged" contract callers rely on.
-	if cache == "" && util.GateTmpDir() == "" {
-		return nil
-	}
 	return env
 }
 
