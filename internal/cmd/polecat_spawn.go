@@ -110,6 +110,20 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		return nil, err
 	}
 
+	// Pre-flight global ceiling guard (gu-yqndt): the town-wide working-polecat
+	// count vs scheduler.global_max_polecats is knowable from town config +
+	// tmux/beads state without spawning anything — exactly like the per-rig cap
+	// above. Check it FIRST so a town already at its global ceiling fails fast
+	// with the 8/8 message instead of printing "[N/M] Slinging..." and then
+	// paying for the Dolt health probe, admission flock, and capacity snapshot
+	// only to be rejected at the authoritative check inside acquirePolecatAdmission.
+	// That authoritative check is retained (under the admission gate) to close the
+	// race where a concurrent sling claims the last town-wide slot between this
+	// pre-flight read and the spawn.
+	if err := checkGlobalPolecatCeiling(townRoot, rigName, opts.HookBead); err != nil {
+		return nil, err
+	}
+
 	// Get polecat manager (with tmux for session-aware allocation)
 	polecatGit := git.NewGit(r.Path)
 	t := tmux.NewTmux()

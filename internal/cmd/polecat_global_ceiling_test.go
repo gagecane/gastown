@@ -113,6 +113,61 @@ func TestGlobalCeilingRefusesDeferredDispatch(t *testing.T) {
 	}
 }
 
+// TestCheckGlobalPolecatCeiling exercises the pre-flight/authoritative ceiling
+// guard directly (gu-yqndt): no ceiling configured passes through without
+// consulting the count, under-ceiling passes, and at-or-over ceiling returns the
+// actionable 8/8-style error with the raise hint.
+func TestCheckGlobalPolecatCeiling(t *testing.T) {
+	// Not parallel: swaps the package-level countWorkingPolecatsTownWideFn seam.
+	t.Run("no ceiling configured passes (count not consulted)", func(t *testing.T) {
+		townRoot := t.TempDir()
+		configureScheduler(t, townRoot, -1, 1) // no global_max_polecats
+		orig := countWorkingPolecatsTownWideFn
+		t.Cleanup(func() { countWorkingPolecatsTownWideFn = orig })
+		countWorkingPolecatsTownWideFn = func() int {
+			t.Fatal("count must not be consulted when no ceiling is configured")
+			return 0
+		}
+		if err := checkGlobalPolecatCeiling(townRoot, "rigA", "gt-one"); err != nil {
+			t.Errorf("checkGlobalPolecatCeiling(no ceiling) = %v, want nil", err)
+		}
+	})
+
+	t.Run("under ceiling passes", func(t *testing.T) {
+		townRoot := t.TempDir()
+		setSchedulerGlobalCeiling(t, townRoot, -1, 8)
+		withStubTownWideWorking(t, 7)
+		if err := checkGlobalPolecatCeiling(townRoot, "rigA", "gt-one"); err != nil {
+			t.Errorf("checkGlobalPolecatCeiling(7/8) = %v, want nil", err)
+		}
+	})
+
+	t.Run("at ceiling fails fast", func(t *testing.T) {
+		townRoot := t.TempDir()
+		setSchedulerGlobalCeiling(t, townRoot, -1, 8)
+		withStubTownWideWorking(t, 8)
+		err := checkGlobalPolecatCeiling(townRoot, "rigA", "gt-one")
+		if err == nil {
+			t.Fatal("checkGlobalPolecatCeiling(8/8) = nil, want ceiling error")
+		}
+		if !strings.Contains(err.Error(), "8/8 town-wide working polecats") {
+			t.Errorf("error missing count detail: %v", err)
+		}
+		if !strings.Contains(err.Error(), "scheduler.global_max_polecats 9") {
+			t.Errorf("error missing raise hint: %v", err)
+		}
+	})
+
+	t.Run("over ceiling fails", func(t *testing.T) {
+		townRoot := t.TempDir()
+		setSchedulerGlobalCeiling(t, townRoot, -1, 4)
+		withStubTownWideWorking(t, 9)
+		if err := checkGlobalPolecatCeiling(townRoot, "rigA", "gt-one"); err == nil {
+			t.Error("checkGlobalPolecatCeiling(9/4) = nil, want ceiling error")
+		}
+	})
+}
+
 // TestGetGlobalMaxPolecats covers the config accessor's defaulting.
 func TestGetGlobalMaxPolecats(t *testing.T) {
 	if got := (*capacity.SchedulerConfig)(nil).GetGlobalMaxPolecats(); got != 0 {
