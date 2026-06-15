@@ -1666,11 +1666,44 @@ func (b *Beads) ReadyForMol(moleculeID string) ([]*Issue, error) {
 		return nil, err
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
+	return parseReadyMolOutput(out)
+}
+
+// molReadyEnvelope is the JSON envelope emitted by bd ready --mol --json
+// (schema_version 1). Ready issues live under .steps[].issue rather than at
+// the top level. See gs-nw6w: bd wrapped the previously-flat array in this
+// envelope, which broke gt's parser.
+type molReadyEnvelope struct {
+	SchemaVersion int `json:"schema_version"`
+	Steps         []struct {
+		Issue *Issue `json:"issue"`
+	} `json:"steps"`
+}
+
+// parseReadyMolOutput decodes bd ready --mol --json output, tolerating both the
+// schema_version:1 envelope (object) and the legacy flat array, so gt does not
+// break across either direction of bd version drift.
+func parseReadyMolOutput(out []byte) ([]*Issue, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		// Legacy flat array of issues.
+		var issues []*Issue
+		if err := json.Unmarshal(trimmed, &issues); err != nil {
+			return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
+		}
+		return issues, nil
 	}
 
+	var env molReadyEnvelope
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return nil, fmt.Errorf("parsing bd ready --mol output: %w", err)
+	}
+	issues := make([]*Issue, 0, len(env.Steps))
+	for _, step := range env.Steps {
+		if step.Issue != nil {
+			issues = append(issues, step.Issue)
+		}
+	}
 	return issues, nil
 }
 
