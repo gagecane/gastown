@@ -150,6 +150,7 @@ type PatrolsConfig struct {
 	BranchSync           *BranchSyncConfig           `json:"branch_sync,omitempty"`
 	AgentHeartbeat       *AgentHeartbeatConfig       `json:"agent_heartbeat,omitempty"`
 	MergeQueueAge        *MergeQueueAgeConfig        `json:"merge_queue_age,omitempty"`
+	EscalateStale        *EscalateStaleConfig        `json:"escalate_stale,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -447,6 +448,18 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.MergeQueueAge.Enabled
+	}
+
+	if patrol == "escalate_stale" {
+		// Default-enabled (gu-2sepi): drives the stale-escalation re-routing
+		// mechanism, which is otherwise dead unless a human runs `gt escalate
+		// stale`. Must run out of the box, including on towns whose daemon.json
+		// predates this addition. The dog only re-escalates open, unacked
+		// escalations (bumps severity / re-routes), so it is safe to default on.
+		if config == nil || config.Patrols == nil || config.Patrols.EscalateStale == nil {
+			return true
+		}
+		return config.Patrols.EscalateStale.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

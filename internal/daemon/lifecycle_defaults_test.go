@@ -174,6 +174,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			CircuitBreakerGC:     &CircuitBreakerGCConfig{Enabled: false},
 			AgentHeartbeat:       &AgentHeartbeatConfig{Enabled: false},
 			MergeQueueAge:        &MergeQueueAgeConfig{Enabled: false},
+			EscalateStale:        &EscalateStaleConfig{Enabled: false},
 		},
 	}
 

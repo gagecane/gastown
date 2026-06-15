@@ -99,6 +99,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "5m",
 			},
+			EscalateStale: &EscalateStaleConfig{
+				Enabled:     true,
+				IntervalStr: "4h",
+			},
 		},
 	}
 }
@@ -190,6 +194,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.MergeQueueAge == nil {
 		p.MergeQueueAge = d.MergeQueueAge
+		changed = true
+	}
+	if p.EscalateStale == nil {
+		p.EscalateStale = d.EscalateStale
 		changed = true
 	}
 
