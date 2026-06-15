@@ -2278,7 +2278,7 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 				continue
 			}
 
-			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap); found {
+			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap, router); found {
 				result.Zombies = append(result.Zombies, zombie)
 			}
 			continue // Either handled or not a zombie
@@ -2302,7 +2302,7 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 //
 // gt-dsgp: Uses restart-first policy. Instead of nuking polecats, restarts their
 // sessions to preserve worktrees and branches.
-func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot) (ZombieResult, bool) {
+func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot, router *mail.Router) (ZombieResult, bool) {
 	// gt-2gra: Agent state and hook bead are read from the pre-fetched snapshot
 	// instead of calling getAgentBeadState multiple times per code path.
 	snapState, snapHook := "", ""
@@ -2366,15 +2366,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		// age GROWING (15m→33m) across restarts. Past the cap, stop looping and
 		// escalate to the mayor instead, mirroring the blank-tools cap (gs-4lk).
 		if snapHook != "" && ShouldEscalateStuckInDone(workDir, snapHook) {
-			zombie := ZombieResult{
-				PolecatName:    polecatName,
-				AgentState:     snapState,
-				Classification: ZombieStuckInDoneCapped,
-				HookBead:       snapHook,
-				WasActive:      true,
-				Action:         fmt.Sprintf("escalated-stuck-in-done (restart cap %d reached for %s, done-intent age=%v)", MaxStuckInDoneAutoRestarts, snapHook, age),
-			}
-			return zombie, true
+			return releaseCappedStuckInDonePolecat(bd, workDir, rigName, polecatName, sessionName, t, snapState, snapHook, age, snap, router)
 		}
 
 		zombie := ZombieResult{
@@ -2557,6 +2549,55 @@ func recoverBlankToolsPolecat(workDir, rigName, polecatName, sessionName string,
 		count = RecordBlankToolsRestart(workDir, hookBead)
 	}
 	zombie.Action = fmt.Sprintf("restarted-blank-tools (auto-restart %d/%d, bead=%s)", count, MaxBlankToolsAutoRestarts, hookBead)
+	return zombie, true
+}
+
+// releaseCappedStuckInDonePolecat handles a live polecat that has been
+// auto-restarted MaxStuckInDoneAutoRestarts times for the stuck-in-done failure
+// and is still wedged in gt done. The previous behavior escalated to the mayor
+// but left the session alive and the bead HOOKED — and because the session was
+// still alive, the dead-session orphan/stale recovery paths never fired. The
+// bead sat in_progress/HOOKED on a provably-wedged polecat until a human acted,
+// converting a bounded restart loop into an indefinite strand (gu-lrfqn).
+//
+// We now actively release the strand: kill the wedged session and route the
+// hooked bead through resetAbandonedBead so it is re-dispatched (or closed if
+// its work already landed). resetAbandonedBead's own safety gates apply
+// (work-already-on-main close, respawn circuit breaker, re-dispatch rate
+// limiter). A pending MR is preserved — if the polecat's work is validly queued
+// in the refinery, we must NOT kill the session or reset the bead, mirroring the
+// pending-MR guard the dead-session path already enforces (handlers.go:2715).
+func releaseCappedStuckInDonePolecat(bd *BdCli, workDir, rigName, polecatName, sessionName string, t *tmux.Tmux, snapState, hookBead string, age time.Duration, snap *agentBeadSnapshot, router *mail.Router) (ZombieResult, bool) {
+	zombie := ZombieResult{
+		PolecatName:    polecatName,
+		AgentState:     snapState,
+		Classification: ZombieStuckInDoneCapped,
+		HookBead:       hookBead,
+		WasActive:      true,
+	}
+
+	// Pending-MR guard: the polecat may have completed its work and filed an MR
+	// before re-sticking on a later gt-done step (e.g. label cleanup). Killing
+	// the session / resetting the bead here would delete the queued branch and
+	// re-dispatch already-submitted work. Preserve it and escalate as before.
+	if hasPendingMRFromSnapshot(bd, workDir, rigName, polecatName, snap) {
+		zombie.Action = fmt.Sprintf("escalated-stuck-in-done-pending-mr (restart cap %d reached for %s, done-intent age=%v)", MaxStuckInDoneAutoRestarts, hookBead, age)
+		return zombie, true
+	}
+
+	// Kill the wedged session so the slot is freed and the polecat stops
+	// re-sticking. KillSessionWithProcesses also tears down orphaned child
+	// processes that survive a bare kill-session.
+	if err := t.KillSessionWithProcesses(sessionName); err != nil {
+		zombie.Error = err
+	}
+
+	// Route the bead through the standard recovery helper: it closes the bead if
+	// the work already landed on main, otherwise resets it to open and mails
+	// RECOVERED_BEAD to the deacon — subject to the respawn circuit breaker and
+	// re-dispatch rate limiter.
+	zombie.BeadRecovered = resetAbandonedBead(bd, workDir, rigName, hookBead, polecatName, router)
+	zombie.Action = fmt.Sprintf("released-stuck-in-done (restart cap %d reached for %s, done-intent age=%v, session killed, bead_recovered=%t)", MaxStuckInDoneAutoRestarts, hookBead, age, zombie.BeadRecovered)
 	return zombie, true
 }
 
