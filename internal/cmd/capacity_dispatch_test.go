@@ -228,6 +228,11 @@ func TestIsScheduledWorkBeadReady_Deferred(t *testing.T) {
 		{"awaiting_refinery_merge label", beadStatusInfo{Status: "open", Labels: []string{"awaiting_refinery_merge"}}, false},
 		{"awaiting_refinery_merge among others", beadStatusInfo{Status: "open", Labels: []string{"bug", "awaiting_refinery_merge"}}, false},
 		{"awaiting_refinery_recovery is NOT filtered here", beadStatusInfo{Status: "open", Labels: []string{"awaiting_refinery_recovery"}}, true},
+		// gs-t307: judgment-class PR-review-comment beads (needs-human-triage) must
+		// not auto-dispatch — they require human sign-off before a customer-facing
+		// reply. The poller mails the mayor and leaves the bead for manual sling.
+		{"needs-human-triage label", beadStatusInfo{Status: "open", Labels: []string{"needs-human-triage"}}, false},
+		{"needs-human-triage among others", beadStatusInfo{Status: "open", Labels: []string{"pr-review-comment", "needs-human-triage"}}, false},
 		{"normal work with unrelated label still ready", beadStatusInfo{Status: "open", Labels: []string{"gt:rig"}}, true},
 	}
 	for _, tt := range tests {

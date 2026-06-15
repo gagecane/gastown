@@ -40,6 +40,13 @@ func NewGTDispatcher(workDir string) *GTDispatcher {
 // CreateBead creates a work bead carrying the PR-comment label set. Mechanical
 // beads carry only LabelPRComment; judgment beads also carry the caller-supplied
 // label (LabelNeedsHumanTriage). Priority 2 matches the parent feature's P2.
+//
+// Judgment beads are additionally created DEFERRED (gs-t307). The
+// needs-human-triage label alone is the authoritative auto-dispatch gate in the
+// scheduler, but deferring also keeps the bead out of `bd ready` so no operator
+// or other tool surfaces it as actionable before a human confirms intent —
+// belt-and-suspenders against a customer-facing auto-reply leak. A human clears
+// the gate by un-deferring (`bd update --status open`) and `gt sling`-ing.
 func (d *GTDispatcher) CreateBead(title, description, label string) (string, error) {
 	labels := []string{LabelPRComment}
 	if label != "" && label != LabelPRComment {
@@ -56,6 +63,12 @@ func (d *GTDispatcher) CreateBead(title, description, label string) (string, err
 	}
 	if issue == nil || issue.ID == "" {
 		return "", errors.New("bd create: empty issue returned")
+	}
+	if label == LabelNeedsHumanTriage {
+		deferred := "deferred"
+		if err := d.B.Update(issue.ID, beads.UpdateOptions{Status: &deferred}); err != nil {
+			return "", fmt.Errorf("defer judgment bead %s: %w", issue.ID, err)
+		}
 	}
 	return issue.ID, nil
 }

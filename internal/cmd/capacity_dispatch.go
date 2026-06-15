@@ -1751,6 +1751,19 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if hasLabel(info.Labels, labelNoAutoDispatch) {
 		return false
 	}
+	// Skip judgment-class PR-review-comment beads awaiting human triage (gs-t307).
+	// The pr-feedback poller labels comments that require human judgment with
+	// needs-human-triage and deliberately does NOT auto-sling them (it mails the
+	// mayor for confirmation instead). But the scheduler did NOT honor the label,
+	// so these beads were still picked up and dispatched to a polecat — which
+	// then auto-replied on the customer PR thread and closed no-code, bypassing
+	// human sign-off on a customer-facing interaction (lb-f9g0, PR #1788). Like
+	// no-auto-dispatch above, this only blocks the AUTOMATIC scheduler path: a
+	// human still triages `bd list --label=needs-human-triage` and dispatches the
+	// real ones via `gt sling` with confirmed intent.
+	if hasLabel(info.Labels, labelNeedsHumanTriage) {
+		return false
+	}
 	// Skip beads deferred to a future time (gs-o5f). `gt done --status DEFERRED`
 	// sets defer_until WITHOUT flipping status off "open", so the status check
 	// alone lets a future-deferred bead through and the scheduler re-dispatches
@@ -1793,6 +1806,11 @@ const (
 	// while still allowing manual `gt sling` and `gt done` (gs-b2a). Unlike the
 	// tripwire labels above it is checked only in the dispatch readiness gate.
 	labelNoAutoDispatch = "no-auto-dispatch"
+	// labelNeedsHumanTriage marks a PR-review-comment bead the pr-feedback poller
+	// classified as judgment-class: it requires human confirmation before any
+	// code change and must NOT be auto-dispatched (gs-t307). Like no-auto-dispatch
+	// it only blocks the automatic scheduler path; manual `gt sling` still works.
+	labelNeedsHumanTriage = "needs-human-triage"
 	// labelAwaitingRefineryMerge marks a source bead whose polecat already
 	// submitted an MR that the refinery has not yet merged to origin/main
 	// (completion.MarkAwaitingRefineryMerge, gu-treq). The bead stays open for
