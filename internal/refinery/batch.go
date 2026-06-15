@@ -129,6 +129,25 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 			continue
 		}
 
+		// Reject a STALE fork-sync MR before stacking it (gc-hdi17t, gc-ailhrp).
+		// A fork-sync branch built off a stale origin/<target> snapshot would
+		// revert commits that landed since; the single-MR path guards this in
+		// doMerge, so the batch path must too or a stale fork-sync could slip in
+		// when batched with siblings. Treat it like a conflict: escalate to the
+		// mayor and remove it from the batch (rebuilding the stack without it).
+		// Fail-safe: a detection error never removes the MR — log and continue.
+		if staleFS, staleErr := detectStaleForkSync(e.git, mr.Branch, target); staleErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: stale fork-sync detection failed (%v) — proceeding\n", mr.ID, staleErr)
+		} else if staleFS.Stale {
+			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: stale fork-sync (%s), removing from batch (escalated to mayor)\n", mr.ID, staleFS.Reason)
+			e.HandleMRInfoFailure(mr, ProcessResult{
+				StaleForkSync: true,
+				Error:         fmt.Sprintf("stale fork-sync: %s — regenerate against current origin/%s", staleFS.Reason, target),
+			})
+			conflicts = append(conflicts, mr)
+			continue
+		}
+
 		// Check for conflicts before merging
 		conflictFiles, conflictErr := e.git.CheckConflicts(mr.Branch, target)
 		if conflictErr != nil || len(conflictFiles) > 0 {
@@ -356,6 +375,15 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 		// Dequeue silently — there is nothing for a worker to fix and nothing
 		// landed. Do NOT call HandleMRInfoSuccess (nothing reached origin).
 		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: retracted/human-review-only at push time, dequeuing (nothing landed)\n", mr.ID)
+		e.HandleMRInfoFailure(mr, processResult)
+	} else if processResult.StaleForkSync {
+		// gc-hdi17t / gc-ailhrp: fork-sync branch generated off a stale main
+		// snapshot — merging it would revert commits that landed since. Nothing
+		// was merged. Route through HandleMRInfoFailure so the mayor is escalated
+		// to regenerate the fork-sync against current main; the branch + MR bead
+		// are preserved. Do NOT call HandleMRInfoSuccess (nothing landed) and do
+		// NOT nudge the polecat to resubmit (would re-queue the same stale branch).
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: stale fork-sync, refusing merge (escalated to mayor for regeneration)\n", mr.ID)
 		e.HandleMRInfoFailure(mr, processResult)
 	} else {
 		result.Error = fmt.Errorf("merge failed: %s", processResult.Error)

@@ -751,6 +751,18 @@ type ProcessResult struct {
 	// talon_cdk mis-merge gc-wisp-ifnp: a retracted, merge=local MR auto-landed
 	// after its gate stalled ~20min on a stale flock).
 	Retracted bool
+
+	// StaleForkSync indicates the MR is a fork-sync branch generated against a
+	// stale snapshot of the target: it integrated upstream/<target> but does
+	// NOT contain the current origin/<target> tip. Merging it would silently
+	// revert every commit that landed after the snapshot (gc-hdi17t; the
+	// gc-ailhrp incident where a stale fork-sync would have reverted 5 landed
+	// main commits, -860 lines, including the pre-push gate fix). Nothing is
+	// merged or pushed. Not a build/test/conflict failure and not a worker
+	// fix: the branch must be REGENERATED against current main. Callers MUST
+	// NOT run post-merge cleanup and MUST NOT nudge the polecat to "fix and
+	// resubmit" — they escalate to the mayor to re-run the fork-sync instead.
+	StaleForkSync bool
 }
 
 // doMerge performs the actual git merge operation.
@@ -826,6 +838,33 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			Success:  false,
 			Conflict: true,
 			Error:    fmt.Sprintf("merge conflicts in: %v", conflicts),
+		}
+	}
+
+	// Step 3.2: Refuse to merge a STALE fork-sync branch (gc-hdi17t, gc-ailhrp).
+	// A fork-sync MR snapshots origin/<target> at GENERATION time; a burst of
+	// landings (or the push-block-outage drain) can move origin/<target>
+	// underneath it. If such a branch integrated upstream but no longer contains
+	// the current origin/<target> tip, squash-/no-ff-merging it would silently
+	// revert every commit that landed after the snapshot — the -860-line revert
+	// the refinery caught and rejected by hand in gc-ailhrp. Reject it here so
+	// the fork-sync is regenerated against current main instead of reverting it.
+	// Target is up to date (Step 2 pulled origin/<target>), so the origin/<target>
+	// tracking ref this guard reads is the live tip. The all-WIP / conflict checks
+	// above are cheap; the guard runs before gates so we never burn a gate cycle
+	// on a branch we will reject.
+	//
+	// Fail-safe: a detection error never blocks the merge — log and continue to
+	// the normal path (matches the fork_sync.go fail-open stance).
+	staleFS, staleErr := detectStaleForkSync(e.git, branch, target)
+	if staleErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: stale fork-sync detection failed (%v) — proceeding with merge\n", staleErr)
+	} else if staleFS.Stale {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Refusing to merge %s: %s\n", branch, staleFS.Reason)
+		return ProcessResult{
+			Success:       false,
+			StaleForkSync: true,
+			Error:         fmt.Sprintf("stale fork-sync: %s — regenerate the fork-sync against current origin/%s", staleFS.Reason, target),
 		}
 	}
 
@@ -2091,6 +2130,27 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	// mayor nudge. The local squash commit was already rolled back in doMerge.
 	if result.Retracted {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: retracted/human-review-only at push time (%s), dequeued\n", mr.ID, result.Error)
+		return
+	}
+
+	// gc-hdi17t / gc-ailhrp: the MR is a fork-sync branch generated against a
+	// stale snapshot — merging it would revert commits that landed after the
+	// snapshot. Nothing was merged. This is NOT a worker fix (the polecat can't
+	// "fix and resubmit" a fork-sync by editing code); the fork-sync must be
+	// REGENERATED against current main. Escalate to the mayor (who owns the
+	// upstream-sync re-dispatch) and do NOT nudge the polecat — a resubmit nudge
+	// would just re-queue the same stale branch (the gu-erckc re-dispatch loop
+	// the escalation warned about).
+	if result.StaleForkSync {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: stale fork-sync (%s) — escalating to mayor for regeneration\n", mr.ID, result.Error)
+		mayorMsg := fmt.Sprintf("STALE_FORK_SYNC: MR %s branch=%s issue=%s worker=%s — fork-sync generated off a stale main snapshot; merging would revert landed commits. Rejected (not merged). Re-run the fork-sync against CURRENT origin/main; do NOT re-dispatch this branch unchanged.",
+			mr.ID, mr.Branch, mr.SourceIssue, mr.Worker)
+		mayorCmd := exec.Command("gt", "nudge", "mayor/", mayorMsg)
+		util.SetDetachedProcessGroup(mayorCmd)
+		mayorCmd.Dir = e.workDir
+		if err := mayorCmd.Run(); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge mayor about stale fork-sync: %v\n", err)
+		}
 		return
 	}
 

@@ -189,3 +189,95 @@ func TestDoMerge_NonForkSync_StillSquashes(t *testing.T) {
 		t.Error("non-fork-sync merge unexpectedly made upstream an ancestor of HEAD")
 	}
 }
+
+// TestDoMerge_StaleForkSync_Rejected is the end-to-end regression test for
+// gc-hdi17t / gc-ailhrp. It reproduces the exact hazard the refinery caught
+// and rejected by hand:
+//
+//  1. origin/main and upstream/main have diverged.
+//  2. A polecat fork-sync branch is generated off the CURRENT origin/main
+//     snapshot (integrates upstream — a real fork-sync branch).
+//  3. While that branch sat in the gate/queue, a NEW commit landed on
+//     origin/main (the burst-of-landings / push-block-drain scenario).
+//  4. Refinery processes the now-stale fork-sync branch.
+//
+// Without the guard, doMerge would merge the stale branch and (because its
+// base predates the landing) silently revert the landed commit. With the
+// guard, doMerge detects the branch does not contain the current origin/main
+// tip and rejects it with StaleForkSync=true, pushing nothing.
+func TestDoMerge_StaleForkSync_Rejected(t *testing.T) {
+	workDir, g := testForkSyncRepo(t)
+
+	// Build the fork-sync branch off the CURRENT main (a legitimate, fresh
+	// fork-sync at generation time).
+	run(t, workDir, "git", "checkout", "-b", "polecat/fork-sync", "main")
+	run(t, workDir, "git", "merge", "--no-ff", "-m", "Sync fork from upstream", "upstream/main")
+	run(t, workDir, "git", "push", "-u", "origin", "polecat/fork-sync")
+
+	// Now a sibling commit LANDS on origin/main AFTER the fork-sync branch was
+	// generated — moving main underneath it (the gc-ailhrp burst-of-landings).
+	run(t, workDir, "git", "checkout", "main")
+	writeFile(t, workDir, "landed_after.md", "# Landed after the fork-sync snapshot\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: landed after fork-sync snapshot")
+	run(t, workDir, "git", "push", "origin", "main")
+	preMain := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	e := newTestEngineer(t, workDir, g)
+	result := e.doMerge(context.Background(), "polecat/fork-sync", "main", "gu-yay98")
+
+	if result.Success {
+		t.Fatal("expected stale fork-sync to be rejected, got Success=true (would revert landed commit)")
+	}
+	if !result.StaleForkSync {
+		t.Errorf("expected StaleForkSync=true, got %+v", result)
+	}
+	if result.Conflict || result.TestsFailed || result.PushFailed || result.Retracted {
+		t.Errorf("stale fork-sync must not be misclassified as conflict/tests/push/retracted: %+v", result)
+	}
+
+	// Nothing was pushed: origin/main still has the landed commit.
+	postMain := run(t, workDir, "git", "rev-parse", "origin/main")
+	if preMain != postMain {
+		t.Errorf("origin/main moved despite rejected stale fork-sync: %s -> %s", preMain, postMain)
+	}
+
+	// The landed commit's file must still be present on origin/main (the
+	// revert this guard prevents would have removed it).
+	landedOnMain := run(t, workDir, "git", "cat-file", "-t", "origin/main:landed_after.md")
+	if strings.TrimSpace(landedOnMain) != "blob" {
+		t.Errorf("landed_after.md missing from origin/main — the stale fork-sync reverted a landed commit")
+	}
+}
+
+// TestDoMerge_FreshForkSync_NotRejected is the negative control: a fork-sync
+// branch generated off the current origin/main (no landing raced it) must NOT
+// trip the stale guard — it merges normally and preserves upstream ancestry.
+// Guards against the guard being too aggressive and wedging healthy syncs.
+func TestDoMerge_FreshForkSync_NotRejected(t *testing.T) {
+	workDir, g := testForkSyncRepo(t)
+
+	run(t, workDir, "git", "checkout", "-b", "polecat/fork-sync", "main")
+	run(t, workDir, "git", "merge", "--no-ff", "-m", "Sync fork from upstream", "upstream/main")
+	run(t, workDir, "git", "push", "-u", "origin", "polecat/fork-sync")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	result := e.doMerge(context.Background(), "polecat/fork-sync", "main", "gu-9yi3")
+
+	if result.StaleForkSync {
+		t.Fatalf("fresh fork-sync wrongly rejected as stale: %+v", result)
+	}
+	if !result.Success {
+		t.Fatalf("expected fresh fork-sync to merge, got conflict=%v error=%s", result.Conflict, result.Error)
+	}
+
+	// Upstream ancestry preserved (the gu-9yi3 contract still holds).
+	isAnc, err := g.IsAncestor("upstream/main", "HEAD")
+	if err != nil {
+		t.Fatalf("post-merge IsAncestor failed: %v", err)
+	}
+	if !isAnc {
+		t.Error("fresh fork-sync merge did not preserve upstream ancestry")
+	}
+}

@@ -266,3 +266,178 @@ func TestPreserveForkSyncTopology_CustomTarget(t *testing.T) {
 		t.Errorf("expected UpstreamRef=upstream/release-1.0, got %q", decision.UpstreamRef)
 	}
 }
+
+// TestDetectStaleForkSync_StaleBranch is the core positive case (gc-hdi17t,
+// gc-ailhrp): a fork-sync branch that integrated upstream/main but whose base
+// does NOT contain the current origin/main tip — it was generated off a stale
+// snapshot and would revert commits that landed since. Must be flagged stale.
+func TestDetectStaleForkSync_StaleBranch(t *testing.T) {
+	g := &fakeGitOps{
+		refExists: map[string]fakeRefExistsResult{
+			"upstream/main": {ok: true},
+		},
+		isAncestor: map[string]fakeIsAncestorResult{
+			"upstream/main->polecat/fork-sync": {ok: true},  // is a fork-sync branch
+			"origin/main->polecat/fork-sync":   {ok: false}, // but does NOT contain current main
+		},
+	}
+	decision, err := detectStaleForkSync(g, "polecat/fork-sync", "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !decision.Stale {
+		t.Fatalf("expected Stale=true for stale fork-sync, got false (reason=%q)", decision.Reason)
+	}
+	if decision.Reason == "" {
+		t.Errorf("expected a non-empty Reason for observability")
+	}
+}
+
+// TestDetectStaleForkSync_CurrentBranch: a fork-sync branch whose base DOES
+// contain the current origin/main tip is fresh — merging it adds upstream
+// without reverting anything. Must NOT be flagged stale.
+func TestDetectStaleForkSync_CurrentBranch(t *testing.T) {
+	g := &fakeGitOps{
+		refExists: map[string]fakeRefExistsResult{
+			"upstream/main": {ok: true},
+		},
+		isAncestor: map[string]fakeIsAncestorResult{
+			"upstream/main->polecat/fork-sync": {ok: true}, // is a fork-sync branch
+			"origin/main->polecat/fork-sync":   {ok: true}, // contains current main — fresh
+		},
+	}
+	decision, err := detectStaleForkSync(g, "polecat/fork-sync", "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.Stale {
+		t.Errorf("expected Stale=false for a current fork-sync, got true (reason=%q)", decision.Reason)
+	}
+}
+
+// TestDetectStaleForkSync_NotForkSyncBranch: a plain feature branch (did not
+// integrate upstream) is out of scope. It is allowed to be behind origin/main
+// — the merge fast-forwards it — so the guard must NOT fire and must not even
+// probe origin/main (short-circuit after the upstream-ancestor check). Firing
+// here would wedge every normal MR.
+func TestDetectStaleForkSync_NotForkSyncBranch(t *testing.T) {
+	g := &fakeGitOps{
+		refExists: map[string]fakeRefExistsResult{
+			"upstream/main": {ok: true},
+		},
+		isAncestor: map[string]fakeIsAncestorResult{
+			"upstream/main->polecat/regular": {ok: false}, // not a fork-sync branch
+		},
+	}
+	decision, err := detectStaleForkSync(g, "polecat/regular", "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.Stale {
+		t.Errorf("expected Stale=false for a non-fork-sync branch, got true (reason=%q)", decision.Reason)
+	}
+	// Must short-circuit before probing origin/main ancestry.
+	for _, c := range g.calls {
+		if c == "IsAncestor(origin/main->polecat/regular)" {
+			t.Errorf("guard probed origin/main for a non-fork-sync branch (should short-circuit): calls=%v", g.calls)
+		}
+	}
+}
+
+// TestDetectStaleForkSync_NoUpstreamRemote: a non-fork repo (no upstream
+// remote) has no fork-sync semantics. Guard must not fire, and must not
+// descend into ancestor checks.
+func TestDetectStaleForkSync_NoUpstreamRemote(t *testing.T) {
+	g := &fakeGitOps{
+		// upstream/main absent.
+	}
+	decision, err := detectStaleForkSync(g, "polecat/branch", "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.Stale {
+		t.Errorf("expected Stale=false when upstream remote absent, got true (reason=%q)", decision.Reason)
+	}
+	for _, c := range g.calls {
+		if c != "RefExists(upstream/main)" {
+			t.Errorf("unexpected call after ref-missing short-circuit: %s", c)
+		}
+	}
+}
+
+// TestDetectStaleForkSync_RefExistsError: an unexpected git failure probing
+// the upstream ref must fail OPEN (Stale=false + error returned) so a transient
+// git hiccup never wedges a legitimate fork-sync.
+func TestDetectStaleForkSync_RefExistsError(t *testing.T) {
+	bang := errors.New("disk I/O error")
+	g := &fakeGitOps{
+		refExists: map[string]fakeRefExistsResult{
+			"upstream/main": {err: bang},
+		},
+	}
+	decision, err := detectStaleForkSync(g, "polecat/x", "main")
+	if !errors.Is(err, bang) {
+		t.Fatalf("expected error %v to be returned, got %v", bang, err)
+	}
+	if decision.Stale {
+		t.Errorf("expected Stale=false on git error (fail open), got true")
+	}
+}
+
+// TestDetectStaleForkSync_IsAncestorError_Target: a git failure on the
+// origin/main ancestry probe must also fail open.
+func TestDetectStaleForkSync_IsAncestorError_Target(t *testing.T) {
+	bang := errors.New("ref missing")
+	g := &fakeGitOps{
+		refExists: map[string]fakeRefExistsResult{
+			"upstream/main": {ok: true},
+		},
+		isAncestor: map[string]fakeIsAncestorResult{
+			"upstream/main->polecat/x": {ok: true},
+			"origin/main->polecat/x":   {err: bang},
+		},
+	}
+	decision, err := detectStaleForkSync(g, "polecat/x", "main")
+	if !errors.Is(err, bang) {
+		t.Fatalf("expected error %v, got %v", bang, err)
+	}
+	if decision.Stale {
+		t.Errorf("expected Stale=false on target IsAncestor error (fail open), got true")
+	}
+}
+
+// TestDetectStaleForkSync_EmptyInputs / NilOps: defensive guards mirroring
+// the preserveForkSyncTopology contract — never touch git, never panic.
+func TestDetectStaleForkSync_EmptyInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name, branch, target string
+	}{
+		{"empty branch", "", "main"},
+		{"empty target", "polecat/x", ""},
+		{"both empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &fakeGitOps{}
+			decision, err := detectStaleForkSync(g, tc.branch, tc.target)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.Stale {
+				t.Errorf("expected Stale=false on empty inputs, got true")
+			}
+			if len(g.calls) != 0 {
+				t.Errorf("expected no git calls on empty inputs, got %v", g.calls)
+			}
+		})
+	}
+}
+
+func TestDetectStaleForkSync_NilOps(t *testing.T) {
+	decision, err := detectStaleForkSync(nil, "polecat/x", "main")
+	if err == nil {
+		t.Fatal("expected error for nil git ops, got nil")
+	}
+	if decision.Stale {
+		t.Error("expected Stale=false for nil git ops")
+	}
+}
