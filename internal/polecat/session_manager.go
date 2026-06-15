@@ -1064,8 +1064,17 @@ func (m *SessionManager) verifyStartupNudgeDelivery(sessionID string, rc *config
 		}
 
 		// Agent is truly idle (no busy indicator, prompt visible) — nudge was likely lost. Retry.
-		fmt.Fprintf(os.Stderr, "[startup-nudge] attempt %d/%d: agent %s idle at prompt, retrying nudge\n",
-			attempt, maxRetries, sessionID)
+		// The retry itself is non-actionable noise on the common reused-idle-polecat
+		// path: the session comes up and discovers work via the beacon + gt prime
+		// regardless, so a clean dispatch ("Session started for X") otherwise gets
+		// flooded with per-attempt "idle at prompt" lines (gu-btyx7). Gate the
+		// progress line behind GT_DEBUG_SESSION (same convention as debugSession),
+		// but keep re-nudging unconditionally and keep the genuine nudge-failed
+		// error visible — that one is actionable.
+		if os.Getenv("GT_DEBUG_SESSION") != "" {
+			fmt.Fprintf(os.Stderr, "[startup-nudge] attempt %d/%d: agent %s idle at prompt, retrying nudge\n",
+				attempt, maxRetries, sessionID)
+		}
 		if err := m.tmux.NudgeSession(sessionID, retryContent); err != nil {
 			fmt.Fprintf(os.Stderr, "[startup-nudge] retry nudge failed for %s: %v\n", sessionID, err)
 			return
@@ -1073,8 +1082,12 @@ func (m *SessionManager) verifyStartupNudgeDelivery(sessionID string, rc *config
 	}
 
 	// If we exhausted retries and the agent is still idle, log a warning.
-	// The witness zombie patrol will handle this case.
-	if m.tmux.IsIdle(sessionID) {
+	// The witness zombie patrol will handle this case. Gated behind
+	// GT_DEBUG_SESSION: dispatch still succeeds (the agent picks up work via
+	// the beacon + gt prime), so this WARNING misleads operators into reading
+	// a successful sling as a failure (gu-btyx7). The witness zombie patrol —
+	// not this log — is the real backstop for a genuinely stuck polecat.
+	if os.Getenv("GT_DEBUG_SESSION") != "" && m.tmux.IsIdle(sessionID) {
 		fmt.Fprintf(os.Stderr, "[startup-nudge] WARNING: agent %s still idle after %d nudge retries\n",
 			sessionID, maxRetries)
 	}
