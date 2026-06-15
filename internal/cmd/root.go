@@ -342,7 +342,11 @@ func checkStaleBinaryWarning() {
 
 		msg := info.Describe("gt binary")
 		fmt.Fprintf(os.Stderr, "%s %s\n", style.WarningPrefix, msg)
-		fmt.Fprintf(os.Stderr, "    %s Run 'make install' in gastown repo to update\n", style.ArrowPrefix)
+		if info.IsForward && info.OnMainBranch {
+			fmt.Fprintf(os.Stderr, "    %s Run 'make install' in gastown repo to update\n", style.ArrowPrefix)
+		} else {
+			fmt.Fprintf(os.Stderr, "    %s Run 'gt stale' for details; switch to a build branch before rebuilding\n", style.ArrowPrefix)
+		}
 	}
 }
 

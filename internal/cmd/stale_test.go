@@ -3,6 +3,8 @@ package cmd
 import (
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/version"
 )
 
 // TestCompareDaemonCommit covers the running-daemon-vs-on-disk-binary staleness
@@ -123,7 +125,7 @@ func TestOutputStaleText(t *testing.T) {
 				"(3 commits behind main)",
 				"main is NOT a descendant of binary commit",
 				"source worktree is not on a build branch (compared against main)",
-				"NOT safe for automated rebuild (forward=false, main=false)",
+				"NOT safe for automated rebuild (forward=false, build_branch=false)",
 			},
 			notWant: []string{"Safe to rebuild: run"},
 		},
@@ -191,6 +193,25 @@ func TestOutputStaleText(t *testing.T) {
 				if strings.Contains(out, nw) {
 					t.Errorf("output unexpectedly contains %q\n--- got ---\n%s", nw, out)
 				}
+			}
+		})
+	}
+}
+
+func TestStaleQuietExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		info *version.StaleBinaryInfo
+		want int
+	}{
+		{name: "skipped is undetermined", info: &version.StaleBinaryInfo{Skipped: true}, want: 2},
+		{name: "stale", info: &version.StaleBinaryInfo{IsStale: true}, want: 0},
+		{name: "fresh", info: &version.StaleBinaryInfo{}, want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := staleQuietExitCode(tt.info); got != tt.want {
+				t.Errorf("staleQuietExitCode() = %d, want %d", got, tt.want)
 			}
 		})
 	}

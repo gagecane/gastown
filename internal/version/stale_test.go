@@ -404,23 +404,41 @@ func TestCheckStaleBinary_NoBuildBranchSkips(t *testing.T) {
 	}
 }
 
-func TestResolveBuildBranchRef(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping git-backed test in -short mode")
+func TestCheckStaleBinary_BinaryCommitMissingSkips(t *testing.T) {
+	dir := newGitRepo(t)
+	gitCommit(t, dir, "a.go", "1")
+	gitRun(t, dir, "branch", "-M", "main")
+	setBinaryCommit(t, "ffffffffffffffffffffffffffffffffffffffff")
+
+	info := CheckStaleBinary(dir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
 	}
+	if !info.Skipped {
+		t.Fatalf("expected missing binary commit to skip")
+	}
+	if !strings.Contains(info.SkipReason, "binary commit not found") {
+		t.Errorf("SkipReason = %q, want binary commit not found", info.SkipReason)
+	}
+	if info.IsStale {
+		t.Errorf("IsStale must be false when binary commit is missing")
+	}
+}
+
+func TestResolveBuildBranchRef(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 
-	t.Run("prefers local main", func(t *testing.T) {
+	t.Run("prefers carry when same commit is on carry and main", func(t *testing.T) {
 		dir := newGitRepo(t)
 		c1 := gitCommit(t, dir, "a.go", "1")
 		gitRun(t, dir, "branch", "-M", "main")
 		gitRun(t, dir, "branch", "carry/operational")
 		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
 		ref, ok := resolveBuildBranchRef(dir, c1)
-		if !ok || ref != "main" {
-			t.Errorf("got (%q,%v), want (\"main\",true)", ref, ok)
+		if !ok || ref.display != "carry/operational" || ref.ref != "refs/heads/carry/operational" || ref.commit != c1 {
+			t.Errorf("got (%+v,%v), want carry/operational at %s", ref, ok, c1)
 		}
 	})
 
@@ -432,8 +450,8 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		carryOnly := gitCommit(t, dir, "b.go", "fork work")
 		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
 		ref, ok := resolveBuildBranchRef(dir, carryOnly)
-		if !ok || ref != "carry/operational" {
-			t.Errorf("got (%q,%v), want (\"carry/operational\",true)", ref, ok)
+		if !ok || ref.display != "carry/operational" || ref.commit != carryOnly {
+			t.Errorf("got (%+v,%v), want carry/operational at %s", ref, ok, carryOnly)
 		}
 	})
 
@@ -444,7 +462,7 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		gitRun(t, dir, "branch", "carry/a")
 		gitRun(t, dir, "branch", "carry/b")
 		if ref, ok := resolveBuildBranchRef(dir, c1); ok {
-			t.Errorf("got (%q,%v), want (\"\",false) for ambiguous carry/*", ref, ok)
+			t.Errorf("got (%+v,%v), want no ref for ambiguous carry/*", ref, ok)
 		}
 	})
 
@@ -454,8 +472,69 @@ func TestResolveBuildBranchRef(t *testing.T) {
 		gitRun(t, dir, "branch", "-M", "feature/only")
 		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", c1)
 		ref, ok := resolveBuildBranchRef(dir, c1)
-		if !ok || ref != "origin/main" {
-			t.Errorf("got (%q,%v), want (\"origin/main\",true)", ref, ok)
+		if !ok || ref.display != "origin/main" || ref.ref != "refs/remotes/origin/main" || ref.commit != c1 {
+			t.Errorf("got (%+v,%v), want origin/main at %s", ref, ok, c1)
+		}
+	})
+
+	t.Run("fresher remote beats stale local main", func(t *testing.T) {
+		dir := newGitRepo(t)
+		old := gitCommit(t, dir, "a.go", "1")
+		fresh := gitCommit(t, dir, "b.go", "2")
+		gitRun(t, dir, "branch", "-M", "main")
+		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", fresh)
+		gitRun(t, dir, "reset", "--hard", old)
+		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
+
+		ref, ok := resolveBuildBranchRef(dir, old)
+		if !ok || ref.display != "origin/main" || ref.commit != fresh {
+			t.Errorf("got (%+v,%v), want fresher origin/main at %s", ref, ok, fresh)
+		}
+	})
+
+	t.Run("prefers upstream over divergent origin", func(t *testing.T) {
+		dir := newGitRepo(t)
+		base := gitCommit(t, dir, "a.go", "1")
+		gitRun(t, dir, "branch", "-M", "main")
+		gitRun(t, dir, "checkout", "-q", "-b", "origin-line")
+		originTip := gitCommit(t, dir, "origin.go", "origin")
+		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", originTip)
+		gitRun(t, dir, "checkout", "-q", "main")
+		gitRun(t, dir, "checkout", "-q", "-b", "upstream-line")
+		upstreamTip := gitCommit(t, dir, "upstream.go", "upstream")
+		gitRun(t, dir, "update-ref", "refs/remotes/upstream/main", upstreamTip)
+		gitRun(t, dir, "checkout", "-q", "main")
+		gitRun(t, dir, "checkout", "-q", "-b", "feat/x")
+
+		ref, ok := resolveBuildBranchRef(dir, base)
+		if !ok || ref.display != "upstream/main" || ref.commit != upstreamTip {
+			t.Errorf("got (%+v,%v), want upstream/main at %s", ref, ok, upstreamTip)
+		}
+	})
+
+	t.Run("uses remote carry when local carry absent", func(t *testing.T) {
+		dir := newGitRepo(t)
+		c1 := gitCommit(t, dir, "a.go", "1")
+		gitRun(t, dir, "branch", "-M", "feature/only")
+		gitRun(t, dir, "update-ref", "refs/remotes/origin/carry/operational", c1)
+
+		ref, ok := resolveBuildBranchRef(dir, c1)
+		if !ok || ref.display != "origin/carry/operational" || ref.ref != "refs/remotes/origin/carry/operational" || ref.commit != c1 {
+			t.Errorf("got (%+v,%v), want origin/carry/operational at %s", ref, ok, c1)
+		}
+	})
+
+	t.Run("fully qualified remote ref resists local branch shadow", func(t *testing.T) {
+		dir := newGitRepo(t)
+		old := gitCommit(t, dir, "a.go", "1")
+		gitRun(t, dir, "branch", "-M", "feature/only")
+		fresh := gitCommit(t, dir, "b.go", "2")
+		gitRun(t, dir, "update-ref", "refs/heads/origin/main", old)
+		gitRun(t, dir, "update-ref", "refs/remotes/origin/main", fresh)
+
+		ref, ok := resolveBuildBranchRef(dir, old)
+		if !ok || ref.display != "origin/main" || ref.ref != "refs/remotes/origin/main" || ref.commit != fresh {
+			t.Errorf("got (%+v,%v), want remote origin/main at %s", ref, ok, fresh)
 		}
 	})
 }

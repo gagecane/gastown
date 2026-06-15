@@ -19,26 +19,26 @@ var staleCmd = &cobra.Command{
 	Use:     "stale",
 	GroupID: GroupDiag,
 	Short:   "Check if the gt binary is stale",
-	Long: `Check if the gt binary was built from an older commit than the current repo HEAD.
+	Long: `Check if the gt binary was built from an older commit than a build ref.
 
 This command compares the commit hash embedded in the binary at build time
-with the current HEAD of the gastown repository.
+with the resolved build branch of the gastown repository (main/master/carry/*).
 
 Examples:
   gt stale              # Human-readable output
   gt stale --json       # Machine-readable JSON output
-  gt stale --quiet      # Exit code only (0=stale, 1=fresh)
+  gt stale --quiet      # Exit code only (0=stale, 1=fresh, 2=undetermined)
 
 Exit codes:
-  0 - Binary is stale (needs rebuild)
+  0 - Binary is stale
   1 - Binary is fresh (up to date)
-  2 - Error (could not determine staleness)`,
+  2 - Error or skipped (could not determine staleness)`,
 	RunE: runStale,
 }
 
 func init() {
 	staleCmd.Flags().BoolVar(&staleJSON, "json", false, "Output as JSON")
-	staleCmd.Flags().BoolVarP(&staleQuiet, "quiet", "q", false, "Exit code only (0=stale, 1=fresh)")
+	staleCmd.Flags().BoolVarP(&staleQuiet, "quiet", "q", false, "Exit code only (0=stale, 1=fresh, 2=undetermined)")
 	rootCmd.AddCommand(staleCmd)
 }
 
@@ -157,10 +157,7 @@ func runStale(cmd *cobra.Command, args []string) error {
 	// and other consumers depend on). The daemon-vs-binary signal is surfaced
 	// in --json and text output, not the exit code.
 	if staleQuiet {
-		if info.IsStale {
-			return NewSilentExit(0)
-		}
-		return NewSilentExit(1)
+		return NewSilentExit(staleQuietExitCode(info))
 	}
 
 	// Distinct signal (gu-qx6rn): is the RUNNING daemon executing the on-disk
@@ -168,7 +165,7 @@ func runStale(cmd *cobra.Command, args []string) error {
 	daemonInfo := checkDaemonStale(info.BinaryCommit)
 
 	// Build output
-	// SafeToRebuild requires: stale + forward-only + on main branch
+	// SafeToRebuild requires: stale + forward-only + on a build branch.
 	safeToRebuild := info.IsStale && info.IsForward && info.OnMainBranch
 	output := StaleOutput{
 		Stale:              info.IsStale,
@@ -192,6 +189,16 @@ func runStale(cmd *cobra.Command, args []string) error {
 	}
 
 	return outputStaleText(output)
+}
+
+func staleQuietExitCode(info *version.StaleBinaryInfo) int {
+	if info.Skipped {
+		return 2
+	}
+	if info.IsStale {
+		return 0
+	}
+	return 1
 }
 
 func outputStaleJSON(output StaleOutput) error {
@@ -223,7 +230,7 @@ func outputStaleText(output StaleOutput) error {
 		if output.SafeToRebuild {
 			fmt.Printf("\n  Safe to rebuild: run 'make build && make install'\n")
 		} else {
-			fmt.Printf("\n  %s NOT safe for automated rebuild (forward=%v, main=%v)\n",
+			fmt.Printf("\n  %s NOT safe for automated rebuild (forward=%v, build_branch=%v)\n",
 				style.Error.Render("✗"), output.Forward, output.OnMainBranch)
 		}
 	} else {

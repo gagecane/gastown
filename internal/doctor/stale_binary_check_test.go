@@ -20,7 +20,7 @@ func TestStaleResult(t *testing.T) {
 		wantStatus  CheckStatus
 		wantMessage string
 		wantDetail  string // substring expected in Details[0]; "" => no details required
-		wantFixHint bool
+		wantFixHint string
 	}{
 		{
 			name:        "error -> OK dev-build message",
@@ -39,22 +39,23 @@ func TestStaleResult(t *testing.T) {
 		{
 			name: "stale with count -> Warning + fix hint",
 			info: &version.StaleBinaryInfo{
-				IsStale: true, CommitsBehind: 2, CompareRef: "main",
+				IsStale: true, IsForward: true, OnMainBranch: true,
+				CommitsBehind: 2, CompareRef: "main",
 				BinaryCommit: "abc1234567890", RepoCommit: "def4567890123",
 			},
 			wantStatus:  StatusWarning,
 			wantMessage: "Binary is 2 commits behind main (built from abc123456789, main at def456789012)",
-			wantFixHint: true,
+			wantFixHint: "gt install",
 		},
 		{
-			name: "stale without count -> Warning, stale wording",
+			name: "stale off build branch -> Warning, qualified fix hint",
 			info: &version.StaleBinaryInfo{
 				IsStale: true, CompareRef: "origin/main",
 				BinaryCommit: "abc1234567890", RepoCommit: "def4567890123",
 			},
 			wantStatus:  StatusWarning,
 			wantMessage: "Binary is stale (built from abc123456789, origin/main at def456789012)",
-			wantFixHint: true,
+			wantFixHint: "switch to a build branch",
 		},
 		{
 			name:        "fresh -> OK up to date",
@@ -81,10 +82,10 @@ func TestStaleResult(t *testing.T) {
 					t.Errorf("Details = %v, want one containing %q", got.Details, tt.wantDetail)
 				}
 			}
-			if tt.wantFixHint && got.FixHint == "" {
-				t.Error("expected a FixHint for a stale binary, got none")
+			if tt.wantFixHint != "" && !strings.Contains(got.FixHint, tt.wantFixHint) {
+				t.Errorf("FixHint = %q, want substring %q", got.FixHint, tt.wantFixHint)
 			}
-			if !tt.wantFixHint && got.FixHint != "" {
+			if tt.wantFixHint == "" && got.FixHint != "" {
 				t.Errorf("unexpected FixHint %q", got.FixHint)
 			}
 		})

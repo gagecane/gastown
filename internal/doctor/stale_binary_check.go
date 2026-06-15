@@ -66,7 +66,7 @@ func staleResult(name string, info *version.StaleBinaryInfo) *CheckResult {
 			Name:    name,
 			Status:  StatusWarning,
 			Message: info.Describe("Binary"),
-			FixHint: "Run 'gt install' to rebuild and install",
+			FixHint: staleFixHint(info),
 		}
 	}
 
@@ -75,6 +75,13 @@ func staleResult(name string, info *version.StaleBinaryInfo) *CheckResult {
 		Status:  StatusOK,
 		Message: fmt.Sprintf("Binary is up to date (%s)", version.ShortCommit(info.BinaryCommit)),
 	}
+}
+
+func staleFixHint(info *version.StaleBinaryInfo) string {
+	if info.IsForward && info.OnMainBranch {
+		return "Run 'gt install' to rebuild and install"
+	}
+	return "Run 'gt stale' for details; switch to a build branch before rebuilding"
 }
 
 // Fix rebuilds and installs gt.

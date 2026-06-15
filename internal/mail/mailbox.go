@@ -162,194 +162,183 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 		return nil, fmt.Errorf("ensuring custom types: %w", err)
 	}
 
-	assignee, cc, wispAssignee, wispCC := m.fetchInboxQueries(beadsDir, identities)
+	type beadsFetch struct {
+		messages []BeadsMessage
+		err      error
+	}
+	type wispFetch struct {
+		messages []wispQueryMessage
+		err      error
+	}
 
-	// Deduplicate messages across queries (assignee + CC may overlap).
-	// Merge order is preserved from the previous sequential implementation:
-	// assignee → CC → wisp-assignee → wisp-CC. The seen map ensures earlier
-	// matches win when a message appears in multiple result sets.
+	var assignee beadsFetch
+	var cc beadsFetch
+	var wisps wispFetch
+
+	// The three fetches are independent. Keep identity variants collapsed inside
+	// each fetch so parallelism reduces latency without multiplying wisp SQL work.
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		assignee.messages, assignee.err = m.queryIssueMessagesByAssignee(beadsDir, identities)
+	}()
+	go func() {
+		defer wg.Done()
+		cc.messages = m.queryIssueMessagesByCC(beadsDir, identities)
+	}()
+	go func() {
+		defer wg.Done()
+		wisps.messages, wisps.err = m.queryWispMessages(beadsDir, identities)
+	}()
+	wg.Wait()
+
+	if assignee.err != nil {
+		return nil, assignee.err
+	}
+
+	// Deduplicate messages across queries (assignee + CC + wisps may overlap).
 	seen := make(map[string]bool)
-	messages := make([]*Message, 0)
-
-	// Assignee matches are primary — a failure on any variant aborts the
-	// listing rather than silently returning a partial inbox.
-	for i := range identities {
-		if err := assignee[i].err; err != nil {
-			return nil, err
-		}
-		appendBeadsMessagesIf(&messages, seen, assignee[i].messages, isOpenOrHooked)
-	}
-
-	// CC matches are secondary — query failures are non-fatal.
-	for i := range identities {
-		if cc[i].err != nil {
-			continue
-		}
-		appendBeadsMessagesIf(&messages, seen, cc[i].messages, isOpen)
-	}
-
-	// Wisps mirror the issues queries (ephemeral protocol messages). The
-	// underlying runWispSQL swallows errors — a missing wisps table just
-	// yields an empty slice.
-	for i := range identities {
-		appendBeadsMessagesIf(&messages, seen, wispAssignee[i].messages, isOpenOrHooked)
-	}
-	for i := range identities {
-		appendBeadsMessagesIf(&messages, seen, wispCC[i].messages, isOpen)
+	messages := make([]*Message, 0, len(assignee.messages)+len(cc.messages)+len(wisps.messages))
+	messages = appendBeadsMessages(messages, seen, assignee.messages, true)
+	messages = appendBeadsMessages(messages, seen, cc.messages, false)
+	if wisps.err == nil {
+		messages = appendWispMessages(messages, seen, wisps.messages)
 	}
 
 	return messages, nil
 }
 
-// inboxQueryResult holds one identity-variant query's outcome. The error is
-// only meaningful for the issues-table queries (assignee/CC); wisp SQL queries
-// surface errors as empty slices to preserve prior best-effort semantics.
-type inboxQueryResult struct {
-	messages []BeadsMessage
-	err      error
+func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []string) ([]BeadsMessage, error) {
+	var messages []BeadsMessage
+	for _, id := range identities {
+		args := []string{"list",
+			"--label", "gt:message",
+			"--assignee", id,
+			"--json",
+			"--limit", "0",
+		}
+
+		ctx, cancel := bdReadCtx()
+		stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		msgs, err := parseBeadsListOutput(stdout)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, msgs...)
+	}
+	return messages, nil
 }
 
-// fetchInboxQueries fans out the four mailbox query families across all
-// identity variants concurrently. Each returned slice is indexed by the
-// position of the variant in `identities` and has len(identities) entries.
-//
-// Wall-clock cost is bounded by the slowest individual subprocess (typically
-// well under 1s warm; up to bdReadTimeout if a single bd hangs). Sequential
-// dispatch in the previous implementation stretched the typical case to the
-// sum of all per-call latencies, which under concurrent refinery load was
-// enough to trip the per-call 60s timeout on the first invocation after a
-// cold period (gs-5di).
-func (m *Mailbox) fetchInboxQueries(beadsDir string, identities []string) (
-	assignee, cc, wispAssignee, wispCC []inboxQueryResult,
-) {
-	n := len(identities)
-	assignee = make([]inboxQueryResult, n)
-	cc = make([]inboxQueryResult, n)
-	wispAssignee = make([]inboxQueryResult, n)
-	wispCC = make([]inboxQueryResult, n)
+func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) []BeadsMessage {
+	var messages []BeadsMessage
+	for _, id := range identities {
+		args := []string{"list",
+			"--label", "gt:message",
+			"--label", "cc:" + id,
+			"--json",
+			"--limit", "0",
+		}
 
-	var wg sync.WaitGroup
-	for i, id := range identities {
-		i, id := i, id
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
-			msgs, err := m.queryIssuesByAssignee(beadsDir, id)
-			assignee[i] = inboxQueryResult{messages: msgs, err: err}
-		}()
-		go func() {
-			defer wg.Done()
-			msgs, err := m.queryIssuesByCC(beadsDir, id)
-			cc[i] = inboxQueryResult{messages: msgs, err: err}
-		}()
-		go func() {
-			defer wg.Done()
-			wispAssignee[i] = inboxQueryResult{messages: m.queryWispMessagesByAssignee(beadsDir, id)}
-		}()
-		go func() {
-			defer wg.Done()
-			wispCC[i] = inboxQueryResult{messages: m.queryWispMessagesByCC(beadsDir, id)}
-		}()
+		ctx, cancel := bdReadCtx()
+		stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+		cancel()
+		if err != nil {
+			continue
+		}
+		msgs, err := parseBeadsListOutput(stdout)
+		if err != nil {
+			continue
+		}
+		messages = append(messages, msgs...)
 	}
-	wg.Wait()
-	return assignee, cc, wispAssignee, wispCC
+	return messages
 }
 
-// queryIssuesByAssignee runs the `bd list --assignee=ID --label=gt:message`
-// query that powers the primary inbox feed.
-func (m *Mailbox) queryIssuesByAssignee(beadsDir, identity string) ([]BeadsMessage, error) {
-	args := []string{"list",
-		"--label", "gt:message",
-		"--assignee", identity,
-		"--json",
-		"--limit", "0",
-	}
-	return m.runIssuesListQuery(beadsDir, args)
-}
-
-// queryIssuesByCC runs the `bd list --label=cc:ID --label=gt:message` query
-// that captures messages where this identity is on the CC line.
-func (m *Mailbox) queryIssuesByCC(beadsDir, identity string) ([]BeadsMessage, error) {
-	args := []string{"list",
-		"--label", "gt:message",
-		"--label", "cc:" + identity,
-		"--json",
-		"--limit", "0",
-	}
-	return m.runIssuesListQuery(beadsDir, args)
-}
-
-// runIssuesListQuery executes a `bd list ... --json` invocation and decodes
-// the result. bd v0.58.0 returns plain text (e.g. "No issues found.") for
-// empty result sets instead of JSON; that case yields a nil slice and no
-// error.
-func (m *Mailbox) runIssuesListQuery(beadsDir string, args []string) ([]BeadsMessage, error) {
-	ctx, cancel := bdReadCtx()
-	defer cancel()
-	stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
-	if err != nil {
-		return nil, err
-	}
-	if !isJSON(stdout) {
-		return nil, nil
-	}
+func parseBeadsListOutput(stdout []byte) ([]BeadsMessage, error) {
 	trimmed := bytes.TrimSpace(stdout)
-	if len(trimmed) == 0 || string(trimmed) == "null" || (trimmed[0] != '[' && trimmed[0] != '{') {
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("No issues found.")) {
 		return nil, nil
 	}
+	if !isJSON(trimmed) {
+		return nil, nil
+	}
+
 	var msgs []BeadsMessage
-	if err := json.Unmarshal(stdout, &msgs); err != nil {
+	if err := json.Unmarshal(trimmed, &msgs); err != nil {
 		return nil, err
 	}
 	return msgs, nil
 }
 
-// appendBeadsMessagesIf appends messages that pass `accept` and aren't
-// already in `seen`, recording each appended message's ID in `seen`.
-func appendBeadsMessagesIf(dst *[]*Message, seen map[string]bool, src []BeadsMessage, accept func(string) bool) {
-	for i := range src {
-		bm := &src[i]
+func appendBeadsMessages(messages []*Message, seen map[string]bool, msgs []BeadsMessage, includeHooked bool) []*Message {
+	for i := range msgs {
+		bm := &msgs[i]
 		if seen[bm.ID] {
 			continue
 		}
-		if !accept(bm.Status) {
+		if bm.Status == "open" || (includeHooked && bm.Status == "hooked") {
+			seen[bm.ID] = true
+			messages = append(messages, bm.ToMessage())
+		}
+	}
+	return messages
+}
+
+func appendWispMessages(messages []*Message, seen map[string]bool, wisps []wispQueryMessage) []*Message {
+	for i := range wisps {
+		wisp := &wisps[i]
+		bm := &wisp.message
+		if seen[bm.ID] {
 			continue
 		}
-		seen[bm.ID] = true
-		*dst = append(*dst, bm.ToMessage())
+		include := wisp.assigneeMatch && (bm.Status == "open" || bm.Status == "hooked")
+		include = include || (wisp.ccMatch && bm.Status == "open")
+		if include {
+			seen[bm.ID] = true
+			messages = append(messages, bm.ToMessage())
+		}
 	}
+	return messages
 }
 
-func isOpen(status string) bool         { return status == "open" }
-func isOpenOrHooked(status string) bool { return status == "open" || status == "hooked" }
-
-// queryWispMessagesByAssignee queries wisps table for messages assigned to identity.
-func (m *Mailbox) queryWispMessagesByAssignee(beadsDir, identity string) []BeadsMessage {
-	query := fmt.Sprintf(
-		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, "+
-			"GROUP_CONCAT(al.label) as labels_csv "+
-			"FROM wisps w "+
-			"JOIN wisp_labels l ON w.id = l.issue_id "+
-			"JOIN wisp_labels al ON w.id = al.issue_id "+
-			"WHERE l.label = 'gt:message' AND w.status IN ('open', 'hooked') AND w.assignee = '%s' "+
-			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at",
-		escapeSQLString(identity))
-	return m.runWispSQL(beadsDir, query)
+type wispQueryMessage struct {
+	message       BeadsMessage
+	assigneeMatch bool
+	ccMatch       bool
 }
 
-// queryWispMessagesByCC queries wisps table for messages where identity is CC'd.
-func (m *Mailbox) queryWispMessagesByCC(beadsDir, identity string) []BeadsMessage {
-	ccLabel := "cc:" + identity
+// queryWispMessages queries ephemeral messages once across all identity variants.
+// Protocol/lifecycle messages are stored as wisps by shouldBeWisp(), but bd list
+// only queries the issues table.
+func (m *Mailbox) queryWispMessages(beadsDir string, identities []string) ([]wispQueryMessage, error) {
+	if len(identities) == 0 {
+		return nil, nil
+	}
+
+	ccLabels := make([]string, 0, len(identities))
+	for _, id := range identities {
+		ccLabels = append(ccLabels, "cc:"+id)
+	}
+	identityList := sqlStringList(identities)
+	ccLabelList := sqlStringList(ccLabels)
+
 	query := fmt.Sprintf(
 		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, "+
-			"GROUP_CONCAT(al.label) as labels_csv "+
+			"GROUP_CONCAT(DISTINCT al.label) as labels_csv, "+
+			"MAX(CASE WHEN w.assignee IN (%s) THEN 1 ELSE 0 END) as assignee_match, "+
+			"MAX(CASE WHEN cc.label IS NOT NULL THEN 1 ELSE 0 END) as cc_match "+
 			"FROM wisps w "+
-			"JOIN wisp_labels l1 ON w.id = l1.issue_id "+
-			"JOIN wisp_labels l2 ON w.id = l2.issue_id "+
+			"JOIN wisp_labels msg_label ON w.id = msg_label.issue_id AND msg_label.label = 'gt:message' "+
 			"JOIN wisp_labels al ON w.id = al.issue_id "+
-			"WHERE l1.label = 'gt:message' AND l2.label = '%s' AND w.status IN ('open', 'hooked') "+
+			"LEFT JOIN wisp_labels cc ON w.id = cc.issue_id AND cc.label IN (%s) "+
+			"WHERE w.status IN ('open', 'hooked') AND (w.assignee IN (%s) OR cc.label IS NOT NULL) "+
 			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at",
-		escapeSQLString(ccLabel))
+		identityList, ccLabelList, identityList)
 	return m.runWispSQL(beadsDir, query)
 }
 
@@ -364,27 +353,29 @@ type wispSQLRow struct {
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 	LabelsCSV   string `json:"labels_csv"`
+	AssigneeHit int    `json:"assignee_match"`
+	CCHit       int    `json:"cc_match"`
 }
 
-// runWispSQL executes a bd sql --json query and converts results to BeadsMessages.
-func (m *Mailbox) runWispSQL(beadsDir, query string) []BeadsMessage {
+// runWispSQL executes a bd sql --json query and converts results to wisp query messages.
+func (m *Mailbox) runWispSQL(beadsDir, query string) ([]wispQueryMessage, error) {
 	args := []string{"sql", "--json", query}
 	ctx, cancel := bdReadCtx()
 	stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
 	cancel()
 	if err != nil {
-		return nil // Wisps table may not exist yet
+		return nil, err // Wisps table may not exist yet.
 	}
 	if !isJSON(stdout) {
-		return nil
+		return nil, nil
 	}
 
 	var rows []wispSQLRow
 	if err := json.Unmarshal(stdout, &rows); err != nil {
-		return nil
+		return nil, err
 	}
 
-	msgs := make([]BeadsMessage, 0, len(rows))
+	msgs := make([]wispQueryMessage, 0, len(rows))
 	for _, row := range rows {
 		bm := BeadsMessage{
 			ID:          row.ID,
@@ -403,13 +394,26 @@ func (m *Mailbox) runWispSQL(beadsDir, query string) []BeadsMessage {
 		if row.LabelsCSV != "" {
 			bm.Labels = strings.Split(row.LabelsCSV, ",")
 		}
-		msgs = append(msgs, bm)
+		msgs = append(msgs, wispQueryMessage{
+			message:       bm,
+			assigneeMatch: row.AssigneeHit != 0,
+			ccMatch:       row.CCHit != 0,
+		})
 	}
-	return msgs
+	return msgs, nil
 }
 
-// escapeSQLString escapes single quotes for SQL string literals.
+func sqlStringList(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, "'"+escapeSQLString(value)+"'")
+	}
+	return strings.Join(quoted, ",")
+}
+
+// escapeSQLString escapes backslashes and single quotes for Dolt/MySQL SQL string literals.
 func escapeSQLString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
 	return strings.ReplaceAll(s, "'", "''")
 }
 
@@ -1380,7 +1384,13 @@ func (m *Mailbox) listByThreadBeads(threadID string) ([]*Message, error) {
 		"--json",
 		"--limit", "0",
 	}
-	issueMsgs, err := m.runIssuesListQuery(m.beadsDir, issueArgs)
+	ctx, cancel := bdReadCtx()
+	stdout, err := runBdCommand(ctx, issueArgs, m.workDir, m.beadsDir)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	issueMsgs, err := parseBeadsListOutput(stdout)
 	if err != nil {
 		return nil, err
 	}
@@ -1423,7 +1433,19 @@ func (m *Mailbox) queryWispMessagesByThread(beadsDir, threadID string) []BeadsMe
 			"WHERE l.label = '%s' "+
 			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at",
 		escapeSQLString(threadLabel))
-	return m.runWispSQL(beadsDir, query)
+	// runWispSQL is best-effort (a missing wisps table yields an error we
+	// intentionally swallow, mirroring the prior thread-view semantics). It now
+	// returns wispQueryMessage values (upstream #4261 converged the wisp query),
+	// so unwrap the embedded BeadsMessage for the thread listing.
+	rows, err := m.runWispSQL(beadsDir, query)
+	if err != nil {
+		return nil
+	}
+	msgs := make([]BeadsMessage, 0, len(rows))
+	for i := range rows {
+		msgs = append(msgs, rows[i].message)
+	}
+	return msgs
 }
 
 func (m *Mailbox) listByThreadLegacy(threadID string) ([]*Message, error) {
