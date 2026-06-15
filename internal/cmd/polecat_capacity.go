@@ -264,7 +264,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, polecatCapacitySnapshot{}, err
 	}
 
-	snapshot, _, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
+	snapshot, perRigOccupied, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
 	}
@@ -274,6 +274,31 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 			Rig:      rigName,
 			Bead:     beadID,
 			Reason:   "configured scheduler.max_polecats capacity is full",
+		}
+	}
+
+	// Authoritative per-rig cap check, genuinely under the admission flock
+	// (gu-uxwob). perRigOccupied[rigName] counts the same unit as the town cap —
+	// working + recovery_blocked + that rig's already-written reservations
+	// (gu-ccycc) — and is recomputed here while the flock is held, AFTER stale
+	// reservations were cleaned (above) and BEFORE this sling writes its own.
+	// So a concurrent sling that claimed the rig's last slot has, by the time we
+	// hold the lock, an on-disk reservation attributed to the rig and is counted
+	// here. This closes the race the pre-flight/post-admission checks in
+	// SpawnPolecatForSling could not: those run lock-free (the flock is released
+	// when this function returns), so they are duplicate reads, not a
+	// serialization point. The returned error is retryable (the bead stays
+	// queued and the next dispatch re-evaluates once a per-rig slot frees up).
+	if cap := loadRigPolecatMaxConcurrent(filepath.Join(townRoot, rigName)); cap > 0 {
+		if occupied := perRigOccupied[rigName]; occupied >= cap {
+			return nil, snapshot, &polecatCapacityAdmissionError{
+				Snapshot: snapshot,
+				Rig:      rigName,
+				Bead:     beadID,
+				Reason: fmt.Sprintf("rig %s per-rig cap reached (%d/%d working+recovery+reservations; "+
+					"raise: gt rig settings set %s polecat.max_concurrent %d)",
+					rigName, occupied, cap, rigName, cap+1),
+			}
 		}
 	}
 

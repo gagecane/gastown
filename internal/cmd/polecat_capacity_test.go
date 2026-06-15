@@ -328,6 +328,72 @@ func TestConcurrentPolecatAdmissionReservationsDoNotExceedCap(t *testing.T) {
 	}
 }
 
+// TestPolecatAdmissionEnforcesPerRigCapUnderLock is the gu-uxwob regression
+// guard. The per-rig cap is now enforced UNDER the admission flock inside
+// acquirePolecatAdmission, counting the same unit as the town cap: working +
+// recovery_blocked + that rig's already-written reservations (gu-ccycc).
+//
+// Deterministic by construction: the admission flock (TryLock) serializes
+// concurrent callers, so a live concurrent sling that "claimed the last slot"
+// is observable, by the time we hold the lock, as its on-disk rig-attributed
+// reservation. We simulate that prior sling by pre-writing one reservation for
+// the rig, then assert a fresh admission to the SAME rig is denied by the
+// per-rig cap (cap=1, already 1 reservation), while the town still has room —
+// and that a DIFFERENT rig with headroom is still admitted.
+//
+// Before the fix acquirePolecatAdmission guarded only the town cap, so this
+// second same-rig admission would succeed and overshoot the per-rig cap; the
+// per-rig check lived only in the lock-free SpawnPolecatForSling reads.
+func TestPolecatAdmissionEnforcesPerRigCapUnderLock(t *testing.T) {
+	townRoot := setupPolecatCapacityTestTown(t, 10) // town cap high (headroom)
+	one := 1
+	writeRigCap(t, townRoot, "capped", &one)
+
+	// Simulate a concurrent sling that already claimed capped's only slot:
+	// write its rig-attributed admission reservation on disk.
+	dir := polecatAdmissionDir(townRoot)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir reservations: %v", err)
+	}
+	prior := polecatAdmissionReservation{
+		ID:        "prior-sling",
+		PID:       os.Getpid(), // live PID so cleanup keeps it
+		Rig:       "capped",
+		Bead:      "gt-prior",
+		Operation: "test",
+		CreatedAt: time.Now(),
+	}
+	data, err := json.Marshal(prior)
+	if err != nil {
+		t.Fatalf("marshal prior reservation: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "prior-sling.json"), data, 0o644); err != nil {
+		t.Fatalf("write prior reservation: %v", err)
+	}
+
+	// Same rig, already at its per-rig cap via the prior reservation → denied.
+	handle, snapshot, err := acquirePolecatAdmission(townRoot, "capped", "gt-second", "test")
+	if err == nil {
+		handle.Release()
+		t.Fatalf("admission to capped rig succeeded, want per-rig cap denial (snapshot %+v)", snapshot)
+	}
+	var admissionErr *polecatCapacityAdmissionError
+	if !errors.As(err, &admissionErr) {
+		t.Fatalf("error = %v, want *polecatCapacityAdmissionError", err)
+	}
+	if !strings.Contains(err.Error(), "per-rig cap") {
+		t.Fatalf("denial reason = %q, want per-rig cap message", err.Error())
+	}
+
+	// A different, uncapped rig still has town headroom and must be admitted —
+	// proving the denial is the PER-RIG gate, not the town cap.
+	otherHandle, _, err := acquirePolecatAdmission(townRoot, "roomy", "gt-other", "test")
+	if err != nil {
+		t.Fatalf("admission to uncapped roomy rig failed: %v (town cap=10 has room)", err)
+	}
+	otherHandle.Release()
+}
+
 func TestApplyAgentFieldsToCapacitySnapshotSeparatesPendingMR(t *testing.T) {
 	tests := []struct {
 		name   string

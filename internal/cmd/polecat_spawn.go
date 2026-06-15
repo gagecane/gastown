@@ -102,10 +102,10 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// without spawning anything. Check it FIRST — before the Dolt health probe,
 	// admission flock + town-wide capacity snapshot, polecat spawn, and
 	// startup-nudge retries below — so a saturated rig fails fast instead of
-	// paying for all that setup only to be rejected at the end. The same check
-	// is re-asserted after admission (the authoritative, lock-protected point)
-	// to close the race where a concurrent sling fills the last slot between
-	// this pre-flight read and the spawn.
+	// paying for all that setup only to be rejected at the end. This is a
+	// lock-free fast-fail read, NOT a race guard: the authoritative per-rig
+	// check runs under the admission flock inside acquirePolecatAdmission
+	// (gu-uxwob), which is where the concurrent-sling race is actually closed.
 	if err := checkPerRigPolecatCap(rigName, r.Path); err != nil {
 		return nil, err
 	}
@@ -158,10 +158,14 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		defer admission.Release()
 	}
 
-	// Per-rig concurrency cap (gu-1lvs): re-asserted here under the admission
-	// lock (gu-4vjrw). The pre-flight guard above fails fast on an already-full
-	// rig; this authoritative check catches the race where a concurrent sling
-	// claimed the last slot after the pre-flight read.
+	// Per-rig concurrency cap (gu-1lvs): a post-admission re-read. The
+	// authoritative, race-closing per-rig check now runs UNDER the admission
+	// flock inside acquirePolecatAdmission (gu-uxwob) — the flock is released by
+	// the time control returns here, so this read is NOT lock-protected and is
+	// not the serialization point (correcting the prior gu-4vjrw comment, which
+	// claimed it was). It is retained as a defense-in-depth re-check that also
+	// covers the SkipAdmission path (callers that acquired admission upstream,
+	// e.g. sling_formula.go), where the under-lock check already ran for them.
 	if err := checkPerRigPolecatCap(rigName, r.Path); err != nil {
 		return nil, err
 	}
