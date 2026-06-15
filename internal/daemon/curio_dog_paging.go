@@ -133,7 +133,7 @@ func (d *Daemon) recordCurioShadowPages(windowID string, actions []PageAction, p
 		d.logger.Printf("curio: dolt-degraded — skipping shadow-ledger write")
 		return
 	}
-	store, err := curio.OpenStore("127.0.0.1", d.doltServerPort(), "hq")
+	store, err := curio.OpenStore(d.doltServerHost(), d.doltServerPort(), "hq")
 	if err != nil {
 		d.doltBreaker.Record(err)
 		d.logger.Printf("curio: shadow-ledger open failed: %v", err)

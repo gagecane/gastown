@@ -123,7 +123,7 @@ func (d *Daemon) onCurioBeadClose(beadID string) {
 		return
 	}
 
-	store, err := curio.OpenStore("127.0.0.1", d.doltServerPort(), "hq")
+	store, err := curio.OpenStore(d.doltServerHost(), d.doltServerPort(), "hq")
 	if err != nil {
 		d.doltBreaker.Record(err)
 		d.logger.Printf("curio: reconcile: failed to open HQ store for bead=%s: %v", beadID, err)

@@ -188,7 +188,7 @@ func (d *Daemon) runCurio() {
 		return
 	}
 
-	store, err := curio.OpenStore("127.0.0.1", d.doltServerPort(), "hq")
+	store, err := curio.OpenStore(d.doltServerHost(), d.doltServerPort(), "hq")
 	if err != nil {
 		d.doltBreaker.Record(err)
 		d.logger.Printf("curio: failed to open HQ store: %v", err)

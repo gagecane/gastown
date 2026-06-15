@@ -48,8 +48,9 @@ func (d *Daemon) scanHookedBeads() (total, deadLetter map[string]int64) {
 	total = make(map[string]int64)
 	deadLetter = make(map[string]int64)
 
+	host := d.doltServerHost()
 	port := d.doltServerPort()
-	databases := reaper.DiscoverDatabases("127.0.0.1", port)
+	databases := reaper.DiscoverDatabases(host, port)
 	if len(databases) == 0 {
 		return total, deadLetter
 	}
@@ -61,7 +62,7 @@ func (d *Daemon) scanHookedBeads() (total, deadLetter map[string]int64) {
 			continue
 		}
 
-		db, err := reaper.OpenDB("127.0.0.1", port, dbName, hookedBeadsScanTimeout, hookedBeadsScanTimeout)
+		db, err := reaper.OpenDB(host, port, dbName, hookedBeadsScanTimeout, hookedBeadsScanTimeout)
 		if err != nil {
 			d.logger.Printf("hooked_beads_metrics: %s: connect error: %v", dbName, err)
 			continue
