@@ -93,6 +93,28 @@ pct() {  # pct NUMER DENOM -> "NN.N%" or "n/a"
     awk -v n="$n" -v d="$d" 'BEGIN{printf "%.1f%%", (n/d)*100}'; fi
 }
 
+# digest_bead_exists RIG -> 0 if a digest bead for THIS window already exists.
+# Idempotency guard (gs-0w55): the daemon can dispatch this weekly cron plugin
+# more than once for the same scheduled fire — the ephemeral plugin-run receipt
+# that gates re-dispatch is purged after 1h (reaper EphemeralPurgeAge) while the
+# cron window is a full week, so a later heartbeat sees no receipt and re-fires,
+# and a transient Dolt visibility lag can let two near-simultaneous fires both
+# pass the gate. Either way the plugin must not write a second digest bead for a
+# window it has already covered. The window is encoded in the digest bead title
+# (`${PLUGIN_NAME}: ${SINCE}..now`) — SINCE is the day-granularity window start —
+# so a same-window re-fire produces an identical title we can detect and skip.
+# Mirrors daemon branchSyncBeadExists: a label-scoped list, presence = skip.
+digest_bead_exists() {
+  local rig="$1"
+  local existing
+  existing=$(gt rig bd "$rig" list --json --all \
+    -l "type:digest,plugin:${PLUGIN_NAME},rig:${rig}" \
+    --limit 200 2>/dev/null) || return 1
+  echo "$existing" | jq -e \
+    --arg t "${PLUGIN_NAME}: ${SINCE}..now" \
+    'any(.[]?; .title == $t)' >/dev/null 2>&1
+}
+
 OVERALL_OK=0
 OVERALL_FAIL=0
 
@@ -198,6 +220,11 @@ EOF
   if [ -n "$DRY_RUN" ]; then
     OVERALL_OK=$((OVERALL_OK + 1))
     log "  dry-run: skip digest bead"
+  elif digest_bead_exists "$RIG"; then
+    # Already covered this window — a duplicate dispatch (see digest_bead_exists).
+    # Count as OK: the digest for this window exists, so the run succeeded.
+    OVERALL_OK=$((OVERALL_OK + 1))
+    log "  digest bead for this window already exists — skipping (idempotent)"
   elif gt rig bd "$RIG" create "${PLUGIN_NAME}: ${SINCE}..now" -t chore \
       -l "type:digest,plugin:${PLUGIN_NAME},rig:${RIG},category:quality" \
       -d "$DIGEST" --silent >/dev/null 2>&1; then

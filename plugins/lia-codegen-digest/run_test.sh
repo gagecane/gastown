@@ -51,6 +51,18 @@ if grep -qE -- '--created-after="?-[0-9]+d' "$RUN_SH"; then
   fail "run.sh uses a relative -Nd --created-after; bd wants YYYY-MM-DD/RFC3339"
 fi
 
+# --- 3b. idempotency guard (gs-0w55: no duplicate digest per window) --------
+echo "=== idempotency guard ==="
+grep -q 'digest_bead_exists' "$RUN_SH" \
+  && pass "defines a per-window existence guard" \
+  || fail "run.sh must guard against duplicate digest beads per window (gs-0w55)"
+# The guard must run BEFORE the create so a re-fire skips instead of writing.
+if grep -q 'elif digest_bead_exists' "$RUN_SH"; then
+  pass "guard gates the digest-bead create (skips on duplicate)"
+else
+  fail "digest_bead_exists must gate the create branch (elif before create)"
+fi
+
 # --- 4. all four metrics present --------------------------------------------
 echo "=== four metrics ==="
 grep -q 'First-pass approval rate' "$RUN_SH" && pass "metric 1 present" \
