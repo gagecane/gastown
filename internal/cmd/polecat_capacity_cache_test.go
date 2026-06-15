@@ -21,7 +21,7 @@ func TestPolecatCapacitySnapshot_CachedWithinTTL(t *testing.T) {
 	t.Cleanup(func() { dropCachedPolecatCapacitySnapshotForTest(townRoot) })
 
 	want := polecatCapacitySnapshot{Max: 8, Working: 3, Free: 5}
-	storeCachedPolecatCapacitySnapshot(townRoot, want, nil)
+	storeCachedPolecatCapacitySnapshot(townRoot, want, nil, nil)
 
 	got, ok := loadCachedPolecatCapacitySnapshot(townRoot)
 	if !ok {

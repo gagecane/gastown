@@ -622,20 +622,41 @@ func countActivePolecats() int {
 	return count
 }
 
-// countWorkingPolecatsInRig counts polecat sessions that are actively working
-// within a specific rig. See countWorkingPolecats for the "working" definition.
-// Returns 0 when tmux or the workspace cannot be located; falls back to a
-// best-effort count of tmux sessions matching the rig when beads is unreachable.
+// countWorkingPolecatsInRig counts the polecat slots a rig occupies toward its
+// per-rig cap, counting the SAME unit as the town-wide cap: working +
+// recovery-blocked (dead-session-hooked) + that rig's in-flight reservations.
+// This is the town capacity snapshot's per-rig occupancy, computed by
+// enumerating polecat DIRECTORIES (not just live tmux sessions), so a polecat
+// that holds a hook but whose session has died still occupies a per-rig slot —
+// matching the town snapshot's RecoveryBlocked classification (gu-ccycc).
+// Previously this filtered live tmux sessions first, making dead-session-hooked
+// polecats invisible to the per-rig cap while they consumed a town slot.
+//
+// Fallback tiers when the town occupancy is unavailable (e.g. the town cap is
+// disabled in direct-dispatch mode, max_polecats<=0, where the snapshot skips
+// the directory scan):
+//  1. the hook-filtered live-session count (countWorkingPolecatsByRig) — the
+//     pre-gu-ccycc behavior, precise for live polecats; and
+//  2. a best-effort all-sessions count (countActivePolecatsInRig) when beads is
+//     unreachable. Over-counting is the safe direction for a cap: it can only
+//     refuse admission early, never overcommit.
 func countWorkingPolecatsInRig(rigName string) int {
-	counts, ok := countWorkingPolecatsByRig()
-	if !ok {
-		// Fallback when beads lookups failed or workspace is unresolved:
-		// count active tmux sessions scoped to the rig so the cap still
-		// has some protective value. This may over-count (includes idle
-		// polecats) which is the safer direction for a safety limit.
-		return countActivePolecatsInRig(rigName)
+	if townRoot, err := workspace.FindFromCwd(); err == nil {
+		if occupied, ok := perRigOccupiedSlots(townRoot); ok {
+			return occupied[rigName]
+		}
 	}
-	return counts[rigName]
+	// Town occupancy unavailable (town cap disabled, or its scan was skipped).
+	// Fall back to the hook-filtered live-session counter — same as before this
+	// fix — so direct-dispatch per-rig caps keep their precise live count.
+	if counts, ok := countWorkingPolecatsByRig(); ok {
+		return counts[rigName]
+	}
+	// Beads lookups failed or workspace is unresolved: count active tmux
+	// sessions scoped to the rig so the cap still has some protective value.
+	// This may over-count (includes idle polecats) which is the safer
+	// direction for a safety limit.
+	return countActivePolecatsInRig(rigName)
 }
 
 // countWorkingPolecatsByRig returns a per-rig map of working polecat counts.

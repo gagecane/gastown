@@ -46,8 +46,13 @@ var (
 
 type cachedCapacitySnapshot struct {
 	snapshot polecatCapacitySnapshot
-	err      error
-	at       time.Time
+	// perRigOccupied is the per-rig occupied-slot count computed in the SAME
+	// pass as the town snapshot, so the per-rig cap and the town cap count the
+	// identical unit (Working + RecoveryBlocked + that rig's reservations) and
+	// cannot drift (gu-ccycc). nil when max<=0 or the snapshot errored.
+	perRigOccupied map[string]int
+	err            error
+	at             time.Time
 }
 
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
@@ -259,7 +264,7 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, polecatCapacitySnapshot{}, err
 	}
 
-	snapshot, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
+	snapshot, _, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
 	}
@@ -320,9 +325,41 @@ func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, e
 			return polecatCapacitySnapshot{}, err
 		}
 	}
-	snapshot, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
-	storeCachedPolecatCapacitySnapshot(townRoot, snapshot, err)
+	snapshot, perRig, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
+	storeCachedPolecatCapacitySnapshot(townRoot, snapshot, perRig, err)
 	return snapshot, err
+}
+
+// perRigOccupiedSlots returns the per-rig occupied-slot map (working +
+// recovery-blocked + that rig's reservations) computed in the same pass as the
+// town capacity snapshot, serving it from the shared 5s cache. The per-rig cap
+// reads this so it counts the IDENTICAL unit as the town cap and a
+// dead-session-hooked polecat occupies a per-rig slot, not just a town slot
+// (gu-ccycc). The boolean is false when no per-rig data is available (max<=0,
+// snapshot error, or beads unreadable), in which case callers fall back to the
+// tmux-session count.
+func perRigOccupiedSlots(townRoot string) (map[string]int, bool) {
+	if cached, ok := loadCachedPolecatCapacitySnapshot(townRoot); ok {
+		if cached.err != nil || cached.perRigOccupied == nil {
+			return nil, false
+		}
+		return cached.perRigOccupied, true
+	}
+	max, err := configuredSchedulerMaxPolecats(townRoot)
+	if err != nil {
+		return nil, false
+	}
+	if max > 0 {
+		if err := cleanupStalePolecatAdmissionReservationsWithLock(townRoot); err != nil {
+			return nil, false
+		}
+	}
+	snapshot, perRig, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
+	storeCachedPolecatCapacitySnapshot(townRoot, snapshot, perRig, err)
+	if err != nil || perRig == nil {
+		return nil, false
+	}
+	return perRig, true
 }
 
 // loadCachedPolecatCapacitySnapshot returns the cached snapshot if it is
@@ -345,33 +382,34 @@ func loadCachedPolecatCapacitySnapshot(townRoot string) (cachedCapacitySnapshot,
 
 // storeCachedPolecatCapacitySnapshot records the result of a fresh snapshot
 // computation for reuse by subsequent callers within the TTL window.
-func storeCachedPolecatCapacitySnapshot(townRoot string, snapshot polecatCapacitySnapshot, err error) {
+func storeCachedPolecatCapacitySnapshot(townRoot string, snapshot polecatCapacitySnapshot, perRigOccupied map[string]int, err error) {
 	polecatCapacityCacheMu.Lock()
 	defer polecatCapacityCacheMu.Unlock()
 	if polecatCapacityCache == nil {
 		polecatCapacityCache = make(map[string]cachedCapacitySnapshot)
 	}
 	polecatCapacityCache[townRoot] = cachedCapacitySnapshot{
-		snapshot: snapshot,
-		err:      err,
-		at:       time.Now(),
+		snapshot:       snapshot,
+		perRigOccupied: perRigOccupied,
+		err:            err,
+		at:             time.Now(),
 	}
 }
 
-func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySnapshot, error) {
+func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySnapshot, map[string]int, error) {
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
-		return polecatCapacitySnapshot{}, err
+		return polecatCapacitySnapshot{}, nil, err
 	}
 	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
 	if max <= 0 {
-		return snapshot, nil
+		return snapshot, nil, nil
 	}
 
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
 	if err != nil {
-		return snapshot, fmt.Errorf("loading rigs config for polecat capacity: %w", err)
+		return snapshot, nil, fmt.Errorf("loading rigs config for polecat capacity: %w", err)
 	}
 
 	// Enumerate live tmux sessions ONCE for the whole snapshot instead of
@@ -398,7 +436,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		}
 		polecatNames, err := listPolecatDirectoryNames(rigPath)
 		if err != nil {
-			return snapshot, fmt.Errorf("listing polecat dirs for %s capacity: %w", rigName, err)
+			return snapshot, nil, fmt.Errorf("listing polecat dirs for %s capacity: %w", rigName, err)
 		}
 		if len(polecatNames) == 0 {
 			continue
@@ -445,16 +483,25 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	wg.Wait()
 
 	// Phase 3 (serial): fold each rig's results into the shared snapshot
-	// single-threaded, preserving deterministic counting without locking.
+	// single-threaded, preserving deterministic counting without locking. Each
+	// rig also folds into its OWN sub-snapshot so the per-rig cap reads the
+	// identical occupancy unit the town cap reads — a dead-session-hooked
+	// polecat classified RecoveryBlocked occupies a per-rig slot exactly as it
+	// occupies a town slot (gu-ccycc).
+	perRigOccupied := make(map[string]int)
 	for _, w := range work {
 		// A rig whose agent-bead read failed contributes NO capacity rather than
 		// being miscounted: with a nil agents map every polecat would parse as a
 		// fields==nil slot and inflate ReusableIdle/Working from stale guesses.
 		// Skipping leaves that rig out of this snapshot entirely; the next scan
-		// (or warm-cache expiry) re-reads it.
+		// (or warm-cache expiry) re-reads it. Because the per-rig occupancy is
+		// folded from the SAME scan, a skipped rig reports 0 to BOTH the town
+		// and per-rig gates — they stay aligned (the inverse of the gu-y9epu
+		// divergence) rather than one over- and one under-counting.
 		if !w.readOK {
 			continue
 		}
+		rigSnapshot := polecatCapacitySnapshot{}
 		for _, name := range w.polecatNames {
 			agentID := beads.PolecatBeadIDWithPrefix(w.prefix, w.rigName, name)
 			issue := w.agents[agentID] // nil-safe: nil map lookup yields nil
@@ -464,21 +511,32 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 				fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
 			}
 			applyAgentFieldsToCapacitySnapshot(&snapshot, w.rigName, name, fields, liveSessions)
+			applyAgentFieldsToCapacitySnapshot(&rigSnapshot, w.rigName, name, fields, liveSessions)
 		}
+		perRigOccupied[w.rigName] = rigSnapshot.occupied()
 	}
 
 	reservations, err := readPolecatAdmissionReservations(townRoot)
 	if err != nil {
-		return snapshot, err
+		return snapshot, nil, err
 	}
 	snapshot.Reservations = len(reservations)
+	// Attribute reservations to their target rig so the per-rig occupied count
+	// includes in-flight admissions (mirrors the town occupied() including
+	// snapshot.Reservations). A reservation with no rig recorded only counts
+	// town-wide.
+	for _, res := range reservations {
+		if res.Rig != "" {
+			perRigOccupied[res.Rig]++
+		}
+	}
 	if max > 0 {
 		snapshot.Free = max - snapshot.occupied()
 		if snapshot.Free < 0 {
 			snapshot.Free = 0
 		}
 	}
-	return snapshot, nil
+	return snapshot, perRigOccupied, nil
 }
 
 func listPolecatDirectoryNames(rigPath string) ([]string, error) {

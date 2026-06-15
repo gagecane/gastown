@@ -420,6 +420,49 @@ func TestApplyAgentFieldsToCapacitySnapshot_LiveSessionSetLookup(t *testing.T) {
 	}
 }
 
+// TestPerRigOccupancyCountsDeadSessionHookedPolecat is the gu-ccycc regression
+// guard. A polecat that holds a hook but whose tmux session has died must
+// occupy a per-rig slot exactly as it occupies a town-wide slot. The town cap
+// classifies such a polecat as RecoveryBlocked (occupied); the per-rig cap must
+// agree. Before the fix the per-rig counter enumerated LIVE tmux sessions first
+// and filtered by hook, so a dead-session-hooked polecat was invisible to the
+// per-rig cap while still consuming a town slot — the dispatch-wedge in
+// gu-ccycc (per-rig says "free", town says "full").
+//
+// This exercises the shared classifier applyAgentFieldsToCapacitySnapshot,
+// which is the single source both the town snapshot and the per-rig sub-
+// snapshot fold through (so they cannot drift). The end-to-end town-snapshot
+// path is covered by the integration suite (requires Dolt).
+func TestPerRigOccupancyCountsDeadSessionHookedPolecat(t *testing.T) {
+	rig := "gastown"
+	// Live session set is empty => every polecat's session is "dead".
+	deadSessions := map[string]bool{}
+
+	// Hooked + dead session: the exact gu-ccycc case.
+	hookedDead := &beads.AgentFields{AgentState: "working", HookBead: "gu-work"}
+
+	// The per-rig sub-snapshot (built the same way polecatCapacitySnapshotFor-
+	// TownNoCleanup builds it) must count this polecat as occupied.
+	rigSnapshot := polecatCapacitySnapshot{}
+	applyAgentFieldsToCapacitySnapshot(&rigSnapshot, rig, "stalled", hookedDead, deadSessions)
+	if rigSnapshot.RecoveryBlocked != 1 {
+		t.Fatalf("hooked dead-session polecat must classify RecoveryBlocked, got %+v", rigSnapshot)
+	}
+	if rigSnapshot.occupied() != 1 {
+		t.Fatalf("hooked dead-session polecat must occupy a per-rig slot, occupied=%d (snapshot %+v)",
+			rigSnapshot.occupied(), rigSnapshot)
+	}
+
+	// And the town snapshot, folding the SAME polecat through the SAME
+	// classifier, must reach the identical occupied count — the two gates agree.
+	townSnapshot := polecatCapacitySnapshot{}
+	applyAgentFieldsToCapacitySnapshot(&townSnapshot, rig, "stalled", hookedDead, deadSessions)
+	if townSnapshot.occupied() != rigSnapshot.occupied() {
+		t.Fatalf("per-rig occupied=%d disagrees with town occupied=%d for the same polecat",
+			rigSnapshot.occupied(), townSnapshot.occupied())
+	}
+}
+
 // TestCapacityFanoutConcurrency covers the semaphore bound for the per-rig
 // agent-bead fan-out (gu-el5bx). Defaults to 4; GT_CAPACITY_FANOUT overrides
 // with a positive int; junk/zero/negative fall back to the default so a

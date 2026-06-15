@@ -1204,10 +1204,12 @@ func filterByPerRigCapacity(townRoot string, pending []capacity.PendingBead) []c
 	// actually have a cap configured.
 	rigRemaining := make(map[string]int)
 
-	// Pre-fetch rig-level working counts once so we don't pay the tmux+beads
-	// cost per-bead.
+	// Pre-fetch rig-level occupied-slot counts once so we don't pay the
+	// directory+beads cost per-bead. This counts the SAME unit as the town cap
+	// (working + recovery-blocked + that rig's reservations), so a
+	// dead-session-hooked polecat occupies a per-rig slot here too (gu-ccycc).
 	var workingByRig map[string]int
-	if counts, ok := countWorkingPolecatsByRig(); ok {
+	if counts, ok := perRigOccupiedSlots(townRoot); ok {
 		workingByRig = counts
 	}
 
