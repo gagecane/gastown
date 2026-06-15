@@ -24,26 +24,31 @@ func (t *Tmux) DisplayMessageDefault(session, message string) error {
 	return t.DisplayMessage(session, message, constants.DefaultDisplayMs)
 }
 
-// SendNotificationBanner sends a visible notification banner to a tmux session.
-// This interrupts the terminal to ensure the notification is seen.
-// Uses echo to print a boxed banner with the notification details.
+// SendNotificationBanner shows a non-disruptive mail notification in the
+// target session's tmux status line.
+//
+// It deliberately does NOT use SendKeys: send-keys types its argument into the
+// pane as literal keystrokes, which only "executes" when the pane sits at a
+// shell prompt. Agent panes (Claude Code, etc.) treat the keystrokes as input,
+// so a shell-command banner like "echo '...'" was rendered verbatim in the
+// agent's input box instead of being displayed — leaking the literal echo
+// wrapper, surrounding quotes, and box-drawing scaffold into the message
+// stream (gu-8ue4b). display-message paints the status line directly and never
+// touches pane input, so it is safe for both human shells and agent panes.
 func (t *Tmux) SendNotificationBanner(session, from, subject string) error {
-	// Sanitize inputs to prevent output manipulation
-	from = strings.ReplaceAll(from, "\n", " ")
-	from = strings.ReplaceAll(from, "\r", " ")
-	subject = strings.ReplaceAll(subject, "\n", " ")
-	subject = strings.ReplaceAll(subject, "\r", " ")
+	return t.DisplayMessageDefault(session, formatNotificationBanner(from, subject))
+}
 
-	// Build the banner text
-	banner := fmt.Sprintf(`echo '
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📬 NEW MAIL from %s
-Subject: %s
-Run: gt mail inbox
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-'`, from, subject)
-
-	return t.SendKeys(session, banner)
+// formatNotificationBanner builds the clean, single-line status-line text for a
+// mail notification: sender, subject, and an action hint. It contains no shell
+// wrapper, surrounding quotes, or box-drawing scaffold (gu-8ue4b). Newlines and
+// carriage returns in the inputs are collapsed to spaces to keep the banner on
+// a single status line and to prevent output manipulation.
+func formatNotificationBanner(from, subject string) string {
+	replacer := strings.NewReplacer("\n", " ", "\r", " ")
+	from = replacer.Replace(from)
+	subject = replacer.Replace(subject)
+	return fmt.Sprintf("📬 NEW MAIL from %s — %s (run: gt mail inbox)", from, subject)
 }
 
 // ApplyTheme sets the status bar style for a session.

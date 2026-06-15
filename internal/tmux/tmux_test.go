@@ -1899,6 +1899,51 @@ func TestIsTransientSendKeysError(t *testing.T) {
 	}
 }
 
+// TestFormatNotificationBanner verifies the mail-notification banner renders
+// clean content with no shell wrapper, surrounding quotes, or box-drawing
+// scaffold — the exit criteria for gu-8ue4b.
+func TestFormatNotificationBanner(t *testing.T) {
+	t.Parallel()
+
+	const (
+		from    = "overseer"
+		subject = "Convoy complete: Work done"
+	)
+	got := formatNotificationBanner(from, subject)
+
+	// Must include the meaningful content.
+	for _, want := range []string{from, subject, "gt mail inbox"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("banner %q missing expected content %q", got, want)
+		}
+	}
+
+	// Must NOT include any of the leaked scaffold.
+	for _, bad := range []string{"echo", "'", "━"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("banner %q must not contain scaffold %q", got, bad)
+		}
+	}
+
+	// Must be a single line — multi-line content was part of the box-drawing
+	// scaffold and breaks the single-line status display.
+	if strings.Contains(got, "\n") {
+		t.Errorf("banner %q must be single-line", got)
+	}
+}
+
+// TestFormatNotificationBanner_SanitizesNewlines verifies CR/LF in inputs are
+// collapsed to spaces so the banner stays on one status line and cannot be used
+// to inject extra lines.
+func TestFormatNotificationBanner_SanitizesNewlines(t *testing.T) {
+	t.Parallel()
+
+	got := formatNotificationBanner("evil\nfrom", "subject\rwith\nbreaks")
+	if strings.ContainsAny(got, "\n\r") {
+		t.Errorf("banner %q must not contain raw newlines/carriage returns", got)
+	}
+}
+
 func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 	tm := newTestTmux(t)
 	sessionName := "gt-test-retry-ok-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
