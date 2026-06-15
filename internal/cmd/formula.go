@@ -489,14 +489,27 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 	// must use the town hq- prefix so HQ-routed lookups (gt convoy list,
 	// dep list, status) hit the town database, not the rig database.
 	convoyID := fmt.Sprintf("hq-cv-%s", generateFormulaShortID())
+	// Prefer the run's seed problem statement (e.g. --set problem=...) for the
+	// title so concurrent runs of the same formula are distinguishable from an
+	// operator seat; fall back to the generic formula description (gs-h1q4).
+	setVars := parseSetVars(formulaRunSet)
+	convoyTopic := formulaSeedTopic(setVars)
 	convoyTitle := fmt.Sprintf("%s: %s", formulaName, f.Description)
+	if convoyTopic != "" {
+		convoyTitle = fmt.Sprintf("%s: %s", formulaName, convoyTopic)
+	}
 	if len(convoyTitle) > 80 {
 		convoyTitle = convoyTitle[:77] + "..."
 	}
 
-	// Build description with formula context
+	// Build description with formula context. Echo the seed problem statement so
+	// `gt convoy status` can surface what the convoy is about even when its
+	// leg/syn beads live in a separate (cross-context) wisp DB (gs-h1q4).
 	description := fmt.Sprintf("Formula convoy: %s\n\nLegs: %d\nRig: %s",
 		formulaName, len(f.Legs), targetRig)
+	if convoyTopic != "" {
+		description = fmt.Sprintf("Topic: %s\n\n%s", convoyTopic, description)
+	}
 	if formulaRunPR > 0 {
 		description += fmt.Sprintf("\nPR: #%d", formulaRunPR)
 	}
@@ -527,9 +540,6 @@ func executeConvoyFormula(f *formula.Formula, formulaName, targetRig string) err
 	}
 
 	fmt.Printf("%s Created convoy: %s\n", style.Bold.Render("✓"), convoyID)
-
-	// Parse --set key=value pairs for template rendering
-	setVars := parseSetVars(formulaRunSet)
 
 	// Generate a unique review ID for this convoy run. Honors --set
 	// review_id=X so it matches --dry-run output exactly (gt-4032).
@@ -833,11 +843,21 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 
 	// Step 1: Create workflow root bead
 	workflowID := fmt.Sprintf("hq-wf-%s", generateFormulaShortID())
+	// Prefer the run's seed problem statement for the title so concurrent runs
+	// of the same formula are distinguishable from an operator seat (gs-h1q4).
+	workflowTopic := formulaSeedTopic(setVars)
 	workflowTitle := fmt.Sprintf("%s: %s (%d steps)", formulaName,
 		truncate(f.Description, 50), len(f.Steps))
+	if workflowTopic != "" {
+		workflowTitle = fmt.Sprintf("%s: %s (%d steps)", formulaName,
+			truncate(workflowTopic, 50), len(f.Steps))
+	}
 
 	description := fmt.Sprintf("Workflow: %s\n\nSteps: %d\nRig: %s",
 		formulaName, len(f.Steps), targetRig)
+	if workflowTopic != "" {
+		description = fmt.Sprintf("Topic: %s\n\n%s", workflowTopic, description)
+	}
 
 	// Record the driving assignment bead (the `issue` var) so the chain can be
 	// torn down when its driver closes (gu-guwpn). Orchestrators (e.g.
@@ -1179,6 +1199,28 @@ func parseSetVars(setArgs []string) map[string]interface{} {
 		}
 	}
 	return vars
+}
+
+// formulaSeedTopicVars lists the --set var names that carry a run's seed
+// problem statement, in priority order. Planning formulas (idea-to-plan,
+// design, prd-review, plan-review) take the idea via `problem`; work/sling
+// runs take an assignment bead via `issue`.
+var formulaSeedTopicVars = []string{"problem", "idea", "topic", "subject", "issue"}
+
+// formulaSeedTopic returns the run's seed problem statement from setVars, if
+// any of the known seed vars are set. This is what distinguishes one concurrent
+// run of a formula from another — without it, every convoy for a given formula
+// shares the same generic "<formula>: <formula description>" title and an
+// operator can't tell which convoy is about what (gs-h1q4 / re-home hq-lge7c).
+func formulaSeedTopic(setVars map[string]interface{}) string {
+	for _, name := range formulaSeedTopicVars {
+		if v, ok := setVars[name].(string); ok {
+			if v = strings.TrimSpace(v); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 func formulaTemplateContext(formulaName, targetDescription, reviewID, designID string, prNumber int, prTitle string, changedFiles []map[string]interface{}, files []string, setVars map[string]interface{}) map[string]interface{} {

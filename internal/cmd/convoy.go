@@ -3205,6 +3205,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 		type jsonStatus struct {
 			ID            string             `json:"id"`
 			Title         string             `json:"title"`
+			Topic         string             `json:"topic,omitempty"`
 			Status        string             `json:"status"`
 			Owned         bool               `json:"owned"`
 			Lifecycle     string             `json:"lifecycle"`
@@ -3217,6 +3218,7 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 		out := jsonStatus{
 			ID:            convoy.ID,
 			Title:         convoy.Title,
+			Topic:         convoyTopicFromFields(convoy.Description),
 			Status:        convoy.Status,
 			Owned:         isOwned,
 			Lifecycle:     lifecycle,
@@ -3233,6 +3235,9 @@ func runConvoyStatus(cmd *cobra.Command, args []string) error {
 
 	// Human-readable output
 	fmt.Printf("🚚 %s %s\n\n", style.Bold.Render(convoy.ID+":"), convoy.Title)
+	if topic := convoyTopicFromFields(convoy.Description); topic != "" {
+		fmt.Printf("  Topic:     %s\n", topic)
+	}
 	fmt.Printf("  Status:    %s\n", formatConvoyStatus(convoy.Status))
 	fmt.Printf("  Owned:     %s\n", formatYesNo(isOwned))
 	if isOwned {
@@ -3673,6 +3678,21 @@ func hasAllLabels(labels, required []string) bool {
 // Delegates to the sling domain API.
 func convoyMergeFromFields(description string) string {
 	return sling.MergeFromFields(description)
+}
+
+// convoyTopicFromFields extracts the seed problem statement echoed onto the
+// convoy at creation time (a leading "Topic: <text>" line). This lets
+// `gt convoy status` show what a convoy is ABOUT from an operator seat even
+// when its leg/syn beads live in a separate cross-context wisp DB (gs-h1q4).
+// Returns empty string if no Topic line is present.
+func convoyTopicFromFields(description string) string {
+	for _, line := range strings.Split(description, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "Topic:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
 }
 
 // formatYesNo returns "yes" or "no" for a boolean value.
