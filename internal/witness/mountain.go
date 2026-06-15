@@ -221,13 +221,26 @@ func updateMountainFailureCount(bd *BdCli, workDir, issueID string, oldCount, ne
 	return bd.Run(workDir, args...)
 }
 
-// skipMountainIssue marks an issue as blocked and adds the mountain:skipped label.
-// This removes the issue from the convoy's ready front, allowing the convoy to
-// continue grinding around it.
+// skipMountainIssue retires a leg the Mountain-Eater has given up on: it adds the
+// mountain:skipped label (for queryability/visibility) and then CLOSES the leg
+// with a mountain:skipped close reason.
+//
+// Closing — rather than the old status=blocked — is essential to keep the convoy
+// alive (gu-lcddy). A mountain convoy's synthesis bead is gated by blocks-edges
+// from every leg, and bd's blocker computation (and convoy.go's completion gate)
+// treat ONLY closed/tombstone blockers as satisfied. A blocked leg is therefore a
+// permanent non-closed blocker: the synthesis rollup never dispatches and the
+// convoy never auto-completes — the exact opposite of the design intent that
+// skipping lets the convoy grind on around the failed leg. Closing satisfies the
+// edge so the synthesis can run and the convoy can close.
+//
+// The matching convoy ship-verification gate recognizes this close reason
+// (see shippingNotExpected) so the closed-but-unshipped leg does not trip the
+// Pattern B/C false-close warning and re-block the convoy.
 func skipMountainIssue(bd *BdCli, workDir, issueID string, failureCount int) error {
-	return bd.Run(workDir, "update", issueID,
-		"--status=blocked",
-		"--add-label", "mountain:skipped",
-		"--notes", fmt.Sprintf("Skipped by Mountain-Eater after %d polecat failures", failureCount),
-	)
+	if err := bd.Run(workDir, "update", issueID, "--add-label", "mountain:skipped"); err != nil {
+		return err
+	}
+	reason := fmt.Sprintf("mountain:skipped: Skipped by Mountain-Eater after %d polecat failures", failureCount)
+	return bd.Run(workDir, "close", issueID, "--reason", reason)
 }

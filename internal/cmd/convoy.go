@@ -1756,9 +1756,12 @@ func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
 // was closed without ever doing the work — so a missing citing commit on
 // origin/main is expected. The recognized prefixes are:
 //
-//   - "stale:"          — reaper auto-closed an aged-out deferred bead
-//   - "no-changes:"     — polecat closed without code changes (formula exception)
-//   - "not-applicable:" — polecat closed because the bead doesn't apply
+//   - "stale:"            — reaper auto-closed an aged-out deferred bead
+//   - "no-changes:"       — polecat closed without code changes (formula exception)
+//   - "not-applicable:"   — polecat closed because the bead doesn't apply
+//   - "mountain:skipped:" — Mountain-Eater retired a leg after repeated polecat
+//                           failures (gu-lcddy); the leg is closed to unblock the
+//                           convoy's synthesis rollup, and no commit ships for it.
 //
 // Any other close_reason (including "merged", "done", and the empty default)
 // falls through to the standard ship-verification logic.
@@ -1766,7 +1769,7 @@ func shippingNotExpected(closeReason string) bool {
 	if closeReason == "" {
 		return false
 	}
-	for _, prefix := range []string{"stale:", "no-changes:", "not-applicable:"} {
+	for _, prefix := range []string{"stale:", "no-changes:", "not-applicable:", "mountain:skipped:"} {
 		if strings.HasPrefix(closeReason, prefix) {
 			return true
 		}

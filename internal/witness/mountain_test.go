@@ -244,15 +244,24 @@ func TestTrackConvoyFailure_MountainThirdFailure_AutoSkip(t *testing.T) {
 		t.Error("expected Skipped=true after 3 failures")
 	}
 
-	// Verify skip action: status=blocked + mountain:skipped label
-	foundSkip := false
+	// Verify skip action (gu-lcddy): the leg gets the mountain:skipped label AND
+	// is CLOSED (not status=blocked) so its blocks-edge on the synthesis bead is
+	// satisfied and the convoy can roll up and auto-close.
+	foundLabel := false
+	foundClose := false
 	for _, call := range mock.runCalls {
-		if strings.Contains(call, "--status=blocked") && strings.Contains(call, "mountain:skipped") {
-			foundSkip = true
+		if strings.Contains(call, "update") && strings.Contains(call, "mountain:skipped") {
+			foundLabel = true
+		}
+		if strings.Contains(call, "close") && strings.Contains(call, "mountain:skipped:") {
+			foundClose = true
 		}
 	}
-	if !foundSkip {
-		t.Errorf("expected bd update with --status=blocked and mountain:skipped, got calls: %v", mock.runCalls)
+	if !foundLabel {
+		t.Errorf("expected bd update adding mountain:skipped label, got calls: %v", mock.runCalls)
+	}
+	if !foundClose {
+		t.Errorf("expected bd close with mountain:skipped reason, got calls: %v", mock.runCalls)
 	}
 }
 
