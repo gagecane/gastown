@@ -4,8 +4,10 @@
 # Syncs production databases to filesystem backups via `dolt backup sync`.
 # Skips databases that haven't changed since last backup (hash check).
 # Only escalates when actual backup operations fail — not on ping failures.
-# After each run, prunes old .darc files keeping at least BACKUP_SAFETY_FLOOR
-# most-recent archives and deleting any older than BACKUP_RETENTION_DAYS.
+# Does NOT prune individual .darc files: a Dolt backup store is incremental and
+# content-addressed, so an old-mtime .darc can still be live-referenced by the
+# current manifest. Deleting by age corrupts the store (gs-uogx) — let Dolt
+# manage the store's contents.
 #
 # Usage: ./run.sh [--databases db1,db2,...] [--dry-run]
 
@@ -32,8 +34,6 @@ if [[ -z "${DOLT_BACKUP_DIR:-}" ]]; then
 fi
 BACKUP_DIR="$DOLT_BACKUP_DIR"
 BACKUP_TIMEOUT=60
-BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
-BACKUP_SAFETY_FLOOR="${BACKUP_SAFETY_FLOOR:-3}"
 
 # Store-lock: serialize `dolt backup sync` against Dolt server restarts so a
 # restart never rewrites/prunes live table files mid-sync and corrupts the
@@ -157,75 +157,6 @@ write_heartbeat() {
     rm -f "$hb_tmp" 2>/dev/null || true
     log "  heartbeat: write failed for $hb_file — skipping signal"
   fi
-}
-
-# retention_cleanup <backup_path>
-# Deletes .darc files older than BACKUP_RETENTION_DAYS, always keeping the
-# BACKUP_SAFETY_FLOOR most-recent files. Non-fatal: errors are logged and skipped.
-retention_cleanup() {
-  local backup_path="$1"
-  [[ -d "$backup_path" ]] || return 0
-
-  # Collect all .darc files sorted newest-first (ls -t is portable on macOS+Linux)
-  local -a darcs=()
-  while IFS= read -r f; do
-    darcs+=("$f")
-  done < <(ls -t "$backup_path"/*.darc 2>/dev/null || true)
-
-  local total=${#darcs[@]}
-  [[ $total -eq 0 ]] && return 0
-
-  local deleted=0
-  local freed_kb=0
-  local errors=0
-  local cutoff=$(( $(date +%s) - BACKUP_RETENTION_DAYS * 86400 ))
-
-  for (( i=0; i<total; i++ )); do
-    local f="${darcs[$i]}"
-    # Safety floor: never delete the BACKUP_SAFETY_FLOOR most-recent archives
-    (( i < BACKUP_SAFETY_FLOOR )) && continue
-
-    # mtime: try GNU stat -c "%Y" first (Linux daemon), macOS stat -f "%m"
-    # as fallback. Order matters: `stat -f` is GNU's FILESYSTEM-info mode and on
-    # Linux prints a multiline `  File: ...` blob to stdout while returning
-    # non-zero, which previously leaked into $mtime and crashed the arithmetic
-    # below under `set -u` ("File: unbound variable"), aborting the whole run in
-    # Step 3 even though all backups had already synced (gu-t9xgf). The numeric
-    # guard makes a non-numeric result skip the file rather than crash or delete.
-    local mtime
-    mtime=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)
-    if ! [[ "$mtime" =~ ^[0-9]+$ ]]; then
-      log "    retention: could not read mtime of $(basename "$f") — skipping"
-      errors=$(( errors + 1 ))
-      continue
-    fi
-
-    if (( mtime < cutoff )); then
-      local age_days=$(( ( $(date +%s) - mtime ) / 86400 ))
-      local kb
-      kb=$(du -k "$f" 2>/dev/null | cut -f1 || echo 0)
-      if rm -f "$f" 2>/dev/null; then
-        deleted=$(( deleted + 1 ))
-        freed_kb=$(( freed_kb + kb ))
-        log "    retention: removed $(basename "$f") (${age_days}d old, ${kb}KB)"
-      else
-        log "    retention: could not remove $(basename "$f") — skipping"
-        errors=$(( errors + 1 ))
-      fi
-    fi
-  done
-
-  if (( deleted > 0 )); then
-    log "  retention: freed ${freed_kb}KB across ${deleted} file(s) (${BACKUP_RETENTION_DAYS}d policy, floor ${BACKUP_SAFETY_FLOOR})"
-  fi
-
-  # Signal a non-fatal retention error to the caller so it can be counted and
-  # surfaced as a low-severity warning (gu-8xvpw) — distinct from a backup-sync
-  # failure. Returning explicitly also avoids inheriting the exit status of the
-  # `(( deleted > 0 ))` test above (non-zero whenever nothing was pruned), which
-  # the caller's `if retention_cleanup` would otherwise misread as a failure.
-  (( errors > 0 )) && return 1
-  return 0
 }
 
 # --- Step 1: Discover databases -----------------------------------------------
@@ -446,47 +377,25 @@ for DB in "${PROD_DBS[@]}"; do
   fi
 done
 
-# --- Step 3: Retention — prune old .darc files --------------------------------
-# Prune ONLY this plugin's own backup directory ($BACKUP_DIR/$DB, the target of
-# the "${DB}-backup" remote synced in Step 2). We must NOT read the backup URL
-# from repo_state.json and prune whatever comes first: a served DB also carries
-# a "backup_export" remote owned by the beads `bd` tool, pointing at
-# <rig>/mayor/rig/.beads/backup. Its manifest is rewritten only by `bd backup
-# sync`, not by this plugin. JSON map order in repo_state.json is unstable, so
-# `list(backups.values())[0]` was nondeterministically selecting backup_export
-# and rm -f'ing its .darc files WITHOUT rewriting that dir's manifest — leaving
-# the live SQL server, which holds backup_export registered, unable to open the
-# referenced table files. That flooded "error opening table file: table file not
-# found" on every query, exhausting the conn pool and crashing Dolt townwide
-# (gc-itl3us). Targeting $BACKUP_DIR/$DB directly prunes only what we own and own
-# the manifest for.
-
+# --- Step 3: Retention (intentionally a no-op) --------------------------------
+# We deliberately do NOT prune individual .darc files. A Dolt backup store is
+# incremental and content-addressed: .darc table files are deduplicated chunk
+# files, not independent dated snapshots, so an OLD-mtime .darc can still be
+# referenced by the CURRENT backup manifest. Deleting by age removed
+# live-referenced table files and corrupted the store — the next
+# `dolt backup sync` then failed with "error opening table file: table file not
+# found" (gs-uogx; observed corrupting hq and lia_iac within hours). The store
+# self-manages on each incremental sync; let Dolt own its contents.
+#
+# These counters remain (always 0) so the heartbeat schema (retention_dirs /
+# retention_failed) and the severity logic below stay unchanged. With pruning
+# gone, RETENTION_FAILED can never be > 0, so it can never drive an escalation.
 RETENTION_CLEANED=0
 RETENTION_FAILED=0
-for DB in "${PROD_DBS[@]}"; do
-  BACKUP_PATH="$BACKUP_DIR/$DB"
-  [[ -d "$BACKUP_PATH" ]] || continue
-
-  if $DRY_RUN; then
-    DARC_COUNT=$(ls "$BACKUP_PATH"/*.darc 2>/dev/null | wc -l | tr -d ' ')
-    log "  $DB: DRY RUN retention — $DARC_COUNT .darc in $BACKUP_PATH"
-  else
-    # Retention is best-effort maintenance, NOT a backup-sync operation: a
-    # failure here must never be reported as data-loss (gu-t9xgf/gu-8xvpw).
-    # retention_cleanup is internally non-fatal; guard the call anyway so a
-    # future change can't let it abort the run under set -e.
-    if retention_cleanup "$BACKUP_PATH"; then
-      RETENTION_CLEANED=$(( RETENTION_CLEANED + 1 ))
-    else
-      RETENTION_FAILED=$(( RETENTION_FAILED + 1 ))
-      log "  $DB: retention cleanup reported an error (non-fatal) — continuing"
-    fi
-  fi
-done
 
 # --- Step 4: Report results ---------------------------------------------------
 
-SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked, $DEFERRED deferred (of ${#PROD_DBS[@]} DBs); retention pruned ${RETENTION_CLEANED} dir(s), ${RETENTION_FAILED} retention error(s)"
+SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked, $DEFERRED deferred (of ${#PROD_DBS[@]} DBs)"
 log "$SUMMARY"
 if [[ "$NO_REMOTE" -gt 0 ]]; then
   log "  no-remote DBs (enumerated but unconfigured — likely orphan/stray):$NO_REMOTE_DBS"
