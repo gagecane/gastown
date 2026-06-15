@@ -1066,3 +1066,32 @@ func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 		t.Fatal("design usage examples do not mention --set problem=")
 	}
 }
+
+// TestIdeaToPlanParentChildArgOrder is the regression test for gu-oordu:
+// convert-to-beads wired the epic↔child parent-child edge backwards by putting
+// the epic first, which made the epic a child of its own impl beads and caused
+// `gt sling` to refuse every leaf with "has open children".
+//
+// bd's convention (verified against the live deps table) is that
+// `bd dep add A B --type=parent-child` stores issue_id=A (child),
+// depends_on_id=B (parent) — i.e. A's parent is B. So the CHILD must come
+// first and the EPIC second, exactly the same arg order as a blocking edge.
+func TestIdeaToPlanParentChildArgOrder(t *testing.T) {
+	t.Parallel()
+
+	idea, err := formula.GetEmbeddedFormulaContent("mol-idea-to-plan")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent(mol-idea-to-plan): %v", err)
+	}
+	text := string(idea)
+
+	// The correct command: child first, epic second.
+	if !strings.Contains(text, "bd dep add <child-id> <epic-id> --type=parent-child") {
+		t.Error("mol-idea-to-plan must wire parent-child as 'bd dep add <child-id> <epic-id> --type=parent-child' (child first, epic second)")
+	}
+
+	// The inverted form (epic first) is the gu-oordu bug — it must not appear.
+	if strings.Contains(text, "bd dep add <epic-id> <child-id> --type=parent-child") {
+		t.Error("mol-idea-to-plan still contains the inverted 'bd dep add <epic-id> <child-id>' form (gu-oordu): epic-first makes the epic a child of its impl beads")
+	}
+}

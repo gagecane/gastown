@@ -725,23 +725,30 @@ Implementation of: {{problem}}
 
 **5. Link children to the epic (NON-BLOCKING — read this carefully):**
 
-⚠️ **FOOTGUN — DO NOT create a blocking child→epic dependency.**
-`bd dep add <child> <epic>` means "child depends on epic" = the child is
-BLOCKED until the epic closes. But an epic stays open until all its children
-finish, so every child becomes permanently blocked → never ready → dispatch
-deadlocks silently. (This deadlocked CASC wiki Phase 3, 2026-06-02.)
-
-To associate each child impl-bead with its parent epic, use a NON-BLOCKING
-`parent-child` edge in the **EPIC → child** direction. The epic tracks the
-child for hierarchy; the child is NOT blocked:
+`bd dep add A B` always stores "A depends on / belongs to B" — A is the
+subordinate, B is the target. The argument order is the SAME for every dep
+type; ONLY the `--type` flag decides whether the edge blocks execution or just
+records hierarchy. So for a child impl-bead and its parent epic, the child is
+always first and the epic second:
 
 ```bash
-# Correct: epic is the parent, child is the child. Non-blocking hierarchy edge.
-bd dep add <epic-id> <child-id> --type=parent-child
+# Correct: child first, epic second, with --type=parent-child.
+# Non-blocking hierarchy edge — the child is tracked by the epic, NOT blocked.
+bd dep add <child-id> <epic-id> --type=parent-child
 ```
 
-Note the argument order: the EPIC comes first (it is the parent). This is the
-opposite of the blocking `bd dep add <child> <dependency>` form in step 3.
+⚠️ **FOOTGUN 1 — DO NOT omit `--type=parent-child`.** The bare
+`bd dep add <child> <epic>` creates a BLOCKING edge: the child depends on the
+epic. But an epic stays open until all its children finish, so every child
+becomes permanently blocked → never ready → dispatch deadlocks silently.
+(This deadlocked CASC wiki Phase 3, 2026-06-02.) Same args, just add the
+`--type=parent-child` flag.
+
+⚠️ **FOOTGUN 2 — DO NOT swap the args to put the epic first.**
+`bd dep add <epic> <child> --type=parent-child` inverts the hierarchy: the
+EPIC becomes a child of its own impl beads. Then every leaf impl bead looks
+like a container with open children and `gt sling` refuses the whole epic with
+"has open children". (This blocked gu-oordu's flywheel-retro epic, 2026-06-13.)
 
 Sibling-to-sibling ordering deps from step 3 are correct and stay as blocking
 edges. Only the child↔epic association must be non-blocking.
@@ -752,13 +759,18 @@ bd blocked  # should show clean topological order
 bv --robot-mode  # if available: graph visualization
 ```
 
-⚠️ **Verify no child is blocked by the epic.** If `bd blocked` lists an
-impl-bead as blocked by the epic, you wired the child↔epic edge backwards
-(blocking child→epic instead of non-blocking epic→child). Remove the bad
-edge and redo it per step 5:
+⚠️ **Verify the hierarchy is correct in BOTH directions:**
+- `bd children <epic-id>` must list the impl beads (epic is their parent).
+- `bd children <impl-id>` must be empty (an impl bead is a leaf, not a container).
+- `bd blocked` must NOT list any impl-bead as blocked by the epic.
+
+If an impl-bead is blocked by the epic, you omitted `--type=parent-child`
+(footgun 1). If `bd children <impl-id>` lists the epic, you swapped the args
+(footgun 2). Either way, remove the bad edge and redo it per step 5:
 ```bash
-bd dep remove <child-id> <epic-id>                      # drop the blocking edge
-bd dep add <epic-id> <child-id> --type=parent-child     # add non-blocking hierarchy edge
+bd dep remove <child-id> <epic-id>                      # drop whatever edge exists
+bd dep remove <epic-id> <child-id>                      # (try both directions)
+bd dep add <child-id> <epic-id> --type=parent-child     # child first, epic second
 ```
 At least one task should be ready (`bd ready`) immediately after wiring.
 
