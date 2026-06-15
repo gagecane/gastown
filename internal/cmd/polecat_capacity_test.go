@@ -584,6 +584,56 @@ func TestPerRigOccupancyCountsDeadSessionHookedPolecat(t *testing.T) {
 	}
 }
 
+// TestFoldUnreadableRigAsOccupied is the gu-y9epu regression guard. When a
+// rig's bead reads fail (Dolt blip), the town snapshot must degrade FAIL-CLOSED
+// — every polecat directory counts as an occupied slot in BOTH the town
+// snapshot and the per-rig occupancy — rather than contributing zero capacity
+// (which let the town cap overcommit while the per-rig terminal fallback
+// over-counted, desyncing the two gates in opposite directions). Both gates now
+// degrade in the SAME conservative direction.
+func TestFoldUnreadableRigAsOccupied(t *testing.T) {
+	t.Run("folds dirs as occupied into both town and per-rig", func(t *testing.T) {
+		snapshot := polecatCapacitySnapshot{}
+		perRig := map[string]int{}
+		foldUnreadableRigAsOccupied(&snapshot, perRig, "gastown", 3)
+
+		if snapshot.RecoveryBlocked != 3 {
+			t.Fatalf("unreadable rig must fold 3 dirs as RecoveryBlocked, got %+v", snapshot)
+		}
+		if snapshot.occupied() != 3 {
+			t.Fatalf("town occupied must be 3 (fail-closed), got %d (%+v)", snapshot.occupied(), snapshot)
+		}
+		if perRig["gastown"] != 3 {
+			t.Fatalf("per-rig occupancy must be 3, got %d", perRig["gastown"])
+		}
+		// The two gates degrade in the SAME direction: town occupancy
+		// contributed by the rig equals the rig's own occupancy.
+		if perRig["gastown"] != snapshot.occupied() {
+			t.Fatalf("per-rig (%d) and town (%d) must agree for a single unreadable rig",
+				perRig["gastown"], snapshot.occupied())
+		}
+	})
+
+	t.Run("not Working so it cannot read as live throughput", func(t *testing.T) {
+		// poolDegraded / stuck-detection treat Working as live throughput; an
+		// unreadable rig's assumed-occupied slots must NOT inflate Working.
+		snapshot := polecatCapacitySnapshot{}
+		foldUnreadableRigAsOccupied(&snapshot, map[string]int{}, "gastown", 2)
+		if snapshot.Working != 0 {
+			t.Fatalf("unreadable rig must not inflate Working, got %+v", snapshot)
+		}
+	})
+
+	t.Run("empty rig folds nothing", func(t *testing.T) {
+		snapshot := polecatCapacitySnapshot{}
+		perRig := map[string]int{}
+		foldUnreadableRigAsOccupied(&snapshot, perRig, "gastown", 0)
+		if snapshot.occupied() != 0 || len(perRig) != 0 {
+			t.Fatalf("rig with no dirs must fold nothing, snapshot=%+v perRig=%v", snapshot, perRig)
+		}
+	})
+}
+
 // TestCapacityFanoutConcurrency covers the semaphore bound for the per-rig
 // agent-bead fan-out (gu-el5bx). Defaults to 4; GT_CAPACITY_FANOUT overrides
 // with a positive int; junk/zero/negative fall back to the default so a

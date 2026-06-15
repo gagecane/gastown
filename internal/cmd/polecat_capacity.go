@@ -540,15 +540,20 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	// occupies a town slot (gu-ccycc).
 	perRigOccupied := make(map[string]int)
 	for _, w := range work {
-		// A rig whose agent-bead read failed contributes NO capacity rather than
-		// being miscounted: with a nil agents map every polecat would parse as a
-		// fields==nil slot and inflate ReusableIdle/Working from stale guesses.
-		// Skipping leaves that rig out of this snapshot entirely; the next scan
-		// (or warm-cache expiry) re-reads it. Because the per-rig occupancy is
-		// folded from the SAME scan, a skipped rig reports 0 to BOTH the town
-		// and per-rig gates — they stay aligned (the inverse of the gu-y9epu
-		// divergence) rather than one over- and one under-counting.
+		// A rig whose bead reads failed degrades FAIL-CLOSED: every polecat
+		// directory counts as an occupied slot in BOTH the town snapshot and the
+		// rig's own occupancy (gu-y9epu). Previously this branch skipped the rig
+		// entirely (contributed 0 capacity), so the town cap UNDER-counted and
+		// could overcommit, while the per-rig terminal fallback
+		// (countActivePolecatsInRig) OVER-counts — a single Dolt blip desynced
+		// the two gates in OPPOSITE directions. Counting the filesystem directory
+		// scan (no Dolt needed) as fully occupied makes both gates degrade in the
+		// SAME conservative direction: over-counting only refuses admission early,
+		// it can never overcommit. Self-corrects on the next healthy scan (5s
+		// cache TTL). The directory count is the same unit the per-rig fallback
+		// approximates via live tmux sessions, so the two stay aligned.
 		if !w.readOK {
+			foldUnreadableRigAsOccupied(&snapshot, perRigOccupied, w.rigName, len(w.polecatNames))
 			continue
 		}
 		rigSnapshot := polecatCapacitySnapshot{}
@@ -647,6 +652,24 @@ func liveSessionSet(tmuxClient *tmux.Tmux) map[string]bool {
 		set[name] = true
 	}
 	return set
+}
+
+// foldUnreadableRigAsOccupied accounts for a rig whose bead reads failed by
+// treating every one of its polecat directories as an occupied slot, in BOTH
+// the town snapshot and the per-rig occupancy map (gu-y9epu). This is the
+// fail-closed degradation: when Dolt is unreachable we cannot tell working from
+// idle, so we assume the worst (fully occupied) for a CEILING — over-counting
+// can only refuse admission early, never overcommit. dirCount comes from the
+// filesystem directory scan, which needs no Dolt, so this stays available
+// exactly when the bead reads do not. RecoveryBlocked (not Working) is used so
+// the slots count toward occupied() without being mistaken for live throughput
+// by poolDegraded / stuck-detection heuristics.
+func foldUnreadableRigAsOccupied(snapshot *polecatCapacitySnapshot, perRigOccupied map[string]int, rigName string, dirCount int) {
+	if dirCount <= 0 {
+		return
+	}
+	snapshot.RecoveryBlocked += dirCount
+	perRigOccupied[rigName] += dirCount
 }
 
 // applyAgentFieldsToCapacitySnapshot classifies one polecat into the capacity
