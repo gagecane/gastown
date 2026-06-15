@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -115,6 +116,33 @@ func SuppressWrites() func() {
 	return func() { suppressWrites = false }
 }
 
+// EnvTestAllowEventWrites, when set, opts a test back into real event writes.
+// Tests that genuinely exercise the write path (chdir into a temp town and
+// assert on the resulting .events.jsonl) set this; everything else running
+// under `go test` is suppressed by default.
+const EnvTestAllowEventWrites = "GT_TEST_ALLOW_EVENT_WRITES"
+
+// testSuppressed reports whether event writes should be suppressed because we
+// are running under `go test` and the caller has not opted into real writes.
+//
+// This is the structural fix for the test-suite event leak (gs-gl6q): fixture
+// tests across internal/cmd, internal/tmux, and internal/daemon exercise
+// production code paths that emit session_death/mass_death/
+// scheduler_dispatch_failed events. write() resolves the town root from the
+// cwd, which — when the suite runs inside the live worktree — is the REAL
+// town, so those phantom fixture events land in ~/gt/.events.jsonl and pollute
+// gt feed. Guarding at this single boundary covers every caller without
+// re-plumbing each test (mirrors the testing.Testing() boundaries in
+// internal/tmux/sendkeys.go (gu-l8zp) and internal/beads/database.go).
+// Production binaries return false because testing.Testing() is false outside
+// the test runner.
+func testSuppressed() bool {
+	if !testing.Testing() {
+		return false
+	}
+	return os.Getenv(EnvTestAllowEventWrites) == ""
+}
+
 // Log writes an event to the events log.
 // The event is appended to ~/gt/.events.jsonl.
 // Returns nil if logging fails (events are best-effort).
@@ -144,7 +172,7 @@ func LogAudit(eventType, actor string, payload map[string]interface{}) error {
 // Uses flock for cross-process synchronization — sync.Mutex only protects
 // intra-process goroutines, but multiple gt processes write concurrently.
 func write(event Event) error {
-	if suppressWrites {
+	if suppressWrites || testSuppressed() {
 		return nil
 	}
 

@@ -11,6 +11,11 @@ import (
 )
 
 func TestRunLogCrashEmitsFeedSessionDeath(t *testing.T) {
+	// This test exercises the real event write path (runLogCrash -> events.Log)
+	// against a temp town, so opt back into writes that are suppressed by
+	// default under `go test` (gs-gl6q).
+	t.Setenv(gtevents.EnvTestAllowEventWrites, "1")
+
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
