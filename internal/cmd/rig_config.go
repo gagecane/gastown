@@ -275,10 +275,28 @@ func setBeadLabel(townRoot string, r *rig.Rig, key, value string) error {
 	beadsDir := beads.ResolveBeadsDir(r.Path)
 	bd := beads.NewWithBeadsDir(townRoot, beadsDir)
 
-	// Check if bead exists
-	issue, err := bd.Show(rigBeadID)
+	// Ensure the rig identity bead exists, auto-creating it if missing.
+	// Some live rigs lack their identity bead (gu-av1j3), which previously made
+	// --global persistence impossible. EnsureRigBead is idempotent: it returns
+	// the existing bead or creates one mirroring `gt rig add`.
+	repo := r.GitURL
+	if repo == "" {
+		repo = r.PushURL
+	}
+	existed := true
+	if _, err := bd.Show(rigBeadID); err != nil {
+		existed = false
+	}
+	issue, err := bd.EnsureRigBead(r.Name, &beads.RigFields{
+		Repo:   repo,
+		Prefix: prefix,
+		State:  beads.RigStateActive,
+	})
 	if err != nil {
-		return fmt.Errorf("rig identity bead %s not found (run 'gt rig add' to create it)", rigBeadID)
+		return fmt.Errorf("rig identity bead %s not found and could not be created (try 'gt rig add'): %w", rigBeadID, err)
+	}
+	if !existed {
+		fmt.Printf("%s Created missing rig identity bead %s\n", style.Warning.Render("!"), rigBeadID)
 	}
 
 	// Build new labels list: remove existing key:* and add new key:value
