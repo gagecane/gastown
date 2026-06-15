@@ -386,6 +386,31 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// gc-hdi17t fix #1: submit-time base re-validation for fork-sync MRs.
+	// A fork-sync branch snapshots origin/<target> at GENERATION time; a burst
+	// of landings can move the tip underneath it, so by submit time the branch
+	// may no longer contain current origin/<target>. Merging it then silently
+	// reverts whatever landed after the snapshot (the -860-line revert the
+	// refinery caught by hand in gc-ailhrp). Refuse here so the stale branch
+	// never enters the queue — the refinery's merge-gate (detectStaleForkSync,
+	// cbeb76700) remains the backstop for anything that slips past. Restricted
+	// to fork-sync branches: a normal feature branch is expected to be behind
+	// main and is rebased forward by the merge. Fail-open on git errors.
+	if isForkSyncBranch(branch) {
+		branchTip := commitSHA
+		if branchTip == "" {
+			branchTip = "refs/heads/" + branch
+		}
+		if stale, reason, sErr := detectStaleForkSyncAtSubmit(g, target, branchTip); sErr != nil {
+			style.PrintWarning("could not re-validate fork-sync base (proceeding; refinery will re-check): %v", sErr)
+		} else if stale {
+			return fmt.Errorf("refusing to submit stale fork-sync branch %q: %s\n\n"+
+				"  This fork-sync was generated against an older origin/%s and would revert\n"+
+				"  commits that have since landed. Regenerate it against current origin/%s\n"+
+				"  (re-run the upstream sync) and resubmit.", branch, reason, target, target)
+		}
+	}
+
 	// Check if MR bead already exists for this branch+SHA (idempotency)
 	var mrIssue *beads.Issue
 	var existingMR *beads.Issue
@@ -738,4 +763,61 @@ func isForkSyncBranch(branch string) bool {
 		strings.Contains(branch, "upstream-sync") ||
 		strings.Contains(branch, "fork-sync") ||
 		strings.Contains(branch, "rebase-upstream")
+}
+
+// submitGitOps is the subset of *git.Git that detectStaleForkSyncAtSubmit
+// needs. Kept small so unit tests can stub it without bringing up a real repo.
+type submitGitOps interface {
+	FetchRemoteBranch(remote, branch string) error
+	IsAncestor(ancestor, descendant string) (bool, error)
+}
+
+// Compile-time check: the real *git.Git satisfies the interface.
+var _ submitGitOps = (*git.Git)(nil)
+
+// detectStaleForkSyncAtSubmit re-validates, at SUBMIT time, that a fork-sync
+// branch still contains the CURRENT origin/<target> tip. This is fix #1 of
+// gc-hdi17t — the submit-time complement to the refinery's merge-gate backstop
+// (detectStaleForkSync, cbeb76700).
+//
+// Root cause (gc-hdi17t): a fork-sync MR snapshots origin/<target> at
+// GENERATION time, not submit time. A burst of landings (or the push-block
+// drain) moves origin/<target> underneath the branch. If the branch no longer
+// contains the live tip, merging it silently reverts whatever landed after the
+// snapshot. Catching it here keeps the stale branch out of the queue entirely,
+// so the refinery never has to reject it mid-merge.
+//
+// The check refreshes origin/<target> first (the local tracking ref may itself
+// be stale) and reports Stale=true iff the live origin/<target> is NOT an
+// ancestor of branchTip. The caller is responsible for restricting this to
+// fork-sync branches (via isForkSyncBranch) — a normal feature branch is
+// expected to be behind main and is rebased forward by the merge, so it must
+// never be flagged.
+//
+// Fail-open: a non-nil error (fetch hiccup, ancestry probe failure) returns
+// stale=false so a transient git problem never wedges a legitimate submit —
+// the refinery's merge-gate re-checks before the merge actually lands.
+func detectStaleForkSyncAtSubmit(g submitGitOps, target, branchTip string) (stale bool, reason string, err error) {
+	if g == nil {
+		return false, "nil git ops", fmt.Errorf("detectStaleForkSyncAtSubmit: nil git ops")
+	}
+	if target == "" || branchTip == "" {
+		return false, "empty target or branch tip", nil
+	}
+
+	// Refresh origin/<target> so the comparison is against the LIVE tip, not a
+	// stale local tracking ref left over from before the latest landings.
+	if ferr := g.FetchRemoteBranch("origin", target); ferr != nil {
+		return false, fmt.Sprintf("fetch origin/%s failed: %v", target, ferr), ferr
+	}
+
+	targetRef := "origin/" + target
+	contains, aerr := g.IsAncestor(targetRef, branchTip)
+	if aerr != nil {
+		return false, fmt.Sprintf("IsAncestor(%s, %s) failed", targetRef, branchTip), aerr
+	}
+	if contains {
+		return false, fmt.Sprintf("%s contained in branch — fork-sync base is current", targetRef), nil
+	}
+	return true, fmt.Sprintf("%s not contained in fork-sync branch — generated off a stale snapshot; merging would revert commits landed since", targetRef), nil
 }
