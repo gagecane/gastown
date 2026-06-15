@@ -367,6 +367,12 @@ type DaemonThresholds struct {
 	// MaxLifecycleMessageAge is max age of lifecycle mail before discard (default "6h").
 	MaxLifecycleMessageAge string `json:"max_lifecycle_message_age,omitempty"`
 
+	// RecoveredBeadFallbackGrace is how long a RECOVERED_BEAD mail must sit
+	// un-drained in the deacon inbox before the daemon's fallback handler
+	// re-dispatches it (default "15m"). Gives a live Deacon first crack;
+	// the daemon acts only as a backstop. See gu-jbcag.
+	RecoveredBeadFallbackGrace string `json:"recovered_bead_fallback_grace,omitempty"`
+
 	// SyncFailureEscalationThreshold is consecutive git pull failures before
 	// logging escalates from WARN to ERROR (default 3).
 	SyncFailureEscalationThreshold *int `json:"sync_failure_escalation_threshold,omitempty"`

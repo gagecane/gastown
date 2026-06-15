@@ -158,6 +158,19 @@ The bead is reset to open status and this mail is sent for re-dispatch.
 - Auto-detects target rig from bead prefix
 - Slings the bead to an available polecat via `gt sling`
 
+**Daemon fallback** (gu-jbcag): the Deacon is the primary handler, but if it is
+down, paused, or crash-looping the mail would otherwise sit un-drained forever
+and the bead is never re-slung (and the escalate-to-Mayor backstop, which lives
+inside `Redispatch`, never fires either). The daemon's
+`processRecoveredBeadFallback` phase backstops this: any RECOVERED_BEAD mail
+that has sat past a grace window (`operational.daemon.recovered_bead_fallback_grace`,
+default 15m) is picked up and run through the same `deacon.Redispatch`. The
+grace window gives a live Deacon first crack; the daemon acts only as a
+backstop. `Redispatch` is self-guarded (cooldown, open-status check,
+escalate-after-N), so the daemon deletes the mail only on a terminal outcome
+(re-dispatched / escalated / skipped-not-open) and leaves it pinned to retry on
+a transient cooldown/error.
+
 ### RECOVERY_NEEDED
 
 **Route**: Witness → Deacon

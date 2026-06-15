@@ -100,6 +100,13 @@ const (
 	// logs. Audit-only by design — this is mechanical self-healing, not
 	// feed-visible activity.
 	TypeRestartPolecatHandled = "restart_polecat_handled"
+
+	// RECOVERED_BEAD fallback processing (gu-jbcag). Emitted by the daemon's
+	// processRecoveredBeadFallback handler when it re-dispatches or escalates
+	// a RECOVERED_BEAD mail the Deacon failed to drain in time (Deacon down,
+	// paused, or crash-looping). Audit-only — this is the mechanical backstop
+	// for the otherwise Deacon-only redispatch path.
+	TypeRecoveredBeadFallbackHandled = "recovered_bead_fallback_handled"
 )
 
 // EventsFile is the name of the raw events log.

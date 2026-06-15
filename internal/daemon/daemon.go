@@ -1271,6 +1271,16 @@ func (d *Daemon) heartbeat(state *State) {
 	// `gt session start` by hand.
 	d.phase("processRestartPolecatRequests", d.processRestartPolecatRequests)
 
+	// 7b. Fallback consumer for RECOVERED_BEAD mail (gu-jbcag). The Witness
+	// mails RECOVERED_BEAD to the Deacon when it recovers an abandoned bead;
+	// the only consumer is the Deacon agent running `gt deacon redispatch`.
+	// If the Deacon is down/paused/crash-looping, recovered beads sit as
+	// un-drained mail and are never re-slung — and the escalate-to-Mayor
+	// backstop (inside Redispatch) never fires either. This handler takes
+	// over mail that has sat past a grace window and runs the same
+	// deacon.Redispatch deterministically in Go.
+	d.phase("processRecoveredBeadFallback", d.processRecoveredBeadFallback)
+
 	// 9. (Removed) Stale agent check - violated "discover, don't track"
 
 	// 10. Check for GUPP violations (agents with work-on-hook not progressing)

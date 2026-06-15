@@ -67,9 +67,15 @@ const (
 	// within 30 minutes. Phase 2's keepalive ticker will allow tightening this
 	// further. A value <=0 disables the per-role override and falls back to
 	// DefaultDeadAgentReapTimeout.
-	DefaultRefineryReapTimeout            = 30 * time.Minute
-	DefaultMaxDogPoolSize                 = 4
-	DefaultMaxLifecycleMessageAge         = 6 * time.Hour
+	DefaultRefineryReapTimeout    = 30 * time.Minute
+	DefaultMaxDogPoolSize         = 4
+	DefaultMaxLifecycleMessageAge = 6 * time.Hour
+	// DefaultRecoveredBeadFallbackGrace is how long a RECOVERED_BEAD mail must
+	// sit un-drained in the deacon inbox before the daemon's fallback handler
+	// takes it over. The grace window gives a live Deacon first crack at the
+	// re-dispatch so the daemon acts only as a backstop when the Deacon is
+	// down/paused/crash-looping. See gu-jbcag.
+	DefaultRecoveredBeadFallbackGrace     = 15 * time.Minute
 	DefaultSyncFailureEscalationThreshold = 3
 	DefaultDoctorMolCooldown              = 5 * time.Minute
 	DefaultRecoveryHeartbeatInterval      = 3 * time.Minute
@@ -531,6 +537,16 @@ func (d *DaemonThresholds) MaxLifecycleMessageAgeD() time.Duration {
 		return ParseDurationOrDefault(d.MaxLifecycleMessageAge, DefaultMaxLifecycleMessageAge)
 	}
 	return DefaultMaxLifecycleMessageAge
+}
+
+// RecoveredBeadFallbackGraceD returns the configured or default grace period
+// the daemon waits before taking over an un-drained RECOVERED_BEAD mail. See
+// gu-jbcag.
+func (d *DaemonThresholds) RecoveredBeadFallbackGraceD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.RecoveredBeadFallbackGrace, DefaultRecoveredBeadFallbackGrace)
+	}
+	return DefaultRecoveredBeadFallbackGrace
 }
 
 // SyncFailureEscalationThresholdV returns the configured or default threshold.
