@@ -543,6 +543,68 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	})
 }
 
+// escalationMailCopyLabel returns the label that links a delivered escalation
+// mail-copy back to its escalation bead. runEscalate annotates every mail-copy
+// it sends with this label (alongside severity:<sev>), so acking/closing the
+// escalation can find and silence the paired mail-copies.
+func escalationMailCopyLabel(escalationID string) string {
+	return "escalation:" + escalationID
+}
+
+// MarkEscalationMailCopiesRead marks every mail-copy paired with the given
+// escalation as read, so the stop hook's unread-mail check stops blocking on a
+// message whose underlying escalation was already acked/closed (gu-fag41).
+//
+// Each escalation fans out into TWO inbox artifacts: the escalation bead itself
+// AND a separate mail-copy (one per routed target) carrying the same content.
+// Acking/closing the escalation only mutates the escalation bead — the
+// mail-copy stays unread, so `gt signal stop` keeps re-firing "You have 1
+// unread message" pointing at a fully-processed escalation, forcing a redundant
+// manual `gt mail read`.
+//
+// runEscalate annotates each delivered mail-copy with escalation:<id>, so we
+// can find them by that label and add the "read" label (the same marker
+// MarkReadOnly uses) — that makes ListUnread skip them without removing them
+// from the inbox feed. Best-effort: returns the number of mail-copies marked.
+func (b *Beads) MarkEscalationMailCopiesRead(escalationID string) (int, error) {
+	if escalationID == "" {
+		return 0, nil
+	}
+	copies, err := b.List(ListOptions{
+		Label:    escalationMailCopyLabel(escalationID),
+		Status:   "open",
+		Priority: -1,
+		Limit:    0,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	marked := 0
+	var firstErr error
+	for _, copyBead := range copies {
+		// Only touch mail-copies, never the escalation bead itself or any
+		// unrelated bead that happens to carry the link label.
+		if !HasLabel(copyBead, "gt:message") {
+			continue
+		}
+		// Already read — nothing to do.
+		if HasLabel(copyBead, "read") {
+			continue
+		}
+		if err := b.forIssueID(copyBead.ID).Update(copyBead.ID, UpdateOptions{
+			AddLabels: []string{"read"},
+		}); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		marked++
+	}
+	return marked, firstErr
+}
+
 // GetEscalationBead retrieves an escalation bead by ID.
 // Returns nil if not found.
 func (b *Beads) GetEscalationBead(id string) (*Issue, *EscalationFields, error) {

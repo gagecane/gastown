@@ -790,3 +790,91 @@ func TestParseEscalationClosedAt(t *testing.T) {
 		})
 	}
 }
+
+// TestMarkEscalationMailCopiesRead verifies that marking an escalation's paired
+// mail-copies read (gu-fag41) adds the "read" label only to gt:message copies
+// that aren't already read, and never touches unrelated beads. The bd stub
+// serves the `list` query and captures `update` calls so we can assert which
+// beads were marked.
+func TestMarkEscalationMailCopiesRead(t *testing.T) {
+	stubDir := t.TempDir()
+	updatesPath := filepath.Join(stubDir, "updates.txt")
+
+	// list returns: two mail-copies (one already read), and a non-message bead
+	// that happens to carry the escalation: link label (must be skipped).
+	listJSON := `[` +
+		`{"id":"hq-mail-1","title":"[HIGH] x","status":"open","labels":["gt:message","escalation:hq-esc-1"]},` +
+		`{"id":"hq-mail-2","title":"[HIGH] x","status":"open","labels":["gt:message","escalation:hq-esc-1","read"]},` +
+		`{"id":"hq-other","title":"unrelated","status":"open","labels":["escalation:hq-esc-1"]}` +
+		`]`
+
+	// bd injects --flat/--allow-stale ahead of the subcommand, so detect the
+	// subcommand by scanning all args rather than matching $1.
+	stubScript := `#!/bin/sh
+cmd=""
+for a in "$@"; do
+  case "$a" in
+    list) cmd="list" ; break ;;
+    update) cmd="update" ; break ;;
+  esac
+done
+case "$cmd" in
+  list)
+    cat <<'JSON'
+` + listJSON + `
+JSON
+    ;;
+  update)
+    printf '%s\n' "$*" >> "` + updatesPath + `"
+    echo '{"id":"x","status":"open"}'
+    ;;
+  *)
+    echo '[]'
+    ;;
+esac
+exit 0
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ResetBdAllowStaleCacheForTest()
+
+	b := New(t.TempDir())
+	marked, err := b.MarkEscalationMailCopiesRead("hq-esc-1")
+	if err != nil {
+		t.Fatalf("MarkEscalationMailCopiesRead: %v", err)
+	}
+	if marked != 1 {
+		t.Errorf("marked = %d, want 1 (only the unread gt:message copy)", marked)
+	}
+
+	updates := ""
+	if data, err := os.ReadFile(updatesPath); err == nil {
+		updates = string(data)
+	}
+	// Only hq-mail-1 should be updated with the read label.
+	if !strings.Contains(updates, "hq-mail-1") || !strings.Contains(updates, "--add-label=read") {
+		t.Errorf("expected update hq-mail-1 --add-label=read, got:\n%s", updates)
+	}
+	if strings.Contains(updates, "hq-mail-2") {
+		t.Errorf("already-read copy hq-mail-2 must not be updated, got:\n%s", updates)
+	}
+	if strings.Contains(updates, "hq-other") {
+		t.Errorf("non-message bead hq-other must not be updated, got:\n%s", updates)
+	}
+}
+
+// TestMarkEscalationMailCopiesReadEmptyID is a no-op guard: an empty escalation
+// ID must not issue any bd queries or updates.
+func TestMarkEscalationMailCopiesReadEmptyID(t *testing.T) {
+	b := New(t.TempDir())
+	marked, err := b.MarkEscalationMailCopiesRead("")
+	if err != nil {
+		t.Fatalf("MarkEscalationMailCopiesRead(\"\"): %v", err)
+	}
+	if marked != 0 {
+		t.Errorf("marked = %d, want 0 for empty id", marked)
+	}
+}

@@ -498,6 +498,13 @@ func runEscalateAck(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("acknowledging escalation: %w", err)
 	}
 
+	// Silence the paired mail-copies so the stop hook stops re-firing an
+	// "unread message" block for an escalation that's already been processed
+	// (gu-fag41). Best-effort: a failure here must not fail the ack.
+	if _, err := bd.MarkEscalationMailCopiesRead(escalationID); err != nil {
+		fmt.Fprintf(os.Stderr, "gt escalate ack: failed to mark paired mail-copies read: %v\n", err)
+	}
+
 	// Log to activity feed
 	_ = events.LogFeed(events.TypeEscalationAcked, ackedBy, map[string]interface{}{
 		"escalation_id": escalationID,
@@ -525,6 +532,13 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
 	if err := bd.CloseEscalation(escalationID, closedBy, escalateCloseReason); err != nil {
 		return fmt.Errorf("closing escalation: %w", err)
+	}
+
+	// Silence the paired mail-copies so the stop hook stops re-firing an
+	// "unread message" block for an escalation that's already been resolved
+	// (gu-fag41). Best-effort: a failure here must not fail the close.
+	if _, err := bd.MarkEscalationMailCopiesRead(escalationID); err != nil {
+		fmt.Fprintf(os.Stderr, "gt escalate close: failed to mark paired mail-copies read: %v\n", err)
 	}
 
 	// Log to activity feed
