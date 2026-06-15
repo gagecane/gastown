@@ -30,8 +30,12 @@ func TestAssessActiveMR(t *testing.T) {
 		"mr-with-source": &beads.Issue{ID: "mr-with-source", Status: "closed", Description: "source_issue: gt-closed\n"},
 		"mr-merged":      &beads.Issue{ID: "mr-merged", Status: "closed", Description: "close_reason: merged\n"},
 		"mr-mergecommit": &beads.Issue{ID: "mr-mergecommit", Status: "closed", Description: "merge_commit: 2b97b2c\n"},
-		"gt-closed":      &beads.Issue{ID: "gt-closed", Status: "closed"},
-		"gt-open":        &beads.Issue{ID: "gt-open", Status: "open"},
+		// gu-pfge3: description Update failed (no close_reason/merge_commit in
+		// the description) but CloseWithReason("merged") set the column. The
+		// column alone must prove the merge.
+		"mr-colmerged": &beads.Issue{ID: "mr-colmerged", Status: "closed", CloseReason: "merged"},
+		"gt-closed":    &beads.Issue{ID: "gt-closed", Status: "closed"},
+		"gt-open":      &beads.Issue{ID: "gt-open", Status: "open"},
 	}}
 
 	tests := []struct {
@@ -57,6 +61,9 @@ func TestAssessActiveMR(t *testing.T) {
 		// check fails — but the work demonstrably landed on target).
 		{name: "merged MR is stale despite git unsafe", reader: reader, input: ActiveMRInput{ActiveMR: "mr-merged", SourceIssueHint: "gt-closed", RequireGitSafe: true, GitSafe: false}, wantPend: false, wantSource: "gt-closed"},
 		{name: "MR with merge_commit is stale despite git unsafe", reader: reader, input: ActiveMRInput{ActiveMR: "mr-mergecommit", SourceIssueHint: "gt-closed", RequireGitSafe: true, GitSafe: false}, wantPend: false, wantSource: "gt-closed"},
+		// gu-pfge3: column-level CloseReason=merged proves the merge even when the
+		// description Update failed (no close_reason/merge_commit in description).
+		{name: "MR with column close_reason=merged is stale despite git unsafe", reader: reader, input: ActiveMRInput{ActiveMR: "mr-colmerged", SourceIssueHint: "gt-closed", RequireGitSafe: true, GitSafe: false}, wantPend: false, wantSource: "gt-closed"},
 		// A merged MR whose source is NOT terminal still requires the source to be
 		// terminal first — the merge alone does not bypass an open source bead.
 		{name: "merged MR with open source is pending", reader: reader, input: ActiveMRInput{ActiveMR: "mr-merged", SourceIssueHint: "gt-open", RequireGitSafe: true, GitSafe: false}, wantPend: true, wantSource: "gt-open"},
@@ -70,6 +77,31 @@ func TestAssessActiveMR(t *testing.T) {
 			}
 			if tt.wantSource != "" && got.SourceIssue != tt.wantSource {
 				t.Fatalf("SourceIssue = %q, want %q", got.SourceIssue, tt.wantSource)
+			}
+		})
+	}
+}
+
+func TestMrMerged(t *testing.T) {
+	tests := []struct {
+		name string
+		mr   *beads.Issue
+		want bool
+	}{
+		{name: "nil bead is not merged", mr: nil, want: false},
+		{name: "no merge evidence is not merged", mr: &beads.Issue{ID: "mr", Status: "closed"}, want: false},
+		{name: "description close_reason=merged", mr: &beads.Issue{ID: "mr", Status: "closed", Description: "close_reason: merged\n"}, want: true},
+		{name: "description merge_commit", mr: &beads.Issue{ID: "mr", Status: "closed", Description: "merge_commit: 2b97b2c\n"}, want: true},
+		// gu-pfge3: column-level CloseReason proves the merge even when the
+		// description carries neither field (the Update write was swallowed).
+		{name: "column close_reason=merged", mr: &beads.Issue{ID: "mr", Status: "closed", CloseReason: "merged"}, want: true},
+		{name: "column close_reason=merged case-insensitive", mr: &beads.Issue{ID: "mr", Status: "closed", CloseReason: "Merged"}, want: true},
+		{name: "column close_reason=rejected is not merged", mr: &beads.Issue{ID: "mr", Status: "closed", CloseReason: "rejected"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mrMerged(tt.mr); got != tt.want {
+				t.Fatalf("mrMerged() = %v, want %v", got, tt.want)
 			}
 		})
 	}

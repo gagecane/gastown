@@ -113,10 +113,27 @@ func assessStaleActiveMR(reader IssueReader, in ActiveMRInput, result ActiveMRAs
 
 // mrMerged reports whether a terminal MR bead represents a successful merge to
 // the target branch (as opposed to rejected/superseded/conflict). It is proven
-// by either close_reason=merged or the presence of a merge_commit SHA. A nil mr
+// by any of: the column-level CloseReason=merged, the description-level
+// close_reason=merged, or the presence of a merge_commit SHA. A nil mr
 // (missing bead) is NOT treated as merged — absence of the bead is not proof the
 // work landed.
+//
+// The column-level CloseReason check is the critical safety net (gu-pfge3): the
+// refinery's post-merge write path persists merge_commit/close_reason into the
+// DESCRIPTION via beads.Update and then separately calls CloseWithReason("merged"),
+// which writes only the column-level CloseReason. The Update failure is swallowed
+// as a warning, so if it fails while the close succeeds the description carries
+// neither field. Reading only description-parsed fields then reports a
+// genuinely-merged MR as not-merged, the orphan reconcile skips it, and the
+// source bead stays HOOKED to a dead polecat forever (the gu-7igu8 signature).
+// Consulting the column proves the merge from the close alone.
 func mrMerged(mr *beads.Issue) bool {
+	if mr == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(mr.CloseReason), "merged") {
+		return true
+	}
 	fields := beads.ParseMRFields(mr)
 	if fields == nil {
 		return false
