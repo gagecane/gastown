@@ -121,6 +121,11 @@ Sling All Ready Work (--all):
   unattended auto-dispatcher, --all includes agent/crew-owned beads — an
   operator running --all is explicitly asking to sling everything ready.
 
+  Thundering-herd guard: when the ready-set exceeds the daemon's spawn-gate
+  cap, --all asks for confirmation (or pass --force / --dry-run) before slinging
+  and throttles direct spawns to the cap, so a large fan-out cannot wedge the
+  daemon or kill the tmux server (gu-iw3pf).
+
 Dispatch Modes (direct vs deferred):
   The town's scheduler.max_polecats setting controls how sling dispatches:
 

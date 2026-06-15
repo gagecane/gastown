@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // TestSlingArgsValidator_AllMode verifies the positional-arg contract for --all.
@@ -76,6 +77,59 @@ func TestParseSlingInvocation_AllRejectsOnAndReviewFlags(t *testing.T) {
 			t.Errorf("--all alone should not trip flag-combo guards, got: %v", err)
 		}
 	})
+}
+
+// TestConfirmLargeSlingAll verifies the thundering-herd confirmation gate
+// (gu-iw3pf): the decision matrix across interactive/non-interactive streams,
+// --force, and the operator's y/n answer.
+func TestConfirmLargeSlingAll(t *testing.T) {
+	oldIsTTY := isStdinTerminal
+	oldPrompt := promptYesNoUnsafeProceed
+	t.Cleanup(func() {
+		isStdinTerminal = oldIsTTY
+		promptYesNoUnsafeProceed = oldPrompt
+	})
+
+	cases := []struct {
+		name      string
+		isTTY     bool
+		promptAns bool
+		force     bool
+		want      bool
+	}{
+		{"interactive yes proceeds", true, true, false, true},
+		{"interactive no aborts", true, false, false, false},
+		{"interactive prompt wins over force", true, false, true, false},
+		{"non-interactive without force refuses", false, false, false, false},
+		{"non-interactive with force proceeds", false, false, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isStdinTerminal = func() bool { return tc.isTTY }
+			promptCalled := false
+			promptYesNoUnsafeProceed = func(string) bool {
+				promptCalled = true
+				return tc.promptAns
+			}
+			got := confirmLargeSlingAll(20, 4, "gastown", tc.force)
+			if got != tc.want {
+				t.Errorf("confirmLargeSlingAll(tty=%v, ans=%v, force=%v) = %v, want %v",
+					tc.isTTY, tc.promptAns, tc.force, got, tc.want)
+			}
+			// The prompt must only be consulted on an interactive terminal.
+			if promptCalled != tc.isTTY {
+				t.Errorf("prompt called = %v, want %v (only on TTY)", promptCalled, tc.isTTY)
+			}
+		})
+	}
+}
+
+// TestSlingAllSpawnCap verifies the cap falls back to the default when town
+// config is unavailable (empty town root).
+func TestSlingAllSpawnCap(t *testing.T) {
+	if got := slingAllSpawnCap(""); got != config.DefaultSpawnMaxPerHeartbeat {
+		t.Errorf("slingAllSpawnCap(\"\") = %d, want default %d", got, config.DefaultSpawnMaxPerHeartbeat)
+	}
 }
 
 // TestSortReadyBeadsByPriority verifies the priority-then-ID ordering used by

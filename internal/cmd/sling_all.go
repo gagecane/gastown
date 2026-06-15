@@ -53,6 +53,24 @@ func runSlingAll(townRoot, townBeadsDir string) error {
 
 	fmt.Printf("%s --all: %d ready bead(s) in rig '%s'\n", style.Bold.Render("🎯"), len(beadIDs), rigName)
 
+	// Thundering-herd guard (gu-iw3pf). A large ready-set slung all at once is a
+	// per-bead polecat/tmux spawn burst that, stacked on a busy daemon heartbeat,
+	// wedged the daemon and killed the tmux server (2026-06-15 incident). Bound
+	// the fan-out to the daemon's spawn-gate cap two ways:
+	//   1. When the set exceeds the cap, require an explicit confirmation
+	//      (interactive y/n, or --force / --dry-run) so an operator never fires a
+	//      surprise stampede. This protects both dispatch modes — including the
+	//      deferred path, which still synchronously creates N sling-contexts +
+	//      convoys against Dolt.
+	//   2. For the direct-spawn path, default --max-concurrent to the cap so
+	//      runBatchSling paces spawns in waves instead of all at once.
+	spawnCap := slingAllSpawnCap(townRoot)
+	if !slingDryRun && len(beadIDs) > spawnCap {
+		if !confirmLargeSlingAll(len(beadIDs), spawnCap, rigName, slingForce) {
+			return fmt.Errorf("aborted: %d ready beads exceeds the spawn-gate cap of %d", len(beadIDs), spawnCap)
+		}
+	}
+
 	// Route through the existing batch paths so all guards, idempotency, and
 	// dry-run behavior are shared with `gt sling <a> <b> <c> <rig>`.
 	deferred, deferErr := shouldDeferDispatch()
@@ -62,7 +80,54 @@ func runSlingAll(townRoot, townBeadsDir string) error {
 	if deferred {
 		return runBatchSchedule(beadIDs, rigName, townRoot)
 	}
+	// Direct-spawn path: throttle spawn rate to the cap when the operator did
+	// not set --max-concurrent, so the fan-out ramps in waves instead of firing
+	// every polecat at once.
+	if slingMaxConcurrent <= 0 && len(beadIDs) > spawnCap {
+		slingMaxConcurrent = spawnCap
+	}
 	return runBatchSling(beadIDs, rigName, townBeadsDir)
+}
+
+// slingAllSpawnCap returns the spawn-gate cap used to bound a `--all` fan-out.
+// It mirrors the daemon's per-heartbeat spawn cap
+// (scheduler-independent: this is the rate at which NEW sessions may start),
+// so an operator's manual `--all` burst is held to the same ceiling the
+// unattended dispatcher already respects. Falls back to the default when town
+// config is unavailable.
+func slingAllSpawnCap(townRoot string) int {
+	if townRoot == "" {
+		return config.DefaultSpawnMaxPerHeartbeat
+	}
+	c := config.LoadOperationalConfig(townRoot).GetDaemonConfig().SpawnMaxPerHeartbeatV()
+	if c <= 0 {
+		return config.DefaultSpawnMaxPerHeartbeat
+	}
+	return c
+}
+
+// confirmLargeSlingAll gates a fan-out larger than the spawn-gate cap. With
+// --force on an interactive terminal it prompts y/n; with --force on a
+// non-interactive stream it proceeds (operator opted in explicitly). Without
+// --force on a terminal it prompts; without --force on a non-interactive stream
+// it refuses and points at the safe alternatives. Mirrors confirmUnsafeProceed
+// (rig.go) and reuses its test seams (isStdinTerminal, promptYesNoUnsafeProceed).
+func confirmLargeSlingAll(count, spawnCap int, rigName string, force bool) bool {
+	if isStdinTerminal() {
+		fmt.Printf("\n%s slinging %d ready beads in '%s' exceeds the spawn-gate cap of %d.\n",
+			style.Warning.Render("⚠"), count, rigName, spawnCap)
+		fmt.Printf("  Each bead spawns its own polecat (tmux session + Claude process). A burst this large\n")
+		fmt.Printf("  can wedge the daemon. Spawns will be throttled to %d at a time.\n", spawnCap)
+		return promptYesNoUnsafeProceed("Proceed?")
+	}
+	if force {
+		return true
+	}
+	fmt.Printf("\n%s %d ready beads exceeds the spawn-gate cap of %d (rig '%s').\n",
+		style.Warning.Render("⚠"), count, spawnCap, rigName)
+	fmt.Printf("  Re-run with %s to confirm, or %s to preview the set without slinging.\n",
+		style.Bold.Render("--force"), style.Bold.Render("--dry-run"))
+	return false
 }
 
 // readyDispatchableBeadIDsForRig returns the IDs of ready, dispatchable beads
