@@ -485,6 +485,27 @@ exit 1
 	}
 }
 
+func TestCleanOrphanedWispDepsUsesTypedTargets(t *testing.T) {
+	data, err := os.ReadFile("compact.go")
+	if err != nil {
+		t.Fatalf("read compact.go: %v", err)
+	}
+	body := compactSourceBetween(t, string(data), "func cleanOrphanedWispDeps(", "// listWisps")
+	if strings.Contains(body, "depends_on_id") {
+		t.Fatalf("cleanOrphanedWispDeps should not use legacy depends_on_id:\n%s", body)
+	}
+	for _, want := range []string{
+		"depends_on_wisp_id IS NOT NULL AND NOT EXISTS",
+		"wisps WHERE id = wisp_dependencies.depends_on_wisp_id",
+		"depends_on_issue_id IS NOT NULL AND NOT EXISTS",
+		"issues WHERE id = wisp_dependencies.depends_on_issue_id",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("cleanOrphanedWispDeps missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestResolveCompactTimeoutDefault(t *testing.T) {
 	t.Setenv(compactTimeoutEnv, "")
 	compactTimeout = 0
@@ -559,4 +580,17 @@ func TestErrCompactTimeoutMessage(t *testing.T) {
 	if !strings.Contains(got, "5m") || !strings.Contains(got, "timed out") {
 		t.Errorf("errCompactTimeout.Error() = %q, want 5m + 'timed out' substring", got)
 	}
+}
+
+func compactSourceBetween(t *testing.T, source, startMarker, endMarker string) string {
+	t.Helper()
+	start := strings.Index(source, startMarker)
+	if start == -1 {
+		t.Fatalf("could not find %q", startMarker)
+	}
+	end := strings.Index(source[start:], endMarker)
+	if end == -1 {
+		t.Fatalf("could not find %q after %q", endMarker, startMarker)
+	}
+	return source[start : start+end]
 }
