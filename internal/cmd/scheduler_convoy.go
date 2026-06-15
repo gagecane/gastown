@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -41,18 +40,6 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 		return nil
 	}
 
-	type scheduleCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []scheduleCandidate
-	skippedClosed := 0
-	skippedDeferred := 0
-	skippedAssigned := 0
-	skippedScheduled := 0
-	skippedNoRig := 0
-
 	// Batch-check scheduling status for all tracked issues (single DB query).
 	var beadIDs []string
 	for _, t := range tracked {
@@ -60,54 +47,25 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 	}
 	scheduledSet := areScheduled(beadIDs)
 
+	items := make([]scheduleItem, 0, len(tracked))
 	for _, t := range tracked {
-		if t.Status == "closed" || t.Status == "tombstone" {
-			skippedClosed++
-			continue
-		}
-
-		// Deferred guard (gu-pi35l regression). The df7da9bf fix added the
-		// deferred guard to runSling / executeSling / scheduleBead / the stranded
-		// scan, but NOT to this convoy-level candidate selection. So `gt sling
-		// <convoy>` (the convoy re-attach path) selected a DEFERRED tracked bead
-		// as a candidate and re-attached a fresh molecule every cycle — the
-		// convoy-driven re-attach bypass observed on gu-n5dvk (status=DEFERRED,
-		// defer_until in the future, yet polecats ghoul+chrome were dispatched
-		// idle-clean). Filter deferred beads (status=deferred OR future
-		// defer_until) out of the candidate set entirely so they never reach
-		// scheduleBead. Not bypassed by --force — un-defer the bead first.
-		if isDeferredBead(&beadInfo{Status: t.Status, DeferUntil: t.DeferUntil, Description: t.Description}) {
-			skippedDeferred++
-			continue
-		}
-
-		if t.Assignee != "" && !opts.Force {
-			skippedAssigned++
-			continue
-		}
-
-		if scheduledSet[t.ID] {
-			skippedScheduled++
-			continue
-		}
-
-		rigName := resolveRigForBeadWithLabels(townRoot, t.ID, t.Labels)
-		if rigName == "" {
-			skippedNoRig++
-			prefix := beads.ExtractPrefix(t.ID)
-			fmt.Printf("  %s %s: cannot resolve rig from prefix %q (town-root or unknown)\n",
-				style.Dim.Render("○"), t.ID, prefix)
-			continue
-		}
-
-		candidates = append(candidates, scheduleCandidate{ID: t.ID, Title: t.Title, RigName: rigName})
+		items = append(items, scheduleItem{
+			ID:          t.ID,
+			Title:       t.Title,
+			Status:      t.Status,
+			Assignee:    t.Assignee,
+			Labels:      t.Labels,
+			DeferUntil:  t.DeferUntil,
+			Description: t.Description,
+		})
 	}
+	candidates, skips := selectScheduleCandidates(townRoot, items, scheduledSet, opts.Force)
 
 	if len(candidates) == 0 {
 		fmt.Printf("No issues to schedule from convoy %s", convoyID)
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedScheduled > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf(" (%d closed, %d deferred, %d assigned, %d already scheduled, %d no rig)",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedScheduled, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.Scheduled, skips.NoRig)
 		}
 		fmt.Println()
 		return nil
@@ -126,9 +84,9 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 		for _, c := range candidates {
 			fmt.Printf("  Would schedule: %s -> %s (%s)\n", c.ID, c.RigName, c.Title)
 		}
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedScheduled > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf("\nSkipped: %d closed, %d deferred, %d assigned, %d already scheduled, %d no rig\n",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedScheduled, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.Scheduled, skips.NoRig)
 		}
 		return nil
 	}
@@ -153,9 +111,9 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 
 	fmt.Printf("\n%s Scheduled %d/%d issue(s) from convoy %s\n",
 		style.Bold.Render("📊"), successCount, len(candidates), convoyID)
-	if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedScheduled > 0 || skippedNoRig > 0 {
+	if skips.any() {
 		fmt.Printf("  Skipped: %d closed, %d deferred, %d assigned, %d already scheduled, %d no rig\n",
-			skippedClosed, skippedDeferred, skippedAssigned, skippedScheduled, skippedNoRig)
+			skips.Closed, skips.Deferred, skips.Assigned, skips.Scheduled, skips.NoRig)
 	}
 
 	if successCount == 0 {
@@ -188,55 +146,30 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		return nil
 	}
 
-	type slingCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []slingCandidate
-	skippedClosed := 0
-	skippedDeferred := 0
-	skippedAssigned := 0
-	skippedNoRig := 0
-
+	items := make([]scheduleItem, 0, len(tracked))
 	for _, t := range tracked {
-		if t.Status == "closed" || t.Status == "tombstone" {
-			skippedClosed++
-			continue
-		}
-		// Deferred guard (gu-pi35l regression). This direct-dispatch convoy path
-		// passes opts.Force straight into executeSling, and executeSling's
-		// deferred guard is intentionally bypassed by an explicit --force
-		// (explicitForce). So a forced `gt sling <convoy>` re-dispatch of a
-		// DEFERRED tracked bead spawned a polecat and re-attached a fresh
-		// molecule — the convoy-driven re-attach bypass on gu-n5dvk. Filter
-		// deferred beads (status=deferred OR future defer_until) out of the
-		// candidate set here so the --force-on-executeSling seam can never reach
-		// them. Not bypassed by --force — un-defer the bead first.
-		if isDeferredBead(&beadInfo{Status: t.Status, DeferUntil: t.DeferUntil, Description: t.Description}) {
-			skippedDeferred++
-			continue
-		}
-		if t.Assignee != "" && !opts.Force {
-			skippedAssigned++
-			continue
-		}
-		rigName := resolveRigForBeadWithLabels(townRoot, t.ID, t.Labels)
-		if rigName == "" {
-			skippedNoRig++
-			prefix := beads.ExtractPrefix(t.ID)
-			fmt.Printf("  %s %s: cannot resolve rig from prefix %q (town-root or unknown)\n",
-				style.Dim.Render("○"), t.ID, prefix)
-			continue
-		}
-		candidates = append(candidates, slingCandidate{ID: t.ID, Title: t.Title, RigName: rigName})
+		items = append(items, scheduleItem{
+			ID:          t.ID,
+			Title:       t.Title,
+			Status:      t.Status,
+			Assignee:    t.Assignee,
+			Labels:      t.Labels,
+			DeferUntil:  t.DeferUntil,
+			Description: t.Description,
+		})
 	}
+	// Direct-dispatch convoy path: no pre-check of scheduling status (nil set),
+	// so the shared ladder skips no items as already-scheduled. The deferred guard
+	// still applies — opts.Force passes into executeSling whose own deferred guard
+	// is bypassed by an explicit --force, so filtering here keeps the force seam
+	// from re-dispatching deferred beads (the gu-n5dvk re-attach bypass).
+	candidates, skips := selectScheduleCandidates(townRoot, items, nil, opts.Force)
 
 	if len(candidates) == 0 {
 		fmt.Printf("No issues to dispatch from convoy %s", convoyID)
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf(" (%d closed, %d deferred, %d assigned, %d no rig)",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.NoRig)
 		}
 		fmt.Println()
 		return nil
@@ -250,9 +183,9 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		for _, c := range candidates {
 			fmt.Printf("  Would dispatch: %s -> %s (%s)\n", c.ID, c.RigName, c.Title)
 		}
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf("\nSkipped: %d closed, %d deferred, %d assigned, %d no rig\n",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.NoRig)
 		}
 		return nil
 	}
@@ -303,9 +236,9 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 
 	fmt.Printf("\n%s Dispatched %d/%d issue(s) from convoy %s\n",
 		style.Bold.Render("📊"), successCount, len(candidates), convoyID)
-	if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
+	if skips.any() {
 		fmt.Printf("  Skipped: %d closed, %d deferred, %d assigned, %d no rig\n",
-			skippedClosed, skippedDeferred, skippedAssigned, skippedNoRig)
+			skips.Closed, skips.Deferred, skips.Assigned, skips.NoRig)
 	}
 
 	if successCount == 0 {

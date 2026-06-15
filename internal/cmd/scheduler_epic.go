@@ -42,18 +42,6 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 		return nil
 	}
 
-	type scheduleCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []scheduleCandidate
-	skippedClosed := 0
-	skippedDeferred := 0
-	skippedAssigned := 0
-	skippedScheduled := 0
-	skippedNoRig := 0
-
 	// Batch-check scheduling status for all children (single DB query).
 	var childIDs []string
 	for _, c := range children {
@@ -61,49 +49,25 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 	}
 	scheduledSet := areScheduled(childIDs)
 
+	items := make([]scheduleItem, 0, len(children))
 	for _, c := range children {
-		if c.Status == "closed" || c.Status == "tombstone" {
-			skippedClosed++
-			continue
-		}
-
-		// Deferred guard (gu-pi35l regression). Sibling of the convoy
-		// candidate-selection gap: the df7da9bf fix did not cover this epic-level
-		// candidate selection, so a DEFERRED child was re-scheduled every cycle.
-		// Filter deferred children (status=deferred OR future defer_until) out of
-		// the candidate set. Not bypassed by --force — un-defer the child first.
-		if isDeferredBead(&beadInfo{Status: c.Status, DeferUntil: c.DeferUntil, Description: c.Description}) {
-			skippedDeferred++
-			continue
-		}
-
-		if c.Assignee != "" && !opts.Force {
-			skippedAssigned++
-			continue
-		}
-
-		if scheduledSet[c.ID] {
-			skippedScheduled++
-			continue
-		}
-
-		rigName := resolveRigForBeadWithLabels(townRoot, c.ID, c.Labels)
-		if rigName == "" {
-			skippedNoRig++
-			prefix := beads.ExtractPrefix(c.ID)
-			fmt.Printf("  %s %s: cannot resolve rig from prefix %q (town-root or unknown)\n",
-				style.Dim.Render("○"), c.ID, prefix)
-			continue
-		}
-
-		candidates = append(candidates, scheduleCandidate{ID: c.ID, Title: c.Title, RigName: rigName})
+		items = append(items, scheduleItem{
+			ID:          c.ID,
+			Title:       c.Title,
+			Status:      c.Status,
+			Assignee:    c.Assignee,
+			Labels:      c.Labels,
+			DeferUntil:  c.DeferUntil,
+			Description: c.Description,
+		})
 	}
+	candidates, skips := selectScheduleCandidates(townRoot, items, scheduledSet, opts.Force)
 
 	if len(candidates) == 0 {
 		fmt.Printf("No children to schedule from epic %s", epicID)
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedScheduled > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf(" (%d closed, %d deferred, %d assigned, %d already scheduled, %d no rig)",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedScheduled, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.Scheduled, skips.NoRig)
 		}
 		fmt.Println()
 		return nil
@@ -122,9 +86,9 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 		for _, c := range candidates {
 			fmt.Printf("  Would schedule: %s -> %s (%s)\n", c.ID, c.RigName, c.Title)
 		}
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedScheduled > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf("\nSkipped: %d closed, %d deferred, %d assigned, %d already scheduled, %d no rig\n",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedScheduled, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.Scheduled, skips.NoRig)
 		}
 		return nil
 	}
@@ -149,9 +113,9 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 
 	fmt.Printf("\n%s Scheduled %d/%d child(ren) from epic %s\n",
 		style.Bold.Render("📊"), successCount, len(candidates), epicID)
-	if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedScheduled > 0 || skippedNoRig > 0 {
+	if skips.any() {
 		fmt.Printf("  Skipped: %d closed, %d deferred, %d assigned, %d already scheduled, %d no rig\n",
-			skippedClosed, skippedDeferred, skippedAssigned, skippedScheduled, skippedNoRig)
+			skips.Closed, skips.Deferred, skips.Assigned, skips.Scheduled, skips.NoRig)
 	}
 
 	if successCount == 0 {
@@ -183,50 +147,30 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 		return nil
 	}
 
-	type slingCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []slingCandidate
-	skippedClosed := 0
-	skippedDeferred := 0
-	skippedAssigned := 0
-	skippedNoRig := 0
-
+	items := make([]scheduleItem, 0, len(children))
 	for _, c := range children {
-		if c.Status == "closed" || c.Status == "tombstone" {
-			skippedClosed++
-			continue
-		}
-		// Deferred guard (gu-pi35l regression). Like the convoy direct-dispatch
-		// path, this passes opts.Force into executeSling whose deferred guard is
-		// bypassed by explicit --force; filter deferred children out here so the
-		// force seam never reaches them. Not bypassed by --force.
-		if isDeferredBead(&beadInfo{Status: c.Status, DeferUntil: c.DeferUntil, Description: c.Description}) {
-			skippedDeferred++
-			continue
-		}
-		if c.Assignee != "" && !opts.Force {
-			skippedAssigned++
-			continue
-		}
-		rigName := resolveRigForBeadWithLabels(townRoot, c.ID, c.Labels)
-		if rigName == "" {
-			skippedNoRig++
-			prefix := beads.ExtractPrefix(c.ID)
-			fmt.Printf("  %s %s: cannot resolve rig from prefix %q (town-root or unknown)\n",
-				style.Dim.Render("○"), c.ID, prefix)
-			continue
-		}
-		candidates = append(candidates, slingCandidate{ID: c.ID, Title: c.Title, RigName: rigName})
+		items = append(items, scheduleItem{
+			ID:          c.ID,
+			Title:       c.Title,
+			Status:      c.Status,
+			Assignee:    c.Assignee,
+			Labels:      c.Labels,
+			DeferUntil:  c.DeferUntil,
+			Description: c.Description,
+		})
 	}
+	// Direct-dispatch epic path: no pre-check of scheduling status (nil set), so
+	// the shared ladder skips no children as already-scheduled. The deferred guard
+	// still applies — opts.Force passes into executeSling whose deferred guard is
+	// bypassed by explicit --force, so filtering here keeps the force seam from
+	// re-dispatching deferred children.
+	candidates, skips := selectScheduleCandidates(townRoot, items, nil, opts.Force)
 
 	if len(candidates) == 0 {
 		fmt.Printf("No children to dispatch from epic %s", epicID)
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf(" (%d closed, %d deferred, %d assigned, %d no rig)",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.NoRig)
 		}
 		fmt.Println()
 		return nil
@@ -240,9 +184,9 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 		for _, c := range candidates {
 			fmt.Printf("  Would dispatch: %s -> %s (%s)\n", c.ID, c.RigName, c.Title)
 		}
-		if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
+		if skips.any() {
 			fmt.Printf("\nSkipped: %d closed, %d deferred, %d assigned, %d no rig\n",
-				skippedClosed, skippedDeferred, skippedAssigned, skippedNoRig)
+				skips.Closed, skips.Deferred, skips.Assigned, skips.NoRig)
 		}
 		return nil
 	}
@@ -293,9 +237,9 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 
 	fmt.Printf("\n%s Dispatched %d/%d child(ren) from epic %s\n",
 		style.Bold.Render("📊"), successCount, len(candidates), epicID)
-	if skippedClosed > 0 || skippedDeferred > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
+	if skips.any() {
 		fmt.Printf("  Skipped: %d closed, %d deferred, %d assigned, %d no rig\n",
-			skippedClosed, skippedDeferred, skippedAssigned, skippedNoRig)
+			skips.Closed, skips.Deferred, skips.Assigned, skips.NoRig)
 	}
 
 	if successCount == 0 {
