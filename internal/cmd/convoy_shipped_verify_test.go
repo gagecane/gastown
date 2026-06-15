@@ -450,6 +450,7 @@ func TestEvaluateTrackedBeadShipped_CloseReasonShortCircuit(t *testing.T) {
 		{"reaper auto-close", "stale:auto-closed by reaper"},
 		{"polecat no-changes", "no-changes: bug already fixed upstream"},
 		{"polecat not-applicable", "not-applicable: spec item is now obsolete"},
+		{"mountain skip", "mountain:skipped: Skipped by Mountain-Eater after 3 polecat failures"},
 	}
 
 	for _, c := range cases {
