@@ -2798,6 +2798,61 @@ func TestStoreFieldsInBeadConvoyFields(t *testing.T) {
 	}
 }
 
+// TestStoreFieldsInBeadReviewOnlyPinsLocal verifies that a review-only dispatch
+// with no explicit merge strategy is pinned to merge=local, so review-leg
+// convoys never inherit a customer rig's pr/mr default and open a throwaway PR
+// per leg (gs-k2q8).
+func TestStoreFieldsInBeadReviewOnlyPinsLocal(t *testing.T) {
+	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", filepath.Join(t.TempDir(), "mol.log"))
+	logPath := os.Getenv("GT_TEST_ATTACHED_MOLECULE_LOG")
+
+	if err := storeFieldsInBead("gt-test456", beadFieldUpdates{
+		ReviewOnly: true,
+	}); err != nil {
+		t.Fatalf("storeFieldsInBead: %v", err)
+	}
+
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "review_only: true") {
+		t.Fatalf("missing review_only in description:\n%s", text)
+	}
+	if !strings.Contains(text, "merge_strategy: local") {
+		t.Fatalf("review-only dispatch should pin merge=local:\n%s", text)
+	}
+}
+
+// TestStoreFieldsInBeadReviewOnlyRespectsExplicitMerge verifies that an explicit
+// merge strategy on a review-only dispatch is NOT overridden by the local pin
+// (gs-k2q8): the pin only fills in the default, it never overrides an operator's
+// explicit --merge choice.
+func TestStoreFieldsInBeadReviewOnlyRespectsExplicitMerge(t *testing.T) {
+	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", filepath.Join(t.TempDir(), "mol.log"))
+	logPath := os.Getenv("GT_TEST_ATTACHED_MOLECULE_LOG")
+
+	if err := storeFieldsInBead("gt-test789", beadFieldUpdates{
+		ReviewOnly:    true,
+		MergeStrategy: "mr",
+	}); err != nil {
+		t.Fatalf("storeFieldsInBead: %v", err)
+	}
+
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "merge_strategy: mr") {
+		t.Fatalf("explicit merge strategy should win over the review-only local pin:\n%s", text)
+	}
+	if strings.Contains(text, "merge_strategy: local") {
+		t.Fatalf("review-only local pin must not override explicit --merge:\n%s", text)
+	}
+}
+
 // TestSlingIdempotentNoOp verifies that slinging a bead to the same target
 // it's already assigned to returns a no-op instead of an error.
 func TestSlingIdempotentNoOp(t *testing.T) {

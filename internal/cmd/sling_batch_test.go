@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestBatchSling_ConvoyIDStoredInBeadFieldUpdates verifies that the batch convoy ID
@@ -1342,6 +1344,63 @@ exit 1
 	got := getConvoyInfoFromIssue("nonexistent-id", tmpDir)
 	if got != nil {
 		t.Errorf("getConvoyInfoFromIssue(\"nonexistent-id\", ...) = %+v, want nil", got)
+	}
+}
+
+// TestConvoyInfoFromAttachment verifies the merge-strategy resolution used at
+// gt done time. A bead carrying its own merge_strategy (e.g. a review-only
+// convoy leg slung with --no-convoy, so no convoy_id is stamped) must be
+// honored rather than treated as untracked, which would fall through to the
+// dep-based parent-convoy lookup and open a PR (gs-k2q8).
+func TestConvoyInfoFromAttachment(t *testing.T) {
+	tests := []struct {
+		name      string
+		fields    *beads.AttachmentFields
+		wantNil   bool
+		wantID    string
+		wantMerge string
+	}{
+		{
+			name:    "nil attachment",
+			fields:  nil,
+			wantNil: true,
+		},
+		{
+			name:    "no convoy and no merge strategy",
+			fields:  &beads.AttachmentFields{ReviewOnly: true},
+			wantNil: true,
+		},
+		{
+			name:      "merge strategy without convoy_id is honored",
+			fields:    &beads.AttachmentFields{ReviewOnly: true, MergeStrategy: "local"},
+			wantMerge: "local",
+		},
+		{
+			name:   "convoy_id alone is honored",
+			fields: &beads.AttachmentFields{ConvoyID: "hq-cv-abc"},
+			wantID: "hq-cv-abc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convoyInfoFromAttachment(tt.fields)
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("convoyInfoFromAttachment = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("convoyInfoFromAttachment = nil, want non-nil")
+			}
+			if got.ID != tt.wantID {
+				t.Errorf("ID = %q, want %q", got.ID, tt.wantID)
+			}
+			if got.MergeStrategy != tt.wantMerge {
+				t.Errorf("MergeStrategy = %q, want %q", got.MergeStrategy, tt.wantMerge)
+			}
+		})
 	}
 }
 

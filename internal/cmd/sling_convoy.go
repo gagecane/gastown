@@ -426,8 +426,22 @@ func getConvoyInfoFromIssue(issueID, cwd string) *ConvoyInfo {
 		return nil
 	}
 
-	attachment := beads.ParseAttachmentFields(issue)
-	if attachment == nil || attachment.ConvoyID == "" {
+	return convoyInfoFromAttachment(beads.ParseAttachmentFields(issue))
+}
+
+// convoyInfoFromAttachment derives a bead's ConvoyInfo from its parsed
+// attachment fields, or nil when the bead carries neither a convoy_id nor its
+// own merge strategy. A bead can carry a merge strategy WITHOUT a convoy_id:
+// convoy legs are slung with --no-convoy (no convoy_id stamped), but a
+// review-only leg still gets merge_strategy=local pinned at dispatch (gs-k2q8).
+// Honoring that keeps `gt done` on the leg's own local strategy instead of
+// falling through to the dep-based parent-convoy lookup (which reads the parent
+// convoy's strategy, not the leg's) and opening a PR.
+func convoyInfoFromAttachment(attachment *beads.AttachmentFields) *ConvoyInfo {
+	if attachment == nil {
+		return nil
+	}
+	if attachment.ConvoyID == "" && attachment.MergeStrategy == "" {
 		return nil
 	}
 

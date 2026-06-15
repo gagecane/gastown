@@ -646,6 +646,15 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	}
 	if updates.MergeStrategy != "" {
 		fields.MergeStrategy = updates.MergeStrategy
+	} else if updates.ReviewOnly && fields.MergeStrategy == "" {
+		// Review-only legs (PRD/design/plan-review analysts) produce internal
+		// orchestration artifacts the orchestrator consumes via synthesis — not
+		// product changes. Without an explicit strategy they would inherit the
+		// rig default; in a customer PR-review rig that opens a throwaway PR per
+		// leg (gs-k2q8). Pin review-only dispatches to merge=local so their
+		// commits stay on the feature branch and never reach a customer PR /
+		// the merge queue. An explicit --merge always wins (handled above).
+		fields.MergeStrategy = "local"
 	}
 	if updates.ConvoyOwned {
 		fields.ConvoyOwned = true

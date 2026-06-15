@@ -36,6 +36,9 @@ A .designs/<review-id>/ directory containing:
 formula = "design"
 type = "convoy"
 version = 1
+review_only = true  # All legs are analysis-only — they emit a design doc the
+                    # synthesis step consumes, not product code. Keeps legs on
+                    # merge=local so they never open per-leg PRs (gs-k2q8).
 
 # Input variables - provided at runtime
 [inputs]
