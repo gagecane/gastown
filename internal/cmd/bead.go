@@ -23,9 +23,10 @@ moving beads between repos and viewing beads by ID with automatic
 prefix-based routing.
 
 Subcommands:
-  move    Move a bead from one repository to another
-  show    Show details of a bead (routes by prefix)
-  read    Alias for show`,
+  move     Move a bead from one repository to another
+  show     Show details of a bead (routes by prefix)
+  read     Alias for show
+  comment  Append a comment to a bead without changing its status`,
 	RunE: requireSubcommand,
 }
 
@@ -86,12 +87,49 @@ Examples:
 	},
 }
 
+var beadCommentCmd = &cobra.Command{
+	Use:   "comment <bead-id> [text...] [flags]",
+	Short: "Append a comment to a bead without changing its status",
+	Long: `Appends a comment to a bead's comment thread, leaving its status unchanged.
+
+This is the comment-only update that 'gt close' is not: it records a
+progress note or finding without closing the bead. Delegates to
+'bd comment' and routes to the correct beads database automatically
+based on the bead's prefix (gt-, hq-, bd-, rig prefixes, etc.).
+
+All 'bd comment' flags are supported (--stdin, --file).
+
+Examples:
+  gt bead comment gt-abc123 "Working on this now"
+  gt bead comment hq-xyz789 Investigated, root cause found
+  echo "note from pipe" | gt bead comment gt-abc123 --stdin
+  gt bead comment gt-abc123 --file notes.txt`,
+	DisableFlagParsing: true, // Pass all flags through to bd comment
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runBeadComment(cmd, args)
+	},
+}
+
 func init() {
 	beadMoveCmd.Flags().BoolVarP(&beadMoveDryRun, "dry-run", "n", false, "Show what would be done")
 	beadCmd.AddCommand(beadMoveCmd)
 	beadCmd.AddCommand(beadShowCmd)
 	beadCmd.AddCommand(beadReadCmd)
+	beadCmd.AddCommand(beadCommentCmd)
 	rootCmd.AddCommand(beadCmd)
+}
+
+func runBeadComment(cmd *cobra.Command, args []string) error {
+	// Handle --help since DisableFlagParsing bypasses Cobra's help handling.
+	if helped, err := checkHelpFlag(cmd, args); helped || err != nil {
+		return err
+	}
+
+	if extractBeadIDFromArgs(args) == "" {
+		return fmt.Errorf("bead ID required\n\nUsage: gt bead comment <bead-id> [text...] [flags]")
+	}
+
+	return execBdComment(args)
 }
 
 // moveBeadInfo holds the essential fields we need to copy when moving beads
