@@ -49,10 +49,11 @@ type scanTestOpts struct {
 
 // scanTestPaths holds paths created by mockGtForScanTest.
 type scanTestPaths struct {
-	binDir       string
-	townRoot     string
-	slingLogPath string // sling call log; absent if sling was never called
-	checkLogPath string // convoy check call log; absent if check was never called
+	binDir         string
+	townRoot       string
+	slingLogPath   string // sling call log; absent if sling was never called
+	checkLogPath   string // convoy check call log; absent if check was never called
+	recheckLogPath string // convoy recheck-unverified call log; absent if never called
 }
 
 // mockGtForScanTest creates a mock gt binary and directory layout for scan tests.
@@ -79,6 +80,7 @@ func mockGtForScanTest(t *testing.T, opts scanTestOpts) scanTestPaths {
 
 	slingLogPath := filepath.Join(binDir, "sling.log")
 	checkLogPath := filepath.Join(binDir, "check.log")
+	recheckLogPath := filepath.Join(binDir, "recheck.log")
 
 	slingFailClause := ""
 	if opts.slingFailOnce {
@@ -99,6 +101,10 @@ if [ "$1" = "sling" ]; then
   echo "$@" >> "` + slingLogPath + `"` + slingFailClause + `
   exit 0
 fi
+if [ "$1" = "convoy" ] && [ "$2" = "recheck-unverified" ]; then
+  echo "$@" >> "` + recheckLogPath + `"
+  exit 0
+fi
 if [ "$1" = "convoy" ] && [ "$2" = "check" ]; then
   echo "$@" >> "` + checkLogPath + `"
   exit 0
@@ -112,10 +118,11 @@ exit 0
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	return scanTestPaths{
-		binDir:       binDir,
-		townRoot:     townRoot,
-		slingLogPath: slingLogPath,
-		checkLogPath: checkLogPath,
+		binDir:         binDir,
+		townRoot:       townRoot,
+		slingLogPath:   slingLogPath,
+		checkLogPath:   checkLogPath,
+		recheckLogPath: recheckLogPath,
 	}
 }
 
@@ -551,6 +558,44 @@ func TestScanStranded_PeriodicCompletionBackstop(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'periodic backstop' in log messages, got: %v", logged)
+	}
+}
+
+// TestScanStranded_ShipUnverifiedRecheckOnBackstop verifies the gu-fnd1w fix:
+// the daemon fires `gt convoy recheck-unverified` on the slow completion-backstop
+// cadence (and NOT on every scan), restoring daemon-driven recovery for the
+// otherwise-terminal convoy:ship-unverified state without per-tick cost.
+func TestScanStranded_ShipUnverifiedRecheckOnBackstop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	paths := mockGtForScanTest(t, scanTestOpts{strandedJSON: "[]"})
+
+	logger := func(format string, args ...interface{}) {}
+	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+
+	// Scans before the backstop interval must NOT fire the recheck.
+	for i := 0; i < completionBackstopInterval-1; i++ {
+		m.scan()
+	}
+	if _, err := os.Stat(paths.recheckLogPath); err == nil {
+		data, _ := os.ReadFile(paths.recheckLogPath)
+		t.Fatalf("recheck-unverified fired before backstop interval: %s", string(data))
+	}
+
+	// The Nth scan triggers the backstop → recheck fires exactly once.
+	m.scan()
+	data, err := os.ReadFile(paths.recheckLogPath)
+	if err != nil {
+		t.Fatalf("recheck-unverified NOT fired at backstop interval (scan %d): %v", completionBackstopInterval, err)
+	}
+	logStr := strings.TrimSpace(string(data))
+	if logStr != "convoy recheck-unverified" {
+		t.Errorf("expected `convoy recheck-unverified`, got: %q", logStr)
+	}
+	if lines := strings.Count(logStr, "\n"); lines != 0 {
+		t.Errorf("expected exactly one recheck invocation at the backstop, got:\n%s", logStr)
 	}
 }
 

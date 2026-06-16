@@ -94,6 +94,7 @@ var (
 	convoyCheckDryRun       bool
 	convoyReapOrphansDryRun bool
 	convoyReapStagedDryRun  bool
+	convoyRecheckDryRun     bool
 	convoyLandForce         bool
 	convoyLandKeep          bool
 	convoyLandDryRun        bool
@@ -368,6 +369,37 @@ Examples:
 	RunE:         runConvoyReapStaged,
 }
 
+var convoyRecheckUnverifiedCmd = &cobra.Command{
+	Use:   "recheck-unverified",
+	Short: "Re-evaluate convoy:ship-unverified convoys whose tracked beads advanced",
+	Long: `Find open convoys marked convoy:ship-unverified whose tracked beads changed
+after the label was applied and re-run their completion check.
+
+The gu-j7u5 ship-verification gate marks an all-tracked-closed convoy
+convoy:ship-unverified when its beads can't be proven shipped, and gu-4cxuv
+makes the daemon completion + stranded sweeps SKIP labeled convoys so they
+stop burning the dispatch budget every tick. But the only path that clears the
+label (gt convoy check <id>) was reachable solely by hand — so a mountain with
+one false-closed leg parked open forever (gu-fnd1w).
+
+This pass restores daemon-driven recovery without the gu-4cxuv budget blowup:
+it re-evaluates a labeled convoy ONLY when one of its tracked beads has an
+updated_at after the convoy's own updated_at (the time the label was applied) —
+the only event that can make a previously-unverifiable convoy ship-verifiable
+(a citing commit lands, a bead reopens, a no_merge marker is set). Convoys with
+no advanced bead are filtered out in-memory at one batched query's cost.
+
+Run by the daemon on the slow completion-backstop cadence and available
+manually.
+
+Examples:
+  gt convoy recheck-unverified            # Re-evaluate advanced ship-unverified convoys
+  gt convoy recheck-unverified --dry-run  # Preview which would be re-checked`,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE:         runConvoyRecheckUnverified,
+}
+
 var convoyStrandedCmd = &cobra.Command{
 	Use:   "stranded",
 	Short: "Find stranded convoys (ready work, stuck, or empty) needing attention",
@@ -487,6 +519,8 @@ func init() {
 	convoyCmd.AddCommand(convoyReapOrphansCmd)
 	convoyReapStagedCmd.Flags().BoolVar(&convoyReapStagedDryRun, "dry-run", false, "Preview what would launch without acting")
 	convoyCmd.AddCommand(convoyReapStagedCmd)
+	convoyRecheckUnverifiedCmd.Flags().BoolVar(&convoyRecheckDryRun, "dry-run", false, "Preview which convoys would be re-evaluated without acting")
+	convoyCmd.AddCommand(convoyRecheckUnverifiedCmd)
 	convoyCmd.AddCommand(convoyStrandedCmd)
 	convoyCmd.AddCommand(convoyCloseCmd)
 	convoyCmd.AddCommand(convoyLandCmd)
@@ -1225,6 +1259,30 @@ func runConvoyReapStaged(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runConvoyRecheckUnverified(cmd *cobra.Command, args []string) error {
+	townBeads, err := getTownBeadsDir()
+	if err != nil {
+		return err
+	}
+	rechecked, err := recheckShipUnverifiedConvoys(townBeads, convoyRecheckDryRun)
+	if err != nil {
+		return err
+	}
+	if len(rechecked) == 0 {
+		fmt.Println("No ship-unverified convoys with advanced tracked beads to re-evaluate.")
+		return nil
+	}
+	if convoyRecheckDryRun {
+		fmt.Printf("%s Would re-evaluate %d ship-unverified convoy(s):\n", style.Warning.Render("⚠"), len(rechecked))
+	} else {
+		fmt.Printf("%s Re-evaluated %d ship-unverified convoy(s):\n", style.Bold.Render("✓"), len(rechecked))
+	}
+	for _, r := range rechecked {
+		fmt.Printf("  🔁 %s (tracked bead advanced since label applied)\n", r.ConvoyID)
+	}
+	return nil
+}
+
 // reapedWorkflow records one orphaned workflow chain torn down by the reaper.
 type reapedWorkflow struct {
 	WorkflowID  string
@@ -1429,6 +1487,152 @@ func reapStaleStagedConvoys(townBeads string, dryRun bool) ([]reapedStagedConvoy
 		reaped = append(reaped, reapedStagedConvoy{ConvoyID: c.ID, Age: age})
 	}
 	return reaped, nil
+}
+
+// recheckUnverifiedMaxConvoys caps how many convoy:ship-unverified convoys a
+// single recheck pass re-evaluates (gu-fnd1w). Like completionSweepMaxConvoys,
+// this bounds the per-convoy checkSingleConvoy fan-out so the recovery pass can
+// never blow the dispatch budget — the very failure mode (gu-4cxuv) that the
+// ship-unverified label was introduced to prevent. The change-detection gate
+// already filters out unchanged convoys for free; the cap is a backstop for the
+// rare case where many tracked beads advance at once.
+const recheckUnverifiedMaxConvoys = 50
+
+// recheckedConvoy records one convoy:ship-unverified convoy that the recovery
+// pass re-evaluated because one of its tracked beads advanced after the label
+// was applied.
+type recheckedConvoy struct {
+	ConvoyID string
+}
+
+// recheckShipUnverifiedConvoys is the daemon-driven recovery pass for the
+// otherwise-terminal convoy:ship-unverified state (gu-fnd1w).
+//
+// The gu-j7u5 ship-verification gate stamps convoy:ship-unverified on an
+// all-tracked-closed convoy whose beads can't be proven shipped, and gu-4cxuv
+// then makes BOTH daemon sweeps (checkAndCloseCompletedConvoys, findStranded-
+// Convoys) skip labeled convoys so they stop burning the dispatch budget every
+// tick. But the only path that CLEARS the label (removeShipUnverifiedLabel) is
+// reachable solely from checkSingleConvoy via an explicit `gt convoy check <id>`
+// — the daemon never invokes the single-convoy form. So a mountain with one
+// false-closed leg parked open forever: never re-evaluated, never rolled up,
+// never notified, until a human ran `gt convoy check <id>` by hand.
+//
+// This pass restores daemon-driven recovery WITHOUT reintroducing the gu-4cxuv
+// budget blowup. It re-evaluates a labeled convoy ONLY when one of its tracked
+// beads has an updated_at strictly after the convoy's own updated_at — i.e. the
+// bead changed AFTER the label was (re)applied, which is the only event that can
+// make a previously-unverifiable convoy ship-verifiable (a citing commit lands,
+// a bead reopens, a no_merge marker is set). Convoys with no advanced bead are
+// filtered out in-memory (no per-convoy subprocess), so a steady-state backlog
+// of genuinely-stuck convoys costs one batched tracks query + one batched detail
+// fetch per pass and nothing more.
+//
+// The re-evaluation itself is checkSingleConvoy, which clears the stale label
+// and lets the fresh gu-j7u5 check decide anew: a now-shippable convoy closes; a
+// still-unverifiable one re-applies the label (bumping its updated_at, so it
+// won't be re-checked until a tracked bead advances again — self-limiting).
+//
+// Conservative by construction: a convoy whose updated_at can't be parsed, or
+// whose tracked beads' details can't be read, is LEFT ALONE (the manual
+// `gt convoy check <id>` escape hatch still works). Fail-open here would re-run
+// the expensive per-convoy check on every pass and risk the budget blowup this
+// design exists to avoid.
+func recheckShipUnverifiedConvoys(townBeads string, dryRun bool) ([]recheckedConvoy, error) {
+	convoys, err := listConvoyIssues(townBeads, "open", false, convoyShipUnverifiedLabel)
+	if err != nil {
+		return nil, fmt.Errorf("listing ship-unverified convoys: %w", err)
+	}
+	if len(convoys) == 0 {
+		return nil, nil
+	}
+
+	// Batch the tracked-ID lookup across all candidate convoys (one IN(...) SQL),
+	// mirroring checkAndCloseCompletedConvoys (gc-pai9b). On batch failure, fall
+	// back to per-convoy getTrackedIssueIDs below.
+	convoyIDs := make([]string, 0, len(convoys))
+	for _, c := range convoys {
+		convoyIDs = append(convoyIDs, c.ID)
+	}
+	trackedIDsByConvoy, batchErr := getAllTrackedIssuesByConvoy(townBeads, convoyIDs)
+	if batchErr != nil {
+		trackedIDsByConvoy = nil
+	}
+
+	// Resolve every convoy's tracked IDs first (cheap dep-edge lookups / cached
+	// batch), then fetch all bead details in ONE town-wide bd show batch.
+	trackedByConvoy := make(map[string][]string, len(convoys))
+	allTrackedIDs := make([]string, 0)
+	seenAll := make(map[string]bool)
+	for _, c := range convoys {
+		ids := trackedIDsByConvoy[c.ID]
+		if ids == nil {
+			ids, _ = getTrackedIssueIDs(townBeads, c.ID)
+		}
+		trackedByConvoy[c.ID] = ids
+		for _, id := range ids {
+			if !seenAll[id] {
+				seenAll[id] = true
+				allTrackedIDs = append(allTrackedIDs, id)
+			}
+		}
+	}
+	freshDetails := getIssueDetailsBatch(allTrackedIDs)
+
+	var rechecked []recheckedConvoy
+	processed := 0
+	for _, c := range convoys {
+		if processed >= recheckUnverifiedMaxConvoys {
+			break
+		}
+		if !convoyTrackedAdvanced(c.UpdatedAt, trackedByConvoy[c.ID], freshDetails) {
+			continue
+		}
+		processed++
+		if dryRun {
+			rechecked = append(rechecked, recheckedConvoy{ConvoyID: c.ID})
+			continue
+		}
+		// checkSingleConvoy clears the stale label and re-runs the gu-j7u5 gate:
+		// it closes a now-shippable convoy or re-applies the label otherwise.
+		if err := checkSingleConvoy(townBeads, c.ID, false); err != nil {
+			style.PrintWarning("recheck-unverified %s: re-evaluation failed: %v", c.ID, err)
+			continue
+		}
+		rechecked = append(rechecked, recheckedConvoy{ConvoyID: c.ID})
+	}
+	return rechecked, nil
+}
+
+// convoyTrackedAdvanced reports whether any tracked bead changed AFTER the
+// convoy's own updated_at — the signal that a convoy:ship-unverified convoy is
+// worth re-evaluating (gu-fnd1w). The convoy's updated_at is the time the label
+// was last (re)applied, since markConvoyShipUnverified is a bd write that bumps
+// it; a tracked bead whose updated_at is strictly later therefore changed since
+// the label was stamped (citing commit landed, bead reopened, marker set).
+//
+// Returns false (leave the convoy alone) when the convoy's updated_at can't be
+// parsed or no tracked bead's details are readable — fail-closed, so an
+// unreadable bead never triggers the expensive per-convoy re-check on every pass.
+func convoyTrackedAdvanced(convoyUpdatedAt string, trackedIDs []string, details map[string]*issueDetails) bool {
+	convoyTime := parseBeadsTimestamp(convoyUpdatedAt)
+	if convoyTime.IsZero() {
+		return false
+	}
+	for _, id := range trackedIDs {
+		d := details[id]
+		if d == nil {
+			continue
+		}
+		beadTime := parseBeadsTimestamp(d.UpdatedAt)
+		if beadTime.IsZero() {
+			continue
+		}
+		if beadTime.After(convoyTime) {
+			return true
+		}
+	}
+	return false
 }
 
 // convoyShipUnverifiedLabel marks an all-tracked-closed convoy whose tracked
@@ -3552,6 +3756,7 @@ type convoyListIssue struct {
 	Title       string   `json:"title"`
 	Status      string   `json:"status"`
 	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
 	Description string   `json:"description"`
 	IssueType   string   `json:"issue_type"`
 	Labels      []string `json:"labels"`
@@ -4035,6 +4240,7 @@ type issueDetailsJSON struct {
 	BlockedByCount int               `json:"blocked_by_count"`
 	CloseReason    string            `json:"close_reason"`
 	DeferUntil     string            `json:"defer_until"`
+	UpdatedAt      string            `json:"updated_at"`
 	Dependencies   []issueDependency `json:"dependencies"`
 }
 
@@ -4052,6 +4258,7 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 		BlockedByCount: issue.BlockedByCount,
 		CloseReason:    issue.CloseReason,
 		DeferUntil:     issue.DeferUntil,
+		UpdatedAt:      issue.UpdatedAt,
 		Dependencies:   issue.Dependencies,
 	}
 }
@@ -4070,6 +4277,7 @@ type issueDetails struct {
 	BlockedByCount int
 	CloseReason    string
 	DeferUntil     string
+	UpdatedAt      string
 	Dependencies   []issueDependency
 }
 

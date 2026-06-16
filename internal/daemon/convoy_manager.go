@@ -846,6 +846,19 @@ func (m *ConvoyManager) scan() {
 		m.checkAllConvoyCompletion()
 	}
 
+	// Recovery pass for the otherwise-terminal convoy:ship-unverified state
+	// (gu-fnd1w). The completion + stranded sweeps SKIP labeled convoys (gu-4cxuv)
+	// and the only label-clearing path was a manual `gt convoy check <id>`, so a
+	// mountain with one false-closed leg parked open forever. This re-evaluates a
+	// labeled convoy ONLY when a tracked bead advanced after the label was applied
+	// (a citing commit landed / a bead reopened), so it costs ~one batched query
+	// per pass at steady state. Run on the same slow backstop cadence — recovery
+	// of a stranded mountain is not latency-sensitive, and the cadence bounds the
+	// cost well below the dispatch budget the label exists to protect.
+	if backstopDue {
+		m.recheckShipUnverifiedConvoys()
+	}
+
 	// Feed-storm rate monitor (gc-wwpw2): a sustained high per-scan sling-failure
 	// count is the signature of a re-dispatch storm (gu-q1wzq) — beads re-fed
 	// every cycle that can never succeed, burning CPU + Dolt connections. No
@@ -872,6 +885,26 @@ func (m *ConvoyManager) checkAllConvoyCompletion() {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		m.logger("Convoy: batched completion check failed: %s", util.FirstLine(stderr.String()))
+	}
+}
+
+// recheckShipUnverifiedConvoys runs `gt convoy recheck-unverified` to recover
+// convoys stuck in the terminal convoy:ship-unverified state (gu-fnd1w). The
+// completion + stranded sweeps skip labeled convoys (gu-4cxuv) and the only
+// label-clearing path was a manual `gt convoy check <id>`, so a mountain with
+// one false-closed leg parked open forever. The subprocess re-evaluates a
+// labeled convoy ONLY when a tracked bead advanced after the label was applied,
+// so it stays cheap. Mutation routing so the re-evaluation's label-clear /
+// convoy-close writes land in the right databases.
+func (m *ConvoyManager) recheckShipUnverifiedConvoys() {
+	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "recheck-unverified")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdMutationRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		m.logger("Convoy: ship-unverified recheck failed: %s", util.FirstLine(stderr.String()))
 	}
 }
 
