@@ -2342,6 +2342,197 @@ func TestEnsureDaemonPatrolConfig(t *testing.T) {
 
 }
 
+// TestSaveDaemonPatrolConfigPreservesTypedFields guards against the silent,
+// lossy round-trip described in gu-bgqkj: the map-based config.DaemonPatrolConfig
+// cannot represent typed patrol sub-fields (dolt_server, curio, ...) or
+// top-level keys (env), so a naive load->save would drop them. Save must
+// read-modify-write to preserve them.
+func TestSaveDaemonPatrolConfigPreservesTypedFields(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mayor", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a daemon.json with typed patrol blocks and a top-level env key
+	// that the map-based struct cannot model.
+	onDisk := `{
+  "type": "daemon-patrol-config",
+  "version": 1,
+  "heartbeat": {"enabled": true, "interval": "3m"},
+  "env": {"GT_DOLT_PORT": "43211"},
+  "patrols": {
+    "witness": {"enabled": true, "interval": "5m", "agent": "witness", "rigs": ["gastown"]},
+    "dolt_remotes": {
+      "enabled": true,
+      "interval": "15m",
+      "remote": "origin",
+      "branch": "main",
+      "databases": ["beads"]
+    },
+    "curio": {"enabled": false, "interval": "30m", "lookback": "24h"}
+  }
+}`
+	if err := os.WriteFile(path, []byte(onDisk), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the lossy path: load into the map-based struct, then save.
+	loaded, err := LoadDaemonPatrolConfig(path)
+	if err != nil {
+		t.Fatalf("LoadDaemonPatrolConfig: %v", err)
+	}
+	if err := SaveDaemonPatrolConfig(path, loaded); err != nil {
+		t.Fatalf("SaveDaemonPatrolConfig: %v", err)
+	}
+
+	// Re-read the raw JSON and assert the typed fields survived.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("re-parsing saved config: %v", err)
+	}
+
+	// Top-level env preserved.
+	if _, ok := got["env"]; !ok {
+		t.Error("top-level 'env' key was dropped on save")
+	}
+
+	var patrols map[string]json.RawMessage
+	if err := json.Unmarshal(got["patrols"], &patrols); err != nil {
+		t.Fatalf("parsing patrols: %v", err)
+	}
+
+	// dolt_remotes typed sub-fields preserved.
+	doltRemotes, ok := patrols["dolt_remotes"]
+	if !ok {
+		t.Fatal("dolt_remotes patrol was dropped on save")
+	}
+	var dr map[string]json.RawMessage
+	if err := json.Unmarshal(doltRemotes, &dr); err != nil {
+		t.Fatalf("parsing dolt_remotes: %v", err)
+	}
+	for _, field := range []string{"remote", "branch", "databases"} {
+		if _, ok := dr[field]; !ok {
+			t.Errorf("dolt_remotes.%s was dropped on save", field)
+		}
+	}
+
+	// curio typed sub-field preserved.
+	curio, ok := patrols["curio"]
+	if !ok {
+		t.Fatal("curio patrol was dropped on save")
+	}
+	var cu map[string]json.RawMessage
+	if err := json.Unmarshal(curio, &cu); err != nil {
+		t.Fatalf("parsing curio: %v", err)
+	}
+	if _, ok := cu["lookback"]; !ok {
+		t.Error("curio.lookback was dropped on save")
+	}
+
+	// The known fields the struct DOES model still round-trip and load cleanly.
+	reloaded, err := LoadDaemonPatrolConfig(path)
+	if err != nil {
+		t.Fatalf("reload after save: %v", err)
+	}
+	if _, ok := reloaded.Patrols["witness"]; !ok {
+		t.Error("witness patrol missing after round-trip")
+	}
+}
+
+// TestSaveDaemonPatrolConfigNoExistingFile verifies Save works when no file
+// exists yet (the fresh-install path), writing the struct as-is.
+func TestSaveDaemonPatrolConfigNoExistingFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mayor", "daemon.json")
+
+	if err := SaveDaemonPatrolConfig(path, NewDaemonPatrolConfig()); err != nil {
+		t.Fatalf("SaveDaemonPatrolConfig: %v", err)
+	}
+
+	loaded, err := LoadDaemonPatrolConfig(path)
+	if err != nil {
+		t.Fatalf("LoadDaemonPatrolConfig: %v", err)
+	}
+	if len(loaded.Patrols) != 3 {
+		t.Errorf("Patrols count = %d, want 3", len(loaded.Patrols))
+	}
+}
+
+// TestSaveDaemonPatrolConfigUpdatesKnownFields verifies that fields the struct
+// DOES model are actually updated (the merge overlays desired over existing,
+// it doesn't freeze on-disk values).
+func TestSaveDaemonPatrolConfigUpdatesKnownFields(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mayor", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	onDisk := `{
+  "type": "daemon-patrol-config",
+  "version": 1,
+  "patrols": {
+    "witness": {"enabled": true, "interval": "5m", "agent": "witness", "rigs": ["gastown"], "dolt_server": {"port": 3307}}
+  }
+}`
+	if err := os.WriteFile(path, []byte(onDisk), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadDaemonPatrolConfig(path)
+	if err != nil {
+		t.Fatalf("LoadDaemonPatrolConfig: %v", err)
+	}
+	// Flip a modeled field.
+	w := loaded.Patrols["witness"]
+	w.Enabled = false
+	w.Interval = "10m"
+	loaded.Patrols["witness"] = w
+
+	if err := SaveDaemonPatrolConfig(path, loaded); err != nil {
+		t.Fatalf("SaveDaemonPatrolConfig: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	var patrols map[string]json.RawMessage
+	if err := json.Unmarshal(got["patrols"], &patrols); err != nil {
+		t.Fatal(err)
+	}
+	var witness map[string]json.RawMessage
+	if err := json.Unmarshal(patrols["witness"], &witness); err != nil {
+		t.Fatal(err)
+	}
+	// Modeled fields updated.
+	if string(witness["enabled"]) != "false" {
+		t.Errorf("enabled = %s, want false", witness["enabled"])
+	}
+	if string(witness["interval"]) != `"10m"` {
+		t.Errorf("interval = %s, want \"10m\"", witness["interval"])
+	}
+	// Unmodeled sub-field preserved.
+	if _, ok := witness["dolt_server"]; !ok {
+		t.Error("witness.dolt_server was dropped on update")
+	}
+}
+
 func TestNewDaemonPatrolConfig(t *testing.T) {
 	t.Parallel()
 	cfg := NewDaemonPatrolConfig()

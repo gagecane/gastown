@@ -582,6 +582,16 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 }
 
 // SaveDaemonPatrolConfig saves a daemon patrol config to a file.
+//
+// The map-based DaemonPatrolConfig models only the four basic PatrolConfig
+// fields (enabled/interval/agent/rigs) per patrol, plus a heartbeat block. The
+// on-disk daemon.json also carries typed patrol blocks with richer fields
+// (dolt_server, dolt_backup, jsonl_git_backup, curio, scheduled_maintenance,
+// ...) and top-level keys (e.g. env) that this struct cannot represent. To
+// avoid silently dropping them on a load->save round-trip, Save performs a
+// read-modify-write that overlays the struct's known fields onto the existing
+// file, preserving everything else. This mirrors the preservation pattern
+// already used by AddRigToDaemonPatrols. (gu-bgqkj)
 func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 	if err := validateDaemonPatrolConfig(config); err != nil {
 		return err
@@ -591,9 +601,9 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
-	data, err := json.MarshalIndent(config, "", "  ")
+	data, err := marshalDaemonPatrolConfigPreserving(path, config)
 	if err != nil {
-		return fmt.Errorf("encoding daemon patrol config: %w", err)
+		return err
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil { //nolint:gosec // G306: config files don't contain secrets
@@ -601,6 +611,114 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 	}
 
 	return nil
+}
+
+// marshalDaemonPatrolConfigPreserving encodes config for writing to path,
+// merging it over any fields already present on disk that the typed
+// DaemonPatrolConfig cannot represent. If path does not exist or its contents
+// are not parseable JSON, it falls back to a plain encoding of config.
+func marshalDaemonPatrolConfigPreserving(path string, config *DaemonPatrolConfig) ([]byte, error) {
+	plain := func() ([]byte, error) {
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("encoding daemon patrol config: %w", err)
+		}
+		return data, nil
+	}
+
+	existingData, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
+	if err != nil {
+		// No existing file (or unreadable) — write config as-is.
+		return plain()
+	}
+
+	var existing map[string]json.RawMessage
+	if err := json.Unmarshal(existingData, &existing); err != nil {
+		// Existing file isn't a JSON object we can merge into — overwrite it
+		// rather than fail, preserving the prior overwrite behavior.
+		return plain()
+	}
+
+	desiredData, err := json.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("encoding daemon patrol config: %w", err)
+	}
+	var desired map[string]json.RawMessage
+	if err := json.Unmarshal(desiredData, &desired); err != nil {
+		return nil, fmt.Errorf("encoding daemon patrol config: %w", err)
+	}
+
+	// Merge the patrols map per-entry so typed sub-fields survive.
+	if mergedPatrols, ok := mergePatrolsPreserving(existing["patrols"], desired["patrols"]); ok {
+		desired["patrols"] = mergedPatrols
+	}
+
+	// Preserve any top-level keys present on disk that the struct omits
+	// (e.g. env). Keys present in desired always win.
+	for key, val := range existing {
+		if _, ok := desired[key]; !ok {
+			desired[key] = val
+		}
+	}
+
+	out, err := json.MarshalIndent(desired, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encoding daemon patrol config: %w", err)
+	}
+	return out, nil
+}
+
+// mergePatrolsPreserving overlays the desired patrols object onto the existing
+// one. For each patrol present in desired, its known fields override the
+// existing entry's, but any sub-fields only present on disk (e.g. dolt_server
+// settings) are preserved. Patrols absent from desired are dropped (the caller
+// removed them); patrols only on disk but absent from desired are kept only if
+// desired has no patrols object at all. Returns the merged object and whether a
+// merged result should replace desired["patrols"].
+func mergePatrolsPreserving(existingRaw, desiredRaw json.RawMessage) (json.RawMessage, bool) {
+	var existing map[string]json.RawMessage
+	if len(existingRaw) == 0 || json.Unmarshal(existingRaw, &existing) != nil {
+		// Nothing on disk to preserve.
+		return nil, false
+	}
+
+	var desired map[string]json.RawMessage
+	if len(desiredRaw) == 0 || json.Unmarshal(desiredRaw, &desired) != nil {
+		// Caller provided no patrols — keep the existing ones intact.
+		return existingRaw, true
+	}
+
+	for name, desiredEntry := range desired {
+		existingEntry, ok := existing[name]
+		if !ok {
+			continue
+		}
+		desired[name] = mergeJSONObject(existingEntry, desiredEntry)
+	}
+
+	merged, err := json.Marshal(desired)
+	if err != nil {
+		return desiredRaw, true
+	}
+	return merged, true
+}
+
+// mergeJSONObject shallow-merges the desired JSON object over the existing one:
+// keys in desired override, keys only in existing are preserved. If either side
+// is not a JSON object, desired is returned unchanged.
+func mergeJSONObject(existingRaw, desiredRaw json.RawMessage) json.RawMessage {
+	var existing, desired map[string]json.RawMessage
+	if json.Unmarshal(existingRaw, &existing) != nil || json.Unmarshal(desiredRaw, &desired) != nil {
+		return desiredRaw
+	}
+	for key, val := range desired {
+		existing[key] = val
+	}
+	merged, err := json.Marshal(existing)
+	if err != nil {
+		return desiredRaw
+	}
+	return merged
 }
 
 func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
