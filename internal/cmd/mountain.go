@@ -168,6 +168,23 @@ func runMountain(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("compute waves: %w", err)
 	}
 
+	// Append a capstone validation bead as the final wave, blocked by every
+	// slingable leg. Without this an ad-hoc `gt mountain <epic>` rolls up only
+	// via the convoy auto-close gate (a bare AND over leg statuses) and produces
+	// no combined deliverable. This mirrors runConvoyStage's Step 11a so the
+	// epic-promotion path gets the same fan-in synthesis as staged convoys
+	// (gu-4513b). The bead is added to the DAG, so createStagedConvoy tracks it
+	// and dispatchWave1 leaves it for a later wave (it is blocked by all legs).
+	var validationID string
+	waves, validationID, err = appendValidationWave(dag, waves, epicID)
+	if err != nil {
+		return fmt.Errorf("creating validation bead: %w", err)
+	}
+	if validationID != "" {
+		blockerCount := len(dag.Nodes[validationID].BlockedBy)
+		fmt.Printf("  Validation bead: %s (blocked by %d tasks, formula: mol-validate-prd)\n", validationID, blockerCount)
+	}
+
 	// Add gated task warnings.
 	for _, g := range gated {
 		warns = append(warns, StagingFinding{

@@ -132,6 +132,65 @@ func TestRunMountain_ConvoyInput_Closed(t *testing.T) {
 	}
 }
 
+// gu-4513b: an ad-hoc `gt mountain <epic>` must build a fan-in capstone
+// validation bead — blocked by every leg — so the convoy rolls up to a combined
+// deliverable instead of degrading to the bare auto-close AND gate. runMountain
+// assembles its own DAG/waves and previously never reached appendValidationWave
+// (only runConvoyStage did), so the epic-promotion path produced no capstone.
+func TestRunMountain_EpicInput_AppendsValidationCapstone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows — shell stubs")
+	}
+
+	td := newTestDAG(t).
+		Epic("gt-epic-x", "Mountain Epic").
+		Task("gt-a", "Task A", withRig("gastown")).ParentOf("gt-epic-x").
+		Task("gt-b", "Task B", withRig("gastown")).ParentOf("gt-epic-x").BlockedBy("gt-a")
+
+	_, logPath := td.Setup(t)
+
+	// Stub dispatch so we don't spawn a real `gt sling`.
+	var mu sync.Mutex
+	var dispatched []string
+	orig := dispatchTaskDirect
+	dispatchTaskDirect = func(townRoot, beadID, rig string) error {
+		mu.Lock()
+		dispatched = append(dispatched, beadID)
+		mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { dispatchTaskDirect = orig })
+
+	defer func() { mountainForce = false }()
+
+	if err := runMountain(mountainCmd, []string{"gt-epic-x"}); err != nil {
+		t.Fatalf("runMountain on epic: %v", err)
+	}
+
+	logContent := readLog(t, logPath)
+
+	// A capstone validation bead must be created with the mol-validate-prd formula.
+	if !strings.Contains(logContent, "mol-validate-prd") {
+		t.Errorf("expected validation bead created with mol-validate-prd, got log:\n%s", logContent)
+	}
+
+	// Each slingable leg must block the validation bead.
+	for _, leg := range []string{"gt-a", "gt-b"} {
+		if !strings.Contains(logContent, "dep add "+leg+" ") || !strings.Contains(logContent, "--type=blocks") {
+			t.Errorf("expected blocking dep from leg %s to the validation bead, got log:\n%s", leg, logContent)
+		}
+	}
+
+	// Wave 1 dispatches only the unblocked leg (gt-a); the capstone is in a later
+	// wave and must NOT be dispatched immediately.
+	mu.Lock()
+	got := append([]string{}, dispatched...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "gt-a" {
+		t.Fatalf("expected Wave 1 to dispatch only gt-a, got %v", got)
+	}
+}
+
 // readLog reads the bd stub log file.
 func readLog(t *testing.T, logPath string) string {
 	t.Helper()

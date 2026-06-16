@@ -318,6 +318,25 @@ func (d *testDAG) BdStubScript() string {
 		sb.WriteString("    ;;\n")
 	}
 
+	// --- handle: show <runtime-generated convoy> → staged_ready convoy ---
+	// createStagedConvoy mints fresh hq-cv-* IDs that are not in the DAG; the
+	// launch path (transitionConvoyToOpen) then `show`s them. Resolve any such
+	// generated convoy ID as a staged_ready convoy so epic-input launches work.
+	// Must precede the generic hq-* (validation bead) handler.
+	sb.WriteString("  show\\ hq-cv-*\\ --json|show\\ --json\\ hq-cv-*)\n")
+	sb.WriteString("    CVID=$(echo \"$ALL_ARGS\" | tr ' ' '\\n' | grep '^hq-cv-')\n")
+	sb.WriteString("    echo '[{\"id\":\"'\"$CVID\"'\",\"title\":\"Generated convoy\",\"status\":\"staged_ready\",\"issue_type\":\"task\",\"labels\":[\"gt:convoy\"]}]'\n")
+	sb.WriteString("    exit 0\n")
+	sb.WriteString("    ;;\n")
+
+	// --- handle: show <runtime-generated validation bead> → task ---
+	// appendValidationWave mints fresh hq-* (non-convoy) IDs for the capstone.
+	sb.WriteString("  show\\ hq-*\\ --json|show\\ --json\\ hq-*)\n")
+	sb.WriteString("    VID=$(echo \"$ALL_ARGS\" | tr ' ' '\\n' | grep '^hq-')\n")
+	sb.WriteString("    echo '[{\"id\":\"'\"$VID\"'\",\"title\":\"Validate: PRD success criteria\",\"status\":\"open\",\"issue_type\":\"task\"}]'\n")
+	sb.WriteString("    exit 0\n")
+	sb.WriteString("    ;;\n")
+
 	// --- handle: show <unknown> → exit 1 ---
 	sb.WriteString("  show\\ *)\n")
 	sb.WriteString("    echo '{\"error\":\"not found\"}' >&2\n")
