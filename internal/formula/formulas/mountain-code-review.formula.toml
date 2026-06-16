@@ -11,14 +11,14 @@
 # per-leg failures:
 #
 #   # 1. Stage + launch the convoy from this formula
-#   gt formula run mountain-code-review --rig=gastown_upstream --preset=full
+#   gt formula run mountain-code-review --rig=gastown_upstream --set preset=full
 #
 #   # 2. Promote the resulting convoy to a mountain (enables audit + rollup)
 #   gt mountain <hq-cv-id>
 #
 #   # Re-runnable / scoped variants:
-#   gt formula run mountain-code-review --preset=quick
-#   gt formula run mountain-code-review --set scope=changed --branch=my-branch
+#   gt formula run mountain-code-review --set preset=quick
+#   gt formula run mountain-code-review --set scope=changed --set branch=my-branch
 #
 # Re-runnability: each run writes to a run-scoped directory
 # (.reviews/mountain/{{.design_id}}) and the synthesis step dedups findings
