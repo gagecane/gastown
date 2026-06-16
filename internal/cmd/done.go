@@ -84,6 +84,14 @@ var (
 // to the auto-dispatcher within seconds, causing a re-dispatch loop (gu-vty0).
 const defaultDeferredOffset = "+1d"
 
+// noCodeReasonMarker is the canonical token embedded in the close_reason of an
+// audited `gt done --no-code` completion (gu-gc4ex). Because that close is
+// gated on a mandatory --reason rationale, the marker is a trustworthy
+// "no commit expected" signal: the convoy ship-verification gate
+// (shippingNotExpected, gu-twc9l) recognizes it so a legitimately no-code bead
+// does not trip the Pattern B/C false-close warning.
+const noCodeReasonMarker = "--no-code, gu-gc4ex"
+
 // Valid exit types for gt done
 const (
 	ExitCompleted = "COMPLETED"

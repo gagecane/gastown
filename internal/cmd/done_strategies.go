@@ -841,7 +841,7 @@ func completeNoMR(sc strategyContext, originDefault string, isNoMergeTask bool) 
 
 	closeReason := "Completed with no code changes (already fixed or pushed directly to main)"
 	if doneNoCode {
-		closeReason = fmt.Sprintf("Completed — no code change required (--no-code, gu-gc4ex)\nno_code_reason: %s", doneReason)
+		closeReason = fmt.Sprintf("Completed — no code change required (%s)\nno_code_reason: %s", noCodeReasonMarker, doneReason)
 	}
 	noMRCommitSHA, _ := sc.g.Rev("HEAD")
 

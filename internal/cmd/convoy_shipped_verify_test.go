@@ -451,6 +451,20 @@ func TestEvaluateTrackedBeadShipped_CloseReasonShortCircuit(t *testing.T) {
 		{"polecat no-changes", "no-changes: bug already fixed upstream"},
 		{"polecat not-applicable", "not-applicable: spec item is now obsolete"},
 		{"mountain skip", "mountain:skipped: Skipped by Mountain-Eater after 3 polecat failures"},
+		// gu-twc9l: operator/triage no-code closes the 2026-06-16 convoy triage
+		// found wrongly flagged. None of these produce a citing commit by design.
+		{"false-positive finding", "false-positive: the artifact was already correct"},
+		{"duplicate of landed", "duplicate: fix landed under cadk-other's commit"},
+		{"superseded", "superseded: replaced by gu-xyz landed work"},
+		{"re-homed", "re-homed: moved to talontriage rig"},
+		{"rehomed alt spelling", "rehomed: moved to another rig"},
+		{"ops close", "ops: BRASS grant applied, no code change"},
+		{"infra close", "infra: Dolt data fix, no code change"},
+		{"wont-fix", "wont-fix: not worth the maintenance burden"},
+		{"won't-fix apostrophe", "won't-fix: working as intended"},
+		// gu-gc4ex audited --no-code close: the marker can appear mid-line with
+		// a rationale following, so it must match as a substring.
+		{"audited no-code close", "Completed — no code change required (--no-code, gu-gc4ex)\nno_code_reason: verify-only"},
 	}
 
 	for _, c := range cases {
@@ -500,6 +514,52 @@ func TestEvaluateTrackedBeadShipped_CloseReasonDoesNotMaskRealFalseClose(t *test
 			}
 			if !strings.Contains(got, "Pattern B/C") {
 				t.Fatalf("expected Pattern B/C warning, got: %q", got)
+			}
+		})
+	}
+}
+
+// TestShippingNotExpected pins the recognized-vs-rejected close_reason
+// vocabulary directly (gu-twc9l). Recognized triage prefixes and the audited
+// gu-gc4ex no-code marker mean "no commit expected"; everything else must fall
+// through so genuine Pattern B/C false-closes are still flagged. The
+// prefix-matched entries deliberately do NOT fire on a mid-sentence mention
+// (e.g. "merged; was a duplicate:") — only a leading prefix counts.
+func TestShippingNotExpected(t *testing.T) {
+	cases := []struct {
+		closeReason string
+		want        bool
+	}{
+		// Recognized: pre-existing (gu-yy39).
+		{"stale:auto-closed by reaper", true},
+		{"no-changes: already fixed", true},
+		{"not-applicable: obsolete", true},
+		{"mountain:skipped: retired leg", true},
+		// Recognized: new triage prefixes (gu-twc9l).
+		{"false-positive: artifact already correct", true},
+		{"duplicate: landed under another bead", true},
+		{"superseded: replaced by other work", true},
+		{"re-homed: moved to other rig", true},
+		{"rehomed: moved to other rig", true},
+		{"ops: BRASS grant", true},
+		{"infra: Dolt data fix", true},
+		{"wont-fix: by design", true},
+		{"won't-fix: by design", true},
+		// Recognized: audited no-code marker, matched as substring.
+		{"Completed — no code change required (--no-code, gu-gc4ex)\nno_code_reason: verify-only", true},
+		// Rejected: empty and generic closes still fall through.
+		{"", false},
+		{"merged", false},
+		{"done", false},
+		{"completed: by hand", false},
+		// Rejected: a recognized word that is NOT a leading prefix must not fire.
+		{"merged; it was a duplicate: of gu-x", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.closeReason, func(t *testing.T) {
+			if got := shippingNotExpected(c.closeReason); got != c.want {
+				t.Fatalf("shippingNotExpected(%q) = %v, want %v", c.closeReason, got, c.want)
 			}
 		})
 	}

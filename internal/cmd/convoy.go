@@ -1763,13 +1763,46 @@ func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
 //     failures (gu-lcddy); the leg is closed to unblock the
 //     convoy's synthesis rollup, and no commit ships for it.
 //
+// gu-twc9l extends the set to the operator/triage closes that the 2026-06-16
+// convoy triage found wrongly flagged as Pattern B/C false-closes. These are
+// legitimate no-code resolutions where NO citing commit exists by design:
+//
+//   - "false-positive:"   — finding's premise was wrong / artifact already correct
+//     (wiki-quality findings closed --no-code); nothing to ship.
+//   - "duplicate:"        — dup of an already-landed bead; the fix shipped under a
+//     DIFFERENT bead's commit (real prefix, see witness handlers).
+//   - "superseded:"       — work obsoleted by other landed work (real prefix, see
+//     sling_dispatch).
+//   - "re-homed:" / "rehomed:" — bead moved to another rig; ships there, not here.
+//   - "ops:" / "infra:"   — operational/infrastructure closes (BRASS grant, Dolt
+//     data fix) that resolve the bead without a code commit.
+//   - "wont-fix:" / "won't-fix:" — won't-fix operator decision; no ship by design.
+//
+// In addition, the audited `gt done --no-code` path (gu-gc4ex) records the
+// noCodeReasonMarker in its close_reason. That close is gated on a mandatory
+// --reason rationale, so it is a trustworthy "no commit expected" signal — the
+// in-repo equivalent of the explicit no-merge marker referenced by gu-twc9l.
+//
 // Any other close_reason (including "merged", "done", and the empty default)
-// falls through to the standard ship-verification logic.
+// falls through to the standard ship-verification logic, so genuine Pattern B/C
+// false-closes (bare/generic close, or a cited-SHA absent from origin/main) are
+// still caught.
 func shippingNotExpected(closeReason string) bool {
 	if closeReason == "" {
 		return false
 	}
-	for _, prefix := range []string{"stale:", "no-changes:", "not-applicable:", "mountain:skipped:"} {
+	// Audited no-code close (gu-gc4ex): the marker can appear on the first
+	// line while a free-text rationale follows, so match as a substring rather
+	// than a prefix.
+	if strings.Contains(closeReason, noCodeReasonMarker) {
+		return true
+	}
+	for _, prefix := range []string{
+		"stale:", "no-changes:", "not-applicable:", "mountain:skipped:",
+		"false-positive:", "duplicate:", "superseded:",
+		"re-homed:", "rehomed:", "ops:", "infra:",
+		"wont-fix:", "won't-fix:",
+	} {
 		if strings.HasPrefix(closeReason, prefix) {
 			return true
 		}
