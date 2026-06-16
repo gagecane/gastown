@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hard RAM-derived townwide live-agent session ceiling** (gu-tawx0) — A
+  memory thundering-herd (~59GB allocated in 15s by an unbounded ~112-session
+  spawn wave) tore down the tmux server and wiped every agent session town-wide,
+  with no cgroup/systemd-oomd kill to catch it (global reclaim stalled the
+  process group to death). The existing guards did not cover this:
+  `scheduler.global_max_polecats` caps only polecats (witnesses, refineries,
+  crew, dogs, boot were uncapped), and the default-on `pressure_mem_budget_fraction`
+  only defers *reactively* once free RAM is already low — too late under a
+  multi-GB/s allocation spike. The daemon spawn gate now enforces a *proactive*
+  hard ceiling on the live session COUNT across ALL roles, derived from RAM:
+  `floor(MemTotal × pressure_session_ceiling_fraction / pressure_session_mem_gb)`.
+  Defaults ON (`0.6` of total RAM at `1.0`GB per session-tree ≈ 75 sessions on a
+  126GB box); machine-independent; set either knob to 0 to disable. Enforced in
+  `checkPressure`, so every gated start (witness/refinery/polecat/dog) defers
+  before a spawn wave can exceed RAM.
+
 - **`gt done --no-code` exit for verify/report-only beads** (gu-gc4ex) —
   Verify-only and report-only tasks dispatched with a CODE formula
   (`mol-polecat-work`) produce zero commits by design, but `gt done` blocked

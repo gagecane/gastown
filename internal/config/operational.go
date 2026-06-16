@@ -116,6 +116,23 @@ const (
 	// 0.15 = require 15% headroom. Set to 0 to disable.
 	DefaultPressureMemBudgetFraction = 0.15
 
+	// DefaultPressureSessionCeilingFraction is the fraction of TOTAL system
+	// memory the live agent fleet may consume before the daemon refuses to admit
+	// any new session of any role. With DefaultPressureSessionMemGB it yields a
+	// hard, RAM-derived town-wide concurrency ceiling — the durable fix for the
+	// memory thundering-herd (gu-tawx0). Unlike PressureMemBudgetFraction (which
+	// defers reactively once free RAM is already low), this caps the session
+	// COUNT proactively so a spawn wave cannot exceed RAM in the first place.
+	// 0.6 of a 126GB box at 1GB/session-tree ≈ 75 sessions max. Set to 0 to
+	// disable the RAM-derived ceiling.
+	DefaultPressureSessionCeilingFraction = 0.6
+	// DefaultPressureSessionMemGB is the estimated peak resident memory of one
+	// agent session tree (claude + its MCP servers + workers). Measured at the
+	// gu-tawx0 incident: each spawned session forks its own MCP stack
+	// (builder-mcp ~120MB, serena ~230MB+workers) plus a large-context claude,
+	// so a session tree's peak RSS runs ~1GB+. Set to 0 to disable the ceiling.
+	DefaultPressureSessionMemGB = 1.0
+
 	// DefaultPolecatSelfTerminate defaults polecats to self-terminating their
 	// session after `gt done` completes. See gu-ci0l: previously default false
 	// meant polecats waited on the witness for tmux-kill, exposing them to a
@@ -669,6 +686,27 @@ func (d *DaemonThresholds) PressureMemBudgetFractionV() float64 {
 		return *d.PressureMemBudgetFraction
 	}
 	return DefaultPressureMemBudgetFraction
+}
+
+// PressureSessionCeilingFractionV returns the configured or default fraction of
+// total system memory the live agent fleet may consume before new spawns of any
+// role are refused. 0 disables the RAM-derived session ceiling. See gu-tawx0.
+func (d *DaemonThresholds) PressureSessionCeilingFractionV() float64 {
+	if d != nil && d.PressureSessionCeilingFraction != nil {
+		return *d.PressureSessionCeilingFraction
+	}
+	return DefaultPressureSessionCeilingFraction
+}
+
+// PressureSessionMemGBV returns the configured or default estimated peak
+// resident memory (GB) of one agent session tree, used to convert the session
+// ceiling RAM budget into a maximum session count. 0 disables the RAM-derived
+// ceiling. See gu-tawx0.
+func (d *DaemonThresholds) PressureSessionMemGBV() float64 {
+	if d != nil && d.PressureSessionMemGB != nil {
+		return *d.PressureSessionMemGB
+	}
+	return DefaultPressureSessionMemGB
 }
 
 // --- Deacon accessors ---

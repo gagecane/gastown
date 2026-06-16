@@ -42,7 +42,7 @@ func newGateDaemon(t *testing.T, daemonJSON string) *Daemon {
 // The per-heartbeat cap admits at most N new spawns; the rest defer. Memory
 // budget disabled so the test isolates the cap. Stagger disabled for speed.
 func TestAdmitSpawn_PerHeartbeatCap(t *testing.T) {
-	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":3,"spawn_stagger":"0s","pressure_mem_budget_fraction":0}`)
+	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":3,"spawn_stagger":"0s","pressure_mem_budget_fraction":0,"pressure_session_ceiling_fraction":0}`)
 
 	admitted := 0
 	for i := 0; i < 10; i++ {
@@ -63,7 +63,7 @@ func TestAdmitSpawn_PerHeartbeatCap(t *testing.T) {
 
 // A zero cap disables the per-heartbeat limit entirely.
 func TestAdmitSpawn_CapDisabled(t *testing.T) {
-	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"0s","pressure_mem_budget_fraction":0}`)
+	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"0s","pressure_mem_budget_fraction":0,"pressure_session_ceiling_fraction":0}`)
 	for i := 0; i < 20; i++ {
 		if !d.admitSpawn("refinery", "rig") {
 			t.Fatalf("admission %d deferred with cap disabled", i)
@@ -73,7 +73,7 @@ func TestAdmitSpawn_CapDisabled(t *testing.T) {
 
 // Stagger spaces successive admitted spawns apart in wall-clock time.
 func TestAdmitSpawn_Staggers(t *testing.T) {
-	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"40ms","pressure_mem_budget_fraction":0}`)
+	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"40ms","pressure_mem_budget_fraction":0,"pressure_session_ceiling_fraction":0}`)
 
 	start := time.Now()
 	// First admission's slot is "now" (no wait). Three more each add 40ms.
@@ -91,7 +91,7 @@ func TestAdmitSpawn_Staggers(t *testing.T) {
 
 // resetSpawnGate clears the per-heartbeat counter.
 func TestResetSpawnGate(t *testing.T) {
-	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":1,"spawn_stagger":"0s","pressure_mem_budget_fraction":0}`)
+	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":1,"spawn_stagger":"0s","pressure_mem_budget_fraction":0,"pressure_session_ceiling_fraction":0}`)
 	if !d.admitSpawn("witness", "rig") {
 		t.Fatal("first admission should succeed")
 	}
@@ -107,7 +107,7 @@ func TestResetSpawnGate(t *testing.T) {
 // The cap holds under concurrent admission, mirroring the rig worker pool
 // (10 goroutines) fanning out witness/refinery starts on one heartbeat.
 func TestAdmitSpawn_ConcurrentCap(t *testing.T) {
-	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":4,"spawn_stagger":"0s","pressure_mem_budget_fraction":0}`)
+	d := newGateDaemon(t, `{"spawn_max_per_heartbeat":4,"spawn_stagger":"0s","pressure_mem_budget_fraction":0,"pressure_session_ceiling_fraction":0}`)
 
 	var admitted int64
 	var wg sync.WaitGroup
@@ -135,13 +135,13 @@ func TestAdmitSpawn_MemoryBudget(t *testing.T) {
 	}
 
 	// Require 99.9% of total RAM free — effectively always defers.
-	deny := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"0s","pressure_mem_budget_fraction":0.999}`)
+	deny := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"0s","pressure_mem_budget_fraction":0.999,"pressure_session_ceiling_fraction":0}`)
 	if deny.admitSpawn("witness", "rig") {
 		t.Fatal("expected deferral under an unsatisfiable memory budget")
 	}
 
 	// Require 0.1% free — effectively always admits.
-	allow := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"0s","pressure_mem_budget_fraction":0.001}`)
+	allow := newGateDaemon(t, `{"spawn_max_per_heartbeat":0,"spawn_stagger":"0s","pressure_mem_budget_fraction":0.001,"pressure_session_ceiling_fraction":0}`)
 	if !allow.admitSpawn("witness", "rig") {
 		t.Fatal("expected admission under a trivially-satisfiable memory budget")
 	}

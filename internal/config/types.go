@@ -432,6 +432,24 @@ type DaemonThresholds struct {
 	// remain available for a new spawn to proceed — the machine-independent OOM
 	// safety net (gu-xrkoq). Defaults to 0.15 (15% headroom). 0 disables it.
 	PressureMemBudgetFraction *float64 `json:"pressure_mem_budget_fraction,omitempty"`
+
+	// PressureSessionCeilingFraction is the fraction of TOTAL system memory the
+	// live agent fleet may consume before the daemon refuses to admit ANY new
+	// session of ANY role. Combined with PressureSessionMemGB it yields a hard,
+	// RAM-derived town-wide concurrency ceiling counting all roles (witness,
+	// refinery, crew, polecat, dog, boot). This is the durable backstop for the
+	// memory thundering-herd (gu-tawx0): unlike PressureMemBudgetFraction, which
+	// only defers once free RAM is already low (too late under a multi-GB/s
+	// allocation spike), this caps the session COUNT up front. Defaults to 0.6.
+	// 0 disables the RAM-derived ceiling.
+	PressureSessionCeilingFraction *float64 `json:"pressure_session_ceiling_fraction,omitempty"`
+
+	// PressureSessionMemGB is the estimated peak resident memory (GB) of one
+	// agent session tree (claude plus its MCP servers and workers) used to
+	// convert the PressureSessionCeilingFraction RAM budget into a maximum
+	// session count (gu-tawx0). Defaults to 1.0. 0 disables the RAM-derived
+	// ceiling.
+	PressureSessionMemGB *float64 `json:"pressure_session_mem_gb,omitempty"`
 }
 
 // DeaconThresholds configures deacon health-check and dispatch thresholds.

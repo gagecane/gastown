@@ -261,6 +261,13 @@ type Daemon struct {
 	// against a fake tmux binary). See gu-j0xs.
 	deaconStartFn func() error
 
+	// countAgentSessionsFn is a test seam for the town-wide live-agent session
+	// count consumed by the pressure session ceiling (gu-tawx0). When nil
+	// (production) countAgentSessions enumerates the real tmux server. Tests set
+	// it to return a fixed count so the RAM-derived ceiling can be exercised
+	// without a live tmux fleet.
+	countAgentSessionsFn func() int
+
 	// alarmedSessions tracks polecat sessions that have already been alarmed
 	// as dead, keyed by tmux session name. This dedups CRASH DETECTED log
 	// lines, mass-death contributions, feed events, and witness notifications

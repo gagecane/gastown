@@ -47,11 +47,15 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	memThreshold := cfg.PressureMemThresholdGBV()
 	maxSessions := cfg.PressureMaxSessionsV()
 	memBudgetFraction := cfg.PressureMemBudgetFractionV()
+	sessionCeilingFraction := cfg.PressureSessionCeilingFractionV()
+	sessionMemGB := cfg.PressureSessionMemGBV()
+	ramCeiling := ramDerivedSessionCeiling(sessionCeilingFraction, sessionMemGB)
 
 	// All checks disabled — skip entirely, no subprocess calls. Note that
-	// memBudgetFraction defaults ON (gu-xrkoq), so this short-circuit only
-	// triggers when an operator has explicitly zeroed every knob.
-	if cpuThreshold <= 0 && memThreshold <= 0 && maxSessions <= 0 && memBudgetFraction <= 0 {
+	// memBudgetFraction and the RAM-derived ceiling default ON (gu-xrkoq,
+	// gu-tawx0), so this short-circuit only triggers when an operator has
+	// explicitly zeroed every knob.
+	if cpuThreshold <= 0 && memThreshold <= 0 && maxSessions <= 0 && memBudgetFraction <= 0 && ramCeiling <= 0 {
 		return PressureResult{OK: true}
 	}
 
@@ -99,12 +103,25 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 		}
 	}
 
-	// Tier 2: Session concurrency cap
-	if maxSessions > 0 {
+	// Tier 2: Session concurrency ceiling (counts ALL agent roles).
+	//
+	// Two count caps converge here:
+	//   - maxSessions: a static operator-set ceiling (pressure_max_sessions),
+	//     disabled by default.
+	//   - ramCeiling: the RAM-derived hard ceiling = floor(MemTotal * fraction /
+	//     per_session_GB), default ON (gu-tawx0). This is the durable fix for the
+	//     memory thundering-herd: it caps the live session COUNT proactively so a
+	//     spawn wave cannot push the box past RAM in the first place — whereas the
+	//     Tier 0 memory budget only reacts once free RAM is already low.
+	//
+	// The binding cap is the smaller of whichever are enabled. We count sessions
+	// once (a single tmux list-sessions) and compare against it.
+	ceiling := effectiveSessionCeiling(maxSessions, ramCeiling)
+	if ceiling > 0 {
 		result.ActiveSessions = d.countAgentSessions()
-		if result.ActiveSessions >= maxSessions {
+		if result.ActiveSessions >= ceiling {
 			result.OK = false
-			result.Reason = fmt.Sprintf("session cap: %d active sessions, max %d", result.ActiveSessions, maxSessions)
+			result.Reason = sessionCeilingReason(result.ActiveSessions, ceiling, maxSessions, ramCeiling, sessionCeilingFraction)
 			return result
 		}
 	}
@@ -112,9 +129,64 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	return result
 }
 
+// ramDerivedSessionCeiling computes the maximum number of live agent sessions
+// the box can safely hold: floor(MemTotal * ceilingFraction / perSessionGB).
+// Returns 0 (disabled) when either knob is non-positive or total memory is
+// unreadable — failing open so an unreadable /proc/meminfo never blocks all
+// spawns. See gu-tawx0.
+func ramDerivedSessionCeiling(ceilingFraction, perSessionGB float64) int {
+	if ceilingFraction <= 0 || perSessionGB <= 0 {
+		return 0
+	}
+	total := totalMemoryGB()
+	if total <= 0 {
+		return 0
+	}
+	ceiling := int((total * ceilingFraction) / perSessionGB)
+	// Always permit at least one session so a tiny box or an aggressive config
+	// cannot wedge the town into admitting nothing.
+	if ceiling < 1 {
+		ceiling = 1
+	}
+	return ceiling
+}
+
+// effectiveSessionCeiling returns the binding session-count cap: the smaller of
+// the static cap and the RAM-derived ceiling, ignoring whichever is disabled
+// (<= 0). Returns 0 when both are disabled.
+func effectiveSessionCeiling(maxSessions, ramCeiling int) int {
+	switch {
+	case maxSessions > 0 && ramCeiling > 0:
+		if maxSessions < ramCeiling {
+			return maxSessions
+		}
+		return ramCeiling
+	case maxSessions > 0:
+		return maxSessions
+	case ramCeiling > 0:
+		return ramCeiling
+	default:
+		return 0
+	}
+}
+
+// sessionCeilingReason builds the deferral message, naming which cap bound the
+// admission so operators can see whether to raise the static cap or the
+// RAM-derived ceiling.
+func sessionCeilingReason(active, ceiling, maxSessions, ramCeiling int, ceilingFraction float64) string {
+	if ramCeiling > 0 && ceiling == ramCeiling && (maxSessions <= 0 || ramCeiling <= maxSessions) {
+		return fmt.Sprintf("session ceiling: %d active sessions, RAM-derived max %d (%.0f%% of %.1fGB total); raise pressure_session_ceiling_fraction or add RAM",
+			active, ceiling, ceilingFraction*100, totalMemoryGB())
+	}
+	return fmt.Sprintf("session cap: %d active sessions, max %d", active, ceiling)
+}
+
 // countAgentSessions counts active tmux sessions that belong to Gas Town agents.
 // Uses the town's tmux socket so it only counts sessions for this town.
 func (d *Daemon) countAgentSessions() int {
+	if d.countAgentSessionsFn != nil {
+		return d.countAgentSessionsFn()
+	}
 	t := tmux.NewTmux()
 	sessions, err := t.ListSessions()
 	if err != nil {

@@ -572,6 +572,45 @@ func TestPressureThresholds_JSON(t *testing.T) {
 	}
 }
 
+// The RAM-derived session ceiling knobs default ON and honor overrides and an
+// explicit zero (disable). See gu-tawx0.
+func TestPressureSessionCeiling_Accessors(t *testing.T) {
+	t.Parallel()
+
+	var nilDT *DaemonThresholds
+	if got := nilDT.PressureSessionCeilingFractionV(); got != DefaultPressureSessionCeilingFraction {
+		t.Errorf("nil ceiling fraction: got %v, want %v", got, DefaultPressureSessionCeilingFraction)
+	}
+	if got := nilDT.PressureSessionMemGBV(); got != DefaultPressureSessionMemGB {
+		t.Errorf("nil per-session GB: got %v, want %v", got, DefaultPressureSessionMemGB)
+	}
+
+	frac := 0.5
+	perSession := 1.5
+	dt := &DaemonThresholds{
+		PressureSessionCeilingFraction: &frac,
+		PressureSessionMemGB:           &perSession,
+	}
+	if got := dt.PressureSessionCeilingFractionV(); got != 0.5 {
+		t.Errorf("override ceiling fraction: got %v, want 0.5", got)
+	}
+	if got := dt.PressureSessionMemGBV(); got != 1.5 {
+		t.Errorf("override per-session GB: got %v, want 1.5", got)
+	}
+
+	zero := 0.0
+	disabled := &DaemonThresholds{
+		PressureSessionCeilingFraction: &zero,
+		PressureSessionMemGB:           &zero,
+	}
+	if disabled.PressureSessionCeilingFractionV() != 0 {
+		t.Error("explicit zero ceiling fraction should disable the ceiling")
+	}
+	if disabled.PressureSessionMemGBV() != 0 {
+		t.Error("explicit zero per-session GB should disable the ceiling")
+	}
+}
+
 // gu-xrkoq: boot-storm backpressure knobs default ON.
 func TestSpawnBackpressure_Defaults(t *testing.T) {
 	t.Parallel()
