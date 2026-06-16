@@ -94,6 +94,7 @@ var (
 	convoyCheckDryRun       bool
 	convoyReapOrphansDryRun bool
 	convoyReapStagedDryRun  bool
+	convoyDrainDryRun       bool
 	convoyLandForce         bool
 	convoyLandKeep          bool
 	convoyLandDryRun        bool
@@ -390,6 +391,38 @@ Examples:
 	RunE:         runConvoyStranded,
 }
 
+var convoyDrainUnverifiedCmd = &cobra.Command{
+	Use:   "drain-unverified",
+	Short: "Re-verify and drain the convoy:ship-unverified backlog",
+	Long: `Re-verify and drain open convoys parked under the convoy:ship-unverified label.
+
+The label (gu-4cxuv) is a terminal-but-reversible parking state: the completion
+scan and stranded scan both SKIP labeled convoys so an all-tracked-closed-but-
+unshippable convoy stops burning the dispatch budget every tick. Without an
+active drain that backlog is write-only — it grows unbounded and hides genuine
+false-closes (closed beads whose work never reached origin/main) among the
+legitimately-landed ones.
+
+This command does the verification a human previously did by hand: for each
+labeled convoy it clears the label and re-runs the same ship-verification the
+completion scan uses (gu-j7u5):
+  - verified landed       → label cleared + convoy auto-closed + subscribers notified
+  - a tracked bead reopened → label cleared, convoy re-enters the normal scan
+  - still in-flight       → label re-applied, left parked (no churn)
+  - genuine false-close   → escalated to mayor with the bead evidence, left parked
+
+Bounded per invocation (same cap / time-box as the completion sweep, gu-c76op)
+so a large backlog drains over several ticks without blowing the dispatch budget.
+Run by the daemon on a patrol cadence and available manually.
+
+Examples:
+  gt convoy drain-unverified            # Re-verify + drain the backlog
+  gt convoy drain-unverified --dry-run  # Preview without clearing/closing/escalating`,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE:         runConvoyDrainUnverified,
+}
+
 var convoyCloseCmd = &cobra.Command{
 	Use:   "close <convoy-id>",
 	Short: "Close a convoy",
@@ -487,6 +520,8 @@ func init() {
 	convoyCmd.AddCommand(convoyReapOrphansCmd)
 	convoyReapStagedCmd.Flags().BoolVar(&convoyReapStagedDryRun, "dry-run", false, "Preview what would launch without acting")
 	convoyCmd.AddCommand(convoyReapStagedCmd)
+	convoyDrainUnverifiedCmd.Flags().BoolVar(&convoyDrainDryRun, "dry-run", false, "Preview what would drain without clearing/closing/escalating")
+	convoyCmd.AddCommand(convoyDrainUnverifiedCmd)
 	convoyCmd.AddCommand(convoyStrandedCmd)
 	convoyCmd.AddCommand(convoyCloseCmd)
 	convoyCmd.AddCommand(convoyLandCmd)
@@ -1225,6 +1260,43 @@ func runConvoyReapStaged(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runConvoyDrainUnverified(cmd *cobra.Command, args []string) error {
+	townBeads, err := getTownBeadsDir()
+	if err != nil {
+		return err
+	}
+	res, err := drainShipUnverifiedConvoys(townBeads, convoyDrainDryRun)
+	if err != nil {
+		return err
+	}
+
+	if len(res.Closed) == 0 && len(res.Reopened) == 0 && len(res.Escalated) == 0 && res.StillInFlight == 0 {
+		fmt.Println("No ship-unverified convoys to drain.")
+		return nil
+	}
+
+	verb := "Drained"
+	if convoyDrainDryRun {
+		verb = "Would drain"
+	}
+	fmt.Printf("%s %s ship-unverified backlog: %d closed, %d reopened, %d escalated, %d still in-flight\n",
+		style.Bold.Render("✓"), verb, len(res.Closed), len(res.Reopened), len(res.Escalated), res.StillInFlight)
+	for _, c := range res.Closed {
+		fmt.Printf("  🚚 closed %s: %s\n", c.ID, c.Title)
+	}
+	for _, id := range res.Reopened {
+		fmt.Printf("  ↩ reopened %s (tracked bead reopened — re-entered scan)\n", id)
+	}
+	for _, id := range res.Escalated {
+		fmt.Printf("  %s escalated %s (candidate false-close)\n", style.Warning.Render("⚠"), id)
+	}
+	if res.Deferred > 0 {
+		fmt.Printf("%s Deferred %d convoy(s) to next tick (cap=%d) — bounded to protect the dispatch budget (gu-c76op)\n",
+			style.Dim.Render("○"), res.Deferred, completionSweepMaxConvoys)
+	}
+	return nil
+}
+
 // reapedWorkflow records one orphaned workflow chain torn down by the reaper.
 type reapedWorkflow struct {
 	WorkflowID  string
@@ -1747,10 +1819,18 @@ func evaluateTrackedBeadShipped(townBeads string, t trackedIssueInfo) string {
 		return ""
 	}
 	if !cited {
-		return "no commit on origin/main cites this bead ID — possible Pattern B/C false-close"
+		return falseCloseUnshippedReason
 	}
 	return ""
 }
+
+// falseCloseUnshippedReason is the verdict findUnshippedTrackedBeads emits for a
+// closed bead that has NO citing commit on origin/main and no in-flight label /
+// no-merge marker to explain the absence — the signature of a Pattern B/C
+// false-close (gu-j7u5). The drain patrol (drainShipUnverifiedConvoys) matches
+// on this exact string to tell a genuine false-close (escalate to mayor) apart
+// from an in-flight bead (awaiting_refinery_merge / stranded-merge — leave it).
+const falseCloseUnshippedReason = "no commit on origin/main cites this bead ID — possible Pattern B/C false-close"
 
 // shippingNotExpected reports whether a bead's close_reason indicates the bead
 // was closed without ever doing the work — so a missing citing commit on
@@ -3051,6 +3131,203 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 // timeNowForCompletionSweep is a seam so tests can drive the sweep time-box
 // clock deterministically without sleeping.
 var timeNowForCompletionSweep = time.Now
+
+// drainResult summarizes one drain-unverified pass over the
+// convoy:ship-unverified backlog.
+type drainResult struct {
+	Closed        []struct{ ID, Title string } // verified-landed → label cleared + auto-closed
+	Reopened      []string                     // a tracked bead reopened → label cleared, re-entered scan
+	Escalated     []string                     // genuine false-close → escalated to mayor
+	StillInFlight int                          // awaiting_refinery_merge / stranded-merge → left labeled
+	Deferred      int                          // not reached this tick (cap / time-box)
+}
+
+// escalateConvoyFalseCloseFn shells out to `gt escalate` for a genuine
+// false-close. It is a package var so tests can stub it without spawning a
+// subprocess. Deduped by a stable per-convoy signature so the same false-close
+// is not re-escalated on every patrol tick.
+var escalateConvoyFalseCloseFn = func(townBeads, convoyID, title string, beadIDs []string) {
+	msg := fmt.Sprintf("Convoy %s (%s): tracked bead(s) %s are closed but no commit on origin/main ships them — candidate false-close (gu-yosez). Verify with: gt convoy status %s",
+		convoyID, title, strings.Join(beadIDs, ", "), convoyID)
+	cmd := exec.Command("gt", "escalate", "-s", "high",
+		"--source", "patrol:convoy-drain",
+		"--related", convoyID,
+		"--dedup", "--signature", "convoy-false-close:"+convoyID,
+		msg)
+	cmd.Dir = townBeads
+	if out, err := cmd.CombinedOutput(); err != nil {
+		style.PrintWarning("could not escalate false-close for convoy %s: %v (%s)", convoyID, err, strings.TrimSpace(string(out)))
+	}
+}
+
+// drainShipUnverifiedConvoys re-verifies and drains the convoy:ship-unverified
+// backlog (gu-yosez). The label is a terminal-but-reversible parking state
+// (gu-4cxuv): the completion scan and stranded scan both SKIP labeled convoys so
+// they stop burning the dispatch budget. Without an active drain that backlog is
+// write-only — it grows unbounded and hides genuine false-closes (closed beads
+// whose work never reached origin/main) among legitimately-landed convoys. This
+// patrol does the verification a human previously did by hand:
+//
+//  1. List open convoys CARRYING the label (the inverse of the scan's skip).
+//  2. For each, clear the label and re-run the same gu-j7u5 ship-verification
+//     (findUnshippedTrackedBeads) the completion scan uses:
+//     - verified landed (all tracked closed + shipped) → closeConvoyIfComplete
+//     clears it for good, auto-closes, and notifies subscribers.
+//     - a tracked bead has since reopened → the cleared label lets the convoy
+//     re-enter the normal scan with real work again (Reopened).
+//     - still in-flight (awaiting_refinery_merge / stranded-merge) →
+//     closeConvoyIfComplete re-applies the label; no escalation, no churn.
+//     - genuine false-close (closed, no citing commit, no in-flight label) →
+//     escalate to mayor with the bead evidence; closeConvoyIfComplete
+//     re-applies the label so it stays parked until the false-close is fixed.
+//  3. Bound the work per tick with the SAME cap / time-box the completion sweep
+//     uses (completionSweepMaxConvoys / completionSweepTimeBox, gu-c76op) so the
+//     backlog drains over several ticks without blowing the dispatch budget.
+func drainShipUnverifiedConvoys(townBeads string, dryRun bool) (drainResult, error) {
+	var res drainResult
+
+	convoys, err := listConvoyIssues(townBeads, "open", false, convoyShipUnverifiedLabel)
+	if err != nil {
+		return res, fmt.Errorf("listing ship-unverified convoys: %w", err)
+	}
+	if len(convoys) == 0 {
+		return res, nil
+	}
+
+	// Bound the work per tick (gu-c76op machinery). Cap BEFORE the batched tracks
+	// query so the heavy bd work also stays bounded; unreached convoys are picked
+	// up next tick (no silent cap — surfaced via res.Deferred).
+	if len(convoys) > completionSweepMaxConvoys {
+		res.Deferred = len(convoys) - completionSweepMaxConvoys
+		convoys = convoys[:completionSweepMaxConvoys]
+	}
+
+	// Batch the tracked-deps + issue-details fan-out into town-wide queries,
+	// mirroring checkAndCloseCompletedConvoys (gc-pai9b / gu-mxra) so a large
+	// backlog drain doesn't serialize one bd subprocess per convoy.
+	convoyIDs := make([]string, 0, len(convoys))
+	for _, c := range convoys {
+		convoyIDs = append(convoyIDs, c.ID)
+	}
+	trackedIDsByConvoy, batchErr := getAllTrackedIssuesByConvoy(townBeads, convoyIDs)
+	if batchErr != nil {
+		style.PrintWarning("batched tracked-deps query failed; falling back to per-convoy lookups: %v", batchErr)
+		trackedIDsByConvoy = nil
+	}
+	allTrackedIDs := make([]string, 0)
+	seenAll := make(map[string]bool)
+	if trackedIDsByConvoy != nil {
+		for _, ids := range trackedIDsByConvoy {
+			for _, id := range ids {
+				if !seenAll[id] {
+					seenAll[id] = true
+					allTrackedIDs = append(allTrackedIDs, id)
+				}
+			}
+		}
+	}
+	var (
+		freshDetails map[string]*issueDetails
+		workersMap   map[string]*workerInfo
+	)
+	if len(allTrackedIDs) > 0 {
+		freshDetails = getIssueDetailsBatch(allTrackedIDs)
+		workersMap = getWorkersForIssues(openIssueIDsFromDetails(allTrackedIDs, freshDetails))
+	}
+
+	sweepDeadline := timeNowForCompletionSweep().Add(completionSweepTimeBox)
+	for i, convoy := range convoys {
+		if timeNowForCompletionSweep().After(sweepDeadline) {
+			res.Deferred += len(convoys) - i
+			break
+		}
+
+		var tracked []trackedIssueInfo
+		if ids, ok := trackedIDsByConvoy[convoy.ID]; trackedIDsByConvoy != nil && ok && len(ids) > 0 {
+			tracked = buildTrackedIssueInfosFromCache(ids, freshDetails, workersMap)
+		} else {
+			t, err := getTrackedIssues(townBeads, convoy.ID)
+			if err != nil {
+				style.PrintWarning("skipping convoy %s: %v", convoy.ID, err)
+				continue
+			}
+			tracked = t
+		}
+
+		// Classify BEFORE close: closeConvoyIfComplete may re-apply the label,
+		// and we want the verdict computed against the convoy's current state.
+		// allTrackedClosed mirrors closeConvoyIfComplete's gate — only when every
+		// tracked bead is closed/tombstone does ship-verification (and thus close
+		// or false-close escalation) even apply; otherwise a tracked bead has
+		// reopened and the convoy simply re-enters the normal scan.
+		allTrackedClosed := len(tracked) > 0
+		for _, t := range tracked {
+			if t.Status != "closed" && t.Status != "tombstone" {
+				allTrackedClosed = false
+				break
+			}
+		}
+		var unshipped []unshippedTrackedBead
+		var falseCloseBeads []string
+		if allTrackedClosed {
+			unshipped = findUnshippedTrackedBeads(townBeads, tracked)
+			for _, u := range unshipped {
+				if u.reason == falseCloseUnshippedReason {
+					falseCloseBeads = append(falseCloseBeads, u.id)
+				}
+			}
+		}
+
+		if dryRun {
+			switch {
+			case !allTrackedClosed:
+				fmt.Printf("%s Would clear %s on convoy %s: a tracked bead reopened — re-enters the normal scan\n",
+					style.Dim.Render("○"), convoyShipUnverifiedLabel, convoy.ID)
+				res.Reopened = append(res.Reopened, convoy.ID)
+			case len(falseCloseBeads) > 0:
+				fmt.Printf("%s Would escalate convoy %s: %d candidate false-close bead(s): %s\n",
+					style.Warning.Render("⚠"), convoy.ID, len(falseCloseBeads), strings.Join(falseCloseBeads, ", "))
+				res.Escalated = append(res.Escalated, convoy.ID)
+			case len(unshipped) > 0:
+				res.StillInFlight++
+			default:
+				fmt.Printf("%s Would clear %s + auto-close convoy 🚚 %s: %s\n",
+					style.Warning.Render("⚠"), convoyShipUnverifiedLabel, convoy.ID, convoy.Title)
+				res.Closed = append(res.Closed, struct{ ID, Title string }{convoy.ID, convoy.Title})
+			}
+			continue
+		}
+
+		// Clear the label so the convoy is re-evaluated from scratch. If it is
+		// still ship-unverifiable, closeConvoyIfComplete re-applies it below.
+		removeShipUnverifiedLabel(townBeads, convoy.ID)
+
+		ready, err := closeConvoyIfComplete(townBeads, convoy.ID, convoy.Title, tracked, false)
+		if err != nil {
+			style.PrintWarning("couldn't drain convoy %s: %v", convoy.ID, err)
+			continue
+		}
+		switch {
+		case ready:
+			res.Closed = append(res.Closed, struct{ ID, Title string }{convoy.ID, convoy.Title})
+		case len(falseCloseBeads) > 0:
+			// Genuine false-close: closeConvoyIfComplete re-applied the label;
+			// surface the evidence to mayor instead of leaving it to rot.
+			escalateConvoyFalseCloseFn(townBeads, convoy.ID, convoy.Title, falseCloseBeads)
+			res.Escalated = append(res.Escalated, convoy.ID)
+		case len(unshipped) > 0:
+			// In-flight (awaiting_refinery_merge / stranded-merge) — still parked,
+			// no escalation, no churn.
+			res.StillInFlight++
+		default:
+			// allClosed was false (a tracked bead reopened) → label cleared, convoy
+			// re-enters the normal scan with real work again.
+			res.Reopened = append(res.Reopened, convoy.ID)
+		}
+	}
+
+	return res, nil
+}
 
 // notifyConvoyCompletion sends notifications to owner, any notify addresses, and mayor/.
 func notifyConvoyCompletion(townBeads, convoyID, title string) {
