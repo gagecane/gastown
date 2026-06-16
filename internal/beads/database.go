@@ -198,31 +198,52 @@ func stripBDCommandFlags(args []string) []string {
 	return args
 }
 
+// bdSideEffectSuppressionEnv is the canonical set of env vars that disable
+// Beads JSONL export/backup/push side effects. The authoritative data plane is
+// Dolt; exporting JSONL from high-frequency gt callers re-invalidates Beads'
+// import freshness checks and can create a self-feeding Dolt load loop, and
+// bd's per-repo backup remote force-adds .beads/backup/ table files that, when
+// GC'd out of sync with their manifest, flood the Dolt server with
+// "table file not found" errors and crash the data plane (gu-gajrj). Keeping
+// the keys/values in one place lets both subprocess env builders
+// (SuppressBDSideEffects) and the daemon's own process env
+// (ApplyBDSideEffectSuppression) share the same list.
+var bdSideEffectSuppressionEnv = [][2]string{
+	{"BEADS_NO_AUTO_IMPORT", "1"},
+	{"BD_EXPORT_AUTO", "false"},
+	{"BD_BACKUP_ENABLED", "false"},
+	{"BD_DOLT_AUTO_PUSH", "false"},
+	{"BD_NO_PUSH", "true"},
+	{"BD_EXPORT_GIT_ADD", "false"},
+	{"BD_NO_GIT_OPS", "true"},
+}
+
 // SuppressBDSideEffects disables Beads JSONL export/backup/push side effects for
-// Gas Town-managed subprocesses. The authoritative data plane is Dolt; exporting
-// JSONL from high-frequency gt callers re-invalidates Beads' import freshness
-// checks and can create a self-feeding Dolt load loop.
+// Gas Town-managed subprocesses. See bdSideEffectSuppressionEnv for rationale.
 func SuppressBDSideEffects(env []string) []string {
-	for _, key := range []string{
-		"BEADS_NO_AUTO_IMPORT",
-		"BD_EXPORT_AUTO",
-		"BD_BACKUP_ENABLED",
-		"BD_DOLT_AUTO_PUSH",
-		"BD_NO_PUSH",
-		"BD_EXPORT_GIT_ADD",
-		"BD_NO_GIT_OPS",
-	} {
-		env = stripEnvKey(env, key)
+	for _, kv := range bdSideEffectSuppressionEnv {
+		env = stripEnvKey(env, kv[0])
 	}
-	return append(env,
-		"BEADS_NO_AUTO_IMPORT=1",
-		"BD_EXPORT_AUTO=false",
-		"BD_BACKUP_ENABLED=false",
-		"BD_DOLT_AUTO_PUSH=false",
-		"BD_NO_PUSH=true",
-		"BD_EXPORT_GIT_ADD=false",
-		"BD_NO_GIT_OPS=true",
-	)
+	for _, kv := range bdSideEffectSuppressionEnv {
+		env = append(env, kv[0]+"="+kv[1])
+	}
+	return env
+}
+
+// ApplyBDSideEffectSuppression sets the side-effect suppression env vars on the
+// current process via os.Setenv. The daemon spawns bd MUTATION subprocesses
+// (e.g. zombie-wisp reset `bd update`) that inherit os.Environ() directly rather
+// than going through SuppressBDSideEffects. Without these vars in the daemon's
+// own environment, a daemon started from a shell that lacks them (e.g. a manual
+// `gt daemon start`) lets those mutations re-enable bd's per-repo backup remote
+// against rig repos that have a git remote, recreating the .beads/backup/
+// manifest-vs-table-file desync that crashed the Dolt data plane (gu-gajrj).
+// Setting them in code makes the guarantee independent of the launch
+// environment.
+func ApplyBDSideEffectSuppression() {
+	for _, kv := range bdSideEffectSuppressionEnv {
+		_ = os.Setenv(kv[0], kv[1])
+	}
 }
 
 func forceBDReadOnly(env []string) []string {

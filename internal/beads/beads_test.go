@@ -455,6 +455,39 @@ func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
 	}
 }
 
+func TestApplyBDSideEffectSuppressionSetsProcessEnv(t *testing.T) {
+	// Seed the process env with "enabled" values that would let the daemon's
+	// raw-os.Environ() bd mutation subprocesses re-enable per-repo backup
+	// (gu-gajrj). t.Setenv restores them after the test.
+	for key, enabled := range map[string]string{
+		"BEADS_NO_AUTO_IMPORT": "0",
+		"BD_EXPORT_AUTO":       "true",
+		"BD_BACKUP_ENABLED":    "true",
+		"BD_DOLT_AUTO_PUSH":    "true",
+		"BD_NO_PUSH":           "false",
+		"BD_EXPORT_GIT_ADD":    "true",
+		"BD_NO_GIT_OPS":        "false",
+	} {
+		t.Setenv(key, enabled)
+	}
+
+	ApplyBDSideEffectSuppression()
+
+	for key, want := range map[string]string{
+		"BEADS_NO_AUTO_IMPORT": "1",
+		"BD_EXPORT_AUTO":       "false",
+		"BD_BACKUP_ENABLED":    "false",
+		"BD_DOLT_AUTO_PUSH":    "false",
+		"BD_NO_PUSH":           "true",
+		"BD_EXPORT_GIT_ADD":    "false",
+		"BD_NO_GIT_OPS":        "true",
+	} {
+		if got := os.Getenv(key); got != want {
+			t.Fatalf("after ApplyBDSideEffectSuppression, %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestBuildReadOnlyBDEnvForcesReadOnly(t *testing.T) {
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {

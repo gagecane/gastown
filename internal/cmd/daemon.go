@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/session"
@@ -413,6 +414,18 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		os.Unsetenv(k)
 	}
 	os.Setenv("BD_ACTOR", "daemon")
+
+	// Suppress bd's per-repo JSONL export/backup/push side effects in the
+	// daemon's own process env. The daemon spawns bd MUTATION subprocesses
+	// (e.g. zombie-wisp reset `bd update`) that inherit os.Environ() directly,
+	// bypassing the SuppressBDSideEffects env builder. If the daemon is started
+	// from a shell lacking BD_BACKUP_ENABLED=false, those mutations re-enable
+	// bd's per-repo backup remote against rig repos with a git remote, which
+	// recreates the .beads/backup/ manifest-vs-table-file desync that floods the
+	// Dolt server with "table file not found" errors and crashes the data plane
+	// (gu-gajrj). Setting them here makes the guarantee independent of the
+	// launch environment.
+	beads.ApplyBDSideEffectSuppression()
 
 	config := daemon.DefaultConfig(townRoot)
 	d, err := daemon.New(config)
