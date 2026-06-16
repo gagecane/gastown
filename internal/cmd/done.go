@@ -1551,8 +1551,13 @@ func submitToMergeQueue(p mrSubmitParams) (mrID string, mrFailed bool) {
 			// Non-fatal: record the error and skip to notifyWitness.
 			// Push succeeded so branch is on remote, but MR bead failed.
 			// Set mrFailed so the witness knows not to send MERGE_READY.
-			errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
-			style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
+			// TAL-46: file a stranded-push wisp so the daemon's push_stranded_dog
+			// can re-submit the MR for the already-pushed branch even after this
+			// session/worktree is reaped — without it, push-success/MR-fail leaves
+			// no durable marker the recovery dog can action.
+			strandErr := fmt.Errorf("MR bead creation failed: %w", err)
+			style.PrintWarning("%v\nBranch is pushed but MR bead not created. Filing a stranded-push wisp for recovery.", strandErr)
+			fileStrandedPushWisp(beads.New(p.cwd), p.rigName, p.branch, p.commitSHA, p.target, p.issueID, p.agentBeadID, p.worker, strandErr)
 			return mrID, true
 		}
 		mrID = mrIssue.ID
@@ -1560,8 +1565,10 @@ func submitToMergeQueue(p mrSubmitParams) (mrID string, mrFailed bool) {
 		// Guard against empty ID from bd create (observed in ephemeral/wisp mode).
 		// Fail fast with a clear message rather than passing "" to bd.Show.
 		if mrID == "" {
-			errMsg := "MR bead creation returned empty ID"
-			style.PrintWarning("%s\nBranch is pushed but MR bead has no ID. Witness will be notified.", errMsg)
+			// TAL-46: file a stranded-push wisp (branch is already on origin).
+			strandErr := fmt.Errorf("MR bead creation returned empty ID")
+			style.PrintWarning("%v\nBranch is pushed but MR bead has no ID. Filing a stranded-push wisp for recovery.", strandErr)
+			fileStrandedPushWisp(beads.New(p.cwd), p.rigName, p.branch, p.commitSHA, p.target, p.issueID, p.agentBeadID, p.worker, strandErr)
 			return mrID, true
 		}
 
@@ -1570,8 +1577,11 @@ func submitToMergeQueue(p mrSubmitParams) (mrID string, mrFailed bool) {
 		// didn't persist (Dolt failure, corrupt state), we'd nuke the worktree
 		// with no MR in the queue — losing the polecat's work permanently.
 		if verifiedMR, verifyErr := p.bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
-			errMsg := fmt.Sprintf("MR bead created but verification read-back failed (id=%s): %v", mrID, verifyErr)
-			style.PrintWarning("%s\nBranch is pushed but MR bead not confirmed. Preserving worktree.", errMsg)
+			// TAL-46: file a stranded-push wisp (branch is already on origin) so
+			// the push_stranded_dog can recover the MR after the worktree is reaped.
+			strandErr := fmt.Errorf("MR bead created but verification read-back failed (id=%s): %w", mrID, verifyErr)
+			style.PrintWarning("%v\nBranch is pushed but MR bead not confirmed. Filing a stranded-push wisp for recovery; preserving worktree.", strandErr)
+			fileStrandedPushWisp(beads.New(p.cwd), p.rigName, p.branch, p.commitSHA, p.target, p.issueID, p.agentBeadID, p.worker, strandErr)
 			return mrID, true
 		}
 

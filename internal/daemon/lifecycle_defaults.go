@@ -103,6 +103,11 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "4h",
 			},
+			PushStranded: &PushStrandedConfig{
+				Enabled:     true,
+				IntervalStr: "10m",
+				MaxAttempts: defaultPushStrandedMaxAttempts,
+			},
 		},
 	}
 }
@@ -198,6 +203,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.EscalateStale == nil {
 		p.EscalateStale = d.EscalateStale
+		changed = true
+	}
+	if p.PushStranded == nil {
+		p.PushStranded = d.PushStranded
 		changed = true
 	}
 

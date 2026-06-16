@@ -151,6 +151,7 @@ type PatrolsConfig struct {
 	AgentHeartbeat       *AgentHeartbeatConfig       `json:"agent_heartbeat,omitempty"`
 	MergeQueueAge        *MergeQueueAgeConfig        `json:"merge_queue_age,omitempty"`
 	EscalateStale        *EscalateStaleConfig        `json:"escalate_stale,omitempty"`
+	PushStranded         *PushStrandedConfig         `json:"push_stranded,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
@@ -460,6 +461,21 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.EscalateStale.Enabled
+	}
+
+	if patrol == "push_stranded" {
+		// Default-enabled (TAL-46): the only daemon-side consumer of
+		// gt:push-stranded wisps. Without it a polecat that pushed its branch
+		// but died before submitting the MR strands forever (the witness's
+		// worktree-anchored recovery cannot act once the slot is reaped). Must
+		// run out of the box, including on towns whose daemon.json predates this
+		// addition. The dog submits an MR ONLY for a branch that is on origin,
+		// has no open MR, and whose owning polecat session is provably dead —
+		// idempotent on branch+SHA — so it is safe to default on.
+		if config == nil || config.Patrols == nil || config.Patrols.PushStranded == nil {
+			return true
+		}
+		return config.Patrols.PushStranded.Enabled
 	}
 
 	if config == nil || config.Patrols == nil {

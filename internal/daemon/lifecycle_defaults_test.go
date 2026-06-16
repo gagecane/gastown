@@ -175,6 +175,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			AgentHeartbeat:       &AgentHeartbeatConfig{Enabled: false},
 			MergeQueueAge:        &MergeQueueAgeConfig{Enabled: false},
 			EscalateStale:        &EscalateStaleConfig{Enabled: false},
+			PushStranded:         &PushStrandedConfig{Enabled: false},
 		},
 	}
 

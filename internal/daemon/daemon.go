@@ -104,6 +104,14 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	syncFailures map[string]int
 
+	// pushStrandedAttempts tracks per-wisp MR-submit attempts for the
+	// push_stranded_dog so a never-submittable branch escalates instead of
+	// retrying forever (TAL-46). Keyed rig/wispID. In-memory: a daemon restart
+	// re-arms the budget, which is intended — a fresh process should re-attempt
+	// recovery before giving up again.
+	pushStrandedMu       sync.Mutex
+	pushStrandedAttempts map[string]int
+
 	// PATCH-006: Resolved binary paths to avoid PATH issues in subprocesses.
 	gtPath string
 	bdPath string
@@ -1099,6 +1107,19 @@ func (d *Daemon) Run() (err error) {
 			// severity forever if the Mayor was offline/crashed/missed mail.
 			if !d.isShutdownInProgress() {
 				d.runEscalateStaleDog()
+			}
+
+		case <-patrols.pushStranded:
+			// Push-stranded dog — the daemon-side consumer of gt:push-stranded
+			// wisps (TAL-46). A polecat that pushed its branch to origin but
+			// died before submitting the MR strands forever otherwise: the
+			// witness's recovery is worktree-anchored and cannot act once the
+			// slot is reaped. This dog submits the MR directly from the pushed
+			// tip — but ONLY for a branch on origin, with no open MR, whose
+			// owning polecat session is provably dead (no yanking a live
+			// polecat). Idempotent on branch+SHA; escalates after maxAttempts.
+			if !d.isShutdownInProgress() {
+				d.runPushStrandedDog()
 			}
 
 		case <-timer.C:
