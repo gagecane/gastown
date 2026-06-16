@@ -1194,6 +1194,71 @@ func TestGetBeadStatus_EmptyBeadID(t *testing.T) {
 	}
 }
 
+func TestGetBeadStatuses_EmptyIDs(t *testing.T) {
+	t.Parallel()
+	// No IDs → nil map, no bd call.
+	bd, mock := mockBd(
+		func(args []string) (string, error) { return "", fmt.Errorf("should not be called") },
+		func(args []string) error { return nil },
+	)
+	if got := getBeadStatuses(bd, "/tmp", nil); got != nil {
+		t.Errorf("getBeadStatuses(nil) = %v, want nil", got)
+	}
+	if len(mock.calls) != 0 {
+		t.Errorf("expected no bd calls for empty IDs, got %v", mock.calls)
+	}
+}
+
+func TestGetBeadStatuses_BatchesSingleShow(t *testing.T) {
+	t.Parallel()
+	// Three IDs resolve in a single `bd show` and map by id.
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 || args[0] != "show" {
+				return "", fmt.Errorf("unexpected args: %v", args)
+			}
+			return `[
+  {"id":"gt-mol-a","status":"open"},
+  {"id":"gt-mol-b","status":"closed"}
+]`, nil
+		},
+		func(args []string) error { return nil },
+	)
+	got := getBeadStatuses(bd, "/tmp", []string{"gt-mol-a", "gt-mol-b", "gt-mol-gone"})
+	if got["gt-mol-a"] != "open" {
+		t.Errorf("gt-mol-a = %q, want open", got["gt-mol-a"])
+	}
+	if got["gt-mol-b"] != "closed" {
+		t.Errorf("gt-mol-b = %q, want closed", got["gt-mol-b"])
+	}
+	// A reaped/missing bead is simply absent — caller treats absent as unknown.
+	if _, ok := got["gt-mol-gone"]; ok {
+		t.Errorf("gt-mol-gone should be absent, got %q", got["gt-mol-gone"])
+	}
+	// Exactly one bd call for all IDs (no N+1).
+	showCalls := 0
+	for _, c := range mock.calls {
+		if strings.HasPrefix(c, "show ") {
+			showCalls++
+		}
+	}
+	if showCalls != 1 {
+		t.Errorf("expected 1 show call, got %d (%v)", showCalls, mock.calls)
+	}
+}
+
+func TestGetBeadStatuses_LookupFailureReturnsNil(t *testing.T) {
+	t.Parallel()
+	// On a total lookup failure, return nil so callers skip destructive action.
+	bd, _ := mockBd(
+		func(args []string) (string, error) { return "", fmt.Errorf("bd: not found") },
+		func(args []string) error { return nil },
+	)
+	if got := getBeadStatuses(bd, "/tmp", []string{"gt-mol-a"}); got != nil {
+		t.Errorf("getBeadStatuses on error = %v, want nil", got)
+	}
+}
+
 func TestDetectZombie_BeadClosedStillRunning(t *testing.T) {
 	t.Parallel()
 	// Verify the logic: live session + agent alive + hooked bead closed → zombie
@@ -2183,8 +2248,10 @@ func TestDetectOrphanedMolecules_WithMockBd(t *testing.T) {
 			switch args[0] {
 			case "list":
 				if strings.Contains(joined, "--status=hooked") {
+					// bd list --json returns the description inline; the molecule
+					// ID is parsed from it without a per-bead show.
 					return `[
-  {"id":"gt-work-001","assignee":"testrig/polecats/alpha"},
+  {"id":"gt-work-001","assignee":"testrig/polecats/alpha","description":"attached_molecule: gt-mol-orphan\nattached_at: 2026-01-15T10:00:00Z\ndispatched_by: mayor"},
   {"id":"gt-work-002","assignee":"testrig/polecats/bravo"},
   {"id":"gt-work-003","assignee":"testrig/crew/sean"},
   {"id":"gt-work-004","assignee":""}
@@ -2205,9 +2272,11 @@ func TestDetectOrphanedMolecules_WithMockBd(t *testing.T) {
 				if len(args) > 1 {
 					switch args[1] {
 					case "gt-work-001":
-						return `[{"status":"hooked","description":"attached_molecule: gt-mol-orphan\nattached_at: 2026-01-15T10:00:00Z\ndispatched_by: mayor"}]`, nil
+						// Single show: resetAbandonedBead's status check.
+						return `[{"id":"gt-work-001","status":"hooked","description":"attached_molecule: gt-mol-orphan\nattached_at: 2026-01-15T10:00:00Z\ndispatched_by: mayor"}]`, nil
 					case "gt-mol-orphan":
-						return `[{"status":"open"}]`, nil
+						// Batched molecule-status show.
+						return `[{"id":"gt-mol-orphan","status":"open"}]`, nil
 					}
 				}
 				return `[{"status":"open","description":""}]`, nil

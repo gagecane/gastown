@@ -3858,6 +3858,35 @@ func getBeadStatus(bd *BdCli, workDir, beadID string) (string, bool) {
 	return issues[0].Status, true
 }
 
+// getBeadStatuses batch-fetches the statuses of multiple beads in a single
+// `bd show` call, returning a map from bead ID to status. Beads that no longer
+// exist (reaped/deleted) are simply absent from the map. Returns nil on a total
+// lookup failure or unparseable output — callers must treat an absent entry as
+// "unknown" and avoid destructive action on it.
+func getBeadStatuses(bd *BdCli, workDir string, ids []string) map[string]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := append([]string{"show"}, ids...)
+	args = append(args, "--json")
+	output, err := bd.Exec(workDir, args...)
+	if err != nil || output == "" {
+		return nil
+	}
+	var issues []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+		return nil
+	}
+	statuses := make(map[string]string, len(issues))
+	for _, iss := range issues {
+		statuses[iss.ID] = iss.Status
+	}
+	return statuses
+}
+
 // resetAbandonedBead resets a dead polecat's hooked bead so it can be re-dispatched.
 // If the bead is in "hooked" or "in_progress" status, it:
 //  0. Checks if the polecat's work is already on main — if so, closes
@@ -4272,9 +4301,12 @@ func DetectOrphanedMolecules(bd *BdCli, workDir, rigName string, router *mail.Ro
 
 	// Step 1: List beads that could have attached molecules.
 	// Slung beads start as status=hooked; polecats may change them to in_progress.
+	// bd list --json already returns the description inline, so the attached
+	// molecule ID can be parsed in-memory — no per-bead `bd show` needed.
 	type beadSummary struct {
-		ID       string `json:"id"`
-		Assignee string `json:"assignee"`
+		ID          string `json:"id"`
+		Assignee    string `json:"assignee"`
+		Description string `json:"description"`
 	}
 	var allBeads []beadSummary
 	for _, status := range []string{"hooked", "in_progress"} {
@@ -4298,7 +4330,17 @@ func DetectOrphanedMolecules(bd *BdCli, workDir, rigName string, router *mail.Ro
 		return result
 	}
 
-	// Step 2: Check each polecat-assigned bead
+	// Step 2: Check each polecat-assigned bead. Beads whose polecat is confirmed
+	// dead and which carry an attached molecule become candidates; the molecule
+	// status check and close are batched in a second pass below.
+	type orphanCandidate struct {
+		beadID      string
+		assignee    string
+		polecatName string
+		moleculeID  string
+	}
+	var candidates []orphanCandidate
+
 	polecatPrefix := rigName + "/polecats/"
 	t := tmux.NewTmux()
 	polecatsDir := filepath.Join(townRoot, rigName, "polecats")
@@ -4357,28 +4399,58 @@ func DetectOrphanedMolecules(bd *BdCli, workDir, rigName string, router *mail.Ro
 			continue
 		}
 
-		// Polecat is dead and gone — read the full bead to check for attached molecule
-		attachedMol := getAttachedMoleculeID(bd, workDir, b.ID)
+		// Polecat is dead and gone — parse the attached molecule from the bead
+		// description that the bulk `bd list` already returned (no per-bead show).
+		attachedMol := parseAttachedMoleculeID(b.Description)
 		if attachedMol == "" {
 			continue // No molecule attached
 		}
 
-		// Check molecule status — skip if already closed or reaped.
-		// On lookup failure, skip (safe — don't close what we can't verify).
-		molStatus, molFound := getBeadStatus(bd, workDir, attachedMol)
+		// Defer the molecule-status check and close to a batched second pass so
+		// we issue one `bd show` for all candidates instead of one per orphan.
+		candidates = append(candidates, orphanCandidate{
+			beadID:      b.ID,
+			assignee:    b.Assignee,
+			polecatName: polecatName,
+			moleculeID:  attachedMol,
+		})
+	}
+
+	if len(candidates) == 0 {
+		return result
+	}
+
+	// Step 3: Batch-fetch the statuses of all candidate molecules in a single
+	// `bd show`, then close the ones still open. Absent entries (reaped/deleted)
+	// or a total lookup failure are treated as "unverifiable" and skipped — we
+	// don't close what we can't confirm is open.
+	molIDs := make([]string, 0, len(candidates))
+	seenMol := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		if !seenMol[c.moleculeID] {
+			seenMol[c.moleculeID] = true
+			molIDs = append(molIDs, c.moleculeID)
+		}
+	}
+	molStatuses := getBeadStatuses(bd, workDir, molIDs)
+
+	for _, c := range candidates {
+		// Skip if already closed or reaped, or if the status couldn't be
+		// verified (safe — don't close what we can't confirm).
+		molStatus, molFound := molStatuses[c.moleculeID]
 		if !molFound || molStatus == "closed" || molStatus == "" {
 			continue
 		}
 
 		// Close the orphaned molecule and its descendants
 		orphan := OrphanedMoleculeResult{
-			BeadID:      b.ID,
-			MoleculeID:  attachedMol,
-			Assignee:    b.Assignee,
-			PolecatName: polecatName,
+			BeadID:      c.beadID,
+			MoleculeID:  c.moleculeID,
+			Assignee:    c.assignee,
+			PolecatName: c.polecatName,
 		}
 
-		closed, closeErr := closeMoleculeWithDescendants(bd, workDir, attachedMol)
+		closed, closeErr := closeMoleculeWithDescendants(bd, workDir, c.moleculeID)
 		if closeErr != nil {
 			orphan.Error = closeErr
 			result.Errors = append(result.Errors, closeErr)
@@ -4386,7 +4458,7 @@ func DetectOrphanedMolecules(bd *BdCli, workDir, rigName string, router *mail.Ro
 		orphan.Closed = closed
 
 		// Reset the parent bead so it can be re-dispatched
-		orphan.BeadRecovered = resetAbandonedBead(bd, workDir, rigName, b.ID, polecatName, router)
+		orphan.BeadRecovered = resetAbandonedBead(bd, workDir, rigName, c.beadID, c.polecatName, router)
 
 		result.Orphans = append(result.Orphans, orphan)
 	}
@@ -4728,7 +4800,14 @@ func getAttachedMoleculeID(bd *BdCli, workDir, beadID string) string {
 		return ""
 	}
 
-	fields := beads.ParseAttachmentFields(&beads.Issue{Description: issues[0].Description})
+	return parseAttachedMoleculeID(issues[0].Description)
+}
+
+// parseAttachedMoleculeID extracts the attached_molecule ID from a bead
+// description that has already been fetched (e.g. via a bulk `bd list --json`),
+// avoiding a redundant per-bead `bd show`. Returns "" if no molecule is attached.
+func parseAttachedMoleculeID(description string) string {
+	fields := beads.ParseAttachmentFields(&beads.Issue{Description: description})
 	if fields == nil {
 		return ""
 	}
