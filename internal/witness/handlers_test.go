@@ -4781,6 +4781,127 @@ func TestHandleZombieRestart_AaApwBeatsUnfiledMR(t *testing.T) {
 	}
 }
 
+// TestDetectZombieDeadSession_DoneIntentRecoversStrandedMR covers gu-oz1i0:
+// the "pushed-but-no-MR" stranded-branch failure mode. A polecat's `gt done`
+// committed + pushed the branch, then the session died BEFORE submitting the
+// MR, leaving a stale done-intent:COMPLETED marker, an OPEN hook bead, and no
+// pending MR. The done-intent dead-session path used to only RESTART; it must
+// now drive the same unfiled-MR recovery the standard zombie path runs, so the
+// stranded work is submitted automatically instead of waiting for a mayor.
+//
+// Not parallel: overrides package-level verifyUnfiledMR / recoverUnfiledMR.
+func TestDetectZombieDeadSession_DoneIntentRecoversStrandedMR(t *testing.T) {
+	installFakeTmuxNoServer(t) // dead session: tmux reports no server
+
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		return &UnfiledMRState{
+			Branch:        "polecat/fury/gu-oz1i0",
+			HeadSHA:       "abc123",
+			Target:        "main",
+			CommitsAhead:  true,
+			AlreadyPushed: true, // pushed-but-no-MR
+		}, nil
+	}
+	recoverCalled := false
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, s *UnfiledMRState) (string, error) {
+		recoverCalled = true
+		if !s.AlreadyPushed {
+			t.Errorf("recover called with AlreadyPushed=false, want true for pushed-no-mr")
+		}
+		return "filed-mr-pushed-no-mr (aa-pushed-no-mr, mr=gt-mr-xyz)", nil
+	}
+	t.Cleanup(func() {
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	// show <bead> --json → open (hook NOT closed); every other query → empty
+	// (no cleanup wisp, no pending MR), so we fall through to recovery.
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"status":"open"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	doneIntent := &DoneIntent{ExitType: "COMPLETED", Timestamp: time.Now().Add(-1 * time.Minute)}
+	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gu-oz1i0"}
+
+	zombie, found := detectZombieDeadSession(
+		bd, t.TempDir(), t.TempDir(), "testrig", "fury",
+		"gt-testrig-fury", tmux.NewTmux(), doneIntent, time.Now(),
+		&config.WitnessThresholds{}, snap,
+	)
+
+	if !found {
+		t.Fatal("detectZombieDeadSession returned found=false for stranded done-intent polecat")
+	}
+	if !recoverCalled {
+		t.Fatal("recoverUnfiledMR not called — done-intent path did not attempt stranded-MR recovery")
+	}
+	if !strings.Contains(zombie.Action, "filed-mr-pushed-no-mr") {
+		t.Errorf("Action = %q, want filed-mr-pushed-no-mr recovery tag", zombie.Action)
+	}
+	if strings.HasPrefix(zombie.Action, "restarted") {
+		t.Errorf("Action = %q, polecat must not be merely restarted when stranded work is recovered", zombie.Action)
+	}
+}
+
+// TestDetectZombieDeadSession_DoneIntentRestartsWhenNoStrandedWork verifies the
+// fall-through: when verifyUnfiledMR reports no recovery is needed (e.g. no
+// commits ahead of target), the done-intent path keeps its original
+// restart-the-session behavior rather than mis-firing recovery (gu-oz1i0).
+//
+// Not parallel: overrides package-level verifyUnfiledMR / recoverUnfiledMR.
+func TestDetectZombieDeadSession_DoneIntentRestartsWhenNoStrandedWork(t *testing.T) {
+	installFakeTmuxNoServer(t)
+
+	oldVerify := verifyUnfiledMR
+	oldRecover := recoverUnfiledMR
+	verifyUnfiledMR = func(_ *BdCli, _, _, _, _ string) (*UnfiledMRState, error) {
+		return &UnfiledMRState{Branch: "polecat/fury/gu-oz1i0", CommitsAhead: false}, nil
+	}
+	recoverUnfiledMR = func(_ *BdCli, _, _, _ string, _ *UnfiledMRState) (string, error) {
+		t.Fatal("recoverUnfiledMR must NOT be called when there is no stranded work")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		verifyUnfiledMR = oldVerify
+		recoverUnfiledMR = oldRecover
+	})
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"status":"open"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	doneIntent := &DoneIntent{ExitType: "COMPLETED", Timestamp: time.Now().Add(-1 * time.Minute)}
+	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gu-oz1i0"}
+
+	zombie, found := detectZombieDeadSession(
+		bd, t.TempDir(), t.TempDir(), "testrig", "fury",
+		"gt-testrig-fury", tmux.NewTmux(), doneIntent, time.Now(),
+		&config.WitnessThresholds{}, snap,
+	)
+
+	if !found {
+		t.Fatal("detectZombieDeadSession returned found=false for stale done-intent polecat")
+	}
+	if strings.Contains(zombie.Action, "filed-mr") {
+		t.Errorf("Action = %q, must not file an MR when no stranded work exists", zombie.Action)
+	}
+}
+
 // TestHandleZombieRestart_EmptyPolecat verifies gu-ur85: a polecat that produced
 // no commits (HEAD == merge-base) is archived as "empty," not "merged."
 func TestHandleZombieRestart_EmptyPolecat(t *testing.T) {

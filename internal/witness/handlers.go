@@ -2832,6 +2832,44 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			return ZombieResult{}, false
 		}
 
+		// gu-oz1i0: pushed-but-no-MR stranded-branch recovery. This is the exact
+		// failure mode the bead describes: `gt done` committed + pushed the
+		// branch, then the session died BEFORE submitting the MR / merge-queue
+		// entry — leaving a stale `done-intent:COMPLETED` marker, an open hook
+		// bead, and work safe on origin but invisible to the refinery. By this
+		// point we've ruled out every "already completed" signal above (bead
+		// closed, pending MR, terminal-safe, completed-outcome write), so a
+		// worktree carrying commits ahead of target with no open MR is genuinely
+		// stranded. The standard (non-done-intent) zombie path already drives
+		// this recovery forward via handleZombieRestart → verifyUnfiledMR /
+		// recoverUnfiledMR (gu-j98v); the done-intent path used to only RESTART,
+		// so a polecat that died here sat NEEDS_RECOVERY across patrol cycles
+		// until a mayor manually re-slung it. Wire the same recovery in here so
+		// it submits the MR automatically.
+		//
+		// Safety (mayor's gu-oz1i0 divergence note): verifyUnfiledMR inspects the
+		// WORKTREE HEAD (not an assumed-fresh on-origin tip), is squash-aware via
+		// `git cherry` (already-merged or empty work yields no recovery), and
+		// recoverUnfiledMR re-runs the polecat's pre-merge gates and pushes
+		// WITHOUT --force before submitting — never entangling already-merged
+		// sibling commits.
+		if state, vErr := verifyUnfiledMR(bd, workDir, rigName, polecatName, snapHook); vErr == nil &&
+			state.NeedsRecovery() {
+			action, recoverErr := recoverUnfiledMR(bd, workDir, rigName, polecatName, state)
+			zombie := ZombieResult{
+				PolecatName:    polecatName,
+				AgentState:     snapState,
+				Classification: ZombieDoneIntentDead,
+				HookBead:       snapHook,
+				WasActive:      true,
+				Action:         fmt.Sprintf("%s (done-intent age=%v)", action, age.Round(time.Second)),
+			}
+			if recoverErr != nil {
+				zombie.Error = fmt.Errorf("unfiled-mr recovery (done-intent): %w", recoverErr)
+			}
+			return zombie, true
+		}
+
 		// gt-dsgp: Restart instead of nuke — the session died during gt done,
 		// restart it so it can retry the exit sequence or pick up new work.
 		zombie := ZombieResult{
