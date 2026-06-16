@@ -30,7 +30,8 @@ gt daemon status || gt daemon start
 
 ## Verify
 1. Daemon PID file exists: `$GT_TOWN_ROOT/daemon/daemon.pid`
-2. Process is alive: `kill -0 $(cat $GT_TOWN_ROOT/daemon/daemon.pid)`
+2. Process is alive: `kill -0 $(head -1 $GT_TOWN_ROOT/daemon/daemon.pid)`
+   (daemon.pid is two lines — `PID\nNONCE`; always read line 1 for the PID)
 3. Daemon responds: `gt daemon status` returns success
 
 ## OnFail

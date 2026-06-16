@@ -10,9 +10,21 @@ import (
 )
 
 // PID file format: "PID\nNONCE"
-// The nonce is a random hex string generated at write time.
-// On read, we verify both that the PID is alive and that the nonce matches,
-// which guards against PID reuse without fragile ps command-line matching.
+//
+//	line 1: the numeric process ID
+//	line 2: a 16-char (8-byte) random hex nonce generated at write time
+//
+// The nonce is written atomically with the PID (single WriteFile) so that
+// ownership can be verified without fragile ps/pgrep command-line matching:
+// on read we check both that the PID is alive AND that the nonce matches,
+// which guards against PID reuse.
+//
+// CONSUMER CONTRACT: daemon.pid is intentionally two lines. Any reader MUST
+// take line 1 only for the PID — Go callers use readPIDFile; shell callers
+// MUST use `head -1` (NOT `cat`, which yields "PID\nNONCE" and breaks naive
+// `kill $(cat …)` / `kill -0 $(cat …)` usage). The nonce stays in the same
+// file by design; splitting it out would lose the atomic-write guarantee that
+// makes ownership verification reliable.
 
 // writePIDFile writes a PID file with a unique nonce for ownership verification.
 // Returns the nonce written, which is only needed for testing.
