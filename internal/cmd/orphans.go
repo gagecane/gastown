@@ -237,7 +237,7 @@ func runOrphans(cmd *cobra.Command, args []string) error {
 		foundAnything = true
 		fmt.Printf("%s Found %d orphaned commit(s):\n\n", style.Warning.Render("⚠"), len(filtered))
 		for _, o := range filtered {
-			age := formatAge(o.Date)
+			age := util.HumanizeSince(o.Date, "")
 			fmt.Printf("  %s %s\n", style.Bold.Render(shortHash(o.SHA)), o.Subject)
 			fmt.Printf("    %s by %s\n\n", style.Dim.Render(age), o.Author)
 		}
@@ -562,23 +562,6 @@ func isNoiseCommit(subject string) bool {
 	return false
 }
 
-// formatAge returns a human-readable age string
-func formatAge(t time.Time) string {
-	d := time.Since(t)
-
-	if d < time.Hour {
-		return fmt.Sprintf("%d minutes ago", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%d hours ago", int(d.Hours()))
-	}
-	days := int(d.Hours() / 24)
-	if days == 1 {
-		return "1 day ago"
-	}
-	return fmt.Sprintf("%d days ago", days)
-}
-
 // runOrphansKill removes orphaned commits and kills orphaned processes
 func runOrphansKill(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -638,7 +621,7 @@ func runOrphansKill(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Found %d orphaned commit(s) to remove:\n\n", style.Warning.Render("⚠"), len(filteredCommits))
 		for _, o := range filteredCommits {
 			fmt.Printf("  %s %s\n", style.Bold.Render(shortHash(o.SHA)), o.Subject)
-			fmt.Printf("    %s by %s\n\n", style.Dim.Render(formatAge(o.Date)), o.Author)
+			fmt.Printf("    %s by %s\n\n", style.Dim.Render(util.HumanizeSince(o.Date, "")), o.Author)
 		}
 	} else if len(commitOrphans) > 0 {
 		fmt.Printf("%s No orphaned commits in the last %d days (use --days=N or --all)\n\n",

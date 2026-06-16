@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -822,7 +823,7 @@ func showDogStatus(mgr *dog.Manager, name string) error {
 		fmt.Printf("  Work:        %s\n", style.Dim.Render("(none)"))
 	}
 	fmt.Printf("  Path:        %s\n", d.Path)
-	fmt.Printf("  Last Active: %s\n", dogFormatTimeAgo(d.LastActive))
+	fmt.Printf("  Last Active: %s\n", util.HumanizeSince(d.LastActive, "(unknown)"))
 	fmt.Printf("  Created:     %s\n", d.CreatedAt.Format("2006-01-02 15:04"))
 
 	if len(d.Worktrees) > 0 {
@@ -909,37 +910,6 @@ func showPackStatus(mgr *dog.Manager) error {
 	}
 
 	return nil
-}
-
-// dogFormatTimeAgo formats a time as a relative string like "2 hours ago".
-func dogFormatTimeAgo(t time.Time) string {
-	if t.IsZero() {
-		return "(unknown)"
-	}
-
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		mins := int(d.Minutes())
-		if mins == 1 {
-			return "1 minute ago"
-		}
-		return fmt.Sprintf("%d minutes ago", mins)
-	case d < 24*time.Hour:
-		hours := int(d.Hours())
-		if hours == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", hours)
-	default:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1 day ago"
-		}
-		return fmt.Sprintf("%d days ago", days)
-	}
 }
 
 func runDogHealthCheck(cmd *cobra.Command, args []string) error {
