@@ -37,6 +37,15 @@ func TestIsTransientPushError(t *testing.T) {
 		// retries the killed push once the binary is healthy.
 		{"git layer timeout-kill", errors.New("git push timed out after 1m0s (remote may be unreachable)"), true},
 
+		// gu-3o9r3: GitFarm write-lock contention. A swarm of same-rig polecats
+		// pushing one package serialize on GitFarm's per-repo write lock; the
+		// losers see these errors. They are transient — the lock drains when the
+		// holder finishes — so they MUST retry (with jitter) rather than fail
+		// gt done and escalate. Markers per the GitFarm FAQ "Master Lock Failure"
+		// section (tiny.amazon.com/k0oid70c/WriteLock).
+		{"master lock failure", errors.New("remote: Master Lock Failure: user bob is running git-receive-pack"), true},
+		{"another process holding the lock", errors.New("remote: Write failed due to another process holding the lock"), true},
+
 		// Deterministic rejections — must NOT be treated as transient.
 		{"non-fast-forward", errors.New("! [rejected] main -> main (non-fast-forward)"), false},
 		{"fetch first", errors.New("error: failed to push some refs; hint: Updates were rejected; fetch first"), false},

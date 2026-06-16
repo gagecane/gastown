@@ -243,11 +243,23 @@ func correctPhantomMainTarget(currentTarget, defaultBranch string, branchExists 
 // pushForDone makes when a transient push-infra error is observed. git push is
 // idempotent — re-pushing an already-landed commit exits 0 ("up to date") — so
 // retrying a transient failure cannot corrupt or duplicate work.
-const pushForDoneMaxAttempts = 3
+//
+// Sized for GitFarm write-lock contention (gu-3o9r3): a swarm of same-rig
+// polecats pushing one package serialize on GitFarm's per-repo write lock, so
+// the losers need a few jittered retries to drain. The total sleep across all
+// retries (~2+4+8s with jitter) stays well under the witness idle/force-kill
+// window (gu-d416) — gt done must never sleep long enough to look idle.
+const pushForDoneMaxAttempts = 4
 
 // pushForDoneRetryBackoff is the base backoff between transient-error retries.
-// Attempt N waits pushForDoneRetryBackoff * N before retrying (2s, 4s).
+// Backoff grows exponentially with ±25% jitter (via slingBackoff): ~2s, ~4s,
+// ~8s. The jitter is the point — without it, concurrent lock-contenders retry
+// in lockstep and re-collide on the same GitFarm write lock (gu-3o9r3).
 var pushForDoneRetryBackoff = 2 * time.Second
+
+// pushForDoneRetryBackoffMax caps a single retry's backoff so the bounded loop
+// never sleeps long enough to trip the witness idle/force-kill window (gu-d416).
+var pushForDoneRetryBackoffMax = 10 * time.Second
 
 // isTransientPushError reports whether a failed push looks like a transient
 // push-infra blip (network reset, server 5xx, TLS handshake, timeout, hung-up
@@ -297,6 +309,15 @@ func isTransientPushError(err error) bool {
 		"503",
 		"502",
 		"504",
+		// GitFarm write-lock contention (gu-3o9r3): another pusher holds the
+		// per-repo write lock. This is transient — the lock drains when the
+		// other push (or its slow pre-push hook) finishes — so a few jittered
+		// retries let same-rig polecats serialize cleanly instead of failing
+		// gt done and escalating. Markers per the GitFarm FAQ "Master Lock
+		// Failure" section (tiny.amazon.com/k0oid70c/WriteLock).
+		"master lock failure",
+		"write failed due to another process holding the lock",
+		"another process holding the lock",
 	}
 	for _, marker := range transientMarkers {
 		if strings.Contains(msg, marker) {
@@ -314,9 +335,12 @@ func isTransientPushError(err error) bool {
 // branch (formula step 7), so the hook's gates are pure waste. The hook's
 // branch-name and integration-branch guardrails still run.
 //
-// Transient push-infra blips are retried with backoff (gu-1or22): see
-// isTransientPushError. Deterministic rejections fail fast on the first
-// attempt and fall through to the caller's existing recovery paths.
+// Transient push-infra blips are retried with jittered exponential backoff
+// (gu-1or22, gu-3o9r3): see isTransientPushError. The jitter desyncs
+// concurrent same-rig pushers contending on a GitFarm per-repo write lock so
+// they drain instead of hot-looping in lockstep. Deterministic rejections fail
+// fast on the first attempt and fall through to the caller's existing recovery
+// paths.
 func pushForDone(g *git.Git, refspec string) error {
 	var err error
 	for attempt := 1; attempt <= pushForDoneMaxAttempts; attempt++ {
@@ -328,7 +352,11 @@ func pushForDone(g *git.Git, refspec string) error {
 		if err == nil || !isTransientPushError(err) || attempt == pushForDoneMaxAttempts {
 			return err
 		}
-		backoff := pushForDoneRetryBackoff * time.Duration(attempt)
+		// Jittered exponential backoff (gu-3o9r3): under GitFarm write-lock
+		// contention, fixed/linear backoff makes contenders retry in lockstep
+		// and re-collide on the same lock. slingBackoff's ±25% jitter desyncs
+		// them so they drain instead of thrashing.
+		backoff := slingBackoff(attempt, pushForDoneRetryBackoff, pushForDoneRetryBackoffMax)
 		style.PrintWarning("push attempt %d/%d failed (transient): %v — retrying in %s", attempt, pushForDoneMaxAttempts, err, backoff)
 		time.Sleep(backoff)
 	}
