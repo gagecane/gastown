@@ -774,24 +774,65 @@ bd dep add <child-id> <epic-id> --type=parent-child     # child first, epic seco
 ```
 At least one task should be ready (`bd ready`) immediately after wiring.
 
-**7. Notify the human in conversation:**
+**7. Sling the ready frontier — DO NOT leave the DAG inert (gs-p2bu):**
+
+`bd create` only CREATES beads; it does not enqueue them for dispatch. A DAG
+that is built but never slung looks "planned and ready" but is actually
+stalled — nothing pushes it forward and a human has to hand-sling every node as
+its blocker closes. The closing contract for this step is: **sling the ready
+frontier** (the just-created tasks with no open blockers) so the held-and-
+auto-release scheduler then carries the rest of the DAG forward.
+
+```bash
+# 7a. Deferred dispatch MUST be on, or blocked beads cannot be held and
+# auto-released (in direct mode, sling REFUSES a blocked bead). Verify:
+gt config get scheduler.max_polecats     # must be > 0
+# If it is 0, enable deferred dispatch (operator decision — escalate if unsure):
+#   gt config set scheduler.max_polecats <N>   # N = max concurrent polecats
+
+# 7b. Sling each currently-unblocked task you just created to the target rig.
+# In deferred mode this enqueues durable sling contexts; the BLOCKED tasks are
+# HELD and auto-dispatched as each blocker closes — the whole DAG advances with
+# no manual per-bead slinging, capped at scheduler.max_polecats.
+gt sling <ready-task-id> [<ready-task-id> ...] <rig>
+```
+
+⚠️ **CROSS-RIG CAVEAT — exclude beads with unmodeled cross-rig prerequisites
+(gs-p2bu caveat 1).** `bd ready` only sees in-rig blockers. If a task's REAL
+prerequisite lives in another rig/database and is NOT a `bd dep` edge, the task
+will look ready and slinging it dispatches a polecat that cannot do the work.
+For any such task, do ONE of:
+- model the cross-rig prerequisite as a real blocking edge first (preferred), or
+- leave it OUT of the frontier sling and note it for manual release later.
+
+Do NOT sling the epic — it has open children and `gt sling` refuses containers.
+Sling only leaf tasks.
+
+**8. Notify the human in conversation:**
 
 Output:
 
 ```
-## Beads Created: {{problem}}
+## Beads Created & Dispatched: {{problem}}
 
 ### Summary
 <list of created beads with IDs>
 
+### Dispatched (ready frontier)
+<the unblocked tasks slung in step 7; the rest are HELD and auto-release as blockers close>
+
+### Held back (if any)
+<tasks excluded for cross-rig prerequisites, with the prerequisite noted>
+
 ### Next Steps
-- Review beads: bd list --type=task
-- Start work: bd ready (shows unblocked tasks)
-- Kick off agent swarm: gt sling <first-bead-id> <rig>
+- Track progress: gt convoy list  /  bd list --type=task
+- Inspect a task: bd show <task-id>
 ```
 
-**Exit criteria:** All plan tasks exist as beads. Dependencies are correctly wired.
-Epic created. Human notified."""
+**Exit criteria:** All plan tasks exist as beads. Dependencies are correctly
+wired. Epic created. The ready frontier has been slung (deferred mode), so work
+begins and advances through the DAG with no manual per-bead slinging. Human
+notified."""
 
 [[steps]]
 id = "verify-beads-pass-1"

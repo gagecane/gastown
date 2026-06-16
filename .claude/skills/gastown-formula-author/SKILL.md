@@ -31,6 +31,14 @@ description: |
   `[prompts]` and `[output]` use **Go `text/template` `{{.var}}`** (note the
   leading dot). Do not mix them — `{{.feature}}` in a workflow step or `{{feature}}`
   in a convoy prompt will not resolve.
+- **A step that emits a work-bead DAG MUST end by slinging the ready frontier
+  (gs-p2bu).** `bd create` only creates beads — it does NOT dispatch them. A DAG
+  that is built but never slung looks "planned and ready" but is inert: nothing
+  advances it and a human must hand-sling every node. So any step that creates a
+  graph of work beads (e.g. a `create-beads` step) must, after building and
+  verifying the graph, sling the unblocked beads — see
+  [`references/schema.md`](references/schema.md) ("Closing contract") for the
+  exact commands and the cross-rig caveat.
 
 ## Instructions
 

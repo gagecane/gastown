@@ -148,7 +148,47 @@ Handlebars control words (`else`, `this`, `range`, `with`, `end`, `if`, `each`,
 `unless`, block helpers `{{#...}}`/`{{/...}}`) are NOT variables and need no
 declaration.
 
+## Closing contract: steps that emit a work-bead DAG (gs-p2bu)
+
+`bd create` (including `bd create --graph`) only CREATES beads — it does not
+enqueue them for dispatch. The deferred scheduler's hold-and-auto-release
+("blocked beads are HELD and auto-dispatched when their blockers close") only
+applies to beads that were **slung** into a durable sling context; it does NOT
+pick up bare OPEN beads. So a step that builds a DAG and stops leaves it inert:
+it looks "planned and ready" but nothing advances it, and a human must hand-sling
+every node as its blocker closes.
+
+**Rule:** any workflow step that emits a graph of work beads (e.g. `create-beads`)
+must END by slinging the **ready frontier** — the just-created beads with no open
+blockers — so the held-and-auto-release machinery carries the rest of the DAG
+forward. Closing block for such a step's `description`:
+
+```bash
+# Deferred dispatch must be on (direct mode REFUSES blocked beads, so there is
+# no hold-and-release):
+gt config get scheduler.max_polecats     # must be > 0
+
+# Sling each currently-unblocked task to the target rig. Blocked tasks are HELD
+# and auto-dispatched as their blockers close, capped at scheduler.max_polecats.
+gt sling <ready-task-id> [<ready-task-id> ...] <rig>
+```
+
+Two caveats the closing block must respect:
+
+1. **Exclude beads with unmodeled cross-rig prerequisites.** `bd ready` only sees
+   in-rig blockers. If a task's real prerequisite lives in another rig/database
+   and is NOT a `bd dep` edge, the task looks ready and slinging it dispatches a
+   polecat that cannot do the work. Model the cross-rig prerequisite as a real
+   blocking edge first, or leave the task out of the frontier sling.
+2. **Never sling the epic** — it has open children and `gt sling` refuses
+   containers. Sling only leaf tasks.
+
+`gt sling --all <rig>` slings the rig's entire ready set (not just this DAG's
+frontier) and is convenient when the rig holds only this plan's work; prefer
+explicit per-bead slinging when other unrelated ready beads exist in the rig.
+
 ## Sources
 
 - `internal/formula/types.go` — struct definitions and TOML tags — accessed 2026-06-06
 - `internal/formula/parser.go` — `Validate`, `inferType`, `checkCycles` — accessed 2026-06-06
+- `internal/cmd/sling.go` (`--all`, batch, deferred), `internal/cmd/capacity_dispatch.go` (hold-and-release) — accessed 2026-06-15
