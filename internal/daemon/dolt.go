@@ -652,28 +652,7 @@ Action needed: Investigate and fix the root cause, then restart the daemon or th
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port)
 
-	townRoot := m.townRoot
-	logger := m.logger
-
-	m.alertWg.Add(1)
-	go func() {
-		defer m.alertWg.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "gt", "mail", "send", "mayor/", "-s", subject, "-m", body) //nolint:gosec // G204: args are constructed internally
-		setSysProcAttr(cmd)
-		cmd.Dir = townRoot
-		cmd.Env = os.Environ()
-
-		if err := cmd.Run(); err != nil {
-			logger("Warning: failed to send escalation mail to mayor: %v", err)
-		} else {
-			logger("Sent escalation mail to mayor about Dolt server crash-loop")
-		}
-
-		// Also notify all witnesses so they can react to degraded Dolt state
-		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
-	}()
+	m.dispatchAlert(subject, body)
 }
 
 // sendCrashAlert sends a mail to the mayor when the Dolt server is found dead.
@@ -697,15 +676,7 @@ Check the log file for crash details. If crashes recur, the daemon will escalate
 		m.config.Host, m.config.Port,
 		m.config.MaxRestartsInWindow, m.config.RestartWindow)
 
-	townRoot := m.townRoot
-	logger := m.logger
-
-	m.alertWg.Add(1)
-	go func() {
-		defer m.alertWg.Done()
-		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
-	}()
+	m.dispatchAlert(subject, body)
 }
 
 // sendUnhealthyAlert sends a mail to the mayor when the Dolt server fails health checks.
@@ -729,6 +700,15 @@ This may indicate high load, connection exhaustion, or internal server errors.`,
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port)
 
+	m.dispatchAlert(subject, body)
+}
+
+// dispatchAlert delivers a Dolt alert asynchronously to the mayor and all rig
+// witnesses. It owns the shared waitgroup + goroutine + dual-send tail used by
+// every alert sender, so any change to delivery (retry, timeout, recipient
+// routing) lives in one place and can never silently skip a sender. Callers
+// apply their own override guard and build subject/body before calling this.
+func (m *DoltServerManager) dispatchAlert(subject, body string) {
 	townRoot := m.townRoot
 	logger := m.logger
 
@@ -1664,15 +1644,7 @@ concurrent polecat count or staggering write-heavy operations.`,
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port)
 
-	townRoot := m.townRoot
-	logger := m.logger
-
-	m.alertWg.Add(1)
-	go func() {
-		defer m.alertWg.Done()
-		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
-	}()
+	m.dispatchAlert(subject, body)
 }
 
 // getDoltVersion returns the Dolt server version.
