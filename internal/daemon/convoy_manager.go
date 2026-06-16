@@ -101,6 +101,18 @@ const (
 	// At 60s scan interval, 10 scans = ~10 minutes.
 	completionBackstopInterval = 10
 
+	// drainUnverifiedInterval is the number of scan ticks between drain passes
+	// over the convoy:ship-unverified backlog (gu-yosez). Those convoys are
+	// SKIPPED by both the completion scan and the stranded scan (gu-4cxuv), so
+	// nothing re-verifies whether their work actually landed — the label is a
+	// write-only graveyard that hides genuine false-closes. This patrol clears
+	// the verified-landed ones, escalates the genuine false-closes, and leaves
+	// the in-flight ones parked. It is bounded per pass (gu-c76op cap/time-box)
+	// so it drains incrementally. Run less often than the completion backstop
+	// since the backlog drains slowly and each pass git-verifies every tracked
+	// bead. At 60s scan interval, 30 scans = ~30 minutes.
+	drainUnverifiedInterval = 30
+
 	// strandedCacheMaxAge bounds how long a findStranded() result may be served
 	// from cache (gu-e5psy). The cache sentinel (gu-rd9ph) keys only on the open
 	// convoy-issue count + MAX(updated_at) in the hq store, but a convoy's
@@ -846,6 +858,15 @@ func (m *ConvoyManager) scan() {
 		m.checkAllConvoyCompletion()
 	}
 
+	// Periodically drain the convoy:ship-unverified backlog (gu-yosez). Those
+	// convoys are skipped by both the completion check above and the stranded
+	// scan, so nothing else re-verifies them; without this patrol the label is a
+	// write-only graveyard that hides genuine false-closes. Bounded per pass
+	// (gu-c76op) and run on its own slower cadence than the completion backstop.
+	if m.scanCount%drainUnverifiedInterval == 0 {
+		m.drainShipUnverifiedConvoys()
+	}
+
 	// Feed-storm rate monitor (gc-wwpw2): a sustained high per-scan sling-failure
 	// count is the signature of a re-dispatch storm (gu-q1wzq) — beads re-fed
 	// every cycle that can never succeed, burning CPU + Dolt connections. No
@@ -872,6 +893,25 @@ func (m *ConvoyManager) checkAllConvoyCompletion() {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		m.logger("Convoy: batched completion check failed: %s", util.FirstLine(stderr.String()))
+	}
+}
+
+// drainShipUnverifiedConvoys runs a single `gt convoy drain-unverified` which
+// re-verifies the convoy:ship-unverified backlog: it clears + auto-closes the
+// convoys whose work has since landed, escalates genuine false-closes to mayor,
+// and leaves in-flight convoys parked (gu-yosez). The backlog is otherwise
+// skipped by both the completion scan and the stranded scan, so nothing else
+// drains it. Bounded per pass inside the subprocess (gu-c76op cap/time-box).
+func (m *ConvoyManager) drainShipUnverifiedConvoys() {
+	m.logger("Convoy: draining ship-unverified backlog (scan %d)", m.scanCount)
+	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "drain-unverified")
+	cmd.Dir = m.townRoot
+	cmd.Env = bdMutationRoutingEnv(m.townRoot)
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		m.logger("Convoy: ship-unverified drain failed: %s", util.FirstLine(stderr.String()))
 	}
 }
 

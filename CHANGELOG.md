@@ -24,6 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gt convoy drain-unverified` patrol drains the ship-unverified backlog**
+  (gu-yosez) — Convoys parked under `convoy:ship-unverified` (all tracked beads
+  closed but not ship-verifiable, gu-4cxuv) are SKIPPED by both the completion
+  scan and the stranded scan so they stop burning the dispatch budget. But
+  nothing re-verified whether their work ever landed: the label was a write-only
+  graveyard that grew unbounded and hid genuine false-closes (closed beads whose
+  commits never reached origin/main) among legitimately-landed ones — a human
+  (mayor) had to fan out subagents to git-verify each by hand. The new
+  `gt convoy drain-unverified` command does that verification automatically: for
+  each labeled convoy it clears the label, re-runs the same gu-j7u5
+  ship-verification the completion scan uses, then auto-closes the verified-landed
+  ones (notifying subscribers), re-enters reopened ones into the normal scan,
+  leaves in-flight ones parked, and escalates genuine false-closes to mayor with
+  the bead evidence. Bounded per pass with the same cap/time-box as the completion
+  sweep (gu-c76op) so a large backlog drains over several ticks. The daemon runs
+  it on a patrol cadence (~every 30 scans); `--dry-run` previews without acting.
+
 - **`gt done --no-code` exit for verify/report-only beads** (gu-gc4ex) —
   Verify-only and report-only tasks dispatched with a CODE formula
   (`mol-polecat-work`) produce zero commits by design, but `gt done` blocked
