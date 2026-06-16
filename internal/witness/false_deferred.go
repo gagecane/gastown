@@ -51,8 +51,8 @@ type DeferredBeadRecovery struct {
 	// BeadID. Empty when no cited commit was found (Action="skip-no-commit").
 	CitedCommitSHA string
 	// Action is the outcome: "closed", "skip-no-commit",
-	// "skip-already-labeled", "skip-bare-repo-missing", "close-failed", or
-	// "skip-grep-error".
+	// "skip-already-labeled", "skip-assigned", "skip-bare-repo-missing",
+	// "close-failed", or "skip-grep-error".
 	Action string
 	// Error captures non-fatal errors so the caller can surface them without
 	// aborting the rest of the scan.
@@ -70,6 +70,31 @@ type DiscoverDeferredButShippedResult struct {
 	// Errors collects scan-wide failures (bd list error, JSON parse error,
 	// etc.) that prevented the scan from running normally.
 	Errors []error
+}
+
+// shippedScanConfig parameterizes the shared citing-commit scan
+// (discoverShippedBeads) for a given bead status. Two callers configure it:
+// the deferred-state scan (DiscoverDeferredButShipped, gu-wykt) and the
+// re-dispatch zombie-loop scan (DiscoverOpenButShipped, gu-y55ux).
+type shippedScanConfig struct {
+	// status is the `bd list --status=<status>` filter the scan lists.
+	status string
+	// requireUnassigned, when true, restricts the scan to beads with an empty
+	// assignee. The open-bead scan sets this so a bead a polecat is actively
+	// hooked to (or an operator deliberately re-assigned) is never auto-closed
+	// from under a live worker — a re-dispatchable zombie is, by definition,
+	// unassigned (dispatch requires an empty assignee).
+	requireUnassigned bool
+	// skipIfLabeled, when true, skips beads already carrying the
+	// false-deferred-recovered:* dedup label. The deferred scan sets this so a
+	// recovered-then-manually-re-deferred bead isn't fought every tick. The
+	// open scan sets it FALSE: a labeled bead that is open again means a prior
+	// recovery was undone by a re-open, so it must be re-closed to break the
+	// loop (close is idempotent; the citing commit is authoritative proof).
+	skipIfLabeled bool
+	// closeReason builds the bd close reason from the short SHA of the citing
+	// commit.
+	closeReason func(shortSHA string) string
 }
 
 // DiscoverDeferredButShipped scans status=deferred beads, looks for an on-
@@ -103,6 +128,68 @@ type DiscoverDeferredButShippedResult struct {
 // gu-551r explicitly prevents on the polecat side; running --grep on origin/
 // main is safe because gu-551r ensures the commit literally cites the bead.
 func DiscoverDeferredButShipped(bd *BdCli, workDir, rigName string) *DiscoverDeferredButShippedResult {
+	return discoverShippedBeads(bd, workDir, rigName, shippedScanConfig{
+		status:            "deferred",
+		requireUnassigned: false,
+		skipIfLabeled:     true,
+		closeReason: func(shortSHA string) string {
+			return fmt.Sprintf(
+				"Work shipped at %s while deferred — auto-recovered (gu-wykt)",
+				shortSHA)
+		},
+	})
+}
+
+// DiscoverOpenButShipped scans status=open, UNASSIGNED beads for an on-mainline
+// commit that cites each bead's ID and auto-closes any whose work has already
+// shipped. It is the re-dispatch zombie-loop fix (gu-y55ux): the sibling of
+// DiscoverDeferredButShipped for the OPEN state.
+//
+// Why this scan is needed. A work bead whose fix already landed gets closed
+// `no-changes` by a polecat, but a reaper/patrol later flips it back to
+// status=open (e.g. dead-agent-wisp reap, stale-park unblock, convoy re-open
+// after a reopen event). bd CLEARS close_reason on re-open, so the dispatch
+// chokepoints (isScheduledWorkBeadReady, the convoy feed) see a plain open
+// bead with no surviving "no-changes" marker and re-dispatch it every cycle —
+// spawning a polecat that re-closes no-changes, ad infinitum. The same loop
+// hits a bead deferred without a defer_until (released straight back to open).
+// Both reduce to "an open bead whose fix is already an ancestor of origin/main
+// keeps getting dispatched." Three confirmed instances: gu-ecstl (4×),
+// gu-9qz45, gu-0dnrh.
+//
+// Closing the bead at the source — once its work is proven on mainline by a
+// citing commit — breaks the loop without putting a git query on the dispatch
+// hot path: the witness patrol already runs DiscoverDeferredButShipped, and
+// this is the same mechanical detector over a different status filter.
+//
+// Conservatism (differs from the deferred scan):
+//   - requireUnassigned=true: a bead a polecat is actively hooked to, or one an
+//     operator deliberately re-assigned, is never auto-closed. A genuinely
+//     re-dispatchable zombie is unassigned by definition (dispatch requires an
+//     empty assignee), so this loses no real coverage while guaranteeing we
+//     never yank work from under a live worker.
+//   - skipIfLabeled=false: unlike the deferred scan, a re-opened bead that we
+//     already recovered (and labeled) MUST be re-closed — the re-open is
+//     exactly the loop we are breaking. Close is idempotent and the citing
+//     commit is authoritative, so re-closing a re-opened zombie is safe.
+func DiscoverOpenButShipped(bd *BdCli, workDir, rigName string) *DiscoverDeferredButShippedResult {
+	return discoverShippedBeads(bd, workDir, rigName, shippedScanConfig{
+		status:            "open",
+		requireUnassigned: true,
+		skipIfLabeled:     false,
+		closeReason: func(shortSHA string) string {
+			return fmt.Sprintf(
+				"Work shipped at %s — auto-closed to break re-dispatch zombie loop (gu-y55ux)",
+				shortSHA)
+		},
+	})
+}
+
+// discoverShippedBeads is the shared citing-commit scan behind
+// DiscoverDeferredButShipped (gu-wykt) and DiscoverOpenButShipped (gu-y55ux).
+// It lists beads of cfg.status, and for each one with an on-mainline commit
+// citing its ID, closes it with cfg.closeReason and stamps the dedup label.
+func discoverShippedBeads(bd *BdCli, workDir, rigName string, cfg shippedScanConfig) *DiscoverDeferredButShippedResult {
 	result := &DiscoverDeferredButShippedResult{}
 
 	townRoot, err := workspace.Find(workDir)
@@ -129,12 +216,12 @@ func DiscoverDeferredButShipped(bd *BdCli, workDir, rigName string) *DiscoverDef
 	}
 	bareGit := git.NewGitWithDir(bareRepoPath, "")
 
-	// List deferred beads. --limit=0 mirrors DetectStaleInProgressBeads so
-	// large rigs see all candidates per cycle.
-	output, err := bd.Exec(workDir, "list", "--status=deferred", "--json", "--limit=0")
+	// List candidate beads of the configured status. --limit=0 mirrors
+	// DetectStaleInProgressBeads so large rigs see all candidates per cycle.
+	output, err := bd.Exec(workDir, "list", "--status="+cfg.status, "--json", "--limit=0")
 	if err != nil {
 		result.Errors = append(result.Errors,
-			fmt.Errorf("listing deferred beads: %w", err))
+			fmt.Errorf("listing %s beads: %w", cfg.status, err))
 		return result
 	}
 	if output == "" {
@@ -142,13 +229,14 @@ func DiscoverDeferredButShipped(bd *BdCli, workDir, rigName string) *DiscoverDef
 	}
 
 	type beadRow struct {
-		ID     string   `json:"id"`
-		Labels []string `json:"labels"`
+		ID       string   `json:"id"`
+		Labels   []string `json:"labels"`
+		Assignee string   `json:"assignee"`
 	}
 	var beadList []beadRow
 	if err := json.Unmarshal([]byte(output), &beadList); err != nil {
 		result.Errors = append(result.Errors,
-			fmt.Errorf("parsing deferred beads JSON: %w", err))
+			fmt.Errorf("parsing %s beads JSON: %w", cfg.status, err))
 		return result
 	}
 
@@ -158,11 +246,24 @@ func DiscoverDeferredButShipped(bd *BdCli, workDir, rigName string) *DiscoverDef
 		}
 		result.Checked++
 
+		// Assignee guard (open scan only). Never auto-close a bead a polecat is
+		// actively hooked to or an operator re-assigned — a re-dispatchable
+		// zombie is unassigned by definition.
+		if cfg.requireUnassigned && strings.TrimSpace(b.Assignee) != "" {
+			result.Recovered = append(result.Recovered, DeferredBeadRecovery{
+				BeadID: b.ID,
+				Action: "skip-assigned",
+			})
+			continue
+		}
+
 		// Dedup: skip beads that already carry our recovery label. We close
 		// the bead AND add the label, so this guard catches the rare case
 		// where the close failed but the label was applied (or the bead was
-		// re-deferred manually after close).
-		if hasFalseDeferredRecoveredLabel(b.Labels) {
+		// re-deferred manually after close). Disabled for the open scan: a
+		// re-opened labeled bead is the very loop we are breaking, so it must
+		// be re-closed.
+		if cfg.skipIfLabeled && hasFalseDeferredRecoveredLabel(b.Labels) {
 			result.Recovered = append(result.Recovered, DeferredBeadRecovery{
 				BeadID: b.ID,
 				Action: "skip-already-labeled",
@@ -186,7 +287,7 @@ func DiscoverDeferredButShipped(bd *BdCli, workDir, rigName string) *DiscoverDef
 			continue
 		}
 		if sha == "" {
-			// No citing commit on mainline — bead is legitimately deferred.
+			// No citing commit on mainline — bead has real work outstanding.
 			result.Recovered = append(result.Recovered, DeferredBeadRecovery{
 				BeadID: b.ID,
 				Action: "skip-no-commit",
@@ -204,9 +305,7 @@ func DiscoverDeferredButShipped(bd *BdCli, workDir, rigName string) *DiscoverDef
 			Action:         "closed",
 		}
 
-		closeReason := fmt.Sprintf(
-			"Work shipped at %s while deferred — auto-recovered (gu-wykt)",
-			shortShaTruncate(sha))
+		closeReason := cfg.closeReason(shortShaTruncate(sha))
 		if closeErr := bd.Run(workDir, "close", b.ID, "-r", closeReason); closeErr != nil {
 			recovery.Action = "close-failed"
 			recovery.Error = fmt.Errorf("closing bead %s: %w", b.ID, closeErr)

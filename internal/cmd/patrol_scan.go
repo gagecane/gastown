@@ -366,7 +366,18 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// but whose work has shipped on origin/<default> with a commit citing the
 	// bead ID — auto-close them with the cited SHA. Sibling to gu-551r
 	// (Pattern A close-validation) but for the deferred-state escape hatch.
-	falseDeferredResult := witness.DiscoverDeferredButShipped(bd, workDir, rigName)
+	//
+	// Re-dispatch zombie-loop recovery (gu-y55ux). Same detector, but for
+	// status=open UNASSIGNED beads whose fix is already cited on mainline —
+	// a no-changes close that a reaper/patrol flipped back to open (bd clears
+	// close_reason on re-open, so dispatch can't tell it was already resolved)
+	// keeps re-spawning polecats that only re-close. Both scans share the
+	// DiscoverDeferredButShippedResult shape, so we merge them into one result
+	// and the existing reporters surface both without signature changes.
+	falseDeferredResult := mergeShippedResults(
+		witness.DiscoverDeferredButShipped(bd, workDir, rigName),
+		witness.DiscoverOpenButShipped(bd, workDir, rigName),
+	)
 
 	// Stale-park recovery (gs-du4h). Beads parked at status=blocked whose
 	// blocking dependencies have all closed — bd does not auto-flip the
@@ -420,6 +431,23 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, postHocResult, strandedResult, staleAgentResult, falseDeferredResult, staleParkResult, refineryPausedResult, receipts)
+}
+
+// mergeShippedResults combines the deferred-but-shipped and open-but-shipped
+// citing-commit scans (gu-wykt + gu-y55ux) into a single result so the existing
+// patrol reporters surface both without threading a second result through every
+// output signature. Nil inputs are tolerated (a nil scan contributes nothing).
+func mergeShippedResults(results ...*witness.DiscoverDeferredButShippedResult) *witness.DiscoverDeferredButShippedResult {
+	merged := &witness.DiscoverDeferredButShippedResult{}
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		merged.Checked += r.Checked
+		merged.Recovered = append(merged.Recovered, r.Recovered...)
+		merged.Errors = append(merged.Errors, r.Errors...)
+	}
+	return merged
 }
 
 func runPatrolScanPhase[T any](diagnostics io.Writer, name string, fn func() T) T {
@@ -951,7 +979,8 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
-	// False-deferred bead recovery (gu-wykt)
+	// Shipped-but-stuck bead recovery: deferred (gu-wykt) + open re-dispatch
+	// zombie loop (gu-y55ux), merged into one result.
 	if falseDeferredResult != nil {
 		closed := 0
 		for _, r := range falseDeferredResult.Recovered {
@@ -960,11 +989,11 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			}
 		}
 		if closed > 0 || patrolScanVerbose {
-			fmt.Printf("%s False-Deferred Recovery: checked %d deferred bead(s)\n",
+			fmt.Printf("%s Shipped-But-Stuck Recovery: checked %d deferred/open bead(s)\n",
 				style.Bold.Render("⏳"), falseDeferredResult.Checked)
 
 			if closed == 0 && !patrolScanVerbose {
-				fmt.Printf("  %s\n", style.Dim.Render("No false-deferred beads recovered"))
+				fmt.Printf("  %s\n", style.Dim.Render("No shipped-but-stuck beads recovered"))
 			} else {
 				for _, r := range falseDeferredResult.Recovered {
 					if r.Action != "closed" && !patrolScanVerbose {
