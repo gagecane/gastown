@@ -2219,73 +2219,44 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 
 	t := tmux.NewTmux()
 
+	// gu-ges77: Bound-parallelize the per-polecat scan. Each entry runs
+	// t.HasSession (tmux exec), fetchAgentBeadSnapshot (bd show), and usually
+	// getBeadStatus + IsAgentAlive — each a fresh subprocess + Dolt round-trip.
+	// Serial O(N) fan-out grows the patrol wall-clock linearly with swarm size
+	// and lets one slow bd/tmux call stall detection for every polecat behind
+	// it. A small worker pool (same buffered-channel semaphore pattern as the
+	// dispatch scan, gu-1h3ur/gu-el5bx) collapses the round-trips while bounding
+	// concurrent Dolt/tmux load. Results are written position-indexed and folded
+	// in directory order so the scan output stays deterministic.
+	var names []string
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
+		names = append(names, entry.Name())
+	}
 
-		polecatName := entry.Name()
-		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	scanResults := make([]polecatScanResult, len(names))
+	sem := make(chan struct{}, zombieScanConcurrency())
+	var wg sync.WaitGroup
+	for i, polecatName := range names {
+		wg.Add(1)
+		go func(i int, polecatName string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			scanResults[i] = checkPolecatForZombie(bd, workDir, townRoot, rigName, polecatName, t, witCfg, router)
+		}(i, polecatName)
+	}
+	wg.Wait()
+
+	for _, r := range scanResults {
 		result.Checked++
-
-		detectedAt := time.Now()
-
-		sessionAlive, err := t.HasSession(sessionName)
-		if err != nil {
-			result.Errors = append(result.Errors,
-				fmt.Errorf("checking session %s: %w", sessionName, err))
-			continue
+		if r.err != nil {
+			result.Errors = append(result.Errors, r.err)
 		}
-
-		prefix := beads.GetPrefixForRig(townRoot, rigName)
-		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-
-		// gt-2gra: Fetch agent bead data once per polecat instead of 3-5 times
-		// across helper functions. The snapshot is passed to sub-functions.
-		snap := fetchAgentBeadSnapshot(bd, workDir, agentBeadID)
-
-		var labels []string
-		if snap != nil {
-			labels = snap.Labels
-		}
-		doneIntent := extractDoneIntent(labels)
-
-		if sessionAlive {
-			// gt-s8bq: Idle Polecat Heresy fix. Idle polecats are HEALTHY — they
-			// have no hook_bead, agent_state="idle", and their sandbox is preserved
-			// for reuse. Skip them entirely during patrol. Only report if the
-			// sandbox is dirty (uncommitted changes in idle state).
-			agentState := ""
-			if snap != nil {
-				agentState = snap.AgentState
-			}
-			if beads.AgentState(agentState) == AgentStateIdle {
-				cleanupStatus := snap.cleanupStatus()
-				if cleanupStatus != "" && cleanupStatus != "clean" {
-					// ZFC (gt-5rne): Report data, don't escalate. The witness agent
-					// decides whether dirty idle state warrants escalation.
-					zombie := ZombieResult{
-						PolecatName:    polecatName,
-						AgentState:     agentState,
-						Classification: ZombieIdleDirtySandbox,
-						CleanupStatus:  cleanupStatus,
-						WasActive:      false,
-						Action:         "detected-dirty-idle-polecat",
-					}
-					result.Zombies = append(result.Zombies, zombie)
-				}
-				// Clean idle polecat — healthy, skip entirely.
-				continue
-			}
-
-			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap, router); found {
-				result.Zombies = append(result.Zombies, zombie)
-			}
-			continue // Either handled or not a zombie
-		}
-
-		if zombie, found := detectZombieDeadSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, detectedAt, witCfg, snap); found {
-			result.Zombies = append(result.Zombies, zombie)
+		if r.zombie != nil {
+			result.Zombies = append(result.Zombies, *r.zombie)
 		}
 	}
 
@@ -2295,6 +2266,96 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 	trackConvoyFailures(bd, workDir, result)
 
 	return result
+}
+
+// polecatScanResult is one per-polecat outcome of the bounded zombie-scan
+// fan-out: an optional detected zombie and an optional transient error that
+// prevented the check. Both may be nil (healthy polecat, nothing to report).
+type polecatScanResult struct {
+	zombie *ZombieResult
+	err    error
+}
+
+// zombieScanConcurrency returns the worker-pool size for the per-polecat zombie
+// scan fan-out. Mirrors dispatchScanConcurrency (gu-1h3ur): a small bound keeps
+// concurrent bd/tmux subprocesses (and thus Dolt load) in check while collapsing
+// the serial O(N) round-trip latency. Overridable via GT_ZOMBIE_SCAN_FANOUT.
+func zombieScanConcurrency() int {
+	const def = 6
+	if v := os.Getenv("GT_ZOMBIE_SCAN_FANOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return def
+}
+
+// checkPolecatForZombie runs the per-polecat zombie checks: session liveness,
+// agent-bead snapshot, and the live/dead-session classification. It is the body
+// of the DetectZombiePolecats scan loop, extracted (gu-ges77) so it can run
+// concurrently behind a bounded worker pool. It performs no shared-state
+// mutation of its own — all side-effecting helpers it calls
+// (RestartPolecatWithBackoff, Record*/ShouldEscalate*) are individually
+// mutex+flock guarded — so it is safe to invoke from multiple goroutines.
+func checkPolecatForZombie(bd *BdCli, workDir, townRoot, rigName, polecatName string, t *tmux.Tmux, witCfg *config.WitnessThresholds, router *mail.Router) polecatScanResult {
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	detectedAt := time.Now()
+
+	sessionAlive, err := t.HasSession(sessionName)
+	if err != nil {
+		return polecatScanResult{err: fmt.Errorf("checking session %s: %w", sessionName, err)}
+	}
+
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+
+	// gt-2gra: Fetch agent bead data once per polecat instead of 3-5 times
+	// across helper functions. The snapshot is passed to sub-functions.
+	snap := fetchAgentBeadSnapshot(bd, workDir, agentBeadID)
+
+	var labels []string
+	if snap != nil {
+		labels = snap.Labels
+	}
+	doneIntent := extractDoneIntent(labels)
+
+	if sessionAlive {
+		// gt-s8bq: Idle Polecat Heresy fix. Idle polecats are HEALTHY — they
+		// have no hook_bead, agent_state="idle", and their sandbox is preserved
+		// for reuse. Skip them entirely during patrol. Only report if the
+		// sandbox is dirty (uncommitted changes in idle state).
+		agentState := ""
+		if snap != nil {
+			agentState = snap.AgentState
+		}
+		if beads.AgentState(agentState) == AgentStateIdle {
+			cleanupStatus := snap.cleanupStatus()
+			if cleanupStatus != "" && cleanupStatus != "clean" {
+				// ZFC (gt-5rne): Report data, don't escalate. The witness agent
+				// decides whether dirty idle state warrants escalation.
+				return polecatScanResult{zombie: &ZombieResult{
+					PolecatName:    polecatName,
+					AgentState:     agentState,
+					Classification: ZombieIdleDirtySandbox,
+					CleanupStatus:  cleanupStatus,
+					WasActive:      false,
+					Action:         "detected-dirty-idle-polecat",
+				}}
+			}
+			// Clean idle polecat — healthy, skip entirely.
+			return polecatScanResult{}
+		}
+
+		if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap, router); found {
+			return polecatScanResult{zombie: &zombie}
+		}
+		return polecatScanResult{} // Either handled or not a zombie
+	}
+
+	if zombie, found := detectZombieDeadSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, detectedAt, witCfg, snap); found {
+		return polecatScanResult{zombie: &zombie}
+	}
+	return polecatScanResult{}
 }
 
 // detectZombieLiveSession checks a polecat with a live tmux session for zombie indicators:

@@ -331,6 +331,29 @@ func TestDetectZombiePolecats_EmptyPolecatsDir(t *testing.T) {
 	}
 }
 
+func TestZombieScanConcurrency(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want int
+	}{
+		{"default when unset", "", 6},
+		{"valid override", "12", 12},
+		{"override of one", "1", 1},
+		{"zero falls back to default", "0", 6},
+		{"negative falls back to default", "-3", 6},
+		{"non-numeric falls back to default", "abc", 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GT_ZOMBIE_SCAN_FANOUT", tt.env)
+			if got := zombieScanConcurrency(); got != tt.want {
+				t.Errorf("zombieScanConcurrency() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSessionRecreated_NoSession(t *testing.T) {
 	t.Parallel()
 	// When the session doesn't exist, sessionRecreated should return false
