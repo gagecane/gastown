@@ -21,8 +21,10 @@ const (
 // doltRemotesInterval returns the configured push interval, or the default (15m).
 func doltRemotesInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.DoltRemotes != nil {
-		if config.Patrols.DoltRemotes.Interval > 0 {
-			return config.Patrols.DoltRemotes.Interval
+		if config.Patrols.DoltRemotes.IntervalStr != "" {
+			if d, err := time.ParseDuration(config.Patrols.DoltRemotes.IntervalStr); err == nil && d > 0 {
+				return d
+			}
 		}
 	}
 	return defaultDoltRemotesInterval

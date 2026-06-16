@@ -159,8 +159,8 @@ type DoltRemotesConfig struct {
 	// Enabled controls whether remote push runs.
 	Enabled bool `json:"enabled"`
 
-	// Interval is how often to push (default 15m).
-	Interval time.Duration `json:"interval,omitempty"`
+	// IntervalStr is how often to push, as a string (e.g., "15m").
+	IntervalStr string `json:"interval,omitempty"`
 
 	// Databases lists specific database names to push.
 	// If empty, auto-discovers databases with configured remotes.
