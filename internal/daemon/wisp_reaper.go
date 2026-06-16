@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -334,84 +335,27 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 
 	// Step 3b: Close plugin receipts (fast-track — 1h instead of 7d stale age)
 	pluginReceiptAge := 1 * time.Hour
-	var totalPluginClosed int
-	for _, dbName := range databases {
-		if err := reaper.ValidateDBName(dbName); err != nil {
-			continue
-		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
-		if err != nil {
-			continue
-		}
-		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			db.Close()
-			continue
-		}
-		result, err := reaper.ClosePluginReceipts(db, dbName, pluginReceiptAge, dryRun)
-		db.Close()
-		if err != nil {
-			d.logger.Printf("wisp_reaper: %s: plugin receipt close error: %v", dbName, err)
-			continue
-		}
-		totalPluginClosed += result.Closed
-		if result.Closed > 0 {
-			d.logger.Printf("wisp_reaper: %s: closed %d plugin receipts", dbName, result.Closed)
-		}
-	}
+	totalPluginClosed := d.closeStaleAcrossDBs(databases, host, port,
+		"plugin receipt", "plugin receipts",
+		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
+			return reaper.ClosePluginReceipts(db, dbName, pluginReceiptAge, dryRun)
+		})
 
 	// Step 3c: Close plugin dispatch mails (daemon→dog instruction beads that are never closed)
 	pluginDispatchAge := 1 * time.Hour
-	var totalDispatchClosed int
-	for _, dbName := range databases {
-		if err := reaper.ValidateDBName(dbName); err != nil {
-			continue
-		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
-		if err != nil {
-			continue
-		}
-		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			db.Close()
-			continue
-		}
-		result, err := reaper.ClosePluginDispatches(db, dbName, pluginDispatchAge, dryRun)
-		db.Close()
-		if err != nil {
-			d.logger.Printf("wisp_reaper: %s: plugin dispatch close error: %v", dbName, err)
-			continue
-		}
-		totalDispatchClosed += result.Closed
-		if result.Closed > 0 {
-			d.logger.Printf("wisp_reaper: %s: closed %d plugin dispatches", dbName, result.Closed)
-		}
-	}
+	totalDispatchClosed := d.closeStaleAcrossDBs(databases, host, port,
+		"plugin dispatch", "plugin dispatches",
+		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
+			return reaper.ClosePluginDispatches(db, dbName, pluginDispatchAge, dryRun)
+		})
 
 	// Step 3d: Close stale hooked mols — dispatch wisps that sat in 'hooked'
 	// status beyond defaultHookedMolTTL because no dog was alive to consume them.
-	var totalHookedClosed int
-	for _, dbName := range databases {
-		if err := reaper.ValidateDBName(dbName); err != nil {
-			continue
-		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
-		if err != nil {
-			continue
-		}
-		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			db.Close()
-			continue
-		}
-		result, err := reaper.CloseStaleHookedMols(db, dbName, defaultHookedMolTTL, dryRun)
-		db.Close()
-		if err != nil {
-			d.logger.Printf("wisp_reaper: %s: hooked mol close error: %v", dbName, err)
-			continue
-		}
-		totalHookedClosed += result.Closed
-		if result.Closed > 0 {
-			d.logger.Printf("wisp_reaper: %s: closed %d stale hooked mols", dbName, result.Closed)
-		}
-	}
+	totalHookedClosed := d.closeStaleAcrossDBs(databases, host, port,
+		"hooked mol", "stale hooked mols",
+		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
+			return reaper.CloseStaleHookedMols(db, dbName, defaultHookedMolTTL, dryRun)
+		})
 
 	// Step 4: Auto-close
 	autoCloseErrors := 0
@@ -548,6 +492,54 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		totalOpen, len(databases), dryRun)
 	d.logger.Printf("%s", summary)
 	mol.closeStep("report")
+}
+
+// closeStaleAcrossDBs runs a per-database "close stale X" reaper step across all
+// databases, applying one consistent error-handling policy. errLabel names the
+// operation in error logs (e.g. "plugin receipt" → "plugin receipt close error");
+// closedLabel names the unit in success logs (e.g. "plugin receipts" →
+// "closed N plugin receipts"). closeFn binds the specific reaper call (and its
+// age threshold) for the step.
+//
+// Unlike the earlier hand-rolled loops, this surfaces OpenDB failures: it counts
+// them and emits a WARNING summarizing how many databases could not be opened,
+// matching the error-visibility the adjacent Step-4 auto-close loop already had.
+// Silent OpenDB failures here would mask Dolt-access problems during reaping.
+func (d *Daemon) closeStaleAcrossDBs(
+	databases []string, host string, port int,
+	errLabel, closedLabel string,
+	closeFn func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error),
+) (totalClosed int) {
+	openErrors := 0
+	for _, dbName := range databases {
+		if err := reaper.ValidateDBName(dbName); err != nil {
+			continue
+		}
+		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
+		if err != nil {
+			openErrors++
+			continue
+		}
+		if ok, _ := reaper.HasReaperSchema(db); !ok {
+			db.Close()
+			continue
+		}
+		result, err := closeFn(db, dbName)
+		db.Close()
+		if err != nil {
+			d.logger.Printf("wisp_reaper: %s: %s close error: %v", dbName, errLabel, err)
+			continue
+		}
+		totalClosed += result.Closed
+		if result.Closed > 0 {
+			d.logger.Printf("wisp_reaper: %s: closed %d %s", dbName, result.Closed, closedLabel)
+		}
+	}
+	if openErrors > 0 {
+		d.logger.Printf("wisp_reaper: WARNING: %d databases could not be opened during %s reap",
+			openErrors, errLabel)
+	}
+	return totalClosed
 }
 
 // doltServerPort returns the configured Dolt server port.
