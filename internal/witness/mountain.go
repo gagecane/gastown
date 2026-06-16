@@ -36,21 +36,65 @@ type ConvoyFailureResult struct {
 // For each zombie that had active work on a hook_bead (polecat failed without
 // completing), checks if the issue belongs to a convoy and tracks the failure.
 // Called from DetectZombiePolecats after all zombies are collected.
+//
+// gu-h7hc0: The convoy lookups are batched to avoid an N+1 explosion of bd
+// subprocess+Dolt round-trips during a mass-death incident (documented: 14
+// deaths in one rig). Instead of dep-list + show + show per zombie, we issue:
+//   - one batched up-query (`bd dep list <all-hooks> --direction=up
+//     --type=tracks`) to discover the tracking convoys and their labels, then
+//   - one down-query per unique convoy (`bd dep list <convoy> --direction=down
+//     --type=tracks`) to recover which hook bead belongs to which convoy and to
+//     read each leg's current failure labels in the same response.
+//
+// Unique convoys are few — a mass death is typically concentrated in a single
+// mountain convoy — so the read cost collapses from O(3N) to roughly O(unique
+// convoys). The increment/skip writes remain per-affected-leg (they are rare
+// and must hit each leg individually).
 func trackConvoyFailures(bd *BdCli, workDir string, result *DetectZombiePolecatsResult) {
+	// Collect the hook beads of zombies that represent an actual incomplete
+	// failure. Submitted/orphan cleanup states can still carry a hook_bead for
+	// traceability, but they must not increment mountain failure counts.
+	hookBeads := make([]string, 0, len(result.Zombies))
+	seen := make(map[string]bool, len(result.Zombies))
 	for i := range result.Zombies {
 		zombie := &result.Zombies[i]
-
-		// Only track failures for zombies that had active work on an issue and
-		// didn't complete it. Submitted/orphan cleanup states can still carry a
-		// hook_bead for traceability, but they must not increment mountain failure
-		// counts.
 		if zombie.HookBead == "" || !zombieImpliesActiveFailure(*zombie) {
 			continue
 		}
+		if seen[zombie.HookBead] {
+			continue
+		}
+		seen[zombie.HookBead] = true
+		hookBeads = append(hookBeads, zombie.HookBead)
+	}
+	if len(hookBeads) == 0 {
+		return
+	}
 
-		cfr := TrackConvoyFailure(bd, workDir, zombie.HookBead)
-		if cfr == nil {
+	// Resolve hook bead -> tracking convoy in batch.
+	assignments := resolveConvoyAssignments(bd, workDir, hookBeads)
+	if len(assignments) == 0 {
+		return
+	}
+
+	// Process the affected legs in stable hook-bead order.
+	for _, issueID := range hookBeads {
+		a, ok := assignments[issueID]
+		if !ok {
 			continue // Not convoy-tracked
+		}
+
+		cfr := &ConvoyFailureResult{
+			IssueID:    issueID,
+			ConvoyID:   a.convoyID,
+			IsMountain: a.isMountain,
+		}
+		if a.isMountain {
+			// Reuse the leg labels already fetched by the down-query instead of
+			// re-issuing a bd show per leg.
+			cfr.Error = applyMountainFailure(bd, workDir, issueID, a.issueLabels, cfr)
+		} else {
+			cfr.Warning = fmt.Sprintf("polecat failure on convoy-tracked issue %s (convoy %s)", issueID, a.convoyID)
 		}
 
 		if cfr.IsMountain {
@@ -72,6 +116,132 @@ func trackConvoyFailures(bd *BdCli, workDir string, result *DetectZombiePolecats
 
 		result.ConvoyFailures = append(result.ConvoyFailures, *cfr)
 	}
+}
+
+// convoyAssignment records the tracking convoy a hook bead belongs to, along
+// with the convoy's mountain status and the leg's labels (carrying the
+// mountain:failures:N count) as observed in the convoy down-query.
+type convoyAssignment struct {
+	convoyID    string
+	isMountain  bool
+	issueLabels []string
+}
+
+// resolveConvoyAssignments maps each hook bead to its tracking convoy using two
+// batched query stages (see trackConvoyFailures). Hook beads with no tracking
+// convoy are absent from the returned map.
+//
+// An issue is assumed to belong to at most one active convoy (the same
+// invariant the per-issue path relies on); when a hook bead is tracked by more
+// than one convoy, the first convoy encountered in the up-query order wins.
+func resolveConvoyAssignments(bd *BdCli, workDir string, hookBeads []string) map[string]*convoyAssignment {
+	// Stage 1: one up-query discovers every convoy tracking any hook bead,
+	// deduped in first-seen order, with mountain status read from inline labels.
+	convoys := getTrackingConvoysBatch(bd, workDir, hookBeads)
+	if len(convoys) == 0 {
+		return nil
+	}
+
+	eligible := make(map[string]bool, len(hookBeads))
+	for _, id := range hookBeads {
+		eligible[id] = true
+	}
+
+	// Stage 2: one down-query per unique convoy recovers attribution (which leg
+	// belongs to which convoy) and each leg's failure labels in the same
+	// response. First convoy to claim a leg wins.
+	assignments := make(map[string]*convoyAssignment, len(hookBeads))
+	for _, c := range convoys {
+		for _, leg := range getConvoyLegsWithLabels(bd, workDir, c.id) {
+			if !eligible[leg.id] {
+				continue
+			}
+			if _, claimed := assignments[leg.id]; claimed {
+				continue
+			}
+			assignments[leg.id] = &convoyAssignment{
+				convoyID:    c.id,
+				isMountain:  c.isMountain,
+				issueLabels: leg.labels,
+			}
+		}
+	}
+	return assignments
+}
+
+// convoyRef is a tracking convoy discovered by the batched up-query.
+type convoyRef struct {
+	id         string
+	isMountain bool
+}
+
+// beadRef is a bead id paired with its labels.
+type beadRef struct {
+	id     string
+	labels []string
+}
+
+// getTrackingConvoysBatch issues a single `bd dep list <ids...> --direction=up
+// --type=tracks --json` and returns the tracking convoys, deduped in first-seen
+// order. Mountain status is read from each convoy's inline labels, so no
+// follow-up bd show is needed. The batched up-query returns a flat array of
+// dependent (convoy) records with no per-source attribution; attribution is
+// recovered separately via the per-convoy down-query.
+func getTrackingConvoysBatch(bd *BdCli, workDir string, issueIDs []string) []convoyRef {
+	args := append([]string{"dep", "list"}, issueIDs...)
+	args = append(args, "--direction=up", "--type=tracks", "--json")
+	output, err := bd.Exec(workDir, args...)
+	if err != nil || output == "" || output == "[]" || output == "null" {
+		return nil
+	}
+
+	var deps []struct {
+		ID     string   `json:"id"`
+		Type   string   `json:"dependency_type"`
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(output), &deps); err != nil {
+		return nil
+	}
+
+	convoys := make([]convoyRef, 0, len(deps))
+	seen := make(map[string]bool, len(deps))
+	for _, d := range deps {
+		if d.ID == "" || seen[d.ID] {
+			continue
+		}
+		seen[d.ID] = true
+		convoys = append(convoys, convoyRef{id: d.ID, isMountain: hasLabel(d.Labels, "mountain")})
+	}
+	return convoys
+}
+
+// getConvoyLegsWithLabels issues a single `bd dep list <convoy> --direction=down
+// --type=tracks --json` and returns the convoy's tracked legs with their labels.
+// The single-id down-query returns full issue records (id + labels), so each
+// leg's mountain:failures:N count is available without a per-leg bd show.
+func getConvoyLegsWithLabels(bd *BdCli, workDir, convoyID string) []beadRef {
+	output, err := bd.Exec(workDir, "dep", "list", convoyID, "--direction=down", "--type=tracks", "--json")
+	if err != nil || output == "" || output == "[]" || output == "null" {
+		return nil
+	}
+
+	var legs []struct {
+		ID     string   `json:"id"`
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(output), &legs); err != nil {
+		return nil
+	}
+
+	refs := make([]beadRef, 0, len(legs))
+	for _, l := range legs {
+		if l.ID == "" {
+			continue
+		}
+		refs = append(refs, beadRef{id: l.ID, labels: l.Labels})
+	}
+	return refs
 }
 
 func zombieImpliesActiveFailure(zombie ZombieResult) bool {
@@ -123,10 +293,18 @@ func TrackConvoyFailure(bd *BdCli, workDir, issueID string) *ConvoyFailureResult
 }
 
 // trackMountainFailure increments the failure count for a mountain-tracked
-// issue and auto-skips if the count reaches MountainMaxFailures.
+// issue and auto-skips if the count reaches MountainMaxFailures. Used by the
+// per-issue path (TrackConvoyFailure), which fetches the issue labels itself.
 func trackMountainFailure(bd *BdCli, workDir, issueID string, result *ConvoyFailureResult) error {
-	// Get current failure count from issue labels
 	issueLabels := getBeadLabels(bd, workDir, issueID)
+	return applyMountainFailure(bd, workDir, issueID, issueLabels, result)
+}
+
+// applyMountainFailure increments the failure count for a mountain-tracked issue
+// (using the supplied current labels) and auto-skips if the count reaches
+// MountainMaxFailures. The labels are passed in so callers that already fetched
+// them (the batched path) do not re-issue a bd show per leg.
+func applyMountainFailure(bd *BdCli, workDir, issueID string, issueLabels []string, result *ConvoyFailureResult) error {
 	currentCount := getMountainFailureCount(issueLabels)
 	newCount := currentCount + 1
 	result.FailureCount = newCount

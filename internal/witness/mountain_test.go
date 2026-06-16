@@ -385,24 +385,22 @@ func TestTrackConvoyFailures_MountainZombie(t *testing.T) {
 		},
 	}
 
-	// dep list returns mountain convoy
-	deps, _ := json.Marshal([]struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-	}{{ID: "hq-cv-mtn", Type: "tracks"}})
-	mock.execResults["dep list gt-mtn-task --direction=up --type=tracks --json"] = mockExecResult{output: string(deps)}
-
-	// Convoy has mountain label
-	convoyShow, _ := json.Marshal([]struct {
+	// Batched up-query: the tracking convoy is returned with its labels inline
+	// (mountain status is read here, not via a follow-up bd show).
+	upDeps, _ := json.Marshal([]struct {
+		ID     string   `json:"id"`
+		Type   string   `json:"dependency_type"`
 		Labels []string `json:"labels"`
-	}{{Labels: []string{"mountain"}}})
-	mock.execResults["show hq-cv-mtn --json"] = mockExecResult{output: string(convoyShow)}
+	}{{ID: "hq-cv-mtn", Type: "tracks", Labels: []string{"mountain"}}})
+	mock.execResults["dep list gt-mtn-task --direction=up --type=tracks --json"] = mockExecResult{output: string(upDeps)}
 
-	// Issue has no existing failures
-	issueShow, _ := json.Marshal([]struct {
+	// Per-convoy down-query: recovers attribution (leg -> convoy) and the leg's
+	// labels (failure count) in one response. Issue has no existing failures.
+	downLegs, _ := json.Marshal([]struct {
+		ID     string   `json:"id"`
 		Labels []string `json:"labels"`
-	}{{Labels: []string{}}})
-	mock.execResults["show gt-mtn-task --json"] = mockExecResult{output: string(issueShow)}
+	}{{ID: "gt-mtn-task", Labels: []string{}}})
+	mock.execResults["dep list hq-cv-mtn --direction=down --type=tracks --json"] = mockExecResult{output: string(downLegs)}
 
 	trackConvoyFailures(mock.toBdCli(), "/tmp", result)
 
@@ -422,5 +420,88 @@ func TestTrackConvoyFailures_MountainZombie(t *testing.T) {
 	}
 	if cf.Skipped {
 		t.Error("should not be skipped after 1 failure")
+	}
+}
+
+// TestTrackConvoyFailures_BatchesQueries is the gu-h7hc0 regression guard: when
+// several zombies in one mass-death event all belong to the same mountain
+// convoy, the read path must collapse to exactly one up-query plus one
+// down-query, regardless of how many legs failed — not the old O(3N) explosion
+// of dep-list + show + show per zombie.
+func TestTrackConvoyFailures_BatchesQueries(t *testing.T) {
+	t.Parallel()
+	mock := newMockBd()
+
+	result := &DetectZombiePolecatsResult{
+		Checked: 3,
+		Zombies: []ZombieResult{
+			{PolecatName: "nux", Classification: ZombieSessionDeadActive, HookBead: "gt-leg-a"},
+			{PolecatName: "slit", Classification: ZombieSessionDeadActive, HookBead: "gt-leg-b"},
+			{PolecatName: "rictus", Classification: ZombieAgentDeadInSession, HookBead: "gt-leg-c"},
+		},
+	}
+
+	// Single batched up-query over all three hook beads returns the shared
+	// mountain convoy (deduped to one record).
+	upDeps, _ := json.Marshal([]struct {
+		ID     string   `json:"id"`
+		Type   string   `json:"dependency_type"`
+		Labels []string `json:"labels"`
+	}{
+		{ID: "hq-cv-mtn", Type: "tracks", Labels: []string{"mountain"}},
+		{ID: "hq-cv-mtn", Type: "tracks", Labels: []string{"mountain"}},
+		{ID: "hq-cv-mtn", Type: "tracks", Labels: []string{"mountain"}},
+	})
+	mock.execResults["dep list gt-leg-a gt-leg-b gt-leg-c --direction=up --type=tracks --json"] = mockExecResult{output: string(upDeps)}
+
+	// Single down-query over the convoy attributes all three legs and carries
+	// each leg's current failure labels. Leg c is on its third failure → skip.
+	downLegs, _ := json.Marshal([]struct {
+		ID     string   `json:"id"`
+		Labels []string `json:"labels"`
+	}{
+		{ID: "gt-leg-a", Labels: []string{}},
+		{ID: "gt-leg-b", Labels: []string{"mountain:failures:1"}},
+		{ID: "gt-leg-c", Labels: []string{"mountain:failures:2"}},
+	})
+	mock.execResults["dep list hq-cv-mtn --direction=down --type=tracks --json"] = mockExecResult{output: string(downLegs)}
+
+	trackConvoyFailures(mock.toBdCli(), "/tmp", result)
+
+	// Exactly two read queries total: one up, one down. This is the N+1 collapse.
+	if len(mock.execCalls) != 2 {
+		t.Fatalf("expected 2 exec (read) calls, got %d: %v", len(mock.execCalls), mock.execCalls)
+	}
+
+	if len(result.ConvoyFailures) != 3 {
+		t.Fatalf("expected 3 convoy failures, got %d", len(result.ConvoyFailures))
+	}
+
+	byID := make(map[string]ConvoyFailureResult, 3)
+	for _, cf := range result.ConvoyFailures {
+		byID[cf.IssueID] = cf
+	}
+	for id, want := range map[string]struct {
+		count   int
+		skipped bool
+	}{
+		"gt-leg-a": {1, false},
+		"gt-leg-b": {2, false},
+		"gt-leg-c": {3, true},
+	} {
+		cf, ok := byID[id]
+		if !ok {
+			t.Errorf("missing convoy failure for %s", id)
+			continue
+		}
+		if !cf.IsMountain {
+			t.Errorf("%s: expected IsMountain=true", id)
+		}
+		if cf.FailureCount != want.count {
+			t.Errorf("%s: FailureCount = %d, want %d", id, cf.FailureCount, want.count)
+		}
+		if cf.Skipped != want.skipped {
+			t.Errorf("%s: Skipped = %v, want %v", id, cf.Skipped, want.skipped)
+		}
 	}
 }
