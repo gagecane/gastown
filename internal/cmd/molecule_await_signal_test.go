@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -204,6 +206,117 @@ func TestWaitForEventsFile_Signal(t *testing.T) {
 	}
 	if result.Signal == "" {
 		t.Error("expected signal line to be set")
+	}
+}
+
+func TestShouldWakeOnEvent(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "audit-only daemon plugin dispatch is skipped",
+			line: `{"ts":"t","type":"daemon.plugin.dispatch","actor":"daemon","visibility":"audit"}`,
+			want: false,
+		},
+		{
+			name: "feed-visible mail wakes",
+			line: `{"ts":"t","type":"mail","actor":"witness","visibility":"feed"}`,
+			want: true,
+		},
+		{
+			name: "both-visible event wakes",
+			line: `{"ts":"t","type":"sling","actor":"mayor","visibility":"both"}`,
+			want: true,
+		},
+		{
+			name: "missing visibility fails open (wakes)",
+			line: `{"ts":"t","type":"sling","actor":"mayor"}`,
+			want: true,
+		},
+		{
+			name: "unparseable line fails open (wakes)",
+			line: `not json at all`,
+			want: true,
+		},
+		{
+			name: "unknown visibility value is skipped",
+			line: `{"ts":"t","type":"x","visibility":"audit"}`,
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldWakeOnEvent(tt.line); got != tt.want {
+				t.Errorf("shouldWakeOnEvent(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWaitForEventsFile_SkipsAuditOnlyEvent(t *testing.T) {
+	// An audit-only daemon event must NOT wake the agent; the context should
+	// time out instead (gu-z6gdo). Only feed-visible events count as signals.
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	if err := os.WriteFile(eventsPath, []byte(`{"ts":"old","type":"ignore"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"ts":"new","type":"daemon.plugin.dispatch","actor":"daemon","visibility":"audit"}` + "\n")
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "timeout" {
+		t.Errorf("expected reason 'timeout' (audit event must not wake), got %q", result.Reason)
+	}
+}
+
+func TestWaitForEventsFile_AuditThenFeedWakesOnFeed(t *testing.T) {
+	// An audit-only event followed by a feed-visible event: the agent must
+	// skip the first and wake on the second, returning the feed line.
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	if err := os.WriteFile(eventsPath, []byte(`{"ts":"old","type":"ignore"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		time.Sleep(150 * time.Millisecond)
+		_, _ = f.WriteString(`{"ts":"a","type":"daemon.plugin.dispatch","visibility":"` + events.VisibilityAudit + `"}` + "\n")
+		time.Sleep(150 * time.Millisecond)
+		_, _ = f.WriteString(`{"ts":"b","type":"mail","actor":"witness","visibility":"` + events.VisibilityFeed + `"}` + "\n")
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "signal" {
+		t.Fatalf("expected reason 'signal', got %q", result.Reason)
+	}
+	if !strings.Contains(result.Signal, `"type":"mail"`) {
+		t.Errorf("expected to wake on the feed-visible mail event, got signal %q", result.Signal)
 	}
 }
 

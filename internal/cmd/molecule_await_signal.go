@@ -455,6 +455,15 @@ func waitForEventsFile(ctx context.Context, eventsPath string) (*AwaitSignalResu
 		case <-ticker.C:
 			line, err := reader.ReadString('\n')
 			if err == nil && line != "" {
+				// Skip audit-only daemon-internal noise (e.g.
+				// daemon.plugin.dispatch — the daemon firing its own scheduled
+				// plugins every heartbeat). Waking on those busy-loops an idle
+				// patrol agent and burns tokens re-running patrols on internal
+				// churn (gu-z6gdo). Keep polling until a real, oversight-worthy
+				// (feed-visible) event arrives.
+				if !shouldWakeOnEvent(line) {
+					continue
+				}
 				return &AwaitSignalResult{
 					Reason: "signal",
 					Signal: strings.TrimRight(line, "\n"),
@@ -466,6 +475,30 @@ func waitForEventsFile(ctx context.Context, eventsPath string) (*AwaitSignalResu
 			}
 		}
 	}
+}
+
+// shouldWakeOnEvent reports whether an events.jsonl line is worth waking a
+// patrol agent for. It returns true for feed-visible events (real activity such
+// as mail, nudges, slings, session lifecycle, and escalations) and false for
+// audit-only events (daemon-internal churn like daemon.plugin.dispatch, which
+// the daemon emits every heartbeat when it fires its own scheduled plugins).
+//
+// This mirrors the feed curator's visibility filter (internal/feed/curator.go):
+// the activity feed already curates these audit events out of the user-facing
+// view, so an idle patrol agent should not wake on them either (gu-z6gdo).
+//
+// Fail-open: a line that cannot be parsed, or one with no visibility set, is
+// treated as wake-worthy. Missing a real signal (leaving an agent parked
+// through genuine activity) is worse than an occasional spurious wake.
+func shouldWakeOnEvent(line string) bool {
+	var ev events.Event
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		return true // unparseable — fail open and wake
+	}
+	if ev.Visibility == "" {
+		return true // visibility unset — fail open and wake
+	}
+	return ev.Visibility == events.VisibilityFeed || ev.Visibility == events.VisibilityBoth
 }
 
 // parseIntSimple parses a string to int without using strconv.
