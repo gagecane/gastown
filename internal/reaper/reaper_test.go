@@ -404,26 +404,43 @@ func sourceBetween(t *testing.T, source, startMarker, endMarker string) string {
 	return source[start : start+end]
 }
 
-// TestReapExcludesAgentBeads verifies that the Reap function excludes agent beads
-// from being closed, regardless of their age. This is a regression test for the bug
-// where the wisp reaper was closing agent beads (hq-mayor, hq-deacon, witness, refinery,
-// etc.) after 24 hours, causing doctor to report them as missing.
+// TestReapExcludesAgentBeads verifies — by executing Reap() against the fake SQL
+// driver — that a stale, parent-less agent bead is left open while a comparable
+// non-agent orphan of the same age is closed. This is the safety-critical
+// invariant (gu-016x1, and the doctor "core agents missing" regression): the wisp
+// reaper must never close hq-mayor/witness/refinery/deacon agent beads.
+//
+// Unlike a source-text substring check, this exercises the real query path. The
+// fake driver's validateStaleWispQuery also requires the production SELECT to
+// carry "w.issue_type != 'agent'", so dropping the predicate fails here too.
 func TestReapExcludesAgentBeads(t *testing.T) {
-	// Verify that the WHERE clause in Reap() excludes issue_type='agent'
-	// by checking the source code pattern.
-	// This is a compile-time guard — if the exclusion is removed, this test
-	// will fail when the query pattern doesn't match.
+	now := time.Now().UTC()
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			// Both are stale (older than maxAge) and parent-less, so the only
+			// thing keeping the agent bead open is the issue_type='agent' guard.
+			"stale-agent":  {id: "stale-agent", status: "open", issueType: "agent", createdAt: now.Add(-48 * time.Hour)},
+			"stale-orphan": {id: "stale-orphan", status: "open", issueType: "task", createdAt: now.Add(-48 * time.Hour)},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
 
-	// The whereClause in Reap() should contain:
-	// "w.issue_type != 'agent'"
-	// This test documents the expected behavior; actual exclusion is tested
-	// in integration tests with a real database.
-
-	// Integration test would require spinning up a Dolt server, which is
-	// beyond the scope of this unit test. The exclusion is verified manually
-	// by checking that agent beads are not closed by the wisp_reaper patrol.
-	t.Log("Agent beads (issue_type='agent') are excluded from wisp reaping")
-	t.Log("This prevents hq-mayor, hq-deacon, witness, refinery, etc. from being closed")
+	maxAge := 24 * time.Hour
+	result, err := Reap(db, "testdb", maxAge, false)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if result.Reaped != 1 {
+		t.Fatalf("Reap Reaped = %d, want 1 (only the non-agent orphan)", result.Reaped)
+	}
+	if got := state.status("stale-agent"); got != "open" {
+		t.Fatalf("stale-agent status = %q, want open (agent beads must never be reaped)", got)
+	}
+	if got := state.status("stale-orphan"); got != "closed" {
+		t.Fatalf("stale-orphan status = %q, want closed (control: stale non-agent orphan is reaped)", got)
+	}
 }
 
 // TestScanExcludesAgentBeads documents that Scan() must use the same eligibility
