@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -471,6 +472,17 @@ func tryReuseIdlePolecat(
 	}
 	reuseOK := false
 	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
+		// gu-q2vnb: a recovery-needed slot must NOT be force-repaired. The forced
+		// repair (RepairWorktreeWithOptions(force=true)) removes the old worktree via
+		// raw WorktreeRemove, bypassing preserveUnpushedHead — so a COMPLETED polecat's
+		// unpushed deliverable commit would be destroyed when the slot is reused for the
+		// next bead before that commit lands via MR or is preserved. Skip this slot
+		// instead; the caller tries the next idle polecat or allocates a fresh one,
+		// leaving the worktree intact for witness/deacon recovery.
+		if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
+			fmt.Printf("  Idle polecat %s needs recovery before reuse (%v); leaving it intact and trying next idle polecat...\n", polecatName, err)
+			return nil, false
+		}
 		// Branch-only reuse failed — try full worktree repair as fallback
 		fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v, trying full repair...\n", polecatName, err)
 		if _, err := polecatMgr.RepairWorktreeWithOptions(polecatName, true, addOpts); err != nil {
