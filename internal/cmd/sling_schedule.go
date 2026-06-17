@@ -182,6 +182,202 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	// coordinator decides whether to close one before it dispatches.
 	workOverlapWarner(townRoot, rigName, beadID, info.Title)
 
+	// Run the dispatch-eligibility guard chain. Any guard that rejects the bead
+	// returns a descriptive error here. Extracted into checkScheduleEligibility
+	// so the ~15-guard branch matrix is unit-testable without the surrounding
+	// town/rig/DB orchestration (gu-1sgeb).
+	if err := checkScheduleEligibility(beadID, info); err != nil {
+		return err
+	}
+
+	// Idempotency: check for existing open sling context for this work bead.
+	// Fail fast on errors to avoid creating duplicate contexts on transient DB failures.
+	//
+	// Create the sling context in the target rig's beads dir so that the target
+	// rig's witness can discover it during patrol. Previously this used the HQ
+	// beads dir, which meant non-HQ rig witnesses never saw the context. (GH#3468)
+	rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, rigName)
+	rigBeads := beads.NewWithBeadsDir(townRoot, rigBeadsDir)
+	existingCtx, existingFields, findErr := rigBeads.FindOpenSlingContext(beadID)
+	if findErr != nil {
+		return fmt.Errorf("checking for existing sling context: %w", findErr)
+	}
+	if existingCtx != nil {
+		// Re-attach a DIFFERENT formula to an already-scheduled bead (gs-am8
+		// GAP 2). The previous behavior unconditionally no-op'd, so a staged
+		// bead stuck on the wrong formula — e.g. a review gate scheduled with
+		// the default mol-polecat-work instead of mol-pw-adversarial-review —
+		// could never be corrected (`gt sling mol-X --on <bead> --force`
+		// no-op'd). With --force and a changed formula, rewrite the existing
+		// context's formula in place (same context ID) so the next dispatch
+		// runs the intended formula.
+		if shouldReattachFormula(opts.Force, opts.Formula, existingFields) {
+			if opts.Formula != "" {
+				if err := verifyFormulaExists(opts.Formula, townRoot, rigName); err != nil {
+					return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
+				}
+			}
+			if opts.DryRun {
+				fmt.Printf("Would re-attach formula %q to %s (context %s, was %q)\n",
+					opts.Formula, beadID, existingCtx.ID, existingFields.Formula)
+				return nil
+			}
+			if opts.Formula != "" {
+				workDir := beads.ResolveHookDir(townRoot, beadID, "")
+				if err := CookFormula(opts.Formula, workDir, townRoot); err != nil {
+					return fmt.Errorf("formula %q failed to cook: %w", opts.Formula, err)
+				}
+			}
+			newFields := *existingFields
+			newFields.Formula = opts.Formula
+			if err := rigBeads.UpdateSlingContextFields(existingCtx.ID, &newFields); err != nil {
+				return fmt.Errorf("re-attaching formula to context %s: %w", existingCtx.ID, err)
+			}
+			fmt.Printf("%s Re-attached formula %q to %s (context %s, was %q)\n",
+				style.Bold.Render("→"), opts.Formula, beadID, existingCtx.ID, existingFields.Formula)
+			return nil
+		}
+
+		// Stale/failed-context recovery (gu-rm08l). A context that recorded a
+		// transient dispatch failure (dispatch_failures>0) or has aged past the
+		// TTL is NOT a healthy in-flight dispatch — it is a parked context the
+		// daemon will never make progress on. Close it and fall through to
+		// create a fresh one so the bead returns to the dispatchable pool.
+		// Without this, re-slings (manual or from convoy/epic/stranded scans,
+		// which already treat such contexts as unscheduled via areScheduled's
+		// TTL logic) no-op on the lingering context and park the bead forever.
+		if isStaleOrFailedContext(existingCtx, existingFields, time.Now()) {
+			reason := staleContextReslingReason(existingFields)
+			if opts.DryRun {
+				fmt.Printf("Would recycle stale/failed context %s for %s (%s) and re-schedule\n",
+					existingCtx.ID, beadID, reason)
+			} else {
+				if err := rigBeads.CloseSlingContext(existingCtx.ID, reason); err != nil {
+					return fmt.Errorf("recycling stale sling context %s: %w", existingCtx.ID, err)
+				}
+				fmt.Printf("%s Recycled stale/failed context %s for %s (%s); re-scheduling\n",
+					style.Bold.Render("↻"), existingCtx.ID, beadID, reason)
+			}
+			// Fall through to fresh schedule (existingCtx is now closed).
+			existingCtx = nil
+			existingFields = nil
+		}
+	}
+	if existingCtx != nil {
+		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
+			style.Dim.Render("○"), beadID, existingCtx.ID)
+		// Point the operator at --force when they're trying to change the
+		// formula but didn't pass it (gs-am8 GAP 2).
+		if existingFields != nil && opts.Formula != "" && opts.Formula != existingFields.Formula {
+			fmt.Printf("  %s staged formula is %q; pass --force to re-attach %q\n",
+				style.Dim.Render("Tip:"), existingFields.Formula, opts.Formula)
+		}
+		return nil
+	}
+
+	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !opts.Force {
+		return fmt.Errorf("bead %s is already %s to %s\nUse --force to override", beadID, info.Status, info.Assignee)
+	}
+
+	// Honor a 'gt:formula:<name>' label declared on the bead (gs-zq0 / gs-am8
+	// GAP 1) so a pre-staged gated leg's intended formula survives the deferred
+	// auto-dispatch path. The label outranks only the rig/system DEFAULT: when
+	// the caller passed nothing or the resolved default, the declared formula
+	// wins; an explicit non-default choice (e.g. `gt sling mol-X --on`) is
+	// preserved. hook-raw-bead (an explicit no-formula request) is left alone.
+	if declared := beads.FormulaFromLabels(info.Labels); declared != "" && !opts.HookRawBead {
+		if opts.Formula == "" || opts.Formula == resolveFormula("", false, townRoot, rigName) {
+			if declared != opts.Formula {
+				fmt.Printf("  %s Honoring %s%s declared on %s (was %q)\n",
+					style.Bold.Render("→"), beads.FormulaLabelPrefix, declared, beadID, opts.Formula)
+			}
+			opts.Formula = declared
+		}
+	}
+
+	if opts.Formula != "" {
+		if err := verifyFormulaExists(opts.Formula, townRoot, rigName); err != nil {
+			return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
+		}
+	}
+
+	if opts.DryRun {
+		fmt.Printf("Would schedule %s → %s\n", beadID, rigName)
+		fmt.Printf("  Would create sling context bead\n")
+		if !opts.NoConvoy {
+			fmt.Printf("  Would create auto-convoy\n")
+		}
+		return nil
+	}
+
+	// Cook formula after dry-run check to avoid side effects
+	if opts.Formula != "" {
+		workDir := beads.ResolveHookDir(townRoot, beadID, "")
+		if err := CookFormula(opts.Formula, workDir, townRoot); err != nil {
+			return fmt.Errorf("formula %q failed to cook: %w", opts.Formula, err)
+		}
+	}
+
+	// Build sling context fields from the scheduling options (gu-1sgeb).
+	fields := buildSlingContextFields(beadID, rigName, opts, time.Now())
+
+	// Create sling context bead in the target rig's beads dir so the rig's
+	// witness discovers it during patrol. (GH#3468)
+	ctxBead, err := rigBeads.CreateSlingContext(info.Title, beadID, fields)
+	if err != nil {
+		return fmt.Errorf("creating sling context: %w", err)
+	}
+
+	// Auto-convoy (unless --no-convoy)
+	if !opts.NoConvoy {
+		existingConvoy := isTrackedByConvoy(beadID)
+		if existingConvoy == "" {
+			convoyID, created, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch)
+			if err != nil {
+				fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
+			} else {
+				if created {
+					fmt.Printf("%s Created convoy %s\n", style.Bold.Render("→"), convoyID)
+				} else {
+					// Create-chokepoint dedup found a pre-existing convoy (gu-xig8y).
+					fmt.Printf("%s Already tracked by convoy %s\n", style.Dim.Render("○"), convoyID)
+				}
+				// Stamp the tracking convoy (new or pre-existing) onto the context
+				// bead so downstream dispatch resolves the same convoy.
+				fields.Convoy = convoyID
+				if updateErr := rigBeads.UpdateSlingContextFields(ctxBead.ID, fields); updateErr != nil {
+					fmt.Printf("%s Could not update context with convoy: %v\n", style.Dim.Render("Warning:"), updateErr)
+				}
+			}
+		} else {
+			fmt.Printf("%s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
+		}
+	}
+
+	actor := detectActor()
+	_ = events.LogFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
+
+	fmt.Printf("%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)
+	return nil
+}
+
+// checkScheduleEligibility runs scheduleBead's dispatch-eligibility guard chain
+// against an already-fetched bead. It returns a descriptive error for the first
+// guard that rejects the bead, or nil if the bead is eligible to be scheduled.
+//
+// Each guard mirrors a dispatch-time invariant so a bead that can never be
+// dispatched (identity bead, container, mayor/human-only, notification, deferred,
+// open-children container, etc.) never gets a sling context + auto-convoy created
+// for it. None of these guards are bypassable by --force: they are dispatcher
+// invariants, not the status/assignee sanity checks --force exists to override.
+//
+// The order is deliberate: the closed/tombstone check runs first so its error
+// names the closed cause rather than the more general identity message (gu-3znx),
+// and the open-children guard runs last because it is the only one that pays a
+// `bd children` subprocess — every cheap title/label/owner guard short-circuits
+// before it. Extracted from scheduleBead so the branch matrix is unit-testable
+// without the surrounding town/rig/DB orchestration (gu-1sgeb).
+func checkScheduleEligibility(beadID string, info *beadInfo) error {
 	// Guard against scheduling closed/tombstone beads (defense-in-depth, hq-ki2).
 	// Mirrors the closed-bead guards in runSling (sling.go) and executeSling
 	// (sling_dispatch.go). The daemon's stranded scan can route closed cross-prefix
@@ -384,140 +580,20 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 			beadID, info.Title, beadID)
 	}
 
-	// Idempotency: check for existing open sling context for this work bead.
-	// Fail fast on errors to avoid creating duplicate contexts on transient DB failures.
-	//
-	// Create the sling context in the target rig's beads dir so that the target
-	// rig's witness can discover it during patrol. Previously this used the HQ
-	// beads dir, which meant non-HQ rig witnesses never saw the context. (GH#3468)
-	rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, rigName)
-	rigBeads := beads.NewWithBeadsDir(townRoot, rigBeadsDir)
-	existingCtx, existingFields, findErr := rigBeads.FindOpenSlingContext(beadID)
-	if findErr != nil {
-		return fmt.Errorf("checking for existing sling context: %w", findErr)
-	}
-	if existingCtx != nil {
-		// Re-attach a DIFFERENT formula to an already-scheduled bead (gs-am8
-		// GAP 2). The previous behavior unconditionally no-op'd, so a staged
-		// bead stuck on the wrong formula — e.g. a review gate scheduled with
-		// the default mol-polecat-work instead of mol-pw-adversarial-review —
-		// could never be corrected (`gt sling mol-X --on <bead> --force`
-		// no-op'd). With --force and a changed formula, rewrite the existing
-		// context's formula in place (same context ID) so the next dispatch
-		// runs the intended formula.
-		if shouldReattachFormula(opts.Force, opts.Formula, existingFields) {
-			if opts.Formula != "" {
-				if err := verifyFormulaExists(opts.Formula, townRoot, rigName); err != nil {
-					return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
-				}
-			}
-			if opts.DryRun {
-				fmt.Printf("Would re-attach formula %q to %s (context %s, was %q)\n",
-					opts.Formula, beadID, existingCtx.ID, existingFields.Formula)
-				return nil
-			}
-			if opts.Formula != "" {
-				workDir := beads.ResolveHookDir(townRoot, beadID, "")
-				if err := CookFormula(opts.Formula, workDir, townRoot); err != nil {
-					return fmt.Errorf("formula %q failed to cook: %w", opts.Formula, err)
-				}
-			}
-			newFields := *existingFields
-			newFields.Formula = opts.Formula
-			if err := rigBeads.UpdateSlingContextFields(existingCtx.ID, &newFields); err != nil {
-				return fmt.Errorf("re-attaching formula to context %s: %w", existingCtx.ID, err)
-			}
-			fmt.Printf("%s Re-attached formula %q to %s (context %s, was %q)\n",
-				style.Bold.Render("→"), opts.Formula, beadID, existingCtx.ID, existingFields.Formula)
-			return nil
-		}
+	return nil
+}
 
-		// Stale/failed-context recovery (gu-rm08l). A context that recorded a
-		// transient dispatch failure (dispatch_failures>0) or has aged past the
-		// TTL is NOT a healthy in-flight dispatch — it is a parked context the
-		// daemon will never make progress on. Close it and fall through to
-		// create a fresh one so the bead returns to the dispatchable pool.
-		// Without this, re-slings (manual or from convoy/epic/stranded scans,
-		// which already treat such contexts as unscheduled via areScheduled's
-		// TTL logic) no-op on the lingering context and park the bead forever.
-		if isStaleOrFailedContext(existingCtx, existingFields, time.Now()) {
-			reason := staleContextReslingReason(existingFields)
-			if opts.DryRun {
-				fmt.Printf("Would recycle stale/failed context %s for %s (%s) and re-schedule\n",
-					existingCtx.ID, beadID, reason)
-			} else {
-				if err := rigBeads.CloseSlingContext(existingCtx.ID, reason); err != nil {
-					return fmt.Errorf("recycling stale sling context %s: %w", existingCtx.ID, err)
-				}
-				fmt.Printf("%s Recycled stale/failed context %s for %s (%s); re-scheduling\n",
-					style.Bold.Render("↻"), existingCtx.ID, beadID, reason)
-			}
-			// Fall through to fresh schedule (existingCtx is now closed).
-			existingCtx = nil
-			existingFields = nil
-		}
-	}
-	if existingCtx != nil {
-		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
-			style.Dim.Render("○"), beadID, existingCtx.ID)
-		// Point the operator at --force when they're trying to change the
-		// formula but didn't pass it (gs-am8 GAP 2).
-		if existingFields != nil && opts.Formula != "" && opts.Formula != existingFields.Formula {
-			fmt.Printf("  %s staged formula is %q; pass --force to re-attach %q\n",
-				style.Dim.Render("Tip:"), existingFields.Formula, opts.Formula)
-		}
-		return nil
-	}
-
-	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !opts.Force {
-		return fmt.Errorf("bead %s is already %s to %s\nUse --force to override", beadID, info.Status, info.Assignee)
-	}
-
-	// Honor a 'gt:formula:<name>' label declared on the bead (gs-zq0 / gs-am8
-	// GAP 1) so a pre-staged gated leg's intended formula survives the deferred
-	// auto-dispatch path. The label outranks only the rig/system DEFAULT: when
-	// the caller passed nothing or the resolved default, the declared formula
-	// wins; an explicit non-default choice (e.g. `gt sling mol-X --on`) is
-	// preserved. hook-raw-bead (an explicit no-formula request) is left alone.
-	if declared := beads.FormulaFromLabels(info.Labels); declared != "" && !opts.HookRawBead {
-		if opts.Formula == "" || opts.Formula == resolveFormula("", false, townRoot, rigName) {
-			if declared != opts.Formula {
-				fmt.Printf("  %s Honoring %s%s declared on %s (was %q)\n",
-					style.Bold.Render("→"), beads.FormulaLabelPrefix, declared, beadID, opts.Formula)
-			}
-			opts.Formula = declared
-		}
-	}
-
-	if opts.Formula != "" {
-		if err := verifyFormulaExists(opts.Formula, townRoot, rigName); err != nil {
-			return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
-		}
-	}
-
-	if opts.DryRun {
-		fmt.Printf("Would schedule %s → %s\n", beadID, rigName)
-		fmt.Printf("  Would create sling context bead\n")
-		if !opts.NoConvoy {
-			fmt.Printf("  Would create auto-convoy\n")
-		}
-		return nil
-	}
-
-	// Cook formula after dry-run check to avoid side effects
-	if opts.Formula != "" {
-		workDir := beads.ResolveHookDir(townRoot, beadID, "")
-		if err := CookFormula(opts.Formula, workDir, townRoot); err != nil {
-			return fmt.Errorf("formula %q failed to cook: %w", opts.Formula, err)
-		}
-	}
-
-	// Build sling context fields
+// buildSlingContextFields constructs the SlingContextFields persisted in the
+// sling-context bead from the scheduling options. enqueuedAt is injected (rather
+// than read from the clock internally) so the mapping is deterministic and
+// unit-testable; scheduleBead passes time.Now(). Extracted from scheduleBead so
+// the option→field mapping can be verified directly (gu-1sgeb).
+func buildSlingContextFields(beadID, rigName string, opts ScheduleOptions, enqueuedAt time.Time) *capacity.SlingContextFields {
 	fields := &capacity.SlingContextFields{
 		Version:    1,
 		WorkBeadID: beadID,
 		TargetRig:  rigName,
-		EnqueuedAt: time.Now().UTC().Format(time.RFC3339),
+		EnqueuedAt: enqueuedAt.UTC().Format(time.RFC3339),
 	}
 	if opts.Formula != "" {
 		fields.Formula = opts.Formula
@@ -553,45 +629,7 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	if opts.PriorityFloor > 0 {
 		fields.PriorityFloor = opts.PriorityFloor
 	}
-
-	// Create sling context bead in the target rig's beads dir so the rig's
-	// witness discovers it during patrol. (GH#3468)
-	ctxBead, err := rigBeads.CreateSlingContext(info.Title, beadID, fields)
-	if err != nil {
-		return fmt.Errorf("creating sling context: %w", err)
-	}
-
-	// Auto-convoy (unless --no-convoy)
-	if !opts.NoConvoy {
-		existingConvoy := isTrackedByConvoy(beadID)
-		if existingConvoy == "" {
-			convoyID, created, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch)
-			if err != nil {
-				fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
-			} else {
-				if created {
-					fmt.Printf("%s Created convoy %s\n", style.Bold.Render("→"), convoyID)
-				} else {
-					// Create-chokepoint dedup found a pre-existing convoy (gu-xig8y).
-					fmt.Printf("%s Already tracked by convoy %s\n", style.Dim.Render("○"), convoyID)
-				}
-				// Stamp the tracking convoy (new or pre-existing) onto the context
-				// bead so downstream dispatch resolves the same convoy.
-				fields.Convoy = convoyID
-				if updateErr := rigBeads.UpdateSlingContextFields(ctxBead.ID, fields); updateErr != nil {
-					fmt.Printf("%s Could not update context with convoy: %v\n", style.Dim.Render("Warning:"), updateErr)
-				}
-			}
-		} else {
-			fmt.Printf("%s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
-		}
-	}
-
-	actor := detectActor()
-	_ = events.LogFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
-
-	fmt.Printf("%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)
-	return nil
+	return fields
 }
 
 // runBatchSchedule schedules multiple beads for deferred dispatch.
