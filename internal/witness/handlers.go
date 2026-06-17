@@ -3214,6 +3214,39 @@ type DetectStalledPolecatsResult struct {
 	Errors  []error         // Transient errors
 }
 
+// isLegacyStartupStall decides whether a session that writes no heartbeat (a
+// non-v2 agent such as gpu-dev) is genuinely stuck at the startup dialog, using
+// only structured tmux signals. It returns true when ALL of:
+//
+//   - sessionAge >= stallThreshold (old enough that startup should be done), AND
+//   - activityAge >= activityGrace (no tmux output recently), AND
+//   - the session produced NO output meaningfully past creation, i.e. the gap
+//     between session creation and its last activity is below stallThreshold.
+//
+// The third condition is the false-positive guard (gu-lx727). A genuine startup
+// stall renders the trust/permissions dialog and then never produces output, so
+// last-activity stays pinned near creation time. A busy agent that cleared
+// startup and is now quietly thinking (e.g. an in-flight LLM turn with no pane
+// output) has last-activity far past creation — it is NOT at the startup prompt,
+// so blindly injecting Enter/Down+Enter would interrupt real work. Requiring
+// last-activity to sit close to creation distinguishes the two.
+func isLegacyStartupStall(created, lastActivity, now time.Time, stallThreshold, activityGrace time.Duration) bool {
+	sessionAge := now.Sub(created)
+	if sessionAge < stallThreshold {
+		return false // Too young — still in normal startup
+	}
+	activityAge := now.Sub(lastActivity)
+	if activityAge < activityGrace {
+		return false // Recent activity — agent is making progress
+	}
+	// Progressed-past-startup guard: if the session emitted output well after it
+	// was created, it cleared the startup dialog and is now an active (thinking)
+	// agent, not a startup stall. Only treat it as a startup stall when last
+	// activity is still near creation.
+	progressedPastStartup := lastActivity.Sub(created)
+	return progressedPastStartup < stallThreshold
+}
+
 // DetectStalledPolecats checks live polecat sessions for agents stuck at
 // startup (e.g., on interactive prompts that block automated sessions).
 // Unlike zombie detection which looks for dead sessions/agents, this targets
@@ -3223,6 +3256,9 @@ type DetectStalledPolecatsResult struct {
 // rather than screen-scraping pane content. A session is considered stalled when:
 //   - It is older than StartupStallThreshold (90s)
 //   - Its last tmux activity is older than StartupActivityGrace (60s)
+//   - Its last activity is still near creation time (never progressed past the
+//     startup dialog). See isLegacyStartupStall — this guard avoids flagging a
+//     busy agent that is quietly thinking (gu-lx727).
 //
 // When a startup stall is detected, DismissStartupDialogsBlind is called to
 // send blind key sequences that dismiss known blocking dialogs (workspace trust,
@@ -3293,8 +3329,8 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 				fmt.Errorf("getting session created time for %s: %w", sessionName, err))
 			continue
 		}
-		sessionAge := now.Sub(time.Unix(createdUnix, 0))
-		if sessionAge < stallThreshold {
+		created := time.Unix(createdUnix, 0)
+		if now.Sub(created) < stallThreshold {
 			continue // Too young — still in normal startup
 		}
 
@@ -3304,9 +3340,12 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 				fmt.Errorf("getting session activity for %s: %w", sessionName, err))
 			continue
 		}
-		activityAge := now.Sub(activity)
-		if activityAge < activityGrace {
-			continue // Recent activity — agent is making progress
+
+		// Only flag sessions still pinned at the startup dialog. A busy agent
+		// that cleared startup and is now thinking (no recent pane output) has
+		// activity far past creation and must not be auto-dismissed (gu-lx727).
+		if !isLegacyStartupStall(created, activity, now, stallThreshold, activityGrace) {
+			continue
 		}
 
 		// Session is old enough and has no recent activity: startup stall.

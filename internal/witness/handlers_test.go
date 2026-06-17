@@ -1860,6 +1860,67 @@ func TestStartupStallThresholds(t *testing.T) {
 	}
 }
 
+func TestIsLegacyStartupStall(t *testing.T) {
+	t.Parallel()
+	const (
+		stallThreshold = 90 * time.Second
+		activityGrace  = 60 * time.Second
+	)
+	now := time.Unix(1_000_000, 0)
+
+	tests := []struct {
+		name         string
+		created      time.Time
+		lastActivity time.Time
+		want         bool
+	}{
+		{
+			name: "genuine startup stall: old session, activity pinned near creation",
+			// Created 5m ago, last output 2s after creation, none since.
+			created:      now.Add(-5 * time.Minute),
+			lastActivity: now.Add(-5*time.Minute + 2*time.Second),
+			want:         true,
+		},
+		{
+			name: "busy thinking agent: old session, activity far past creation",
+			// gu-lx727 false positive: worked for 10m, now quietly thinking 90s.
+			created:      now.Add(-12 * time.Minute),
+			lastActivity: now.Add(-90 * time.Second),
+			want:         false,
+		},
+		{
+			name:         "too young: session age below stall threshold",
+			created:      now.Add(-30 * time.Second),
+			lastActivity: now.Add(-30 * time.Second),
+			want:         false,
+		},
+		{
+			name:         "recent activity: within activity grace",
+			created:      now.Add(-5 * time.Minute),
+			lastActivity: now.Add(-10 * time.Second),
+			want:         false,
+		},
+		{
+			name: "boundary: progressed exactly at stall threshold is not a stall",
+			// last activity is exactly stallThreshold past creation → cleared startup.
+			created:      now.Add(-5 * time.Minute),
+			lastActivity: now.Add(-5*time.Minute + stallThreshold),
+			want:         false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isLegacyStartupStall(tc.created, tc.lastActivity, now, stallThreshold, activityGrace)
+			if got != tc.want {
+				t.Errorf("isLegacyStartupStall() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDetectOrphanedBeads_NoBdAvailable(t *testing.T) {
 	t.Parallel()
 	// When bd is not available (test environment), should return empty result
