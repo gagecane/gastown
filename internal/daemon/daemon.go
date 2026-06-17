@@ -878,6 +878,53 @@ func (d *Daemon) Run() (err error) {
 	d.heartbeat(state)
 	startupComplete = true
 
+	return d.supervise(state, sigChan, patrols, timer)
+}
+
+// signalAction classifies how the supervisor loop should react to an OS signal.
+type signalAction int
+
+const (
+	// signalShutdown means terminate the daemon (default for SIGINT/SIGTERM).
+	signalShutdown signalAction = iota
+	// signalLifecycle means process pending lifecycle + restart-polecat requests.
+	signalLifecycle
+	// signalReloadRestart means reload the restart tracker from disk.
+	signalReloadRestart
+)
+
+// classifySignal maps an OS signal to the supervisor's response. It is a pure
+// decision function so the loop's signal handling stays branch-free and the
+// mapping is unit-testable without a running daemon.
+func classifySignal(sig os.Signal) signalAction {
+	switch {
+	case isLifecycleSignal(sig):
+		return signalLifecycle
+	case isReloadRestartSignal(sig):
+		return signalReloadRestart
+	default:
+		return signalShutdown
+	}
+}
+
+// runIfActive invokes fn unless a town shutdown is in progress. Every periodic
+// patrol case in the supervisor loop is gated this way so the daemon does not
+// fight `gt down` by doing recovery work mid-shutdown. Centralizing the guard
+// keeps each patrol case a single named step instead of an inline if-block.
+func (d *Daemon) runIfActive(fn func()) {
+	if !d.isShutdownInProgress() {
+		fn()
+	}
+}
+
+// supervise runs the daemon's main loop until a shutdown signal or context
+// cancellation. It is extracted from Run so the lock/PID/defer-laden startup
+// sequence and the long-lived select loop are separately readable; the
+// startup-scoped defers (lock release, PID cleanup, ticker stops) remain in Run
+// and outlive this call. Each periodic patrol case is gated through
+// runIfActive and dispatches to its own tested method, so the loop reads as a
+// sequence of named steps.
+func (d *Daemon) supervise(state *State, sigChan <-chan os.Signal, patrols patrolTickers, timer *time.Timer) error {
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -885,7 +932,8 @@ func (d *Daemon) Run() (err error) {
 			return d.shutdown(state)
 
 		case sig := <-sigChan:
-			if isLifecycleSignal(sig) {
+			switch classifySignal(sig) {
+			case signalLifecycle:
 				// Lifecycle signal: immediate lifecycle processing (from gt handoff)
 				d.logger.Println("Received lifecycle signal, processing lifecycle requests immediately")
 				d.processLifecycleRequests()
@@ -893,7 +941,7 @@ func (d *Daemon) Run() (err error) {
 				// lifecycle-signal heartbeat should action both message
 				// families the daemon owns from the deacon inbox (gu-nep2).
 				d.processRestartPolecatRequests()
-			} else if isReloadRestartSignal(sig) {
+			case signalReloadRestart:
 				// Reload restart tracker from disk (from 'gt daemon clear-backoff')
 				d.logger.Println("Received reload-restart signal, reloading restart tracker from disk")
 				if d.restartTracker != nil {
@@ -901,7 +949,7 @@ func (d *Daemon) Run() (err error) {
 						d.logger.Printf("Warning: failed to reload restart tracker: %v", err)
 					}
 				}
-			} else {
+			case signalShutdown:
 				d.logger.Printf("Received signal %v, shutting down", sig)
 				return d.shutdown(state)
 			}
@@ -909,16 +957,12 @@ func (d *Daemon) Run() (err error) {
 		case <-patrols.doltHealth:
 			// Dedicated Dolt health check — fast crash detection independent
 			// of the 3-minute general heartbeat.
-			if !d.isShutdownInProgress() {
-				d.ensureDoltServerRunning()
-			}
+			d.runIfActive(d.ensureDoltServerRunning)
 
 		case <-patrols.doltRemotes:
 			// Periodic Dolt remote push — pushes databases to their configured
 			// git remotes on a 15-minute cadence (independent of heartbeat).
-			if !d.isShutdownInProgress() {
-				d.pushDoltRemotes()
-			}
+			d.runIfActive(d.pushDoltRemotes)
 
 		case <-patrols.doltBackup:
 			// Periodic Dolt filesystem backup — syncs production databases to
@@ -926,58 +970,42 @@ func (d *Daemon) Run() (err error) {
 			// the dolt-backup plugin in-process, decoupled from deacon-dog
 			// availability so freshness doesn't drift during handoff gaps
 			// (gu-a727o); on macOS it runs the native sync + iCloud offsite.
-			if !d.isShutdownInProgress() {
-				d.syncDoltBackups()
-			}
+			d.runIfActive(d.syncDoltBackups)
 
 		case <-patrols.doltBackupWatcher:
 			// Heartbeat staleness check (gu-8xvpw) — escalates if backups have
 			// silently stopped. Independent of the backup tick above.
-			if !d.isShutdownInProgress() {
-				d.runDoltBackupWatcher()
-			}
+			d.runIfActive(d.runDoltBackupWatcher)
 
 		case <-patrols.jsonlGitBackup:
 			// Periodic JSONL git backup — exports issues, scrubs ephemeral data,
 			// commits and pushes to git repo.
-			if !d.isShutdownInProgress() {
-				d.syncJsonlGitBackup()
-			}
+			d.runIfActive(d.syncJsonlGitBackup)
 
 		case <-patrols.wispReaper:
 			// Periodic wisp reaper — closes stale wisps (abandoned molecule steps,
 			// old patrol data) to prevent unbounded table growth (Clown Show audit).
-			if !d.isShutdownInProgress() {
-				d.reapWisps()
-			}
+			d.runIfActive(d.reapWisps)
 
 		case <-patrols.doctorDog:
 			// Doctor dog — comprehensive Dolt health monitor: connectivity, latency,
 			// gc, zombie detection, backup staleness, and disk usage checks.
-			if !d.isShutdownInProgress() {
-				d.runDoctorDog()
-			}
+			d.runIfActive(d.runDoctorDog)
 
 		case <-patrols.compactorDog:
 			// Compactor dog — flattens Dolt commit history on production databases.
 			// Reclaims commit graph storage, then runs gc to reclaim chunks.
-			if !d.isShutdownInProgress() {
-				d.runCompactorDog()
-			}
+			d.runIfActive(d.runCompactorDog)
 
 		case <-patrols.checkpointDog:
 			// Checkpoint dog — auto-commits WIP changes in active polecat
 			// worktrees to prevent data loss from session crashes.
-			if !d.isShutdownInProgress() {
-				d.runCheckpointDog()
-			}
+			d.runIfActive(d.runCheckpointDog)
 
 		case <-patrols.scheduledMaintenance:
 			// Scheduled maintenance — checks if we're in the maintenance window
 			// and runs `gt maintain --force` when commit counts exceed threshold.
-			if !d.isShutdownInProgress() {
-				d.runScheduledMaintenance()
-			}
+			d.runIfActive(d.runScheduledMaintenance)
 
 		case <-patrols.mainBranchTest:
 			// Main branch test runner — periodically runs quality gates on each
@@ -985,76 +1013,56 @@ func (d *Daemon) Run() (err error) {
 			// Launched off the select loop (gu-23xve): the suite runs each rig's
 			// full act/Docker gate (20-40min) and must not block heartbeat,
 			// signal handling, or dispatch.
-			if !d.isShutdownInProgress() {
-				d.launchMainBranchTests()
-			}
+			d.runIfActive(d.launchMainBranchTests)
 
 		case <-patrols.quotaDog:
 			// Quota dog — scans for rate-limited sessions and automatically
 			// rotates credentials to available accounts via keychain swap.
-			if !d.isShutdownInProgress() {
-				d.runQuotaDog()
-			}
+			d.runIfActive(d.runQuotaDog)
 
 		case <-patrols.pollerDog:
 			// Poller dog — supervises nudge-poller processes. Respawns
 			// dead pollers for live sessions and removes stale PID files.
-			if !d.isShutdownInProgress() {
-				d.runPollerDog()
-			}
+			d.runIfActive(d.runPollerDog)
 
 		case <-patrols.failureClassifier:
 			// Failure classifier — classifies main_branch_test escalations against
 			// known code-issue signatures and auto-files rig beads for matches.
-			if !d.isShutdownInProgress() {
-				d.runFailureClassifier()
-			}
+			d.runIfActive(d.runFailureClassifier)
 
 		case <-patrols.curio:
 			// Curio dog — runs declarative content rules over live Gastown
 			// state and emits candidates to HQ Dolt (candidates only, Phase 1).
-			if !d.isShutdownInProgress() {
-				d.runCurio()
-			}
+			d.runIfActive(d.runCurio)
 
 		case <-patrols.nudgeQueueGC:
 			// Nudge queue GC — sweeps expired entries from
 			// .runtime/nudge_queue/<session>/ regardless of recipient
 			// liveness. Drain's lazy expiry only fires when an agent
 			// actively drains; this catches dead/idle/wedged sessions.
-			if !d.isShutdownInProgress() {
-				d.runNudgeQueueGC()
-			}
+			d.runIfActive(d.runNudgeQueueGC)
 
 		case <-patrols.restartPending:
 			// Restart-pending dog — escalates daemon-restart-pending beads to an
 			// agent so a gated restart happens (gu-muj66). Does NOT self-restart.
-			if !d.isShutdownInProgress() {
-				d.runRestartPendingDog()
-			}
+			d.runIfActive(d.runRestartPendingDog)
 
 		case <-patrols.circuitBreak:
 			// Circuit-break dog — escalates beads circuit-broken repeatedly
 			// within the window (gu-ixo67). Does NOT auto-remediate.
-			if !d.isShutdownInProgress() {
-				d.runCircuitBreakDog()
-			}
+			d.runIfActive(d.runCircuitBreakDog)
 
 		case <-patrols.schedulerStuck:
 			// Scheduler-stuck dog — escalates a sustained non-draining ready
 			// queue with free capacity (gu-n0hvf). Does NOT auto-remediate.
-			if !d.isShutdownInProgress() {
-				d.runSchedulerStuckDog()
-			}
+			d.runIfActive(d.runSchedulerStuckDog)
 
 		case <-patrols.eventChannelGC:
 			// Event channel GC — prunes stale .event files from
 			// events/<channel>/ that fire-and-forget fan-out never
 			// cleans up (await-event has no offset/cursor, and
 			// consumers without --cleanup leave files behind).
-			if !d.isShutdownInProgress() {
-				d.runEventChannelGC()
-			}
+			d.runIfActive(d.runEventChannelGC)
 
 		case <-patrols.circuitBreakerGC:
 			// Circuit-breaker GC — reaps stale CLOSED beads circuit-breaker
@@ -1062,9 +1070,7 @@ func (d *Daemon) Run() (err error) {
 			// only expires open/half-open files, so closed-state pollution
 			// accumulated unbounded and taxed every bd call ~650ms. Leaves
 			// open/half-open breakers intact.
-			if !d.isShutdownInProgress() {
-				d.runCircuitBreakerGC()
-			}
+			d.runIfActive(d.runCircuitBreakerGC)
 
 		case <-patrols.branchSync:
 			// Branch sync — keeps each configured long-lived branch merged from
@@ -1072,9 +1078,7 @@ func (d *Daemon) Run() (err error) {
 			// worktree. Clean merges are pushed to the target branch; conflicts
 			// abort cleanly and file+sling a bead to the rig crew. Never touches
 			// or pushes the source branch, never force-pushes (gs-auhe).
-			if !d.isShutdownInProgress() {
-				d.syncBranches()
-			}
+			d.runIfActive(d.syncBranches)
 
 		case <-patrols.agentHeartbeat:
 			// Agent-heartbeat dog — closes the who-watches-the-watchers gap
@@ -1084,9 +1088,7 @@ func (d *Daemon) Run() (err error) {
 			// surfaces. Reuses witness.DetectStaleRigAgentHeartbeats so
 			// daemon-side and witness-side observations share dedup state and
 			// don't double-escalate.
-			if !d.isShutdownInProgress() {
-				d.runAgentHeartbeatDog()
-			}
+			d.runIfActive(d.runAgentHeartbeatDog)
 
 		case <-patrols.mergeQueueAge:
 			// Merge-queue-age dog — watches each rig's merge queue and escalates
@@ -1094,9 +1096,7 @@ func (d *Daemon) Run() (err error) {
 			// advancing while a backlog waits (gu-78bbg). A parked/stuck refinery
 			// surfaces automatically instead of via a manual mayor health sweep.
 			// Escalate-only; never auto-remediates.
-			if !d.isShutdownInProgress() {
-				d.runMergeQueueAgeDog()
-			}
+			d.runIfActive(d.runMergeQueueAgeDog)
 
 		case <-patrols.escalateStale:
 			// Escalate-stale dog — invokes `gt escalate stale` on a cadence so
@@ -1105,9 +1105,7 @@ func (d *Daemon) Run() (err error) {
 			// (gu-2sepi). Previously runEscalateStale was reachable only from
 			// the CLI, leaving an unacked escalation stuck at its original
 			// severity forever if the Mayor was offline/crashed/missed mail.
-			if !d.isShutdownInProgress() {
-				d.runEscalateStaleDog()
-			}
+			d.runIfActive(d.runEscalateStaleDog)
 
 		case <-patrols.pushStranded:
 			// Push-stranded dog — the daemon-side consumer of gt:push-stranded
@@ -1118,9 +1116,7 @@ func (d *Daemon) Run() (err error) {
 			// tip — but ONLY for a branch on origin, with no open MR, whose
 			// owning polecat session is provably dead (no yanking a live
 			// polecat). Idempotent on branch+SHA; escalates after maxAttempts.
-			if !d.isShutdownInProgress() {
-				d.runPushStrandedDog()
-			}
+			d.runIfActive(d.runPushStrandedDog)
 
 		case <-timer.C:
 			d.heartbeat(state)
