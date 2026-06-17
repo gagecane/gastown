@@ -35,6 +35,18 @@ fi
 BACKUP_DIR="$DOLT_BACKUP_DIR"
 BACKUP_TIMEOUT=60
 
+# Auto-repair of corrupt backup DESTS (gu-90fcw). When a sync fails because the
+# dest store's manifest references a table file that no longer exists on disk
+# ("table file not found" / Error 1105), the dest is unrecoverable in place:
+# every sync re-reads the stale manifest and fails exit-1 forever, firing a HIGH
+# escalation each cycle. The prevention guard (gu-p02zy) stops NEW corruption but
+# cannot self-heal dests already corrupted by pre-fix races. Repair = discard the
+# corrupt dest and re-initialize it with a full fresh sync from the INTACT live
+# source store. Destructive ONLY to the already-useless backup dest under
+# BACKUP_DIR; the live source DB is never touched. Set DOLT_BACKUP_AUTO_REPAIR=0
+# to disable (e.g. to leave a corrupt dest in place for forensics).
+AUTO_REPAIR="${DOLT_BACKUP_AUTO_REPAIR:-1}"
+
 # Store-lock: serialize `dolt backup sync` against Dolt server restarts so a
 # restart never rewrites/prunes live table files mid-sync and corrupts the
 # backup dest (gu-p02zy). The Go restart paths (internal/doltserver.WithStoreLock,
@@ -159,6 +171,64 @@ write_heartbeat() {
   fi
 }
 
+# is_tablefile_corruption <sync-output> reports (exit 0) whether a failed
+# `dolt backup sync` failed because the dest manifest references a table file
+# that is missing on disk — the gu-p02zy/gu-90fcw corruption signature. We match
+# on the stable dolt error text rather than the exit code (a bare exit-1 covers
+# many unrelated failures we must NOT "repair" by wiping the dest).
+is_tablefile_corruption() {
+  local out="$1"
+  grep -qiE 'table file not found|error opening table file|Error 1105' <<<"$out"
+}
+
+# repair_corrupt_dest <db> <db-dir> <backup-name> re-initializes a corrupt backup
+# dest from the intact live source store (gu-90fcw). The dest under BACKUP_DIR/<db>
+# is discarded and rebuilt by a full fresh `dolt backup sync`. Returns 0 if the
+# re-sync succeeds (dest is healthy again), non-zero otherwise. The caller MUST
+# already hold the store lock (fd 9) so the rebuild does not race a Dolt restart.
+#
+# SAFETY: only ever removes the backup DEST directory, which is fully derived
+# from the live source and currently useless (every sync fails). A hard path
+# guard refuses to remove anything that is not BACKUP_DIR/<db> with a non-empty
+# BACKUP_DIR and db — a defensive check against an empty/unset variable expanding
+# `rm -rf` to a dangerous path. The live source DB ($DB_DIR) is NEVER touched.
+repair_corrupt_dest() {
+  local db="$1" db_dir="$2" backup_name="$3"
+  local dest="$BACKUP_DIR/$db"
+
+  # Path guard: dest must be exactly "<non-empty BACKUP_DIR>/<non-empty db>" and
+  # must live under BACKUP_DIR. Bail (no removal) if anything looks unsafe.
+  if [[ -z "$BACKUP_DIR" || -z "$db" || "$dest" != "$BACKUP_DIR/$db" || "$dest" != "$BACKUP_DIR"/* ]]; then
+    log "  $db: REPAIR aborted — unsafe dest path '$dest' (refusing to remove)"
+    return 1
+  fi
+
+  log "  $db: REPAIR — discarding corrupt backup dest '$dest' and re-initializing from live source"
+  rm -rf "$dest" || { log "  $db: REPAIR failed — could not remove corrupt dest '$dest'"; return 1; }
+  mkdir -p "$dest"
+
+  # Re-add the backup remote (the dolt backup add we just blew away) pointing at
+  # the same dest path, then do a full fresh sync. Both run inside the lock the
+  # caller holds.
+  if ! (cd "$db_dir" && dolt backup add "$backup_name" "file://$dest" 2>/dev/null); then
+    # add may report "already exists" if the remote config survives the dir wipe;
+    # that is fine — proceed to the sync.
+    log "  $db: REPAIR — backup remote add returned non-zero (may already exist), proceeding to re-sync"
+  fi
+
+  local repair_out repair_rc
+  set +e
+  repair_out=$(cd "$db_dir" && timeout "$BACKUP_TIMEOUT" dolt backup sync "$backup_name" 2>&1)
+  repair_rc=$?
+  set -e
+  if [[ $repair_rc -eq 0 ]]; then
+    log "  $db: REPAIR succeeded — dest re-initialized from live source"
+    return 0
+  fi
+  log "  $db: REPAIR re-sync still failing (exit $repair_rc): $repair_out"
+  return 1
+}
+
 # --- Step 1: Discover databases -----------------------------------------------
 
 # Use explicit list if provided, otherwise auto-discover by scanning
@@ -194,10 +264,12 @@ FAILED=0
 NO_REMOTE=0
 PARKED=0
 DEFERRED=0
+REPAIRED=0
 FAILED_DBS=""
 NO_REMOTE_DBS=""
 PARKED_DBS=""
 DEFERRED_DBS=""
+REPAIRED_DBS=""
 
 # Open the shared store-lock fd once for the whole run (each per-DB sync grabs it
 # briefly via `flock -w`). Best-effort: if the lock file/dir can't be opened we
@@ -351,9 +423,6 @@ for DB in "${PROD_DBS[@]}"; do
   SYNC_OUTPUT=$(cd "$DB_DIR" && timeout "$BACKUP_TIMEOUT" dolt backup sync "$BACKUP_NAME" 2>&1)
   SYNC_RC=$?
   set -e
-  # Release the store lock immediately after the sync (before retention/reporting)
-  # so a waiting restart proceeds with minimal delay.
-  $HAVE_FLOCK && flock -u 9 || true
   SYNC_ELAPSED=$(( $(date +%s) - SYNC_START ))
 
   if [[ $SYNC_RC -eq 0 ]]; then
@@ -370,11 +439,35 @@ for DB in "${PROD_DBS[@]}"; do
     FAILED=$((FAILED + 1))
     FAILED_DBS="$FAILED_DBS $DB(timeout)"
     log "  $DB: TIMEOUT after ${BACKUP_TIMEOUT}s"
+  elif [[ "$AUTO_REPAIR" == "1" ]] && is_tablefile_corruption "$SYNC_OUTPUT"; then
+    # Corrupt backup DEST (gu-90fcw): the dest manifest references a missing
+    # table file, so every sync fails exit-1 forever. The live source is intact,
+    # so rebuild the dest from it. We still hold the store lock (fd 9) here, so
+    # the rebuild cannot race a Dolt restart. On success the DB counts as synced
+    # (and self-healed); on failure it falls through to a genuine FAILED so a
+    # real, non-repairable problem still escalates.
+    log "  $DB: FAILED (exit $SYNC_RC) with corruption signature — attempting self-heal: $SYNC_OUTPUT"
+    if repair_corrupt_dest "$DB" "$DB_DIR" "$BACKUP_NAME"; then
+      mkdir -p "$(dirname "$HASH_FILE")"
+      echo "$CURRENT_HASH" > "$HASH_FILE"
+      touch "$BACKUP_DIR/$DB" 2>/dev/null || true
+      SYNCED=$((SYNCED + 1))
+      REPAIRED=$((REPAIRED + 1))
+      REPAIRED_DBS="$REPAIRED_DBS $DB"
+    else
+      FAILED=$((FAILED + 1))
+      FAILED_DBS="$FAILED_DBS $DB(repair-failed)"
+      log "  $DB: FAILED — self-heal did not recover the dest"
+    fi
   else
     FAILED=$((FAILED + 1))
     FAILED_DBS="$FAILED_DBS $DB(exit-$SYNC_RC)"
     log "  $DB: FAILED (exit $SYNC_RC): $SYNC_OUTPUT"
   fi
+
+  # Release the store lock now that the sync (and any in-lock repair re-sync) is
+  # done, so a waiting restart proceeds with minimal delay.
+  $HAVE_FLOCK && flock -u 9 || true
 done
 
 # --- Step 3: Retention (intentionally a no-op) --------------------------------
@@ -395,8 +488,14 @@ RETENTION_FAILED=0
 
 # --- Step 4: Report results ---------------------------------------------------
 
-SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked, $DEFERRED deferred (of ${#PROD_DBS[@]} DBs)"
+SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed, $NO_REMOTE no-remote, $PARKED parked, $DEFERRED deferred, $REPAIRED repaired (of ${#PROD_DBS[@]} DBs)"
 log "$SUMMARY"
+if [[ "$REPAIRED" -gt 0 ]]; then
+  # Repaired = a corrupt backup dest was self-healed by re-initializing it from
+  # the intact live source (gu-90fcw). Counts within SYNCED; surfaced for
+  # observability so recurring self-heals are visible without paging HIGH.
+  log "  repaired DBs (corrupt dest re-initialized from live source — gu-90fcw self-heal):$REPAIRED_DBS"
+fi
 if [[ "$NO_REMOTE" -gt 0 ]]; then
   log "  no-remote DBs (enumerated but unconfigured — likely orphan/stray):$NO_REMOTE_DBS"
 fi

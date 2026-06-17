@@ -53,6 +53,19 @@ grep -qE -- '--dedup --dedup-window 2h' "$RUN_SH" || \
 grep -qE -- '--related gu-p02zy' "$RUN_SH" || \
   fail "run.sh FAILED escalate is not --related gu-p02zy"
 
+# Corrupt-dest self-heal (gu-90fcw): a "table file not found" sync failure must
+# route to repair_corrupt_dest, which rebuilds the dest from the live source.
+grep -qE 'is_tablefile_corruption|table file not found' "$RUN_SH" || \
+  fail "run.sh does not detect the table-file-not-found corruption signature"
+grep -qE 'repair_corrupt_dest' "$RUN_SH" || \
+  fail "run.sh has no repair_corrupt_dest self-heal path for corrupt dests"
+# Repair must only ever remove the dest under BACKUP_DIR (path guard present).
+grep -qE 'dest" != "\$BACKUP_DIR/\$db"' "$RUN_SH" || \
+  fail "repair_corrupt_dest lacks the BACKUP_DIR path-safety guard"
+# A successful repair counts within SYNCED (not FAILED) so it never pages HIGH.
+grep -qE 'REPAIRED=\$\(\(REPAIRED \+ 1\)\)' "$RUN_SH" || \
+  fail "run.sh has no REPAIRED counter for self-healed dests"
+
 # ============================================================================
 # B. FUNCTIONAL harness
 # ============================================================================
@@ -127,6 +140,84 @@ EOF
     fail "lock held: deferred run wrongly fired a gt escalate"
   else
     pass "lock held: no escalation fired for a deferred run"
+  fi
+fi
+
+# ============================================================================
+echo "=== C. functional: corrupt-dest self-heal (gu-90fcw) ==="
+
+if ! command -v flock >/dev/null 2>&1; then
+  echo "SKIP self-heal functional: flock(1) not available"
+else
+  CTOWN="$(mktemp -d)"
+  trap 'rm -rf "$TOWN" "$CTOWN"' EXIT
+  CBIN="$CTOWN/bin"
+  mkdir -p "$CBIN" "$CTOWN/.dolt-data/heal_db/.dolt" "$CTOWN/daemon" "$CTOWN/.dolt-backup/heal_db"
+  # Marker file inside the corrupt dest — repair must wipe the dir and rebuild it.
+  echo "stale" > "$CTOWN/.dolt-backup/heal_db/corrupt-marker"
+
+  # Stub `dolt`: the FIRST `backup sync` fails with the table-file-not-found
+  # corruption signature; the repair re-add + second sync succeed. A counter
+  # file tracks sync invocations across subprocesses.
+  cat > "$CBIN/dolt" <<EOF
+#!/usr/bin/env bash
+COUNTER="$CTOWN/.sync-count"
+case "\$1" in
+  log) echo "abc1234 fake" ;;
+  backup)
+    case "\${2:-}" in
+      -v|"") echo "heal_db-backup file:///dummy" ;;
+      add)   exit 0 ;;
+      sync)
+        n=0; [[ -f "\$COUNTER" ]] && n=\$(cat "\$COUNTER")
+        n=\$((n + 1)); echo "\$n" > "\$COUNTER"
+        if [[ "\$n" -eq 1 ]]; then
+          echo "error: table file not found: 04kkj4tjiklj8c0d9c7s3q6n4m9m68u4" >&2
+          exit 1
+        fi
+        exit 0 ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$CBIN/dolt"
+
+  cat > "$CBIN/bd" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$CBIN/bd"
+  cat > "$CBIN/gt" <<EOF
+#!/usr/bin/env bash
+echo "GT_CALL: \$*" >> "$CTOWN/gt-calls.log"
+exit 0
+EOF
+  chmod +x "$CBIN/gt"
+
+  out_heal="$(PATH="$CBIN:$PATH" GT_TOWN_ROOT="$CTOWN" STORE_LOCK_WAIT="1" \
+    bash "$RUN_SH" --databases heal_db 2>&1)"; rc_heal=$?
+
+  # C1: corrupt dest self-heals → 1 synced, 1 repaired, 0 failed, exit 0.
+  if [[ $rc_heal -eq 0 ]] && grep -qE "1 synced" <<<"$out_heal" \
+     && grep -qE "0 failed" <<<"$out_heal" && grep -qE "1 repaired" <<<"$out_heal"; then
+    pass "corrupt dest: self-healed (1 synced, 1 repaired, 0 failed, exit 0)"
+  else
+    fail "corrupt dest: expected '1 synced ... 0 failed ... 1 repaired' exit 0; got rc=$rc_heal: $(grep Backup: <<<"$out_heal")"
+  fi
+
+  # C2: the repair must have wiped the stale dest contents (rebuilt from source).
+  if [[ ! -f "$CTOWN/.dolt-backup/heal_db/corrupt-marker" ]]; then
+    pass "corrupt dest: stale dest contents discarded during repair"
+  else
+    fail "corrupt dest: stale marker survived — dest was not re-initialized"
+  fi
+
+  # C3: a successful self-heal must NOT fire a HIGH escalation.
+  if [[ -f "$CTOWN/gt-calls.log" ]] && grep -q "escalate.*high" "$CTOWN/gt-calls.log"; then
+    fail "corrupt dest: self-heal wrongly fired a HIGH escalation"
+  else
+    pass "corrupt dest: no HIGH escalation for a successful self-heal"
   fi
 fi
 
