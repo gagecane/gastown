@@ -186,9 +186,106 @@ func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
 	return nil
 }
 
+// reapTotals accumulates the per-step counters of one inline reaper cycle.
+// It lets reapWispsInline stay a thin orchestrator that hands a single value to
+// the per-step helpers, and lets buildReapSummary format the cycle report as a
+// pure function with no I/O.
+type reapTotals struct {
+	reaped        int
+	moleculeSteps int
+	open          int
+
+	purged      int
+	mailPurged  int
+	wispFlushed int
+
+	pluginClosed   int
+	dispatchClosed int
+	hookedClosed   int
+	autoClosed     int
+
+	reconScanned      int
+	reconReconciled   int
+	reconPreservedWIP int
+
+	scrubScanned      int
+	scrubCleared      int
+	scrubPreservedWIP int
+	scrubStillPending int
+
+	fkScanned      int
+	fkClearedMRID  int
+	fkClearedHook  int
+	fkPreservedWIP int
+}
+
 // reapWispsInline is the fallback that runs the reaper cycle inline when
-// Dog dispatch is unavailable. Delegates to the reaper package for SQL execution.
+// Dog dispatch is unavailable. It is a thin orchestrator: each step is a helper
+// that connects to the reaper package for SQL execution, accumulates into a
+// shared reapTotals, and marks its molecule step.
 func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge time.Duration, mol *dogMol) {
+	databases, ok := d.resolveReapDatabases(config, mol)
+	if !ok {
+		return
+	}
+	d.logger.Printf("wisp_reaper: scanning %d databases (inline fallback)", len(databases))
+	mol.closeStep("scan")
+
+	host := d.doltServerHost()
+	port := d.doltServerPort()
+	dryRun := config.DryRun
+	var t reapTotals
+
+	d.reapStep(&t, databases, host, port, maxAge, dryRun, mol)
+	d.purgeStep(&t, databases, host, port, deleteAge, dryRun, mol)
+	d.flushStep(&t, databases, host, port, dryRun, mol)
+
+	// Step 3b: Close plugin receipts (fast-track — 1h instead of 7d stale age)
+	pluginReceiptAge := 1 * time.Hour
+	t.pluginClosed = d.closeStaleAcrossDBs(databases, host, port,
+		"plugin receipt", "plugin receipts",
+		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
+			return reaper.ClosePluginReceipts(db, dbName, pluginReceiptAge, dryRun)
+		})
+
+	// Step 3c: Close plugin dispatch mails (daemon→dog instruction beads that are never closed)
+	pluginDispatchAge := 1 * time.Hour
+	t.dispatchClosed = d.closeStaleAcrossDBs(databases, host, port,
+		"plugin dispatch", "plugin dispatches",
+		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
+			return reaper.ClosePluginDispatches(db, dbName, pluginDispatchAge, dryRun)
+		})
+
+	// Step 3d: Close stale hooked mols — dispatch wisps that sat in 'hooked'
+	// status beyond defaultHookedMolTTL because no dog was alive to consume them.
+	t.hookedClosed = d.closeStaleAcrossDBs(databases, host, port,
+		"hooked mol", "stale hooked mols",
+		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
+			return reaper.CloseStaleHookedMols(db, dbName, defaultHookedMolTTL, dryRun)
+		})
+
+	d.autoCloseStep(&t, databases, host, port, dryRun, mol)
+
+	// Town-only scrubs run after the per-database steps. The reconcile runs
+	// BEFORE the active_mr scrub so a source it closes is terminal in time for
+	// the same-cycle scrub to clear the dangling active_mr.
+	d.reconcileMergedOrphansInline(&t, dryRun)
+	d.scrubActiveMRInline(&t, dryRun)
+	d.scrubDanglingFKInline(&t, dryRun)
+
+	// Step 5: Report
+	if t.open > wispAlertThreshold {
+		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
+			t.open, wispAlertThreshold)
+	}
+	d.logger.Printf("%s", buildReapSummary(t, len(databases), dryRun))
+	mol.closeStep("report")
+}
+
+// resolveReapDatabases determines which databases this cycle should reap. It
+// returns ok=false (after failing the "scan" step) when the database list
+// cannot be determined, so the caller aborts the cycle.
+func (d *Daemon) resolveReapDatabases(config *WispReaperConfig, mol *dogMol) ([]string, bool) {
 	databases := config.Databases
 	if len(databases) == 0 {
 		discovered, err := reaper.DiscoverDatabases(d.doltServerHost(), d.doltServerPort())
@@ -198,50 +295,61 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 			// loudly so the failure is visible rather than degrading silently.
 			d.logger.Printf("wisp_reaper: discover databases failed: %v", err)
 			mol.failStep("scan", fmt.Sprintf("discover databases: %v", err))
-			return
+			return nil, false
 		}
 		databases = discovered
 	}
 	if len(databases) == 0 {
 		d.logger.Printf("wisp_reaper: no databases to reap")
 		mol.failStep("scan", "no databases found")
-		return
+		return nil, false
 	}
-	d.logger.Printf("wisp_reaper: scanning %d databases (inline fallback)", len(databases))
-	mol.closeStep("scan")
+	return databases, true
+}
 
-	host := d.doltServerHost()
-	port := d.doltServerPort()
-	dryRun := config.DryRun
-	var totalReaped, totalMoleculeSteps, totalOpen, totalPurged, totalMailPurged, totalAutoClosed int
-
-	// Step 2: Reap
-	reapErrors := 0
+// withReapableDBs runs fn against every database that has a reaper schema,
+// opening a connection with the given read/write timeout and closing it after
+// fn returns. Databases with an invalid name or no reaper schema are skipped
+// silently. It returns the number of databases for which OpenDB or fn failed so
+// the caller can mark its molecule step failed.
+func (d *Daemon) withReapableDBs(
+	databases []string, host string, port int, timeout time.Duration,
+	fn func(db *sql.DB, dbName string) error,
+) (errCount int) {
 	for _, dbName := range databases {
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(host, port, dbName, timeout, timeout)
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: connect error: %v", dbName, err)
-			reapErrors++
+			errCount++
 			continue
 		}
 		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			d.logger.Printf("wisp_reaper: %s: skipped (no reaper schema)", dbName)
 			db.Close()
 			continue
 		}
-		result, err := reaper.Reap(db, dbName, maxAge, dryRun)
+		err = fn(db, dbName)
 		db.Close()
 		if err != nil {
-			d.logger.Printf("wisp_reaper: %s: reap error: %v", dbName, err)
-			reapErrors++
-			continue
+			errCount++
 		}
-		totalReaped += result.Reaped
-		totalMoleculeSteps += result.MoleculeStepsClosed
-		totalOpen += result.OpenRemain
+	}
+	return errCount
+}
+
+// reapStep closes stale wisps and molecule steps across all databases (Step 2).
+func (d *Daemon) reapStep(t *reapTotals, databases []string, host string, port int, maxAge time.Duration, dryRun bool, mol *dogMol) {
+	errs := d.withReapableDBs(databases, host, port, 10*time.Second, func(db *sql.DB, dbName string) error {
+		result, err := reaper.Reap(db, dbName, maxAge, dryRun)
+		if err != nil {
+			d.logger.Printf("wisp_reaper: %s: reap error: %v", dbName, err)
+			return err
+		}
+		t.reaped += result.Reaped
+		t.moleculeSteps += result.MoleculeStepsClosed
+		t.open += result.OpenRemain
 		if result.Reaped > 0 || result.MoleculeStepsClosed > 0 {
 			reapSummary := fmt.Sprintf("wisp_reaper: %s: reaped %d stale wisps", dbName, result.Reaped)
 			if result.MoleculeStepsClosed > 0 {
@@ -249,76 +357,43 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 			}
 			d.logger.Printf("%s, %d open remain", reapSummary, result.OpenRemain)
 		}
-	}
-	if reapErrors > 0 {
-		mol.failStep("reap", fmt.Sprintf("%d databases had reap errors", reapErrors))
-	} else {
-		mol.closeStep("reap")
-	}
+		return nil
+	})
+	d.markStep(mol, "reap", errs, "reap errors")
+}
 
-	// Step 3: Purge
-	purgeErrors := 0
-	for _, dbName := range databases {
-		if err := reaper.ValidateDBName(dbName); err != nil {
-			continue
-		}
-		db, err := reaper.OpenDB(host, port, dbName, 30*time.Second, 30*time.Second)
-		if err != nil {
-			purgeErrors++
-			continue
-		}
-		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			db.Close()
-			continue
-		}
+// purgeStep permanently deletes closed wisps and mail older than the purge age (Step 3).
+func (d *Daemon) purgeStep(t *reapTotals, databases []string, host string, port int, deleteAge time.Duration, dryRun bool, mol *dogMol) {
+	errs := d.withReapableDBs(databases, host, port, 30*time.Second, func(db *sql.DB, dbName string) error {
 		result, err := reaper.Purge(db, dbName, deleteAge, defaultMailDeleteAge, dryRun)
-		db.Close()
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: purge error: %v", dbName, err)
-			purgeErrors++
-			continue
+			return err
 		}
-		totalPurged += result.WispsPurged
-		totalMailPurged += result.MailPurged
+		t.purged += result.WispsPurged
+		t.mailPurged += result.MailPurged
 		for _, a := range result.Anomalies {
 			d.logger.Printf("wisp_reaper: %s: ANOMALY: %s", dbName, a.Message)
 		}
-	}
-	if purgeErrors > 0 {
-		mol.failStep("purge", fmt.Sprintf("%d databases had purge errors", purgeErrors))
-	} else {
-		mol.closeStep("purge")
-	}
+		return nil
+	})
+	d.markStep(mol, "purge", errs, "purge errors")
+}
 
-	// Step 3a: Flush the dolt_ignored wisp_* working set to HEAD (gu-tqtwt).
-	// bd never commits the wisp tables (they are dolt_ignored), so their churn
-	// accumulates unbounded in the Dolt working set until bd's pre-migration
-	// dirty-table guard deadlocks on the oldest/highest-volume rigs and every
-	// --json/capacity query starts failing. The reaper's raw connection bypasses
-	// that guard, so flushing here bounds the backlog every cycle.
-	flushErrors := 0
-	var totalWispFlushed int
-	for _, dbName := range databases {
-		if err := reaper.ValidateDBName(dbName); err != nil {
-			continue
-		}
-		db, err := reaper.OpenDB(host, port, dbName, 30*time.Second, 30*time.Second)
-		if err != nil {
-			flushErrors++
-			continue
-		}
-		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			db.Close()
-			continue
-		}
+// flushStep flushes the dolt_ignored wisp_* working set to HEAD (Step 3a, gu-tqtwt).
+// bd never commits the wisp tables (they are dolt_ignored), so their churn
+// accumulates unbounded in the Dolt working set until bd's pre-migration
+// dirty-table guard deadlocks on the oldest/highest-volume rigs and every
+// --json/capacity query starts failing. The reaper's raw connection bypasses
+// that guard, so flushing here bounds the backlog every cycle.
+func (d *Daemon) flushStep(t *reapTotals, databases []string, host string, port int, dryRun bool, mol *dogMol) {
+	errs := d.withReapableDBs(databases, host, port, 30*time.Second, func(db *sql.DB, dbName string) error {
 		result, err := reaper.FlushWispWorkingSet(db, dbName, dryRun)
-		db.Close()
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: wisp flush error: %v", dbName, err)
-			flushErrors++
-			continue
+			return err
 		}
-		totalWispFlushed += result.Flushed
+		t.wispFlushed += result.Flushed
 		if result.Flushed > 0 {
 			d.logger.Printf("wisp_reaper: %s: flushed %d pending wisp row change(s) across %v",
 				dbName, result.Flushed, result.Tables)
@@ -326,172 +401,136 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		for _, a := range result.Anomalies {
 			d.logger.Printf("wisp_reaper: %s: ANOMALY: %s", dbName, a.Message)
 		}
-	}
-	if flushErrors > 0 {
-		mol.failStep("wisp-flush", fmt.Sprintf("%d databases had wisp flush errors", flushErrors))
-	} else {
-		mol.closeStep("wisp-flush")
-	}
+		return nil
+	})
+	d.markStep(mol, "wisp-flush", errs, "wisp flush errors")
+}
 
-	// Step 3b: Close plugin receipts (fast-track — 1h instead of 7d stale age)
-	pluginReceiptAge := 1 * time.Hour
-	totalPluginClosed := d.closeStaleAcrossDBs(databases, host, port,
-		"plugin receipt", "plugin receipts",
-		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
-			return reaper.ClosePluginReceipts(db, dbName, pluginReceiptAge, dryRun)
-		})
-
-	// Step 3c: Close plugin dispatch mails (daemon→dog instruction beads that are never closed)
-	pluginDispatchAge := 1 * time.Hour
-	totalDispatchClosed := d.closeStaleAcrossDBs(databases, host, port,
-		"plugin dispatch", "plugin dispatches",
-		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
-			return reaper.ClosePluginDispatches(db, dbName, pluginDispatchAge, dryRun)
-		})
-
-	// Step 3d: Close stale hooked mols — dispatch wisps that sat in 'hooked'
-	// status beyond defaultHookedMolTTL because no dog was alive to consume them.
-	totalHookedClosed := d.closeStaleAcrossDBs(databases, host, port,
-		"hooked mol", "stale hooked mols",
-		func(db *sql.DB, dbName string) (*reaper.ClosePluginReceiptResult, error) {
-			return reaper.CloseStaleHookedMols(db, dbName, defaultHookedMolTTL, dryRun)
-		})
-
-	// Step 4: Auto-close
-	autoCloseErrors := 0
-	for _, dbName := range databases {
-		if err := reaper.ValidateDBName(dbName); err != nil {
-			continue
-		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
-		if err != nil {
-			autoCloseErrors++
-			continue
-		}
-		// Auto-close operates on the issues table, not wisps, but if the database
-		// has no beads schema at all we should skip it too.
-		if ok, _ := reaper.HasReaperSchema(db); !ok {
-			db.Close()
-			continue
-		}
+// autoCloseStep auto-closes stale issues across all databases (Step 4). Auto-close
+// operates on the issues table, not wisps, but a database with no beads schema
+// at all is still skipped.
+func (d *Daemon) autoCloseStep(t *reapTotals, databases []string, host string, port int, dryRun bool, mol *dogMol) {
+	errs := d.withReapableDBs(databases, host, port, 10*time.Second, func(db *sql.DB, dbName string) error {
 		result, err := reaper.AutoClose(db, dbName, defaultStaleIssueAge, dryRun)
-		db.Close()
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: auto-close error: %v", dbName, err)
-			autoCloseErrors++
-			continue
+			return err
 		}
-		totalAutoClosed += result.Closed
-	}
-	if autoCloseErrors > 0 {
-		mol.failStep("auto-close", fmt.Sprintf("%d databases had auto-close errors", autoCloseErrors))
-	} else {
-		mol.closeStep("auto-close")
-	}
+		t.autoClosed += result.Closed
+		return nil
+	})
+	d.markStep(mol, "auto-close", errs, "auto-close errors")
+}
 
-	// Step 4a: Reconcile post-merge orphans (gu-7igu8).
-	// The refinery's post-merge sequence (close MR → close source → unhook →
-	// reap) is non-atomic; an interrupted reconcile can leave a source issue
-	// non-terminal (HOOKED on a dead polecat) even though the MR merged. Detect
-	// that signature — agent bead whose active_mr points at a proven-merged MR
-	// with a still-non-terminal source — and complete the reconcile by closing
-	// the source issue. Runs BEFORE the active_mr scrub (4b) so the source is
-	// terminal in time for the same-cycle scrub to clear the dangling active_mr.
-	var reconScanned, reconReconciled, reconPreservedWIP int
+// markStep records a molecule step as failed (when errCount > 0) or closed.
+func (d *Daemon) markStep(mol *dogMol, stepID string, errCount int, errLabel string) {
+	if errCount > 0 {
+		mol.failStep(stepID, fmt.Sprintf("%d databases had %s", errCount, errLabel))
+		return
+	}
+	mol.closeStep(stepID)
+}
+
+// reconcileMergedOrphansInline reconciles post-merge orphans (Step 4a, gu-7igu8).
+// The refinery's post-merge sequence (close MR → close source → unhook → reap)
+// is non-atomic; an interrupted reconcile can leave a source issue non-terminal
+// (HOOKED on a dead polecat) even though the MR merged. Detect that signature —
+// agent bead whose active_mr points at a proven-merged MR with a still-non-terminal
+// source — and complete the reconcile by closing the source issue.
+func (d *Daemon) reconcileMergedOrphansInline(t *reapTotals, dryRun bool) {
 	if d.config.TownRoot == "" {
 		d.logger.Printf("wisp_reaper: post-merge orphan reconcile skipped (no town root)")
-	} else {
-		bd := beads.New(d.config.TownRoot).ForAgentBead()
-		reconResult, err := reaper.ReconcileMergedOrphans(bd, dryRun)
-		if err != nil {
-			d.logger.Printf("wisp_reaper: post-merge orphan reconcile error: %v", err)
-		} else {
-			reconScanned = reconResult.Scanned
-			reconReconciled = reconResult.Reconciled
-			reconPreservedWIP = reconResult.PreservedWIP
-			for _, entry := range reconResult.ReconciledEntries {
-				d.logger.Printf("wisp_reaper: reconciled post-merge orphan: agent=%s active_mr=%s source=%s closed",
-					entry.AgentBeadID, entry.ActiveMR, entry.SourceIssue)
-			}
-			for _, a := range reconResult.Anomalies {
-				d.logger.Printf("wisp_reaper: post-merge orphan reconcile ANOMALY: %s", a.Message)
-			}
-		}
+		return
 	}
+	bd := beads.New(d.config.TownRoot).ForAgentBead()
+	result, err := reaper.ReconcileMergedOrphans(bd, dryRun)
+	if err != nil {
+		d.logger.Printf("wisp_reaper: post-merge orphan reconcile error: %v", err)
+		return
+	}
+	t.reconScanned = result.Scanned
+	t.reconReconciled = result.Reconciled
+	t.reconPreservedWIP = result.PreservedWIP
+	for _, entry := range result.ReconciledEntries {
+		d.logger.Printf("wisp_reaper: reconciled post-merge orphan: agent=%s active_mr=%s source=%s closed",
+			entry.AgentBeadID, entry.ActiveMR, entry.SourceIssue)
+	}
+	for _, a := range result.Anomalies {
+		d.logger.Printf("wisp_reaper: post-merge orphan reconcile ANOMALY: %s", a.Message)
+	}
+}
 
-	// Step 4b: Scrub stale active_mr refs on agent beads (gu-dhqm).
-	// Re-evaluate every agent bead's active_mr through polecat.AssessActiveMR
-	// and clear refs whose MR + source issue are both terminal. Preserves
-	// polecats with cleanup_status indicating human WIP (gc-eysed). Operates
-	// on the town database only.
-	var scrubScanned, scrubCleared, scrubPreservedWIP, scrubStillPending int
+// scrubActiveMRInline scrubs stale active_mr refs on agent beads (Step 4b, gu-dhqm).
+// Re-evaluate every agent bead's active_mr through polecat.AssessActiveMR and
+// clear refs whose MR + source issue are both terminal. Preserves polecats with
+// cleanup_status indicating human WIP (gc-eysed). Operates on the town database only.
+func (d *Daemon) scrubActiveMRInline(t *reapTotals, dryRun bool) {
 	if d.config.TownRoot == "" {
 		d.logger.Printf("wisp_reaper: active_mr scrub skipped (no town root)")
-	} else {
-		bd := beads.New(d.config.TownRoot).ForAgentBead()
-		scrubResult, err := reaper.ScrubStaleActiveMR(bd, dryRun)
-		if err != nil {
-			d.logger.Printf("wisp_reaper: active_mr scrub error: %v", err)
-		} else {
-			scrubScanned = scrubResult.Scanned
-			scrubCleared = scrubResult.Cleared
-			scrubPreservedWIP = scrubResult.PreservedWIP
-			scrubStillPending = scrubResult.StillPending
-			for _, entry := range scrubResult.ClearedEntries {
-				d.logger.Printf("wisp_reaper: cleared active_mr on %s: mr=%s status=%s source=%s",
-					entry.AgentBeadID, entry.ActiveMR, entry.MRStatus, entry.SourceIssue)
-			}
-			for _, a := range scrubResult.Anomalies {
-				d.logger.Printf("wisp_reaper: active_mr scrub ANOMALY: %s", a.Message)
-			}
-		}
+		return
 	}
+	bd := beads.New(d.config.TownRoot).ForAgentBead()
+	result, err := reaper.ScrubStaleActiveMR(bd, dryRun)
+	if err != nil {
+		d.logger.Printf("wisp_reaper: active_mr scrub error: %v", err)
+		return
+	}
+	t.scrubScanned = result.Scanned
+	t.scrubCleared = result.Cleared
+	t.scrubPreservedWIP = result.PreservedWIP
+	t.scrubStillPending = result.StillPending
+	for _, entry := range result.ClearedEntries {
+		d.logger.Printf("wisp_reaper: cleared active_mr on %s: mr=%s status=%s source=%s",
+			entry.AgentBeadID, entry.ActiveMR, entry.MRStatus, entry.SourceIssue)
+	}
+	for _, a := range result.Anomalies {
+		d.logger.Printf("wisp_reaper: active_mr scrub ANOMALY: %s", a.Message)
+	}
+}
 
-	// Step 4c: Scrub dangling mr_id/hook_bead refs on agent beads (gu-96uxo).
-	// Clear FK fields whose referent wisp was reaped/purged this cycle (now
-	// missing). Complements the active_mr scrub above (gu-dhqm), which the
-	// existence-only check here deliberately does not duplicate. Operates on
-	// the town database only.
-	var fkScanned, fkClearedMRID, fkClearedHook, fkPreservedWIP int
+// scrubDanglingFKInline scrubs dangling mr_id/hook_bead refs on agent beads
+// (Step 4c, gu-96uxo). Clear FK fields whose referent wisp was reaped/purged
+// this cycle (now missing). Complements the active_mr scrub above (gu-dhqm),
+// which the existence-only check here deliberately does not duplicate. Operates
+// on the town database only.
+func (d *Daemon) scrubDanglingFKInline(t *reapTotals, dryRun bool) {
 	if d.config.TownRoot == "" {
 		d.logger.Printf("wisp_reaper: dangling_fk scrub skipped (no town root)")
-	} else {
-		bd := beads.New(d.config.TownRoot).ForAgentBead()
-		fkResult, err := reaper.ScrubDanglingFKRefs(bd, dryRun)
-		if err != nil {
-			d.logger.Printf("wisp_reaper: dangling_fk scrub error: %v", err)
-		} else {
-			fkScanned = fkResult.Scanned
-			fkClearedMRID = fkResult.ClearedMRID
-			fkClearedHook = fkResult.ClearedHookBead
-			fkPreservedWIP = fkResult.PreservedWIP
-			for _, entry := range fkResult.ClearedEntries {
-				d.logger.Printf("wisp_reaper: cleared %s on %s: referent=%s (missing)",
-					entry.Field, entry.AgentBeadID, entry.Referent)
-			}
-			for _, a := range fkResult.Anomalies {
-				d.logger.Printf("wisp_reaper: dangling_fk scrub ANOMALY: %s", a.Message)
-			}
-		}
+		return
 	}
+	bd := beads.New(d.config.TownRoot).ForAgentBead()
+	result, err := reaper.ScrubDanglingFKRefs(bd, dryRun)
+	if err != nil {
+		d.logger.Printf("wisp_reaper: dangling_fk scrub error: %v", err)
+		return
+	}
+	t.fkScanned = result.Scanned
+	t.fkClearedMRID = result.ClearedMRID
+	t.fkClearedHook = result.ClearedHookBead
+	t.fkPreservedWIP = result.PreservedWIP
+	for _, entry := range result.ClearedEntries {
+		d.logger.Printf("wisp_reaper: cleared %s on %s: referent=%s (missing)",
+			entry.Field, entry.AgentBeadID, entry.Referent)
+	}
+	for _, a := range result.Anomalies {
+		d.logger.Printf("wisp_reaper: dangling_fk scrub ANOMALY: %s", a.Message)
+	}
+}
 
-	// Step 5: Report
-	if totalOpen > wispAlertThreshold {
-		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
-			totalOpen, wispAlertThreshold)
-	}
-	summary := fmt.Sprintf("wisp_reaper: cycle complete — reaped=%d", totalReaped)
-	if totalMoleculeSteps > 0 {
-		summary += fmt.Sprintf(" molecule_steps_closed=%d", totalMoleculeSteps)
+// buildReapSummary formats the end-of-cycle report line. It is pure (no I/O) so
+// the report format is unit-testable in isolation from the reaper I/O.
+func buildReapSummary(t reapTotals, dbCount int, dryRun bool) string {
+	summary := fmt.Sprintf("wisp_reaper: cycle complete — reaped=%d", t.reaped)
+	if t.moleculeSteps > 0 {
+		summary += fmt.Sprintf(" molecule_steps_closed=%d", t.moleculeSteps)
 	}
 	summary += fmt.Sprintf(" purged=%d wisp_flushed=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d hooked_closed=%d auto_closed=%d orphan_recon_scanned=%d orphan_reconciled=%d orphan_recon_preserved=%d active_mr_scanned=%d active_mr_cleared=%d active_mr_preserved=%d active_mr_pending=%d dangling_fk_scanned=%d dangling_fk_cleared_mr_id=%d dangling_fk_cleared_hook=%d dangling_fk_preserved=%d open=%d databases=%d dryRun=%v",
-		totalPurged, totalWispFlushed, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalHookedClosed, totalAutoClosed,
-		reconScanned, reconReconciled, reconPreservedWIP,
-		scrubScanned, scrubCleared, scrubPreservedWIP, scrubStillPending,
-		fkScanned, fkClearedMRID, fkClearedHook, fkPreservedWIP,
-		totalOpen, len(databases), dryRun)
-	d.logger.Printf("%s", summary)
-	mol.closeStep("report")
+		t.purged, t.wispFlushed, t.mailPurged, t.pluginClosed, t.dispatchClosed, t.hookedClosed, t.autoClosed,
+		t.reconScanned, t.reconReconciled, t.reconPreservedWIP,
+		t.scrubScanned, t.scrubCleared, t.scrubPreservedWIP, t.scrubStillPending,
+		t.fkScanned, t.fkClearedMRID, t.fkClearedHook, t.fkPreservedWIP,
+		t.open, dbCount, dryRun)
+	return summary
 }
 
 // closeStaleAcrossDBs runs a per-database "close stale X" reaper step across all
