@@ -202,6 +202,7 @@ test: test-makefile
 
 test-makefile:
 	bash scripts/check-install-path_test.sh
+<<<<<<< HEAD
 	bash scripts/check-lockfile-mirror_test.sh
 	bash scripts/check-upstream-rebased_test.sh
 	bash scripts/git-push-verified_test.sh
@@ -231,6 +232,11 @@ verify:
 verify-integration: verify
 	@echo "==> verify-integration: running -tags=integration tests (requires Docker)"
 	@go test ./... -tags=integration -count=1 -timeout 15m
+=======
+	bash -n plugins/stuck-agent-dog/run.sh
+	bash -n plugins/stuck-agent-dog/run_test.sh
+	bash plugins/stuck-agent-dog/run_test.sh
+>>>>>>> upstream/main
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

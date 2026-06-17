@@ -1,6 +1,9 @@
 package plugin
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,6 +27,7 @@ func TestPluginRunRecord(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestRecordRunArgs_EphemeralByDefault(t *testing.T) {
 	args := recordRunArgs(PluginRunRecord{
 		PluginName: "lia-codegen-digest",
@@ -57,6 +61,61 @@ func containsArg(args []string, want string) bool {
 		}
 	}
 	return false
+=======
+func TestRecordRunCreatesAndClosesReceipt(t *testing.T) {
+	townRoot := t.TempDir()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-args.log")
+	bdPath := filepath.Join(binDir, "bd")
+	fakeBD := "#!/usr/bin/env bash\n" +
+		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
+		"case \"$1\" in\n" +
+		"  create) printf '{\\\"id\\\":\\\"gt-test-run\\\"}\\n' ;;\n" +
+		"  close) exit 0 ;;\n" +
+		"  *) exit 2 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", logPath)
+
+	recorder := NewRecorder(townRoot)
+	id, err := recorder.RecordRun(PluginRunRecord{
+		PluginName:  "tool-updater",
+		RigName:     "gastown",
+		Result:      RunResult("warning"),
+		Title:       "tool-updater: failed=brew",
+		Body:        "brew failed",
+		ExtraLabels: []string{"source:test"},
+	})
+	if err != nil {
+		t.Fatalf("RecordRun failed: %v", err)
+	}
+	if id != "gt-test-run" {
+		t.Fatalf("RecordRun id = %q, want gt-test-run", id)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		"create --ephemeral --json -t chore --title=tool-updater: failed=brew",
+		"-l type:plugin-run",
+		"-l plugin:tool-updater",
+		"-l result:warning",
+		"-l rig:gastown",
+		"-l source:test",
+		"--description=brew failed",
+		"close gt-test-run --reason plugin run recorded",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("fake bd log missing %q in:\n%s", want, log)
+		}
+	}
+>>>>>>> upstream/main
 }
 
 func TestRunResultConstants(t *testing.T) {

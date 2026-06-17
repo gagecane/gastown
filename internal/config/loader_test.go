@@ -4062,7 +4062,7 @@ func TestBuildArgsWithPromptWarnsOnDroppedPrompt(t *testing.T) {
 //	      "command": "opencode",
 //	      "args": ["-m", "openai/gpt-5.2-codex"],
 //	      "prompt_mode": "none",
-//	      "process_names": ["opencode", "node"],
+//	      "process_names": ["opencode", "node", "bun"],
 //	      "env": {
 //	        "OPENCODE_PERMISSION": "{\"*\":\"allow\"}"
 //	      }

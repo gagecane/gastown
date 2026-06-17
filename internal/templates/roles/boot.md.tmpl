@@ -92,9 +92,12 @@ Execute the decided action:
 
 - **NOTHING**: Log and exit
 - **NUDGE**: `{{ cmd }} nudge deacon "Boot check-in: you have pending work"`
-- **WAKE**: Escape + `{{ cmd }} nudge deacon "Boot wake: check your inbox"`
+- **WAKE**: `{{ cmd }} nudge --mode=immediate deacon "Boot wake: check your inbox"`
 - **INTERRUPT**: Mail the Deacon requesting restart consideration
 - **START**: Log detection (daemon handles restart)
+
+Never run raw `tmux send-keys` for Deacon communication; Boot hooks block it
+because it can leave unsubmitted text staged in the Deacon TUI. Use `{{ cmd }} nudge`.
 
 ### Step 4: Clean
 

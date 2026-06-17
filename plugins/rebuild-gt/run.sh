@@ -134,17 +134,28 @@ SAFE=$(echo "$STALE_JSON" | python3 -c "import json,sys; print(json.load(sys.std
 
 if [ "$IS_STALE" != "True" ]; then
   log "Binary is fresh. Nothing to do."
+<<<<<<< HEAD
   bd create "rebuild-gt: binary is fresh" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:success" \
     --silent 2>/dev/null || true
+=======
+  gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
+    --title "rebuild-gt: binary is fresh" >/dev/null 2>&1 || true
+>>>>>>> upstream/main
   exit 0
 fi
 
 if [ "$SAFE" != "True" ]; then
   log "Not safe to rebuild (not on main or would be a downgrade). Skipping."
+<<<<<<< HEAD
   bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
     -d "Skipped: not safe to rebuild" --silent 2>/dev/null || true
+=======
+  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+    --title "Plugin: rebuild-gt [skipped]" \
+    --description "Skipped: not safe to rebuild" >/dev/null 2>&1 || true
+>>>>>>> upstream/main
   exit 0
 fi
 
@@ -164,19 +175,32 @@ log "Using source rig: $RIG_ROOT (rig=$RIG_NAME)"
 
 DIRTY=$(source_dirty "$RIG_ROOT")
 if [ -n "$DIRTY" ]; then
+<<<<<<< HEAD
   log "Repo is dirty (outside known-local operational paths), skipping rebuild."
   bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
     -d "Skipped: repo has uncommitted changes outside known-local operational paths" --silent 2>/dev/null || true
+=======
+  log "Repo is dirty, skipping rebuild."
+  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+    --title "Plugin: rebuild-gt [skipped]" \
+    --description "Skipped: repo has uncommitted changes" >/dev/null 2>&1 || true
+>>>>>>> upstream/main
   exit 0
 fi
 
 BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null)
 if [ "$BRANCH" != "main" ]; then
   log "Not on main branch (on $BRANCH), skipping rebuild."
+<<<<<<< HEAD
   bd create "Plugin: rebuild-gt [skipped]" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:skipped" \
     -d "Skipped: not on main branch (on $BRANCH)" --silent 2>/dev/null || true
+=======
+  gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+    --title "Plugin: rebuild-gt [skipped]" \
+    --description "Skipped: not on main branch (on $BRANCH)" >/dev/null 2>&1 || true
+>>>>>>> upstream/main
   exit 0
 fi
 
@@ -212,6 +236,7 @@ printf '%s\n' "$BUILD_OUTPUT" | sed 's/^/[rebuild-gt]   /'
 if [ "$BUILD_OK" = true ]; then
   NEW_VER=$(gt version 2>/dev/null | head -1 || echo "unknown")
   log "Rebuilt: $OLD_VER -> $NEW_VER"
+<<<<<<< HEAD
   bd create "rebuild-gt: $OLD_VER -> $NEW_VER" -t chore --ephemeral \
     -l "type:plugin-run,plugin:rebuild-gt,${RIG_LABEL},result:success" \
     --silent 2>/dev/null || true
@@ -241,5 +266,16 @@ else
     -d "Build failed after ${MAX_ATTEMPTS} attempts ($OLD_VER). Output (tail):
 ${ERROR_TAIL}" --silent 2>/dev/null || true
   gt escalate "Plugin FAILED: rebuild-gt after ${MAX_ATTEMPTS} attempts: ${ERROR_SUMMARY:-no output captured}" -s medium 2>/dev/null || true
+=======
+  gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
+    --title "rebuild-gt: $OLD_VER -> $NEW_VER" >/dev/null 2>&1 || true
+else
+  ERROR="make build/safe-install failed"
+  log "FAILED: $ERROR"
+  gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
+    --title "Plugin: rebuild-gt [failure]" \
+    --description "Build failed: $ERROR" >/dev/null 2>&1 || true
+  gt escalate "Plugin FAILED: rebuild-gt" -s medium 2>/dev/null || true
+>>>>>>> upstream/main
   exit 1
 fi

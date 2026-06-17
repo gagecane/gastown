@@ -715,8 +715,8 @@ exit 1
 	if err != nil {
 		t.Fatalf("reading config.yaml: %v", err)
 	}
-	// Upstream added export.auto: "false" to the default config so beads
-	// doesn't auto-export issue files on every write.
+	// Gas Town defaults written by beads.EnsureConfigYAML: idle-timeout 0,
+	// auto-start false (town-safety), auto-commit on, export.auto false.
 	want := "prefix: gt\nissue-prefix: gt\ndolt.idle-timeout: \"0\"\ndolt.auto-start: \"false\"\ndolt.auto-commit: \"on\"\nexport.auto: \"false\"\n"
 	if string(config) != want {
 		t.Fatalf("config.yaml = %q, want %q", string(config), want)

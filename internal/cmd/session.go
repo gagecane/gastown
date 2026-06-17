@@ -24,14 +24,16 @@ import (
 
 // Session command flags
 var (
-	sessionIssue      string
-	sessionForce      bool
-	sessionLines      int
-	sessionMessage    string
-	sessionFile       string
-	sessionRigFilter  string
-	sessionListJSON   bool
-	sessionStatusJSON bool
+	sessionIssue               string
+	sessionForce               bool
+	sessionLines               int
+	sessionMessage             string
+	sessionFile                string
+	sessionRigFilter           string
+	sessionListJSON            bool
+	sessionStatusJSON          bool
+	sessionHealthJSON          bool
+	sessionHealthMaxInactivity time.Duration
 )
 
 var sessionCmd = &cobra.Command{
@@ -168,6 +170,25 @@ Examples:
 	RunE: runSessionCheck,
 }
 
+var sessionHealthCmd = &cobra.Command{
+	Use:   "health <tmux-session>",
+	Short: "Check a tmux agent session with central runtime liveness",
+	Long: `Check a tmux agent session using the central runtime-aware liveness path.
+
+This wraps tmux.CheckSessionHealth, which reads GT_PROCESS_NAMES/GT_AGENT from
+the session environment before falling back to built-in agent process names.
+
+The command exits successfully for all valid health states; inspect the status
+field when using --json. Operational failures, argument errors, or invalid flags
+return non-zero.
+
+Examples:
+  gt session health gt-vault --json
+  gt session health gt-vault --json --max-inactivity 30m`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSessionHealth,
+}
+
 func init() {
 	// Start flags
 	sessionStartCmd.Flags().StringVar(&sessionIssue, "issue", "", "Issue ID to work on")
@@ -192,6 +213,10 @@ func init() {
 	// Status flags
 	sessionStatusCmd.Flags().BoolVar(&sessionStatusJSON, "json", false, "Output as JSON")
 
+	// Health flags
+	sessionHealthCmd.Flags().BoolVar(&sessionHealthJSON, "json", false, "Output as JSON")
+	sessionHealthCmd.Flags().DurationVar(&sessionHealthMaxInactivity, "max-inactivity", 0, "Maximum tmux inactivity before reporting agent-hung (0 disables activity check)")
+
 	// Add subcommands
 	sessionCmd.AddCommand(sessionStartCmd)
 	sessionCmd.AddCommand(sessionStopCmd)
@@ -202,8 +227,27 @@ func init() {
 	sessionCmd.AddCommand(sessionRestartCmd)
 	sessionCmd.AddCommand(sessionStatusCmd)
 	sessionCmd.AddCommand(sessionCheckCmd)
+	sessionCmd.AddCommand(sessionHealthCmd)
 
 	rootCmd.AddCommand(sessionCmd)
+}
+
+type sessionHealthReport struct {
+	Session              string `json:"session"`
+	Status               string `json:"status"`
+	Healthy              bool   `json:"healthy"`
+	Zombie               bool   `json:"zombie"`
+	MaxInactivitySeconds int64  `json:"max_inactivity_seconds"`
+}
+
+func newSessionHealthReport(session string, status tmux.ZombieStatus, maxInactivity time.Duration) sessionHealthReport {
+	return sessionHealthReport{
+		Session:              session,
+		Status:               status.String(),
+		Healthy:              status == tmux.SessionHealthy,
+		Zombie:               status.IsZombie(),
+		MaxInactivitySeconds: int64(maxInactivity.Seconds()),
+	}
 }
 
 // parseAddress parses "rig/polecat" format.
@@ -603,6 +647,25 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nAttach with: %s\n", style.Dim.Render(fmt.Sprintf("gt session at %s/%s", rigName, polecatName)))
+	return nil
+}
+
+func runSessionHealth(cmd *cobra.Command, args []string) error {
+	sessionName := args[0]
+	status := tmux.NewTmux().CheckSessionHealth(sessionName, sessionHealthMaxInactivity)
+	report := newSessionHealthReport(sessionName, status, sessionHealthMaxInactivity)
+
+	if sessionHealthJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}
+
+	if report.Healthy {
+		fmt.Printf("%s: %s\n", sessionName, style.Bold.Render(report.Status))
+	} else {
+		fmt.Printf("%s: %s\n", sessionName, style.Dim.Render(report.Status))
+	}
 	return nil
 }
 

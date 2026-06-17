@@ -508,10 +508,10 @@ Record the quality review result. This is fail-open: if the command fails,
 log the error and continue — never block the merge.
 
 ```bash
-bd create "quality-review: Score <score>, <recommendation>" -t chore --ephemeral \\
-  -l type:plugin-run,plugin:quality-review-result,worker:<polecat-name>,rig:<rig-name>,score:<score>,recommendation:<approve|request_changes>,result:success \\
-  -d "Score: <score>, <recommendation>. Issues: <count> (<summary>)" \\
-  --silent 2>/dev/null || true
+gt plugin record-run --plugin quality-review-result --result success --rig <rig-name> \\
+  --label worker:<polecat-name> --label score:<score> --label recommendation:<approve|request_changes> \\
+  --title "quality-review: Score <score>, <recommendation>" \\
+  --description "Score: <score>, <recommendation>. Issues: <count> (<summary>)" >/dev/null 2>&1 || true
 ```
 
 **Step 6: Handle breach scores (measurement-only)**

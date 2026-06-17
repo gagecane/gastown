@@ -863,6 +863,54 @@ func TestComputeExpectedPatrolRolesDisableUserPromptMailCheck(t *testing.T) {
 	}
 }
 
+func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	boot, err := ComputeExpected("boot")
+	if err != nil {
+		t.Fatalf("ComputeExpected(boot): %v", err)
+	}
+
+	entry, ok := findPreToolUse(boot, "Bash(*tmux*send-keys*)")
+	if !ok {
+		t.Fatal("boot missing raw tmux send-keys guard")
+	}
+	if len(entry.Hooks) != 1 {
+		t.Fatalf("boot raw tmux guard hooks = %d, want 1", len(entry.Hooks))
+	}
+	command := entry.Hooks[0].Command
+	for _, want := range []string{
+		"BLOCKED: Boot must not use raw tmux send-keys",
+		"gt nudge --mode=immediate deacon",
+		"exit 2",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("boot raw tmux guard command missing %q: %s", want, command)
+		}
+	}
+	if len(boot.UserPromptSubmit) != 0 {
+		t.Fatalf("boot should still disable UserPromptSubmit mail-check, got %+v", boot.UserPromptSubmit)
+	}
+
+	mayor, err := ComputeExpected("mayor")
+	if err != nil {
+		t.Fatalf("ComputeExpected(mayor): %v", err)
+	}
+	if _, ok := findPreToolUse(mayor, "Bash(*tmux*send-keys*)"); ok {
+		t.Fatal("mayor must not receive Boot's raw tmux send-keys guard")
+	}
+}
+
+func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
+	for _, entry := range cfg.PreToolUse {
+		if entry.Matcher == matcher {
+			return entry, true
+		}
+	}
+	return HookEntry{}, false
+}
+
 func TestComputeExpectedPolecatsKeepUserPromptMailCheck(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)

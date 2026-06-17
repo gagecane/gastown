@@ -520,6 +520,7 @@ fi
 # can distinguish "ran and succeeded" from "never ran / died silently".
 
 if [[ "$FAILED" -eq 0 ]]; then
+<<<<<<< HEAD
   # All remote-configured DBs synced. Retention errors and no-remote skips are
   # non-data-loss conditions → low-severity warning, not a HIGH page (gu-8xvpw).
   if [[ "$RETENTION_FAILED" -eq 0 && "$NO_REMOTE" -eq 0 ]]; then
@@ -542,16 +543,26 @@ if [[ "$FAILED" -eq 0 ]]; then
       --severity low \
       --reason "Backups succeeded ($SYNCED synced, $SKIPPED unchanged); ${RETENTION_FAILED} retention error(s), ${NO_REMOTE} DB(s) with no backup remote (${NO_REMOTE_DBS# }). Config/maintenance issue, not a data-loss failure." 2>/dev/null || true
   fi
+=======
+  # Success — record quietly
+  gt plugin record-run --plugin dolt-backup --result success \
+    --title "dolt-backup: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+>>>>>>> upstream/main
 else
   # Backup-sync failure — real data-safety risk. Heartbeat records the failure
   # so the watcher sees a recent (failed) run rather than silence.
   FAIL_MSG="$SUMMARY. Failed:$FAILED_DBS"
+<<<<<<< HEAD
   write_heartbeat "failed" "$SYNCED" "$SKIPPED" "$FAILED" "${#PROD_DBS[@]}" \
     "$RETENTION_CLEANED" "$RETENTION_FAILED" "$FAIL_MSG"
 
   bd create --title "dolt-backup: FAILED - $FAIL_MSG" -t chore --ephemeral \
     -l type:plugin-run,plugin:dolt-backup,result:failure \
     -d "$FAIL_MSG" --silent 2>/dev/null || true
+=======
+  gt plugin record-run --plugin dolt-backup --result failure \
+    --title "dolt-backup: FAILED - $FAIL_MSG" --description "$FAIL_MSG" >/dev/null 2>&1 || true
+>>>>>>> upstream/main
 
   # Dedup the HIGH escalation by a stable signature (the failing DB set) so a
   # recurring backup-dest issue bumps ONE open escalation instead of filing a

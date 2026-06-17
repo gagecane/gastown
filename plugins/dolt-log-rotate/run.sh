@@ -35,9 +35,8 @@ log "Current log size: ${SIZE_MB}MB (threshold: ${MAX_MB}MB)"
 
 if [[ $SIZE_MB -lt $MAX_MB ]]; then
   log "Below threshold. Nothing to do."
-  bd create "dolt-log-rotate: log size ${SIZE_MB}MB, below ${MAX_MB}MB threshold" \
-    -t chore --ephemeral -l type:plugin-run,plugin:dolt-log-rotate,result:success \
-    --silent 2>/dev/null || true
+  gt plugin record-run --plugin dolt-log-rotate --result success \
+    --title "dolt-log-rotate: log size ${SIZE_MB}MB, below ${MAX_MB}MB threshold" >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -87,6 +86,5 @@ SUMMARY="dolt-log-rotate: rotated ${SIZE_MB}MB -> ${COMPRESSED_MB}MB compressed,
 log ""
 log "=== Done === $SUMMARY"
 
-bd create "$SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:dolt-log-rotate,result:success \
-  --silent 2>/dev/null || true
+gt plugin record-run --plugin dolt-log-rotate --result success \
+  --title "$SUMMARY" >/dev/null 2>&1 || true

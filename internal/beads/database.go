@@ -4,24 +4,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 )
 
+var envKeysCaseInsensitive = runtime.GOOS == "windows"
+
 var bdTargetEnvKeys = []string{
 	"BEADS_DIR",
 	"BEADS_DB",
 	"BD_DB",
-	"BEADS_DOLT_DATA_DIR",
-	"BEADS_DOLT_HOST",
-	"BEADS_DOLT_PORT",
-	"BEADS_DOLT_SERVER_DATABASE",
-	"BEADS_DOLT_SERVER_HOST",
-	"BEADS_DOLT_SERVER_PORT",
-	"BEADS_DOLT_SERVER_SOCKET",
-	"BEADS_DOLT_SERVER_MODE",
-	"BEADS_DOLT_SHARED_SERVER",
 	"BEADS_SHARED_SERVER_DIR",
 }
 
@@ -56,11 +50,27 @@ func DatabaseEnv(beadsDir string) string {
 // Gas Town. It intentionally preserves BEADS_DOLT_AUTO_START so callers can keep
 // the shared-server guardrail enabled.
 func StripBDTargetEnv(env []string) []string {
-	filtered := env
-	for _, key := range bdTargetEnvKeys {
-		filtered = stripEnvKey(filtered, key)
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if isBDTargetEnv(entry) {
+			continue
+		}
+		filtered = append(filtered, entry)
 	}
 	return filtered
+}
+
+func isBDTargetEnv(entry string) bool {
+	keyName, _, ok := strings.Cut(entry, "=")
+	if !ok {
+		return false
+	}
+	for _, key := range bdTargetEnvKeys {
+		if envKeyMatches(keyName, key) {
+			return true
+		}
+	}
+	return envKeyHasPrefix(keyName, "BEADS_DOLT_") && !envKeyMatches(keyName, "BEADS_DOLT_AUTO_START")
 }
 
 // BuildPinnedBDEnv returns env for a bd subprocess pinned to beadsDir. BEADS_DIR
@@ -221,6 +231,7 @@ var bdSideEffectSuppressionEnv = [][2]string{
 // SuppressBDSideEffects disables Beads JSONL export/backup/push side effects for
 // Gas Town-managed subprocesses. See bdSideEffectSuppressionEnv for rationale.
 func SuppressBDSideEffects(env []string) []string {
+<<<<<<< HEAD
 	for _, kv := range bdSideEffectSuppressionEnv {
 		env = stripEnvKey(env, kv[0])
 	}
@@ -243,18 +254,30 @@ func SuppressBDSideEffects(env []string) []string {
 func ApplyBDSideEffectSuppression() {
 	for _, kv := range bdSideEffectSuppressionEnv {
 		_ = os.Setenv(kv[0], kv[1])
+=======
+	for _, key := range []string{
+		"BEADS_NO_AUTO_IMPORT",
+		"BD_EXPORT_AUTO",
+		"BD_BACKUP_ENABLED",
+		"BD_DOLT_AUTO_PUSH",
+		"BD_NO_PUSH",
+		"BD_EXPORT_GIT_ADD",
+		"BD_NO_GIT_OPS",
+	} {
+		env = StripEnvKey(env, key)
+>>>>>>> upstream/main
 	}
 }
 
 func forceBDReadOnly(env []string) []string {
-	env = stripEnvKey(env, "BD_DOLT_AUTO_COMMIT")
-	env = stripEnvKey(env, "BD_READONLY")
+	env = StripEnvKey(env, "BD_DOLT_AUTO_COMMIT")
+	env = StripEnvKey(env, "BD_READONLY")
 	return append(env, "BD_DOLT_AUTO_COMMIT=off", "BD_READONLY=true")
 }
 
 func forceBDMutation(env []string) []string {
-	env = stripEnvKey(env, "BD_DOLT_AUTO_COMMIT")
-	env = stripEnvKey(env, "BD_READONLY")
+	env = StripEnvKey(env, "BD_DOLT_AUTO_COMMIT")
+	env = StripEnvKey(env, "BD_READONLY")
 	return append(env, "BD_DOLT_AUTO_COMMIT=on")
 }
 
@@ -337,16 +360,33 @@ func readDoltMetadata(beadsDir string) doltMetadata {
 	return meta
 }
 
-func stripEnvKey(env []string, key string) []string {
-	prefix := key + "="
+// StripEnvKey removes all entries for key. Environment keys are case-insensitive
+// on Windows, so matching follows the target platform instead of the host shell's
+// spelling.
+func StripEnvKey(env []string, key string) []string {
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
+		keyName, _, ok := strings.Cut(entry, "=")
+		if ok && envKeyMatches(keyName, key) {
 			continue
 		}
 		filtered = append(filtered, entry)
 	}
 	return filtered
+}
+
+func envKeyMatches(got, want string) bool {
+	if envKeysCaseInsensitive {
+		return strings.EqualFold(got, want)
+	}
+	return got == want
+}
+
+func envKeyHasPrefix(keyName, prefix string) bool {
+	if envKeysCaseInsensitive {
+		return len(keyName) >= len(prefix) && strings.EqualFold(keyName[:len(prefix)], prefix)
+	}
+	return strings.HasPrefix(keyName, prefix)
 }
 
 func addGTDerivedDoltTargetEnv(env []string) []string {
@@ -424,10 +464,10 @@ func PreventTestDoltLeak(env []string, beadsDir string) []string {
 }
 
 func envValue(env []string, key string) string {
-	prefix := key + "="
 	for _, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
-			return strings.TrimPrefix(entry, prefix)
+		keyName, value, ok := strings.Cut(entry, "=")
+		if ok && envKeyMatches(keyName, key) {
+			return value
 		}
 	}
 	return ""

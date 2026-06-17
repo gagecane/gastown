@@ -161,16 +161,23 @@ func showFormulaSteps(formulaName, label, townRoot, rigName string, extraVars ..
 // townRoot and rigName are used to load formula overlays (operator customizations).
 // extraVars is an optional list of "key=value" overrides substituted into step descriptions.
 func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) {
+	rendered, err := renderFormulaStepsFull(formulaName, townRoot, rigName, extraVars...)
+	if err != nil {
+		style.PrintWarning("%v", err)
+		return
+	}
+	fmt.Print(rendered)
+}
+
+func renderFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]string) (string, error) {
 	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
 	if err != nil {
-		style.PrintWarning("could not load formula %s: %v", formulaName, err)
-		return
+		return "", fmt.Errorf("could not load formula %s: %w", formulaName, err)
 	}
 
 	f, err := formula.Parse(content)
 	if err != nil {
-		style.PrintWarning("could not parse formula %s: %v", formulaName, err)
-		return
+		return "", fmt.Errorf("could not parse formula %s: %w", formulaName, err)
 	}
 
 	// Resolve extends/compose so child formulas (e.g. wc26-frontend extends
@@ -183,7 +190,7 @@ func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]
 	}
 
 	if len(f.Steps) == 0 {
-		return
+		return "", nil
 	}
 
 	// Apply formula overlays if townRoot is available.
@@ -195,16 +202,18 @@ func showFormulaStepsFull(formulaName, townRoot, rigName string, extraVars ...[]
 	}
 	varMap := buildFormulaVarMap(f, vars)
 
-	fmt.Println()
-	fmt.Printf("**Formula Checklist** (%d steps from %s):\n\n", len(f.Steps), formulaName)
+	var sb strings.Builder
+	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "**Formula Checklist** (%d steps from %s):\n\n", len(f.Steps), formulaName)
 	for i, step := range f.Steps {
 		title := applyFormulaVars(step.Title, varMap)
-		fmt.Printf("### Step %d: %s\n\n", i+1, title)
+		fmt.Fprintf(&sb, "### Step %d: %s\n\n", i+1, title)
 		if step.Description != "" {
-			fmt.Println(applyFormulaVars(step.Description, varMap))
-			fmt.Println()
+			sb.WriteString(applyFormulaVars(step.Description, varMap))
+			sb.WriteString("\n\n")
 		}
 	}
+	return sb.String(), nil
 }
 
 // resolveFormulaSearchPaths returns on-disk directories Resolve uses to locate
@@ -247,13 +256,32 @@ func attachmentFormulaVars(attachment *beads.AttachmentFields) []string {
 	if attachment == nil {
 		return nil
 	}
-	if len(attachment.AttachedVars) > 0 {
-		return attachment.AttachedVars
+	indexes := make(map[string]int)
+	vars := make([]string, 0, len(attachment.AttachedVars))
+	add := func(variable string) {
+		variable = strings.TrimSpace(variable)
+		if variable == "" {
+			return
+		}
+		idx := strings.IndexByte(variable, '=')
+		if idx <= 0 {
+			return
+		}
+		key := strings.TrimSpace(variable[:idx])
+		if idx, ok := indexes[key]; ok {
+			vars[idx] = variable
+			return
+		}
+		indexes[key] = len(vars)
+		vars = append(vars, variable)
 	}
-	if attachment.FormulaVars == "" {
-		return nil
+	for _, variable := range strings.Split(attachment.FormulaVars, "\n") {
+		add(variable)
 	}
-	return strings.Split(attachment.FormulaVars, "\n")
+	for _, variable := range attachment.AttachedVars {
+		add(variable)
+	}
+	return vars
 }
 
 // applyFormulaVars replaces {{key}} placeholders in text with values from varMap.

@@ -132,7 +132,6 @@ echo "$SUMMARY"
 RESULT="success"
 [ -n "$ERRORS" ] && RESULT="warning"
 
-bd create "$SUMMARY" -t chore --ephemeral \
-  -l "type:plugin-run,plugin:gitignore-reconcile,result:$RESULT" \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin gitignore-reconcile --result "$RESULT" \
+  --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 ```

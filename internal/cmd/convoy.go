@@ -3007,8 +3007,15 @@ func hasLiveRelayWriter(tracked []trackedIssueInfo) bool {
 }
 
 func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
+	status := strings.TrimSpace(t.Status)
+
+	// Unresolved issues are not safe to dispatch.
+	if status == "" || status == trackedStatusUnknown {
+		return false
+	}
+
 	// Closed issues are never ready
-	if t.Status == "closed" || t.Status == "tombstone" {
+	if status == "closed" || status == "tombstone" {
 		return false
 	}
 
@@ -3067,7 +3074,7 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	}
 
 	// Open issues with no assignee are trivially ready
-	if t.Status == "open" && t.Assignee == "" {
+	if status == "open" && t.Assignee == "" {
 		return true
 	}
 
@@ -3999,7 +4006,10 @@ type trackedDependency struct {
 }
 
 func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
-	dep.Status = details.Status
+	dep.Status = strings.TrimSpace(details.Status)
+	if dep.Status == "" {
+		dep.Status = trackedStatusUnknown
+	}
 	dep.Blocked = details.IsBlocked()
 	if dep.Title == "" {
 		dep.Title = details.Title
@@ -4227,6 +4237,7 @@ type issueDependency struct {
 	DependencyType string `json:"dependency_type"`
 }
 
+<<<<<<< HEAD
 type issueDetailsJSON struct {
 	ID             string            `json:"id"`
 	Title          string            `json:"title"`
@@ -4263,6 +4274,8 @@ func (issue issueDetailsJSON) toIssueDetails() *issueDetails {
 	}
 }
 
+=======
+>>>>>>> upstream/main
 // issueDetails holds basic issue info.
 type issueDetails struct {
 	ID             string
@@ -4296,76 +4309,93 @@ func (d issueDetails) IsBlocked() bool {
 	return false
 }
 
-// getIssueDetailsBatch fetches details for multiple issues in a single bd show call.
+// getIssueDetailsBatch fetches details through the central routed beads lookup.
 // Returns a map from issue ID to details. Missing/invalid issues are omitted from the map.
 func getIssueDetailsBatch(issueIDs []string) map[string]*issueDetails {
-	result := make(map[string]*issueDetails)
+	result := make(map[string]*issueDetails, len(issueIDs))
 	if len(issueIDs) == 0 {
 		return result
 	}
 
-	// Build args: bd show id1 id2 id3 ... --json
-	args := append([]string{"show"}, issueIDs...)
-	args = append(args, "--json")
-
-	// Run from town root so bd's prefix routing (routes.jsonl) can dispatch
-	// to the correct rig database for cross-rig bead lookups. (GH#2960)
-	townRoot, _ := workspace.FindFromCwdOrError()
-	bdc := BdCmd(args...).Stderr(io.Discard)
-	if townRoot != "" {
-		bdc.Dir(townRoot).WithRouting()
+	client := convoyIssueClient()
+	if client == nil {
+		return result
 	}
-	out, err := bdc.Output()
-	if err != nil {
-		// Batch failed - fall back to individual lookups for robustness
-		// This handles cases where some IDs are invalid/missing
-		for _, id := range issueIDs {
-			if details := getIssueDetails(id); details != nil {
-				result[id] = details
-			}
+
+	issues, err := client.ShowMultiple(issueIDs)
+	for id, issue := range issues {
+		if details := issueToDetails(issue); details != nil {
+			result[id] = details
 		}
+	}
+	if err == nil {
 		return result
 	}
 
-	var issues []issueDetailsJSON
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return result
-	}
-
-	for _, issue := range issues {
-		result[issue.ID] = issue.toIssueDetails()
+	// If a grouped batch fails because one ID is missing or stale, keep the
+	// previous best-effort behavior and recover any IDs that still resolve.
+	for _, id := range issueIDs {
+		if result[id] != nil {
+			continue
+		}
+		if details := getIssueDetailsWithClient(client, id); details != nil {
+			result[id] = details
+		}
 	}
 
 	return result
 }
 
-// getIssueDetails fetches issue details by trying to show it via bd.
-// Prefer getIssueDetailsBatch for multiple issues to avoid N+1 subprocess calls.
+// getIssueDetails fetches issue details through the central routed beads lookup.
 func getIssueDetails(issueID string) *issueDetails {
-	// Use bd show with routing - resolve from town root so bd's prefix
-	// routing (routes.jsonl) can dispatch to the correct rig database.
-	// Without Dir + StripBeadsDir, bd inherits CWD/BEADS_DIR which may
-	// point to a rig that doesn't contain the target bead. (GH#2960)
-	townRoot, _ := workspace.FindFromCwdOrError()
-	bdc := BdCmd("show", issueID, "--json").Stderr(io.Discard)
-	if townRoot != "" {
-		bdc.Dir(townRoot).WithRouting()
+	client := convoyIssueClient()
+	if client == nil {
+		return nil
 	}
-	out, err := bdc.Output()
+	return getIssueDetailsWithClient(client, issueID)
+}
+
+func convoyIssueClient() *beads.Beads {
+	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return nil
 	}
-	// Handle bd exit 0 bug: empty stdout means not found
-	if len(out) == 0 {
+	return beads.New(townRoot)
+}
+
+func getIssueDetailsWithClient(client *beads.Beads, issueID string) *issueDetails {
+	issue, err := client.Show(issueID)
+	if err != nil {
+		return nil
+	}
+	return issueToDetails(issue)
+}
+
+func issueToDetails(issue *beads.Issue) *issueDetails {
+	if issue == nil {
 		return nil
 	}
 
-	var issues []issueDetailsJSON
-	if err := json.Unmarshal(out, &issues); err != nil || len(issues) == 0 {
-		return nil
+	deps := make([]issueDependency, 0, len(issue.Dependencies))
+	for _, dep := range issue.Dependencies {
+		deps = append(deps, issueDependency{
+			ID:             dep.ID,
+			Status:         dep.Status,
+			DependencyType: dep.DependencyType,
+		})
 	}
 
-	return issues[0].toIssueDetails()
+	return &issueDetails{
+		ID:             issue.ID,
+		Title:          issue.Title,
+		Status:         issue.Status,
+		IssueType:      issue.Type,
+		Assignee:       issue.Assignee,
+		Labels:         issue.Labels,
+		BlockedBy:      issue.BlockedBy,
+		BlockedByCount: issue.BlockedByCount,
+		Dependencies:   deps,
+	}
 }
 
 // workerInfo holds info about a worker assigned to an issue.

@@ -1369,6 +1369,8 @@ func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaNam
 	}
 
 	// Formula-on-bead mode: instantiate formula and bond to original bead
+	formulaVarsForAttachment := strings.Join(slingVars, "\n")
+	varsForAttachment := append([]string(nil), slingVars...)
 	if formulaName != "" {
 		fmt.Printf("  Instantiating formula %s...\n", formulaName)
 
@@ -1376,6 +1378,8 @@ func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaNam
 		if parts := strings.SplitN(targetAgent, "/", 2); len(parts) >= 1 && parts[0] != "" {
 			rigCmdVars := loadRigCommandVars(townRoot, parts[0])
 			slingVars = append(rigCmdVars, slingVars...)
+			varsForAttachment = append([]string(nil), slingVars...)
+			formulaVarsForAttachment = strings.Join(slingVars, "\n")
 		}
 
 		result, err := InstantiateFormulaOnBead(ctx, formulaName, beadID, info.Title, hookWorkDir, townRoot, false, slingVars)
@@ -1405,6 +1409,10 @@ func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaNam
 		// - gt done: close attached_molecule (wisp) first, then close base bead
 		// - Compound resolution: base bead -> attached_molecule -> wisp
 		attachedMoleculeID = result.WispRootID
+		if len(result.FormulaVars) > 0 {
+			varsForAttachment = append([]string(nil), result.FormulaVars...)
+			formulaVarsForAttachment = strings.Join(result.FormulaVars, "\n")
+		}
 
 		// NOTE: We intentionally keep beadID as the ORIGINAL base bead, not the wisp.
 		// The base bead is hooked so that:
@@ -1464,6 +1472,7 @@ func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaNam
 	// Store all attachment fields in a single read-modify-write cycle.
 	// This eliminates the race condition where sequential independent updates
 	// (dispatcher, args, no_merge, attached_molecule) could overwrite each other.
+<<<<<<< HEAD
 	//
 	// Inject `issue=<beadID>` into the stored vars so polecat formula step
 	// descriptions render `{{issue}}` correctly. InstantiateFormulaOnBead sets
@@ -1475,11 +1484,26 @@ func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaNam
 		actor,
 		slingArgs,
 		storedVars,
+=======
+	mode := ""
+	if slingRalph {
+		mode = "ralph"
+	}
+	fieldUpdates := buildSlingFieldUpdates(
+		actor,
+		slingArgs,
+		varsForAttachment,
+>>>>>>> upstream/main
 		attachedMoleculeID,
 		formulaName,
 		slingNoMerge,
 		slingReviewOnly,
+<<<<<<< HEAD
 		strings.Join(storedVars, "\n"),
+=======
+		mode,
+		formulaVarsForAttachment,
+>>>>>>> upstream/main
 		convoyID,
 		slingMerge,
 		slingOwned,
@@ -1497,6 +1521,9 @@ func executeSlingDispatch(ctx context.Context, args []string, beadID, formulaNam
 		if slingReviewOnly {
 			fmt.Printf("%s Review-only mode: assignee must evaluate and report back, NOT merge/commit/push\n", style.Bold.Render("⚠"))
 		}
+	}
+	if mode != "" {
+		updateAgentMode(targetAgent, mode, hookWorkDir, townBeadsDir)
 	}
 
 	// Start delayed dog session now that hook is set

@@ -30,6 +30,12 @@ var (
 	pluginSyncSource   string
 	pluginSyncClean    bool
 	pluginSyncDryRun   bool
+	pluginRecordPlugin string
+	pluginRecordResult string
+	pluginRecordTitle  string
+	pluginRecordBody   string
+	pluginRecordRig    string
+	pluginRecordLabels []string
 )
 
 var pluginCmd = &cobra.Command{
@@ -143,6 +149,17 @@ Examples:
 	RunE: runPluginHistory,
 }
 
+var pluginRecordRunCmd = &cobra.Command{
+	Use:   "record-run",
+	Short: "Record a plugin run receipt",
+	Long: `Record a plugin run receipt through the canonical plugin recorder.
+
+The recorder creates an ephemeral type:plugin-run bead, closes it immediately,
+and leaves the receipt available to plugin history/cooldown queries that use
+closed beads. This keeps plugin scripts from leaking open run-log beads.`,
+	RunE: runPluginRecordRun,
+}
+
 func init() {
 	// List subcommand flags
 	pluginListCmd.Flags().BoolVar(&pluginListJSON, "json", false, "Output as JSON")
@@ -158,6 +175,14 @@ func init() {
 	pluginHistoryCmd.Flags().BoolVar(&pluginHistoryJSON, "json", false, "Output as JSON")
 	pluginHistoryCmd.Flags().IntVar(&pluginHistoryLimit, "limit", 10, "Maximum number of runs to show")
 
+	// Record-run subcommand flags
+	pluginRecordRunCmd.Flags().StringVar(&pluginRecordPlugin, "plugin", "", "Plugin name")
+	pluginRecordRunCmd.Flags().StringVar(&pluginRecordResult, "result", "", "Run result label value")
+	pluginRecordRunCmd.Flags().StringVar(&pluginRecordTitle, "title", "", "Receipt title")
+	pluginRecordRunCmd.Flags().StringVar(&pluginRecordBody, "description", "", "Receipt description")
+	pluginRecordRunCmd.Flags().StringVar(&pluginRecordRig, "rig", "", "Rig label value")
+	pluginRecordRunCmd.Flags().StringArrayVarP(&pluginRecordLabels, "label", "l", nil, "Additional label for the receipt")
+
 	// Sync subcommand flags
 	pluginSyncCmd.Flags().StringVar(&pluginSyncSource, "source", "", "Source plugins directory (auto-detected if omitted)")
 	pluginSyncCmd.Flags().BoolVar(&pluginSyncClean, "clean", false, "Remove plugins from target that don't exist in source")
@@ -168,6 +193,7 @@ func init() {
 	pluginCmd.AddCommand(pluginShowCmd)
 	pluginCmd.AddCommand(pluginRunCmd)
 	pluginCmd.AddCommand(pluginHistoryCmd)
+	pluginCmd.AddCommand(pluginRecordRunCmd)
 	pluginCmd.AddCommand(pluginSyncCmd)
 
 	rootCmd.AddCommand(pluginCmd)
@@ -697,5 +723,35 @@ func runPluginHistory(cmd *cobra.Command, args []string) error {
 			style.Dim.Render(run.ID))
 	}
 
+	return nil
+}
+
+func runPluginRecordRun(cmd *cobra.Command, args []string) error {
+	if pluginRecordPlugin == "" {
+		return fmt.Errorf("--plugin is required")
+	}
+	if pluginRecordResult == "" {
+		return fmt.Errorf("--result is required")
+	}
+
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	recorder := plugin.NewRecorder(townRoot)
+	beadID, err := recorder.RecordRun(plugin.PluginRunRecord{
+		PluginName:  pluginRecordPlugin,
+		RigName:     pluginRecordRig,
+		Result:      plugin.RunResult(pluginRecordResult),
+		Title:       pluginRecordTitle,
+		Body:        pluginRecordBody,
+		ExtraLabels: pluginRecordLabels,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), beadID)
 	return nil
 }

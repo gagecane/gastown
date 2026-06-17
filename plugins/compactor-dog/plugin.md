@@ -239,23 +239,22 @@ echo "=== $SUMMARY ==="
 
 On success (no escalation needed):
 ```bash
-bd create "compactor-dog: $SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:compactor-dog,result:success \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin compactor-dog --result success \
+  --title "compactor-dog: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 ```
 
 On escalation:
 ```bash
-bd create "compactor-dog: ESCALATED - $SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:compactor-dog,result:warning \
-  -d "Escalated to Mayor for compaction. $SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin compactor-dog --result warning \
+  --title "compactor-dog: ESCALATED - $SUMMARY" \
+  --description "Escalated to Mayor for compaction. $SUMMARY" >/dev/null 2>&1 || true
 ```
 
 On failure:
 ```bash
-bd create "compactor-dog: FAILED" -t chore --ephemeral \
-  -l type:plugin-run,plugin:compactor-dog,result:failure \
-  -d "Compactor check failed: $ERROR" --silent 2>/dev/null || true
+gt plugin record-run --plugin compactor-dog --result failure \
+  --title "compactor-dog: FAILED" \
+  --description "Compactor check failed: $ERROR" >/dev/null 2>&1 || true
 
 gt escalate "Plugin FAILED: compactor-dog" \
   --severity medium \

@@ -73,6 +73,15 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
+	if provider == "claude" && role == "boot" && isSettingsFile(hooksFile) {
+		_, err := SyncManagedClaudeSettings(Target{
+			Path:     targetPath,
+			Key:      "boot",
+			Role:     "boot",
+			Provider: "claude",
+		}, false)
+		return err
+	}
 
 	if existing, err := os.ReadFile(targetPath); err == nil {
 		if !needsUpgrade(existing) && !denyListDrifted(existing, hooksFile, role) {

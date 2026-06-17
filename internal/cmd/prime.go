@@ -239,7 +239,10 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// started with. Only emitted when GT telemetry is active (GT_OTEL_LOGS_URL set).
 	telemetry.RecordPrimeContext(context.Background(), formula, os.Getenv("GT_ROLE"), primeHookMode)
 
-	hasSlungWork := checkSlungWork(ctx, hookedBead)
+	hasSlungWork, err := checkSlungWork(ctx, hookedBead)
+	if err != nil {
+		return err
+	}
 	explain(hasSlungWork, "Autonomous mode: hooked/in-progress work detected")
 
 	outputMoleculeContext(ctx)
@@ -717,9 +720,9 @@ func runMailCheckInject(workDir string) {
 //
 // hookedBead is pre-fetched by the caller (runPrime) via findAgentWork to avoid a
 // redundant lookup and ensure work context is already injected before output runs.
-func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) bool {
+func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	if hookedBead == nil {
-		return false
+		return false, nil
 	}
 
 	attachment := workflowAttachmentForHookedBead(hookedBead)
@@ -729,12 +732,14 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) bool {
 	outputHookedBeadDetails(hookedBead)
 
 	if hasWorkflow {
-		outputMoleculeWorkflow(ctx, attachment)
+		if err := outputMoleculeWorkflow(ctx, attachment); err != nil {
+			return true, err
+		}
 	} else {
 		outputBeadPreview(hookedBead)
 	}
 
-	return true
+	return true, nil
 }
 
 func hasWorkflowAttachment(attachment *beads.AttachmentFields) bool {
@@ -1011,7 +1016,7 @@ func outputHookedBeadDetails(hookedBead *beads.Issue) {
 }
 
 // outputMoleculeWorkflow displays attached molecule context with current step.
-func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields) {
+func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields) error {
 	fmt.Printf("%s\n\n", style.Bold.Render("## 🧬 ATTACHED FORMULA (WORKFLOW CHECKLIST)"))
 	if attachment.AttachedFormula != "" {
 		fmt.Printf("Formula: %s\n", attachment.AttachedFormula)
@@ -1033,8 +1038,7 @@ func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields)
 
 	// Ralph loop mode: output Ralph Wiggum loop command instead of step-by-step execution
 	if attachment.Mode == "ralph" {
-		outputRalphLoopDirective(ctx, attachment)
-		return
+		return outputRalphLoopDirective(ctx, attachment)
 	}
 
 	// Show inline formula steps from the embedded binary (root-only: no child wisps to query).
@@ -1053,7 +1057,7 @@ func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields)
 		fmt.Printf("%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
 		fmt.Println("The base bead is your assignment. The formula steps define your workflow.")
 		fmt.Printf("\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit to the merge queue. Do NOT stop after implementation — the formula has submit steps you must follow."))
-		return
+		return nil
 	}
 
 	// Legacy path: no formula name stored, fall back to bd mol current
@@ -1061,8 +1065,10 @@ func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields)
 	fmt.Println()
 	fmt.Printf("%s\n", style.Bold.Render("Follow the molecule steps above, NOT the base bead."))
 	fmt.Println("The base bead is just a container. The molecule steps define your workflow.")
+	return nil
 }
 
+<<<<<<< HEAD
 func isPatrolFormulaName(formulaName string) bool {
 	return strings.HasSuffix(strings.TrimSpace(formulaName), "-patrol")
 }
@@ -1079,28 +1085,99 @@ func outputRalphLoopDirective(ctx RoleContext, attachment *beads.AttachmentField
 	fmt.Println("committing after each meaningful change. Loop until acceptance criteria")
 	fmt.Println("are met or no further progress can be made.")
 	fmt.Println()
+=======
+const ralphLoopPluginID = "ralph-loop@claude-plugins-official"
+>>>>>>> upstream/main
 
-	// Show the formula steps inline (same as normal mode) so the agent has
-	// the full checklist. Previously this emitted a /ralph-loop slash command
-	// that didn't exist, causing the polecat to die immediately.
+// outputRalphLoopDirective emits the ralph-loop plugin command for Ralph mode.
+func outputRalphLoopDirective(ctx RoleContext, attachment *beads.AttachmentFields) error {
+	installed, configDir, err := isRalphLoopPluginInstalled()
+	if err != nil {
+		return err
+	}
+	return outputRalphLoopDirectiveWithPluginCheck(ctx, attachment, installed, configDir)
+}
+
+func outputRalphLoopDirectiveWithPluginCheck(ctx RoleContext, attachment *beads.AttachmentFields, pluginInstalled bool, configDir string) error {
+	if !pluginInstalled {
+		return missingRalphLoopPluginError(configDir)
+	}
+
+	prompt, err := renderRalphLoopPrompt(ctx, attachment)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("/ralph-loop %s --completion-promise DONE\n", quoteForRalphLoop(prompt))
+	return nil
+}
+
+func renderRalphLoopPrompt(ctx RoleContext, attachment *beads.AttachmentFields) (string, error) {
+	var sb strings.Builder
 	if attachment.AttachedFormula != "" {
-		showFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
-		fmt.Println()
+		rendered, err := renderFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, attachmentFormulaVars(attachment))
+		if err != nil {
+			return "", err
+		}
+		sb.WriteString(rendered)
 	}
-
 	if attachment.AttachedArgs != "" {
-		fmt.Printf("%s\n", style.Bold.Render("Context:"))
-		fmt.Printf("  %s\n\n", attachment.AttachedArgs)
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("Context:\n")
+		sb.WriteString(attachment.AttachedArgs)
+		sb.WriteString("\n")
 	}
+	if sb.Len() == 0 {
+		sb.WriteString("Work through the assigned Ralph-mode workflow.\n")
+	}
+	sb.WriteString("\nWhen all steps are complete and `" + cli.Name() + " done` has run successfully, output exactly: <promise>DONE</promise>")
+	return sb.String(), nil
+}
 
-	fmt.Printf("%s\n", style.Bold.Render("Iterative workflow:"))
-	fmt.Println("1. Work through the formula steps above")
-	fmt.Println("2. Commit after each meaningful change (preserve progress via git)")
-	fmt.Println("3. After completing a pass, evaluate results against acceptance criteria")
-	fmt.Println("4. If criteria not met, loop: identify the worst gap, fix it, commit, re-evaluate")
-	fmt.Println("5. When all criteria are met (or no further progress possible), run `" + cli.Name() + " done`")
-	fmt.Println()
-	fmt.Printf("%s\n", style.Bold.Render("Commit frequently. Each commit preserves your progress."))
+func isRalphLoopPluginInstalled() (bool, string, error) {
+	configDir, err := config.ClaudeConfigDir()
+	if err != nil {
+		return false, "", fmt.Errorf("resolving Claude config dir for ralph-loop plugin: %w", err)
+	}
+	installed, err := ralphLoopPluginInstalledIn(filepath.Join(configDir, "plugins", "installed_plugins.json"))
+	return installed, configDir, err
+}
+
+func missingRalphLoopPluginError(configDir string) error {
+	manifestPath := filepath.Join(configDir, "plugins", "installed_plugins.json")
+	return fmt.Errorf("--ralph requires the %s plugin in Claude Code config %s (checked %s). Install it with: /plugin install %s", ralphLoopPluginID, configDir, manifestPath, ralphLoopPluginID)
+}
+
+func ralphLoopPluginInstalledIn(manifestPath string) (bool, error) {
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading ralph-loop plugin manifest %s: %w", manifestPath, err)
+	}
+	var manifest struct {
+		Plugins map[string]json.RawMessage `json:"plugins"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return false, fmt.Errorf("parsing ralph-loop plugin manifest %s: %w", manifestPath, err)
+	}
+	_, ok := manifest.Plugins[ralphLoopPluginID]
+	return ok, nil
+}
+
+// quoteForRalphLoop wraps s in double quotes for the slash command and escapes
+// characters that could break the prompt argument or shell-backed plugin setup.
+func quoteForRalphLoop(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, `$`, `\$`)
+	s = strings.ReplaceAll(s, "`", "\\`")
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return `"` + s + `"`
 }
 
 // outputBeadPreview runs `bd show` and displays a truncated preview of the bead.

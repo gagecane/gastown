@@ -107,6 +107,68 @@ func TestSetAttachmentFieldsPreservesMode(t *testing.T) {
 	}
 }
 
+func TestAttachmentFormulaVarsRoundTrip(t *testing.T) {
+	fields := &AttachmentFields{
+		AttachedFormula: "mol-polecat-work",
+		FormulaVars:     "feature=Bug to fix\nissue=gt-abc123\nbase_branch=main",
+	}
+
+	formatted := FormatAttachmentFields(fields)
+	if !strings.Contains(formatted, `formula_vars: ["feature=Bug to fix","issue=gt-abc123","base_branch=main"]`) {
+		t.Fatalf("formula_vars should use single-line JSON array, got:\n%s", formatted)
+	}
+	if strings.Contains(formatted, "\nissue=gt-abc123") {
+		t.Fatalf("formula_vars leaked continuation lines:\n%s", formatted)
+	}
+
+	parsed := ParseAttachmentFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	want := "feature=Bug to fix\nissue=gt-abc123\nbase_branch=main"
+	if parsed.FormulaVars != want {
+		t.Fatalf("FormulaVars = %q, want %q", parsed.FormulaVars, want)
+	}
+}
+
+func TestParseAttachmentFieldsDoesNotConsumeAdjacentKeyValueLines(t *testing.T) {
+	desc := "formula_vars: feature=Bug to fix\nissue=gt-abc123\nbase_branch=main\nexample=value\nmode: ralph"
+	fields := ParseAttachmentFields(&Issue{Description: desc})
+	if fields == nil {
+		t.Fatal("ParseAttachmentFields returned nil")
+	}
+	want := "feature=Bug to fix"
+	if fields.FormulaVars != want {
+		t.Fatalf("FormulaVars = %q, want %q", fields.FormulaVars, want)
+	}
+	for _, adjacent := range []string{"issue=gt-abc123", "base_branch=main", "example=value"} {
+		if strings.Contains(fields.FormulaVars, adjacent) {
+			t.Fatalf("adjacent key=value line should not be parsed as formula var: %q", fields.FormulaVars)
+		}
+	}
+	if fields.Mode != "ralph" {
+		t.Fatalf("Mode = %q, want ralph", fields.Mode)
+	}
+}
+
+func TestSetAttachmentFieldsPreservesAdjacentKeyValueLines(t *testing.T) {
+	issue := &Issue{Description: "formula_vars: old=1\nissue=old\nbase_branch=old\nexample=value\n\nBody"}
+	fields := &AttachmentFields{FormulaVars: "feature=New\nissue=gt-new"}
+
+	newDesc := SetAttachmentFields(issue, fields)
+	if !strings.Contains(newDesc, `formula_vars: ["feature=New","issue=gt-new"]`) {
+		t.Fatalf("new formula_vars missing, got:\n%s", newDesc)
+	}
+	for _, adjacent := range []string{"issue=old", "base_branch=old", "example=value"} {
+		if !strings.Contains(newDesc, adjacent) {
+			t.Fatalf("adjacent key=value line %q should be preserved, got:\n%s", adjacent, newDesc)
+		}
+	}
+	if !strings.Contains(newDesc, "Body") {
+		t.Fatalf("prose should be preserved, got:\n%s", newDesc)
+	}
+}
+
 // --- AgentFields Mode round-trip ---
 
 func TestAgentFieldsModeRoundTrip(t *testing.T) {

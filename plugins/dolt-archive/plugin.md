@@ -260,9 +260,8 @@ if [ "$EXPORT_FAILED" -gt 0 ] || [ "$DOLT_PUSH_FAILED" -gt 0 ] || [ "$VERIFY_FAI
   RESULT="warning"
 fi
 
-bd create "$SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:dolt-archive,result:$RESULT \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin dolt-archive --result "$RESULT" \
+  --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 
 if [ "$EXPORT_FAILED" -gt 0 ]; then
   gt escalate "JSONL export failed for $EXPORT_FAILED databases" \

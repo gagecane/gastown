@@ -16,15 +16,15 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
-func TestBuildBdInitArgs_AlwaysIncludesServerPort(t *testing.T) {
+func TestBuildBdInitArgs_AlwaysIncludesServerPortWithoutReinit(t *testing.T) {
 	townDir := t.TempDir()
 	t.Setenv("GT_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_PORT", "")
 
 	args := buildBdInitArgs(townDir)
 
-	if len(args) != 7 {
-		t.Fatalf("expected 7 args, got %d: %v", len(args), args)
+	if len(args) != 6 {
+		t.Fatalf("expected 6 args, got %d: %v", len(args), args)
 	}
 	if args[4] != "--server-port" {
 		t.Fatalf("expected args[4] = --server-port, got %q", args[4])
@@ -32,10 +32,17 @@ func TestBuildBdInitArgs_AlwaysIncludesServerPort(t *testing.T) {
 	if args[5] != "3307" {
 		t.Fatalf("expected default port 3307, got %q", args[5])
 	}
+<<<<<<< HEAD
 	// --reinit-local replaces the deprecated --force (bd >= 1.0.5) so init
 	// re-initializes when a server-side Dolt database already exists.
 	if args[6] != "--reinit-local" {
 		t.Fatalf("expected args[6] = --reinit-local, got %q", args[6])
+=======
+	for _, arg := range args {
+		if arg == "--force" || arg == "--reinit-local" {
+			t.Fatalf("expected no destructive reinit flag, got %v", args)
+		}
+>>>>>>> upstream/main
 	}
 }
 
@@ -95,9 +102,13 @@ func TestEnsureBeadsConfigYAML_CreatesWhenMissing(t *testing.T) {
 	}
 
 	got := string(data)
+<<<<<<< HEAD
 	// Upstream added export.auto: "false" to the default config so beads
 	// doesn't auto-export issue files into the worktree on every write.
 	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\ndolt.auto-start: \"false\"\ndolt.auto-commit: \"on\"\nexport.auto: \"false\"\n"
+=======
+	want := "prefix: hq\nissue-prefix: hq\ndolt.idle-timeout: \"0\"\nexport.auto: \"false\"\n"
+>>>>>>> upstream/main
 	if got != want {
 		t.Fatalf("config.yaml = %q, want %q", got, want)
 	}

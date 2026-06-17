@@ -831,9 +831,13 @@ func TestCheckSlungWork_StandaloneFormulaUsesWorkflowOutput(t *testing.T) {
 	}
 
 	var found bool
+	var gotErr error
 	output := captureStdout(t, func() {
-		found = checkSlungWork(ctx, hookedBead)
+		found, gotErr = checkSlungWork(ctx, hookedBead)
 	})
+	if gotErr != nil {
+		t.Fatalf("checkSlungWork() error = %v", gotErr)
+	}
 
 	if !found {
 		t.Fatalf("checkSlungWork() = false, want true")
@@ -849,6 +853,7 @@ func TestCheckSlungWork_StandaloneFormulaUsesWorkflowOutput(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestCheckSlungWork_MoleculeHookInfersWorkflowFromTitle(t *testing.T) {
 	ctx := RoleContext{Role: RoleRefinery, Rig: "chatehr"}
 	hookedBead := &beads.Issue{
@@ -874,6 +879,46 @@ func TestCheckSlungWork_MoleculeHookInfersWorkflowFromTitle(t *testing.T) {
 	}
 	if !strings.Contains(output, "mol-refinery-patrol") {
 		t.Fatalf("expected inferred formula name in output, got:\n%s", output)
+=======
+func TestCheckSlungWork_RalphModeUsesLoopDirective(t *testing.T) {
+	configDir := t.TempDir()
+	pluginsDir := filepath.Join(configDir, "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginsDir, "installed_plugins.json"), []byte(`{"plugins":{"ralph-loop@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write plugin manifest: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	ctx := RoleContext{Role: RoleCrew}
+	hookedBead := &beads.Issue{
+		ID:    "gt-wisp-ralph",
+		Title: "Ralph workflow",
+		Description: strings.Join([]string{
+			"attached_molecule: gt-wisp-ralph",
+			"attached_args: do the loop",
+			"mode: ralph",
+		}, "\n"),
+	}
+
+	var found bool
+	var gotErr error
+	output := captureStdout(t, func() {
+		found, gotErr = checkSlungWork(ctx, hookedBead)
+	})
+	if gotErr != nil {
+		t.Fatalf("checkSlungWork() error = %v", gotErr)
+	}
+	if !found {
+		t.Fatalf("checkSlungWork() = false, want true")
+	}
+	if !strings.Contains(output, "/ralph-loop ") || !strings.Contains(output, "--completion-promise DONE") {
+		t.Fatalf("expected ralph-loop directive, got:\n%s", output)
+	}
+	if strings.Contains(output, "Formula Checklist") {
+		t.Fatalf("ralph mode should emit plugin directive instead of inline checklist, got:\n%s", output)
+>>>>>>> upstream/main
 	}
 }
 
@@ -990,62 +1035,121 @@ func TestEnsureBeadsRedirect_RepairsExistingRedirectChain(t *testing.T) {
 	}
 }
 
-// TestOutputRalphLoopDirective_NoSlashCommand verifies that ralph mode emits
-// inline iterative work instructions instead of referencing a nonexistent
-// /ralph-loop slash command. This is the regression test for the ralph-loop
-// dies-on-spawn bug: polecats died immediately because Claude tried to run
-// /ralph-loop which didn't exist as a provisioned slash command.
-func TestOutputRalphLoopDirective_NoSlashCommand(t *testing.T) {
-	attachment := &beads.AttachmentFields{
-		Mode:         "ralph",
-		AttachedArgs: "Run story audit, fix worst gap, commit, loop",
-	}
-	output := captureStdout(t, func() {
-		outputRalphLoopDirective(RoleContext{}, attachment)
-	})
-
-	// Must NOT reference /ralph-loop (nonexistent slash command)
-	if strings.Contains(output, "/ralph-loop") {
-		t.Fatalf("ralph directive must NOT reference /ralph-loop (slash command doesn't exist), got:\n%s", output)
-	}
-
-	// Must contain iterative workflow instructions
-	if !strings.Contains(output, "RALPH LOOP MODE") {
-		t.Fatalf("expected 'RALPH LOOP MODE' header, got:\n%s", output)
-	}
-	if !strings.Contains(output, "gt done") {
-		t.Fatalf("expected 'gt done' instruction for completion, got:\n%s", output)
-	}
-	if !strings.Contains(output, "Commit frequently") {
-		t.Fatalf("expected commit guidance, got:\n%s", output)
-	}
-
-	// Must include the context/args
-	if !strings.Contains(output, "story audit") {
-		t.Fatalf("expected attached args in output, got:\n%s", output)
-	}
-}
-
-// TestOutputRalphLoopDirective_WithFormula verifies that ralph mode shows
-// formula steps inline (same as normal mode) when a formula is attached.
-func TestOutputRalphLoopDirective_WithFormula(t *testing.T) {
+func TestOutputRalphLoopDirective_PluginInstalled(t *testing.T) {
 	attachment := &beads.AttachmentFields{
 		Mode:            "ralph",
 		AttachedFormula: "mol-polecat-work",
+		AttachedArgs:    "Run story audit, fix worst gap, commit, loop",
 		FormulaVars:     "base_branch=main",
 	}
+	var gotErr error
 	output := captureStdout(t, func() {
-		outputRalphLoopDirective(RoleContext{}, attachment)
+		gotErr = outputRalphLoopDirectiveWithPluginCheck(RoleContext{}, attachment, true, t.TempDir())
 	})
-
-	// Should NOT reference /ralph-loop
-	if strings.Contains(output, "/ralph-loop") {
-		t.Fatalf("ralph directive must NOT reference /ralph-loop, got:\n%s", output)
+	if gotErr != nil {
+		t.Fatalf("outputRalphLoopDirectiveWithPluginCheck: %v", gotErr)
 	}
 
-	// Should show formula steps (from mol-polecat-work)
+	if !strings.Contains(output, "/ralph-loop ") {
+		t.Fatalf("expected /ralph-loop command, got:\n%s", output)
+	}
+	if !strings.Contains(output, "--completion-promise DONE") {
+		t.Fatalf("expected completion promise flag, got:\n%s", output)
+	}
 	if !strings.Contains(output, "Formula Checklist") {
-		t.Fatalf("expected formula checklist in ralph output, got:\n%s", output)
+		t.Fatalf("expected rendered formula checklist in prompt, got:\n%s", output)
+	}
+	if !strings.Contains(output, "story audit") {
+		t.Fatalf("expected attached args in prompt, got:\n%s", output)
+	}
+	if !strings.Contains(output, `<promise>DONE</promise>`) {
+		t.Fatalf("expected DONE promise instruction in prompt, got:\n%s", output)
+	}
+}
+
+func TestOutputRalphLoopDirective_PluginMissing(t *testing.T) {
+	var gotErr error
+	output := captureStdout(t, func() {
+		gotErr = outputRalphLoopDirectiveWithPluginCheck(RoleContext{}, &beads.AttachmentFields{Mode: "ralph"}, false, "/tmp/claude-test")
+	})
+	if gotErr == nil {
+		t.Fatal("expected missing plugin error")
+	}
+	if !strings.Contains(gotErr.Error(), ralphLoopPluginID) || !strings.Contains(gotErr.Error(), "/plugin install") {
+		t.Fatalf("missing plugin error not actionable: %v", gotErr)
+	}
+	if strings.Contains(output, "/ralph-loop") {
+		t.Fatalf("should not emit /ralph-loop when plugin is missing, got:\n%s", output)
+	}
+}
+
+func TestRalphLoopPluginInstalledIn(t *testing.T) {
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	manifestPath := filepath.Join(pluginsDir, "installed_plugins.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"plugins":{"ralph-loop@claude-plugins-official":{},"ralph-loop-evil@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	installed, err := ralphLoopPluginInstalledIn(manifestPath)
+	if err != nil {
+		t.Fatalf("ralphLoopPluginInstalledIn: %v", err)
+	}
+	if !installed {
+		t.Fatal("expected canonical ralph-loop plugin to be detected")
+	}
+
+	if err := os.WriteFile(manifestPath, []byte(`{"plugins":{"ralph-loop-evil@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	installed, err = ralphLoopPluginInstalledIn(manifestPath)
+	if err != nil {
+		t.Fatalf("ralphLoopPluginInstalledIn malicious key: %v", err)
+	}
+	if installed {
+		t.Fatal("must not accept prefix-like plugin IDs")
+	}
+}
+
+func TestIsRalphLoopPluginInstalledUsesClaudeConfigDir(t *testing.T) {
+	configDir := t.TempDir()
+	pluginsDir := filepath.Join(configDir, "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		t.Fatalf("mkdir plugins: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginsDir, "installed_plugins.json"), []byte(`{"plugins":{"ralph-loop@claude-plugins-official":{}}}`), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	installed, gotConfigDir, err := isRalphLoopPluginInstalled()
+	if err != nil {
+		t.Fatalf("isRalphLoopPluginInstalled: %v", err)
+	}
+	if !installed {
+		t.Fatal("expected plugin installed via CLAUDE_CONFIG_DIR")
+	}
+	if gotConfigDir != configDir {
+		t.Fatalf("configDir = %q, want %q", gotConfigDir, configDir)
+	}
+}
+
+func TestQuoteForRalphLoop(t *testing.T) {
+	quoted := quoteForRalphLoop("line1\r\nline2 \"quoted\" \\ $HOME `cmd`")
+	if !strings.HasPrefix(quoted, `"`) || !strings.HasSuffix(quoted, `"`) {
+		t.Fatalf("expected double-quoted prompt, got %q", quoted)
+	}
+	for _, forbidden := range []string{"\n", "\r"} {
+		if strings.Contains(quoted, forbidden) {
+			t.Fatalf("quoted prompt contains raw line break %q: %q", forbidden, quoted)
+		}
+	}
+	for _, want := range []string{`\n`, `\"`, `\\`, `\$`, "\\`"} {
+		if !strings.Contains(quoted, want) {
+			t.Fatalf("quoted prompt missing escape %q: %q", want, quoted)
+		}
 	}
 }
 

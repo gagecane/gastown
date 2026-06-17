@@ -555,7 +555,7 @@ type beadFieldUpdates struct {
 	AttachedFormula  string   // Formula name (e.g., "mol-polecat-work") for inline step display
 	NoMerge          bool     // Skip merge queue on completion
 	ReviewOnly       bool     // Review-only mode: assignee must not merge/commit/push
-	Mode             string   // Execution mode: "" (normal) or "ralph"
+	Mode             *string  // Execution mode: nil means unchanged, "" clears, "ralph" enables Ralph mode
 	ConvoyID         string   // Convoy bead ID (e.g., "hq-cv-abc")
 	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local"
 	ConvoyOwned      bool     // Convoy has gt:owned label (caller-managed lifecycle)
@@ -570,6 +570,7 @@ func buildSlingFieldUpdates(
 	attachedFormula string,
 	noMerge bool,
 	reviewOnly bool,
+	mode string,
 	formulaVars string,
 	convoyID string,
 	mergeStrategy string,
@@ -583,6 +584,7 @@ func buildSlingFieldUpdates(
 		AttachedFormula:  attachedFormula,
 		NoMerge:          noMerge,
 		ReviewOnly:       reviewOnly,
+		Mode:             &mode,
 		ConvoyID:         convoyID,
 		MergeStrategy:    mergeStrategy,
 		ConvoyOwned:      convoyOwned,
@@ -646,12 +648,12 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	}
 	if updates.AttachedMolecule != "" {
 		fields.AttachedMolecule = updates.AttachedMolecule
-		if fields.AttachedAt == "" {
-			fields.AttachedAt = time.Now().UTC().Format(time.RFC3339)
-		}
 	}
 	if updates.AttachedFormula != "" {
 		fields.AttachedFormula = updates.AttachedFormula
+	}
+	if (updates.AttachedMolecule != "" || updates.AttachedFormula != "") && fields.AttachedAt == "" {
+		fields.AttachedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if updates.NoMerge {
 		fields.NoMerge = true
@@ -659,8 +661,8 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	if updates.ReviewOnly {
 		fields.ReviewOnly = true
 	}
-	if updates.Mode != "" {
-		fields.Mode = updates.Mode
+	if updates.Mode != nil {
+		fields.Mode = *updates.Mode
 	}
 	if updates.ConvoyID != "" {
 		fields.ConvoyID = updates.ConvoyID
@@ -1063,8 +1065,9 @@ func isUnroutableTarget(target string, isRig func(string) (string, bool)) bool {
 
 // FormulaOnBeadResult contains the result of instantiating a formula on a bead.
 type FormulaOnBeadResult struct {
-	WispRootID string // The wisp root ID (compound root after bonding)
-	BeadToHook string // The bead ID to hook (BASE bead, not wisp - lifecycle fix)
+	WispRootID  string   // The wisp root ID (compound root after bonding)
+	BeadToHook  string   // The bead ID to hook (BASE bead, not wisp - lifecycle fix)
+	FormulaVars []string // Vars used to instantiate/render the formula
 }
 
 // InstantiateFormulaOnBead creates a wisp from a formula, bonds it to a bead.
@@ -1193,8 +1196,9 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 			return nil, fmt.Errorf("bonding formula to bead: %w (direct formula bond fallback failed: %v)", err, fallbackErr)
 		}
 		return &FormulaOnBeadResult{
-			WispRootID: fallbackRootID,
-			BeadToHook: beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
+			WispRootID:  fallbackRootID,
+			BeadToHook:  beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
+			FormulaVars: append([]string(nil), formulaVars...),
 		}, nil
 	}
 
@@ -1211,8 +1215,9 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 			return nil, fmt.Errorf("bond output not parseable and direct formula bond fallback failed: %v", fallbackErr)
 		}
 		return &FormulaOnBeadResult{
-			WispRootID: fallbackRootID,
-			BeadToHook: beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
+			WispRootID:  fallbackRootID,
+			BeadToHook:  beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
+			FormulaVars: append([]string(nil), formulaVars...),
 		}, nil
 	}
 	if parsedRootID != "" {
@@ -1220,8 +1225,9 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 	}
 
 	return &FormulaOnBeadResult{
-		WispRootID: wispRootID,
-		BeadToHook: beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
+		WispRootID:  wispRootID,
+		BeadToHook:  beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
+		FormulaVars: append([]string(nil), formulaVars...),
 	}, nil
 }
 

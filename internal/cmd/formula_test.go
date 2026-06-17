@@ -360,6 +360,7 @@ func TestAttachmentFormulaVarsPrefersAttachedVars(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 // writeEmbeddedFormulaToTempDir copies the embedded formula <name> to a fresh
 // temp directory and returns its on-disk path. Used by parseFormulaFile tests
 // that need a real file path (parseFormulaFile reads from disk).
@@ -914,6 +915,21 @@ func TestResolveReviewID(t *testing.T) {
 				t.Fatalf("resolveReviewID(%s) = %q, want generated 5-char id", name, got)
 			}
 		})
+=======
+func TestAttachmentFormulaVarsRoundTripsPersistedVars(t *testing.T) {
+	t.Parallel()
+
+	desc := beads.SetAttachmentFields(&beads.Issue{Description: "Body"}, &beads.AttachmentFields{
+		AttachedFormula: "mol-polecat-work",
+		AttachedVars:    []string{"feature=Attached Feature"},
+		FormulaVars:     "feature=Persisted Feature\nissue=gt-123\nbase_branch=main",
+	})
+	attachment := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
+	got := attachmentFormulaVars(attachment)
+	want := []string{"feature=Attached Feature", "issue=gt-123", "base_branch=main"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("attachmentFormulaVars() = %#v, want %#v\nDescription:\n%s", got, want, desc)
+>>>>>>> upstream/main
 	}
 }
 

@@ -34,10 +34,9 @@ bd list --json --all -l type:plugin-run,plugin:quality-review-result --created-a
 If no results are found, record a run wisp and stop:
 
 ```bash
-bd create "quality-review: No results in last 24h" -t chore --ephemeral \
-  -l type:plugin-run,plugin:quality-review,result:success \
-  -d "No quality-review results in last 24h. Nothing to analyze." \
-  --silent 2>/dev/null || true
+gt plugin record-run --plugin quality-review --result success \
+  --title "quality-review: No results in last 24h" \
+  --description "No quality-review results in last 24h. Nothing to analyze." >/dev/null 2>&1 || true
 ```
 
 ## Step 2: Compute per-worker trends
@@ -91,19 +90,17 @@ gt escalate "Quality BREACH: <worker> (avg: <avg>)" \
 Record a summary wisp for this plugin run:
 
 ```bash
-bd create "quality-review: Analyzed <N> workers over <M> reviews" -t chore --ephemeral \
-  -l type:plugin-run,plugin:quality-review,result:success \
-  -d "Analyzed <N> workers over <M> reviews. <B> breaches, <W> warnings." \
-  --silent 2>/dev/null || true
+gt plugin record-run --plugin quality-review --result success \
+  --title "quality-review: Analyzed <N> workers over <M> reviews" \
+  --description "Analyzed <N> workers over <M> reviews. <B> breaches, <W> warnings." >/dev/null 2>&1 || true
 ```
 
 If any step fails unexpectedly, record a failure wisp and escalate:
 
 ```bash
-bd create "quality-review: FAILED" -t chore --ephemeral \
-  -l type:plugin-run,plugin:quality-review,result:failure \
-  -d "<error description>" \
-  --silent 2>/dev/null || true
+gt plugin record-run --plugin quality-review --result failure \
+  --title "quality-review: FAILED" \
+  --description "<error description>" >/dev/null 2>&1 || true
 
 gt escalate "Plugin FAILED: quality-review" \
   --severity medium \
@@ -118,10 +115,10 @@ This plugin does NOT record scores itself. The Refinery records result wisps dur
 merges via the `quality-review` formula step. Each merge produces a wisp like:
 
 ```bash
-bd create "quality-review: Score 0.85, approve" -t chore --ephemeral \
-  -l type:plugin-run,plugin:quality-review-result,worker:<polecat-name>,rig:<rig-name>,score:0.85,recommendation:approve,result:success \
-  -d "Score: 0.85, approve. Issues: 1 minor (style)" \
-  --silent 2>/dev/null || true
+gt plugin record-run --plugin quality-review-result --result success --rig <rig-name> \
+  --label worker:<polecat-name> --label score:0.85 --label recommendation:approve \
+  --title "quality-review: Score 0.85, approve" \
+  --description "Score: 0.85, approve. Issues: 1 minor (style)" >/dev/null 2>&1 || true
 ```
 
 This creates the data that Step 1 queries.

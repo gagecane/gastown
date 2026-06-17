@@ -180,3 +180,21 @@ func TestOutputRoleDirectives(t *testing.T) {
 		}
 	})
 }
+
+func TestOutputCommandQuickReferenceBootBlocksRawTmux(t *testing.T) {
+	output := captureStdout(t, func() {
+		outputCommandQuickReference(RoleContext{Role: RoleBoot})
+	})
+
+	for _, want := range []string{
+		"gt nudge deacon",
+		"blocked; can stage unsubmitted input",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("Boot quick reference missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "tmux send-keys~~ (unreliable)") {
+		t.Fatalf("Boot quick reference still calls raw tmux merely unreliable:\n%s", output)
+	}
+}

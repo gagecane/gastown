@@ -239,9 +239,8 @@ log "Skipped (below threshold): ${#SKIPPED[@]}"
 if [[ ${#CANDIDATES[@]} -eq 0 ]]; then
   log "All databases within threshold ($COMMIT_THRESHOLD). No compaction needed."
   SUMMARY="compactor-dog: all ${DB_COUNT} DBs below threshold ($COMMIT_THRESHOLD commits)"
-  bd create "$SUMMARY" -t chore --ephemeral \
-    -l type:plugin-run,plugin:compactor-dog,result:success \
-    -d "$SUMMARY" --silent 2>/dev/null || true
+  gt plugin record-run --plugin compactor-dog --result success \
+    --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -254,9 +253,8 @@ if $CHECK_ONLY; then
     log "  ${entry%%:*} (${entry##*:} commits) — recommends compaction"
   done
   SUMMARY="compactor-dog: ${#CANDIDATES[@]} DBs exceed threshold ($COMMIT_THRESHOLD commits)"
-  bd create "$SUMMARY" -t chore --ephemeral \
-    -l type:plugin-run,plugin:compactor-dog,result:check-only \
-    -d "$SUMMARY" --silent 2>/dev/null || true
+  gt plugin record-run --plugin compactor-dog --result check-only \
+    --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -514,13 +512,12 @@ if [[ $ERRORS -gt 0 ]]; then
   gt escalate "compactor-dog: $ERRORS databases had compaction errors" -s MEDIUM \
     --reason "Compaction cycle completed with errors. $SUMMARY" 2>/dev/null || true
 
-  bd create "compactor-dog: ERRORS — $SUMMARY" -t chore --ephemeral \
-    -l type:plugin-run,plugin:compactor-dog,result:warning \
-    -d "Compaction completed with $ERRORS errors. $SUMMARY" --silent 2>/dev/null || true
+  gt plugin record-run --plugin compactor-dog --result warning \
+    --title "compactor-dog: ERRORS — $SUMMARY" \
+    --description "Compaction completed with $ERRORS errors. $SUMMARY" >/dev/null 2>&1 || true
 else
-  bd create "$SUMMARY" -t chore --ephemeral \
-    -l type:plugin-run,plugin:compactor-dog,result:success \
-    -d "$SUMMARY" --silent 2>/dev/null || true
+  gt plugin record-run --plugin compactor-dog --result success \
+    --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 fi
 
 log "Done."

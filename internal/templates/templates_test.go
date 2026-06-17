@@ -747,6 +747,38 @@ func TestRoleNames(t *testing.T) {
 	}
 }
 
+func TestRenderRole_BootUsesNudgeNotRawTmux(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	output, err := tmpl.RenderRole("boot", RoleData{
+		Role:          "boot",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/deacon/dogs/boot",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	})
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	if !strings.Contains(output, `gt nudge --mode=immediate deacon "Boot wake: check your inbox"`) {
+		t.Fatalf("boot template missing immediate nudge wake guidance:\n%s", output)
+	}
+	if !strings.Contains(output, "Boot hooks block it") {
+		t.Fatalf("boot template missing raw tmux block rationale:\n%s", output)
+	}
+	for _, forbidden := range []string{"Escape +", "tmux send-keys -t"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("boot template contains forbidden raw tmux guidance %q:\n%s", forbidden, output)
+		}
+	}
+}
+
 // TestCreatePolecatCLAUDEmd_IsNoOp verifies that CreatePolecatCLAUDEmd is a
 // backwards-compatibility no-op. Polecat lifecycle context is now injected
 // ephemerally by `gt prime --hook` via the SessionStart hook — no CLAUDE.md

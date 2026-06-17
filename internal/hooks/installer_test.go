@@ -266,6 +266,60 @@ func TestInstallForRole_ClaudeCurrentTemplatePreservesExistingSettings(t *testin
 	}
 }
 
+func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing bool
+	}{
+		{name: "creates managed settings"},
+		{name: "updates existing settings", existing: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			setTestHome(t, dir)
+			settingsPath := filepath.Join(dir, ".claude", "settings.json")
+
+			if tt.existing {
+				if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+					t.Fatalf("creating settings dir: %v", err)
+				}
+				if err := os.WriteFile(settingsPath, []byte(`{"customSentinel":true}`), 0600); err != nil {
+					t.Fatalf("writing existing settings: %v", err)
+				}
+			}
+
+			if err := InstallForRole("claude", dir, dir, "boot", ".claude", "settings.json", true); err != nil {
+				t.Fatalf("InstallForRole: %v", err)
+			}
+
+			settings, err := LoadSettings(settingsPath)
+			if err != nil {
+				t.Fatalf("LoadSettings: %v", err)
+			}
+			entry, ok := findPreToolUse(&settings.Hooks, "Bash(*tmux*send-keys*)")
+			if !ok {
+				t.Fatal("boot install did not write managed raw tmux send-keys guard")
+			}
+			if !strings.Contains(entry.Hooks[0].Command, "gt nudge --mode=immediate deacon") {
+				t.Fatalf("boot guard command does not point to gt nudge: %s", entry.Hooks[0].Command)
+			}
+			if len(settings.Hooks.UserPromptSubmit) != 0 {
+				t.Fatalf("boot managed settings should disable UserPromptSubmit, got %+v", settings.Hooks.UserPromptSubmit)
+			}
+			if !HasClaudePromptDefaults(settings) {
+				t.Fatal("boot managed settings missing Claude prompt defaults")
+			}
+			if tt.existing {
+				if raw, ok := settings.Extra["customSentinel"]; !ok || string(raw) != "true" {
+					t.Fatalf("customSentinel not preserved: %s", raw)
+				}
+			}
+		})
+	}
+}
+
 func TestInstallForRole_RoleAgnostic(t *testing.T) {
 	// OpenCode, Pi, OMP have single templates
 	tests := []struct {

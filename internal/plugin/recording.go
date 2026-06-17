@@ -38,6 +38,7 @@ const (
 
 // PluginRunRecord represents data for creating a plugin run bead.
 type PluginRunRecord struct {
+<<<<<<< HEAD
 	PluginName string
 	RigName    string
 	Result     RunResult
@@ -56,6 +57,14 @@ type PluginRunRecord struct {
 	// lingering record never wrongly suppresses the next fire. Cooldown/manual
 	// receipts stay ephemeral (their gate semantics don't span a purge horizon).
 	Durable bool
+=======
+	PluginName  string
+	RigName     string
+	Result      RunResult
+	Title       string
+	Body        string
+	ExtraLabels []string
+>>>>>>> upstream/main
 }
 
 // PluginRunBead represents a recorded plugin run from the ledger.
@@ -82,7 +91,40 @@ func NewRecorder(townRoot string) *Recorder {
 // keep it for the standard purge age when the gate must outlive that horizon.
 // This is pure data writing - the caller decides what result to record.
 func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
+<<<<<<< HEAD
 	args := recordRunArgs(record)
+=======
+	title := record.Title
+	if title == "" {
+		title = fmt.Sprintf("Plugin run: %s", record.PluginName)
+	}
+
+	// Build labels
+	labels := []string{
+		"type:plugin-run",
+		fmt.Sprintf("plugin:%s", record.PluginName),
+		fmt.Sprintf("result:%s", record.Result),
+	}
+	if record.RigName != "" {
+		labels = append(labels, fmt.Sprintf("rig:%s", record.RigName))
+	}
+	labels = append(labels, record.ExtraLabels...)
+
+	// Build bd create command
+	args := []string{
+		"create",
+		"--ephemeral",
+		"--json",
+		"-t", "chore",
+		"--title=" + title,
+	}
+	for _, label := range labels {
+		args = append(args, "-l", label)
+	}
+	if record.Body != "" {
+		args = append(args, "--description="+record.Body)
+	}
+>>>>>>> upstream/main
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()

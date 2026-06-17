@@ -671,6 +671,8 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	beadToHook := params.BeadID
 	attachedMoleculeID := ""
 	var allVars []string
+	varsForAttachment := append([]string(nil), params.Vars...)
+	formulaVarsForAttachment := strings.Join(varsForAttachment, "\n")
 	if params.FormulaName != "" && formulaCooked {
 		// Auto-inject rig command vars as defaults (user --var flags override)
 		rigCmdVars := loadRigCommandVars(townRoot, params.RigName)
@@ -695,6 +697,8 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			allVars = append(allVars, priorVars...)
 			fmt.Printf("  %s Prior attempt found — context injected for polecat\n", style.Dim.Render("↻"))
 		}
+		varsForAttachment = append([]string(nil), allVars...)
+		formulaVarsForAttachment = strings.Join(allVars, "\n")
 		formulaResult, err := InstantiateFormulaOnBead(context.Background(), params.FormulaName, params.BeadID, info.Title, hookWorkDir, townRoot, true, allVars)
 		if err != nil {
 			if params.FormulaFailFatal {
@@ -710,6 +714,11 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			fmt.Printf("  %s Formula %s applied\n", style.Bold.Render("✓"), params.FormulaName)
 			beadToHook = formulaResult.BeadToHook
 			attachedMoleculeID = formulaResult.WispRootID
+			if len(formulaResult.FormulaVars) > 0 {
+				allVars = formulaResult.FormulaVars
+				varsForAttachment = append([]string(nil), allVars...)
+				formulaVarsForAttachment = strings.Join(allVars, "\n")
+			}
 		}
 	}
 	result.AttachedMolecule = attachedMoleculeID
@@ -741,13 +750,27 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	updateAgentHookBead(targetAgent, beadToHook, hookWorkDir, beadsDir)
 
 	// 10. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
+<<<<<<< HEAD
 	fieldUpdates := slingDispatchFieldUpdates(actor, attachedMoleculeID, trackingConvoyID, strings.Join(allVars, "\n"), beadToHook, params)
+=======
+	fieldUpdates := beadFieldUpdates{
+		Dispatcher:       actor,
+		Args:             params.Args,
+		Vars:             varsForAttachment,
+		AttachedMolecule: attachedMoleculeID,
+		AttachedFormula:  params.FormulaName,
+		NoMerge:          params.NoMerge,
+		ReviewOnly:       params.ReviewOnly,
+		Mode:             &params.Mode,
+		FormulaVars:      formulaVarsForAttachment,
+	}
+>>>>>>> upstream/main
 	// Use beadToHook for the update target (may differ from beadID when formula-on-bead)
 	if err := storeFieldsInBead(beadToHook, fieldUpdates); err != nil {
 		fmt.Printf("  %s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
 	}
 
-	// Update agent bead mode (for stuck detector to identify ralphcats)
+	// Update agent bead mode for stuck-detector Ralph thresholds. Reuse/reset clears stale mode.
 	if params.Mode != "" {
 		updateAgentMode(targetAgent, params.Mode, hookWorkDir, beadsDir)
 	}

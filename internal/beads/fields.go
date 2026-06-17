@@ -37,6 +37,7 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 
 	fields := &AttachmentFields{}
 	hasFields := false
+	var formulaVars []string
 
 	for _, line := range strings.Split(issue.Description, "\n") {
 		line = strings.TrimSpace(line)
@@ -95,9 +96,12 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 			fields.ConvoyOwned = strings.ToLower(value) == "true"
 			hasFields = true
 		case "formula_vars", "formula-vars", "formulavars":
-			fields.FormulaVars = value
+			formulaVars = append(formulaVars, splitFormulaVars(parseFormulaVars(value))...)
 			hasFields = true
 		}
+	}
+	if len(formulaVars) > 0 {
+		fields.FormulaVars = strings.Join(formulaVars, "\n")
 	}
 
 	if !hasFields {
@@ -173,7 +177,9 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 		lines = append(lines, "convoy_owned: true")
 	}
 	if fields.FormulaVars != "" {
-		lines = append(lines, "formula_vars: "+fields.FormulaVars)
+		if formatted := formatFormulaVars(fields.FormulaVars); formatted != "" {
+			lines = append(lines, "formula_vars: "+formatted)
+		}
 	}
 
 	return strings.Join(lines, "\n")
@@ -546,6 +552,39 @@ func parseAttachedVars(raw string) []string {
 		}
 	}
 	return []string{raw}
+}
+
+func formatFormulaVars(raw string) string {
+	return formatAttachedVars(splitFormulaVars(raw))
+}
+
+func parseFormulaVars(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "[") {
+		if vars := parseAttachedVars(raw); len(vars) > 0 {
+			return strings.Join(vars, "\n")
+		}
+		return ""
+	}
+	return strings.Join(splitFormulaVars(raw), "\n")
+}
+
+func splitFormulaVars(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	vars := strings.Split(raw, "\n")
+	out := vars[:0]
+	for _, variable := range vars {
+		variable = strings.TrimSpace(variable)
+		if variable != "" {
+			out = append(out, variable)
+		}
+	}
+	return out
 }
 
 // SetConvoyFields updates an issue's description with the given convoy fields.

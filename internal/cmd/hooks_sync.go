@@ -284,12 +284,12 @@ const (
 // syncTarget syncs a single target's .claude/settings.json.
 // Uses MarshalSettings/UnmarshalSettings to preserve unknown fields.
 func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
-	// Compute expected hooks for this target
-	expected, err := hooks.ComputeExpected(target.Key)
+	result, err := hooks.SyncManagedClaudeSettings(target, dryRun)
 	if err != nil {
-		return 0, fmt.Errorf("computing expected config: %w", err)
+		return 0, err
 	}
 
+<<<<<<< HEAD
 	// Compute expected enabledPlugins for this target: the shared neutral
 	// default (beads disabled) plus the town's on-disk plugin overrides. This
 	// replaces the previously hardcoded AIM disable-list; a town that needs to
@@ -374,7 +374,16 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	}
 
 	if fileExists {
+=======
+	switch result {
+	case hooks.SyncCreated:
+		return syncCreated, nil
+	case hooks.SyncUpdated:
+>>>>>>> upstream/main
 		return syncUpdated, nil
+	case hooks.SyncUnchanged:
+		return syncUnchanged, nil
+	default:
+		return 0, fmt.Errorf("unknown sync result: %d", result)
 	}
-	return syncCreated, nil
 }

@@ -102,7 +102,7 @@ Signs of working:
 **Output**: Record decision as one of:
 - NOTHING: Let Deacon continue
 - NUDGE: Gentle wake signal (gt nudge)
-- WAKE: Stronger wake (escape + message)
+- WAKE: Stronger wake (immediate gt nudge)
 - INTERRUPT: Force restart needed
 - START: Session is dead, start fresh
 """
@@ -125,14 +125,8 @@ gt nudge --mode=queue deacon "Boot check-in: you have pending work"
 
 **WAKE**
 ```bash
-# Send escape to break any tool waiting
-tmux send-keys -t hq-deacon Escape
-
-# Brief pause
-sleep 1
-
-# Send wake message
-gt nudge deacon "Boot wake: please check your inbox and pending work"
+# Raw tmux send-keys is blocked for Boot; it can leave unsubmitted input staged.
+gt nudge --mode=immediate deacon "Boot wake: please check your inbox and pending work"
 ```
 
 **INTERRUPT**

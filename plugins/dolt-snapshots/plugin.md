@@ -135,7 +135,7 @@ if [ $SNAPSHOT_EXIT -ne 0 ]; then
   RESULT="failure"
 fi
 
-bd create "dolt-snapshots: $RESULT" -t chore --ephemeral \
-  -l type:plugin-run,plugin:dolt-snapshots,result:$RESULT \
-  -d "dolt-snapshots plugin completed with exit code $SNAPSHOT_EXIT. Watcher started." --silent 2>/dev/null || true
+gt plugin record-run --plugin dolt-snapshots --result "$RESULT" \
+  --title "dolt-snapshots: $RESULT" \
+  --description "dolt-snapshots plugin completed with exit code $SNAPSHOT_EXIT. Watcher started." >/dev/null 2>&1 || true
 ```

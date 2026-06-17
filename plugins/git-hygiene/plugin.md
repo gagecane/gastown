@@ -207,16 +207,15 @@ echo "$SUMMARY"
 
 On success:
 ```bash
-bd create "git-hygiene: $SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:git-hygiene,result:success \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin git-hygiene --result success \
+  --title "git-hygiene: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 ```
 
 On failure:
 ```bash
-bd create "git-hygiene: FAILED" -t chore --ephemeral \
-  -l type:plugin-run,plugin:git-hygiene,result:failure \
-  -d "Git hygiene failed: $ERROR" --silent 2>/dev/null || true
+gt plugin record-run --plugin git-hygiene --result failure \
+  --title "git-hygiene: FAILED" \
+  --description "Git hygiene failed: $ERROR" >/dev/null 2>&1 || true
 
 gt escalate "Plugin FAILED: git-hygiene" \
   --severity low \

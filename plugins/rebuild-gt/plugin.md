@@ -47,10 +47,9 @@ Parse the JSON output and check these fields:
 
 If `safe_to_rebuild` is false, record a skip wisp:
 ```bash
-bd create --wisp-type patrol \
-  --labels type:plugin-run,plugin:rebuild-gt,rig:gastown,result:skipped \
-  --description "Skipped: not safe to rebuild (forward=$FORWARD, main=$ON_MAIN)" \
-  "Plugin: rebuild-gt [skipped]"
+gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
+  --title "Plugin: rebuild-gt [skipped]" \
+  --description "Skipped: not safe to rebuild (forward=$FORWARD, main=$ON_MAIN)" >/dev/null 2>&1 || true
 ```
 
 ## Pre-flight Checks
@@ -102,18 +101,16 @@ even after the on-disk binary is upgraded. Added for gu-wcxv.
 
 On success:
 ```bash
-bd create --wisp-type patrol \
-  --labels type:plugin-run,plugin:rebuild-gt,rig:gastown,result:success \
-  --description "Rebuilt gt: $OLD → $NEW ($N commits)" \
-  "Plugin: rebuild-gt [success]"
+gt plugin record-run --plugin rebuild-gt --result success --rig gastown \
+  --title "Plugin: rebuild-gt [success]" \
+  --description "Rebuilt gt: $OLD → $NEW ($N commits)" >/dev/null 2>&1 || true
 ```
 
 On failure:
 ```bash
-bd create --wisp-type patrol \
-  --labels type:plugin-run,plugin:rebuild-gt,rig:gastown,result:failure \
-  --description "Build failed: $ERROR" \
-  "Plugin: rebuild-gt [failure]"
+gt plugin record-run --plugin rebuild-gt --result failure --rig gastown \
+  --title "Plugin: rebuild-gt [failure]" \
+  --description "Build failed: $ERROR" >/dev/null 2>&1 || true
 
 gt escalate --severity=medium \
   --subject="Plugin FAILED: rebuild-gt" \
