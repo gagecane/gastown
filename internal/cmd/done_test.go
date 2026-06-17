@@ -769,72 +769,46 @@ func TestClearDoneIntentLabel(t *testing.T) {
 	}
 }
 
-// TestMRVerificationSetsMRFailed verifies that if MR bead creation returns
-// success but the bead cannot be read back (verification fails), mrFailed
-// is set to true. This is the core fix for GH#1945: without verification,
-// a "successful" bd.Create that didn't actually persist would allow the
-// worktree nuke to proceed, losing the polecat's work.
+// TestMRVerificationSetsMRFailed exercises mrReadbackConfirmed, the real
+// GH#1945 read-back guard used by submitToMergeQueue. bd.Create() can return
+// success while the write never persisted (Dolt failure, corrupt state); the
+// only durable confirmation is a non-error Show() returning a non-nil issue.
+// When the read-back is not confirmed, submitToMergeQueue sets mrFailed and
+// files a stranded-push wisp instead of nuking the worktree with no MR in the
+// queue — losing the polecat's work permanently.
 func TestMRVerificationSetsMRFailed(t *testing.T) {
 	tests := []struct {
-		name         string
-		createErr    error // error from bd.Create
-		showErr      error // error from bd.Show (verification)
-		showReturns  bool  // whether Show returns a non-nil issue
-		wantMRFailed bool
+		name        string
+		verifiedMR  *beads.Issue
+		verifyErr   error
+		wantConfirm bool
 	}{
 		{
-			name:         "create succeeds + show succeeds → mrFailed=false",
-			createErr:    nil,
-			showErr:      nil,
-			showReturns:  true,
-			wantMRFailed: false,
+			name:        "show succeeds with issue → confirmed (mrFailed=false)",
+			verifiedMR:  &beads.Issue{ID: "gt-mr-1"},
+			verifyErr:   nil,
+			wantConfirm: true,
 		},
 		{
-			name:         "create fails → mrFailed=true (existing behavior)",
-			createErr:    fmt.Errorf("dolt write failed"),
-			showErr:      nil,
-			showReturns:  false,
-			wantMRFailed: true,
+			name:        "show fails → not confirmed (GH#1945 fix sets mrFailed)",
+			verifiedMR:  nil,
+			verifyErr:   fmt.Errorf("bead not found"),
+			wantConfirm: false,
 		},
 		{
-			name:         "create succeeds + show fails → mrFailed=true (GH#1945 fix)",
-			createErr:    nil,
-			showErr:      fmt.Errorf("bead not found"),
-			showReturns:  false,
-			wantMRFailed: true,
-		},
-		{
-			name:         "create succeeds + show returns nil → mrFailed=true (GH#1945 fix)",
-			createErr:    nil,
-			showErr:      nil,
-			showReturns:  false,
-			wantMRFailed: true,
+			name:        "show returns nil issue → not confirmed (GH#1945 fix sets mrFailed)",
+			verifiedMR:  nil,
+			verifyErr:   nil,
+			wantConfirm: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the MR creation + verification flow from done.go
-			mrFailed := false
-
-			if tt.createErr != nil {
-				// bd.Create failed — existing behavior
-				mrFailed = true
-			} else {
-				// bd.Create succeeded — now verify (GH#1945 fix)
-				var showResult bool
-				if tt.showErr != nil || !tt.showReturns {
-					showResult = false
-				} else {
-					showResult = true
-				}
-				if !showResult {
-					mrFailed = true
-				}
-			}
-
-			if mrFailed != tt.wantMRFailed {
-				t.Errorf("mrFailed = %v, want %v", mrFailed, tt.wantMRFailed)
+			got := mrReadbackConfirmed(tt.verifiedMR, tt.verifyErr)
+			if got != tt.wantConfirm {
+				t.Errorf("mrReadbackConfirmed(%v, %v) = %v, want %v",
+					tt.verifiedMR, tt.verifyErr, got, tt.wantConfirm)
 			}
 		})
 	}
@@ -923,212 +897,22 @@ func TestDeferredKillNotOnValidationError(t *testing.T) {
 	}
 }
 
-// TestBranchDetectionGuard verifies that the branch detection logic in runDone
-// correctly handles the three states: cwd available, cwd unavailable with GT_BRANCH,
-// and cwd unavailable without GT_BRANCH.
-// This is a regression test for PR #1402 — prevents incorrect main/master detection
-// when the polecat's working directory is deleted.
-func TestBranchDetectionGuard(t *testing.T) {
-	tests := []struct {
-		name         string
-		cwdAvailable bool
-		gtBranch     string // GT_BRANCH env var value
-		wantError    bool
-		wantBranch   string
-	}{
-		{
-			name:         "cwd available - uses git CurrentBranch",
-			cwdAvailable: true,
-			gtBranch:     "",
-			wantError:    false,
-			wantBranch:   "current-branch", // simulated
-		},
-		{
-			name:         "cwd unavailable + GT_BRANCH set - uses env var",
-			cwdAvailable: false,
-			gtBranch:     "polecat/test-worker",
-			wantError:    false,
-			wantBranch:   "polecat/test-worker",
-		},
-		{
-			name:         "cwd unavailable + GT_BRANCH empty - returns error",
-			cwdAvailable: false,
-			gtBranch:     "",
-			wantError:    true,
-			wantBranch:   "",
-		},
-	}
+// Branch detection is owned by completion.ResolveBranch and fully covered by
+// TestResolveBranch_* in internal/polecat/completion/branch_test.go (the env-var
+// fallback ladder, the !cwdAvailable hard error, and the detached-HEAD guard).
+// The former TestBranchDetectionGuard / TestBranchDetectionCleanupOnError here
+// re-implemented that logic inline and asserted a `sessionCleanupNeeded` backstop
+// that no longer exists — the persistent-polecat model (gt-hdf8) removed the
+// deferred session kill. They were deleted as theatre (gu-eup4p).
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the branch detection logic from runDone
-			var branch string
-			if !tt.cwdAvailable {
-				branch = tt.gtBranch
-			}
-
-			var gotError bool
-			if branch == "" {
-				if !tt.cwdAvailable {
-					gotError = true
-				} else {
-					// Would call g.CurrentBranch() — simulate success
-					branch = "current-branch"
-				}
-			}
-
-			if gotError != tt.wantError {
-				t.Errorf("error = %v, want %v", gotError, tt.wantError)
-			}
-			if !tt.wantError && branch != tt.wantBranch {
-				t.Errorf("branch = %q, want %q", branch, tt.wantBranch)
-			}
-		})
-	}
-}
-
-// TestBranchDetectionCleanupOnError verifies that when branch detection fails
-// (cwdAvailable=false + no GT_BRANCH), the session cleanup backstop is armed
-// so the polecat doesn't get stranded.
-func TestBranchDetectionCleanupOnError(t *testing.T) {
-	// Simulate the cleanup arming logic from runDone's branch detection error path
-	cwdAvailable := false
-	gtBranch := ""
-	gtPolecat := "test-worker"
-	rigName := "test-rig"
-
-	var branch string
-	if !cwdAvailable {
-		branch = gtBranch
-	}
-
-	sessionCleanupNeeded := false
-	if branch == "" && !cwdAvailable {
-		// This mirrors the actual code: arm cleanup before returning error
-		if gtPolecat != "" {
-			sessionCleanupNeeded = true
-		}
-	}
-
-	if !sessionCleanupNeeded {
-		t.Error("sessionCleanupNeeded should be true when branch detection fails with GT_POLECAT set")
-	}
-
-	// Verify the RoleInfo would be constructible from env vars
-	roleInfo := RoleInfo{
-		Role:    RolePolecat,
-		Rig:     rigName,
-		Polecat: gtPolecat,
-	}
-	if roleInfo.Rig != rigName || roleInfo.Polecat != gtPolecat {
-		t.Error("RoleInfo should be constructible from env vars for cleanup")
-	}
-}
-
-// TestConvoyMergeStrategyBranching verifies that the merge strategy branching
-// logic in runDone correctly routes to the right code path for each strategy.
-func TestConvoyMergeStrategyBranching(t *testing.T) {
-	tests := []struct {
-		name          string
-		mergeStrategy string
-		wantPush      bool // should push happen?
-		wantMR        bool // should MR bead be created?
-		wantDirect    bool // should push to default branch?
-	}{
-		{
-			name:          "mr strategy - normal push and MR",
-			mergeStrategy: "mr",
-			wantPush:      true,
-			wantMR:        true,
-			wantDirect:    false,
-		},
-		{
-			name:          "empty strategy - defaults to mr behavior",
-			mergeStrategy: "",
-			wantPush:      true,
-			wantMR:        true,
-			wantDirect:    false,
-		},
-		{
-			name:          "direct strategy - push to main, no MR",
-			mergeStrategy: "direct",
-			wantPush:      true,
-			wantMR:        false,
-			wantDirect:    true,
-		},
-		{
-			name:          "local strategy - no push, no MR",
-			mergeStrategy: "local",
-			wantPush:      false,
-			wantMR:        false,
-			wantDirect:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the branching logic from runDone
-			shouldPush := true
-			shouldCreateMR := true
-			shouldPushDirect := false
-
-			switch tt.mergeStrategy {
-			case "local":
-				shouldPush = false
-				shouldCreateMR = false
-			case "direct":
-				shouldPushDirect = true
-				shouldCreateMR = false
-			default:
-				// "mr" or empty = default behavior
-			}
-
-			if shouldPush != tt.wantPush {
-				t.Errorf("shouldPush = %v, want %v", shouldPush, tt.wantPush)
-			}
-			if shouldCreateMR != tt.wantMR {
-				t.Errorf("shouldCreateMR = %v, want %v", shouldCreateMR, tt.wantMR)
-			}
-			if shouldPushDirect != tt.wantDirect {
-				t.Errorf("shouldPushDirect = %v, want %v", shouldPushDirect, tt.wantDirect)
-			}
-		})
-	}
-}
-
-// TestConvoyMergeStrategyNotification verifies that the merge strategy
-// is included in the witness notification body when set to non-default values.
-func TestConvoyMergeStrategyNotification(t *testing.T) {
-	tests := []struct {
-		name          string
-		mergeStrategy string
-		wantInBody    bool
-	}{
-		{"direct strategy included", "direct", true},
-		{"local strategy included", "local", true},
-		{"mr strategy excluded", "mr", false},
-		{"empty strategy excluded", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the notification body building from runDone
-			var bodyLines []string
-			bodyLines = append(bodyLines, "Exit: COMPLETED")
-			if tt.mergeStrategy != "" && tt.mergeStrategy != "mr" {
-				bodyLines = append(bodyLines, fmt.Sprintf("MergeStrategy: %s", tt.mergeStrategy))
-			}
-
-			body := strings.Join(bodyLines, "\n")
-			hasMergeStrategy := strings.Contains(body, "MergeStrategy:")
-
-			if hasMergeStrategy != tt.wantInBody {
-				t.Errorf("body contains MergeStrategy = %v, want %v\nbody: %s",
-					hasMergeStrategy, tt.wantInBody, body)
-			}
-		})
-	}
-}
+// The merge-strategy routing (local skips push/MR, direct pushes to the default
+// branch, mr/empty go through the queue) is exercised end-to-end by the
+// runConvoy*Strategy paths and, for the idle-sync decision, by
+// TestShouldSyncIdlePolecatWorktree. The former TestConvoyMergeStrategyBranching
+// re-implemented that switch inline against local booleans, and
+// TestConvoyMergeStrategyNotification asserted a "MergeStrategy:" notification
+// body that production never emits (the real nudge is "POLECAT_DONE <name>
+// exit=<type>"). Both were deleted as theatre (gu-eup4p).
 
 // TestConvoyMergeFromFields verifies that convoyMergeFromFields correctly
 // extracts the merge strategy from convoy descriptions using typed ConvoyFields.
@@ -1852,12 +1636,22 @@ func TestAutoCommitSafetyNet(t *testing.T) {
 			t.Fatal("expected non-runtime uncommitted changes")
 		}
 
-		// Simulate the auto-commit safety net
-		if err := g.Add("-A"); err != nil {
-			t.Fatalf("git add: %v", err)
+		// Drive the REAL safety net (runDone's auto-commit entry point). The repo
+		// has no remote, so committing on the default branch is permitted.
+		branch, err := g.CurrentBranch()
+		if err != nil {
+			t.Fatalf("CurrentBranch: %v", err)
 		}
-		if err := g.Commit("fix: auto-save uncommitted implementation work (gt-pvx safety net)"); err != nil {
-			t.Fatalf("git commit: %v", err)
+		prevStatus := doneCleanupStatus
+		doneCleanupStatus = "uncommitted"
+		defer func() { doneCleanupStatus = prevStatus }()
+
+		salvagedSHA, err := runAutoCommitSafetyNet(g, dir, branch, branch, true)
+		if err != nil {
+			t.Fatalf("runAutoCommitSafetyNet: %v", err)
+		}
+		if salvagedSHA == "" {
+			t.Error("expected a salvage SHA when the safety net auto-committed work")
 		}
 
 		// Verify clean after auto-commit
@@ -1865,7 +1659,7 @@ func TestAutoCommitSafetyNet(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CheckUncommittedWork after commit: %v", err)
 		}
-		if ws2.HasUncommittedChanges {
+		if ws2.HasUncommittedChanges && !ws2.CleanExcludingRuntime() {
 			t.Error("expected clean working tree after auto-commit")
 		}
 	})
@@ -1933,16 +1727,18 @@ func TestAutoCommitSafetyNet(t *testing.T) {
 			t.Fatal("expected mixed source and runtime changes")
 		}
 
-		if err := g.Add("-A"); err != nil {
-			t.Fatalf("git add: %v", err)
+		// Drive the REAL safety net so the runtime-artifact exclusion under test
+		// is the production exclusion, not a re-implementation.
+		branch, err := g.CurrentBranch()
+		if err != nil {
+			t.Fatalf("CurrentBranch: %v", err)
 		}
-		if runtimePaths := ws.RuntimeArtifactPaths(); len(runtimePaths) > 0 {
-			if err := g.ResetFiles(runtimePaths...); err != nil {
-				t.Fatalf("reset runtime artifacts: %v", err)
-			}
-		}
-		if err := g.Commit("fix: auto-save uncommitted implementation work (gt-pvx safety net)"); err != nil {
-			t.Fatalf("git commit: %v", err)
+		prevStatus := doneCleanupStatus
+		doneCleanupStatus = "uncommitted"
+		defer func() { doneCleanupStatus = prevStatus }()
+
+		if _, err := runAutoCommitSafetyNet(g, repo, branch, branch, true); err != nil {
+			t.Fatalf("runAutoCommitSafetyNet: %v", err)
 		}
 
 		changed, err := g.DiffNameOnly("HEAD~1", "HEAD")
@@ -1991,14 +1787,15 @@ func TestSyncGuardWithUncommittedChanges(t *testing.T) {
 		t.Fatalf("CheckUncommittedWork: %v", err)
 	}
 
-	// The sync guard condition: if uncommitted non-runtime changes exist, syncSafe = false
-	syncSafe := true
-	if ws.HasUncommittedChanges && !ws.CleanExcludingRuntime() {
-		syncSafe = false
+	// Drive the real sync guard used by teardownAfterDone. Uncommitted
+	// implementation files must make it refuse the worktree sync.
+	if worktreeSyncSafe(ws, nil) {
+		t.Error("worktreeSyncSafe should be false when uncommitted implementation files exist")
 	}
 
-	if syncSafe {
-		t.Error("syncSafe should be false when uncommitted implementation files exist")
+	// A status-inspection error must also refuse the sync (preserve work).
+	if worktreeSyncSafe(nil, fmt.Errorf("git status failed")) {
+		t.Error("worktreeSyncSafe should be false when worktree status cannot be inspected")
 	}
 }
 

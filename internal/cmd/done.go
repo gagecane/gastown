@@ -465,6 +465,23 @@ func sessionDurationMs() float64 {
 	return float64(elapsed.Milliseconds())
 }
 
+// worktreeSyncSafe reports whether it is safe to sync an idle polecat's worktree
+// to the default branch (gt-pvx). Switching branches discards uncommitted work,
+// so this returns false when the worktree status could not be inspected (wsErr)
+// or when real (non-runtime) uncommitted changes remain — e.g. the auto-commit
+// safety net failed. In those cases the caller leaves the worktree dirty on the
+// feature branch so the work can be recovered. Runtime-only changes
+// (CleanExcludingRuntime) are safe to leave behind, so they do not block a sync.
+func worktreeSyncSafe(ws *git.UncommittedWorkStatus, wsErr error) bool {
+	if wsErr != nil {
+		return false
+	}
+	if ws.HasUncommittedChanges && !ws.CleanExcludingRuntime() {
+		return false
+	}
+	return true
+}
+
 func shouldSyncIdlePolecatWorktree(exitType, mergeStrategy string, pushFailed, mrFailed, syncSafe bool) bool {
 	if exitType != ExitCompleted || pushFailed || mrFailed || !syncSafe {
 		return false
@@ -1251,11 +1268,11 @@ func teardownAfterDone(p teardownParams) {
 		// dirty on the feature branch so work can be recovered.
 		syncSafe := true
 		if p.cwdAvailable {
-			if ws, wsErr := p.g.CheckUncommittedWork(); wsErr != nil {
-				syncSafe = false
+			ws, wsErr := p.g.CheckUncommittedWork()
+			syncSafe = worktreeSyncSafe(ws, wsErr)
+			if wsErr != nil {
 				style.PrintWarning("could not inspect worktree before idle sync: %v — skipping sync to preserve work", wsErr)
-			} else if ws.HasUncommittedChanges && !ws.CleanExcludingRuntime() {
-				syncSafe = false
+			} else if !syncSafe {
 				style.PrintWarning("uncommitted changes still present — skipping worktree sync to preserve work")
 				fmt.Printf("  Files: %s\n", ws.String())
 			}
@@ -1576,7 +1593,8 @@ func submitToMergeQueue(p mrSubmitParams) (mrID string, mrFailed bool) {
 		// bd.Create() succeeds when the bead is written locally, but if the write
 		// didn't persist (Dolt failure, corrupt state), we'd nuke the worktree
 		// with no MR in the queue — losing the polecat's work permanently.
-		if verifiedMR, verifyErr := p.bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
+		verifiedMR, verifyErr := p.bd.Show(mrID)
+		if !mrReadbackConfirmed(verifiedMR, verifyErr) {
 			// TAL-46: file a stranded-push wisp (branch is already on origin) so
 			// the push_stranded_dog can recover the MR after the worktree is reaped.
 			strandErr := fmt.Errorf("MR bead created but verification read-back failed (id=%s): %w", mrID, verifyErr)
@@ -2312,6 +2330,16 @@ func verifyMRVisibleOnMain(f mrMainViewFinder, branch, commitSHA string) (bool, 
 		return false, err
 	}
 	return issue != nil, nil
+}
+
+// mrReadbackConfirmed reports whether the GH#1945 post-create read-back proves
+// the MR bead actually persisted. bd.Create() can return success while the
+// write never lands (Dolt failure, corrupt state); the only durable signal is a
+// non-error Show() that returns a non-nil issue. When this returns false the
+// caller must treat the MR as failed (file a stranded-push wisp, preserve the
+// worktree) rather than nuking work with no MR in the queue.
+func mrReadbackConfirmed(verifiedMR *beads.Issue, verifyErr error) bool {
+	return verifyErr == nil && verifiedMR != nil
 }
 
 // shouldTrustMRCheckpoint decides whether gt done's resume path may skip MR
